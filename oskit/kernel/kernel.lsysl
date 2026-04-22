@@ -156,9 +156,9 @@ mediates copies via grant_copy, validating access rights.
         mapped_pages: int
         mapper_ptbr: u64
 
-    val GRANT_READ  = 1
-    val GRANT_WRITE = 2
-    val GRANT_RW    = 3
+    private val GRANT_READ  = 1
+    private val GRANT_WRITE = 2
+    private val GRANT_RW    = 3
     val MAX_GRANTS  = 128
     var grant_table: [128]Grant
 
@@ -257,6 +257,13 @@ syscalls (putc, queries) remain hardcoded in boot.asm.
 
     var syscall_table: [512]i64  // 512 = MAX_SYSCALLS (sysl literal required)
     var syscall_ssp: i64
+
+Platform dispatch uses this to hand the saved frame pointer to
+syscall_return. Imported module-level vars are read-only, so go
+through a setter when the arch layer needs to write it.
+
+    syscall_ssp_set(v: i64)
+        syscall_ssp = v
 
 Set the return value for the current syscall. Writes into
 the saved return register slot on the SSP so the caller
@@ -363,8 +370,8 @@ Set just the IPC send mask for a process.
 Arg = (pid << 8) | mask.
 
     sys_set_ipc_mask_handler(arg: int)
-        val pid = (arg >> 8) & 0xFF
-        val mask = arg & 0xFF
+        val pid = (arg >> 16) & 0xFF
+        val mask = arg & 0xFFFF
         if pid > 0
             if pid < MAX_PROCESSES
                 processes[pid].ipc_send_mask = mask
@@ -826,6 +833,17 @@ Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
         syscall_return(0)
         kernel_continue_current()
 
+SYS_VIRTIO_SET_NOTIFY (76): Register a thread to receive a
+notification on every virtio device IRQ. Mirrors the keyboard
+notify pattern; the platform IRQ handler (aarch64
+`arch_dispatch_irq` / future x86 MSI-X) calls
+`notify_send(virtio_notify_tid, 1)` after device-side INT_ACK.
+
+    sys_virtio_set_notify_handler(arg: int)
+        virtio_set_notify(int(i64(arg)))
+        syscall_return(0)
+        kernel_continue_current()
+
     sys_vm_v2p_handler(arg: int)
         val vaddr = u64(arg)
         val paddr = vm_v2p(threads[current_thread].ptbr, vaddr)
@@ -853,6 +871,14 @@ vm_copy_to translates the destination vaddr via page walk and copies.
 Thread info query handlers (syscalls 7-9, 42-43).
 Used by ps and other user programs via ulib.
 
+    sys_thread_id_handler(arg: int)
+        syscall_return(i64(current_thread))
+        kernel_continue_current()
+
+    sys_uptime_handler(arg: int)
+        syscall_return(i64(ticks))
+        kernel_continue_current()
+
     sys_thread_count_handler(arg: int)
         syscall_return(thread_count)
         kernel_continue_current()
@@ -862,11 +888,11 @@ Used by ps and other user programs via ulib.
         kernel_continue_current()
 
     sys_thread_name_handler(arg: int)
-        // Copy name to caller's args page (0xBF000) so user processes
+        // Copy name to caller's info page so user processes
         // can read it — kernel BSS has no PTE_U on x86_64.
         val src = query_thread_name(arg)
         val nlen = query_thread_name_len(arg)
-        val dst = *byte(0xBF100)  // past args area in user page
+        val dst = *byte(INFO_PAGE_VA + 0x100)  // past args area in user page
         var ni = 0
         while ni < nlen
             dst[ni] = src[ni]
@@ -920,6 +946,8 @@ Used by ps and other user programs via ulib.
         register_syscall(61, sys_getuid_handler)
         register_syscall(62, sys_setuid_handler)
         register_syscall(63, sys_vm_create_server_pt_handler)
+        register_syscall(5, sys_thread_id_handler)
+        register_syscall(6, sys_uptime_handler)
         register_syscall(7, sys_thread_count_handler)
         register_syscall(8, sys_thread_state_handler)
         register_syscall(9, sys_thread_name_handler)
@@ -938,6 +966,7 @@ Used by ps and other user programs via ulib.
         register_syscall(73, sys_grant_copy_handler)
         register_syscall(74, sys_grant_map_handler)
         register_syscall(75, sys_grant_unmap_handler)
+        register_syscall(76, sys_virtio_set_notify_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -952,6 +981,17 @@ via kbhit/getkey syscalls.
 
     keyboard_set_notify(tid: int)
         kb_notify_tid = tid
+
+Virtio IRQ target. Set via `svc_virtio_set_notify(tid)`; the
+aarch64 GIC handler reads this after writing the device-side
+`INT_ACK` and fires a 1-valued notification so the nic server
+(or any future virtio consumer) wakes up. -1 means "no target,
+drop the wake" — keyboard path mirrors this on boot.
+
+    var virtio_notify_tid = -1
+
+    virtio_set_notify(tid: int)
+        virtio_notify_tid = tid
 
     kb_has_key() -> int
         if kb_count > 0
@@ -1230,7 +1270,7 @@ process ID (0 for kernel threads).
         processes[pid].name = threads[tid].name
         for w in 0..<8
             processes[pid].syscall_allow[w] = i64(-1)
-        processes[pid].ipc_send_mask = 0xFF
+        processes[pid].ipc_send_mask = 0xFFFF
 
         // Link thread to process
         threads[tid].pid = pid
@@ -1331,7 +1371,7 @@ Unlike create_process, the thread is never enqueued — no race.
         processes[pid].name = threads[tid].name
         for w in 0..<8
             processes[pid].syscall_allow[w] = i64(-1)
-        processes[pid].ipc_send_mask = 0xFF
+        processes[pid].ipc_send_mask = 0xFFFF
 
         // Link thread to process
         threads[tid].pid = pid

@@ -38,7 +38,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl,
       "oskit/services/services" -> servicesSysl,
-      "oskit/kernel/timer" -> timerSysl,
+      "oskit/arch/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl,
       "oskit/sync/mutex" -> mutexSysl,
       "oskit/ipc/ipc" -> ipcSysl,
@@ -99,7 +99,7 @@ class OSKitDiskTests extends OSKitTestHelpers {
     val allSources = Map(
       "oskit/kernel/kernel" -> kernelSysl,
       "oskit/services/services" -> servicesSysl,
-      "oskit/kernel/timer" -> timerSysl,
+      "oskit/arch/timer" -> timerSysl,
       "oskit/sync/semaphore" -> semaphoreSysl,
       "oskit/sync/mutex" -> mutexSysl,
       "oskit/ipc/ipc" -> ipcSysl,

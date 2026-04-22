@@ -22,7 +22,7 @@ IPC commands:
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
     import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
     import oskit.loader.load_tof_to_ptbr
-    import oskit.arch.{PROG_USP, PROG_SSP}
+    import oskit.arch.{PROG_USP, PROG_SSP, INFO_PAGE_VA}
 
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
@@ -248,7 +248,11 @@ PROG_ARGS_ADDR). PM doesn't parse it — just copies it verbatim
 to the child's SPAWN_PROG_ARGS_ADDR. The thread name comes from
 `path`, not argv.
 
-    val SPAWN_PROG_ARGS_ADDR = 0xBF000
+    // SPAWN_PROG_ARGS_ADDR lived here as a hardcoded 0xBF000 but the
+    // VA is arch-specific (0xBF000 on x86/TRISC, 0x60090000 on
+    // aarch64). Use the imported INFO_PAGE_VA constant directly at
+    // call sites instead — module-level expression evaluation of
+    // imported consts isn't reliable across backends.
     val SPAWN_PROG_ARGS_MAX  = 4096
 
     pm_handle_spawn(sender: int, buf: *byte)
@@ -280,7 +284,7 @@ to the child's SPAWN_PROG_ARGS_ADDR. The thread name comes from
         // Copy argv blob verbatim to child's args address
         if blob_len > 0
             val blob_src: *byte = buf + 5 + path_len
-            svc_vm_copy_to(proc_pt, SPAWN_PROG_ARGS_ADDR, blob_src, blob_len)
+            svc_vm_copy_to(proc_pt, u64(INFO_PAGE_VA), blob_src, blob_len)
 
 
 
@@ -425,7 +429,7 @@ Build the POSIX argv blob. See ulib.build_argv_blob for format.
             val alen = len(arg)
             if pos + alen + 1 > cap
                 return -1
-            val ptr: i64 = i64(SPAWN_PROG_ARGS_ADDR) + i64(pos)
+            val ptr: i64 = INFO_PAGE_VA + i64(pos)
             val pbase = 8 + i * 8
             blob[pbase]     = byte(ptr & i64(0xFF))
             blob[pbase + 1] = byte((ptr >> 8) & i64(0xFF))

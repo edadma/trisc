@@ -24,7 +24,7 @@ val PAGE_POOL_END     = 0x7FD000
 val BOOT_INFO_ADDR    = 0x600000
 
 // [ipc]
-val MAX_PORTS = 8
+val MAX_PORTS = 16
 
 // [pm]
 val MAX_WAITERS = 8

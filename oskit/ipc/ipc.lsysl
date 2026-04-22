@@ -46,11 +46,11 @@ queues of blocked senders.
         wait_next: int
 
     var ipc_ctx: [32]IPCContext  // 32 = MAX_THREADS
-    var port_owner: [8]int  // 8 = MAX_PORTS
-    var port_wait_head: [8]int  // 8 = MAX_PORTS
-    var port_wait_tail: [8]int  // 8 = MAX_PORTS
-    var port_name_buf: [64]byte  // 8 ports * 8 bytes per name
-    var port_name_len: [8]int   // length of each name
+    var port_owner: [16]int  // 16 = MAX_PORTS
+    var port_wait_head: [16]int  // 16 = MAX_PORTS
+    var port_wait_tail: [16]int  // 16 = MAX_PORTS
+    var port_name_buf: [128]byte  // 16 ports * 8 bytes per name
+    var port_name_len: [16]int   // length of each name
     var port_count = 0
 
 Syscall numbers for IPC (31-37).

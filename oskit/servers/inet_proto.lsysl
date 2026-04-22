@@ -1,0 +1,492 @@
+Inet server protocol helpers — ARP + ICMP + link-layer glue
+=============================================================
+
+Companion to `oskit/servers/inet.lsysl`. Split out so the
+larger wire-format logic doesn't crowd the socket-API file.
+Both files share `module oskit.servers`.
+
+This file owns:
+
+- Our IP + gateway IP + MAC state
+- ARP request / reply builders + ICMP echo request / reply
+  builders
+- `inet_handle_frame()` — EtherType dispatch on inbound frames
+- Thin nic-client wrappers — inet is an isolated server and can't
+  import `oskit.ulib` (that's for user programs), so we duplicate
+  the four nic IPC wrappers here against `oskit.ipc.ipc_send`.
+
+Replaces `oskit/drivers/virtio/net_handler.lsysl`, which used to
+live in kernel-thread space and call `virtio_net_send` directly.
+
+    module oskit.servers
+
+    import oskit.ipc.{ipc_send, port_lookup}
+    import std.net.{ETHERTYPE_IPV4, ETHERTYPE_ARP,
+        ARP_OP_REQUEST, ARP_OP_REPLY,
+        IP_PROTO_ICMP, IP_PROTO_UDP,
+        ICMP_ECHO_REQ, ICMP_ECHO_REP,
+        pkt_read_u16, pkt_write_u16,
+        pkt_write_mac, pkt_write_ipv4,
+        pkt_match_ipv4, net_checksum,
+        ipv4, ipv4_octet}
+
+
+The guest's IP and gateway IP under QEMU user-mode networking.
+Hardcoded to QEMU's default `-netdev user` lease (every guest
+gets the same lease so this is fine for bring-up).
+
+    val INET_OUR_IP_A = 10
+    val INET_OUR_IP_B = 0
+    val INET_OUR_IP_C = 2
+    val INET_OUR_IP_D = 15
+
+    val INET_GW_IP_A = 10
+    val INET_GW_IP_B = 0
+    val INET_GW_IP_C = 2
+    val INET_GW_IP_D = 2
+
+
+Link-layer state. `*_known` flags guard every use because the
+nic may not be available (e.g. on x86 builds where the virtio-net
+stack isn't wired in), and ARP replies may not have arrived yet.
+
+    var inet_our_mac: [6]byte
+    var inet_our_mac_known: int = 0
+    var inet_gw_mac: [6]byte
+    var inet_gw_mac_known: int = 0
+
+
+Diagnostic counters. Useful for asserting the TX / RX loop is
+flowing end-to-end during bring-up.
+
+    var inet_pings_sent: int = 0
+    var inet_pings_received: int = 0
+
+
+NIC command codes — must track `oskit/servers/nic.lsysl`.
+
+    val INET_NIC_CMD_GET_MAC      = 1
+    val INET_NIC_CMD_SEND_PACKET  = 2
+    val INET_NIC_CMD_SUBSCRIBE_RX = 3
+    val INET_NIC_CMD_RECV_PACKET  = 4
+
+
+Cached nic port, resolved lazily on first use. -1 means both
+"not yet looked up" and "lookup failed" — callers always re-try
+on -1 so a nic that comes up late (future: restartable) still
+gets picked up.
+
+    var inet_nic_port = -1
+
+    inet_nic_get_port() -> int
+        if inet_nic_port < 0
+            inet_nic_port = port_lookup("nic")
+        inet_nic_port
+
+
+### inet_nic_get_mac
+
+Writes 6 MAC bytes into `out`. 0 on success, -1 on any failure.
+
+    inet_nic_get_mac(out: *byte) -> int
+        val port = inet_nic_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_NIC_CMD_GET_MAC)
+        var reply: [7]byte
+        val r = ipc_send(port, msg, 1, reply, 7)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        var i = 0
+        while i < 6
+            out[i] = reply[1 + i]
+            i += 1
+        0
+
+
+### inet_nic_send_packet
+
+Submits a raw Ethernet frame to the nic's TX path. 0 on success,
+-1 on any error.
+
+    inet_nic_send_packet(frame: *byte, len: int) -> int
+        val port = inet_nic_get_port()
+        if port < 0
+            return -1
+        if len <= 0 || len > 1514
+            return -1
+        var msg: [1520]byte
+        msg[0] = byte(INET_NIC_CMD_SEND_PACKET)
+        msg[1] = byte((len >> 8) & 0xff)
+        msg[2] = byte(len & 0xff)
+        var i = 0
+        while i < len
+            msg[3 + i] = frame[i]
+            i += 1
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 3 + len, reply, 1)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        0
+
+
+### inet_nic_subscribe_rx
+
+Registers this server's main thread as the nic's sole RX
+notification target. 0 on success, -1 on any error.
+
+    inet_nic_subscribe_rx() -> int
+        val port = inet_nic_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_NIC_CMD_SUBSCRIBE_RX)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 1, reply, 1)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        0
+
+
+### inet_nic_recv_packet
+
+Non-blocking pop of the head of the nic's RX queue. Returns the
+frame's raw length (up to `maxlen` bytes copied into `out`), or
+-1 when the queue is empty / on IPC failure.
+
+    inet_nic_recv_packet(out: *byte, maxlen: int) -> int
+        val port = inet_nic_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_NIC_CMD_RECV_PACKET)
+        var reply: [1517]byte
+        val r = ipc_send(port, msg, 1, reply, 1517)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        val raw_len = ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
+        var take = raw_len
+        if take > maxlen
+            take = maxlen
+        var i = 0
+        while i < take
+            out[i] = reply[3 + i]
+            i += 1
+        raw_len
+
+
+### Link-layer state setters
+
+    inet_set_our_mac(mac: *byte)
+        var i = 0
+        while i < 6
+            inet_our_mac[i] = mac[i]
+            i += 1
+        inet_our_mac_known = 1
+
+    inet_cache_gw_mac(mac: *byte)
+        var i = 0
+        while i < 6
+            inet_gw_mac[i] = mac[i]
+            i += 1
+        inet_gw_mac_known = 1
+
+    inet_bump_pings_received()
+        inet_pings_received += 1
+
+
+ARP request for the IPv4 address `ta.tb.tc.td`, broadcast. Uses
+our MAC (must be known — early-returns -1 otherwise). Returns 0
+on success, -1 on failure.
+
+    inet_send_arp_request(ta: int, tb: int, tc: int, td: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        var frame: [42]byte
+        var i = 0
+        while i < 6
+            frame[i] = 0xff
+            i += 1
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_ARP)
+        pkt_write_u16(frame, 14, 1)              // htype = Ethernet
+        pkt_write_u16(frame, 16, ETHERTYPE_IPV4) // ptype = IPv4
+        frame[18] = 6                            // hlen
+        frame[19] = 4                            // plen
+        pkt_write_u16(frame, 20, ARP_OP_REQUEST)
+        pkt_write_mac(frame, 22, inet_our_mac)
+        pkt_write_ipv4(frame, 28,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        i = 0
+        while i < 6
+            frame[32 + i] = 0
+            i += 1
+        pkt_write_ipv4(frame, 38, ta, tb, tc, td)
+        inet_nic_send_packet(frame, 42)
+
+
+ARP reply. `req` points at the start of the Ethernet frame that
+carried the request; senders from the request become targets in
+the reply.
+
+    inet_send_arp_reply(req: *byte) -> int
+        if inet_our_mac_known == 0
+            return -1
+        var frame: [42]byte
+        pkt_write_mac(frame, 0, req + 22)       // dst = requester's MAC
+        pkt_write_mac(frame, 6, inet_our_mac)   // src = us
+        pkt_write_u16(frame, 12, ETHERTYPE_ARP)
+        pkt_write_u16(frame, 14, 1)
+        pkt_write_u16(frame, 16, ETHERTYPE_IPV4)
+        frame[18] = 6
+        frame[19] = 4
+        pkt_write_u16(frame, 20, ARP_OP_REPLY)
+        pkt_write_mac(frame, 22, inet_our_mac)
+        pkt_write_ipv4(frame, 28,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_mac(frame, 32, req + 22)      // target MAC = requester
+        pkt_write_ipv4(frame, 38,
+            int(req[28]) & 0xff,
+            int(req[29]) & 0xff,
+            int(req[30]) & 0xff,
+            int(req[31]) & 0xff)
+        inet_nic_send_packet(frame, 42)
+
+
+ICMP echo request to the gateway. Destination MAC must already
+have been learned via ARP. `id` + `seq` are reflected by the peer
+in its reply so we can match replies to requests.
+
+    inet_send_icmp_echo(id: int, seq: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        if inet_gw_mac_known == 0
+            return -1
+        var frame: [42]byte
+
+Ethernet header.
+
+        pkt_write_mac(frame, 0, inet_gw_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+
+IPv4 header (20 bytes, no options).
+
+        frame[14] = 0x45                         // version 4, IHL 5
+        frame[15] = 0                            // DSCP/ECN
+        pkt_write_u16(frame, 16, 28)             // total length = 20 + 8
+        pkt_write_u16(frame, 18, 0)              // id
+        pkt_write_u16(frame, 20, 0)              // flags + frag = 0
+        frame[22] = 64                           // TTL
+        frame[23] = byte(IP_PROTO_ICMP)
+        pkt_write_u16(frame, 24, 0)              // checksum placeholder
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30,
+            INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D)
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+
+ICMP echo (8 bytes, no payload).
+
+        frame[34] = byte(ICMP_ECHO_REQ)
+        frame[35] = 0                            // code
+        pkt_write_u16(frame, 36, 0)              // checksum placeholder
+        pkt_write_u16(frame, 38, id)
+        pkt_write_u16(frame, 40, seq)
+        pkt_write_u16(frame, 36, net_checksum(frame + 34, 8))
+
+        val r = inet_nic_send_packet(frame, 42)
+        if r == 0
+            inet_pings_sent += 1
+        r
+
+
+ICMP echo reply in response to `req`. `req` points at the start
+of the Ethernet frame (ICMP payload starts at offset 14 + ihl).
+
+    inet_send_icmp_reply(req: *byte, total_len: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        var frame: [1514]byte
+        if total_len > 1514
+            return -1
+        if total_len < 14 + 20 + 8
+            return -1
+
+Copy the whole request into our buffer as a starting point; we
+then rewrite the bits that change between request and reply.
+
+        var i = 0
+        while i < total_len
+            frame[i] = req[i]
+            i += 1
+
+Ethernet: swap src and dst.
+
+        pkt_write_mac(frame, 0, req + 6)
+        pkt_write_mac(frame, 6, inet_our_mac)
+
+IPv4: swap src and dst IP, zero checksum, recompute.
+
+        var j = 0
+        while j < 4
+            frame[14 + 12 + j] = req[14 + 16 + j]   // dst <- old src
+            frame[14 + 16 + j] = req[14 + 12 + j]   // src <- old dst
+            j += 1
+        pkt_write_u16(frame, 14 + 10, 0)
+        val ihl_bytes = (int(frame[14]) & 0x0f) * 4
+        pkt_write_u16(frame, 14 + 10, net_checksum(frame + 14, ihl_bytes))
+
+ICMP: flip type from echo-request to echo-reply, zero checksum,
+recompute over the full ICMP message.
+
+        val icmp_off = 14 + ihl_bytes
+        frame[icmp_off] = byte(ICMP_ECHO_REP)
+        pkt_write_u16(frame, icmp_off + 2, 0)
+        val icmp_len = total_len - icmp_off
+        pkt_write_u16(frame, icmp_off + 2,
+            net_checksum(frame + icmp_off, icmp_len))
+
+        inet_nic_send_packet(frame, total_len)
+
+
+### UDP checksum (IPv4 pseudo-header)
+
+Core one's-complement sum over `pseudo-header + UDP header +
+payload`. Pseudo-header layout (12 bytes): src_ip (4) + dst_ip
+(4) + zero (1) + proto=17 (1) + udp_len (2). The UDP bytes come
+straight from the frame buffer at `[udp_off .. udp_off + udp_len)`
+— caller decides whether the checksum field there is zero (for
+transmit) or stored (for receive-side verify).
+
+Returns the folded 16-bit sum (not complemented). Valid transmit
+frames have the complement stored in their checksum field;
+receive-side verification expects this helper to return `0xffff`
+when the stored checksum is correct.
+
+    inet_udp_partial_sum(src_ip: u32, dst_ip: u32,
+                        frame: *byte, udp_off: int, udp_len: int) -> int
+        var sum = 0
+        sum += (ipv4_octet(src_ip, 0) << 8) | ipv4_octet(src_ip, 1)
+        sum += (ipv4_octet(src_ip, 2) << 8) | ipv4_octet(src_ip, 3)
+        sum += (ipv4_octet(dst_ip, 0) << 8) | ipv4_octet(dst_ip, 1)
+        sum += (ipv4_octet(dst_ip, 2) << 8) | ipv4_octet(dst_ip, 3)
+        sum += IP_PROTO_UDP
+        sum += udp_len
+        var i = 0
+        while i + 1 < udp_len
+            sum += pkt_read_u16(frame, udp_off + i)
+            i += 2
+        if i < udp_len
+            sum += (int(frame[udp_off + i]) & 0xff) << 8
+        while (sum >> 16) != 0
+            sum = (sum & 0xffff) + (sum >> 16)
+        sum
+
+
+Transmit-side helper. Caller must zero the UDP checksum field in
+`frame` before calling. A computed 0 maps to `0xffff` so the
+written value never collides with the "no checksum" sentinel
+(RFC 768).
+
+    inet_udp_checksum(src_ip: u32, dst_ip: u32,
+                     frame: *byte, udp_off: int, udp_len: int) -> int
+        val s = inet_udp_partial_sum(src_ip, dst_ip, frame, udp_off, udp_len)
+        val c = (~s) & 0xffff
+        if c == 0
+            return 0xffff
+        c
+
+
+Receive-side verify. Frame still carries its sender-written
+checksum; a valid packet folds to `0xffff`. A stored 0 means
+"no checksum" (accept unconditionally, IPv4-only). Returns 1
+on valid, 0 on corrupt.
+
+    inet_udp_verify(src_ip: u32, dst_ip: u32,
+                   frame: *byte, udp_off: int, udp_len: int) -> int
+        val stored = pkt_read_u16(frame, udp_off + 6)
+        if stored == 0
+            return 1
+        val s = inet_udp_partial_sum(src_ip, dst_ip, frame, udp_off, udp_len)
+        if s == 0xffff
+            return 1
+        0
+
+
+### UDP — outbound
+
+Builds a full Ethernet/IPv4/UDP frame and hands it to the nic. The
+gateway MAC is the only link-layer destination we know (no general
+ARP cache yet), and QEMU user-mode networking routes everything
+through the gateway anyway, so we send every non-loopback packet
+there. Returns 0 on success, -1 if the link isn't ready
+(`inet_our_mac_known` or `inet_gw_mac_known` still 0), if `dlen` is
+out of range, or if the nic rejects the frame.
+
+UDP checksum is computed over the IPv4 pseudo-header + UDP header
++ payload — required for IPv6 peers and recommended for IPv4.
+
+    inet_send_udp(dst_ip: u32, dst_port: int, src_port: int, data: *byte, dlen: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        if inet_gw_mac_known == 0
+            return -1
+        if dlen < 0
+            return -1
+        if dlen > 1472
+            return -1
+        var frame: [1514]byte
+        val total_len = 14 + 20 + 8 + dlen
+
+Ethernet header.
+
+        pkt_write_mac(frame, 0, inet_gw_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+
+IPv4 header (20 bytes, no options).
+
+        frame[14] = 0x45
+        frame[15] = 0
+        pkt_write_u16(frame, 16, 20 + 8 + dlen)
+        pkt_write_u16(frame, 18, 0)
+        pkt_write_u16(frame, 20, 0)
+        frame[22] = 64
+        frame[23] = byte(IP_PROTO_UDP)
+        pkt_write_u16(frame, 24, 0)
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30, ipv4_octet(dst_ip, 0), ipv4_octet(dst_ip, 1), ipv4_octet(dst_ip, 2), ipv4_octet(dst_ip, 3))
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+
+UDP header + payload. Checksum field is zeroed before computing
+the pseudo-header checksum; the result lands at offset 40.
+
+        pkt_write_u16(frame, 34, src_port)
+        pkt_write_u16(frame, 36, dst_port)
+        pkt_write_u16(frame, 38, 8 + dlen)
+        pkt_write_u16(frame, 40, 0)
+        var i = 0
+        while i < dlen
+            frame[42 + i] = data[i]
+            i += 1
+        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
+            INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_u16(frame, 40,
+            inet_udp_checksum(our_ip, dst_ip, frame, 34, 8 + dlen))
+
+        inet_nic_send_packet(frame, total_len)
+
+

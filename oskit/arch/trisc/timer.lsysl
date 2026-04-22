@@ -14,7 +14,7 @@ Device registers (MCU-style timer, word-aligned):
 - +12  IER (interrupt enable: bit 0 = overflow)
 
 
-    module oskit.kernel
+    module oskit.arch
 
     struct TimerRegs
         arr: u32
@@ -27,10 +27,7 @@ Device registers (MCU-style timer, word-aligned):
     val TIMER_BASE = 0x800040
     val TIMER_IRQ  = 0
 
-    extern register_irq(irq: int, handler: i64)
-
     timer_init(period: int)
-        register_irq(TIMER_IRQ, timer_handler)
         var t = *TimerRegs(TIMER_BASE)
         t.arr = u32(period)
         t.ier = 1

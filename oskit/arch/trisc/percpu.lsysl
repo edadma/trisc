@@ -9,7 +9,7 @@ The core ID is read from the IPI device's SELF_ID register
 (memory-mapped, read-only). Each core's IPI device is at
 IPI_BASE + coreId * 16, with SELF_ID at offset 12.
 
-    module oskit.kernel
+    module oskit.arch
 
     import oskit.config.{MAX_CORES, NUM_PRIORITIES}
 

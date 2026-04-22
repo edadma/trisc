@@ -1,0 +1,147 @@
+OSKit NIC client — thin wrappers around the nic IPC ABI
+=========================================================
+
+Mirrors `oskit/net/client.lsysl` (the inet/socket client) but
+talks to the link-layer `nic` server. Exposes two calls today:
+
+- `nic_get_mac(out)` — writes our MAC into `out[0..5]`
+- `nic_send_packet(frame, len)` — enqueues a raw Ethernet frame
+  on the TX queue
+
+The set will grow (RX subscribe + recv) once inet becomes a
+nic subscriber; at that point the wrappers move into the inet
+server rather than client programs, which have no business
+touching raw Ethernet.
+
+    module oskit.net
+
+    import oskit.ulib.{ipc_send, port_lookup}
+
+
+Cached nic port, resolved lazily on first call.
+
+    var nic_port_cached = -1
+
+    nic_get_port() -> int
+        if nic_port_cached < 0
+            nic_port_cached = port_lookup("nic")
+        nic_port_cached
+
+
+Command codes — must track `oskit/servers/nic.lsysl`.
+
+    val NIC_CLI_CMD_GET_MAC      = 1
+    val NIC_CLI_CMD_SEND_PACKET  = 2
+    val NIC_CLI_CMD_SUBSCRIBE_RX = 3
+    val NIC_CLI_CMD_RECV_PACKET  = 4
+
+    val NIC_CLI_MAX_FRAME = 1514
+
+
+### nic_get_mac
+
+Writes 6 bytes into `out`. Returns 0 on success, -1 if the nic
+port isn't registered or the server replies with an error.
+
+    nic_get_mac(out: *byte) -> int
+        val port = nic_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(NIC_CLI_CMD_GET_MAC)
+        var reply: [7]byte
+        val r = ipc_send(port, &msg[0], 1, &reply[0], 7)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        var i = 0
+        while i < 6
+            out[i] = reply[1 + i]
+            i += 1
+        0
+
+
+### nic_send_packet
+
+Sends the already-formed Ethernet frame (starting at the
+destination MAC, no virtio header). Returns 0 on success, -1
+on any error.
+
+    nic_send_packet(frame: *byte, len: int) -> int
+        val port = nic_get_port()
+        if port < 0
+            return -1
+        if len <= 0 || len > NIC_CLI_MAX_FRAME
+            return -1
+        var msg: [1520]byte
+        msg[0] = byte(NIC_CLI_CMD_SEND_PACKET)
+        msg[1] = byte((len >> 8) & 0xff)
+        msg[2] = byte(len & 0xff)
+        var i = 0
+        while i < len
+            msg[3 + i] = frame[i]
+            i += 1
+        var reply: [1]byte
+        val r = ipc_send(port, &msg[0], 3 + len, &reply[0], 1)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        0
+
+
+### nic_subscribe_rx
+
+Register the caller's thread as the nic's sole RX notification
+target. On each received frame the nic calls
+`notify_send_to(sender_tid, 1)` + enqueues the frame; the
+subscriber is expected to drain with `nic_recv_packet` until it
+returns -1. Returns 0 on success, -1 on any IPC failure.
+
+    nic_subscribe_rx() -> int
+        val port = nic_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(NIC_CLI_CMD_SUBSCRIBE_RX)
+        var reply: [1]byte
+        val r = ipc_send(port, &msg[0], 1, &reply[0], 1)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        0
+
+
+### nic_recv_packet
+
+Non-blocking fetch of the next queued RX frame. Writes up to
+`maxlen` bytes of the frame into `out` and returns the frame's
+length, or -1 when the queue is empty / on IPC failure. Shorter
+`maxlen` truncates the returned frame (the nic already sent the
+full frame bytes, so this is purely a caller-side clamp).
+
+    nic_recv_packet(out: *byte, maxlen: int) -> int
+        val port = nic_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(NIC_CLI_CMD_RECV_PACKET)
+        var reply: [1517]byte
+        val r = ipc_send(port, &msg[0], 1, &reply[0], 1517)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        val raw_len = ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
+        var take = raw_len
+        if take > maxlen
+            take = maxlen
+        var i = 0
+        while i < take
+            out[i] = reply[3 + i]
+            i += 1
+        raw_len

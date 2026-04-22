@@ -1,0 +1,297 @@
+Virtio PCI transport (modern v1.0+, x86_64)
+=============================================
+
+Modern virtio-pci implementation of the transport-ops surface
+used by `virtio_net`. The op signatures are identical to
+`virtio_transport_mmio.lsysl`; x86 builds include this file, the
+MMIO sibling is never linked. No runtime dispatch.
+
+This transport only supports the modern (VERSION_1) layout. A
+transitional device (device ID in 0x1000..0x103F) would need
+legacy I/O-BAR register poking which we deliberately don't
+implement — QEMU always offers modern-range IDs for virtio-net
+(`-device virtio-net-pci,...`).
+
+Layout map:
+
+- COMMON_CFG (cap type 1) — the main register file (status,
+  feature select/ack, queue select/size/addresses/enable,
+  queue_notify_off).
+- NOTIFY_CFG (cap type 2) — the "poke" region. For queue `q`:
+  write_addr = notify_base + queue_notify_off(q) * mult.
+- ISR_CFG (cap type 3) — a single byte; read clears. Bit 0 =
+  vring interrupt, bit 1 = config change.
+- DEVICE_CFG (cap type 4) — device-specific byte-addressable
+  config (for virtio-net: MAC at 0..5).
+
+Width rules matter here — status is u8, queue_enable / num_queues
+/ queue_select / queue_size / queue_notify_off are u16,
+feature_* are u32, queue_desc/driver/device are u64.
+
+    module oskit.drivers.virtio
+
+    import oskit.arch.x86_64.{
+        pci_find_virtio, pci_enable, pci_bar_addr,
+        pci_find_virtio_cap, pci_cap_u32, pci_read8,
+        VIRTIO_PCI_CAP_COMMON_CFG, VIRTIO_PCI_CAP_NOTIFY_CFG,
+        VIRTIO_PCI_CAP_ISR_CFG, VIRTIO_PCI_CAP_DEVICE_CFG,
+        VPCI_CAP_BAR, VPCI_CAP_OFFSET, VPCI_CAP_NOTIFY_MULT,
+        PCI_BDF_NONE
+    }
+
+
+Virtio spec-wide constants (identical values to the MMIO
+transport — only one transport is linked per build, so there's
+no duplicate-symbol conflict).
+
+    val VIRTIO_STATUS_ACKNOWLEDGE = 1
+    val VIRTIO_STATUS_DRIVER      = 2
+    val VIRTIO_STATUS_DRIVER_OK   = 4
+    val VIRTIO_STATUS_FEATURES_OK = 8
+    val VIRTIO_STATUS_NEEDS_RESET = 64
+    val VIRTIO_STATUS_FAILED      = 128
+
+    val VIRTIO_DEV_NONE = 0
+    val VIRTIO_DEV_NET  = 1
+    val VIRTIO_DEV_BLK  = 2
+
+    val VIRTIO_INT_USED_BUF      = 1
+    val VIRTIO_INT_CONFIG_CHANGE = 2
+
+
+Common-config register offsets (virtio 1.x spec §4.1.4.3).
+
+    val VPCI_COMMON_DFEAT_SEL    = 0x00    // u32
+    val VPCI_COMMON_DFEAT        = 0x04    // u32
+    val VPCI_COMMON_DRVFEAT_SEL  = 0x08    // u32
+    val VPCI_COMMON_DRVFEAT      = 0x0c    // u32
+    val VPCI_COMMON_MSIX_CFG     = 0x10    // u16
+    val VPCI_COMMON_NUM_QUEUES   = 0x12    // u16
+    val VPCI_COMMON_STATUS       = 0x14    // u8
+    val VPCI_COMMON_CFG_GEN      = 0x15    // u8
+    val VPCI_COMMON_Q_SELECT     = 0x16    // u16
+    val VPCI_COMMON_Q_SIZE       = 0x18    // u16
+    val VPCI_COMMON_Q_MSIX_VEC   = 0x1a    // u16
+    val VPCI_COMMON_Q_ENABLE     = 0x1c    // u16
+    val VPCI_COMMON_Q_NOTIFY_OFF = 0x1e    // u16
+    val VPCI_COMMON_Q_DESC       = 0x20    // u64
+    val VPCI_COMMON_Q_DRIVER     = 0x28    // u64
+    val VPCI_COMMON_Q_DEVICE     = 0x30    // u64
+
+
+Selected device state. Populated by `v_find`.
+
+    var vpci_bdf: int  = -1
+    var vpci_common: i64 = 0        // COMMON_CFG region virt addr
+    var vpci_notify: i64 = 0        // NOTIFY_CFG region virt addr
+    var vpci_notify_mult: i64 = 0   // queue_notify_off * mult
+    var vpci_isr:    i64 = 0        // ISR register byte addr
+    var vpci_device: i64 = 0        // DEVICE_CFG region virt addr
+
+
+Volatile-pointer MMIO accessors over a mapped BAR region. The
+rest of this file uses these; callers pass the BAR base and an
+in-region byte offset.
+
+    mmio_read8(base: i64, off: int) -> int
+        volatile var p: *byte = *byte(base + i64(off))
+        int(*p) & 0xff
+
+    mmio_write8(base: i64, off: int, v: int)
+        volatile var p: *byte = *byte(base + i64(off))
+        *p = byte(v & 0xff)
+
+    mmio_read16(base: i64, off: int) -> int
+        volatile var p: *u16 = *u16(base + i64(off))
+        int(*p) & 0xffff
+
+    mmio_write16(base: i64, off: int, v: int)
+        volatile var p: *u16 = *u16(base + i64(off))
+        *p = u16(v & 0xffff)
+
+    mmio_read32(base: i64, off: int) -> i32
+        volatile var p: *i32 = *i32(base + i64(off))
+        *p
+
+    mmio_write32(base: i64, off: int, v: i32)
+        volatile var p: *i32 = *i32(base + i64(off))
+        *p = v
+
+    mmio_write64(base: i64, off: int, v: i64)
+        volatile var p: *i64 = *i64(base + i64(off))
+        *p = v
+
+
+Resolve a virtio cap into its absolute MMIO address:
+`bar_base + cap.offset`. Returns 0 if the cap isn't present.
+
+    vpci_map_cap(bdf: int, cfg_type: int) -> i64
+        val cap_off = pci_find_virtio_cap(bdf, cfg_type)
+        if cap_off < 0
+            return i64(0)
+        val bar_idx = pci_read8(bdf, cap_off + VPCI_CAP_BAR) & 0xff
+        val bar_base = pci_bar_addr(bdf, bar_idx)
+        if bar_base == u64(0)
+            return i64(0)
+        val inner = i64(pci_cap_u32(bdf, cap_off, VPCI_CAP_OFFSET))
+        i64(bar_base) + inner
+
+
+========================================================================
+Transport ops — same signatures as `virtio_transport_mmio.lsysl`.
+========================================================================
+
+
+Locate a virtio-PCI device of `dev_id`, enable memory + bus-
+master decoding, and resolve the four virtio caps into MMIO
+addresses. Returns 1 if all four required regions mapped, 0
+otherwise.
+
+    v_find(dev_id: int) -> int
+        val bdf = pci_find_virtio(dev_id)
+        if bdf == PCI_BDF_NONE
+            return 0
+        pci_enable(bdf)
+        val common_addr = vpci_map_cap(bdf, VIRTIO_PCI_CAP_COMMON_CFG)
+        val notify_addr = vpci_map_cap(bdf, VIRTIO_PCI_CAP_NOTIFY_CFG)
+        val isr_addr    = vpci_map_cap(bdf, VIRTIO_PCI_CAP_ISR_CFG)
+        val device_addr = vpci_map_cap(bdf, VIRTIO_PCI_CAP_DEVICE_CFG)
+        if common_addr == i64(0) || notify_addr == i64(0) || isr_addr == i64(0)
+            return 0
+
+        // NOTIFY cap has an extra u32 after the standard header.
+        val notify_cap_off = pci_find_virtio_cap(bdf, VIRTIO_PCI_CAP_NOTIFY_CFG)
+        val mult = i64(pci_cap_u32(bdf, notify_cap_off, VPCI_CAP_NOTIFY_MULT))
+
+        vpci_bdf = bdf
+        vpci_common = common_addr
+        vpci_notify = notify_addr
+        vpci_notify_mult = mult
+        vpci_isr = isr_addr
+        vpci_device = device_addr
+        1
+
+
+Status is a u8 — not u32 like MMIO. Width matters: writing a u32
+would clobber `config_generation` at offset 0x15.
+
+    v_status_read() -> int
+        mmio_read8(vpci_common, VPCI_COMMON_STATUS)
+
+    v_status_write(v: int)
+        mmio_write8(vpci_common, VPCI_COMMON_STATUS, v)
+
+    v_status_or(bit: int)
+        mmio_write8(vpci_common, VPCI_COMMON_STATUS,
+            v_status_read() | bit)
+
+
+Feature query / ack. Bank-select is still u32 (feature selector
+is explicitly u32 in the modern PCI layout too).
+
+    v_feat_has(bit: int) -> int
+        val sel = bit / 32
+        val off = bit % 32
+        mmio_write32(vpci_common, VPCI_COMMON_DFEAT_SEL, i32(sel))
+        val feats = mmio_read32(vpci_common, VPCI_COMMON_DFEAT)
+        if (int(feats) & (1 << off)) != 0
+            return 1
+        0
+
+    v_feat_ack(bit: int)
+        val sel = bit / 32
+        val off = bit % 32
+        mmio_write32(vpci_common, VPCI_COMMON_DRVFEAT_SEL, i32(sel))
+        val cur = mmio_read32(vpci_common, VPCI_COMMON_DRVFEAT)
+        mmio_write32(vpci_common, VPCI_COMMON_DRVFEAT,
+            cur | i32(1 << off))
+
+
+Queue setup. Order is critical on PCI: select queue → write size
+→ write addresses → enable LAST. queue_enable=1 tells the device
+the ring is valid; until then it won't read the DESC/DRIVER/
+DEVICE addresses. Returns 0 if the device's reported max size
+(read from queue_size before we write it) is zero or smaller
+than requested.
+
+Also caches the queue's notify_off here so `v_queue_notify` can
+compute the right byte address without re-selecting the queue.
+
+    var vpci_notify_off_q: [16]int   // big enough for VNET_RX / TX
+
+    v_queue_setup(q: int, size: int,
+                  desc_pa: i64, avail_pa: i64, used_pa: i64) -> int
+        mmio_write16(vpci_common, VPCI_COMMON_Q_SELECT, q)
+        val max = mmio_read16(vpci_common, VPCI_COMMON_Q_SIZE)
+        if max == 0
+            return 0
+        if size > max
+            return 0
+        mmio_write16(vpci_common, VPCI_COMMON_Q_SIZE, size)
+
+        mmio_write64(vpci_common, VPCI_COMMON_Q_DESC,   desc_pa)
+        mmio_write64(vpci_common, VPCI_COMMON_Q_DRIVER, avail_pa)
+        mmio_write64(vpci_common, VPCI_COMMON_Q_DEVICE, used_pa)
+
+        val noff = mmio_read16(vpci_common, VPCI_COMMON_Q_NOTIFY_OFF)
+        vpci_notify_off_q[q] = noff
+
+        mmio_write16(vpci_common, VPCI_COMMON_Q_ENABLE, 1)
+        1
+
+
+Kick queue `q`. The target byte address is
+`notify_base + notify_off(q) * notify_off_multiplier`. Many
+virtio devices use mult=0 (one shared notify register) or
+mult=4 (one dword per queue) — we don't special-case, just do
+the arithmetic.
+
+    v_queue_notify(q: int)
+        val off = vpci_notify_off_q[q] * int(vpci_notify_mult)
+        // Standard notify format is a u16 containing the queue
+        // index — same convention MMIO uses.
+        mmio_write16(vpci_notify, off, q)
+
+
+ISR register: one byte, read clears. Bit 0 = queue interrupt,
+bit 1 = config change. Acking is implicit in the read, so
+`v_int_ack` is a no-op.
+
+    v_int_status() -> int
+        mmio_read8(vpci_isr, 0)
+
+    v_int_ack(bits: int)
+        // PCI ISR is read-to-clear; no separate ack needed.
+        0
+
+
+Device-specific config byte (virtio-net: first 6 bytes = MAC).
+DEVICE_CFG is byte-addressable, so this is a plain byte read
+from the device-cfg BAR region.
+
+    v_config_byte(off: int) -> int
+        mmio_read8(vpci_device, off)
+
+
+Diagnostics. PCI transports don't expose an MMIO `Version` reg
+(that's an MMIO-only register), so `v_debug_version` returns 0.
+`v_debug_feats` reads the selected bank the same way `v_feat_has`
+does.
+
+    v_debug_version() -> int
+        0
+
+    v_debug_feats(sel: int) -> i32
+        if vpci_common == 0
+            return i32(0)
+        mmio_write32(vpci_common, VPCI_COMMON_DFEAT_SEL, i32(sel))
+        mmio_read32(vpci_common, VPCI_COMMON_DFEAT)
+
+
+`v_have_device` — 1 iff `v_find` has populated the cap
+addresses. Matches the MMIO transport's contract.
+
+    v_have_device() -> int
+        if vpci_common != 0
+            return 1
+        0

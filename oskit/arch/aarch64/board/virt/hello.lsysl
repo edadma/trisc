@@ -1,18 +1,54 @@
 hello — aarch64 sysl kernel entry (QEMU virt)
 =============================================
 
-Minimal `kernel_main` for the QEMU virt board. Prints greetings
-via the PL011 UART module and returns; `boot.s` halts in wfi
-after we come back.
+Boot path for the QEMU virt board. Provides the platform-side
+implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
+`arch_schedule_after_exc`, then drives one of three demos:
+
+  DEMO_MODE = 0   — kernel-integrated: create two kernel threads
+                    via `create_thread`, then `first_thread_ssp()` +
+                    `arch_resume_process()` to kick off the first.
+                    Timer IRQ flows through the real `schedule()`.
+  DEMO_MODE = 1   — ad-hoc: own two-thread scheduler (no kernel).
+                    Useful for regression testing the context-switch
+                    asm without dragging in the full kernel.
+  DEMO_MODE = 2   — EL0 demo: drop to EL0 with a `b .` program and
+                    watch timer preemption count ticks. Predates
+                    everything else; kept as a sanity check.
 
     module oskit.arch.aarch64.board.virt
 
     import oskit.arch.{page_alloc_zero, kernel_ptbr, vm_flush_tlb,
-        vm_create_process_pt, vm_set_ptbr, read_sctlr_el1}
+        vm_create_process_pt, vm_set_ptbr, read_sctlr_el1,
+        read_esr_el1, abort,
+        last_user_code_page, last_user_stack_page, drop_to_el0,
+        sync_icache_line, vm_v2p, vm_copy_to, vm_copy_from,
+        cntfrq_el0, cntp_tval_set, cntp_ctl_set,
+        build_stack_frame, arch_resume_process,
+        STACK_FRAME_SIZE, arch_cli, arch_sti,
+        PROG_USP, PROG_SSP}
+    import oskit.kernel.{kernel_init, create_thread, create_thread_pri,
+        first_thread_ssp,
+        kernel_stack_usp, kernel_stack_ssp, schedule,
+        syscall_table, syscall_ssp_set, syscall_check_allowed,
+        create_process_suspended, resume_process,
+        register_syscall, syscall_return,
+        kb_enqueue, kb_notify_tid, notify_send,
+        virtio_notify_tid,
+        current_thread, ticks}
+    import oskit.config.{NUM_PRIORITIES}
+    import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
+        ipc_send, ipc_recv, ipc_reply}
+    import oskit.services.{get_thread_count, uptime, sleep, yield}
+    import oskit.hal.memset
+    import oskit.drivers.virtio.{virtio_device_id, virtio_present,
+        VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE, VIRTIO_MMIO_MAX, VIRTIO_DEV_NET}
+
+    extern arch_syscall_call(arg: i64, handler: i64)
+
+    val DEMO_MODE = 5             // 0=kernel+IPC, 1=ad-hoc, 2=EL0 legacy, 3=user proc, 4=user+kern IPC, 5=rs-as-userspace
 
 Render `v` as a 16-digit hex number (prefixed `0x`) to the UART.
-Useful for the boot-time sanity prints below; deliberately crude
-since the kernel will grow a real formatter later.
 
     uart_puthex(v: u64)
         uart_puts("0x")
@@ -25,6 +61,393 @@ since the kernel will grow a real formatter later.
                 uart_putc(int('A') + d - 10)
             shift -= 4
 
+GICv2 programming — QEMU virt wires the distributor at 0x08000000
+and the per-CPU CPU interface at 0x08010000.
+
+    val GICD_CTLR:        u64 = u64(0x08000000)
+    val GICD_ISENABLER0:  u64 = u64(0x08000100)
+    val GICD_ISENABLER1:  u64 = u64(0x08000104)  // SPIs 32..63
+    val GICD_ISENABLER2:  u64 = u64(0x08000108)  // SPIs 64..95
+    val GICD_IPRIORITYR:  u64 = u64(0x08000400)  // 1 byte per IRQ
+    val GICD_ITARGETSR:   u64 = u64(0x08000800)  // 1 byte per IRQ (SPIs only)
+    val GICC_CTLR:        u64 = u64(0x08010000)
+    val GICC_PMR:         u64 = u64(0x08010004)
+    val GICC_IAR:         u64 = u64(0x0801000C)
+    val GICC_EOIR:        u64 = u64(0x08010010)
+    val IRQ_TIMER:       int = 30          // EL1 phys timer (PPI 14)
+    val IRQ_UART:        int = 33          // PL011 on QEMU virt (SPI 1)
+    val IRQ_VIRTIO_NET:  int = 79          // virtio-mmio slot 31 (SPI 47)
+
+    gic_init()
+        var dctl: *i32 = *i32(GICD_CTLR)
+        *dctl = i32(1)
+        // Enable IRQ 30 (timer, PPI) in ISENABLER0.
+        var isen0: *i32 = *i32(GICD_ISENABLER0)
+        *isen0 = i32(0x40000000)
+        var prio_timer: *byte = *byte(GICD_IPRIORITYR + u64(IRQ_TIMER))
+        *prio_timer = byte(0xA0)
+        // Enable IRQ 33 (PL011, SPI 1) in ISENABLER1, route to CPU 0,
+        // priority 0xA0 matching the timer.
+        var isen1: *i32 = *i32(GICD_ISENABLER1)
+        *isen1 = i32(1 << 1)               // bit 1 = IRQ 33
+        var prio_uart: *byte = *byte(GICD_IPRIORITYR + u64(IRQ_UART))
+        *prio_uart = byte(0xA0)
+        var target_uart: *byte = *byte(GICD_ITARGETSR + u64(IRQ_UART))
+        *target_uart = byte(1)             // CPU 0
+        // Enable IRQ 79 (virtio-mmio slot 31, SPI 47) in ISENABLER2 at
+        // bit (79 - 64) = 15. Priority + target match the UART.
+        var isen2: *i32 = *i32(GICD_ISENABLER2)
+        *isen2 = i32(1 << 15)
+        var prio_vnet: *byte = *byte(GICD_IPRIORITYR + u64(IRQ_VIRTIO_NET))
+        *prio_vnet = byte(0xA0)
+        var target_vnet: *byte = *byte(GICD_ITARGETSR + u64(IRQ_VIRTIO_NET))
+        *target_vnet = byte(1)             // CPU 0
+        var pmr: *i32 = *i32(GICC_PMR)
+        *pmr = i32(0xFF)
+        var cctl: *i32 = *i32(GICC_CTLR)
+        *cctl = i32(1)
+        // Unmask PL011 RX at the UART itself.
+        uart_enable_rx_irq()
+
+    gic_ack() -> int
+        var iarp: *i32 = *i32(GICC_IAR)
+        int(*iarp) & 0x3FF
+
+    gic_eoi(irq: int)
+        var eoip: *i32 = *i32(GICC_EOIR)
+        *eoip = i32(irq)
+
+Serial RX handler. Drains all pending PL011 bytes into the kernel's
+keyboard buffer as raw-ASCII events (bit 17 = raw flag, bit 16 =
+press flag, bits 31..24 = ASCII), matching x86 runtime.lsysl's
+serial_handler format. TTY server's tty_process_keyboard picks
+them up via kbhit/getkey and skips scancode translation on the
+raw-ASCII path. Acks the PL011 interrupt before GIC EOI.
+
+    serial_handler()
+        var got = 0
+        while uart_rx_empty() == 0
+            val ch = uart_rx_read()
+            kb_enqueue((ch << 24) | 0x30000)   // raw(17) | press(16)
+            got = 1
+        uart_ack_rx_irq()
+        if got == 1
+            if kb_notify_tid >= 0
+                notify_send(kb_notify_tid, 1)
+
+Virtio-mmio IRQ handler. virtio-mmio slot 31 (virtio-net) is the
+only device we route; its INT_STATUS/INT_ACK registers live at
+fixed PA 0x0a003e00, directly reachable from kernel Device map.
+Must clear the device-side pending bits before the GIC EOI,
+otherwise the level-sensitive line re-asserts immediately.
+
+Kernel doesn't know what queue fired — the nic server walks used
+rings itself. We just ack the device and wake the registered
+notify TID (set via `svc_virtio_set_notify`).
+
+    val VIRTIO_NET_IRQ_PA: u64 = u64(0x0a003e00)
+    val VIRTIO_REG_INT_STATUS_OFF: u64 = u64(0x60)
+    val VIRTIO_REG_INT_ACK_OFF:    u64 = u64(0x64)
+
+    virtio_handler()
+        var sp: *i32 = *i32(VIRTIO_NET_IRQ_PA + VIRTIO_REG_INT_STATUS_OFF)
+        val status = *sp
+        if status != i32(0)
+            var ap: *i32 = *i32(VIRTIO_NET_IRQ_PA + VIRTIO_REG_INT_ACK_OFF)
+            *ap = status
+        if virtio_notify_tid >= 0
+            notify_send(virtio_notify_tid, 1)
+
+    timer_init_periodic(interval_ticks: u64)
+        cntp_tval_set(interval_ticks)
+        cntp_ctl_set(u64(1))
+
+    var tick_count: int = 0
+
+Ad-hoc kernel-thread demo state (DEMO_MODE = 1).
+
+    val MAX_KT = 2
+    val KT_STACK_BYTES = 4096
+
+    var kt_stacks: [2][4096]byte
+    var kt_ssp: [2]i64
+    var kt_current: int = -1
+    var kt_active: int = 0
+
+    kthread_a()
+        while true
+            uart_puts("[kt A tick]\n")
+            arch_wfi()
+
+    kthread_b()
+        while true
+            uart_puts("[kt B tick]\n")
+            arch_wfi()
+
+    extern arch_wfi()
+
+    kt_init(slot: int, entry: i64)
+        var i = 0
+        while i < KT_STACK_BYTES
+            kt_stacks[slot][i] = 0
+            i += 1
+        val top = i64(&kt_stacks[slot][0]) + i64(KT_STACK_BYTES)
+        kt_ssp[slot] = build_stack_frame(entry, top, top)
+
+Sync dispatcher — decode ESR and route.
+
+    extern read_far_el1() -> u64
+
+    arch_dispatch_sync(esr: u64, frame: u64)
+        val ec = int((esr >> u64(26)) & u64(0x3F))
+        if ec == 0x15
+            syscall_dispatch(frame)
+        else
+            uart_puts("[unhandled sync, ESR=")
+            uart_puthex(esr)
+            uart_puts(" FAR=")
+            uart_puthex(read_far_el1())
+            uart_puts(" ELR=")
+            var fp: *i64 = *i64(frame)
+            var elr_p: *i64 = *i64(frame + u64(0x108))
+            uart_puthex(u64(*elr_p))
+            uart_puts("]\n")
+            abort()
+
+IRQ dispatcher — GIC ack, handle, EOI. Any printing is conditional
+on DEMO_MODE because in DEMO_MODE=0 every timer tick drives a real
+scheduler pass and the kernel threads themselves produce output.
+
+    arch_dispatch_irq(frame: u64)
+        val irq = gic_ack()
+        if irq == IRQ_TIMER
+            tick_count += 1
+            if DEMO_MODE == 2
+                uart_puts("[tick ")
+                uart_puthex(u64(tick_count))
+                uart_puts("]\n")
+            cntp_tval_set(cntfrq_el0() / u64(100))
+        else if irq == IRQ_UART
+            serial_handler()
+        else if irq == IRQ_VIRTIO_NET
+            virtio_handler()
+        gic_eoi(irq)
+
+Scheduler hook. Five shapes:
+  DEMO_MODE == 0 → delegate to the kernel's real schedule(ssp)
+  DEMO_MODE == 1 → ad-hoc round-robin across kt_ssp[]
+  DEMO_MODE == 2 → identity (EL0 demo has nothing to schedule)
+  DEMO_MODE == 3 → same as 0, but idle=halt so the user-proc test
+                   terminates cleanly after the sole process exits
+  DEMO_MODE == 4 → same as 3 (user process + kernel echo server,
+                   both go through schedule(); idle halts)
+
+When the kernel's schedule() returns 0, there are no ready threads.
+arch_resume_process(0) would trash SP_EL1; instead we spin on wfi
+so the VM halts cleanly (or waits for an interrupt in richer setups).
+
+    // Fast-path skip flag. Set by `syscall_dispatch` when a short
+    // syscall (putc/thread_id/uptime) completes entirely in dispatch
+    // and doesn't want the scheduler to re-evaluate (which would
+    // FIFO-swap the thread with any peer at equal priority — the
+    // visible symptom is per-byte interleave of boot banners).
+    // Matches x86 boot.s's fast-path-then-iretq pattern.
+    var skip_schedule = false
+
+    arch_schedule_after_exc(ssp: i64) -> i64
+        if skip_schedule
+            skip_schedule = false
+            return ssp
+        if DEMO_MODE == 0 || DEMO_MODE == 3 || DEMO_MODE == 4 || DEMO_MODE == 5
+            val next = schedule(ssp)
+            if next == i64(0)
+                // The idle thread (created in kernel_main_rs) is always
+                // READY at priority NUM_PRIORITIES-1, so schedule() should
+                // never come back with 0 once it's been registered.
+                // Keep a wfi spin as a last-resort safety net for modes
+                // that don't spawn an idle thread.
+                arch_sti()
+                while true
+                    arch_wfi()
+            return next
+        if DEMO_MODE == 1
+            if kt_active <= 0
+                return ssp
+            if kt_current >= 0
+                kt_ssp[kt_current] = ssp
+            val next = (kt_current + 1) % kt_active
+            kt_current = next
+            return kt_ssp[next]
+        ssp
+
+Idle thread body. Sits at NUM_PRIORITIES-1 (lowest) so
+`sched_pick_next` only picks it when no other thread is ready.
+Runs on its own kernel stack (slot 0), so we avoid the previous
+problem of arch_schedule_after_exc entering an infinite wfi loop
+inside a caller's stack frame and leaking that frame every time
+we idle. Unlike the old inline loop, every "idle, wake, run real
+thread, idle again" cycle cleanly resets this thread's ssp via
+the standard schedule() save/restore path.
+
+arch_sti is redundant on entry (SPSR = 0x5 already clears DAIF at
+ERET), but keeps the invariant explicit for readers who find this
+via grep.
+
+    idle_thread_body()
+        arch_sti()
+        while true
+            arch_wfi()
+
+SVC dispatcher. Looks up the kernel's registered handler in
+syscall_table[num], runs the privilege check, and tail-calls the
+handler via the arch_syscall_call asm helper. Handlers write
+their return value into the saved frame by calling syscall_return
+(which reads syscall_ssp).
+
+DEMO_MODE == 2 keeps the old EL0 demo behavior (SYS_EXIT=93 halts,
+SYS_PUTHEX=1 prints) so legacy output still works when the shared
+kernel isn't in play.
+
+    syscall_dispatch(frame: u64)
+        var fp: *i64 = *i64(frame)
+        val num = int(fp[8])
+        val a0 = fp[0]
+
+        if DEMO_MODE == 2
+            if num == 1
+                uart_puts("[EL0 says ")
+                uart_puthex(u64(a0))
+                uart_puts("]\n")
+                fp[0] = i64(0)
+                return
+            if num == 93
+                uart_puts("[EL0 exited, code=")
+                uart_puthex(u64(a0))
+                uart_puts("]\n")
+                abort()
+
+        if num < 0 || num >= 96
+            fp[0] = i64(-1)
+            return
+
+        // Fast path: putc/thread_id/uptime don't touch scheduler state
+        // and are the common case for boot-time printing. Handle
+        // inline, set skip_schedule so arch_schedule_after_exc returns
+        // the current ssp directly. Matches the x86 fast-path in
+        // boot.s that jumps to restore_context without touching
+        // syscall_table. Without this, every putc FIFO-swaps two
+        // printing threads, interleaving each byte.
+        if num == 1
+            uart_putc(int(a0) & 0xFF)
+            fp[0] = i64(0)
+            skip_schedule = true
+            return
+        if num == 5
+            fp[0] = i64(current_thread)
+            skip_schedule = true
+            return
+        if num == 6
+            fp[0] = i64(ticks)
+            skip_schedule = true
+            return
+
+        val handler = syscall_table[num]
+        if handler == i64(0)
+            fp[0] = i64(-1)
+            return
+
+        syscall_ssp_set(i64(frame))
+
+        if syscall_check_allowed(num) == 0
+            fp[0] = i64(-1)
+            return
+
+        arch_syscall_call(a0, handler)
+
+Kernel-thread entries for the kernel-integrated demo. kentry_a
+is the echo server: creates a port, registers "echo", then
+loops on ipc_recv and echoes each message back. kentry_b is
+the client: yields once so A registers, looks up "echo", sends
+a handful of messages, and prints each reply before wfi-ing out.
+
+    var kt_reply_buf: [32]byte
+    var kt_send_buf:  [32]byte
+
+    kentry_a()
+        uart_puts("[kern A] starting echo server\n")
+        val port = port_create()
+        if port < 0
+            uart_puts("[kern A] port_create failed\n")
+            while true
+                arch_wfi()
+        val reg = port_register(port, "echo")
+        if reg < 0
+            uart_puts("[kern A] port_register failed\n")
+            while true
+                arch_wfi()
+        uart_puts("[kern A] echo server ready on port ")
+        uart_puthex(u64(port))
+        uart_puts("\n")
+        while true
+            val sender = ipc_recv(port, *byte(kt_reply_buf), 32)
+            if sender < 0
+                uart_puts("[kern A] ipc_recv failed\n")
+                arch_wfi()
+            else
+                uart_puts("[kern A] got msg from tid=")
+                uart_puthex(u64(sender))
+                uart_puts("\n")
+                ipc_reply(sender, *byte(kt_reply_buf), 1)
+
+    kentry_b()
+        yield()
+        uart_puts("[kern B] looking up echo\n")
+        val port = port_lookup("echo")
+        if port < 0
+            uart_puts("[kern B] port_lookup failed\n")
+            while true
+                arch_wfi()
+        uart_puts("[kern B] found port ")
+        uart_puthex(u64(port))
+        uart_puts("\n")
+        var seq = 0
+        while seq < 3
+            kt_send_buf[0] = byte('A' + seq)
+            val r = ipc_send(port, *byte(kt_send_buf), 1,
+                *byte(kt_reply_buf), 1)
+            uart_puts("[kern B] reply=")
+            uart_putc(int(kt_reply_buf[0]))
+            uart_puts(" r=")
+            uart_puthex(u64(r))
+            uart_puts("\n")
+            seq += 1
+        while true
+            arch_wfi()
+
+Walk the 32 virtio-mmio slots QEMU virt exposes and print a
+one-line summary of every present device. Diagnostic only; the
+net driver's real init runs in `virtio_net_bringup` below.
+
+    virtio_probe()
+        var i = 0
+        var found = 0
+        while i < VIRTIO_MMIO_MAX
+            val base: i64 = VIRTIO_MMIO_BASE + i64(i) * VIRTIO_MMIO_STRIDE
+            if virtio_present(base) != 0
+                val dev = virtio_device_id(base)
+                if dev != 0
+                    uart_puts("virtio: slot @ ")
+                    uart_puthex(base)
+                    uart_puts(" dev=")
+                    uart_puthex(i64(dev))
+                    if dev == VIRTIO_DEV_NET
+                        uart_puts(" (net)")
+                    uart_puts("\n")
+                    found += 1
+            i += 1
+        if found == 0
+            uart_puts("virtio: no devices\n")
+
     kernel_main()
         uart_puts("SLIX aarch64 boot (sysl, MMU on)\n")
         uart_puts("Hello, aarch64!\n")
@@ -33,17 +456,420 @@ since the kernel will grow a real formatter later.
         uart_puthex(kernel_ptbr())
         uart_puts("\n")
 
-        // Dump SCTLR_EL1 so we can inspect which control bits the
-        // boot path left set. Bit 19 (WXN) in particular would make
-        // any EL0-writable mapping execute-never at EL1 — i.e. the
-        // kernel would fault as soon as we flip AP[1] on RAM.
+        virtio_probe()
+
+        if DEMO_MODE == 0
+            kernel_main_kern()
+        else if DEMO_MODE == 1
+            kernel_main_kt()
+        else if DEMO_MODE == 3
+            kernel_main_user()
+        else if DEMO_MODE == 4
+            kernel_main_user_ipc()
+        else if DEMO_MODE == 5
+            kernel_main_rs()
+        else
+            kernel_main_el0()
+
+Kernel-integrated boot path. Uses the shared oskit/kernel scheduler,
+create_thread, and first_thread_ssp. The timer IRQ routes through
+the real schedule(), which picks the next thread from the run
+queue. Both kernel threads print on every scheduler pass.
+
+    kernel_main_kern()
+        uart_puts("[kern] kernel_init...\n")
+        kernel_init()
+        ipc_init()
+
+        uart_puts("[kern] creating threads\n")
+        create_thread(i64(&kentry_a), kernel_stack_usp(0),
+            kernel_stack_ssp(0), "kA")
+        create_thread(i64(&kentry_b), kernel_stack_usp(1),
+            kernel_stack_ssp(1), "kB")
+
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(100))
+        uart_puts("[kern] gic + timer initialised\n")
+
+        arch_cli()
+        val first = first_thread_ssp()
+        if first == i64(0)
+            uart_puts("[kern] first_thread_ssp returned 0\n")
+            abort()
+        uart_puts("[kern] resuming first thread\n")
+        arch_resume_process(first)
+        uart_puts("unexpected return from arch_resume_process\n")
+
+Ad-hoc two-thread demo (no kernel dependency). Used as a smoke
+test for the context-switch asm.
+
+    kernel_main_kt()
+        uart_puts("[kt] initialising two kernel threads\n")
+        kt_init(0, i64(&kthread_a))
+        kt_init(1, i64(&kthread_b))
+        kt_active = 2
+
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(100))
+        uart_puts("gic + timer initialised\n")
+
+        arch_cli()
+        kt_current = 0
+        uart_puts("[kt] resuming thread 0\n")
+        arch_resume_process(kt_ssp[0])
+        uart_puts("unexpected return from arch_resume_process\n")
+
+User-process demo (DEMO_MODE=3). Loads the embedded user program
+(compiled from oskit/bin/<USER_PROG>.lsysl via build_prog.sh,
+copied to user_prog.bin, embedded as _binary_user_prog_bin_*
+symbols by objcopy -I binary) into a fresh process page table
+and resumes. Default USER_PROG=test_putc calls putc('O'),
+putc('K'), putc('\n'), exit() — so we expect "OK\n" on the UART
+then a clean halt. Other USER_PROG binaries plug in here.
+
+DEMO_MODE=4 is the same idea plus a kernel-thread echo server
+(kentry_a) spawned first, so the user program can validate
+cross-address-space IPC by doing port_lookup("echo") + ipc_send.
+
+User binaries no longer live inside the kernel ELF. Instead the
+build packs them into bootinfo.img (see MakeAarch64BootInfoMain),
+which QEMU loads at BOOT_INFO_PA via `-device loader,file=...,
+addr=0x44000000`. The kernel parses the SLIX header on demand and
+copies the requested module's payload into the new process.
+
+    val BOOT_INFO_PA: u64 = u64(0x44000000)
+
+Little-endian readers — boot info uses the same encoding as x86.
+
+    bi_read_u32(p: *byte) -> i64
+        i64(p[0] & 0xff) | (i64(p[1] & 0xff) << 8) | (i64(p[2] & 0xff) << 16) | (i64(p[3] & 0xff) << 24)
+
+    bi_read_i64(p: *byte) -> i64
+        bi_read_u32(p) | (bi_read_u32(p + 4) << 32)
+
+Validate magic + return module count; -1 if header is bad.
+
+    bi_module_count() -> int
+        var p: *byte = *byte(BOOT_INFO_PA)
+        if p[0] != byte('S')
+            return -1
+        if p[1] != byte('L')
+            return -1
+        if p[2] != byte('I')
+            return -1
+        if p[3] != byte('X')
+            return -1
+        int(bi_read_u32(p + 4))
+
+Look up a module by name. Returns physical addr (0 if not found)
+and writes the size to *size_out.
+
+    bi_find(name: string, size_out: *int) -> i64
+        val count = bi_module_count()
+        if count < 0
+            return i64(0)
+        val nb: *byte = *byte(name)
+        val nl = len(name)
+        var i = 0
+        while i < count
+            val entry: *byte = *byte(BOOT_INFO_PA + u64(8 + i * 24))
+            // Compare name (NUL-padded to 8)
+            var j = 0
+            var matched = true
+            while j < nl && j < 8
+                if entry[j] != nb[j]
+                    matched = false
+                    break
+                j += 1
+            if matched
+                if nl < 8 && entry[nl] != 0
+                    matched = false
+            if matched
+                val off = bi_read_i64(entry + 8)
+                val sz  = bi_read_i64(entry + 16)
+                *size_out = int(sz)
+                return i64(BOOT_INFO_PA) + off
+            i += 1
+        i64(0)
+
+SYS_PUTC handler: write a single byte to the PL011 UART. Registered
+into syscall_table so user programs can print via ulib.putc().
+
+    sys_putc_handler(arg: int)
+        uart_putc(arg & 0xFF)
+        syscall_return(i64(0))
+
+Load `len` bytes from `src` into the process's user code region,
+walking its L3 entries so the binary spans multiple 4KB pages.
+VA 0x60000000..0x6000FFFF is identity-mapped in the user PT from
+vm_create_process_pt; since we're still under the kernel PTBR when
+this runs we reach each physical page directly.
+
+    user_load_program(ptbr: u64, src_va: i64, len: int)
+        // src_va points at the kernel-side blob; iterate one byte
+        // at a time walking the user PT to find each destination
+        // physical address. Slow but simple; replace with a stride-
+        // per-page memcpy once we have a real block copy.
+        var i = 0
+        while i < len
+            val user_va = u64(0x60000000) + u64(i)
+            val dst_pa = vm_v2p(ptbr, user_va)
+            if dst_pa == u64(0)
+                uart_puts("[user] load: unmapped VA at offset ")
+                uart_puthex(u64(i))
+                uart_puts("\n")
+                abort()
+            var dst: *byte = *byte(dst_pa)
+            var sp: *byte = *byte(src_va + i64(i))
+            dst[0] = sp[0]
+            i += 1
+
+Flush the I-cache for every line covering `len` bytes starting at
+the user code region's first physical page. We walk the L3 entries
+again to get each page's PA, then clean + invalidate one cache
+line per 64 bytes of code.
+
+    user_sync_icache(ptbr: u64, len: int)
+        var off = 0
+        while off < len
+            val user_va = u64(0x60000000) + u64(off)
+            val pa = vm_v2p(ptbr, user_va)
+            if pa != u64(0)
+                sync_icache_line(i64(pa))
+            off += 64
+
+    kernel_main_user()
+        uart_puts("[user] kernel_init...\n")
+        kernel_init()
+        ipc_init()
+        register_syscall(1, sys_putc_handler)
+
+        uart_puts("[user] creating process PT\n")
+        val new_pt = vm_create_process_pt()
+        if new_pt == 0
+            uart_puts("[user] vm_create_process_pt failed\n")
+            abort()
+
+        var blob_len = 0
+        val blob_start = bi_find("user", &blob_len)
+        if blob_start == i64(0) || blob_len <= 0
+            uart_puts("[user] boot module 'user' not found\n")
+            abort()
+        uart_puts("[user] loading user blob=")
+        uart_puthex(u64(blob_start))
+        uart_puts(" len=")
+        uart_puthex(u64(blob_len))
+        uart_puts("\n")
+
+        user_load_program(new_pt, blob_start, blob_len)
+        user_sync_icache(new_pt, blob_len)
+
+        val pid = create_process_suspended(
+            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            "user1", new_pt)
+        if pid <= 0
+            uart_puts("[user] create_process_suspended failed pid=")
+            uart_puthex(u64(pid))
+            uart_puts("\n")
+            abort()
+        uart_puts("[user] created pid=")
+        uart_puthex(u64(pid))
+        uart_puts("\n")
+
+        resume_process(pid)
+
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(100))
+        uart_puts("[user] gic + timer initialised\n")
+
+        arch_cli()
+        val first = first_thread_ssp()
+        if first == i64(0)
+            uart_puts("[user] no ready thread\n")
+            abort()
+        uart_puts("[user] resuming first thread\n")
+        arch_resume_process(first)
+
+Cross-AS IPC demo (DEMO_MODE=4). Spawns kentry_a as a kernel-
+thread echo server, then loads the embedded user program into
+its own page table and resumes. If USER_PROG is a test that
+does port_lookup("echo") + ipc_send, this round-trips a message
+from the user process (its own PTBR) through the kernel's IPC
+machinery to kentry_a (kernel PTBR) and back. Validates
+ipc_deliver's cross-address-space vm_copy_cross path plus
+ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
+
+    kernel_main_user_ipc()
+        uart_puts("[uipc] kernel_init...\n")
+        kernel_init()
+        ipc_init()
+        register_syscall(1, sys_putc_handler)
+
+        uart_puts("[uipc] creating echo server thread\n")
+        create_thread(i64(&kentry_a), kernel_stack_usp(0),
+            kernel_stack_ssp(0), "kA")
+
+        uart_puts("[uipc] creating process PT\n")
+        val new_pt = vm_create_process_pt()
+        if new_pt == 0
+            uart_puts("[uipc] vm_create_process_pt failed\n")
+            abort()
+
+        var blob_len = 0
+        val blob_start = bi_find("user", &blob_len)
+        if blob_start == i64(0) || blob_len <= 0
+            uart_puts("[uipc] boot module 'user' not found\n")
+            abort()
+        uart_puts("[uipc] loading user_prog len=")
+        uart_puthex(u64(blob_len))
+        uart_puts("\n")
+
+        user_load_program(new_pt, blob_start, blob_len)
+        user_sync_icache(new_pt, blob_len)
+
+        val pid = create_process_suspended(
+            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            "user1", new_pt)
+        if pid <= 0
+            uart_puts("[uipc] create_process_suspended failed\n")
+            abort()
+        uart_puts("[uipc] created pid=")
+        uart_puthex(u64(pid))
+        uart_puts("\n")
+
+        resume_process(pid)
+
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(100))
+        uart_puts("[uipc] gic + timer initialised\n")
+
+        arch_cli()
+        val first = first_thread_ssp()
+        if first == i64(0)
+            uart_puts("[uipc] no ready thread\n")
+            abort()
+        uart_puts("[uipc] resuming first thread\n")
+        arch_resume_process(first)
+
+RS-as-userspace bootstrap (DEMO_MODE=5). Mirrors x86's `kernel_main`
+in app_nsh.sysl: find the "rs" boot module, load it into a fresh
+server PT, write the info page (RS TID placeholder + ramdisk
+placeholder + boot info header copy with offsets converted to
+absolute PAs), create the process suspended, resume it, then kick
+the scheduler. RS itself takes it from there (prints the banner,
+tries to load each remaining server in turn; with no other
+servers packed yet it prints "disk MISSING" and exits cleanly —
+which is the baseline we want for this commit).
+
+    kernel_main_rs()
+        uart_puts("[rs] kernel_init...\n")
+        kernel_init()
+        ipc_init()
+        register_syscall(1, sys_putc_handler)
+
+        // Create the idle thread at the lowest priority. It runs
+        // `arch_sti(); wfi()` in a loop on its own kernel stack
+        // (slot 0), so when every real thread is blocked the
+        // scheduler picks the idle thread instead of bouncing
+        // through the recursive-wfi path in arch_schedule_after_exc
+        // (which leaked a frame on the last-active thread's kstack
+        // every time through).
+        create_thread_pri(i64(&idle_thread_body),
+            kernel_stack_usp(0), kernel_stack_ssp(0),
+            "idle", NUM_PRIORITIES - 1, kernel_ptbr())
+
+        uart_puts("[rs] creating process PT\n")
+        val new_pt = vm_create_process_pt()
+        if new_pt == 0
+            uart_puts("[rs] vm_create_process_pt failed\n")
+            abort()
+
+        var blob_len = 0
+        val blob_start = bi_find("rs", &blob_len)
+        if blob_start == i64(0) || blob_len <= 0
+            uart_puts("[rs] boot module 'rs' not found\n")
+            abort()
+        uart_puts("[rs] loading rs blob=")
+        uart_puthex(u64(blob_start))
+        uart_puts(" len=")
+        uart_puthex(u64(blob_len))
+        uart_puts("\n")
+
+        user_load_program(new_pt, blob_start, blob_len)
+        user_sync_icache(new_pt, blob_len)
+
+        // Build the info page in a local buffer, then vm_copy_to
+        // into RS's PT. Layout matches x86 app_nsh.sysl:
+        //   +0:  RS TID placeholder (RS overwrites with thread_id())
+        //   +8:  ramdisk base (hardcoded 0x50000000 on aarch64 —
+        //        matches -device loader,file=ramdisk.img,addr=0x50000000
+        //        in build.sh / run-test.sh)
+        //  +16:  ramdisk size (hardcoded 0x200000 / 2MB — matches
+        //        MakeAarch64RamdiskMain's TFS.format(512 blocks * 4KB))
+        //  +24:  boot info header copy (SLIX magic + module entries),
+        //        with per-entry offsets converted to absolute PAs.
+        var info_page: [512]byte
+        memset(info_page, 0, 512)
+        var ramdisk_base_p: *i64 = *i64(&info_page[8])
+        *ramdisk_base_p = i64(0x50000000)
+        var ramdisk_size_p: *i64 = *i64(&info_page[16])
+        *ramdisk_size_p = i64(0x200000)
+        // Copy boot info header (magic + count + per-module entries)
+        val mod_count = bi_module_count()
+        if mod_count < 0
+            uart_puts("[rs] bad boot info magic\n")
+            abort()
+        val bi_copy_len = 8 + mod_count * 24
+        if bi_copy_len + 24 > 512
+            uart_puts("[rs] boot info too big for info page\n")
+            abort()
+        val bi_base: *byte = *byte(BOOT_INFO_PA)
+        var ci = 0
+        while ci < bi_copy_len
+            info_page[ci + 24] = bi_base[ci]
+            ci += 1
+        // Convert relative offsets in copied entries to absolute PAs
+        var fi = 0
+        while fi < mod_count
+            val addr_off = 24 + 8 + fi * 24 + 8
+            var p: *i64 = *i64(&info_page[addr_off])
+            val orig_off = *p
+            *p = i64(BOOT_INFO_PA) + orig_off
+            fi += 1
+
+        vm_copy_to(new_pt, u64(0x60090000), info_page, 512)
+
+        val pid = create_process_suspended(
+            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            "rs", new_pt)
+        if pid <= 0
+            uart_puts("[rs] create_process_suspended failed\n")
+            abort()
+        uart_puts("[rs] created pid=")
+        uart_puthex(u64(pid))
+        uart_puts("\n")
+
+        resume_process(pid)
+
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(100))
+        uart_puts("[rs] gic + timer initialised\n")
+
+        arch_cli()
+        val first = first_thread_ssp()
+        if first == i64(0)
+            uart_puts("[rs] no ready thread\n")
+            abort()
+        uart_puts("[rs] resuming first thread\n")
+        arch_resume_process(first)
+
+Legacy EL0 demo.
+
+    kernel_main_el0()
         uart_puts("sctlr_el1=")
         uart_puthex(read_sctlr_el1())
         uart_puts("\n")
 
-        // Allocate a couple of zeroed pages and confirm they live at
-        // distinct, page-aligned addresses. Proves the page pool and
-        // the zero-fill path are functional under the new MMU map.
         val p1 = page_alloc_zero()
         val p2 = page_alloc_zero()
         uart_puts("page_alloc_zero 1=")
@@ -55,18 +881,27 @@ since the kernel will grow a real formatter later.
         vm_flush_tlb()
         uart_puts("vm_flush_tlb ok\n")
 
-        // Create a per-process page table (a clone of the kernel map
-        // at this stage) and switch TTBR0 to it. If the kernel keeps
-        // running and the UART still works, the switch landed.
         val new_pt = vm_create_process_pt()
         uart_puts("new_pt=")
         uart_puthex(new_pt)
         uart_puts("\n")
 
+        val code_pa = last_user_code_page
+        uart_puts("user code_pa=")
+        uart_puthex(code_pa)
+        uart_puts("\n")
+
+        var code_word: *i32 = *i32(code_pa)
+        code_word[0] = i32(0x14000000)
+        sync_icache_line(i64(code_pa))
+
         vm_set_ptbr(new_pt)
         uart_puts("after vm_set_ptbr: still alive\n")
 
-        // Swap back to the kernel map so subsequent boot work (once
-        // it exists) doesn't need to worry about which table is live.
-        vm_set_ptbr(kernel_ptbr())
-        uart_puts("restored kernel ptbr\n")
+        gic_init()
+        timer_init_periodic(cntfrq_el0() / u64(100))
+        uart_puts("gic + timer initialised\n")
+
+        uart_puts("dropping to EL0...\n")
+        drop_to_el0(i64(0x60000000), i64(0x60020000))
+        uart_puts("unexpected return from EL0 drop\n")

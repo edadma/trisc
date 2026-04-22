@@ -14,6 +14,7 @@ primitives for future per-process page tables.
     module oskit.arch
 
     import oskit.config.{PAGE_SIZE}
+    import oskit.hal.memcpy
 
 Page tables emitted by `mmu.s`.
 
@@ -25,6 +26,11 @@ Hardware page-table operations (vm_asm.s).
     extern vm_flush_tlb()
     extern vm_get_ptbr() -> u64
     extern read_sctlr_el1() -> u64
+    extern abort()
+    extern cntfrq_el0() -> u64
+    extern cntpct_el0() -> u64
+    extern cntp_tval_set(tval: u64)
+    extern cntp_ctl_set(v: u64)
 
 Kernel page-table base, captured on first call so later code can
 route around it (e.g. building per-process tables that clone a
@@ -52,6 +58,7 @@ per-process mappings must carve out a smaller user region at L2/L3.
     val PTE_PAGE:  i64 = 2          // bit 1 — page (at L3)
     val PTE_AF:    i64 = 0x400      // bit 10 — access flag
     val PTE_AP_EL0: i64 = 0x40      // bit 6 — AP[1]: 1 = EL0 accessible
+    val PTE_UXN:   i64 = 0x40000000000000  // bit 54 — EL0 execute-never
 
 Mask for extracting the output address from a level 1/2/3 descriptor.
 
@@ -114,17 +121,41 @@ between the kernel image and the top of our 1GB identity map.
                 i += 1
         page
 
-Create a per-process page table that mirrors the kernel map. At
-this stage every process sees the same 1GB Device / 1GB Normal
-blocks we established in `mmu.s`; future work will carve a smaller
-EL0-accessible region out of the RAM block so user code can be
-isolated from kernel globals.
+Create a per-process page table. L1[0] (Device MMIO) is copied
+verbatim from the kernel's map. L1[1] (the 1GB RAM block) is
+split into 512 × 2MB L2 block entries that each mirror the
+kernel's attributes (AP=00, Normal WBWA). The carve-out is a
+no-op at this stage — the process sees the same memory the
+kernel sees — but it sets up the structure we need to flip a
+small sub-region to AP=01/UXN=0 for EL0 user code later (without
+breaking kernel execute, which the implicit-PXN rule would do if
+we flipped AP on the 1GB block itself).
+
+User region layout (580KB total, 145 pages in L3[0..144] of L2[256]):
+  VA 0x60000000..0x6007FFFF — code region, 128 × 4KB pages (L3[0..127])
+                              AP=01 (EL0 RW), UXN=0 (EL0 execute)
+  VA 0x60080000..0x6008FFFF — stack region, 16 × 4KB pages (L3[128..143])
+                              AP=01, UXN=1. USP grows down from 0x60090000.
+  VA 0x60090000..0x60090FFF — info page,    1 × 4KB page  (L3[144])
+                              AP=01, UXN=1. Mirrors x86's 0xBF000
+                              scratch page — RS bring-up info + argv.
+Implicit-PXN forces PXN=1 on all user pages, which is what we want
+(EL1 never fetches from them). AP=01 means EL1 can still read/write.
 
 Returns the physical address of the new L0 table, or 0 on failure.
-The L0 has a single table descriptor at index 0 pointing at a
-fresh L1; the L1 is populated by copying L1[0] and L1[1] from the
-kernel's L1. That's enough for kernel code and UART MMIO to remain
-mapped after `vm_set_ptbr(new_pt)`.
+Also sets `last_user_code_page` / `last_user_stack_page` to the
+physical address of the FIRST code / stack page respectively, for
+DEMO_MODE=2 (EL0 demo) convenience. Real loaders should use
+`vm_copy_to` under the new process PTBR instead of poking these
+directly — only the first page is exposed this way.
+
+    val USER_CODE_PAGES  = 128
+    val USER_STACK_PAGES = 16
+    val USER_STACK_L3_START = 128
+    val USER_INFO_L3_IDX = 144
+
+    var last_user_code_page: u64 = 0
+    var last_user_stack_page: u64 = 0
 
     extern l1_table: byte
 
@@ -136,17 +167,406 @@ mapped after `vm_set_ptbr(new_pt)`.
         if new_l1 == 0
             page_free(new_l0)
             return 0
+        val new_l2 = page_alloc_zero()
+        if new_l2 == 0
+            page_free(new_l1)
+            page_free(new_l0)
+            return 0
 
-        // L0[0] -> new_l1 (table descriptor: addr | valid | table)
+        // L0[0] -> new_l1 (table descriptor)
         vm_write_pte64(new_l0, i64(new_l1) | PTE_VALID | PTE_TABLE)
 
-        // Copy the kernel's L1[0] (Device) and L1[1] (Normal) blocks.
-        // Everything above 2GB is left zero for now; we only need the
-        // two regions set up by mmu.s.
+        // L1[0] mirrors the kernel's Device mapping byte-for-byte.
         val kernel_l1 = u64(i64(&l1_table))
         val device_block = vm_read_pte64(kernel_l1)
-        val ram_block    = vm_read_pte64(kernel_l1 + u64(8))
-        vm_write_pte64(new_l1,          device_block)
-        vm_write_pte64(new_l1 + u64(8), ram_block)
+        vm_write_pte64(new_l1, device_block)
+
+        // L1[1] -> new_l2 table. This replaces the kernel's 1GB Normal
+        // block with a finer L2 carve-out.
+        vm_write_pte64(new_l1 + u64(8), i64(new_l2) | PTE_VALID | PTE_TABLE)
+
+        // Populate new_l2[0..511] as 2MB block descriptors covering
+        // 0x40000000..0x7FFFFFFF. We inherit the kernel block's lower
+        // attributes (AttrIdx, SH, AF, AP=00, UXN=0, PXN=0) so every
+        // 2MB region is indistinguishable from the kernel's mapping.
+        // At L2 a block uses the same bit-1=0 encoding as at L1, so
+        // the low-12 attr bits transfer directly.
+        val ram_attrs = vm_read_pte64(kernel_l1 + u64(8)) & ~PTE_ADDR_MASK
+        var addr = new_l2
+        var i = 0
+        while i < 512
+            val pa = i64(0x40000000) + i64(i) * i64(0x200000)
+            vm_write_pte64(addr, pa | ram_attrs)
+            addr += u64(8)
+            i += 1
+
+        // L3 carve-out: replace L2[256] (VA 0x60000000..0x601FFFFF)
+        // with a table descriptor pointing at a fresh L3 populated
+        // with 32 user pages (see USER_CODE_PAGES / USER_STACK_PAGES
+        // at the top of this section).
+        val new_l3 = page_alloc_zero()
+        if new_l3 == 0
+            page_free(new_l2)
+            page_free(new_l1)
+            page_free(new_l0)
+            return 0
+
+        // L2[256] -> new_l3 table
+        vm_write_pte64(new_l2 + u64(256 * 8),
+            i64(new_l3) | PTE_VALID | PTE_TABLE)
+
+        // Page encoding needs bit 1 = 1 (PTE_PAGE) unlike the block
+        // form, so mask that bit off ram_attrs first. AP=01 makes the
+        // page EL0-accessible; stack pages additionally set UXN to
+        // prevent EL0 execution from the stack.
+        val base_user_attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0
+
+        var total_pages = USER_CODE_PAGES + USER_STACK_PAGES + 1
+        var p = 0
+        while p < total_pages
+            val pa = page_alloc_zero()
+            if pa == 0
+                // Unwind: free every user page we wrote, then the L3
+                // and the higher tables. Simpler than trying to recover.
+                var q = 0
+                while q < p
+                    val pte = vm_read_pte64(new_l3 + u64(q * 8))
+                    if (pte & i64(3)) == i64(3)
+                        page_free(u64(pte & PTE_ADDR_MASK))
+                    q += 1
+                page_free(new_l3)
+                page_free(new_l2)
+                page_free(new_l1)
+                page_free(new_l0)
+                return 0
+            var attrs = base_user_attrs
+            // Code pages (L3[0..127]) are EL0 R/W/X. Stack and info pages
+            // (L3[128..144]) are EL0 R/W but set UXN to block EL0 execute.
+            if p >= USER_STACK_L3_START
+                attrs = attrs | PTE_UXN
+            // Slot 144 is the info page (VA 0x60090000).
+            val l3_slot = p
+            vm_write_pte64(new_l3 + u64(l3_slot * 8), i64(pa) | attrs)
+            if p == 0
+                last_user_code_page = pa
+            if p == USER_STACK_L3_START
+                last_user_stack_page = pa
+            p += 1
 
         new_l0
+
+Translate a virtual address under `ptbr` to its physical address
+by walking the 4-level page table. Returns 0 if any descriptor
+along the walk is invalid (unmapped region).
+
+Descriptor encoding recap (for aarch64 4KB granule):
+  bits [1:0] = 00 or 10  → invalid
+  bits [1:0] = 01        → block (at L1 = 1GB, at L2 = 2MB)
+  bits [1:0] = 11        → table (L0/L1/L2) or page (L3)
+The "block" encoding only appears at L1/L2; at L3 the low two bits
+must be 11 for a valid page, and we compute the final PA by OR-ing
+the low 12 bits of the VA as the page offset.
+
+    vm_v2p(ptbr: u64, vaddr: u64) -> u64
+        val l0_idx = int((vaddr >> u64(39)) & u64(0x1FF))
+        val l1_idx = int((vaddr >> u64(30)) & u64(0x1FF))
+        val l2_idx = int((vaddr >> u64(21)) & u64(0x1FF))
+        val l3_idx = int((vaddr >> u64(12)) & u64(0x1FF))
+
+        val l0_entry = vm_read_pte64(ptbr + u64(l0_idx * 8))
+        if (l0_entry & i64(3)) != i64(3)
+            return u64(0)
+        val l1_base = u64(l0_entry & PTE_ADDR_MASK)
+
+        val l1_entry = vm_read_pte64(l1_base + u64(l1_idx * 8))
+        val l1_low = l1_entry & i64(3)
+        if l1_low == i64(1)
+            return u64(l1_entry & PTE_ADDR_MASK) + (vaddr & u64(0x3FFFFFFF))
+        if l1_low != i64(3)
+            return u64(0)
+        val l2_base = u64(l1_entry & PTE_ADDR_MASK)
+
+        val l2_entry = vm_read_pte64(l2_base + u64(l2_idx * 8))
+        val l2_low = l2_entry & i64(3)
+        if l2_low == i64(1)
+            return u64(l2_entry & PTE_ADDR_MASK) + (vaddr & u64(0x1FFFFF))
+        if l2_low != i64(3)
+            return u64(0)
+        val l3_base = u64(l2_entry & PTE_ADDR_MASK)
+
+        val l3_entry = vm_read_pte64(l3_base + u64(l3_idx * 8))
+        if (l3_entry & i64(3)) != i64(3)
+            return u64(0)
+        u64(l3_entry & PTE_ADDR_MASK) + (vaddr & u64(0xFFF))
+
+Copy `len` bytes from a kernel-side source into `dst_vaddr` under
+`dst_ptbr`. Strides one page at a time: translate VA→PA once per
+page, then memcpy the chunk that fits inside that page. The memcpy
+call is the HAL's `oskit.hal.memcpy`, which on boards with a DMA
+engine (e.g. rp2040) is free to route through it.
+
+    vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int)
+        var copied = 0
+        while copied < len
+            val pa = vm_v2p(dst_ptbr, dst_vaddr + u64(copied))
+            if pa == u64(0)
+                return
+            val page_off = int((dst_vaddr + u64(copied)) & u64(0xFFF))
+            var chunk = PAGE_SIZE - page_off
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(*byte(pa), src + copied, chunk)
+            copied += chunk
+
+Copy `len` bytes from `src_vaddr` under `src_ptbr` into a kernel-
+side destination. Same stride-per-page + memcpy pattern as
+`vm_copy_to`.
+
+    vm_copy_from(src_ptbr: u64, src_vaddr: u64, dst: *byte, len: int)
+        var copied = 0
+        while copied < len
+            val pa = vm_v2p(src_ptbr, src_vaddr + u64(copied))
+            if pa == u64(0)
+                return
+            val page_off = int((src_vaddr + u64(copied)) & u64(0xFFF))
+            var chunk = PAGE_SIZE - page_off
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(dst + copied, *byte(pa), chunk)
+            copied += chunk
+
+Cross-address-space copy between two different page tables. Strides
+by the SMALLER of the two page-remainders so a single memcpy always
+sits inside a source page and a destination page. Used by IPC /
+grant paths when both endpoints live in different address spaces.
+
+    vm_copy_cross(src_ptbr: u64, src_vaddr: u64,
+                  dst_ptbr: u64, dst_vaddr: u64, len: int)
+        var copied = 0
+        while copied < len
+            val src_pa = vm_v2p(src_ptbr, src_vaddr + u64(copied))
+            val dst_pa = vm_v2p(dst_ptbr, dst_vaddr + u64(copied))
+            if src_pa == u64(0) || dst_pa == u64(0)
+                return
+            val src_off = int((src_vaddr + u64(copied)) & u64(0xFFF))
+            val dst_off = int((dst_vaddr + u64(copied)) & u64(0xFFF))
+            var chunk = PAGE_SIZE - src_off
+            val dst_chunk = PAGE_SIZE - dst_off
+            if dst_chunk < chunk
+                chunk = dst_chunk
+            if chunk > len - copied
+                chunk = len - copied
+            memcpy(*byte(dst_pa), *byte(src_pa), chunk)
+            copied += chunk
+
+Placeholder for the kernel's arch init hook. The MMU is already on
+when sysl gets control (mmu_init ran from boot.s), so on aarch64
+`vm_init` has nothing to do except record the kernel TTBR0 for
+future `kernel_ptbr()` calls. Called from `kernel_init`.
+
+    vm_init()
+        kernel_ttbr0 = u64(i64(&l0_table))
+
+Legacy 32-bit PTE write kept for interface compatibility with
+arch_x86_64. On aarch64 all descriptors are 64-bit, so this just
+forwards to the 64-bit form.
+
+    vm_write_pte(addr: u64, pte: int)
+        vm_write_pte64(addr, i64(pte))
+
+Legacy TRISC/x86 PTE flag names. aarch64 uses a different bit
+layout, but keeping the names exported avoids import errors in
+shared kernel code that references them.
+
+    val PTE_P = 1
+    val PTE_W = 0
+    val PTE_U = 0
+    val PTE_R = 2
+    val PTE_X = 0
+    val PTE_G = 0
+    val PTE_PS: i64 = 0
+
+Server-accessible MMIO slot in the user L3 carve-out. L3[256] =
+VA 0x60100000, chosen to sit well above the user code/stack/info
+pages (which top out at L3[144]) so future growth there doesn't
+collide. A server whose `io_page` is non-zero gets the physical
+page `io_page × PAGE_SIZE` mapped here with Device memory attrs
++ EL0 R/W + UXN. Register blocks that aren't page-aligned (e.g.
+virtio-mmio slot 31 at PA 0x0a003e00) land at VA
+`MMIO_SERVER_VA + (PA & 0xfff)` — the caller adds the offset.
+
+`MMIO_SERVER_VA` is the constant servers import from `oskit.arch`;
+it lives in `prog_config.sysl` so both kernel and server builds
+see the same value (the kernel build doesn't need the VA itself —
+it pokes PTEs via `MMIO_SERVER_L3_IDX` directly).
+
+    val MMIO_SERVER_L3_IDX  = 256
+
+
+Create a server page table. Same structure as `vm_create_process_pt`
+(L2+L3 carve-out at VA 0x60000000); an `io_page` argument lets the
+caller ask for a specific MMIO page mapping at EL0. `io_page = 0`
+means "no extra MMIO mapping" (the common case for pure servers
+like pm, vfs, init).
+
+When `io_page != 0` we walk the freshly-built PT
+(PTBR → L0[0] → L1[1] → L2[256] → L3), inherit the low + upper
+attribute bits from the kernel's L1[0] Device block (giving us
+the correct MAIR index + SH + AF), switch from block to page
+encoding (bit 1), mark the page EL0-accessible (AP[1]=1) and
+UXN, and write the mapping at `L3[MMIO_SERVER_L3_IDX]`.
+
+    vm_create_server_pt(io_page: int) -> u64
+        val pt = vm_create_process_pt()
+        if pt == 0
+            return 0
+        if io_page != 0
+            val mmio_pa = i64(io_page) * i64(PAGE_SIZE)
+            val l1 = u64(vm_read_pte64(pt) & PTE_ADDR_MASK)
+            val l2 = u64(vm_read_pte64(l1 + u64(8)) & PTE_ADDR_MASK)
+            val l3 = u64(vm_read_pte64(l2 + u64(256 * 8)) & PTE_ADDR_MASK)
+            val kernel_l1 = u64(i64(&l1_table))
+            val device_block = vm_read_pte64(kernel_l1)
+            val device_attrs = (device_block & ~PTE_ADDR_MASK & ~i64(2)) | PTE_PAGE | PTE_AP_EL0 | PTE_UXN
+            vm_write_pte64(l3 + u64(MMIO_SERVER_L3_IDX * 8), mmio_pa | device_attrs)
+        pt
+
+Grant region for zero-copy IPC. We put it at VA 0x62000000, sitting
+one L2 block above the user code carve-out. The entire 2MB region
+is a single L3 table populated lazily per-process.
+
+    val GRANT_L2_IDX = 272          // VA 0x62000000 in L2 of L1[1]
+    val GRANT_REGION_BASE: u64 = u64(0x62000000)
+    val GRANT_REGION_PAGES = 512
+
+    vm_grant_l1_of(ptbr: u64) -> u64
+        val l0 = vm_read_pte64(ptbr)
+        u64(l0 & PTE_ADDR_MASK)
+
+    vm_grant_l2_of(ptbr: u64) -> u64
+        val l1 = vm_grant_l1_of(ptbr)
+        val l1e = vm_read_pte64(l1 + u64(8))     // L1[1] -> L2 (our carve-out)
+        u64(l1e & PTE_ADDR_MASK)
+
+Ensure an L3 table exists for the grant region (L2[272]). Allocates
+a fresh L3 if the slot is still a 2MB block. Returns the L3 table
+physical address (= the page's physical address since we identity-
+map), or 0 on failure.
+
+    vm_grant_ensure_pt(ptbr: u64) -> u64
+        val l2 = vm_grant_l2_of(ptbr)
+        if l2 == u64(0)
+            return u64(0)
+        val slot = l2 + u64(GRANT_L2_IDX * 8)
+        val entry = vm_read_pte64(slot)
+        if (entry & i64(3)) == i64(3)
+            return u64(entry & PTE_ADDR_MASK)
+        val l3 = page_alloc_zero()
+        if l3 == u64(0)
+            return u64(0)
+        vm_write_pte64(slot, i64(l3) | PTE_VALID | PTE_TABLE)
+        vm_flush_tlb()
+        l3
+
+Scan the grant region L3 for `count` contiguous free (invalid)
+entries. Returns the starting VA or 0 if not found.
+
+    vm_grant_find_free(ptbr: u64, count: int) -> u64
+        val pt = vm_grant_ensure_pt(ptbr)
+        if pt == u64(0)
+            return u64(0)
+        var run = 0
+        var start = 0
+        var i = 0
+        while i < GRANT_REGION_PAGES
+            val pte = vm_read_pte64(pt + u64(i * 8))
+            if (pte & i64(3)) != i64(3)
+                if run == 0
+                    start = i
+                run += 1
+                if run >= count
+                    return GRANT_REGION_BASE + u64(start) * u64(4096)
+            else
+                run = 0
+            i += 1
+        u64(0)
+
+Map a single physical page at a specific VA inside the grant region.
+On aarch64 the page attributes mirror the 2MB RAM block attributes
+inherited from the kernel (Normal WBWA) plus AP=01 (EL0 RW) and the
+PAGE encoding bit. `writable == 0` flips AP[1]=1 to AP[2]=1 (RO at
+EL0) for read-only grants.
+
+    vm_grant_map_page(ptbr: u64, vaddr: u64, paddr: u64, writable: int)
+        val pt = vm_grant_ensure_pt(ptbr)
+        if pt == u64(0)
+            return
+        val idx = int((vaddr - GRANT_REGION_BASE) / u64(4096))
+        if idx < 0 || idx >= GRANT_REGION_PAGES
+            return
+        // Inherit Normal attrs from the kernel 2MB block, convert to
+        // page descriptor, and add EL0 access. Read-only grants set
+        // AP[2]=1 (bit 7).
+        val kernel_l1 = u64(i64(&l1_table))
+        val ram_attrs = vm_read_pte64(kernel_l1 + u64(8)) & ~PTE_ADDR_MASK
+        var attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0
+        if writable == 0
+            attrs = attrs | i64(0x80)          // AP[2] — RO at EL0
+        vm_write_pte64(pt + u64(idx * 8), i64(paddr) | attrs)
+        vm_flush_tlb()
+
+Clear `count` PTEs starting at `vaddr` in the grant region. Flushes
+the TLB afterwards so stale mappings are dropped.
+
+    vm_grant_unmap_pages(ptbr: u64, vaddr: u64, count: int)
+        val pt = vm_grant_ensure_pt(ptbr)
+        if pt == u64(0)
+            return
+        val start_idx = int((vaddr - GRANT_REGION_BASE) / u64(4096))
+        var i = 0
+        while i < count
+            if start_idx + i < GRANT_REGION_PAGES
+                vm_write_pte64(pt + u64((start_idx + i) * 8), i64(0))
+            i += 1
+        vm_flush_tlb()
+
+Free all pages allocated for a process's page table, including any
+grant region L3, the user-region L3 + its code/stack pages, the
+L2 table, the L1 table, and the L0 root. Safe to call on the kernel
+PTBR (no-op) or a null pointer.
+
+    vm_free_process_pt(l1_addr: u64)
+        if l1_addr == u64(0)
+            return
+        if l1_addr == kernel_ptbr()
+            return
+
+        val l1 = vm_grant_l1_of(l1_addr)
+        if l1 == u64(0)
+            return
+        val l2 = vm_grant_l2_of(l1_addr)
+        if l2 == u64(0)
+            return
+
+        // User region L3 at L2[256]
+        val user_l3_entry = vm_read_pte64(l2 + u64(256 * 8))
+        if (user_l3_entry & i64(3)) == i64(3)
+            val user_l3 = u64(user_l3_entry & PTE_ADDR_MASK)
+            var i = 0
+            while i < 512
+                val pte = vm_read_pte64(user_l3 + u64(i * 8))
+                if (pte & i64(3)) == i64(3)
+                    page_free(u64(pte & PTE_ADDR_MASK))
+                i += 1
+            page_free(user_l3)
+
+        // Grant region L3 at L2[GRANT_L2_IDX] — don't free the mapped
+        // pages (they belong to other address spaces); just free the
+        // L3 table itself.
+        val grant_l3_entry = vm_read_pte64(l2 + u64(GRANT_L2_IDX * 8))
+        if (grant_l3_entry & i64(3)) == i64(3)
+            page_free(u64(grant_l3_entry & PTE_ADDR_MASK))
+
+        page_free(l2)
+        page_free(l1)
+        page_free(l1_addr)

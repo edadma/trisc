@@ -103,7 +103,7 @@ Server state.
     var ds_key_tail = 0
     var ds_key_count = 0
 
-    import oskit.drivers.kbd.{kb_has_key, kb_read_key, keyboard_set_notify}
+    import oskit.kernel.{kb_has_key, kb_read_key, keyboard_set_notify}
 
     ds_handle_keyboard()
         // Drain all buffered key events from the keyboard driver

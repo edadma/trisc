@@ -43,21 +43,144 @@ vector_table:
     VECTOR low32_fiq        // 0x700
     VECTOR low32_serror     // 0x780
 
-// Each stub loads its vector index into x0 and jumps to the reporter,
-// except `low64_sync` which handles SVC from EL0 and only routes to
-// the crash reporter for non-SVC synchronous exceptions.
+// Each stub loads its vector index into x0 and jumps to the reporter.
 el0sp_sync:   mov x0, #0;  b exception_report
 el0sp_irq:    mov x0, #1;  b exception_report
 el0sp_fiq:    mov x0, #2;  b exception_report
 el0sp_serror: mov x0, #3;  b exception_report
 
-elxsp_sync:   mov x0, #4;  b exception_report
-elxsp_irq:    mov x0, #5;  b exception_report
+// elxsp_sync — sync exception taken from EL1 (SPSel=1). Reuses the
+// same save + dispatch + restore path as low64_sync so a kernel-mode
+// SVC or fault routes through arch_dispatch_sync. Frame layout is
+// identical, SP_EL0 is still saved even though it's meaningless at
+// EL1 (the sysl layer just ignores it).
+elxsp_sync:
+    sub sp, sp, #0x110
+    stp x0,  x1,  [sp, #0x000]
+    stp x2,  x3,  [sp, #0x010]
+    stp x4,  x5,  [sp, #0x020]
+    stp x6,  x7,  [sp, #0x030]
+    stp x8,  x9,  [sp, #0x040]
+    stp x10, x11, [sp, #0x050]
+    stp x12, x13, [sp, #0x060]
+    stp x14, x15, [sp, #0x070]
+    stp x16, x17, [sp, #0x080]
+    stp x18, x19, [sp, #0x090]
+    stp x20, x21, [sp, #0x0A0]
+    stp x22, x23, [sp, #0x0B0]
+    stp x24, x25, [sp, #0x0C0]
+    stp x26, x27, [sp, #0x0D0]
+    stp x28, x29, [sp, #0x0E0]
+    mrs x0, sp_el0
+    stp x30, x0,  [sp, #0x0F0]
+    mrs x0, spsr_el1
+    mrs x1, elr_el1
+    stp x0,  x1,  [sp, #0x100]
+    mov x0, sp
+    bl  oskit_arch__handle_sync_lower
+    b   arch_resume_process
+
+// elxsp_irq — async IRQ taken while at EL1. Needed so the timer
+// can preempt a running kernel thread and let the scheduler pick a
+// different one. Same save/dispatch/restore as low64_irq.
+elxsp_irq:
+    sub sp, sp, #0x110
+    stp x0,  x1,  [sp, #0x000]
+    stp x2,  x3,  [sp, #0x010]
+    stp x4,  x5,  [sp, #0x020]
+    stp x6,  x7,  [sp, #0x030]
+    stp x8,  x9,  [sp, #0x040]
+    stp x10, x11, [sp, #0x050]
+    stp x12, x13, [sp, #0x060]
+    stp x14, x15, [sp, #0x070]
+    stp x16, x17, [sp, #0x080]
+    stp x18, x19, [sp, #0x090]
+    stp x20, x21, [sp, #0x0A0]
+    stp x22, x23, [sp, #0x0B0]
+    stp x24, x25, [sp, #0x0C0]
+    stp x26, x27, [sp, #0x0D0]
+    stp x28, x29, [sp, #0x0E0]
+    mrs x0, sp_el0
+    stp x30, x0,  [sp, #0x0F0]
+    mrs x0, spsr_el1
+    mrs x1, elr_el1
+    stp x0,  x1,  [sp, #0x100]
+    mov x0, sp
+    bl  oskit_arch__handle_irq
+    b   arch_resume_process
+
 elxsp_fiq:    mov x0, #6;  b exception_report
 elxsp_serror: mov x0, #7;  b exception_report
 
-// low64_sync is implemented as a real dispatcher further down.
-low64_irq:    mov x0, #9;  b exception_report
+// low64_sync — synchronous exception from a lower EL (EL0 user code).
+// Saves a 272-byte frame on SP_EL1, calls the arch-level handler,
+// and tail-jumps to arch_resume_process with the returned SSP. The
+// handler's return value is the frame the scheduler picked (same
+// thread = same frame, different thread = a different SSP whose
+// frame matches the same layout). Frame layout:
+//   [sp, #0x000] x0,  x1
+//   [sp, #0x010] x2,  x3
+//   ...
+//   [sp, #0x0E0] x28, x29
+//   [sp, #0x0F0] x30, SP_EL0
+//   [sp, #0x100] SPSR_EL1, ELR_EL1
+// Total: 0x110 bytes (16-byte aligned).
+low64_sync:
+    sub sp, sp, #0x110
+    stp x0,  x1,  [sp, #0x000]
+    stp x2,  x3,  [sp, #0x010]
+    stp x4,  x5,  [sp, #0x020]
+    stp x6,  x7,  [sp, #0x030]
+    stp x8,  x9,  [sp, #0x040]
+    stp x10, x11, [sp, #0x050]
+    stp x12, x13, [sp, #0x060]
+    stp x14, x15, [sp, #0x070]
+    stp x16, x17, [sp, #0x080]
+    stp x18, x19, [sp, #0x090]
+    stp x20, x21, [sp, #0x0A0]
+    stp x22, x23, [sp, #0x0B0]
+    stp x24, x25, [sp, #0x0C0]
+    stp x26, x27, [sp, #0x0D0]
+    stp x28, x29, [sp, #0x0E0]
+    mrs x0, sp_el0
+    stp x30, x0,  [sp, #0x0F0]
+    mrs x0, spsr_el1
+    mrs x1, elr_el1
+    stp x0,  x1,  [sp, #0x100]
+
+    mov x0, sp
+    bl  oskit_arch__handle_sync_lower
+    b   arch_resume_process
+
+// low64_irq — asynchronous IRQ from EL0. Same save path as above;
+// dispatches to the arch-level IRQ handler and resumes via the
+// scheduler's chosen frame.
+low64_irq:
+    sub sp, sp, #0x110
+    stp x0,  x1,  [sp, #0x000]
+    stp x2,  x3,  [sp, #0x010]
+    stp x4,  x5,  [sp, #0x020]
+    stp x6,  x7,  [sp, #0x030]
+    stp x8,  x9,  [sp, #0x040]
+    stp x10, x11, [sp, #0x050]
+    stp x12, x13, [sp, #0x060]
+    stp x14, x15, [sp, #0x070]
+    stp x16, x17, [sp, #0x080]
+    stp x18, x19, [sp, #0x090]
+    stp x20, x21, [sp, #0x0A0]
+    stp x22, x23, [sp, #0x0B0]
+    stp x24, x25, [sp, #0x0C0]
+    stp x26, x27, [sp, #0x0D0]
+    stp x28, x29, [sp, #0x0E0]
+    mrs x0, sp_el0
+    stp x30, x0,  [sp, #0x0F0]
+    mrs x0, spsr_el1
+    mrs x1, elr_el1
+    stp x0,  x1,  [sp, #0x100]
+
+    mov x0, sp
+    bl  oskit_arch__handle_irq
+    b   arch_resume_process
 low64_fiq:    mov x0, #10; b exception_report
 low64_serror: mov x0, #11; b exception_report
 
@@ -65,111 +188,6 @@ low32_sync:   mov x0, #12; b exception_report
 low32_irq:    mov x0, #13; b exception_report
 low32_fiq:    mov x0, #14; b exception_report
 low32_serror: mov x0, #15; b exception_report
-
-// ============================================================================
-// low64_sync — EL0 synchronous exception entry (AArch64)
-// ============================================================================
-//
-// Saves full context onto SP_EL1 (272 bytes, layout matches
-// oskit/arch/aarch64/cpu.lsysl: x0..x30, SP_EL0, ELR_EL1, SPSR_EL1),
-// decodes ESR_EL1.EC, and either dispatches the SVC or falls through
-// to the crash reporter for other synchronous faults (data abort,
-// instruction abort, …).
-//
-// At trap entry: SP_EL1 is the current per-CPU kernel stack (the
-// kernel leaves SP_EL1 at the thread's kstack_top after the previous
-// eret popped the context frame). After stp-ing the full frame the
-// saved frame base equals the new SP, and `syscall_return()` in
-// kernel.lsysl writes into the x0 slot at that base.
-//
-// The full syscall_table dispatch (bounds/privilege/handler) is
-// deferred to the next commit — this pass just proves the save/decode
-// /restore/eret mechanics without depending on the kernel build.
-//
-//   Save order:
-//     stp x0,x1   [sp,#  0]    x8  is the syscall number (musl / ARM64 ABI)
-//     stp x2,x3   [sp,# 16]    x0..x5 carry the syscall args
-//     stp x4,x5   [sp,# 32]
-//     stp x6,x7   [sp,# 48]
-//     stp x8,x9   [sp,# 64]
-//     stp x10-29  [sp,# 80..#232]
-//     stp x30,SP_EL0 [sp,#240]
-//     stp ELR,SPSR   [sp,#256]
-// ============================================================================
-
-.global low64_sync
-low64_sync:
-    sub sp, sp, #272
-    stp x0,  x1,  [sp, #0]
-    stp x2,  x3,  [sp, #16]
-    stp x4,  x5,  [sp, #32]
-    stp x6,  x7,  [sp, #48]
-    stp x8,  x9,  [sp, #64]
-    stp x10, x11, [sp, #80]
-    stp x12, x13, [sp, #96]
-    stp x14, x15, [sp, #112]
-    stp x16, x17, [sp, #128]
-    stp x18, x19, [sp, #144]
-    stp x20, x21, [sp, #160]
-    stp x22, x23, [sp, #176]
-    stp x24, x25, [sp, #192]
-    stp x26, x27, [sp, #208]
-    stp x28, x29, [sp, #224]
-    mrs x9,  sp_el0
-    stp x30, x9,  [sp, #240]
-    mrs x9,  elr_el1
-    mrs x10, spsr_el1
-    stp x9,  x10, [sp, #256]
-
-    // Decode ESR_EL1.EC (bits [31:26]); 0x15 = SVC from AArch64 EL0.
-    mrs x9, esr_el1
-    lsr x9, x9, #26
-    cmp x9, #0x15
-    b.ne .low64_sync_fault
-
-    // SVC path — placeholder. Prints 'Y' to UART so round-trip is
-    // visible, then falls through to the restore path. A follow-up
-    // commit will replace this with bounds/privilege check and a
-    // syscall_table lookup.
-    mov w0, #'Y'
-    bl  uart_putc_asm
-
-.low64_sync_restore:
-    // Restore ELR_EL1 / SPSR_EL1 first (uses x9/x10 as scratch — their
-    // saved values come back when we restore x8-x11 below).
-    ldp x9,  x10, [sp, #256]
-    msr elr_el1, x9
-    msr spsr_el1, x10
-
-    // Restore x30 and SP_EL0.
-    ldp x30, x9,  [sp, #240]
-    msr sp_el0, x9
-
-    // Restore x0..x29.
-    ldp x0,  x1,  [sp, #0]
-    ldp x2,  x3,  [sp, #16]
-    ldp x4,  x5,  [sp, #32]
-    ldp x6,  x7,  [sp, #48]
-    ldp x8,  x9,  [sp, #64]
-    ldp x10, x11, [sp, #80]
-    ldp x12, x13, [sp, #96]
-    ldp x14, x15, [sp, #112]
-    ldp x16, x17, [sp, #128]
-    ldp x18, x19, [sp, #144]
-    ldp x20, x21, [sp, #160]
-    ldp x22, x23, [sp, #176]
-    ldp x24, x25, [sp, #192]
-    ldp x26, x27, [sp, #208]
-    ldp x28, x29, [sp, #224]
-    add sp, sp, #272
-    eret
-
-.low64_sync_fault:
-    // Not an SVC — drop the saved frame and fall through to the crash
-    // reporter so ESR/FAR get printed just like the old stub did.
-    add sp, sp, #272
-    mov x0, #8
-    b   exception_report
 
 // exception_report(vec_id)
 //   x0: vector index 0..15

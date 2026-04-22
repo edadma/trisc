@@ -12,7 +12,7 @@ The SLIX scheduler is a preemptive priority scheduler with per-priority FIFO run
 | Priority | Level | Typical use |
 |----------|-------|-------------|
 | 0 | Highest | Kernel threads, RS |
-| 1 | High | System servers (disk, tfs, tty, pm, vfs) |
+| 1 | High | System servers (rs, disk, tfs, tty, pm, vfs, ds, init) |
 | 2 | Normal | User programs |
 | 3 | Low | Background tasks |
 
