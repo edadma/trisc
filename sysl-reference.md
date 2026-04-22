@@ -2047,7 +2047,7 @@ fact(n: int) -> int
 - Make indirect (function-pointer) calls or interface-dispatch calls
 - Contain `asm` blocks
 
-Cross-module purity propagation is currently best-effort: if an imported function is seen without `#pure`, it is assumed impure. Annotate library functions you intend to call from pure code.
+**Cross-module propagation:** `#pure` is carried through `.smeta` files. A `#pure` function in one module can call a `#pure` function in another module. Imported functions without `#pure` are impure, so annotate library functions you intend to call from pure code.
 
 **Interaction with `--no-contracts`:** `#pure` checking is not a contract — it is a static enforcement and always runs. Only the runtime verification that contracts describe is elided by `--no-contracts`.
 
