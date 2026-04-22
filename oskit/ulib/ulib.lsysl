@@ -69,11 +69,7 @@ Command bytes for TFS and TTY server protocols.
     val GRANT_RW    = 3
 
     grant_create(vaddr: u64, len: int, flags: int) -> int
-        var args: [3]i64
-        args[0] = i64(vaddr)
-        args[1] = len
-        args[2] = flags
-        int(syscall(SYS_GRANT_CREATE, i64(args)))
+        int(syscall6(SYS_GRANT_CREATE, i64(vaddr), i64(len), i64(flags), 0, 0, 0))
 
     grant_revoke(grant_id: int)
         syscall(SYS_GRANT_REVOKE, i64(grant_id))

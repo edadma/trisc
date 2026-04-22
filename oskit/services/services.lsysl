@@ -234,14 +234,7 @@ importing them directly.
         u64(syscall(SYS_VM_CREATE_PT, 0))
 
     svc_create_proc_susp(entry: i64, usp: i64, ssp: i64, name: string, ptbr: u64) -> int
-        var args: [6]i64
-        args[0] = entry
-        args[1] = usp
-        args[2] = ssp
-        args[3] = i64(*byte(name))
-        args[4] = len(name)
-        args[5] = i64(ptbr)
-        syscall(SYS_CREATE_PROC_SUSP, i64(args))
+        int(syscall6(SYS_CREATE_PROC_SUSP, entry, usp, ssp, i64(*byte(name)), i64(len(name)), i64(ptbr)))
 
     svc_resume_proc(pid: int)
         syscall(SYS_RESUME_PROC, pid)
@@ -256,10 +249,7 @@ importing them directly.
         syscall(SYS_REGISTER_PM, tid)
 
     svc_set_thread_ptbr(tid: int, ptbr: u64)
-        var args: [2]i64
-        args[0] = tid
-        args[1] = i64(ptbr)
-        syscall(SYS_SET_THREAD_PTBR, i64(args))
+        syscall6(SYS_SET_THREAD_PTBR, i64(tid), i64(ptbr), 0, 0, 0, 0)
 
     svc_vm_set_ptbr(addr: u64)
         syscall(SYS_VM_SET_PTBR_SC, i64(addr))
@@ -289,10 +279,7 @@ importing them directly.
         syscall(SYS_PROC_PARENT_TID, pid)
 
     svc_proc_set_parent_tid(pid: int, parent_tid: int)
-        var args: [2]i64
-        args[0] = pid
-        args[1] = parent_tid
-        syscall(SYS_PROC_SET_PARENT_TID, i64(args))
+        syscall6(SYS_PROC_SET_PARENT_TID, i64(pid), i64(parent_tid), 0, 0, 0, 0)
 
 Translate a virtual address to physical using the current
 thread's page table. Used by drivers that need DMA addresses.
@@ -306,12 +293,7 @@ thread's page table. Used by drivers that need DMA addresses.
     val SYS_SET_PRIV      = 69
 
     svc_set_priv(pid: int, allow_lo: i64, allow_hi: i64, ipc_mask: int)
-        var args: [4]i64
-        args[0] = pid
-        args[1] = allow_lo
-        args[2] = allow_hi
-        args[3] = ipc_mask
-        syscall(SYS_SET_PRIV, i64(args))
+        syscall6(SYS_SET_PRIV, i64(pid), allow_lo, allow_hi, i64(ipc_mask), 0, 0)
 
     svc_port_transfer(port: int, new_owner_tid: int)
         var args: [2]i64
@@ -327,11 +309,7 @@ thread's page table. Used by drivers that need DMA addresses.
     val SYS_PHYS_READ = 67
 
     svc_phys_read(src_phys: u64, dst: *byte, vlen: int)
-        var args: [3]i64
-        args[0] = i64(src_phys)
-        args[1] = i64(dst)
-        args[2] = vlen
-        syscall(SYS_PHYS_READ, i64(args))
+        syscall6(SYS_PHYS_READ, i64(src_phys), i64(dst), i64(vlen), 0, 0, 0)
 
 Grant-based IPC. Clients create grants to allow servers
 to access their memory. The kernel mediates copies.
@@ -345,33 +323,19 @@ to access their memory. The kernel mediates copies.
     val GRANT_RW    = 3
 
     svc_grant_create(vaddr: u64, len: int, flags: int) -> int
-        var args: [3]i64
-        args[0] = i64(vaddr)
-        args[1] = len
-        args[2] = flags
-        syscall(SYS_GRANT_CREATE, i64(args))
+        int(syscall6(SYS_GRANT_CREATE, i64(vaddr), i64(len), i64(flags), 0, 0, 0))
 
     svc_grant_revoke(grant_id: int)
         syscall(SYS_GRANT_REVOKE, grant_id)
 
     svc_grant_copy(grant_id: int, offset: int, local_buf: *byte, len: int, direction: int) -> int
-        var args: [5]i64
-        args[0] = grant_id
-        args[1] = offset
-        args[2] = i64(local_buf)
-        args[3] = len
-        args[4] = direction
-        syscall(SYS_GRANT_COPY, i64(args))
+        int(syscall6(SYS_GRANT_COPY, i64(grant_id), i64(offset), i64(local_buf), i64(len), i64(direction), 0))
 
     val SYS_GRANT_MAP   = 74
     val SYS_GRANT_UNMAP = 75
 
     svc_grant_map(grant_id: int, offset: int, len: int) -> int
-        var args: [3]i64
-        args[0] = grant_id
-        args[1] = offset
-        args[2] = len
-        syscall(SYS_GRANT_MAP, i64(args))
+        int(syscall6(SYS_GRANT_MAP, i64(grant_id), i64(offset), i64(len), 0, 0, 0))
 
     svc_grant_unmap(grant_id: int)
         syscall(SYS_GRANT_UNMAP, grant_id)

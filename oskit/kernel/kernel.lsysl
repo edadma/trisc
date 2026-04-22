@@ -362,21 +362,17 @@ given port, 0 if denied. Kernel threads (PID 0) always pass.
         0
 
 Set the privilege masks for a process. Called by RS before
-resuming a server. Arg = pointer to [pid(i64), lo(i64), hi(i64), ipc_mask(i64)].
+resuming a server. Args: a0=pid, a1=lo, a2=hi, a3=ipc_mask.
 
-    sys_set_priv_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val pid = int(args[0])
-        val lo = args[1]
-        val hi = args[2]
-        val ipc = int(args[3])
+    sys_set_priv_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val pid = int(a0)
         if pid > 0
             if pid < MAX_PROCESSES
-                processes[pid].syscall_allow[0] = lo
-                processes[pid].syscall_allow[1] = hi
-                processes[pid].ipc_send_mask = ipc
-        syscall_return(0)
+                processes[pid].syscall_allow[0] = a1
+                processes[pid].syscall_allow[1] = a2
+                processes[pid].ipc_send_mask = int(a3)
         kernel_continue_current()
+        i64(0)
 
 Grant the POSIX syscall range (128-511) to a process. Called from
 the aarch64 ELF loader when a musl-linked program is created, so
@@ -403,14 +399,12 @@ Arg = (pid << 8) | mask.
         kernel_continue_current()
 
 SYS_GRANT_CREATE (71): Create a memory grant.
-Arg = pointer to [vaddr(i64), len(i64), flags(i64)].
-Returns grant_id or -1 if table full.
+Args: a0=vaddr, a1=len, a2=flags. Returns grant_id or -1 if table full.
 
-    sys_grant_create_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val vaddr = u64(args[0])
-        val len = int(args[1])
-        val flags = int(args[2])
+    sys_grant_create_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val vaddr = u64(a0)
+        val len = int(a1)
+        val flags = int(a2)
         val pid = threads[current_thread].pid
         var i = 0
         while i < MAX_GRANTS
@@ -420,12 +414,11 @@ Returns grant_id or -1 if table full.
                 grant_table[i].len = len
                 grant_table[i].flags = flags
                 grant_table[i].in_use = 1
-                syscall_return(i)
                 kernel_continue_current()
-                return
+                return i64(i)
             i += 1
-        syscall_return(-1)
         kernel_continue_current()
+        i64(-1)
 
 SYS_GRANT_REVOKE (72): Revoke a grant.
 Arg = grant_id. Returns 0 on success, -1 on error.
@@ -455,82 +448,69 @@ Arg = grant_id. Returns 0 on success, -1 on error.
         kernel_continue_current()
 
 SYS_GRANT_COPY (73): Copy data using a grant.
-Arg = pointer to [grant_id(i64), offset(i64), local_buf(i64), len(i64), direction(i64)].
+Args: a0=grant_id, a1=offset, a2=local_buf, a3=len, a4=direction.
 Direction: 0 = from granter to caller, 1 = from caller to granter.
 Returns bytes copied or -1 on error.
 
-    sys_grant_copy_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val gid = int(args[0])
-        val offset = int(args[1])
-        val local_buf = *byte(args[2])
-        val len = int(args[3])
-        val direction = int(args[4])
+    sys_grant_copy_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val gid = int(a0)
+        val offset = int(a1)
+        val local_buf = *byte(a2)
+        val len = int(a3)
+        val direction = int(a4)
         if gid < 0
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         if gid >= MAX_GRANTS
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         if grant_table[gid].in_use == 0
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         if offset + len > grant_table[gid].len
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         // Validate direction against grant flags
         if direction == 0
             if (grant_table[gid].flags & GRANT_READ) == 0
-                syscall_return(-1)
                 kernel_continue_current()
-                return
+                return i64(-1)
         else
             if (grant_table[gid].flags & GRANT_WRITE) == 0
-                syscall_return(-1)
                 kernel_continue_current()
-                return
+                return i64(-1)
         val granter_ptbr = processes[grant_table[gid].granter_pid].ptbr
         val remote_addr = grant_table[gid].vaddr + u64(offset)
         if direction == 0
             vm_copy_from(granter_ptbr, remote_addr, local_buf, len)
         else
             vm_copy_to(granter_ptbr, remote_addr, local_buf, len)
-        syscall_return(len)
         kernel_continue_current()
+        i64(len)
 
 SYS_GRANT_MAP (74): Map granter's pages into caller's address space.
-Arg = pointer to [grant_id(i64), offset(i64), len(i64)].
+Args: a0=grant_id, a1=offset, a2=len.
 Returns mapped virtual address or -1 on error.
 
-    sys_grant_map_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val gid = int(args[0])
-        val offset = int(args[1])
-        val len = int(args[2])
+    sys_grant_map_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val gid = int(a0)
+        val offset = int(a1)
+        val len = int(a2)
         if gid < 0
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         if gid >= MAX_GRANTS
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         if grant_table[gid].in_use == 0
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         if offset + len > grant_table[gid].len
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         if grant_table[gid].mapped_vaddr != 0
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         val granter_ptbr = processes[grant_table[gid].granter_pid].ptbr
         val granter_vaddr = grant_table[gid].vaddr + u64(offset)
         val page_offset = granter_vaddr & u64(0xFFF)
@@ -538,9 +518,8 @@ Returns mapped virtual address or -1 on error.
         val caller_ptbr = threads[current_thread].ptbr
         val base_vaddr = vm_grant_find_free(caller_ptbr, page_count)
         if base_vaddr == 0
-            syscall_return(-1)
             kernel_continue_current()
-            return
+            return i64(-1)
         val writable = grant_table[gid].flags & GRANT_WRITE
         var i = 0
         while i < page_count
@@ -549,17 +528,16 @@ Returns mapped virtual address or -1 on error.
             if paddr == 0
                 // Granter page not present — unmap what we did so far
                 vm_grant_unmap_pages(caller_ptbr, base_vaddr, i)
-                syscall_return(-1)
                 kernel_continue_current()
-                return
+                return i64(-1)
             vm_grant_map_page(caller_ptbr, base_vaddr + u64(i) * u64(4096), paddr & ~u64(0xFFF), writable)
             i += 1
         vm_flush_tlb()
         grant_table[gid].mapped_vaddr = base_vaddr
         grant_table[gid].mapped_pages = page_count
         grant_table[gid].mapper_ptbr = caller_ptbr
-        syscall_return(i64(base_vaddr + page_offset))
         kernel_continue_current()
+        i64(base_vaddr + page_offset)
 
 SYS_GRANT_UNMAP (75): Unmap a previously mapped grant.
 Arg = grant_id. Returns 0 on success, -1 on error.
@@ -646,17 +624,16 @@ No args. Returns L1 base address.
         kernel_continue_current()
 
 SYS_CREATE_PROC_SUSP (45): Create a process suspended.
-Arg = pointer to packed args: [entry(i64), usp(i64), ssp(i64), name(*byte), ptbr(i64)]
+Args: a0=entry, a1=usp, a2=ssp, a3=name_ptr, a4=name_len, a5=ptbr.
 
     var syscall_name_tmp: [16]byte
 
-    sys_create_proc_susp_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val entry = args[0]
-        val usp = args[1]
-        val ssp = args[2]
-        val name_ptr = *byte(args[3])
-        var name_len = int(args[4])
+    sys_create_proc_susp_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val entry = a0
+        val usp = a1
+        val ssp = a2
+        val name_ptr = *byte(a3)
+        var name_len = int(a4)
         if name_len > 15
             name_len = 15
         // Copy name from caller's address space into kernel buffer
@@ -669,10 +646,10 @@ Arg = pointer to packed args: [entry(i64), usp(i64), ssp(i64), name(*byte), ptbr
             ni += 1
         syscall_name_tmp[ni] = 0
         val name = string(syscall_name_tmp, name_len)
-        val ptbr = u64(args[5])
+        val ptbr = u64(a5)
         val result = create_process_suspended(entry, usp, ssp, name, ptbr)
-        syscall_return(result)
         kernel_continue_current()
+        i64(result)
 
 SYS_RESUME_PROC (46): Resume a suspended process.
 Arg = pid.
@@ -707,15 +684,12 @@ Arg = tid.
         kernel_continue_current()
 
 SYS_SET_THREAD_PTBR (50): Set a thread's page table base.
-Arg = pointer to packed args: [tid(i64), ptbr(i64)]
+Args: a0=tid, a1=ptbr.
 
-    sys_set_thread_ptbr_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val tid = int(args[0])
-        val ptbr = u64(args[1])
-        kernel_set_thread_ptbr(tid, ptbr)
-        syscall_return(0)
+    sys_set_thread_ptbr_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        kernel_set_thread_ptbr(int(a0), u64(a1))
         kernel_continue_current()
+        i64(0)
 
 SYS_VM_SET_PTBR (51): Set the hardware PTBR.
 Arg = address.
@@ -807,17 +781,16 @@ Arg = pid. Returns parent_tid.
         kernel_continue_current()
 
 SYS_PROC_SET_PARENT_TID (60): Set a process's parent thread ID.
-Arg = pointer to packed args: [pid(i64), parent_tid(i64)]
+Args: a0=pid, a1=parent_tid.
 
-    sys_proc_set_parent_tid_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val pid = int(args[0])
-        val parent_tid = int(args[1])
+    sys_proc_set_parent_tid_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val pid = int(a0)
+        val parent_tid = int(a1)
         if pid >= 0
             if pid < MAX_PROCESSES
                 processes[pid].parent_tid = parent_tid
-        syscall_return(0)
         kernel_continue_current()
+        i64(0)
 
     sys_vm_create_server_pt_handler(arg: int)
         val io_page = int(i64(arg))
@@ -865,7 +838,7 @@ notify pattern; the platform IRQ handler (aarch64
         kernel_continue_current()
 
 SYS_PHYS_READ (67): Copy from physical address into caller's address space.
-Arg = pointer to packed args: [src_phys(i64), dst_vaddr(i64), len(i64)]
+Args: a0=src_phys, a1=dst_vaddr, a2=len.
 Used by userspace RS to read boot module data from physical memory.
 
 Both source (physical RAM) and destination are accessible under the
@@ -873,14 +846,10 @@ caller's PTBR: server page tables identity-map the kernel and page
 pool regions (TRISC L1[1] superpage, x86_64 PD[1..15] superpages).
 vm_copy_to translates the destination vaddr via page walk and copies.
 
-    sys_phys_read_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val src_phys = u64(args[0])
-        val dst_vaddr = u64(args[1])
-        val vlen = int(args[2])
-        vm_copy_to(threads[current_thread].ptbr, dst_vaddr, *byte(src_phys), vlen)
-        syscall_return(0)
+    sys_phys_read_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        vm_copy_to(threads[current_thread].ptbr, u64(a1), *byte(a0), int(a2))
         kernel_continue_current()
+        i64(0)
 
 Thread info query handlers (syscalls 7-9, 42-43).
 Used by ps and other user programs via ulib.
@@ -953,12 +922,12 @@ Used by ps and other user programs via ulib.
         register_syscall(40, waitpid_current)
         register_syscall(41, getpid_current)
         register_syscall(44, sys_vm_create_pt_handler)
-        register_syscall(45, sys_create_proc_susp_handler)
+        register_syscall6(45, sys_create_proc_susp_handler)
         register_syscall(46, sys_resume_proc_handler)
         register_syscall(47, sys_reap_proc_handler)
         register_syscall(48, sys_kill_proc_handler)
         register_syscall(49, sys_register_pm_handler)
-        register_syscall(50, sys_set_thread_ptbr_handler)
+        register_syscall6(50, sys_set_thread_ptbr_handler)
         register_syscall(51, sys_vm_set_ptbr_handler)
         register_syscall(52, sys_get_thread_pid_handler)
         register_syscall(53, sys_get_thread_ptbr_handler)
@@ -968,7 +937,7 @@ Used by ps and other user programs via ulib.
         register_syscall(57, sys_proc_exit_code_handler)
         register_syscall(58, sys_proc_main_tid_handler)
         register_syscall(59, sys_proc_parent_tid_handler)
-        register_syscall(60, sys_proc_set_parent_tid_handler)
+        register_syscall6(60, sys_proc_set_parent_tid_handler)
         register_syscall(61, sys_getuid_handler)
         register_syscall(62, sys_setuid_handler)
         register_syscall(63, sys_vm_create_server_pt_handler)
@@ -984,13 +953,13 @@ Used by ps and other user programs via ulib.
         register_syscall(64, sys_kb_set_notify_handler)
         // syscall 65 (ipc_last_msg_len) is registered by ipc_init
         register_syscall(66, sys_vm_v2p_handler)
-        register_syscall(67, sys_phys_read_handler)
-        register_syscall(69, sys_set_priv_handler)
+        register_syscall6(67, sys_phys_read_handler)
+        register_syscall6(69, sys_set_priv_handler)
         register_syscall(70, sys_set_ipc_mask_handler)
-        register_syscall(71, sys_grant_create_handler)
+        register_syscall6(71, sys_grant_create_handler)
         register_syscall(72, sys_grant_revoke_handler)
-        register_syscall(73, sys_grant_copy_handler)
-        register_syscall(74, sys_grant_map_handler)
+        register_syscall6(73, sys_grant_copy_handler)
+        register_syscall6(74, sys_grant_map_handler)
         register_syscall(75, sys_grant_unmap_handler)
         register_syscall(76, sys_virtio_set_notify_handler)
 
