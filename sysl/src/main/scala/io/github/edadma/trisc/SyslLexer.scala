@@ -32,7 +32,7 @@ class SyslLexical extends IndentationLexical(
     "=", "+=", "-=", "*=", "/=", "%=",
     "&=", "|=", "^=", "<<=", ">>=",
     "->", "=>",
-    ",", ":", ";", "..<", "..", ".", "#", "?",
+    ",", "::", ":", ";", "..<", "..", ".", "#", "?",
   )
 
   private def hexDigit = elem("hex digit", c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')

@@ -165,3 +165,7 @@ case class NewArrayAST(size: ExpressionAST, elemType: TypeAST) extends Expressio
 case class StringLitExprAST(value: String) extends ExpressionAST
 case class ClosureParamAST(name: String, typ: Option[TypeAST])
 case class ClosureAST(params: List[ClosureParamAST], body: FunBodyAST) extends ExpressionAST
+// Type attribute: `T::First`, `T::Last`, `T::Range`, `T::Image(x)`, `T::Pos(x)`, `T::Val(n)`.
+// `arg` is set only for attributes that take one (Image, Pos, Val). `Range` is only valid
+// syntactically inside `for i in T::Range` and is desugared at parse time; it is never analyzed.
+case class TypeAttrAST(typeName: String, attr: String, arg: Option[ExpressionAST] = None) extends ExpressionAST

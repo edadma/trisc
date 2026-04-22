@@ -309,6 +309,45 @@ type IntPtr = *int
 type Callback = (int) -> int
 ```
 
+### Type Attributes (`T::Attr`)
+
+Range-constrained types and simple enums expose their metadata through `::`-suffixed
+attributes. They work like Ada's `'Attr` notation, retargeted to sysl's `::` separator.
+
+```sysl
+type Age = int within 0..150
+enum Day { Mon; Tue; Wed; Thu; Fri; Sat; Sun }
+
+Age::First     // 0
+Age::Last      // 150
+Age::Range     // used only in `for i in Age::Range` — iterates 0..150 inclusive
+
+Day::First     // Mon (value 0)
+Day::Last      // Sun (value 6)
+Day::Image(d)  // "Tue" for d = Day.Tue
+Day::Pos(d)    // 1    for d = Day.Tue
+Day::Val(2)    // Day.Wed
+```
+
+| Attribute     | Applies to                              | Result                                              |
+|---------------|-----------------------------------------|-----------------------------------------------------|
+| `T::First`    | `within`-constrained int, simple enum   | lower bound / first variant's value                 |
+| `T::Last`     | `within`-constrained int, simple enum   | upper bound (minus 1 if `..<`) / last variant       |
+| `T::Range`    | same                                    | only valid in `for i in T::Range` — inclusive scan  |
+| `T::Image(x)` | simple enum, constrained numeric type   | variant name string / `str(x)` for numerics         |
+| `T::Pos(x)`   | simple enum                             | 0-based declaration position                        |
+| `T::Val(n)`   | simple enum                             | variant at position `n`; traps on out-of-range      |
+
+`::First` and `::Last` fold to compile-time constants. `::Image`, `::Pos`, `::Val` lower
+to synthesized helper functions (`__image_T`, `__pos_T`, `__val_T`) generated once per
+target type. `::Pos` on an unknown value and `::Val` on an out-of-range position both
+trap via the standard contract-check path.
+
+`::Range` is syntactic sugar: `for i in T::Range body` parses as
+`for i in T::First..T::Last body`. Using `::Range` outside a for-loop is a compile error.
+
+Float-based `within` types do not yet support `::First` / `::Last`.
+
 ---
 
 ## Three Allocation Modes

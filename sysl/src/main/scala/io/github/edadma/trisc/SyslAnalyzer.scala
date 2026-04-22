@@ -1019,6 +1019,114 @@ class SyslAnalyzer:
     specializedDecls += TFunDecl(funcName, List(TParam("value", base)), base, body)
     funcName
 
+  /** Generate a synthetic `__image_<EnumName>(v: i32) -> string` that returns the variant name
+   * matching the integer value of a simple-enum value. Unknown values return "?". */
+  private def materializeEnumImageFunc(et: SyslType.EnumType): String =
+    val funcName = s"__image_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), StringType)
+    val arms = et.variants.map { case (vname, _) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TStringLit(vname, StringType))))
+    }
+    val default = Some(List[TStmt](TExprStmt(TStringLit("?", StringType))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, StringType)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), StringType,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate a synthetic `__pos_<EnumName>(v: i32) -> i32` that returns the 0-based declaration
+   * position matching the integer value. Traps on an unknown value. */
+  private def materializeEnumPosFunc(et: SyslType.EnumType): String =
+    val funcName = s"__pos_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), I32)
+    val arms = et.variants.zipWithIndex.map { case ((vname, _), idx) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TIntLit(idx.toLong, I32))))
+    }
+    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"invalid enum value for ${et.name}::Pos")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate a synthetic `__val_<EnumName>(p: i32) -> i32` that returns the integer value at
+   * position `p` (0-based). Traps on a position out of range. */
+  private def materializeEnumValFunc(et: SyslType.EnumType): String =
+    val funcName = s"__val_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("p", I32)), I32)
+    val arms = et.variants.zipWithIndex.map { case ((vname, _), idx) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TIntLit(idx.toLong, I32))), None, List(TExprStmt(TIntLit(value, I32))))
+    }
+    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"out-of-range position for ${et.name}::Val")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("p", I32), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("p", I32)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Resolve a `Type::First` or `Type::Last` attribute to a compile-time constant expression. */
+  private def analyzeTypeFirstLast(typeName: String, typ: SyslType, isFirst: Boolean): TExpr =
+    val attrName = if isFirst then "First" else "Last"
+    typ match
+      case nt @ NamedType(_, base, nominal, Some(IntRange(lo, hi, excl)), _) =>
+        val value = if isFirst then lo else (if excl then hi - 1 else hi)
+        val lit = TIntLit(value, base)
+        if nominal then TCast(lit, nt) else applyTargetType(lit, nt)
+      case NamedType(_, _, _, Some(FloatRange(_, _, _)), _) =>
+        throw AnalysisError(s"$typeName::$attrName on a float-within type is not yet supported")
+      case NamedType(_, _, _, None, _) =>
+        throw AnalysisError(s"$typeName::$attrName requires a range-constrained type")
+      case et @ EnumType(name, variants) if simpleEnumTypes.contains(name) =>
+        if variants.isEmpty then throw AnalysisError(s"enum '$name' has no members")
+        val members = enumTypes(name)
+        val picked = if isFirst then variants.head._1 else variants.last._1
+        TIntLit(members(picked), I32)
+      case other =>
+        throw AnalysisError(s"$typeName::$attrName requires a range-constrained type or simple enum, got $other")
+
+  /** Resolve a `Type::Image(x)` attribute — returns a string representation of x. */
+  private def analyzeTypeImage(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        TCall(materializeEnumImageFunc(et), List(asInt), StringType)
+      case nt @ NamedType(_, base, _, _, _) if base.isNumeric || base == BoolType =>
+        val unwrapped = if tArg.typ == nt then TCast(tArg, base) else tArg
+        TStr(unwrapped)
+      case other =>
+        throw AnalysisError(s"$typeName::Image requires a simple enum or numeric constrained type, got $other")
+
+  /** Resolve a `Type::Pos(x)` attribute — returns the declaration position (0-based) for x. */
+  private def analyzeTypePos(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        TCall(materializeEnumPosFunc(et), List(asInt), I32)
+      case other =>
+        throw AnalysisError(s"$typeName::Pos requires a simple enum, got $other")
+
+  /** Resolve a `Type::Val(n)` attribute — returns the enum value at position n. */
+  private def analyzeTypeVal(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        if !tArg.typ.isIntegral then
+          throw AnalysisError(s"$typeName::Val argument must be integer, got ${tArg.typ}")
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        TCall(materializeEnumValFunc(et), List(asInt), I32)
+      case other =>
+        throw AnalysisError(s"$typeName::Val requires a simple enum, got $other")
+
   /** `PtrType` / `RefType` may embed a recursive generic `StructType` placeholder (empty `fields`); use `structTypes`. */
   private def latestStruct(st: SyslType.StructType): SyslType.StructType =
     structTypes.getOrElse(st.name, st)
@@ -2045,6 +2153,28 @@ class SyslAnalyzer:
         if s.startsWith("s:") then analyzeInterpolatedString(s.substring(2))
         else if s.startsWith("f:") then analyzeFormattedString(s.substring(2))
         else TStringLit(s, StringType)
+      case TypeAttrAST(typeName, attr, argOpt) =>
+        val resolved: SyslType =
+          if typeAliases.contains(typeName) then resolveType(NamedTypeAST(typeName))
+          else if simpleEnumTypes.contains(typeName) then simpleEnumTypes(typeName)
+          else throw AnalysisError(s"'$typeName' is not a type with attributes (expected constrained type or simple enum)")
+        attr match
+          case "First" | "Last" =>
+            if argOpt.isDefined then throw AnalysisError(s"$typeName::$attr takes no arguments")
+            analyzeTypeFirstLast(typeName, resolved, attr == "First")
+          case "Range" =>
+            throw AnalysisError(s"$typeName::Range is only valid in a 'for i in $typeName::Range' loop")
+          case "Image" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Image requires one argument"))
+            analyzeTypeImage(typeName, resolved, arg)
+          case "Pos" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Pos requires one argument"))
+            analyzeTypePos(typeName, resolved, arg)
+          case "Val" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Val requires one argument"))
+            analyzeTypeVal(typeName, resolved, arg)
+          case other =>
+            throw AnalysisError(s"unknown type attribute: $typeName::$other (expected First, Last, Range, Image, Pos, Val)")
       case TupleLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
         val tupleType = SyslType.tupleType(tElems.map(_.typ))

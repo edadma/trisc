@@ -558,13 +558,20 @@ class SyslParser extends StandardTokenParsers {
     )
 
   private def buildForEach(valName: String, arr: ExpressionAST, body: List[StmtAST]): ForStmtAST =
-    val idxName = s"__foreach_idx_${valName}"
-    ForStmtAST(
-      VarStmtAST(idxName, None, IntLitAST(0)),
-      BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(arr))),
-      ExprStmtAST(PostIncAST(idxName)),
-      VarStmtAST(valName, None, IndexAST(arr, VarRefAST(idxName))) :: body,
-    )
+    arr match
+      // `for i in T::Range` desugars to `for i in T::First..T::Last` — iterate inclusive.
+      case TypeAttrAST(typeName, "Range", None) =>
+        val lo = TypeAttrAST(typeName, "First", None)
+        val hi = TypeAttrAST(typeName, "Last", None)
+        buildForRange(valName, lo, "..", hi, None, body)
+      case _ =>
+        val idxName = s"__foreach_idx_${valName}"
+        ForStmtAST(
+          VarStmtAST(idxName, None, IntLitAST(0)),
+          BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(arr))),
+          ExprStmtAST(PostIncAST(idxName)),
+          VarStmtAST(valName, None, IndexAST(arr, VarRefAST(idxName))) :: body,
+        )
 
   private def buildForIndexValue(idxName: String, valName: String, arr: ExpressionAST, body: List[StmtAST]): ForStmtAST =
     ForStmtAST(
@@ -845,6 +852,11 @@ class SyslParser extends StandardTokenParsers {
       "string" ~> "(" ~> rep1sep(expr, ",") <~ ")" ^^ { args => CallAST("string", args) } |
       cast |
       ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
+      // Type attribute: Type::Attr or Type::Attr(arg). Must come before the bare
+      // VarRefAST rule so the `::`-suffix is recognized.
+      ident ~ ("::" ~> ident) ~ opt("(" ~> expr <~ ")") ^^ {
+        case typeName ~ attr ~ argOpt => TypeAttrAST(typeName, attr, argOpt)
+      } |
       // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42)
       ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool") ^^ VarRefAST.apply |
       ident ^^ VarRefAST.apply |
