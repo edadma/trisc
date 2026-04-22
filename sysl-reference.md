@@ -158,10 +158,13 @@ struct Range
 ```
 
 A violating mutation traps via the standard contract-check path. The invariant is
-re-evaluated at each mutation site — so an invariant that refers to an expression
-with side effects re-runs those side effects. Current scope: checks fire on
-`s.field = v` and `s.field op= v` (and through pointer/ref: `(*p).field = v`);
-struct construction itself does not yet run the invariant.
+re-evaluated at each check site — so an invariant that refers to an expression
+with side effects re-runs those side effects. Checks fire on:
+
+- var init with a struct-typed value: `var a: Account = Account(...)`
+- whole-struct reassignment: `a = Account(...)`
+- field assignment: `s.field = v` (including through a pointer/ref: `(*p).field = v`)
+- field compound assignment: `s.field op= v`
 
 ### Enum Types (Simple)
 
@@ -352,10 +355,11 @@ Day::Last      // Sun (value 6)
 Day::Image(d)  // "Tue" for d = Day.Tue
 Day::Pos(d)    // 1    for d = Day.Tue
 Day::Val(2)    // Day.Wed
-Day::Succ(d)   // Wed  for d = Day.Tue
-Day::Pred(d)   // Mon  for d = Day.Tue
-Age::Succ(a)   // a+1, traps if a is already 150
-Age::Pred(a)   // a-1, traps if a is already 0
+Day::Succ(d)    // Wed  for d = Day.Tue
+Day::Pred(d)    // Mon  for d = Day.Tue
+Age::Succ(a)    // a+1, traps if a is already 150
+Age::Pred(a)    // a-1, traps if a is already 0
+Day::Value("Tue")  // Day.Tue — parses a string back to its variant
 ```
 
 | Attribute     | Applies to                              | Result                                              |
@@ -364,19 +368,22 @@ Age::Pred(a)   // a-1, traps if a is already 0
 | `T::Last`     | `within`-constrained int, simple enum   | upper bound (minus 1 if `..<`) / last variant       |
 | `T::Range`    | same                                    | only valid in `for i in T::Range` — inclusive scan  |
 | `T::Image(x)` | simple enum, constrained numeric type   | variant name string / `str(x)` for numerics         |
+| `T::Value(s)` | simple enum                             | variant whose name equals `s`; traps on no match    |
 | `T::Pos(x)`   | simple enum                             | 0-based declaration position                        |
 | `T::Val(n)`   | simple enum                             | variant at position `n`; traps on out-of-range      |
 | `T::Succ(x)`  | `within`-constrained int, simple enum   | next value; traps at the upper end                  |
 | `T::Pred(x)`  | `within`-constrained int, simple enum   | previous value; traps at the lower end              |
 
 `::First` and `::Last` fold to compile-time constants. The others lower to synthesized
-helper functions (`__image_T`, `__pos_T`, `__val_T`, `__succ_T`, `__pred_T`) generated
-once per target type. `::Pos` on an unknown value, `::Val` on an out-of-range position,
-`::Succ` past the upper bound, and `::Pred` past the lower bound all trap via the
-standard contract-check path.
+helper functions (`__image_T`, `__value_T`, `__pos_T`, `__val_T`, `__succ_T`, `__pred_T`)
+generated once per target type. `::Pos` / `::Value` on an unknown input, `::Val` on an
+out-of-range position, `::Succ` past the upper bound, and `::Pred` past the lower bound
+all trap via the standard contract-check path. `::Value` and `::Image` round-trip:
+`T::Value(T::Image(x)) == x` for every variant `x`.
 
 `::Range` is syntactic sugar: `for i in T::Range body` parses as
-`for i in T::First..T::Last body`. Using `::Range` outside a for-loop is a compile error.
+`for i in T::First..T::Last body`. `for i in reverse T::Range` desugars the other way,
+`for i in T::Last downTo T::First`. Using `::Range` outside a for-loop is a compile error.
 
 Float-based `within` types do not yet support `::First` / `::Last`.
 
@@ -1395,6 +1402,10 @@ for i in 20 downTo 0 step 4     // 20, 16, 12, 8, 4, 0
 // Iterate values over arrays/slices/strings
 for v in arr
     body                       // v = each element
+
+// Iterate backward — over a T::Range or over a collection
+for i in reverse Day::Range    // last variant down to first
+for v in reverse arr           // index len-1 down to 0
 
 // Iterate with index and value
 for i, v in arr

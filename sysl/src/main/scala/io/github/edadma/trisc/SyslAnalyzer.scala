@@ -1189,6 +1189,25 @@ class SyslAnalyzer:
       TBlockBody(List(TExprStmt(matchExpr))))
     funcName
 
+  /** Generate `__value_<EnumName>(s: string) -> i32` — match input string against each variant
+   * name (structural equality via TValuePattern on string) and return the matching variant's
+   * integer value. Traps on unknown input. */
+  private def materializeEnumValueFunc(et: SyslType.EnumType): String =
+    val funcName = s"__value_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("s", StringType)), I32)
+    val arms = et.variants.map { case (vname, _) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TStringLit(vname, StringType))), None, List(TExprStmt(TIntLit(value, I32))))
+    }
+    val trap = TContractCheck("type attribute", TBoolLit(false, BoolType), s"no variant matches string for ${et.name}::Value")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("s", StringType), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("s", StringType)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
   /** Generate `__succ_<EnumName>(v: i32) -> i32` — next variant value by declaration order.
    * Traps if `v` is the last variant or not a known variant. */
   private def materializeEnumSuccFunc(et: SyslType.EnumType): String =
@@ -1308,6 +1327,17 @@ class SyslAnalyzer:
         TCall(materializeEnumValFunc(et), List(asInt), I32)
       case other =>
         throw AnalysisError(s"$typeName::Val requires a simple enum, got $other")
+
+  /** Resolve `Type::Value(s)` — parse a string into a simple-enum value. */
+  private def analyzeTypeValueString(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    if tArg.typ != StringType then
+      throw AnalysisError(s"$typeName::Value argument must be string, got ${tArg.typ}")
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        TCall(materializeEnumValueFunc(et), List(tArg), I32)
+      case other =>
+        throw AnalysisError(s"$typeName::Value requires a simple enum, got $other")
 
   /** Resolve `Type::Succ(x)` / `Type::Pred(x)` — next/previous value. For simple enums,
    * steps by declaration order; for int `within` types, by one. Both trap at the boundary. */
@@ -2126,7 +2156,13 @@ class SyslAnalyzer:
         else
           if scopeStack != null then
             currentScope(name) = SymInfo(name, declType, isMutable)
-          TVarStmt(name, declType, tInitFinal, isVolatile)
+          val baseStmt = TVarStmt(name, declType, tInitFinal, isVolatile)
+          // Fire struct invariants on the freshly-initialized value, if any are declared.
+          val checks = declType match
+            case st: StructType if structInvariants.contains(st.name) =>
+              buildStructInvariantChecks(VarRefAST(name), st.name)
+            case _ => Nil
+          if checks.isEmpty then baseStmt else TMultiStmt(baseStmt :: checks)
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
@@ -2161,13 +2197,23 @@ class SyslAnalyzer:
         val sym = lookupOrCreate(target, tValue0.typ)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = applyTargetType(tValue0, sym.typ)
-        TAssignStmt(sym.name, tValue)
+        val baseStmt = TAssignStmt(sym.name, tValue)
+        val checks = sym.typ match
+          case st: StructType if structInvariants.contains(st.name) =>
+            buildStructInvariantChecks(VarRefAST(target), st.name)
+          case _ => Nil
+        if checks.isEmpty then baseStmt else TMultiStmt(baseStmt :: checks)
 
       case CompoundAssignStmtAST(target, op, value) =>
         val sym = lookup(target)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = analyzeExpr(value)
-        TCompoundAssignStmt(sym.name, op, tValue)
+        val baseStmt = TCompoundAssignStmt(sym.name, op, tValue)
+        val checks = sym.typ match
+          case st: StructType if structInvariants.contains(st.name) =>
+            buildStructInvariantChecks(VarRefAST(target), st.name)
+          case _ => Nil
+        if checks.isEmpty then baseStmt else TMultiStmt(baseStmt :: checks)
 
       case DerefAssignStmtAST(pointer, value) =>
         val tPointer = analyzeExpr(pointer)
@@ -2415,8 +2461,11 @@ class SyslAnalyzer:
           case "Pred" =>
             val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Pred requires one argument"))
             analyzeTypeSuccPred(typeName, resolved, arg, isSucc = false)
+          case "Value" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Value requires one argument"))
+            analyzeTypeValueString(typeName, resolved, arg)
           case other =>
-            throw AnalysisError(s"unknown type attribute: $typeName::$other (expected First, Last, Range, Image, Pos, Val, Succ, Pred)")
+            throw AnalysisError(s"unknown type attribute: $typeName::$other (expected First, Last, Range, Image, Value, Pos, Val, Succ, Pred)")
       case TupleLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
         val tupleType = SyslType.tupleType(tElems.map(_.typ))

@@ -561,9 +561,16 @@ class SyslParser extends StandardTokenParsers {
       "for" ~> ident ~ ("in" ~> logicalOr) ~ rangeOp ~ logicalOr ~ opt("step" ~> logicalOr) ~ forBody ^^ {
         case name ~ lo ~ op ~ hi ~ step ~ body => buildForRange(name, lo, op, hi, step, body)
       } |
+      "for" ~> ident ~ ("in" ~> reverseKw ~> logicalOr) ~ forBody ^^ {
+        case valName ~ arr ~ body => buildForEach(valName, arr, body, reverse = true)
+      } |
       "for" ~> ident ~ ("in" ~> logicalOr) ~ forBody ^^ {
         case valName ~ arr ~ body => buildForEach(valName, arr, body)
       }
+
+  // Contextual keyword: `reverse` is not a reserved word (so user identifiers named
+  // `reverse` still work), but acts as a keyword directly after `in` in a for-loop.
+  private lazy val reverseKw: Parser[Unit] = ident ^? { case "reverse" => () }
 
   private def buildForRange(name: String, lo: ExpressionAST, op: String, hi: ExpressionAST, step: Option[ExpressionAST], body: List[StmtAST]): ForStmtAST =
     val (condOp, updateOp) = op match
@@ -580,13 +587,23 @@ class SyslParser extends StandardTokenParsers {
       body,
     )
 
-  private def buildForEach(valName: String, arr: ExpressionAST, body: List[StmtAST]): ForStmtAST =
+  private def buildForEach(valName: String, arr: ExpressionAST, body: List[StmtAST], reverse: Boolean = false): ForStmtAST =
     arr match
-      // `for i in T::Range` desugars to `for i in T::First..T::Last` — iterate inclusive.
+      // `for i in T::Range` desugars to `for i in T::First..T::Last` (or `T::Last downTo T::First`).
       case TypeAttrAST(typeName, "Range", None) =>
         val lo = TypeAttrAST(typeName, "First", None)
         val hi = TypeAttrAST(typeName, "Last", None)
-        buildForRange(valName, lo, "..", hi, None, body)
+        if reverse then buildForRange(valName, hi, "downTo", lo, None, body)
+        else buildForRange(valName, lo, "..", hi, None, body)
+      case _ if reverse =>
+        // `for v in reverse arr` — iterate backward from len-1 to 0.
+        val idxName = s"__foreach_idx_${valName}"
+        ForStmtAST(
+          VarStmtAST(idxName, None, BinaryAST(CallAST("len", List(arr)), "-", IntLitAST(1))),
+          BinaryAST(VarRefAST(idxName), ">=", IntLitAST(0)),
+          ExprStmtAST(PostDecAST(idxName)),
+          VarStmtAST(valName, None, IndexAST(arr, VarRefAST(idxName))) :: body,
+        )
       case _ =>
         val idxName = s"__foreach_idx_${valName}"
         ForStmtAST(
