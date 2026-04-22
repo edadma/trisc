@@ -651,6 +651,46 @@ syscall_entry:
     cmpq $0, %rbx
     jl .bad_syscall
 
+    # --- 6-arg path: check syscall_table_6 first ---
+    # Handlers registered via register_syscall6 have signature
+    # `fn handler(a0..a5: i64) -> i64` (via __wrap_ closure ABI).
+    # User-side 6-arg convention: rdi=num, rsi=a0, rdx=a1, rcx=a2,
+    # r8=a3, r9=a4, r10=a5 (saved-context offsets below).
+    leaq syscall_table_6(%rip), %rax
+    movq (%rax,%rbx,8), %rax
+    testq %rax, %rax
+    jz .not_syscall6
+
+    # Save SSP (handlers may still call syscall_return for legacy paths)
+    leaq syscall_ssp(%rip), %rcx
+    movq %rsp, (%rcx)
+
+    pushq %rax                 # save handler pointer
+    movl %ebx, %edi            # arg = syscall number
+    call oskit_kernel__syscall_check_allowed
+    testl %eax, %eax
+    popq %rax                  # restore handler pointer
+    jz .denied_syscall
+
+    # Load 6 args from saved context. Offsets from the 15-reg save:
+    #   80:RSI(a0) 88:RDX(a1) 96:RCX(a2) 56:R8(a3) 48:R9(a4) 40:R10(a5).
+    # Closure ABI needs env=null in rdi; a5 spills to stack (SysV: 7 args,
+    # 6 in regs, 7th at [rsp+8] after call).
+    movq 80(%rsp), %rsi
+    movq 88(%rsp), %rdx
+    movq 96(%rsp), %rcx
+    movq 56(%rsp), %r8
+    movq 48(%rsp), %r9
+    movq 40(%rsp), %r11
+    pushq %r11                 # a5 on stack for the call
+    xorq %rdi, %rdi            # env = null
+    call *%rax
+    addq $8, %rsp              # drop the pushed a5
+    movq %rax, 112(%rsp)       # write handler return into saved RAX
+
+    jmp do_schedule
+
+.not_syscall6:
     # Look up handler: syscall_table[num] (array of i64)
     leaq syscall_table(%rip), %rax
     movq (%rax,%rbx,8), %rax  # rax = handler (function pointer)
