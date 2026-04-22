@@ -363,19 +363,20 @@ recompute over the full ICMP message.
 
 ### UDP checksum (IPv4 pseudo-header)
 
-RFC 768 UDP checksum over `pseudo-header + UDP header + payload`.
-Returns a folded + complemented 16-bit value. A zero computed
-checksum becomes `0xffff` so it isn't mistaken for the "no
-checksum" sentinel.
+Core one's-complement sum over `pseudo-header + UDP header +
+payload`. Pseudo-header layout (12 bytes): src_ip (4) + dst_ip
+(4) + zero (1) + proto=17 (1) + udp_len (2). The UDP bytes come
+straight from the frame buffer at `[udp_off .. udp_off + udp_len)`
+— caller decides whether the checksum field there is zero (for
+transmit) or stored (for receive-side verify).
 
-Pseudo-header layout (12 bytes):
-  src_ip (4) + dst_ip (4) + zero (1) + proto=17 (1) + udp_len (2)
+Returns the folded 16-bit sum (not complemented). Valid transmit
+frames have the complement stored in their checksum field;
+receive-side verification expects this helper to return `0xffff`
+when the stored checksum is correct.
 
-Caller must leave the UDP header's checksum field zero before
-calling (the sum covers the full header).
-
-    inet_udp_checksum(src_ip: u32, dst_ip: u32,
-                     frame: *byte, udp_off: int, udp_len: int) -> int
+    inet_udp_partial_sum(src_ip: u32, dst_ip: u32,
+                        frame: *byte, udp_off: int, udp_len: int) -> int
         var sum = 0
         sum += (ipv4_octet(src_ip, 0) << 8) | ipv4_octet(src_ip, 1)
         sum += (ipv4_octet(src_ip, 2) << 8) | ipv4_octet(src_ip, 3)
@@ -391,10 +392,37 @@ calling (the sum covers the full header).
             sum += (int(frame[udp_off + i]) & 0xff) << 8
         while (sum >> 16) != 0
             sum = (sum & 0xffff) + (sum >> 16)
-        val c = (~sum) & 0xffff
+        sum
+
+
+Transmit-side helper. Caller must zero the UDP checksum field in
+`frame` before calling. A computed 0 maps to `0xffff` so the
+written value never collides with the "no checksum" sentinel
+(RFC 768).
+
+    inet_udp_checksum(src_ip: u32, dst_ip: u32,
+                     frame: *byte, udp_off: int, udp_len: int) -> int
+        val s = inet_udp_partial_sum(src_ip, dst_ip, frame, udp_off, udp_len)
+        val c = (~s) & 0xffff
         if c == 0
             return 0xffff
         c
+
+
+Receive-side verify. Frame still carries its sender-written
+checksum; a valid packet folds to `0xffff`. A stored 0 means
+"no checksum" (accept unconditionally, IPv4-only). Returns 1
+on valid, 0 on corrupt.
+
+    inet_udp_verify(src_ip: u32, dst_ip: u32,
+                   frame: *byte, udp_off: int, udp_len: int) -> int
+        val stored = pkt_read_u16(frame, udp_off + 6)
+        if stored == 0
+            return 1
+        val s = inet_udp_partial_sum(src_ip, dst_ip, frame, udp_off, udp_len)
+        if s == 0xffff
+            return 1
+        0
 
 
 ### UDP — outbound
