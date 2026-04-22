@@ -138,6 +138,22 @@ the obvious upgrade once the stack grows.
         -1
 
 
+### Allocate an ephemeral source port
+
+Linear scan from 49152 upward (RFC 6335 suggested range), returning
+the first port no existing socket is bound to. Returns -1 if the
+entire range is occupied — won't happen in practice with 32 sockets
+but the guard keeps the loop bounded.
+
+    inet_alloc_ephemeral_port() -> int
+        var port = 49152
+        while port < 65536
+            if inet_find_bound_port(port) < 0
+                return port
+            port += 1
+        -1
+
+
 ### Locate any socket bound to `port`
 
 Port-only variant for UDP RX dispatch. The guest has a single unicast
@@ -365,6 +381,25 @@ let us drop unmatched loopback targets silently with
         val dst_ip = inet_read_ipv4(buf, 5)
         val dlen = inet_read_u16(buf, 9)
         val data: *byte = buf + 11
+
+Auto-bind unbound sockets to an ephemeral src port (matches POSIX
+`sendto(2)` semantics). Covers both loopback and wire paths so
+receivers always see a non-zero `src_port` in `recvfrom` replies.
+Fails sendto only if the ephemeral range is exhausted — 32 sockets
+vs. 16K ports, so not in practice.
+
+        if inet_sockets[fd].bound == 0
+            val eph = inet_alloc_ephemeral_port()
+            if eph < 0
+                var err: [3]byte
+                err[0] = byte(-1)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            inet_sockets[fd].bound = 1
+            inet_sockets[fd].bound_ip = INADDR_ANY
+            inet_sockets[fd].bound_port = eph
         val src_port = inet_sockets[fd].bound_port
         if dst_ip == INADDR_LOOPBACK
             val target = inet_find_bound(dst_ip, dst_port)
@@ -377,13 +412,6 @@ let us drop unmatched loopback targets silently with
             reply[0] = 0
             inet_write_u16(reply, 1, dlen)
             ipc_reply(sender, reply, 3)
-            return
-        if inet_sockets[fd].bound == 0
-            var err: [3]byte
-            err[0] = byte(-1)
-            err[1] = 0
-            err[2] = 0
-            ipc_reply(sender, err, 3)
             return
         val r = inet_send_udp(dst_ip, dst_port, src_port, data, dlen)
         if r < 0

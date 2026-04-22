@@ -76,19 +76,17 @@ non-zero code. Phase 2 is advisory — failures don't abort.
         puts("'\n")
         close_socket(fd)
 
-Phase 2 — real-wire sendto. Bind on 0.0.0.0:6000 and try to send
-"hello" to the gateway discard port. Non-fatal on failure so this
-test still passes on targets without a nic.
+Phase 2 — real-wire sendto. Skips the explicit bind to exercise
+inet's auto-bind-on-sendto path (POSIX semantics). On targets
+where inet's link layer is up (aarch64 virt with virtio-net),
+this produces an outbound UDP frame visible in a pcap with an
+ephemeral src port; prints `test_net: wire sent=5`. Non-fatal on
+failure — targets without a nic print `wire sendto failed (no
+nic?)` and keep going.
 
         val fd2 = socket(AF_INET, SOCK_DGRAM, 0)
         if fd2 < 0
             puts("test_net: wire socket failed\n")
-            exit()
-            return
-        val br2 = bind(fd2, INADDR_ANY, 6000)
-        if br2 < 0
-            puts("test_net: wire bind failed\n")
-            close_socket(fd2)
             exit()
             return
         var wmsg: [5]byte

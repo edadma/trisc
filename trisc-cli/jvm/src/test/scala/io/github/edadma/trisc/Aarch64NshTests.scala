@@ -158,10 +158,13 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
 
   "aarch64 inet: UDP loopback via test_net" in {
     // test_net opens a UDP socket on 127.0.0.1:5000, sends "hello"
-    // to itself, and prints what recvfrom returned.
+    // to itself, and prints what recvfrom returned. Phase 2 on
+    // aarch64 exercises real-wire sendto without an explicit bind
+    // so the `wire sent=5` line also covers inet's auto-bind path.
     val output = qemu.command("test_net")
     output should include("sent=5")
     output should include("recv=5 'hello'")
+    output should include("wire sent=5")
   }
 
   "aarch64 nic: GET_MAC + subscribe + drain via test_nic" in {
