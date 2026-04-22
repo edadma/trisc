@@ -271,20 +271,10 @@ importing them directly.
         u64(syscall(SYS_GET_THREAD_PTBR, tid))
 
     svc_vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, vlen: int)
-        var args: [4]i64
-        args[0] = i64(dst_ptbr)
-        args[1] = i64(dst_vaddr)
-        args[2] = i64(src)
-        args[3] = vlen
-        syscall(SYS_VM_COPY_TO, i64(args))
+        syscall6(SYS_VM_COPY_TO, i64(dst_ptbr), i64(dst_vaddr), i64(src), i64(vlen), 0, 0)
 
     svc_vm_copy_from(src_ptbr: u64, src_vaddr: u64, dst: *byte, vlen: int)
-        var args: [4]i64
-        args[0] = i64(src_ptbr)
-        args[1] = i64(src_vaddr)
-        args[2] = i64(dst)
-        args[3] = vlen
-        syscall(SYS_VM_COPY_FROM, i64(args))
+        syscall6(SYS_VM_COPY_FROM, i64(src_ptbr), i64(src_vaddr), i64(dst), i64(vlen), 0, 0)
 
     svc_proc_state(pid: int) -> int
         syscall(SYS_PROC_STATE, pid)
