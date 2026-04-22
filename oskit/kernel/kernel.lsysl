@@ -136,8 +136,7 @@ loaded by nsh each get their own process entry.
         exit_code: int
         main_tid: int
         name: string
-        syscall_allow_lo: i64
-        syscall_allow_hi: i64
+        syscall_allow: [8]i64   // 8 words × 64 bits = 512 bits, indexed by syscall number
         ipc_send_mask: int
 
     var processes: [16]Process  // 16 = MAX_PROCESSES
@@ -300,13 +299,13 @@ in hi.
         val pid = threads[current_thread].pid
         if pid <= 0
             return 1
-        if num < 64
-            val mask = processes[pid].syscall_allow_lo
-            if (mask & (i64(1) << num)) != 0
-                return 1
+        if num < 0
             return 0
-        val bit = num - 64
-        val mask = processes[pid].syscall_allow_hi
+        if num >= 512
+            return 0
+        val word = num >> 6         // num / 64
+        val bit = num & 63          // num % 64
+        val mask = processes[pid].syscall_allow[word]
         if (mask & (i64(1) << bit)) != 0
             return 1
         0
@@ -342,11 +341,23 @@ resuming a server. Arg = pointer to [pid(i64), lo(i64), hi(i64), ipc_mask(i64)].
         val ipc = int(args[3])
         if pid > 0
             if pid < MAX_PROCESSES
-                processes[pid].syscall_allow_lo = lo
-                processes[pid].syscall_allow_hi = hi
+                processes[pid].syscall_allow[0] = lo
+                processes[pid].syscall_allow[1] = hi
                 processes[pid].ipc_send_mask = ipc
         syscall_return(0)
         kernel_continue_current()
+
+Grant the POSIX syscall range (128-511) to a process. Called from
+the aarch64 ELF loader when a musl-linked program is created, so
+the program can call write/read/exit_group/etc. without each bit
+being set explicitly. Kernel-only helper; not exposed as a syscall.
+
+    proc_grant_posix_range(pid: int)
+        if pid > 0
+            if pid < MAX_PROCESSES
+                // bits 128-511 live in words 2..7
+                for w in 2..<8
+                    processes[pid].syscall_allow[w] = i64(-1)
 
 Set just the IPC send mask for a process.
 Arg = (pid << 8) | mask.
@@ -1217,8 +1228,8 @@ process ID (0 for kernel threads).
         processes[pid].exit_code = 0
         processes[pid].main_tid = tid
         processes[pid].name = threads[tid].name
-        processes[pid].syscall_allow_lo = i64(-1)
-        processes[pid].syscall_allow_hi = i64(-1)
+        for w in 0..<8
+            processes[pid].syscall_allow[w] = i64(-1)
         processes[pid].ipc_send_mask = 0xFF
 
         // Link thread to process
@@ -1318,8 +1329,8 @@ Unlike create_process, the thread is never enqueued — no race.
         processes[pid].exit_code = 0
         processes[pid].main_tid = tid
         processes[pid].name = threads[tid].name
-        processes[pid].syscall_allow_lo = i64(-1)
-        processes[pid].syscall_allow_hi = i64(-1)
+        for w in 0..<8
+            processes[pid].syscall_allow[w] = i64(-1)
         processes[pid].ipc_send_mask = 0xFF
 
         // Link thread to process
