@@ -30,20 +30,24 @@ families / types, and any unknown command code, return
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
-    import oskit.services.{rs_ready, notify_read_self}
+    import oskit.services.{rs_ready, notify_read_self, svc_timer_subscribe}
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet,
         ETHERTYPE_IPV4, ETHERTYPE_ARP, ARP_OP_REQUEST, ARP_OP_REPLY,
-        IP_PROTO_ICMP, IP_PROTO_UDP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
+        IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
         pkt_read_u16, pkt_match_ipv4}
 
 
 Protocol command codes (byte value of buf[0]).
 
-    val INET_CMD_SOCKET   = 1
-    val INET_CMD_BIND     = 2
-    val INET_CMD_SENDTO   = 3
-    val INET_CMD_RECVFROM = 4
-    val INET_CMD_CLOSE    = 5
+    val INET_CMD_SOCKET       = 1
+    val INET_CMD_BIND         = 2
+    val INET_CMD_SENDTO       = 3
+    val INET_CMD_RECVFROM     = 4
+    val INET_CMD_CLOSE        = 5
+    val INET_CMD_TCP_CONNECT  = 10
+    val INET_CMD_TCP_SEND     = 11
+    val INET_CMD_TCP_RECV     = 12
+    val INET_CMD_TCP_CLOSE    = 13
 
 
 Capacity limits.
@@ -492,6 +496,124 @@ the caller doesn't block forever.
         ipc_reply(sender, reply, 1)
 
 
+### TCP command handlers
+
+All four commands are blocking: they do NOT reply before the
+wakeup condition is met. Handlers stash the caller tid in the
+per-socket waiter slot (connect_waiter / recv_waiter / close_waiter)
+and the state machine / timer scan delivers the reply later.
+SEND is the one exception — POSIX `write()` semantics mean it
+replies as soon as bytes land in the send buffer.
+
+Wire layout (all big-endian u16):
+- TCP_CONNECT: cmd(1), ip(4), port(2) -> status(1)
+- TCP_SEND: cmd(1), fd(2), len(2), data(len) -> status(1), written(2)
+- TCP_RECV: cmd(1), fd(2), maxlen(2) -> status(1), len(2), data(len); len=0 means EOF
+- TCP_CLOSE: cmd(1), fd(2) -> status(1)
+
+`fd` is a 16-bit raw socket index. First byte at offset 1 is the
+high byte (0), second (offset 2) is the low byte / index.
+
+    inet_read_u16_at(buf: *byte, off: int) -> int
+        inet_read_u16(buf, off)
+
+    inet_handle_tcp_connect(sender: int, buf: *byte)
+        val ip = inet_read_ipv4(buf, 1)
+        val port = inet_read_u16(buf, 5)
+        val s = inet_tcp_begin_connect(sender, sender, ip, port)
+        if s < 0
+            var err: [2]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            ipc_reply(sender, err, 2)
+            return
+        // Deferred reply — inet_tcp_state_step replies when ESTABLISHED.
+
+    inet_handle_tcp_send(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val dlen = inet_read_u16(buf, 3)
+        val data: *byte = buf + 5
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        if tcp_sockets[fd].in_use == 0
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        val n = inet_tcp_do_send(fd, data, dlen)
+        if n < 0
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        var reply: [3]byte
+        reply[0] = 0
+        inet_write_u16(reply, 1, n)
+        ipc_reply(sender, reply, 3)
+
+    inet_handle_tcp_recv(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val maxlen_raw = inet_read_u16(buf, 3)
+        var maxlen = maxlen_raw
+        if maxlen > 500
+            maxlen = 500
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        if tcp_sockets[fd].in_use == 0
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        tcp_sockets[fd].recv_waiter = sender
+        tcp_sockets[fd].recv_maxlen = maxlen
+        if tcp_sockets[fd].recv_len > 0
+            var give = tcp_sockets[fd].recv_len
+            if give > maxlen
+                give = maxlen
+            inet_tcp_reply_recv(fd, give)
+            return
+        if tcp_sockets[fd].peer_fin != 0
+            inet_tcp_reply_recv(fd, 0)
+            return
+        // Deferred reply — state step delivers when data arrives.
+
+    inet_handle_tcp_close(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        if tcp_sockets[fd].in_use == 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        val r = inet_tcp_do_close(fd, sender)
+        if r == 1
+            var reply: [1]byte
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
+        if r < 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        // Deferred reply — state step delivers when FIN is acked.
+
+
 ### UDP — inbound
 
 Dispatch an IPv4/UDP frame that already passed the destination-IP
@@ -591,6 +713,9 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
             if proto == IP_PROTO_UDP
                 inet_handle_udp(frame, len, ihl_bytes)
                 return 1
+            if proto == IP_PROTO_TCP
+                inet_tcp_handle_segment(frame, len, ihl_bytes)
+                return 1
             return 0
         0
 
@@ -648,15 +773,21 @@ silently skip link-layer setup and still serve UDP loopback.
 
     inet_server()
         inet_init_sockets()
+        inet_tcp_init()
         inet_port = port_create()
         port_register(inet_port, "inet")
         rs_ready()
 
         inet_link_init()
 
+        // Periodic wakeup for TCP retransmit / TIME_WAIT scans.
+        // 5 ticks ≈ 50 ms on a 100 Hz scheduler timer.
+        svc_timer_subscribe(5)
+
         var buf: [540]byte
         while 1 == 1
             val r = ipc_recv_notify(inet_port, buf, INET_MSG_BUF)
+            inet_tcp_scan_timers()
             if r == -2
                 notify_read_self()
                 inet_drain_rx()
@@ -673,6 +804,14 @@ silently skip link-layer setup and still serve UDP loopback.
                     inet_handle_recvfrom(sender, buf)
                 else if cmd == INET_CMD_CLOSE
                     inet_handle_close(sender, buf)
+                else if cmd == INET_CMD_TCP_CONNECT
+                    inet_handle_tcp_connect(sender, buf)
+                else if cmd == INET_CMD_TCP_SEND
+                    inet_handle_tcp_send(sender, buf)
+                else if cmd == INET_CMD_TCP_RECV
+                    inet_handle_tcp_recv(sender, buf)
+                else if cmd == INET_CMD_TCP_CLOSE
+                    inet_handle_tcp_close(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)

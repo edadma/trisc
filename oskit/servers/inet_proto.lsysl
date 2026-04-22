@@ -20,10 +20,11 @@ live in kernel-thread space and call `virtio_net_send` directly.
 
     module oskit.servers
 
-    import oskit.ipc.{ipc_send, port_lookup}
+    import oskit.ipc.{ipc_send, port_lookup, ipc_reply}
+    import oskit.services.uptime
     import std.net.{ETHERTYPE_IPV4, ETHERTYPE_ARP,
         ARP_OP_REQUEST, ARP_OP_REPLY,
-        IP_PROTO_ICMP, IP_PROTO_UDP,
+        IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP,
         ICMP_ECHO_REQ, ICMP_ECHO_REP,
         pkt_read_u16, pkt_write_u16,
         pkt_write_mac, pkt_write_ipv4,
@@ -456,35 +457,36 @@ recompute over the full ICMP message.
         inet_nic_send_packet(frame, total_len)
 
 
-### UDP checksum (IPv4 pseudo-header)
+### L4 checksum helpers (IPv4 pseudo-header)
 
-Core one's-complement sum over `pseudo-header + UDP header +
+Core one's-complement sum over `pseudo-header + L4 header +
 payload`. Pseudo-header layout (12 bytes): src_ip (4) + dst_ip
-(4) + zero (1) + proto=17 (1) + udp_len (2). The UDP bytes come
-straight from the frame buffer at `[udp_off .. udp_off + udp_len)`
+(4) + zero (1) + proto (1) + l4_len (2). The L4 bytes come
+straight from the frame buffer at `[l4_off .. l4_off + l4_len)`
 — caller decides whether the checksum field there is zero (for
 transmit) or stored (for receive-side verify).
 
 Returns the folded 16-bit sum (not complemented). Valid transmit
 frames have the complement stored in their checksum field;
 receive-side verification expects this helper to return `0xffff`
-when the stored checksum is correct.
+when the stored checksum is correct. Shared by UDP (proto=17)
+and TCP (proto=6).
 
-    inet_udp_partial_sum(src_ip: u32, dst_ip: u32,
-                        frame: *byte, udp_off: int, udp_len: int) -> int
+    inet_l4_partial_sum(src_ip: u32, dst_ip: u32, proto: int,
+                        frame: *byte, l4_off: int, l4_len: int) -> int
         var sum = 0
         sum += (ipv4_octet(src_ip, 0) << 8) | ipv4_octet(src_ip, 1)
         sum += (ipv4_octet(src_ip, 2) << 8) | ipv4_octet(src_ip, 3)
         sum += (ipv4_octet(dst_ip, 0) << 8) | ipv4_octet(dst_ip, 1)
         sum += (ipv4_octet(dst_ip, 2) << 8) | ipv4_octet(dst_ip, 3)
-        sum += IP_PROTO_UDP
-        sum += udp_len
+        sum += proto
+        sum += l4_len
         var i = 0
-        while i + 1 < udp_len
-            sum += pkt_read_u16(frame, udp_off + i)
+        while i + 1 < l4_len
+            sum += pkt_read_u16(frame, l4_off + i)
             i += 2
-        if i < udp_len
-            sum += (int(frame[udp_off + i]) & 0xff) << 8
+        if i < l4_len
+            sum += (int(frame[l4_off + i]) & 0xff) << 8
         while (sum >> 16) != 0
             sum = (sum & 0xffff) + (sum >> 16)
         sum
@@ -497,7 +499,8 @@ written value never collides with the "no checksum" sentinel
 
     inet_udp_checksum(src_ip: u32, dst_ip: u32,
                      frame: *byte, udp_off: int, udp_len: int) -> int
-        val s = inet_udp_partial_sum(src_ip, dst_ip, frame, udp_off, udp_len)
+        val s = inet_l4_partial_sum(src_ip, dst_ip, IP_PROTO_UDP,
+                                    frame, udp_off, udp_len)
         val c = (~s) & 0xffff
         if c == 0
             return 0xffff
@@ -514,7 +517,8 @@ on valid, 0 on corrupt.
         val stored = pkt_read_u16(frame, udp_off + 6)
         if stored == 0
             return 1
-        val s = inet_udp_partial_sum(src_ip, dst_ip, frame, udp_off, udp_len)
+        val s = inet_l4_partial_sum(src_ip, dst_ip, IP_PROTO_UDP,
+                                    frame, udp_off, udp_len)
         if s == 0xffff
             return 1
         0
@@ -585,3 +589,607 @@ the pseudo-header checksum; the result lands at offset 40.
         inet_nic_send_packet(frame, total_len)
 
 
+### TCP — state machine (phase 1 MVP)
+
+Active-open client only. `connect()` → SYN_SENT → ESTABLISHED,
+graceful close either side, fixed 500 ms RTO, TIME_WAIT capped
+at 2 s. No listen/accept, no out-of-order reassembly, no
+congestion control, no Nagle. Enough to echo-test against a
+host echo server via `hostfwd=tcp`.
+
+Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
+
+    val TCP_MAX_SOCKETS = 16
+    val TCP_SEND_BUF    = 1024
+    val TCP_RECV_BUF    = 1024
+    val TCP_MSS_ADV     = 1460
+    val TCP_MAX_SEG     = 480
+    val TCP_RTO_TICKS   = 50
+    val TCP_TW_TICKS    = 200
+    val TCP_MAX_RETRIES = 5
+
+    val TCP_STATE_CLOSED      = 0
+    val TCP_STATE_SYN_SENT    = 1
+    val TCP_STATE_ESTABLISHED = 2
+    val TCP_STATE_FIN_WAIT_1  = 3
+    val TCP_STATE_FIN_WAIT_2  = 4
+    val TCP_STATE_CLOSE_WAIT  = 5
+    val TCP_STATE_LAST_ACK    = 6
+    val TCP_STATE_TIME_WAIT   = 7
+
+    val TCP_F_FIN = 0x01
+    val TCP_F_SYN = 0x02
+    val TCP_F_RST = 0x04
+    val TCP_F_PSH = 0x08
+    val TCP_F_ACK = 0x10
+
+    struct TcpSocket
+        in_use: int
+        state: int
+        owner_tid: int
+        local_port: int
+        remote_ip: u32
+        remote_port: int
+        iss: u32
+        irs: u32
+        snd_una: u32
+        snd_nxt: u32
+        snd_wnd: int
+        rcv_nxt: u32
+        mss: int
+        send_buf: [1024]byte
+        send_len: int
+        recv_buf: [1024]byte
+        recv_len: int
+        rtx_deadline: int
+        retries: int
+        tw_deadline: int
+        peer_fin: int
+        our_fin_sent: int
+        connect_waiter: int
+        send_waiter: int
+        send_waiter_len: int
+        recv_waiter: int
+        recv_maxlen: int
+        close_waiter: int
+
+    var tcp_sockets: [16]TcpSocket
+    var tcp_iss_counter: u32 = u32(1000)
+
+    tcp_next_iss() -> u32
+        val v = tcp_iss_counter
+        tcp_iss_counter = v + u32(65536)
+        v
+
+    inet_tcp_init()
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            tcp_sockets[i].in_use = 0
+            tcp_sockets[i].state = TCP_STATE_CLOSED
+            tcp_sockets[i].connect_waiter = -1
+            tcp_sockets[i].send_waiter = -1
+            tcp_sockets[i].recv_waiter = -1
+            tcp_sockets[i].close_waiter = -1
+            i += 1
+
+
+32-bit sequence-number comparisons, wrapping modulo 2^32.
+
+    tcp_seq_lt(a: u32, b: u32) -> int
+        val d = i32(a - b)
+        if d < 0
+            return 1
+        0
+
+    tcp_seq_le(a: u32, b: u32) -> int
+        val d = i32(a - b)
+        if d <= 0
+            return 1
+        0
+
+
+TCP seq/ack field helpers (big-endian u32).
+
+    tcp_write_u32(frame: *byte, off: int, v: u32)
+        frame[off]     = byte((v >> 24) & u32(0xff))
+        frame[off + 1] = byte((v >> 16) & u32(0xff))
+        frame[off + 2] = byte((v >>  8) & u32(0xff))
+        frame[off + 3] = byte( v        & u32(0xff))
+
+    tcp_read_u32(frame: *byte, off: int) -> u32
+        val b0 = u32(frame[off]     & 0xff)
+        val b1 = u32(frame[off + 1] & 0xff)
+        val b2 = u32(frame[off + 2] & 0xff)
+        val b3 = u32(frame[off + 3] & 0xff)
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+
+Build a single Ethernet + IPv4 + TCP frame for socket `s`. Payload
+is `payload_len` bytes of send_buf starting at `payload_seq`
+(relative to snd_una). A 4-byte MSS option is attached on SYN.
+
+    inet_tcp_emit(s: int, flags: int, seq: u32,
+                  payload_seq: u32, payload_len: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        var next_hop_mac: [6]byte
+        if inet_resolve_mac(tcp_sockets[s].remote_ip, next_hop_mac) == 0
+            return -1
+        val mss_opt = (flags & TCP_F_SYN) != 0
+        var hdr_bytes = 20
+        if mss_opt
+            hdr_bytes = 24
+        var seg_len = hdr_bytes + payload_len
+        if seg_len > 1460
+            return -1
+        var frame: [1514]byte
+        val total_len = 14 + 20 + seg_len
+        pkt_write_mac(frame, 0, next_hop_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+        frame[14] = 0x45
+        frame[15] = 0
+        pkt_write_u16(frame, 16, 20 + seg_len)
+        pkt_write_u16(frame, 18, 0)
+        pkt_write_u16(frame, 20, 0x4000)
+        frame[22] = 64
+        frame[23] = byte(IP_PROTO_TCP)
+        pkt_write_u16(frame, 24, 0)
+        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
+            INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30,
+            ipv4_octet(tcp_sockets[s].remote_ip, 0),
+            ipv4_octet(tcp_sockets[s].remote_ip, 1),
+            ipv4_octet(tcp_sockets[s].remote_ip, 2),
+            ipv4_octet(tcp_sockets[s].remote_ip, 3))
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+        val tcp_off = 34
+        pkt_write_u16(frame, tcp_off + 0, tcp_sockets[s].local_port)
+        pkt_write_u16(frame, tcp_off + 2, tcp_sockets[s].remote_port)
+        tcp_write_u32(frame, tcp_off + 4, seq)
+        var ack_val: u32 = u32(0)
+        if (flags & TCP_F_ACK) != 0
+            ack_val = tcp_sockets[s].rcv_nxt
+        tcp_write_u32(frame, tcp_off + 8, ack_val)
+        val data_off_words = hdr_bytes / 4
+        frame[tcp_off + 12] = byte((data_off_words << 4) & 0xf0)
+        frame[tcp_off + 13] = byte(flags & 0xff)
+        val rwnd = TCP_RECV_BUF - tcp_sockets[s].recv_len
+        pkt_write_u16(frame, tcp_off + 14, rwnd)
+        pkt_write_u16(frame, tcp_off + 16, 0)
+        pkt_write_u16(frame, tcp_off + 18, 0)
+        if mss_opt
+            frame[tcp_off + 20] = 2
+            frame[tcp_off + 21] = 4
+            pkt_write_u16(frame, tcp_off + 22, TCP_MSS_ADV)
+        if payload_len > 0
+            val offset = int(i32(payload_seq - tcp_sockets[s].snd_una))
+            var i = 0
+            while i < payload_len
+                frame[tcp_off + hdr_bytes + i] = tcp_sockets[s].send_buf[offset + i]
+                i += 1
+        pkt_write_u16(frame, tcp_off + 16,
+            (~inet_l4_partial_sum(our_ip, tcp_sockets[s].remote_ip,
+                IP_PROTO_TCP, frame, tcp_off, seg_len)) & 0xffff)
+        inet_nic_send_packet(frame, total_len)
+        0
+
+
+    inet_tcp_arm_rtx(s: int)
+        tcp_sockets[s].rtx_deadline = int(uptime()) + TCP_RTO_TICKS
+
+    inet_tcp_disarm_rtx(s: int)
+        tcp_sockets[s].rtx_deadline = 0
+        tcp_sockets[s].retries = 0
+
+
+One-byte status reply — close() completion.
+
+    inet_tcp_reply_status(tid: int, status: int)
+        var wr: [1]byte
+        wr[0] = byte(status & 0xff)
+        ipc_reply(tid, wr, 1)
+
+
+Two-byte connect() reply: status + fd. fd is meaningless on
+error but the client still reads it (stable wire shape).
+
+    inet_tcp_reply_connect(tid: int, status: int, fd: int)
+        var wr: [2]byte
+        wr[0] = byte(status & 0xff)
+        wr[1] = byte(fd & 0xff)
+        ipc_reply(tid, wr, 2)
+
+Parked SEND reply (MVP currently doesn't park, keep helper for
+symmetry / phase 2).
+
+    inet_tcp_reply_send(tid: int, status: int, written: int)
+        var wr: [3]byte
+        wr[0] = byte(status & 0xff)
+        pkt_write_u16(wr, 1, written)
+        ipc_reply(tid, wr, 3)
+
+RECV drain + reply. `n == 0` signals peer-closed EOF.
+
+    inet_tcp_reply_recv(s: int, n: int)
+        val tid = tcp_sockets[s].recv_waiter
+        tcp_sockets[s].recv_waiter = -1
+        var wr: [540]byte
+        wr[0] = 0
+        pkt_write_u16(wr, 1, n)
+        var i = 0
+        while i < n
+            wr[3 + i] = tcp_sockets[s].recv_buf[i]
+            i += 1
+        if n > 0
+            var j = n
+            while j < tcp_sockets[s].recv_len
+                tcp_sockets[s].recv_buf[j - n] = tcp_sockets[s].recv_buf[j]
+                j += 1
+            tcp_sockets[s].recv_len -= n
+        ipc_reply(tid, wr, 3 + n)
+
+
+Free socket `s` and wake any parked waiter with `status`. Used on
+terminal ACK and on retransmit exhaustion.
+
+    inet_tcp_close_slot(s: int, status: int)
+        if tcp_sockets[s].connect_waiter >= 0
+            inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, status, 0)
+            tcp_sockets[s].connect_waiter = -1
+        if tcp_sockets[s].recv_waiter >= 0
+            inet_tcp_reply_recv(s, 0)
+        if tcp_sockets[s].send_waiter >= 0
+            inet_tcp_reply_send(tcp_sockets[s].send_waiter, status, 0)
+            tcp_sockets[s].send_waiter = -1
+        if tcp_sockets[s].close_waiter >= 0
+            inet_tcp_reply_status(tcp_sockets[s].close_waiter, 0)
+            tcp_sockets[s].close_waiter = -1
+        tcp_sockets[s].in_use = 0
+        tcp_sockets[s].state = TCP_STATE_CLOSED
+        tcp_sockets[s].rtx_deadline = 0
+        tcp_sockets[s].tw_deadline = 0
+
+
+    inet_tcp_alloc() -> int
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use == 0
+                tcp_sockets[i].in_use = 1
+                tcp_sockets[i].state = TCP_STATE_CLOSED
+                tcp_sockets[i].send_len = 0
+                tcp_sockets[i].recv_len = 0
+                tcp_sockets[i].retries = 0
+                tcp_sockets[i].rtx_deadline = 0
+                tcp_sockets[i].tw_deadline = 0
+                tcp_sockets[i].peer_fin = 0
+                tcp_sockets[i].our_fin_sent = 0
+                tcp_sockets[i].connect_waiter = -1
+                tcp_sockets[i].send_waiter = -1
+                tcp_sockets[i].recv_waiter = -1
+                tcp_sockets[i].close_waiter = -1
+                tcp_sockets[i].mss = TCP_MSS_ADV
+                return i
+            i += 1
+        -1
+
+    inet_tcp_find(local_port: int, remote_ip: u32, remote_port: int) -> int
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use != 0
+                if tcp_sockets[i].local_port == local_port
+                    if tcp_sockets[i].remote_port == remote_port
+                        if tcp_sockets[i].remote_ip == remote_ip
+                            return i
+            i += 1
+        -1
+
+
+TCP-private ephemeral port allocator (49152+). Distinct from UDP's
+so a TCP connect and a UDP socket can both hold 49152.
+
+    tcp_alloc_port() -> int
+        var port = 49152
+        while port < 65536
+            var taken = 0
+            var i = 0
+            while i < TCP_MAX_SOCKETS
+                if tcp_sockets[i].in_use != 0
+                    if tcp_sockets[i].local_port == port
+                        taken = 1
+                        i = TCP_MAX_SOCKETS
+                    else
+                        i += 1
+                else
+                    i += 1
+            if taken == 0
+                return port
+            port += 1
+        -1
+
+
+connect() entry — allocate slot, emit SYN, park caller. Returns
+the socket index on success (caller blocks until ESTABLISHED),
+-1 on immediate failure.
+
+    inet_tcp_begin_connect(owner_tid: int, caller_tid: int,
+                           remote_ip: u32, remote_port: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        val s = inet_tcp_alloc()
+        if s < 0
+            return -1
+        val lp = tcp_alloc_port()
+        if lp < 0
+            tcp_sockets[s].in_use = 0
+            return -1
+        val iss = tcp_next_iss()
+        tcp_sockets[s].owner_tid = owner_tid
+        tcp_sockets[s].local_port = lp
+        tcp_sockets[s].remote_ip = remote_ip
+        tcp_sockets[s].remote_port = remote_port
+        tcp_sockets[s].iss = iss
+        tcp_sockets[s].snd_una = iss
+        tcp_sockets[s].snd_nxt = iss + u32(1)
+        tcp_sockets[s].rcv_nxt = u32(0)
+        tcp_sockets[s].snd_wnd = 0
+        tcp_sockets[s].state = TCP_STATE_SYN_SENT
+        tcp_sockets[s].connect_waiter = caller_tid
+        inet_tcp_emit(s, TCP_F_SYN, iss, u32(0), 0)
+        inet_tcp_arm_rtx(s)
+        s
+
+
+send() entry — buffer, emit one segment, reply bytes written.
+Returns `n` on success (>= 0), -1 if connection is not
+established. MVP rejects overlapping sends with written = 0.
+
+    inet_tcp_do_send(s: int, data: *byte, len: int) -> int
+        if tcp_sockets[s].state != TCP_STATE_ESTABLISHED
+            return -1
+        if tcp_sockets[s].send_len > 0
+            return 0
+        var n = len
+        if n > TCP_SEND_BUF
+            n = TCP_SEND_BUF
+        if n > TCP_MAX_SEG
+            n = TCP_MAX_SEG
+        var i = 0
+        while i < n
+            tcp_sockets[s].send_buf[i] = data[i]
+            i += 1
+        tcp_sockets[s].send_len = n
+        val seq = tcp_sockets[s].snd_nxt
+        tcp_sockets[s].snd_nxt = seq + u32(n)
+        inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH, seq, seq, n)
+        inet_tcp_arm_rtx(s)
+        n
+
+
+close() entry — emit FIN (or immediately free if never opened).
+Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
+-1 on invalid state.
+
+    inet_tcp_do_close(s: int, caller_tid: int) -> int
+        val st = tcp_sockets[s].state
+        if st == TCP_STATE_CLOSED
+            tcp_sockets[s].in_use = 0
+            return 1
+        if st == TCP_STATE_ESTABLISHED
+            val seq = tcp_sockets[s].snd_nxt
+            tcp_sockets[s].snd_nxt = seq + u32(1)
+            tcp_sockets[s].our_fin_sent = 1
+            tcp_sockets[s].state = TCP_STATE_FIN_WAIT_1
+            tcp_sockets[s].close_waiter = caller_tid
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
+            inet_tcp_arm_rtx(s)
+            return 0
+        if st == TCP_STATE_CLOSE_WAIT
+            val seq = tcp_sockets[s].snd_nxt
+            tcp_sockets[s].snd_nxt = seq + u32(1)
+            tcp_sockets[s].our_fin_sent = 1
+            tcp_sockets[s].state = TCP_STATE_LAST_ACK
+            tcp_sockets[s].close_waiter = caller_tid
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
+            inet_tcp_arm_rtx(s)
+            return 0
+        if st == TCP_STATE_SYN_SENT
+            inet_tcp_close_slot(s, -1)
+            return 1
+        -1
+
+
+Inbound IPv4 protocol=6 dispatch. Parses header, verifies
+checksum, locates the matching socket, and delegates.
+
+    inet_tcp_handle_segment(frame: *byte, total_len: int, ihl_bytes: int)
+        val tcp_off = 14 + ihl_bytes
+        if total_len < tcp_off + 20
+            return
+        val src_port = pkt_read_u16(frame, tcp_off + 0)
+        val dst_port = pkt_read_u16(frame, tcp_off + 2)
+        val seq = tcp_read_u32(frame, tcp_off + 4)
+        val ack = tcp_read_u32(frame, tcp_off + 8)
+        val data_off_words = (int(frame[tcp_off + 12]) >> 4) & 0x0f
+        val tcp_hdr_len = data_off_words * 4
+        val flags = int(frame[tcp_off + 13]) & 0xff
+        val wnd = pkt_read_u16(frame, tcp_off + 14)
+        if tcp_hdr_len < 20
+            return
+        if total_len < tcp_off + tcp_hdr_len
+            return
+        val ip_total = pkt_read_u16(frame, 16)
+        val tcp_len = ip_total - ihl_bytes
+        val payload_len = tcp_len - tcp_hdr_len
+        val payload: *byte = frame + tcp_off + tcp_hdr_len
+        val src_ip = ipv4(
+            int(frame[14 + 12]) & 0xff, int(frame[14 + 13]) & 0xff,
+            int(frame[14 + 14]) & 0xff, int(frame[14 + 15]) & 0xff)
+        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
+            INET_OUR_IP_C, INET_OUR_IP_D)
+        if inet_l4_partial_sum(src_ip, our_ip, IP_PROTO_TCP,
+                frame, tcp_off, tcp_len) != 0xffff
+            return
+        val s = inet_tcp_find(dst_port, src_ip, src_port)
+        if s < 0
+            return
+        inet_tcp_state_step(s, flags, seq, ack, wnd, payload, payload_len)
+
+
+Per-socket state transition for one validated segment.
+
+    inet_tcp_state_step(s: int, flags: int, seq: u32, ack: u32,
+                        wnd: int, payload: *byte, payload_len: int)
+        val st = tcp_sockets[s].state
+        if st == TCP_STATE_SYN_SENT
+            if (flags & TCP_F_RST) != 0
+                inet_tcp_close_slot(s, -1)
+                return
+            if (flags & TCP_F_SYN) == 0
+                return
+            if (flags & TCP_F_ACK) == 0
+                return
+            if ack != tcp_sockets[s].snd_nxt
+                return
+            tcp_sockets[s].irs = seq
+            tcp_sockets[s].rcv_nxt = seq + u32(1)
+            tcp_sockets[s].snd_una = ack
+            tcp_sockets[s].snd_wnd = wnd
+            tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+            inet_tcp_disarm_rtx(s)
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+            if tcp_sockets[s].connect_waiter >= 0
+                inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, 0, s)
+                tcp_sockets[s].connect_waiter = -1
+            return
+
+Past handshake: process ACK, data, FIN in that order.
+
+        if (flags & TCP_F_RST) != 0
+            inet_tcp_close_slot(s, -1)
+            return
+        if (flags & TCP_F_ACK) != 0
+            if tcp_seq_lt(tcp_sockets[s].snd_una, ack) != 0
+                if tcp_seq_le(ack, tcp_sockets[s].snd_nxt) != 0
+                    val acked = int(i32(ack - tcp_sockets[s].snd_una))
+                    var eff = acked
+                    if tcp_sockets[s].our_fin_sent != 0
+                        if ack == tcp_sockets[s].snd_nxt
+                            eff -= 1
+                    if eff > tcp_sockets[s].send_len
+                        eff = tcp_sockets[s].send_len
+                    var k = eff
+                    while k < tcp_sockets[s].send_len
+                        tcp_sockets[s].send_buf[k - eff] = tcp_sockets[s].send_buf[k]
+                        k += 1
+                    tcp_sockets[s].send_len -= eff
+                    tcp_sockets[s].snd_una = ack
+                    tcp_sockets[s].snd_wnd = wnd
+                    if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                        inet_tcp_disarm_rtx(s)
+
+        var did_data = 0
+        if payload_len > 0
+            if seq == tcp_sockets[s].rcv_nxt
+                val room = TCP_RECV_BUF - tcp_sockets[s].recv_len
+                var take = payload_len
+                if take > room
+                    take = room
+                var i = 0
+                while i < take
+                    tcp_sockets[s].recv_buf[tcp_sockets[s].recv_len + i] = payload[i]
+                    i += 1
+                tcp_sockets[s].recv_len += take
+                tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
+                did_data = 1
+
+        var did_fin = 0
+        if (flags & TCP_F_FIN) != 0
+            if seq + u32(payload_len) == tcp_sockets[s].rcv_nxt
+                tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(1)
+                tcp_sockets[s].peer_fin = 1
+                did_fin = 1
+
+        if did_data != 0
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+            if tcp_sockets[s].recv_waiter >= 0
+                val mx = tcp_sockets[s].recv_maxlen
+                var give = tcp_sockets[s].recv_len
+                if give > mx
+                    give = mx
+                inet_tcp_reply_recv(s, give)
+        if did_fin != 0
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+
+        val st2 = tcp_sockets[s].state
+        if st2 == TCP_STATE_ESTABLISHED
+            if did_fin != 0
+                tcp_sockets[s].state = TCP_STATE_CLOSE_WAIT
+                if tcp_sockets[s].recv_waiter >= 0
+                    if tcp_sockets[s].recv_len == 0
+                        inet_tcp_reply_recv(s, 0)
+        else if st2 == TCP_STATE_FIN_WAIT_1
+            if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                if did_fin != 0
+                    // Simultaneous close: peer FIN arrived with the ACK
+                    // of our FIN. Skip TIME_WAIT for MVP — real 2MSL
+                    // is localhost-meaningless and would force us to
+                    // wait for a timer subscription that may not be
+                    // wired up yet.
+                    inet_tcp_close_slot(s, 0)
+                else
+                    tcp_sockets[s].state = TCP_STATE_FIN_WAIT_2
+        else if st2 == TCP_STATE_FIN_WAIT_2
+            if did_fin != 0
+                // Same MVP shortcut as above: act on the peer FIN
+                // immediately instead of parking in TIME_WAIT.
+                inet_tcp_close_slot(s, 0)
+        else if st2 == TCP_STATE_LAST_ACK
+            if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                inet_tcp_close_slot(s, 0)
+
+
+Called from inet main loop on every wake. Scans every active
+socket for retransmit and TIME_WAIT deadlines.
+
+    inet_tcp_scan_timers()
+        val now = int(uptime())
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use != 0
+                val rtx = tcp_sockets[i].rtx_deadline
+                if rtx != 0
+                    if now >= rtx
+                        if tcp_sockets[i].retries >= TCP_MAX_RETRIES
+                            inet_tcp_close_slot(i, -1)
+                        else
+                            tcp_sockets[i].retries += 1
+                            inet_tcp_retransmit(i)
+                            inet_tcp_arm_rtx(i)
+                val tw = tcp_sockets[i].tw_deadline
+                if tw != 0
+                    if now >= tw
+                        inet_tcp_close_slot(i, 0)
+            i += 1
+
+    inet_tcp_retransmit(s: int)
+        val st = tcp_sockets[s].state
+        if st == TCP_STATE_SYN_SENT
+            inet_tcp_emit(s, TCP_F_SYN, tcp_sockets[s].iss, u32(0), 0)
+            return
+        if st == TCP_STATE_ESTABLISHED
+            if tcp_sockets[s].send_len > 0
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
+                    tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
+                    tcp_sockets[s].send_len)
+            return
+        if st == TCP_STATE_FIN_WAIT_1
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
+                tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
+            return
+        if st == TCP_STATE_LAST_ACK
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
+                tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
+            return

@@ -55,7 +55,7 @@ object MakeAarch64RamdiskMain:
 
     val disk = TFS.format(
       blockSize = 4096,
-      totalBlocks = 512,   // 2 MB
+      totalBlocks = 1024,  // 4 MB (headroom for test binaries)
       maxInodes = 256,
       prefill = prefill,
       files = files,

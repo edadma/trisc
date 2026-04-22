@@ -295,6 +295,48 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("'ping!'")
   }
 
+  "x86 tcp: connect, send, receive echo, close" in {
+    // Host-side TCP echo server on 127.0.0.1:18080. QEMU's
+    // user-mode networking routes guest dials of 10.0.2.2:18080
+    // to the host's matching port, so no hostfwd is needed for
+    // outbound. test_tcp sends "ping\n", expects it echoed
+    // back, then closes.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+
+    val echoThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](64)
+          val n = in.read(buf)
+          if n > 0 then
+            out.write(buf, 0, n)
+            out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-echo-server")
+    echoThread.setDaemon(true)
+    echoThread.start()
+
+    try
+      qemu.send("test_tcp\n")
+      val output = qemu.waitFor("test_tcp: closed")
+      output should include("test_tcp: connected fd=")
+      output should include("test_tcp: sent=5")
+      output should include("test_tcp: got 5 'ping")
+      output should include("test_tcp: closed")
+    finally
+      server.close()
+      echoThread.join(2000)
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

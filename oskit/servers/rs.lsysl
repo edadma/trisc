@@ -113,6 +113,11 @@ created but before it is resumed.
             // and virtio_pci_info(77) so the x86 server can fetch the
             // kernel-cached BAR/cap addresses (no-op wire on aarch64).
             hi = hi | i64(4) | i64(0x1000) | i64(0x2000)
+        else if idx == 7
+            // inet: needs timer_subscribe(78) to drive TCP
+            // retransmission / TIME_WAIT scans without relying on
+            // incoming frames for liveness.
+            hi = hi | i64(0x4000)
         svc_set_priv(pid, lo, hi, ipc)
 
 Per-server IPC send mask. Single source of truth — consulted

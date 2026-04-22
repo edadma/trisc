@@ -882,6 +882,54 @@ buffer in the caller's address space. Returns zeros on aarch64
         syscall_return(0)
         kernel_continue_current()
 
+Periodic timer subscriptions. Each entry fires `notify_send(tid, 2)`
+once per `period` ticks from the scheduler tick hook. Value 2
+distinguishes timer wakes from virtio wakes (value 1). Used by
+the inet TCP stack to scan retransmission deadlines without
+relying on incoming frames for liveness.
+
+    val MAX_TIMER_SUBS = 4
+
+    struct TimerSub
+        active: int
+        tid: int
+        period: int
+        next_tick: int
+
+    var timer_subs: [4]TimerSub
+
+    timer_subscribe(tid: int, period: int) -> int
+        if period <= 0
+            return -1
+        var i = 0
+        while i < MAX_TIMER_SUBS
+            if timer_subs[i].active == 0
+                timer_subs[i].active = 1
+                timer_subs[i].tid = tid
+                timer_subs[i].period = period
+                timer_subs[i].next_tick = ticks + period
+                return i
+            i += 1
+        -1
+
+    timer_scan_subs()
+        var i = 0
+        while i < MAX_TIMER_SUBS
+            if timer_subs[i].active == 1
+                if ticks >= timer_subs[i].next_tick
+                    notify_send(timer_subs[i].tid, 2)
+                    timer_subs[i].next_tick = ticks + timer_subs[i].period
+            i += 1
+
+SYS_TIMER_SUBSCRIBE (78): Register calling thread for periodic
+notifications every `period` ticks. Returns subscription index
+or -1 on failure.
+
+    sys_timer_subscribe_handler(arg: int)
+        val idx = timer_subscribe(current_thread, arg)
+        syscall_return(i64(idx))
+        kernel_continue_current()
+
     sys_vm_v2p_handler(arg: int)
         val vaddr = u64(arg)
         val paddr = vm_v2p(threads[current_thread].ptbr, vaddr)
@@ -1006,6 +1054,7 @@ Used by ps and other user programs via ulib.
         register_syscall(75, sys_grant_unmap_handler)
         register_syscall(76, sys_virtio_set_notify_handler)
         register_syscall(77, sys_virtio_pci_info_handler)
+        register_syscall(78, sys_timer_subscribe_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -1531,6 +1580,7 @@ Steps:
 
     schedule(current_ssp: i64) -> i64
         ticks += 1
+        timer_scan_subs()
 
         // Save current thread (skip when idle, current_thread == -1)
         if current_thread >= 0

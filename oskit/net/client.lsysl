@@ -28,13 +28,18 @@ run until a program actually opens a socket.
 
 Command codes — must track `oskit/servers/inet.lsysl`.
 
-    val INET_CMD_SOCKET   = 1
-    val INET_CMD_BIND     = 2
-    val INET_CMD_SENDTO   = 3
-    val INET_CMD_RECVFROM = 4
-    val INET_CMD_CLOSE    = 5
+    val INET_CMD_SOCKET       = 1
+    val INET_CMD_BIND         = 2
+    val INET_CMD_SENDTO       = 3
+    val INET_CMD_RECVFROM     = 4
+    val INET_CMD_CLOSE        = 5
+    val INET_CMD_TCP_CONNECT  = 10
+    val INET_CMD_TCP_SEND     = 11
+    val INET_CMD_TCP_RECV     = 12
+    val INET_CMD_TCP_CLOSE    = 13
 
     val INET_MAX_DATA     = 512
+    val INET_MAX_TCP_SEG  = 480
 
 
 ### Byte-buffer helpers (matching the server's big-endian wire
@@ -182,6 +187,131 @@ Release a socket. Returns 0 on success, -1 on error.
         msg[1] = byte(fd & 0xff)
         var reply: [1]byte
         ipc_send(port, msg, 2, reply, 1)
+        if reply[0] != 0
+            return -1
+        0
+
+
+TCP client wrappers
+===================
+
+Active-open only in phase 1: `tcp_connect` blocks until
+ESTABLISHED, `tcp_send` returns once bytes are buffered (POSIX
+`write()` semantics — no ACK wait), `tcp_recv` blocks until data
+arrives or peer closes, `tcp_close` blocks until FIN is
+acknowledged. `fd` is a 16-bit raw socket index (distinct from
+UDP sockets).
+
+
+### tcp_connect
+
+Open a TCP connection to (`dst_ip`, `dst_port`). Returns the new
+socket's fd on success, -1 on failure. Blocks in the caller
+until the 3-way handshake completes or retransmits exhaust.
+
+NOTE: phase 1 returns the local ephemeral port on success in the
+`fd` channel — actual TCP socket indices are tracked server-side
+and the protocol doesn't echo one back. We use the local port
+as a handle; subsequent send/recv/close reference it.
+
+Actually — for phase 1 the server-side slot IS the fd. The
+inet_tcp_begin_connect() return value is the socket index, but
+that's not handed to the client. To keep the protocol minimal
+we'll plumb it through the status-reply so clients can pass it
+to send/recv/close.
+
+    tcp_connect(dst_ip: u32, dst_port: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [7]byte
+        msg[0] = byte(INET_CMD_TCP_CONNECT)
+        net_write_ipv4(msg, 1, dst_ip)
+        net_write_u16(msg, 5, dst_port)
+        var reply: [2]byte
+        ipc_send(port, msg, 7, reply, 2)
+        if reply[0] != 0
+            return -1
+        int(reply[1]) & 0xff
+
+
+### tcp_send
+
+Buffer `len` bytes into the socket's send buffer and put them on
+the wire. Returns the number of bytes buffered (0..len), or -1
+on error. 0 return means the send buffer still has unacked data
+from a prior call — retry after a short delay.
+
+    tcp_send(fd: int, data: *byte, len: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        if len < 0
+            return -1
+        var n = len
+        if n > INET_MAX_TCP_SEG
+            n = INET_MAX_TCP_SEG
+        var msg: [485]byte
+        msg[0] = byte(INET_CMD_TCP_SEND)
+        net_write_u16(msg, 1, fd)
+        net_write_u16(msg, 3, n)
+        var i = 0
+        while i < n
+            msg[5 + i] = data[i]
+            i += 1
+        var reply: [3]byte
+        ipc_send(port, msg, 5 + n, reply, 3)
+        if reply[0] != 0
+            return -1
+        net_read_u16(reply, 1)
+
+
+### tcp_recv
+
+Copy up to `maxlen` bytes of received data into `buf`. Returns
+the number of bytes written (>0), 0 if the peer has closed
+(EOF), or -1 on error. Blocks until data is available or FIN
+arrives.
+
+    tcp_recv(fd: int, buf: *byte, maxlen: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        var cap_len = maxlen
+        if cap_len > INET_MAX_TCP_SEG
+            cap_len = INET_MAX_TCP_SEG
+        var msg: [5]byte
+        msg[0] = byte(INET_CMD_TCP_RECV)
+        net_write_u16(msg, 1, fd)
+        net_write_u16(msg, 3, cap_len)
+        var reply: [540]byte
+        ipc_send(port, msg, 5, reply, 540)
+        if reply[0] != 0
+            return -1
+        val r_len = net_read_u16(reply, 1)
+        var i = 0
+        while i < r_len
+            buf[i] = reply[3 + i]
+            i += 1
+        r_len
+
+
+### tcp_close
+
+Emit FIN and block until the close handshake completes (or 2MSL
+TIME_WAIT elapses). Returns 0 on success, -1 on error.
+
+    tcp_close(fd: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_TCP_CLOSE)
+        net_write_u16(msg, 1, fd)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
         if reply[0] != 0
             return -1
         0
