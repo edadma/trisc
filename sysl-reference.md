@@ -360,6 +360,7 @@ Day::Pred(d)    // Mon  for d = Day.Tue
 Age::Succ(a)    // a+1, traps if a is already 150
 Age::Pred(a)    // a-1, traps if a is already 0
 Day::Value("Tue")  // Day.Tue — parses a string back to its variant
+Age::Valid(raw)    // bool — true iff `raw` is in range, never traps
 ```
 
 | Attribute     | Applies to                              | Result                                              |
@@ -369,17 +370,26 @@ Day::Value("Tue")  // Day.Tue — parses a string back to its variant
 | `T::Range`    | same                                    | only valid in `for i in T::Range` — inclusive scan  |
 | `T::Image(x)` | simple enum, constrained numeric type   | variant name string / `str(x)` for numerics         |
 | `T::Value(s)` | simple enum                             | variant whose name equals `s`; traps on no match    |
+| `T::Valid(x)` | `within`-constrained int, simple enum   | bool — does `x` satisfy the constraint? never traps |
 | `T::Pos(x)`   | simple enum                             | 0-based declaration position                        |
 | `T::Val(n)`   | simple enum                             | variant at position `n`; traps on out-of-range      |
 | `T::Succ(x)`  | `within`-constrained int, simple enum   | next value; traps at the upper end                  |
 | `T::Pred(x)`  | `within`-constrained int, simple enum   | previous value; traps at the lower end              |
 
-`::First` and `::Last` fold to compile-time constants. The others lower to synthesized
-helper functions (`__image_T`, `__value_T`, `__pos_T`, `__val_T`, `__succ_T`, `__pred_T`)
-generated once per target type. `::Pos` / `::Value` on an unknown input, `::Val` on an
-out-of-range position, `::Succ` past the upper bound, and `::Pred` past the lower bound
-all trap via the standard contract-check path. `::Value` and `::Image` round-trip:
-`T::Value(T::Image(x)) == x` for every variant `x`.
+`::First` and `::Last` fold to compile-time constants; `::Valid` on a `within`-int type
+folds to an inline `x >= lo && x <= hi` (or `< hi` for `..<`). The rest lower to synthesized
+helper functions (`__image_T`, `__value_T`, `__valid_T`, `__pos_T`, `__val_T`, `__succ_T`,
+`__pred_T`) generated once per target type. `::Pos` / `::Value` on an unknown input,
+`::Val` on an out-of-range position, `::Succ` past the upper bound, and `::Pred` past the
+lower bound all trap via the standard contract-check path. `::Valid` is the non-throwing
+complement — it returns a bool so the caller can branch. Typical guard-style use:
+
+```sysl
+if Age::Valid(raw) then
+    var a: Age = raw          // safe: the range check will pass
+```
+
+`::Value` and `::Image` round-trip: `T::Value(T::Image(x)) == x` for every variant `x`.
 
 `::Range` is syntactic sugar: `for i in T::Range body` parses as
 `for i in T::First..T::Last body`. `for i in reverse T::Range` desugars the other way,

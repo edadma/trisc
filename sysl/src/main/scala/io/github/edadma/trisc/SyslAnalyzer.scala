@@ -1189,6 +1189,23 @@ class SyslAnalyzer:
       TBlockBody(List(TExprStmt(matchExpr))))
     funcName
 
+  /** Generate `__valid_<EnumName>(v: i32) -> bool` — true iff `v` equals one of the declared
+   * variant values, false otherwise. Non-throwing complement to the Val/Pos trap paths. */
+  private def materializeEnumValidFunc(et: SyslType.EnumType): String =
+    val funcName = s"__valid_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), BoolType)
+    val arms = et.variants.map { case (vname, _) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TBoolLit(true, BoolType))))
+    }
+    val default = Some(List[TStmt](TExprStmt(TBoolLit(false, BoolType))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, BoolType)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), BoolType,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
   /** Generate `__value_<EnumName>(s: string) -> i32` — match input string against each variant
    * name (structural equality via TValuePattern on string) and return the matching variant's
    * integer value. Traps on unknown input. */
@@ -1327,6 +1344,32 @@ class SyslAnalyzer:
         TCall(materializeEnumValFunc(et), List(asInt), I32)
       case other =>
         throw AnalysisError(s"$typeName::Val requires a simple enum, got $other")
+
+  /** Resolve `Type::Valid(x)` — returns bool without trapping. Checks whether `x` satisfies
+   * the type's constraints: range bounds for `within`-int types, known variant value for
+   * simple enums. Accepts the base numeric / integer type as argument. */
+  private def analyzeTypeValid(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    typ match
+      case nt @ NamedType(_, base, _, Some(IntRange(lo, hi, excl)), _) =>
+        if !tArg.typ.isIntegral then
+          throw AnalysisError(s"$typeName::Valid expects integer, got ${tArg.typ}")
+        val v = if tArg.typ == base then tArg else TCast(tArg, base)
+        val loOk = TBinary(v, ">=", TIntLit(lo, base), BoolType)
+        val hiOp = if excl then "<" else "<="
+        val hiOk = TBinary(v, hiOp, TIntLit(hi, base), BoolType)
+        TBinary(loOk, "&&", hiOk, BoolType)
+      case NamedType(_, _, _, Some(FloatRange(_, _, _)), _) =>
+        throw AnalysisError(s"$typeName::Valid on a float-within type is not yet supported")
+      case NamedType(_, _, _, None, _) =>
+        throw AnalysisError(s"$typeName::Valid requires a range-constrained type")
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        if !tArg.typ.isIntegral then
+          throw AnalysisError(s"$typeName::Valid expects integer, got ${tArg.typ}")
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        TCall(materializeEnumValidFunc(et), List(asInt), BoolType)
+      case other =>
+        throw AnalysisError(s"$typeName::Valid requires a range-constrained type or simple enum, got $other")
 
   /** Resolve `Type::Value(s)` — parse a string into a simple-enum value. */
   private def analyzeTypeValueString(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
@@ -2464,8 +2507,11 @@ class SyslAnalyzer:
           case "Value" =>
             val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Value requires one argument"))
             analyzeTypeValueString(typeName, resolved, arg)
+          case "Valid" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Valid requires one argument"))
+            analyzeTypeValid(typeName, resolved, arg)
           case other =>
-            throw AnalysisError(s"unknown type attribute: $typeName::$other (expected First, Last, Range, Image, Value, Pos, Val, Succ, Pred)")
+            throw AnalysisError(s"unknown type attribute: $typeName::$other (expected First, Last, Range, Image, Value, Valid, Pos, Val, Succ, Pred)")
       case TupleLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
         val tupleType = SyslType.tupleType(tElems.map(_.typ))
