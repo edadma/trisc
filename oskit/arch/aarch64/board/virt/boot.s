@@ -56,6 +56,16 @@ halt:
     wfi
     b    halt
 
+// thread_exit — trampoline a thread returns to when its entry function
+// falls off the end. Issues SYS_EXIT (SLIX native syscall 3) with status
+// 0. The dispatcher's exit path must not return.
+.global thread_exit
+thread_exit:
+    mov x8, #3               // SLIX native SYS_EXIT
+    mov x0, #0               // status
+    svc #0
+1:  b   1b                   // exit never returns; spin if it does
+
 .section .bss
 .align 4                     // 16-byte align (aarch64 SP alignment rule)
 stack_bottom:

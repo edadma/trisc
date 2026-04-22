@@ -2,15 +2,29 @@ OSKit Arch — aarch64 CPU Primitives
 ===================================
 
 Architecture-specific CPU operations for aarch64: interrupt
-enable/disable, plus (eventually) spinlock helpers and stack-frame
-construction. Mirrors the shape of `oskit/arch/x86_64/cpu.lsysl`
-so the kernel can import from `oskit.arch` without caring which
-target is underneath.
+enable/disable, context frame construction, syscall-return ABI.
+Mirrors the shape of `oskit/arch/x86_64/cpu.lsysl` and
+`oskit/arch/trisc/cpu.lsysl` so the kernel can import from
+`oskit.arch` without caring which target is underneath.
 
-Implementations live in `cpu_asm.s` so we can emit bare `msr`
-instructions without paying for a sysl function prologue.
+Bare-instruction implementations (cli/sti, drop_to_el0) live in
+`cpu_asm.s` so we can emit `msr`/`eret` without a sysl function
+prologue. The SVC dispatcher is hand-written in `vectors.s` and
+reads the frame layout defined here.
 
     module oskit.arch
+
+Offset from a saved SSP to the return-value register slot.
+On aarch64 the context frame puts x0 at the lowest address, so
+the offset is 0. `syscall_return` writes into this slot; the
+dispatcher's restore path pops it back into x0 before `eret`.
+
+Frame layout (34 i64 slots = 272 bytes, sp points at x0):
+x0 at +0, x1 at +8, ..., x30 (lr) at +240,
+SP_EL0 at +248, ELR_EL1 at +256, SPSR_EL1 at +264.
+
+    val SYSCALL_RETURN_OFFSET = 0
+    val STACK_FRAME_SIZE = 272       // 34 fields × 8 bytes
 
 Mask async exceptions (IRQ, FIQ, SError). Runs one instruction
 plus the return; safe to call with interrupts already masked.
@@ -27,3 +41,60 @@ way out. Caller must ensure the active page table maps both the
 entry point and the user stack EL0-accessible.
 
     extern drop_to_el0(entry: i64, sp: i64)
+
+Per-thread kernel stack top. Updated by `tss_set_rsp0` on context
+switch for API parity with x86/TRISC. On aarch64 the dispatcher
+uses whatever `SP_EL1` is live at trap time — SP_EL1 naturally
+ends up at the thread's kstack_top after the previous eret pops
+the context frame, so this var is informational today but kept
+so the scheduler interface stays target-neutral.
+
+    var current_kstack_top: i64 = 0
+
+    tss_set_rsp0(rsp0: i64)
+        current_kstack_top = rsp0
+
+Trampoline a thread returns to when its entry function falls off
+the end. Issues SYS_EXIT (SLIX native syscall 3) with status 0.
+Defined in `board/virt/boot.s`.
+
+    extern thread_exit: byte
+
+Build a fake context frame at the top of a supervisor stack so
+the dispatcher's restore path can pop it and `eret` into the
+new thread. The frame matches the layout above (x0..x30, SP_EL0,
+ELR_EL1, SPSR_EL1). x30 (lr) is primed to `thread_exit` so a
+function that returns normally enters the exit path.
+
+SPSR_EL1 = 0 means: M[3:0]=EL0t (AArch64 EL0, SP=SP_EL0), DAIF
+unmasked (interrupts will fire after eret).
+
+    build_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64
+        val sp = ssp - STACK_FRAME_SIZE
+        var i = 0
+        while i < 31
+            *(*i64(sp + i64(i * 8))) = 0
+            i += 1
+        *(*i64(sp + 240)) = i64(&thread_exit)   // x30 = lr
+        *(*i64(sp + 248)) = usp                 // SP_EL0
+        *(*i64(sp + 256)) = entry_point         // ELR_EL1
+        *(*i64(sp + 264)) = 0                   // SPSR_EL1: EL0t, DAIF=0
+        sp
+
+Aarch64 has no ring-0/ring-3 split at the frame level (EL0 is the
+user mode and is encoded by SPSR_EL1.M). Alias for parity with
+x86_64/TRISC callers.
+
+    build_user_stack_frame(entry_point: i64, usp: i64, ssp: i64) -> i64 =
+        build_stack_frame(entry_point, usp, ssp)
+
+Set up the initial context frame for a new process. On aarch64
+the per-process kernel stack sits in the shared kernel mapping
+(every process's page table clones the kernel's L1 blocks in
+`vm_create_process_pt`), so we can build the frame directly
+without routing through `vm_copy_to`. Returns the SSP value for
+the new thread.
+
+    arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: u64) -> i64
+        build_stack_frame(entry_point, usp, kstack_top_val)
+        kstack_top_val - STACK_FRAME_SIZE
