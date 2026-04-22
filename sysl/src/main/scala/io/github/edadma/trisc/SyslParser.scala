@@ -392,7 +392,7 @@ class SyslParser extends StandardTokenParsers {
     "invariant" ~> expr ^^ InvariantStmtAST.apply
 
   lazy val stmt: Parser[StmtAST] =
-    asmStmt | invariantStmt | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    asmStmt | invariantStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
     mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut.isMutable) } |
@@ -402,10 +402,22 @@ class SyslParser extends StandardTokenParsers {
       ident ~ ("," ~> rep1sep(bindName, ",")) ~ ("=" ~> tupleExpr) ^^ { case first ~ rest ~ init => DestructureStmtAST(first :: rest, init) }
 
   lazy val breakStmt: Parser[BreakStmtAST] =
-    "break" ^^^ BreakStmtAST()
+    "break" ~> opt(ident) ^^ BreakStmtAST.apply
 
   lazy val continueStmt: Parser[ContinueStmtAST] =
-    "continue" ^^^ ContinueStmtAST()
+    "continue" ~> opt(ident) ^^ ContinueStmtAST.apply
+
+  /** `label: for ...` / `label: while ...` / `label: do ...` — labeled loop form. */
+  lazy val labeledLoop: Parser[StmtAST] =
+    (ident <~ ":") ~ (forStmt | doWhileStmt | whileStmt) ^^ {
+      case name ~ loop => attachLoopLabel(name, loop)
+    }
+
+  private def attachLoopLabel(name: String, stmt: StmtAST): StmtAST = stmt match
+    case f: ForStmtAST     => f.copy(label = Some(name))
+    case w: WhileStmtAST   => w.copy(label = Some(name))
+    case d: DoWhileStmtAST => d.copy(label = Some(name))
+    case other             => other
 
   lazy val deferStmt: Parser[DeferStmtAST] =
     "defer" ~> (derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply) ^^ DeferStmtAST.apply

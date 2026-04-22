@@ -1379,6 +1379,19 @@ while true
     if done then break
     if skip then continue
     process()
+
+// Labeled loops — break / continue can target an outer loop by name.
+// A label is an identifier followed by `:` immediately before `for`, `while`, or `do`.
+outer: for i in 0..<n
+    for j in 0..<m
+        if grid[i][j] == target then break outer      // exits both loops
+        if grid[i][j] == 0 then continue outer        // next iteration of outer
+        use(grid[i][j])
+
+// Unlabeled `break` / `continue` always target the innermost enclosing loop,
+// regardless of whether that loop has a label.
+// A label cannot be reused on a nested loop (would make `break label` ambiguous),
+// but the same name can appear on sibling (non-nested) loops.
 ```
 
 ### Destructuring and Parallel Assignment

@@ -144,8 +144,19 @@ class SyslLLVMCodegen(target: String = "host"):
   // Break/continue label stacks for loop codegen
   private val breakLabels = new mutable.Stack[String]
   private val continueLabels = new mutable.Stack[String]
+  // User-supplied loop labels (None for unlabeled loops). Parallel to break/continue stacks.
+  private val loopNameStack = new mutable.Stack[Option[String]]
   // Scope snapshots for loop body cleanup (parallel to break/continue stacks)
   private val loopScopeSnapshots = new mutable.Stack[Set[String]]
+
+  /** Find the stack index (0 = innermost) of the loop matching the given label,
+   *  or 0 if label is None (nearest enclosing loop). */
+  private def resolveLoopIdx(label: Option[String]): Int = label match
+    case None => 0
+    case Some(name) =>
+      val idx = loopNameStack.indexWhere(_.contains(name))
+      if idx < 0 then throw new RuntimeException(s"no enclosing loop with label '$name'")
+      idx
   // Defer stack — LIFO execution before returns
   private val deferStack = new mutable.Stack[TStmt]
 
@@ -881,13 +892,14 @@ class SyslLLVMCodegen(target: String = "host"):
         val escaped = code.replace("\\n", "\n").replace("\"", "\\22")
         emit(s"""  call void asm sideeffect "$escaped", ""()""")
 
-      case TWhileStmt(cond, body) =>
+      case TWhileStmt(cond, body, loopLabel) =>
         val condLabel = newLabel("while_cond")
         val bodyLabel = newLabel("while_body")
         val endLabel = newLabel("while_end")
         val preLoopLocals = locals.keySet.toSet
         breakLabels.push(endLabel)
         continueLabels.push(condLabel)
+        loopNameStack.push(loopLabel)
         loopScopeSnapshots.push(preLoopLocals)
         emit(s"  br label %$condLabel")
         emitLabel(condLabel)
@@ -907,9 +919,10 @@ class SyslLLVMCodegen(target: String = "host"):
         hasReturned = savedHR
         breakLabels.pop()
         continueLabels.pop()
+        loopNameStack.pop()
         loopScopeSnapshots.pop()
 
-      case TForStmt(init, cond, update, body) =>
+      case TForStmt(init, cond, update, body, loopLabel) =>
         genStmt(init)
         val condLabel = newLabel("for_cond")
         val bodyLabel = newLabel("for_body")
@@ -918,6 +931,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val preLoopLocals = locals.keySet.toSet // after init, before body
         breakLabels.push(endLabel)
         continueLabels.push(updateLabel)
+        loopNameStack.push(loopLabel)
         loopScopeSnapshots.push(preLoopLocals)
         emit(s"  br label %$condLabel")
         emitLabel(condLabel)
@@ -940,15 +954,17 @@ class SyslLLVMCodegen(target: String = "host"):
         hasReturned = savedHR
         breakLabels.pop()
         continueLabels.pop()
+        loopNameStack.pop()
         loopScopeSnapshots.pop()
 
-      case TDoWhileStmt(cond, body) =>
+      case TDoWhileStmt(cond, body, loopLabel) =>
         val bodyLabel = newLabel("dowhile_body")
         val condLabel = newLabel("dowhile_cond")
         val endLabel = newLabel("dowhile_end")
         val preLoopLocals = locals.keySet.toSet
         breakLabels.push(endLabel)
         continueLabels.push(condLabel)
+        loopNameStack.push(loopLabel)
         loopScopeSnapshots.push(preLoopLocals)
         emit(s"  br label %$bodyLabel")
         emitLabel(bodyLabel)
@@ -969,16 +985,19 @@ class SyslLLVMCodegen(target: String = "host"):
         hasReturned = savedHR
         breakLabels.pop()
         continueLabels.pop()
+        loopNameStack.pop()
         loopScopeSnapshots.pop()
 
-      case TBreakStmt =>
-        emitScopeCleanup(loopScopeSnapshots.top)
-        emit(s"  br label %${breakLabels.top}")
+      case TBreakStmt(lbl) =>
+        val idx = resolveLoopIdx(lbl)
+        emitScopeCleanup(loopScopeSnapshots(idx))
+        emit(s"  br label %${breakLabels(idx)}")
         hasReturned = true // stop emitting after unconditional branch
 
-      case TContinueStmt =>
-        emitScopeCleanup(loopScopeSnapshots.top)
-        emit(s"  br label %${continueLabels.top}")
+      case TContinueStmt(lbl) =>
+        val idx = resolveLoopIdx(lbl)
+        emitScopeCleanup(loopScopeSnapshots(idx))
+        emit(s"  br label %${continueLabels(idx)}")
         hasReturned = true
 
       case TIndexAssignStmt(array, index, value) =>

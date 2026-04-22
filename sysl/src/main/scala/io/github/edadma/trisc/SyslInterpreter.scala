@@ -50,9 +50,14 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   import Value.*
 
   case class ReturnException(value: Value) extends RuntimeException
-  case object BreakException extends RuntimeException
-  case object ContinueException extends RuntimeException
+  case class BreakException(label: Option[String]) extends RuntimeException
+  case class ContinueException(label: Option[String]) extends RuntimeException
   case class RuntimeError(msg: String) extends RuntimeException(msg)
+
+  /** True if a break/continue exception is "for me" — label is None (nearest loop)
+   *  or matches this loop's own label. */
+  private def claimsLoop(exLabel: Option[String], myLabel: Option[String]): Boolean =
+    exLabel.isEmpty || exLabel == myLabel
 
   private type Env = mutable.LinkedHashMap[String, Cell]
   private val deferStack = new mutable.ArrayBuffer[(TStmt, Env)]
@@ -572,7 +577,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TDeferStmt(body) =>
         deferStack += ((body, env))
 
-      case TForStmt(init, cond, update, body) =>
+      case TForStmt(init, cond, update, body, myLabel) =>
         exec(init, env)
         var running = true
         while running && toLong(evalAny(cond, env)) != 0 do
@@ -581,44 +586,44 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             execBlock(body, env)
             exec(update, env)
           catch
-            case BreakException => running = false
-            case ContinueException => exec(update, env)
+            case e: BreakException if claimsLoop(e.label, myLabel) => running = false
+            case e: ContinueException if claimsLoop(e.label, myLabel) => exec(update, env)
           // Release refs for variables created in this iteration
           for key <- env.keySet.toSet -- savedKeys do
             refDecr(env(key).value)
             env.remove(key)
 
-      case TWhileStmt(cond, body) =>
+      case TWhileStmt(cond, body, myLabel) =>
         var running = true
         while running && toLong(evalAny(cond, env)) != 0 do
           val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
           catch
-            case BreakException => running = false
-            case ContinueException =>
+            case e: BreakException if claimsLoop(e.label, myLabel) => running = false
+            case e: ContinueException if claimsLoop(e.label, myLabel) =>
           // Release refs for variables created in this iteration
           for key <- env.keySet.toSet -- savedKeys do
             refDecr(env(key).value)
             env.remove(key)
 
-      case TDoWhileStmt(cond, body) =>
+      case TDoWhileStmt(cond, body, myLabel) =>
         var running = true
         while running do
           val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
           catch
-            case BreakException    => running = false
-            case ContinueException =>
+            case e: BreakException if claimsLoop(e.label, myLabel) => running = false
+            case e: ContinueException if claimsLoop(e.label, myLabel) =>
           // Release refs for variables created in this iteration
           for key <- env.keySet.toSet -- savedKeys do
             refDecr(env(key).value)
             env.remove(key)
           if running then running = toLong(evalAny(cond, env)) != 0
 
-      case TBreakStmt => throw BreakException
-      case TContinueStmt => throw ContinueException
+      case TBreakStmt(label) => throw BreakException(label)
+      case TContinueStmt(label) => throw ContinueException(label)
 
       case TAsmStmt(_) => // no-op in interpreter
 

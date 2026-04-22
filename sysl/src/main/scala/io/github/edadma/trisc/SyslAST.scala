@@ -99,11 +99,11 @@ case class IndexAssignStmtAST(array: ExpressionAST, index: ExpressionAST, value:
 case class FieldAssignStmtAST(obj: ExpressionAST, field: String, value: ExpressionAST) extends StmtAST
 case class FieldCompoundAssignStmtAST(obj: ExpressionAST, field: String, op: String, value: ExpressionAST) extends StmtAST
 case class ReturnStmtAST(value: Option[ExpressionAST]) extends StmtAST
-case class WhileStmtAST(cond: ExpressionAST, body: List[StmtAST]) extends StmtAST
-case class ForStmtAST(init: StmtAST, cond: ExpressionAST, update: StmtAST, body: List[StmtAST]) extends StmtAST
-case class DoWhileStmtAST(cond: ExpressionAST, body: List[StmtAST]) extends StmtAST
-case class BreakStmtAST() extends StmtAST
-case class ContinueStmtAST() extends StmtAST
+case class WhileStmtAST(cond: ExpressionAST, body: List[StmtAST], label: Option[String] = None) extends StmtAST
+case class ForStmtAST(init: StmtAST, cond: ExpressionAST, update: StmtAST, body: List[StmtAST], label: Option[String] = None) extends StmtAST
+case class DoWhileStmtAST(cond: ExpressionAST, body: List[StmtAST], label: Option[String] = None) extends StmtAST
+case class BreakStmtAST(label: Option[String] = None) extends StmtAST
+case class ContinueStmtAST(label: Option[String] = None) extends StmtAST
 case class DeferStmtAST(body: StmtAST) extends StmtAST
 case class AsmStmtAST(code: String) extends StmtAST
 // `invariant <bool>` statement — traps on false. Essentially `assert` with nicer name; intended

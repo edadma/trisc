@@ -38,11 +38,11 @@ case class TIndexAssignStmt(array: TExpr, index: TExpr, value: TExpr) extends TS
 case class TFieldAssignStmt(obj: TExpr, fieldIndex: Int, value: TExpr) extends TStmt
 case class TFieldCompoundAssignStmt(obj: TExpr, fieldIndex: Int, op: String, value: TExpr) extends TStmt
 case class TReturnStmt(value: Option[TExpr]) extends TStmt
-case class TWhileStmt(cond: TExpr, body: List[TStmt]) extends TStmt
-case class TForStmt(init: TStmt, cond: TExpr, update: TStmt, body: List[TStmt]) extends TStmt
-case class TDoWhileStmt(cond: TExpr, body: List[TStmt]) extends TStmt
-case object TBreakStmt extends TStmt
-case object TContinueStmt extends TStmt
+case class TWhileStmt(cond: TExpr, body: List[TStmt], label: Option[String] = None) extends TStmt
+case class TForStmt(init: TStmt, cond: TExpr, update: TStmt, body: List[TStmt], label: Option[String] = None) extends TStmt
+case class TDoWhileStmt(cond: TExpr, body: List[TStmt], label: Option[String] = None) extends TStmt
+case class TBreakStmt(label: Option[String] = None) extends TStmt
+case class TContinueStmt(label: Option[String] = None) extends TStmt
 case class TDeferStmt(body: TStmt) extends TStmt
 case class TAsmStmt(code: String) extends TStmt
 // Sequence of statements executed in order — used to splice multiple stmts into a single slot

@@ -36,6 +36,17 @@ class SyslAnalyzer:
   private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   private val compileTimeConstants = new mutable.LinkedHashMap[String, Long] // val name → folded value (for constant propagation)
   private var loopDepth: Int = 0
+  // Stack of enclosing loop labels (None for unlabeled loops). Used to validate
+  // `break label` / `continue label` refers to an enclosing labeled loop.
+  private val loopLabelStack = new mutable.ArrayBuffer[Option[String]]
+
+  /** Reject label shadowing — a labeled loop cannot be nested inside another loop with
+   * the same label, because `break label` would be ambiguous. */
+  private def checkLoopLabelUnique(label: Option[String]): Unit =
+    label.foreach { lbl =>
+      if loopLabelStack.contains(Some(lbl)) then
+        throw AnalysisError(s"duplicate loop label '$lbl': already in use by an enclosing loop")
+    }
   private var currentReturnType: SyslType = VoidType
 
   // Module-path name mangling: set from ModuleDeclAST during analyze()
@@ -1837,9 +1848,9 @@ class SyslAnalyzer:
     case TReturnStmt(None) =>
       TMultiStmt(ensureChecks ++ List(TReturnStmt(None)))
     case TReturnStmt(_) => stmt // void return with value — already rejected upstream
-    case TWhileStmt(c, body)          => TWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks))
-    case TForStmt(init, c, upd, body) => TForStmt(init, c, upd, rewriteReturnsForEnsure(body, returnType, ensureChecks))
-    case TDoWhileStmt(c, body)        => TDoWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks))
+    case TWhileStmt(c, body, lbl)          => TWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
+    case TForStmt(init, c, upd, body, lbl) => TForStmt(init, c, upd, rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
+    case TDoWhileStmt(c, body, lbl)        => TDoWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
     case TDeferStmt(inner)            => TDeferStmt(rewriteStmtForEnsure(inner, returnType, ensureChecks))
     case TMultiStmt(xs)               => TMultiStmt(xs.map(x => rewriteStmtForEnsure(x, returnType, ensureChecks)))
     case TExprStmt(e)                 => TExprStmt(rewriteExprForEnsure(e, returnType, ensureChecks))
@@ -2014,47 +2025,64 @@ class SyslAnalyzer:
           applyTargetType(tv, currentReturnType)
         })
 
-      case ForStmtAST(init, cond, update, body) =>
+      case ForStmtAST(init, cond, update, body, label) =>
+        checkLoopLabelUnique(label)
         pushScope()
         val tInit = analyzeStmt(init)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"for condition must be bool, got ${tCond.typ}")
         loopDepth += 1
+        loopLabelStack += label
         pushScope()
         val tBody = analyzeBlock(body)
         popScope()
         val tUpdate = analyzeStmt(update)
+        loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
         popScope()
-        TForStmt(tInit, tCond, tUpdate, tBody)
+        TForStmt(tInit, tCond, tUpdate, tBody, label)
 
-      case WhileStmtAST(cond, body) =>
+      case WhileStmtAST(cond, body, label) =>
+        checkLoopLabelUnique(label)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
+        loopLabelStack += label
         pushScope()
         val tBody = analyzeBlock(body)
         popScope()
+        loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
-        TWhileStmt(tCond, tBody)
+        TWhileStmt(tCond, tBody, label)
 
-      case DoWhileStmtAST(cond, body) =>
+      case DoWhileStmtAST(cond, body, label) =>
+        checkLoopLabelUnique(label)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"do/while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
+        loopLabelStack += label
         pushScope()
         val tBody = analyzeBlock(body)
         popScope()
+        loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
-        TDoWhileStmt(tCond, tBody)
+        TDoWhileStmt(tCond, tBody, label)
 
-      case BreakStmtAST() =>
+      case BreakStmtAST(label) =>
         if loopDepth == 0 then throw AnalysisError("break outside of loop")
-        TBreakStmt
+        label.foreach { lbl =>
+          if !loopLabelStack.contains(Some(lbl)) then
+            throw AnalysisError(s"break '$lbl': no enclosing loop with that label")
+        }
+        TBreakStmt(label)
 
-      case ContinueStmtAST() =>
+      case ContinueStmtAST(label) =>
         if loopDepth == 0 then throw AnalysisError("continue outside of loop")
-        TContinueStmt
+        label.foreach { lbl =>
+          if !loopLabelStack.contains(Some(lbl)) then
+            throw AnalysisError(s"continue '$lbl': no enclosing loop with that label")
+        }
+        TContinueStmt(label)
 
       case DeferStmtAST(body) =>
         TDeferStmt(analyzeStmt(body))
@@ -2344,17 +2372,17 @@ class SyslAnalyzer:
             scanCaptures(e, locals)
             locals
           case TReturnStmt(None) => locals
-          case TWhileStmt(c, body) =>
+          case TWhileStmt(c, body, _) =>
             scanCaptures(c, locals)
             scanStmtSeq(body, locals)
             locals
-          case TForStmt(init, c, upd, body) =>
+          case TForStmt(init, c, upd, body, _) =>
             var Lf = scanStmtInSeq(init, locals)
             scanCaptures(c, Lf)
             Lf = scanStmtInSeq(upd, Lf)
             scanStmtSeq(body, Lf)
             locals
-          case TDoWhileStmt(c, body) =>
+          case TDoWhileStmt(c, body, _) =>
             scanStmtSeq(body, locals)
             scanCaptures(c, locals)
             locals
@@ -2362,7 +2390,7 @@ class SyslAnalyzer:
             scanStmtInSeq(inner, locals)
             locals
           case TAsmStmt(_) => locals
-          case TBreakStmt | TContinueStmt => locals
+          case _: TBreakStmt | _: TContinueStmt => locals
           case _ => locals
         tBody match
           case TExprBody(e) => scanCaptures(e, paramNames)
