@@ -196,8 +196,10 @@ Returns PML4 address, or 0 on failure.
 
         // PT[0x00..0xCB]: kernel region, identity-mapped (present + writable)
         // Exceptions:
-        //   0xBF (PROG_ARGS_ADDR): fresh per-process page so parent and
-        //        child don't share argv data (written by PM during spawn).
+        //   0xBF (INFO_PAGE_VA on x86): fresh per-process page, used by RS
+        //        for bring-up info (RS TID, ramdisk metadata) and by the
+        //        kernel for sys_thread_name's scratch region. Separate from
+        //        argv, which now lives on the user stack (System V ABI).
         //   0xCB: guard page — left non-present so stack overflow past the
         //        bottom of the program stack region (0xCC000) traps instead
         //        of silently corrupting low memory. Safe to drop here since

@@ -3,9 +3,9 @@ cat — concatenate and print files
 
 Reads a file and writes its contents to the terminal.
 
-Builds the path from [[PROG_ARGS_ADDR]] into a stack buffer before [[open]],
-same idea as `/bin/echo`: avoids passing a `string` view tied to the shared
-args page through IPC (unreliable in the external-program bootstrap path).
+Copies the path out of `argv[1]` into a stack buffer before [[open]], same
+idea as `/bin/echo`: avoids passing a `string` view tied to the init-stack
+argv block through IPC (unreliable in the external-program bootstrap path).
 
 Read path matches the demo volume: ramdisk sectors and TFS `sb_block_size`
 are **4096** bytes (`TriscCli` ramdisk + `TFS.format`). Each `read(..., 4096)`

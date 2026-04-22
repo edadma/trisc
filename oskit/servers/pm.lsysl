@@ -22,7 +22,7 @@ IPC commands:
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
     import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
     import oskit.loader.load_tof_to_ptbr
-    import oskit.arch.{PROG_USP, PROG_SSP, INFO_PAGE_VA}
+    import oskit.arch.{PROG_USP, PROG_SSP}
 
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
@@ -243,17 +243,12 @@ Handle SPAWN: create a new process from a binary path.
 Request: [cmd(1), path_len(1), blob_len_lo(1), blob_len_hi(1), num_handles(1), path(N), blob(M), handle_pairs(H*2)]
 Reply:   [status(1), pid(4)]
 
-The `blob` is an opaque POSIX argv image (see ulib's
-PROG_ARGS_ADDR). PM doesn't parse it — just copies it verbatim
-to the child's SPAWN_PROG_ARGS_ADDR. The thread name comes from
-`path`, not argv.
-
-    // SPAWN_PROG_ARGS_ADDR lived here as a hardcoded 0xBF000 but the
-    // VA is arch-specific (0xBF000 on x86/TRISC, 0x60090000 on
-    // aarch64). Use the imported INFO_PAGE_VA constant directly at
-    // call sites instead — module-level expression evaluation of
-    // imported consts isn't reliable across backends.
-    val SPAWN_PROG_ARGS_MAX  = 4096
+The `blob` is the PM-SPAWN wire-format argv image (see
+`build_argv_blob`): a 4-byte argc + 4 pad bytes + the
+NUL-separated argv string data. PM parses it and builds a
+System V ABI init stack frame in the child's user stack (see
+`pm_build_sysv_stack`). The thread name comes from `path`, not
+argv.
 
     pm_handle_spawn(sender: int, buf: *byte)
         val path_len = int(buf[1])
@@ -417,12 +412,11 @@ with PM via IPC.
             return -1
         pm_msg_read_i32(reply, 1)
 
-Build the POSIX argv blob. See ulib.build_argv_blob for format.
+Build the PM-SPAWN wire-format argv blob. Mirror of
+ulib.build_argv_blob; see that one for the format spec.
 
     pm_build_argv_blob(argv: *string, argc: int, blob: *byte, cap: int) -> int
-        val ptrs_size = (argc + 1) * 8
-        var str_off = 8 + ptrs_size
-        if str_off > cap
+        if 8 > cap
             return -1
         blob[0] = byte(argc & 0xFF)
         blob[1] = byte((argc >> 8) & 0xFF)
@@ -432,23 +426,13 @@ Build the POSIX argv blob. See ulib.build_argv_blob for format.
         blob[5] = 0
         blob[6] = 0
         blob[7] = 0
-        var pos = str_off
+        var pos = 8
         var i = 0
         while i < argc
             val arg = argv[i]
             val alen = len(arg)
             if pos + alen + 1 > cap
                 return -1
-            val ptr: i64 = INFO_PAGE_VA + i64(pos)
-            val pbase = 8 + i * 8
-            blob[pbase]     = byte(ptr & i64(0xFF))
-            blob[pbase + 1] = byte((ptr >> 8) & i64(0xFF))
-            blob[pbase + 2] = byte((ptr >> 16) & i64(0xFF))
-            blob[pbase + 3] = byte((ptr >> 24) & i64(0xFF))
-            blob[pbase + 4] = byte((ptr >> 32) & i64(0xFF))
-            blob[pbase + 5] = byte((ptr >> 40) & i64(0xFF))
-            blob[pbase + 6] = byte((ptr >> 48) & i64(0xFF))
-            blob[pbase + 7] = byte((ptr >> 56) & i64(0xFF))
             val ap = *byte(arg)
             var j = 0
             while j < alen
@@ -457,11 +441,6 @@ Build the POSIX argv blob. See ulib.build_argv_blob for format.
             blob[pos + alen] = 0
             pos = pos + alen + 1
             i += 1
-        val nbase = 8 + argc * 8
-        var z = 0
-        while z < 8
-            blob[nbase + z] = 0
-            z += 1
         pos
 
 Build a System V Application Binary Interface process initialization
@@ -473,15 +452,13 @@ points into. PM copies the whole frame into the new process's stack
 region and hands the bottom address to `svc_create_proc_susp` as
 the initial SP_EL0 / RSP / r7.
 
-`src` is the client-side argv blob in the existing wire format
-(see `build_argv_blob`): `[argc(4) pad(4) argv[0](8)...NULL(8) strs]`.
-We only read argc and walk the string data structurally; the
-absolute pointers baked into the blob for the old info-page path
-are ignored here.
+`src` is the client-side wire-format argv blob (see
+`build_argv_blob`): `[argc(4) pad(4) arg0\0 arg1\0 ...]`.
 
-`child_sp_top` is the value the initial SP lived at under the old
-convention (PROG_USP). `frame_size` is rounded up to a 16-byte
-boundary and returned; child_sp = child_sp_top - frame_size.
+`child_sp_top` is the top of the new process's user stack region
+(PROG_USP). `frame_size` is rounded up to a 16-byte boundary and
+returned; the initial SP the caller passes to create_proc_susp
+is `child_sp_top - frame_size`.
 
 Returns the frame size on success, -1 if the frame wouldn't fit
 in `cap` or the blob is malformed.
@@ -495,9 +472,9 @@ in `cap` or the blob is malformed.
         if argc < 0
             return -1
 
-        // Source string data starts right after argc(4) + pad(4) +
-        // (argc+1) 8-byte pointers.
-        val src_str_off = 8 + (argc + 1) * 8
+        // Source string data starts right after the 8-byte header
+        // (argc(4) + 4 bytes pad).
+        val src_str_off = 8
 
         // Walk the string area to sum up total bytes (argv[i] + NUL each).
         var s_total = 0
