@@ -53,6 +53,7 @@ Interrupt handler addresses (provided by boot.s).
     extern exc_stub_30: byte
     extern exc_stub_31: byte
     extern serial_isr_entry: byte
+    extern virtio_isr_entry: byte
 
 
 UART -- COM1 serial port at 0x3F8.
@@ -238,7 +239,8 @@ Event format: (ascii << 24) | (1 << 17) | (1 << 16)
 - Bit 17: raw ASCII flag (TTY skips scancode translation)
 - Bit 16: press flag (1 = key press)
 
-    import oskit.kernel.{kb_enqueue, kb_notify_tid, notify_send}
+    import oskit.kernel.{kb_enqueue, kb_notify_tid, notify_send,
+        virtio_pci_isr, virtio_notify_tid}
 
     serial_handler()
         var lsr = inb(0x3FD)
@@ -251,6 +253,55 @@ Event format: (ascii << 24) | (1 << 17) | (1 << 16)
         if got == 1
             if kb_notify_tid >= 0
                 notify_send(kb_notify_tid, 1)
+
+
+Virtio ISR handler — virtio-pci legacy INTx. Called from boot.s
+virtio_isr_entry after every register save but before the PIC EOI.
+
+Reads the device's ISR byte (offset 0 in the ISR-CFG BAR region)
+which atomically clears pending bits. Without this, the level-
+triggered line would re-assert immediately after PIC EOI and we'd
+storm on the same interrupt forever.
+
+The kernel doesn't inspect which bit fired; the nic server walks
+the used ring itself on every wake. Just clear and wake.
+
+    virtio_handler()
+        val isr = virtio_pci_isr
+        if isr != i64(0)
+            volatile var p: *byte = *byte(isr)
+            val _ack = *p    // read clears
+        if virtio_notify_tid >= 0
+            notify_send(virtio_notify_tid, 1)
+
+
+Wire the virtio-pci INTx IRQ. Called from virtio_bringup_x86 after
+v_find successfully resolves the BDF — we read the Interrupt Line
+register from PCI config space at that point, then hit this to
+install the IDT gate (vector 32+irq) and unmask the line in the
+PIC. IRQ 8..15 live on the slave PIC, so we also unmask the
+master cascade (IRQ 2) if it's still masked.
+
+Expect irq_line in [0..15]. QEMU i440fx routes virtio-net-pci to
+IRQ 11 by default; q35 varies. The bringup reads the actual value
+and passes it through so we stay portable across QEMU machine
+configs.
+
+    virtio_irq_wire(irq_line: int)
+        if irq_line < 0 || irq_line > 15
+            return
+        val vec = 32 + irq_line
+        idt_set_gate(vec, i64(&virtio_isr_entry), 0x8E)
+        if irq_line < 8
+            val mask = inb(0x21)
+            outb(0x21, byte(mask & ~(1 << irq_line)))
+        else
+            val bit = irq_line - 8
+            val slave_mask = inb(0xA1)
+            outb(0xA1, byte(slave_mask & ~(1 << bit)))
+            // Ensure master cascade (IRQ 2) is unmasked so slave ints reach CPU
+            val master_mask = inb(0x21)
+            outb(0x21, byte(master_mask & ~(1 << 2)))
 
 
 Exception handler (called from boot.s stubs).

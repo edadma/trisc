@@ -299,6 +299,7 @@ build_nic() {
     build_server nic nic_server \
         "import oskit.servers.{nic_server}" \
         oskit/servers/nic.lsysl \
+        oskit/arch/${ARCH_NAME}/nic_attach.sysl \
         oskit/drivers/virtio/virtio_transport_mmio.lsysl \
         oskit/drivers/virtio/virtio_net.lsysl \
         oskit/drivers/virtio/virtio_dma_server.lsysl

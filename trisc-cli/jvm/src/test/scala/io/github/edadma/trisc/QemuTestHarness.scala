@@ -34,6 +34,15 @@ class QemuTestHarness(
     cmd.add("none")
     cmd.add("-monitor")
     cmd.add("none")
+    // virtio-net-pci with user-mode networking and a single UDP
+    // hostfwd so tests can shoot packets at guest:7777 via host
+    // port 17777 (mirrors aarch64's QemuAarch64TestHarness). The
+    // nic boot module attaches to this device via the kernel's
+    // probe + cached caps.
+    cmd.add("-netdev")
+    cmd.add("user,id=n0,hostfwd=udp::17777-:7777")
+    cmd.add("-device")
+    cmd.add("virtio-net-pci,netdev=n0,disable-legacy=on")
     if new java.io.File(ramdiskPath).exists() then
       val bootInfoPath = ramdiskPath.replace("ramdisk.img", "bootinfo.img")
       cmd.add("-initrd")

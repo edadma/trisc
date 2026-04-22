@@ -394,3 +394,15 @@ every IPC wake.
 
     svc_virtio_set_notify(tid: int)
         syscall(SYS_VIRTIO_SET_NOTIFY, tid)
+
+Fetch the virtio-pci cap addresses cached by the kernel's
+one-shot PCI probe. Fills `out` (40 bytes = 5 × i64): common_pa,
+notify_pa, notify_mult, isr_pa, device_pa. All zero if no
+virtio-net was found or on arches without virtio-pci. x86 nic
+server uses this to `v_attach_pci(...)` without needing PCI
+config-space access.
+
+    val SYS_VIRTIO_PCI_INFO = 77
+
+    svc_virtio_pci_info(out: *byte)
+        syscall(SYS_VIRTIO_PCI_INFO, i64(out))

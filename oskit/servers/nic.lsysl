@@ -53,8 +53,8 @@ the stack. Unknown commands reply `status = -1`.
     import oskit.services.{rs_ready, notify_send_to, notify_read_self,
         thread_id, svc_virtio_set_notify}
     import oskit.drivers.virtio.{virtio_net_init, virtio_net_get_mac,
-        virtio_net_send, virtio_net_recv, v_attach, VIRTIO_DEV_NET}
-    import oskit.arch.{MMIO_SERVER_VA}
+        virtio_net_send, virtio_net_recv}
+    import oskit.arch.srv_nic_attach
 
 
 Command codes.
@@ -93,14 +93,6 @@ Single subscriber for now — inet is the sole RX consumer.
 
     var nic_subscriber_tid = -1
     var nic_port = -1
-
-
-virtio-mmio slot 31 on QEMU virt lives at PA `0x0a003e00`
-(`VIRTIO_MMIO_BASE + 31 * 0x200`). The RS grant maps page `0xa003`
-at `MMIO_SERVER_VA` (`0x60100000`) with Device memory attrs, so
-the virtio-net slot shows up at `0x60100e00` inside the server.
-
-    val VIRTIO_NET_SLOT_OFFSET: i64 = i64(0xe00)
 
 
 ### Byte-buffer helpers
@@ -231,7 +223,7 @@ that case — inet's nic IPC wrappers degrade to returning -1 and
 UDP loopback keeps working. Matches the inet "best effort" pattern.
 
     nic_server()
-        v_attach(MMIO_SERVER_VA + VIRTIO_NET_SLOT_OFFSET, VIRTIO_DEV_NET)
+        srv_nic_attach()
         virtio_net_init()
 
         nic_port = port_create()

@@ -844,6 +844,44 @@ notify pattern; the platform IRQ handler (aarch64
         syscall_return(0)
         kernel_continue_current()
 
+Virtio-PCI cap addresses. Populated by the x86 kernel_main probe
+(which walks PCI config space and resolves each cap's BAR+offset)
+and handed out via SYS_VIRTIO_PCI_INFO to the nic server so it can
+`v_attach_pci(...)` without needing PCI access from userspace.
+
+All zero on aarch64 — that arch uses MMIO-mapped virtio-mmio via
+`svc_vm_create_server_pt(io_page)`, not virtio-pci.
+
+    var virtio_pci_common:      i64 = 0
+    var virtio_pci_notify:      i64 = 0
+    var virtio_pci_notify_mult: i64 = 0
+    var virtio_pci_isr:         i64 = 0
+    var virtio_pci_device:      i64 = 0
+
+    virtio_pci_info_set(common: i64, notify: i64, notify_mult: i64,
+                        isr: i64, device: i64)
+        virtio_pci_common = common
+        virtio_pci_notify = notify
+        virtio_pci_notify_mult = notify_mult
+        virtio_pci_isr = isr
+        virtio_pci_device = device
+
+SYS_VIRTIO_PCI_INFO (77): Return the 5 virtio-pci cap addresses
+cached during kernel_main's probe (common_pa, notify_pa,
+notify_mult, isr_pa, device_pa). Arg = pointer to a 40-byte
+buffer in the caller's address space. Returns zeros on aarch64
+(no virtio-pci there).
+
+    sys_virtio_pci_info_handler(arg: int)
+        var out: *i64 = *i64(i64(arg))
+        out[0] = virtio_pci_common
+        out[1] = virtio_pci_notify
+        out[2] = virtio_pci_notify_mult
+        out[3] = virtio_pci_isr
+        out[4] = virtio_pci_device
+        syscall_return(0)
+        kernel_continue_current()
+
     sys_vm_v2p_handler(arg: int)
         val vaddr = u64(arg)
         val paddr = vm_v2p(threads[current_thread].ptbr, vaddr)
@@ -967,6 +1005,7 @@ Used by ps and other user programs via ulib.
         register_syscall(74, sys_grant_map_handler)
         register_syscall(75, sys_grant_unmap_handler)
         register_syscall(76, sys_virtio_set_notify_handler)
+        register_syscall(77, sys_virtio_pci_info_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events

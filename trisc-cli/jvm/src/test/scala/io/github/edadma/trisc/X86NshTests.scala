@@ -262,10 +262,37 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
 
   "x86 inet: UDP loopback via test_net" in {
     // test_net opens a UDP socket on 127.0.0.1:5000, sends "hello"
-    // to itself, and prints what recvfrom returned.
+    // to itself, and prints what recvfrom returned. Phase 2 also
+    // exercises real-wire sendto without an explicit bind so the
+    // `wire sent=5` line covers inet's auto-bind path via the
+    // isolated nic server.
     val output = qemu.command("test_net")
     output should include("sent=5")
     output should include("recv=5 'hello'")
+    output should include("wire sent=5")
+  }
+
+  "x86 async RX: unsolicited UDP reaches recvfrom via virtio IRQ" in {
+    // test_udp_echo binds :7777, blocks in recvfrom. The harness's
+    // netdev forwards host localhost:17777 → guest:7777. Sending a
+    // datagram from Scala arrives at the guest unsolicited, travels
+    // through the virtio-pci INTx path (PIC IRQ → virtio_handler →
+    // nic → inet → deferred recvfrom reply), and test_udp_echo
+    // prints the payload. Without the IRQ path, recvfrom would
+    // block forever.
+    qemu.send("test_udp_echo\n")
+    qemu.waitFor("listening on :7777")
+
+    val sock = new java.net.DatagramSocket()
+    try
+      val payload = "ping!".getBytes("UTF-8")
+      val addr = java.net.InetAddress.getByName("127.0.0.1")
+      sock.send(new java.net.DatagramPacket(payload, payload.length, addr, 17777))
+    finally sock.close()
+
+    val output = qemu.waitFor("'ping!'")
+    output should include("test_udp_echo: got 5 from ")
+    output should include("'ping!'")
   }
 
   "x86 crash recovery: kill tfs and restart" in {

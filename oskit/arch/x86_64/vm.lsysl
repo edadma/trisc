@@ -194,6 +194,20 @@ Returns PML4 address, or 0 on failure.
             vm_write_pte64(pd + u64(j) * 8, k_pde)
             j += 1
 
+        // PDPT[1..3]: copy kernel's hi PDs covering 1-4GB. Kernel
+        // mode (ring 0) ISRs must be able to reach MMIO regardless
+        // of which process's cr3 is live — otherwise the virtio
+        // IRQ handler faults while dereferencing vpci_isr from an
+        // unrelated process's context. The underlying pd_hi{1,2,3}
+        // entries carry U=0 (see boot.s), so ring 3 user code still
+        // can't touch 1-4GB — vm_create_server_pt separately
+        // installs a U=1 PD[3] for the nic server.
+        var pi = 1
+        while pi < 4
+            val k_pdpte = vm_read_pte64(k_pdpt + u64(pi) * 8)
+            vm_write_pte64(pdpt + u64(pi) * 8, k_pdpte)
+            pi += 1
+
         // PT[0x00..0xCB]: kernel region, identity-mapped (present + writable)
         // Exceptions:
         //   0xBF (PROG_ARGS_ADDR): fresh per-process page so parent and
@@ -236,12 +250,24 @@ Returns PML4 address, or 0 on failure.
 
 
 Create a server page table with MMIO grant. Like
-vm_create_process_pt but additionally maps the first 32MB I/O
-region and grants user access to one specified I/O page.
+vm_create_process_pt but additionally grants user access to one
+I/O page (page 0xBF for the RS info page, always) and — when
+`io_page != 0` — maps the kernel's 3-4GB identity region into
+the server's PDPT[3] so it can reach virtio-pci BARs that QEMU
+places in the PCI hole near 0xFEBF0000.
 
-Note: x86_64 doesn't have TRISC's fixed 0x800000 I/O region.
-This is a placeholder — real x86_64 I/O uses port I/O (already
-in boot.s) not MMIO. Stubbed for interface compatibility.
+PDPT[1..3] normally stay unmapped in per-process PTs (boot.s
+comment documents this), keeping MMIO out of user address
+spaces. The nic server is the one exception today: granting
+PDPT[3] shares the kernel's static 2MB-superpage PD for 3-4GB,
+which includes all standard virtio-pci device BARs on QEMU's
+default q35/i440fx machine configs.
+
+The `io_page` arg is overloaded: on aarch64 it's a physical
+frame number to map at L3[256] (MMIO_SERVER_VA). On x86 the
+value itself is ignored — any non-zero flags the PDPT[3] share.
+That's fine because only the nic server passes a non-zero value
+today (other servers pass 0 and skip the MMIO grant entirely).
 
     vm_create_server_pt(io_page: int) -> u64
         val pml4 = vm_create_process_pt()
@@ -254,6 +280,25 @@ in boot.s) not MMIO. Stubbed for interface compatibility.
         val pt = u64(vm_read_pte64(pd) & PTE_ADDR_MASK)
         val old_pte = vm_read_pte64(pt + u64(0xBF) * 8)
         vm_write_pte64(pt + u64(0xBF) * 8, old_pte | PTE_U)
+
+        if io_page != 0
+            // Build a fresh PD for 3-4GB with PTE_U=1 on every 2MB
+            // superpage so ring 3 code in the server can reach virtio-
+            // pci BARs (QEMU places them near 0xFEBF0000 by default).
+            // Kernel's boot.s pd_hi3 has PTE_U=0 and is shared by
+            // every kernel thread; giving the server its own PD keeps
+            // the U=0 invariant for non-server contexts.
+            val pd3 = page_alloc_zero()
+            if pd3 == 0
+                return 0
+            var k = 0
+            while k < 512
+                val base = u64(0xC0000000) + u64(k) * u64(0x200000)
+                vm_write_pte64(pd3 + u64(k) * 8,
+                    i64(base) | PTE_P | PTE_W | PTE_U | PTE_PS)
+                k += 1
+            vm_write_pte64(pdpt + u64(3) * 8,
+                i64(pd3) | PTE_P | PTE_W | PTE_U)
         pml4
 
 
