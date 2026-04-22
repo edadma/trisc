@@ -48,6 +48,8 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_SEND     = 11
     val INET_CMD_TCP_RECV     = 12
     val INET_CMD_TCP_CLOSE    = 13
+    val INET_CMD_TCP_LISTEN   = 14
+    val INET_CMD_TCP_ACCEPT   = 15
 
 
 Capacity limits.
@@ -613,6 +615,38 @@ high byte (0), second (offset 2) is the low byte / index.
             return
         // Deferred reply — state step delivers when FIN is acked.
 
+    inet_handle_tcp_listen(sender: int, buf: *byte)
+        val port = inet_read_u16(buf, 1)
+        val s = inet_tcp_begin_listen(sender, port)
+        var reply: [2]byte
+        if s < 0
+            reply[0] = byte(-1)
+            reply[1] = 0
+            ipc_reply(sender, reply, 2)
+            return
+        reply[0] = 0
+        reply[1] = byte(s & 0xff)
+        ipc_reply(sender, reply, 2)
+
+    inet_handle_tcp_accept(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            var err: [8]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 8)
+            return
+        val child = inet_tcp_do_accept(sender, fd)
+        if child == -2
+            var err: [8]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 8)
+            return
+        if child >= 0
+            inet_tcp_reply_accept(sender, 0, child)
+            return
+        // child == -1 → caller parked; state_step will reply once a
+        // SYN_RCVD child reaches ESTABLISHED.
+
 
 ### UDP — inbound
 
@@ -794,25 +828,19 @@ silently skip link-layer setup and still serve UDP loopback.
             else if r >= 0
                 val sender = r
                 val cmd = int(buf[0]) & 0xff
-                if cmd == INET_CMD_SOCKET
-                    inet_handle_socket(sender, buf)
-                else if cmd == INET_CMD_BIND
-                    inet_handle_bind(sender, buf)
-                else if cmd == INET_CMD_SENDTO
-                    inet_handle_sendto(sender, buf)
-                else if cmd == INET_CMD_RECVFROM
-                    inet_handle_recvfrom(sender, buf)
-                else if cmd == INET_CMD_CLOSE
-                    inet_handle_close(sender, buf)
-                else if cmd == INET_CMD_TCP_CONNECT
-                    inet_handle_tcp_connect(sender, buf)
-                else if cmd == INET_CMD_TCP_SEND
-                    inet_handle_tcp_send(sender, buf)
-                else if cmd == INET_CMD_TCP_RECV
-                    inet_handle_tcp_recv(sender, buf)
-                else if cmd == INET_CMD_TCP_CLOSE
-                    inet_handle_tcp_close(sender, buf)
-                else
-                    var reply: [1]byte
-                    reply[0] = byte(-1)
-                    ipc_reply(sender, reply, 1)
+                cmd match
+                    INET_CMD_SOCKET      -> inet_handle_socket(sender, buf)
+                    INET_CMD_BIND        -> inet_handle_bind(sender, buf)
+                    INET_CMD_SENDTO      -> inet_handle_sendto(sender, buf)
+                    INET_CMD_RECVFROM    -> inet_handle_recvfrom(sender, buf)
+                    INET_CMD_CLOSE       -> inet_handle_close(sender, buf)
+                    INET_CMD_TCP_CONNECT -> inet_handle_tcp_connect(sender, buf)
+                    INET_CMD_TCP_SEND    -> inet_handle_tcp_send(sender, buf)
+                    INET_CMD_TCP_RECV    -> inet_handle_tcp_recv(sender, buf)
+                    INET_CMD_TCP_CLOSE   -> inet_handle_tcp_close(sender, buf)
+                    INET_CMD_TCP_LISTEN  -> inet_handle_tcp_listen(sender, buf)
+                    INET_CMD_TCP_ACCEPT  -> inet_handle_tcp_accept(sender, buf)
+                    else ->
+                        var reply: [1]byte
+                        reply[0] = byte(-1)
+                        ipc_reply(sender, reply, 1)

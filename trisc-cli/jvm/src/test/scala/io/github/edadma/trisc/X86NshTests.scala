@@ -295,6 +295,19 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("'ping!'")
   }
 
+  "x86 timer: subscribe fires expected count in N ticks" in {
+    // test_timer subscribes to a period=5 timer and waits for 10
+    // notifications. Proves svc_timer_subscribe fires reliably
+    // during a quiet channel — required before phase-2 can trust
+    // the timer path with real TIME_WAIT parking.
+    qemu.send("test_timer\n")
+    val output = qemu.waitFor("test_timer: ok")
+    output should include("test_timer: subscribed idx=")
+    output should include("test_timer: got 10 wakes value=2 delta=")
+    output should include("test_timer: ok")
+    output should not include "test_timer: FAIL"
+  }
+
   "x86 tcp: connect, send, receive echo, close" in {
     // Host-side TCP echo server on 127.0.0.1:18080. QEMU's
     // user-mode networking routes guest dials of 10.0.2.2:18080
@@ -335,6 +348,39 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     finally
       server.close()
       echoThread.join(2000)
+  }
+
+  // RST-on-unsolicited-SYN is implemented in inet_proto.lsysl but
+  // can't be validated through QEMU's user-mode slirp (see the
+  // mirrored note in Aarch64NshTests). Needs tap networking or a
+  // guest-side pcap to assert the outbound RST frame.
+
+  "x86 tcp: passive open, accept, echo, close" in {
+    // test_tcp_srv listens on :7890. QEMU's hostfwd=tcp::28080-:7890
+    // routes host dials of 127.0.0.1:28080 into the guest. Send
+    // "ping\n", receive echo, close cleanly.
+    qemu.send("test_tcp_srv\n")
+    qemu.waitFor("test_tcp_srv: listening fd=")
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(10000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write("ping\n".getBytes("UTF-8"))
+      out.flush()
+      val buf = new Array[Byte](32)
+      val n = in.read(buf)
+      n should be > 0
+      new String(buf, 0, n, "UTF-8") should include("ping")
+    finally sock.close()
+
+    val output = qemu.waitFor("test_tcp_srv: closed")
+    output should include("test_tcp_srv: accepted cfd=")
+    output should include("test_tcp_srv: got ")
+    output should include("test_tcp_srv: sent=")
+    output should include("test_tcp_srv: closed")
   }
 
   "x86 crash recovery: kill tfs and restart" in {

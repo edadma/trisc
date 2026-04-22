@@ -616,6 +616,10 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     val TCP_STATE_CLOSE_WAIT  = 5
     val TCP_STATE_LAST_ACK    = 6
     val TCP_STATE_TIME_WAIT   = 7
+    val TCP_STATE_LISTEN      = 8
+    val TCP_STATE_SYN_RCVD    = 9
+
+    val TCP_LISTEN_BACKLOG = 16
 
     val TCP_F_FIN = 0x01
     val TCP_F_SYN = 0x02
@@ -652,6 +656,13 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         recv_waiter: int
         recv_maxlen: int
         close_waiter: int
+        is_listen: int
+        accept_queue: [16]int
+        accept_head: int
+        accept_tail: int
+        accept_count: int
+        accept_waiter: int
+        parent_listen: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -670,6 +681,12 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
             tcp_sockets[i].send_waiter = -1
             tcp_sockets[i].recv_waiter = -1
             tcp_sockets[i].close_waiter = -1
+            tcp_sockets[i].is_listen = 0
+            tcp_sockets[i].accept_head = 0
+            tcp_sockets[i].accept_tail = 0
+            tcp_sockets[i].accept_count = 0
+            tcp_sockets[i].accept_waiter = -1
+            tcp_sockets[i].parent_listen = -1
             i += 1
 
 
@@ -835,6 +852,20 @@ RECV drain + reply. `n == 0` signals peer-closed EOF.
 Free socket `s` and wake any parked waiter with `status`. Used on
 terminal ACK and on retransmit exhaustion.
 
+Enter TIME_WAIT for 2MSL. Unblocks any parked close() caller
+immediately (the handshake is complete from the app's point of
+view) but leaves the slot live until tw_deadline fires — so the
+stack can absorb a retransmitted peer FIN and stale duplicates.
+
+    inet_tcp_enter_time_wait(s: int)
+        if tcp_sockets[s].close_waiter >= 0
+            inet_tcp_reply_status(tcp_sockets[s].close_waiter, 0)
+            tcp_sockets[s].close_waiter = -1
+        tcp_sockets[s].state = TCP_STATE_TIME_WAIT
+        tcp_sockets[s].rtx_deadline = 0
+        tcp_sockets[s].tw_deadline = int(uptime()) + TCP_TW_TICKS
+
+
     inet_tcp_close_slot(s: int, status: int)
         if tcp_sockets[s].connect_waiter >= 0
             inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, status, 0)
@@ -847,8 +878,16 @@ terminal ACK and on retransmit exhaustion.
         if tcp_sockets[s].close_waiter >= 0
             inet_tcp_reply_status(tcp_sockets[s].close_waiter, 0)
             tcp_sockets[s].close_waiter = -1
+        if tcp_sockets[s].accept_waiter >= 0
+            inet_tcp_reply_accept(tcp_sockets[s].accept_waiter, status, 0)
+            tcp_sockets[s].accept_waiter = -1
         tcp_sockets[s].in_use = 0
         tcp_sockets[s].state = TCP_STATE_CLOSED
+        tcp_sockets[s].is_listen = 0
+        tcp_sockets[s].accept_count = 0
+        tcp_sockets[s].accept_head = 0
+        tcp_sockets[s].accept_tail = 0
+        tcp_sockets[s].parent_listen = -1
         tcp_sockets[s].rtx_deadline = 0
         tcp_sockets[s].tw_deadline = 0
 
@@ -871,6 +910,12 @@ terminal ACK and on retransmit exhaustion.
                 tcp_sockets[i].recv_waiter = -1
                 tcp_sockets[i].close_waiter = -1
                 tcp_sockets[i].mss = TCP_MSS_ADV
+                tcp_sockets[i].is_listen = 0
+                tcp_sockets[i].accept_head = 0
+                tcp_sockets[i].accept_tail = 0
+                tcp_sockets[i].accept_count = 0
+                tcp_sockets[i].accept_waiter = -1
+                tcp_sockets[i].parent_listen = -1
                 return i
             i += 1
         -1
@@ -878,11 +923,23 @@ terminal ACK and on retransmit exhaustion.
     inet_tcp_find(local_port: int, remote_ip: u32, remote_port: int) -> int
         var i = 0
         while i < TCP_MAX_SOCKETS
-            if tcp_sockets[i].in_use != 0
-                if tcp_sockets[i].local_port == local_port
-                    if tcp_sockets[i].remote_port == remote_port
-                        if tcp_sockets[i].remote_ip == remote_ip
-                            return i
+            if (tcp_sockets[i].in_use != 0 && tcp_sockets[i].is_listen == 0 &&
+                    tcp_sockets[i].local_port == local_port &&
+                    tcp_sockets[i].remote_port == remote_port &&
+                    tcp_sockets[i].remote_ip == remote_ip)
+                return i
+            i += 1
+        -1
+
+
+Find a listen socket bound to `local_port`. Returns slot index or -1.
+
+    inet_tcp_find_listen(local_port: int) -> int
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if (tcp_sockets[i].in_use != 0 && tcp_sockets[i].is_listen != 0 &&
+                    tcp_sockets[i].local_port == local_port)
+                return i
             i += 1
         -1
 
@@ -942,6 +999,187 @@ the socket index on success (caller blocks until ESTABLISHED),
         s
 
 
+listen() entry — allocate a slot bound to `local_port` in LISTEN
+state. Unlike connect(), listen() returns immediately; the caller
+reuses the returned fd for accept(). Fails with -1 if the slot
+pool is exhausted or a listen is already bound to that port.
+
+    inet_tcp_begin_listen(owner_tid: int, local_port: int) -> int
+        if inet_tcp_find_listen(local_port) >= 0
+            return -1
+        val s = inet_tcp_alloc()
+        if s < 0
+            return -1
+        tcp_sockets[s].owner_tid = owner_tid
+        tcp_sockets[s].local_port = local_port
+        tcp_sockets[s].remote_ip = u32(0)
+        tcp_sockets[s].remote_port = 0
+        tcp_sockets[s].state = TCP_STATE_LISTEN
+        tcp_sockets[s].is_listen = 1
+        s
+
+
+Handle an incoming SYN that matches no existing 4-tuple but does
+match a LISTEN socket. Allocates a child socket in SYN_RCVD,
+emits SYN-ACK, arms retransmit. The child is NOT queued for
+accept() until its SYN_RCVD → ESTABLISHED transition.
+
+    inet_tcp_handle_passive_syn(ls: int, remote_ip: u32,
+                                remote_port: int, seg_seq: u32)
+        // If accept queue is already at capacity, silently drop.
+        // SYN cookies / overflow handling is phase-3.
+        if tcp_sockets[ls].accept_count >= TCP_LISTEN_BACKLOG
+            return
+        val s = inet_tcp_alloc()
+        if s < 0
+            return
+        val iss = tcp_next_iss()
+        tcp_sockets[s].owner_tid = tcp_sockets[ls].owner_tid
+        tcp_sockets[s].local_port = tcp_sockets[ls].local_port
+        tcp_sockets[s].remote_ip = remote_ip
+        tcp_sockets[s].remote_port = remote_port
+        tcp_sockets[s].iss = iss
+        tcp_sockets[s].snd_una = iss
+        tcp_sockets[s].snd_nxt = iss + u32(1)
+        tcp_sockets[s].irs = seg_seq
+        tcp_sockets[s].rcv_nxt = seg_seq + u32(1)
+        tcp_sockets[s].snd_wnd = 0
+        tcp_sockets[s].state = TCP_STATE_SYN_RCVD
+        tcp_sockets[s].parent_listen = ls
+        inet_tcp_emit(s, TCP_F_SYN | TCP_F_ACK, iss, u32(0), 0)
+        inet_tcp_arm_rtx(s)
+
+
+8-byte reply to a parked accept() caller:
+status(1) + child_fd(1) + peer_ip(4) + peer_port(2).
+
+    inet_tcp_reply_accept(tid: int, status: int, child_s: int)
+        var wr: [8]byte
+        wr[0] = byte(status & 0xff)
+        wr[1] = byte(child_s & 0xff)
+        if status == 0
+            val rip = tcp_sockets[child_s].remote_ip
+            wr[2] = byte(ipv4_octet(rip, 0) & 0xff)
+            wr[3] = byte(ipv4_octet(rip, 1) & 0xff)
+            wr[4] = byte(ipv4_octet(rip, 2) & 0xff)
+            wr[5] = byte(ipv4_octet(rip, 3) & 0xff)
+            pkt_write_u16(wr, 6, tcp_sockets[child_s].remote_port)
+        ipc_reply(tid, wr, 8)
+
+
+accept() entry — dequeue one established child (skipping dead
+entries left behind by retransmit-giveup on a half-open child).
+Returns the child socket index (caller replies immediately) or
+-1 if the caller was parked as accept_waiter. Returns -2 if
+`ls` is not a valid listen socket.
+
+    inet_tcp_do_accept(caller_tid: int, ls: int) -> int
+        if tcp_sockets[ls].in_use == 0 || tcp_sockets[ls].is_listen == 0
+            return -2
+        // Drain stale entries at the head: a child may have died
+        // (RST / retransmit giveup) before accept() got to it.
+        while tcp_sockets[ls].accept_count > 0
+            val head = tcp_sockets[ls].accept_head
+            val c = tcp_sockets[ls].accept_queue[head]
+            tcp_sockets[ls].accept_head = (head + 1) % TCP_LISTEN_BACKLOG
+            tcp_sockets[ls].accept_count -= 1
+            if tcp_sockets[c].in_use != 0 && tcp_sockets[c].state == TCP_STATE_ESTABLISHED
+                return c
+        // Queue empty — park caller.
+        tcp_sockets[ls].accept_waiter = caller_tid
+        -1
+
+
+Enqueue a newly-established child onto its parent listen's accept
+queue. If a caller is already parked in accept(), wake it with the
+child directly (the entry is dequeued before reply, not after).
+
+    inet_tcp_accept_enqueue(child_s: int)
+        val ls = tcp_sockets[child_s].parent_listen
+        if ls < 0 || tcp_sockets[ls].in_use == 0 || tcp_sockets[ls].is_listen == 0
+            return
+        if tcp_sockets[ls].accept_waiter >= 0
+            val tid = tcp_sockets[ls].accept_waiter
+            tcp_sockets[ls].accept_waiter = -1
+            inet_tcp_reply_accept(tid, 0, child_s)
+            return
+        if tcp_sockets[ls].accept_count >= TCP_LISTEN_BACKLOG
+            // Backlog full — the child becomes an orphan;
+            // nobody will accept() it. Close it.
+            inet_tcp_close_slot(child_s, -1)
+            return
+        val tail = tcp_sockets[ls].accept_tail
+        tcp_sockets[ls].accept_queue[tail] = child_s
+        tcp_sockets[ls].accept_tail = (tail + 1) % TCP_LISTEN_BACKLOG
+        tcp_sockets[ls].accept_count += 1
+
+
+Stateless RST emit for a segment arriving to a port with no
+matching connection or listen socket. Per RFC 793 §3.4: if the
+incoming segment has an ACK, the RST takes its seq from seg.ack
+and no ACK flag; otherwise the RST has seq=0, ACK=seg.seq+seg_len,
+and the ACK flag is set. seg_len counts SYN and FIN as one octet.
+
+    inet_tcp_emit_rst(remote_ip: u32, remote_port: int,
+                      local_port: int, seg_flags: int,
+                      seg_seq: u32, seg_ack: u32, seg_payload_len: int)
+        if inet_our_mac_known == 0
+            return
+        var next_hop_mac: [6]byte
+        if inet_resolve_mac(remote_ip, next_hop_mac) == 0
+            return
+        var rst_seq: u32 = u32(0)
+        var rst_ack: u32 = u32(0)
+        var rst_flags = TCP_F_RST
+        if (seg_flags & TCP_F_ACK) != 0
+            rst_seq = seg_ack
+        else
+            var ack_bump = seg_payload_len
+            if (seg_flags & TCP_F_SYN) != 0
+                ack_bump += 1
+            if (seg_flags & TCP_F_FIN) != 0
+                ack_bump += 1
+            rst_ack = seg_seq + u32(ack_bump)
+            rst_flags = TCP_F_RST | TCP_F_ACK
+        val hdr_bytes = 20
+        val seg_total = hdr_bytes
+        var frame: [1514]byte
+        val total_len = 14 + 20 + seg_total
+        pkt_write_mac(frame, 0, next_hop_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+        frame[14] = 0x45
+        frame[15] = 0
+        pkt_write_u16(frame, 16, 20 + seg_total)
+        pkt_write_u16(frame, 18, 0)
+        pkt_write_u16(frame, 20, 0x4000)
+        frame[22] = 64
+        frame[23] = byte(IP_PROTO_TCP)
+        pkt_write_u16(frame, 24, 0)
+        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
+            INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30,
+            ipv4_octet(remote_ip, 0), ipv4_octet(remote_ip, 1),
+            ipv4_octet(remote_ip, 2), ipv4_octet(remote_ip, 3))
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+        val tcp_off = 34
+        pkt_write_u16(frame, tcp_off + 0, local_port)
+        pkt_write_u16(frame, tcp_off + 2, remote_port)
+        tcp_write_u32(frame, tcp_off + 4, rst_seq)
+        tcp_write_u32(frame, tcp_off + 8, rst_ack)
+        frame[tcp_off + 12] = byte((5 << 4) & 0xf0)
+        frame[tcp_off + 13] = byte(rst_flags & 0xff)
+        pkt_write_u16(frame, tcp_off + 14, 0)
+        pkt_write_u16(frame, tcp_off + 16, 0)
+        pkt_write_u16(frame, tcp_off + 18, 0)
+        pkt_write_u16(frame, tcp_off + 16,
+            (~inet_l4_partial_sum(our_ip, remote_ip,
+                IP_PROTO_TCP, frame, tcp_off, seg_total)) & 0xffff)
+        inet_nic_send_packet(frame, total_len)
+
+
 send() entry — buffer, emit one segment, reply bytes written.
 Returns `n` on success (>= 0), -1 if connection is not
 established. MVP rejects overlapping sends with written = 0.
@@ -976,6 +1214,11 @@ Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
         val st = tcp_sockets[s].state
         if st == TCP_STATE_CLOSED
             tcp_sockets[s].in_use = 0
+            return 1
+        if st == TCP_STATE_LISTEN
+            // No peer to FIN; any parked accept_waiter gets woken
+            // with status=1 (error) by close_slot.
+            inet_tcp_close_slot(s, 1)
             return 1
         if st == TCP_STATE_ESTABLISHED
             val seq = tcp_sockets[s].snd_nxt
@@ -1034,6 +1277,18 @@ checksum, locates the matching socket, and delegates.
             return
         val s = inet_tcp_find(dst_port, src_ip, src_port)
         if s < 0
+            // No connection match. SYN-to-a-listen gets the passive
+            // open path. Anything else that isn't already a RST gets
+            // a stateless RST per RFC 793 §3.4.
+            if (flags & TCP_F_RST) != 0
+                return
+            if (flags & TCP_F_SYN) != 0
+                val ls = inet_tcp_find_listen(dst_port)
+                if ls >= 0
+                    inet_tcp_handle_passive_syn(ls, src_ip, src_port, seq)
+                    return
+            inet_tcp_emit_rst(src_ip, src_port, dst_port,
+                              flags, seq, ack, payload_len)
             return
         inet_tcp_state_step(s, flags, seq, ack, wnd, payload, payload_len)
 
@@ -1063,6 +1318,23 @@ Per-socket state transition for one validated segment.
             if tcp_sockets[s].connect_waiter >= 0
                 inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, 0, s)
                 tcp_sockets[s].connect_waiter = -1
+            return
+        if st == TCP_STATE_SYN_RCVD
+            if (flags & TCP_F_RST) != 0
+                inet_tcp_close_slot(s, -1)
+                return
+            if (flags & TCP_F_ACK) == 0
+                return
+            if ack != tcp_sockets[s].snd_nxt
+                return
+            tcp_sockets[s].snd_una = ack
+            tcp_sockets[s].snd_wnd = wnd
+            tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+            inet_tcp_disarm_rtx(s)
+            // Hand child to parent listen (or directly to the parked
+            // accept caller). Data in this segment is ignored — rely on
+            // the peer retransmitting once we ACK the next segment.
+            inet_tcp_accept_enqueue(s)
             return
 
 Past handshake: process ACK, data, FIN in that order.
@@ -1134,18 +1406,14 @@ Past handshake: process ACK, data, FIN in that order.
             if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
                 if did_fin != 0
                     // Simultaneous close: peer FIN arrived with the ACK
-                    // of our FIN. Skip TIME_WAIT for MVP — real 2MSL
-                    // is localhost-meaningless and would force us to
-                    // wait for a timer subscription that may not be
-                    // wired up yet.
-                    inet_tcp_close_slot(s, 0)
+                    // of our FIN. Enter TIME_WAIT for 2MSL.
+                    inet_tcp_enter_time_wait(s)
                 else
                     tcp_sockets[s].state = TCP_STATE_FIN_WAIT_2
         else if st2 == TCP_STATE_FIN_WAIT_2
             if did_fin != 0
-                // Same MVP shortcut as above: act on the peer FIN
-                // immediately instead of parking in TIME_WAIT.
-                inet_tcp_close_slot(s, 0)
+                // Peer FIN after our FIN-ACK — enter TIME_WAIT.
+                inet_tcp_enter_time_wait(s)
         else if st2 == TCP_STATE_LAST_ACK
             if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
                 inet_tcp_close_slot(s, 0)
@@ -1178,6 +1446,9 @@ socket for retransmit and TIME_WAIT deadlines.
         val st = tcp_sockets[s].state
         if st == TCP_STATE_SYN_SENT
             inet_tcp_emit(s, TCP_F_SYN, tcp_sockets[s].iss, u32(0), 0)
+            return
+        if st == TCP_STATE_SYN_RCVD
+            inet_tcp_emit(s, TCP_F_SYN | TCP_F_ACK, tcp_sockets[s].iss, u32(0), 0)
             return
         if st == TCP_STATE_ESTABLISHED
             if tcp_sockets[s].send_len > 0

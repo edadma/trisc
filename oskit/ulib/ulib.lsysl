@@ -57,6 +57,10 @@ Command bytes for TFS and TTY server protocols.
     val SYS_GETUID  = 61
     val SYS_SETUID  = 62
 
+    val SYS_NOTIFY_WAIT      = 24
+    val SYS_NOTIFY_READ      = 25
+    val SYS_TIMER_SUBSCRIBE  = 78
+
     val SYS_GRANT_CREATE = 71
     val SYS_GRANT_REVOKE = 72
 
@@ -416,6 +420,21 @@ System queries and control.
 
     setuid(uid: int)
         syscall(SYS_SETUID, uid)
+
+Periodic timer / notify wrappers for user programs. `svc_timer_subscribe`
+registers the calling thread for a periodic `notify_send(tid, 2)` every
+`period` ticks — used by tests that need to prove the kernel timer path
+fires reliably during a quiet channel. `notify_wait` blocks until any
+notify arrives; `notify_read_self` reads and clears the pending value.
+
+    svc_timer_subscribe(period: int) -> int
+        syscall(SYS_TIMER_SUBSCRIBE, i64(period))
+
+    notify_wait()
+        syscall(SYS_NOTIFY_WAIT, 0)
+
+    notify_read_self() -> int
+        syscall(SYS_NOTIFY_READ, 0)
 
 Read one byte from stdin (handle 0). Blocks until data
 is available. Returns the byte value or -1 on error.

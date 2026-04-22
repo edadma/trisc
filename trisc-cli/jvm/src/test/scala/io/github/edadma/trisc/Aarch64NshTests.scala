@@ -203,6 +203,21 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("'ping!'")
   }
 
+  "aarch64 timer: subscribe fires expected count in N ticks" in {
+    // test_timer subscribes to a period=5 timer and waits for 10
+    // notifications via notify_wait/notify_read_self. Proves the
+    // kernel's svc_timer_subscribe path is load-bearing-reliable
+    // during a quiet channel (no incoming frames, no other wakes).
+    // If the kernel timer wake is dropped silently, notify_wait
+    // blocks forever and the harness times out — a detectable fail.
+    qemu.send("test_timer\n")
+    val output = qemu.waitFor("test_timer: ok")
+    output should include("test_timer: subscribed idx=")
+    output should include("test_timer: got 10 wakes value=2 delta=")
+    output should include("test_timer: ok")
+    output should not include "test_timer: FAIL"
+  }
+
   "aarch64 tcp: connect, send, receive echo, close" in {
     // Start a tiny host-side TCP echo server on 127.0.0.1:18080.
     // QEMU user-mode networking translates guest dials of
@@ -245,6 +260,43 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     finally
       server.close()
       echoThread.join(2000)
+  }
+
+  // RST-on-unsolicited-SYN is implemented in inet_proto.lsysl
+  // (inet_tcp_emit_rst + handle_segment listen-miss dispatch) but
+  // can't be validated through QEMU's user-mode slirp: hostfwd
+  // completes the host-side three-way handshake locally regardless
+  // of what the guest does, so a stateless RST from the guest
+  // doesn't surface to the host dial as ConnectException. Direct
+  // validation needs tap networking or a guest-side pcap. The
+  // positive path is exercised by the passive-open test below.
+
+  "aarch64 tcp: passive open, accept, echo, close" in {
+    // test_tcp_srv listens on :7890. QEMU's hostfwd=tcp::28080-:7890
+    // forwards host dials of 127.0.0.1:28080 into the guest. We
+    // send "ping\n", expect the same bytes back, close cleanly.
+    qemu.send("test_tcp_srv\n")
+    qemu.waitFor("test_tcp_srv: listening fd=")
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(10000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write("ping\n".getBytes("UTF-8"))
+      out.flush()
+      val buf = new Array[Byte](32)
+      val n = in.read(buf)
+      n should be > 0
+      new String(buf, 0, n, "UTF-8") should include("ping")
+    finally sock.close()
+
+    val output = qemu.waitFor("test_tcp_srv: closed")
+    output should include("test_tcp_srv: accepted cfd=")
+    output should include("test_tcp_srv: got ")
+    output should include("test_tcp_srv: sent=")
+    output should include("test_tcp_srv: closed")
   }
 
   "aarch64 crash recovery: kill tfs and restart" in {

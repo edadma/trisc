@@ -34,13 +34,11 @@ class QemuTestHarness(
     cmd.add("none")
     cmd.add("-monitor")
     cmd.add("none")
-    // virtio-net-pci with user-mode networking and a single UDP
-    // hostfwd so tests can shoot packets at guest:7777 via host
-    // port 17777 (mirrors aarch64's QemuAarch64TestHarness). The
-    // nic boot module attaches to this device via the kernel's
-    // probe + cached caps.
+    // virtio-net-pci with user-mode networking and hostfwd entries
+    // for the inbound tests: UDP 17777→7777 for test_udp_echo,
+    // TCP 28080→7890 for test_tcp_srv (phase-2 passive open).
     cmd.add("-netdev")
-    cmd.add("user,id=n0,hostfwd=udp::17777-:7777")
+    cmd.add("user,id=n0,hostfwd=udp::17777-:7777,hostfwd=tcp::28080-:7890")
     cmd.add("-device")
     cmd.add("virtio-net-pci,netdev=n0,disable-legacy=on")
     if new java.io.File(ramdiskPath).exists() then
