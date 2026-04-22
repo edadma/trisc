@@ -33,10 +33,11 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         syscall_table, syscall_ssp_set, syscall_check_allowed,
         create_process_suspended, resume_process,
         register_syscall, syscall_return,
+        terminate_current,
         kb_enqueue, kb_notify_tid, notify_send,
         virtio_notify_tid,
         current_thread, ticks}
-    import oskit.config.{NUM_PRIORITIES}
+    import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
     import oskit.services.{get_thread_count, uptime, sleep, yield}
@@ -326,7 +327,7 @@ kernel isn't in play.
                 uart_puts("]\n")
                 abort()
 
-        if num < 0 || num >= 96
+        if num < 0 || num >= MAX_SYSCALLS
             fp[0] = i64(-1)
             return
 
@@ -351,6 +352,20 @@ kernel isn't in play.
             skip_schedule = true
             return
 
+        // POSIX shim range (128-511): multi-arg handlers. Musl-linked
+        // programs enter here with x0..x5 carrying up to six args in
+        // standard AArch64 ABI order. The native single-arg
+        // arch_syscall_call path (below) can't express that, so these
+        // syscalls route through posix_dispatch which picks the args
+        // it needs off the saved frame.
+        if num >= 128
+            syscall_ssp_set(i64(frame))
+            if syscall_check_allowed(num) == 0
+                fp[0] = i64(-1)
+                return
+            fp[0] = posix_dispatch(num, fp[0], fp[1], fp[2], fp[3], fp[4], fp[5])
+            return
+
         val handler = syscall_table[num]
         if handler == i64(0)
             fp[0] = i64(-1)
@@ -363,6 +378,40 @@ kernel isn't in play.
             return
 
         arch_syscall_call(a0, handler)
+
+POSIX shim dispatch. Musl's aarch64-slix arch/ uses SLIX-local
+syscall numbers starting at 128 (see `slix/musl/arch/aarch64-slix
+/bits/syscall.h.in`). Handlers take the raw user-space args and
+return bytes-written / 0-on-success / -errno as i64, which the
+dispatcher writes into the saved x0 slot. Only the Phase-1
+minimum is wired up today — SYS_WRITE to stdout/stderr and
+SYS_EXIT_GROUP (alias of SLIX native SYS_EXIT).
+
+    posix_dispatch(num: int, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        if num == 128
+            return sys_write(int(a0), a1, int(a2))
+        if num == 129
+            terminate_current(int(a0))
+            return i64(0)
+        i64(-38)            // -ENOSYS
+
+SYS_WRITE shim. fd=1 (stdout) and fd=2 (stderr) write directly to
+the PL011 UART; any other fd returns -EBADF. The user's buffer
+lives in the current process's EL0-accessible carve-out and is
+already mapped in the active PT (which we're running under since
+EL1 inherits TTBR0_EL1 from EL0), so we dereference it directly
+without vm_copy_from. A future commit will extend this to route
+non-TTY fds through the VFS server.
+
+    sys_write(fd: int, buf: i64, len: int) -> i64
+        if fd == 1 || fd == 2
+            var p: *byte = *byte(buf)
+            var i = 0
+            while i < len
+                uart_putc(int(p[i]))
+                i += 1
+            return i64(len)
+        i64(-9)             // -EBADF
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a
 is the echo server: creates a port, registers "echo", then
