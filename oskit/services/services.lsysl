@@ -296,10 +296,7 @@ thread's page table. Used by drivers that need DMA addresses.
         syscall6(SYS_SET_PRIV, i64(pid), allow_lo, allow_hi, i64(ipc_mask), 0, 0)
 
     svc_port_transfer(port: int, new_owner_tid: int)
-        var args: [2]i64
-        args[0] = port
-        args[1] = new_owner_tid
-        syscall(SYS_PORT_TRANSFER, i64(args))
+        syscall6(SYS_PORT_TRANSFER, i64(port), i64(new_owner_tid), 0, 0, 0, 0)
 
     val SYS_SET_IPC_MASK = 70
 
