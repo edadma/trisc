@@ -247,15 +247,29 @@ blocks with a wake_tick deadline (sleep, IPC timeout).
     val STATE_NOTIFY_WAIT = 10
     val STATE_MUTEX_WAIT = 11
 
-Syscall dispatch table. Each slot holds a function pointer
-(i64) for a slow-path syscall handler. Handlers receive one
-arg (int) and are called with context already saved. After
-the handler returns, the scheduler runs.
+Syscall dispatch tables. Each slot holds a function pointer
+(i64) for a slow-path syscall handler.
 
-Modules register handlers via register_syscall(). Fast-path
-syscalls (putc, queries) remain hardcoded in boot.asm.
+Two parallel tables during the multi-arg ABI migration:
+- syscall_table: legacy single-arg handlers, signature
+  `fn handler(arg: int)`. Return value via syscall_return().
+- syscall_table_6: new multi-arg handlers, signature
+  `fn handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64,
+  a5: i64) -> i64`. Return value is the handler's i64 result,
+  written to the saved frame by the dispatcher (no need to
+  call syscall_return).
+
+Dispatchers check syscall_table_6 first; if the slot is
+non-zero, use the 6-arg path. Otherwise fall through to the
+legacy syscall_table. One of the two is null for any given
+number — never both.
+
+Modules register handlers via register_syscall() (legacy) or
+register_syscall6() (new). Fast-path syscalls (putc, queries)
+remain hardcoded in boot.asm.
 
     var syscall_table: [512]i64  // 512 = MAX_SYSCALLS (sysl literal required)
+    var syscall_table_6: [512]i64
     var syscall_ssp: i64
 
 Platform dispatch uses this to hand the saved frame pointer to
@@ -293,6 +307,16 @@ Used by the scheduler for generic timeout wakeups.
         if num >= 0
             if num < MAX_SYSCALLS
                 syscall_table[num] = handler
+
+Register a 6-arg handler. The handler must have signature
+`fn handler(a0: i64, ..., a5: i64) -> i64`. The dispatcher
+passes saved user-space args a0..a5 directly and writes the
+returned i64 into the frame's return slot.
+
+    register_syscall6(num: int, handler: i64)
+        if num >= 0
+            if num < MAX_SYSCALLS
+                syscall_table_6[num] = handler
 
 Syscall privilege check. Called from the assembly slow-path
 dispatcher before invoking the handler. Returns 1 if allowed,

@@ -30,7 +30,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
     import oskit.kernel.{kernel_init, create_thread, create_thread_pri,
         first_thread_ssp,
         kernel_stack_usp, kernel_stack_ssp, schedule,
-        syscall_table, syscall_ssp_set, syscall_check_allowed,
+        syscall_table, syscall_table_6, syscall_ssp_set, syscall_check_allowed,
         create_process_suspended, resume_process,
         register_syscall, syscall_return,
         terminate_current,
@@ -46,6 +46,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE, VIRTIO_MMIO_MAX, VIRTIO_DEV_NET}
 
     extern arch_syscall_call(arg: i64, handler: i64)
+    extern arch_syscall_call6(handler: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
 
     val DEMO_MODE = 5             // 0=kernel+IPC, 1=ad-hoc, 2=EL0 legacy, 3=user proc, 4=user+kern IPC, 5=rs-as-userspace
 
@@ -364,6 +365,18 @@ kernel isn't in play.
                 fp[0] = i64(-1)
                 return
             fp[0] = posix_dispatch(num, fp[0], fp[1], fp[2], fp[3], fp[4], fp[5])
+            return
+
+        // 6-arg path: check syscall_table_6 first. Handlers here
+        // take all six i64 args and return i64; dispatcher writes
+        // the result to fp[0].
+        val handler6 = syscall_table_6[num]
+        if handler6 != i64(0)
+            syscall_ssp_set(i64(frame))
+            if syscall_check_allowed(num) == 0
+                fp[0] = i64(-1)
+                return
+            fp[0] = arch_syscall_call6(handler6, fp[0], fp[1], fp[2], fp[3], fp[4], fp[5])
             return
 
         val handler = syscall_table[num]
