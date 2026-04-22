@@ -35,7 +35,9 @@ class QemuAarch64TestHarness(
     cmd.add("-display"); cmd.add("none")
     cmd.add("-monitor"); cmd.add("none")
     cmd.add("-global"); cmd.add("virtio-mmio.force-legacy=false")
-    cmd.add("-netdev"); cmd.add("user,id=n0")
+    // hostfwd=udp::17777-:7777 forwards host localhost:17777 to guest:7777
+    // so async-RX tests (test_udp_echo) can inject unsolicited inbound.
+    cmd.add("-netdev"); cmd.add("user,id=n0,hostfwd=udp::17777-:7777")
     cmd.add("-device"); cmd.add("virtio-net-device,netdev=n0,mac=52:54:00:12:34:56")
     if new java.io.File(bootinfoPath).exists() then
       cmd.add("-device")

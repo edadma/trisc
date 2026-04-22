@@ -177,6 +177,29 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("rx=")
   }
 
+  "aarch64 async RX: unsolicited UDP reaches recvfrom via virtio IRQ" in {
+    // test_udp_echo binds :7777, blocks in recvfrom. The harness's
+    // netdev forwards host localhost:17777 → guest:7777. Sending a
+    // datagram from Scala arrives at the guest unsolicited, travels
+    // through the virtio-mmio IRQ path (GIC 79 → virtio_handler →
+    // nic → inet → deferred recvfrom reply), and test_udp_echo
+    // prints the payload. Without the IRQ path, recvfrom would
+    // block forever (nothing else pokes nic to drain the ring).
+    qemu.send("test_udp_echo\n")
+    qemu.waitFor("listening on :7777")
+
+    val sock = new java.net.DatagramSocket()
+    try
+      val payload = "ping!".getBytes("UTF-8")
+      val addr = java.net.InetAddress.getByName("127.0.0.1")
+      sock.send(new java.net.DatagramPacket(payload, payload.length, addr, 17777))
+    finally sock.close()
+
+    val output = qemu.waitFor("'ping!'")
+    output should include("test_udp_echo: got 5 from ")
+    output should include("'ping!'")
+  }
+
   "aarch64 crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))

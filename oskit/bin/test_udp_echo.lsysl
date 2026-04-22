@@ -1,0 +1,85 @@
+test_udp_echo — unsolicited UDP inbound sanity test
+=====================================================
+
+Exercises the full async RX pipeline end-to-end:
+
+  host sends UDP to localhost:PORT (forwarded via QEMU hostfwd)
+  → virtio-net RX ring
+  → virtio-mmio IRQ (GIC IRQ 79)
+  → kernel `virtio_handler()` → notify_send(nic_tid)
+  → nic server drains, enqueues, notify_send(inet_tid)
+  → inet's ipc_recv_notify wakes, inet_drain_rx
+  → inet_handle_frame → inet_handle_udp
+  → this program's pending recvfrom reply fires
+
+Runs as:
+
+  bind 0.0.0.0:7777 → puts "listening" → recvfrom (blocks) →
+  prints `test_udp_echo: got N from A.B.C.D:P 'text'` → exits
+
+Pair with a host-side `DatagramSocket.send(..., localhost, HOST_PORT)`
+where `-netdev user,hostfwd=udp::HOST_PORT-:7777` forwards
+host-port → guest:7777. The test is pass/fail on whether the
+`got ...` line shows up; without the IRQ path, recvfrom would
+block forever (nic is blocked in ipc_recv_notify with nothing
+to kick it).
+
+    module oskit.bin.test_udp_echo
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{socket, bind, recvfrom, close_socket}
+    import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, ipv4_octet}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+Render the host-order u32 as dotted-quad.
+
+    print_ipv4(ip: u32)
+        print_udec(ipv4_octet(ip, 0))
+        puts(".")
+        print_udec(ipv4_octet(ip, 1))
+        puts(".")
+        print_udec(ipv4_octet(ip, 2))
+        puts(".")
+        print_udec(ipv4_octet(ip, 3))
+
+
+    main(argv: []string)
+        val fd = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd < 0
+            puts("test_udp_echo: socket failed\n")
+            exit_with(1)
+            return
+        val br = bind(fd, INADDR_ANY, 7777)
+        if br < 0
+            puts("test_udp_echo: bind failed\n")
+            exit_with(2)
+            return
+        puts("test_udp_echo: listening on :7777\n")
+
+        var rbuf: [64]byte
+        var sip: u32 = 0u32
+        var sport: int = 0
+        val got = recvfrom(fd, &rbuf[0], 64, &sip, &sport)
+        if got < 0
+            puts("test_udp_echo: recvfrom failed\n")
+            exit_with(3)
+            return
+        puts("test_udp_echo: got ")
+        print_udec(got)
+        puts(" from ")
+        print_ipv4(sip)
+        puts(":")
+        print_udec(sport)
+        puts(" '")
+        puts(string(&rbuf[0], got))
+        puts("'\n")
+        close_socket(fd)
+        exit()
