@@ -49,7 +49,7 @@ object SyslPrettyPrinter:
       }.mkString("\n")
       s"enum $name$tpStr\n$body"
 
-    case StructDeclAST(name, fields, tps, _) =>
+    case StructDeclAST(name, fields, tps, _, _) =>
       val tpStr = if tps.nonEmpty then s"[${tps.mkString(", ")}]" else ""
       val body = fields.map((n, t, _) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
       s"struct $name$tpStr\n$body"
@@ -139,20 +139,28 @@ object SyslPrettyPrinter:
         case Some(v) => s"return ${exprToSource(v, depth)}"
         case None    => "return"
 
-    case WhileStmtAST(cond, body) =>
+    case WhileStmtAST(cond, body, label) =>
       val bodyStr = body.map(s => s"${IND * (depth + 1)}${stmtToSource(s, depth + 1)}").mkString("\n")
-      s"while ${exprToSource(cond, depth)}\n$bodyStr"
+      val prefix = label.map(l => s"$l: ").getOrElse("")
+      s"${prefix}while ${exprToSource(cond, depth)}\n$bodyStr"
 
-    case ForStmtAST(init, cond, update, body) =>
+    case ForStmtAST(init, cond, update, body, label) =>
       val bodyStr = body.map(s => s"${IND * (depth + 1)}${stmtToSource(s, depth + 1)}").mkString("\n")
-      s"for ${stmtToSource(init, depth)}; ${exprToSource(cond, depth)}; ${stmtToSource(update, depth)} do\n$bodyStr"
+      val prefix = label.map(l => s"$l: ").getOrElse("")
+      s"${prefix}for ${stmtToSource(init, depth)}; ${exprToSource(cond, depth)}; ${stmtToSource(update, depth)} do\n$bodyStr"
 
-    case DoWhileStmtAST(cond, body) =>
+    case DoWhileStmtAST(cond, body, label) =>
       val bodyStr = body.map(s => s"${IND * (depth + 1)}${stmtToSource(s, depth + 1)}").mkString("\n")
-      s"do\n$bodyStr\n${IND * depth}while ${exprToSource(cond, depth)}"
+      val prefix = label.map(l => s"$l: ").getOrElse("")
+      s"${prefix}do\n$bodyStr\n${IND * depth}while ${exprToSource(cond, depth)}"
 
-    case BreakStmtAST()    => "break"
-    case ContinueStmtAST() => "continue"
+    case LoopStmtAST(body, label) =>
+      val bodyStr = body.map(s => s"${IND * (depth + 1)}${stmtToSource(s, depth + 1)}").mkString("\n")
+      val prefix = label.map(l => s"$l: ").getOrElse("")
+      s"${prefix}loop\n$bodyStr"
+
+    case BreakStmtAST(label)    => label.map(l => s"break $l").getOrElse("break")
+    case ContinueStmtAST(label) => label.map(l => s"continue $l").getOrElse("continue")
 
     case DeferStmtAST(body) =>
       s"defer ${stmtToSource(body, depth)}"

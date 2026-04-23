@@ -721,9 +721,10 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TFieldCompoundAssignStmt(obj, _, _, value) => scanE(obj) || scanE(value)
       case TExprStmt(e) => scanE(e)
       case TReturnStmt(Some(e)) => scanE(e)
-      case TWhileStmt(c, body) => scanE(c) || body.exists(scanS)
-      case TDoWhileStmt(c, body) => scanE(c) || body.exists(scanS)
-      case TForStmt(init, c, upd, body) => scanS(init) || scanE(c) || scanS(upd) || body.exists(scanS)
+      case TWhileStmt(c, body, _) => scanE(c) || body.exists(scanS)
+      case TDoWhileStmt(c, body, _) => scanE(c) || body.exists(scanS)
+      case TForStmt(init, c, upd, body, _) => scanS(init) || scanE(c) || scanS(upd) || body.exists(scanS)
+      case TLoopStmt(body, _) => body.exists(scanS)
       case TDeferStmt(stmt) => scanS(stmt)
       case TDestructureStmt(_, _, init) => scanE(init)
       case TDestructureAssignStmt(_, _, init) => scanE(init)
@@ -1757,6 +1758,16 @@ class SyslTriscCodegen(addresses: Int = 4):
   // Break/continue label stacks
   private val breakLabels = new mutable.Stack[String]
   private val continueLabels = new mutable.Stack[String]
+  // User-supplied loop labels (None for unlabeled loops). Parallel to break/continue stacks.
+  private val loopNameStack = new mutable.Stack[Option[String]]
+
+  /** Find stack index of loop matching `label` (0 = innermost). None → innermost. */
+  private def resolveLoopIdx(label: Option[String]): Int = label match
+    case None => 0
+    case Some(name) =>
+      val idx = loopNameStack.indexWhere(_.contains(name))
+      if idx < 0 then throw new RuntimeException(s"no enclosing loop with label '$name'")
+      idx
 
   // Defer stack — deferred statements executed in LIFO order before return/epilogue
   private val deferStack = new mutable.ArrayBuffer[TStmt]
@@ -2189,11 +2200,12 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TExprStmt(expr) =>
         genExpr(expr) // result in r1, discarded
 
-      case TWhileStmt(cond, body) =>
+      case TWhileStmt(cond, body, userLabel) =>
         val loopLabel = newLabel("while")
         val endLabel = newLabel("endwhile")
         breakLabels.push(endLabel)
         continueLabels.push(loopLabel)
+        loopNameStack.push(userLabel)
         loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
         genExpr(cond)
@@ -2204,10 +2216,11 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  bra $loopLabel")
         emit(s"$endLabel")
         loopScopeOffsets.pop()
+        loopNameStack.pop()
         breakLabels.pop()
         continueLabels.pop()
 
-      case TForStmt(init, cond, update, body) =>
+      case TForStmt(init, cond, update, body, userLabel) =>
         val loopLabel = newLabel("for")
         val updateLabel = newLabel("forupdate")
         val endLabel = newLabel("endfor")
@@ -2215,6 +2228,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         genStmt(init)
         breakLabels.push(endLabel)
         continueLabels.push(updateLabel)
+        loopNameStack.push(userLabel)
         loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
         genExpr(cond)
@@ -2227,16 +2241,18 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  bra $loopLabel")
         emit(s"$endLabel")
         loopScopeOffsets.pop()
+        loopNameStack.pop()
         breakLabels.pop()
         continueLabels.pop()
         leaveScope()
 
-      case TDoWhileStmt(cond, body) =>
+      case TDoWhileStmt(cond, body, userLabel) =>
         val loopLabel = newLabel("dowhile")
         val condLabel = newLabel("dowhile_cond")
         val endLabel = newLabel("enddowhile")
         breakLabels.push(endLabel)
         continueLabels.push(condLabel) // continue jumps to condition, not body
+        loopNameStack.push(userLabel)
         loopScopeOffsets.push(stackOffset)
         emit(s"$loopLabel")
         enterScope()
@@ -2247,20 +2263,41 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit(s"  bne r1, r0, $loopLabel")
         emit(s"$endLabel")
         loopScopeOffsets.pop()
+        loopNameStack.pop()
         breakLabels.pop()
         continueLabels.pop()
 
-      case TBreakStmt =>
-        val loopOffset = loopScopeOffsets.top
-        if stackOffset != loopOffset then
-          emitAddImm(7, 7, loopOffset - stackOffset)
-        emit(s"  bra ${breakLabels.top}")
+      case TLoopStmt(body, userLabel) =>
+        val loopLabel = newLabel("loop")
+        val endLabel = newLabel("endloop")
+        breakLabels.push(endLabel)
+        continueLabels.push(loopLabel)
+        loopNameStack.push(userLabel)
+        loopScopeOffsets.push(stackOffset)
+        emit(s"$loopLabel")
+        enterScope()
+        for stmt <- body do genStmt(stmt)
+        leaveScope()
+        emit(s"  bra $loopLabel")
+        emit(s"$endLabel")
+        loopScopeOffsets.pop()
+        loopNameStack.pop()
+        breakLabels.pop()
+        continueLabels.pop()
 
-      case TContinueStmt =>
-        val loopOffset = loopScopeOffsets.top
+      case TBreakStmt(lbl) =>
+        val idx = resolveLoopIdx(lbl)
+        val loopOffset = loopScopeOffsets(idx)
         if stackOffset != loopOffset then
           emitAddImm(7, 7, loopOffset - stackOffset)
-        emit(s"  bra ${continueLabels.top}")
+        emit(s"  bra ${breakLabels(idx)}")
+
+      case TContinueStmt(lbl) =>
+        val idx = resolveLoopIdx(lbl)
+        val loopOffset = loopScopeOffsets(idx)
+        if stackOffset != loopOffset then
+          emitAddImm(7, 7, loopOffset - stackOffset)
+        emit(s"  bra ${continueLabels(idx)}")
 
       case TAsmStmt(code) =>
         // Emit each line of inline assembly verbatim

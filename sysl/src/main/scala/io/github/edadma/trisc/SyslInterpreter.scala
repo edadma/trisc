@@ -50,9 +50,14 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   import Value.*
 
   case class ReturnException(value: Value) extends RuntimeException
-  case object BreakException extends RuntimeException
-  case object ContinueException extends RuntimeException
+  case class BreakException(label: Option[String]) extends RuntimeException
+  case class ContinueException(label: Option[String]) extends RuntimeException
   case class RuntimeError(msg: String) extends RuntimeException(msg)
+
+  /** True if a break/continue exception is "for me" — label is None (nearest loop)
+   *  or matches this loop's own label. */
+  private def claimsLoop(exLabel: Option[String], myLabel: Option[String]): Boolean =
+    exLabel.isEmpty || exLabel == myLabel
 
   private type Env = mutable.LinkedHashMap[String, Cell]
   private val deferStack = new mutable.ArrayBuffer[(TStmt, Env)]
@@ -183,6 +188,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   // Heap for sbrk: 1MB of cells, bump pointer
   private val heapCells = Array.fill(1024 * 1024)(new Cell(IntVal(0)))
   private var heapBreak = 0
+
+  // Virtual MMIO memory for `#address(N)` vars. Real hardware addresses aren't accessible
+  // from the JVM interpreter, so we simulate with a map. Reads of an untouched address
+  // yield 0 (hardware-like default); writes persist for the duration of the run.
+  private val mmioMemory = new mutable.LongMap[Long]
 
   private val builtins: mutable.Map[String, List[Value] => Value] = mutable.Map(
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
@@ -534,6 +544,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case ">>" => l >> r.toInt
             cell.value = IntVal(truncateNarrow(raw, value.typ))
 
+      case TDerefAssignStmt(TCast(TIntLit(addr, _), SyslType.PtrType(_)), value) =>
+        // #address MMIO write: store into the virtual mmio map keyed by the literal address.
+        mmioMemory(addr) = toLong(evalAny(value, env))
+
       case TDerefAssignStmt(pointer, value) =>
         val cell = derefCell(evalAny(pointer, env))
         cell.value = evalAny(value, env)
@@ -572,7 +586,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TDeferStmt(body) =>
         deferStack += ((body, env))
 
-      case TForStmt(init, cond, update, body) =>
+      case TForStmt(init, cond, update, body, myLabel) =>
         exec(init, env)
         var running = true
         while running && toLong(evalAny(cond, env)) != 0 do
@@ -581,44 +595,57 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             execBlock(body, env)
             exec(update, env)
           catch
-            case BreakException => running = false
-            case ContinueException => exec(update, env)
+            case e: BreakException if claimsLoop(e.label, myLabel) => running = false
+            case e: ContinueException if claimsLoop(e.label, myLabel) => exec(update, env)
           // Release refs for variables created in this iteration
           for key <- env.keySet.toSet -- savedKeys do
             refDecr(env(key).value)
             env.remove(key)
 
-      case TWhileStmt(cond, body) =>
+      case TWhileStmt(cond, body, myLabel) =>
         var running = true
         while running && toLong(evalAny(cond, env)) != 0 do
           val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
           catch
-            case BreakException => running = false
-            case ContinueException =>
+            case e: BreakException if claimsLoop(e.label, myLabel) => running = false
+            case e: ContinueException if claimsLoop(e.label, myLabel) =>
           // Release refs for variables created in this iteration
           for key <- env.keySet.toSet -- savedKeys do
             refDecr(env(key).value)
             env.remove(key)
 
-      case TDoWhileStmt(cond, body) =>
+      case TDoWhileStmt(cond, body, myLabel) =>
         var running = true
         while running do
           val savedKeys = env.keySet.toSet
           try
             execBlock(body, env)
           catch
-            case BreakException    => running = false
-            case ContinueException =>
+            case e: BreakException if claimsLoop(e.label, myLabel) => running = false
+            case e: ContinueException if claimsLoop(e.label, myLabel) =>
           // Release refs for variables created in this iteration
           for key <- env.keySet.toSet -- savedKeys do
             refDecr(env(key).value)
             env.remove(key)
           if running then running = toLong(evalAny(cond, env)) != 0
 
-      case TBreakStmt => throw BreakException
-      case TContinueStmt => throw ContinueException
+      case TLoopStmt(body, myLabel) =>
+        var running = true
+        while running do
+          val savedKeys = env.keySet.toSet
+          try
+            execBlock(body, env)
+          catch
+            case e: BreakException if claimsLoop(e.label, myLabel) => running = false
+            case e: ContinueException if claimsLoop(e.label, myLabel) =>
+          for key <- env.keySet.toSet -- savedKeys do
+            refDecr(env(key).value)
+            env.remove(key)
+
+      case TBreakStmt(label) => throw BreakException(label)
+      case TContinueStmt(label) => throw ContinueException(label)
 
       case TAsmStmt(_) => // no-op in interpreter
 
@@ -740,6 +767,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             val old = toLong(cell.value)
             cell.value = IntVal(truncateNarrow(old - 1, typ))
             IntVal(old)
+
+      case TDeref(TCast(TIntLit(addr, _), SyslType.PtrType(_)), typ) =>
+        // #address MMIO read: pull from the virtual mmio map (0 if never written).
+        val raw = mmioMemory.getOrElse(addr, 0L)
+        IntVal(truncateNarrow(raw, typ))
 
       case TDeref(inner, _) =>
         evalAny(inner, env) match

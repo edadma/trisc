@@ -3,17 +3,42 @@ package io.github.edadma.trisc
 import scala.collection.mutable
 import SyslType.*
 
-class SyslAnalyzer:
+class SyslAnalyzer(val contractsEnabled: Boolean = true):
   case class AnalysisError(msg: String, node: Any = null) extends RuntimeException(msg)
 
-  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false)
-  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false)
+  /** Build a contract-check statement, or a no-op when contracts are disabled (via
+   *  `--no-contracts` / `config("contracts") = "off"`). Used by every contract emission
+   *  site — require/ensure/invariant/type predicate/type attribute — so the strip is
+   *  centralized. When disabled, the check becomes `TMultiStmt(Nil)`: every backend
+   *  already iterates zero children. The surrounding expression (e.g. `v + 1` in
+   *  `__succ`) continues to execute without a guard, giving Ada-style "suppressed
+   *  check" semantics: fast path, undefined on bad input. */
+  private def contract(kind: String, expr: TExpr, message: String): TStmt =
+    if contractsEnabled then TContractCheck(kind, expr, message)
+    else TMultiStmt(Nil)
+
+  /** `autoIndirect = true` marks a body-scope symbol whose actual storage is a hidden
+   *  pointer (Ada `out` / `inout` parameter). Every read/write goes through `*ptr`:
+   *  VarRef lowers to `TDeref(TVarRef(name, *T), T)`; plain and compound assignments
+   *  lower to `TDerefAssignStmt(TVarRef(name, *T), v)`. The caller passes an lvalue
+   *  auto-wrapped with `TAddrOf*`. `typ` is still the underlying `T` (what the body
+   *  sees); the pointer wrap is invisible to user code. */
+  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false, autoIndirect: Boolean = false)
+  /** `modes` is parallel to `params`: one entry per parameter. Empty means "all In"
+   *  (default, back-compat). `params` stores the call-side signature: for `Out`/`Inout`
+   *  this is `*T` so `checkArgs` and codegen see the hidden-pointer type; the body-scope
+   *  view is the inner `T` with `autoIndirect = true`. */
+  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil):
+    def modeOf(i: Int): ParamMode = if modes.isEmpty then ParamMode.In else modes(i)
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
   // Default parameter expressions: function name → list of defaults (one per param, None if no default)
   private val functionDefaults = new mutable.LinkedHashMap[String, List[Option[TExpr]]]
   private val structTypes = new mutable.LinkedHashMap[String, SyslType.StructType]
+  // Struct name → list of invariant expressions declared in the struct body.
+  // Checked at every field-assignment / field-compound-assignment on a value of that type.
+  private val structInvariants = new mutable.LinkedHashMap[String, List[ExpressionAST]]
   private val enumTypes = new mutable.LinkedHashMap[String, Map[String, Long]]  // enum name → (member name → value)
   // Simple enums registered as EnumType so they can appear in type positions.
   // Distinct from dataEnumTypes because simple-enum `Name.Member` access still
@@ -35,7 +60,119 @@ class SyslAnalyzer:
   private val externalSymbols = new mutable.LinkedHashSet[String]
   private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   private val compileTimeConstants = new mutable.LinkedHashMap[String, Long] // val name → folded value (for constant propagation)
+
+  /** Module-level vars tagged with `#address(N)` map to a fixed physical address — used
+   *  for MMIO device registers. Reads lower to `*(N as *T)`, writes to `*(N as *T) = v`.
+   *  No storage is emitted (the var is just a handle on hardware). Both the local and
+   *  mangled keys are recorded so cross-module references resolve. */
+  private val fixedAddressVars = new mutable.LinkedHashMap[String, (Long, SyslType)]
   private var loopDepth: Int = 0
+  // Stack of enclosing loop labels (None for unlabeled loops). Used to validate
+  // `break label` / `continue label` refers to an enclosing labeled loop.
+  private val loopLabelStack = new mutable.ArrayBuffer[Option[String]]
+
+  /** Reject label shadowing — a labeled loop cannot be nested inside another loop with
+   * the same label, because `break label` would be ambiguous. */
+  private def checkLoopLabelUnique(label: Option[String]): Unit =
+    label.foreach { lbl =>
+      if loopLabelStack.contains(Some(lbl)) then
+        throw AnalysisError(s"duplicate loop label '$lbl': already in use by an enclosing loop")
+    }
+
+  // Counter for uniquely naming hoisted `variant` state across nested / sibling loops.
+  private var variantIdCounter: Int = 0
+
+  /** Type-check each invariant expression at struct declaration time. Invariants are
+   *  analyzed in a scope where each field name binds to a local of the field's type, so
+   *  type errors (wrong field name, non-bool result) are caught before any mutation site. */
+  private def validateStructInvariants(structName: String, fields: List[(String, SyslType)], invariants: List[ExpressionAST]): Unit =
+    val savedScope = scopeStack
+    scopeStack = new mutable.ArrayBuffer
+    pushScope()
+    for (fname, ftype) <- fields do
+      currentScope(fname) = SymInfo(fname, ftype, mutable = false)
+    try
+      for inv <- invariants do
+        val tInv = analyzeExpr(inv)
+        if tInv.typ != BoolType then
+          throw AnalysisError(s"struct '$structName' invariant must be bool, got ${tInv.typ}")
+    finally scopeStack = savedScope
+
+  /** Rewrite `VarRefAST(fieldName)` → `FieldAccessAST(objAst, fieldName)` for any name that
+   *  is a field of the struct. Used to bind bare field names in a struct invariant expression
+   *  against a concrete struct-valued sub-expression at a mutation site. */
+  private def substituteStructFieldRefs(expr: ExpressionAST, objAst: ExpressionAST, fields: Set[String]): ExpressionAST =
+    def rec(e: ExpressionAST): ExpressionAST = e match
+      case VarRefAST(name) if fields.contains(name) => FieldAccessAST(objAst, name)
+      case BinaryAST(l, op, r)      => BinaryAST(rec(l), op, rec(r))
+      case UnaryAST(op, operand)    => UnaryAST(op, rec(operand))
+      case CallAST(name, args)      => CallAST(name, args.map(rec))
+      case MethodCallAST(o, m, args)=> MethodCallAST(rec(o), m, args.map(rec))
+      case CastAST(t, inner)        => CastAST(t, rec(inner))
+      case FieldAccessAST(o, f)     => FieldAccessAST(rec(o), f)
+      case IndexAST(a, i)           => IndexAST(rec(a), rec(i))
+      case DerefAST(inner)          => DerefAST(rec(inner))
+      case TupleLitAST(es)          => TupleLitAST(es.map(rec))
+      case IfExprAST(c, tb, eb)     => IfExprAST(rec(c), tb, eb)  // stmt bodies not rewritten
+      case NamedArgAST(n, v)        => NamedArgAST(n, rec(v))
+      case TypeAttrAST(t, a, argO)  => TypeAttrAST(t, a, argO.map(rec))
+      case other => other
+    rec(expr)
+
+  /** Build a TContractCheck stmt sequence that verifies all invariants of `structType` for
+   *  the struct-valued expression `objAst`, using its struct name. Returns empty if no
+   *  invariants are declared for this struct. */
+  private def buildStructInvariantChecks(objAst: ExpressionAST, structName: String): List[TStmt] =
+    structInvariants.get(structName) match
+      case None => Nil
+      case Some(invs) =>
+        val st = structTypes(structName)
+        val fieldNames = st.fields.map(_._1).toSet
+        invs.map { inv =>
+          val rewritten = substituteStructFieldRefs(inv, objAst, fieldNames)
+          val tExpr = analyzeExpr(rewritten)
+          if tExpr.typ != BoolType then
+            throw AnalysisError(s"struct invariant must be bool, got ${tExpr.typ}")
+          contract("invariant", tExpr, s"$structName invariant")
+        }
+
+  /** Extract top-level `variant <expr>` statements from a loop body. Returns a pair of
+   *  AST stmt lists: (hoisted-pre-decls, rewritten-body). The caller must analyze the
+   *  pre-decls in the current scope (outside the loop) and the rewritten body in the
+   *  loop's own body scope. */
+  private def extractVariants(body: List[StmtAST]): (List[StmtAST], List[StmtAST]) =
+    if !contractsEnabled then
+      // --no-contracts: elide loop variants entirely — no hoisted state, no per-iter check.
+      return (Nil, body.filter { case _: VariantStmtAST => false; case _ => true })
+    val pre = mutable.ListBuffer.empty[StmtAST]
+    val newBody = body.flatMap {
+      case VariantStmtAST(expr) =>
+        variantIdCounter += 1
+        val id = variantIdCounter
+        val initName = s"__variant_init_$id"
+        val prevName = s"__variant_prev_$id"
+        val curName  = s"__variant_cur_$id"
+        // Hoisted state: init flag + prev value (i64 is wide enough for any integer expr).
+        pre += VarStmtAST(initName, Some(NamedTypeAST("bool")), BoolLitAST(false))
+        pre += VarStmtAST(prevName, Some(NamedTypeAST("i64")), IntLitAST(0))
+        // Inline per-iteration check and state update.
+        val castExpr: ExpressionAST = CastAST(NamedTypeAST("i64"), expr)
+        val okExpr: ExpressionAST = BinaryAST(
+          BinaryAST(VarRefAST(curName), "<", VarRefAST(prevName)),
+          "&&",
+          BinaryAST(VarRefAST(curName), ">=", IntLitAST(0)),
+        )
+        val assertCall: ExpressionAST = CallAST("assert", List(okExpr, StringLitAST("loop variant failed")))
+        val guardedCheck: ExpressionAST = IfExprAST(VarRefAST(initName), List(ExprStmtAST(assertCall)), None)
+        List(
+          VarStmtAST(curName, Some(NamedTypeAST("i64")), castExpr),
+          ExprStmtAST(guardedCheck),
+          AssignStmtAST(prevName, VarRefAST(curName)),
+          AssignStmtAST(initName, BoolLitAST(true)),
+        )
+      case other => List(other)
+    }
+    (pre.toList, newBody)
   private var currentReturnType: SyslType = VoidType
 
   // Module-path name mangling: set from ModuleDeclAST during analyze()
@@ -267,7 +404,7 @@ class SyslAnalyzer:
       val sn = shortName(sym.name)
       val localKey = shortToAlias.getOrElse(sn, sn) // use alias if provided
       sym.typ match
-        case SymbolMeta.Kind.Func(params, returnType, isDef) =>
+        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
           if functions.contains(localKey) then
             // Allow same-module sibling re-registration (same mangled name) and externs
@@ -275,7 +412,7 @@ class SyslAnalyzer:
             if !sym.isExtern && existing.name != sym.name then
               throw AnalysisError(s"imported symbol '$localKey' conflicts with existing function")
           else
-            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef)
+            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure, modes)
             externalSymbols += localKey
         case SymbolMeta.Kind.Data(dataType) =>
           if globalScope.contains(localKey) then
@@ -383,7 +520,7 @@ class SyslAnalyzer:
         case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _) if tps.nonEmpty =>
           if !genericTemplates.contains(name) && !functions.contains(name) then
             genericTemplates(name) = fd
-        case sd @ StructDeclAST(name, _, tps, _) if tps.nonEmpty =>
+        case sd @ StructDeclAST(name, _, tps, _, _) if tps.nonEmpty =>
           if !genericStructs.contains(name) then
             genericStructs(name) = sd
         case de @ DataEnumDeclAST(name, variants, tps, _) if tps.nonEmpty =>
@@ -409,7 +546,7 @@ class SyslAnalyzer:
     val pass0Enums = mutable.HashSet[String]()
     for decl <- program.decls do
       decl match
-        case StructDeclAST(name, _, typeParams, _) if typeParams.isEmpty =>
+        case StructDeclAST(name, _, typeParams, _, _) if typeParams.isEmpty =>
           if pass0Structs.contains(name) || structTypes.contains(name) then
             throw AnalysisError(s"duplicate struct: '$name'", decl)
           pass0Structs += name
@@ -446,7 +583,7 @@ class SyslAnalyzer:
             globalScope(name) = SymInfo(name, resolved, mutable = false)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
-        case sd @ StructDeclAST(name, fields, typeParams, _) =>
+        case sd @ StructDeclAST(name, fields, typeParams, _, invariants) =>
           if typeParams.nonEmpty then
             // Generic struct: store as template, don't resolve fields yet
             if genericStructs.contains(name) then
@@ -458,6 +595,7 @@ class SyslAnalyzer:
             val volSet = fields.zipWithIndex.collect { case ((_, _, true), i) => i }.toSet
             // Update the placeholder with resolved fields
             structTypes(name) = SyslType.StructType(name, resolvedFields, volSet)
+            if invariants.nonEmpty then structInvariants(name) = invariants
         case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _, isDef) =>
           // Duplicate-parameter-name check.
           val seenParams = mutable.HashSet[String]()
@@ -476,20 +614,39 @@ class SyslAnalyzer:
                   s"parameter '${params(i).name}' of '$name' must have a default value (all parameters after a defaulted parameter must also have defaults)",
                   decl,
                 )
+          // Validate mode constraints: no defaults on out/inout; no out/inout on self.
+          for p <- params do
+            if p.mode != ParamMode.In && p.default.isDefined then
+              throw AnalysisError(s"parameter '${p.name}' of '$name' is ${p.mode.toString.toLowerCase} and cannot have a default value", decl)
+            if p.mode != ParamMode.In && p.name == "__self__" then
+              throw AnalysisError(s"method receiver 'self' of '$name' cannot be '${p.mode.toString.toLowerCase}'", decl)
           if typeParams.nonEmpty then
             // Generic function: store as template, don't resolve types yet
             if genericTemplates.contains(name) || functions.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             if params.exists(_.default.isDefined) then
               throw AnalysisError(s"generic function '$name' cannot have default parameter values (not yet supported)", decl)
+            if params.exists(_.mode != ParamMode.In) then
+              throw AnalysisError(s"generic function '$name' cannot have 'out'/'inout' parameters (not yet supported)", decl)
             genericTemplates(name) = fd
           else
-            val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+            // For Out/Inout params, the call-side signature carries `*T` (hidden pointer);
+            // the body sees the inner `T` with autoIndirect via SymInfo. Store modes parallel
+            // to params so checkArgs and SMETA can consult them.
+            val paramTypes = params.map { p =>
+              val inner = resolveType(p.typ)
+              val sigType = p.mode match
+                case ParamMode.In => inner
+                case ParamMode.Out | ParamMode.Inout => PtrType(inner)
+              (p.name, sigType)
+            }
+            val paramModes = params.map(_.mode)
             val retType = returnType.map(resolveType).getOrElse(VoidType)
             if functions.contains(name) || genericTemplates.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
-            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty)
+            val isPure = fd.attributes.exists(_.name == "pure")
+            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes)
             // Record #deprecated info
             for attr <- fd.attributes if attr.name == "deprecated" do
               val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
@@ -607,9 +764,19 @@ class SyslAnalyzer:
               compileTimeConstants(name) = masked
               val mangled = if shouldMangle(name) then mangleName(name) else name
               compileTimeConstants(mangled) = masked
+              // Also publish the const in globalScope so name-based lookups during this pass
+              // (e.g. struct invariant validation) can find it.
+              if !globalScope.contains(name) then
+                globalScope(name) = SymInfo(mangled, declType, mutable = false, isConst = true)
             case None =>
               throw AnalysisError(s"const '$name' initializer is not compile-time evaluable", decl)
         case _ =>
+
+    // Validate all struct invariants now that constants are registered — catches wrong field
+    // names, unknown identifiers, and non-bool result types before any mutation site sees them.
+    for (structName, invariants) <- structInvariants do
+      val st = structTypes(structName)
+      validateStructInvariants(structName, st.fields, invariants)
 
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do
@@ -712,7 +879,7 @@ class SyslAnalyzer:
       case ExternVarDeclAST(name, typ, _) =>
         TExternVarDecl(name, resolveType(typ))
 
-      case StructDeclAST(name, _, _, _) =>
+      case StructDeclAST(name, _, _, _, _) =>
         val st = structTypes(name)
         TStructDecl(name, st.fields, st.volatileFields)
 
@@ -752,13 +919,21 @@ class SyslAnalyzer:
           if funInfo.name != name then functionDefaults(funInfo.name) = defaults
         val savedReturnType = currentReturnType
         currentReturnType = funInfo.returnType
-        for (paramName, paramType) <- funInfo.params do
-          currentScope(paramName) = SymInfo(paramName, paramType, true)
+        for (((paramName, paramType), idx) <- funInfo.params.zipWithIndex) do
+          val mode = funInfo.modeOf(idx)
+          // For Out/Inout, the body-scope symbol sees the inner type with autoIndirect,
+          // while the actual parameter storage is a `*T` the body auto-dereferences.
+          val (bodyType, autoInd) = mode match
+            case ParamMode.In => (paramType, false)
+            case ParamMode.Out | ParamMode.Inout => paramType match
+              case PtrType(inner) => (inner, true)
+              case other => (other, false) // shouldn't happen — collectDecls wrapped it
+          currentScope(paramName) = SymInfo(paramName, bodyType, true, autoIndirect = autoInd)
           // Auto-alias the implicit method receiver: `self` -> `__self__`
           // so method bodies can write `self.x` while the actual parameter
           // is named `__self__` to avoid conflicting with user-declared names.
           if paramName == "__self__" then
-            currentScope("self") = SymInfo(paramName, paramType, true)
+            currentScope("self") = SymInfo(paramName, bodyType, true, autoIndirect = autoInd)
         val savedExp = currentExpected
         currentExpected = if funInfo.returnType == VoidType then None else Some(funInfo.returnType)
         val tBody = try body match
@@ -779,54 +954,230 @@ class SyslAnalyzer:
           functions(name) = funInfo.copy(returnType = inferred)
           inferred
         else funInfo.returnType
-        val tParams = funInfo.params.map((n, t) => TParam(n, t))
+        val tParams = funInfo.params.zipWithIndex.map { case ((n, t), i) => TParam(n, t, None, funInfo.modeOf(i)) }
         currentReturnType = savedReturnType
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
+        if funInfo.isPure then validatePureFn(name, tBody, funInfo.params.map(_._1))
         TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef)
 
-      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _, isVolatile, isConst) =>
+      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
-        val tInit0 = analyzeExpr(init)
-        val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
-        val tInit1 = coerceLiteral(tInit0, declType)
-        // `const` requires a compile-time-evaluable initializer.
-        if isConst then
-          if !declType.isIntegral then
-            throw AnalysisError(s"const '$name' must have an integer type (found $declType); float/string/aggregate const is not yet supported")
-          tryConstEval(tInit1) match
-            case Some(n) =>
-              val masked = maskToType(n, declType)
-              val mangledName = if shouldMangle(name) then mangleName(name) else name
-              compileTimeConstants(name) = masked
-              compileTimeConstants(mangledName) = masked
-            case None =>
-              throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
-        // Constant folding: immutable vals with constant initializers become compile-time constants
-        val tInit = if !isMutable then
-          tryConstEval(tInit1) match
-            case Some(n) =>
-              val masked = maskToType(n, declType)
-              val mangledName = if shouldMangle(name) then mangleName(name) else name
-              compileTimeConstants(name) = masked
-              compileTimeConstants(mangledName) = masked
-              TIntLit(masked, declType)
-            case None => tInit1
-        else tInit1
-        val mangledVarName = if shouldMangle(name) then mangleName(name) else name
-        globalScope(name) = SymInfo(mangledVarName, declType, isMutable, isConst = isConst)
-        scopeStack = null
-        // `const` declarations do not generate a storage slot — callers inline the folded value
-        // via compileTimeConstants lookup during VarRef analysis.
-        if isConst then TConstDecl(mangledVarName, declType)
-        else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile)
+        // #address(N): MMIO var. No storage; reads/writes become direct loads/stores
+        // through a literal pointer. Must have an explicit type.
+        attrs.find(_.name == "address") match
+          case Some(addrAttr) =>
+            if isConst then throw AnalysisError(s"'#address' cannot be combined with 'const' on '$name'")
+            val addr = addrAttr.args match
+              case List(AttrPositional(AttrLitInt(n))) => n
+              case _ => throw AnalysisError(s"#address on '$name' expects a single integer address, e.g. #address(0xFF000000)")
+            val declTypeAST = typOpt.getOrElse(
+              throw AnalysisError(s"#address var '$name' must have an explicit type"))
+            val resolvedType = resolveType(declTypeAST)
+            val mangledName = if shouldMangle(name) then mangleName(name) else name
+            fixedAddressVars(name) = (addr, resolvedType)
+            fixedAddressVars(mangledName) = (addr, resolvedType)
+            globalScope(name) = SymInfo(mangledName, resolvedType, isMutable)
+            scopeStack = null
+            TConstDecl(mangledName, resolvedType) // no storage emitted
+          case None =>
+            analyzeRegularVarDecl(name, typOpt, init, isPrivate, isMutable, isVolatile, isConst)
+
+  /** Factored path for the non-#address module-level var decl. Same logic as before — pulled
+   *  into its own method so the #address branch can early-return cleanly. */
+  private def analyzeRegularVarDecl(name: String, typOpt: Option[TypeAST], init: ExpressionAST,
+      isPrivate: Boolean, isMutable: Boolean, isVolatile: Boolean, isConst: Boolean): TDecl =
+    val tInit0 = analyzeExpr(init)
+    val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
+    val tInit1 = coerceLiteral(tInit0, declType)
+    // `const` requires a compile-time-evaluable initializer.
+    if isConst then
+      if !declType.isIntegral then
+        throw AnalysisError(s"const '$name' must have an integer type (found $declType); float/string/aggregate const is not yet supported")
+      tryConstEval(tInit1) match
+        case Some(n) =>
+          val masked = maskToType(n, declType)
+          val mangledName = if shouldMangle(name) then mangleName(name) else name
+          compileTimeConstants(name) = masked
+          compileTimeConstants(mangledName) = masked
+        case None =>
+          throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
+    // Constant folding: immutable vals with constant initializers become compile-time constants
+    val tInit = if !isMutable then
+      tryConstEval(tInit1) match
+        case Some(n) =>
+          val masked = maskToType(n, declType)
+          val mangledName = if shouldMangle(name) then mangleName(name) else name
+          compileTimeConstants(name) = masked
+          compileTimeConstants(mangledName) = masked
+          TIntLit(masked, declType)
+        case None => tInit1
+    else tInit1
+    val mangledVarName = if shouldMangle(name) then mangleName(name) else name
+    globalScope(name) = SymInfo(mangledVarName, declType, isMutable, isConst = isConst)
+    scopeStack = null
+    // `const` declarations do not generate a storage slot — callers inline the folded value
+    // via compileTimeConstants lookup during VarRef analysis.
+    if isConst then TConstDecl(mangledVarName, declType)
+    else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile)
 
   private def warnDeprecated(name: String): Unit =
     if deprecations.contains(name) && !warnedDeprecations.contains(name) then
       warnedDeprecations += name
       val suffix = deprecations(name).map(r => s": $r").getOrElse("")
       System.err.println(s"warning: '$name' is deprecated$suffix")
+
+  /** Names of builtins that are safe to call from a #pure function. Arithmetic/comparison
+   *  intrinsics aren't calls (they lower to TBinary/TUnary) so they don't need listing.
+   *  `assert` is allowed because its only observable effect is termination — consistent
+   *  with Ada's policy of letting pragma Assert live in pure functions. IO, allocation
+   *  (malloc/free/…), and side-effecting traps (panic/abort/expect) are *not* listed. */
+  private val purePermittedBuiltins: Set[String] = Set("assert")
+
+  /** Analyze a #pure function body. Reject any construct that could have observable
+   *  side effects on state outside the function: writes to non-local vars, writes
+   *  through pointers/fields, calls to non-pure user functions, indirect calls, asm,
+   *  and IO/allocation builtins. Local-variable mutation is fine — it cannot escape.
+   *  Called after body analysis so the typed AST is complete; purity of callees is
+   *  read from their FunInfo, which was populated in the pre-collection pass. */
+  private def validatePureFn(funcName: String, body: TFunBody, paramNames: List[String]): Unit =
+    val localVars = mutable.HashSet.from(paramNames)
+
+    def reject(msg: String): Nothing = throw AnalysisError(s"#pure function '$funcName' $msg")
+
+    def isPureCallee(callee: String): Boolean =
+      // Self-recursion is always fine (the function has isPure=true in the table).
+      if callee == funcName then true
+      else if purePermittedBuiltins.contains(callee) then true
+      else if builtinFunctions.contains(callee) then false // other builtins are impure
+      else
+        // TCall carries the mangled name (for codegen), but the `functions` map is
+        // keyed by the *local* name. Look up by key first; if that misses, fall back
+        // to scanning FunInfo.name so cross-module calls (e.g. `mymod__sq`) resolve.
+        val info = functions.get(callee).orElse(functions.values.find(_.name == callee))
+        info match
+          case Some(i) => i.isPure
+          case None    => false // unknown: conservative reject
+
+    def checkExpr(e: TExpr): Unit = e match
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+      case _: TVarRef | _: TAddrOf | _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl => ()
+      case TArrayLit(els, _)               => els.foreach(checkExpr)
+      case TAddrOfIndex(a, i, _)           => checkExpr(a); checkExpr(i)
+      case TAddrOfField(o, _, _)           => checkExpr(o)
+      case TTempAddr(e, _)                 => checkExpr(e)
+      case TDeref(e, _)                    => checkExpr(e)
+      case TIndex(e, i, _)                 => checkExpr(e); checkExpr(i)
+      case TFieldAccess(o, _, _)           => checkExpr(o)
+      case _: TFieldPreInc =>
+        reject("cannot increment/decrement struct fields (side effect)")
+      case _: TFieldPreDec =>
+        reject("cannot increment/decrement struct fields (side effect)")
+      case _: TFieldPostInc =>
+        reject("cannot increment/decrement struct fields (side effect)")
+      case _: TFieldPostDec =>
+        reject("cannot increment/decrement struct fields (side effect)")
+      case _: TStructLit                   => ()
+      case TStructConstruct(_, args)       => args.foreach(checkExpr)
+      case TPreInc(n, _) =>
+        if !localVars.contains(n) then reject(s"cannot mutate non-local '$n'")
+      case TPreDec(n, _) =>
+        if !localVars.contains(n) then reject(s"cannot mutate non-local '$n'")
+      case TPostInc(n, _) =>
+        if !localVars.contains(n) then reject(s"cannot mutate non-local '$n'")
+      case TPostDec(n, _) =>
+        if !localVars.contains(n) then reject(s"cannot mutate non-local '$n'")
+      case TUnary(_, o, _)                 => checkExpr(o)
+      case TBinary(l, _, r, _)             => checkExpr(l); checkExpr(r)
+      case TCall(callee, args, _) =>
+        if !isPureCallee(callee) then reject(s"cannot call impure function '$callee'")
+        args.foreach(checkExpr)
+      case TIndirectCall(_, _, _)          => reject("cannot make indirect calls (purity of callee is unknown)")
+      case TCast(e, _)                     => checkExpr(e)
+      case TIfExpr(c, t, el, _)            => checkExpr(c); t.foreach(checkStmt); el.foreach(_.foreach(checkStmt))
+      case TMatchExpr(e, arms, deflt, _) =>
+        checkExpr(e)
+        for arm <- arms do
+          arm.guard.foreach(checkExpr)
+          arm.body.foreach(checkStmt)
+        deflt.foreach(_.foreach(checkStmt))
+      case _: TEnumConstruct               => () // data-less construction
+      case _: TNew =>
+        reject("cannot heap-allocate (`new`) — allocation is observable")
+      case _: TNewEnum =>
+        reject("cannot heap-allocate (`new`) — allocation is observable")
+      case _: TNewArray =>
+        reject("cannot heap-allocate (`new`) — allocation is observable")
+      case TLen(e, _)                      => checkExpr(e)
+      case TCap(e, _)                      => checkExpr(e)
+      case TSliceExpr(a, lo, hi, _)        => checkExpr(a); lo.foreach(checkExpr); hi.foreach(checkExpr)
+      case TAppend(_, _, _)                => reject("cannot append to a slice (allocating side effect)")
+      case TStringFromPtr(p, l, _)         => checkExpr(p); checkExpr(l)
+      case TStringFromSlice(s, _)          => checkExpr(s)
+      case TStr(e)                         => checkExpr(e)
+      case TFmtStr(e, _)                   => checkExpr(e)
+      case _: TClosure                     => reject("cannot construct closures (may capture mutable state)")
+      case TInterfaceBox(e, _)             => checkExpr(e)
+      case TInterfaceDispatch(_, _, _, _)  => reject("cannot make interface-dispatch calls (purity of impl is unknown)")
+      case TIntrinsicCall(name, args, _)   =>
+        if !purePermittedBuiltins.contains(name) then reject(s"cannot call intrinsic '$name'")
+        args.foreach(checkExpr)
+      case TRangeCheck(e, _, _, _)         => checkExpr(e)
+      case TAsmExpr(_, _)                  => reject("cannot contain asm expressions")
+
+    def checkStmt(s: TStmt): Unit = s match
+      case TVarStmt(n, _, init, _) =>
+        checkExpr(init)
+        localVars += n
+      case TDestructureStmt(ns, _, init) =>
+        checkExpr(init)
+        localVars ++= ns
+      case TDestructureAssignStmt(ns, _, init) =>
+        checkExpr(init)
+        for n <- ns do
+          if !localVars.contains(n) then reject(s"cannot write to non-local '$n'")
+      case TAssignStmt(target, value) =>
+        if !localVars.contains(target) then reject(s"cannot write to non-local '$target'")
+        checkExpr(value)
+      case TCompoundAssignStmt(target, _, value) =>
+        if !localVars.contains(target) then reject(s"cannot write to non-local '$target'")
+        checkExpr(value)
+      case TDerefAssignStmt(_, _) =>
+        reject("cannot write through a pointer (possible non-local side effect)")
+      case TIndexAssignStmt(_, _, _) =>
+        reject("cannot write to an index (possible non-local side effect)")
+      case TFieldAssignStmt(_, _, _) =>
+        reject("cannot write to a struct field (possible non-local side effect)")
+      case TFieldCompoundAssignStmt(_, _, _, _) =>
+        reject("cannot compound-assign to a struct field (possible non-local side effect)")
+      case TReturnStmt(v) =>
+        v.foreach(checkExpr)
+      case TWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TForStmt(init, c, u, b, _) =>
+        checkStmt(init); checkExpr(c); checkStmt(u); b.foreach(checkStmt)
+      case TDoWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TLoopStmt(b, _) =>
+        b.foreach(checkStmt)
+      case TBreakStmt(_) => ()
+      case TContinueStmt(_) => ()
+      case TDeferStmt(inner) =>
+        // Defer executes on function exit — allowed if inner is pure too.
+        checkStmt(inner)
+      case TAsmStmt(_) =>
+        reject("cannot contain asm blocks")
+      case TContractCheck(_, e, _) =>
+        checkExpr(e)
+      case TMultiStmt(ss) =>
+        ss.foreach(checkStmt)
+      case TExprStmt(e) =>
+        checkExpr(e)
+
+    body match
+      case TExprBody(e) => checkExpr(e)
+      case TBlockBody(stmts) => stmts.foreach(checkStmt)
 
   private def validateTestAttr(fd: FunDeclAST, info: FunInfo): Unit =
     fd.attributes.find(_.name == "test") match
@@ -898,7 +1249,7 @@ class SyslAnalyzer:
         functions(funcName) = FunInfo(funcName, List(("value", base)), base)
         val nullLit = TIntLit(0L, base)
         val body = TBlockBody(List(
-          TContractCheck("type predicate",
+          contract("type predicate",
             TBinary(TVarRef("value", base), "!=", nullLit, BoolType),
             s"not null pointer"),
           TExprStmt(TVarRef("value", base))
@@ -1013,11 +1364,277 @@ class SyslAnalyzer:
     // Body: if !predicate then abort(); value
     //   compiled as a block with a contract check + trailing expression return
     val body = TBlockBody(List(
-      TContractCheck("type predicate", tPred, s"type predicate '$aliasName'"),
+      contract("type predicate", tPred, s"type predicate '$aliasName'"),
       TExprStmt(TVarRef("value", base))
     ))
     specializedDecls += TFunDecl(funcName, List(TParam("value", base)), base, body)
     funcName
+
+  /** Generate a synthetic `__image_<EnumName>(v: i32) -> string` that returns the variant name
+   * matching the integer value of a simple-enum value. Unknown values return "?". */
+  private def materializeEnumImageFunc(et: SyslType.EnumType): String =
+    val funcName = s"__image_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), StringType)
+    val arms = et.variants.map { case (vname, _) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TStringLit(vname, StringType))))
+    }
+    val default = Some(List[TStmt](TExprStmt(TStringLit("?", StringType))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, StringType)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), StringType,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate a synthetic `__pos_<EnumName>(v: i32) -> i32` that returns the 0-based declaration
+   * position matching the integer value. Traps on an unknown value. */
+  private def materializeEnumPosFunc(et: SyslType.EnumType): String =
+    val funcName = s"__pos_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), I32)
+    val arms = et.variants.zipWithIndex.map { case ((vname, _), idx) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TIntLit(idx.toLong, I32))))
+    }
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"invalid enum value for ${et.name}::Pos")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate a synthetic `__val_<EnumName>(p: i32) -> i32` that returns the integer value at
+   * position `p` (0-based). Traps on a position out of range. */
+  private def materializeEnumValFunc(et: SyslType.EnumType): String =
+    val funcName = s"__val_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("p", I32)), I32)
+    val arms = et.variants.zipWithIndex.map { case ((vname, _), idx) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TIntLit(idx.toLong, I32))), None, List(TExprStmt(TIntLit(value, I32))))
+    }
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"out-of-range position for ${et.name}::Val")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("p", I32), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("p", I32)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate `__valid_<EnumName>(v: i32) -> bool` — true iff `v` equals one of the declared
+   * variant values, false otherwise. Non-throwing complement to the Val/Pos trap paths. */
+  private def materializeEnumValidFunc(et: SyslType.EnumType): String =
+    val funcName = s"__valid_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), BoolType)
+    val arms = et.variants.map { case (vname, _) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TBoolLit(true, BoolType))))
+    }
+    val default = Some(List[TStmt](TExprStmt(TBoolLit(false, BoolType))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, BoolType)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), BoolType,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate `__value_<EnumName>(s: string) -> i32` — match input string against each variant
+   * name (structural equality via TValuePattern on string) and return the matching variant's
+   * integer value. Traps on unknown input. */
+  private def materializeEnumValueFunc(et: SyslType.EnumType): String =
+    val funcName = s"__value_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("s", StringType)), I32)
+    val arms = et.variants.map { case (vname, _) =>
+      val value = members(vname)
+      TMatchArm(List(TValuePattern(TStringLit(vname, StringType))), None, List(TExprStmt(TIntLit(value, I32))))
+    }
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"no variant matches string for ${et.name}::Value")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("s", StringType), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("s", StringType)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate `__succ_<EnumName>(v: i32) -> i32` — next variant value by declaration order.
+   * Traps if `v` is the last variant or not a known variant. */
+  private def materializeEnumSuccFunc(et: SyslType.EnumType): String =
+    val funcName = s"__succ_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), I32)
+    val arms = et.variants.zipWithIndex.dropRight(1).map { case ((vname, _), idx) =>
+      val value = members(vname)
+      val nextValue = members(et.variants(idx + 1)._1)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TIntLit(nextValue, I32))))
+    }
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"no successor for ${et.name}::Succ (past last variant)")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate `__pred_<EnumName>(v: i32) -> i32` — previous variant value by declaration order.
+   * Traps if `v` is the first variant or not a known variant. */
+  private def materializeEnumPredFunc(et: SyslType.EnumType): String =
+    val funcName = s"__pred_${et.name}"
+    if functions.contains(funcName) then return funcName
+    val members = enumTypes(et.name)
+    functions(funcName) = FunInfo(funcName, List(("v", I32)), I32)
+    val arms = et.variants.zipWithIndex.drop(1).map { case ((vname, _), idx) =>
+      val value = members(vname)
+      val prevValue = members(et.variants(idx - 1)._1)
+      TMatchArm(List(TValuePattern(TIntLit(value, I32))), None, List(TExprStmt(TIntLit(prevValue, I32))))
+    }
+    val trap = contract("type attribute", TBoolLit(false, BoolType), s"no predecessor for ${et.name}::Pred (past first variant)")
+    val default = Some(List[TStmt](trap, TExprStmt(TIntLit(-1L, I32))))
+    val matchExpr = TMatchExpr(TVarRef("v", I32), arms.toList, default, I32)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", I32)), I32,
+      TBlockBody(List(TExprStmt(matchExpr))))
+    funcName
+
+  /** Generate `__succ_<AliasName>(v: base) -> base` — v+1 with upper-bound trap. */
+  private def materializeWithinSuccFunc(aliasName: String, nt: NamedType, base: SyslType, range: IntRange): String =
+    val funcName = s"__succ_${aliasName}"
+    if functions.contains(funcName) then return funcName
+    functions(funcName) = FunInfo(funcName, List(("v", base)), base)
+    val hi = if range.exclusiveHi then range.hi - 1 else range.hi
+    val check = contract("type attribute",
+      TBinary(TVarRef("v", base), "<", TIntLit(hi, base), BoolType),
+      s"no successor for $aliasName::Succ (value is at upper bound)")
+    val result = TBinary(TVarRef("v", base), "+", TIntLit(1L, base), base)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", base)), base,
+      TBlockBody(List(check, TExprStmt(result))))
+    funcName
+
+  /** Generate `__pred_<AliasName>(v: base) -> base` — v-1 with lower-bound trap. */
+  private def materializeWithinPredFunc(aliasName: String, nt: NamedType, base: SyslType, range: IntRange): String =
+    val funcName = s"__pred_${aliasName}"
+    if functions.contains(funcName) then return funcName
+    functions(funcName) = FunInfo(funcName, List(("v", base)), base)
+    val check = contract("type attribute",
+      TBinary(TVarRef("v", base), ">", TIntLit(range.lo, base), BoolType),
+      s"no predecessor for $aliasName::Pred (value is at lower bound)")
+    val result = TBinary(TVarRef("v", base), "-", TIntLit(1L, base), base)
+    specializedDecls += TFunDecl(funcName, List(TParam("v", base)), base,
+      TBlockBody(List(check, TExprStmt(result))))
+    funcName
+
+  /** Resolve a `Type::First` or `Type::Last` attribute to a compile-time constant expression. */
+  private def analyzeTypeFirstLast(typeName: String, typ: SyslType, isFirst: Boolean): TExpr =
+    val attrName = if isFirst then "First" else "Last"
+    typ match
+      case nt @ NamedType(_, base, nominal, Some(IntRange(lo, hi, excl)), _) =>
+        val value = if isFirst then lo else (if excl then hi - 1 else hi)
+        val lit = TIntLit(value, base)
+        if nominal then TCast(lit, nt) else applyTargetType(lit, nt)
+      case NamedType(_, _, _, Some(FloatRange(_, _, _)), _) =>
+        throw AnalysisError(s"$typeName::$attrName on a float-within type is not yet supported")
+      case NamedType(_, _, _, None, _) =>
+        throw AnalysisError(s"$typeName::$attrName requires a range-constrained type")
+      case et @ EnumType(name, variants) if simpleEnumTypes.contains(name) =>
+        if variants.isEmpty then throw AnalysisError(s"enum '$name' has no members")
+        val members = enumTypes(name)
+        val picked = if isFirst then variants.head._1 else variants.last._1
+        TIntLit(members(picked), I32)
+      case other =>
+        throw AnalysisError(s"$typeName::$attrName requires a range-constrained type or simple enum, got $other")
+
+  /** Resolve a `Type::Image(x)` attribute — returns a string representation of x. */
+  private def analyzeTypeImage(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        TCall(materializeEnumImageFunc(et), List(asInt), StringType)
+      case nt @ NamedType(_, base, _, _, _) if base.isNumeric || base == BoolType =>
+        val unwrapped = if tArg.typ == nt then TCast(tArg, base) else tArg
+        TStr(unwrapped)
+      case other =>
+        throw AnalysisError(s"$typeName::Image requires a simple enum or numeric constrained type, got $other")
+
+  /** Resolve a `Type::Pos(x)` attribute — returns the declaration position (0-based) for x. */
+  private def analyzeTypePos(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        TCall(materializeEnumPosFunc(et), List(asInt), I32)
+      case other =>
+        throw AnalysisError(s"$typeName::Pos requires a simple enum, got $other")
+
+  /** Resolve a `Type::Val(n)` attribute — returns the enum value at position n. */
+  private def analyzeTypeVal(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        if !tArg.typ.isIntegral then
+          throw AnalysisError(s"$typeName::Val argument must be integer, got ${tArg.typ}")
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        TCall(materializeEnumValFunc(et), List(asInt), I32)
+      case other =>
+        throw AnalysisError(s"$typeName::Val requires a simple enum, got $other")
+
+  /** Resolve `Type::Valid(x)` — returns bool without trapping. Checks whether `x` satisfies
+   * the type's constraints: range bounds for `within`-int types, known variant value for
+   * simple enums. Accepts the base numeric / integer type as argument. */
+  private def analyzeTypeValid(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    typ match
+      case nt @ NamedType(_, base, _, Some(IntRange(lo, hi, excl)), _) =>
+        if !tArg.typ.isIntegral then
+          throw AnalysisError(s"$typeName::Valid expects integer, got ${tArg.typ}")
+        val v = if tArg.typ == base then tArg else TCast(tArg, base)
+        val loOk = TBinary(v, ">=", TIntLit(lo, base), BoolType)
+        val hiOp = if excl then "<" else "<="
+        val hiOk = TBinary(v, hiOp, TIntLit(hi, base), BoolType)
+        TBinary(loOk, "&&", hiOk, BoolType)
+      case NamedType(_, _, _, Some(FloatRange(_, _, _)), _) =>
+        throw AnalysisError(s"$typeName::Valid on a float-within type is not yet supported")
+      case NamedType(_, _, _, None, _) =>
+        throw AnalysisError(s"$typeName::Valid requires a range-constrained type")
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        if !tArg.typ.isIntegral then
+          throw AnalysisError(s"$typeName::Valid expects integer, got ${tArg.typ}")
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        TCall(materializeEnumValidFunc(et), List(asInt), BoolType)
+      case other =>
+        throw AnalysisError(s"$typeName::Valid requires a range-constrained type or simple enum, got $other")
+
+  /** Resolve `Type::Value(s)` — parse a string into a simple-enum value. */
+  private def analyzeTypeValueString(typeName: String, typ: SyslType, argAst: ExpressionAST): TExpr =
+    val tArg = analyzeExpr(argAst)
+    if tArg.typ != StringType then
+      throw AnalysisError(s"$typeName::Value argument must be string, got ${tArg.typ}")
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        TCall(materializeEnumValueFunc(et), List(tArg), I32)
+      case other =>
+        throw AnalysisError(s"$typeName::Value requires a simple enum, got $other")
+
+  /** Resolve `Type::Succ(x)` / `Type::Pred(x)` — next/previous value. For simple enums,
+   * steps by declaration order; for int `within` types, by one. Both trap at the boundary. */
+  private def analyzeTypeSuccPred(typeName: String, typ: SyslType, argAst: ExpressionAST, isSucc: Boolean): TExpr =
+    val tArg = analyzeExpr(argAst)
+    val attrName = if isSucc then "Succ" else "Pred"
+    typ match
+      case et @ EnumType(name, _) if simpleEnumTypes.contains(name) =>
+        val asInt = if tArg.typ == I32 then tArg else TCast(tArg, I32)
+        val fn = if isSucc then materializeEnumSuccFunc(et) else materializeEnumPredFunc(et)
+        TCall(fn, List(asInt), I32)
+      case nt @ NamedType(_, base, _, Some(range: IntRange), _) =>
+        val unwrapped = if tArg.typ == nt then TCast(tArg, base) else tArg
+        val fn = if isSucc then materializeWithinSuccFunc(typeName, nt, base, range)
+                 else materializeWithinPredFunc(typeName, nt, base, range)
+        val raw = TCall(fn, List(unwrapped), base)
+        // Re-wrap in the named type (range-check at entry happens on the arg; the result is in-range by construction)
+        if nt.nominal then TCast(raw, nt) else applyTargetType(raw, nt)
+      case other =>
+        throw AnalysisError(s"$typeName::$attrName requires a simple enum or range-constrained int, got $other")
 
   /** `PtrType` / `RefType` may embed a recursive generic `StructType` placeholder (empty `fields`); use `structTypes`. */
   private def latestStruct(st: SyslType.StructType): SyslType.StructType =
@@ -1146,8 +1763,10 @@ class SyslAnalyzer:
     target match
       case nt @ NamedType(aliasName, base, _, rangeOpt, predFuncOpt) =>
         // Step 1: range check (if any). Literal values are validated at compile time.
+        // With contracts disabled, both the compile-time literal check and the runtime
+        // TRangeCheck emission are skipped — the value is cast without any guard.
         val afterRange: TExpr = rangeOpt match
-          case Some(range) =>
+          case Some(range) if contractsEnabled =>
             val literalChecked: Option[TExpr] = (expr, range) match
               case (TIntLit(v, _), IntRange(lo, hi, excl)) =>
                 val ok = if excl then v >= lo && v < hi else v >= lo && v <= hi
@@ -1159,6 +1778,9 @@ class SyslAnalyzer:
                 Some(if expr.typ == nt then expr else TCast(expr, nt))
               case _ => None
             literalChecked.getOrElse(TRangeCheck(expr, range, aliasName, nt))
+          case Some(_) =>
+            // Contracts off: bare cast, no range verification.
+            if expr.typ == nt then expr else TCast(expr, nt)
           case None => expr
         // Step 2: where-predicate check (if any). Synth function does the trap and returns value.
         val afterPred: TExpr = predFuncOpt match
@@ -1627,7 +2249,22 @@ class SyslAnalyzer:
           // else: leave unfilled — checkArgs will report an arity error
     result.toList
 
-  private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
+  /** For an `out`/`inout` argument, take an already-analyzed arg (seen as plain T) and
+   *  wrap it as a pointer so it matches the hidden `*T` param slot. Accepts any simple
+   *  lvalue: a variable reference, a field access, an index, or an already-dereferenced
+   *  pointer (`&*p` collapses to `p`). Anything else is rejected — literals, temporaries,
+   *  and calls have no address. */
+  private def lvalueToAddr(name: String, pName: String, mode: ParamMode, arg: TExpr): TExpr =
+    val inner = arg.typ
+    arg match
+      case TVarRef(n, t)              => TAddrOf(n, PtrType(t))
+      case TFieldAccess(obj, idx, t)  => TAddrOfField(obj, idx, PtrType(t))
+      case TIndex(arr, ix, t)         => TAddrOfIndex(arr, ix, PtrType(t))
+      case TDeref(p, _)               => p // &*p = p
+      case _ =>
+        throw AnalysisError(s"argument '$pName' of '$name' is '${mode.toString.toLowerCase}' and requires an lvalue (variable, field, or index), got ${arg.getClass.getSimpleName}")
+
+  private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr], modes: List[ParamMode] = Nil): List[TExpr] =
     // Try to fill missing trailing args with defaults registered for the function.
     val filledArgs =
       if args.length < params.length then
@@ -1642,26 +2279,37 @@ class SyslAnalyzer:
       else args
     if filledArgs.length != params.length then
       throw AnalysisError(s"function '$name' expects ${params.length} argument(s), got ${args.length}")
-    filledArgs.zip(params).map { case (arg, (pName, pType)) =>
-      val coerced = coerceLiteral(arg, pType)
-      // Special case: `self` (always *T inside methods, mangled as __self__) auto-derefs
-      // when passed to a T param. This is the ONLY implicit *T → T allowed; elsewhere write `*ptr`.
-      val selfDeref = (coerced, pType) match
-        case (TVarRef("__self__", PtrType(st: StructType)), pSt: StructType) if st.name == pSt.name =>
-          Some(TDeref(coerced, pSt))
-        case _ => None
-      if selfDeref.isEmpty && !compatible(coerced.typ, pType) then
-        throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
-      // Insert explicit conversions for codegen
-      val converted = selfDeref.getOrElse {
-        (coerced.typ, pType) match
-          case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
-          case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
-          case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
-            TInterfaceBox(coerced, iface)
-          case _ => coerced
-      }
-      applyTargetType(converted, pType)
+    filledArgs.zip(params).zipWithIndex.map { case ((arg, (pName, pType)), idx) =>
+      val mode = if modes.isEmpty then ParamMode.In else modes(idx)
+      mode match
+        case ParamMode.Out | ParamMode.Inout =>
+          // pType is PtrType(inner). Require arg to be T-valued lvalue, wrap with TAddrOf*.
+          val innerT = pType match
+            case PtrType(t) => t
+            case _          => pType // defensive — collectDecls wrapped it
+          if !compatible(arg.typ, innerT) then
+            throw AnalysisError(s"argument '$pName' of '$name' is '${mode.toString.toLowerCase}' expecting $innerT, got ${arg.typ}")
+          lvalueToAddr(name, pName, mode, arg)
+        case ParamMode.In =>
+          val coerced = coerceLiteral(arg, pType)
+          // Special case: `self` (always *T inside methods, mangled as __self__) auto-derefs
+          // when passed to a T param. This is the ONLY implicit *T → T allowed; elsewhere write `*ptr`.
+          val selfDeref = (coerced, pType) match
+            case (TVarRef("__self__", PtrType(st: StructType)), pSt: StructType) if st.name == pSt.name =>
+              Some(TDeref(coerced, pSt))
+            case _ => None
+          if selfDeref.isEmpty && !compatible(coerced.typ, pType) then
+            throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
+          // Insert explicit conversions for codegen
+          val converted = selfDeref.getOrElse {
+            (coerced.typ, pType) match
+              case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+              case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
+              case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
+                TInterfaceBox(coerced, iface)
+              case _ => coerced
+          }
+          applyTargetType(converted, pType)
     }
 
   private def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
@@ -1681,7 +2329,7 @@ class SyslAnalyzer:
     val requireChecks: List[TStmt] = contracts.collect { case ContractClauseAST(ContractRequire, e, msg) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"require expression must be bool, got ${te.typ}")
-      TContractCheck("precondition", te, msg.getOrElse("precondition"))
+      contract("precondition", te, msg.getOrElse("precondition"))
     }
     // Enable `old()` interception while analyzing ensure clauses. Snapshot declarations
     // accumulated during analysis are emitted as TVarStmts at the very top of the body so
@@ -1692,7 +2340,7 @@ class SyslAnalyzer:
     val ensureChecks: List[TStmt] = try contracts.collect { case ContractClauseAST(ContractEnsure, e, msg) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"ensure expression must be bool, got ${te.typ}")
-      TContractCheck("postcondition", te, msg.getOrElse("postcondition"))
+      contract("postcondition", te, msg.getOrElse("postcondition"))
     } finally inEnsureAnalysis = savedEnsureMode
     val capturedSnapshots = oldSnapshots.drop(snapshotsBefore).toList
     oldSnapshots.remove(snapshotsBefore, capturedSnapshots.length)
@@ -1729,9 +2377,10 @@ class SyslAnalyzer:
     case TReturnStmt(None) =>
       TMultiStmt(ensureChecks ++ List(TReturnStmt(None)))
     case TReturnStmt(_) => stmt // void return with value — already rejected upstream
-    case TWhileStmt(c, body)          => TWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks))
-    case TForStmt(init, c, upd, body) => TForStmt(init, c, upd, rewriteReturnsForEnsure(body, returnType, ensureChecks))
-    case TDoWhileStmt(c, body)        => TDoWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks))
+    case TWhileStmt(c, body, lbl)          => TWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
+    case TForStmt(init, c, upd, body, lbl) => TForStmt(init, c, upd, rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
+    case TDoWhileStmt(c, body, lbl)        => TDoWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
+    case TLoopStmt(body, lbl)              => TLoopStmt(rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
     case TDeferStmt(inner)            => TDeferStmt(rewriteStmtForEnsure(inner, returnType, ensureChecks))
     case TMultiStmt(xs)               => TMultiStmt(xs.map(x => rewriteStmtForEnsure(x, returnType, ensureChecks)))
     case TExprStmt(e)                 => TExprStmt(rewriteExprForEnsure(e, returnType, ensureChecks))
@@ -1816,7 +2465,13 @@ class SyslAnalyzer:
         else
           if scopeStack != null then
             currentScope(name) = SymInfo(name, declType, isMutable)
-          TVarStmt(name, declType, tInitFinal, isVolatile)
+          val baseStmt = TVarStmt(name, declType, tInitFinal, isVolatile)
+          // Fire struct invariants on the freshly-initialized value, if any are declared.
+          val checks = declType match
+            case st: StructType if structInvariants.contains(st.name) =>
+              buildStructInvariantChecks(VarRefAST(name), st.name)
+            case _ => Nil
+          if checks.isEmpty then baseStmt else TMultiStmt(baseStmt :: checks)
 
       case DestructureStmtAST(names, init, isMutable) =>
         val tInit = analyzeExpr(init)
@@ -1846,18 +2501,55 @@ class SyslAnalyzer:
         else
           throw AnalysisError(s"cannot mix declared and undeclared names in destructuring")
 
+      case AssignStmtAST(target, value) if fixedAddressVars.contains(target) =>
+        // #address MMIO write: `reg = v` lowers to `*(addr as *T) = v`.
+        val (addr, typ) = fixedAddressVars(target)
+        val tValue0 = analyzeExpr(value)
+        val tValue = applyTargetType(coerceLiteral(tValue0, typ), typ)
+        TDerefAssignStmt(TCast(TIntLit(addr, I64), PtrType(typ)), tValue)
+
       case AssignStmtAST(target, value) =>
         val tValue0 = analyzeExpr(value)
         val sym = lookupOrCreate(target, tValue0.typ)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = applyTargetType(tValue0, sym.typ)
-        TAssignStmt(sym.name, tValue)
+        // Out/Inout param: lower `x = v` to `*ptr = v` so the store flows back through
+        // the caller's lvalue.
+        val baseStmt: TStmt =
+          if sym.autoIndirect then TDerefAssignStmt(TVarRef(sym.name, PtrType(sym.typ)), tValue)
+          else TAssignStmt(sym.name, tValue)
+        val checks = sym.typ match
+          case st: StructType if structInvariants.contains(st.name) =>
+            buildStructInvariantChecks(VarRefAST(target), st.name)
+          case _ => Nil
+        if checks.isEmpty then baseStmt else TMultiStmt(baseStmt :: checks)
+
+      case CompoundAssignStmtAST(target, op, value) if fixedAddressVars.contains(target) =>
+        // #address MMIO read-modify-write: `reg += v` lowers to `*(ptr) = *(ptr) op v`.
+        val (addr, typ) = fixedAddressVars(target)
+        val tValue0 = analyzeExpr(value)
+        val tValue = coerceLiteral(tValue0, typ)
+        val ptrExpr = TCast(TIntLit(addr, I64), PtrType(typ))
+        val loadExpr = TDeref(ptrExpr, typ)
+        TDerefAssignStmt(ptrExpr, TBinary(loadExpr, op, tValue, typ))
 
       case CompoundAssignStmtAST(target, op, value) =>
         val sym = lookup(target)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = analyzeExpr(value)
-        TCompoundAssignStmt(sym.name, op, tValue)
+        // Out/Inout param: lower `x += v` to `*ptr = *ptr op v` for the same reason as
+        // plain assignment.
+        val baseStmt: TStmt =
+          if sym.autoIndirect then
+            val ptr = TVarRef(sym.name, PtrType(sym.typ))
+            val load = TDeref(ptr, sym.typ)
+            TDerefAssignStmt(ptr, TBinary(load, op, tValue, sym.typ))
+          else TCompoundAssignStmt(sym.name, op, tValue)
+        val checks = sym.typ match
+          case st: StructType if structInvariants.contains(st.name) =>
+            buildStructInvariantChecks(VarRefAST(target), st.name)
+          case _ => Nil
+        if checks.isEmpty then baseStmt else TMultiStmt(baseStmt :: checks)
 
       case DerefAssignStmtAST(pointer, value) =>
         val tPointer = analyzeExpr(pointer)
@@ -1885,7 +2577,9 @@ class SyslAnalyzer:
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
-        TFieldAssignStmt(resolvedObj, idx, tValue)
+        val assign = TFieldAssignStmt(resolvedObj, idx, tValue)
+        val checks = buildStructInvariantChecks(obj, structType.name)
+        if checks.isEmpty then assign else TMultiStmt(assign :: checks)
 
       case FieldCompoundAssignStmtAST(obj, field, op, value) =>
         val tObj = analyzeExpr(obj)
@@ -1898,7 +2592,9 @@ class SyslAnalyzer:
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
-        TFieldCompoundAssignStmt(resolvedObj, idx, op, tValue)
+        val assign = TFieldCompoundAssignStmt(resolvedObj, idx, op, tValue)
+        val checks = buildStructInvariantChecks(obj, structType.name)
+        if checks.isEmpty then assign else TMultiStmt(assign :: checks)
 
       case ReturnStmtAST(value) =>
         TReturnStmt(value.map { v =>
@@ -1906,47 +2602,91 @@ class SyslAnalyzer:
           applyTargetType(tv, currentReturnType)
         })
 
-      case ForStmtAST(init, cond, update, body) =>
+      case ForStmtAST(init, cond, update, body, label) =>
+        checkLoopLabelUnique(label)
+        // Hoist variant state to caller scope (before pushScope for for-init).
+        val (preDecls, rewrittenBody) = extractVariants(body)
+        val tPreDecls = preDecls.map(analyzeStmt)
         pushScope()
         val tInit = analyzeStmt(init)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"for condition must be bool, got ${tCond.typ}")
         loopDepth += 1
+        loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(body)
+        val tBody = analyzeBlock(rewrittenBody)
         popScope()
         val tUpdate = analyzeStmt(update)
+        loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
         popScope()
-        TForStmt(tInit, tCond, tUpdate, tBody)
+        val loopStmt = TForStmt(tInit, tCond, tUpdate, tBody, label)
+        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
 
-      case WhileStmtAST(cond, body) =>
+      case WhileStmtAST(cond, body, label) =>
+        checkLoopLabelUnique(label)
+        val (preDecls, rewrittenBody) = extractVariants(body)
+        val tPreDecls = preDecls.map(analyzeStmt)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
+        loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(body)
+        val tBody = analyzeBlock(rewrittenBody)
         popScope()
+        loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
-        TWhileStmt(tCond, tBody)
+        val loopStmt = TWhileStmt(tCond, tBody, label)
+        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
 
-      case DoWhileStmtAST(cond, body) =>
+      case DoWhileStmtAST(cond, body, label) =>
+        checkLoopLabelUnique(label)
+        val (preDecls, rewrittenBody) = extractVariants(body)
+        val tPreDecls = preDecls.map(analyzeStmt)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"do/while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
+        loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(body)
+        val tBody = analyzeBlock(rewrittenBody)
         popScope()
+        loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
-        TDoWhileStmt(tCond, tBody)
+        val loopStmt = TDoWhileStmt(tCond, tBody, label)
+        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
 
-      case BreakStmtAST() =>
+      case LoopStmtAST(body, label) =>
+        checkLoopLabelUnique(label)
+        val (preDecls, rewrittenBody) = extractVariants(body)
+        val tPreDecls = preDecls.map(analyzeStmt)
+        loopDepth += 1
+        loopLabelStack += label
+        pushScope()
+        val tBody = analyzeBlock(rewrittenBody)
+        popScope()
+        loopLabelStack.remove(loopLabelStack.length - 1)
+        loopDepth -= 1
+        val loopStmt = TLoopStmt(tBody, label)
+        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
+
+      case VariantStmtAST(_) =>
+        throw AnalysisError("variant statement must appear at the top level of a loop body")
+
+      case BreakStmtAST(label) =>
         if loopDepth == 0 then throw AnalysisError("break outside of loop")
-        TBreakStmt
+        label.foreach { lbl =>
+          if !loopLabelStack.contains(Some(lbl)) then
+            throw AnalysisError(s"break '$lbl': no enclosing loop with that label")
+        }
+        TBreakStmt(label)
 
-      case ContinueStmtAST() =>
+      case ContinueStmtAST(label) =>
         if loopDepth == 0 then throw AnalysisError("continue outside of loop")
-        TContinueStmt
+        label.foreach { lbl =>
+          if !loopLabelStack.contains(Some(lbl)) then
+            throw AnalysisError(s"continue '$lbl': no enclosing loop with that label")
+        }
+        TContinueStmt(label)
 
       case DeferStmtAST(body) =>
         TDeferStmt(analyzeStmt(body))
@@ -1957,7 +2697,7 @@ class SyslAnalyzer:
       case InvariantStmtAST(e) =>
         val te = analyzeExpr(e)
         if te.typ != BoolType then throw AnalysisError(s"invariant expression must be bool, got ${te.typ}")
-        TContractCheck("invariant", te, "invariant")
+        contract("invariant", te, "invariant")
 
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
@@ -2045,6 +2785,40 @@ class SyslAnalyzer:
         if s.startsWith("s:") then analyzeInterpolatedString(s.substring(2))
         else if s.startsWith("f:") then analyzeFormattedString(s.substring(2))
         else TStringLit(s, StringType)
+      case TypeAttrAST(typeName, attr, argOpt) =>
+        val resolved: SyslType =
+          if typeAliases.contains(typeName) then resolveType(NamedTypeAST(typeName))
+          else if simpleEnumTypes.contains(typeName) then simpleEnumTypes(typeName)
+          else throw AnalysisError(s"'$typeName' is not a type with attributes (expected constrained type or simple enum)")
+        attr match
+          case "First" | "Last" =>
+            if argOpt.isDefined then throw AnalysisError(s"$typeName::$attr takes no arguments")
+            analyzeTypeFirstLast(typeName, resolved, attr == "First")
+          case "Range" =>
+            throw AnalysisError(s"$typeName::Range is only valid in a 'for i in $typeName::Range' loop")
+          case "Image" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Image requires one argument"))
+            analyzeTypeImage(typeName, resolved, arg)
+          case "Pos" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Pos requires one argument"))
+            analyzeTypePos(typeName, resolved, arg)
+          case "Val" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Val requires one argument"))
+            analyzeTypeVal(typeName, resolved, arg)
+          case "Succ" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Succ requires one argument"))
+            analyzeTypeSuccPred(typeName, resolved, arg, isSucc = true)
+          case "Pred" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Pred requires one argument"))
+            analyzeTypeSuccPred(typeName, resolved, arg, isSucc = false)
+          case "Value" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Value requires one argument"))
+            analyzeTypeValueString(typeName, resolved, arg)
+          case "Valid" =>
+            val arg = argOpt.getOrElse(throw AnalysisError(s"$typeName::Valid requires one argument"))
+            analyzeTypeValid(typeName, resolved, arg)
+          case other =>
+            throw AnalysisError(s"unknown type attribute: $typeName::$other (expected First, Last, Range, Image, Value, Valid, Pos, Val, Succ, Pred)")
       case TupleLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
         val tupleType = SyslType.tupleType(tElems.map(_.typ))
@@ -2214,25 +2988,28 @@ class SyslAnalyzer:
             scanCaptures(e, locals)
             locals
           case TReturnStmt(None) => locals
-          case TWhileStmt(c, body) =>
+          case TWhileStmt(c, body, _) =>
             scanCaptures(c, locals)
             scanStmtSeq(body, locals)
             locals
-          case TForStmt(init, c, upd, body) =>
+          case TForStmt(init, c, upd, body, _) =>
             var Lf = scanStmtInSeq(init, locals)
             scanCaptures(c, Lf)
             Lf = scanStmtInSeq(upd, Lf)
             scanStmtSeq(body, Lf)
             locals
-          case TDoWhileStmt(c, body) =>
+          case TDoWhileStmt(c, body, _) =>
             scanStmtSeq(body, locals)
             scanCaptures(c, locals)
+            locals
+          case TLoopStmt(body, _) =>
+            scanStmtSeq(body, locals)
             locals
           case TDeferStmt(inner) =>
             scanStmtInSeq(inner, locals)
             locals
           case TAsmStmt(_) => locals
-          case TBreakStmt | TContinueStmt => locals
+          case _: TBreakStmt | _: TContinueStmt => locals
           case _ => locals
         tBody match
           case TExprBody(e) => scanCaptures(e, paramNames)
@@ -2370,6 +3147,12 @@ class SyslAnalyzer:
       case VarRefAST(name) =>
         if name == "_" then
           throw AnalysisError("cannot read from '_' — it is a write-only discard binding")
+        // #address MMIO var: read lowers to *(addr as *T). Keep the cast explicit so
+        // each codegen can emit a volatile load at the literal address.
+        if fixedAddressVars.contains(name) then
+          val (addr, typ) = fixedAddressVars(name)
+          TDeref(TCast(TIntLit(addr, I64), PtrType(typ)), typ)
+        else
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
           val f = functions(name)
@@ -2390,6 +3173,10 @@ class SyslAnalyzer:
                 compileTimeConstants.getOrElse(name,
                   throw AnalysisError(s"const '$name' missing folded value")))
               TIntLit(v, sym.typ)
+            case Some(sym) if sym.autoIndirect =>
+              // Out/Inout param: reads auto-dereference the hidden pointer so the body
+              // sees a plain T value.
+              TDeref(TVarRef(sym.name, PtrType(sym.typ)), sym.typ)
             case Some(sym) => TVarRef(sym.name, sym.typ)
             case None =>
               if variantToEnum.contains(name) then
@@ -2496,7 +3283,7 @@ class SyslAnalyzer:
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
           case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
-          case SymbolMeta.Kind.Func(params, retType, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
+          case SymbolMeta.Kind.Func(params, retType, _, _, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
           case SymbolMeta.Kind.Interface(_) => throw AnalysisError(s"'$nsName.$member' is an interface type, not a value")
@@ -2767,7 +3554,7 @@ class SyslAnalyzer:
           TStructConstruct(st, checkedArgs)
         else
           val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ), List(typeArg))
-          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
           TCall(mangled, checkedArgs, funInfo.returnType)
 
       case IndirectCallAST(callee, args) =>
@@ -2789,9 +3576,9 @@ class SyslAnalyzer:
         val funcSym = meta.publicSymbols.find(s => shortName(s.name) == method)
           .getOrElse(throw AnalysisError(s"module '$nsName' has no function '$method'"))
         funcSym.typ match
-          case SymbolMeta.Kind.Func(params, returnType, _) =>
+          case SymbolMeta.Kind.Func(params, returnType, _, _, modes) =>
             val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
-            val checkedArgs = checkArgs(s"$nsName.$method", paramPairs, tArgs)
+            val checkedArgs = checkArgs(s"$nsName.$method", paramPairs, tArgs, modes)
             TCall(funcSym.name, checkedArgs, returnType)
           case _ => throw AnalysisError(s"'$nsName.$method' is not a function")
 
@@ -2799,7 +3586,7 @@ class SyslAnalyzer:
         // Trait method call: Ord.cmp(a, b)
         val tArgs = args.map(analyzeExpr)
         val (mangled, funInfo) = analyzeTraitCall(name, method, tArgs)
-        val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+        val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
         TCall(mangled, checkedArgs, funInfo.returnType)
 
       case MethodCallAST(obj, method, args) =>
@@ -2834,7 +3621,7 @@ class SyslAnalyzer:
                 case _ => TTempAddr(tObj, PtrType(st))  // method on temporary — copy into temp cell
             case _ => tObj // PtrType or RefType — already a pointer
           val funInfo = functions(funcName)
-          val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
+          val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs, funInfo.modes.drop(1)) // .tail skips self param
           TCall(funInfo.name, selfArg :: checkedArgs, funInfo.returnType)
         else if structToTemplate.contains(structName) && {
           val (templateName, _) = structToTemplate(structName)
@@ -2853,7 +3640,7 @@ class SyslAnalyzer:
             case _ => tObj
           val allArgTypes = selfArg.typ :: tArgs.map(_.typ)
           val (mangled, funInfo) = instantiateGeneric(templateFuncName, allArgTypes)
-          val checkedArgs = checkArgs(mangled, funInfo.params.tail, tArgs)
+          val checkedArgs = checkArgs(mangled, funInfo.params.tail, tArgs, funInfo.modes.drop(1))
           TCall(mangled, selfArg :: checkedArgs, funInfo.returnType)
         else
           // Fall back to calling a function-typed field
@@ -2869,6 +3656,16 @@ class SyslAnalyzer:
               throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
+        // For each param, the expected arg type during analysis. For Out/Inout the
+        // body-visible type is the inner T (not the hidden `*T`), so the user-written
+        // arg is analyzed against T — matching what's actually written at the call site.
+        def expectedFor(paramTypes: List[SyslType], modes: List[ParamMode]): List[SyslType] =
+          paramTypes.zipWithIndex.map { case (t, i) =>
+            val m = if modes.isEmpty then ParamMode.In else modes(i)
+            (m, t) match
+              case (ParamMode.Out | ParamMode.Inout, PtrType(inner)) => inner
+              case _ => t
+          }
         // If any named args are present, resolve them via param-name lookup
         // and type the resulting positional list. Otherwise, use the fast path.
         val tArgs: List[TExpr] =
@@ -2885,15 +3682,22 @@ class SyslAnalyzer:
                 (f.map(_._1), f.map(_._2))
               else
                 throw AnalysisError(s"named arguments are not supported for '$name'")
-            resolveNamedArgsTyped(name, paramNames, paramTypes, args)
+            // For named-args, use the body-visible expected types (unwrap *T for out/inout).
+            val modesForNamed =
+              if traitCallRewrite.contains(name) then functions(traitCallRewrite(name)).modes
+              else if functions.contains(name) || builtinFunctions.contains(name) then lookupFun(name).modes
+              else Nil
+            resolveNamedArgsTyped(name, paramNames, expectedFor(paramTypes, modesForNamed), args)
           else
             // Determine expected types for args if callee has known concrete signature
             val argExpected: List[Option[SyslType]] =
               if traitCallRewrite.contains(name) then
                 val mangled = traitCallRewrite(name)
-                functions(mangled).params.map(p => Some(p._2))
+                val fi = functions(mangled)
+                expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
               else if functions.contains(name) || builtinFunctions.contains(name) then
-                lookupFun(name).params.map(p => Some(p._2))
+                val fi = lookupFun(name)
+                expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
               else if structTypes.contains(name) then
                 structTypes(name).fields.map(f => Some(f._2))
               else
@@ -2907,13 +3711,13 @@ class SyslAnalyzer:
         if traitCallRewrite.contains(name) then
           val mangled = traitCallRewrite(name)
           val funInfo = functions(mangled)
-          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
           TCall(mangled, checkedArgs, funInfo.returnType)
         else
         // Check if it's a direct function call or an indirect call through a variable
         if genericTemplates.contains(name) then
           val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ))
-          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
           TCall(mangled, checkedArgs, funInfo.returnType)
         else if functions.contains(name) || builtinFunctions.contains(name) then
           warnDeprecated(name)
@@ -2928,7 +3732,7 @@ class SyslAnalyzer:
                 TIndirectCall(autoCall, checkedArgs, fRet)
               case _ => throw AnalysisError(s"def '$name' returns ${funInfo.returnType}, not a callable type")
           else
-            val checkedArgs = checkArgs(name, funInfo.params, tArgs)
+            val checkedArgs = checkArgs(name, funInfo.params, tArgs, funInfo.modes)
             TCall(funInfo.name, checkedArgs, funInfo.returnType)
         else if typeAliases.contains(name) then
           // Named-type cast: Meters(3), SafeAge(x). Resolves to a TCast whose target is the
