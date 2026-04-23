@@ -599,16 +599,18 @@ host echo server via `hostfwd=tcp`.
 
 Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
 
-    val TCP_MAX_SOCKETS   = 16
-    val TCP_SEND_BUF      = 1024
-    val TCP_RECV_BUF      = 1024
-    val TCP_MSS_ADV       = 1460
-    val TCP_MAX_SEG       = 480
-    val TCP_RTO_TICKS     = 50
-    val TCP_TW_TICKS      = 200
-    val TCP_FW2_TICKS     = 6000
-    val TCP_MAX_RETRIES   = 5
-    val TCP_REORDER_SLOTS = 4
+    val TCP_MAX_SOCKETS     = 16
+    val TCP_SEND_BUF        = 1024
+    val TCP_RECV_BUF        = 1024
+    val TCP_MSS_ADV         = 1460
+    val TCP_MAX_SEG         = 480
+    val TCP_RTO_INITIAL     = 100
+    val TCP_RTO_MIN         = 20
+    val TCP_RTO_MAX         = 6000
+    val TCP_TW_TICKS        = 200
+    val TCP_FW2_TICKS       = 6000
+    val TCP_MAX_RETRIES     = 5
+    val TCP_REORDER_SLOTS   = 4
 
     val TCP_STATE_CLOSED      = 0
     val TCP_STATE_SYN_SENT    = 1
@@ -674,6 +676,13 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         reorder: [4]TcpReorderEntry
         fin_seq: u32
         fin_pending: int
+        srtt: int
+        rttvar: int
+        rto: int
+        rtt_measured: int
+        rtt_sample_valid: int
+        rtt_sample_seq: u32
+        rtt_sample_time: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -699,6 +708,11 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
             tcp_sockets[i].accept_waiter = -1
             tcp_sockets[i].parent_listen = -1
             tcp_sockets[i].fin_pending = 0
+            tcp_sockets[i].srtt = 0
+            tcp_sockets[i].rttvar = 0
+            tcp_sockets[i].rto = TCP_RTO_INITIAL
+            tcp_sockets[i].rtt_measured = 0
+            tcp_sockets[i].rtt_sample_valid = 0
             var k = 0
             while k < TCP_REORDER_SLOTS
                 tcp_sockets[i].reorder[k].in_use = 0
@@ -811,11 +825,82 @@ is `payload_len` bytes of send_buf starting at `payload_seq`
 
 
     inet_tcp_arm_rtx(s: int)
-        tcp_sockets[s].rtx_deadline = int(uptime()) + TCP_RTO_TICKS
+        tcp_sockets[s].rtx_deadline = int(uptime()) + tcp_sockets[s].rto
 
     inet_tcp_disarm_rtx(s: int)
         tcp_sockets[s].rtx_deadline = 0
         tcp_sockets[s].retries = 0
+
+
+RFC 6298 RTT measurement + RTO update. Caller guarantees `r` is
+ticks (clock granularity = 1 tick).
+
+First measurement: SRTT = R, RTTVAR = R/2, RTO = SRTT + 4*RTTVAR.
+Subsequent:        RTTVAR += (|SRTT - R| - RTTVAR) >> 2
+                   SRTT   += (R - SRTT) >> 3
+                   RTO    =  SRTT + 4*RTTVAR
+
+RTO is clamped to [TCP_RTO_MIN, TCP_RTO_MAX].
+
+    inet_tcp_rtt_update(s: int, r: int)
+        var rr = r
+        if rr < 1
+            rr = 1
+        if tcp_sockets[s].rtt_measured == 0
+            tcp_sockets[s].srtt = rr
+            tcp_sockets[s].rttvar = rr >> 1
+            tcp_sockets[s].rtt_measured = 1
+        else
+            var diff = tcp_sockets[s].srtt - rr
+            if diff < 0
+                diff = 0 - diff
+            val old_var = tcp_sockets[s].rttvar
+            val old_srtt = tcp_sockets[s].srtt
+            tcp_sockets[s].rttvar = (3 * old_var + diff) >> 2
+            tcp_sockets[s].srtt = (7 * old_srtt + rr) >> 3
+            if tcp_sockets[s].srtt < 1
+                tcp_sockets[s].srtt = 1
+        var new_rto = tcp_sockets[s].srtt + (tcp_sockets[s].rttvar << 2)
+        if new_rto < TCP_RTO_MIN
+            new_rto = TCP_RTO_MIN
+        if new_rto > TCP_RTO_MAX
+            new_rto = TCP_RTO_MAX
+        tcp_sockets[s].rto = new_rto
+
+Karn's rule: after a retransmit the original segment's timing is
+ambiguous, so discard any in-flight RTT sample. Doubles the RTO
+with cap.
+
+    inet_tcp_rto_backoff(s: int)
+        tcp_sockets[s].rtt_sample_valid = 0
+        var doubled = tcp_sockets[s].rto << 1
+        if doubled > TCP_RTO_MAX
+            doubled = TCP_RTO_MAX
+        tcp_sockets[s].rto = doubled
+
+Start an RTT sample for the next ACK covering `expected_ack`. If a
+sample is already in flight, keep it — measuring once per RTT is
+sufficient per RFC 6298.
+
+    inet_tcp_rtt_start_sample(s: int, expected_ack: u32)
+        if tcp_sockets[s].rtt_sample_valid != 0
+            return
+        tcp_sockets[s].rtt_sample_valid = 1
+        tcp_sockets[s].rtt_sample_seq = expected_ack
+        tcp_sockets[s].rtt_sample_time = int(uptime())
+
+If the incoming ACK covers our sample seq (ack >= sample_seq),
+take the RTT measurement and clear the sample.
+
+    inet_tcp_rtt_maybe_sample(s: int, ack: u32)
+        if tcp_sockets[s].rtt_sample_valid == 0
+            return
+        val target = tcp_sockets[s].rtt_sample_seq
+        if tcp_seq_lt(ack, target) != 0
+            return
+        val r = int(uptime()) - tcp_sockets[s].rtt_sample_time
+        tcp_sockets[s].rtt_sample_valid = 0
+        inet_tcp_rtt_update(s, r)
 
 
 One-byte status reply — close() completion.
@@ -907,6 +992,11 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].rtx_deadline = 0
         tcp_sockets[s].tw_deadline = 0
         tcp_sockets[s].fin_pending = 0
+        tcp_sockets[s].srtt = 0
+        tcp_sockets[s].rttvar = 0
+        tcp_sockets[s].rto = TCP_RTO_INITIAL
+        tcp_sockets[s].rtt_measured = 0
+        tcp_sockets[s].rtt_sample_valid = 0
         var k = 0
         while k < TCP_REORDER_SLOTS
             tcp_sockets[s].reorder[k].in_use = 0
@@ -938,6 +1028,11 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 tcp_sockets[i].accept_waiter = -1
                 tcp_sockets[i].parent_listen = -1
                 tcp_sockets[i].fin_pending = 0
+                tcp_sockets[i].srtt = 0
+                tcp_sockets[i].rttvar = 0
+                tcp_sockets[i].rto = TCP_RTO_INITIAL
+                tcp_sockets[i].rtt_measured = 0
+                tcp_sockets[i].rtt_sample_valid = 0
                 var k = 0
                 while k < TCP_REORDER_SLOTS
                     tcp_sockets[i].reorder[k].in_use = 0
@@ -1240,6 +1335,7 @@ overlapping sends with written = 0.
         val seq = tcp_sockets[s].snd_nxt
         tcp_sockets[s].snd_nxt = seq + u32(n)
         inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH, seq, seq, n)
+        inet_tcp_rtt_start_sample(s, seq + u32(n))
         inet_tcp_arm_rtx(s)
         n
 
@@ -1512,8 +1608,11 @@ the connection down.
                     tcp_sockets[s].send_len -= eff
                     tcp_sockets[s].snd_una = ack
                     tcp_sockets[s].snd_wnd = wnd
+                    inet_tcp_rtt_maybe_sample(s, ack)
                     if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
                         inet_tcp_disarm_rtx(s)
+                    else
+                        inet_tcp_arm_rtx(s)
 
         var did_data = 0
         var did_fin = 0
@@ -1622,6 +1721,7 @@ socket for retransmit and TIME_WAIT deadlines.
                         else
                             tcp_sockets[i].retries += 1
                             inet_tcp_retransmit(i)
+                            inet_tcp_rto_backoff(i)
                             inet_tcp_arm_rtx(i)
                 val tw = tcp_sockets[i].tw_deadline
                 if tw != 0
@@ -1756,6 +1856,49 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
                 inet_tcp_close_slot(s, 0)
                 return 5
             i += 1
+
+        // RFC 6298 RTO math. Scratch socket starts fresh in alloc
+        // state (rtt_measured = 0). We overwrote the above fields
+        // directly instead of going through alloc, so rebaseline
+        // the RTT state first.
+        tcp_sockets[s].srtt = 0
+        tcp_sockets[s].rttvar = 0
+        tcp_sockets[s].rto = TCP_RTO_INITIAL
+        tcp_sockets[s].rtt_measured = 0
+        tcp_sockets[s].rtt_sample_valid = 0
+
+        // First measurement R=50 → SRTT=50, RTTVAR=25, RTO=150.
+        inet_tcp_rtt_update(s, 50)
+        if tcp_sockets[s].srtt != 50
+            inet_tcp_close_slot(s, 0)
+            return 6
+        if tcp_sockets[s].rttvar != 25
+            inet_tcp_close_slot(s, 0)
+            return 7
+        if tcp_sockets[s].rto != 150
+            inet_tcp_close_slot(s, 0)
+            return 8
+
+        // Second measurement R=40.
+        //   RTTVAR = 25 + (|50-40| - 25) >> 2 = 25 + (-15 >> 2) = 25 + (-4) = 21
+        //   SRTT   = 50 + (40-50) >> 3         = 50 + (-10 >> 3) = 50 + (-2) = 48
+        //   RTO    = 48 + 4*21 = 48 + 84 = 132
+        inet_tcp_rtt_update(s, 40)
+        if tcp_sockets[s].srtt != 48
+            inet_tcp_close_slot(s, 0)
+            return 9
+        if tcp_sockets[s].rttvar != 21
+            inet_tcp_close_slot(s, 0)
+            return 10
+        if tcp_sockets[s].rto != 132
+            inet_tcp_close_slot(s, 0)
+            return 11
+
+        // Backoff doubles RTO: 132 → 264 (still below MAX=6000).
+        inet_tcp_rto_backoff(s)
+        if tcp_sockets[s].rto != 264
+            inet_tcp_close_slot(s, 0)
+            return 12
 
         inet_tcp_close_slot(s, 0)
         0
