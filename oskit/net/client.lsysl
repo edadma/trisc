@@ -39,6 +39,7 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_TCP_CLOSE    = 13
     val INET_CMD_TCP_LISTEN   = 14
     val INET_CMD_TCP_ACCEPT   = 15
+    val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val INET_MAX_DATA     = 512
     val INET_MAX_TCP_SEG  = 480
@@ -365,3 +366,19 @@ error.
             peer_port[0] = reply[6]
             peer_port[1] = reply[7]
         int(reply[1]) & 0xff
+
+
+### tcp_ooo_selftest (test-only)
+
+Triggers the inet server's TCP out-of-order reassembly self-test.
+Returns 0 on pass, a nonzero error code on failure.
+
+    tcp_ooo_selftest() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_TCP_OOO_SELFTEST)
+        var reply: [1]byte
+        ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff

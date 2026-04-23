@@ -50,6 +50,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_CLOSE    = 13
     val INET_CMD_TCP_LISTEN   = 14
     val INET_CMD_TCP_ACCEPT   = 15
+    val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
 Capacity limits.
@@ -648,6 +649,18 @@ high byte (0), second (offset 2) is the low byte / index.
         // SYN_RCVD child reaches ESTABLISHED.
 
 
+Test-only: drive inet_tcp_state_step through a deliberately out-of-
+order segment sequence against a scratch socket and verify the
+reorder queue yields the right rcv_nxt / recv_buf contents. Reply
+is 1 byte: 0 on pass, nonzero error code on failure.
+
+    inet_handle_tcp_ooo_selftest(sender: int, buf: *byte)
+        val rc = inet_tcp_ooo_selftest()
+        var reply: [1]byte
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+
 ### UDP — inbound
 
 Dispatch an IPv4/UDP frame that already passed the destination-IP
@@ -840,6 +853,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_CLOSE   -> inet_handle_tcp_close(sender, buf)
                     INET_CMD_TCP_LISTEN  -> inet_handle_tcp_listen(sender, buf)
                     INET_CMD_TCP_ACCEPT  -> inet_handle_tcp_accept(sender, buf)
+                    INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte
                         reply[0] = byte(-1)

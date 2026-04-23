@@ -96,7 +96,7 @@ echo "=== Build ramdisk apps ==="
 # that fails to build is listed but doesn't abort the whole build —
 # this is a bring-up harness, not a release. MakeAarch64RamdiskMain
 # picks up whatever ELFs actually land in /tmp/slix-aarch64/bin/.
-APPS=(login nsh su ls cat echo whoami uptime ps stat touch mkdir rmdir rm mv chmod head tail wc grep hello count write test_net test_nic test_udp_echo test_tcp test_timer test_tcp_srv test_tcp_mcl test_tcp_big test_tcp_rx test_tcp_vfs test_tcp_lsv test_tcp_fcw)
+APPS=(login nsh su ls cat echo whoami uptime ps stat touch mkdir rmdir rm mv chmod head tail wc grep hello count write test_net test_nic test_udp_echo test_tcp test_timer test_tcp_srv test_tcp_mcl test_tcp_big test_tcp_rx test_tcp_vfs test_tcp_lsv test_tcp_fcw test_tcp_ooo)
 for app in "${APPS[@]}"; do
     bash "$ARCH_DIR/build_prog.sh" "$app" > "$OUT/build-$app.log" 2>&1
     if [ ! -f "$OUT/bin/$app" ]; then

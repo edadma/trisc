@@ -612,6 +612,20 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("test_tcp_lsv: closed")
   }
 
+  "aarch64 tcp: out-of-order reassembly self-test" in {
+    // test_tcp_ooo triggers inet's reorder-queue self-test via a
+    // dedicated IPC op. The test exercises the stash → drain path
+    // without depending on slirp to actually reorder packets, which
+    // it doesn't. See inet_tcp_ooo_selftest for the exact sequence:
+    // two out-of-order segs at seq 200 and 250 get stashed, then an
+    // in-order seg at seq 100 fills the gap and drains both stashed
+    // segs in order.
+    qemu.send("test_tcp_ooo\n")
+    val output = qemu.waitFor("test_tcp_ooo: ok")
+    output should include("test_tcp_ooo: ok")
+    output should not include "test_tcp_ooo: failed"
+  }
+
   "aarch64 crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))

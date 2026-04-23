@@ -599,15 +599,16 @@ host echo server via `hostfwd=tcp`.
 
 Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
 
-    val TCP_MAX_SOCKETS = 16
-    val TCP_SEND_BUF    = 1024
-    val TCP_RECV_BUF    = 1024
-    val TCP_MSS_ADV     = 1460
-    val TCP_MAX_SEG     = 480
-    val TCP_RTO_TICKS   = 50
-    val TCP_TW_TICKS    = 200
-    val TCP_FW2_TICKS   = 6000
-    val TCP_MAX_RETRIES = 5
+    val TCP_MAX_SOCKETS   = 16
+    val TCP_SEND_BUF      = 1024
+    val TCP_RECV_BUF      = 1024
+    val TCP_MSS_ADV       = 1460
+    val TCP_MAX_SEG       = 480
+    val TCP_RTO_TICKS     = 50
+    val TCP_TW_TICKS      = 200
+    val TCP_FW2_TICKS     = 6000
+    val TCP_MAX_RETRIES   = 5
+    val TCP_REORDER_SLOTS = 4
 
     val TCP_STATE_CLOSED      = 0
     val TCP_STATE_SYN_SENT    = 1
@@ -627,6 +628,12 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     val TCP_F_RST = 0x04
     val TCP_F_PSH = 0x08
     val TCP_F_ACK = 0x10
+
+    struct TcpReorderEntry
+        in_use: int
+        seq: u32
+        len: int
+        data: [480]byte
 
     struct TcpSocket
         in_use: int
@@ -664,6 +671,9 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         accept_count: int
         accept_waiter: int
         parent_listen: int
+        reorder: [4]TcpReorderEntry
+        fin_seq: u32
+        fin_pending: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -688,6 +698,11 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
             tcp_sockets[i].accept_count = 0
             tcp_sockets[i].accept_waiter = -1
             tcp_sockets[i].parent_listen = -1
+            tcp_sockets[i].fin_pending = 0
+            var k = 0
+            while k < TCP_REORDER_SLOTS
+                tcp_sockets[i].reorder[k].in_use = 0
+                k += 1
             i += 1
 
 
@@ -891,6 +906,11 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].parent_listen = -1
         tcp_sockets[s].rtx_deadline = 0
         tcp_sockets[s].tw_deadline = 0
+        tcp_sockets[s].fin_pending = 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            tcp_sockets[s].reorder[k].in_use = 0
+            k += 1
 
 
     inet_tcp_alloc() -> int
@@ -917,6 +937,11 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 tcp_sockets[i].accept_count = 0
                 tcp_sockets[i].accept_waiter = -1
                 tcp_sockets[i].parent_listen = -1
+                tcp_sockets[i].fin_pending = 0
+                var k = 0
+                while k < TCP_REORDER_SLOTS
+                    tcp_sockets[i].reorder[k].in_use = 0
+                    k += 1
                 return i
             i += 1
         -1
@@ -1317,6 +1342,85 @@ checksum, locates the matching socket, and delegates.
         inet_tcp_state_step(s, flags, seq, ack, wnd, payload, payload_len)
 
 
+Reorder queue for out-of-order segments.
+
+`inet_tcp_reorder_store` stashes a segment whose seq > rcv_nxt but
+still inside the advertised recv window. Duplicates (seq already
+stored) and partial overlaps are rejected — peer will retransmit.
+Returns 1 if stored, 0 if dropped.
+
+    inet_tcp_reorder_store(s: int, seq: u32, payload: *byte,
+                           payload_len: int) -> int
+        if payload_len <= 0
+            return 0
+        if payload_len > TCP_MAX_SEG
+            return 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            if tcp_sockets[s].reorder[k].in_use != 0
+                val e_seq = tcp_sockets[s].reorder[k].seq
+                val e_end = e_seq + u32(tcp_sockets[s].reorder[k].len)
+                val n_end = seq + u32(payload_len)
+                if tcp_seq_lt(seq, e_end) != 0
+                    if tcp_seq_lt(e_seq, n_end) != 0
+                        return 0
+            k += 1
+        var j = 0
+        while j < TCP_REORDER_SLOTS
+            if tcp_sockets[s].reorder[j].in_use == 0
+                tcp_sockets[s].reorder[j].in_use = 1
+                tcp_sockets[s].reorder[j].seq = seq
+                tcp_sockets[s].reorder[j].len = payload_len
+                var i = 0
+                while i < payload_len
+                    tcp_sockets[s].reorder[j].data[i] = payload[i]
+                    i += 1
+                return 1
+            j += 1
+        0
+
+`inet_tcp_drain_reorder` is called after a contiguous append to
+recv_buf. It scans the reorder queue for slots whose seq matches
+the new rcv_nxt, copies their bytes into recv_buf, advances
+rcv_nxt, and frees the slot. Continues until no slot lines up.
+If a pending FIN (fin_pending != 0, fin_seq == rcv_nxt) lines up,
+processes it too.
+
+Returns non-zero if any data was drained (caller uses this to
+decide whether an ACK needs to be re-emitted). Bit 0 = data,
+bit 1 = FIN processed.
+
+    inet_tcp_drain_reorder(s: int) -> int
+        var result = 0
+        var progress = 1
+        while progress != 0
+            progress = 0
+            var k = 0
+            while k < TCP_REORDER_SLOTS
+                if tcp_sockets[s].reorder[k].in_use != 0
+                    if tcp_sockets[s].reorder[k].seq == tcp_sockets[s].rcv_nxt
+                        val take = tcp_sockets[s].reorder[k].len
+                        val room = TCP_RECV_BUF - tcp_sockets[s].recv_len
+                        if take <= room
+                            var i = 0
+                            while i < take
+                                tcp_sockets[s].recv_buf[tcp_sockets[s].recv_len + i] = tcp_sockets[s].reorder[k].data[i]
+                                i += 1
+                            tcp_sockets[s].recv_len += take
+                            tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
+                            tcp_sockets[s].reorder[k].in_use = 0
+                            result = result | 1
+                            progress = 1
+                k += 1
+            if tcp_sockets[s].fin_pending != 0
+                if tcp_sockets[s].fin_seq == tcp_sockets[s].rcv_nxt
+                    tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(1)
+                    tcp_sockets[s].peer_fin = 1
+                    tcp_sockets[s].fin_pending = 0
+                    result = result | 2
+        result
+
+
 Per-socket state transition for one validated segment.
 
     inet_tcp_state_step(s: int, flags: int, seq: u32, ack: u32,
@@ -1412,6 +1516,7 @@ the connection down.
                         inet_tcp_disarm_rtx(s)
 
         var did_data = 0
+        var did_fin = 0
         if payload_len > 0
             if seq == tcp_sockets[s].rcv_nxt
                 val room = TCP_RECV_BUF - tcp_sockets[s].recv_len
@@ -1425,12 +1530,32 @@ the connection down.
                 tcp_sockets[s].recv_len += take
                 tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
                 did_data = 1
+            else if tcp_seq_lt(tcp_sockets[s].rcv_nxt, seq) != 0
+                // seq > rcv_nxt: out-of-order. Stash if it fits in
+                // our advertised window. If the stash fails (full
+                // queue, overlap), peer will retransmit — the dup
+                // re-ACK path below still advertises rcv_nxt.
+                val seg_end = seq + u32(payload_len)
+                val wnd_room = u32(TCP_RECV_BUF - tcp_sockets[s].recv_len)
+                val wnd_end = tcp_sockets[s].rcv_nxt + wnd_room
+                if tcp_seq_le(seg_end, wnd_end) != 0
+                    inet_tcp_reorder_store(s, seq, payload, payload_len)
 
-        var did_fin = 0
         if (flags & TCP_F_FIN) != 0
-            if seq + u32(payload_len) == tcp_sockets[s].rcv_nxt
+            val fin_end = seq + u32(payload_len)
+            if fin_end == tcp_sockets[s].rcv_nxt
                 tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(1)
                 tcp_sockets[s].peer_fin = 1
+                did_fin = 1
+            else if tcp_seq_lt(tcp_sockets[s].rcv_nxt, fin_end) != 0
+                // FIN is out-of-order — stash its seq and process
+                // when drain catches up.
+                tcp_sockets[s].fin_seq = fin_end
+                tcp_sockets[s].fin_pending = 1
+
+        if did_data != 0
+            val drained = inet_tcp_drain_reorder(s)
+            if (drained & 2) != 0
                 did_fin = 1
 
         if did_data != 0
@@ -1539,3 +1664,98 @@ socket for retransmit and TIME_WAIT deadlines.
                 inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
                     tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
             return
+
+
+Test-only: drive inet_tcp_state_step against a scratch TCP socket
+with a deliberately out-of-order segment sequence. Verifies stash,
+drain, and recv_buf ordering. Returns 0 on pass, 1..6 on failure.
+
+Sequence exercised:
+  1. Seg A at seq 200 len 50  (bytes 'B') — out-of-order, stashed.
+  2. Seg B at seq 250 len 50  (bytes 'C') — out-of-order, stashed.
+  3. Seg C at seq 100 len 100 (bytes 'A') — in-order, triggers
+     drain of the two stashed slots so rcv_nxt advances 100 → 300.
+Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
+100 'A' + 50 'B' + 50 'C'.
+
+    inet_tcp_ooo_selftest() -> int
+        val s = TCP_MAX_SOCKETS - 1
+        tcp_sockets[s].in_use = 1
+        tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+        tcp_sockets[s].rcv_nxt = u32(100)
+        tcp_sockets[s].snd_una = u32(1)
+        tcp_sockets[s].snd_nxt = u32(1)
+        tcp_sockets[s].recv_len = 0
+        tcp_sockets[s].send_len = 0
+        tcp_sockets[s].fin_pending = 0
+        tcp_sockets[s].peer_fin = 0
+        tcp_sockets[s].our_fin_sent = 0
+        tcp_sockets[s].recv_waiter = -1
+        tcp_sockets[s].send_waiter = -1
+        tcp_sockets[s].connect_waiter = -1
+        tcp_sockets[s].close_waiter = -1
+        tcp_sockets[s].accept_waiter = -1
+        tcp_sockets[s].is_listen = 0
+        tcp_sockets[s].owner_tid = -1
+        tcp_sockets[s].local_port = 0
+        tcp_sockets[s].remote_port = 0
+        tcp_sockets[s].remote_ip = u32(0)
+        tcp_sockets[s].rtx_deadline = 0
+        tcp_sockets[s].tw_deadline = 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            tcp_sockets[s].reorder[k].in_use = 0
+            k += 1
+
+        var seg_b: [50]byte
+        var i = 0
+        while i < 50
+            seg_b[i] = byte('B')
+            i += 1
+        inet_tcp_state_step(s, TCP_F_ACK, u32(200), u32(1), 1024, seg_b, 50)
+        if tcp_sockets[s].rcv_nxt != u32(100)
+            inet_tcp_close_slot(s, 0)
+            return 1
+
+        var seg_c: [50]byte
+        i = 0
+        while i < 50
+            seg_c[i] = byte('C')
+            i += 1
+        inet_tcp_state_step(s, TCP_F_ACK, u32(250), u32(1), 1024, seg_c, 50)
+        if tcp_sockets[s].rcv_nxt != u32(100)
+            inet_tcp_close_slot(s, 0)
+            return 2
+
+        var seg_a: [100]byte
+        i = 0
+        while i < 100
+            seg_a[i] = byte('A')
+            i += 1
+        inet_tcp_state_step(s, TCP_F_ACK, u32(100), u32(1), 1024, seg_a, 100)
+        if tcp_sockets[s].rcv_nxt != u32(300)
+            inet_tcp_close_slot(s, 0)
+            return 3
+        if tcp_sockets[s].recv_len != 200
+            inet_tcp_close_slot(s, 0)
+            return 4
+
+        i = 0
+        while i < 100
+            if tcp_sockets[s].recv_buf[i] != byte('A')
+                inet_tcp_close_slot(s, 0)
+                return 5
+            i += 1
+        while i < 150
+            if tcp_sockets[s].recv_buf[i] != byte('B')
+                inet_tcp_close_slot(s, 0)
+                return 5
+            i += 1
+        while i < 200
+            if tcp_sockets[s].recv_buf[i] != byte('C')
+                inet_tcp_close_slot(s, 0)
+                return 5
+            i += 1
+
+        inet_tcp_close_slot(s, 0)
+        0
