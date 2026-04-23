@@ -52,6 +52,7 @@ Command bytes for TFS and TTY server protocols.
     val FS_CMD_SEEK    = 14
     val FS_CMD_CONNECT = 15
     val FS_CMD_PIPE    = 18
+    val FS_CMD_ACCEPT  = 19
     val TTY_CMD_PUTS   = 3
 
     val SYS_GETUID  = 61
@@ -464,6 +465,34 @@ Returns a handle or -1 on error.
         ipc_send(port, msg, nlen + 1, reply, 9)
         if reply[0] != 0
             return -1
+        msg_read_i32(reply, 1)
+
+Accept a connection on a `tcp-listen:` handle. Blocks until a
+peer completes the three-way handshake, then returns a new
+handle that `read`/`write_handle`/`close` already work on — no
+tcp_* wrappers needed. Fills `peer_ip` (4 bytes) and `peer_port`
+(2 bytes, big-endian) if non-null. Returns the child handle on
+success or -1 on error.
+
+    accept(h: int, peer_ip: *byte, peer_port: *byte) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(FS_CMD_ACCEPT)
+        msg_write_i32(msg, 1, h)
+        var reply: [11]byte
+        ipc_send(port, msg, 5, reply, 11)
+        if reply[0] != 0
+            return -1
+        if i64(peer_ip) != i64(0)
+            peer_ip[0] = reply[5]
+            peer_ip[1] = reply[6]
+            peer_ip[2] = reply[7]
+            peer_ip[3] = reply[8]
+        if i64(peer_port) != i64(0)
+            peer_port[0] = reply[9]
+            peer_port[1] = reply[10]
         msg_read_i32(reply, 1)
 
 Seek to a position in an open file.

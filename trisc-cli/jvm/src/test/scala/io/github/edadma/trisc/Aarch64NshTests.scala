@@ -542,6 +542,36 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       srvThread.join(2000)
   }
 
+  "aarch64 tcp: VFS listen bridge (connect/accept/read/write/close)" in {
+    // test_tcp_lsv listens via connect("tcp-listen:7890") + accept()
+    // + read/write/close — no tcp_listen/tcp_accept wrappers. Proves
+    // that OFT_TYPE_TCP_LISTEN + FS_CMD_ACCEPT let a passive TCP
+    // server run entirely through VFS. QEMU's hostfwd=tcp::28080-:7890
+    // forwards host dials of 127.0.0.1:28080 into the guest.
+    qemu.send("test_tcp_lsv\n")
+    qemu.waitFor("test_tcp_lsv: listening h=")
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(10000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write("ping\n".getBytes("UTF-8"))
+      out.flush()
+      val buf = new Array[Byte](32)
+      val n = in.read(buf)
+      n should be > 0
+      new String(buf, 0, n, "UTF-8") should include("ping")
+    finally sock.close()
+
+    val output = qemu.waitFor("test_tcp_lsv: closed")
+    output should include("test_tcp_lsv: accepted ch=")
+    output should include("test_tcp_lsv: got ")
+    output should include("test_tcp_lsv: sent=")
+    output should include("test_tcp_lsv: closed")
+  }
+
   "aarch64 crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))
