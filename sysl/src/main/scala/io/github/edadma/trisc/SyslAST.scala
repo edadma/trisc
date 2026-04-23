@@ -110,6 +110,7 @@ case class ReturnStmtAST(value: Option[ExpressionAST]) extends StmtAST
 case class WhileStmtAST(cond: ExpressionAST, body: List[StmtAST], label: Option[String] = None) extends StmtAST
 case class ForStmtAST(init: StmtAST, cond: ExpressionAST, update: StmtAST, body: List[StmtAST], label: Option[String] = None) extends StmtAST
 case class DoWhileStmtAST(cond: ExpressionAST, body: List[StmtAST], label: Option[String] = None) extends StmtAST
+case class LoopStmtAST(body: List[StmtAST], label: Option[String] = None) extends StmtAST
 case class BreakStmtAST(label: Option[String] = None) extends StmtAST
 case class ContinueStmtAST(label: Option[String] = None) extends StmtAST
 case class DeferStmtAST(body: StmtAST) extends StmtAST

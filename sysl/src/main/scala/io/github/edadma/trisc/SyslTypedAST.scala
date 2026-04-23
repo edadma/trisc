@@ -41,6 +41,7 @@ case class TReturnStmt(value: Option[TExpr]) extends TStmt
 case class TWhileStmt(cond: TExpr, body: List[TStmt], label: Option[String] = None) extends TStmt
 case class TForStmt(init: TStmt, cond: TExpr, update: TStmt, body: List[TStmt], label: Option[String] = None) extends TStmt
 case class TDoWhileStmt(cond: TExpr, body: List[TStmt], label: Option[String] = None) extends TStmt
+case class TLoopStmt(body: List[TStmt], label: Option[String] = None) extends TStmt
 case class TBreakStmt(label: Option[String] = None) extends TStmt
 case class TContinueStmt(label: Option[String] = None) extends TStmt
 case class TDeferStmt(body: TStmt) extends TStmt

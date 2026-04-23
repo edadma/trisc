@@ -154,6 +154,11 @@ object SyslPrettyPrinter:
       val prefix = label.map(l => s"$l: ").getOrElse("")
       s"${prefix}do\n$bodyStr\n${IND * depth}while ${exprToSource(cond, depth)}"
 
+    case LoopStmtAST(body, label) =>
+      val bodyStr = body.map(s => s"${IND * (depth + 1)}${stmtToSource(s, depth + 1)}").mkString("\n")
+      val prefix = label.map(l => s"$l: ").getOrElse("")
+      s"${prefix}loop\n$bodyStr"
+
     case BreakStmtAST(label)    => label.map(l => s"break $l").getOrElse("break")
     case ContinueStmtAST(label) => label.map(l => s"continue $l").getOrElse("continue")
 

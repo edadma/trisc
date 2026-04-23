@@ -104,7 +104,7 @@ class SyslParser extends StandardTokenParsers {
       "false" ^^^ "false"
 
   lazy val structDecl: Parser[StructDeclAST] =
-    "struct" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(structMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+    "struct" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(structMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("struct")) ^^ {
       case name ~ tps ~ members =>
         val fields = members.collect { case Left(f) => f }
         val invariants = members.collect { case Right(e) => e }
@@ -120,7 +120,7 @@ class SyslParser extends StandardTokenParsers {
     opt("volatile") ~ ident ~ (":" ~> typeRef) ^^ { case vol ~ name ~ typ => (name, typ, vol.isDefined) }
 
   lazy val enumDecl: Parser[DeclAST] =
-    "enum" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(enumVariantOrMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+    "enum" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(enumVariantOrMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("enum")) ^^ {
       case name ~ tps ~ members =>
         // If any member has fields, it's a data enum
         val hasData = members.exists(_.isInstanceOf[Right[?, ?]]) || tps.nonEmpty
@@ -156,7 +156,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val traitDecl: Parser[TraitDeclAST] =
     "trait" ~> ident ~ ("[" ~> ident <~ "]") ~
-      (Newline ~> Indent ~> rep1sep(traitMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+      (Newline ~> Indent ~> rep1sep(traitMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("trait")) ^^ {
         case name ~ tparam ~ methods => TraitDeclAST(name, tparam, methods)
       }
 
@@ -171,7 +171,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val implDecl: Parser[ImplDeclAST] =
     "impl" ~> ident ~ ("[" ~> typeRef <~ "]") ~
-      (Newline ~> Indent ~> rep1sep(implMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+      (Newline ~> Indent ~> rep1sep(implMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("impl")) ^^ {
         case name ~ typ ~ methods => ImplDeclAST(name, typ, methods)
       }
 
@@ -182,7 +182,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val interfaceDecl: Parser[InterfaceDeclAST] =
     "interface" ~> ident ~
-      (Newline ~> Indent ~> rep1sep(interfaceMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) ^^ {
+      (Newline ~> Indent ~> rep1sep(interfaceMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("interface")) ^^ {
         case name ~ members =>
           val methods = members.collect { case Right(m) => m }
           val embedded = members.collect { case Left(n) => n }
@@ -420,7 +420,7 @@ class SyslParser extends StandardTokenParsers {
     "variant" ~> expr ^^ VariantStmtAST.apply
 
   lazy val stmt: Parser[StmtAST] =
-    asmStmt | invariantStmt | variantStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    asmStmt | invariantStmt | variantStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
     mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut.isMutable) } |
@@ -435,9 +435,9 @@ class SyslParser extends StandardTokenParsers {
   lazy val continueStmt: Parser[ContinueStmtAST] =
     "continue" ~> opt(ident) ^^ ContinueStmtAST.apply
 
-  /** `label: for ...` / `label: while ...` / `label: do ...` — labeled loop form. */
+  /** `label: for ...` / `label: while ...` / `label: do ...` / `label: loop ...` — labeled loop form. */
   lazy val labeledLoop: Parser[StmtAST] =
-    (ident <~ ":") ~ (forStmt | doWhileStmt | whileStmt) ^^ {
+    (ident <~ ":") ~ (forStmt | doWhileStmt | whileStmt | loopStmt) ^^ {
       case name ~ loop => attachLoopLabel(name, loop)
     }
 
@@ -445,6 +445,7 @@ class SyslParser extends StandardTokenParsers {
     case f: ForStmtAST     => f.copy(label = Some(name))
     case w: WhileStmtAST   => w.copy(label = Some(name))
     case d: DoWhileStmtAST => d.copy(label = Some(name))
+    case l: LoopStmtAST    => l.copy(label = Some(name))
     case other             => other
 
   lazy val deferStmt: Parser[DeferStmtAST] =
@@ -566,7 +567,7 @@ class SyslParser extends StandardTokenParsers {
   lazy val rangeOp: Parser[String] = "..<" | ".." | "downTo"
 
   lazy val forStmt: Parser[ForStmtAST] =
-    "for" ~> identStmt ~ (";" ~> expr) ~ (";" ~> forUpdate) ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ {
+    ("for" ~> identStmt ~ (";" ~> expr) ~ (";" ~> forUpdate) ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ {
       case init ~ cond ~ update ~ body => ForStmtAST(init, cond, update, body)
     } |
       "for" ~> identStmt ~ (";" ~> expr) ~ (";" ~> forUpdate) ~ block ^^ {
@@ -583,7 +584,7 @@ class SyslParser extends StandardTokenParsers {
       } |
       "for" ~> ident ~ ("in" ~> logicalOr) ~ forBody ^^ {
         case valName ~ arr ~ body => buildForEach(valName, arr, body)
-      }
+      }) <~ opt(endMarker("for"))
 
   // Contextual keyword: `reverse` is not a reserved word (so user identifiers named
   // `reverse` still work), but acts as a keyword directly after `in` in a for-loop.
@@ -647,8 +648,16 @@ class SyslParser extends StandardTokenParsers {
       "do" ~> inlineStmt ~ (Newline ~> "while" ~> expr) ^^ { case stmt ~ cond => DoWhileStmtAST(cond, List(stmt)) }
 
   lazy val whileStmt: Parser[WhileStmtAST] =
-    "while" ~> expr ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ { case cond ~ body => WhileStmtAST(cond, body) } |
-      "while" ~> expr ~ block ^^ { case cond ~ body => WhileStmtAST(cond, body) }
+    ("while" ~> expr ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ { case cond ~ body => WhileStmtAST(cond, body) } |
+      "while" ~> expr ~ block ^^ { case cond ~ body => WhileStmtAST(cond, body) }) <~ opt(endMarker("while"))
+
+  /** Ada-style infinite loop: `loop` <indented body> [`end loop`]. */
+  lazy val loopStmt: Parser[LoopStmtAST] =
+    ("loop" ~> block <~ opt(endMarker("loop"))) ^^ (body => LoopStmtAST(body))
+
+  /** Optional Scala-3-style `end <kw>` terminator. Always preceded by a newline. */
+  private def endMarker(kw: String): Parser[Unit] =
+    Newline ~> "end" ~> kw ^^^ (())
 
   lazy val returnStmt: Parser[ReturnStmtAST] =
     "return" ~> opt(tupleExpr) ^^ ReturnStmtAST.apply
@@ -691,7 +700,7 @@ class SyslParser extends StandardTokenParsers {
     logicalOr ^^ ExprBodyAST.apply
 
   lazy val matchExpr: Parser[MatchExprAST] =
-    logicalOr ~ ("match" ~> Newline ~> Indent ~> rep1(matchArm) ~ opt(matchElse) <~ Dedent) ^^ {
+    logicalOr ~ ("match" ~> Newline ~> Indent ~> rep1(matchArm) ~ opt(matchElse) <~ Dedent) <~ opt(endMarker("match")) ^^ {
       case scrutinee ~ (arms ~ default) => MatchExprAST(scrutinee, arms, default)
     }
 
@@ -710,10 +719,10 @@ class SyslParser extends StandardTokenParsers {
     "else" ~> "->" ~> (block | inlineStmt ^^ (s => List(s))) <~ opt(Newline)
 
   lazy val ifExpr: Parser[IfExprAST] =
-    "if" ~> logicalOr ~ ("then" ~> thenBody) ^^ { case cond ~ ((tb, eb)) => IfExprAST(cond, tb, eb) } |
+    ("if" ~> logicalOr ~ ("then" ~> thenBody) ^^ { case cond ~ ((tb, eb)) => IfExprAST(cond, tb, eb) } |
       "if" ~> logicalOr ~ block ~ opt(Newline ~> elseOrElif) ^^ {
         case cond ~ body ~ elseBody => IfExprAST(cond, body, elseBody)
-      }
+      }) <~ opt(endMarker("if"))
 
   lazy val elifExpr: Parser[IfExprAST] =
     "elif" ~> logicalOr ~ ("then" ~> thenBody) ^^ { case cond ~ ((tb, eb)) => IfExprAST(cond, tb, eb) } |

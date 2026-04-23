@@ -1464,6 +1464,11 @@ do
     body
 while cond
 
+// loop — Ada-style infinite loop; exit only via break (or return).
+loop
+    if done then break
+    body
+
 // for (C-style)
 for i = 0; i < 10; i++
     body
@@ -1525,7 +1530,7 @@ while remaining > 0
     remaining = remaining - step()
 
 // Labeled loops — break / continue can target an outer loop by name.
-// A label is an identifier followed by `:` immediately before `for`, `while`, or `do`.
+// A label is an identifier followed by `:` immediately before `for`, `while`, `do`, or `loop`.
 outer: for i in 0..<n
     for j in 0..<m
         if grid[i][j] == target then break outer      // exits both loops
@@ -1536,6 +1541,54 @@ outer: for i in 0..<n
 // regardless of whether that loop has a label.
 // A label cannot be reused on a nested loop (would make `break label` ambiguous),
 // but the same name can appear on sibling (non-nested) loops.
+
+// Optional `end <kw>` terminators (Scala 3 style) — every block construct accepts
+// an optional matching `end <keyword>` after its body. Useful for long blocks
+// where the matching indentation is hard to see; always optional.
+if cond
+    big_body()
+end if
+
+while running
+    tick()
+end while
+
+for i = 0; i < n; i++
+    process(i)
+end for
+
+loop
+    if done then break
+    work()
+end loop
+
+x match
+    1 -> "one"
+    else -> "other"
+end match
+
+struct Point
+    x: int
+    y: int
+end struct
+
+enum Color
+    Red
+    Green
+    Blue
+end enum
+
+trait Eq[T]
+    eq(self: T, other: T) -> bool
+end trait
+
+impl Eq[int]
+    eq(self: int, other: int) -> bool = self == other
+end impl
+
+interface Closer
+    close() -> int
+end interface
 ```
 
 ### Destructuring and Parallel Assignment
