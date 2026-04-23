@@ -606,6 +606,7 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     val TCP_MAX_SEG     = 480
     val TCP_RTO_TICKS   = 50
     val TCP_TW_TICKS    = 200
+    val TCP_FW2_TICKS   = 6000
     val TCP_MAX_RETRIES = 5
 
     val TCP_STATE_CLOSED      = 0
@@ -1360,10 +1361,35 @@ Per-socket state transition for one validated segment.
             inet_tcp_accept_enqueue(s)
             return
 
+TIME_WAIT is its own branch so the past-handshake logic below
+doesn't second-guess a quiescent socket. We re-ACK retransmitted
+FINs (peer missed our last ACK) and refresh the 2MSL timer so a
+stream of FIN retransmits keeps absorbing; new-SYN-on-TIME_WAIT
+(RFC 1122 §4.2.2.13) is silently dropped here — peer retries and
+the listen path picks it up.
+
+        if st == TCP_STATE_TIME_WAIT
+            if (flags & TCP_F_RST) != 0
+                inet_tcp_close_slot(s, 0)
+                return
+            if (flags & TCP_F_FIN) != 0
+                inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+                tcp_sockets[s].tw_deadline = int(uptime()) + TCP_TW_TICKS
+            return
+
 Past handshake: process ACK, data, FIN in that order.
 
         if (flags & TCP_F_RST) != 0
             inet_tcp_close_slot(s, -1)
+            return
+
+RFC 5961 §4: a SYN arriving on a synchronized connection is a
+challenge — respond with our current ACK and drop the segment.
+Covers confused peers / port-collision retries without tearing
+the connection down.
+
+        if (flags & TCP_F_SYN) != 0
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
             return
         if (flags & TCP_F_ACK) != 0
             if tcp_seq_lt(tcp_sockets[s].snd_una, ack) != 0
@@ -1441,7 +1467,11 @@ Past handshake: process ACK, data, FIN in that order.
                     // as the CLOSING state). Either way enter TIME_WAIT.
                     inet_tcp_enter_time_wait(s)
                 else
+                    // Arm an idle timeout so the slot is reclaimed
+                    // even if the peer never FINs. Linux's default
+                    // tcp_fin_timeout is 60s; we match that.
                     tcp_sockets[s].state = TCP_STATE_FIN_WAIT_2
+                    tcp_sockets[s].tw_deadline = int(uptime()) + TCP_FW2_TICKS
         else if st2 == TCP_STATE_FIN_WAIT_2
             if did_fin != 0
                 // Peer FIN after our FIN-ACK — enter TIME_WAIT.
