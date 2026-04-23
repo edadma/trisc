@@ -7,7 +7,7 @@ via the mount table. Currently only root ("/") is mounted on TFS.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.services.{sleep, rs_ready, svc_get_thread_pid, svc_grant_map, svc_grant_unmap, thread_id}
+    import oskit.services.{sleep, rs_ready, svc_get_thread_pid, svc_grant_create, svc_grant_revoke, svc_grant_map, svc_grant_unmap, thread_id, GRANT_READ}
     import oskit.config.MAX_PROCESSES
 
 Open file table. Each open file tracks inode, position, mount
@@ -260,7 +260,7 @@ Read from a pipe. Blocks if empty and write end open.
 
 Write to a pipe. Wakes any deferred reader.
 
-    vfs_pipe_write(sender: int, fid: int, grant_id: int, req_len: int)
+    vfs_pipe_write(sender: int, fid: int, grant_id: int, req_len: int, vfs_buf: *byte)
         val pipe_id = oft_pipe_id[fid]
 
         if pipe_read_oft[pipe_id] == -1
@@ -276,19 +276,26 @@ Write to a pipe. Wakes any deferred reader.
         if n > PIPE_BUF_SIZE
             n = PIPE_BUF_SIZE
 
-        val mapped = svc_grant_map(grant_id, 0, n)
-        if mapped <= 0
-            var reply: [5]byte
-            reply[0] = -1
-            ipc_reply(sender, reply, 5)
-            return
-        var src: *byte = *byte(mapped)
         val tail = pipe_tail[pipe_id]
-        var copied = 0
-        while copied < n
-            pipe_buf[pipe_id][(tail + copied) & (PIPE_BUF_SIZE - 1)] = src[copied]
-            copied += 1
-        svc_grant_unmap(grant_id)
+        if grant_id == -1
+            // Inline fast path — payload at vfs_buf+13
+            var copied = 0
+            while copied < n
+                pipe_buf[pipe_id][(tail + copied) & (PIPE_BUF_SIZE - 1)] = vfs_buf[13 + copied]
+                copied += 1
+        else
+            val mapped = svc_grant_map(grant_id, 0, n)
+            if mapped <= 0
+                var reply: [5]byte
+                reply[0] = -1
+                ipc_reply(sender, reply, 5)
+                return
+            var src: *byte = *byte(mapped)
+            var copied = 0
+            while copied < n
+                pipe_buf[pipe_id][(tail + copied) & (PIPE_BUF_SIZE - 1)] = src[copied]
+                copied += 1
+            svc_grant_unmap(grant_id)
         pipe_tail[pipe_id] = (tail + n) & (PIPE_BUF_SIZE - 1)
         pipe_count[pipe_id] += n
 
@@ -857,7 +864,7 @@ local staging buffer, then sends. Returns bytes buffered by inet.
 
 Wire: request [cmd(1), fd(2), len(2), data], reply [status(1), nsent(2)].
 
-    vfs_tcp_write(sender: int, fid: int, grant_id: int, len: int)
+    vfs_tcp_write(sender: int, fid: int, grant_id: int, len: int, vfs_buf: *byte)
         val inet = vfs_lookup_inet()
         if inet < 0
             var err: [1]byte
@@ -877,18 +884,25 @@ Wire: request [cmd(1), fd(2), len(2), data], reply [status(1), nsent(2)].
         msg[3] = byte((wlen >> 8) & 0xFF)
         msg[4] = byte(wlen & 0xFF)
         if wlen > 0
-            val mapped = svc_grant_map(grant_id, 0, wlen)
-            if mapped <= 0
-                var err: [1]byte
-                err[0] = byte(-1)
-                ipc_reply(sender, err, 1)
-                return
-            var src: *byte = *byte(mapped)
-            var k = 0
-            while k < wlen
-                msg[5 + k] = src[k]
-                k += 1
-            svc_grant_unmap(grant_id)
+            if grant_id == -1
+                // Inline payload at vfs_buf+13
+                var k = 0
+                while k < wlen
+                    msg[5 + k] = vfs_buf[13 + k]
+                    k += 1
+            else
+                val mapped = svc_grant_map(grant_id, 0, wlen)
+                if mapped <= 0
+                    var err: [1]byte
+                    err[0] = byte(-1)
+                    ipc_reply(sender, err, 1)
+                    return
+                var src: *byte = *byte(mapped)
+                var k = 0
+                while k < wlen
+                    msg[5 + k] = src[k]
+                    k += 1
+                svc_grant_unmap(grant_id)
         var icreply: [3]byte
         ipc_send(inet, msg, 5 + wlen, icreply, 3)
         if icreply[0] != 0
@@ -1115,7 +1129,15 @@ byte read (or 0 on error).
 Write to a TTY handle. Sends TTY_CMD_PUTS to the TTY server
 with the data from the client buffer.
 
-    vfs_tty_write(sender: int, fid: int, grant_id: int, len: int)
+`grant_id == -1` means the payload was inlined into the
+original FS_CMD_WRITE at offset 13 (`vfs_buf + 13`). This is
+the fast path taken by short writes — no grant_map, no
+grant_unmap, no cross-address-space copy through the grant
+abstraction. For larger writes we still grant-map so the
+payload doesn't have to traverse the IPC message buffer
+twice.
+
+    vfs_tty_write(sender: int, fid: int, grant_id: int, len: int, vfs_buf: *byte)
         val tty = vfs_lookup_tty()
         if tty < 0
             var reply: [5]byte
@@ -1123,27 +1145,32 @@ with the data from the client buffer.
             ipc_reply(sender, reply, 1)
             return
         val console = oft_console[fid]
-        // Map client buffer via grant
         var wlen = len
         if wlen > 125
             wlen = 125
-        val mapped = svc_grant_map(grant_id, 0, wlen)
-        if mapped <= 0
-            var reply: [5]byte
-            reply[0] = -1
-            ipc_reply(sender, reply, 5)
-            return
-        var src: *byte = *byte(mapped)
-        // Build TTY_CMD_PUTS message: [cmd(1), console(1), len(1), data...]
         var tty_msg: [128]byte
         tty_msg[0] = 3  // TTY_CMD_PUTS
         tty_msg[1] = byte(console)
         tty_msg[2] = byte(wlen)
-        var i = 0
-        while i < wlen
-            tty_msg[3 + i] = src[i]
-            i += 1
-        svc_grant_unmap(grant_id)
+        if grant_id == -1
+            // Inline fast path — payload already in our IPC buf
+            var i = 0
+            while i < wlen
+                tty_msg[3 + i] = vfs_buf[13 + i]
+                i += 1
+        else
+            val mapped = svc_grant_map(grant_id, 0, wlen)
+            if mapped <= 0
+                var reply: [5]byte
+                reply[0] = -1
+                ipc_reply(sender, reply, 5)
+                return
+            var src: *byte = *byte(mapped)
+            var i = 0
+            while i < wlen
+                tty_msg[3 + i] = src[i]
+                i += 1
+            svc_grant_unmap(grant_id)
         var tty_reply: [1]byte
         ipc_send(tty, tty_msg, 3 + wlen, tty_reply, 1)
         // Reply: bytes written
@@ -1217,19 +1244,37 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
             return
 
         if oft_type[fid] == OFT_TYPE_TTY
-            vfs_tty_write(sender, fid, grant_id, len)
+            vfs_tty_write(sender, fid, grant_id, len, buf)
             return
 
         if oft_type[fid] == OFT_TYPE_PIPE
-            vfs_pipe_write(sender, fid, grant_id, len)
+            vfs_pipe_write(sender, fid, grant_id, len, buf)
             return
 
         if oft_type[fid] == OFT_TYPE_TCP
-            vfs_tcp_write(sender, fid, grant_id, len)
+            vfs_tcp_write(sender, fid, grant_id, len, buf)
             return
 
         val ino = oft_ino[fid]
         val offset = oft_pos[fid]
+
+        // Inline-path file writes: we have the payload in our IPC
+        // buf (at offset 13) but TFS expects to grant_map against
+        // the caller's address space. Create a local VFS-side
+        // grant on `buf+13` so TFS can pull the data via the
+        // existing protocol. The grant is scoped to this call
+        // only (revoked on reply).
+        var forward_grant = grant_id
+        var inline_grant = -1
+        if grant_id == -1
+            inline_grant = svc_grant_create(
+                u64(buf) + u64(13), len, GRANT_READ)
+            if inline_grant < 0
+                var err: [1]byte
+                err[0] = -1
+                ipc_reply(sender, err, 1)
+                return
+            forward_grant = inline_grant
 
         // Build TFS-format message: [cmd(1), ino(4), offset(4), len(4), grant_id(4)]
         var tfs_msg: [17]byte
@@ -1237,10 +1282,12 @@ Client request:  [cmd(1), fid(4), len(4), buf_addr(4)]  (13 bytes)
         vfs_msg_write_i32(tfs_msg, 1, ino)
         vfs_msg_write_i32(tfs_msg, 5, offset)
         vfs_msg_write_i32(tfs_msg, 9, len)
-        vfs_msg_write_i32(tfs_msg, 13, grant_id)
+        vfs_msg_write_i32(tfs_msg, 13, forward_grant)
 
         var be_reply: [64]byte
         ipc_send(backend, tfs_msg, 17, be_reply, 64)
+        if inline_grant >= 0
+            svc_grant_revoke(inline_grant)
         if be_reply[0] == 0
             val nw = vfs_msg_read_i32(be_reply, 1)
             oft_pos[fid] += nw

@@ -162,10 +162,38 @@ Write a string to stdout (handle 1) via VFS.
     val STDOUT = 1
     val STDERR = 2
 
+    val WRITE_INLINE_MAX = 100
+
     write_handle(handle: int, data: *byte, wlen: int) -> int
         val port = fs_port()
         if port < 0
             return -1
+        // Short writes skip the grant-create/revoke dance entirely
+        // and inline the payload into the FS_CMD_WRITE message
+        // itself. VFS already buffers through a 128-byte scratch,
+        // so the server-side grant_map + copy + unmap chain is
+        // pure overhead for anything that fits. grant_id = -1 is
+        // the "inline" sentinel; data starts at offset 13.
+        if wlen >= 0 && wlen <= WRITE_INLINE_MAX
+            var msg: [128]byte
+            msg[0] = byte(FS_CMD_WRITE)
+            msg_write_i32(msg, 1, handle)
+            msg_write_i32(msg, 5, wlen)
+            msg_write_i32(msg, 9, -1)
+            var i = 0
+            while i < wlen
+                msg[13 + i] = data[i]
+                i += 1
+            var reply: [5]byte
+            val result = ipc_send(port, msg, 13 + wlen, reply, 5)
+            if result != 0
+                return -1
+            if reply[0] != 0
+                return -1
+            return msg_read_i32(reply, 1)
+        // Long writes still go via a grant — the server-side
+        // mapping avoids copying the whole payload into our IPC
+        // buffer just to copy it again on the far side.
         val gid = grant_create(u64(data), wlen, GRANT_READ)
         if gid < 0
             return -1
