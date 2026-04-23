@@ -988,6 +988,17 @@ identity. Returns 0 on success.
         kernel_continue_current()
         i64(0)
 
+SYS_GRANT_POSIX_RANGE (79): Enable the POSIX syscall range (128-511)
+for a process in a single shot. Used by PM after creating a process
+from an ELF binary so musl-linked programs can call
+write/read/exit_group/etc. without RS having to enumerate each bit
+explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
+
+    sys_grant_posix_range_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        proc_grant_posix_range(int(a0))
+        kernel_continue_current()
+        i64(0)
+
     kernel_init()
         vm_init()
         register_syscall(0, sleep_current)
@@ -1048,6 +1059,7 @@ identity. Returns 0 on success.
         register_syscall(76, sys_virtio_set_notify_handler)
         register_syscall6(77, sys_getinfo_handler)
         register_syscall6(78, sys_set_rs_tid_handler)
+        register_syscall6(79, sys_grant_posix_range_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events

@@ -20,7 +20,7 @@ IPC commands:
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
-    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
+    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range}
     import oskit.loader.load_tof_to_ptbr
     import oskit.arch.{PROG_USP, PROG_SSP}
 
@@ -303,6 +303,12 @@ argv.
             reply[0] = -1
             ipc_reply(sender, reply, 1)
         else
+            // aarch64 and x86 spawn ELF binaries; enable the POSIX
+            // syscall range (128-511) unconditionally so musl-linked
+            // programs can invoke write/read/exit_group/etc. TRISC
+            // will load TRB here in future; granting bits for
+            // POSIX syscalls that TRISC never issues is harmless.
+            svc_grant_posix_range(pid)
             // Copy handles from parent to child via VFS (child is suspended)
             if num_handles > 0
                 val sender_pid = svc_get_thread_pid(sender)

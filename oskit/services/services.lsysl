@@ -377,3 +377,12 @@ Types:
 
     svc_set_rs_tid_self()
         syscall6(SYS_SET_RS_TID, 0, 0, 0, 0, 0, 0)
+
+Grant the POSIX syscall range (128-511) to a process. Called by
+PM after spawning an ELF binary so musl-linked programs can invoke
+POSIX shim syscalls without each bit being set individually.
+
+    val SYS_GRANT_POSIX_RANGE = 79
+
+    svc_grant_posix_range(pid: int)
+        syscall6(SYS_GRANT_POSIX_RANGE, i64(pid), 0, 0, 0, 0, 0)
