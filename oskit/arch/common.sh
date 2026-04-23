@@ -155,7 +155,7 @@ dispatch_program_arg() {
 }
 
 # Write a server wrapper .sysl file with the standard entry pattern:
-# read RS TID from INFO_PAGE_VA and call the server's entry function.
+# query RS TID via sys_getinfo and call the server's entry function.
 # Takes: <name> <imports> <entry_call>
 # where <entry_call> is e.g. "tfs_server()" or a multi-line body.
 write_server_wrapper() {
@@ -169,12 +169,10 @@ write_server_wrapper() {
 module oskit.arch.${ARCH_NAME}.gen
 
 $IMPORTS
-import oskit.services.{rs_set_tid}
-import oskit.arch.{INFO_PAGE_VA}
+import oskit.services.{rs_set_tid, svc_get_rs_tid}
 
 main()
-    val info = *i64(INFO_PAGE_VA)
-    rs_set_tid(int(*info))
+    rs_set_tid(svc_get_rs_tid())
     $BODY
 WRAPPER_EOF
 }
@@ -225,14 +223,15 @@ build_server() {
     build_server_with_wrapper "$NAME" "$@"
 }
 
-# Disk server has a non-standard wrapper — it also reads ramdisk base/size
-# from the info page after the RS TID. Same pattern on both arches; only
+# Disk server has a non-standard wrapper — it also queries ramdisk base/size
+# from the kernel after the RS TID. Same pattern on both arches; only
 # the extra srcs differ (disk_x86 stays, mem_cpu stays).
 build_disk_server() {
     echo "=== Building server: disk ==="
     write_server_wrapper disk \
-        "import oskit.drivers.disk.{disk_server, disk_set_ramdisk}" \
-        "disk_set_ramdisk(int(info[1]), int(info[2]))
+        "import oskit.drivers.disk.{disk_server, disk_set_ramdisk}
+import oskit.services.{svc_get_ramdisk_base, svc_get_ramdisk_size}" \
+        "disk_set_ramdisk(int(svc_get_ramdisk_base()), int(svc_get_ramdisk_size()))
     disk_server()"
     build_server_with_wrapper disk "$@"
 }
