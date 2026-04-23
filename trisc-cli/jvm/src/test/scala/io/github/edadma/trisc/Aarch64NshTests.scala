@@ -215,6 +215,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     qemu.allOutput should not include "network: dhcp spawn failed"
   }
 
+  "aarch64 ifconfig: reports the lease installed at boot" in {
+    // init's start_dhcp has already leased 10.0.2.15 from slirp by
+    // the time the shell is up, so ifconfig should read it back
+    // through inet_get_ip_config.
+    val output = qemu.command("ifconfig")
+    output should include("ip:      10.0.2.15")
+    output should include("mask:    255.255.255.0")
+    output should include("gateway: 10.0.2.2")
+  }
+
   "aarch64 udp: recvfrom_timeout fires after ~1s with no sender" in {
     // test_udp_tmo binds 0.0.0.0:7788 and calls
     // recvfrom_timeout(..., 1000 ms) with nothing sending to it.
