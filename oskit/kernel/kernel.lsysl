@@ -951,8 +951,13 @@ memory.
                 kernel_continue_current()
                 return i64(-1)
             val bi_src = *byte(system_boot_info_pa)
-            // boot info header layout: magic(8) + u32 module_count (little-endian)
-            val mc = int(bi_src[8]) | (int(bi_src[9]) << 8) | (int(bi_src[10]) << 16) | (int(bi_src[11]) << 24)
+            // Boot info header layout: 4-byte "SLIX" magic +
+            // u32 module_count (little-endian) at offset 4. Total
+            // blob = 8-byte header + module_count * 24 bytes. Each
+            // entry is name[8] + addr[8] + size[8]; addr is stored
+            // as an offset relative to system_boot_info_pa, so we
+            // patch it to an absolute PA during copy-out.
+            val mc = int(bi_src[4]) | (int(bi_src[5]) << 8) | (int(bi_src[6]) << 16) | (int(bi_src[7]) << 24)
             val total = 8 + mc * 24
             if cap < total
                 kernel_continue_current()
@@ -962,6 +967,12 @@ memory.
             while ci < total
                 dst[ci] = bi_src[ci]
                 ci += 1
+            var fi = 0
+            while fi < mc
+                val addr_off = 8 + fi * 24 + 8
+                val p: *i64 = *i64(&dst[addr_off])
+                *p = system_boot_info_pa + *p
+                fi += 1
             kernel_continue_current()
             return i64(total)
         kernel_continue_current()

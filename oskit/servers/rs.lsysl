@@ -29,7 +29,7 @@ starts the next server.
 
     module oskit.servers
 
-    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask}
+    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask, svc_set_rs_tid_self, svc_get_ramdisk_base, svc_get_ramdisk_size, svc_getinfo, GETINFO_BOOT_INFO}
     import oskit.ipc.{ipc_recv_notify, port_create, port_lookup}
     import oskit.hal.memset
     import oskit.arch.{SRV_USP, SRV_SSP, INFO_PAGE_VA}
@@ -586,23 +586,20 @@ bytes into the page; server VA = MMIO_SERVER_VA + 0xe00).
 
     rs_main()
         rs_set_tid(thread_id())
+        // Register ourselves with the kernel so system servers can
+        // query our TID via sys_getinfo(GETINFO_RS_TID).
+        svc_set_rs_tid_self()
 
-        // Read info page (x86/TRISC 0xBF000, aarch64 0x60090000)
-        val info = *i64(INFO_PAGE_VA)
-        rs_ramdisk_base = int(info[1])
-        rs_ramdisk_size = int(info[2])
+        // Read ramdisk info + boot info blob from the kernel.
+        // Replaces the old per-process INFO_PAGE_VA scratch page.
+        rs_ramdisk_base = int(svc_get_ramdisk_base())
+        rs_ramdisk_size = int(svc_get_ramdisk_size())
 
-        // Copy boot info header from info page (+24)
-        val bi_src = *byte(INFO_PAGE_VA + i64(24))
-        // Read module count to determine copy size
-        val mod_count = int(rs_read_u32_le(bi_src + 4))
-        rs_boot_info_len = 8 + mod_count * 24
-        if rs_boot_info_len > 512
-            rs_boot_info_len = 512
-        var ci = 0
-        while ci < rs_boot_info_len
-            rs_boot_info[ci] = bi_src[ci]
-            ci += 1
+        val n = int(svc_getinfo(GETINFO_BOOT_INFO, &rs_boot_info[0], 512))
+        if n <= 0
+            rs_print("rs: sys_getinfo(BOOT_INFO) failed\n")
+            return
+        rs_boot_info_len = n
 
         rs_init_boot_order()
 
