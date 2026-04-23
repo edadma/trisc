@@ -281,14 +281,14 @@ class SyslPureAttrTests extends SyslTestHelpers {
     val typed = (new SyslAnalyzer).analyze(ast)
     val metaOut = ModuleMeta.fromProgram(typed)
     metaOut.symbols.find(_.name == "sq").get.typ match
-      case SymbolMeta.Kind.Func(_, _, _, isPure) => isPure shouldBe true
+      case SymbolMeta.Kind.Func(_, _, _, isPure, _) => isPure shouldBe true
       case other                                  => fail(s"expected Func, got $other")
 
     val text = metaOut.toSmeta
     text should include("FUNCP sq")
     val Some(metaIn) = ModuleMeta.fromSmeta(text): @unchecked
     metaIn.symbols.find(_.name == "sq").get.typ match
-      case SymbolMeta.Kind.Func(_, _, _, isPure) => isPure shouldBe true
+      case SymbolMeta.Kind.Func(_, _, _, isPure, _) => isPure shouldBe true
       case other                                  => fail(s"expected Func, got $other")
   }
 }

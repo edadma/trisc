@@ -340,8 +340,25 @@ class SyslParser extends StandardTokenParsers {
       doWhileStmt ^^ (s => BlockBodyAST(List(s))) |
       tupleExpr ^^ ExprBodyAST.apply
 
+  // Ada-style parameter mode prefix (optional): `in`, `out`, or `inout` before the
+  // param name. `in` is already reserved; `out` / `inout` are contextual keywords
+  // (user identifiers named `out` or `inout` still work outside param position).
+  private lazy val paramMode: Parser[ParamMode] =
+    "in"                                            ^^ (_ => ParamMode.In)     |
+    (ident ^? { case "inout" => ParamMode.Inout })                             |
+    (ident ^? { case "out"   => ParamMode.Out   })
+
+  // Two branches with explicit `|` alternation, not `opt(paramMode) ~ ident` — we
+  // need backtracking when `paramMode` matches the *name* of a param (e.g. `out: T`
+  // where the param is actually named `out`). `opt` commits on success, so the
+  // modeful branch is tried first and failure falls through to the mode-less branch.
   lazy val param: Parser[ParamAST] =
-    ident ~ (":" ~> typeRef) ~ opt("=" ~> expr) ^^ { case name ~ t ~ default => ParamAST(name, t, default) }
+    (paramMode ~ ident ~ (":" ~> typeRef) ~ opt("=" ~> expr) ^^ {
+      case mode ~ name ~ t ~ default => ParamAST(name, t, default, mode)
+    }) |
+    (ident ~ (":" ~> typeRef) ~ opt("=" ~> expr) ^^ {
+      case name ~ t ~ default => ParamAST(name, t, default)
+    })
 
   // Function call argument: `name = expr` (named) or `expr` (positional).
   // The `ident ~ "="` lookahead must succeed only when both tokens are present.

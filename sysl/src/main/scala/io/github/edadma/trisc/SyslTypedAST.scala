@@ -19,7 +19,7 @@ case class TTypeAliasDecl(name: String, target: SyslType) extends TDecl
 case class TConstDecl(name: String, typ: SyslType) extends TDecl
 case class TInterfaceDecl(name: String, ifaceType: SyslType.InterfaceType) extends TDecl
 
-case class TParam(name: String, typ: SyslType, default: Option[TExpr] = None)
+case class TParam(name: String, typ: SyslType, default: Option[TExpr] = None, mode: ParamMode = ParamMode.In)
 
 // Function body
 trait TFunBody

@@ -17,8 +17,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     if contractsEnabled then TContractCheck(kind, expr, message)
     else TMultiStmt(Nil)
 
-  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false)
-  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false)
+  /** `autoIndirect = true` marks a body-scope symbol whose actual storage is a hidden
+   *  pointer (Ada `out` / `inout` parameter). Every read/write goes through `*ptr`:
+   *  VarRef lowers to `TDeref(TVarRef(name, *T), T)`; plain and compound assignments
+   *  lower to `TDerefAssignStmt(TVarRef(name, *T), v)`. The caller passes an lvalue
+   *  auto-wrapped with `TAddrOf*`. `typ` is still the underlying `T` (what the body
+   *  sees); the pointer wrap is invisible to user code. */
+  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false, autoIndirect: Boolean = false)
+  /** `modes` is parallel to `params`: one entry per parameter. Empty means "all In"
+   *  (default, back-compat). `params` stores the call-side signature: for `Out`/`Inout`
+   *  this is `*T` so `checkArgs` and codegen see the hidden-pointer type; the body-scope
+   *  view is the inner `T` with `autoIndirect = true`. */
+  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil):
+    def modeOf(i: Int): ParamMode = if modes.isEmpty then ParamMode.In else modes(i)
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
@@ -393,7 +404,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       val sn = shortName(sym.name)
       val localKey = shortToAlias.getOrElse(sn, sn) // use alias if provided
       sym.typ match
-        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure) =>
+        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
           if functions.contains(localKey) then
             // Allow same-module sibling re-registration (same mangled name) and externs
@@ -401,7 +412,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if !sym.isExtern && existing.name != sym.name then
               throw AnalysisError(s"imported symbol '$localKey' conflicts with existing function")
           else
-            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure)
+            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure, modes)
             externalSymbols += localKey
         case SymbolMeta.Kind.Data(dataType) =>
           if globalScope.contains(localKey) then
@@ -603,21 +614,39 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                   s"parameter '${params(i).name}' of '$name' must have a default value (all parameters after a defaulted parameter must also have defaults)",
                   decl,
                 )
+          // Validate mode constraints: no defaults on out/inout; no out/inout on self.
+          for p <- params do
+            if p.mode != ParamMode.In && p.default.isDefined then
+              throw AnalysisError(s"parameter '${p.name}' of '$name' is ${p.mode.toString.toLowerCase} and cannot have a default value", decl)
+            if p.mode != ParamMode.In && p.name == "__self__" then
+              throw AnalysisError(s"method receiver 'self' of '$name' cannot be '${p.mode.toString.toLowerCase}'", decl)
           if typeParams.nonEmpty then
             // Generic function: store as template, don't resolve types yet
             if genericTemplates.contains(name) || functions.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             if params.exists(_.default.isDefined) then
               throw AnalysisError(s"generic function '$name' cannot have default parameter values (not yet supported)", decl)
+            if params.exists(_.mode != ParamMode.In) then
+              throw AnalysisError(s"generic function '$name' cannot have 'out'/'inout' parameters (not yet supported)", decl)
             genericTemplates(name) = fd
           else
-            val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+            // For Out/Inout params, the call-side signature carries `*T` (hidden pointer);
+            // the body sees the inner `T` with autoIndirect via SymInfo. Store modes parallel
+            // to params so checkArgs and SMETA can consult them.
+            val paramTypes = params.map { p =>
+              val inner = resolveType(p.typ)
+              val sigType = p.mode match
+                case ParamMode.In => inner
+                case ParamMode.Out | ParamMode.Inout => PtrType(inner)
+              (p.name, sigType)
+            }
+            val paramModes = params.map(_.mode)
             val retType = returnType.map(resolveType).getOrElse(VoidType)
             if functions.contains(name) || genericTemplates.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
             val isPure = fd.attributes.exists(_.name == "pure")
-            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure)
+            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes)
             // Record #deprecated info
             for attr <- fd.attributes if attr.name == "deprecated" do
               val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
@@ -890,13 +919,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           if funInfo.name != name then functionDefaults(funInfo.name) = defaults
         val savedReturnType = currentReturnType
         currentReturnType = funInfo.returnType
-        for (paramName, paramType) <- funInfo.params do
-          currentScope(paramName) = SymInfo(paramName, paramType, true)
+        for (((paramName, paramType), idx) <- funInfo.params.zipWithIndex) do
+          val mode = funInfo.modeOf(idx)
+          // For Out/Inout, the body-scope symbol sees the inner type with autoIndirect,
+          // while the actual parameter storage is a `*T` the body auto-dereferences.
+          val (bodyType, autoInd) = mode match
+            case ParamMode.In => (paramType, false)
+            case ParamMode.Out | ParamMode.Inout => paramType match
+              case PtrType(inner) => (inner, true)
+              case other => (other, false) // shouldn't happen — collectDecls wrapped it
+          currentScope(paramName) = SymInfo(paramName, bodyType, true, autoIndirect = autoInd)
           // Auto-alias the implicit method receiver: `self` -> `__self__`
           // so method bodies can write `self.x` while the actual parameter
           // is named `__self__` to avoid conflicting with user-declared names.
           if paramName == "__self__" then
-            currentScope("self") = SymInfo(paramName, paramType, true)
+            currentScope("self") = SymInfo(paramName, bodyType, true, autoIndirect = autoInd)
         val savedExp = currentExpected
         currentExpected = if funInfo.returnType == VoidType then None else Some(funInfo.returnType)
         val tBody = try body match
@@ -917,7 +954,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           functions(name) = funInfo.copy(returnType = inferred)
           inferred
         else funInfo.returnType
-        val tParams = funInfo.params.map((n, t) => TParam(n, t))
+        val tParams = funInfo.params.zipWithIndex.map { case ((n, t), i) => TParam(n, t, None, funInfo.modeOf(i)) }
         currentReturnType = savedReturnType
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
@@ -2210,7 +2247,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           // else: leave unfilled — checkArgs will report an arity error
     result.toList
 
-  private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr]): List[TExpr] =
+  /** For an `out`/`inout` argument, take an already-analyzed arg (seen as plain T) and
+   *  wrap it as a pointer so it matches the hidden `*T` param slot. Accepts any simple
+   *  lvalue: a variable reference, a field access, an index, or an already-dereferenced
+   *  pointer (`&*p` collapses to `p`). Anything else is rejected — literals, temporaries,
+   *  and calls have no address. */
+  private def lvalueToAddr(name: String, pName: String, mode: ParamMode, arg: TExpr): TExpr =
+    val inner = arg.typ
+    arg match
+      case TVarRef(n, t)              => TAddrOf(n, PtrType(t))
+      case TFieldAccess(obj, idx, t)  => TAddrOfField(obj, idx, PtrType(t))
+      case TIndex(arr, ix, t)         => TAddrOfIndex(arr, ix, PtrType(t))
+      case TDeref(p, _)               => p // &*p = p
+      case _ =>
+        throw AnalysisError(s"argument '$pName' of '$name' is '${mode.toString.toLowerCase}' and requires an lvalue (variable, field, or index), got ${arg.getClass.getSimpleName}")
+
+  private def checkArgs(name: String, params: List[(String, SyslType)], args: List[TExpr], modes: List[ParamMode] = Nil): List[TExpr] =
     // Try to fill missing trailing args with defaults registered for the function.
     val filledArgs =
       if args.length < params.length then
@@ -2225,26 +2277,37 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       else args
     if filledArgs.length != params.length then
       throw AnalysisError(s"function '$name' expects ${params.length} argument(s), got ${args.length}")
-    filledArgs.zip(params).map { case (arg, (pName, pType)) =>
-      val coerced = coerceLiteral(arg, pType)
-      // Special case: `self` (always *T inside methods, mangled as __self__) auto-derefs
-      // when passed to a T param. This is the ONLY implicit *T → T allowed; elsewhere write `*ptr`.
-      val selfDeref = (coerced, pType) match
-        case (TVarRef("__self__", PtrType(st: StructType)), pSt: StructType) if st.name == pSt.name =>
-          Some(TDeref(coerced, pSt))
-        case _ => None
-      if selfDeref.isEmpty && !compatible(coerced.typ, pType) then
-        throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
-      // Insert explicit conversions for codegen
-      val converted = selfDeref.getOrElse {
-        (coerced.typ, pType) match
-          case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
-          case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
-          case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
-            TInterfaceBox(coerced, iface)
-          case _ => coerced
-      }
-      applyTargetType(converted, pType)
+    filledArgs.zip(params).zipWithIndex.map { case ((arg, (pName, pType)), idx) =>
+      val mode = if modes.isEmpty then ParamMode.In else modes(idx)
+      mode match
+        case ParamMode.Out | ParamMode.Inout =>
+          // pType is PtrType(inner). Require arg to be T-valued lvalue, wrap with TAddrOf*.
+          val innerT = pType match
+            case PtrType(t) => t
+            case _          => pType // defensive — collectDecls wrapped it
+          if !compatible(arg.typ, innerT) then
+            throw AnalysisError(s"argument '$pName' of '$name' is '${mode.toString.toLowerCase}' expecting $innerT, got ${arg.typ}")
+          lvalueToAddr(name, pName, mode, arg)
+        case ParamMode.In =>
+          val coerced = coerceLiteral(arg, pType)
+          // Special case: `self` (always *T inside methods, mangled as __self__) auto-derefs
+          // when passed to a T param. This is the ONLY implicit *T → T allowed; elsewhere write `*ptr`.
+          val selfDeref = (coerced, pType) match
+            case (TVarRef("__self__", PtrType(st: StructType)), pSt: StructType) if st.name == pSt.name =>
+              Some(TDeref(coerced, pSt))
+            case _ => None
+          if selfDeref.isEmpty && !compatible(coerced.typ, pType) then
+            throw AnalysisError(s"argument '$pName' of '$name' expects $pType, got ${coerced.typ}")
+          // Insert explicit conversions for codegen
+          val converted = selfDeref.getOrElse {
+            (coerced.typ, pType) match
+              case (StringType, PtrType(I8 | U8)) => TCast(coerced, pType)
+              case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
+              case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
+                TInterfaceBox(coerced, iface)
+              case _ => coerced
+          }
+          applyTargetType(converted, pType)
     }
 
   private def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
@@ -2447,7 +2510,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val sym = lookupOrCreate(target, tValue0.typ)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = applyTargetType(tValue0, sym.typ)
-        val baseStmt = TAssignStmt(sym.name, tValue)
+        // Out/Inout param: lower `x = v` to `*ptr = v` so the store flows back through
+        // the caller's lvalue.
+        val baseStmt: TStmt =
+          if sym.autoIndirect then TDerefAssignStmt(TVarRef(sym.name, PtrType(sym.typ)), tValue)
+          else TAssignStmt(sym.name, tValue)
         val checks = sym.typ match
           case st: StructType if structInvariants.contains(st.name) =>
             buildStructInvariantChecks(VarRefAST(target), st.name)
@@ -2467,7 +2534,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val sym = lookup(target)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = analyzeExpr(value)
-        val baseStmt = TCompoundAssignStmt(sym.name, op, tValue)
+        // Out/Inout param: lower `x += v` to `*ptr = *ptr op v` for the same reason as
+        // plain assignment.
+        val baseStmt: TStmt =
+          if sym.autoIndirect then
+            val ptr = TVarRef(sym.name, PtrType(sym.typ))
+            val load = TDeref(ptr, sym.typ)
+            TDerefAssignStmt(ptr, TBinary(load, op, tValue, sym.typ))
+          else TCompoundAssignStmt(sym.name, op, tValue)
         val checks = sym.typ match
           case st: StructType if structInvariants.contains(st.name) =>
             buildStructInvariantChecks(VarRefAST(target), st.name)
@@ -3079,6 +3153,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 compileTimeConstants.getOrElse(name,
                   throw AnalysisError(s"const '$name' missing folded value")))
               TIntLit(v, sym.typ)
+            case Some(sym) if sym.autoIndirect =>
+              // Out/Inout param: reads auto-dereference the hidden pointer so the body
+              // sees a plain T value.
+              TDeref(TVarRef(sym.name, PtrType(sym.typ)), sym.typ)
             case Some(sym) => TVarRef(sym.name, sym.typ)
             case None =>
               if variantToEnum.contains(name) then
@@ -3185,7 +3263,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
           case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
-          case SymbolMeta.Kind.Func(params, retType, _, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
+          case SymbolMeta.Kind.Func(params, retType, _, _, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
           case SymbolMeta.Kind.Interface(_) => throw AnalysisError(s"'$nsName.$member' is an interface type, not a value")
@@ -3456,7 +3534,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           TStructConstruct(st, checkedArgs)
         else
           val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ), List(typeArg))
-          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
           TCall(mangled, checkedArgs, funInfo.returnType)
 
       case IndirectCallAST(callee, args) =>
@@ -3478,9 +3556,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val funcSym = meta.publicSymbols.find(s => shortName(s.name) == method)
           .getOrElse(throw AnalysisError(s"module '$nsName' has no function '$method'"))
         funcSym.typ match
-          case SymbolMeta.Kind.Func(params, returnType, _, _) =>
+          case SymbolMeta.Kind.Func(params, returnType, _, _, modes) =>
             val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
-            val checkedArgs = checkArgs(s"$nsName.$method", paramPairs, tArgs)
+            val checkedArgs = checkArgs(s"$nsName.$method", paramPairs, tArgs, modes)
             TCall(funcSym.name, checkedArgs, returnType)
           case _ => throw AnalysisError(s"'$nsName.$method' is not a function")
 
@@ -3488,7 +3566,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // Trait method call: Ord.cmp(a, b)
         val tArgs = args.map(analyzeExpr)
         val (mangled, funInfo) = analyzeTraitCall(name, method, tArgs)
-        val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+        val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
         TCall(mangled, checkedArgs, funInfo.returnType)
 
       case MethodCallAST(obj, method, args) =>
@@ -3523,7 +3601,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 case _ => TTempAddr(tObj, PtrType(st))  // method on temporary — copy into temp cell
             case _ => tObj // PtrType or RefType — already a pointer
           val funInfo = functions(funcName)
-          val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs) // .tail skips self param
+          val checkedArgs = checkArgs(funcName, funInfo.params.tail, tArgs, funInfo.modes.drop(1)) // .tail skips self param
           TCall(funInfo.name, selfArg :: checkedArgs, funInfo.returnType)
         else if structToTemplate.contains(structName) && {
           val (templateName, _) = structToTemplate(structName)
@@ -3542,7 +3620,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             case _ => tObj
           val allArgTypes = selfArg.typ :: tArgs.map(_.typ)
           val (mangled, funInfo) = instantiateGeneric(templateFuncName, allArgTypes)
-          val checkedArgs = checkArgs(mangled, funInfo.params.tail, tArgs)
+          val checkedArgs = checkArgs(mangled, funInfo.params.tail, tArgs, funInfo.modes.drop(1))
           TCall(mangled, selfArg :: checkedArgs, funInfo.returnType)
         else
           // Fall back to calling a function-typed field
@@ -3558,6 +3636,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
+        // For each param, the expected arg type during analysis. For Out/Inout the
+        // body-visible type is the inner T (not the hidden `*T`), so the user-written
+        // arg is analyzed against T — matching what's actually written at the call site.
+        def expectedFor(paramTypes: List[SyslType], modes: List[ParamMode]): List[SyslType] =
+          paramTypes.zipWithIndex.map { case (t, i) =>
+            val m = if modes.isEmpty then ParamMode.In else modes(i)
+            (m, t) match
+              case (ParamMode.Out | ParamMode.Inout, PtrType(inner)) => inner
+              case _ => t
+          }
         // If any named args are present, resolve them via param-name lookup
         // and type the resulting positional list. Otherwise, use the fast path.
         val tArgs: List[TExpr] =
@@ -3574,15 +3662,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 (f.map(_._1), f.map(_._2))
               else
                 throw AnalysisError(s"named arguments are not supported for '$name'")
-            resolveNamedArgsTyped(name, paramNames, paramTypes, args)
+            // For named-args, use the body-visible expected types (unwrap *T for out/inout).
+            val modesForNamed =
+              if traitCallRewrite.contains(name) then functions(traitCallRewrite(name)).modes
+              else if functions.contains(name) || builtinFunctions.contains(name) then lookupFun(name).modes
+              else Nil
+            resolveNamedArgsTyped(name, paramNames, expectedFor(paramTypes, modesForNamed), args)
           else
             // Determine expected types for args if callee has known concrete signature
             val argExpected: List[Option[SyslType]] =
               if traitCallRewrite.contains(name) then
                 val mangled = traitCallRewrite(name)
-                functions(mangled).params.map(p => Some(p._2))
+                val fi = functions(mangled)
+                expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
               else if functions.contains(name) || builtinFunctions.contains(name) then
-                lookupFun(name).params.map(p => Some(p._2))
+                val fi = lookupFun(name)
+                expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
               else if structTypes.contains(name) then
                 structTypes(name).fields.map(f => Some(f._2))
               else
@@ -3596,13 +3691,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         if traitCallRewrite.contains(name) then
           val mangled = traitCallRewrite(name)
           val funInfo = functions(mangled)
-          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
           TCall(mangled, checkedArgs, funInfo.returnType)
         else
         // Check if it's a direct function call or an indirect call through a variable
         if genericTemplates.contains(name) then
           val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ))
-          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs)
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
           TCall(mangled, checkedArgs, funInfo.returnType)
         else if functions.contains(name) || builtinFunctions.contains(name) then
           warnDeprecated(name)
@@ -3617,7 +3712,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 TIndirectCall(autoCall, checkedArgs, fRet)
               case _ => throw AnalysisError(s"def '$name' returns ${funInfo.returnType}, not a callable type")
           else
-            val checkedArgs = checkArgs(name, funInfo.params, tArgs)
+            val checkedArgs = checkArgs(name, funInfo.params, tArgs, funInfo.modes)
             TCall(funInfo.name, checkedArgs, funInfo.returnType)
         else if typeAliases.contains(name) then
           // Named-type cast: Meters(3), SafeAge(x). Resolves to a TCast whose target is the

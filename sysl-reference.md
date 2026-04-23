@@ -664,6 +664,88 @@ Named arguments are currently supported for regular function calls,
 struct constructors, and builtins — not yet for generic function
 instantiation, method calls, or trait methods.
 
+### Parameter Modes — `in` / `out` / `inout`
+
+Each parameter can carry an Ada-style mode prefix that states **how** the argument
+is passed:
+
+- **`in x: T`** (default) — pass-by-value. The body sees a local copy; the caller's
+  value is not affected by writes inside the function. This is the same as a plain
+  `x: T` declaration.
+- **`out x: T`** — caller passes an **lvalue** (a variable, field, or array element).
+  The body writes into it through a hidden pointer; whatever value the body last
+  assigned is visible at the call site after the call returns. The caller doesn't
+  need to have initialized the lvalue beforehand.
+- **`inout x: T`** — same as `out`, but the body also reads the initial value the
+  caller supplied. Useful for accumulating / transforming a variable in place.
+
+```sysl
+// Out: initialize a caller-supplied variable.
+set_to(out x: int, v: int)
+    x = v
+
+// Inout: read initial, write updated.
+inc_by(inout x: int, by: int)
+    x = x + by
+
+main() -> int
+    var v: int = 0
+    set_to(v, 42)   // v is now 42
+    inc_by(v, 5)    // v is now 47
+    return v
+```
+
+Writes inside the body use plain assignment — the body always sees the parameter
+as type `T`, not `*T`. The hidden pointer indirection is invisible:
+
+```sysl
+swap(inout a: int, inout b: int)
+    val t: int = a
+    a = b
+    b = t
+
+split(x: int, out q: int, out r: int)
+    q = x / 10
+    r = x % 10
+```
+
+At a call site, the compiler auto-takes the address of the argument — you do
+not write `&v`:
+
+```sysl
+inc(inout n: int)
+    n += 1
+
+struct Point
+    x: int
+    y: int
+
+main() -> int
+    var p: Point = Point(10, 20)
+    inc(p.x)              // field lvalue — OK
+    var arr: [3]int = [0, 0, 0]
+    inc(arr[1])           // index lvalue — OK
+    // inc(p.x + 1)       // error: not an lvalue
+    // inc(42)            // error: not an lvalue
+    return p.x + p.y + arr[1]
+```
+
+Errors:
+- Passing a literal, arithmetic expression, or call result to an `out`/`inout` param.
+- A default value on an `out`/`inout` parameter (only `in` can have defaults).
+- `out` or `inout` on the implicit method receiver `self`.
+- `out` or `inout` parameters on a generic function (not yet supported in V1).
+
+`out` and `inout` interact with `#pure`: writing to such a parameter is a write to
+the caller's memory and will be rejected by the purity checker. Read-only
+(`in`) parameters are fine in pure functions.
+
+Internally the body auto-dereferences reads and writes: `x` in the body lowers to
+`*ptr_x`, and `x = v` to `*ptr_x = v`. Both behaviors mean there is **no early-return
+write-back**: every assignment commits immediately. Contextual-keyword rules: `in`
+is already reserved; `out` and `inout` are contextual, so user identifiers with
+those names still work outside parameter position.
+
 ### `def` — Auto-Call Functions
 
 `def` declares a zero-argument function that is automatically called when

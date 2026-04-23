@@ -75,7 +75,15 @@ case class CondNot(expr: CondExpr) extends CondExpr
 case class CondEq(name: String, value: String) extends CondExpr
 case class CondNeq(name: String, value: String) extends CondExpr
 
-case class ParamAST(name: String, typ: TypeAST, default: Option[ExpressionAST] = None) extends Positional
+/** Ada-style parameter passing mode.
+ *  - `In` (default): pass-by-value, read-only handle in the body.
+ *  - `Out`: caller passes an lvalue; local is uninitialized on entry, value flows
+ *    back to the caller on exit (via a hidden pointer).
+ *  - `Inout`: caller passes an lvalue; body reads initial value and writes back. */
+enum ParamMode:
+  case In, Out, Inout
+
+case class ParamAST(name: String, typ: TypeAST, default: Option[ExpressionAST] = None, mode: ParamMode = ParamMode.In) extends Positional
 
 // Function body
 trait FunBodyAST
