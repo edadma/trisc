@@ -803,7 +803,10 @@ is `payload_len` bytes of send_buf starting at `payload_seq`
         val data_off_words = hdr_bytes / 4
         frame[tcp_off + 12] = byte((data_off_words << 4) & 0xf0)
         frame[tcp_off + 13] = byte(flags & 0xff)
-        val rwnd = TCP_RECV_BUF - tcp_sockets[s].recv_len
+        val stashed = inet_tcp_reorder_bytes(s)
+        var rwnd = TCP_RECV_BUF - tcp_sockets[s].recv_len - stashed
+        if rwnd < 0
+            rwnd = 0
         pkt_write_u16(frame, tcp_off + 14, rwnd)
         pkt_write_u16(frame, tcp_off + 16, 0)
         pkt_write_u16(frame, tcp_off + 18, 0)
@@ -1440,6 +1443,20 @@ checksum, locates the matching socket, and delegates.
 
 Reorder queue for out-of-order segments.
 
+`inet_tcp_reorder_bytes` returns the total payload bytes currently
+stashed in the reorder queue for socket `s`. Used by `inet_tcp_emit`
+to subtract stashed bytes from the advertised receive window, and
+by the stash window check so peer sees a consistent window.
+
+    inet_tcp_reorder_bytes(s: int) -> int
+        var total = 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            if tcp_sockets[s].reorder[k].in_use != 0
+                total += tcp_sockets[s].reorder[k].len
+            k += 1
+        total
+
 `inet_tcp_reorder_store` stashes a segment whose seq > rcv_nxt but
 still inside the advertised recv window. Duplicates (seq already
 stored) and partial overlaps are rejected — peer will retransmit.
@@ -1635,7 +1652,11 @@ the connection down.
                 // queue, overlap), peer will retransmit — the dup
                 // re-ACK path below still advertises rcv_nxt.
                 val seg_end = seq + u32(payload_len)
-                val wnd_room = u32(TCP_RECV_BUF - tcp_sockets[s].recv_len)
+                val rem = TCP_RECV_BUF - tcp_sockets[s].recv_len - inet_tcp_reorder_bytes(s)
+                var rem_clamped = rem
+                if rem_clamped < 0
+                    rem_clamped = 0
+                val wnd_room = u32(rem_clamped)
                 val wnd_end = tcp_sockets[s].rcv_nxt + wnd_room
                 if tcp_seq_le(seg_end, wnd_end) != 0
                     inet_tcp_reorder_store(s, seq, payload, payload_len)
@@ -1827,6 +1848,12 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
             inet_tcp_close_slot(s, 0)
             return 2
 
+        // Two segments totalling 100 bytes are stashed — helper must
+        // report 100 so the advertised rwnd can shrink accordingly.
+        if inet_tcp_reorder_bytes(s) != 100
+            inet_tcp_close_slot(s, 0)
+            return 13
+
         var seg_a: [100]byte
         i = 0
         while i < 100
@@ -1856,6 +1883,12 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
                 inet_tcp_close_slot(s, 0)
                 return 5
             i += 1
+
+        // After drain the reorder queue is empty — helper must
+        // return 0 so rwnd is only shrunk while bytes are in flight.
+        if inet_tcp_reorder_bytes(s) != 0
+            inet_tcp_close_slot(s, 0)
+            return 14
 
         // RFC 6298 RTO math. Scratch socket starts fresh in alloc
         // state (rtt_measured = 0). We overwrote the above fields
