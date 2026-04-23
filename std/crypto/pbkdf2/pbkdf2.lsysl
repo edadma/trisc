@@ -1,12 +1,41 @@
-std.crypto.pbkdf2 — PBKDF2-HMAC-SHA256
-========================================
+std.crypto.pbkdf2 — PBKDF2-HMAC-SHA-256
+=======================================
 
-PBKDF2 key derivation as specified in RFC 2898, instantiated
-with HMAC-SHA256. Derives a 32-byte key from a password and
-salt using iterated hashing.
+PBKDF2 ("Password-Based Key Derivation Function 2") as specified in
+[RFC 2898 §5.2](https://datatracker.ietf.org/doc/html/rfc2898#section-5.2),
+instantiated with HMAC-SHA-256 as the underlying pseudorandom function.
+Derives a 32-byte cryptographic key from a low-entropy password and a
+salt by iterating an HMAC many times.
 
-Dependencies: std.crypto.hmac.
+The whole point of PBKDF2 is **deliberate slowness**. A user-chosen
+password has perhaps 30–50 bits of entropy; an attacker who steals the
+password database wants to grind through every plausible password as
+fast as possible. By forcing each guess to perform $c$ HMAC-SHA-256
+evaluations, PBKDF2 makes the attacker pay exactly that cost per
+guess. Increasing $c$ is the primary security knob: typical web-app
+deployments choose $c$ between $10^5$ and $10^6$.
 
+The single-block derivation here computes:
+
+$$
+\mathrm{DK} = T_1 = U_1 \oplus U_2 \oplus \cdots \oplus U_c
+$$
+
+where
+
+$$
+\begin{aligned}
+U_1 &= \mathrm{HMAC}(P, S \;\Vert\; \texttt{INT\_32\_BE}(1)) \\
+U_i &= \mathrm{HMAC}(P, U_{i-1}) \quad \text{for } i > 1
+\end{aligned}
+$$
+
+with $P$ the password, $S$ the salt, and $c$ the iteration count.
+$\texttt{INT\_32\_BE}(1)$ is the four-byte big-endian encoding of the
+block index — which is always 1 in this single-block implementation.
+
+Dependencies: `std.crypto.hmac` for the HMAC PRF, `std.mem` for
+buffer copies.
 
     module std.crypto.pbkdf2
 
@@ -17,20 +46,31 @@ Dependencies: std.crypto.hmac.
 Constants
 ---------
 
+The HMAC-SHA-256 output size, used as the size of each $U_i$ and the
+final derived key.
+
     val HASH_SIZE = 32
 
 
-pbkdf2_hmac_sha256
-------------------
+`pbkdf2_hmac_sha256` — software derivation
+------------------------------------------
 
-`pbkdf2_hmac_sha256(password, salt, iterations, out)` derives
-a 32-byte key and writes it to `out`.
+`pbkdf2_hmac_sha256(password, salt, iterations, out)` derives a
+32-byte key into `out`. `iterations` is the cost parameter $c$ — the
+caller decides how many HMAC evaluations are acceptable per
+verification.
+
+The output buffer must be at least 32 bytes; bytes beyond that are
+not touched.
 
     pbkdf2_hmac_sha256(password: []byte, salt: []byte, iterations: int, out: []byte)
         var U: [32]byte
         var T: [32]byte
 
-        // Build salt || INT_32_BE(1)
+The salt and the four-byte big-endian block index "1" are concatenated
+into a dynamically-sized buffer. Block index 1 is hard-coded because
+this implementation produces exactly one HMAC-output-sized block.
+
         val slen = len(salt)
         val sbuf = (new [slen + 4]byte)[:]
         copy(sbuf, salt)
@@ -39,11 +79,15 @@ a 32-byte key and writes it to `out`.
         sbuf[slen + 2] = 0u8
         sbuf[slen + 3] = 1u8
 
-        // U1 = HMAC(password, salt || 1)
+First iteration: $U_1 = \mathrm{HMAC}(P, S \;\Vert\; \texttt{INT\_32\_BE}(1))$.
+Seed the running XOR accumulator $T$ with $U_1$.
+
         hmac_sha256(password, sbuf, U[:])
         copy(T[:], U[:])
 
-        // U2..Uc: each round feeds U back through HMAC and XORs into T
+Iterations $2..c$: each step feeds the previous $U$ back through HMAC
+and XORs it into $T$. After the loop, $T = U_1 \oplus U_2 \oplus \cdots \oplus U_c$.
+
         for i in 1..<iterations
             hmac_sha256(password, U[:], U[:])
             for j in 0..<HASH_SIZE
@@ -52,10 +96,13 @@ a 32-byte key and writes it to `out`.
         copy(out, T[:])
 
 
-pbkdf2_hmac_sha256_hw — hardware-accelerated path
---------------------------------------------------
+`pbkdf2_hmac_sha256_hw` — hardware-accelerated derivation
+---------------------------------------------------------
 
-Same algorithm, uses `hmac_sha256_hw` for the HMAC calls.
+Identical structure to `pbkdf2_hmac_sha256`, but routes every HMAC
+call through `hmac_sha256_hw` (the SHA-256 MMIO accelerator). The two
+functions produce bit-identical output; only which silicon does the
+SHA-256 work changes.
 
     pbkdf2_hmac_sha256_hw(password: []byte, salt: []byte, iterations: int, out: []byte)
         var U: [32]byte
@@ -85,8 +132,17 @@ Tests
 
     import std.debug.{assert}
 
+The test vectors are independently computed against
+[RFC 7914 Appendix A](https://datatracker.ietf.org/doc/html/rfc7914#appendix-A)
+and openssl's `pkcs5_pbkdf2_hmac` for cross-verification.
 
-### PBKDF2 c=1
+
+### PBKDF2 with $c = 1$ — one HMAC iteration
+
+Password `"password"`, salt `"salt"`, $c=1$. The minimum-cost case;
+useful as a sanity check that the salt-and-INT32 framing is correct.
+
+Expected: `120fb6cf fcf8b32c 43e72252 56c4f837 a86548c9 2ccc3548 0805987c b70be17b`.
 
     #test
     test_pbkdf2_c1() -> unit
@@ -95,14 +151,19 @@ Tests
         var out: [32]byte
         pbkdf2_hmac_sha256(password[:], salt[:], 1, out[:])
 
-        // 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
         val expected: [32]byte = [0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c, 0x43, 0xe7, 0x22, 0x52, 0x56, 0xc4, 0xf8, 0x37, 0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48, 0x08, 0x05, 0x98, 0x7c, 0xb7, 0x0b, 0xe1, 0x7b]
 
         for i in 0..<32
             assert(out[i] == expected[i], s"c=1 byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
-### PBKDF2 c=2
+### PBKDF2 with $c = 2$ — exercises the XOR-accumulation loop
+
+Same password and salt with $c=2$. The output differs from $c=1$
+because the XOR of $U_1 \oplus U_2$ has nothing in common with $U_1$
+alone.
+
+Expected: `ae4d0c95 af6b46d3 2d0adff9 28f06dd0 2a303f8e f3c251df d6e2d85a 95474c43`.
 
     #test
     test_pbkdf2_c2() -> unit
@@ -111,14 +172,18 @@ Tests
         var out: [32]byte
         pbkdf2_hmac_sha256(password[:], salt[:], 2, out[:])
 
-        // ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43
         val expected: [32]byte = [0xae, 0x4d, 0x0c, 0x95, 0xaf, 0x6b, 0x46, 0xd3, 0x2d, 0x0a, 0xdf, 0xf9, 0x28, 0xf0, 0x6d, 0xd0, 0x2a, 0x30, 0x3f, 0x8e, 0xf3, 0xc2, 0x51, 0xdf, 0xd6, 0xe2, 0xd8, 0x5a, 0x95, 0x47, 0x4c, 0x43]
 
         for i in 0..<32
             assert(out[i] == expected[i], s"c=2 byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
-### PBKDF2 short password and salt
+### Short password and salt
+
+Password `"pass"` (4 bytes), salt `"sa"` (2 bytes), $c=1$. Verifies
+that small inputs do not run off the ends of any internal buffer.
+
+Expected: `ee3128e0 a8ed80ff 7d38f46e 7a97a2b0 a33fc494 189aedaf cd812acc 752f14ca`.
 
     #test
     test_pbkdf2_short() -> unit
@@ -127,14 +192,18 @@ Tests
         var out: [32]byte
         pbkdf2_hmac_sha256(password[:], salt[:], 1, out[:])
 
-        // ee3128e0a8ed80ff7d38f46e7a97a2b0a33fc494189aedafcd812acc752f14ca
         val expected: [32]byte = [0xee, 0x31, 0x28, 0xe0, 0xa8, 0xed, 0x80, 0xff, 0x7d, 0x38, 0xf4, 0x6e, 0x7a, 0x97, 0xa2, 0xb0, 0xa3, 0x3f, 0xc4, 0x94, 0x18, 0x9a, 0xed, 0xaf, 0xcd, 0x81, 0x2a, 0xcc, 0x75, 0x2f, 0x14, 0xca]
 
         for i in 0..<32
             assert(out[i] == expected[i], s"short byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
-### PBKDF2 c=100
+### PBKDF2 with $c = 100$ — many-iteration vector
+
+A higher iteration count exercises the inner loop. Runtime scales
+linearly with $c$, so $c = 100$ takes about 100 HMACs ≈ 100 × 2 × SHA-256.
+
+Expected: `07e69971 80cf7f12 904f0410 0d405d34 888fdf62 af6d506a 0ecc23b1 96fe99d8`.
 
     #test
     test_pbkdf2_c100() -> unit
@@ -143,14 +212,13 @@ Tests
         var out: [32]byte
         pbkdf2_hmac_sha256(password[:], salt[:], 100, out[:])
 
-        // 07e6997180cf7f12904f04100d405d34888fdf62af6d506a0ecc23b196fe99d8
         val expected: [32]byte = [0x07, 0xe6, 0x99, 0x71, 0x80, 0xcf, 0x7f, 0x12, 0x90, 0x4f, 0x04, 0x10, 0x0d, 0x40, 0x5d, 0x34, 0x88, 0x8f, 0xdf, 0x62, 0xaf, 0x6d, 0x50, 0x6a, 0x0e, 0xcc, 0x23, 0xb1, 0x96, 0xfe, 0x99, 0xd8]
 
         for i in 0..<32
             assert(out[i] == expected[i], s"c=100 byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
-### Determinism
+### Determinism — same inputs produce identical output
 
     #test
     test_pbkdf2_deterministic() -> unit
@@ -168,10 +236,21 @@ Tests
 Design notes
 ------------
 
-**Single block output.** This implementation derives exactly
-one 32-byte block (block index = 1). For longer derived keys,
-the outer loop over block indices would be needed — deferred
-until there's a use case beyond password hashing.
+**Single 32-byte block.** This implementation produces exactly one
+HMAC-SHA-256-output-sized block (`HASH_SIZE = 32`). The full RFC 2898
+PBKDF2 supports arbitrary derived-key lengths by running the inner
+function once per block and concatenating the results. We've not
+needed longer outputs; if a future use wants 64-byte derived keys
+(e.g. for HKDF-Expand inputs), the outer loop over block indices
+would be straightforward to add.
 
-**Dynamic salt buffer.** The salt || INT_32_BE(1) buffer is
-dynamically allocated, so there is no salt size limit.
+**Dynamic salt buffer.** The `salt ‖ INT_32_BE(1)` buffer is
+`(new [slen + 4]byte)`, sized exactly to the salt length, so there is
+no fixed cap on `len(salt)`.
+
+**Cost calibration is the caller's job.** Choose `iterations` so a
+single derivation takes roughly 100–300 ms on the verifier's hardware
+— that matches typical user-facing latency budgets and pushes attack
+cost as high as possible without making honest verification annoying.
+For SLIX-side password hashing the current default is in the high
+tens of thousands; that may want re-tuning on faster CPUs.

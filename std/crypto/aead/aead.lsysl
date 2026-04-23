@@ -1,12 +1,32 @@
 std.crypto.aead — ChaCha20-Poly1305 AEAD
-==========================================
+========================================
 
-Authenticated encryption with associated data as specified
-in RFC 8439. Combines ChaCha20 stream cipher with Poly1305
-MAC for authenticated encryption.
+ChaCha20-Poly1305 as specified in
+[RFC 8439](https://datatracker.ietf.org/doc/html/rfc8439). This is the
+canonical AEAD (Authenticated Encryption with Associated Data)
+construction used in TLS 1.3, WireGuard, OpenSSH, QUIC, age, and most
+modern protocols that don't have AES hardware available.
 
-Dependencies: std.crypto.chacha20.
+The construction combines two pieces:
 
+| Primitive | Role | Output |
+|-----------|------|--------|
+| **ChaCha20** | Stream cipher | 64-byte keystream blocks XORed with the plaintext |
+| **Poly1305** | One-time MAC | 16-byte tag over (associated data ‖ ciphertext ‖ length fields) |
+
+The MAC key for Poly1305 is itself derived from a ChaCha20 keystream
+block — specifically block 0 with the same key/nonce — so a single
+secret $(k, n)$ pair drives both operations.
+
+The two public entry points are:
+
+- `seal(key, nonce, aad, pt, ct, tag)` — encrypt + authenticate.
+- `open(key, nonce, aad, ct, tag, pt) -> bool` — verify + decrypt;
+  returns `false` (and leaves `pt` undefined) if the tag does not
+  match.
+
+Dependencies: `std.crypto.chacha20` (for `chacha20_block`) and
+`std.encoding.binary` (for little-endian word packing).
 
     module std.crypto.aead
 
@@ -17,12 +37,56 @@ Dependencies: std.crypto.chacha20.
 Poly1305 MAC
 ------------
 
-Poly1305 one-shot MAC using the donna 5×26-bit limb
-representation. Accumulator arithmetic uses i64 to hold
-intermediate products (max ~2^55, well within i63).
+Poly1305 evaluates a polynomial in $r$ over the prime field
+$\mathbb{F}_p$ with $p = 2^{130} - 5$:
+
+$$
+\mathrm{Tag}(m) = \big( ((m_1 \cdot r + m_2) \cdot r + \dots + m_q) \cdot r \big) \bmod p \;+\; s \pmod{2^{128}}
+$$
+
+where:
+
+- $m_i$ is the $i$-th 16-byte block of the message, padded out and
+  with a `0x01` byte appended to mark the high end (so that
+  $m_i$ is treated as a 17-byte little-endian integer in
+  $[2^{128}, 2^{129})$ for a full block, or $[0, 2^{128})$ for the
+  final partial block).
+- $r, s$ are the two halves of the 32-byte one-time key. Before use,
+  $r$ is **clamped** by zeroing 22 specific bits (the masks below) —
+  this both bounds $r$ and removes the bits that would otherwise
+  cause carries to escape the 26-bit limb representation.
+- $s$ is added once at the end, modulo $2^{128}$, and the low 128
+  bits become the tag.
+
+### Limb representation
+
+The accumulator $h$, key $r$, and message blocks are kept in **five
+26-bit limbs** stored as `i64`. This is "donna"-style arithmetic, due
+to Bernstein:
+
+$$
+x = x_0 + x_1 \cdot 2^{26} + x_2 \cdot 2^{52} + x_3 \cdot 2^{78} + x_4 \cdot 2^{104}
+$$
+
+A limb-by-limb multiply produces ten 52-bit partial products. Carries
+fold the upper bits down through the next limb, and the limbs of $r$
+that wrap past $2^{130}$ reduce by the prime-form trick: $2^{130}
+\equiv 5 \pmod p$, so a carry out of limb 4 multiplies the wrapped bits
+by 5 and adds them back into limb 0. The pre-scaled values
+$s_i = 5 \cdot r_i$ appear in the multiplication formulas exactly for
+this reason.
+
+Intermediate products stay under $\sim 2^{55}$ — comfortable in the
+63-bit positive range of `i64` — so no manual overflow check is needed
+inside the inner loop.
 
     poly1305(tag: []byte, msg: []byte, key: []byte)
-        // Load and clamp r
+
+The first 16 key bytes form $r$; the next 16 bytes form $s$. Load
+$r$ as four little-endian u32 words, then split into the five 26-bit
+clamped limbs in one pass. Each AND mask clears one nibble of the
+forbidden carry bits.
+
         var t0 = u32_le_at(key, 0)
         var t1 = u32_le_at(key, 4)
         var t2 = u32_le_at(key, 8)
@@ -34,12 +98,16 @@ intermediate products (max ~2^55, well within i63).
         val r3: i64 = i64(((t2 >> 14u32) | (t3 << 18u32)) & 0x03f03fffu32)
         val r4: i64 = i64((t3 >> 8u32) & 0x000fffffu32)
 
+Pre-multiply each $r_i$ by 5 for the carry-wrap step — $s_i$ appears
+once per row of the multiplication grid below.
+
         val s1 = r1 * 5i64
         val s2 = r2 * 5i64
         val s3 = r3 * 5i64
         val s4 = r4 * 5i64
 
-        // Accumulator
+The accumulator $h$ starts at zero.
+
         var h0: i64 = 0i64
         var h1: i64 = 0i64
         var h2: i64 = 0i64
@@ -50,7 +118,13 @@ intermediate products (max ~2^55, well within i63).
         var pos = 0
 
         while pos < mlen
-            // Load block (up to 16 bytes)
+
+Process one 16-byte block per iteration. Full blocks set `hibit` to
+$2^{24}$ (which lands at bit 128 after the limb split — Poly1305's
+"append `0x01`" rule). Partial blocks are zero-padded into a 16-byte
+buffer with the `0x01` byte placed explicitly at the data end, and
+`hibit` is cleared so no extra high bit is added.
+
             val remaining = mlen - pos
             var hibit: i64 = 1i64 << 24i64
 
@@ -60,32 +134,40 @@ intermediate products (max ~2^55, well within i63).
                 t2 = u32_le_at(msg, pos + 8)
                 t3 = u32_le_at(msg, pos + 12)
             else
-                // Partial block: pad with zeros, hibit = 0 for final
                 var buf: [16]byte = ""
                 for i in 0..<remaining
                     buf[i] = msg[pos + i]
-                buf[remaining] = 1u8
+                buf[remaining] = 1u8                  // explicit "1" delimiter for partial block
                 hibit = 0i64
                 t0 = u32_le_at(buf[:], 0)
                 t1 = u32_le_at(buf[:], 4)
                 t2 = u32_le_at(buf[:], 8)
                 t3 = u32_le_at(buf[:], 12)
 
-            // Add block to accumulator
+Add the block (also 5×26 limbs) into $h$. The high limb gets the
+`hibit` for full blocks.
+
             h0 += i64(t0 & 0x03ffffffu32)
             h1 += i64(((t0 >> 26u32) | (t1 << 6u32)) & 0x03ffffffu32)
             h2 += i64(((t1 >> 20u32) | (t2 << 12u32)) & 0x03ffffffu32)
             h3 += i64(((t2 >> 14u32) | (t3 << 18u32)) & 0x03ffffffu32)
             h4 += i64(t3 >> 8u32) | hibit
 
-            // Multiply: h = h * r mod (2^130 - 5)
+Multiply $h \cdot r \bmod (2^{130} - 5)$. Each $d_i$ collects the
+limb products that contribute to position $i$; products that would
+exceed $2^{130}$ wrap via the $s_i = 5 r_i$ pre-scale.
+
             var d0 = h0*r0 + h1*s4 + h2*s3 + h3*s2 + h4*s1
             var d1 = h0*r1 + h1*r0 + h2*s4 + h3*s3 + h4*s2
             var d2 = h0*r2 + h1*r1 + h2*r0 + h3*s4 + h4*s3
             var d3 = h0*r3 + h1*r2 + h2*r1 + h3*r0 + h4*s4
             var d4 = h0*r4 + h1*r3 + h2*r2 + h3*r1 + h4*r0
 
-            // Carry propagation
+Propagate carries through the limbs. Bits above position 26 in $d_i$
+flow into $d_{i+1}$; bits above position 26 in $d_4$ wrap to
+$h_0$ multiplied by 5 (the $2^{130} \equiv 5$ reduction). One more
+$h_0 \to h_1$ carry catches the wrap from that.
+
             var c: i64
             c = d0 >> 26i64
             h0 = d0 & 0x3ffffffi64
@@ -111,7 +193,9 @@ intermediate products (max ~2^55, well within i63).
             else
                 pos = mlen
 
-        // Final reduction mod 2^130 - 5
+After the last block, fully reduce $h$ modulo $2^{130} - 5$ by
+chasing one more carry chain end-to-end.
+
         c = h1 >> 26i64
         h1 = h1 & 0x3ffffffi64
         h2 += c
@@ -128,7 +212,14 @@ intermediate products (max ~2^55, well within i63).
         h0 = h0 & 0x3ffffffi64
         h1 += c
 
-        // Compute h + -p (check if h >= p)
+After the partial reduction, $h$ is in $[0, 2 p)$. To bring it down
+to $[0, p)$ compute $g = h - p$ (in two's complement, this is
+$h + (2^{130} - p) - 2^{130} = h + 5 - 2^{130}$) and select $g$ iff
+the subtraction did not borrow. The borrow is signaled by `g4` being
+negative — its sign bit, replicated by the arithmetic shift, becomes
+the all-ones mask that picks `h`; otherwise the all-zeros mask picks
+`g`. Both branches do the same work, so this is constant-time.
+
         var g0 = h0 + 5i64
         c = g0 >> 26i64
         g0 = g0 & 0x3ffffffi64
@@ -143,21 +234,24 @@ intermediate products (max ~2^55, well within i63).
         g3 = g3 & 0x3ffffffi64
         var g4 = h4 + c - (1i64 << 26i64)
 
-        // Select h or g: g4 >> 63 gives -1 (keep h) or 0 (keep g)
-        val mask = g4 >> 63i64
+        val mask = g4 >> 63i64                        // -1 if h < p (keep h), 0 if h >= p (use g)
         h0 = g0 ^ (mask & (g0 ^ h0))
         h1 = g1 ^ (mask & (g1 ^ h1))
         h2 = g2 ^ (mask & (g2 ^ h2))
         h3 = g3 ^ (mask & (g3 ^ h3))
         h4 = g4 ^ (mask & (g4 ^ h4))
 
-        // Reassemble h into four 32-bit words (mask to 32 bits)
+Reassemble the five 26-bit limbs back into four 32-bit words. The mask
+to 32 bits drops everything above the desired position.
+
         val w0 = (h0 | (h1 << 26i64)) & 0xffffffffi64
         val w1 = ((h1 >> 6i64) | (h2 << 20i64)) & 0xffffffffi64
         val w2 = ((h2 >> 12i64) | (h3 << 14i64)) & 0xffffffffi64
         val w3 = ((h3 >> 18i64) | (h4 << 8i64)) & 0xffffffffi64
 
-        // Add s with carry
+Add the second half of the key, $s$, modulo $2^{128}$, with manual
+32-bit carry propagation.
+
         val s0_val = i64(u32_le_at(key, 16))
         val s1_val = i64(u32_le_at(key, 20))
         val s2_val = i64(u32_le_at(key, 24))
@@ -168,7 +262,8 @@ intermediate products (max ~2^55, well within i63).
         var f2 = w2 + s2_val + (f1 >> 32i64)
         var f3 = w3 + s3_val + (f2 >> 32i64)
 
-        // Output tag (little-endian)
+Serialize the 128-bit tag little-endian.
+
         put_u32_le_at(tag, 0, u32(f0))
         put_u32_le_at(tag, 4, u32(f1))
         put_u32_le_at(tag, 8, u32(f2))
@@ -176,18 +271,26 @@ intermediate products (max ~2^55, well within i63).
 
 
 ChaCha20 stream encryption
----------------------------
+--------------------------
 
-Encrypts (or decrypts) by XORing with the ChaCha20 keystream.
-The key is 32 bytes, nonce is 12 bytes.
+ChaCha20 is a stream cipher: it generates a pseudorandom 64-byte
+keystream block per `(key, nonce, counter)` triple, and the ciphertext
+is the XOR of the keystream with the plaintext. Decryption is the same
+operation — XOR is its own inverse.
+
+`chacha20_crypt` walks the input 64 bytes at a time, generating one
+keystream block per chunk and incrementing the block counter. The
+output buffer must be the same length as the input.
 
     chacha20_crypt(key_bytes: []byte, nonce_bytes: []byte, counter: u32, input: []byte, output: []byte)
-        // Convert key bytes to u32 words (little-endian)
+
+Convert key and nonce from bytes to little-endian u32 words once,
+outside the loop.
+
         var key_words: [8]u32
         for i in 0..<8
             key_words[i] = u32_le_at(key_bytes, i * 4)
 
-        // Convert nonce bytes to u32 words
         var nonce_words: [3]u32
         for i in 0..<3
             nonce_words[i] = u32_le_at(nonce_bytes, i * 4)
@@ -197,11 +300,13 @@ The key is 32 bytes, nonce is 12 bytes.
         var ctr = counter
 
         while pos < n
-            // Generate 64 bytes of keystream
+
+Generate a 64-byte keystream block, then XOR up to 64 bytes of input
+into the output.
+
             var block: [64]byte
             chacha20_block(key_words, ctr, nonce_words, block)
 
-            // XOR with input
             val remaining = n - pos
             val chunk = if remaining < 64 then remaining else 64
 
@@ -215,13 +320,37 @@ The key is 32 bytes, nonce is 12 bytes.
 AEAD construction
 -----------------
 
-### seal
+The full AEAD per RFC 8439 §2.8 is an Encrypt-then-MAC scheme: encrypt
+the plaintext with ChaCha20 starting at counter 1, then compute a
+Poly1305 tag over the *associated data* and *ciphertext* (the AAD
+authenticates context like protocol headers without itself being
+encrypted). Counter 0 is reserved for deriving the one-time Poly1305
+key.
 
-`seal(key, nonce, aad, pt, ct, tag)` encrypts and
-authenticates. `ct` must be the same length as `pt`.
+The Poly1305 message is built from these fields, in order, with each
+section padded up to a 16-byte boundary so that the absorbed blocks
+align with Poly1305's natural granularity:
+
+```
+aad ‖ pad₁₆(aad) ‖ ciphertext ‖ pad₁₆(ciphertext) ‖ len(aad) (u64 LE) ‖ len(ct) (u64 LE)
+```
+
+The trailing length fields prevent splice attacks where an attacker
+moves bytes across the AAD/ciphertext boundary — without them, the MAC
+would not distinguish `aad="ab", ct="cd"` from `aad="abc", ct="d"`.
+
+### `seal` — encrypt and authenticate
+
+`seal(key, nonce, aad, pt, ct, tag)` writes the ciphertext into `ct`
+(which must be the same length as `pt`) and the 16-byte tag into
+`tag`. AAD may be empty.
 
     seal(key: []byte, nonce: []byte, aad: []byte, pt: []byte, ct: []byte, tag: []byte)
-        // Generate Poly1305 key from ChaCha20 block 0
+
+Derive the Poly1305 one-time key from the first 32 bytes of ChaCha20
+block 0 (the rest of that block is discarded — encryption uses
+counters 1, 2, 3, ...).
+
         var poly_key: [32]byte
         var key_words: [8]u32
         for i in 0..<8
@@ -234,10 +363,12 @@ authenticates. `ct` must be the same length as `pt`.
         for i in 0..<32
             poly_key[i] = block0[i]
 
-        // Encrypt plaintext with counter starting at 1
+Encrypt the plaintext starting from counter 1.
+
         chacha20_crypt(key, nonce, 1u32, pt, ct)
 
-        // Build Poly1305 message: aad || pad || ct || pad || len_aad || len_ct
+Build the Poly1305 message: `aad ‖ pad ‖ ct ‖ pad ‖ len_aad ‖ len_ct`.
+
         val aad_len = len(aad)
         val ct_len = len(ct)
         val aad_pad = if aad_len % 16 == 0 then 0 else 16 - aad_len % 16
@@ -247,38 +378,42 @@ authenticates. `ct` must be the same length as `pt`.
 
         var pos = 0
 
-        // AAD
         for i in 0..<aad_len
             mac_data[pos + i] = aad[i]
-        pos += aad_len + aad_pad
+        pos += aad_len + aad_pad                      // padding region is left zero by `new`
 
-        // Ciphertext
         for i in 0..<ct_len
             mac_data[pos + i] = ct[i]
         pos += ct_len + ct_pad
 
-        // Lengths as 64-bit little-endian
+The two length fields are little-endian u64s, written here as paired
+u32s with the high half always zero (sysl has no `put_u64_le_at` yet).
+
         put_u32_le_at(mac_data, pos, u32(aad_len))
         put_u32_le_at(mac_data, pos + 4, 0u32)
         put_u32_le_at(mac_data, pos + 8, u32(ct_len))
         put_u32_le_at(mac_data, pos + 12, 0u32)
 
-        // Compute tag
         poly1305(tag, mac_data, poly_key[:])
 
 
-### open
+### `open` — verify and decrypt
 
-`open(key, nonce, aad, ct, tag, pt)` decrypts and verifies.
-Returns `true` if the tag is valid, `false` otherwise.
+`open(key, nonce, aad, ct, tag, pt) -> bool` recomputes the tag over
+the ciphertext (NOT the plaintext — the MAC is over what's on the wire)
+and decrypts only if the tag matches. Returns `false` if the tag does
+not match; in that case `pt` is left untouched, so callers can detect
+forgery by checking the boolean before reading `pt`.
+
+The order is critical: we must verify *before* releasing any
+plaintext. Decrypting first and then checking the tag would let an
+attacker observe partial decryption side effects.
 
     open(key: []byte, nonce: []byte, aad: []byte, ct: []byte, tag: []byte, pt: []byte) -> bool
-        // Compute expected tag
         var expected: [16]byte
-        // Temporarily encrypt ct to get pt, but first verify tag
-        // We need to compute the tag over the ciphertext (not plaintext)
 
-        // Generate Poly1305 key
+Derive the same Poly1305 key as `seal` (counter 0 of ChaCha20).
+
         var poly_key: [32]byte
         var key_words: [8]u32
         for i in 0..<8
@@ -291,7 +426,9 @@ Returns `true` if the tag is valid, `false` otherwise.
         for i in 0..<32
             poly_key[i] = block0[i]
 
-        // Build MAC data from ciphertext
+Reconstruct the same Poly1305 message that `seal` computed the tag
+over. Same layout, same padding, same length suffix.
+
         val aad_len = len(aad)
         val ct_len = len(ct)
         val aad_pad = if aad_len % 16 == 0 then 0 else 16 - aad_len % 16
@@ -313,14 +450,17 @@ Returns `true` if the tag is valid, `false` otherwise.
 
         poly1305(expected[:], mac_data, poly_key[:])
 
-        // Constant-time tag comparison
+Constant-time tag compare: OR all 16 byte-difference bits together; if
+the running OR is zero, every byte matched. The early return only fires
+*after* the full 16-byte scan completes, so the rejection branch leaks
+nothing about *where* the mismatch was.
+
         var diff: byte = 0u8
         for i in 0..<16
             diff = diff | (expected[i] ^ tag[i])
 
         if diff != 0u8 then return false
 
-        // Tag valid — decrypt
         chacha20_crypt(key, nonce, 1u32, ct, pt)
         return true
 
@@ -331,7 +471,12 @@ Tests
     import std.debug.{assert}
 
 
-### Poly1305 — RFC 8439 Section 2.5.2
+### Poly1305 — RFC 8439 §2.5.2 reference vector
+
+The MAC of `"Cryptographic Forum Research Group"` under the published
+key.
+
+Expected tag: `a8061dc1 305136c6 c22b8baf 0c0127a9`.
 
     #test
     test_poly1305_rfc8439() -> unit
@@ -340,14 +485,20 @@ Tests
         var tag: [16]byte
         poly1305(tag[:], msg[:], key[:])
 
-        // a8061dc1305136c6c22b8baf0c0127a9
         val expected: [16]byte = [0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9]
 
         for i in 0..<16
             assert(tag[i] == expected[i], s"poly1305 byte $i: got ${int(tag[i])} want ${int(expected[i])}")
 
 
-### AEAD seal — RFC 8439 Section 2.8.2
+### AEAD seal — RFC 8439 §2.8.2 reference vector
+
+The full plaintext, ciphertext, AAD, key, and nonce are all reproduced
+from the RFC. The published ciphertext is 114 bytes; the spot-checks
+below cover the first four bytes (`d31a8d34`), the last byte (`16`),
+and every byte of the 16-byte tag.
+
+Expected tag: `1ae10b59 4f09e26a 7e902ecb d0600691`.
 
     #test
     test_aead_seal_rfc8439() -> unit
@@ -355,28 +506,24 @@ Tests
         val nonce: [12]byte = [0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47]
         val aad: [12]byte = [0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7]
 
-        // "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
         val pt: [114]byte = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
 
         var ct: [114]byte
         var tag: [16]byte
         seal(key[:], nonce[:], aad[:], pt[:], ct[:], tag[:])
 
-        // Expected ciphertext first 4 and last 4 bytes
-        // d31a8d34...cec64b6116
         assert(ct[0] == 0xd3u8, s"ct[0]: got ${int(ct[0])}")
         assert(ct[1] == 0x1au8, s"ct[1]: got ${int(ct[1])}")
         assert(ct[2] == 0x8du8, s"ct[2]: got ${int(ct[2])}")
         assert(ct[3] == 0x34u8, s"ct[3]: got ${int(ct[3])}")
         assert(ct[113] == 0x16u8, s"ct[113]: got ${int(ct[113])}")
 
-        // Expected tag: 1ae10b594f09e26a7e902ecbd0600691
         val expected_tag: [16]byte = [0x1a, 0xe1, 0x0b, 0x59, 0x4f, 0x09, 0xe2, 0x6a, 0x7e, 0x90, 0x2e, 0xcb, 0xd0, 0x60, 0x06, 0x91]
         for i in 0..<16
             assert(tag[i] == expected_tag[i], s"tag byte $i: got ${int(tag[i])} want ${int(expected_tag[i])}")
 
 
-### AEAD open — round-trip
+### AEAD round trip — `seal` then `open` recovers the plaintext
 
     #test
     test_aead_roundtrip() -> unit
@@ -385,12 +532,10 @@ Tests
         val aad: [12]byte = [0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7]
         val pt: [114]byte = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
 
-        // Seal
         var ct: [114]byte
         var tag: [16]byte
         seal(key[:], nonce[:], aad[:], pt[:], ct[:], tag[:])
 
-        // Open
         var recovered: [114]byte
         val ok = open(key[:], nonce[:], aad[:], ct[:], tag[:], recovered[:])
 
@@ -399,7 +544,10 @@ Tests
             assert(recovered[i] == pt[i], s"recovered byte $i")
 
 
-### AEAD open — tampered ciphertext rejected
+### AEAD `open` rejects a tampered ciphertext
+
+A single-bit flip in the ciphertext invalidates the Poly1305 tag, so
+`open` must return `false` and refuse to release plaintext.
 
     #test
     test_aead_tamper_rejected() -> unit
@@ -412,8 +560,7 @@ Tests
         var tag: [16]byte
         seal(key[:], nonce[:], aad[:], pt[:], ct[:], tag[:])
 
-        // Tamper with ciphertext
-        ct[0] ^= 0xffu8
+        ct[0] ^= 0xffu8                               // flip every bit of the first ciphertext byte
 
         var recovered: [5]byte
         val ok = open(key[:], nonce[:], aad[:], ct[:], tag[:], recovered[:])
@@ -421,7 +568,12 @@ Tests
         assert(!ok, "tampered ciphertext should be rejected")
 
 
-### Simple AEAD — verified against Node.js
+### Simple AEAD vector — cross-checked against Node.js `crypto`
+
+`key = (0x01, 0, 0, ...)`, `nonce = (0, ...)`, no AAD, plaintext
+`"hello"`. Cross-implementation reference: the same call to Node's
+`crypto.createCipheriv('chacha20-poly1305', key, nonce, ...)` produces
+`ct = 78933a8abe`, `tag = 4b62a254 af342caf 426cc0ce f759ac3f`.
 
     #test
     test_aead_simple() -> unit
@@ -435,7 +587,6 @@ Tests
         var tag: [16]byte
         seal(key[:], nonce[:], empty[:], msg[:], ct[:], tag[:])
 
-        // Verified: ct = 78933a8abe, tag = 4b62a254af342caf426cc0cef759ac3f
         val expected_ct: [5]byte = [0x78, 0x93, 0x3a, 0x8a, 0xbe]
         val expected_tag: [16]byte = [0x4b, 0x62, 0xa2, 0x54, 0xaf, 0x34, 0x2c, 0xaf, 0x42, 0x6c, 0xc0, 0xce, 0xf7, 0x59, 0xac, 0x3f]
 
@@ -448,15 +599,23 @@ Tests
 Design notes
 ------------
 
-**Poly1305 arithmetic.** Uses 5 limbs of 26 bits each in
-i64 to avoid overflow. Products of 26-bit limbs fit in 52
-bits; summing 5 such products stays under 2^56, well within
-the 63-bit positive range of i64.
+**Limb arithmetic stays in `i64`.** Each 26-bit limb fits in 26 bits;
+products of two limbs fit in 52 bits; the row sums in the
+multiplication step have at most five terms, so they stay under
+$5 \cdot 2^{52} \approx 2^{55}$ — comfortably below the 63-bit
+positive range of `i64`. No overflow check is needed inside the
+inner loop, which is the whole point of the 5×26 representation
+(versus 4×32, where the products would overflow `u64`).
 
-**Constant-time tag comparison.** The `open` function uses
-bitwise OR accumulation to compare tags, avoiding
-timing side channels.
+**Constant-time tag comparison.** `open` uses bitwise OR accumulation
+across all 16 bytes before testing for zero. A short-circuit early-out
+on the first mismatching byte would leak the position of the divergence
+through timing.
 
-**Single-block Poly1305 key.** The Poly1305 one-time key is
-derived from ChaCha20 block 0 (first 32 bytes), per RFC 8439
-Section 2.6.
+**Single-block Poly1305 key.** RFC 8439 §2.6 specifies that the
+one-time key for Poly1305 comes from ChaCha20 block 0 (counter = 0)
+under the same `(key, nonce)`. Encryption then starts at counter 1, so
+the keystream block used for key derivation is never reused for
+ciphertext. Reusing nonces under the same key would reuse the Poly1305
+key — catastrophic — so callers must guarantee fresh nonces per
+message under each key.

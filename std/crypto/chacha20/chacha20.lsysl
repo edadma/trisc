@@ -1,39 +1,58 @@
 std.crypto.chacha20 — ChaCha20 stream cipher
-===============================================
+============================================
 
-ChaCha20 as specified in RFC 8439. The core is a block
-function that maps (key, counter, nonce) to 64 bytes of
-pseudorandom output. The stream cipher XORs these blocks
-with plaintext.
+ChaCha20 as specified in
+[RFC 8439](https://datatracker.ietf.org/doc/html/rfc8439). The core
+exported function `chacha20_block` is a deterministic permutation
+mapping a triple $(\text{key}, \text{counter}, \text{nonce})$ to
+64 bytes of pseudorandom output. The stream cipher built on top is
+just XOR of these blocks with the plaintext.
 
-This implementation uses `u32` arithmetic throughout — the
-wrapping semantics of `u32` addition are essential for
-correctness (mod 2^32 addition is the core of every round).
+ChaCha20 is the keystream half of the ChaCha20-Poly1305 AEAD
+construction in `std.crypto.aead`. It can also stand alone as a CSPRNG
+generator if used carefully — but raw ChaCha20 has **no integrity** (no
+MAC), so any use that an attacker can tamper with on the wire wants the
+AEAD wrapper instead.
+
+Every operation is `u32`. The whole algorithm depends on **wrapping
+$\bmod\, 2^{32}$ addition** — the round function is an ARX (Add /
+Rotate / Xor) design where the only nonlinearity comes from the carry
+chain inside `+`.
 
 Dependencies: none.
-
 
     module std.crypto.chacha20
 
 
-rotl32
-------
+### `rotl32` — 32-bit left rotation
 
-32-bit left rotation.
+$$
+\mathrm{rotl32}(x, n) = (x \ll n) \;\lor\; (x \gg (32 - n))
+$$
 
     rotl32(x: u32, n: u32) -> u32 = (x << n) | (x >> (32u32 - n))
 
 
-quarter_round
--------------
+### `quarter_round` — the ChaCha20 mixing core
 
-The ChaCha20 quarter round operates on four 32-bit words
-in place. Each round mixes the words via add-xor-rotate:
+The quarter round operates **in place** on four 32-bit words. Every
+ChaCha20 round consists of eight quarter rounds — four on columns,
+four on diagonals — and the full block function applies 10 double
+rounds (= 20 rounds = 80 quarter rounds).
 
-$$a \mathrel{+}= b;\; d \mathrel{\oplus}= a;\; d \lll 16$$
-$$c \mathrel{+}= d;\; b \mathrel{\oplus}= c;\; b \lll 12$$
-$$a \mathrel{+}= b;\; d \mathrel{\oplus}= a;\; d \lll 8$$
-$$c \mathrel{+}= d;\; b \mathrel{\oplus}= c;\; b \lll 7$$
+The quarter round is an ARX sequence with rotation amounts 16, 12, 8,
+7. Those numbers are not arbitrary: 16 and 8 are byte-aligned and free
+on most ISAs; 12 and 7 are odd, which prevents structural alignments
+between successive rounds:
+
+$$
+\begin{aligned}
+a \mathrel{+}= b; \quad d \mathrel{\oplus}= a; \quad d &\lll 16 \\
+c \mathrel{+}= d; \quad b \mathrel{\oplus}= c; \quad b &\lll 12 \\
+a \mathrel{+}= b; \quad d \mathrel{\oplus}= a; \quad d &\lll 8 \\
+c \mathrel{+}= d; \quad b \mathrel{\oplus}= c; \quad b &\lll 7
+\end{aligned}
+$$
 
     quarter_round(a: *u32, b: *u32, c: *u32, d: *u32)
         *a = *a + *b
@@ -53,65 +72,90 @@ $$c \mathrel{+}= d;\; b \mathrel{\oplus}= c;\; b \lll 7$$
         *b = rotl32(*b, 7u32)
 
 
-chacha20_block
---------------
+`chacha20_block` — generate one 64-byte keystream block
+-------------------------------------------------------
 
-`chacha20_block` produces 64 bytes of output from a 256-bit
-key, 32-bit block counter, and 96-bit nonce. The state
-matrix layout is:
+`chacha20_block(key, counter, nonce, out)` writes 64 bytes of
+keystream to `out`, derived from a 256-bit key (eight u32 words), a
+32-bit block counter, and a 96-bit nonce (three u32 words).
+
+### State matrix layout
+
+The 16-word state is conceptually a 4×4 matrix laid out as:
 
 ```
-cccc cccc cccc cccc    (c = constant "expand 32-byte k")
-kkkk kkkk kkkk kkkk    (k = key words 0-3)
-kkkk kkkk kkkk kkkk    (k = key words 4-7)
-bbbb nnnn nnnn nnnn    (b = block counter, n = nonce)
+cccc cccc cccc cccc    c = constant "expand 32-byte k"
+kkkk kkkk kkkk kkkk    k = key words 0–3
+kkkk kkkk kkkk kkkk    k = key words 4–7
+bnnn nnnn nnnn nnnn    b = block counter, n = nonce
 ```
+
+The four constants in row 0 spell `"expand 32-byte k"` when serialized
+little-endian — the well-known DJB tag, included so that an attacker
+who learns the keystream cannot reverse-engineer it into "this might
+be from a different cipher".
+
+### Algorithm
+
+1. Initialize the 16-word state.
+2. Copy state into a working buffer.
+3. Apply 20 rounds (10 double rounds): each double round is four
+   *column* quarter rounds followed by four *diagonal* quarter rounds.
+4. Add the original state back into the working buffer (Davies–Meyer
+   feedforward — the same trick that makes SHA-256 a one-way function).
+5. Serialize the 16 working words little-endian into the output.
 
     chacha20_block(key: *u32, counter: u32, nonce: *u32, out: *byte)
         var state: [16]u32
         var working: [16]u32
 
-        // "expand 32-byte k" in little-endian u32
+The four-word constant `"expand 32-byte k"` in little-endian u32 form.
+
         state[0] = 0x61707865u32
         state[1] = 0x3320646eu32
         state[2] = 0x79622d32u32
         state[3] = 0x6b206574u32
 
-        // key (8 words)
+Eight key words at positions 4..11.
+
         for i in 0..<8
             state[4 + i] = *(key + i)
 
-        // counter
-        state[12] = counter
+Block counter at position 12; three nonce words at 13..15.
 
-        // nonce (3 words)
+        state[12] = counter
         state[13] = *(nonce + 0)
         state[14] = *(nonce + 1)
         state[15] = *(nonce + 2)
 
-        // copy state to working
+Snapshot the state — the post-round result will be added back to it.
+
         for i in 0..<16
             working[i] = state[i]
 
-        // 20 rounds (10 double rounds)
+Twenty rounds = ten double rounds. Each double round is four column
+quarter rounds followed by four diagonal quarter rounds.
+
         for r in 0..<10
-            // column rounds
-            quarter_round(working, &working[4], &working[8],  &working[12])
+            quarter_round(working,        &working[4], &working[8],  &working[12])
             quarter_round(&working[1], &working[5], &working[9],  &working[13])
             quarter_round(&working[2], &working[6], &working[10], &working[14])
             quarter_round(&working[3], &working[7], &working[11], &working[15])
 
-            // diagonal rounds
-            quarter_round(working, &working[5], &working[10], &working[15])
+            quarter_round(working,        &working[5], &working[10], &working[15])
             quarter_round(&working[1], &working[6], &working[11], &working[12])
             quarter_round(&working[2], &working[7], &working[8],  &working[13])
             quarter_round(&working[3], &working[4], &working[9],  &working[14])
 
-        // add original state
+Davies–Meyer feedforward: add the original state into the round output.
+This is what makes the function one-way — without it, the inverse round
+function could simply reverse the 20 rounds.
+
         for i in 0..<16
             working[i] = working[i] + state[i]
 
-        // serialize little-endian
+Serialize each u32 little-endian into 4 output bytes (16 words × 4 = 64).
+
         for i in 0..<16
             val v = working[i]
             *(out + i * 4)     = byte(v)
@@ -123,17 +167,17 @@ bbbb nnnn nnnn nnnn    (b = block counter, n = nonce)
 Tests
 =====
 
-Tests verify against the RFC 8439 Section 2.3.2 test vector.
+Tests verify against the published RFC 8439 reference vectors. The
+canonical test key is bytes `0x00..0x1f`, which packs little-endian
+into the u32 words `0x03020100, 0x07060504, …, 0x1f1e1d1c`. The
+canonical test nonce is `00 00 00 09 00 00 00 4a 00 00 00 00`, which
+packs LE into `0x09000000, 0x4a000000, 0x00000000`. The block counter
+is 1 in the longer worked example.
 
-The test key is bytes 0x00..0x1f, which in little-endian u32
-words is: 0x03020100, 0x07060504, ..., 0x1f1e1d1c.
+### `quarter_round` — RFC 8439 §2.1.1 reference vector
 
-The test nonce is bytes 00 00 00 09 00 00 00 4a 00 00 00 00,
-which in LE u32 is: 0x09000000, 0x4a000000, 0x00000000.
-
-Counter = 1.
-
-### quarter_round — RFC 8439 Section 2.1.1 test vector
+A single quarter round on the four published input words must produce
+the four published output words.
 
     #test
     test_quarter_round() -> unit
@@ -150,12 +194,13 @@ Counter = 1.
         assert(d == 0x5881c4bbu32, "d")
 
 
-### chacha20_block — RFC 8439 Section 2.3.2 test vector
+### `chacha20_block` — RFC 8439 Appendix A.1 Test Vector #1
+
+All-zero key, all-zero nonce, counter 0. The first 16 output bytes
+must be `76 b8 e0 ad a0 f1 3d 90 40 5d 6a e5 53 86 bd 28`.
 
     #test
     test_chacha20_block_rfc7539() -> unit
-        // RFC 7539 Appendix A.1 Test Vector #1
-        // Key: all zeros, Nonce: all zeros, Counter: 0
         var key: [8]u32
 
         for i in 0..<8
@@ -170,14 +215,16 @@ Counter = 1.
 
         chacha20_block(key, 0u32, nonce, out)
 
-        // Expected first 16 bytes: 76 b8 e0 ad a0 f1 3d 90 40 5d 6a e5 53 86 bd 28
         val expected: [16]byte = [0x76, 0xb8, 0xe0, 0xad, 0xa0, 0xf1, 0x3d, 0x90, 0x40, 0x5d, 0x6a, 0xe5, 0x53, 0x86, 0xbd, 0x28]
 
         for i in 0..<16
             assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
-### Determinism — same inputs produce same output
+### Determinism — same inputs produce identical output
+
+A pure block function over a fixed `(key, counter, nonce)` must be
+bitwise reproducible across calls.
 
     #test
     test_chacha20_deterministic() -> unit
@@ -206,7 +253,12 @@ Counter = 1.
             assert(out1[i] == out2[i], "deterministic")
 
 
-### Different counters produce different output
+### Different counters → different output
+
+If incrementing the block counter did not change the keystream, the
+cipher would output the same 64 bytes for every block — utterly
+broken. The test asserts that *some* byte differs; it cannot prove
+distinguishability strength, only that the counter is wired up.
 
     #test
     test_chacha20_different_counters() -> unit
@@ -226,7 +278,6 @@ Counter = 1.
         chacha20_block(key, 0u32, nonce, out0)
         chacha20_block(key, 1u32, nonce, out1)
 
-        // At least one byte must differ
         var differs = false
 
         for i in 0..<64
@@ -238,23 +289,27 @@ Counter = 1.
 Design notes
 ------------
 
-**u32 wrapping is essential.** Every `+` in the quarter
-round is mod-2^32 addition. The recent fix to Sysl's u32
-arithmetic wrapping makes this work correctly without
-explicit masking.
+**u32 wrapping is the entire round function.** Every `+` in the
+quarter round is $\bmod\, 2^{32}$ addition. The language guarantees
+this — Sysl's `u32` arithmetic wraps without trapping — and any change
+to that semantic (e.g. inserting overflow checks) would break this
+file.
 
-**No allocation.** The block function uses only stack-
-allocated fixed arrays. No heap, no refcounting, no GC
-pressure. This is appropriate for a primitive that may be
-called millions of times per second.
+**No allocation.** The block function uses only stack-allocated fixed
+arrays. No heap, no refcounting, no GC pressure. This matters: a
+primitive that may be called millions of times per second needs to be
+allocator-free, and ChaCha20 is the keystream generator under both the
+AEAD and any future CSPRNG wrapper.
 
-**No Poly1305 yet.** ChaCha20 alone provides confidentiality
-(encryption) but not authentication (integrity). For real
-use, pair with Poly1305 to get ChaCha20-Poly1305 AEAD.
-Using ChaCha20 without authentication is a security error
-in most contexts.
+**No Poly1305 inside this module.** ChaCha20 alone provides
+confidentiality but not integrity — a single bit-flip in the
+ciphertext silently produces garbage plaintext with no detection.
+Pair with Poly1305 (`std.crypto.aead`) for authenticated encryption.
+Using bare ChaCha20 over an attacker-controlled channel is a
+security bug in most contexts.
 
-**CSPRNG wrapper deferred.** `ChaChaRng` needs either raw
-key initialization or SHA-256 seeding. The block function
-is the foundation; the CSPRNG interface layers on top once
-the key management story is clear.
+**CSPRNG wrapper deferred.** A `ChaChaRng` interface needs a key
+management story (raw key in? SHA-256 seeding? `/dev/urandom`
+bootstrap?) that has not been pinned down yet. The block function is
+the foundation; the random-stream interface layers on top once that
+story exists.

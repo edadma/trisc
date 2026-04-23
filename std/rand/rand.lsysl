@@ -164,7 +164,10 @@ Tests
 
         shuffle(s[:])
 
-        // All original elements should still be present
+A shuffle is a permutation: the multiset of elements is preserved
+even though their order changes. Sum is the cheapest invariant to
+check.
+
         var sum = 0
 
         for i in 0..<5
@@ -182,7 +185,10 @@ Tests
 
         shuffle(s[:])
 
-        // Very unlikely that a 10-element shuffle produces identity
+A 10-element identity permutation has probability $1/10! \approx
+2.8 \times 10^{-7}$, so it is essentially impossible that *every*
+element ends up at its starting index. Demand at least one move.
+
         var same = 0
 
         for i in 0..<10

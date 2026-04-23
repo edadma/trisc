@@ -291,20 +291,17 @@ Tests
         b.write(set_fg(RED))
         b.write(BOLD)
         val s = b.to_str()
-        // ESC[1;1H + ESC[2J + ESC[31m + ESC[1m = 6+4+5+4 = 19
-        assert(len(s) == 19, s"composed len: ${len(s)}")
+        assert(len(s) == 19, s"composed len: ${len(s)}")    // ESC[1;1H + ESC[2J + ESC[31m + ESC[1m = 6+4+5+4
 
     #test
     test_composed_interpolation() -> unit
         val s = s"$BOLD$UNDERLINE"
-        // ESC[1m + ESC[4m = 4+4 = 8
-        assert(len(s) == 8, s"interpolated len: ${len(s)}")
+        assert(len(s) == 8, s"interpolated len: ${len(s)}")    // ESC[1m + ESC[4m = 4+4
 
     #test
     test_composed_with_text() -> unit
         val s = s"${set_fg(RED)}${BOLD}hello$RESET"
-        // ESC[31m + ESC[1m + "hello" + ESC[0m = 5+4+5+4 = 18
-        assert(len(s) == 18, s"text len: ${len(s)}")
+        assert(len(s) == 18, s"text len: ${len(s)}")    // ESC[31m + ESC[1m + "hello" + ESC[0m = 5+4+5+4
 
 
 Design notes

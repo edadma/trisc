@@ -2293,7 +2293,7 @@ The `.lsysl` renderer supports:
 - **Horizontal rules** (`---`)
 - **Links** (`[text](url)`)
 - **HTML comments** (`<!-- -->`)
-- **LaTeX math** via KaTeX — inline `\(x^2\)` and display `\[equation\]`
+- **LaTeX math** via KaTeX — inline `$x^2$` and display `$$equation$$` (CommonMark/Pandoc convention; the markdown processor emits the right `\(..\)` / `\[..\]` delimiters for KaTeX automatically). Do not write `\(..\)` or `\[..\]` directly in source — the markdown parser strips the backslashes before KaTeX sees them.
 
 ### Commands
 
