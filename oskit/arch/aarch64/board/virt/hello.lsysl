@@ -882,46 +882,8 @@ which is the baseline we want for this commit).
         user_load_program(new_pt, blob_start, blob_len)
         user_sync_icache(new_pt, blob_len)
 
-        // Build the info page in a local buffer, then vm_copy_to
-        // into RS's PT. Layout matches x86 app_nsh.sysl:
-        //   +0:  RS TID placeholder (RS overwrites with thread_id())
-        //   +8:  ramdisk base (hardcoded 0x50000000 on aarch64 —
-        //        matches -device loader,file=ramdisk.img,addr=0x50000000
-        //        in build.sh / run-test.sh)
-        //  +16:  ramdisk size (hardcoded 0x200000 / 2MB — matches
-        //        MakeAarch64RamdiskMain's TFS.format(512 blocks * 4KB))
-        //  +24:  boot info header copy (SLIX magic + module entries),
-        //        with per-entry offsets converted to absolute PAs.
-        var info_page: [512]byte
-        memset(info_page, 0, 512)
-        var ramdisk_base_p: *i64 = *i64(&info_page[8])
-        *ramdisk_base_p = i64(0x50000000)
-        var ramdisk_size_p: *i64 = *i64(&info_page[16])
-        *ramdisk_size_p = i64(0x200000)
-        // Copy boot info header (magic + count + per-module entries)
-        val mod_count = bi_module_count()
-        if mod_count < 0
-            uart_puts("[rs] bad boot info magic\n")
-            abort()
-        val bi_copy_len = 8 + mod_count * 24
-        if bi_copy_len + 24 > 512
-            uart_puts("[rs] boot info too big for info page\n")
-            abort()
-        val bi_base: *byte = *byte(BOOT_INFO_PA)
-        var ci = 0
-        while ci < bi_copy_len
-            info_page[ci + 24] = bi_base[ci]
-            ci += 1
-        // Convert relative offsets in copied entries to absolute PAs
-        var fi = 0
-        while fi < mod_count
-            val addr_off = 24 + 8 + fi * 24 + 8
-            var p: *i64 = *i64(&info_page[addr_off])
-            val orig_off = *p
-            *p = i64(BOOT_INFO_PA) + orig_off
-            fi += 1
-
-        vm_copy_to(new_pt, u64(0x60090000), info_page, 512)
+        // RS reads ramdisk info + boot info blob via sys_getinfo at
+        // startup — no per-process info page to build or copy.
 
         val pid = create_process_suspended(
             i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),

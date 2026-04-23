@@ -1,7 +1,7 @@
 // aarch64 server startup — entry point for standalone SLIX servers.
 //
-// Servers don't use the ulib argv/sysl_start path: they read their
-// config from the RS info page at INFO_PAGE_VA inside their own
+// Servers don't use the ulib argv/sysl_start path: they query their
+// config (RS TID + ramdisk info) via sys_getinfo inside their own
 // generated main() wrapper, so _start just calls main() and exits
 // via SYS_EXIT. Mirrors oskit/arch/x86_64/srv_start.s.
 

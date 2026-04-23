@@ -8,7 +8,3 @@ val PROG_USP = 0xD0000
 val PROG_SSP = 0xCF000
 val SRV_USP  = 0xD0000
 val SRV_SSP  = 0xCF000
-
-// Scratch page used by the kernel to pass per-process bring-up info
-// (RS TID, ramdisk base/size, boot info) and by PM for argv.
-val INFO_PAGE_VA: i64 = 0xBF000
