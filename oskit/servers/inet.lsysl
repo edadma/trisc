@@ -50,6 +50,8 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_CLOSE    = 13
     val INET_CMD_TCP_LISTEN   = 14
     val INET_CMD_TCP_ACCEPT   = 15
+    val INET_CMD_SET_IP_CONFIG = 16
+    val INET_CMD_GET_IP_CONFIG = 17
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -649,6 +651,37 @@ high byte (0), second (offset 2) is the low byte / index.
         // SYN_RCVD child reaches ESTABLISHED.
 
 
+### inet_handle_set_ip_config
+
+Install a new (ip, mask, gw) triple via `inet_set_ip_config`. Used
+by the DHCP client once a lease is bound, and exposed as an IPC op
+so any userspace tool (ifconfig, tests) can drive it. Wire format:
+cmd(1) + ip(4) + mask(4) + gw(4) = 13 bytes in; 1 byte status out.
+
+    inet_handle_set_ip_config(sender: int, buf: *byte)
+        val ip = inet_read_ipv4(buf, 1)
+        val mask = inet_read_ipv4(buf, 5)
+        val gw = inet_read_ipv4(buf, 9)
+        inet_set_ip_config(ip, mask, gw)
+        var reply: [1]byte
+        reply[0] = byte(0)
+        ipc_reply(sender, reply, 1)
+
+
+### inet_handle_get_ip_config
+
+Return the current (ip, mask, gw). Reply: status(1) + ip(4) +
+mask(4) + gw(4) = 13 bytes. Payload-less request (just cmd).
+
+    inet_handle_get_ip_config(sender: int, buf: *byte)
+        var reply: [13]byte
+        reply[0] = byte(0)
+        inet_write_ipv4(reply, 1, inet_get_our_ip())
+        inet_write_ipv4(reply, 5, inet_get_mask())
+        inet_write_ipv4(reply, 9, inet_get_gw())
+        ipc_reply(sender, reply, 13)
+
+
 Test-only: drive inet_tcp_state_step through a deliberately out-of-
 order segment sequence against a scratch socket and verify the
 reorder queue yields the right rcv_nxt / recv_buf contents. Reply
@@ -742,8 +775,16 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
             val ihl_bytes = (int(frame[14]) & 0x0f) * 4
             if ihl_bytes < 20
                 return 0
-            if pkt_match_ipv4(frame, 14 + 16, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D) == 0
-                return 0
+            // Accept unicast to us OR the limited-broadcast
+            // 255.255.255.255. The broadcast allowance lets DHCP
+            // OFFER/ACK through pre-lease (we have no IP yet at
+            // DISCOVER time, so the server replies by broadcast
+            // per RFC 2131 §4.1).
+            val is_unicast = pkt_match_ipv4(frame, 14 + 16, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+            val is_bcast = pkt_match_ipv4(frame, 14 + 16, 255, 255, 255, 255)
+            if is_unicast == 0
+                if is_bcast == 0
+                    return 0
             val proto = int(frame[14 + 9]) & 0xff
             if proto == IP_PROTO_ICMP
                 val icmp_off = 14 + ihl_bytes
@@ -853,6 +894,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_CLOSE   -> inet_handle_tcp_close(sender, buf)
                     INET_CMD_TCP_LISTEN  -> inet_handle_tcp_listen(sender, buf)
                     INET_CMD_TCP_ACCEPT  -> inet_handle_tcp_accept(sender, buf)
+                    INET_CMD_SET_IP_CONFIG -> inet_handle_set_ip_config(sender, buf)
+                    INET_CMD_GET_IP_CONFIG -> inet_handle_get_ip_config(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte

@@ -39,6 +39,8 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_TCP_CLOSE    = 13
     val INET_CMD_TCP_LISTEN   = 14
     val INET_CMD_TCP_ACCEPT   = 15
+    val INET_CMD_SET_IP_CONFIG = 16
+    val INET_CMD_GET_IP_CONFIG = 17
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val INET_MAX_DATA     = 512
@@ -366,6 +368,53 @@ error.
             peer_port[0] = reply[6]
             peer_port[1] = reply[7]
         int(reply[1]) & 0xff
+
+
+### inet_set_ip_config
+
+Install (`ip`, `mask`, `gw`) on the inet server. The DHCP client
+(Phase B) calls this after binding a lease; tools like `ifconfig`
+could use it for manual config. Returns 0 on success, -1 on error.
+
+    inet_set_ip_config(ip: u32, mask: u32, gw: u32) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [13]byte
+        msg[0] = byte(INET_CMD_SET_IP_CONFIG)
+        net_write_ipv4(msg, 1, ip)
+        net_write_ipv4(msg, 5, mask)
+        net_write_ipv4(msg, 9, gw)
+        var reply: [1]byte
+        ipc_send(port, msg, 13, reply, 1)
+        if reply[0] != 0
+            return -1
+        0
+
+
+### inet_get_ip_config
+
+Read the current (`ip`, `mask`, `gw`). Each out pointer is written
+only if non-null, so callers can ask for a subset. Returns 0 on
+success, -1 on error.
+
+    inet_get_ip_config(ip: *u32, mask: *u32, gw: *u32) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_GET_IP_CONFIG)
+        var reply: [13]byte
+        ipc_send(port, msg, 1, reply, 13)
+        if reply[0] != 0
+            return -1
+        if i64(ip) != 0
+            *ip = net_read_ipv4(reply, 1)
+        if i64(mask) != 0
+            *mask = net_read_ipv4(reply, 5)
+        if i64(gw) != 0
+            *gw = net_read_ipv4(reply, 9)
+        0
 
 
 ### tcp_ooo_selftest (test-only)

@@ -32,19 +32,61 @@ live in kernel-thread space and call `virtio_net_send` directly.
         ipv4, ipv4_octet}
 
 
-The guest's IP and gateway IP under QEMU user-mode networking.
-Hardcoded to QEMU's default `-netdev user` lease (every guest
-gets the same lease so this is fine for bring-up).
+Our IP, netmask, and gateway IP. Mutable so a DHCP client can
+install a learned lease at runtime (see Phase B —
+`oskit/bin/dhclient.lsysl`). Defaults match QEMU's `-netdev user`
+lease (10.0.2.15 / 255.255.255.0 / 10.0.2.2) so a fresh boot
+without DHCP works exactly like the hardcoded era.
 
-    val INET_OUR_IP_A = 10
-    val INET_OUR_IP_B = 0
-    val INET_OUR_IP_C = 2
-    val INET_OUR_IP_D = 15
+Each octet is a separate `var` because Sysl's module-level
+variable initializers must be integer literals — `var X =
+IMPORTED_CONST` evaluates to zero at load time
+(`feedback_sysl_module_var_init.md`).
 
-    val INET_GW_IP_A = 10
-    val INET_GW_IP_B = 0
-    val INET_GW_IP_C = 2
-    val INET_GW_IP_D = 2
+    var INET_OUR_IP_A = 10
+    var INET_OUR_IP_B = 0
+    var INET_OUR_IP_C = 2
+    var INET_OUR_IP_D = 15
+
+    var INET_GW_IP_A = 10
+    var INET_GW_IP_B = 0
+    var INET_GW_IP_C = 2
+    var INET_GW_IP_D = 2
+
+    var INET_MASK_A = 255
+    var INET_MASK_B = 255
+    var INET_MASK_C = 255
+    var INET_MASK_D = 0
+
+
+IP-config accessors. The setter lives in this file because
+another module (later `oskit.bin.dhclient`) that imports these
+vars cannot write them — cross-module `var` writes are
+forbidden (`feedback_sysl_module_split.md`). Keeping the
+mutation local to `oskit.servers` sidesteps that.
+
+    inet_set_ip_config(ip: u32, mask: u32, gw: u32)
+        INET_OUR_IP_A = ipv4_octet(ip, 0)
+        INET_OUR_IP_B = ipv4_octet(ip, 1)
+        INET_OUR_IP_C = ipv4_octet(ip, 2)
+        INET_OUR_IP_D = ipv4_octet(ip, 3)
+        INET_MASK_A = ipv4_octet(mask, 0)
+        INET_MASK_B = ipv4_octet(mask, 1)
+        INET_MASK_C = ipv4_octet(mask, 2)
+        INET_MASK_D = ipv4_octet(mask, 3)
+        INET_GW_IP_A = ipv4_octet(gw, 0)
+        INET_GW_IP_B = ipv4_octet(gw, 1)
+        INET_GW_IP_C = ipv4_octet(gw, 2)
+        INET_GW_IP_D = ipv4_octet(gw, 3)
+
+    inet_get_our_ip() -> u32
+        ipv4(INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+
+    inet_get_mask() -> u32
+        ipv4(INET_MASK_A, INET_MASK_B, INET_MASK_C, INET_MASK_D)
+
+    inet_get_gw() -> u32
+        ipv4(INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D)
 
 
 Link-layer state. `inet_our_mac_known` guards every outbound
@@ -123,18 +165,17 @@ slot 0 (simplest FIFO-ish policy). Good enough at this scale.
         inet_arp_cache[idx].in_use = 1
 
 
-Returns 1 if `ip` lives in our local /24 subnet (matches our
-first 3 octets). Off-subnet destinations route via the default
-gateway.
+Returns 1 if `ip` lives in our local subnet per the current
+netmask. Off-subnet destinations route via the default gateway.
+Bitwise `(ip & mask) == (ours & mask)` so CIDR widths other
+than /24 work once DHCP installs them.
 
     inet_in_subnet(ip: u32) -> int
-        if ipv4_octet(ip, 0) != INET_OUR_IP_A
-            return 0
-        if ipv4_octet(ip, 1) != INET_OUR_IP_B
-            return 0
-        if ipv4_octet(ip, 2) != INET_OUR_IP_C
-            return 0
-        1
+        val mask = inet_get_mask()
+        val ours = inet_get_our_ip()
+        if (ip & mask) == (ours & mask)
+            return 1
+        0
 
 
 Resolve the next-hop MAC for `dst_ip`: the cached entry for
@@ -1934,4 +1975,36 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
             return 12
 
         inet_tcp_close_slot(s, 0)
+
+        // IP-config round-trip: save the current triple, install a
+        // deliberately different one, verify every getter + the
+        // bitwise `inet_in_subnet`, then restore. Lets the harness
+        // prove inet_set/get + CIDR matching before a real DHCP
+        // client is live.
+        val saved_ip = inet_get_our_ip()
+        val saved_mask = inet_get_mask()
+        val saved_gw = inet_get_gw()
+        val probe_ip = ipv4(192, 168, 7, 42)
+        val probe_mask = ipv4(255, 255, 0, 0)
+        val probe_gw = ipv4(192, 168, 7, 1)
+        inet_set_ip_config(probe_ip, probe_mask, probe_gw)
+        if inet_get_our_ip() != probe_ip
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 15
+        if inet_get_mask() != probe_mask
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 16
+        if inet_get_gw() != probe_gw
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 17
+        // /16 says 192.168.99.5 is on-link; 192.169.0.5 is not.
+        if inet_in_subnet(ipv4(192, 168, 99, 5)) == 0
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 18
+        if inet_in_subnet(ipv4(192, 169, 0, 5)) != 0
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 19
+        inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+        if inet_get_our_ip() != saved_ip
+            return 20
         0
