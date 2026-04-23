@@ -418,3 +418,23 @@ frames for liveness.
 
     svc_timer_subscribe(period: int) -> int
         syscall(SYS_TIMER_SUBSCRIBE, i64(period))
+
+
+Bulk write to the console. The kernel handler loops `uart_putc`
+in kernel context, avoiding the per-byte user/kernel transition
+that `SYS_PUTC` × N incurs. Used by the TTY server so every
+`puts` that reaches the UART is one syscall, not one-per-byte.
+
+Currently registered on aarch64 only (see
+`oskit/arch/aarch64/board/virt/hello.lsysl::sys_puts_handler`).
+x86 is sidelined; when it's reactivated, add a parallel
+handler registration there — otherwise tty_handle_puts on x86
+silently fails.
+
+    val SYS_PUTS = 79
+
+    svc_puts(buf: *byte, len: int) -> int
+        var args: [2]i64
+        args[0] = i64(buf)
+        args[1] = len
+        syscall(SYS_PUTS, i64(args))

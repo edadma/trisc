@@ -8,7 +8,7 @@ to the active console's input buffer.
 
     module oskit.drivers.tty
 
-    import oskit.services.{thread_id, putc, notify_read_self, rs_ready, kbhit, getkey, svc_kb_set_notify}
+    import oskit.services.{thread_id, putc, svc_puts, notify_read_self, rs_ready, kbhit, getkey, svc_kb_set_notify}
     import oskit.ipc.*
 
     val TTY_CMD_WRITE   = 1
@@ -357,10 +357,8 @@ server prints garbage (e.g. two stray characters before the next prompt).
             val maxpl = tot - 3
             if len > maxpl
                 len = maxpl
-        var i = 0
-        while i < len
-            putc(buf[i + 3])
-            i += 1
+        if len > 0
+            svc_puts(&buf[3], len)
         var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, reply, 1)

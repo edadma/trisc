@@ -60,9 +60,14 @@ Common bits (lo): sleep(0), putc(1), yield(2), exit(3), join(4),
 
     val PRIV_COMMON_LO: i64 = i64(0x7F) | (i64(7) << 21) | (i64(0xFFFFFFFF) << 24) | (i64(1) << 61)
 
-Common bits (hi): ipc_last_msg_len(65), grant_create(71), grant_revoke(72)
+Common bits (hi): ipc_last_msg_len(65), grant_create(71),
+grant_revoke(72), puts(79).
 
-    val PRIV_COMMON_HI: i64 = i64(0x182)
+puts(79) is the bulk-write companion to putc(1) in
+PRIV_COMMON_LO — any server that can print a character can
+print a buffer.
+
+    val PRIV_COMMON_HI: i64 = i64(0x182) | (i64(1) << 15)
 
 PM extra bits (lo): vm_create_pt(44), create_proc_susp(45),
   resume_proc(46), reap_proc(47), kill_proc(48), register_pm(49),
@@ -87,7 +92,7 @@ created but before it is resumed.
 
     rs_set_server_priv(pid: int, idx: int)
         var lo: i64 = PRIV_COMMON_LO
-        var hi: i64 = i64(0x182)                // PRIV_COMMON_HI
+        var hi: i64 = PRIV_COMMON_HI
         // IPC mask set to 0xFFFF during boot (all 16 ports allowed).
         // Tightened after all servers are up via rs_set_ipc_masks().
         var ipc = 0xFFFF
