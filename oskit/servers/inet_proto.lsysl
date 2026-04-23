@@ -1073,18 +1073,26 @@ Returns the child socket index (caller replies immediately) or
 -1 if the caller was parked as accept_waiter. Returns -2 if
 `ls` is not a valid listen socket.
 
+A child is also acceptable in CLOSE_WAIT: the peer can send data
+and FIN while our accept() hasn't been called yet, so the child
+transitions ESTABLISHED → CLOSE_WAIT before dequeue. Returning
+it lets the caller drain buffered data and close cleanly instead
+of silently dropping the connection. Other teardown states
+(FIN_WAIT_*, LAST_ACK, TIME_WAIT) can't appear here — they only
+enter after *we* close(), which the caller hasn't done yet.
+
     inet_tcp_do_accept(caller_tid: int, ls: int) -> int
         if tcp_sockets[ls].in_use == 0 || tcp_sockets[ls].is_listen == 0
             return -2
-        // Drain stale entries at the head: a child may have died
-        // (RST / retransmit giveup) before accept() got to it.
         while tcp_sockets[ls].accept_count > 0
             val head = tcp_sockets[ls].accept_head
             val c = tcp_sockets[ls].accept_queue[head]
             tcp_sockets[ls].accept_head = (head + 1) % TCP_LISTEN_BACKLOG
             tcp_sockets[ls].accept_count -= 1
-            if tcp_sockets[c].in_use != 0 && tcp_sockets[c].state == TCP_STATE_ESTABLISHED
-                return c
+            if tcp_sockets[c].in_use != 0
+                val cst = tcp_sockets[c].state
+                if cst == TCP_STATE_ESTABLISHED || cst == TCP_STATE_CLOSE_WAIT
+                    return c
         // Queue empty — park caller.
         tcp_sockets[ls].accept_waiter = caller_tid
         -1
