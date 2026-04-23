@@ -393,8 +393,7 @@ Tests
 
     #test
     test_reverse32() -> unit
-        // 0x80000000 reversed = 0x00000001
-        assert(reverse32(0x80000000u32) == 0x00000001u32, "high to low")
+        assert(reverse32(0x80000000u32) == 0x00000001u32, "high to low")    // bit 31 → bit 0
 
     #test
     test_reverse32_roundtrip() -> unit

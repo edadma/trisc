@@ -88,8 +88,12 @@ negative-accumulation covers the whole range with one code path.
 
         if i >= n then return Err(new_error("invalid integer"))
 
-        // Accumulate as a negative i64 to cover MIN_I64.
-        // LIMIT = MIN_I64 / 10, truncated toward zero.
+Accumulate as a *negative* i64. The signed range is asymmetric —
+$|\mathrm{MIN\_I64}| = \mathrm{MAX\_I64} + 1$ — so building the value
+on the negative side covers MIN_I64 with the same code path. `LIMIT`
+is $\lfloor \mathrm{MIN\_I64} / 10 \rfloor$, the largest magnitude
+that can survive a `* 10` without wrapping.
+
         var acc: i64 = 0i64
         val LIMIT: i64 = -922337203685477580i64
 
@@ -108,7 +112,10 @@ negative-accumulation covers the whole range with one code path.
 
         if neg then return Ok(acc)
 
-        // Positive: negate. If acc == MIN_I64, -acc would overflow.
+For a positive result we negate. The single value `acc == MIN_I64`
+would overflow `-acc` (since `-MIN_I64 > MAX_I64`); reject that case
+explicitly before negating.
+
         if acc < -9223372036854775807i64 then return Err(new_error("integer overflow"))
 
         return Ok(-acc)
@@ -161,13 +168,18 @@ never computed on a positive overflow path.
 
         if cap < 1 then return 0
 
-        // Accumulate as a negative number to cover MIN_I64.
+Operate on a negative copy of `x` so we never compute `-MIN_I64`
+(which would overflow). The digit extraction below uses unary minus
+on the modulus, so the produced digits are non-negative either way.
+
         var x: i64 = n
 
         if x > 0i64 then x = -x
 
-        // Write digits to a temporary buffer in reverse.
-        // Max 19 digits + optional sign = 20 bytes.
+A 20-byte scratch buffer is enough for any `i64`: 19 digits plus an
+optional sign byte. Digits are written from the right and the final
+slice from `i` to 20 is the formatted number.
+
         val tmp = new [20]byte
         var i = 20
 
@@ -262,7 +274,11 @@ use letters a–z (case-insensitive).
 
         if i >= n then return Err(new_error("invalid integer"))
 
-        // Accumulate as negative i64 to cover MIN_I64
+Same negative-accumulation trick as `parse_i64`, generalized over an
+arbitrary base. The pre-multiply check rejects any value that would
+exceed the magnitude of MIN_I64 once multiplied; the post-subtract
+sign check catches the remaining "MIN_I64 ± 1 digit" edge cases.
+
         var acc: i64 = 0i64
         val b: i64 = i64(base)
         val limit: i64 = -9223372036854775807i64 / b - 1i64
@@ -276,8 +292,7 @@ use letters a–z (case-insensitive).
 
             acc = acc * b - i64(d)
 
-            // Check for overflow after multiply-subtract
-            if acc > 0i64 then return Err(new_error("integer overflow"))
+            if acc > 0i64 then return Err(new_error("integer overflow"))    // wrapped past MIN_I64
 
             i++
 

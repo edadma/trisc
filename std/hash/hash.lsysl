@@ -90,7 +90,9 @@ Tests
         var h = new_sha256()
         var out: [32]byte
         h.sum(out[:])
-        // e3b0c442...
+
+Empty-input digest is the famous `e3b0c44298fc1c14...7852b855`.
+
         assert(out[0] == 0xe3u8, s"byte 0: ${int(out[0])}")
         assert(out[1] == 0xb0u8, s"byte 1: ${int(out[1])}")
         assert(out[31] == 0x55u8, s"byte 31: ${int(out[31])}")
@@ -114,7 +116,11 @@ Tests
         val _ = h.write(d2[:])
         var out: [32]byte
         h.sum(out[:])
-        // Same as sha256("abc")
+
+Two `write` calls of `"ab"` and `"c"` must produce the same digest
+as a one-shot `sha256("abc")` — the buffering API is observably
+identical to the one-shot API.
+
         assert(out[0] == 0xbau8, "byte 0")
         assert(out[3] == 0xbfu8, "byte 3")
 
@@ -126,8 +132,7 @@ Tests
         h.reset()
         var out: [32]byte
         h.sum(out[:])
-        // After reset, should hash empty
-        assert(out[0] == 0xe3u8, "byte 0 after reset")
+        assert(out[0] == 0xe3u8, "byte 0 after reset")    // empty-string digest, see test above
 
     #test
     test_sha256hash_size() -> unit
@@ -151,13 +156,11 @@ Tests
     test_hash_writer_interface() -> unit
         var h = new_sha256()
         val data: [5]byte = "hello"
-        // write via Writer interface (Hash embeds Writer)
-        val n = h.write(data[:])
+        val n = h.write(data[:])             // Hash embeds Writer; write reaches it via interface dispatch
         assert(n == 5, "wrote 5")
         var out: [32]byte
         h.sum(out[:])
-        // sha256("hello") starts with 2c f2 4d ba
-        assert(out[0] == 0x2cu8, s"byte 0: ${int(out[0])}")
+        assert(out[0] == 0x2cu8, s"byte 0: ${int(out[0])}")    // sha256("hello") = 2cf24dba...
         assert(out[1] == 0xf2u8, s"byte 1: ${int(out[1])}")
 
 

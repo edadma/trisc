@@ -57,7 +57,11 @@ of a single i64 nanosecond counter.
         var s = seconds
         var n = nano
 
-        // Normalize: nano must be in [0, 999_999_999]
+Normalize so the `nano` field always lies in $[0, 999\,999\,999]$ —
+borrow from `seconds` when negative, carry into `seconds` when
+overflowing a billion. This keeps comparison and arithmetic simple
+downstream.
+
         if n < 0
             val borrow = (-n + 999999999) / 1000000000
             s -= i64(borrow)
@@ -262,7 +266,12 @@ Returns 0=Monday through 6=Sunday.
 
     day_of_week(year: int, month: int, day: int) -> int
         val z = days_from_civil(year, month, day)
-        // Day 0 (1970-01-01) is Thursday (4). Sunday=0.
+
+Day 0 (1970-01-01) is Thursday (4 in Sunday=0 numbering). The first
+branch handles dates from 1969-12-28 onward; the second handles
+earlier dates with explicit modular wrap so the result stays in
+`[0, 6]`.
+
         if z >= -4i64 then return int((z + 4i64) % 7i64)
         return int((z + 5i64) % 7i64 + 6i64)
 
@@ -379,7 +388,11 @@ Zero-pad an integer to 4 digits.
             val ch = pattern[i]
 
             if ch == byte('|')
-                // Literal: |text|
+
+Literal text: `|text|` emits the bytes between the two `|` markers
+verbatim, so a pattern can include words like `|at|` without the
+formatter eating them as letter codes.
+
                 i++
 
                 while i < n && pattern[i] != byte('|')
@@ -429,7 +442,11 @@ Zero-pad an integer to 4 digits.
                 if count == 4 then b.write(WEEKDAYS_LONG[dow])
                 else b.write(WEEKDAYS_SHORT[dow])
             else if ch == byte('h')
-                // Check for h12 or hh12
+
+`h` may be the start of a 24-hour code (`h`, `hh`) or a 12-hour code
+(`h12`, `hh12`). Look ahead two or three characters to disambiguate
+before falling back to the count-of-`h`s 24-hour path.
+
                 if i + 2 < n && pattern[i + 1] == byte('1') && pattern[i + 2] == byte('2')
                     val raw = dt.hour % 12
                     val hr = if raw == 0 then 12 else raw
@@ -666,16 +683,17 @@ Tests
 
     #test
     test_civil_roundtrip_2026() -> unit
-        // 2026-04-15 is day 20558 from epoch
-        val days = days_from_civil(2026, 4, 15)
+        val days = days_from_civil(2026, 4, 15)        // 2026-04-15 is day 20558 from epoch
         val y, m, d = civil_from_days(days)
         assert(y == 2026, s"year: $y")
         assert(m == 4, s"month: $m")
         assert(d == 15, s"day: $d")
 
+A pre-epoch date exercises the negative-`days` branch of
+`civil_from_days`.
+
     #test
     test_civil_roundtrip_1969() -> unit
-        // Before epoch
         val days = days_from_civil(1969, 12, 31)
         assert(days == -1i64, s"dec 31 1969: $days")
         val y, m, d = civil_from_days(-1i64)
@@ -693,11 +711,8 @@ Tests
 
     #test
     test_day_of_week_known() -> unit
-        // 2026-04-15 is a Wednesday (3)
         assert(day_of_week(2026, 4, 15) == WEDNESDAY, s"wednesday: ${day_of_week(2026, 4, 15)}")
-        // 1970-01-01 is a Thursday (4)
         assert(day_of_week(1970, 1, 1) == THURSDAY, s"thursday: ${day_of_week(1970, 1, 1)}")
-        // 2026-04-19 is a Sunday (0)
         assert(day_of_week(2026, 4, 19) == SUNDAY, s"sunday: ${day_of_week(2026, 4, 19)}")
 
 
@@ -714,9 +729,10 @@ Tests
     test_datetime_to_instant_2026() -> unit
         val dt = new_datetime(2026, 4, 15, 12, 30, 0)
         val t = datetime_to_instant(dt)
-        // Should be positive and large
-        assert(t.seconds > 0i64, "positive")
-        // Round-trip back
+        assert(t.seconds > 0i64, "positive")          // a 2026 date is well after the epoch
+
+Convert back via UTC and check every field round-trips.
+
         val dt2 = instant_to_utc(t)
         assert(dt2.year == 2026, s"year: ${dt2.year}")
         assert(dt2.month == 4, s"month: ${dt2.month}")
@@ -724,18 +740,24 @@ Tests
         assert(dt2.hour == 12, s"hour: ${dt2.hour}")
         assert(dt2.minute == 30, s"minute: ${dt2.minute}")
 
+2026-04-15 12:00:00 UTC = 2026-04-15 08:00:00 EDT (offset = -240
+minutes). The offset shifts the wall-clock representation without
+moving the underlying instant.
+
     #test
     test_instant_to_datetime_with_offset() -> unit
-        // 2026-04-15 12:00:00 UTC = 2026-04-15 08:00:00 EDT (-240 minutes)
         val dt_utc = new_datetime(2026, 4, 15, 12, 0, 0)
         val t = datetime_to_instant(dt_utc)
         val dt_edt = instant_to_datetime(t, -240)
         assert(dt_edt.hour == 8, s"hour: ${dt_edt.hour}")
         assert(dt_edt.offset_minutes == -240, "offset")
 
+Round-trip in the other direction: build a `DateTime` already in
+EST (-300) and verify converting to UTC moves the wall clock by
+five hours.
+
     #test
     test_datetime_with_offset_roundtrip() -> unit
-        // Create datetime in EST (-300), convert to instant, back to UTC
         val dt_est = new_datetime_offset(2026, 4, 15, 8, 0, 0, -300)
         val t = datetime_to_instant(dt_est)
         val dt_utc = instant_to_utc(t)

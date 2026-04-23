@@ -191,10 +191,12 @@ Tests
 
 ### Growth beyond initial capacity
 
+The default `new_builder()` capacity is 16 bytes. A write longer
+than that exercises the grow path.
+
     #test
     test_grows_past_initial_cap() -> unit
         var b = new_builder()
-        // Initial cap is 16; write more than that
         b.write("this string is definitely longer than sixteen bytes")
         assert(b.to_str() == "this string is definitely longer than sixteen bytes", "grown buffer")
 

@@ -132,7 +132,10 @@ Allocate size bytes of memory. Returns pointer or null.
         if total < MIN_BLOCK then total = MIN_BLOCK
         total = (total + 7) & ~7
 
-        // Try segregated free lists
+Three-tier allocation strategy: try a segregated free list first
+(O(1) hit for common sizes), fall back to first-fit on the large
+free list, then `sbrk` more from the kernel.
+
         val cls = _size_class(total)
         if cls >= 0
             var try_cls = cls
@@ -152,7 +155,9 @@ Allocate size bytes of memory. Returns pointer or null.
                     return block + HEADER_SIZE
                 try_cls++
 
-        // Try large free list (first fit)
+Large-block fallback: linear scan of `large_free` looking for the
+first block big enough to satisfy `total`.
+
         if cls < 0
             var prev: *byte = *byte(0)
             var cur = large_free
@@ -175,7 +180,9 @@ Allocate size bytes of memory. Returns pointer or null.
                 prev = cur
                 cur = _get_next(cur)
 
-        // Extend heap via sbrk
+Last resort: ask the kernel for more heap via `sbrk` and carve the
+fresh region as a single allocated block.
+
         val brk = sbrk(int(total))
         if i64(brk) == SBRK_FAIL then return *byte(0)
 
@@ -193,7 +200,8 @@ Free a previously allocated pointer.
         var block = ptr - HEADER_SIZE
         var size = _block_size(_get_header(block))
 
-        // Coalesce with next physical block
+Forward coalesce: if the next physical block is free, absorb it.
+
         val next_block = block + size
         if i64(next_block) < i64(heap_top)
             val nh = _get_header(next_block)
@@ -202,7 +210,10 @@ Free a previously allocated pointer.
                 _remove_from_free(next_block, ns)
                 size += ns
 
-        // Coalesce with previous physical block
+Backward coalesce: if the previous physical block (located via the
+boundary-tag footer) is free, absorb it too. The two coalesces
+together keep fragmentation bounded.
+
         if i64(block) > i64(heap_base)
             val ps = _prev_footer(block)
             val prev_block = block - ps
@@ -230,7 +241,10 @@ Reallocate a previously allocated pointer to a new size.
         if total < MIN_BLOCK then total = MIN_BLOCK
         total = (total + 7) & ~7
 
-        // Current block is big enough — maybe split
+Shrinking case: the current block already fits, possibly with room
+to spare. Split if the leftover would meet `MIN_BLOCK`; otherwise
+leave the slack and reuse in place.
+
         if old_size >= total
             val rem = old_size - total
             if rem >= MIN_BLOCK
@@ -239,7 +253,9 @@ Reallocate a previously allocated pointer to a new size.
                 _add_to_free(block + total, rem)
             return ptr
 
-        // Need bigger block: alloc, copy, free
+Growing case: allocate a fresh block, memcpy the old contents over,
+free the old block. (No `mremap`-style in-place expansion yet.)
+
         val new_ptr = malloc(new_size)
         if i64(new_ptr) == 0 then return *byte(0)
 

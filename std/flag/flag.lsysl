@@ -1,10 +1,12 @@
 std.flag — Command-line flag parsing
-=====================================
+====================================
 
-A safe, idiomatic command-line flag parser inspired by Go's
-`flag` package but with short/long flag names and combined
-short flags. Returns `Result` on parse errors instead of
-panicking.
+A safe, idiomatic command-line flag parser inspired by Go's `flag`
+package, with two ergonomic upgrades: every flag has both a short
+(`-v`) and a long (`--verbose`) name, and combined short flags
+(`-abc` for three booleans) are supported. Parse errors come back
+as `Result[ParsedArgs, Error]` instead of panicking, so callers can
+print a usage message and exit cleanly.
 
 Usage:
 
@@ -26,9 +28,29 @@ val output = parsed.get_str(opt_o)
 val files = parsed.args()
 ```
 
-Dependencies: std.errors, std.result, std.strconv,
-std.strings, std.builder.
+Each `*_flag` registration returns an `int` index handle that the
+caller stashes in a `val`; later, `get_bool` / `get_int` / `get_str`
+on the `ParsedArgs` retrieve the value at that index. This avoids
+generics, pointers, and dynamic dispatch entirely — flag access is
+plain array indexing.
 
+Supported syntax for a single argv entry:
+
+| Form | Example | Notes |
+|------|---------|-------|
+| Short bool | `-v` | Sets the bool to `true` |
+| Combined short bools | `-abc` | Each character sets one bool |
+| Short with value (separate) | `-p 8080` | Next argv entry is the value |
+| Short with value (attached) | `-p8080`, `-ofile.txt` | Same arg holds the value |
+| Long bool | `--verbose` | |
+| Long with value (`=`) | `--port=8080` | |
+| Long with value (separate) | `--port 8080` | Next argv entry is the value |
+| End-of-flags | `--` | Everything after is positional |
+| Bare dash | `-` | Treated as a positional (stdin convention) |
+
+Dependencies: `std.errors`, `std.result`, `std.strconv` (for
+`parse_i64`), `std.strings` (for `has_prefix`), `std.builder` (for
+slicing argv tokens).
 
     module std.flag
 
@@ -43,7 +65,9 @@ std.strings, std.builder.
 Constants
 ---------
 
-Flag type tags.
+Flag-type tags stored in `FlagDesc.flag_type`. The fixed `MAX_FLAGS`
+of 32 is a deliberate choice — it caps the per-parser table at a
+modest size and keeps the in-memory descriptor table cache-friendly.
 
     val FLAG_BOOL = 0
     val FLAG_INT  = 1
@@ -55,7 +79,8 @@ Flag type tags.
 Flag descriptor
 ---------------
 
-Each registered flag is stored as a descriptor.
+One descriptor per registered flag, stored in the parser's fixed
+`flags` array.
 
     struct FlagDesc
         short_name: string
@@ -69,7 +94,10 @@ Each registered flag is stored as a descriptor.
 Parsed result
 -------------
 
-Holds the parsed values and positional arguments.
+`ParsedArgs` is what `parse()` returns on success. It holds the
+parsed flag values (one per registered flag, indexed by the handle
+returned during registration) and the positional arguments collected
+in declaration order.
 
     struct ParsedArgs
         bool_vals: [32]bool
@@ -92,6 +120,9 @@ Holds the parsed values and positional arguments.
 Parser
 ------
 
+The parser owns the flag table and the program metadata used by the
+help generator.
+
     struct Parser
         name: string
         description: string
@@ -108,8 +139,9 @@ Parser
 
 ### Flag registration
 
-Each returns an index handle used to retrieve the
-parsed value.
+Each registration appends one entry to the parser's flag table and
+returns its index. Callers must keep that index — it's the handle
+used to retrieve the parsed value later.
 
     Parser.bool_flag(short_name: string, long_name: string, help_text: string) -> int
         val idx = self.count
@@ -130,9 +162,11 @@ parsed value.
         return idx
 
 
-### find_flag
+### `find_flag` — name → index lookup
 
-Returns the index of a flag by short or long name, or -1.
+Linear scan of the flag table; returns the index, or `-1` if no flag
+matches. Linear is fine here: the table is at most 32 entries and
+this only runs once per token at parse time.
 
     Parser.find_flag(name: string) -> int
         for i in 0..<self.count
@@ -141,21 +175,22 @@ Returns the index of a flag by short or long name, or -1.
         return -1
 
 
-### parse
+### `parse` — walk argv and produce `ParsedArgs`
 
-Parses an argument list (typically argv[1:]). Supports:
-- `-v` (short bool)
-- `-abc` (combined short bools)
-- `-p 8080` (short with value)
-- `--verbose` (long bool)
-- `--port=8080` (long with =)
-- `--port 8080` (long with next arg)
-- `--` stops flag parsing
+`parse(argv)` consumes a list of argument strings (typically
+`argv[1:]` after the program name) and returns
+`Result[ParsedArgs, Error]`. The state machine handles five branch
+classes per token: positional, bare `-`, end-of-flags `--`, long
+flag, short flag(s). Each long/short flag may consume a following
+token as its value if needed.
 
     Parser.parse(argv: []string) -> Result[ParsedArgs, Error]
         var result: ParsedArgs
 
-        // Set defaults
+Seed every registered flag with its declared default before parsing
+begins. Bool flags default to `false` (already zero-initialized);
+ints and strings get the per-flag default supplied at registration.
+
         for i in 0..<self.count
             val f = self.flags[i]
 
@@ -164,7 +199,9 @@ Parses an argument list (typically argv[1:]). Supports:
             else if f.flag_type == FLAG_STR
                 result.str_vals[i] = f.default_str
 
-        // Collect positional args
+Allocate a positional buffer the size of `argv`. The actual count is
+tracked separately and may be smaller than the buffer.
+
         val pos = (new [len(argv)]string)[:]
         var pos_count = 0
 
@@ -176,23 +213,33 @@ Parses an argument list (typically argv[1:]). Supports:
             val arg = argv[i]
             val alen = len(arg)
 
+A token that doesn't start with `-` (or anything once `--` has been
+seen, or empty) is positional.
+
             if flags_done || alen == 0 || arg[0] != byte('-')
-                // Positional argument
                 pos[pos_count] = arg
                 pos_count++
                 i++
             else if alen == 1
-                // Bare "-" is a positional
+
+A bare `-` is the conventional "use stdin/stdout" marker — keep it
+as a positional.
+
                 pos[pos_count] = arg
                 pos_count++
                 i++
             else if alen == 2 && arg[1] == byte('-')
-                // "--" stops flag parsing
+
+`--` is the end-of-flags marker. Switch to positional-only mode for
+all remaining tokens.
+
                 flags_done = true
                 i++
             else if arg[1] == byte('-')
-                // Long flag: --name or --name=value or --name value
-                // Strip leading --
+
+**Long flag** of the form `--name`, `--name=value`, or `--name value`.
+Walk for an `=` to split the name and inline value.
+
                 var name = ""
                 var value = ""
                 var has_eq = false
@@ -201,7 +248,10 @@ Parses an argument list (typically argv[1:]). Supports:
                 while j < alen
                     if arg[j] == byte('=')
                         has_eq = true
-                        // name is arg[2..j], value is arg[j+1..end]
+
+The name is the substring between `--` and `=`; the value is
+everything after `=`.
+
                         var nb = new_builder_cap(j - 2)
                         for k in 2..<j
                             nb.write_byte(byte(arg[k]))
@@ -215,6 +265,8 @@ Parses an argument list (typically argv[1:]). Supports:
                         j = alen
                     else
                         j++
+
+If no `=` was found, the entire post-`--` substring is the name.
 
                 if !has_eq
                     var nb = new_builder_cap(alen - 2)
@@ -242,7 +294,10 @@ Parses an argument list (typically argv[1:]). Supports:
                         result.str_vals[idx] = value
                     i++
                 else
-                    // Next arg is the value
+
+The flag wants a value but didn't carry an `=` — pull the next argv
+entry. Error out if there isn't one.
+
                     i++
 
                     if i >= argc then return Err(new_error(s"flag --$name requires a value"))
@@ -259,7 +314,13 @@ Parses an argument list (typically argv[1:]). Supports:
                         result.str_vals[idx] = next
                     i++
             else
-                // Short flags: -v, -abc, -p 8080
+
+**Short flag(s)** of the form `-v`, `-abc`, `-p 8080`, or `-p8080`.
+The inner loop walks character-by-character so a single argv token
+can fold multiple boolean flags together. As soon as a value-taking
+flag appears, the remainder of the token (or the next token) is its
+value and the inner loop exits.
+
                 j = 1
 
                 while j < alen
@@ -276,9 +337,12 @@ Parses an argument list (typically argv[1:]). Supports:
                         result.bool_vals[idx] = true
                         j++
                     else
-                        // Value flag — rest of arg or next arg
+
+A value-taking short flag has two cases: characters remain in this
+token (so `-p8080` and `-ofile.txt` work), or it consumes the next
+argv token.
+
                         if j + 1 < alen
-                            // Rest of this arg is the value
                             var vb = new_builder_cap(alen - j - 1)
                             for k in (j + 1)..<alen
                                 vb.write_byte(byte(arg[k]))
@@ -295,7 +359,6 @@ Parses an argument list (typically argv[1:]). Supports:
 
                             j = alen
                         else
-                            // Next arg is the value
                             i++
 
                             if i >= argc then return Err(new_error(s"flag -$ch requires a value"))
@@ -320,9 +383,12 @@ Parses an argument list (typically argv[1:]). Supports:
         return Ok(result)
 
 
-### help
+### `help` — generate a usage block
 
-Generate a usage/help string.
+Builds a multi-line help string with the program name, optional
+description, and one line per registered flag (short + long names,
+type hint, help text, and default value where meaningful). Use this
+to print on `--help` or on parse error.
 
     Parser.help() -> string
         var b = new_builder_cap(256)
@@ -363,7 +429,6 @@ Generate a usage/help string.
 
 Tests
 =====
-
 
 ### Bool flags
 
@@ -563,18 +628,25 @@ Tests
 Design notes
 ------------
 
-**Index handles.** Flag registration returns an int index.
-The caller stores it in a `val` and uses it to retrieve
-the parsed value. This avoids generics, pointers, and
-dynamic dispatch — just array indexing.
+**Index handles, no generics.** Flag registration returns an `int`
+index. The caller stores it in a `val` and uses it to retrieve the
+parsed value. This avoids generics, pointers, and dynamic dispatch
+— flag access becomes plain array indexing on a fixed-size table.
+A future generics-aware redesign could expose typed handles, but
+the index approach has been comfortable in practice.
 
-**Result on error.** Parse returns `Result[ParsedArgs, Error]`
-instead of panicking. Callers match or use `?` to propagate.
+**`Result` on error.** `parse` returns `Result[ParsedArgs, Error]`
+instead of panicking, so a bad command line surfaces as a normal
+return value. Callers `match` it (or use `?` to propagate) and can
+print a nice usage message before exiting with a non-zero code.
 
-**Combined short flags.** `-abc` sets all three bool flags.
-If a non-bool flag appears in a combined group, the rest
-of the argument is its value: `-p8080` sets port to 8080.
+**Combined short flags with embedded values.** `-abc` sets all three
+booleans. If a non-bool flag appears in a combined group, the rest
+of the same argv token becomes its value: `-p8080` sets port to 8080
+without needing a separate token. This matches the long-standing
+Unix convention that drives every well-known CLI tool.
 
-**Fixed capacity.** 32 flags max per parser. Sufficient for
-any reasonable CLI tool. No dynamic allocation for the flag
-table.
+**Fixed-capacity flag table.** 32 flags maximum per parser. That's
+enough for any reasonable CLI tool (compare: `git status` exposes
+~25 options) and lets the table live entirely on the stack —
+zero heap allocation per registration.

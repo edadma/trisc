@@ -1,23 +1,117 @@
 std.crypto.sha256 — SHA-256 hash function
-============================================
+=========================================
 
-SHA-256 as specified in FIPS 180-4. Produces a 256-bit
-(32-byte) hash from arbitrary-length input. Uses u32
-wrapping arithmetic throughout.
+SHA-256 is the 256-bit member of the SHA-2 family, specified in
+[FIPS 180-4](https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf).
+It hashes an arbitrary-length byte sequence into a 32-byte digest and
+is used as a building block for HMAC, PBKDF2, and the AEAD construction
+in this library. Expect collision resistance of $2^{128}$ and
+preimage resistance of $2^{256}$.
 
-Dependencies: none.
+The algorithm is a **Merkle–Damgård** construction over a Davies–Meyer
+compression function:
 
+$$
+\mathrm{state}_{i+1} = \mathrm{state}_i \boxplus F(\mathrm{state}_i, \mathrm{block}_i)
+$$
+
+where $F$ is a 64-round ARX (Add / Rotate / Xor) mixing function and
+$\boxplus$ is componentwise 32-bit wrapping addition. State is eight
+32-bit words; each 512-bit (64-byte) input block updates that state,
+and the final state — serialized big-endian — is the 32-byte digest.
+
+All arithmetic is `u32` and wraps modulo $2^{32}$ by the language's
+unsigned-overflow rule.
+
+Dependencies: `std.encoding.binary` for big-endian u32 packing.
 
     module std.crypto.sha256
 
     import std.encoding.binary.{u32_be_at, put_u32_be_at}
 
 
-Constants
----------
+Compression primitives
+----------------------
 
-First 32 bits of the fractional parts of the cube roots of
-the first 64 prime numbers.
+Six mixing functions drive every round. Their purpose is to spread each
+input bit over many output positions as cheaply as possible (rotations
+and xors are free on most hardware; additions cost a carry).
+
+### `rotr` — 32-bit right rotation
+
+$$
+\mathrm{rotr}(x, n) = (x \gg n) \;\lor\; (x \ll (32 - n))
+$$
+
+    rotr(x: u32, n: u32) -> u32 = (x >> n) | (x << (32u32 - n))
+
+### `ch` — "choose"
+
+Bit $i$ of $\mathrm{ch}(x, y, z)$ is bit $i$ of $y$ when
+bit $i$ of $x$ is set, otherwise bit $i$ of $z$:
+
+$$
+\mathrm{Ch}(x, y, z) = (x \land y) \oplus (\neg x \land z)
+$$
+
+    ch(x: u32, y: u32, z: u32) -> u32 = (x & y) ^ (~x & z)
+
+### `maj` — "majority"
+
+Bit $i$ of $\mathrm{maj}(x, y, z)$ is set iff at least two of the
+three inputs have bit $i$ set:
+
+$$
+\mathrm{Maj}(x, y, z) = (x \land y) \oplus (x \land z) \oplus (y \land z)
+$$
+
+    maj(x: u32, y: u32, z: u32) -> u32 = (x & y) ^ (x & z) ^ (y & z)
+
+### `big_sigma0` / `big_sigma1` — state-diffusion functions ($\Sigma_0, \Sigma_1$)
+
+Applied to the working variables `a` and `e` each round, the "big
+sigmas" scatter bits across all 32 positions with three rotations:
+
+$$
+\Sigma_0(x) = \mathrm{ROTR}^{2}(x) \oplus \mathrm{ROTR}^{13}(x) \oplus \mathrm{ROTR}^{22}(x)
+$$
+$$
+\Sigma_1(x) = \mathrm{ROTR}^{6}(x) \oplus \mathrm{ROTR}^{11}(x) \oplus \mathrm{ROTR}^{25}(x)
+$$
+
+    big_sigma0(x: u32) -> u32 = rotr(x, 2u32) ^ rotr(x, 13u32) ^ rotr(x, 22u32)
+
+    big_sigma1(x: u32) -> u32 = rotr(x, 6u32) ^ rotr(x, 11u32) ^ rotr(x, 25u32)
+
+### `small_sigma0` / `small_sigma1` — message-schedule functions ($\sigma_0, \sigma_1$)
+
+The "small sigmas" drive the message-schedule expansion from 16 input
+words to 64 working words. One of the three mixers is a shift (not a
+rotation) so that the low bits get a distinct treatment from the
+high bits:
+
+$$
+\sigma_0(x) = \mathrm{ROTR}^{7}(x) \oplus \mathrm{ROTR}^{18}(x) \oplus (x \gg 3)
+$$
+$$
+\sigma_1(x) = \mathrm{ROTR}^{17}(x) \oplus \mathrm{ROTR}^{19}(x) \oplus (x \gg 10)
+$$
+
+    small_sigma0(x: u32) -> u32 = rotr(x, 7u32) ^ rotr(x, 18u32) ^ (x >> 3u32)
+
+    small_sigma1(x: u32) -> u32 = rotr(x, 17u32) ^ rotr(x, 19u32) ^ (x >> 10u32)
+
+
+Round constants
+---------------
+
+The `K` table holds one 32-bit constant per round — the first 32 bits
+of the fractional part of $\sqrt[3]{p_i}$, where $p_i$ is the
+$i$-th prime. These are "nothing-up-my-sleeve" numbers: cheap to
+verify yet structureless enough that no backdoor can be hidden in them.
+
+The initial hash state `H⁰` (set inside `sha256()` below) uses the same
+trick with square roots of the first eight primes.
 
     val K: [64]u32 = [
         0x428a2f98u32, 0x71374491u32, 0xb5c0fbcfu32, 0xe9b5dba5u32,
@@ -39,42 +133,46 @@ the first 64 prime numbers.
     ]
 
 
-Primitives
-----------
+Compression function
+--------------------
 
-    rotr(x: u32, n: u32) -> u32 = (x >> n) | (x << (32u32 - n))
+`process_block` folds one 512-bit input block into the eight-word state.
+It proceeds in three phases:
 
-    ch(x: u32, y: u32, z: u32) -> u32 = (x & y) ^ (~x & z)
+1. **Load** the 16 input words $W_0 \ldots W_{15}$ big-endian from the block.
+2. **Expand** to a 64-word message schedule $W_{16} \ldots W_{63}$ via
+   $$
+   W_i = \sigma_1(W_{i-2}) + W_{i-7} + \sigma_0(W_{i-15}) + W_{i-16}.
+   $$
+3. **Run 64 rounds**, each of which mixes one schedule word and one round
+   constant into eight working variables $a, b, c, d, e, f, g, h$:
+   $$
+   \begin{aligned}
+   T_1 &= h + \Sigma_1(e) + \mathrm{Ch}(e, f, g) + K_i + W_i \\
+   T_2 &= \Sigma_0(a) + \mathrm{Maj}(a, b, c) \\
+   (a, b, c, d, e, f, g, h) &\leftarrow (T_1 + T_2,\; a,\; b,\; c,\; d + T_1,\; e,\; f,\; g)
+   \end{aligned}
+   $$
 
-    maj(x: u32, y: u32, z: u32) -> u32 = (x & y) ^ (x & z) ^ (y & z)
-
-    big_sigma0(x: u32) -> u32 = rotr(x, 2u32) ^ rotr(x, 13u32) ^ rotr(x, 22u32)
-
-    big_sigma1(x: u32) -> u32 = rotr(x, 6u32) ^ rotr(x, 11u32) ^ rotr(x, 25u32)
-
-    small_sigma0(x: u32) -> u32 = rotr(x, 7u32) ^ rotr(x, 18u32) ^ (x >> 3u32)
-
-    small_sigma1(x: u32) -> u32 = rotr(x, 17u32) ^ rotr(x, 19u32) ^ (x >> 10u32)
-
-
-process_block
--------------
-
-Process a single 512-bit (64-byte) block, updating the
-8-word state.
+After 64 rounds the working variables are added back into the input
+state — the Davies–Meyer feedforward that makes this a one-way function
+even though every individual round is invertible.
 
     process_block(state: []u32, block: []byte, off: int)
         var w: [64]u32
 
-        // Load first 16 words (big-endian)
+Load the 16 message words big-endian.
+
         for i in 0..<16
             w[i] = u32_be_at(block, off + i * 4)
 
-        // Expand to 64 words
+Expand to 64 schedule words via $\sigma_0 / \sigma_1$.
+
         for i in 16..<64
             w[i] = small_sigma1(w[i - 2]) + w[i - 7] + small_sigma0(w[i - 15]) + w[i - 16]
 
-        // Working variables
+Pull the eight working variables from state.
+
         var a = state[0]
         var b = state[1]
         var c = state[2]
@@ -84,7 +182,8 @@ Process a single 512-bit (64-byte) block, updating the
         var g = state[6]
         var h = state[7]
 
-        // 64 rounds
+Run 64 mixing rounds.
+
         for i in 0..<64
             var t1: u32 = h + big_sigma1(e)
             t1 = t1 + ch(e, f, g)
@@ -101,7 +200,8 @@ Process a single 512-bit (64-byte) block, updating the
             b = a
             a = t1 + t2
 
-        // Add working variables back to state
+Feed the final working variables back into the state (Davies–Meyer).
+
         state[0] += a
         state[1] += b
         state[2] += c
@@ -112,11 +212,31 @@ Process a single 512-bit (64-byte) block, updating the
         state[7] += h
 
 
-sha256
-------
+`sha256` — hash a contiguous buffer
+-----------------------------------
 
-`sha256(data, out)` hashes `data` and writes the 32-byte
-digest to `out`.
+`sha256(data, out)` hashes `data` and writes the 32-byte digest into
+`out`. The output buffer must be at least 32 bytes; bytes beyond that
+are not touched.
+
+### Initial hash value `H⁰`
+
+The eight IV words are the first 32 bits of the fractional parts of
+$\sqrt{p_i}$ for the first eight primes — another nothing-up-my-sleeve
+set, matching the rationale behind `K`.
+
+### Padding
+
+The Merkle–Damgård padding scheme appends, in order:
+
+1. one `0x80` byte (the "1" bit followed by seven "0" bits),
+2. zero or more `0x00` bytes,
+3. the 64-bit big-endian length in **bits** of the original message.
+
+Enough zero bytes are inserted so that the padded total is a multiple
+of 64 bytes. When the final message remainder is 56 bytes or more, the
+eight-byte length field cannot fit in the current block — the padding
+spills into a second block that is zeros followed by the length.
 
     sha256(data: []byte, out: []byte)
         var state: [8]u32
@@ -132,39 +252,43 @@ digest to `out`.
         val n = len(data)
         var i = 0
 
-        // Process full 64-byte blocks
+Process every complete 64-byte block.
+
         while i + 64 <= n
             process_block(state[:], data, i)
             i += 64
 
-        // Final block with padding
+The tail is at most 63 bytes. A 128-byte local buffer is always enough
+for the tail plus padding plus length — whether the padded tail fits in
+one block or spills into a second.
+
         var block: [128]byte = ""
         val rem = n - i
 
-        // Copy remainder
         for j in 0..<rem
             block[j] = data[i + j]
 
-        // Append 1-bit
-        block[rem] = 0x80u8
-
-        // Zero-fill between data and length
+        block[rem] = 0x80u8                       // "1" delimiter bit, seven zero bits
         val total_bits: i64 = i64(n) * 8i64
 
         if rem < 56
-            // Append length as big-endian 64-bit
+
+One-block tail: the length fits in bytes 56..63 of the same block.
+
             for j in 0..<8
                 block[56 + j] = byte(total_bits >> i64(56 - j * 8))
 
             process_block(state[:], block[:], 0)
         else
-            // Pad rest of first block
+
+Two-block tail: first block carries the "1" bit and zero padding; the
+length lives in bytes 56..63 of the second block.
+
             for j in (rem + 1)..<64
                 block[j] = 0u8
 
             process_block(state[:], block[:], 0)
 
-            // Second block: zeros + length
             for j in 0..<56
                 block[j] = 0u8
 
@@ -173,41 +297,50 @@ digest to `out`.
 
             process_block(state[:], block[:], 0)
 
-        // Output state as big-endian bytes
+Serialize the eight state words big-endian as the 32-byte digest.
+
         for i in 0..<8
             put_u32_be_at(out, i * 4, state[i])
 
 
-sha256_hw — hardware-accelerated path
---------------------------------------
+`sha256_hw` — hardware-accelerated path
+---------------------------------------
 
-Uses the ESP32-style SHA-256 MMIO accelerator. The host
-computes the compression function in hardware; software
-handles padding and block sequencing.
+An ESP32-style SHA-256 MMIO accelerator lives at `SHA_BASE`. The hardware
+owns the compression function — it keeps the 256-bit state internally and
+computes one round of $F$ per block write — while software still handles
+bit packing, padding, and block sequencing. Same call-site interface as
+`sha256()`; the caller chooses which path they want.
 
     val SHA_BASE = 0x800160
 
-Write a 512-bit message block to the accelerator's TEXT
-registers and trigger compression. Uses `*u32` word-level
-MMIO writes (16 words instead of 64 bytes).
+### `process_block_hw`
+
+Write one 512-bit block into the accelerator's `TEXT` registers (16 words
+of 4 bytes each) and trigger compression. Two trigger registers exist:
+`START` at offset `0x40` for the very first block (re-inits the hardware
+state to `H⁰`), and `CONTINUE` at offset `0x44` for every subsequent
+block (folds into the running state).
 
     process_block_hw(block: []byte, off: int, first: int)
         val base = SHA_BASE
-        // Write 16 big-endian words to SHA_TEXT[0..15]
-        for i in 0..<16
+
+        for i in 0..<16                           // pack 16 big-endian words into TEXT[0..15]
             val w = u32_be_at(block, off + i * 4)
             var p: *u32 = *u32(base + i * 4)
             *p = w
-        // Trigger compression
+
         if first != 0
-            var p: *u32 = *u32(base + 0x40)
+            var p: *u32 = *u32(base + 0x40)       // START: reset state then compress
             *p = 1u32
         else
-            var p: *u32 = *u32(base + 0x44)
+            var p: *u32 = *u32(base + 0x44)       // CONTINUE: compress into running state
             *p = 1u32
 
-Read the 8-word hash state from the accelerator's TEXT
-registers into an output buffer.
+### `read_hw_state`
+
+Drain the 256-bit accelerator state (eight u32 words) back into a big-
+endian byte buffer.
 
     read_hw_state(out: []byte)
         val base = SHA_BASE
@@ -215,32 +348,29 @@ registers into an output buffer.
             var p: *u32 = *u32(base + i * 4)
             put_u32_be_at(out, i * 4, *p)
 
-`sha256_hw(data, out)` — same interface as `sha256()` but
-uses the MMIO accelerator for the compression function.
+### `sha256_hw`
+
+Drop-in replacement for `sha256()` using the accelerator. Same padding
+logic; only the compression calls change. The `first` flag tracks
+whether the next trigger should be `START` or `CONTINUE`.
 
     sha256_hw(data: []byte, out: []byte)
         val n = len(data)
         var i = 0
         var first = 1
 
-        // Process full 64-byte blocks
         while i + 64 <= n
             process_block_hw(data, i, first)
             first = 0
             i += 64
 
-        // Final block with padding
         var block: [128]byte = ""
         val rem = n - i
 
-        // Copy remainder
         for j in 0..<rem
             block[j] = data[i + j]
 
-        // Append 1-bit
         block[rem] = 0x80u8
-
-        // Length in bits as big-endian 64-bit
         val total_bits: i64 = i64(n) * 8i64
 
         if rem < 56
@@ -264,40 +394,43 @@ uses the MMIO accelerator for the compression function.
 Tests
 =====
 
-### Sigma functions
+### $\sigma_0$ consistency
+
+Recompute $\sigma_0(x)$ from its rotation and shift parts and check
+that the packaged function agrees.
 
     #test
     test_small_sigma0() -> unit
-        // σ0(0x61626380) = rotr(x,7) ^ rotr(x,18) ^ (x >> 3)
         val x: u32 = 0x61626380u32
         val r = small_sigma0(x)
-        // Manual: rotr(0x61626380, 7) = 0x00c2c4c7
-        // No wait, let me compute step by step via the test
         val r7 = rotr(x, 7u32)
         val r18 = rotr(x, 18u32)
         val s3 = x >> 3u32
         val manual = r7 ^ r18 ^ s3
         assert(r == manual, s"sigma0 consistency: fn=${i64(r)} manual=${i64(manual)}")
 
+### Message schedule words `w[16]` and `w[17]` for `"abc"`
+
+For the message `"abc"` the padded block has $W_0 = 0\texttt{x61626380}$,
+$W_1 \ldots W_{14} = 0$, and $W_{15} = 0\texttt{x18}$ (24 bits = 3 bytes).
+Then $W_{16} = \sigma_1(W_{14}) + W_9 + \sigma_0(W_1) + W_0 = W_0$,
+and $W_{17} = \sigma_1(W_{15}) + W_{10} + \sigma_0(W_2) + W_1 = \sigma_1(0\texttt{x18})$.
+
     #test
     test_message_schedule_w16() -> unit
-        // For "abc": w[0]=0x61626380, w[1..14]=0, w[15]=0x18
-        // w[16] = σ1(w[14]) + w[9] + σ0(w[1]) + w[0]
-        //       = σ1(0) + 0 + σ0(0) + 0x61626380
-        //       = 0 + 0 + 0 + 0x61626380 = 0x61626380
         val w16 = small_sigma1(0u32) + 0u32 + small_sigma0(0u32) + 0x61626380u32
         assert(w16 == 0x61626380u32, s"w16: got ${i64(w16)}")
 
     #test
     test_message_schedule_w17() -> unit
-        // w[17] = σ1(w[15]) + w[10] + σ0(w[2]) + w[1]
-        //       = σ1(0x18) + 0 + σ0(0) + 0
-        //       = σ1(0x18)
         val w17 = small_sigma1(0x00000018u32)
         assert(w17 == 0x000F0000u32, s"w17: got ${i64(w17)}")
 
 
 ### K constants integrity
+
+Guard against bit-rot in the `K` table by cross-checking every entry
+against a freshly-typed copy of the FIPS 180-4 values.
 
     #test
     test_k_constants() -> unit
@@ -306,10 +439,15 @@ Tests
             assert(K[i] == expected[i], s"K[$i]: got ${i64(K[i])} want ${i64(expected[i])}")
 
 
-### SHA-256("") — empty string
+### Published FIPS test vectors
 
-Expected:
-`e3b0c442 98fc1c14 9afbf4c8 996fb924 27ae41e4 649b934c a495991b 7852b855`
+Each of the following digests is copied directly from the FIPS 180-4
+Appendix A / NIST CAVS test vectors. Changing any bit of the algorithm
+or constants will flip many output bits and fail one of these tests.
+
+#### SHA-256(`""`)
+
+Expected: `e3b0c442 98fc1c14 9afbf4c8 996fb924 27ae41e4 649b934c a495991b 7852b855`
 
     #test
     test_sha256_empty() -> unit
@@ -317,17 +455,15 @@ Expected:
         var out: [32]byte
         sha256(empty[:], out[:])
 
-        // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         val expected: [32]byte = [0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55]
 
         for i in 0..<32
             assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
-### SHA-256("abc")
+#### SHA-256(`"abc"`)
 
-Expected:
-`ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad`
+Expected: `ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad`
 
     #test
     test_sha256_abc() -> unit
@@ -335,14 +471,18 @@ Expected:
         var out: [32]byte
         sha256(msg[:], out[:])
 
-        // ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
         val expected: [32]byte = [0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad]
 
         for i in 0..<32
             assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
-### Block loading verification
+#### Block loading for `"abc"`
+
+Verifies the first and last message-schedule words of the padded "abc"
+block, then runs one round of compression and cross-checks all eight
+state words against the published digest — which catches bit-order
+bugs in `u32_be_at` before they can corrupt every hash in the system.
 
     #test
     test_block_loading_abc() -> unit
@@ -353,15 +493,12 @@ Expected:
         block[3] = 0x80u8
         block[63] = 0x18u8
 
-        // Verify w[0] = 0x61626380
         val w0 = (u32(block[0]) << 24u32) | (u32(block[1]) << 16u32) | (u32(block[2]) << 8u32) | u32(block[3])
         assert(w0 == 0x61626380u32, s"w0: got ${i64(w0)}")
 
-        // Verify w[15] = 0x00000018
         val w15 = (u32(block[60]) << 24u32) | (u32(block[61]) << 16u32) | (u32(block[62]) << 8u32) | u32(block[63])
         assert(w15 == 0x00000018u32, s"w15: got ${i64(w15)}")
 
-        // Now hash this block and check state
         var state: [8]u32
         state[0] = 0x6a09e667u32
         state[1] = 0xbb67ae85u32
@@ -374,7 +511,6 @@ Expected:
 
         process_block(state[:], block[:], 0)
 
-        // Expected: ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
         assert(state[0] == 0xba7816bfu32, s"state[0]: ${i64(state[0])}")
         assert(state[1] == 0x8f01cfeau32, s"state[1]: ${i64(state[1])}")
         assert(state[2] == 0x414140deu32, s"state[2]: ${i64(state[2])}")
@@ -385,7 +521,9 @@ Expected:
         assert(state[7] == 0xf20015adu32, s"state[7]: ${i64(state[7])}")
 
 
-### SHA-256("a") — single byte
+#### SHA-256(`"a"`)
+
+Expected: `ca978112 ca1bbdca fac231b3 9a23dc4d a786eff8 147c4e72 b9807785 afee48bb`
 
     #test
     test_sha256_a() -> unit
@@ -393,14 +531,17 @@ Expected:
         var out: [32]byte
         sha256(msg[:], out[:])
 
-        // ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb
         val expected: [32]byte = [0xca, 0x97, 0x81, 0x12, 0xca, 0x1b, 0xbd, 0xca, 0xfa, 0xc2, 0x31, 0xb3, 0x9a, 0x23, 0xdc, 0x4d, 0xa7, 0x86, 0xef, 0xf8, 0x14, 0x7c, 0x4e, 0x72, 0xb9, 0x80, 0x77, 0x85, 0xaf, 0xee, 0x48, 0xbb]
 
         for i in 0..<32
             assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
-### Determinism
+### Hash-function properties
+
+Determinism (same input → same output) and sensitivity (different input
+→ some output bit differs) are the two cheapest sanity checks. Neither
+proves cryptographic strength, but a failure of either is fatal.
 
     #test
     test_sha256_deterministic() -> unit
@@ -413,9 +554,6 @@ Expected:
 
         for i in 0..<32
             assert(out1[i] == out2[i], "deterministic")
-
-
-### Different inputs produce different hashes
 
     #test
     test_sha256_different_inputs() -> unit
@@ -435,7 +573,9 @@ Expected:
         assert(differs, "different inputs differ")
 
 
-### SHA-256("hello") — full verification
+#### SHA-256(`"hello"`) — full-digest verification
+
+Expected: `2cf24dba 5fb0a30e 26e83b2a c5b9e29e 1b161e5c 1fa7425e 73043362 938b9824`
 
     #test
     test_sha256_hello() -> unit
@@ -443,17 +583,18 @@ Expected:
         var out: [32]byte
         sha256(msg[:], out[:])
 
-        // 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
         val expected: [32]byte = [0x2c, 0xf2, 0x4d, 0xba, 0x5f, 0xb0, 0xa3, 0x0e, 0x26, 0xe8, 0x3b, 0x2a, 0xc5, 0xb9, 0xe2, 0x9e, 0x1b, 0x16, 0x1e, 0x5c, 0x1f, 0xa7, 0x42, 0x5e, 0x73, 0x04, 0x33, 0x62, 0x93, 0x8b, 0x98, 0x24]
 
         for i in 0..<32
             assert(out[i] == expected[i], s"byte $i: got ${int(out[i])} want ${int(expected[i])}")
 
 
-### SHA-256 two-block message (56 bytes)
+#### SHA-256 two-block message (56-byte input)
 
-The 448-bit test vector. The message is exactly 56 bytes,
-which forces the padding into a second block.
+The 448-bit NIST test vector. Exactly 56 input bytes forces padding to
+spill into a second block — the path where `rem >= 56` in `sha256()`.
+
+Expected: `248d6a61 d20638b8 e5c02693 0c3e6039 a33ce459 64ff2167 f6ecedd4 19db06c1`
 
     #test
     test_sha256_two_block() -> unit
@@ -461,7 +602,6 @@ which forces the padding into a second block.
         var out: [32]byte
         sha256(msg[:], out[:])
 
-        // 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
         val expected: [32]byte = [0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8, 0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e, 0x60, 0x39, 0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67, 0xf6, 0xec, 0xed, 0xd4, 0x19, 0xdb, 0x06, 0xc1]
 
         for i in 0..<32
@@ -471,18 +611,20 @@ which forces the padding into a second block.
 Design notes
 ------------
 
-**Big-endian word loading.** SHA-256 operates on 32-bit
-big-endian words, unlike ChaCha20 which uses little-endian.
-The `process_block` function converts bytes to u32 words
-at the input boundary.
+**Big-endian word loading.** SHA-256 operates on 32-bit big-endian
+words, unlike ChaCha20 which uses little-endian. `process_block`
+converts bytes to `u32` words at the input boundary; the serializer
+does the reverse at the output boundary.
 
-**Two-block final padding.** When the message remainder is
-56 bytes or more, the padding doesn't fit in one block.
-The code handles this by processing two consecutive blocks
-from a 128-byte buffer.
+**Two-block final padding.** When the message remainder is 56 bytes or
+more, the 9-byte trailer (`0x80` delimiter + eight-byte length) does
+not fit in the current block. Rather than branch deeper in the
+compression loop, `sha256()` allocates a single 128-byte local buffer
+that is always large enough for "worst-case tail + padding + length"
+and selects between one-block and two-block padding there.
 
-**No streaming API.** The current interface hashes a
-contiguous byte buffer in one call. A streaming API
-(`sha256_init`/`sha256_update`/`sha256_finalize`) would
-allow incremental hashing. Deferred until there's a use
-case (e.g., hashing data from a slix file handle).
+**No streaming API.** The current interface hashes a contiguous byte
+buffer in one call. A streaming API (`sha256_init` / `sha256_update` /
+`sha256_finalize`) would allow incremental hashing across a sequence
+of read calls, but is deferred until there is a concrete use case
+(e.g. hashing data flowing from a SLIX file handle).

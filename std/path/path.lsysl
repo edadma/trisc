@@ -1,17 +1,27 @@
-std.path — Path manipulation
-=============================
+std.path — Unix-style path manipulation
+=======================================
 
-The `std.path` module provides functions for manipulating
-Unix-style slash-separated paths. It is inspired by Go's
-`path` and `path/filepath` packages but handles only forward
-slashes — there is no Windows backslash support.
+The `std.path` module provides functions for manipulating Unix-style
+slash-separated paths. It is inspired by Go's `path` package — the
+slash-only flavour, not the platform-aware `path/filepath`. There is
+no Windows backslash support; a separate `std.path.windows` module
+would belong elsewhere.
 
-All functions treat paths as opaque byte strings. No
-filesystem access is performed; these are purely textual
-transformations.
+All functions treat paths as opaque byte strings. **No filesystem
+access is performed**; these are purely textual transformations. A
+function like `abs` that resolves against the current working
+directory belongs in an OS-aware module.
+
+| Function | Purpose |
+|----------|---------|
+| `base(path)`    | last element |
+| `dir(path)`     | parent directory |
+| `ext(path)`     | file extension (incl. leading dot) |
+| `is_abs(path)`  | starts with `/`? |
+| `join(a, b)`    | concatenate components with one `/` |
+| `clean(path)`   | collapse duplicate slashes, drop trailing `/` |
 
 Dependencies: `std.builder` (for assembling result strings).
-
 
     module std.path
 
@@ -21,29 +31,38 @@ Dependencies: `std.builder` (for assembling result strings).
 Queries
 -------
 
-### base
+### `base` — last path element
 
-`base(path)` returns the last element of the path. Trailing
-slashes are ignored. If the path is empty, `base` returns
-`"."`. If the path is just `"/"`, `base` returns `"/"`.
+`base(path)` returns the last element of the path. Trailing slashes
+are ignored (so `base("/a/b/")` is `"b"`). Special cases that match
+Go's behaviour:
+
+- empty path → `"."`
+- `"/"` → `"/"`
 
     base(path: string) -> string
         val n = len(path)
 
         if n == 0 then return "."
 
-        // Strip trailing slashes
+Strip trailing slashes from the search range.
+
         var hi = n
 
         while hi> 1
             if path[hi - 1] != byte('/') then break
             hi--
 
-        // Root only
+If after stripping we're left with a single character that is `/`,
+the path was the root (or just one or more slashes).
+
         if hi== 1
             if path[0] == byte('/') then return "/"
 
-        // Find last slash before hi
+Walk back from `hi - 1` until the first `/`; the substring after it
+is the base name. If no `/` was found, the entire (trimmed) path is
+the base.
+
         var i = hi- 1
 
         while i >= 0
@@ -54,11 +73,11 @@ slashes are ignored. If the path is empty, `base` returns
         substring(path, 0, hi)
 
 
-### dir
+### `dir` — parent directory
 
-`dir(path)` returns all but the last element of the path —
-the directory portion. If the path contains no slashes, `dir`
-returns `"."`. Trailing slashes on the original path are
+`dir(path)` returns all but the last element of the path — the
+directory portion. If the path contains no slashes, `dir` returns
+`"."` (the current directory). Trailing slashes on the input are
 ignored.
 
     dir(path: string) -> string
@@ -66,19 +85,26 @@ ignored.
 
         if n == 0 then return "."
 
-        // Strip trailing slashes
+Strip trailing slashes (a search-range tail trim, identical to
+`base`).
+
         var hi = n
 
         while hi> 1
             if path[hi - 1] != byte('/') then break
             hi--
 
-        // Find last slash before hi
+Find the last `/` before `hi`. Everything before it (after stripping
+its own trailing slashes) is the directory.
+
         var i = hi- 1
 
         while i >= 0
             if path[i] == byte('/')
-                // Strip trailing slashes from dir part
+
+Trim trailing slashes from the candidate dir part too — `///a` should
+yield `/`, not `//`.
+
                 var j = i
 
                 while j > 1
@@ -94,17 +120,19 @@ ignored.
         "."
 
 
-### ext
+### `ext` — file extension
 
-`ext(path)` returns the file extension, including the leading
-dot, of the last element in the path. If there is no dot in
-the base name, or the base name starts with a dot and has no
-other dot, it returns `""`.
+`ext(path)` returns the file extension, including the leading dot,
+of the last path element. Returns `""` if the base name has no dot,
+or if the only dot is the leading dot of a hidden file (e.g.
+`".hidden"`).
 
     ext(path: string) -> string
         val n = len(path)
 
-        // Find the start of the base name (after last '/')
+Locate the start of the base name — one past the last `/`, or 0 if
+there is no `/`.
+
         var base_start = 0
         var i = n - 1
 
@@ -114,7 +142,9 @@ other dot, it returns `""`.
                 break
             i--
 
-        // Find the last '.' in the base name
+Find the last `.` strictly *after* `base_start`. The strict-greater
+test is what excludes the leading-dot of dotfiles like `.hidden`.
+
         var dot = -1
 
         i = n - 1
@@ -130,10 +160,10 @@ other dot, it returns `""`.
         substring(path, dot, n)
 
 
-### is_abs
+### `is_abs` — absolute path test
 
-`is_abs(path)` returns `true` if the path begins with a
-slash.
+`is_abs(path)` returns `true` if the path begins with a slash.
+Empty path is not absolute.
 
     is_abs(path: string) -> bool
         if len(path) == 0 then return false
@@ -141,10 +171,11 @@ slash.
         path[0] == byte('/')
 
 
-Helper: substring
------------------
+### `substring` — internal slicing helper
 
-Extract `path[lo..hi]` as a new string via `StrBuilder`.
+Extracts `s[lo..hi)` as a freshly-allocated `string` via `StrBuilder`.
+Used wherever the public functions need to return a portion of their
+input.
 
     substring(s: string, lo: int, hi: int) -> string
         var b = new_builder_cap(hi - lo)
@@ -158,31 +189,35 @@ Extract `path[lo..hi]` as a new string via `StrBuilder`.
 Manipulation
 ------------
 
-### join
+### `join` — concatenate two components
 
-`join(a, b)` concatenates two path components with a single
-`/` between them. Leading slashes on `b` and trailing slashes
-on `a` are consumed so that the result never has doubled
-slashes at the join point. If either argument is empty, the
-other is returned unchanged.
+`join(a, b)` concatenates two path components with a single `/`
+between them. Leading slashes on `b` and trailing slashes on `a` are
+consumed so that the result never has doubled slashes at the join
+point. If either argument is empty, the other is returned unchanged.
 
     join(a: string, b: string) -> string
         if len(a) == 0 then return b
         if len(b) == 0 then return a
 
-        // Strip trailing slashes from a
+Find the run of trailing slashes in `a` and the run of leading
+slashes in `b`. The result will use one explicit `/` between
+`a[..a_end]` and `b[b_start..]`.
+
         var a_end = len(a)
 
         while a_end > 1
             if a[a_end - 1] != byte('/') then break
             a_end--
 
-        // Strip leading slashes from b
         var b_start = 0
 
         while b_start < len(b)
             if b[b_start] != byte('/') then break
             b_start++
+
+Allocate a builder of the exact final length and stitch the three
+pieces together.
 
         var buf = new_builder_cap(a_end + 1 + len(b) - b_start)
 
@@ -197,19 +232,24 @@ other is returned unchanged.
         buf.to_str()
 
 
-### clean
+### `clean` — collapse duplicate slashes, strip trailing
 
-`clean(path)` returns a cleaned version of the path:
-duplicate slashes are collapsed to a single slash and
-trailing slashes are removed (except for the root `"/"`).
-An empty path returns `"."`.
+`clean(path)` returns a normalized version of the path: runs of
+slashes are collapsed to a single slash, and any trailing slash is
+removed (except when the path is just `"/"`). An empty input returns
+`"."`.
 
-This version does not resolve `.` or `..` segments.
+This implementation does **not** resolve `.` or `..` segments;
+adding that requires careful absolute-vs-relative handling and is
+deferred to a future enhancement.
 
     clean(path: string) -> string
         val n = len(path)
 
         if n == 0 then return "."
+
+Single-pass slash collapse: copy each character through the builder,
+but skip a `/` if the previous emitted character was also `/`.
 
         var buf = new_builder_cap(n)
         var prev_slash = false
@@ -226,7 +266,8 @@ This version does not resolve `.` or `..` segments.
                 buf.write_byte(c)
                 prev_slash = false
 
-        // Remove trailing slash unless root
+Drop the trailing slash unless the entire result is just `"/"`.
+
         val result = buf.to_str()
         val rn = len(result)
 
@@ -240,7 +281,7 @@ This version does not resolve `.` or `..` segments.
 Tests
 =====
 
-### base
+### `base`
 
     #test
     test_base_multi() -> unit
@@ -263,7 +304,7 @@ Tests
         assert(base("/a") == "a", "absolute single")
 
 
-### dir
+### `dir`
 
     #test
     test_dir_multi() -> unit
@@ -286,7 +327,7 @@ Tests
         assert(dir("/a") == "/", "root parent")
 
 
-### ext
+### `ext`
 
     #test
     test_ext_txt() -> unit
@@ -305,7 +346,7 @@ Tests
         assert(ext(".hidden") == "", "dotfile no ext")
 
 
-### is_abs
+### `is_abs`
 
     #test
     test_is_abs_true() -> unit
@@ -320,7 +361,7 @@ Tests
         assert(!is_abs(""), "empty")
 
 
-### join
+### `join`
 
     #test
     test_join_simple() -> unit
@@ -339,7 +380,7 @@ Tests
         assert(join("a", "") == "a", "empty right")
 
 
-### clean
+### `clean`
 
     #test
     test_clean_double_slash() -> unit
@@ -361,16 +402,16 @@ Tests
 Design notes
 ------------
 
-**Unix-only.** This module uses `'/'` as the sole path
-separator. Windows support (backslash handling, drive
-letters, UNC paths) is out of scope; a future
-`std.path.windows` module can provide that if needed.
+**Unix-only.** This module uses `'/'` as the sole path separator.
+Windows support (backslash handling, drive letters, UNC paths) is
+out of scope; a future `std.path.windows` module can provide that
+if needed.
 
-**No `.` / `..` resolution.** The `clean` function currently
-only normalizes slashes. Resolving `.` and `..` requires
-careful handling of absolute vs relative paths and is
-deferred to a future enhancement.
+**No `.` / `..` resolution.** The `clean` function currently only
+normalizes slashes. Resolving `.` and `..` requires careful handling
+of absolute vs relative paths and is deferred to a future
+enhancement.
 
-**No filesystem interaction.** These are pure string
-operations. Functions like `abs` (which resolves against the
-current working directory) belong in an OS-aware module.
+**No filesystem interaction.** These are pure string operations.
+Functions like `abs` (which resolves against the current working
+directory) belong in an OS-aware module.

@@ -280,8 +280,7 @@ Tests
 
         val c = clone(src[:])
 
-        // Mutate original — clone should be untouched
-        src[0] = 99
+        src[0] = 99             // mutate original; clone must be a real copy, not a view
 
         assert(c[0] == 1, "clone preserved byte 0")
         assert(c[1] == 2, "clone preserved byte 1")

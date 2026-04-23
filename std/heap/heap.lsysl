@@ -115,9 +115,8 @@ The last element replaces it, then sifts up or down as needed.
             return
         self.data[index] = self.data[last]
         self.data = self.data[:last]
-        // The replacement might need to go up or down
-        self._sift_up(index)
-        self._sift_down(index)
+        self._sift_up(index)               // replacement may be smaller than parent
+        self._sift_down(index)             // ...or larger than children — try both directions
 
 
 Internal helpers
@@ -225,8 +224,11 @@ Tests
         h.push(2)
         h.push(5)
         h.push(4)
-        // Remove element at index 1 (could be 3 or 2 depending on heap shape)
-        // After removal, all remaining elements should still come out sorted
+
+Remove the element at index 1 (whose identity depends on internal
+heap shape). The post-condition we check is the property that
+*matters*: every remaining element still pops out in ascending order.
+
         h.remove_at(1)
         assert(h.len() == 4, "len after remove")
         val a = h.pop()
@@ -256,10 +258,12 @@ Tests
         assert(h.pop() == 1, "first")
         assert(h.pop() == 2, "second")
 
+Stress: push 20 elements in scrambled order, pop them all, check
+they come out monotonically.
+
     #test
     test_many_elements() -> unit
         var h = new_min_heap(int_less)
-        // Push 20 elements in scrambled order
         h.push(15)
         h.push(3)
         h.push(18)
@@ -281,7 +285,7 @@ Tests
         h.push(16)
         h.push(10)
         assert(h.len() == 20, "len 20")
-        // Pop all — must come out in ascending order
+
         var prev = h.pop()
         for var i = 1; i < 20; i++
             val cur = h.pop()
