@@ -203,6 +203,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("'ping!'")
   }
 
+  "aarch64 boot: init auto-runs dhclient before opening logins" in {
+    // D.3 init integration: init spawns /bin/dhclient, pm_waitpids
+    // it, and prints the summary line before reading /etc/ttytab.
+    // beforeEach already drove the boot past the "> " prompt, so
+    // the full boot trace is in allOutput and we can assert the
+    // marker line appears.
+    qemu.allOutput should include("network: dhcp ok")
+    qemu.allOutput should include("bound 10.0.2.15")
+    qemu.allOutput should not include "network: dhcp failed"
+    qemu.allOutput should not include "network: dhcp spawn failed"
+  }
+
   "aarch64 udp: recvfrom_timeout fires after ~1s with no sender" in {
     // test_udp_tmo binds 0.0.0.0:7788 and calls
     // recvfrom_timeout(..., 1000 ms) with nothing sending to it.
