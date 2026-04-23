@@ -1228,6 +1228,17 @@ Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
             tcp_sockets[s].in_use = 0
             return 1
         if st == TCP_STATE_LISTEN
+            // Release every child that was created via this listen —
+            // queued-but-not-yet-accepted ESTABLISHED sockets, and
+            // SYN_RCVD children still mid-handshake. Without this they
+            // orphan onto dead parent_listen and leak their slots
+            // until peer-driven teardown (which may never arrive).
+            var i = 0
+            while i < TCP_MAX_SOCKETS
+                if tcp_sockets[i].in_use != 0
+                    if tcp_sockets[i].parent_listen == s
+                        inet_tcp_close_slot(i, -1)
+                i += 1
             // No peer to FIN; any parked accept_waiter gets woken
             // with status=1 (error) by close_slot.
             inet_tcp_close_slot(s, 1)
@@ -1407,6 +1418,13 @@ Past handshake: process ACK, data, FIN in that order.
         if did_fin != 0
             inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
 
+        // Re-ACK out-of-window segments (old data or dup FIN peer is
+        // retransmitting because an earlier ACK of ours was lost).
+        // Without this, peer keeps retransmitting until giveup+RST.
+        if did_data == 0 && did_fin == 0
+            if payload_len > 0 || (flags & TCP_F_FIN) != 0
+                inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+
         val st2 = tcp_sockets[s].state
         if st2 == TCP_STATE_ESTABLISHED
             if did_fin != 0
@@ -1416,9 +1434,11 @@ Past handshake: process ACK, data, FIN in that order.
                         inet_tcp_reply_recv(s, 0)
         else if st2 == TCP_STATE_FIN_WAIT_1
             if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
-                if did_fin != 0
-                    // Simultaneous close: peer FIN arrived with the ACK
-                    // of our FIN. Enter TIME_WAIT for 2MSL.
+                if tcp_sockets[s].peer_fin != 0
+                    // Our FIN acked and peer has FIN'd (either in this
+                    // segment — simultaneous close — or earlier while
+                    // our FIN was still unacked, which RFC 793 models
+                    // as the CLOSING state). Either way enter TIME_WAIT.
                     inet_tcp_enter_time_wait(s)
                 else
                     tcp_sockets[s].state = TCP_STATE_FIN_WAIT_2
@@ -1469,10 +1489,23 @@ socket for retransmit and TIME_WAIT deadlines.
                     tcp_sockets[s].send_len)
             return
         if st == TCP_STATE_FIN_WAIT_1
-            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
-                tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
+            // If data was still in flight when close() ran, resend it
+            // together with the FIN. A FIN-only retransmit leaves the
+            // peer rejecting our FIN as out-of-window until giveup.
+            if tcp_sockets[s].send_len > 0
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN | TCP_F_PSH,
+                    tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
+                    tcp_sockets[s].send_len)
+            else
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
+                    tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
             return
         if st == TCP_STATE_LAST_ACK
-            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
-                tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
+            if tcp_sockets[s].send_len > 0
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN | TCP_F_PSH,
+                    tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
+                    tcp_sockets[s].send_len)
+            else
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
+                    tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
             return
