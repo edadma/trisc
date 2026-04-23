@@ -203,6 +203,30 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("'ping!'")
   }
 
+  "aarch64 udp: recvfrom_timeout fires after ~1s with no sender" in {
+    // test_udp_tmo binds 0.0.0.0:7788 and calls
+    // recvfrom_timeout(..., 1000 ms) with nothing sending to it.
+    // Verifies that:
+    //   (a) the call returns 0 (timed out, not blocked, not errored),
+    //   (b) the elapsed uptime is in the expected range,
+    //   (c) the server main loop's inet_udp_scan_timeouts
+    //       delivered the deferred reply.
+    // Without the scan, the thread would park in
+    // inet_handle_recvfrom_timeout forever and the harness
+    // would time out rather than the program.
+    // (Binary name shortened from test_udp_timeout to fit TFS's
+    //  DIR_NAME_LEN=14 limit — "test_udp_timeout" was silently
+    //  truncated to "test_udp_timeo" in an earlier iteration.)
+    qemu.send("test_udp_tmo\n")
+    val output = qemu.waitFor("test_udp_tmo: ok")
+    output should include("test_udp_tmo: timeout elapsed=")
+    output should include("test_udp_tmo: ok")
+    output should not include "test_udp_tmo: recvfrom_timeout error"
+    output should not include "test_udp_tmo: too early"
+    output should not include "test_udp_tmo: too late"
+    output should not include "test_udp_tmo: unexpected data"
+  }
+
   "aarch64 timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications via notify_wait/notify_read_self. Proves the

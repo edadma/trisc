@@ -30,7 +30,7 @@ families / types, and any unknown command code, return
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
-    import oskit.services.{rs_ready, notify_read_self, svc_timer_subscribe}
+    import oskit.services.{rs_ready, notify_read_self, svc_timer_subscribe, uptime}
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet,
         ETHERTYPE_IPV4, ETHERTYPE_ARP, ARP_OP_REQUEST, ARP_OP_REPLY,
         IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
@@ -52,6 +52,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_ACCEPT   = 15
     val INET_CMD_SET_IP_CONFIG = 16
     val INET_CMD_GET_IP_CONFIG = 17
+    val INET_CMD_RECVFROM_TIMEOUT = 18
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -88,6 +89,7 @@ reserved for auto-bind, which isn't implemented yet).
         q_count: int
         pending_tid: int
         pending_maxlen: int
+        recv_deadline: int
 
     var inet_sockets: [32]InetSocket
     var inet_port = -1
@@ -124,6 +126,7 @@ client can reach us.
         while i < INET_MAX_SOCKETS
             inet_sockets[i].in_use = 0
             inet_sockets[i].pending_tid = -1
+            inet_sockets[i].recv_deadline = 0
             i += 1
 
 
@@ -217,6 +220,7 @@ replies via IPC.
         val waiter = inet_sockets[fd].pending_tid
         val mlen = inet_sockets[fd].pending_maxlen
         inet_sockets[fd].pending_tid = -1
+        inet_sockets[fd].recv_deadline = 0
         var wr: [540]byte
         var deliver_len = dlen
         if deliver_len > mlen
@@ -300,6 +304,7 @@ waiter. `maxlen` caps how many payload bytes we hand back.
         inet_sockets[idx].q_tail = 0
         inet_sockets[idx].q_count = 0
         inet_sockets[idx].pending_tid = -1
+        inet_sockets[idx].recv_deadline = 0
         var reply: [2]byte
         reply[0] = 0
         reply[1] = byte(idx & 0xff)
@@ -473,6 +478,90 @@ programs; multi-waiter support is on the list.
         // No reply — deferred until a dgram arrives or close.
 
 
+### RECVFROM_TIMEOUT handler
+
+Same as RECVFROM but with a bounded wait. Request layout:
+`cmd(1) + fd(1) + maxlen(2) + timeout_ms(4)` = 8 bytes. The
+reply shape matches RECVFROM so callers can use the same parser.
+
+Status byte in the reply distinguishes outcomes:
+- `0` — data delivered
+- `1` — timed out (no datagram within `timeout_ms`)
+- `-1` — error
+
+`inet_udp_scan_timeouts()` in the server main loop replies with
+status=1 when `now >= recv_deadline`. The deadline is expressed
+in scheduler ticks (100 Hz → 10 ms each). We round timeout up so
+a `1 ms` request still fires on the next tick rather than
+possibly firing immediately.
+
+    inet_handle_recvfrom_timeout(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if inet_fd_valid(fd) == 0
+            var err: [10]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 10)
+            return
+        val maxlen_raw = inet_read_u16(buf, 2)
+        var maxlen = maxlen_raw
+        if maxlen > INET_MAX_DATA
+            maxlen = INET_MAX_DATA
+        val tms_hi = inet_read_u16(buf, 4)
+        val tms_lo = inet_read_u16(buf, 6)
+        val timeout_ms = (tms_hi << 16) | tms_lo
+        if inet_sockets[fd].q_count > 0
+            var reply: [540]byte
+            val n = inet_deliver_head(fd, maxlen, reply)
+            ipc_reply(sender, reply, n)
+            return
+        if inet_sockets[fd].pending_tid >= 0
+            var err: [10]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 10)
+            return
+        if timeout_ms <= 0
+            var tr: [10]byte
+            tr[0] = byte(1)
+            ipc_reply(sender, tr, 10)
+            return
+        val ticks = (timeout_ms + 9) / 10
+        inet_sockets[fd].pending_tid = sender
+        inet_sockets[fd].pending_maxlen = maxlen
+        inet_sockets[fd].recv_deadline = int(uptime()) + ticks
+        // No reply — deferred until a dgram arrives, timeout
+        // expires, or close.
+
+
+### UDP recv-timeout scanner
+
+Called from the inet main loop on every wake. Scans every
+socket with a pending recvfrom that has a non-zero deadline, and
+when the deadline has passed replies with status=1 (timeout). We
+clear the waiter before replying so a datagram arriving on the
+same tick doesn't wake the thread twice.
+
+Timer wakes happen every ~50 ms (`svc_timer_subscribe(5)` in
+inet_server), so worst-case overshoot on an idle port is one
+tick period. Good enough for DHCP-scale retransmits.
+
+    inet_udp_scan_timeouts()
+        val now = int(uptime())
+        var i = 0
+        while i < INET_MAX_SOCKETS
+            if inet_sockets[i].in_use != 0
+                if inet_sockets[i].pending_tid >= 0
+                    val dl = inet_sockets[i].recv_deadline
+                    if dl != 0
+                        if now >= dl
+                            val waiter = inet_sockets[i].pending_tid
+                            inet_sockets[i].pending_tid = -1
+                            inet_sockets[i].recv_deadline = 0
+                            var tr: [10]byte
+                            tr[0] = byte(1)
+                            ipc_reply(waiter, tr, 10)
+            i += 1
+
+
 ### CLOSE handler
 
 Closes the slot. If a recv was pending, reply with an error so
@@ -488,6 +577,7 @@ the caller doesn't block forever.
         if inet_sockets[fd].pending_tid >= 0
             val waiter = inet_sockets[fd].pending_tid
             inet_sockets[fd].pending_tid = -1
+            inet_sockets[fd].recv_deadline = 0
             var wr: [10]byte
             wr[0] = byte(-1)
             ipc_reply(waiter, wr, 10)
@@ -879,6 +969,7 @@ silently skip link-layer setup and still serve UDP loopback.
         while 1 == 1
             val r = ipc_recv_notify(inet_port, buf, INET_MSG_BUF)
             inet_tcp_scan_timers()
+            inet_udp_scan_timeouts()
             if r == -2
                 notify_read_self()
                 inet_drain_rx()
@@ -890,6 +981,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_BIND        -> inet_handle_bind(sender, buf)
                     INET_CMD_SENDTO      -> inet_handle_sendto(sender, buf)
                     INET_CMD_RECVFROM    -> inet_handle_recvfrom(sender, buf)
+                    INET_CMD_RECVFROM_TIMEOUT -> inet_handle_recvfrom_timeout(sender, buf)
                     INET_CMD_CLOSE       -> inet_handle_close(sender, buf)
                     INET_CMD_TCP_CONNECT -> inet_handle_tcp_connect(sender, buf)
                     INET_CMD_TCP_SEND    -> inet_handle_tcp_send(sender, buf)

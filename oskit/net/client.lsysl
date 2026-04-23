@@ -41,6 +41,7 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_TCP_ACCEPT   = 15
     val INET_CMD_SET_IP_CONFIG = 16
     val INET_CMD_GET_IP_CONFIG = 17
+    val INET_CMD_RECVFROM_TIMEOUT = 18
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val INET_MAX_DATA     = 512
@@ -165,6 +166,64 @@ payload length on success, -1 on error.
         ipc_send(port, msg, 4, reply, 540)
         if reply[0] != 0
             return -1
+        val r_port = net_read_u16(reply, 2)
+        val r_ip = net_read_ipv4(reply, 4)
+        val r_len = net_read_u16(reply, 8)
+        if i64(src_ip) != 0
+            *src_ip = r_ip
+        if i64(src_port) != 0
+            *src_port = r_port
+        var i = 0
+        while i < r_len
+            buf[i] = reply[10 + i]
+            i += 1
+        r_len
+
+
+### recvfrom with timeout
+
+Same as `recvfrom` but bounded: waits up to `timeout_ms`
+milliseconds for a datagram. Returns:
+
+- `>0` — bytes received (payload length)
+- `0`  — timed out before a datagram arrived
+- `-1` — error
+
+A `timeout_ms` of 0 gives an immediate poll: returns queued bytes
+if any, otherwise 0. Used by retransmit/renewal loops (dhclient,
+future DNS client, etc.) that need to fail fast on a silent
+network instead of hanging forever.
+
+Wire layout: `cmd(1) + fd(1) + maxlen(2) + timeout_ms(4)` request;
+reply matches `recvfrom`. Status byte: `0` = data, `1` = timeout,
+`-1` (0xff) = error.
+
+    recvfrom_timeout(fd: int, buf: *byte, maxlen: int,
+                     src_ip: *u32, src_port: *int,
+                     timeout_ms: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        if timeout_ms < 0
+            return -1
+        var cap_len = maxlen
+        if cap_len > INET_MAX_DATA
+            cap_len = INET_MAX_DATA
+        var msg: [8]byte
+        msg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
+        msg[1] = byte(fd & 0xff)
+        net_write_u16(msg, 2, cap_len)
+        net_write_u16(msg, 4, (timeout_ms >> 16) & 0xffff)
+        net_write_u16(msg, 6, timeout_ms & 0xffff)
+        var reply: [540]byte
+        ipc_send(port, msg, 8, reply, 540)
+        val status = int(reply[0]) & 0xff
+        if status == 0xff
+            return -1
+        if status == 1
+            return 0
         val r_port = net_read_u16(reply, 2)
         val r_ip = net_read_ipv4(reply, 4)
         val r_len = net_read_u16(reply, 8)
