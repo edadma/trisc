@@ -1189,11 +1189,15 @@ and the ACK flag is set. seg_len counts SYN and FIN as one octet.
 
 
 send() entry — buffer, emit one segment, reply bytes written.
-Returns `n` on success (>= 0), -1 if connection is not
-established. MVP rejects overlapping sends with written = 0.
+Returns `n` on success (>= 0), -1 if connection is not open
+for sending. CLOSE_WAIT (peer half-closed their write side) is
+still fine: only our read side has EOF'd, so we can — and often
+must — send a final response before our own close(). MVP rejects
+overlapping sends with written = 0.
 
     inet_tcp_do_send(s: int, data: *byte, len: int) -> int
-        if tcp_sockets[s].state != TCP_STATE_ESTABLISHED
+        val ds_st = tcp_sockets[s].state
+        if ds_st != TCP_STATE_ESTABLISHED && ds_st != TCP_STATE_CLOSE_WAIT
             return -1
         if tcp_sockets[s].send_len > 0
             return 0
@@ -1458,7 +1462,7 @@ socket for retransmit and TIME_WAIT deadlines.
         if st == TCP_STATE_SYN_RCVD
             inet_tcp_emit(s, TCP_F_SYN | TCP_F_ACK, tcp_sockets[s].iss, u32(0), 0)
             return
-        if st == TCP_STATE_ESTABLISHED
+        if st == TCP_STATE_ESTABLISHED || st == TCP_STATE_CLOSE_WAIT
             if tcp_sockets[s].send_len > 0
                 inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
                     tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,

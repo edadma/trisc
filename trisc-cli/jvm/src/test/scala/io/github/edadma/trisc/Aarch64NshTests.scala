@@ -542,30 +542,43 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       srvThread.join(2000)
   }
 
-  "aarch64 tcp: accept child that peer already FIN'd (CLOSE_WAIT pre-accept)" in {
+  "aarch64 tcp: accept + send on CLOSE_WAIT child (peer already FIN'd)" in {
     // test_tcp_fcw listens, sleeps 100 ticks, then accepts. While the
     // guest is sleeping the host connects, writes "ping\n", and
     // shutdown(SHUT_WR)s — FIN arrives while the child sits on the
-    // accept queue, flipping it ESTABLISHED → CLOSE_WAIT. Pre-fix,
-    // inet_tcp_do_accept skipped CLOSE_WAIT children and parked the
-    // caller forever; post-fix, accept returns the child and read()
-    // drains the 5-byte payload.
+    // accept queue, flipping it ESTABLISHED → CLOSE_WAIT. Exercises
+    // three CLOSE_WAIT-path fixes:
+    //   - do_accept returns the CLOSE_WAIT child (not dropped)
+    //   - do_send accepts a send in CLOSE_WAIT (our write side is
+    //     still open — only the peer half-closed)
+    //   - retransmit still fires for CLOSE_WAIT if needed (covered
+    //     incidentally if the pong reply gets reordered).
     qemu.send("test_tcp_fcw\n")
     qemu.waitFor("test_tcp_fcw: listening h=")
 
     val sock = new java.net.Socket()
     sock.setSoTimeout(10000)
     sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    val replyBytes = new Array[Byte](5)
     try
       val out = sock.getOutputStream
+      val in  = sock.getInputStream
       out.write("ping\n".getBytes("UTF-8"))
       out.flush()
       sock.shutdownOutput()  // FIN now, don't wait for guest to accept
+      var read = 0
+      while read < 5 do
+        val r = in.read(replyBytes, read, 5 - read)
+        if r <= 0 then throw new RuntimeException(s"short read: got $read")
+        read += r
     finally sock.close()
+
+    new String(replyBytes, "UTF-8") shouldBe "pong\n"
 
     val output = qemu.waitFor("test_tcp_fcw: ok")
     output should include("test_tcp_fcw: accepted ch=")
     output should include("test_tcp_fcw: got 5")
+    output should include("test_tcp_fcw: sent=5")
     output should include("test_tcp_fcw: ok")
   }
 

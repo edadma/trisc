@@ -1,33 +1,38 @@
-test_tcp_fcw — accept a child that peer already FIN'd
-=======================================================
+test_tcp_fcw — accept + send on a child the peer already FIN'd
+================================================================
 
-Regression test for the CLOSE_WAIT pre-accept race. The host
-connects, sends a small payload, then half-closes immediately.
-By the time this binary's main() reaches accept(), the child
-has already transitioned ESTABLISHED → CLOSE_WAIT because the
-peer FIN arrived while the child sat on the listen's accept
-queue.
+Regression test for three CLOSE_WAIT-path bugs found in one
+static audit pass:
 
-Before the fix, `inet_tcp_do_accept` only returned children in
-ESTABLISHED, so CLOSE_WAIT children were silently dequeued and
-dropped — accept() then parked forever because the queue was
-empty, and the host's data went unread.
+  1. `inet_tcp_do_accept` used to skip CLOSE_WAIT children,
+     dropping connections where the peer FIN'd before the server
+     called accept().
+  2. `inet_tcp_do_send` rejected sends in CLOSE_WAIT, breaking
+     half-close request/response patterns (HTTP keep-alive-
+     free clients, etc.).
+  3. `inet_tcp_retransmit` had no CLOSE_WAIT branch, so unacked
+     data sent after the peer FIN'd would silently stop being
+     retransmitted.
 
 Sequence the test relies on:
     guest: listen(7890); sleep(100)
-    host:  connect + send("ping\n") + shutdown(SHUT_WR)   // FIN
+    host:  connect + send("ping\n") + shutdown(SHUT_WR)  // FIN
     inet:  passive_syn → ESTABLISHED → enqueue → CLOSE_WAIT
-    guest: accept() must return the child; read() must see "ping\n"
+    guest: accept() must return the child          (bug #1)
+    guest: read("ping\n")
+    guest: write_handle("pong\n")                  (bugs #2, #3)
+    host:  reads "pong\n" before guest closes
 
 Prints:
 - `listening h=N`
 - `accepted ch=N from A.B.C.D:P`
-- `got K`  (K should be 5 for "ping\n")
+- `got K`      (K should be 5 for "ping\n")
+- `sent=5`     (reply bytes buffered by inet)
 - `ok`
 
     module oskit.bin.test_tcp_fcw
 
-    import oskit.ulib.{puts, exit, exit_with, sleep, connect, accept, read, close}
+    import oskit.ulib.{puts, exit, exit_with, sleep, connect, accept, read, write_handle, close}
 
 
     print_udec(v: int)
@@ -87,6 +92,24 @@ Prints:
             return
         puts("test_tcp_fcw: got ")
         print_udec(got)
+        puts("\n")
+
+        // Send in CLOSE_WAIT — exercises do_send's state check.
+        var wbuf: [5]byte
+        wbuf[0] = byte('p')
+        wbuf[1] = byte('o')
+        wbuf[2] = byte('n')
+        wbuf[3] = byte('g')
+        wbuf[4] = byte('\n')
+        val sent = write_handle(ch, &wbuf[0], 5)
+        if sent < 0
+            puts("test_tcp_fcw: write failed\n")
+            close(ch)
+            close(lh)
+            exit_with(4)
+            return
+        puts("test_tcp_fcw: sent=")
+        print_udec(sent)
         puts("\n")
 
         close(ch)
