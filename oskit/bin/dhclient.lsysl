@@ -9,12 +9,16 @@ replies with a `DHCPOFFER`, the host picks one and sends back a
 `DHCPREQUEST`, and the server commits by sending `DHCPACK`.
 
 This client implements the INIT → SELECTING → REQUESTING → BOUND
-arc of RFC 2131 §4.4 — enough to acquire a lease on first boot.
-Retransmit timers and T1/T2 renewal are deferred to Phase C;
-what's here is the correctness core: packet builder, option TLV
-parser, and a straight-through state machine. A `--test` flag
-runs the parser against canned OFFER/ACK packets so the harness
-can exercise this code without a live DHCP server.
+arc of RFC 2131 §4.4, with DISCOVER/REQUEST retransmit per RFC
+2131 §4.1 (exponential 4/8/16/32 s up to a ~60 s ceiling) so
+first-packet loss on a real wire doesn't strand us. T1/T2
+renewal is optional behind a `--renew` flag — default usage is
+still one-shot (acquire a lease and exit) so init can pm_waitpid
+for the bind, and existing tests keep their simple "run
+dhclient, grep for bound line" shape.
+
+A `--test` flag runs the parser against canned OFFER/ACK packets
+so the harness can exercise this code without a live DHCP server.
 
 BOOTP wire layout (RFC 951 §3) — 236-byte fixed header, then a
 magic cookie, then variable-length DHCP options:
@@ -33,8 +37,8 @@ skip.
     module oskit.bin.dhclient
 
     import oskit.ulib.{puts, exit, exit_with, uptime}
-    import oskit.net.{socket, bind, sendto, recvfrom, close_socket,
-        inet_set_ip_config, nic_get_mac}
+    import oskit.net.{socket, bind, sendto, recvfrom, recvfrom_timeout,
+        close_socket, inet_set_ip_config, nic_get_mac}
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, ipv4, ipv4_octet,
         pkt_write_u16, pkt_write_ipv4}
 
@@ -333,15 +337,124 @@ that fail the BOOTREPLY / magic-cookie sanity checks land with
         print_udec(ipv4_octet(ip, 3))
 
 
+### Retransmit ceiling
+
+Initial timeout is 4 s and doubles on each retry up to a 64 s
+cap, so the per-attempt schedule is 4/8/16/32 s. We attempt up
+to four transmissions (DISCOVER or REQUEST), giving ~60 s total
+wall-clock before giving up — inside the one-minute budget init
+can reasonably tolerate during boot. RFC 2131 §4.1 also
+recommends ±1 s jitter; we skip jitter for the first cut since
+slix has no cryptographic / stochastic source of randomness and
+a deterministic schedule collides less with other SLIX guests
+sharing the same slirp segment than it would on a physical LAN.
+
+    val DHCP_RTO_INITIAL_MS = 4000
+    val DHCP_RTO_MAX_MS     = 64000
+    val DHCP_MAX_ATTEMPTS   = 4
+
+
+### dhclient_wait_match
+
+Drain incoming datagrams until one matches our xid and the
+expected message type, or the per-attempt deadline expires.
+Non-matching packets (wrong xid, wrong type) are consumed and
+silently ignored — mid-flight packets from a previous attempt
+could still be in the pipe.
+
+Returns:
+- `1`  matched (out_msg populated)
+- `0`  timeout — caller should retransmit or give up
+- `-1` transport / socket error
+- `-2` NAK received (only when we're waiting for ACK)
+
+    dhclient_wait_match(fd: int, xid: u32, msg_type_want: int,
+                        timeout_ms: int, out_msg: *DhcpMessage) -> int
+        if timeout_ms <= 0
+            return 0
+        val t0 = uptime()
+        val deadline = t0 + (timeout_ms + 9) / 10
+        var rbuf: [512]byte
+        var sip: u32 = u32(0)
+        var sport: int = 0
+        while 1 == 1
+            val now = uptime()
+            if now >= deadline
+                return 0
+            val remain_ticks = deadline - now
+            val remain_ms = remain_ticks * 10
+            val n = recvfrom_timeout(fd, &rbuf[0], 512,
+                &sip, &sport, remain_ms)
+            if n < 0
+                return -1
+            if n == 0
+                return 0
+            parse_dhcp_packet(&rbuf[0], n, out_msg)
+            if out_msg.valid != 0
+                if out_msg.xid == xid
+                    if out_msg.msg_type == msg_type_want
+                        return 1
+                    if msg_type_want == DHCP_MSG_ACK
+                        if out_msg.msg_type == DHCP_MSG_NAK
+                            return -2
+        0
+
+
+### dhclient_exchange
+
+Repeatedly send `msg_type_send` and wait for `msg_type_want`,
+with exponential backoff per RFC 2131 §4.1. Caller handles
+everything around it (packet building, state transition). Used
+by both SELECTING (DISCOVER→OFFER) and REQUESTING (REQUEST→ACK).
+
+`dst_ip` is the L3 destination — bcast for DISCOVER, usually
+bcast for REQUEST, but unicast to server_id during RENEWING.
+
+`requested_ip` / `server_id` feed into build_dhcp_packet for
+REQUEST; DISCOVER leaves them zero.
+
+Returns 0 on match, -1 on timeout-exceeded or NAK or error.
+
+    dhclient_exchange(fd: int, our_mac: *byte, xid: u32,
+                      msg_type_send: int, msg_type_want: int,
+                      dst_ip: u32, requested_ip: u32,
+                      server_id: u32,
+                      out_msg: *DhcpMessage) -> int
+        var pkt: [512]byte
+        var timeout_ms = DHCP_RTO_INITIAL_MS
+        var attempt = 0
+        while attempt < DHCP_MAX_ATTEMPTS
+            val plen = build_dhcp_packet(&pkt[0], msg_type_send,
+                xid, our_mac, requested_ip, server_id)
+            if sendto(fd, &pkt[0], plen, dst_ip, DHCP_PORT_SERVER) < 0
+                return -1
+            val r = dhclient_wait_match(fd, xid, msg_type_want,
+                timeout_ms, out_msg)
+            if r == 1
+                return 0
+            if r == -1
+                return -1
+            if r == -2
+                // NAK — don't retransmit; caller handles fallback.
+                return -2
+            // r == 0: timed out, back off and retransmit.
+            if timeout_ms * 2 > DHCP_RTO_MAX_MS
+                timeout_ms = DHCP_RTO_MAX_MS
+            else
+                timeout_ms = timeout_ms * 2
+            attempt += 1
+        -1
+
+
 ### dhclient_run
 
-Single-shot state-machine traversal INIT → BOUND. No retransmit,
-no renewal — Phase C will add both. Returns 0 on a completed
-bind, -1 on any failure.
+State-machine traversal INIT → BOUND with retransmit. Returns 0
+on a completed bind (out_msg holds the ACK so the caller can
+enter the renewal loop), -1 on any failure.
 
-    dhclient_run() -> int
-        var our_mac: [6]byte
-        if nic_get_mac(&our_mac[0]) < 0
+    dhclient_run(out_ack: *DhcpMessage, out_mac: *byte,
+                 out_fd: *int) -> int
+        if nic_get_mac(out_mac) < 0
             puts("dhclient: nic_get_mac failed\n")
             return -1
         val fd = socket(AF_INET, SOCK_DGRAM, 0)
@@ -355,94 +468,245 @@ bind, -1 on any failure.
         val xid = u32(uptime()) | u32(0x1000)
         val bcast = ipv4(255, 255, 255, 255)
 
-SELECTING — send DISCOVER, then accept OFFERs with matching xid.
+SELECTING — DISCOVER → OFFER with retransmit.
 
-        var pkt: [512]byte
-        var plen = build_dhcp_packet(&pkt[0], DHCP_MSG_DISCOVER, xid,
-            &our_mac[0], u32(0), u32(0))
-        if sendto(fd, &pkt[0], plen, bcast, DHCP_PORT_SERVER) < 0
-            puts("dhclient: DISCOVER sendto failed\n")
+        puts("dhclient: DISCOVER...\n")
+        var offer: DhcpMessage
+        val sr = dhclient_exchange(fd, out_mac, xid,
+            DHCP_MSG_DISCOVER, DHCP_MSG_OFFER,
+            bcast, u32(0), u32(0), &offer)
+        if sr < 0
+            puts("dhclient: no OFFER after retries\n")
             close_socket(fd)
             return -1
-        puts("dhclient: DISCOVER sent\n")
-
-        var rbuf: [512]byte
-        var sip: u32 = u32(0)
-        var sport: int = 0
-        var offer: DhcpMessage
-        var got = 0
-        while got == 0
-            val n = recvfrom(fd, &rbuf[0], 512, &sip, &sport)
-            if n < 0
-                puts("dhclient: OFFER recvfrom failed\n")
-                close_socket(fd)
-                return -1
-            parse_dhcp_packet(&rbuf[0], n, &offer)
-            if offer.valid != 0
-                if offer.xid == xid
-                    if offer.msg_type == DHCP_MSG_OFFER
-                        got = 1
         puts("dhclient: OFFER yiaddr=")
         print_ipv4(offer.yiaddr)
         puts(" server=")
         print_ipv4(offer.server_id)
         puts("\n")
 
-REQUESTING — echo server_id and requested_ip. Server either ACKs
-or NAKs; NAK means someone else grabbed the offered lease first.
+REQUESTING — REQUEST → ACK with retransmit. NAK aborts.
 
-        plen = build_dhcp_packet(&pkt[0], DHCP_MSG_REQUEST, xid,
-            &our_mac[0], offer.yiaddr, offer.server_id)
-        if sendto(fd, &pkt[0], plen, bcast, DHCP_PORT_SERVER) < 0
-            puts("dhclient: REQUEST sendto failed\n")
+        val rr = dhclient_exchange(fd, out_mac, xid,
+            DHCP_MSG_REQUEST, DHCP_MSG_ACK,
+            bcast, offer.yiaddr, offer.server_id, out_ack)
+        if rr == -2
+            puts("dhclient: NAK received\n")
             close_socket(fd)
             return -1
-        puts("dhclient: REQUEST sent\n")
-
-        var ack: DhcpMessage
-        got = 0
-        while got == 0
-            val n = recvfrom(fd, &rbuf[0], 512, &sip, &sport)
-            if n < 0
-                puts("dhclient: ACK recvfrom failed\n")
-                close_socket(fd)
-                return -1
-            parse_dhcp_packet(&rbuf[0], n, &ack)
-            if ack.valid != 0
-                if ack.xid == xid
-                    if ack.msg_type == DHCP_MSG_ACK
-                        got = 1
-                    if ack.msg_type == DHCP_MSG_NAK
-                        puts("dhclient: NAK received\n")
-                        close_socket(fd)
-                        return -1
+        if rr < 0
+            puts("dhclient: no ACK after retries\n")
+            close_socket(fd)
+            return -1
 
 BOUND — install the learned lease. A server that forgot option
 1 (mask) is fixed up with a /24 default; a missing router (3)
 falls back to the server_id, which is usually the gateway on
 consumer routers.
 
-        var mask = ack.mask
+        var mask = out_ack.mask
         if mask == u32(0)
             mask = ipv4(255, 255, 255, 0)
-        var gw = ack.gw
+        var gw = out_ack.gw
         if gw == u32(0)
-            gw = ack.server_id
-        if inet_set_ip_config(ack.yiaddr, mask, gw) < 0
+            gw = out_ack.server_id
+        if inet_set_ip_config(out_ack.yiaddr, mask, gw) < 0
             puts("dhclient: inet_set_ip_config failed\n")
             close_socket(fd)
             return -1
         puts("dhclient: bound ")
-        print_ipv4(ack.yiaddr)
+        print_ipv4(out_ack.yiaddr)
         puts(" mask=")
         print_ipv4(mask)
         puts(" gw=")
         print_ipv4(gw)
         puts(" lease=")
-        print_udec(ack.lease)
+        print_udec(out_ack.lease)
         puts("\n")
-        close_socket(fd)
+        *out_fd = fd
         0
+
+
+### dhclient_renew_loop
+
+RFC 2131 §4.4.5 renewal. Run after a successful BOUND. Sleep
+until T1, then try unicast RENEWING to the server. If that
+fails past T2, try broadcast REBINDING. If that fails past the
+lease expiry, return 0 so the caller can restart from INIT.
+
+Times in the ACK are seconds; we convert to 100 Hz scheduler
+ticks. If the server didn't emit T1/T2, we default to T1 = 0.5
+lease and T2 = 0.875 lease per RFC 2131 §4.4.5.
+
+This function never returns on a persistent success path —
+only on expiry (return 0) or a hard error (return -1). The
+calling main loop is expected to restart dhclient_run on a 0
+return.
+
+    dhclient_renew_loop(fd: int, our_mac: *byte, initial: *DhcpMessage) -> int
+        var ack: DhcpMessage
+        ack.msg_type = initial.msg_type
+        ack.xid = initial.xid
+        ack.yiaddr = initial.yiaddr
+        ack.server_id = initial.server_id
+        ack.mask = initial.mask
+        ack.gw = initial.gw
+        ack.lease = initial.lease
+        ack.t1 = initial.t1
+        ack.t2 = initial.t2
+        ack.valid = initial.valid
+
+        while 1 == 1
+            val t_bound = uptime()
+            var t1_s = ack.t1
+            var t2_s = ack.t2
+            val lease_s = ack.lease
+            if lease_s <= 0
+                puts("dhclient: zero lease, stopping renew\n")
+                return -1
+            if t1_s <= 0
+                t1_s = lease_s / 2
+            if t2_s <= 0
+                t2_s = (lease_s * 7) / 8
+            val lease_deadline = t_bound + lease_s * 100
+            val t1_deadline = t_bound + t1_s * 100
+            val t2_deadline = t_bound + t2_s * 100
+
+Sleep until T1 via a dummy recvfrom_timeout. Any unexpected
+packets that arrive during this window are ignored — we check
+xid later, and the server has no reason to speak to us
+unsolicited while our lease is valid.
+
+            val t_now = uptime()
+            if t1_deadline > t_now
+                val sleep_ms = (t1_deadline - t_now) * 10
+                var rbuf: [8]byte
+                var sip: u32 = u32(0)
+                var sport: int = 0
+                val ignore = recvfrom_timeout(fd, &rbuf[0], 8,
+                    &sip, &sport, sleep_ms)
+
+RENEWING: unicast REQUEST to server_id. Retransmit budget is
+half of (T2 - T1), per RFC 2131 §4.4.5 recommendation.
+
+            val renew_xid = u32(uptime()) | u32(0x2000)
+            val unicast_dst = ack.server_id
+            val now1 = uptime()
+            var renew_budget_ms = 0
+            if t2_deadline > now1
+                renew_budget_ms = (t2_deadline - now1) * 10 / 2
+            if renew_budget_ms < DHCP_RTO_INITIAL_MS
+                renew_budget_ms = DHCP_RTO_INITIAL_MS
+
+            puts("dhclient: RENEWING\n")
+            var renew_ack: DhcpMessage
+            val rr = dhclient_renew_once(fd, our_mac, renew_xid,
+                unicast_dst, ack.yiaddr, ack.server_id,
+                renew_budget_ms, &renew_ack)
+            if rr == 0
+                puts("dhclient: RENEW ok\n")
+                ack.yiaddr = renew_ack.yiaddr
+                if renew_ack.mask != u32(0)
+                    ack.mask = renew_ack.mask
+                if renew_ack.gw != u32(0)
+                    ack.gw = renew_ack.gw
+                if renew_ack.lease > 0
+                    ack.lease = renew_ack.lease
+                if renew_ack.t1 > 0
+                    ack.t1 = renew_ack.t1
+                if renew_ack.t2 > 0
+                    ack.t2 = renew_ack.t2
+                continue
+            if rr == -2
+                puts("dhclient: RENEW NAK, restarting\n")
+                return 0
+
+REBINDING: broadcast REQUEST. Budget = half of (expiry - T2).
+
+            val rebind_xid = u32(uptime()) | u32(0x3000)
+            val bcast = ipv4(255, 255, 255, 255)
+            val now2 = uptime()
+            var rebind_budget_ms = 0
+            if lease_deadline > now2
+                rebind_budget_ms = (lease_deadline - now2) * 10 / 2
+            if rebind_budget_ms < DHCP_RTO_INITIAL_MS
+                rebind_budget_ms = DHCP_RTO_INITIAL_MS
+
+            puts("dhclient: REBINDING\n")
+            var rebind_ack: DhcpMessage
+            val br = dhclient_renew_once(fd, our_mac, rebind_xid,
+                bcast, ack.yiaddr, u32(0),
+                rebind_budget_ms, &rebind_ack)
+            if br == 0
+                puts("dhclient: REBIND ok\n")
+                ack.yiaddr = rebind_ack.yiaddr
+                if rebind_ack.server_id != u32(0)
+                    ack.server_id = rebind_ack.server_id
+                if rebind_ack.mask != u32(0)
+                    ack.mask = rebind_ack.mask
+                if rebind_ack.gw != u32(0)
+                    ack.gw = rebind_ack.gw
+                if rebind_ack.lease > 0
+                    ack.lease = rebind_ack.lease
+                if rebind_ack.t1 > 0
+                    ack.t1 = rebind_ack.t1
+                if rebind_ack.t2 > 0
+                    ack.t2 = rebind_ack.t2
+                continue
+            puts("dhclient: lease expired, restarting INIT\n")
+            return 0
+        -1
+
+
+### dhclient_renew_once
+
+Single RENEW or REBIND attempt with a bounded budget. REQUEST
+with ciaddr = our current IP (we know it; we're bound). Unlike
+SELECTING, we don't retransmit on the same exponential — we
+burn through the budget with one backoff chain.
+
+    dhclient_renew_once(fd: int, our_mac: *byte, xid: u32,
+                        dst_ip: u32, our_ip: u32, server_id: u32,
+                        budget_ms: int, out_msg: *DhcpMessage) -> int
+        var pkt: [512]byte
+        var timeout_ms = DHCP_RTO_INITIAL_MS
+        val t0 = uptime()
+        val deadline = t0 + (budget_ms + 9) / 10
+        while 1 == 1
+            val plen = build_dhcp_packet(&pkt[0], DHCP_MSG_REQUEST,
+                xid, our_mac, our_ip, server_id)
+
+RFC 2131 §3.3: during RENEWING/REBINDING the client's
+`ciaddr` = current IP rather than zero. build_dhcp_packet always
+zeroes yiaddr/ciaddr, so poke our_ip into offset 12.
+
+            pkt[12] = byte(ipv4_octet(our_ip, 0))
+            pkt[13] = byte(ipv4_octet(our_ip, 1))
+            pkt[14] = byte(ipv4_octet(our_ip, 2))
+            pkt[15] = byte(ipv4_octet(our_ip, 3))
+            if sendto(fd, &pkt[0], plen, dst_ip, DHCP_PORT_SERVER) < 0
+                return -1
+            val now = uptime()
+            if now >= deadline
+                return -1
+            val remain_ticks = deadline - now
+            var this_wait_ms = timeout_ms
+            val remain_ms = remain_ticks * 10
+            if this_wait_ms > remain_ms
+                this_wait_ms = remain_ms
+            val r = dhclient_wait_match(fd, xid, DHCP_MSG_ACK,
+                this_wait_ms, out_msg)
+            if r == 1
+                return 0
+            if r == -1
+                return -1
+            if r == -2
+                return -2
+            if timeout_ms * 2 > DHCP_RTO_MAX_MS
+                timeout_ms = DHCP_RTO_MAX_MS
+            else
+                timeout_ms = timeout_ms * 2
+        -1
 
 
 ### dhclient_selftest
@@ -609,10 +873,18 @@ Malformed: smash the magic cookie and confirm valid=0.
 ### main
 
 `dhclient --test` runs the canned-packet selftest and prints
-`dhclient: selftest ok` on pass. With no argument, runs the live
-state machine against whatever DHCP server is on the wire.
+`dhclient: selftest ok` on pass.
+
+`dhclient` with no argument runs the live state machine once
+(INIT → BOUND) and exits. This keeps init's pm_waitpid model
+simple and keeps existing tests unchanged.
+
+`dhclient --renew` runs the live state machine, then stays in
+the background handling T1/T2 renewal forever. On lease expiry
+it restarts from INIT automatically.
 
     main(argv: []string)
+        var renew = 0
         if len(argv) > 1
             val a = argv[1]
             if a == "--test"
@@ -626,8 +898,25 @@ state machine against whatever DHCP server is on the wire.
                 puts("\n")
                 exit_with(rc)
                 return
-        val rc = dhclient_run()
-        if rc < 0
-            exit_with(1)
-            return
-        exit()
+            if a == "--renew"
+                renew = 1
+        while 1 == 1
+            var ack: DhcpMessage
+            var our_mac: [6]byte
+            var fd: int = -1
+            val rc = dhclient_run(&ack, &our_mac[0], &fd)
+            if rc < 0
+                exit_with(1)
+                return
+            if renew == 0
+                if fd >= 0
+                    close_socket(fd)
+                exit()
+                return
+            val rr = dhclient_renew_loop(fd, &our_mac[0], &ack)
+            if fd >= 0
+                close_socket(fd)
+            if rr < 0
+                exit_with(1)
+                return
+            // rr == 0 → lease fully expired, loop back to INIT.
