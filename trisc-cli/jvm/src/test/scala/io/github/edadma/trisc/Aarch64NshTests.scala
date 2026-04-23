@@ -626,6 +626,19 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_tcp_ooo: failed"
   }
 
+  "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
+    // dhclient --test runs the in-process parser selftest against
+    // canned DHCP packets (known-good OFFER, same-layout ACK, and
+    // a malformed magic-cookie negative case). No live DHCP server
+    // is involved — this catches byte-layout regressions without
+    // needing slirp to run a DHCP server (slirp does, but coupling
+    // correctness to a separate service is brittle).
+    qemu.send("dhclient --test\n")
+    val output = qemu.waitFor("dhclient: selftest ok")
+    output should include("dhclient: selftest ok")
+    output should not include "dhclient: selftest failed"
+  }
+
   "aarch64 crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))

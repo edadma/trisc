@@ -1,0 +1,633 @@
+DHCP client — RFC 2131 dynamic host configuration
+===================================================
+
+When a fresh host joins a network it does not yet know its own
+IP address, netmask, or default route. DHCP is the de-facto
+protocol used to learn those on Ethernet-like links: the host
+broadcasts a `DHCPDISCOVER`, any DHCP server on the segment
+replies with a `DHCPOFFER`, the host picks one and sends back a
+`DHCPREQUEST`, and the server commits by sending `DHCPACK`.
+
+This client implements the INIT → SELECTING → REQUESTING → BOUND
+arc of RFC 2131 §4.4 — enough to acquire a lease on first boot.
+Retransmit timers and T1/T2 renewal are deferred to Phase C;
+what's here is the correctness core: packet builder, option TLV
+parser, and a straight-through state machine. A `--test` flag
+runs the parser against canned OFFER/ACK packets so the harness
+can exercise this code without a live DHCP server.
+
+BOOTP wire layout (RFC 951 §3) — 236-byte fixed header, then a
+magic cookie, then variable-length DHCP options:
+
+```
+  0     1     2     3     4    ...   16    ...   28 ...  236 ... 240 ...
+ [op] [hty] [hln] [hop] [   xid  ] [yiaddr] [chaddr(16)]  [cookie] [opts]
+```
+
+DHCP repurposes BOOTP's `file` and `sname` fields for overflow
+options in practice, but we never reach overflow at this protocol
+level. Options are encoded as `code | len | value-bytes...`, with
+`code=255` (END) terminating and `code=0` (PAD) a single-byte
+skip.
+
+    module oskit.bin.dhclient
+
+    import oskit.ulib.{puts, exit, exit_with, uptime}
+    import oskit.net.{socket, bind, sendto, recvfrom, close_socket,
+        inet_set_ip_config, nic_get_mac}
+    import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, ipv4, ipv4_octet,
+        pkt_write_u16, pkt_write_ipv4}
+
+
+BOOTP opcodes (`op` at offset 0). A client sends BOOTREQUEST;
+the server always replies BOOTREPLY.
+
+    val DHCP_OP_BOOTREQUEST = 1
+    val DHCP_OP_BOOTREPLY   = 2
+
+
+Hardware type + address length for Ethernet II. RFC 1700 assigns
+type 1 to 10 Mbps Ethernet and that's been the universal value
+ever since.
+
+    val DHCP_HTYPE_ETHERNET = 1
+    val DHCP_HLEN_ETHERNET  = 6
+
+
+Magic cookie sits at offset 236 and marks a packet as DHCP (as
+opposed to plain BOOTP). Any reply missing these four bytes in
+that order is rejected outright.
+
+    val DHCP_COOKIE_0 = 0x63
+    val DHCP_COOKIE_1 = 0x82
+    val DHCP_COOKIE_2 = 0x53
+    val DHCP_COOKIE_3 = 0x63
+
+
+The BROADCAST flag in the BOOTP `flags` field (offset 10) tells
+servers to reply to the limited-broadcast address rather than
+unicasting to the offered IP — which is what we need pre-lease,
+since our NIC will drop any IP addressed to an address we
+haven't installed yet.
+
+    val DHCP_FLAG_BROADCAST = 0x8000
+
+
+Message types carried in option 53. DISCOVER/OFFER/REQUEST/ACK
+drive the happy path; NAK aborts it; DECLINE + RELEASE are
+implemented by other components (address-conflict detection and
+clean shutdown respectively) that we don't ship here.
+
+    val DHCP_MSG_DISCOVER = 1
+    val DHCP_MSG_OFFER    = 2
+    val DHCP_MSG_REQUEST  = 3
+    val DHCP_MSG_DECLINE  = 4
+    val DHCP_MSG_ACK      = 5
+    val DHCP_MSG_NAK      = 6
+    val DHCP_MSG_RELEASE  = 7
+
+
+Option codes (RFC 2132). We build options 53, 55, 12, 50, 54 and
+we parse options 1, 3, 51, 53, 54, 58, 59.
+
+    val DHCP_OPT_PAD             = 0
+    val DHCP_OPT_SUBNET_MASK     = 1
+    val DHCP_OPT_ROUTER          = 3
+    val DHCP_OPT_HOSTNAME        = 12
+    val DHCP_OPT_REQUESTED_IP    = 50
+    val DHCP_OPT_LEASE_TIME      = 51
+    val DHCP_OPT_MSG_TYPE        = 53
+    val DHCP_OPT_SERVER_ID       = 54
+    val DHCP_OPT_PARAM_REQ_LIST  = 55
+    val DHCP_OPT_T1              = 58
+    val DHCP_OPT_T2              = 59
+    val DHCP_OPT_END             = 255
+
+
+UDP port numbers (RFC 2131 §4.1). Clients always speak from port
+68 to server port 67.
+
+    val DHCP_PORT_SERVER = 67
+    val DHCP_PORT_CLIENT = 68
+
+
+Layout offsets. 236 bytes of BOOTP header, 4 bytes of magic
+cookie, options from 240 onward. 512 is our packet ceiling —
+plenty for the option lists we build (~30 bytes) and for any
+sane server reply.
+
+    val DHCP_MAGIC_OFFSET   = 236
+    val DHCP_OPTIONS_OFFSET = 240
+    val DHCP_PACKET_SIZE    = 512
+
+
+Parsed-message struct. Everything the client needs from an
+OFFER/ACK, already extracted from options. `valid=1` means we
+saw a well-formed packet, even if some fields are missing (a
+server that doesn't advertise T1/T2 is still valid).
+
+    struct DhcpMessage
+        msg_type: int
+        xid: u32
+        yiaddr: u32
+        server_id: u32
+        mask: u32
+        gw: u32
+        lease: int
+        t1: int
+        t2: int
+        valid: int
+
+
+### read_u32_be
+
+Read a big-endian u32 from `p + off`. Used for xid, lease-time,
+and IP-valued options (which are also 32-bit big-endian).
+
+    read_u32_be(p: *byte, off: int) -> u32
+        val b0 = u32(p[off]     & 0xff)
+        val b1 = u32(p[off + 1] & 0xff)
+        val b2 = u32(p[off + 2] & 0xff)
+        val b3 = u32(p[off + 3] & 0xff)
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+
+### build_dhcp_packet
+
+Zero-fill `buf`, write the BOOTP header, write the magic cookie,
+then append TLV options. The caller passes our MAC for the
+`chaddr` slot. `requested_ip` and `server_id` are only consulted
+for REQUEST — DISCOVER leaves them at zero.
+
+Returns the total packet length in bytes.
+
+    build_dhcp_packet(buf: *byte, msg_type: int, xid: u32,
+        our_mac: *byte, requested_ip: u32, server_id: u32) -> int
+        var i = 0
+        while i < DHCP_PACKET_SIZE
+            buf[i] = byte(0)
+            i += 1
+        buf[0] = byte(DHCP_OP_BOOTREQUEST)
+        buf[1] = byte(DHCP_HTYPE_ETHERNET)
+        buf[2] = byte(DHCP_HLEN_ETHERNET)
+        buf[3] = byte(0)
+        buf[4] = byte(int(xid >> 24u32) & 0xff)
+        buf[5] = byte(int(xid >> 16u32) & 0xff)
+        buf[6] = byte(int(xid >> 8u32) & 0xff)
+        buf[7] = byte(int(xid) & 0xff)
+        pkt_write_u16(buf, 10, DHCP_FLAG_BROADCAST)
+        var j = 0
+        while j < 6
+            buf[28 + j] = our_mac[j]
+            j += 1
+        buf[DHCP_MAGIC_OFFSET + 0] = byte(DHCP_COOKIE_0)
+        buf[DHCP_MAGIC_OFFSET + 1] = byte(DHCP_COOKIE_1)
+        buf[DHCP_MAGIC_OFFSET + 2] = byte(DHCP_COOKIE_2)
+        buf[DHCP_MAGIC_OFFSET + 3] = byte(DHCP_COOKIE_3)
+
+Message-Type (53) — always the first option per convention.
+
+        var off = DHCP_OPTIONS_OFFSET
+        buf[off] = byte(DHCP_OPT_MSG_TYPE)
+        buf[off + 1] = byte(1)
+        buf[off + 2] = byte(msg_type)
+        off += 3
+
+Parameter-Request-List (55) — five options we want the server
+to include in its reply: subnet mask, router, lease time, T1, T2.
+
+        buf[off] = byte(DHCP_OPT_PARAM_REQ_LIST)
+        buf[off + 1] = byte(5)
+        buf[off + 2] = byte(DHCP_OPT_SUBNET_MASK)
+        buf[off + 3] = byte(DHCP_OPT_ROUTER)
+        buf[off + 4] = byte(DHCP_OPT_LEASE_TIME)
+        buf[off + 5] = byte(DHCP_OPT_T1)
+        buf[off + 6] = byte(DHCP_OPT_T2)
+        off += 7
+
+Hostname (12) = "slix". Cosmetic but helps router admin UIs
+label our box something useful.
+
+        buf[off] = byte(DHCP_OPT_HOSTNAME)
+        buf[off + 1] = byte(4)
+        buf[off + 2] = byte('s')
+        buf[off + 3] = byte('l')
+        buf[off + 4] = byte('i')
+        buf[off + 5] = byte('x')
+        off += 6
+
+REQUEST-only: echo back the IP the server OFFERed (50) and the
+server's own identifier (54). RFC 2131 §4.3.2 requires both so
+the server can tell this REQUEST apart from one aimed at a
+different server offering us a different IP.
+
+        if msg_type == DHCP_MSG_REQUEST
+            buf[off] = byte(DHCP_OPT_REQUESTED_IP)
+            buf[off + 1] = byte(4)
+            pkt_write_ipv4(buf, off + 2,
+                ipv4_octet(requested_ip, 0), ipv4_octet(requested_ip, 1),
+                ipv4_octet(requested_ip, 2), ipv4_octet(requested_ip, 3))
+            off += 6
+            buf[off] = byte(DHCP_OPT_SERVER_ID)
+            buf[off + 1] = byte(4)
+            pkt_write_ipv4(buf, off + 2,
+                ipv4_octet(server_id, 0), ipv4_octet(server_id, 1),
+                ipv4_octet(server_id, 2), ipv4_octet(server_id, 3))
+            off += 6
+
+End marker.
+
+        buf[off] = byte(DHCP_OPT_END)
+        off += 1
+        off
+
+
+### parse_dhcp_packet
+
+Walk the options TLV starting at offset 240. Unknown codes are
+skipped. Fields missing from the packet stay zero in `out`.
+Caller checks `out.valid` before trusting any field — packets
+that fail the BOOTREPLY / magic-cookie sanity checks land with
+`valid=0` and otherwise-untouched defaults.
+
+    parse_dhcp_packet(buf: *byte, length: int, out: *DhcpMessage)
+        out.valid = 0
+        out.msg_type = 0
+        out.xid = u32(0)
+        out.yiaddr = u32(0)
+        out.server_id = u32(0)
+        out.mask = u32(0)
+        out.gw = u32(0)
+        out.lease = 0
+        out.t1 = 0
+        out.t2 = 0
+        if length < DHCP_OPTIONS_OFFSET
+            return
+        if int(buf[0]) != DHCP_OP_BOOTREPLY
+            return
+        if int(buf[DHCP_MAGIC_OFFSET + 0]) != DHCP_COOKIE_0
+            return
+        if int(buf[DHCP_MAGIC_OFFSET + 1]) != DHCP_COOKIE_1
+            return
+        if int(buf[DHCP_MAGIC_OFFSET + 2]) != DHCP_COOKIE_2
+            return
+        if int(buf[DHCP_MAGIC_OFFSET + 3]) != DHCP_COOKIE_3
+            return
+        out.xid = read_u32_be(buf, 4)
+        out.yiaddr = read_u32_be(buf, 16)
+        var off = DHCP_OPTIONS_OFFSET
+        while off < length
+            val code = int(buf[off]) & 0xff
+            if code == DHCP_OPT_END
+                out.valid = 1
+                return
+            if code == DHCP_OPT_PAD
+                off += 1
+            else
+                if off + 1 >= length
+                    return
+                val olen = int(buf[off + 1]) & 0xff
+                if off + 2 + olen > length
+                    return
+                if code == DHCP_OPT_MSG_TYPE
+                    if olen == 1
+                        out.msg_type = int(buf[off + 2]) & 0xff
+                if code == DHCP_OPT_SUBNET_MASK
+                    if olen == 4
+                        out.mask = read_u32_be(buf, off + 2)
+                if code == DHCP_OPT_ROUTER
+                    if olen >= 4
+                        out.gw = read_u32_be(buf, off + 2)
+                if code == DHCP_OPT_LEASE_TIME
+                    if olen == 4
+                        out.lease = int(read_u32_be(buf, off + 2))
+                if code == DHCP_OPT_SERVER_ID
+                    if olen == 4
+                        out.server_id = read_u32_be(buf, off + 2)
+                if code == DHCP_OPT_T1
+                    if olen == 4
+                        out.t1 = int(read_u32_be(buf, off + 2))
+                if code == DHCP_OPT_T2
+                    if olen == 4
+                        out.t2 = int(read_u32_be(buf, off + 2))
+                off += 2 + olen
+        out.valid = 1
+
+
+### Output helpers
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+    print_ipv4(ip: u32)
+        print_udec(ipv4_octet(ip, 0))
+        puts(".")
+        print_udec(ipv4_octet(ip, 1))
+        puts(".")
+        print_udec(ipv4_octet(ip, 2))
+        puts(".")
+        print_udec(ipv4_octet(ip, 3))
+
+
+### dhclient_run
+
+Single-shot state-machine traversal INIT → BOUND. No retransmit,
+no renewal — Phase C will add both. Returns 0 on a completed
+bind, -1 on any failure.
+
+    dhclient_run() -> int
+        var our_mac: [6]byte
+        if nic_get_mac(&our_mac[0]) < 0
+            puts("dhclient: nic_get_mac failed\n")
+            return -1
+        val fd = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd < 0
+            puts("dhclient: socket failed\n")
+            return -1
+        if bind(fd, INADDR_ANY, DHCP_PORT_CLIENT) < 0
+            puts("dhclient: bind :68 failed\n")
+            close_socket(fd)
+            return -1
+        val xid = u32(uptime()) | u32(0x1000)
+        val bcast = ipv4(255, 255, 255, 255)
+
+SELECTING — send DISCOVER, then accept OFFERs with matching xid.
+
+        var pkt: [512]byte
+        var plen = build_dhcp_packet(&pkt[0], DHCP_MSG_DISCOVER, xid,
+            &our_mac[0], u32(0), u32(0))
+        if sendto(fd, &pkt[0], plen, bcast, DHCP_PORT_SERVER) < 0
+            puts("dhclient: DISCOVER sendto failed\n")
+            close_socket(fd)
+            return -1
+        puts("dhclient: DISCOVER sent\n")
+
+        var rbuf: [512]byte
+        var sip: u32 = u32(0)
+        var sport: int = 0
+        var offer: DhcpMessage
+        var got = 0
+        while got == 0
+            val n = recvfrom(fd, &rbuf[0], 512, &sip, &sport)
+            if n < 0
+                puts("dhclient: OFFER recvfrom failed\n")
+                close_socket(fd)
+                return -1
+            parse_dhcp_packet(&rbuf[0], n, &offer)
+            if offer.valid != 0
+                if offer.xid == xid
+                    if offer.msg_type == DHCP_MSG_OFFER
+                        got = 1
+        puts("dhclient: OFFER yiaddr=")
+        print_ipv4(offer.yiaddr)
+        puts(" server=")
+        print_ipv4(offer.server_id)
+        puts("\n")
+
+REQUESTING — echo server_id and requested_ip. Server either ACKs
+or NAKs; NAK means someone else grabbed the offered lease first.
+
+        plen = build_dhcp_packet(&pkt[0], DHCP_MSG_REQUEST, xid,
+            &our_mac[0], offer.yiaddr, offer.server_id)
+        if sendto(fd, &pkt[0], plen, bcast, DHCP_PORT_SERVER) < 0
+            puts("dhclient: REQUEST sendto failed\n")
+            close_socket(fd)
+            return -1
+        puts("dhclient: REQUEST sent\n")
+
+        var ack: DhcpMessage
+        got = 0
+        while got == 0
+            val n = recvfrom(fd, &rbuf[0], 512, &sip, &sport)
+            if n < 0
+                puts("dhclient: ACK recvfrom failed\n")
+                close_socket(fd)
+                return -1
+            parse_dhcp_packet(&rbuf[0], n, &ack)
+            if ack.valid != 0
+                if ack.xid == xid
+                    if ack.msg_type == DHCP_MSG_ACK
+                        got = 1
+                    if ack.msg_type == DHCP_MSG_NAK
+                        puts("dhclient: NAK received\n")
+                        close_socket(fd)
+                        return -1
+
+BOUND — install the learned lease. A server that forgot option
+1 (mask) is fixed up with a /24 default; a missing router (3)
+falls back to the server_id, which is usually the gateway on
+consumer routers.
+
+        var mask = ack.mask
+        if mask == u32(0)
+            mask = ipv4(255, 255, 255, 0)
+        var gw = ack.gw
+        if gw == u32(0)
+            gw = ack.server_id
+        if inet_set_ip_config(ack.yiaddr, mask, gw) < 0
+            puts("dhclient: inet_set_ip_config failed\n")
+            close_socket(fd)
+            return -1
+        puts("dhclient: bound ")
+        print_ipv4(ack.yiaddr)
+        puts(" mask=")
+        print_ipv4(mask)
+        puts(" gw=")
+        print_ipv4(gw)
+        puts(" lease=")
+        print_udec(ack.lease)
+        puts("\n")
+        close_socket(fd)
+        0
+
+
+### dhclient_selftest
+
+Drive the builder + parser against canned packets. No live
+network involved — this exists so the harness can catch
+byte-layout regressions without depending on a DHCP server.
+
+Return codes track what's being checked so a failure points
+straight at the broken assertion.
+
+    dhclient_selftest() -> int
+        var mac: [6]byte
+        mac[0] = byte(0x52)
+        mac[1] = byte(0x54)
+        mac[2] = byte(0x00)
+        mac[3] = byte(0x12)
+        mac[4] = byte(0x34)
+        mac[5] = byte(0x56)
+
+Build a DISCOVER and spot-check the literal byte positions.
+
+        var pkt: [512]byte
+        val xid = u32(0x12345678)
+        val plen = build_dhcp_packet(&pkt[0], DHCP_MSG_DISCOVER, xid,
+            &mac[0], u32(0), u32(0))
+        if plen < DHCP_OPTIONS_OFFSET + 3
+            return 1
+        if int(pkt[0]) != DHCP_OP_BOOTREQUEST
+            return 2
+        if int(pkt[1]) != DHCP_HTYPE_ETHERNET
+            return 3
+        if int(pkt[2]) != DHCP_HLEN_ETHERNET
+            return 4
+        if int(pkt[4]) != 0x12
+            return 5
+        if int(pkt[7]) != 0x78
+            return 6
+        if int(pkt[28]) != 0x52
+            return 7
+        if int(pkt[DHCP_MAGIC_OFFSET]) != DHCP_COOKIE_0
+            return 8
+        if int(pkt[DHCP_OPTIONS_OFFSET]) != DHCP_OPT_MSG_TYPE
+            return 9
+        if int(pkt[DHCP_OPTIONS_OFFSET + 2]) != DHCP_MSG_DISCOVER
+            return 10
+
+Compose a canned OFFER reply with every option we parse. Lease
+= 3600 s, T1 = 1800 s, T2 = 3150 s (encoded BE 4-byte).
+
+        var rbuf: [512]byte
+        var i = 0
+        while i < 512
+            rbuf[i] = byte(0)
+            i += 1
+        rbuf[0] = byte(DHCP_OP_BOOTREPLY)
+        rbuf[1] = byte(DHCP_HTYPE_ETHERNET)
+        rbuf[2] = byte(DHCP_HLEN_ETHERNET)
+        rbuf[4] = byte(0x12)
+        rbuf[5] = byte(0x34)
+        rbuf[6] = byte(0x56)
+        rbuf[7] = byte(0x78)
+        rbuf[16] = byte(10)
+        rbuf[17] = byte(0)
+        rbuf[18] = byte(2)
+        rbuf[19] = byte(15)
+        rbuf[DHCP_MAGIC_OFFSET + 0] = byte(DHCP_COOKIE_0)
+        rbuf[DHCP_MAGIC_OFFSET + 1] = byte(DHCP_COOKIE_1)
+        rbuf[DHCP_MAGIC_OFFSET + 2] = byte(DHCP_COOKIE_2)
+        rbuf[DHCP_MAGIC_OFFSET + 3] = byte(DHCP_COOKIE_3)
+        var o = DHCP_OPTIONS_OFFSET
+        rbuf[o] = byte(DHCP_OPT_MSG_TYPE)
+        rbuf[o + 1] = byte(1)
+        rbuf[o + 2] = byte(DHCP_MSG_OFFER)
+        o += 3
+        rbuf[o] = byte(DHCP_OPT_SUBNET_MASK)
+        rbuf[o + 1] = byte(4)
+        rbuf[o + 2] = byte(255)
+        rbuf[o + 3] = byte(255)
+        rbuf[o + 4] = byte(255)
+        rbuf[o + 5] = byte(0)
+        o += 6
+        rbuf[o] = byte(DHCP_OPT_ROUTER)
+        rbuf[o + 1] = byte(4)
+        rbuf[o + 2] = byte(10)
+        rbuf[o + 3] = byte(0)
+        rbuf[o + 4] = byte(2)
+        rbuf[o + 5] = byte(2)
+        o += 6
+        rbuf[o] = byte(DHCP_OPT_LEASE_TIME)
+        rbuf[o + 1] = byte(4)
+        rbuf[o + 2] = byte(0)
+        rbuf[o + 3] = byte(0)
+        rbuf[o + 4] = byte(0x0e)
+        rbuf[o + 5] = byte(0x10)
+        o += 6
+        rbuf[o] = byte(DHCP_OPT_SERVER_ID)
+        rbuf[o + 1] = byte(4)
+        rbuf[o + 2] = byte(10)
+        rbuf[o + 3] = byte(0)
+        rbuf[o + 4] = byte(2)
+        rbuf[o + 5] = byte(2)
+        o += 6
+        rbuf[o] = byte(DHCP_OPT_T1)
+        rbuf[o + 1] = byte(4)
+        rbuf[o + 2] = byte(0)
+        rbuf[o + 3] = byte(0)
+        rbuf[o + 4] = byte(0x07)
+        rbuf[o + 5] = byte(0x08)
+        o += 6
+        rbuf[o] = byte(DHCP_OPT_T2)
+        rbuf[o + 1] = byte(4)
+        rbuf[o + 2] = byte(0)
+        rbuf[o + 3] = byte(0)
+        rbuf[o + 4] = byte(0x0c)
+        rbuf[o + 5] = byte(0x4e)
+        o += 6
+        rbuf[o] = byte(DHCP_OPT_END)
+        o += 1
+
+        var msg: DhcpMessage
+        parse_dhcp_packet(&rbuf[0], o, &msg)
+        if msg.valid == 0
+            return 11
+        if msg.xid != u32(0x12345678)
+            return 12
+        if msg.msg_type != DHCP_MSG_OFFER
+            return 13
+        if msg.yiaddr != ipv4(10, 0, 2, 15)
+            return 14
+        if msg.mask != ipv4(255, 255, 255, 0)
+            return 15
+        if msg.gw != ipv4(10, 0, 2, 2)
+            return 16
+        if msg.server_id != ipv4(10, 0, 2, 2)
+            return 17
+        if msg.lease != 3600
+            return 18
+        if msg.t1 != 1800
+            return 19
+        if msg.t2 != 3150
+            return 20
+
+Same packet repurposed as ACK — just flip the msg-type byte.
+
+        rbuf[DHCP_OPTIONS_OFFSET + 2] = byte(DHCP_MSG_ACK)
+        var ack: DhcpMessage
+        parse_dhcp_packet(&rbuf[0], o, &ack)
+        if ack.valid == 0
+            return 21
+        if ack.msg_type != DHCP_MSG_ACK
+            return 22
+
+Malformed: smash the magic cookie and confirm valid=0.
+
+        rbuf[DHCP_MAGIC_OFFSET] = byte(0xff)
+        var bad: DhcpMessage
+        parse_dhcp_packet(&rbuf[0], o, &bad)
+        if bad.valid != 0
+            return 23
+        0
+
+
+### main
+
+`dhclient --test` runs the canned-packet selftest and prints
+`dhclient: selftest ok` on pass. With no argument, runs the live
+state machine against whatever DHCP server is on the wire.
+
+    main(argv: []string)
+        if len(argv) > 1
+            val a = argv[1]
+            if a == "--test"
+                val rc = dhclient_selftest()
+                if rc == 0
+                    puts("dhclient: selftest ok\n")
+                    exit()
+                    return
+                puts("dhclient: selftest failed ")
+                print_udec(rc)
+                puts("\n")
+                exit_with(rc)
+                return
+        val rc = dhclient_run()
+        if rc < 0
+            exit_with(1)
+            return
+        exit()

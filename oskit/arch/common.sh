@@ -103,6 +103,7 @@ build_program() {
         oskit/net/nic_client.lsysl
         std/alloc/alloc.lsysl
         std/net/net.lsysl
+        std/net/packet.lsysl
     )
     case "$NAME" in
         login|su)
