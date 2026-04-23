@@ -715,7 +715,10 @@ Dropping on no-match matches standard UDP semantics.
         val payload_len = udp_len - 8
         val data: *byte = frame + udp_off + 8
         val src_ip = ipv4(int(frame[14 + 12]) & 0xff, int(frame[14 + 13]) & 0xff, int(frame[14 + 14]) & 0xff, int(frame[14 + 15]) & 0xff)
-        val dst_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        // Read dst from the wire rather than hardcoding our own IP:
+        // broadcast UDP (DHCP OFFER/ACK) arrives with dst=255.255.255.255
+        // and the checksum must pseudo-header it accordingly.
+        val dst_ip = ipv4(int(frame[14 + 16]) & 0xff, int(frame[14 + 17]) & 0xff, int(frame[14 + 18]) & 0xff, int(frame[14 + 19]) & 0xff)
         if inet_udp_verify(src_ip, dst_ip, frame, udp_off, udp_len) == 0
             return
         val target = inet_find_bound_port(dst_port)
