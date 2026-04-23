@@ -631,6 +631,19 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             env.remove(key)
           if running then running = toLong(evalAny(cond, env)) != 0
 
+      case TLoopStmt(body, myLabel) =>
+        var running = true
+        while running do
+          val savedKeys = env.keySet.toSet
+          try
+            execBlock(body, env)
+          catch
+            case e: BreakException if claimsLoop(e.label, myLabel) => running = false
+            case e: ContinueException if claimsLoop(e.label, myLabel) =>
+          for key <- env.keySet.toSet -- savedKeys do
+            refDecr(env(key).value)
+            env.remove(key)
+
       case TBreakStmt(label) => throw BreakException(label)
       case TContinueStmt(label) => throw ContinueException(label)
 

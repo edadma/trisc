@@ -1159,6 +1159,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         checkStmt(init); checkExpr(c); checkStmt(u); b.foreach(checkStmt)
       case TDoWhileStmt(c, b, _) =>
         checkExpr(c); b.foreach(checkStmt)
+      case TLoopStmt(b, _) =>
+        b.foreach(checkStmt)
       case TBreakStmt(_) => ()
       case TContinueStmt(_) => ()
       case TDeferStmt(inner) =>
@@ -2378,6 +2380,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case TWhileStmt(c, body, lbl)          => TWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
     case TForStmt(init, c, upd, body, lbl) => TForStmt(init, c, upd, rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
     case TDoWhileStmt(c, body, lbl)        => TDoWhileStmt(c, rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
+    case TLoopStmt(body, lbl)              => TLoopStmt(rewriteReturnsForEnsure(body, returnType, ensureChecks), lbl)
     case TDeferStmt(inner)            => TDeferStmt(rewriteStmtForEnsure(inner, returnType, ensureChecks))
     case TMultiStmt(xs)               => TMultiStmt(xs.map(x => rewriteStmtForEnsure(x, returnType, ensureChecks)))
     case TExprStmt(e)                 => TExprStmt(rewriteExprForEnsure(e, returnType, ensureChecks))
@@ -2650,6 +2653,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
         val loopStmt = TDoWhileStmt(tCond, tBody, label)
+        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
+
+      case LoopStmtAST(body, label) =>
+        checkLoopLabelUnique(label)
+        val (preDecls, rewrittenBody) = extractVariants(body)
+        val tPreDecls = preDecls.map(analyzeStmt)
+        loopDepth += 1
+        loopLabelStack += label
+        pushScope()
+        val tBody = analyzeBlock(rewrittenBody)
+        popScope()
+        loopLabelStack.remove(loopLabelStack.length - 1)
+        loopDepth -= 1
+        val loopStmt = TLoopStmt(tBody, label)
         if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
 
       case VariantStmtAST(_) =>
@@ -2984,6 +3001,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case TDoWhileStmt(c, body, _) =>
             scanStmtSeq(body, locals)
             scanCaptures(c, locals)
+            locals
+          case TLoopStmt(body, _) =>
+            scanStmtSeq(body, locals)
             locals
           case TDeferStmt(inner) =>
             scanStmtInSeq(inner, locals)

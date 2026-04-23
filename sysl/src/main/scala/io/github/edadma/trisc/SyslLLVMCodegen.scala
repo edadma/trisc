@@ -988,6 +988,29 @@ class SyslLLVMCodegen(target: String = "host"):
         loopNameStack.pop()
         loopScopeSnapshots.pop()
 
+      case TLoopStmt(body, loopLabel) =>
+        val bodyLabel = newLabel("loop_body")
+        val endLabel = newLabel("loop_end")
+        val preLoopLocals = locals.keySet.toSet
+        breakLabels.push(endLabel)
+        continueLabels.push(bodyLabel)
+        loopNameStack.push(loopLabel)
+        loopScopeSnapshots.push(preLoopLocals)
+        emit(s"  br label %$bodyLabel")
+        emitLabel(bodyLabel)
+        val savedHR = hasReturned
+        hasReturned = false
+        for s <- body do if !hasReturned then genStmt(s)
+        if !hasReturned then
+          emitScopeCleanup(preLoopLocals)
+          emit(s"  br label %$bodyLabel")
+        emitLabel(endLabel)
+        hasReturned = savedHR
+        breakLabels.pop()
+        continueLabels.pop()
+        loopNameStack.pop()
+        loopScopeSnapshots.pop()
+
       case TBreakStmt(lbl) =>
         val idx = resolveLoopIdx(lbl)
         emitScopeCleanup(loopScopeSnapshots(idx))
