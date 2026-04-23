@@ -1,0 +1,95 @@
+test_tcp_fcw — accept a child that peer already FIN'd
+=======================================================
+
+Regression test for the CLOSE_WAIT pre-accept race. The host
+connects, sends a small payload, then half-closes immediately.
+By the time this binary's main() reaches accept(), the child
+has already transitioned ESTABLISHED → CLOSE_WAIT because the
+peer FIN arrived while the child sat on the listen's accept
+queue.
+
+Before the fix, `inet_tcp_do_accept` only returned children in
+ESTABLISHED, so CLOSE_WAIT children were silently dequeued and
+dropped — accept() then parked forever because the queue was
+empty, and the host's data went unread.
+
+Sequence the test relies on:
+    guest: listen(7890); sleep(100)
+    host:  connect + send("ping\n") + shutdown(SHUT_WR)   // FIN
+    inet:  passive_syn → ESTABLISHED → enqueue → CLOSE_WAIT
+    guest: accept() must return the child; read() must see "ping\n"
+
+Prints:
+- `listening h=N`
+- `accepted ch=N from A.B.C.D:P`
+- `got K`  (K should be 5 for "ping\n")
+- `ok`
+
+    module oskit.bin.test_tcp_fcw
+
+    import oskit.ulib.{puts, exit, exit_with, sleep, connect, accept, read, close}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+    main(argv: []string)
+        val lh = connect("tcp-listen:7890")
+        if lh < 0
+            puts("test_tcp_fcw: listen failed\n")
+            exit_with(1)
+            return
+        puts("test_tcp_fcw: listening h=")
+        print_udec(lh)
+        puts("\n")
+
+        // Give the host time to complete the 3-way handshake AND
+        // send its data + FIN before we call accept. The child will
+        // have transitioned ESTABLISHED → CLOSE_WAIT in the queue by
+        // the time we dequeue it.
+        sleep(100)
+
+        var peer_ip: [4]byte
+        var peer_port: [2]byte
+        val ch = accept(lh, &peer_ip[0], &peer_port[0])
+        if ch < 0
+            puts("test_tcp_fcw: accept failed\n")
+            close(lh)
+            exit_with(2)
+            return
+        puts("test_tcp_fcw: accepted ch=")
+        print_udec(ch)
+        puts(" from ")
+        print_udec(int(peer_ip[0]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[1]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[2]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[3]) & 0xff)
+        puts(":")
+        val pp = ((int(peer_port[0]) & 0xff) << 8) | (int(peer_port[1]) & 0xff)
+        print_udec(pp)
+        puts("\n")
+
+        var rbuf: [32]byte
+        val got = read(ch, &rbuf[0], 32)
+        if got < 0
+            puts("test_tcp_fcw: read failed\n")
+            close(ch)
+            close(lh)
+            exit_with(3)
+            return
+        puts("test_tcp_fcw: got ")
+        print_udec(got)
+        puts("\n")
+
+        close(ch)
+        close(lh)
+        puts("test_tcp_fcw: ok\n")
+        exit()

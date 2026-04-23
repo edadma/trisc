@@ -542,6 +542,33 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       srvThread.join(2000)
   }
 
+  "aarch64 tcp: accept child that peer already FIN'd (CLOSE_WAIT pre-accept)" in {
+    // test_tcp_fcw listens, sleeps 100 ticks, then accepts. While the
+    // guest is sleeping the host connects, writes "ping\n", and
+    // shutdown(SHUT_WR)s — FIN arrives while the child sits on the
+    // accept queue, flipping it ESTABLISHED → CLOSE_WAIT. Pre-fix,
+    // inet_tcp_do_accept skipped CLOSE_WAIT children and parked the
+    // caller forever; post-fix, accept returns the child and read()
+    // drains the 5-byte payload.
+    qemu.send("test_tcp_fcw\n")
+    qemu.waitFor("test_tcp_fcw: listening h=")
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(10000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    try
+      val out = sock.getOutputStream
+      out.write("ping\n".getBytes("UTF-8"))
+      out.flush()
+      sock.shutdownOutput()  // FIN now, don't wait for guest to accept
+    finally sock.close()
+
+    val output = qemu.waitFor("test_tcp_fcw: ok")
+    output should include("test_tcp_fcw: accepted ch=")
+    output should include("test_tcp_fcw: got 5")
+    output should include("test_tcp_fcw: ok")
+  }
+
   "aarch64 tcp: VFS listen bridge (connect/accept/read/write/close)" in {
     // test_tcp_lsv listens via connect("tcp-listen:7890") + accept()
     // + read/write/close — no tcp_listen/tcp_accept wrappers. Proves
