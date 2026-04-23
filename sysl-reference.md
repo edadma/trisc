@@ -2013,6 +2013,31 @@ Exit code is 0 iff all tests pass. Failing tests print the source file and line 
 
 **Test output capture:** Any output from `print`, `println`, `puts`, or `puti` inside a test function is captured and displayed below the failure message if the test fails. This is useful for debugging intermediate values.
 
+### `#address(N)` — map a var to a fixed physical address
+
+Binds a module-level `var` declaration to a fixed physical address. Reads and writes become direct loads and stores at that address. No storage is emitted for the variable — it is just a typed handle on hardware. Intended for MMIO device registers:
+
+```sysl
+#address(0x1000_0000)
+var uart_data: u32
+
+#address(0x1000_0004)
+var uart_status: u32
+
+main() -> int
+    uart_data = 0x41       // write 'A' to the transmit register
+    while uart_status & 1 == 0 do ()  // poll the ready bit
+    return 0
+```
+
+- The var must have an explicit type (no inferred type).
+- `#address` cannot be combined with `const`.
+- The attribute argument must be a single integer literal (decimal or hex).
+- Compound assignment (`reg += v`, `reg |= mask`, …) lowers to a read-modify-write: `*(N as *T) = *(N as *T) op v`.
+- In the interpreter, writes persist in a virtual MMIO map for the duration of the run; reads from untouched addresses return 0. On real hardware (LLVM / TRISC output), the load/store goes straight to the physical address.
+
+Ada-equivalent: `for X use at 16#1000_0000#` in a representation clause.
+
 ### `#pure` — mark side-effect-free functions
 
 A function marked `#pure` is checked by the compiler to have no observable side effects. Pure functions are a discipline enforcement tool: any violation is a compile-time error, not a warning.

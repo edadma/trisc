@@ -49,6 +49,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   private val externalSymbols = new mutable.LinkedHashSet[String]
   private var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   private val compileTimeConstants = new mutable.LinkedHashMap[String, Long] // val name → folded value (for constant propagation)
+
+  /** Module-level vars tagged with `#address(N)` map to a fixed physical address — used
+   *  for MMIO device registers. Reads lower to `*(N as *T)`, writes to `*(N as *T) = v`.
+   *  No storage is emitted (the var is just a handle on hardware). Both the local and
+   *  mangled keys are recorded so cross-module references resolve. */
+  private val fixedAddressVars = new mutable.LinkedHashMap[String, (Long, SyslType)]
   private var loopDepth: Int = 0
   // Stack of enclosing loop labels (None for unlabeled loops). Used to validate
   // `break label` / `continue label` refers to an enclosing labeled loop.
@@ -918,42 +924,66 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         if funInfo.isPure then validatePureFn(name, tBody, funInfo.params.map(_._1))
         TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef)
 
-      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, _, isVolatile, isConst) =>
+      case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
-        val tInit0 = analyzeExpr(init)
-        val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
-        val tInit1 = coerceLiteral(tInit0, declType)
-        // `const` requires a compile-time-evaluable initializer.
-        if isConst then
-          if !declType.isIntegral then
-            throw AnalysisError(s"const '$name' must have an integer type (found $declType); float/string/aggregate const is not yet supported")
-          tryConstEval(tInit1) match
-            case Some(n) =>
-              val masked = maskToType(n, declType)
-              val mangledName = if shouldMangle(name) then mangleName(name) else name
-              compileTimeConstants(name) = masked
-              compileTimeConstants(mangledName) = masked
-            case None =>
-              throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
-        // Constant folding: immutable vals with constant initializers become compile-time constants
-        val tInit = if !isMutable then
-          tryConstEval(tInit1) match
-            case Some(n) =>
-              val masked = maskToType(n, declType)
-              val mangledName = if shouldMangle(name) then mangleName(name) else name
-              compileTimeConstants(name) = masked
-              compileTimeConstants(mangledName) = masked
-              TIntLit(masked, declType)
-            case None => tInit1
-        else tInit1
-        val mangledVarName = if shouldMangle(name) then mangleName(name) else name
-        globalScope(name) = SymInfo(mangledVarName, declType, isMutable, isConst = isConst)
-        scopeStack = null
-        // `const` declarations do not generate a storage slot — callers inline the folded value
-        // via compileTimeConstants lookup during VarRef analysis.
-        if isConst then TConstDecl(mangledVarName, declType)
-        else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile)
+        // #address(N): MMIO var. No storage; reads/writes become direct loads/stores
+        // through a literal pointer. Must have an explicit type.
+        attrs.find(_.name == "address") match
+          case Some(addrAttr) =>
+            if isConst then throw AnalysisError(s"'#address' cannot be combined with 'const' on '$name'")
+            val addr = addrAttr.args match
+              case List(AttrPositional(AttrLitInt(n))) => n
+              case _ => throw AnalysisError(s"#address on '$name' expects a single integer address, e.g. #address(0xFF000000)")
+            val declTypeAST = typOpt.getOrElse(
+              throw AnalysisError(s"#address var '$name' must have an explicit type"))
+            val resolvedType = resolveType(declTypeAST)
+            val mangledName = if shouldMangle(name) then mangleName(name) else name
+            fixedAddressVars(name) = (addr, resolvedType)
+            fixedAddressVars(mangledName) = (addr, resolvedType)
+            globalScope(name) = SymInfo(mangledName, resolvedType, isMutable)
+            scopeStack = null
+            TConstDecl(mangledName, resolvedType) // no storage emitted
+          case None =>
+            analyzeRegularVarDecl(name, typOpt, init, isPrivate, isMutable, isVolatile, isConst)
+
+  /** Factored path for the non-#address module-level var decl. Same logic as before — pulled
+   *  into its own method so the #address branch can early-return cleanly. */
+  private def analyzeRegularVarDecl(name: String, typOpt: Option[TypeAST], init: ExpressionAST,
+      isPrivate: Boolean, isMutable: Boolean, isVolatile: Boolean, isConst: Boolean): TDecl =
+    val tInit0 = analyzeExpr(init)
+    val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
+    val tInit1 = coerceLiteral(tInit0, declType)
+    // `const` requires a compile-time-evaluable initializer.
+    if isConst then
+      if !declType.isIntegral then
+        throw AnalysisError(s"const '$name' must have an integer type (found $declType); float/string/aggregate const is not yet supported")
+      tryConstEval(tInit1) match
+        case Some(n) =>
+          val masked = maskToType(n, declType)
+          val mangledName = if shouldMangle(name) then mangleName(name) else name
+          compileTimeConstants(name) = masked
+          compileTimeConstants(mangledName) = masked
+        case None =>
+          throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
+    // Constant folding: immutable vals with constant initializers become compile-time constants
+    val tInit = if !isMutable then
+      tryConstEval(tInit1) match
+        case Some(n) =>
+          val masked = maskToType(n, declType)
+          val mangledName = if shouldMangle(name) then mangleName(name) else name
+          compileTimeConstants(name) = masked
+          compileTimeConstants(mangledName) = masked
+          TIntLit(masked, declType)
+        case None => tInit1
+    else tInit1
+    val mangledVarName = if shouldMangle(name) then mangleName(name) else name
+    globalScope(name) = SymInfo(mangledVarName, declType, isMutable, isConst = isConst)
+    scopeStack = null
+    // `const` declarations do not generate a storage slot — callers inline the folded value
+    // via compileTimeConstants lookup during VarRef analysis.
+    if isConst then TConstDecl(mangledVarName, declType)
+    else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile)
 
   private def warnDeprecated(name: String): Unit =
     if deprecations.contains(name) && !warnedDeprecations.contains(name) then
@@ -2405,6 +2435,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         else
           throw AnalysisError(s"cannot mix declared and undeclared names in destructuring")
 
+      case AssignStmtAST(target, value) if fixedAddressVars.contains(target) =>
+        // #address MMIO write: `reg = v` lowers to `*(addr as *T) = v`.
+        val (addr, typ) = fixedAddressVars(target)
+        val tValue0 = analyzeExpr(value)
+        val tValue = applyTargetType(coerceLiteral(tValue0, typ), typ)
+        TDerefAssignStmt(TCast(TIntLit(addr, I64), PtrType(typ)), tValue)
+
       case AssignStmtAST(target, value) =>
         val tValue0 = analyzeExpr(value)
         val sym = lookupOrCreate(target, tValue0.typ)
@@ -2416,6 +2453,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             buildStructInvariantChecks(VarRefAST(target), st.name)
           case _ => Nil
         if checks.isEmpty then baseStmt else TMultiStmt(baseStmt :: checks)
+
+      case CompoundAssignStmtAST(target, op, value) if fixedAddressVars.contains(target) =>
+        // #address MMIO read-modify-write: `reg += v` lowers to `*(ptr) = *(ptr) op v`.
+        val (addr, typ) = fixedAddressVars(target)
+        val tValue0 = analyzeExpr(value)
+        val tValue = coerceLiteral(tValue0, typ)
+        val ptrExpr = TCast(TIntLit(addr, I64), PtrType(typ))
+        val loadExpr = TDeref(ptrExpr, typ)
+        TDerefAssignStmt(ptrExpr, TBinary(loadExpr, op, tValue, typ))
 
       case CompoundAssignStmtAST(target, op, value) =>
         val sym = lookup(target)
@@ -3007,6 +3053,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case VarRefAST(name) =>
         if name == "_" then
           throw AnalysisError("cannot read from '_' — it is a write-only discard binding")
+        // #address MMIO var: read lowers to *(addr as *T). Keep the cast explicit so
+        // each codegen can emit a volatile load at the literal address.
+        if fixedAddressVars.contains(name) then
+          val (addr, typ) = fixedAddressVars(name)
+          TDeref(TCast(TIntLit(addr, I64), PtrType(typ)), typ)
+        else
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
           val f = functions(name)

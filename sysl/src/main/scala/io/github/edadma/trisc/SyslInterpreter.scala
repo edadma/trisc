@@ -189,6 +189,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private val heapCells = Array.fill(1024 * 1024)(new Cell(IntVal(0)))
   private var heapBreak = 0
 
+  // Virtual MMIO memory for `#address(N)` vars. Real hardware addresses aren't accessible
+  // from the JVM interpreter, so we simulate with a map. Reads of an untouched address
+  // yield 0 (hardware-like default); writes persist for the duration of the run.
+  private val mmioMemory = new mutable.LongMap[Long]
+
   private val builtins: mutable.Map[String, List[Value] => Value] = mutable.Map(
     "putchar" -> (args => { output(toLong(args.head).toChar.toString); args.head }),
     "print" -> (args => { args.foreach { case FloatVal(d) => output(formatDouble(d)); case a => output(toLong(a).toString) }; IntVal(0) }),
@@ -539,6 +544,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case ">>" => l >> r.toInt
             cell.value = IntVal(truncateNarrow(raw, value.typ))
 
+      case TDerefAssignStmt(TCast(TIntLit(addr, _), SyslType.PtrType(_)), value) =>
+        // #address MMIO write: store into the virtual mmio map keyed by the literal address.
+        mmioMemory(addr) = toLong(evalAny(value, env))
+
       case TDerefAssignStmt(pointer, value) =>
         val cell = derefCell(evalAny(pointer, env))
         cell.value = evalAny(value, env)
@@ -745,6 +754,11 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             val old = toLong(cell.value)
             cell.value = IntVal(truncateNarrow(old - 1, typ))
             IntVal(old)
+
+      case TDeref(TCast(TIntLit(addr, _), SyslType.PtrType(_)), typ) =>
+        // #address MMIO read: pull from the virtual mmio map (0 if never written).
+        val raw = mmioMemory.getOrElse(addr, 0L)
+        IntVal(truncateNarrow(raw, typ))
 
       case TDeref(inner, _) =>
         evalAny(inner, env) match
