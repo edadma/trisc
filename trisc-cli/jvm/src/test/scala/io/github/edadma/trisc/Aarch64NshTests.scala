@@ -689,14 +689,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     // Exercises the full wire path end-to-end: DISCOVER out via the
     // broadcast UDP TX special-case in inet_send_udp, slirp's
     // built-in DHCP server replies OFFER (also broadcast), dhclient
-    // REQUESTs, slirp ACKs, dhclient calls inet_set_ip_config. The
-    // expected bound address under slirp's default lease table is
-    // 10.0.2.15 mask 255.255.255.0 gw 10.0.2.2.
+    // REQUESTs, slirp ACKs, dhclient runs the RFC 5227 probe cycle
+    // (clean on slirp), announces, then calls inet_set_ip_config.
+    // The expected bound address under slirp's default lease table
+    // is 10.0.2.15 mask 255.255.255.0 gw 10.0.2.2.
     qemu.send("dhclient\n")
     val output = qemu.waitFor("lease=")
     output should include("dhclient: bound 10.0.2.15")
     output should include("mask=255.255.255.0")
     output should include("gw=10.0.2.2")
+    // Probe line proves the RFC 5227 path executed. Slirp is silent
+    // on ARP probes so the window completes cleanly.
+    output should include("dhclient: probing 10.0.2.15")
   }
 
   "aarch64 crash recovery: kill tfs and restart" in {

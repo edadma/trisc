@@ -10,9 +10,16 @@ nic), so there's no interface name to iterate or pass. A
 future multi-NIC build would turn this into `ifconfig <ifname>`
 with a per-interface table.
 
-Output shape is three lines: `ip:`, `mask:`, `gateway:`, each
-followed by the dotted-quad. Pairs naturally with `dhclient` —
-dhclient sets the lease, ifconfig shows what's installed.
+Sample output:
+
+```
+ip:      10.0.2.15
+mask:    255.255.255.0
+gateway: 10.0.2.2
+```
+
+Pairs naturally with `dhclient` — dhclient sets the lease,
+ifconfig shows what's installed.
 
     module oskit.bin.ifconfig
 

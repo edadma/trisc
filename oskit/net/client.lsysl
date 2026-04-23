@@ -42,7 +42,13 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_SET_IP_CONFIG = 16
     val INET_CMD_GET_IP_CONFIG = 17
     val INET_CMD_RECVFROM_TIMEOUT = 18
+    val INET_CMD_ARP_PROBE    = 19
     val INET_CMD_TCP_OOO_SELFTEST = 99
+
+    val ARP_PROBE_OP_START    = 0
+    val ARP_PROBE_OP_SEND     = 1
+    val ARP_PROBE_OP_CHECK    = 2
+    val ARP_PROBE_OP_ANNOUNCE = 3
 
     val INET_MAX_DATA     = 512
     val INET_MAX_TCP_SEG  = 480
@@ -474,6 +480,48 @@ success, -1 on error.
         if i64(gw) != 0
             *gw = net_read_ipv4(reply, 9)
         0
+
+
+### ARP probe (RFC 5227 §2.1.1)
+
+Three helpers drive the server-side probe state machine:
+
+- `arp_probe_start(ip)` arms the probe with a target address.
+- `arp_probe_send(ip)` transmits one ARP probe (sender IP =
+  0.0.0.0, target IP = `ip`). The caller invokes this up to
+  PROBE_NUM times with RFC 5227 timing.
+- `arp_probe_check()` returns 1 if any defender was observed,
+  0 if the window was clean, and clears the probe state. -1
+  on transport error. Callers treat `1` as "conflict, DECLINE
+  this lease."
+
+Wire: cmd(1) + op(1) + target(4) → status(1) + seen(1).
+
+    arp_probe_send_op(op: int, ip: u32) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [6]byte
+        msg[0] = byte(INET_CMD_ARP_PROBE)
+        msg[1] = byte(op & 0xff)
+        net_write_ipv4(msg, 2, ip)
+        var reply: [2]byte
+        ipc_send(port, msg, 6, reply, 2)
+        if reply[0] != 0
+            return -1
+        int(reply[1]) & 0xff
+
+    arp_probe_start(ip: u32) -> int
+        arp_probe_send_op(ARP_PROBE_OP_START, ip)
+
+    arp_probe_send(ip: u32) -> int
+        arp_probe_send_op(ARP_PROBE_OP_SEND, ip)
+
+    arp_probe_check() -> int
+        arp_probe_send_op(ARP_PROBE_OP_CHECK, u32(0))
+
+    arp_probe_announce(ip: u32) -> int
+        arp_probe_send_op(ARP_PROBE_OP_ANNOUNCE, ip)
 
 
 ### tcp_ooo_selftest (test-only)

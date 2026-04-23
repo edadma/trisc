@@ -370,6 +370,75 @@ on success, -1 on failure.
         inet_nic_send_packet(frame, 42)
 
 
+ARP probe per RFC 5227 §2.1.1. Wire-identical to an ARP request
+for `ta.tb.tc.td` except the sender IP field (SPA) is
+`0.0.0.0`. A zero SPA is how the target's defender knows this
+is a probe rather than a gratuitous request from an
+already-configured host — so it can answer with a REPLY whose
+sender IP equals the probed address, which our RX path matches
+against `arp_probe_target` to set `arp_probe_seen`.
+
+Returns 0 on success, -1 if our MAC isn't known yet.
+
+    inet_send_arp_probe(ta: int, tb: int, tc: int, td: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        var frame: [42]byte
+        var i = 0
+        while i < 6
+            frame[i] = 0xff
+            i += 1
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_ARP)
+        pkt_write_u16(frame, 14, 1)
+        pkt_write_u16(frame, 16, ETHERTYPE_IPV4)
+        frame[18] = 6
+        frame[19] = 4
+        pkt_write_u16(frame, 20, ARP_OP_REQUEST)
+        pkt_write_mac(frame, 22, inet_our_mac)
+        // SPA = 0.0.0.0 (the probe-distinguishing field)
+        frame[28] = 0
+        frame[29] = 0
+        frame[30] = 0
+        frame[31] = 0
+        i = 0
+        while i < 6
+            frame[32 + i] = 0
+            i += 1
+        pkt_write_ipv4(frame, 38, ta, tb, tc, td)
+        inet_nic_send_packet(frame, 42)
+
+
+Gratuitous ARP announcement per RFC 5227 §2.3. Identical to a
+probe but SPA = TPA = our newly-claimed address. Fires twice
+after a successful probe window to tell the segment that this
+host now owns the address.
+
+    inet_send_arp_announce(ta: int, tb: int, tc: int, td: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        var frame: [42]byte
+        var i = 0
+        while i < 6
+            frame[i] = 0xff
+            i += 1
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_ARP)
+        pkt_write_u16(frame, 14, 1)
+        pkt_write_u16(frame, 16, ETHERTYPE_IPV4)
+        frame[18] = 6
+        frame[19] = 4
+        pkt_write_u16(frame, 20, ARP_OP_REQUEST)
+        pkt_write_mac(frame, 22, inet_our_mac)
+        pkt_write_ipv4(frame, 28, ta, tb, tc, td)
+        i = 0
+        while i < 6
+            frame[32 + i] = 0
+            i += 1
+        pkt_write_ipv4(frame, 38, ta, tb, tc, td)
+        inet_nic_send_packet(frame, 42)
+
+
 ARP reply. `req` points at the start of the Ethernet frame that
 carried the request; senders from the request become targets in
 the reply.

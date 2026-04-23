@@ -53,7 +53,23 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_SET_IP_CONFIG = 16
     val INET_CMD_GET_IP_CONFIG = 17
     val INET_CMD_RECVFROM_TIMEOUT = 18
+    val INET_CMD_ARP_PROBE    = 19
     val INET_CMD_TCP_OOO_SELFTEST = 99
+
+
+Sub-ops for INET_CMD_ARP_PROBE. A single command code fans out
+into three operations so RFC 5227 conflict detection can be
+driven from userspace:
+
+- `START` arms the probe state with a target IP.
+- `SEND` transmits one ARP probe (sender IP = 0.0.0.0).
+- `CHECK` returns whether any defending ARP was observed and
+  clears the probe state.
+
+    val ARP_PROBE_OP_START    = 0
+    val ARP_PROBE_OP_SEND     = 1
+    val ARP_PROBE_OP_CHECK    = 2
+    val ARP_PROBE_OP_ANNOUNCE = 3
 
 
 Capacity limits.
@@ -93,6 +109,48 @@ reserved for auto-bind, which isn't implemented yet).
 
     var inet_sockets: [32]InetSocket
     var inet_port = -1
+
+
+RFC 5227 ARP probe state. `arp_probe_target` is the IPv4
+address currently being probed (0 = no probe active).
+`arp_probe_seen` is set by the ARP RX path when any ARP
+request OR reply arrives whose sender IP matches
+`arp_probe_target` and whose sender MAC is not our own (NIC
+loopback guard per §2.1.1). The dhclient-side probe loop
+clears both fields via the CHECK op when the probe window
+ends.
+
+    var arp_probe_target: u32 = u32(0)
+    var arp_probe_seen:   int = 0
+
+
+Returns 1 if `frame` is an ARP packet whose sender IP matches
+the probe target AND whose sender MAC is not our own. Returns
+0 otherwise (including when no probe is active, when the
+target doesn't match, or when the frame came from our own MAC
+via NIC loopback). Used by the ARP RX path to flag defenders.
+
+    inet_arp_probe_matches(frame: *byte) -> int
+        if arp_probe_target == u32(0)
+            return 0
+        val sender_ip = ipv4(
+            int(frame[14 + 14]) & 0xff,
+            int(frame[14 + 15]) & 0xff,
+            int(frame[14 + 16]) & 0xff,
+            int(frame[14 + 17]) & 0xff)
+        if sender_ip != arp_probe_target
+            return 0
+        // Sender MAC lives at frame+14+8..13 (ARP SHA field).
+        // Compare against our own MAC to filter out NIC loopback.
+        var i = 0
+        var same = 1
+        while i < 6
+            if frame[14 + 8 + i] != inet_our_mac[i]
+                same = 0
+            i += 1
+        if same != 0
+            return 0
+        1
 
 
 ### Byte-buffer helpers
@@ -532,6 +590,57 @@ possibly firing immediately.
         // expires, or close.
 
 
+### ARP probe handler
+
+Four-operation command driven by dhclient for RFC 5227
+conflict detection.
+
+```
+request: cmd(1) + op(1) + target_ip(4)   = 6 bytes
+reply:   status(1) + seen(1)             = 2 bytes
+```
+
+`seen` is meaningful only for `CHECK` and is 1 if any
+defender was observed since the preceding `START`.
+
+    inet_handle_arp_probe(sender: int, buf: *byte)
+        val op = int(buf[1]) & 0xff
+        val target_ip = ipv4(
+            int(buf[2]) & 0xff,
+            int(buf[3]) & 0xff,
+            int(buf[4]) & 0xff,
+            int(buf[5]) & 0xff)
+        var reply: [2]byte
+        reply[0] = 0
+        reply[1] = 0
+        if op == ARP_PROBE_OP_START
+            arp_probe_target = target_ip
+            arp_probe_seen = 0
+        else if op == ARP_PROBE_OP_SEND
+            val rc = inet_send_arp_probe(
+                ipv4_octet(target_ip, 0),
+                ipv4_octet(target_ip, 1),
+                ipv4_octet(target_ip, 2),
+                ipv4_octet(target_ip, 3))
+            if rc < 0
+                reply[0] = byte(-1)
+        else if op == ARP_PROBE_OP_CHECK
+            reply[1] = byte(arp_probe_seen & 0xff)
+            arp_probe_target = u32(0)
+            arp_probe_seen = 0
+        else if op == ARP_PROBE_OP_ANNOUNCE
+            val arc = inet_send_arp_announce(
+                ipv4_octet(target_ip, 0),
+                ipv4_octet(target_ip, 1),
+                ipv4_octet(target_ip, 2),
+                ipv4_octet(target_ip, 3))
+            if arc < 0
+                reply[0] = byte(-1)
+        else
+            reply[0] = byte(-1)
+        ipc_reply(sender, reply, 2)
+
+
 ### UDP recv-timeout scanner
 
 Called from the inet main loop on every wake. Scans every
@@ -836,6 +945,14 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
             if len < 14 + 28
                 return 0
             val op = pkt_read_u16(frame, 14 + 6)
+            // ARP probe conflict detection (RFC 5227 §2.1.1).
+            // Every ARP frame whose sender IP matches the address
+            // being probed counts as a defender — *unless* its
+            // sender MAC matches ours, in which case it's our own
+            // probe looped back through the NIC. We watch both
+            // REQUEST and REPLY since a defender can use either.
+            if inet_arp_probe_matches(frame) != 0
+                arp_probe_seen = 1
             if op == ARP_OP_REQUEST
                 if pkt_match_ipv4(frame, 14 + 24, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D) == 0
                     return 0
@@ -991,6 +1108,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_ACCEPT  -> inet_handle_tcp_accept(sender, buf)
                     INET_CMD_SET_IP_CONFIG -> inet_handle_set_ip_config(sender, buf)
                     INET_CMD_GET_IP_CONFIG -> inet_handle_get_ip_config(sender, buf)
+                    INET_CMD_ARP_PROBE   -> inet_handle_arp_probe(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte
