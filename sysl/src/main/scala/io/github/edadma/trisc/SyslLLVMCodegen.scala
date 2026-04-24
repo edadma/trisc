@@ -87,6 +87,12 @@ class SyslLLVMCodegen(target: String = "host"):
   // Module-level global variable types — needed for compound assignment on globals
   private val globalVarTypes = new mutable.HashMap[String, SyslType]
 
+  // Itables collected during TInterfaceBox. Key = itable symbol name
+  // (e.g. "__itable_ByteReader_Reader"); value = (iface, structName). Each is
+  // emitted once at end-of-module as a constant array of function pointers
+  // indexed by iface method position.
+  private val itables = new mutable.LinkedHashMap[String, (SyslType.InterfaceType, String)]
+
   /** Resolve a struct type to its canonical (field-populated) version from structTypes.
     * Handles stale placeholder StructType(_, Nil) references that can appear in expression types. */
   private def canonicalStruct(st: SyslType.StructType): SyslType.StructType =
@@ -179,6 +185,7 @@ class SyslLLVMCodegen(target: String = "host"):
     sliceElemDeinitsNeeded.clear()
     enumDeinitsNeeded.clear()
     structDeinitsNeeded.clear()
+    itables.clear()
     for decl <- program.decls do
       decl match
         case TStructDecl(name, fields, volFields) =>
@@ -273,6 +280,23 @@ class SyslLLVMCodegen(target: String = "host"):
     for (name, closure) <- closureEnvDeinitsNeeded do
       emitClosureEnvDeinit(name, closure)
     if closureEnvDispatchNeeded then emitClosureEnvDispatch()
+    // Interface itables: one constant array of method function pointers per
+    // (concrete struct, interface) pair seen during codegen. Emitted at the
+    // end so all referenced methods are already defined.
+    for (name, (iface, structName)) <- itables do
+      val n = iface.methods.length
+      val entries = iface.methods.map { (mName, mParams, mRet) =>
+        val shortName = s"${structName}_$mName"
+        val fnName = if funcParamTypes.contains(shortName) then shortName
+          else funcParamTypes.keys.find(_.endsWith(s"__$shortName")).getOrElse(shortName)
+        val retLt = llvmType(mRet)
+        val paramLts = mParams.map(llvmType)
+        val fnParamStr = ("i8*" :: paramLts).mkString(", ")
+        val fnTyStr = s"$retLt ($fnParamStr)"
+        s"i8* bitcast ($fnTyStr* @$fnName to i8*)"
+      }
+      emit(s"@$name = private unnamed_addr constant [$n x i8*] [${entries.mkString(", ")}]")
+    if itables.nonEmpty then emit("")
     val funcCode = out.toString
 
     // Now build final output with string constants at the top
@@ -342,6 +366,10 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("%struct.slice = type { i8*, i32, i32, i8* }")
     // Closure struct type: { func_ptr, env_ptr }
     emit("%struct.closure = type { i8*, i8* }")
+    // Interface struct type: { itable_ptr, data_ptr } — Go-style fat pointer.
+    // itable_ptr → [N x i8*] of method function pointers, in iface-declaration order.
+    // data_ptr → heap copy for value types, raw ptr for &T / *T.
+    emit("%struct.iface = type { i8*, i8* }")
     emit("")
 
     // Emit struct type definitions
@@ -3481,6 +3509,122 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"""  $result = call $retLt asm sideeffect "$escaped", "=r"()""")
         result
 
+      case TInterfaceBox(inner, iface) =>
+        // Box a concrete value into %struct.iface { itable_ptr, data_ptr }.
+        // Value-type structs are heap-copied so the iface owns an independent
+        // buffer (simple leak model — matches TRISC for now); pointer/ref types
+        // pass their pointer directly as data_ptr.
+        val structName = inner.typ.underlying match
+          case SyslType.StructType(n, _, _) => n
+          case SyslType.PtrType(SyslType.StructType(n, _, _)) => n
+          case SyslType.RefType(SyslType.StructType(n, _, _)) => n
+          case other => throw new RuntimeException(s"TInterfaceBox: unsupported concrete type $other")
+        val itableName = s"__itable_${structName}_${iface.name}"
+        if !itables.contains(itableName) then
+          itables(itableName) = (iface, structName)
+        val dataPtr = inner.typ.underlying match
+          case st: SyslType.StructType =>
+            // Value-type struct: genExpr returns a pointer to the struct's
+            // storage (alloca or field address). Pass that pointer as data_ptr
+            // — methods mutate the original, matching interpreter semantics.
+            // Non-escaping interface use only: if the iface outlives the
+            // struct's scope this becomes a dangling pointer. std tests all
+            // use interfaces at the call site and discard them immediately.
+            val src = genExpr(inner)
+            val lt = llvmType(st)
+            val cast = newReg()
+            emit(s"  $cast = bitcast $lt* $src to i8*")
+            cast
+          case _ =>
+            // Pointer/ref: genExpr returns the raw pointer value directly
+            genExpr(inner)
+        val alloca = deferAlloca("%struct.iface")
+        val itableGep = newReg()
+        emit(s"  $itableGep = getelementptr %struct.iface, %struct.iface* $alloca, i32 0, i32 0")
+        val nMethods = iface.methods.length
+        val itableCast = newReg()
+        emit(s"  $itableCast = bitcast [$nMethods x i8*]* @$itableName to i8*")
+        emit(s"  store i8* $itableCast, i8** $itableGep")
+        val dataGep = newReg()
+        emit(s"  $dataGep = getelementptr %struct.iface, %struct.iface* $alloca, i32 0, i32 1")
+        emit(s"  store i8* $dataPtr, i8** $dataGep")
+        alloca
+
+      case TInterfaceDispatch(ifaceVal, methodIndex, args, retType) =>
+        // Dynamic dispatch: load itable + data from interface value, call
+        // method at given index with data_ptr as self.
+        val ifacePtr = genExpr(ifaceVal)
+        val itableGep = newReg()
+        emit(s"  $itableGep = getelementptr %struct.iface, %struct.iface* $ifacePtr, i32 0, i32 0")
+        val itableI8 = newReg()
+        emit(s"  $itableI8 = load i8*, i8** $itableGep")
+        val dataGep = newReg()
+        emit(s"  $dataGep = getelementptr %struct.iface, %struct.iface* $ifacePtr, i32 0, i32 1")
+        val selfPtr = newReg()
+        emit(s"  $selfPtr = load i8*, i8** $dataGep")
+        val iface = ifaceVal.typ.underlying.asInstanceOf[SyslType.InterfaceType]
+        val nMethods = iface.methods.length
+        val (_, methodParams, methodRet) = iface.methods(methodIndex)
+        val retLt = llvmType(methodRet)
+        val paramLts = methodParams.map(llvmType)
+        val fnParamStr = ("i8*" :: paramLts).mkString(", ")
+        val fnTyStr = s"$retLt ($fnParamStr)"
+        // Cast itable i8* -> [N x i8*]*, GEP to methodIndex, load function ptr
+        val itableArr = newReg()
+        emit(s"  $itableArr = bitcast i8* $itableI8 to [$nMethods x i8*]*")
+        val methodI8Gep = newReg()
+        emit(s"  $methodI8Gep = getelementptr [$nMethods x i8*], [$nMethods x i8*]* $itableArr, i32 0, i32 $methodIndex")
+        val methodI8 = newReg()
+        emit(s"  $methodI8 = load i8*, i8** $methodI8Gep")
+        val methodFn = newReg()
+        emit(s"  $methodFn = bitcast i8* $methodI8 to $fnTyStr*")
+        // Evaluate args — aggregates need a value load; match TCall's logic.
+        val argVals = args.zipWithIndex.map { (a, i) =>
+          val v = genExpr(a)
+          val vt = exprType(a)
+          val expectedType = if i < paramLts.length then paramLts(i) else vt
+          if isAggregate(a.typ) then
+            if expectedType == "%struct.slice" && a.typ.isInstanceOf[SyslType.ArrayType] then
+              val arrSize = a.typ.asInstanceOf[SyslType.ArrayType].size
+              val sliceAlloca = deferAlloca("%struct.slice")
+              val dp = newReg()
+              emit(s"  $dp = bitcast $vt* $v to i8*")
+              val pg = newReg()
+              emit(s"  $pg = getelementptr %struct.slice, %struct.slice* $sliceAlloca, i32 0, i32 0")
+              emit(s"  store i8* $dp, i8** $pg")
+              val lg = newReg()
+              emit(s"  $lg = getelementptr %struct.slice, %struct.slice* $sliceAlloca, i32 0, i32 1")
+              emit(s"  store i32 $arrSize, i32* $lg")
+              val cg = newReg()
+              emit(s"  $cg = getelementptr %struct.slice, %struct.slice* $sliceAlloca, i32 0, i32 2")
+              emit(s"  store i32 $arrSize, i32* $cg")
+              val bg = newReg()
+              emit(s"  $bg = getelementptr %struct.slice, %struct.slice* $sliceAlloca, i32 0, i32 3")
+              emit(s"  store i8* null, i8** $bg")
+              val loaded = newReg()
+              emit(s"  $loaded = load %struct.slice, %struct.slice* $sliceAlloca")
+              (loaded, "%struct.slice")
+            else
+              val loaded = newReg()
+              emit(s"  $loaded = load $vt, $vt* $v")
+              (loaded, vt)
+          else
+            val widened = emitSextIfNeeded(v, vt, expectedType, a.typ.isSigned)
+            (widened, expectedType)
+        }
+        val callArgsStr = (s"i8* $selfPtr" :: argVals.map((v, vt) => s"$vt $v")).mkString(", ")
+        if retLt == "void" then
+          emit(s"  call void $methodFn($callArgsStr)")
+          "0"
+        else
+          val result = newReg()
+          emit(s"  $result = call $retLt $methodFn($callArgsStr)")
+          if isAggregate(methodRet) then
+            val alloca = deferAlloca(retLt)
+            emit(s"  store $retLt $result, $retLt* $alloca")
+            alloca
+          else result
+
       case _ =>
         emit(s"  ; TODO: ${expr.getClass.getSimpleName}")
         "0"
@@ -3616,6 +3760,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.FloatType(w) => throw new RuntimeException(s"unsupported float width: $w")
     case SyslType.VoidType => "void"
     case SyslType.StringType => "%struct.string"
+    case _: SyslType.InterfaceType => "%struct.iface"
     case SyslType.StructType(name, fields, _) =>
       // Auto-register struct types encountered in signatures (e.g., built-in tuples)
       if !structTypes.contains(name) && fields.nonEmpty then
@@ -3634,6 +3779,7 @@ class SyslLLVMCodegen(target: String = "host"):
   // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings)
   private def llvmSizeOf(t: SyslType): Long = t match
     case SyslType.StringType => 16  // {i8*, i32} — matches Sysl's sizeOf
+    case _: SyslType.InterfaceType => 16  // {i8* itable, i8* data}
     case SyslType.PtrType(_) => 8
     case SyslType.RefType(_: SyslType.SliceType) => 24  // inline %struct.slice
     case SyslType.RefType(_) => 8
@@ -3668,6 +3814,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.StringType => 8  // contains pointer
     case SyslType.SliceType(_) => 8  // contains pointer
     case _: SyslType.FuncType => 8  // contains pointer
+    case _: SyslType.InterfaceType => 8  // contains pointer
     case SyslType.StructType(name, fields, _) =>
       val resolved = canonicalStruct(SyslType.StructType(name, fields))
       if resolved.fields.isEmpty then 1 else resolved.fields.map((_, ft) => llvmAlignOf(ft)).max
@@ -3677,7 +3824,7 @@ class SyslLLVMCodegen(target: String = "host"):
 
   // Types that are passed by pointer (alloca) rather than by value
   private def isAggregate(t: SyslType): Boolean = t match
-    case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | SyslType.StringType => true
+    case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType | SyslType.StringType => true
     case SyslType.NamedType(_, base, _, _, _) => isAggregate(base)
     case _ => false
 
