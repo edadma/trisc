@@ -26,6 +26,10 @@ case class TestCommand(
     failFast: Boolean = false,
     verbose: Boolean = false,
 ) extends SyslCommand
+case class ProveCommand(
+    inputs: Seq[String] = Seq.empty,
+    output: Option[String] = None,
+) extends SyslCommand
 
 case class SyslConfig(
     command: SyslCommand = CompileCommand(),
@@ -187,6 +191,29 @@ object SyslCli:
               )
             ),
         ),
+      // prove: emit equivalent WhyML for offline discharge with Why3
+      cmd("prove")
+        .text("Translate Sysl source to WhyML (input language for the Why3 verifier)")
+        .action((_, c) => c.copy(command = ProveCommand()))
+        .children(
+          opt[String]('o', "output")
+            .text("Output file (default: stdout)")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case pc: ProveCommand => pc.copy(output = Some(v))
+                case other            => other
+              )
+            ),
+          arg[String]("<source>...")
+            .unbounded()
+            .text("Sysl source files")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case pc: ProveCommand => pc.copy(inputs = pc.inputs :+ v)
+                case other            => other
+              )
+            ),
+        ),
       // Allow bare options/args (no subcommand) to default to compile
       opt[String]('o', "output")
         .hidden()
@@ -224,6 +251,8 @@ object SyslCli:
             failure("No input files specified for doc")
           case TestCommand(inputs, _, _, _, _) if inputs.isEmpty =>
             failure("No input files specified for test")
+          case ProveCommand(inputs, _) if inputs.isEmpty =>
+            failure("No input files specified for prove")
           case _ => success
       ),
     )
@@ -257,6 +286,7 @@ object SyslCli:
         case cmd: RunCommand     => executeRun(cmd)
         case cmd: DocCommand     => executeDoc(cmd)
         case cmd: TestCommand    => executeTest(cmd)
+        case cmd: ProveCommand   => executeProve(cmd)
     catch case CliError(_) => () // already printed
 
   private def executeCompile(cmd: CompileCommand): Unit =
@@ -579,6 +609,40 @@ object SyslCli:
     val skipped = discovered.size - filtered.size
     println(f"\n$passed passed, $failed failed, $skipped skipped — $totalMs%.1fms")
     if failed > 0 then throw CliError(s"$failed test(s) failed")
+
+  private def executeProve(cmd: ProveCommand): Unit =
+    // Phase 1: parse the input file and translate to WhyML directly. We do not run the
+    // analyzer because contracts are woven into the body by the time the typed AST exists,
+    // and WhyML wants them as separate declarative clauses. Type checking happens at the
+    // WhyML/Why3 layer instead.
+    val parser = new SyslParser
+    val out = new StringBuilder
+    var firstUnit = true
+    for path <- cmd.inputs do
+      if !io.exists(path) then fail(s"error: file not found: $path")
+      val raw = io.readFile(path)
+      val source = if io.fileName(path).endsWith(".lsysl") then
+        LiterateRenderer.tangle(new LiterateParser().parse(raw))
+      else raw
+      parser.parseProgram(source) match
+        case Left(err) => fail(s"parse error in $path: $err")
+        case Right(ast) =>
+          val moduleName = io.fileName(path)
+            .stripSuffix(".lsysl").stripSuffix(".sysl")
+            .replace('-', '_').replace('.', '_').capitalize
+          val backend = new SyslWhyMLBackend(moduleName)
+          val mlw =
+            try backend.generate(ast)
+            catch case e: RuntimeException => fail(s"WhyML translation of $path failed: ${e.getMessage}")
+          if !firstUnit then out.append('\n')
+          firstUnit = false
+          out.append(mlw)
+    cmd.output match
+      case Some(path) =>
+        io.writeFile(path, out.toString)
+        System.err.println(s"  -> $path")
+      case None =>
+        print(out.toString)
 
   private def executeDoc(cmd: DocCommand): Unit =
     val isModule = cmd.inputs.size == 1 && io.isDirectory(cmd.inputs.head)
