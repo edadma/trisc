@@ -33,14 +33,11 @@ very end.
 
 
     main(argv: []string)
-        // N=2 is a deliberate conservative choice: it exercises the
-        // accept queue with exactly one child waiting while another
-        // is being echoed. N=3 passes standalone but is flaky when
-        // run inside the full suite — root-cause still pending,
-        // likely host-side ephemeral-port / slirp state leakage
-        // between tests. Bump when the stack has tighter multi-
-        // connect guarantees or the harness gets fresh-slirp-per-test.
-        val n = 2
+        // N=3 exercises the accept queue with two children waiting
+        // while the first is being echoed — deeper than the N=2
+        // "one pending" case. Must stay in sync with the Scala
+        // test's N.
+        val n = 3
         val lfd = tcp_listen(7890)
         if lfd < 0
             puts("test_tcp_mcl: listen failed\n")

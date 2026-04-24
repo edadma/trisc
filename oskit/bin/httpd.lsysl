@@ -2,21 +2,22 @@ httpd — minimal HTTP/1.0 echo server
 =====================================
 
 Phase-5-ish milestone: prove the slix TCP stack coexists with a
-real-world host-side HTTP client. Listens on port 8080, accepts one
-client, drains the request headers until `\r\n\r\n`, replies with a
-canned `HTTP/1.0 200 OK` + `hello\n`, closes, exits.
+real-world host-side HTTP client. Listens on port 8080, accepts `n`
+clients in a sequential loop (each client drained until `\r\n\r\n`,
+replied to with a canned `HTTP/1.0 200 OK` + `hello\n`, closed),
+then exits so `nsh` gets its prompt back.
 
-Single-shot by design — multi-client concurrency is the follow-up
-chunk. The test harness starts us via `httpd` (foreground), waits
-for the `listening` log line, dials through QEMU's
-`hostfwd=tcp::28083-:8080` into the guest, reads until close, and
-asserts the response shape. We exit after one served request so
-the shell gets its prompt back.
+Usage: `httpd` (serves 1 request then exits) or `httpd <n>` (serves
+exactly n requests then exits). Bounded so the test harness can
+use foreground invocation and still get a clean `httpd: done` to
+wait on — running forever would never return control to the shell.
 
 Out of scope:
 
 - HTTP/1.1 keep-alive, HEAD, chunked bodies, routing, 404s.
-- Multiple concurrent accepts (needs the `test_tcp_mcl` fix first).
+- Concurrent accepts — this server is strictly sequential. Parallel
+  dials from the host land in the guest's accept queue and are
+  dequeued one at a time (same path as `test_tcp_mcl`).
 
     module oskit.bin.httpd
 
@@ -34,11 +35,30 @@ Decimal helper — used only for diagnostic log lines.
         puts(string(&buf[0], 1))
 
 
+Parse a decimal string as a non-negative int. Returns `-1` on any
+non-digit input (including empty strings) so callers can fall back
+to a default without extra validation code.
+
+    parse_uint(s: string) -> int
+        val n = len(s)
+        if n <= 0
+            return -1
+        val p = *byte(s)
+        var v = 0
+        var i = 0
+        while i < n
+            val c = int(p[i]) & 0xff
+            if c < int('0') || c > int('9')
+                return -1
+            v = v * 10 + (c - int('0'))
+            i += 1
+        return v
+
+
 Scan `req[0..used)` for the first occurrence of `\r\n\r\n`.
-Returns the index one past the last byte of the match (so the
-caller can tell where the body would start), or `-1` if the
-marker is not present. `stop = used - 3` ensures the 4-byte
-lookahead never runs past the buffer.
+Returns the index one past the last byte of the match, or `-1`
+if the marker is not present. `stop = used - 3` ensures the
+4-byte lookahead never runs past the buffer.
 
     find_header_end(req: *byte, used: int) -> int
         if used < 4
@@ -52,59 +72,23 @@ lookahead never runs past the buffer.
         return -1
 
 
-Main. Listen on :8080, accept one client, drain its headers, reply,
-close both sides, exit. Each step prints a tagged log line so a
-failing run is visible in the serial trace.
+Serve one client on `cfd`. Drains headers into a 1024-byte buffer
+until `\r\n\r\n` shows up or the buffer fills, then blasts the
+canned response. Returns 0 on success, non-zero on error so
+`main` can surface exit codes unchanged from the previous
+single-shot version.
 
-    main(argv: []string)
-        val lfd = tcp_listen(8080)
-        if lfd < 0
-            puts("httpd: listen failed\n")
-            exit_with(1)
-            return
-        puts("httpd: listening on :8080 fd=")
-        print_udec(lfd)
-        puts("\n")
-
-        var peer_ip: [4]byte
-        var peer_port: [2]byte
-        val cfd = tcp_accept(lfd, &peer_ip[0], &peer_port[0])
-        if cfd < 0
-            puts("httpd: accept failed\n")
-            tcp_close(lfd)
-            exit_with(2)
-            return
-        puts("httpd: accepted cfd=")
-        print_udec(cfd)
-        puts(" from ")
-        print_udec(int(peer_ip[0]) & 0xff)
-        puts(".")
-        print_udec(int(peer_ip[1]) & 0xff)
-        puts(".")
-        print_udec(int(peer_ip[2]) & 0xff)
-        puts(".")
-        print_udec(int(peer_ip[3]) & 0xff)
-        val pp = ((int(peer_port[0]) & 0xff) << 8) | (int(peer_port[1]) & 0xff)
-        puts(":")
-        print_udec(pp)
-        puts("\n")
-
-Read loop. The request is TCP-stream data: each `tcp_recv` returns
-whatever chunk of bytes has arrived so far. We accumulate into
-`rbuf` and re-scan after every recv. 1024 bytes holds the request
-line plus any curl-style headers with huge room to spare.
-
+    serve_one(cfd: int, iter: int) -> int
         var rbuf: [1024]byte
         var used = 0
         var hdr_end = -1
         while used < 1024 && hdr_end < 0
             val got = tcp_recv(cfd, &rbuf[used], 1024 - used)
             if got < 0
-                puts("httpd: recv failed\n")
-                tcp_close(cfd)
-                tcp_close(lfd)
-                exit_with(3)
-                return
+                puts("httpd: recv failed i=")
+                print_udec(iter)
+                puts("\n")
+                return 3
             if got == 0
                 break
             used += got
@@ -112,40 +96,112 @@ line plus any curl-style headers with huge room to spare.
         if hdr_end < 0
             puts("httpd: bad request (no CRLFCRLF in ")
             print_udec(used)
-            puts(" bytes)\n")
-            tcp_close(cfd)
-            tcp_close(lfd)
-            exit_with(4)
-            return
-        puts("httpd: request hdr_end=")
+            puts(" bytes) i=")
+            print_udec(iter)
+            puts("\n")
+            return 4
+        puts("httpd: i=")
+        print_udec(iter)
+        puts(" hdr_end=")
         print_udec(hdr_end)
         puts("\n")
 
 Canned response. 73 bytes — well under the 480-byte `tcp_send`
-cap, so one call suffices. The `Content-Length: 6` matches
-`hello\n` exactly so HTTP/1.0 clients that respect the length
-(rare — most just read until close) get an accurate frame.
+cap, so one call suffices. `Content-Length: 6` matches the body
+`hello\n` exactly, so clients that respect the length get an
+accurate frame.
 
         val resp = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\n\r\nhello\n"
         val rlen = len(resp)
         val rptr = *byte(resp)
         val sent = tcp_send(cfd, rptr, rlen)
         if sent < 0
-            puts("httpd: send failed\n")
-            tcp_close(cfd)
-            tcp_close(lfd)
-            exit_with(5)
-            return
+            puts("httpd: send failed i=")
+            print_udec(iter)
+            puts("\n")
+            return 5
         puts("httpd: sent=")
         print_udec(sent)
+        puts(" i=")
+        print_udec(iter)
+        puts("\n")
+        return 0
+
+
+Main. Parse optional request-count arg (default 1), listen on
+:8080, loop accept+serve+close for n iterations, exit clean.
+
+    main(argv: []string)
+        var n = 1
+        if len(argv) > 1
+            val parsed = parse_uint(argv[1])
+            if parsed < 0
+                puts("httpd: usage: httpd [n]\n")
+                exit_with(1)
+                return
+            n = parsed
+        if n <= 0
+            puts("httpd: n must be > 0\n")
+            exit_with(1)
+            return
+
+        val lfd = tcp_listen(8080)
+        if lfd < 0
+            puts("httpd: listen failed\n")
+            exit_with(2)
+            return
+        puts("httpd: listening on :8080 fd=")
+        print_udec(lfd)
+        puts(" n=")
+        print_udec(n)
         puts("\n")
 
-        val cr = tcp_close(cfd)
-        if cr < 0
-            puts("httpd: close cfd failed\n")
-            tcp_close(lfd)
-            exit_with(6)
-            return
+        var peer_ip: [4]byte
+        var peer_port: [2]byte
+        var i = 0
+        while i < n
+            val cfd = tcp_accept(lfd, &peer_ip[0], &peer_port[0])
+            if cfd < 0
+                puts("httpd: accept failed i=")
+                print_udec(i)
+                puts("\n")
+                tcp_close(lfd)
+                exit_with(3)
+                return
+            puts("httpd: accept[")
+            print_udec(i)
+            puts("] cfd=")
+            print_udec(cfd)
+            puts(" from ")
+            print_udec(int(peer_ip[0]) & 0xff)
+            puts(".")
+            print_udec(int(peer_ip[1]) & 0xff)
+            puts(".")
+            print_udec(int(peer_ip[2]) & 0xff)
+            puts(".")
+            print_udec(int(peer_ip[3]) & 0xff)
+            val pp = ((int(peer_port[0]) & 0xff) << 8) | (int(peer_port[1]) & 0xff)
+            puts(":")
+            print_udec(pp)
+            puts("\n")
+
+            val rc = serve_one(cfd, i)
+            if rc != 0
+                tcp_close(cfd)
+                tcp_close(lfd)
+                exit_with(rc)
+                return
+
+            val cr = tcp_close(cfd)
+            if cr < 0
+                puts("httpd: close cfd failed i=")
+                print_udec(i)
+                puts("\n")
+                tcp_close(lfd)
+                exit_with(6)
+                return
+            i += 1
+
         val lr = tcp_close(lfd)
         if lr < 0
             puts("httpd: close lfd failed\n")

@@ -466,28 +466,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("test_tcp_srv: closed")
   }
 
-  // TODO: un-ignore once the suite-order flakiness is diagnosed.
-  // The test passes cleanly in standalone (testOnly -z "multi-
-  // client") but fails with only 2/3 accepts completing when run
-  // after the earlier tcp tests in the full suite. Each test gets
-  // a fresh QEMU, so the interference is host-side — likely slirp
-  // port-tracking state or lingering Scala client socket TIME_WAIT
-  // across back-to-back connections to host:28080. The test itself
-  // is correct and the guest-side code path is exercised by the
-  // standalone passive-open test; revisit when we have time to
-  // isolate the slirp interaction.
-  "aarch64 tcp: multi-client passive open stress" ignore {
-    // test_tcp_mcl listens on :7890 and accepts 3 clients in sequence.
-    // We fire 3 host-side dials concurrently (all arriving while the
-    // server is still processing the first), which forces children 2
-    // and 3 into the accept queue. Each reply carries a "#i" tag so
-    // we can verify FIFO dequeue order. Regression-catching target:
+  "aarch64 tcp: multi-client passive open stress" in {
+    // test_tcp_mcl listens on :7890 and accepts N clients in sequence.
+    // We fire N host-side dials concurrently (all arriving while the
+    // server is still processing the first), which forces children
+    // into the accept queue. Each reply carries a "#i" tag so we can
+    // verify each payload landed. Regression-catching target:
     // accept-queue enqueue/dequeue, SYN_RCVD concurrency, per-child
     // retx arming/disarming across overlapping lifetimes.
-    // N matches the test_tcp_mcl binary. Keep at 2 until the
-    // suite-run flakiness at N>=3 is diagnosed (see the binary's
-    // own comment).
-    val n = 2
+    // N must match the test_tcp_mcl binary.
+    val n = 3
     qemu.send("test_tcp_mcl\n")
     qemu.waitFor("test_tcp_mcl: listening fd=")
 
@@ -520,8 +508,8 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     for t <- threads do t.join(20000)
 
     val output = qemu.waitFor("test_tcp_mcl: ok")
-    output should include("test_tcp_mcl: accept[0] cfd=")
-    output should include("test_tcp_mcl: accept[1] cfd=")
+    for i <- 0 until n do
+      output should include(s"test_tcp_mcl: accept[$i] cfd=")
     output should include("test_tcp_mcl: ok")
 
     import scala.jdk.CollectionConverters.*
@@ -569,9 +557,49 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     body should endWith("hello\n")
 
     val output = qemu.waitFor("httpd: done")
-    output should include("httpd: accepted cfd=")
-    output should include("httpd: request hdr_end=")
+    output should include("httpd: accept[0] cfd=")
+    output should include("httpd: i=0 hdr_end=")
     output should include("httpd: sent=")
+    output should include("httpd: done")
+  }
+
+  "aarch64 tcp: multi-request httpd accept loop" in {
+    // Three back-to-back dials to a single httpd process. The
+    // server serves 3 requests in a sequential accept loop and
+    // exits. Proves the accept loop terminates, closes each child
+    // cleanly without affecting the listen socket, and doesn't
+    // leak slots across iterations. Companion to test_tcp_mcl —
+    // that one proves the queue depth under parallel SYN, this
+    // one proves the full request/response cycle works repeatedly.
+    val n = 3
+    qemu.send(s"httpd $n\n")
+    qemu.waitFor("httpd: listening on :8080 fd=")
+
+    for i <- 0 until n do
+      val sock = new java.net.Socket()
+      sock.setSoTimeout(10000)
+      sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28083), 5000)
+      val body = try
+        val out = sock.getOutputStream
+        val in  = sock.getInputStream
+        out.write(s"GET /iter/$i HTTP/1.0\r\n\r\n".getBytes("UTF-8"))
+        out.flush()
+        val buf = new Array[Byte](256)
+        var total = 0
+        var done  = false
+        while !done && total < buf.length do
+          val r = in.read(buf, total, buf.length - total)
+          if r <= 0 then done = true
+          else total += r
+        new String(buf, 0, total, "UTF-8")
+      finally sock.close()
+      body should startWith("HTTP/1.0 200 OK")
+      body should endWith("hello\n")
+
+    val output = qemu.waitFor("httpd: done")
+    for i <- 0 until n do
+      output should include(s"httpd: accept[$i] cfd=")
+      output should include(s"httpd: i=$i hdr_end=")
     output should include("httpd: done")
   }
 
