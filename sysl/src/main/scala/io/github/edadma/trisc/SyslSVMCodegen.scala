@@ -135,7 +135,10 @@ class SyslSVMCodegen:
         // if-as-statement: scan bodies directly (no scanExpr — would double-count)
         scanExpr(cond); scanStmts(thenBody); elseBody.foreach(scanStmts)
       case TExprStmt(e) => scanExpr(e)
-      case TDestructureStmt(names, _, init) => count += names.length; scanExpr(init)
+      case TDestructureStmt(names, _, init) => count += names.count(_ != "_"); scanExpr(init)
+      case TDestructureAssignStmt(names, _, init) =>
+        // Conservative: each name may be new or existing. Over-count is harmless.
+        count += names.count(_ != "_"); scanExpr(init)
       case TReturnStmt(Some(e)) => scanExpr(e)
       case TMultiStmt(children) => children.foreach(scanStmt)
       case TContractCheck(_, e, _) => scanExpr(e)
@@ -664,17 +667,32 @@ class SyslSVMCodegen:
     case TDestructureStmt(names, types, init) =>
       genExpr(init) // address of struct on stack
       for (name, i) <- names.zipWithIndex do
-        val idx = allocLocal(name, types(i))
-        val st = init.typ match
-          case s: SyslType.StructType => s
-          case SyslType.RefType(s: SyslType.StructType) => s
-          case _ => sys.error("destructure requires struct type")
-        val off = fieldOffset(st, i)
-        emit("  dup") // keep struct addr
-        if off != 0 then { emitPushInt(off); emit("  add") }
-        emitLoad(types(i))
-        emit(s"  local_set $idx")
+        if name != "_" then
+          val idx = allocLocal(name, types(i))
+          val st = structOf(init.typ)
+          val off = fieldOffset(st, i)
+          emit("  dup") // keep struct addr
+          if off != 0 then { emitPushInt(off); emit("  add") }
+          emitLoad(types(i))
+          emit(s"  local_set $idx")
       emit("  drop") // discard struct address
+
+    case TDestructureAssignStmt(names, types, init) =>
+      // Like TDestructureStmt, but the names already refer to existing locals.
+      genExpr(init)
+      for (name, i) <- names.zipWithIndex do
+        if name != "_" then
+          val st = structOf(init.typ)
+          val off = fieldOffset(st, i)
+          val target = locals.getOrElse(name, {
+            val idx = allocLocal(name, types(i))
+            LocalInfo(idx, types(i))
+          })
+          emit("  dup")
+          if off != 0 then { emitPushInt(off); emit("  add") }
+          emitLoad(types(i))
+          emit(s"  local_set ${target.index}")
+      emit("  drop")
 
     case _ => // TODO: remaining stmt types
 
