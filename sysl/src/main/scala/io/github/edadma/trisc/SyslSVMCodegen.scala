@@ -116,6 +116,7 @@ class SyslSVMCodegen:
       case TArrayLit(elements, _) => elements.foreach(scanExpr)
       case TRangeCheck(inner, _, _, _) => scanExpr(inner)
       case TLen(inner, _) => scanExpr(inner)
+      case TCap(inner, _) => scanExpr(inner)
       case _ =>
     def scanStmt(s: TStmt): Unit = s match
       case TVarStmt(name, _, init, _) => seen += name; count += 1; scanExpr(init)
@@ -132,6 +133,7 @@ class SyslSVMCodegen:
       case TForStmt(init, cond, update, body, _) =>
         scanStmt(init); scanExpr(cond); scanStmt(update); scanStmts(body)
       case TDoWhileStmt(cond, body, _) => scanExpr(cond); scanStmts(body)
+      case TLoopStmt(body, _) => scanStmts(body)
       case TIfExpr(cond, thenBody, elseBody, _) =>
         // if-as-statement: scan bodies directly (no scanExpr — would double-count)
         scanExpr(cond); scanStmts(thenBody); elseBody.foreach(scanStmts)
@@ -679,6 +681,18 @@ class SyslSVMCodegen:
       breakLabels.pop()
       continueLabels.pop()
 
+    case TLoopStmt(body, _) =>
+      val loopLabel = newLabel("loop")
+      val endLabel = newLabel("loop_end")
+      breakLabels.push(endLabel)
+      continueLabels.push(loopLabel)
+      emit(s"$loopLabel:")
+      genStmts(body)
+      emit(s"  jump $loopLabel")
+      emit(s"$endLabel:")
+      breakLabels.pop()
+      continueLabels.pop()
+
     case TBreakStmt(_) =>
       emit(s"  jump ${breakLabels.top}")
 
@@ -1036,6 +1050,34 @@ class SyslSVMCodegen:
       for arg <- args do genExpr(arg)
       emit(s"  call $name")
 
+    case TStr(inner) =>
+      inner.typ.underlying match
+        case SyslType.StringType => genExpr(inner) // identity
+        case _ =>
+          // Fallback: emit an "???" placeholder string.
+          labelCounter += 1
+          val lbl = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_${labelCounter}__qqq"
+                    else s"__str_${labelCounter}__qqq"
+          stringLiterals += ((lbl, "???"))
+          // Evaluate and discard inner (side-effects only).
+          genExpr(inner)
+          inner.typ.underlying match
+            case _: SyslType.StructType | _: SyslType.EnumType
+               | _: SyslType.SliceType | _: SyslType.ArrayType
+               | SyslType.StringType => () // no value on stack to drop
+            case _ => emit("  drop")
+          emitMemAlloc(16)
+          emit("  dup")
+          emit(s"  push_i64 $lbl")
+          emit("  swap")
+          emit("  store64")
+          emit("  dup")
+          emitPushInt(8)
+          emit("  add")
+          emitPushInt(3)
+          emit("  swap")
+          emit("  store64")
+
     case TTempAddr(inner, _) =>
       inner.typ.underlying match
         case _: SyslType.StructType | _: SyslType.EnumType
@@ -1144,6 +1186,18 @@ class SyslSVMCodegen:
         case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
           genExpr(inner)
           emitPushInt(8)
+          emit("  add")
+          emit("  load32")
+        case SyslType.ArrayType(_, size) =>
+          emitPushInt(size)
+        case _ =>
+          genExpr(inner)
+
+    case TCap(inner, _) =>
+      inner.typ match
+        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
+          genExpr(inner)
+          emitPushInt(12)
           emit("  add")
           emit("  load32")
         case SyslType.ArrayType(_, size) =>
