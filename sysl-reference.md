@@ -2286,6 +2286,50 @@ fact(n: int) -> int
 
 Future work: allow `#pure` calls inside `const` initializers and as default-parameter expressions, so that `const TABLE = build_table(16)` becomes legal at compile time.
 
+### `#reads(...)` / `#writes(...)` — declare module-level effects
+
+A looser sibling of `#pure`. The two attributes declare which module-level (file-scope or imported) mutable variables a function may read or write. They are the Sysl equivalent of SPARK's `Global => (Input => ..., Output => ..., In_Out => ...)` aspect, and are the static foundation a future verifier (Why3 / Boogie) needs to do sound weakest-precondition reasoning across function calls.
+
+```
+var config_root: int = 0
+var io_buffer: [256]byte
+var io_pos = 0i32
+
+#reads(config_root)
+get_max_threads() -> int = config_root
+
+#reads(io_buffer)
+#writes(io_pos)
+write_byte(b: byte)
+    io_buffer[io_pos] = b
+    io_pos += 1
+
+#reads()
+#writes()
+double(x: int) -> int = x * 2     // no module state; allocation/IO still allowed
+```
+
+**Syntax.** Each attribute goes on its own line above the declaration (matching `#pure` / `#deprecated` style). Either may be omitted; absence-of-both keeps the function in the unannotated default — see "Strict closure" below. Identifiers must resolve to module-level mutable `var`s (or `#address(N)` MMIO vars). `val`s and `const`s are immutable and cannot appear; pass them around freely without declaring an effect.
+
+**The three rules the compiler enforces:**
+
+1. **Body conformance.** In a function with `#reads(R)` and `#writes(W)`:
+   - Every read of a module-level var V requires V ∈ R ∪ W.
+   - Every write to a module-level var V requires V ∈ W.
+   - Reads inside `require` / `ensure` / `invariant` / `assume` / `variant` clauses, and inside `for all` / `for some` predicates, count as reads.
+2. **Call-site subset.** A call to a function with `#reads(R')` `#writes(W')` requires R' ⊆ R ∪ W and W' ⊆ W. The compiler computes both subsets at the call site and reports the offending variable name on mismatch.
+3. **Strict closure.** An annotated function may only call other annotated functions (or `#pure` functions, which count as `#reads() #writes()`) and the pure builtins. Indirect calls, interface dispatch, `new`, `asm`, and unannotated functions are rejected. The intent is leaves-up adoption: annotate the bottom of the call graph first, then work upward.
+
+**Relationship to `#pure`.** `#pure` keeps its existing stricter discipline — no allocation, no I/O, no indirect calls, no closure construction — and is shorthand for `#reads() #writes()` plus those extra bans. Combining `#pure` with explicit `#reads`/`#writes` is rejected as redundant.
+
+**Compound assignment.** `counter += n` is a read-then-write of `counter`. By Rule 1, the implicit read is permitted whenever `counter` is in `#reads ∪ #writes`, so declaring `#writes(counter)` alone is sufficient. (SPARK's stricter `Output` vs `In_Out` distinction is deliberately not modeled in v1.)
+
+**Indirect calls and interfaces.** Function-pointer types and interface types do not yet carry effect annotations, so they have no callable bound on what they touch. Calls through them inside an annotated function are rejected for v1. v2 will lift this once `FuncType` / `InterfaceType` grow optional effect signatures.
+
+**Allocation.** `new`, `new []T`, slice `append`, and closure construction are all rejected from annotated function bodies. Allocation is an effect that the v1 model does not track; a future `#allocates(...)` attribute will handle it.
+
+**Adoption strategy.** Add annotations from the leaves upward. Existing code is untouched (no annotations means "effects unknown" — exactly today's behavior, with no new restrictions). The first time you mark a leaf function `#reads() #writes()`, every annotated caller must follow suit; this is the point — it propagates the discipline up to the surfaces of your program at your own pace.
+
 ### `#deprecated` — warn on use
 
 Marks a function as deprecated. Calls to the function emit a warning to stderr during analysis (once per callee per compilation):

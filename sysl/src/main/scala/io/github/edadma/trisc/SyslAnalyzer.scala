@@ -28,8 +28,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  (default, back-compat). `params` stores the call-side signature: for `Out`/`Inout`
    *  this is `*T` so `checkArgs` and codegen see the hidden-pointer type; the body-scope
    *  view is the inner `T` with `autoIndirect = true`. */
-  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil):
+  /** `reads`/`writes` carry the *raw* (local) names from `#reads(...)` / `#writes(...)`
+   *  attributes. `None` means the function is unannotated; `Some(Set.empty)` means it
+   *  declared an empty set ("no module-level effects"). Resolution to the canonical
+   *  mangled name + mutability/scope validation is deferred to `validateEffects`, which
+   *  runs after the function body is analyzed (so all relevant globals are in scope). */
+  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None):
     def modeOf(i: Int): ParamMode = if modes.isEmpty then ParamMode.In else modes(i)
+    def hasEffectAnnotations: Boolean = reads.isDefined || writes.isDefined || isPure
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   private val functions = new mutable.LinkedHashMap[String, FunInfo]
@@ -669,7 +675,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
             val isPure = fd.attributes.exists(_.name == "pure")
-            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes)
+            // Extract `#reads(a, b)` / `#writes(c)` raw identifier lists. Validation that
+            // each name resolves to a module-level mutable var is deferred to validateEffects
+            // (run after the body is analyzed, so all relevant globals are in scope).
+            // Each attribute may appear multiple times; results are unioned. `#pure` cannot
+            // be combined with explicit `#reads`/`#writes` (it already implies both empty).
+            def extractIdentList(attrName: String): Option[Set[String]] =
+              val matching = fd.attributes.filter(_.name == attrName)
+              if matching.isEmpty then None
+              else Some(matching.flatMap { attr =>
+                attr.args.map {
+                  case AttrPositional(AttrLitIdent(n)) => n
+                  case other => throw AnalysisError(s"#$attrName on '$name' expects identifier arguments, got $other", fd)
+                }
+              }.toSet)
+            val readsSet = extractIdentList("reads")
+            val writesSet = extractIdentList("writes")
+            if isPure && (readsSet.isDefined || writesSet.isDefined) then
+              throw AnalysisError(s"#pure on '$name' cannot be combined with #reads/#writes (it already implies both empty)", fd)
+            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet)
             // Record #deprecated info
             for attr <- fd.attributes if attr.name == "deprecated" do
               val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
@@ -982,6 +1006,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
         if funInfo.isPure then validatePureFn(name, tBody, funInfo.params.map(_._1))
+        if funInfo.reads.isDefined || funInfo.writes.isDefined then
+          validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
         TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef)
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>
@@ -1188,6 +1214,215 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case TContinueStmt(_) => ()
       case TDeferStmt(inner) =>
         // Defer executes on function exit — allowed if inner is pure too.
+        checkStmt(inner)
+      case TAsmStmt(_) =>
+        reject("cannot contain asm blocks")
+      case TContractCheck(_, e, _) =>
+        checkExpr(e)
+      case TMultiStmt(ss) =>
+        ss.foreach(checkStmt)
+      case TExprStmt(e) =>
+        checkExpr(e)
+
+    body match
+      case TExprBody(e) => checkExpr(e)
+      case TBlockBody(stmts) => stmts.foreach(checkStmt)
+
+  /** Cache of resolved `#reads`/`#writes` effect sets, keyed by canonical (mangled)
+   *  function name. Each entry is `(reads, writes)` where both are sets of *mangled*
+   *  global-var names. Populated lazily by `resolveEffects` when validating bodies and
+   *  call sites, so cross-function lookups don't pay quadratic resolution cost. */
+  private val resolvedEffectsCache = new mutable.HashMap[String, (Set[String], Set[String])]
+
+  /** Resolve a function's raw `#reads`/`#writes` identifier lists to mangled global names.
+   *  Validates that each name resolves to a module-level mutable var (via `globalScope`).
+   *  `#pure` is treated as `#reads() #writes()` — both empty sets. Returns `None` for
+   *  unannotated functions (no annotations means "effects unknown", which Rule 3 of the
+   *  effects discipline rejects at call sites of annotated functions). */
+  private def resolveEffects(funInfo: FunInfo): Option[(Set[String], Set[String])] =
+    if !funInfo.hasEffectAnnotations then None
+    else resolvedEffectsCache.get(funInfo.name) match
+      case Some(rw) => Some(rw)
+      case None =>
+        def resolveOne(rawName: String, attrName: String): String =
+          globalScope.get(rawName) match
+            case Some(sym) if sym.mutable && !sym.isConst => sym.name
+            case Some(_) => throw AnalysisError(s"#$attrName on '${funInfo.name}' references '$rawName' which is not mutable")
+            case None    => throw AnalysisError(s"#$attrName on '${funInfo.name}' references unknown global '$rawName'")
+        val r = funInfo.reads.getOrElse(Set.empty).map(resolveOne(_, "reads"))
+        val w = funInfo.writes.getOrElse(Set.empty).map(resolveOne(_, "writes"))
+        val pair = (r, w)
+        resolvedEffectsCache(funInfo.name) = pair
+        Some(pair)
+
+  /** Walk an annotated function body. Enforces three rules:
+   *  - **Body conformance.** Every read of a module-level var V requires V ∈ R ∪ W;
+   *    every write requires V ∈ W. Reads inside contract expressions count.
+   *  - **Call-site subset.** A call to a function with `#reads(R')` `#writes(W')`
+   *    requires R' ⊆ R ∪ W and W' ⊆ W.
+   *  - **Strict closure.** The function may only call other annotated (or `#pure`) functions
+   *    plus the pure builtins; indirect calls, interface dispatch, `new`, and asm are
+   *    rejected (mirrors `validatePureFn`).
+   *
+   *  Called after body analysis, like `validatePureFn`. Skipped for unannotated functions. */
+  private def validateEffects(funcName: String, fi: FunInfo, body: TFunBody, paramNames: List[String]): Unit =
+    val resolvedOpt = resolveEffects(fi)
+    if resolvedOpt.isEmpty then return
+    val (reads, writes) = resolvedOpt.get
+    val readsOrWrites = reads ++ writes
+    val localVars = mutable.HashSet.from(paramNames)
+
+    // Index of mutable globals by mangled name — checked O(1) per TVarRef.
+    val mutableGlobals: Set[String] =
+      globalScope.values.collect { case s if s.mutable && !s.isConst => s.name }.toSet
+
+    def reject(msg: String): Nothing = throw AnalysisError(s"#reads/#writes function '$funcName' $msg")
+
+    def lookupCalleeFunInfo(callee: String): Option[FunInfo] =
+      // Self-recursion: same FunInfo we're validating.
+      if callee == funcName || callee == fi.name then Some(fi)
+      else functions.get(callee).orElse(functions.values.find(_.name == callee))
+
+    def isAllowedBuiltin(callee: String): Boolean =
+      purePermittedBuiltins.contains(callee) || (
+        builtinFunctions.contains(callee) && purePermittedBuiltins.contains(callee)
+      )
+
+    def checkCall(callee: String): Unit =
+      if isAllowedBuiltin(callee) then return
+      if builtinFunctions.contains(callee) then
+        reject(s"cannot call impure builtin '$callee'")
+      lookupCalleeFunInfo(callee) match
+        case None => reject(s"cannot call unknown function '$callee'")
+        case Some(calleeInfo) =>
+          if !calleeInfo.hasEffectAnnotations then
+            reject(s"cannot call '$callee' (no #reads/#writes annotations)")
+          val (cR, cW) = resolveEffects(calleeInfo).get
+          val missingW = cW.diff(writes)
+          if missingW.nonEmpty then
+            reject(s"calls '$callee' which writes ${missingW.mkString(", ")} not in caller's #writes")
+          val missingR = cR.diff(readsOrWrites)
+          if missingR.nonEmpty then
+            reject(s"calls '$callee' which reads ${missingR.mkString(", ")} not in caller's #reads or #writes")
+
+    def checkRead(name: String): Unit =
+      if mutableGlobals.contains(name) && !localVars.contains(name) then
+        if !readsOrWrites.contains(name) then
+          reject(s"reads global '$name' not declared in #reads")
+
+    def checkWrite(name: String): Unit =
+      if mutableGlobals.contains(name) && !localVars.contains(name) then
+        if !writes.contains(name) then
+          reject(s"writes to global '$name' not declared in #writes")
+
+    def checkExpr(e: TExpr): Unit = e match
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+      case TVarRef(name, _)                => checkRead(name)
+      case TAddrOf(name, _)                => checkRead(name)
+      case _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl => ()
+      case TArrayLit(els, _)               => els.foreach(checkExpr)
+      case TAddrOfIndex(a, i, _)           => checkExpr(a); checkExpr(i)
+      case TAddrOfField(o, _, _)           => checkExpr(o)
+      case TTempAddr(e, _)                 => checkExpr(e)
+      case TDeref(e, _)                    => checkExpr(e)
+      case TIndex(e, i, _)                 => checkExpr(e); checkExpr(i)
+      case TFieldAccess(o, _, _)           => checkExpr(o)
+      case TFieldPreInc(o, _, _)           => checkExpr(o)
+      case TFieldPreDec(o, _, _)           => checkExpr(o)
+      case TFieldPostInc(o, _, _)          => checkExpr(o)
+      case TFieldPostDec(o, _, _)          => checkExpr(o)
+      case _: TStructLit                   => ()
+      case TStructConstruct(_, args)       => args.foreach(checkExpr)
+      case TPreInc(n, _)                   => checkWrite(n); checkRead(n)
+      case TPreDec(n, _)                   => checkWrite(n); checkRead(n)
+      case TPostInc(n, _)                  => checkWrite(n); checkRead(n)
+      case TPostDec(n, _)                  => checkWrite(n); checkRead(n)
+      case TUnary(_, o, _)                 => checkExpr(o)
+      case TBinary(l, _, r, _)             => checkExpr(l); checkExpr(r)
+      case TCall(callee, args, _) =>
+        checkCall(callee)
+        args.foreach(checkExpr)
+      case TIndirectCall(_, _, _)          => reject("cannot make indirect calls (callee effects unknown)")
+      case TCast(e, _)                     => checkExpr(e)
+      case TIfExpr(c, t, el, _)            => checkExpr(c); t.foreach(checkStmt); el.foreach(_.foreach(checkStmt))
+      case TQuantifier(_, _, _, lo, hi, _, pred, _) =>
+        checkExpr(lo); checkExpr(hi); checkExpr(pred)
+      case TMatchExpr(e, arms, deflt, _) =>
+        checkExpr(e)
+        for arm <- arms do
+          arm.guard.foreach(checkExpr)
+          arm.body.foreach(checkStmt)
+        deflt.foreach(_.foreach(checkStmt))
+      case _: TEnumConstruct               => ()
+      case _: TNew                         => reject("cannot heap-allocate (`new`) — allocation effects are not yet tracked")
+      case _: TNewEnum                     => reject("cannot heap-allocate (`new`) — allocation effects are not yet tracked")
+      case _: TNewArray                    => reject("cannot heap-allocate (`new`) — allocation effects are not yet tracked")
+      case TLen(e, _)                      => checkExpr(e)
+      case TCap(e, _)                      => checkExpr(e)
+      case TSliceExpr(a, lo, hi, _)        => checkExpr(a); lo.foreach(checkExpr); hi.foreach(checkExpr)
+      case TAppend(_, _, _)                => reject("cannot append to a slice (allocating side effect)")
+      case TStringFromPtr(p, l, _)         => checkExpr(p); checkExpr(l)
+      case TStringFromSlice(s, _)          => checkExpr(s)
+      case TStr(e)                         => checkExpr(e)
+      case TFmtStr(e, _)                   => checkExpr(e)
+      case _: TClosure                     => reject("cannot construct closures (may capture mutable state)")
+      case TInterfaceBox(e, _)             => checkExpr(e)
+      case TInterfaceDispatch(_, _, _, _)  => reject("cannot make interface-dispatch calls (callee effects unknown)")
+      case TIntrinsicCall(name, args, _)   =>
+        if !purePermittedBuiltins.contains(name) then reject(s"cannot call intrinsic '$name'")
+        args.foreach(checkExpr)
+      case TRangeCheck(e, _, _, _)         => checkExpr(e)
+      case TAsmExpr(_, _)                  => reject("cannot contain asm expressions")
+
+    def checkStmt(s: TStmt): Unit = s match
+      case TVarStmt(n, _, init, _) =>
+        checkExpr(init)
+        localVars += n
+      case TDestructureStmt(ns, _, init) =>
+        checkExpr(init)
+        localVars ++= ns
+      case TDestructureAssignStmt(ns, _, init) =>
+        checkExpr(init)
+        for n <- ns do checkWrite(n)
+      case TAssignStmt(target, value) =>
+        checkWrite(target)
+        checkExpr(value)
+      case TCompoundAssignStmt(target, _, value) =>
+        checkWrite(target); checkRead(target)
+        checkExpr(value)
+      case TDerefAssignStmt(p, v) =>
+        // A pointer write may target anything — too coarse to track precisely.
+        // SPARK requires explicit abstract-state tying for pointer effects; reject for now.
+        reject("cannot write through a pointer (effect not yet trackable)")
+      case TIndexAssignStmt(a, i, v) =>
+        checkExpr(a); checkExpr(i); checkExpr(v)
+        // For a write into a global slice/array, treat it as a write to that global.
+        a match
+          case TVarRef(n, _) if mutableGlobals.contains(n) && !localVars.contains(n) => checkWrite(n)
+          case _ => ()
+      case TFieldAssignStmt(o, _, v) =>
+        checkExpr(o); checkExpr(v)
+        o match
+          case TVarRef(n, _) if mutableGlobals.contains(n) && !localVars.contains(n) => checkWrite(n)
+          case _ => ()
+      case TFieldCompoundAssignStmt(o, _, _, v) =>
+        checkExpr(o); checkExpr(v)
+        o match
+          case TVarRef(n, _) if mutableGlobals.contains(n) && !localVars.contains(n) => checkWrite(n)
+          case _ => ()
+      case TReturnStmt(v) =>
+        v.foreach(checkExpr)
+      case TWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TForStmt(init, c, u, b, _) =>
+        checkStmt(init); checkExpr(c); checkStmt(u); b.foreach(checkStmt)
+      case TDoWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TLoopStmt(b, _) =>
+        b.foreach(checkStmt)
+      case TBreakStmt(_) => ()
+      case TContinueStmt(_) => ()
+      case TDeferStmt(inner) =>
         checkStmt(inner)
       case TAsmStmt(_) =>
         reject("cannot contain asm blocks")
