@@ -466,10 +466,17 @@ class SyslLLVMCodegen(target: String = "host"):
       // Increment string buffer refcount for string params (callee holds a copy)
       if param.typ == SyslType.StringType then
         emitStringDescrIncr(alloca)
-      // Value-struct params containing strings: incr string fields (callee holds a copy)
+      // Aggregate params carrying rc content: incr on entry so the callee's
+      // exit cleanup (which always decrs) is balanced. Without this, the
+      // caller's shared buffer gets dropped to rc=0 the first time the
+      // value is passed into any consuming function (is_ok, unwrap, etc.).
       param.typ match
         case st: SyslType.StructType if structHasStringFields(st) =>
           emitStructStringFieldsIncr(alloca, st)
+        case et: SyslType.EnumType if structHasStringFields(et) =>
+          emitEnumStringFieldsIncr(alloca, et)
+        case SyslType.ArrayType(elem, _) if structHasStringFields(elem) =>
+          emitValueRC(alloca, param.typ, incr = true)
         case _ =>
 
     // Switch to body buffer for the function body
@@ -1037,7 +1044,6 @@ class SyslLLVMCodegen(target: String = "host"):
       case TIndexAssignStmt(array, index, value) =>
         val base = genExpr(array)
         val idx = genExpr(index)
-        val v = genExpr(value)
         val elemType = array.typ match
           case SyslType.ArrayType(elem, _) => elem
           case SyslType.SliceType(elem) => elem
@@ -1085,6 +1091,7 @@ class SyslLLVMCodegen(target: String = "host"):
             val cast = newReg()
             emit(s"  $cast = bitcast i8* $elemAddr to $elt*")
             cast
+        val v = genExpr(value)
         val treatAsAggregate = isAggregate(elemType) || (elemType match
           case SyslType.RefType(_: SyslType.SliceType) => true
           case _ => false)
@@ -1092,6 +1099,19 @@ class SyslLLVMCodegen(target: String = "host"):
           val loaded = newReg()
           emit(s"  $loaded = load $elt, $elt* $v")
           emit(s"  store $elt $loaded, $elt* $typedPtr")
+          // Increment rc on the new element if the source is borrowed (not a
+          // freshly-constructed owned value). Mirrors TFieldAssignStmt.
+          if isSliceType(elemType) && !isSliceOwned(value) then emitSliceBackrefIncr(typedPtr)
+          if isStringType(elemType) && !isOwnedString(value) then emitStringDescrIncr(typedPtr)
+          elemType match
+            case _: SyslType.FuncType if !isOwnedClosure(value) => emitClosureDescrIncr(typedPtr)
+            case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(value) =>
+              emitStructStringFieldsIncr(typedPtr, st)
+            case et: SyslType.EnumType if structHasStringFields(et) && !isOwnedStruct(value) =>
+              emitEnumStringFieldsIncr(typedPtr, et)
+            case SyslType.ArrayType(_, _) if structHasStringFields(elemType) && !isOwnedStruct(value) =>
+              emitValueRC(typedPtr, elemType, incr = true)
+            case _ =>
         else
           // Widen or truncate if value width differs from element width
           val vLt = llvmType(value.typ)
