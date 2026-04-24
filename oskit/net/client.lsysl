@@ -43,6 +43,8 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_GET_IP_CONFIG = 17
     val INET_CMD_RECVFROM_TIMEOUT = 18
     val INET_CMD_ARP_PROBE    = 19
+    val INET_CMD_ICMP_SEND    = 21
+    val INET_CMD_ICMP_CHECK   = 22
     val INET_CMD_TCP_DEBUG    = 20
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
@@ -530,6 +532,66 @@ Wire: cmd(1) + op(1) + target(4) → status(1) + seen(1).
 
     arp_probe_announce(ip: u32) -> int
         arp_probe_send_op(ARP_PROBE_OP_ANNOUNCE, ip)
+
+
+### icmp_send / icmp_check
+
+`ping`-style, split into a non-blocking send + a non-blocking
+poll so ping can scan all outstanding requests on its own cadence
+rather than having the server block a worker.
+
+`icmp_send(dst_ip, id, seq)` queues an ECHO_REQUEST and registers
+(id, seq) so the reply can be correlated. Returns 0 on success
+(frame sent or ARP miss fired), -1 if the ping table is full.
+
+`icmp_check(id, seq, out_src_ip, out_rtt_ticks)` returns:
+- `1` — reply arrived; src_ip + rtt_ticks filled in.
+- `0` — still waiting; out vars untouched.
+- `-1` — no such (id, seq) registered.
+
+    icmp_send(dst_ip: u32, id: int, seq: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [9]byte
+        msg[0] = byte(INET_CMD_ICMP_SEND)
+        net_write_ipv4(msg, 1, dst_ip)
+        msg[5] = byte((id >> 8) & 0xff)
+        msg[6] = byte(id & 0xff)
+        msg[7] = byte((seq >> 8) & 0xff)
+        msg[8] = byte(seq & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 9, reply, 1)
+        if reply[0] != 0
+            return -1
+        0
+
+    icmp_check(id: int, seq: int, out_src_ip: *u32, out_rtt_ticks: *int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(INET_CMD_ICMP_CHECK)
+        msg[1] = byte((id >> 8) & 0xff)
+        msg[2] = byte(id & 0xff)
+        msg[3] = byte((seq >> 8) & 0xff)
+        msg[4] = byte(seq & 0xff)
+        var reply: [9]byte
+        ipc_send(port, msg, 5, reply, 9)
+        val status = int(reply[0])
+        if status != 0
+            if status == 1
+                return 0
+            return -1
+        *out_src_ip = ipv4(
+            int(reply[1]) & 0xff,
+            int(reply[2]) & 0xff,
+            int(reply[3]) & 0xff,
+            int(reply[4]) & 0xff)
+        val rtt_hi = ((int(reply[5]) & 0xff) << 24) | ((int(reply[6]) & 0xff) << 16)
+        val rtt_lo = ((int(reply[7]) & 0xff) << 8) | (int(reply[8]) & 0xff)
+        *out_rtt_ticks = rtt_hi | rtt_lo
+        1
 
 
 ### tcp_debug (test-only)

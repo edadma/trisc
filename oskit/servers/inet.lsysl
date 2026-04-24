@@ -55,6 +55,8 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_RECVFROM_TIMEOUT = 18
     val INET_CMD_ARP_PROBE    = 19
     val INET_CMD_TCP_DEBUG    = 20
+    val INET_CMD_ICMP_SEND    = 21
+    val INET_CMD_ICMP_CHECK   = 22
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -691,6 +693,70 @@ defender was observed since the preceding `START`.
         ipc_reply(sender, reply, 2)
 
 
+### ICMP echo send / check
+
+`ping`-style: the client registers a ping (id, seq) and asks us
+to emit an ECHO_REQUEST to `dst_ip`; later it polls for a
+matching ECHO_REPLY. Both operations are non-blocking: SEND
+returns immediately after transmit, CHECK returns "still
+waiting" if no reply has arrived yet. ARP misses are surfaced
+to the caller so it can retry.
+
+```
+SEND request:  cmd(1) + dst_ip(4) + id(2) + seq(2)   = 9 bytes
+SEND reply:    status(1)                             = 1 byte
+CHECK request: cmd(1) + id(2) + seq(2)               = 5 bytes
+CHECK reply:   status(1) + src_ip(4) + rtt(4)        = 9 bytes
+    status: 0 = reply arrived, 1 = still waiting, -1 = no slot
+```
+
+    inet_handle_icmp_send(sender: int, buf: *byte)
+        val dst_ip = ipv4(
+            int(buf[1]) & 0xff,
+            int(buf[2]) & 0xff,
+            int(buf[3]) & 0xff,
+            int(buf[4]) & 0xff)
+        val id  = (int(buf[5]) & 0xff) << 8 | (int(buf[6]) & 0xff)
+        val seq = (int(buf[7]) & 0xff) << 8 | (int(buf[8]) & 0xff)
+        var reply: [1]byte
+        reply[0] = 0
+        if inet_ping_register(id, seq, int(uptime())) < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        if inet_send_icmp_echo_to(dst_ip, id, seq) < 0
+            reply[0] = byte(-1)
+        ipc_reply(sender, reply, 1)
+
+
+    inet_handle_icmp_check(sender: int, buf: *byte)
+        val id  = (int(buf[1]) & 0xff) << 8 | (int(buf[2]) & 0xff)
+        val seq = (int(buf[3]) & 0xff) << 8 | (int(buf[4]) & 0xff)
+        var reply: [9]byte
+        var k = 0
+        while k < 9
+            reply[k] = 0
+            k += 1
+        var src_ip: u32 = u32(0)
+        var rtt: int = 0
+        val rc = inet_ping_check(id, seq, &src_ip, &rtt)
+        if rc < 0
+            reply[0] = byte(-1)
+        else if rc == 0
+            reply[0] = 1
+        else
+            reply[0] = 0
+            reply[1] = byte(ipv4_octet(src_ip, 0))
+            reply[2] = byte(ipv4_octet(src_ip, 1))
+            reply[3] = byte(ipv4_octet(src_ip, 2))
+            reply[4] = byte(ipv4_octet(src_ip, 3))
+            reply[5] = byte((rtt >> 24) & 0xff)
+            reply[6] = byte((rtt >> 16) & 0xff)
+            reply[7] = byte((rtt >> 8) & 0xff)
+            reply[8] = byte(rtt & 0xff)
+        ipc_reply(sender, reply, 9)
+
+
 ### UDP recv-timeout scanner
 
 Called from the inet main loop on every wake. Scans every
@@ -1056,6 +1122,14 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
                     return 1
                 if itype == ICMP_ECHO_REP
                     inet_bump_pings_received()
+                    val rep_id = pkt_read_u16(frame, icmp_off + 4)
+                    val rep_seq = pkt_read_u16(frame, icmp_off + 6)
+                    val rep_src = ipv4(
+                        int(frame[14 + 12]) & 0xff,
+                        int(frame[14 + 13]) & 0xff,
+                        int(frame[14 + 14]) & 0xff,
+                        int(frame[14 + 15]) & 0xff)
+                    inet_ping_deliver(rep_src, rep_id, rep_seq, int(uptime()))
                     return 1
                 return 0
             if proto == IP_PROTO_UDP
@@ -1159,6 +1233,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_SET_IP_CONFIG -> inet_handle_set_ip_config(sender, buf)
                     INET_CMD_GET_IP_CONFIG -> inet_handle_get_ip_config(sender, buf)
                     INET_CMD_ARP_PROBE   -> inet_handle_arp_probe(sender, buf)
+                    INET_CMD_ICMP_SEND   -> inet_handle_icmp_send(sender, buf)
+                    INET_CMD_ICMP_CHECK  -> inet_handle_icmp_check(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->

@@ -551,23 +551,24 @@ the reply.
         inet_nic_send_packet(frame, 42)
 
 
-ICMP echo request to the gateway. Destination MAC must already
-have been learned via ARP. `id` + `seq` are reflected by the peer
-in its reply so we can match replies to requests.
+ICMP echo request to arbitrary `dst_ip`. Next-hop MAC comes from
+`inet_resolve_mac` (same subnet-vs-gateway logic as UDP). `id` +
+`seq` are reflected by the peer in its reply so we can match
+replies to requests. Returns 0 on send, -1 on ARP miss / link
+not ready / nic reject. No pending queue here — ping is already
+periodic so the caller can just re-send.
 
-    inet_send_icmp_echo(id: int, seq: int) -> int
+    inet_send_icmp_echo_to(dst_ip: u32, id: int, seq: int) -> int
         if inet_our_mac_known == 0
             return -1
-        var gw_mac: [6]byte
-        val gw_ip = ipv4(INET_GW_IP_A, INET_GW_IP_B,
-            INET_GW_IP_C, INET_GW_IP_D)
-        if inet_arp_lookup(gw_ip, gw_mac) == 0
+        var next_hop_mac: [6]byte
+        if inet_resolve_mac(dst_ip, next_hop_mac) == 0
             return -1
         var frame: [42]byte
 
 Ethernet header.
 
-        pkt_write_mac(frame, 0, gw_mac)
+        pkt_write_mac(frame, 0, next_hop_mac)
         pkt_write_mac(frame, 6, inet_our_mac)
         pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
 
@@ -584,7 +585,8 @@ IPv4 header (20 bytes, no options).
         pkt_write_ipv4(frame, 26,
             INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
         pkt_write_ipv4(frame, 30,
-            INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D)
+            ipv4_octet(dst_ip, 0), ipv4_octet(dst_ip, 1),
+            ipv4_octet(dst_ip, 2), ipv4_octet(dst_ip, 3))
         pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
 
 ICMP echo (8 bytes, no payload).
@@ -600,6 +602,108 @@ ICMP echo (8 bytes, no payload).
         if r == 0
             inet_pings_sent += 1
         r
+
+
+Convenience wrapper: echo to the default gateway. Retained so
+existing boot-demo ARP-then-ping code keeps working.
+
+    inet_send_icmp_echo(id: int, seq: int) -> int
+        inet_send_icmp_echo_to(
+            ipv4(INET_GW_IP_A, INET_GW_IP_B,
+                INET_GW_IP_C, INET_GW_IP_D),
+            id, seq)
+
+
+### Ping reply table
+
+Small table of outstanding ping requests so `ping`-style programs
+can wait for the matching ECHO_REP. When the inet RX path sees an
+ECHO_REP, it looks up (id, seq) here and stamps reply_tick +
+src_ip. The client polls via INET_CMD_ICMP_CHECK.
+
+    val INET_PING_MAX = 4
+
+    struct InetPingSlot
+        in_use: int
+        id: int
+        seq: int
+        send_tick: int
+        src_ip: u32
+        reply_tick: int
+        received: int
+
+    var inet_ping_table: [4]InetPingSlot
+
+
+Allocate a slot and record (id, seq, send_tick). Returns slot
+index on success, -1 if the table is full. Duplicate (id, seq)
+from a previous un-checked slot just overwrites that slot.
+
+    inet_ping_register(id: int, seq: int, send_tick: int) -> int
+        var found = -1
+        var i = 0
+        while i < INET_PING_MAX
+            if inet_ping_table[i].in_use != 0
+                if inet_ping_table[i].id == id
+                    if inet_ping_table[i].seq == seq
+                        found = i
+            i += 1
+        if found < 0
+            i = 0
+            while i < INET_PING_MAX
+                if inet_ping_table[i].in_use == 0
+                    found = i
+                    i = INET_PING_MAX
+                else
+                    i += 1
+        if found < 0
+            return -1
+        inet_ping_table[found].in_use = 1
+        inet_ping_table[found].id = id
+        inet_ping_table[found].seq = seq
+        inet_ping_table[found].send_tick = send_tick
+        inet_ping_table[found].src_ip = u32(0)
+        inet_ping_table[found].reply_tick = 0
+        inet_ping_table[found].received = 0
+        found
+
+
+Called from `inet_handle_frame` on ICMP_ECHO_REP. Updates the
+matching slot with src_ip and reply_tick so the client's CHECK
+returns a completed entry.
+
+    inet_ping_deliver(src_ip: u32, id: int, seq: int, now_tick: int)
+        var i = 0
+        while i < INET_PING_MAX
+            if inet_ping_table[i].in_use != 0
+                if inet_ping_table[i].received == 0
+                    if inet_ping_table[i].id == id
+                        if inet_ping_table[i].seq == seq
+                            inet_ping_table[i].src_ip = src_ip
+                            inet_ping_table[i].reply_tick = now_tick
+                            inet_ping_table[i].received = 1
+                            return
+            i += 1
+
+
+Look up (id, seq) and, if a reply has arrived, fill `out_src_ip`
++ `out_rtt` and free the slot. Returns 1 on complete, 0 on still
+waiting, -1 on no such slot.
+
+    inet_ping_check(id: int, seq: int, out_src_ip: *u32, out_rtt: *int) -> int
+        var i = 0
+        while i < INET_PING_MAX
+            if inet_ping_table[i].in_use != 0
+                if inet_ping_table[i].id == id
+                    if inet_ping_table[i].seq == seq
+                        if inet_ping_table[i].received != 0
+                            *out_src_ip = inet_ping_table[i].src_ip
+                            *out_rtt = inet_ping_table[i].reply_tick - inet_ping_table[i].send_tick
+                            inet_ping_table[i].in_use = 0
+                            return 1
+                        return 0
+            i += 1
+        -1
 
 
 ICMP echo reply in response to `req`. `req` points at the start

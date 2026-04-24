@@ -1,0 +1,199 @@
+ping — send ICMP echo requests to a host
+=========================================
+
+`ping <ip>` sends 4 ICMP echo requests (one per second by default)
+to `ip` and reports RTT for each. Matches the classic Unix ping
+behaviour closely enough for interactive "is it reachable"
+diagnostics, without the history of quirks (no DNS lookup, no
+record route, no flood mode).
+
+Wire layout:
+
+```
+ping <dotted-ip>                 # 4 pings, 1-second spacing
+ping -c N <dotted-ip>            # N pings
+```
+
+Implementation: for each iteration, call `icmp_send(dst, id, seq)`
+then spin on `icmp_check` with a 1-second budget. RTT arrives in
+scheduler ticks at 100 Hz, so we report in ticks and ms.
+
+    module oskit.bin.ping
+
+    import oskit.ulib.{puts, sleep, exit, exit_with, uptime}
+    import oskit.net.{icmp_send, icmp_check}
+    import std.net.{ipv4, ipv4_octet}
+
+
+Dotted-quad IPv4 parser. Accepts `A.B.C.D` with 0..255 per octet
+and returns the packed u32 via `out_ip`, or -1 on syntax/range
+error.
+
+    parse_ipv4(s: string, out_ip: *u32) -> int
+        val p = *byte(s)
+        val n = len(s)
+        var octets: [4]int
+        var oi = 0
+        var acc = 0
+        var digits = 0
+        var i = 0
+        while i < n
+            val c = int(p[i]) & 0xff
+            if c == int('.')
+                if digits == 0
+                    return -1
+                if oi >= 3
+                    return -1
+                octets[oi] = acc
+                oi += 1
+                acc = 0
+                digits = 0
+            else if c >= int('0')
+                if c <= int('9')
+                    acc = acc * 10 + (c - int('0'))
+                    digits += 1
+                    if acc > 255
+                        return -1
+                else
+                    return -1
+            else
+                return -1
+            i += 1
+        if digits == 0
+            return -1
+        if oi != 3
+            return -1
+        octets[3] = acc
+        *out_ip = ipv4(octets[0], octets[1], octets[2], octets[3])
+        0
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    print_ipv4(ip: u32)
+        print_udec(ipv4_octet(ip, 0))
+        puts(".")
+        print_udec(ipv4_octet(ip, 1))
+        puts(".")
+        print_udec(ipv4_octet(ip, 2))
+        puts(".")
+        print_udec(ipv4_octet(ip, 3))
+
+
+Send one ping and wait up to 1 s for the reply. Returns 1 on
+success (reply arrived), 0 on timeout, -1 on send failure. On
+success, prints the "64 bytes from ... time=N ms" line.
+
+    ping_once(dst_ip: u32, id: int, seq: int) -> int
+        val start = int(uptime())
+        if icmp_send(dst_ip, id, seq) < 0
+            return -1
+        val deadline = start + 100   // 100 ticks ≈ 1 s
+        var src_ip: u32 = u32(0)
+        var rtt_ticks: int = 0
+        while int(uptime()) < deadline
+            val r = icmp_check(id, seq, &src_ip, &rtt_ticks)
+            if r == 1
+                // RTT in ticks → ms: 10 ms per tick at 100 Hz.
+                val rtt_ms = rtt_ticks * 10
+                puts("reply from ")
+                print_ipv4(src_ip)
+                puts(": icmp_seq=")
+                print_udec(seq)
+                puts(" time=")
+                print_udec(rtt_ms)
+                puts(" ms\n")
+                return 1
+            if r < 0
+                return -1
+            sleep(2)
+        0
+
+
+    main(argv: []string)
+        var count = 4
+        var ip_arg: string = ""
+        val n = len(argv)
+        if n < 2
+            puts("usage: ping [-c N] <ip>\n")
+            exit_with(2)
+            return
+        var ai = 1
+        while ai < n
+            val a = argv[ai]
+            if a == "-c"
+                if ai + 1 >= n
+                    puts("ping: -c needs an argument\n")
+                    exit_with(2)
+                    return
+                val cs = argv[ai + 1]
+                val cp = *byte(cs)
+                val cn = len(cs)
+                var v = 0
+                var ci = 0
+                while ci < cn
+                    val d = int(cp[ci]) & 0xff
+                    if d < int('0')
+                        puts("ping: -c needs a number\n")
+                        exit_with(2)
+                        return
+                    if d > int('9')
+                        puts("ping: -c needs a number\n")
+                        exit_with(2)
+                        return
+                    v = v * 10 + (d - int('0'))
+                    ci += 1
+                count = v
+                ai += 2
+            else
+                ip_arg = a
+                ai += 1
+
+        var dst_ip: u32 = u32(0)
+        if parse_ipv4(ip_arg, &dst_ip) < 0
+            puts("ping: bad ip: ")
+            puts(ip_arg)
+            puts("\n")
+            exit_with(2)
+            return
+
+        puts("PING ")
+        print_ipv4(dst_ip)
+        puts("\n")
+
+        val id = int(uptime()) & 0xffff
+        var got = 0
+        var seq = 1
+        while seq <= count
+            val r = ping_once(dst_ip, id, seq)
+            if r == 1
+                got += 1
+            else if r == 0
+                puts("icmp_seq=")
+                print_udec(seq)
+                puts(" timeout\n")
+            else
+                puts("icmp_seq=")
+                print_udec(seq)
+                puts(" send failed\n")
+            if seq < count
+                sleep(100)  // 1 s between pings
+            seq += 1
+
+        puts("--- ")
+        print_ipv4(dst_ip)
+        puts(" ping statistics ---\n")
+        print_udec(count)
+        puts(" sent, ")
+        print_udec(got)
+        puts(" received\n")
+
+        if got > 0
+            exit()
+        exit_with(1)
