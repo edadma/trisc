@@ -710,7 +710,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if functions.contains(name) || genericTemplates.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
-            val isPure = fd.attributes.exists(_.name == "pure")
+            val isPureAttr = fd.attributes.exists(_.name == "pure")
             val isGhost = fd.attributes.exists(_.name == "ghost")
             // Extract `#reads(a, b)` / `#writes(c)` raw identifier lists. Validation that
             // each name resolves to a module-level mutable var is deferred to validateEffects
@@ -728,9 +728,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               }.toSet)
             val readsSet = extractIdentList("reads")
             val writesSet = extractIdentList("writes")
-            if isPure && (readsSet.isDefined || writesSet.isDefined) then
+            // Expression functions (`def ...`) are implicitly `#pure` — they exist to serve
+            // as proof-friendly abstraction predicates, so side effects and global mutation
+            // are never appropriate. `#ghost def` stays on the ghost track (ghost is already
+            // restricted and is stripped before codegen).
+            if isDef && (readsSet.isDefined || writesSet.isDefined) then
+              throw AnalysisError(s"'def $name' cannot carry #reads/#writes — def functions are implicitly pure", fd)
+            val isPure = isPureAttr || (isDef && !isGhost)
+            if isPureAttr && (readsSet.isDefined || writesSet.isDefined) then
               throw AnalysisError(s"#pure on '$name' cannot be combined with #reads/#writes (it already implies both empty)", fd)
-            if isGhost && isPure then
+            if isGhost && isPureAttr then
               throw AnalysisError(s"#ghost on '$name' is incompatible with #pure (ghost code is removed before codegen, so #pure is meaningless)", fd)
             if isGhost && (readsSet.isDefined || writesSet.isDefined) then
               throw AnalysisError(s"#ghost on '$name' is incompatible with #reads/#writes (ghost code is removed before codegen)", fd)
@@ -1130,7 +1137,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         currentReturnType = savedReturnType
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
-        if funInfo.isPure then validatePureFn(name, tBody, funInfo.params.map(_._1))
+        if funInfo.isPure then
+          val isDefFn = fdAst match { case FunDeclAST(_, _, _, _, _, _, _, _, d) => d }
+          validatePureFn(name, tBody, funInfo.params.map(_._1), isDefFn)
         if funInfo.reads.isDefined || funInfo.writes.isDefined then
           validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
         validateGhostDiscipline(name, funInfo, tBody)
@@ -1222,10 +1231,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  and IO/allocation builtins. Local-variable mutation is fine — it cannot escape.
    *  Called after body analysis so the typed AST is complete; purity of callees is
    *  read from their FunInfo, which was populated in the pre-collection pass. */
-  private def validatePureFn(funcName: String, body: TFunBody, paramNames: List[String]): Unit =
+  private def validatePureFn(funcName: String, body: TFunBody, paramNames: List[String], isDefFn: Boolean = false): Unit =
     val localVars = mutable.HashSet.from(paramNames)
+    val prefix = if isDefFn then s"def function '$funcName'" else s"#pure function '$funcName'"
 
-    def reject(msg: String): Nothing = throw AnalysisError(s"#pure function '$funcName' $msg")
+    def reject(msg: String): Nothing = throw AnalysisError(s"$prefix $msg")
 
     def isPureCallee(callee: String): Boolean =
       // Self-recursion is always fine (the function has isPure=true in the table).
