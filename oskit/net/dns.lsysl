@@ -17,7 +17,6 @@ is `server_ip = dhcp_learned_dns_servers[0]`, but a hard-coded
 
     module oskit.net
 
-    import oskit.ulib.{sleep}
     import std.net.{AF_INET, SOCK_DGRAM}
 
 
@@ -258,18 +257,7 @@ query reopens a socket on the same ephemeral port.
             close_socket(fd)
             return -1
 
-        // First sendto to a fresh on-subnet IP fires an ARP request
-        // and drops the datagram (UDP best-effort). Retry a few times
-        // with a short sleep in between so ARP replies have time to
-        // populate the cache. Already-ARP'd destinations (gateway for
-        // off-subnet traffic) succeed on the first attempt.
-        var attempt = 0
-        var sent = -1
-        while attempt < 4 && sent < 0
-            sent = sendto(fd, &qbuf[0], qlen, server_ip, server_port)
-            if sent < 0
-                sleep(5)  // ~50ms at 100Hz
-                attempt += 1
+        val sent = sendto(fd, &qbuf[0], qlen, server_ip, server_port)
         if sent < 0
             close_socket(fd)
             return -1
