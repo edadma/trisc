@@ -1,0 +1,164 @@
+test_sockopt — setsockopt / getsockopt accept-and-ignore
+========================================================
+
+Exercises the MVP setsockopt (208) / getsockopt (209) paths in
+the aarch64 POSIX shim. The shim doesn't actually track option
+state; it just accepts a handful of well-known `(level, optname)`
+pairs (SO_REUSEADDR, SO_BROADCAST, SO_KEEPALIVE, SO_REUSEPORT,
+SO_ERROR, TCP_NODELAY) and returns success. Anything outside the
+accept-list should return `-ENOPROTOOPT` (-92).
+
+Pass criteria:
+- `setsockopt SO_REUSEADDR = 1` returns 0
+- `setsockopt SO_BROADCAST = 1` returns 0
+- `setsockopt TCP_NODELAY = 1` returns 0
+- `setsockopt <unknown>` returns -92
+- `getsockopt SO_REUSEADDR` returns 0, writes value=0, optlen=4
+- `getsockopt <unknown>` returns -92
+- `sockopt: done` marker printed at the end
+
+    module oskit.bin.test_sockopt
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_SETSOCKOPT = 208
+    val NR_GETSOCKOPT = 209
+    val NR_SOCKET     = 337
+    val NR_CLOSE      = 147
+
+    val AF_INET_V     = 2
+    val SOCK_DGRAM_V  = 2
+
+    val SOL_SOCKET    = 1
+    val SO_REUSEADDR  = 2
+    val SO_BROADCAST  = 6
+    val IPPROTO_TCP   = 6
+    val TCP_NODELAY   = 1
+
+
+Decimal printer for small signed ints (handles the negative
+`-errno` we report for unknown options).
+
+    print_sdec(v: int)
+        if v < 0
+            puts("-")
+            print_sdec(-v)
+            return
+        if v >= 10
+            print_sdec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+Raw POSIX syscall wrappers.
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_setsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, vlen: int) -> int
+        int(syscall6(NR_SETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(vlen), 0))
+
+    posix_getsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, lenp: *i32) -> int
+        int(syscall6(NR_GETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(lenp), 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        val fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if fd < 0
+            puts("sockopt: socket failed\n")
+            exit_with(1)
+            return
+
+        var v: [4]byte
+        v[0] = byte(1)
+        v[1] = byte(0)
+        v[2] = byte(0)
+        v[3] = byte(0)
+
+        val r1 = posix_setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &v[0], 4)
+        puts("sockopt: set SO_REUSEADDR = ")
+        print_sdec(r1)
+        puts("\n")
+        if r1 != 0
+            puts("sockopt: FAIL SO_REUSEADDR\n")
+            exit_with(2)
+            return
+
+        val r2 = posix_setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &v[0], 4)
+        puts("sockopt: set SO_BROADCAST = ")
+        print_sdec(r2)
+        puts("\n")
+        if r2 != 0
+            puts("sockopt: FAIL SO_BROADCAST\n")
+            exit_with(3)
+            return
+
+        val r3 = posix_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v[0], 4)
+        puts("sockopt: set TCP_NODELAY = ")
+        print_sdec(r3)
+        puts("\n")
+        if r3 != 0
+            puts("sockopt: FAIL TCP_NODELAY\n")
+            exit_with(4)
+            return
+
+        // Unknown option — should report -ENOPROTOOPT (-92).
+        val r4 = posix_setsockopt(fd, SOL_SOCKET, 999, &v[0], 4)
+        puts("sockopt: set unknown = ")
+        print_sdec(r4)
+        puts("\n")
+        if r4 != -92
+            puts("sockopt: FAIL unknown (expected -92)\n")
+            exit_with(5)
+            return
+
+        var outv: [8]byte
+        outv[0] = byte(0xaa)
+        outv[1] = byte(0xbb)
+        outv[2] = byte(0xcc)
+        outv[3] = byte(0xdd)
+        var olen: i32 = i32(8)
+        val r5 = posix_getsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                                  &outv[0], &olen)
+        puts("sockopt: get SO_REUSEADDR = ")
+        print_sdec(r5)
+        puts(" olen=")
+        print_sdec(int(olen))
+        puts(" val=")
+        print_sdec(int(outv[0]))
+        puts("\n")
+        if r5 != 0
+            puts("sockopt: FAIL get SO_REUSEADDR\n")
+            exit_with(6)
+            return
+        if int(olen) != 4
+            puts("sockopt: FAIL olen not 4\n")
+            exit_with(7)
+            return
+        if int(outv[0]) != 0
+            puts("sockopt: FAIL val not zero\n")
+            exit_with(8)
+            return
+
+        val r6 = posix_getsockopt(fd, SOL_SOCKET, 999,
+                                  &outv[0], &olen)
+        puts("sockopt: get unknown = ")
+        print_sdec(r6)
+        puts("\n")
+        if r6 != -92
+            puts("sockopt: FAIL get unknown (expected -92)\n")
+            exit_with(9)
+            return
+
+        posix_close(fd)
+        puts("sockopt: done\n")
+        exit()

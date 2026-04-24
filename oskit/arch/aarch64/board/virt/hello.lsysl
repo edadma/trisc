@@ -593,6 +593,10 @@ to the same UDP stack that native sysl programs use via
             return sys_recvfrom(int(a0), a1, int(a2), int(a3), a4, a5)
         if num == 307
             return sys_sendto(int(a0), a1, int(a2), int(a3), a4, int(a5))
+        if num == 208
+            return sys_setsockopt(int(a0), int(a1), int(a2), a3, int(a4))
+        if num == 209
+            return sys_getsockopt(int(a0), int(a1), int(a2), a3, a4)
         if num == 334
             return sys_shutdown(int(a0), int(a1))
         if num == 337
@@ -1043,6 +1047,81 @@ do. Documented in the phase-2 handoff memory.
             return i64(-9)
         if posix_fd_target(fd) < 0
             return i64(-107)            // -ENOTCONN
+        i64(0)
+
+SYS_SETSOCKOPT / SYS_GETSOCKOPT. Accept-and-ignore MVP: the inet
+server doesn't track per-socket options today, so we accept the
+handful of `(level, optname)` pairs that real programs reflexively
+call before doing anything (DHCP clients setting SO_BROADCAST, TCP
+servers setting SO_REUSEADDR, latency-sensitive clients toggling
+TCP_NODELAY) and return success without any side effect. Anything
+outside the accept-list returns `-ENOPROTOOPT` so genuine
+misconfiguration still surfaces.
+
+Linux `SOL_SOCKET = 1`; `SO_REUSEADDR = 2`, `SO_ERROR = 4`,
+`SO_BROADCAST = 6`, `SO_KEEPALIVE = 9`, `SO_REUSEPORT = 15`.
+`IPPROTO_TCP = 6`; `TCP_NODELAY = 1`.
+
+    sys_setsockopt(fd: int, level: int, optname: int, optval: i64, optlen: int) -> i64
+        val k = posix_fd_kind(fd)
+        if k != POSIX_FD_UDP_SOCKET
+            if k != POSIX_FD_TCP_SOCKET
+                return i64(-9)          // -EBADF
+        if level == 1
+            if optname == 2
+                return i64(0)
+            if optname == 6
+                return i64(0)
+            if optname == 9
+                return i64(0)
+            if optname == 15
+                return i64(0)
+        if level == 6
+            if optname == 1
+                return i64(0)
+        i64(-92)                        // -ENOPROTOOPT
+
+`val` is a pointer to the option buffer; `len_ptr` points at an
+i32 that the caller seeded with the buffer capacity. We write 0
+into the first 4 bytes (every option we support is an int-sized
+boolean/integer and we never actually track its state) and set
+`*len_ptr = 4`. `-ENOPROTOOPT` is returned for anything outside
+the accept-list (same set as setsockopt); the option buffer is
+left untouched in that case.
+
+    sys_getsockopt(fd: int, level: int, optname: int, optval: i64, len_ptr: i64) -> i64
+        val k = posix_fd_kind(fd)
+        if k != POSIX_FD_UDP_SOCKET
+            if k != POSIX_FD_TCP_SOCKET
+                return i64(-9)          // -EBADF
+        var accept = 0
+        if level == 1
+            if optname == 2
+                accept = 1
+            if optname == 4
+                accept = 1
+            if optname == 6
+                accept = 1
+            if optname == 9
+                accept = 1
+            if optname == 15
+                accept = 1
+        if level == 6
+            if optname == 1
+                accept = 1
+        if accept == 0
+            return i64(-92)             // -ENOPROTOOPT
+        if len_ptr == i64(0)
+            return i64(-14)             // -EFAULT
+        val lp: *i32 = *i32(len_ptr)
+        val cap = int(*lp)
+        if cap < 4
+            return i64(-22)             // -EINVAL
+        if optval == i64(0)
+            return i64(-14)
+        val vp: *i32 = *i32(optval)
+        *vp = i32(0)
+        *lp = i32(4)
         i64(0)
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a
