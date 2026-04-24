@@ -1,0 +1,275 @@
+OSKit DNS Client — Minimal RFC 1035 Resolver
+=============================================
+
+Thin UDP-based DNS resolver that answers one question: given a
+hostname and a DNS server IP, return the first A-record IPv4 it
+finds in the answer section. No caching, no retries beyond the
+single `recvfrom_timeout` call, no AAAA, no CNAME chasing beyond
+the server's own recursion.
+
+Shape mirrors `oskit.net.tcp_connect` et al — a library helper
+that userland binaries (`test_dns`, a future `nslookup`, outbound
+`wget`) call directly. The DNS server IP/port are explicit
+parameters; this module deliberately does not consult any global
+"which nameserver" state so callers stay in control. Typical wiring
+is `server_ip = dhcp_learned_dns_servers[0]`, but a hard-coded
+`10.0.2.2:port_of_mock_server` works fine for tests.
+
+    module oskit.net
+
+    import std.net.{AF_INET, SOCK_DGRAM}
+
+
+Protocol constants
+------------------
+
+    val DNS_TYPE_A       = 1
+    val DNS_TYPE_CNAME   = 5
+    val DNS_CLASS_IN     = 1
+    val DNS_FLAG_RD      = 0x0100    // recursion desired (query)
+    val DNS_FLAG_QR      = 0x8000    // response bit (set in replies)
+    val DNS_RCODE_MASK   = 0x000f
+    val DNS_HDR_LEN      = 12
+    val DNS_MAX_PKT      = 512       // classic UDP DNS payload cap
+    val DNS_MAX_NAME     = 255       // RFC 1035 §3.1
+    val DNS_MAX_LABEL    = 63
+
+
+Endian helpers
+--------------
+
+On-wire DNS is big-endian. The inet server's `net_read_u16` /
+`net_write_u16` helpers live in `oskit.net.client`'s private scope,
+so we keep local copies here to avoid a cross-file dependency on
+internal names.
+
+    dns_write_u16_be(buf: *byte, off: int, v: int)
+        buf[off]     = byte((v >> 8) & 0xff)
+        buf[off + 1] = byte(v & 0xff)
+
+    dns_read_u16_be(buf: *byte, off: int) -> int
+        val hi = int(buf[off]) & 0xff
+        val lo = int(buf[off + 1]) & 0xff
+        (hi << 8) | lo
+
+    dns_read_u32_be(buf: *byte, off: int) -> u32
+        val b0 = u32(int(buf[off])     & 0xff)
+        val b1 = u32(int(buf[off + 1]) & 0xff)
+        val b2 = u32(int(buf[off + 2]) & 0xff)
+        val b3 = u32(int(buf[off + 3]) & 0xff)
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+
+### dns_encode_name
+
+Encode a dotted hostname as length-prefixed labels followed by a
+zero terminator, starting at `buf[off]`. Returns the offset one
+past the terminator on success, or `-1` if the name overruns the
+buffer, any label exceeds 63 bytes, or the total exceeds 255 bytes.
+Empty names and consecutive dots are rejected.
+
+    dns_encode_name(name: string, buf: *byte, off: int, cap: int) -> int
+        val n = len(name)
+        if n <= 0
+            return -1
+        val p = *byte(name)
+        var cur = off
+        var i = 0
+        var total = 0
+        while i < n
+            var j = i
+            while j < n && p[j] != byte('.')
+                j += 1
+            val label_len = j - i
+            if label_len <= 0
+                return -1
+            if label_len > DNS_MAX_LABEL
+                return -1
+            if cur + 1 + label_len >= cap
+                return -1
+            buf[cur] = byte(label_len & 0xff)
+            cur += 1
+            var k = 0
+            while k < label_len
+                buf[cur + k] = p[i + k]
+                k += 1
+            cur += label_len
+            total += label_len + 1
+            if total > DNS_MAX_NAME
+                return -1
+            i = j + 1
+            if j < n && i == n
+                return -1  // trailing dot
+        if cur >= cap
+            return -1
+        buf[cur] = byte(0)
+        cur + 1
+
+
+### dns_skip_name
+
+Walk a DNS-encoded name starting at `buf[off]` and return the
+offset of the first byte after the name. Handles both uncompressed
+labels (length byte + data, terminated by zero) and compressed
+pointers (2-byte sequence starting with the top two bits set).
+A message-compressed name consumes exactly 2 bytes at that point
+regardless of how much the pointer refers to. Returns `-1` on
+malformed names or buffer overrun.
+
+    dns_skip_name(buf: *byte, off: int, stop: int) -> int
+        var cur = off
+        while cur < stop
+            val b = int(buf[cur]) & 0xff
+            if b == 0
+                return cur + 1
+            if (b & 0xc0) == 0xc0
+                if cur + 1 >= stop
+                    return -1
+                return cur + 2
+            if (b & 0xc0) != 0
+                return -1  // reserved / extended label types
+            cur = cur + 1 + b
+        return -1
+
+
+### dns_build_query
+
+Write a standard query (OPCODE 0, RD=1) for an A record to `buf`.
+Returns the packet length in bytes, or `-1` if the buffer is too
+small or the name fails to encode.
+
+Header layout (12 bytes): ID, flags (0x0100 RD), QDCOUNT=1,
+ANCOUNT=0, NSCOUNT=0, ARCOUNT=0. Question: QNAME + QTYPE=A +
+QCLASS=IN.
+
+    dns_build_query(name: string, id: int, buf: *byte, cap: int) -> int
+        if cap < DNS_HDR_LEN + 1 + 4
+            return -1
+        dns_write_u16_be(buf, 0, id & 0xffff)
+        dns_write_u16_be(buf, 2, DNS_FLAG_RD)
+        dns_write_u16_be(buf, 4, 1)   // QDCOUNT
+        dns_write_u16_be(buf, 6, 0)   // ANCOUNT
+        dns_write_u16_be(buf, 8, 0)   // NSCOUNT
+        dns_write_u16_be(buf, 10, 0)  // ARCOUNT
+        val after_name = dns_encode_name(name, buf, DNS_HDR_LEN, cap - 4)
+        if after_name < 0
+            return -1
+        dns_write_u16_be(buf, after_name, DNS_TYPE_A)
+        dns_write_u16_be(buf, after_name + 2, DNS_CLASS_IN)
+        after_name + 4
+
+
+### dns_parse_response
+
+Walk a DNS reply packet, verify it's a response to our query, and
+write the first A-record RDATA into `*out_ip` (host-order u32,
+same shape as `ipv4(a, b, c, d)`).
+
+Validation: id matches, QR bit set, RCODE==0, ANCOUNT>=1, layout
+self-consistent. CNAME records in the answer section are skipped
+rather than followed — recursive resolvers almost always expand
+CNAMEs before replying, so by the time we see the answer section
+there's an A record alongside.
+
+Returns 0 on success, `-1` on malformed response or no A record.
+
+    dns_parse_response(buf: *byte, blen: int, expected_id: int, out_ip: *u32) -> int
+        if blen < DNS_HDR_LEN
+            return -1
+        val id = dns_read_u16_be(buf, 0)
+        if id != (expected_id & 0xffff)
+            return -1
+        val flags = dns_read_u16_be(buf, 2)
+        if (flags & DNS_FLAG_QR) == 0
+            return -1
+        if (flags & DNS_RCODE_MASK) != 0
+            return -1
+        val qdcount = dns_read_u16_be(buf, 4)
+        val ancount = dns_read_u16_be(buf, 6)
+        if ancount <= 0
+            return -1
+
+Skip the question section. Each question is a name followed by
+4 bytes of QTYPE + QCLASS.
+
+        var cur = DNS_HDR_LEN
+        var q = 0
+        while q < qdcount
+            cur = dns_skip_name(buf, cur, blen)
+            if cur < 0 || cur + 4 > blen
+                return -1
+            cur += 4
+            q += 1
+
+Walk answer records. Each answer: name (possibly compressed) +
+TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) + RDATA(RDLENGTH).
+
+        var a = 0
+        while a < ancount
+            cur = dns_skip_name(buf, cur, blen)
+            if cur < 0 || cur + 10 > blen
+                return -1
+            val rtype  = dns_read_u16_be(buf, cur)
+            val rclass = dns_read_u16_be(buf, cur + 2)
+            val rdlen  = dns_read_u16_be(buf, cur + 8)
+            val rdata  = cur + 10
+            if rdata + rdlen > blen
+                return -1
+            if rtype == DNS_TYPE_A && rclass == DNS_CLASS_IN && rdlen == 4
+                *out_ip = dns_read_u32_be(buf, rdata)
+                return 0
+            cur = rdata + rdlen
+            a += 1
+        return -1
+
+
+### dns_resolve
+
+Full round-trip: open UDP socket, send a query to `server_ip:server_port`,
+wait up to `timeout_ms` for a reply, parse, close. `out_ip` receives
+the host-order A record on success.
+
+Return codes:
+- `0`  — resolved, `*out_ip` valid
+- `-1` — error (socket, sendto, response malformed, no A record, etc.)
+- `-2` — timed out before a reply arrived
+
+Uses a nonzero-ish ID derived from the low bits of `server_ip`
+XORed with the low bits of `timeout_ms` as a cheap discriminator —
+not cryptographic, but sufficient to reject stale replies that
+arrive after our recvfrom_timeout window closes and a subsequent
+query reopens a socket on the same ephemeral port.
+
+    dns_resolve(name: string, server_ip: u32, server_port: int,
+                out_ip: *u32, timeout_ms: int) -> int
+        if timeout_ms < 0
+            return -1
+        val fd = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd < 0
+            return -1
+
+        // Array sizes must be integer literals (sysl constraint),
+        // keep in sync with DNS_MAX_PKT = 512 above.
+        var qbuf: [512]byte
+        val qid = (int(server_ip) ^ timeout_ms ^ server_port ^ 0x1234) & 0xffff
+        val qlen = dns_build_query(name, qid, &qbuf[0], DNS_MAX_PKT)
+        if qlen < 0
+            close_socket(fd)
+            return -1
+
+        val sent = sendto(fd, &qbuf[0], qlen, server_ip, server_port)
+        if sent < 0
+            close_socket(fd)
+            return -1
+
+        var rbuf: [512]byte
+        var src_ip: u32 = u32(0)
+        var src_port: int = 0
+        val got = recvfrom_timeout(fd, &rbuf[0], DNS_MAX_PKT,
+                                   &src_ip, &src_port, timeout_ms)
+        close_socket(fd)
+        if got == 0
+            return -2
+        if got < 0
+            return -1
+        dns_parse_response(&rbuf[0], got, qid, out_ip)

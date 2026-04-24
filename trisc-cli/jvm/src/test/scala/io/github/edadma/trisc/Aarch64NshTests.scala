@@ -563,6 +563,71 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("httpd: done")
   }
 
+  "aarch64 dns: resolve against a mock DNS server" in {
+    // Spin up a tiny mock DNS responder on 127.0.0.1:<ephemeral>.
+    // The guest sends its query to 10.0.2.2:<that port> — slirp
+    // forwards outbound UDP to the host's loopback, so the guest
+    // and the mock never need a real network in between. Offline-
+    // friendly and deterministic.
+    //
+    // The mock echoes the query back with QR=1 and one appended
+    // A-record pointing at 1.2.3.4 via a compressed name pointer
+    // to offset 12 (start of the question's QNAME). That's the
+    // minimum a recursive resolver actually emits — recursive
+    // resolvers almost always flatten CNAMEs into the same
+    // response so a client that only looks at answer records can
+    // walk it in one pass.
+    val dns = new java.net.DatagramSocket(
+      new java.net.InetSocketAddress("127.0.0.1", 0))
+    val mockPort = dns.getLocalPort
+    val answered = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val mockThread = new Thread(() => {
+      try
+        val qbuf = new Array[Byte](512)
+        val inPkt = new java.net.DatagramPacket(qbuf, qbuf.length)
+        dns.setSoTimeout(10000)
+        dns.receive(inPkt)
+        val qlen = inPkt.getLength
+        // Build the response in-place: flip QR bit, set ANCOUNT=1,
+        // then append the 16-byte answer record.
+        val resp = new Array[Byte](qlen + 16)
+        System.arraycopy(qbuf, 0, resp, 0, qlen)
+        resp(2) = (resp(2) | 0x80.toByte).toByte   // QR=1
+        resp(6) = 0                                // ANCOUNT hi
+        resp(7) = 1                                // ANCOUNT lo
+        var off = qlen
+        resp(off)     = 0xc0.toByte                // compressed name
+        resp(off + 1) = 0x0c.toByte                // -> offset 12
+        resp(off + 2) = 0; resp(off + 3) = 1       // TYPE=A
+        resp(off + 4) = 0; resp(off + 5) = 1       // CLASS=IN
+        resp(off + 6) = 0; resp(off + 7) = 0
+        resp(off + 8) = 0; resp(off + 9) = 60.toByte  // TTL=60
+        resp(off + 10) = 0; resp(off + 11) = 4     // RDLENGTH=4
+        resp(off + 12) = 1; resp(off + 13) = 2     // RDATA
+        resp(off + 14) = 3; resp(off + 15) = 4
+        val outPkt = new java.net.DatagramPacket(
+          resp, resp.length, inPkt.getAddress, inPkt.getPort)
+        dns.send(outPkt)
+        answered.set(true)
+      catch case _: Throwable => ()
+    }, "mock-dns")
+    mockThread.setDaemon(true)
+    mockThread.start()
+
+    try
+      qemu.send(s"test_dns example.com 10.0.2.2 $mockPort\n")
+      // Wait for the IP itself so `waitFor` returns with the full
+      // "resolved host -> A.B.C.D" line in its output. Matching just
+      // the "resolved " prefix would race — waitFor is cumulative up
+      // to the matched point, so we'd lose the tail in the assert.
+      val output = qemu.waitFor("1.2.3.4")
+      output should include("test_dns: resolved example.com -> 1.2.3.4")
+      mockThread.join(5000)
+      answered.get() shouldBe true
+    finally
+      dns.close()
+  }
+
   "aarch64 tcp: multi-request httpd accept loop" in {
     // Three back-to-back dials to a single httpd process. The
     // server serves 3 requests in a sequential accept loop and

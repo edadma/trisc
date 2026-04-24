@@ -1,0 +1,124 @@
+test_dns — resolve a hostname via UDP DNS
+==========================================
+
+CLI wrapper over `oskit.net.dns_resolve`. Sends a single query to
+a caller-supplied DNS server, waits up to 5 seconds, and prints
+the first A record to the serial console.
+
+Usage: `test_dns <hostname> <server_ip> <server_port>`.
+Example: `test_dns example.com 10.0.2.2 10053`.
+
+The host-side Scala test spins up a tiny mock DNS server on a
+localhost port, then asks slirp to route the guest's UDP to
+`10.0.2.2:<that port>` so the test is offline-friendly and
+deterministic. Pointing `server_ip` at `8.8.8.8` would also work
+on a machine with internet but is not how the test suite verifies
+behaviour.
+
+Exit codes:
+- 0 — resolved, IP printed
+- 1 — usage error (wrong argc, bad IP, bad port)
+- 2 — dns_resolve returned error
+- 3 — dns_resolve timed out
+
+    module oskit.bin.test_dns
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{dns_resolve}
+    import std.net.{parse_ipv4, ipv4_octet}
+
+
+Decimal helper — used for the resolved IP + port echoing.
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+Dotted-quad render of a host-order u32.
+
+    print_ipv4(ip: u32)
+        print_udec(ipv4_octet(ip, 0))
+        puts(".")
+        print_udec(ipv4_octet(ip, 1))
+        puts(".")
+        print_udec(ipv4_octet(ip, 2))
+        puts(".")
+        print_udec(ipv4_octet(ip, 3))
+
+
+Parse a non-negative decimal port (1–65535). Returns the value or
+`-1` on any malformed input.
+
+    parse_port(s: string) -> int
+        val n = len(s)
+        if n <= 0
+            return -1
+        val p = *byte(s)
+        var v = 0
+        var i = 0
+        while i < n
+            val c = int(p[i]) & 0xff
+            if c < int('0') || c > int('9')
+                return -1
+            v = v * 10 + (c - int('0'))
+            if v > 65535
+                return -1
+            i += 1
+        if v <= 0
+            return -1
+        v
+
+
+Main. Validate argv, then round-trip a single DNS query.
+
+    main(argv: []string)
+        if len(argv) != 4
+            puts("test_dns: usage: test_dns <host> <server_ip> <server_port>\n")
+            exit_with(1)
+            return
+        val host = argv[1]
+        var server_ip: u32 = u32(0)
+        if parse_ipv4(argv[2], &server_ip) != 0
+            puts("test_dns: bad server IP\n")
+            exit_with(1)
+            return
+        val port = parse_port(argv[3])
+        if port < 0
+            puts("test_dns: bad port\n")
+            exit_with(1)
+            return
+
+        puts("test_dns: query host=")
+        puts(host)
+        puts(" server=")
+        print_ipv4(server_ip)
+        puts(":")
+        print_udec(port)
+        puts("\n")
+
+        var ip: u32 = u32(0)
+        val rc = dns_resolve(host, server_ip, port, &ip, 5000)
+        if rc == -2
+            puts("test_dns: timeout\n")
+            exit_with(3)
+            return
+        if rc != 0
+            puts("test_dns: resolve failed rc=")
+            if rc < 0
+                puts("-")
+                print_udec(0 - rc)
+            else
+                print_udec(rc)
+            puts("\n")
+            exit_with(2)
+            return
+        puts("test_dns: resolved ")
+        puts(host)
+        puts(" -> ")
+        print_ipv4(ip)
+        puts("\n")
+        exit()

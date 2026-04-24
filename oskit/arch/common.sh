@@ -101,6 +101,7 @@ build_program() {
         oskit/ds/client.lsysl
         oskit/net/client.lsysl
         oskit/net/nic_client.lsysl
+        oskit/net/dns.lsysl
         std/alloc/alloc.lsysl
         std/net/net.lsysl
         std/net/packet.lsysl
