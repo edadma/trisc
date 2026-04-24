@@ -264,6 +264,25 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_udp_tmo: unexpected data"
   }
 
+  "aarch64 posix: socket/bind/sendto/recvfrom round-trip via shim" in {
+    // test_posix_udp drives the POSIX socket syscalls added in the
+    // per-process fd-table migration: 337=socket, 135=bind,
+    // 307=sendto, 276=recvfrom, 147=close. The shim in
+    // hello.lsysl translates sockaddr_in to the inet server's IPC
+    // format and returns a POSIX fd backed by an inet socket id.
+    // Pass = loopback datagram makes the round trip with the
+    // payload and src port intact.
+    qemu.send("test_posix_udp\n")
+    val output = qemu.waitFor("test_posix_udp: done")
+    output should include("test_posix_udp: got 5 from 127.0.0.1:")
+    output should include("'posix'")
+    output should include("test_posix_udp: done")
+    output should not include "test_posix_udp: socket"
+    output should not include "test_posix_udp: bind failed"
+    output should not include "test_posix_udp: sendto"
+    output should not include "test_posix_udp: recvfrom failed"
+  }
+
   "aarch64 timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications via notify_wait/notify_read_self. Proves the

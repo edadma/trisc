@@ -615,6 +615,18 @@ Set a thread's page table base register.
     kernel_get_thread_pid(tid: int) -> int
         threads[tid].pid
 
+Return the main_tid of a process, or -1 for an invalid pid.
+Used as a generation marker: distinct process instances at the
+same pid get distinct main_tids, so lazy per-pid state (POSIX
+fd table, etc.) can detect "this is a new process".
+
+    kernel_get_process_main_tid(pid: int) -> int
+        if pid < 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        processes[pid].main_tid
+
 Re-enqueue the current thread so it keeps running after
 do_schedule. Used by syscall handlers that don't block.
 Must ensure interrupts are disabled since called functions

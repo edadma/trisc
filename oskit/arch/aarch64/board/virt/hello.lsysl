@@ -37,6 +37,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         kb_enqueue, kb_notify_tid, notify_send,
         virtio_notify_tid,
         kernel_set_system_info,
+        kernel_get_thread_pid, kernel_get_process_main_tid,
         current_thread, ticks}
     import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
@@ -393,19 +394,172 @@ kernel isn't in play.
 
         arch_syscall_call(a0, handler)
 
+POSIX fd table
+==============
+
+Per-process POSIX file descriptor table. Each process gets 64
+slots; slots 0/1/2 are lazily initialized to STDIN/STDOUT/STDERR
+so a fresh musl process can `write(1, ...)` without any explicit
+setup from PM.
+
+Slot kinds:
+
+- `POSIX_FD_FREE` — slot is available for allocation.
+- `POSIX_FD_STDIN` — read returns EOF, write is rejected.
+- `POSIX_FD_STDOUT` / `POSIX_FD_STDERR` — write goes directly to
+  the PL011 UART (retained fast-path until TTY routing lands),
+  read is rejected.
+- `POSIX_FD_UDP_SOCKET` — `target` holds the inet server's
+  socket id; read/write/close/sendto/recvfrom route through
+  `ipc_send` to the inet port.
+
+Generation tracking uses `processes[pid].main_tid` as the sentinel:
+when a pid slot is reused by a new process, the new `main_tid`
+differs from the last-initialized value, which triggers a fresh
+table reset. That avoids leaking fd state across process reuse
+without a PM-side cleanup hook.
+
+Not handled in this pass: process-exit cleanup of held socket
+handles on the inet server side (the inet record still quotes the
+terminated thread as owner). Future work tracked under the
+posix_fd_bridge memory.
+
+    val POSIX_FD_FREE        = 0
+    val POSIX_FD_STDIN       = 1
+    val POSIX_FD_STDOUT      = 2
+    val POSIX_FD_STDERR      = 3
+    val POSIX_FD_UDP_SOCKET  = 4
+
+    val POSIX_FDS_PER_PROC   = 64
+
+    struct PosixFd
+        kind: int
+        target: int
+        flags: int
+        pos: i64
+
+    var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
+    var posix_fd_last_gen: [16]int        // main_tid when last initialized
+
+    posix_fd_init_pid(pid: int)
+        val base = pid * POSIX_FDS_PER_PROC
+        var i = 0
+        while i < POSIX_FDS_PER_PROC
+            posix_fd_table[base + i].kind = POSIX_FD_FREE
+            posix_fd_table[base + i].target = 0
+            posix_fd_table[base + i].flags = 0
+            posix_fd_table[base + i].pos = i64(0)
+            i += 1
+        posix_fd_table[base + 0].kind = POSIX_FD_STDIN
+        posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
+        posix_fd_table[base + 2].kind = POSIX_FD_STDERR
+
+    posix_fd_ensure_init(pid: int)
+        val gen = kernel_get_process_main_tid(pid)
+        if posix_fd_last_gen[pid] != gen
+            posix_fd_init_pid(pid)
+            posix_fd_last_gen[pid] = gen
+
+    posix_fd_current_pid() -> int
+        kernel_get_thread_pid(current_thread)
+
+    posix_fd_kind(fd: int) -> int
+        if fd < 0
+            return POSIX_FD_FREE
+        if fd >= POSIX_FDS_PER_PROC
+            return POSIX_FD_FREE
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return POSIX_FD_FREE
+        if pid >= 16
+            return POSIX_FD_FREE
+        posix_fd_ensure_init(pid)
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].kind
+
+    posix_fd_target(fd: int) -> int
+        val pid = posix_fd_current_pid()
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].target
+
+    posix_fd_alloc(kind: int, target: int) -> int
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return -1
+        if pid >= 16
+            return -1
+        posix_fd_ensure_init(pid)
+        val base = pid * POSIX_FDS_PER_PROC
+        var i = 3
+        while i < POSIX_FDS_PER_PROC
+            if posix_fd_table[base + i].kind == POSIX_FD_FREE
+                posix_fd_table[base + i].kind = kind
+                posix_fd_table[base + i].target = target
+                posix_fd_table[base + i].flags = 0
+                posix_fd_table[base + i].pos = i64(0)
+                return i
+            i += 1
+        -1
+
+    posix_fd_clear(fd: int)
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return
+        if pid >= 16
+            return
+        if fd < 0
+            return
+        if fd >= POSIX_FDS_PER_PROC
+            return
+        val idx = pid * POSIX_FDS_PER_PROC + fd
+        posix_fd_table[idx].kind = POSIX_FD_FREE
+        posix_fd_table[idx].target = 0
+        posix_fd_table[idx].flags = 0
+        posix_fd_table[idx].pos = i64(0)
+
+
+INET client helpers (shim-side)
+-------------------------------
+
+Minimal wire helpers that mirror `oskit/servers/inet.lsysl`'s
+message layout. The shim talks to the inet server via the same
+IPC protocol that `oskit/net/client.lsysl` uses from user space;
+we replicate the writers here instead of importing `oskit.net` to
+keep the kernel link free of the full socket-API module.
+
+    val INET_CMD_SOCKET    = 1
+    val INET_CMD_BIND      = 2
+    val INET_CMD_SENDTO    = 3
+    val INET_CMD_RECVFROM  = 4
+    val INET_CMD_CLOSE     = 5
+
+    val POSIX_AF_INET      = 2
+    val POSIX_SOCK_DGRAM   = 2
+
+    var inet_port_cached = -1
+
+    inet_get_port() -> int
+        if inet_port_cached < 0
+            inet_port_cached = port_lookup("inet")
+        inet_port_cached
+
+    shim_write_u16(p: *byte, off: int, v: int)
+        p[off]     = byte((v >> 8) & 0xff)
+        p[off + 1] = byte(v & 0xff)
+
+    shim_read_u16(p: *byte, off: int) -> int
+        ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
+
+
 POSIX shim dispatch. Musl's aarch64-slix arch/ uses SLIX-local
 syscall numbers starting at 128 (see `slix/musl/arch/aarch64-slix
 /bits/syscall.h.in`). Handlers take the raw user-space args and
 return bytes-written / 0-on-success / -errno as i64, which the
 dispatcher writes into the saved x0 slot.
 
-The shim is intentionally minimal: every fd branch is hardcoded
-(fd==1||fd==2 goes to the UART for write, fd==0 is currently an
-EOF stub for read). The real design — per-process POSIX fd table
-routing into VFS/TTY/pipe backends — is captured separately; see
-`project_musl_phase2_posix_fd_bridge.md` in memory. Don't keep
-piling fd==N special cases onto this dispatch; the next syscall
-that needs a real backend should trigger the fd-table migration.
+All fd-carrying syscalls route through the per-process fd table
+above; see `posix_fd_kind` / `posix_fd_target`. Socket syscalls
+translate to inet-server IPC, giving musl programs direct access
+to the same UDP stack that native sysl programs use via
+`oskit.net.client`.
 
     posix_dispatch(num: int, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
         if num == 128
@@ -415,17 +569,28 @@ that needs a real backend should trigger the fd-table migration.
             return i64(0)
         if num == 130
             return sys_read(int(a0), a1, int(a2))
+        if num == 147
+            return sys_close(int(a0))
+        if num == 135
+            return sys_bind(int(a0), a1, int(a2))
+        if num == 276
+            return sys_recvfrom(int(a0), a1, int(a2), int(a3), a4, a5)
+        if num == 307
+            return sys_sendto(int(a0), a1, int(a2), int(a3), a4, int(a5))
+        if num == 337
+            return sys_socket(int(a0), int(a1), int(a2))
         i64(-38)            // -ENOSYS
 
-SYS_WRITE shim. fd=1 (stdout) and fd=2 (stderr) write directly to
-the PL011 UART; any other fd returns -EBADF. The user's buffer
-lives in the current process's EL0-accessible carve-out and is
-already mapped in the active PT (which we're running under since
-EL1 inherits TTBR0_EL1 from EL0), so we dereference it directly
-without vm_copy_from.
+SYS_WRITE. Looks up `fd` in the process's POSIX fd table and
+dispatches by kind. STDOUT/STDERR take the direct UART fast-path
+(musl output stays quick); UDP sockets are rejected (BSD semantics
+route sendto through the socket instead). Any FREE slot → -EBADF.
+The user's buffer lives in the current ptbr which EL1 inherits,
+so pointers dereference directly without vm_copy_from.
 
     sys_write(fd: int, buf: i64, len: int) -> i64
-        if fd == 1 || fd == 2
+        val k = posix_fd_kind(fd)
+        if k == POSIX_FD_STDOUT || k == POSIX_FD_STDERR
             var p: *byte = *byte(buf)
             var i = 0
             while i < len
@@ -434,19 +599,207 @@ without vm_copy_from.
             return i64(len)
         i64(-9)             // -EBADF
 
-SYS_READ stopgap. fd=0 (stdin) returns 0 (EOF) immediately —
-there is no kernel-side input buffer wired to this path yet.
-The TTY server is the actual consumer of UART RX; POSIX reads
-need to go through a per-process fd table that routes into
-TTY/VFS/pipe backends (not yet built). Any other fd → -EBADF.
-Programs that `read(0,...)` will observe EOF on every call, which
-is well-defined and lets musl code that checks for EOF run
-without crashing.
+SYS_READ. fd=0 (STDIN) returns 0 (EOF) — no kernel-side keyboard
+path yet; TTY routing is on the bridge memory's todo list. Any
+other kind → -EBADF for now. Write-only types (STDOUT/STDERR) are
+correctly rejected; socket reads should go through recvfrom.
 
     sys_read(fd: int, buf: i64, len: int) -> i64
-        if fd == 0
-            return i64(0)       // EOF — see posix_fd_bridge memory
-        i64(-9)                 // -EBADF
+        val k = posix_fd_kind(fd)
+        if k == POSIX_FD_STDIN
+            return i64(0)
+        i64(-9)             // -EBADF
+
+SYS_CLOSE. For socket kinds, tell the inet server to drop the
+backend record; the fd slot is cleared either way so a subsequent
+op returns -EBADF. STDIO kinds are simply cleared (user explicitly
+dropped them); a write(1,...) afterwards is correctly rejected.
+
+    sys_close(fd: int) -> i64
+        val k = posix_fd_kind(fd)
+        if k == POSIX_FD_FREE
+            return i64(-9)  // -EBADF
+        if k == POSIX_FD_UDP_SOCKET
+            val inet_fd = posix_fd_target(fd)
+            val port = inet_get_port()
+            if port >= 0
+                var msg: [2]byte
+                msg[0] = byte(INET_CMD_CLOSE)
+                msg[1] = byte(inet_fd & 0xff)
+                var reply: [1]byte
+                ipc_send(port, msg, 2, reply, 1)
+        posix_fd_clear(fd)
+        i64(0)
+
+SYS_SOCKET. Only AF_INET + SOCK_DGRAM today. Forwards to the inet
+server to obtain an inet-local fd, then allocates a POSIX slot.
+
+    sys_socket(family: int, stype: int, proto: int) -> i64
+        if family != POSIX_AF_INET
+            return i64(-97)     // -EAFNOSUPPORT
+        if stype != POSIX_SOCK_DGRAM
+            return i64(-93)     // -EPROTONOSUPPORT
+        val port = inet_get_port()
+        if port < 0
+            return i64(-19)     // -ENODEV
+        var msg: [4]byte
+        msg[0] = byte(INET_CMD_SOCKET)
+        msg[1] = byte(family & 0xff)
+        msg[2] = byte(stype & 0xff)
+        msg[3] = byte(proto & 0xff)
+        var reply: [2]byte
+        val r = ipc_send(port, msg, 4, reply, 2)
+        if r < 0
+            return i64(-5)      // -EIO
+        if reply[0] != 0
+            return i64(-5)
+        val inet_fd = int(reply[1]) & 0xff
+        val posix_fd = posix_fd_alloc(POSIX_FD_UDP_SOCKET, inet_fd)
+        if posix_fd < 0
+            var close_msg: [2]byte
+            close_msg[0] = byte(INET_CMD_CLOSE)
+            close_msg[1] = byte(inet_fd & 0xff)
+            var close_rep: [1]byte
+            ipc_send(port, close_msg, 2, close_rep, 1)
+            return i64(-24)     // -EMFILE
+        i64(posix_fd)
+
+SYS_BIND. The user's `sockaddr_in` is 16 bytes: family(2),
+port(2, BE), addr(4), zero(8). We re-pack into the inet server's
+IPC layout (family(1), port(2, BE), addr(4) — the server reads BE
+too, so the bytes transfer directly).
+
+    sys_bind(fd: int, addr_ptr: i64, addrlen: int) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_UDP_SOCKET
+            return i64(-9)
+        if addrlen < 16
+            return i64(-22)     // -EINVAL
+        val inet_fd = posix_fd_target(fd)
+        val port = inet_get_port()
+        if port < 0
+            return i64(-19)
+        val a: *byte = *byte(addr_ptr)
+        // sin_family = a[0..1], ignored (we only support AF_INET).
+        val sin_port = shim_read_u16(a, 2)
+        var msg: [9]byte
+        msg[0] = byte(INET_CMD_BIND)
+        msg[1] = byte(inet_fd & 0xff)
+        msg[2] = byte(POSIX_AF_INET)
+        msg[3] = byte(sin_port >> 8)
+        msg[4] = byte(sin_port & 0xff)
+        msg[5] = a[4]
+        msg[6] = a[5]
+        msg[7] = a[6]
+        msg[8] = a[7]
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 9, reply, 1)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-98)     // -EADDRINUSE
+        i64(0)
+
+SYS_SENDTO. Args: (fd, buf, len, flags, dst_addr, addrlen).
+Copies the payload into an in-kernel staging buffer (avoids
+re-reading user memory during ipc_deliver's cross-PT walk) and
+forwards to the inet server. `flags` is ignored for v1.
+
+    sys_sendto(fd: int, buf: i64, len: int, flags: int, addr_ptr: i64, addrlen: int) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_UDP_SOCKET
+            return i64(-9)
+        if addrlen < 16
+            return i64(-22)
+        if len < 0
+            return i64(-22)
+        if len > 512
+            return i64(-90)     // -EMSGSIZE
+        val inet_fd = posix_fd_target(fd)
+        val port = inet_get_port()
+        if port < 0
+            return i64(-19)
+        val a: *byte = *byte(addr_ptr)
+        val dst_port = shim_read_u16(a, 2)
+        val ubuf: *byte = *byte(buf)
+        var msg: [523]byte
+        msg[0] = byte(INET_CMD_SENDTO)
+        msg[1] = byte(inet_fd & 0xff)
+        msg[2] = byte(POSIX_AF_INET)
+        msg[3] = byte(dst_port >> 8)
+        msg[4] = byte(dst_port & 0xff)
+        msg[5] = a[4]
+        msg[6] = a[5]
+        msg[7] = a[6]
+        msg[8] = a[7]
+        msg[9] = byte((len >> 8) & 0xff)
+        msg[10] = byte(len & 0xff)
+        var i = 0
+        while i < len
+            msg[11 + i] = ubuf[i]
+            i += 1
+        var reply: [3]byte
+        val r = ipc_send(port, msg, 11 + len, reply, 3)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-101)    // -ENETUNREACH
+        i64(shim_read_u16(reply, 1))
+
+SYS_RECVFROM. Args: (fd, buf, len, flags, src_addr, addrlen_ptr).
+Blocks until a datagram is available. Writes the source's family
++ port + addr into `src_addr` (16-byte sockaddr_in) if non-null,
+updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
+
+    sys_recvfrom(fd: int, buf: i64, len: int, flags: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_UDP_SOCKET
+            return i64(-9)
+        if len < 0
+            return i64(-22)
+        val inet_fd = posix_fd_target(fd)
+        val port = inet_get_port()
+        if port < 0
+            return i64(-19)
+        var cap_len = len
+        if cap_len > 512
+            cap_len = 512
+        var msg: [4]byte
+        msg[0] = byte(INET_CMD_RECVFROM)
+        msg[1] = byte(inet_fd & 0xff)
+        msg[2] = byte((cap_len >> 8) & 0xff)
+        msg[3] = byte(cap_len & 0xff)
+        var reply: [540]byte
+        val r = ipc_send(port, msg, 4, reply, 540)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-5)
+        val src_port = shim_read_u16(reply, 2)
+        val payload_len = shim_read_u16(reply, 8)
+        if addr_ptr != i64(0)
+            val a: *byte = *byte(addr_ptr)
+            a[0] = byte(POSIX_AF_INET & 0xff)
+            a[1] = byte((POSIX_AF_INET >> 8) & 0xff)
+            a[2] = byte(src_port >> 8)
+            a[3] = byte(src_port & 0xff)
+            a[4] = reply[4]
+            a[5] = reply[5]
+            a[6] = reply[6]
+            a[7] = reply[7]
+            var z = 8
+            while z < 16
+                a[z] = byte(0)
+                z += 1
+        if addrlen_ptr != i64(0)
+            val alp: *i32 = *i32(addrlen_ptr)
+            *alp = i32(16)
+        val ubuf: *byte = *byte(buf)
+        var copy_len = payload_len
+        if copy_len > len
+            copy_len = len
+        var i = 0
+        while i < copy_len
+            ubuf[i] = reply[10 + i]
+            i += 1
+        i64(copy_len)
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a
 is the echo server: creates a port, registers "echo", then
