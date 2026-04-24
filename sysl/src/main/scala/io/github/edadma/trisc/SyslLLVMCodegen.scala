@@ -1652,6 +1652,32 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $ignored = call i64 @write(i32 1, i8* $nlPtr, i64 1)")
         "0"
 
+      case TCall("write_str", List(fdArg, strArg), _) =>
+        // std.io.write_str(fd: int, s: string) -> int
+        // Interpreter routes fd=1/2 through stdout/stderr and other fds
+        // through a file table. Here we just call libc write(2) directly —
+        // the caller already has a real OS fd. Returns bytes written.
+        val fd0 = genExpr(fdArg)
+        val fdVt = exprType(fdArg)
+        val fd32 = if fdVt == "i32" then fd0 else
+          val tr = newReg()
+          emit(s"  $tr = trunc $fdVt $fd0 to i32")
+          tr
+        val sp = genExpr(strArg)
+        val ptrGep = newReg()
+        emit(s"  $ptrGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 0")
+        val ptr = newReg()
+        emit(s"  $ptr = load i8*, i8** $ptrGep")
+        val lenGep = newReg()
+        emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $sp, i32 0, i32 1")
+        val len32 = newReg()
+        emit(s"  $len32 = load i32, i32* $lenGep")
+        val len64 = newReg()
+        emit(s"  $len64 = sext i32 $len32 to i64")
+        val written = newReg()
+        emit(s"  $written = call i64 @write(i32 $fd32, i8* $ptr, i64 $len64)")
+        emitSextIfNeeded(written, "i64", t)
+
       case TCall(name, args, _) =>
         val declaredParams = funcParamTypes.getOrElse(name, Nil)
         val argVals = args.zipWithIndex.map { (a, i) =>
