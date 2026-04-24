@@ -46,6 +46,10 @@ class SyslSVMCodegen:
   private val breakLabels = new mutable.Stack[String]
   private val continueLabels = new mutable.Stack[String]
 
+  // Deferred statements — per-function stack, emitted LIFO at every return.
+  private val deferStack = new mutable.Stack[TStmt]
+  private def emitDefers(): Unit = for stmt <- deferStack do genStmt(stmt)
+
   // Current function
   private var currentFunction: TFunDecl = null
   private var needsSpExtern: Boolean = false
@@ -348,6 +352,7 @@ class SyslSVMCodegen:
     currentFunction = fun
     locals = new mutable.LinkedHashMap
     nextLocalIndex = 0
+    deferStack.clear()
 
     val nParams = fun.params.length
     val nBodyLocals = countLocals(fun.body)
@@ -369,16 +374,20 @@ class SyslSVMCodegen:
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr)
+        emitDefers()
         emit("  ret")
       case TBlockBody(stmts) =>
         if stmts.isEmpty then
+          emitDefers()
           emit("  ret")
         else if fun.returnType != SyslType.VoidType then
           genStmtsAsExpr(stmts)
+          emitDefers()
           emit("  ret")
         else
           genStmts(stmts)
           if !stmts.lastOption.exists(_.isInstanceOf[TReturnStmt]) then
+            emitDefers()
             emit("  ret")
 
   // ========================================================================
@@ -393,7 +402,7 @@ class SyslSVMCodegen:
       genStmts(stmts.init)
       stmts.last match
         case TExprStmt(expr) => genExpr(expr)
-        case TReturnStmt(Some(expr)) => genExpr(expr); emit("  ret")
+        case TReturnStmt(Some(expr)) => genExpr(expr); emitDefers(); emit("  ret")
         case other => genStmt(other); emitPushInt(0)
 
   private def genStmt(stmt: TStmt): Unit = stmt match
@@ -541,9 +550,11 @@ class SyslSVMCodegen:
 
     case TReturnStmt(Some(expr)) =>
       genExpr(expr)
+      emitDefers()
       emit("  ret")
 
     case TReturnStmt(None) =>
+      emitDefers()
       emit("  ret")
 
     case TWhileStmt(cond, body, _) =>
@@ -608,9 +619,8 @@ class SyslSVMCodegen:
     case TAsmStmt(code) =>
       emit(s"  $code")
 
-    case TDeferStmt(_) =>
-      // TODO: defer support
-      ()
+    case TDeferStmt(body) =>
+      deferStack.push(body)
 
     case TMultiStmt(children) =>
       children.foreach(genStmt)
