@@ -277,10 +277,58 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("test_posix_udp: got 5 from 127.0.0.1:")
     output should include("'posix'")
     output should include("test_posix_udp: done")
-    output should not include "test_posix_udp: socket"
+    output should not include "test_posix_udp: socket rx failed"
+    output should not include "test_posix_udp: socket tx failed"
     output should not include "test_posix_udp: bind failed"
     output should not include "test_posix_udp: sendto"
     output should not include "test_posix_udp: recvfrom failed"
+  }
+
+  "aarch64 posix: TCP connect/write/read/close via shim" in {
+    // test_posix_tcp drives the POSIX TCP syscalls added in phase
+    // 2: 337=socket(SOCK_STREAM), 148=connect, 128=write,
+    // 130=read, 147=close. Uses the same slirp-forwarded
+    // host echo pattern as test_tcp (10.0.2.2:18080 → host
+    // 127.0.0.1:18080). Pass = full "ping\n" round-trip plus the
+    // "closed" line.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+
+    val echoThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](64)
+          val n = in.read(buf)
+          if n > 0 then
+            out.write(buf, 0, n)
+            out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-echo-server-posix")
+    echoThread.setDaemon(true)
+    echoThread.start()
+
+    try
+      qemu.send("test_posix_tcp\n")
+      val output = qemu.waitFor("test_posix_tcp: closed")
+      output should include("test_posix_tcp: connected")
+      output should include("test_posix_tcp: sent=5")
+      output should include("test_posix_tcp: got 5 'ping")
+      output should include("test_posix_tcp: closed")
+      output should not include "test_posix_tcp: socket failed"
+      output should not include "test_posix_tcp: connect failed"
+      output should not include "test_posix_tcp: write unexpected"
+      output should not include "test_posix_tcp: read failed"
+    finally
+      server.close()
+      echoThread.join(2000)
   }
 
   "aarch64 timer: subscribe fires expected count in N ticks" in {

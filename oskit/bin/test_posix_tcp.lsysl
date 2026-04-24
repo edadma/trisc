@@ -1,0 +1,135 @@
+test_posix_tcp — POSIX TCP syscalls active-open round-trip
+==========================================================
+
+Mirrors `test_tcp.lsysl` (which uses the native `oskit.net.client`
+wrappers) but drives the POSIX shim's syscalls instead:
+
+  337=socket(SOCK_STREAM) → 148=connect → 128=write → 130=read
+  → 147=close
+
+Connects to `10.0.2.2:18080` — QEMU user-mode networking routes
+that to the host's 127.0.0.1:18080 where the Scala harness has a
+tiny TCP echo server listening. Sends "ping\n", expects the five
+bytes back, then closes.
+
+    module oskit.bin.test_posix_tcp
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_WRITE      = 128
+    val NR_READ       = 130
+    val NR_CLOSE      = 147
+    val NR_CONNECT    = 148
+    val NR_SOCKET     = 337
+
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+Populate a 16-byte `sockaddr_in`. `port` is host-order here; we
+write it big-endian into the buffer (POSIX's wire-format
+`sin_port`).
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_read(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        val fd = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if fd < 0
+            puts("test_posix_tcp: socket failed\n")
+            exit_with(1)
+            return
+        puts("test_posix_tcp: fd=")
+        print_udec(fd)
+        puts("\n")
+
+        var dst: [16]byte
+        fill_sockaddr(&dst[0], 18080, 10, 0, 2, 2)
+        val cr = posix_connect(fd, &dst[0], 16)
+        if cr != 0
+            puts("test_posix_tcp: connect failed\n")
+            posix_close(fd)
+            exit_with(2)
+            return
+        puts("test_posix_tcp: connected\n")
+
+        var msg: [5]byte
+        msg[0] = byte('p')
+        msg[1] = byte('i')
+        msg[2] = byte('n')
+        msg[3] = byte('g')
+        msg[4] = byte(10)       // '\n'
+        val n = posix_write(fd, &msg[0], 5)
+        if n != 5
+            puts("test_posix_tcp: write unexpected n=")
+            print_udec(n)
+            puts("\n")
+            posix_close(fd)
+            exit_with(3)
+            return
+        puts("test_posix_tcp: sent=")
+        print_udec(n)
+        puts("\n")
+
+        var rbuf: [32]byte
+        var total = 0
+        while total < 5
+            val r = posix_read(fd, &rbuf[total], 32 - total)
+            if r <= 0
+                puts("test_posix_tcp: read failed r=")
+                if r < 0
+                    puts("-")
+                    print_udec(0 - r)
+                else
+                    print_udec(r)
+                puts("\n")
+                posix_close(fd)
+                exit_with(4)
+                return
+            total += r
+        puts("test_posix_tcp: got ")
+        print_udec(total)
+        puts(" '")
+        puts(string(&rbuf[0], total))
+        puts("'\n")
+
+        posix_close(fd)
+        puts("test_posix_tcp: closed\n")
+        exit()
