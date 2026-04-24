@@ -61,6 +61,12 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     // The SYS_READ stopgap returns EOF (0) for fd=0 — see the
     // posix_fd_bridge memory. "read=0" is the proof the dispatch
     // entry is wired and the syscall returns a valid value.
+    //
+    // If this test reports "mhello: not found", rebuild the musl
+    // libc and the mhello binary:
+    //   bash slix/build-musl.sh          (one-shot; slow on first run)
+    //   bash slix/test/build-hello.sh    (rebuilds /tmp/slix-aarch64/bin/mhello)
+    //   bash oskit/arch/aarch64/board/virt/build.sh  (repacks ramdisk)
     val output = qemu.command("mhello")
     output should include("hello from musl")
     output should include("read=0")
