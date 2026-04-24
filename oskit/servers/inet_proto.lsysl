@@ -756,6 +756,20 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     val TCP_INIT_SSTHRESH   = 65535
     val TCP_MIN_CWND        = 480
 
+    // TCP option kinds (RFC 793, RFC 2018).
+    val TCP_OPT_EOL             = 0
+    val TCP_OPT_NOP             = 1
+    val TCP_OPT_MSS             = 2
+    val TCP_OPT_SACK_PERMITTED  = 4
+    val TCP_OPT_SACK            = 5
+
+    // Max SACK blocks we bother with on either side. RFC 2018
+    // technically allows up to 4 in a 40-byte option space; we
+    // cap at 3 so the option (26 bytes) + 2 NOPs for 4-byte
+    // alignment (28 bytes) fits comfortably alongside any other
+    // options we might carry on an ACK.
+    val TCP_MAX_SACK_BLOCKS     = 3
+
     val TCP_STATE_CLOSED      = 0
     val TCP_STATE_SYN_SENT    = 1
     val TCP_STATE_ESTABLISHED = 2
@@ -832,6 +846,8 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         dup_ack_count: int
         fast_recovery: int
         recovery_point: u32
+        sack_ok: int
+        peer_sack_seen: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -867,6 +883,8 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
             tcp_sockets[i].dup_ack_count = 0
             tcp_sockets[i].fast_recovery = 0
             tcp_sockets[i].recovery_point = u32(0)
+            tcp_sockets[i].sack_ok = 0
+            tcp_sockets[i].peer_sack_seen = 0
             var k = 0
             while k < TCP_REORDER_SLOTS
                 tcp_sockets[i].reorder[k].in_use = 0
@@ -905,9 +923,56 @@ TCP seq/ack field helpers (big-endian u32).
         (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
 
+Walk TCP options in the segment starting at `tcp_off + 20` and
+ending at `tcp_off + hdr_len`. Returns 1 if a SACK-permitted
+option (RFC 2018 §2, kind=4 len=2) is present, 0 otherwise.
+
+`kind=0` (EOL) terminates. `kind=1` (NOP) is a single-byte
+skip. Everything else has `len` at `off+1`; we bounds-check
+to tolerate malformed segments without reading past the
+header end. Unknown options are skipped.
+
+    tcp_opts_has_sack_permitted(frame: *byte, tcp_off: int,
+                                hdr_len: int) -> int
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return 0
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return 0
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return 0
+                if off + olen > opts_end
+                    return 0
+                if kind == TCP_OPT_SACK_PERMITTED
+                    if olen == 2
+                        return 1
+                off += olen
+        0
+
+
 Build a single Ethernet + IPv4 + TCP frame for socket `s`. Payload
 is `payload_len` bytes of send_buf starting at `payload_seq`
-(relative to snd_una). A 4-byte MSS option is attached on SYN.
+(relative to snd_una).
+
+TCP options attached:
+
+- SYN frames carry a 4-byte MSS option and a 2-byte
+  SACK-permitted option (RFC 2018 §2), padded to 4-byte
+  alignment with NOPs — 8 bytes of options, `hdr_bytes = 28`.
+- Non-SYN ACKs with `sack_ok` negotiated and at least one
+  reorder-queue entry carry a SACK option (RFC 2018 §3)
+  advertising up to `TCP_MAX_SACK_BLOCKS` ranges of
+  out-of-order data we have buffered. Each block is 8 bytes
+  (left, right); the option header is 2 bytes; we prefix with
+  2 NOPs for 4-byte alignment. `hdr_bytes = 20 + 4 + 8 * n`.
+- All other ACKs carry no options — `hdr_bytes = 20`.
 
     inet_tcp_emit(s: int, flags: int, seq: u32,
                   payload_seq: u32, payload_len: int) -> int
@@ -916,10 +981,25 @@ is `payload_len` bytes of send_buf starting at `payload_seq`
         var next_hop_mac: [6]byte
         if inet_resolve_mac(tcp_sockets[s].remote_ip, next_hop_mac) == 0
             return -1
-        val mss_opt = (flags & TCP_F_SYN) != 0
+        val is_syn = (flags & TCP_F_SYN) != 0
+        // Count SACK blocks we'd emit on this segment. SACK is
+        // only ever attached to non-SYN ACKs once both sides
+        // agreed on SACK-permitted at handshake.
+        var sack_count = 0
+        if is_syn == 0
+            if (flags & TCP_F_ACK) != 0
+                if tcp_sockets[s].sack_ok != 0
+                    var ri = 0
+                    while ri < TCP_REORDER_SLOTS
+                        if tcp_sockets[s].reorder[ri].in_use != 0
+                            if sack_count < TCP_MAX_SACK_BLOCKS
+                                sack_count += 1
+                        ri += 1
         var hdr_bytes = 20
-        if mss_opt
-            hdr_bytes = 24
+        if is_syn
+            hdr_bytes = 28
+        else if sack_count > 0
+            hdr_bytes = 20 + 4 + 8 * sack_count
         var seg_len = hdr_bytes + payload_len
         if seg_len > 1460
             return -1
@@ -964,10 +1044,38 @@ is `payload_len` bytes of send_buf starting at `payload_seq`
         pkt_write_u16(frame, tcp_off + 14, rwnd)
         pkt_write_u16(frame, tcp_off + 16, 0)
         pkt_write_u16(frame, tcp_off + 18, 0)
-        if mss_opt
-            frame[tcp_off + 20] = 2
+        if is_syn
+            // MSS (RFC 793): kind=2 len=4 value=TCP_MSS_ADV
+            frame[tcp_off + 20] = byte(TCP_OPT_MSS)
             frame[tcp_off + 21] = 4
             pkt_write_u16(frame, tcp_off + 22, TCP_MSS_ADV)
+            // SACK-permitted (RFC 2018 §2): kind=4 len=2
+            frame[tcp_off + 24] = byte(TCP_OPT_SACK_PERMITTED)
+            frame[tcp_off + 25] = 2
+            // Pad to 4-byte alignment with NOPs.
+            frame[tcp_off + 26] = byte(TCP_OPT_NOP)
+            frame[tcp_off + 27] = byte(TCP_OPT_NOP)
+        else if sack_count > 0
+            // 2 NOPs prefix for alignment (Linux emits this
+            // pattern too) — placing SACK at a 4-byte boundary.
+            frame[tcp_off + 20] = byte(TCP_OPT_NOP)
+            frame[tcp_off + 21] = byte(TCP_OPT_NOP)
+            // SACK header: kind=5, len = 2 + 8 * nblocks.
+            frame[tcp_off + 22] = byte(TCP_OPT_SACK)
+            frame[tcp_off + 23] = byte(2 + 8 * sack_count)
+            var out_off = tcp_off + 24
+            var ri2 = 0
+            var emitted = 0
+            while ri2 < TCP_REORDER_SLOTS
+                if emitted < sack_count
+                    if tcp_sockets[s].reorder[ri2].in_use != 0
+                        val blk_left = tcp_sockets[s].reorder[ri2].seq
+                        val blk_right = blk_left + u32(tcp_sockets[s].reorder[ri2].len)
+                        tcp_write_u32(frame, out_off, blk_left)
+                        tcp_write_u32(frame, out_off + 4, blk_right)
+                        out_off += 8
+                        emitted += 1
+                ri2 += 1
         if payload_len > 0
             val offset = int(i32(payload_seq - tcp_sockets[s].snd_una))
             var i = 0
@@ -1195,6 +1303,8 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 tcp_sockets[i].dup_ack_count = 0
                 tcp_sockets[i].fast_recovery = 0
                 tcp_sockets[i].recovery_point = u32(0)
+                tcp_sockets[i].sack_ok = 0
+                tcp_sockets[i].peer_sack_seen = 0
                 var k = 0
                 while k < TCP_REORDER_SLOTS
                     tcp_sockets[i].reorder[k].in_use = 0
@@ -1308,7 +1418,8 @@ emits SYN-ACK, arms retransmit. The child is NOT queued for
 accept() until its SYN_RCVD → ESTABLISHED transition.
 
     inet_tcp_handle_passive_syn(ls: int, remote_ip: u32,
-                                remote_port: int, seg_seq: u32)
+                                remote_port: int, seg_seq: u32,
+                                peer_sack_perm: int)
         // If accept queue is already at capacity, silently drop.
         // SYN cookies / overflow handling is phase-3.
         if tcp_sockets[ls].accept_count >= TCP_LISTEN_BACKLOG
@@ -1329,6 +1440,12 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         tcp_sockets[s].snd_wnd = 0
         tcp_sockets[s].state = TCP_STATE_SYN_RCVD
         tcp_sockets[s].parent_listen = ls
+        // RFC 2018 §2: enable SACK on this connection iff the
+        // peer included SACK-permitted in its SYN. Our SYN-ACK
+        // will echo SACK-permitted back (inet_tcp_emit always
+        // includes it on any SYN frame).
+        if peer_sack_perm != 0
+            tcp_sockets[s].sack_ok = 1
         inet_tcp_emit(s, TCP_F_SYN | TCP_F_ACK, iss, u32(0), 0)
         inet_tcp_arm_rtx(s)
 
@@ -1730,6 +1847,11 @@ checksum, locates the matching socket, and delegates.
         if inet_l4_partial_sum(src_ip, our_ip, IP_PROTO_TCP,
                 frame, tcp_off, tcp_len) != 0xffff
             return
+        // RFC 2018 SACK-permitted is negotiated once on the
+        // handshake; parse it here so both the passive-open and
+        // state-step paths can see the peer's offer.
+        val peer_sack_perm = tcp_opts_has_sack_permitted(
+            frame, tcp_off, tcp_hdr_len)
         val s = inet_tcp_find(dst_port, src_ip, src_port)
         if s < 0
             // No connection match. SYN-to-a-listen gets the passive
@@ -1740,12 +1862,14 @@ checksum, locates the matching socket, and delegates.
             if (flags & TCP_F_SYN) != 0
                 val ls = inet_tcp_find_listen(dst_port)
                 if ls >= 0
-                    inet_tcp_handle_passive_syn(ls, src_ip, src_port, seq)
+                    inet_tcp_handle_passive_syn(ls, src_ip, src_port,
+                        seq, peer_sack_perm)
                     return
             inet_tcp_emit_rst(src_ip, src_port, dst_port,
                               flags, seq, ack, payload_len)
             return
-        inet_tcp_state_step(s, flags, seq, ack, wnd, payload, payload_len)
+        inet_tcp_state_step(s, flags, seq, ack, wnd, payload,
+            payload_len, peer_sack_perm)
 
 
 Reorder queue for out-of-order segments.
@@ -1844,7 +1968,8 @@ bit 1 = FIN processed.
 Per-socket state transition for one validated segment.
 
     inet_tcp_state_step(s: int, flags: int, seq: u32, ack: u32,
-                        wnd: int, payload: *byte, payload_len: int)
+                        wnd: int, payload: *byte, payload_len: int,
+                        peer_sack_perm: int)
         val st = tcp_sockets[s].state
         if st == TCP_STATE_SYN_SENT
             if (flags & TCP_F_RST) != 0
@@ -1861,6 +1986,13 @@ Per-socket state transition for one validated segment.
             tcp_sockets[s].snd_una = ack
             tcp_sockets[s].snd_wnd = wnd
             tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+            // RFC 2018 §2: both our SYN and the peer's SYN-ACK
+            // must carry SACK-permitted for SACK to be enabled
+            // on this connection. We always advertise it in our
+            // SYN, so the peer's SYN-ACK option is the deciding
+            // factor.
+            if peer_sack_perm != 0
+                tcp_sockets[s].sack_ok = 1
             inet_tcp_disarm_rtx(s)
             inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
             if tcp_sockets[s].connect_waiter >= 0
@@ -2190,7 +2322,7 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         while i < 50
             seg_b[i] = byte('B')
             i += 1
-        inet_tcp_state_step(s, TCP_F_ACK, u32(200), u32(1), 1024, seg_b, 50)
+        inet_tcp_state_step(s, TCP_F_ACK, u32(200), u32(1), 1024, seg_b, 50, 0)
         if tcp_sockets[s].rcv_nxt != u32(100)
             inet_tcp_close_slot(s, 0)
             return 1
@@ -2200,7 +2332,7 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         while i < 50
             seg_c[i] = byte('C')
             i += 1
-        inet_tcp_state_step(s, TCP_F_ACK, u32(250), u32(1), 1024, seg_c, 50)
+        inet_tcp_state_step(s, TCP_F_ACK, u32(250), u32(1), 1024, seg_c, 50, 0)
         if tcp_sockets[s].rcv_nxt != u32(100)
             inet_tcp_close_slot(s, 0)
             return 2
@@ -2216,7 +2348,7 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         while i < 100
             seg_a[i] = byte('A')
             i += 1
-        inet_tcp_state_step(s, TCP_F_ACK, u32(100), u32(1), 1024, seg_a, 100)
+        inet_tcp_state_step(s, TCP_F_ACK, u32(100), u32(1), 1024, seg_a, 100, 0)
         if tcp_sockets[s].rcv_nxt != u32(300)
             inet_tcp_close_slot(s, 0)
             return 3
@@ -2323,4 +2455,75 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         inet_set_ip_config(saved_ip, saved_mask, saved_gw)
         if inet_get_our_ip() != saved_ip
             return 20
+
+        // RFC 2018 SACK-permitted parser. QEMU's slirp doesn't carry
+        // the option in SYN-ACKs, so we can't observe negotiation
+        // over the wire in CI — verify it in isolation instead.
+        //
+        // Frame layout: 14 B Ethernet header + 20 B IPv4 header +
+        // 28 B TCP header (MSS + SACK-permitted + 2 NOPs).
+        var synframe: [54]byte
+        var bi = 0
+        while bi < 54
+            synframe[bi] = 0
+            bi += 1
+        // Data offset = 7 words (28 bytes); flags = SYN.
+        synframe[34 + 12] = byte(0x70)
+        synframe[34 + 13] = byte(TCP_F_SYN & 0xff)
+        synframe[34 + 20] = byte(TCP_OPT_MSS)
+        synframe[34 + 21] = 4
+        synframe[34 + 22] = byte(0x05)
+        synframe[34 + 23] = byte(0xb4)
+        synframe[34 + 24] = byte(TCP_OPT_SACK_PERMITTED)
+        synframe[34 + 25] = 2
+        synframe[34 + 26] = byte(TCP_OPT_NOP)
+        synframe[34 + 27] = byte(TCP_OPT_NOP)
+        if tcp_opts_has_sack_permitted(synframe, 34, 28) != 1
+            return 21
+
+        // Same frame without SACK-permitted (replace kind=4 with a
+        // 2-byte unknown option) must parse as "not permitted".
+        synframe[34 + 24] = byte(0xfe)
+        if tcp_opts_has_sack_permitted(synframe, 34, 28) != 0
+            return 22
+
+        // Exercise the SYN_SENT → ESTABLISHED transition with a
+        // synthetic peer_sack_perm = 1 and verify `sack_ok` flips.
+        val ss = TCP_MAX_SOCKETS - 1
+        tcp_sockets[ss].in_use = 1
+        tcp_sockets[ss].state = TCP_STATE_SYN_SENT
+        tcp_sockets[ss].snd_una = u32(0)
+        tcp_sockets[ss].snd_nxt = u32(1)
+        tcp_sockets[ss].recv_len = 0
+        tcp_sockets[ss].send_len = 0
+        tcp_sockets[ss].fin_pending = 0
+        tcp_sockets[ss].peer_fin = 0
+        tcp_sockets[ss].our_fin_sent = 0
+        tcp_sockets[ss].recv_waiter = -1
+        tcp_sockets[ss].send_waiter = -1
+        tcp_sockets[ss].connect_waiter = -1
+        tcp_sockets[ss].close_waiter = -1
+        tcp_sockets[ss].accept_waiter = -1
+        tcp_sockets[ss].is_listen = 0
+        tcp_sockets[ss].owner_tid = -1
+        tcp_sockets[ss].local_port = 0
+        tcp_sockets[ss].remote_port = 0
+        tcp_sockets[ss].remote_ip = u32(0)
+        tcp_sockets[ss].sack_ok = 0
+        var rk = 0
+        while rk < TCP_REORDER_SLOTS
+            tcp_sockets[ss].reorder[rk].in_use = 0
+            rk += 1
+        // state_step only inspects flags/seq/ack/wnd + peer_sack_perm
+        // when walking the SYN_SENT → ESTABLISHED edge — the payload
+        // pointer is unused for the SYN-ACK case, so pass a stub.
+        var nullbuf: [1]byte
+        inet_tcp_state_step(ss,
+            TCP_F_SYN | TCP_F_ACK,
+            u32(100), u32(1), 1024,
+            nullbuf, 0, 1)
+        if tcp_sockets[ss].sack_ok != 1
+            inet_tcp_close_slot(ss, 0)
+            return 23
+        inet_tcp_close_slot(ss, 0)
         0
