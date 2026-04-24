@@ -1,0 +1,170 @@
+test_nonblock — fcntl O_NONBLOCK on UDP + TCP
+==============================================
+
+Drives `fcntl` (syscall 171) + the non-blocking recv paths in the
+aarch64 POSIX shim.
+
+Covers:
+- `fcntl(fd, F_GETFL)` returns 0 initially; after
+  `fcntl(fd, F_SETFL, O_NONBLOCK)` it returns O_NONBLOCK.
+- `recvfrom(udp_fd, ...)` on an empty queue returns -EAGAIN (-11)
+  when O_NONBLOCK is set, instead of blocking.
+- `fcntl(fd, F_GETFD)` returns 0; `fcntl(fd, F_SETFD, FD_CLOEXEC)`
+  returns 0 (accept+ignore).
+- `fcntl(fd, F_DUPFD, 0)` returns -EINVAL — not implemented.
+
+Pass = `nonblock: done` at the end with no `FAIL` markers.
+
+    module oskit.bin.test_nonblock
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE    = 147
+    val NR_BIND     = 135
+    val NR_RECVFROM = 276
+    val NR_SOCKET   = 337
+    val NR_FCNTL    = 171
+
+    val AF_INET_V    = 2
+    val SOCK_DGRAM_V = 2
+
+    val F_DUPFD      = 0
+    val F_GETFD      = 1
+    val F_SETFD      = 2
+    val F_GETFL      = 3
+    val F_SETFL      = 4
+    val O_NONBLOCK   = 2048
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+    print_sdec(v: int)
+        if v < 0
+            puts("-")
+            print_sdec(-v)
+            return
+        print_udec(v)
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+                   addr: *byte, addrlen_ptr: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_ptr)))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_fcntl(fd: int, cmd: int, arg: int) -> int
+        int(syscall6(NR_FCNTL, i64(fd), i64(cmd), i64(arg), 0, 0, 0))
+
+
+    main(argv: []string)
+        val fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if fd < 0
+            puts("nonblock: socket failed\n")
+            exit_with(1)
+            return
+
+        var baddr: [16]byte
+        fill_sockaddr(&baddr[0], 7786, 127, 0, 0, 1)
+        if posix_bind(fd, &baddr[0], 16) < 0
+            puts("nonblock: bind failed\n")
+            exit_with(2)
+            return
+
+        val fl0 = posix_fcntl(fd, F_GETFL, 0)
+        puts("nonblock: F_GETFL pre = ")
+        print_sdec(fl0)
+        puts("\n")
+        if fl0 != 0
+            puts("nonblock: FAIL F_GETFL pre (expected 0)\n")
+            exit_with(3)
+            return
+
+        val r_setfl = posix_fcntl(fd, F_SETFL, O_NONBLOCK)
+        puts("nonblock: F_SETFL(O_NONBLOCK) = ")
+        print_sdec(r_setfl)
+        puts("\n")
+        if r_setfl != 0
+            puts("nonblock: FAIL F_SETFL\n")
+            exit_with(4)
+            return
+
+        val fl1 = posix_fcntl(fd, F_GETFL, 0)
+        puts("nonblock: F_GETFL post = ")
+        print_sdec(fl1)
+        puts("\n")
+        if fl1 != O_NONBLOCK
+            puts("nonblock: FAIL F_GETFL post\n")
+            exit_with(5)
+            return
+
+        var rbuf: [32]byte
+        var src: [16]byte
+        var src_len: i32 = i32(16)
+        val r1 = posix_recvfrom(fd, &rbuf[0], 32, 0, &src[0], &src_len)
+        puts("nonblock: recvfrom (empty) = ")
+        print_sdec(r1)
+        puts("\n")
+        if r1 != -11
+            puts("nonblock: FAIL recvfrom (expected -11)\n")
+            exit_with(6)
+            return
+
+        val fd_cloexec = posix_fcntl(fd, F_GETFD, 0)
+        puts("nonblock: F_GETFD = ")
+        print_sdec(fd_cloexec)
+        puts("\n")
+        if fd_cloexec != 0
+            puts("nonblock: FAIL F_GETFD\n")
+            exit_with(7)
+            return
+
+        val r_setfd = posix_fcntl(fd, F_SETFD, 1)
+        puts("nonblock: F_SETFD(FD_CLOEXEC) = ")
+        print_sdec(r_setfd)
+        puts("\n")
+        if r_setfd != 0
+            puts("nonblock: FAIL F_SETFD\n")
+            exit_with(8)
+            return
+
+        val r_dup = posix_fcntl(fd, F_DUPFD, 0)
+        puts("nonblock: F_DUPFD = ")
+        print_sdec(r_dup)
+        puts("\n")
+        if r_dup != -22
+            puts("nonblock: FAIL F_DUPFD (expected -22)\n")
+            exit_with(9)
+            return
+
+        posix_close(fd)
+        puts("nonblock: done\n")
+        exit()

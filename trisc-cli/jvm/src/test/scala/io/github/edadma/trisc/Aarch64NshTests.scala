@@ -391,6 +391,24 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "getname: FAIL"
   }
 
+  "aarch64 posix: fcntl + O_NONBLOCK non-blocking recv" in {
+    // test_nonblock drives syscall 171 (fcntl) and asserts that
+    // recvfrom on an empty UDP queue returns -EAGAIN (-11) when
+    // O_NONBLOCK is set. Also covers F_GETFL/F_SETFL round-trip,
+    // F_GETFD/F_SETFD accept+ignore, F_DUPFD -EINVAL stub.
+    qemu.send("test_nonblock\n")
+    val output = qemu.waitFor("nonblock: done")
+    output should include("nonblock: F_GETFL pre = 0")
+    output should include("nonblock: F_SETFL(O_NONBLOCK) = 0")
+    output should include("nonblock: F_GETFL post = 2048")
+    output should include("nonblock: recvfrom (empty) = -11")
+    output should include("nonblock: F_GETFD = 0")
+    output should include("nonblock: F_SETFD(FD_CLOEXEC) = 0")
+    output should include("nonblock: F_DUPFD = -22")
+    output should include("nonblock: done")
+    output should not include "nonblock: FAIL"
+  }
+
   "aarch64 timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications via notify_wait/notify_read_self. Proves the

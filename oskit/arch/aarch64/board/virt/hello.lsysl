@@ -481,6 +481,14 @@ posix_fd_bridge memory.
         val pid = posix_fd_current_pid()
         posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].target
 
+    posix_fd_flags(fd: int) -> int
+        val pid = posix_fd_current_pid()
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].flags
+
+    posix_fd_set_flags(fd: int, flags: int)
+        val pid = posix_fd_current_pid()
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].flags = flags
+
     posix_fd_alloc(kind: int, target: int) -> int
         val pid = posix_fd_current_pid()
         if pid <= 0
@@ -539,12 +547,28 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_TCP_ACCEPT  = 15
     val INET_CMD_UDP_GETNAME = 24
     val INET_CMD_TCP_GETNAME = 25
+    val INET_CMD_RECVFROM_TIMEOUT = 18
+    val INET_CMD_TCP_RECV_NB = 26
 
     val INET_MAX_TCP_SEG     = 480
 
     val POSIX_AF_INET        = 2
     val POSIX_SOCK_DGRAM     = 2
     val POSIX_SOCK_STREAM    = 1
+
+POSIX `O_NONBLOCK` is Linux octal 04000 = 2048. We only honour this
+flag today; other open(2) flags (O_APPEND etc.) would need the
+shim to actually track them, so we mask them off on `F_SETFL`.
+
+    val POSIX_O_NONBLOCK     = 2048
+
+fcntl command codes (`<fcntl.h>` in musl arch).
+
+    val POSIX_F_DUPFD        = 0
+    val POSIX_F_GETFD        = 1
+    val POSIX_F_SETFD        = 2
+    val POSIX_F_GETFL        = 3
+    val POSIX_F_SETFL        = 4
 
     var inet_port_cached = -1
 
@@ -595,6 +619,8 @@ to the same UDP stack that native sysl programs use via
             return sys_recvfrom(int(a0), a1, int(a2), int(a3), a4, a5)
         if num == 307
             return sys_sendto(int(a0), a1, int(a2), int(a3), a4, int(a5))
+        if num == 171
+            return sys_fcntl(int(a0), int(a1), int(a2))
         if num == 192
             return sys_getpeername(int(a0), a1, a2)
         if num == 203
@@ -659,8 +685,13 @@ inherits, so pointers dereference directly without vm_copy_from.
                     return i64(-32)     // -EPIPE
                 val n = shim_read_u16(reply, 1)
                 if n <= 0
-                    // Send buffer full; return what we've buffered so far
-                    // (or zero if none yet — musl retries).
+                    // Send buffer full. Non-blocking mode reports
+                    // -EAGAIN if nothing has been queued yet; other-
+                    // wise return the partial count so musl can
+                    // decide whether to retry.
+                    if sent_total == 0
+                        if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                            return i64(-11)     // -EAGAIN
                     return i64(sent_total)
                 sent_total += n
             return i64(sent_total)
@@ -687,14 +718,24 @@ only STDIO kinds and UDP (which should use recvfrom) are rejected.
             var cap_len = len
             if cap_len > INET_MAX_TCP_SEG
                 cap_len = INET_MAX_TCP_SEG
+            val nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
             var msg: [5]byte
-            msg[0] = byte(INET_CMD_TCP_RECV)
+            if nb != 0
+                msg[0] = byte(INET_CMD_TCP_RECV_NB)
+            else
+                msg[0] = byte(INET_CMD_TCP_RECV)
             shim_write_u16(msg, 1, inet_fd)
             shim_write_u16(msg, 3, cap_len)
             var reply: [540]byte
             val r = ipc_send(port, msg, 5, reply, 540)
             if r < 0
                 return i64(-5)
+            if nb != 0
+                val raw = int(reply[0]) & 0xff
+                if raw != 0
+                    if raw >= 128
+                        return i64(raw - 256)
+                    return i64(raw)
             if reply[0] != 0
                 return i64(-5)
             val rlen = shim_read_u16(reply, 1)
@@ -880,17 +921,39 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
         var cap_len = len
         if cap_len > 512
             cap_len = 512
-        var msg: [4]byte
-        msg[0] = byte(INET_CMD_RECVFROM)
-        msg[1] = byte(inet_fd & 0xff)
-        msg[2] = byte((cap_len >> 8) & 0xff)
-        msg[3] = byte(cap_len & 0xff)
+        val nonblock = posix_fd_flags(fd) & POSIX_O_NONBLOCK
         var reply: [540]byte
-        val r = ipc_send(port, msg, 4, reply, 540)
-        if r < 0
-            return i64(-5)
-        if reply[0] != 0
-            return i64(-5)
+        if nonblock != 0
+            // Non-blocking: reuse RECVFROM_TIMEOUT with a zero
+            // timeout — the inet handler will reply with status=1
+            // (no data) immediately if the queue is empty.
+            var nmsg: [8]byte
+            nmsg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
+            nmsg[1] = byte(inet_fd & 0xff)
+            nmsg[2] = byte((cap_len >> 8) & 0xff)
+            nmsg[3] = byte(cap_len & 0xff)
+            nmsg[4] = byte(0)
+            nmsg[5] = byte(0)
+            nmsg[6] = byte(0)
+            nmsg[7] = byte(0)
+            val nr = ipc_send(port, nmsg, 8, reply, 540)
+            if nr < 0
+                return i64(-5)
+            if reply[0] == byte(1)
+                return i64(-11)         // -EAGAIN
+            if reply[0] != 0
+                return i64(-5)
+        else
+            var msg: [4]byte
+            msg[0] = byte(INET_CMD_RECVFROM)
+            msg[1] = byte(inet_fd & 0xff)
+            msg[2] = byte((cap_len >> 8) & 0xff)
+            msg[3] = byte(cap_len & 0xff)
+            val r = ipc_send(port, msg, 4, reply, 540)
+            if r < 0
+                return i64(-5)
+            if reply[0] != 0
+                return i64(-5)
         val src_port = shim_read_u16(reply, 2)
         val payload_len = shim_read_u16(reply, 8)
         if addr_ptr != i64(0)
@@ -1251,6 +1314,41 @@ peer short-circuit.
         shim_write_sockaddr(addr_ptr, p, &reply[3])
         shim_write_addrlen(addrlen_ptr, 16)
         i64(0)
+
+SYS_FCNTL. MVP dispatch for the handful of cmd codes musl programs
+actually exercise before doing I/O:
+
+- `F_GETFL` (3): return the slot's stored flags. Only O_NONBLOCK is
+  meaningful today; other bits echo back whatever was set so
+  `getfl | O_NONBLOCK` round-trips cleanly.
+- `F_SETFL` (4): store `arg & O_NONBLOCK` in the slot. We mask so
+  the shim can't be tricked into remembering unsupported flags and
+  acting surprisingly later.
+- `F_GETFD` (1) / `F_SETFD` (2): file-descriptor flags (mainly
+  FD_CLOEXEC). SLIX has no `exec` yet, so CLOEXEC is a no-op.
+  GETFD returns 0; SETFD accepts any value and returns 0. The
+  day an exec path lands, this is the place to start tracking.
+- `F_DUPFD` (0): not implemented — socket dup requires a separate
+  fd-aliasing design (see POSIX-fd-bridge memory). Returns -EINVAL.
+
+Unknown command → -EINVAL so real misuse surfaces.
+
+    sys_fcntl(fd: int, cmd: int, arg: int) -> i64
+        val k = posix_fd_kind(fd)
+        if k == POSIX_FD_FREE
+            return i64(-9)              // -EBADF
+        if cmd == POSIX_F_GETFL
+            return i64(posix_fd_flags(fd))
+        if cmd == POSIX_F_SETFL
+            posix_fd_set_flags(fd, arg & POSIX_O_NONBLOCK)
+            return i64(0)
+        if cmd == POSIX_F_GETFD
+            return i64(0)
+        if cmd == POSIX_F_SETFD
+            return i64(0)
+        if cmd == POSIX_F_DUPFD
+            return i64(-22)             // -EINVAL (no dup yet)
+        i64(-22)
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a
 is the echo server: creates a port, registers "echo", then
