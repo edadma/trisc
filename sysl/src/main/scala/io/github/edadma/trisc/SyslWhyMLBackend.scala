@@ -30,6 +30,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     line(s"module $moduleName")
     indentLevel += 1
     line("use int.Int")
+    // ComputerDivision provides truncating `div` and `mod` (C-style). int.Int does not
+    // define `/` or `%` because their semantics are debatable; we pin to the C-style choice
+    // since it matches sysl's interpreter and codegen behavior. Always-imported is harmless.
+    line("use int.ComputerDivision")
     blank()
     val fns = program.decls.collect { case f: FunDeclAST => f }
     var first = true
@@ -141,8 +145,15 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case VarRefAST(name) =>
       if name == "result" then "result" else sanitizeName(name)
     case BinaryAST(l, op, r) =>
-      val opStr = mapBinaryOp(op)
-      s"(${formatExpr(l)} $opStr ${formatExpr(r)})"
+      // `div` and `mod` from int.ComputerDivision are plain prefix functions in WhyML,
+      // not infix operators — `a div b` would parse as `a` applied to `div b`. Emit them
+      // as `(div a b)`. All other ops (arithmetic, comparison, logical) are infix.
+      op match
+        case "/"          => s"(div ${formatExpr(l)} ${formatExpr(r)})"
+        case "%" | "mod"  => s"(mod ${formatExpr(l)} ${formatExpr(r)})"
+        case _ =>
+          val opStr = mapBinaryOp(op)
+          s"(${formatExpr(l)} $opStr ${formatExpr(r)})"
     case UnaryAST(op, x) =>
       // The space after `-` and `not` is significant: `-x` would lex as the binary minus,
       // and `notx` as an identifier. Always render with a separator.
@@ -178,8 +189,13 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case "!=" => "<>"
     case "&&" => "/\\"
     case "||" => "\\/"
-    case "+" | "-" | "*" | "/" | "<" | ">" | "<=" | ">=" => op
+    // `/` and `%` route through int.ComputerDivision's `div` / `mod` — the only sense in
+    // which integer division is total in WhyML. The lexer treats `mod` as an identifier;
+    // it is recognized as the operator only because we imported ComputerDivision.
+    case "/"   => "div"
+    case "%"   => "mod"
     case "mod" => "mod"
+    case "+" | "-" | "*" | "<" | ">" | "<=" | ">=" => op
     case other => unsupported("binary operator", other)
 
   /** Strip module-qualified prefixes for now; map sysl identifiers that collide with WhyML

@@ -22,6 +22,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let function twice (x: int) : int
         |    = (x * 2)
@@ -37,6 +38,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let function is_pos (x: int) : bool
         |    = (x > 0)
@@ -53,6 +55,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let function incr (x: int) : int
         |    requires { x > 0 }
@@ -71,6 +74,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let function incr (x: int) : int
         |    requires { x > 0 }
@@ -92,6 +96,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module Factorial
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let rec function fact (n: int) : int
         |    requires { n >= 0 }
@@ -113,12 +118,13 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let rec function gcd (a: int) (b: int) : int
         |    requires { a >= 0 }
         |    requires { b >= 0 }
         |    variant  { a + b }
-        |    = (if (b = 0) then a else (gcd b (a - ((a / b) * b))))
+        |    = (if (b = 0) then a else (gcd b (a - ((div a b) * b))))
         |end
         |""".stripMargin
   }
@@ -134,6 +140,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let function twice (x: int) : int
         |    = (x * 2)
@@ -154,6 +161,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let function abs (x: int) : int
         |    ensures  { result >= 0 }
@@ -171,6 +179,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let function neq (x: int) (y: int) : bool
         |    = (x <> y)
@@ -186,6 +195,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let function sum (a: int) (b: int) : int
         |    = (a + b)
@@ -201,6 +211,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw shouldBe
       """module M
         |  use int.Int
+        |  use int.ComputerDivision
         |
         |  let function neg () : int
         |    = (- 5)
