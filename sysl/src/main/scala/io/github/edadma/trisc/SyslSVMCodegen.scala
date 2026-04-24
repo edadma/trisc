@@ -343,6 +343,33 @@ class SyslSVMCodegen:
                   emit(s"  dl ${bytes.length}")
                 case _ =>
                   emit(s"  dl 0"); emit(s"  dl 0")
+            case SyslType.ArrayType(SyslType.UIntType(8) | SyslType.IntType(8) | SyslType.BoolType, arrSize) =>
+              // Byte array with string-literal / array-literal init.
+              init match
+                case TStringLit(s, _) =>
+                  val bytes = s.getBytes("UTF-8")
+                  for b <- bytes do emit(s"  db ${b & 0xff}")
+                  for _ <- bytes.length until arrSize.toInt do emit("  db 0")
+                case TArrayLit(elements, _) =>
+                  for e <- elements do
+                    val n = constEval(e).getOrElse(0L) & 0xff
+                    emit(s"  db $n")
+                  for _ <- elements.length until arrSize.toInt do emit("  db 0")
+                case _ =>
+                  for _ <- 0 until arrSize.toInt do emit("  db 0")
+            case SyslType.ArrayType(elem, arrSize) =>
+              // Wider-element array: fall back to zero-init for now.
+              val elemBytes = elem.sizeOf.toInt
+              val totalBytes = (arrSize.toInt * elemBytes).max(8)
+              val slots = (totalBytes + 7) / 8
+              init match
+                case TArrayLit(elements, _) if elemBytes == 8 =>
+                  for e <- elements do
+                    val n = constEval(e).getOrElse(0L)
+                    emit(s"  dl $n")
+                  for _ <- elements.length until slots do emit("  dl 0")
+                case _ =>
+                  for _ <- 0 until slots do emit("  dl 0")
             case _ =>
               val sizeSlots = (typ.sizeOf.max(8) / 8).toInt
               constEval(init) match
@@ -747,14 +774,13 @@ class SyslSVMCodegen:
         case Some(LocalInfo(idx, _)) => emit(s"  local_get $idx")
         case None =>
           // Global. Scalars load the cell; aggregates (string / slice /
-          // struct / enum) are address-represented so the symbol's address
-          // IS the value. Scalar globals are stored as 8-byte cells (dl),
-          // so always load 8 bytes — callers doing narrow-int math will
-          // truncate on write-back. (Using narrow load would drop the sign
-          // bit for signed-negative values stored via store64.)
+          // struct / enum / array) are address-represented so the symbol's
+          // address IS the value.
           emit(s"  push_i64 $name")
           typ.underlying match
-            case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType => ()
+            case _: SyslType.StructType | _: SyslType.EnumType
+               | SyslType.StringType | _: SyslType.SliceType
+               | _: SyslType.ArrayType => ()
             case _ => emit("  load64")
 
     case TAddrOf(name, _) =>
@@ -775,10 +801,16 @@ class SyslSVMCodegen:
 
     case TAddrOfIndex(array, index, typ) =>
       genExpr(array)
-      val elemType = array.typ match
+      val elemType = array.typ.underlying match
         case SyslType.ArrayType(e, _) => e
         case SyslType.PtrType(e) => e
+        case SyslType.SliceType(e) => e
+        case SyslType.RefType(SyslType.SliceType(e)) => e
         case _ => SyslType.I64
+      array.typ.underlying match
+        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
+          emit("  load64") // slice struct → data ptr
+        case _ =>
       genExpr(index)
       emitPushInt(elemType.sizeOf)
       emit("  mul")
@@ -1515,7 +1547,8 @@ class SyslSVMCodegen:
     case SyslType.UIntType(32) => emit("  load32")
     // Inline aggregates are address-represented — the 'load' is a no-op,
     // leaving the field/slot address on the stack.
-    case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType =>
+    case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType
+       | _: SyslType.SliceType | _: SyslType.ArrayType =>
       ()
     case _ => emit("  load64")
 
