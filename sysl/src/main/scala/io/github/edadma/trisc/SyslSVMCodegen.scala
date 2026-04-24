@@ -1452,32 +1452,36 @@ class SyslSVMCodegen:
     case SyslType.IntType(32)  => emitPushInt(32); emit("  shl"); emitPushInt(32); emit("  sar")
     case _ =>
 
-  private def emitLoad(typ: SyslType): Unit = typ match
+  private def emitStore(typ: SyslType): Unit = typ match
+    case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => emit("  store8")
+    case SyslType.IntType(16) | SyslType.UIntType(16) => emit("  store16")
+    case SyslType.IntType(32) | SyslType.UIntType(32) => emit("  store32")
+    case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType =>
+      // Inline aggregate: stack has ( src_addr dest_addr ). Copy sizeOf bytes.
+      val size = ((typ.sizeOf + 7) / 8 * 8).toInt
+      for i <- 0 until size by 8 do
+        emit("  over")
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  load64")
+        emit("  over")
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  store64")
+      emit("  drop")
+      emit("  drop")
+    case _ => emit("  store64")
+
+  private def emitLoad(typ: SyslType): Unit = typ.underlying match
     case SyslType.IntType(8) => emit("  load8s")
     case SyslType.UIntType(8) | SyslType.BoolType => emit("  load8")
     case SyslType.IntType(16) => emit("  load16s")
     case SyslType.UIntType(16) => emit("  load16")
     case SyslType.IntType(32) => emit("  load32s")
     case SyslType.UIntType(32) => emit("  load32")
+    // Inline aggregates are address-represented — the 'load' is a no-op,
+    // leaving the field/slot address on the stack.
+    case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType =>
+      ()
     case _ => emit("  load64")
-
-  private def emitStore(typ: SyslType): Unit = typ match
-    case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => emit("  store8")
-    case SyslType.IntType(16) | SyslType.UIntType(16) => emit("  store16")
-    case SyslType.IntType(32) | SyslType.UIntType(32) => emit("  store32")
-    case st: SyslType.StructType =>
-      // Bulk copy: stack has ( src_addr dest_addr )
-      val size = ((st.sizeOf + 7) / 8 * 8).toInt
-      for i <- 0 until size by 8 do
-        emit("  over") // ( src dest src )
-        if i > 0 then { emitPushInt(i); emit("  add") }
-        emit("  load64")
-        emit("  over") // ( src dest val dest )
-        if i > 0 then { emitPushInt(i); emit("  add") }
-        emit("  store64")
-      emit("  drop") // drop dest
-      emit("  drop") // drop src
-    case _ => emit("  store64")
 
   private def emitCast(from: SyslType, to: SyslType): Unit =
     import SyslType.*
