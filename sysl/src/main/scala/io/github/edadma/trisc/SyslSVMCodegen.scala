@@ -79,6 +79,9 @@ class SyslSVMCodegen:
       case v if v >= 0 && v <= 255 => emit(s"  push_u8 $v")
       case v if v >= -32768 && v <= 32767 => emit(s"  push_i16 $v")
       case v if v >= -2147483648L && v <= 2147483647L => emit(s"  push_i32 $v")
+      case Long.MinValue =>
+        // -9223372036854775808 can't be parsed as unary-minus literal; emit via hex.
+        emit("  push_i64 0x8000000000000000")
       case v => emit(s"  push_i64 $v")
 
   private def isUnsigned(t: SyslType): Boolean = t.isInstanceOf[SyslType.UIntType]
