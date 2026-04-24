@@ -1,0 +1,45 @@
+test_cross_as — user-process → kernel-server IPC validation
+============================================================
+
+Looks up the kernel-thread echo server registered under the port
+name "echo" (see board/virt/hello.lsysl DEMO_MODE=4, kentry_a),
+sends two bytes, echoes each reply back to the UART via putc,
+then exits cleanly. Exercises the cross-address-space ipc_deliver
+/ vm_copy_cross path end-to-end.
+
+Startup race: kentry_a may not have finished port_register when we
+run, so retry the lookup a few times (yielding between tries) until
+the port shows up. This is how real user programs will deal with
+server startup ordering too.
+
+    module oskit.bin.test_cross_as
+
+    import oskit.ulib.{putc, exit, port_lookup, ipc_send, yield}
+
+    main(argv: []string)
+        var port = -1
+        var attempts = 0
+        while port < 0
+            if attempts >= 16
+                putc('X')
+                putc('\n')
+                exit()
+            yield()
+            port = port_lookup("echo")
+            attempts += 1
+
+        var send_buf: [1]byte
+        var reply_buf: [1]byte
+
+        send_buf[0] = byte('O')
+        ipc_send(port, *byte(send_buf), 1,
+                 *byte(reply_buf), 1)
+        putc(int(reply_buf[0]))
+
+        send_buf[0] = byte('K')
+        ipc_send(port, *byte(send_buf), 1,
+                 *byte(reply_buf), 1)
+        putc(int(reply_buf[0]))
+
+        putc('\n')
+        exit()

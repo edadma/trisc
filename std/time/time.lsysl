@@ -359,7 +359,7 @@ language matches the Scala `datetime` library:
 
 Zero-pad an integer to 2 digits.
 
-    pad2(b: StrBuilder, v: int)
+    pad2(inout b: StrBuilder, v: int)
         if v < 10
             b.write_byte(byte('0'))
         b.write(format_int(v))
@@ -368,7 +368,7 @@ Zero-pad an integer to 2 digits.
 
 Zero-pad an integer to 4 digits.
 
-    pad4(b: StrBuilder, v: int)
+    pad4(inout b: StrBuilder, v: int)
         if v < 10
             b.write("000")
         else if v < 100

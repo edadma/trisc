@@ -150,10 +150,10 @@ object SyslCli:
               )
             ),
           opt[String]("backend")
-            .text("Backend: interpreter (default) | trisc | all")
+            .text("Backend: interpreter (default) | llvm-host | trisc | all")
             .validate(v =>
-              if Seq("interpreter", "trisc", "all").contains(v) then success
-              else failure(s"Unknown backend: $v (expected interpreter, trisc, all)")
+              if Seq("interpreter", "llvm-host", "trisc", "all").contains(v) then success
+              else failure(s"Unknown backend: $v (expected interpreter, llvm-host, trisc, all)")
             )
             .action((v, c) =>
               c.copy(command = c.command match
@@ -374,6 +374,80 @@ object SyslCli:
   private case object Pass extends TestOutcome
   private case class Fail(msg: String, output: String = "") extends TestOutcome
 
+  /** Compile a unit's scoped TProgram (tests included) to a native binary with a
+    * test dispatcher shim. Returns the binary path on success, None on failure.
+    * Binary takes a test function name as argv[1] and calls it; exits 0 on
+    * clean return, non-zero when the test panics (via abort()).
+    */
+  private def compileUnitToLLVMBinary(program: TProgram, unitName: String): Either[String, String] =
+    val testFns = program.decls.collect { case f: TFunDecl if isTestFn(f) => f.name }
+    if testFns.isEmpty then return Left("no test functions in unit")
+
+    val codegen = new SyslLLVMCodegen("host")
+    val ir = try codegen.generate(program)
+             catch case e: Throwable => return Left(s"IR codegen failed: ${e.getMessage}")
+
+    val workDir = java.nio.file.Files.createTempDirectory("sysl-llvm-test-")
+    val unitKey = unitName.replace("/", "_").replace(".", "_")
+    val irPath = workDir.resolve(s"$unitKey.ll")
+    java.nio.file.Files.writeString(irPath, ir)
+
+    val shim = new StringBuilder
+    shim ++= "#include <stdio.h>\n#include <string.h>\n"
+    for fn <- testFns do shim ++= s"extern void $fn(void);\n"
+    shim ++= "int main(int argc, char** argv) {\n"
+    shim ++= "  if (argc < 2) { fprintf(stderr, \"missing test name\\n\"); return 1; }\n"
+    shim ++= "  const char *name = argv[1];\n"
+    for fn <- testFns do
+      shim ++= s"""  if (!strcmp(name, "$fn")) { $fn(); return 0; }\n"""
+    shim ++= "  fprintf(stderr, \"unknown test: %s\\n\", name);\n"
+    shim ++= "  return 2;\n}\n"
+    val cPath = workDir.resolve(s"$unitKey.c")
+    java.nio.file.Files.writeString(cPath, shim.toString)
+
+    val binPath = workDir.resolve(unitKey)
+    val buildLog = new StringBuilder
+    val logger = scala.sys.process.ProcessLogger(
+      line => buildLog.append(line).append('\n'),
+      line => buildLog.append(line).append('\n')
+    )
+    val exit = scala.sys.process.Process(
+      Seq("clang", "-o", binPath.toString, irPath.toString, cPath.toString, "-w")
+    ).!(logger)
+    if exit != 0 then Left(s"clang failed (exit $exit): ${buildLog.toString.trim}")
+    else Right(binPath.toString)
+
+  private def runOneLLVM(
+      program: TProgram,
+      t: DiscoveredTest,
+      binCache: scala.collection.mutable.Map[String, Either[String, String]],
+  ): TestOutcome =
+    val binResult = binCache.getOrElseUpdate(t.unitName, compileUnitToLLVMBinary(program, t.unitName))
+    binResult match
+      case Left(err) => Fail(s"unit compile failed: $err")
+      case Right(bin) =>
+        val outBuf = new StringBuilder
+        val errBuf = new StringBuilder
+        val logger = scala.sys.process.ProcessLogger(
+          line => outBuf.append(line).append('\n'),
+          line => errBuf.append(line).append('\n'),
+        )
+        val exit = scala.sys.process.Process(Seq(bin, t.fn.name)).!(logger)
+        val output = outBuf.toString
+        val errOut = errBuf.toString
+        if exit == 0 then
+          if t.shouldPanic then Fail("expected panic, got normal return", output) else Pass
+        else
+          val panicMsg = errOut.linesIterator.find(_.startsWith("panic: ")).map(_.stripPrefix("panic: "))
+            .orElse(errOut.linesIterator.find(_.startsWith("assertion failed: ")).map(_.stripPrefix("assertion failed: ")))
+            .getOrElse(errOut.trim)
+          if t.shouldPanic then
+            t.expectedMsg match
+              case Some(substr) if !panicMsg.contains(substr) =>
+                Fail(s"panic message did not contain '$substr' (got: $panicMsg)", output)
+              case _ => Pass
+          else Fail(s"panic: $panicMsg (exit $exit)", output)
+
   private def runOneInterpreter(program: TProgram, stdlibImports: Set[String], t: DiscoveredTest): TestOutcome =
     val outputBuf = new StringBuilder
     val interp = new SyslInterpreter(s => outputBuf ++= s)
@@ -396,7 +470,7 @@ object SyslCli:
 
   private def executeTest(cmd: TestCommand): Unit =
     if cmd.backend == "trisc" || cmd.backend == "all" then
-      System.err.println(s"error: backend '${cmd.backend}' not yet implemented (use 'interpreter')")
+      System.err.println(s"error: backend '${cmd.backend}' not yet implemented (use 'interpreter' or 'llvm-host')")
       throw CliError("unsupported backend")
 
     // Always use project root as base so module paths resolve correctly.
@@ -465,7 +539,7 @@ object SyslCli:
       case Some(pat) => discovered.filter(t =>
         shortFnName(t.fn.name).contains(pat) || t.displayName.contains(pat) || t.fn.name.contains(pat))
 
-    println(s"running ${filtered.size} tests")
+    println(s"running ${filtered.size} tests (backend: ${cmd.backend})")
 
     var passed = 0
     var failed = 0
@@ -473,12 +547,19 @@ object SyslCli:
     var currentUnit = ""
     var stop = false
 
+    // Cache compiled binaries per unit so tests in the same file share one
+    // clang invocation. Stored as Either so a failed unit compile is
+    // reported once and then propagated as a per-test Fail.
+    val llvmBinCache = scala.collection.mutable.Map[String, Either[String, String]]()
+
     for t <- filtered if !stop do
       if t.unitName != currentUnit then
         currentUnit = t.unitName
         println(currentUnit)
       val start = System.nanoTime()
-      val outcome = runOneInterpreter(programFor(t.unitName), stdlibImports, t)
+      val outcome = cmd.backend match
+        case "llvm-host" => runOneLLVM(programFor(t.unitName), t, llvmBinCache)
+        case _           => runOneInterpreter(programFor(t.unitName), stdlibImports, t)
       val elapsedMs = (System.nanoTime() - start) / 1e6
       outcome match
         case Pass =>

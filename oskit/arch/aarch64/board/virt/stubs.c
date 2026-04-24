@@ -34,3 +34,42 @@ __attribute__((noreturn)) void abort(void) {
     for (;;)
         __asm__ volatile("wfi");
 }
+
+/* sbrk — extend heap for std.alloc's Sysl allocator.
+ * Static BSS array keeps the heap safely inside the linked kernel
+ * image and out of the page allocator's way (page_alloc starts at
+ * _heap_start, past all BSS). 2MB matches x86/stubs.c. */
+static char sbrk_heap[2 * 1024 * 1024];
+static char *sbrk_cur = sbrk_heap;
+
+void *sbrk(int incr) {
+    if (incr == 0) return sbrk_cur;
+    char *old = sbrk_cur;
+    if (sbrk_cur + incr > sbrk_heap + sizeof(sbrk_heap))
+        return (void *)-1;
+    sbrk_cur += incr;
+    return old;
+}
+
+/* malloc/free — provided by std.alloc in Sysl (now compiled into the
+ * kernel via board/virt/build.sh's SYSL_FILES list). No C stubs
+ * needed. */
+
+/* Byte-wise memcpy. Not called on hot paths — the kernel's own
+ * memcpy from oskit/hal/memcpy.sysl is word-at-a-time and is what
+ * the kernel prefers; this stub just satisfies LLVM's implicit
+ * memcpy lowering for struct copies. */
+void *memcpy(void *dst, const void *src, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    for (size_t i = 0; i < n; i++)
+        d[i] = s[i];
+    return dst;
+}
+
+void *memset(void *dst, int c, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    for (size_t i = 0; i < n; i++)
+        d[i] = (unsigned char)c;
+    return dst;
+}

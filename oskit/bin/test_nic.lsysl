@@ -1,0 +1,69 @@
+test_nic — NIC server sanity test
+===================================
+
+Asks the `nic` server for the NIC's MAC via IPC and prints it.
+With QEMU's `-device virtio-net-device,mac=52:54:00:12:34:56`
+we expect `test_nic: mac=52:54:00:12:34:56` on a working server.
+Any other output (or a non-zero exit) is a regression in the
+nic IPC path or the virtio-net driver.
+
+    module oskit.bin.test_nic
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{nic_get_mac, nic_subscribe_rx, nic_recv_packet}
+
+
+    put_hex_byte(v: int)
+        val hi = (v >> 4) & 0xf
+        val lo = v & 0xf
+        var out: [1]byte
+        if hi < 10
+            out[0] = byte('0' + hi)
+        else
+            out[0] = byte('a' + hi - 10)
+        puts(string(&out[0], 1))
+        if lo < 10
+            out[0] = byte('0' + lo)
+        else
+            out[0] = byte('a' + lo - 10)
+        puts(string(&out[0], 1))
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+    main(argv: []string)
+        var mac: [6]byte
+        if nic_get_mac(&mac[0]) < 0
+            puts("test_nic: nic_get_mac failed\n")
+            exit_with(1)
+            return
+        puts("test_nic: mac=")
+        var i = 0
+        while i < 6
+            put_hex_byte(int(mac[i]) & 0xff)
+            if i < 5
+                puts(":")
+            i += 1
+        puts("\n")
+        if nic_subscribe_rx() < 0
+            puts("test_nic: subscribe failed\n")
+            exit_with(2)
+            return
+        puts("test_nic: sub=ok\n")
+        var drained = 0
+        var frame: [1514]byte
+        while true
+            val got = nic_recv_packet(&frame[0], 1514)
+            if got < 0
+                break
+            drained += 1
+        puts("test_nic: rx=")
+        print_udec(drained)
+        puts("\n")
+        exit()

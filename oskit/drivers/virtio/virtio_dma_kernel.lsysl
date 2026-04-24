@@ -1,0 +1,22 @@
+Virtio DMA helper — kernel-context provider for `vnet_va_to_pa`
+================================================================
+
+Second file of `module oskit.drivers.virtio`. Supplies the one
+context-dependent primitive the virtio-net driver needs when it
+runs linked directly into the kernel image: converting a CPU-side
+VA to a device-side PA.
+
+On every target the kernel currently supports (aarch64 QEMU virt,
+x86_64 QEMU `-machine q35`), the 1GB RAM block is identity-mapped
+in the kernel's page table — so a kernel VA to RAM *is* the
+matching PA. This makes the provider trivial.
+
+When the nic driver is promoted to a standalone boot-module
+server, a sibling `virtio_dma_server.lsysl` will provide the same
+function using `svc_vm_v2p`. Exactly one of these two files is
+linked into any given build.
+
+    module oskit.drivers.virtio
+
+    vnet_va_to_pa(va: i64) -> i64
+        va

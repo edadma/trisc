@@ -23,7 +23,7 @@ TRISC makes one deliberate trade-off: **simplicity over performance**. Every des
 | **Assembler** | Two-pass assembler with segments, symbols, macros, and pseudo-instructions |
 | **Linker** | Relocatable TOF object format with linker scripts |
 | **Sysl** | Systems language (C-level control, Go syntax) compiling to TRISC and x86_64 via LLVM |
-| **SLIX** | Minix 3-style microkernel OS with 5 isolated servers, IPC, virtual memory, and a shell |
+| **SLIX** | Minix 3-style microkernel OS with 7 isolated servers, IPC, virtual memory, and a shell |
 | **Devices** | Timer, DMA, MMU, GPIO, UART, PL011, interrupt controller, ramdisk, framebuffer, sound, network |
 
 ## Who is this for?
@@ -44,4 +44,4 @@ The emulator and toolchain run on three platforms via Scala's cross-compilation:
 - **JavaScript** (Scala.js) — embed in browser-based lab environments
 - **Native** (Scala Native) — standalone executables, no JVM required
 
-SLIX also runs on **real x86_64 hardware** via QEMU, using the Sysl compiler's LLVM backend.
+SLIX also runs on **x86_64** and **aarch64** (QEMU virt machine) via the Sysl compiler's LLVM backend — the same kernel, servers, and shell source builds for all three targets.

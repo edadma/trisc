@@ -8,7 +8,7 @@ object CheckThreadStruct:
     val sources = Map(
       "oskit/kernel/kernel" -> readLsysl("oskit/kernel/kernel.lsysl"),
       "oskit/services/services" -> readLsysl("oskit/services/services.lsysl"),
-      "oskit/kernel/timer" -> readLsysl("oskit/kernel/timer.lsysl"),
+      "oskit/arch/timer" -> readLsysl("oskit/arch/trisc/timer.lsysl"),
       "oskit/sync/semaphore" -> readLsysl("oskit/sync/semaphore.lsysl"),
       "oskit/sync/mutex" -> readLsysl("oskit/sync/mutex.lsysl"),
       "oskit/ipc/ipc" -> readLsysl("oskit/ipc/ipc.lsysl"),
@@ -32,7 +32,7 @@ object CheckThreadStruct:
     val codegen = new SyslTriscCodegen
 
     // Dump FULL generated assembly for the timer module
-    for unit <- result.units if unit.name == "oskit/kernel/timer" do
+    for unit <- result.units if unit.name == "oskit/arch/timer" do
       val asm = codegen.generate(unit.typed)
       println("=== FULL timer module assembly ===")
       println(asm)

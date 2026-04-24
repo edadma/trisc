@@ -1,0 +1,187 @@
+OSKit INET Client — Socket API
+================================
+
+Thin wrappers around the `oskit.servers.inet` IPC protocol.
+Shape intentionally mirrors POSIX `socket(2)` so a future
+libc-style `posix.sys.socket` layer can forward straight
+through without reformatting messages.
+
+First cut is UDP-only over loopback — see `oskit/servers/inet`
+for the matching server.
+
+    module oskit.net
+
+    import oskit.ulib.{ipc_send, port_lookup}
+    import std.net.{AF_INET, SOCK_DGRAM, ipv4, ipv4_octet}
+
+
+Cached inet server port. Resolved lazily so the lookup doesn't
+run until a program actually opens a socket.
+
+    var inet_port = -1
+
+    inet_get_port() -> int
+        if inet_port < 0
+            inet_port = port_lookup("inet")
+        inet_port
+
+
+Command codes — must track `oskit/servers/inet.lsysl`.
+
+    val INET_CMD_SOCKET   = 1
+    val INET_CMD_BIND     = 2
+    val INET_CMD_SENDTO   = 3
+    val INET_CMD_RECVFROM = 4
+    val INET_CMD_CLOSE    = 5
+
+    val INET_MAX_DATA     = 512
+
+
+### Byte-buffer helpers (matching the server's big-endian wire
+format).
+
+    net_write_u16(p: *byte, off: int, v: int)
+        p[off]     = byte((v >> 8) & 0xff)
+        p[off + 1] = byte(v & 0xff)
+
+    net_read_u16(p: *byte, off: int) -> int
+        ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
+
+    net_write_ipv4(p: *byte, off: int, ip: u32)
+        p[off]     = byte(ipv4_octet(ip, 0))
+        p[off + 1] = byte(ipv4_octet(ip, 1))
+        p[off + 2] = byte(ipv4_octet(ip, 2))
+        p[off + 3] = byte(ipv4_octet(ip, 3))
+
+    net_read_ipv4(p: *byte, off: int) -> u32
+        ipv4(int(p[off]), int(p[off + 1]), int(p[off + 2]), int(p[off + 3]))
+
+
+### socket
+
+Create a new socket. Returns the inet-local fd on success, or
+-1 on error. Only `AF_INET` / `SOCK_DGRAM` is accepted today.
+
+    socket(family: int, sock_type: int, proto: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [4]byte
+        msg[0] = byte(INET_CMD_SOCKET)
+        msg[1] = byte(family & 0xff)
+        msg[2] = byte(sock_type & 0xff)
+        msg[3] = byte(proto & 0xff)
+        var reply: [2]byte
+        ipc_send(port, msg, 4, reply, 2)
+        if reply[0] != 0
+            return -1
+        int(reply[1]) & 0xff
+
+
+### bind
+
+Bind a socket to a local port on `ip`. `ip` is a host-order u32
+(see `std.net.ipv4`). Returns 0 on success, -1 on failure.
+
+    bind(fd: int, ip: u32, port_num: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [9]byte
+        msg[0] = byte(INET_CMD_BIND)
+        msg[1] = byte(fd & 0xff)
+        msg[2] = byte(AF_INET & 0xff)
+        net_write_u16(msg, 3, port_num)
+        net_write_ipv4(msg, 5, ip)
+        var reply: [1]byte
+        ipc_send(port, msg, 9, reply, 1)
+        if reply[0] != 0
+            return -1
+        0
+
+
+### sendto
+
+Send a datagram to (`dst_ip`, `dst_port`). Returns the number of
+bytes accepted, or -1 on error.
+
+    sendto(fd: int, data: *byte, dlen: int, dst_ip: u32, dst_port: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        if dlen < 0
+            return -1
+        if dlen > INET_MAX_DATA
+            return -1
+        var msg: [523]byte
+        msg[0] = byte(INET_CMD_SENDTO)
+        msg[1] = byte(fd & 0xff)
+        msg[2] = byte(AF_INET & 0xff)
+        net_write_u16(msg, 3, dst_port)
+        net_write_ipv4(msg, 5, dst_ip)
+        net_write_u16(msg, 9, dlen)
+        var i = 0
+        while i < dlen
+            msg[11 + i] = data[i]
+            i += 1
+        var reply: [3]byte
+        ipc_send(port, msg, 11 + dlen, reply, 3)
+        if reply[0] != 0
+            return -1
+        net_read_u16(reply, 1)
+
+
+### recvfrom
+
+Block until a datagram is available on `fd`, then copy up to
+`maxlen` bytes into `buf`. If `src_ip` / `src_port` are non-null
+pointers, write the datagram's source into them. Returns the
+payload length on success, -1 on error.
+
+    recvfrom(fd: int, buf: *byte, maxlen: int, src_ip: *u32, src_port: *int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        var cap_len = maxlen
+        if cap_len > INET_MAX_DATA
+            cap_len = INET_MAX_DATA
+        var msg: [4]byte
+        msg[0] = byte(INET_CMD_RECVFROM)
+        msg[1] = byte(fd & 0xff)
+        net_write_u16(msg, 2, cap_len)
+        var reply: [540]byte
+        ipc_send(port, msg, 4, reply, 540)
+        if reply[0] != 0
+            return -1
+        val r_port = net_read_u16(reply, 2)
+        val r_ip = net_read_ipv4(reply, 4)
+        val r_len = net_read_u16(reply, 8)
+        if i64(src_ip) != 0
+            *src_ip = r_ip
+        if i64(src_port) != 0
+            *src_port = r_port
+        var i = 0
+        while i < r_len
+            buf[i] = reply[10 + i]
+            i += 1
+        r_len
+
+
+### close
+
+Release a socket. Returns 0 on success, -1 on error.
+
+    close_socket(fd: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [2]byte
+        msg[0] = byte(INET_CMD_CLOSE)
+        msg[1] = byte(fd & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 2, reply, 1)
+        if reply[0] != 0
+            return -1
+        0

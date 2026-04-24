@@ -13,10 +13,16 @@ REPO_ROOT="$(cd "$BOARD_DIR/../../../../.." && pwd)"
 OUT=/tmp/slix-aarch64
 mkdir -p "$OUT"
 
+# USER_PROG selects which test binary gets embedded as user_prog.bin
+# into the kernel image. Default: test_putc. Override via first positional
+# argument or USER_PROG env var.
+USER_PROG="${USER_PROG:-test_putc}"
+
 RUN=""
 for arg in "$@"; do
     case "$arg" in
         run) RUN=run ;;
+        *)   USER_PROG="$arg" ;;
     esac
 done
 
@@ -24,9 +30,21 @@ ARCH_DIR="$REPO_ROOT/oskit/arch/aarch64"
 
 SYSL_FILES=(
     oskit/config/config.sysl
+    oskit/arch/aarch64/prog_config.sysl
     oskit/arch/aarch64/cpu.lsysl
     oskit/arch/aarch64/vm.lsysl
+    oskit/arch/aarch64/exc.lsysl
+    oskit/hal/mem_cpu.lsysl
+    oskit/kernel/kernel.lsysl
+    oskit/kernel/spinlock.lsysl
+    oskit/services/services.lsysl
+    oskit/ipc/ipc.lsysl
+    std/debug/debug.lsysl
+    std/alloc/alloc.lsysl
+    std/net/net.lsysl
+    std/net/packet.lsysl
     oskit/arch/aarch64/board/virt/uart.lsysl
+    oskit/drivers/virtio/virtio_transport_mmio.lsysl
     oskit/arch/aarch64/board/virt/hello.lsysl
 )
 
@@ -59,14 +77,70 @@ aarch64-elf-as -o "$OUT/mmu.o" "$ARCH_DIR/mmu.s"
 echo "=== Assemble vm_asm.s ==="
 aarch64-elf-as -o "$OUT/vm_asm.o" "$ARCH_DIR/vm_asm.s"
 
+echo "=== Assemble irq_asm.s ==="
+aarch64-elf-as -o "$OUT/irq_asm.o" "$ARCH_DIR/irq_asm.s"
+
 echo "=== Compile stubs.c ==="
 aarch64-elf-gcc -ffreestanding -nostdlib -mcmodel=large \
     -fno-pic -fno-pie -c -o "$OUT/stubs.o" "$BOARD_DIR/stubs.c"
 
+echo "=== Build user program $USER_PROG ==="
+bash "$ARCH_DIR/build_prog.sh" "$USER_PROG" > "$OUT/build-prog.log" 2>&1
+if [ ! -f "$OUT/bin/$USER_PROG.bin" ]; then
+    echo "  $USER_PROG build failed:" >&2
+    tail -10 "$OUT/build-prog.log" >&2
+    exit 1
+fi
+
+echo "=== Build ramdisk apps ==="
+# Core login/shell + everything a useful nsh session needs. Anything
+# that fails to build is listed but doesn't abort the whole build —
+# this is a bring-up harness, not a release. MakeAarch64RamdiskMain
+# picks up whatever ELFs actually land in /tmp/slix-aarch64/bin/.
+APPS=(login nsh su ls cat echo whoami uptime ps stat touch mkdir rmdir rm mv chmod head tail wc grep hello count write test_net test_nic test_udp_echo)
+for app in "${APPS[@]}"; do
+    bash "$ARCH_DIR/build_prog.sh" "$app" > "$OUT/build-$app.log" 2>&1
+    if [ ! -f "$OUT/bin/$app" ]; then
+        echo "  WARN: $app build failed; tail of log:" >&2
+        tail -5 "$OUT/build-$app.log" >&2
+    fi
+done
+
+echo "=== Build servers ==="
+for srv in rs disk tfs tty pm vfs ds nic inet init; do
+    bash "$ARCH_DIR/build_servers.sh" "$srv" > "$OUT/build-$srv.log" 2>&1
+    if [ ! -f "$OUT/servers/$srv.bin" ]; then
+        echo "  $srv server build failed:" >&2
+        tail -30 "$OUT/build-$srv.log" >&2
+        exit 1
+    fi
+done
+
+echo "=== Build ramdisk ==="
+cd "$REPO_ROOT"
+sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeAarch64RamdiskMain" > "$OUT/sbt-ramdisk.log" 2>&1
+if [ ! -f "$OUT/ramdisk.img" ]; then
+    echo "  ramdisk.img build failed:" >&2
+    tail -20 "$OUT/sbt-ramdisk.log" >&2
+    exit 1
+fi
+
+echo "=== Pack boot info (user=$USER_PROG.bin, rs, disk, tfs) ==="
+# Copy the chosen user program to stable name "user.bin" so bi_find("user")
+# resolves consistently regardless of which test program was selected.
+cp "$OUT/bin/$USER_PROG.bin" "$OUT/bin/user.bin"
+cd "$REPO_ROOT"
+sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeAarch64BootInfoMain user rs disk tfs tty pm vfs ds nic inet init" > "$OUT/sbt-bootinfo.log" 2>&1
+if [ ! -f "$OUT/bootinfo.img" ]; then
+    echo "  bootinfo.img build failed:" >&2
+    tail -20 "$OUT/sbt-bootinfo.log" >&2
+    exit 1
+fi
+
 echo "=== Link ==="
 aarch64-elf-ld -T "$BOARD_DIR/link.ld" \
     -o "$OUT/kernel.elf" \
-    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
+    "$OUT/boot.o" "$OUT/vectors.o" "$OUT/cpu_asm.o" "$OUT/mmu.o" "$OUT/vm_asm.o" "$OUT/irq_asm.o" "$OUT/stubs.o" "$OUT/kernel.o" 2>&1 \
     | grep -v "has a LOAD segment with RWX permissions" || true
 
 echo "=== Built: $OUT/kernel.elf ==="
@@ -76,7 +150,10 @@ if [ "$RUN" = "run" ]; then
     exec qemu-system-aarch64 \
         -machine virt \
         -cpu cortex-a72 \
+        -m 512M \
         -nographic \
         -no-reboot \
-        -kernel "$OUT/kernel.elf"
+        -kernel "$OUT/kernel.elf" \
+        -device loader,file="$OUT/bootinfo.img",addr=0x44000000 \
+        -device loader,file="$OUT/ramdisk.img",addr=0x50000000
 fi

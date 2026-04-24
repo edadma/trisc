@@ -53,6 +53,17 @@ mmu_init:
     msr  sctlr_el1, x0
     isb
 
+    // Enable FP/SIMD for both EL0 and EL1 via CPACR_EL1.FPEN = 0b11.
+    // Reset value traps any FP/SIMD access from both ELs, which bites
+    // as soon as clang emits NEON-ish lowerings for things like the
+    // LLVM-generated memcpy inside server binaries. Enabling once at
+    // boot keeps every process's FP state "just works" — we don't do
+    // lazy FP context switching yet.
+    mrs  x0, cpacr_el1
+    orr  x0, x0, #(3 << 20)    // FPEN[21:20] = 0b11 — no trap
+    msr  cpacr_el1, x0
+    isb
+
     ret
 
 

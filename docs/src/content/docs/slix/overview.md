@@ -1,22 +1,22 @@
 ---
 title: SLIX Overview
-description: A Minix 3-style microkernel OS for TRISC.
+description: A Minix 3-style microkernel OS for TRISC, x86_64, and aarch64.
 ---
 
-SLIX is a microkernel operating system that runs on the TRISC emulator and on real x86_64 hardware (via QEMU). It follows the Minix 3 architecture: a small kernel handles scheduling and IPC, while system services run as isolated user-space processes.
+SLIX is a microkernel operating system that runs on the TRISC emulator and under QEMU for x86_64 and aarch64 (virt machine, cortex-a72, GICv2). It follows the Minix 3 architecture: a small kernel handles scheduling and IPC, while system services run as isolated user-space processes.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│ User programs: nsh (shell), cat, echo, login     │
-├──────────────────────────────────────────────────┤
-│ Servers: VFS │ PM │ TTY │ TFS │ Disk             │
-├──────────────────────────────────────────────────┤
-│ Kernel: scheduler, IPC, page tables, syscalls    │
-├──────────────────────────────────────────────────┤
-│ HAL: arch-specific (TRISC or x86_64)             │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│ User programs: nsh (shell), cat, echo, login, ...    │
+├──────────────────────────────────────────────────────┤
+│ Servers: VFS │ PM │ TTY │ TFS │ Disk │ DS │ RS       │
+├──────────────────────────────────────────────────────┤
+│ Kernel: scheduler, IPC, page tables, syscalls        │
+├──────────────────────────────────────────────────────┤
+│ HAL: arch-specific (TRISC, x86_64, or aarch64)       │
+└──────────────────────────────────────────────────────┘
 ```
 
 The kernel is intentionally minimal. It provides:
@@ -30,28 +30,29 @@ Everything else — filesystem, process management, terminal I/O, device drivers
 
 ## Boot sequence
 
-1. CPU reads vector table: SSP from slot 0, PC from slot 1
-2. Boot assembly sets up exception handlers and timer
-3. Kernel initializes scheduler, IPC, page tables
-4. RS (Restart Server) reads boot module info at `0x600000`
-5. RS loads servers as isolated processes: disk, tfs, tty, pm, vfs
-6. Servers register IPC ports and complete handshake with RS
+1. CPU reads the vector table or arch entry stub (TRISC vector table; x86 long-mode jump; aarch64 EL1 exception vectors)
+2. Boot assembly sets up exception handlers, page tables, and the timer
+3. Kernel initializes the scheduler, IPC, and syscall table
+4. RS (Restart Server) reads the boot-module header (`0x600000` on TRISC, `0x44000000` on aarch64, passed via Multiboot on x86)
+5. RS loads servers as isolated processes: disk, tfs, tty, pm, vfs, ds, init
+6. Servers register IPC ports and complete the handshake with RS
 7. Init reads `/etc/ttytab` and spawns login on each terminal
 8. Login authenticates against `/etc/shadow` (PBKDF2-SHA256)
 9. Shell (nsh) starts
 
 ## Written in Sysl
 
-The entire OS — kernel, servers, shell, utilities — is written in Sysl, a systems language that compiles to both TRISC assembly and x86_64 via LLVM. This means the same source code runs on the TRISC emulator and on real hardware.
+The entire OS — kernel, servers, shell, utilities — is written in Sysl, a systems language that compiles to TRISC assembly and to x86_64 and aarch64 via LLVM. This means the same source code runs on the TRISC emulator and on both QEMU platforms without target-specific OS code.
 
-## Two targets, one codebase
+## Three targets, one codebase
 
 | Target | Boot | Kernel | Servers | Shell |
 |--------|------|--------|---------|-------|
 | TRISC emulator | boot.asm (TRISC) | oskit/kernel/ | oskit/servers/ | oskit/bin/ |
 | x86_64 QEMU | boot.s (x86) | same kernel | same servers | same shell |
+| aarch64 QEMU (virt, cortex-a72) | boot.s (aarch64) | same kernel | same servers | same shell |
 
-Architecture-specific code lives in `oskit/arch/trisc/` and `oskit/arch/x86_64/`. The kernel, servers, and userspace are fully portable.
+Architecture-specific code lives in `oskit/arch/trisc/`, `oskit/arch/x86_64/`, and `oskit/arch/aarch64/`. The kernel, servers, and userspace are fully portable — the arch layer exposes a common interface (VM, page tables, exception frames, syscall entry) consumed by shared code.
 
 ## Key design decisions
 

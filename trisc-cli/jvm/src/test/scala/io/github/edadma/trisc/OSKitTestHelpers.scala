@@ -23,7 +23,7 @@ object OSKitTestData {
   lazy val rbtreeSysl: String = readLsysl("oskit/kernel/rbtree.lsysl")
   lazy val rmutexSysl: String = readLsysl("oskit/sync/rmutex.lsysl")
   lazy val qsetSysl: String = readLsysl("oskit/sync/qset.lsysl")
-  lazy val timerSysl: String = readLsysl("oskit/kernel/timer.lsysl")
+  lazy val timerSysl: String = readLsysl("oskit/arch/trisc/timer.lsysl")
   lazy val pimutexSysl: String = readLsysl("oskit/sync/pimutex.lsysl")
   lazy val heapSysl: String = readLsysl("std/heap/heap.lsysl")
   private def readSysl(path: String): String = scala.io.Source.fromFile(path).mkString
@@ -153,7 +153,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     val allSources = Map(
-      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/kernel/timer" -> timerSysl, "oskit/sync/semaphore" -> semaphoreSysl,
+      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/arch/timer" -> timerSysl, "oskit/sync/semaphore" -> semaphoreSysl,
       "oskit/sync/mutex" -> mutexSysl, "oskit/sync/condvar" -> condvarSysl, "oskit/sync/barrier" -> barrierSysl,
       "oskit/sync/rwlock" -> rwlockSysl, "oskit/sync/channel" -> channelSysl, "oskit/sync/mailbox" -> mailboxSysl,
       "oskit/sync/rmutex" -> rmutexSysl, "oskit/sync/qset" -> qsetSysl, "oskit/sync/pimutex" -> pimutexSysl,

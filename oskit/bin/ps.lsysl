@@ -6,7 +6,7 @@ and name.
 
     module oskit.bin.ps
 
-    import oskit.ulib.{putc, exit, get_thread_count, get_thread_state, get_thread_name, get_thread_name_len, get_thread_pid}
+    import oskit.ulib.{putc, exit, get_thread_count, get_thread_state, get_thread_name, get_thread_pid}
 
     putint(n: int)
         if n >= 10
@@ -62,9 +62,9 @@ and name.
                     print("rcvntfy ")
                 else
                     print("unknown ")
-                // Print name
-                val np = get_thread_name(i)
-                val nlen = get_thread_name_len(i)
+                // Print name — copy-out into a local buffer
+                var name_buf: [32]byte
+                val nlen = get_thread_name(i, &name_buf[0], 32)
                 for var j = 0; j < nlen; j++
-                    putc(int(np[j]))
+                    putc(int(name_buf[j]))
                 putc('\n')

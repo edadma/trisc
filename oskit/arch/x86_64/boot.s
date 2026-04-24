@@ -51,9 +51,22 @@
 .align 4096
 
 # Identity-map page tables
-pml4:   .skip 4096
-pdpt:   .skip 4096
-pd:     .skip 4096
+#
+# pd covers 0-1GB via 2MB superpages, split at runtime by
+# vm_init so PD[0]'s 0-2MB can be remapped per process.
+#
+# pd_hi{1,2,3} cover 1-2GB, 2-3GB, 3-4GB with raw 2MB
+# superpages. Reachable only via kernel PT — on by default in
+# the boot PML4 so kernel threads (incl. the nic server) see
+# virtio-pci memory BARs that QEMU places in the PCI hole near
+# the 4GB boundary. Per-process PTs don't copy PDPT[1..3], so
+# user code can't touch MMIO.
+pml4:    .skip 4096
+pdpt:    .skip 4096
+pd:      .skip 4096
+pd_hi1:  .skip 4096
+pd_hi2:  .skip 4096
+pd_hi3:  .skip 4096
 
 # Kernel stack (16 KB)
 .align 16
@@ -109,6 +122,17 @@ _start:
     orl  $0x03, %eax
     movl %eax, pdpt
 
+    # PDPT[1..3] -> hi PDs (1GB, 2GB, 3GB)
+    movl $pd_hi1, %eax
+    orl  $0x03, %eax
+    movl %eax, pdpt + 8
+    movl $pd_hi2, %eax
+    orl  $0x03, %eax
+    movl %eax, pdpt + 16
+    movl $pd_hi3, %eax
+    orl  $0x03, %eax
+    movl %eax, pdpt + 24
+
     # PD[0..15] -> identity-map first 32MB via 2MB pages
     # PS bit (0x80) = 2MB page, present + writable + PS
     movl $pd, %edi
@@ -120,6 +144,42 @@ _start:
     addl $0x200000, %eax       # next 2MB
     addl $8, %edi
     loop 1b
+
+    # pd_hi1[0..511] -> identity-map 1-2GB via 2MB pages
+    # (BAR mapping for virtio-pci — QEMU default places these
+    # near 0xFEBF0000 which is in pd_hi3, but keep the whole
+    # 1-4GB coverage so BARs anywhere in that range work.)
+    movl $pd_hi1, %edi
+    movl $0x40000083, %eax     # 1GB, present+write+PS
+    movl $512, %ecx
+2:
+    movl %eax, (%edi)
+    movl $0, 4(%edi)
+    addl $0x200000, %eax
+    addl $8, %edi
+    loop 2b
+
+    # pd_hi2[0..511] -> identity-map 2-3GB
+    movl $pd_hi2, %edi
+    movl $0x80000083, %eax     # 2GB, present+write+PS
+    movl $512, %ecx
+3:
+    movl %eax, (%edi)
+    movl $0, 4(%edi)
+    addl $0x200000, %eax
+    addl $8, %edi
+    loop 3b
+
+    # pd_hi3[0..511] -> identity-map 3-4GB
+    movl $pd_hi3, %edi
+    movl $0xC0000083, %eax     # 3GB, present+write+PS
+    movl $512, %ecx
+4:
+    movl %eax, (%edi)
+    movl $0, 4(%edi)
+    addl $0x200000, %eax
+    addl $8, %edi
+    loop 4b
 
     # CR3 = PML4
     movl $pml4, %eax
@@ -316,6 +376,22 @@ inb:
 .global io_wait
 io_wait:
     outb %al, $0x80
+    retq
+
+# outl(port: int, val: u32)  — rdi = port, esi = val (32-bit)
+# inl(port: int) -> u32      — rdi = port, returns in eax
+
+.global outl
+outl:
+    movl %edi, %edx
+    movl %esi, %eax
+    outl %eax, %dx
+    retq
+
+.global inl
+inl:
+    movl %edi, %edx
+    inl %dx, %eax
     retq
 
 # ============================================================================
@@ -570,11 +646,51 @@ syscall_entry:
 
     # --- Slow path: table dispatch ---
     # Bounds check
-    cmpq $96, %rbx             # MAX_SYSCALLS
+    cmpq $512, %rbx            # MAX_SYSCALLS
     jge .bad_syscall
     cmpq $0, %rbx
     jl .bad_syscall
 
+    # --- 6-arg path: check syscall_table_6 first ---
+    # Handlers registered via register_syscall6 have signature
+    # `fn handler(a0..a5: i64) -> i64` (via __wrap_ closure ABI).
+    # User-side 6-arg convention: rdi=num, rsi=a0, rdx=a1, rcx=a2,
+    # r8=a3, r9=a4, r10=a5 (saved-context offsets below).
+    leaq syscall_table_6(%rip), %rax
+    movq (%rax,%rbx,8), %rax
+    testq %rax, %rax
+    jz .not_syscall6
+
+    # Save SSP (handlers may still call syscall_return for legacy paths)
+    leaq syscall_ssp(%rip), %rcx
+    movq %rsp, (%rcx)
+
+    pushq %rax                 # save handler pointer
+    movl %ebx, %edi            # arg = syscall number
+    call oskit_kernel__syscall_check_allowed
+    testl %eax, %eax
+    popq %rax                  # restore handler pointer
+    jz .denied_syscall
+
+    # Load 6 args from saved context. Offsets from the 15-reg save:
+    #   80:RSI(a0) 88:RDX(a1) 96:RCX(a2) 56:R8(a3) 48:R9(a4) 40:R10(a5).
+    # Closure ABI needs env=null in rdi; a5 spills to stack (SysV: 7 args,
+    # 6 in regs, 7th at [rsp+8] after call).
+    movq 80(%rsp), %rsi
+    movq 88(%rsp), %rdx
+    movq 96(%rsp), %rcx
+    movq 56(%rsp), %r8
+    movq 48(%rsp), %r9
+    movq 40(%rsp), %r11
+    pushq %r11                 # a5 on stack for the call
+    xorq %rdi, %rdi            # env = null
+    call *%rax
+    addq $8, %rsp              # drop the pushed a5
+    movq %rax, 112(%rsp)       # write handler return into saved RAX
+
+    jmp do_schedule
+
+.not_syscall6:
     # Look up handler: syscall_table[num] (array of i64)
     leaq syscall_table(%rip), %rax
     movq (%rax,%rbx,8), %rax  # rax = handler (function pointer)
@@ -813,6 +929,18 @@ exc_idle:
 
 .global syscall
 syscall:
+    int $0x80
+    retq
+
+# syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+#
+# Kernel-side wrapper (mirrors the one in prog_start.s for user
+# programs). SysV AMD64: rdi=num, rsi=a0, rdx=a1, rcx=a2, r8=a3,
+# r9=a4, [rsp+8]=a5. The 6-arg dispatcher reads num from RDI and a5
+# from R10; everything else is already in the right register.
+.global syscall6
+syscall6:
+    movq 8(%rsp), %r10
     int $0x80
     retq
 

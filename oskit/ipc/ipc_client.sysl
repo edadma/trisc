@@ -9,7 +9,7 @@
 
 module oskit.ipc
 
-import oskit.services.syscall
+import oskit.services.{syscall, syscall6}
 
 val IPC_TIMEOUT = -2
 
@@ -31,57 +31,25 @@ port_close(port: int) -> int
     syscall(SYS_PORT_CLOSE, port)
 
 port_register(port: int, name: string) -> int
-    var args: [3]i64
-    args[0] = port
-    args[1] = i64(*byte(name))
-    args[2] = len(name)
-    syscall(SYS_PORT_REGISTER, i64(args))
+    int(syscall6(SYS_PORT_REGISTER, i64(port), i64(*byte(name)), i64(len(name)), 0, 0, 0))
 
 port_lookup(name: string) -> int
-    var args: [2]i64
-    args[0] = i64(*byte(name))
-    args[1] = len(name)
-    syscall(SYS_PORT_LOOKUP, i64(args))
+    int(syscall6(SYS_PORT_LOOKUP, i64(*byte(name)), i64(len(name)), 0, 0, 0, 0))
 
 ipc_send(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int) -> int
-    var args: [5]i64
-    args[0] = port
-    args[1] = i64(msg)
-    args[2] = msg_len
-    args[3] = i64(reply)
-    args[4] = reply_len
-    syscall(SYS_IPC_SEND, i64(args))
+    int(syscall6(SYS_IPC_SEND, i64(port), i64(msg), i64(msg_len), i64(reply), i64(reply_len), 0))
 
 ipc_recv(port: int, buf: *byte, buf_len: int) -> int
-    var args: [3]i64
-    args[0] = port
-    args[1] = i64(buf)
-    args[2] = buf_len
-    syscall(SYS_IPC_RECV, i64(args))
+    int(syscall6(SYS_IPC_RECV, i64(port), i64(buf), i64(buf_len), 0, 0, 0))
 
 ipc_reply(caller: int, msg: *byte, msg_len: int)
-    var args: [3]i64
-    args[0] = caller
-    args[1] = i64(msg)
-    args[2] = msg_len
-    syscall(SYS_IPC_REPLY, i64(args))
+    syscall6(SYS_IPC_REPLY, i64(caller), i64(msg), i64(msg_len), 0, 0, 0)
 
 ipc_recv_notify(port: int, buf: *byte, buf_len: int) -> int
-    var args: [3]i64
-    args[0] = port
-    args[1] = i64(buf)
-    args[2] = buf_len
-    syscall(SYS_IPC_RECV_NOTIFY, i64(args))
+    int(syscall6(SYS_IPC_RECV_NOTIFY, i64(port), i64(buf), i64(buf_len), 0, 0, 0))
 
 ipc_send_timeout(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int, timeout: int) -> int
-    var args: [6]i64
-    args[0] = port
-    args[1] = i64(msg)
-    args[2] = msg_len
-    args[3] = i64(reply)
-    args[4] = reply_len
-    args[5] = timeout
-    syscall(SYS_IPC_SEND_TIMED, i64(args))
+    int(syscall6(SYS_IPC_SEND_TIMED, i64(port), i64(msg), i64(msg_len), i64(reply), i64(reply_len), i64(timeout)))
 
 ipc_last_msg_len() -> int
     syscall(SYS_IPC_LAST_MSG_LEN, 0)

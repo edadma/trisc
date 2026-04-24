@@ -314,13 +314,79 @@ trap_handler
 
   ; Table dispatch: handler = syscall_table[r1]
   ; Bounds check
-  ldi r4, 96
+  movi r4, 512
   slt r4, r1, r4
-  beq r4, r0, .bad_syscall     ; syscall >= 96
+  beq r4, r0, .bad_syscall     ; syscall >= 512
   slt r4, r1, r0
   bne r4, r0, .bad_syscall     ; syscall < 0
 
-  ; Load handler from table
+  ; --- 6-arg path: check syscall_table_6 first ---
+  ; Handlers registered via register_syscall6 have signature
+  ; `fn handler(a0..a5: i64) -> i64` (via __wrap_ closure ABI).
+  ; TRISC user-side convention for syscall6: r1=num, and a0..a5 are
+  ; on the user's stack at [USP+0..+40]. syscall_table_6 is kept in
+  ; sync with syscall_table — at most one slot is non-null per num.
+  extern syscall_table_6
+  movi r4, syscall_table_6
+  pshd r1                       ; save syscall number
+  ldi r5, 3
+  lsl r3, r1, r5               ; r3 = num * 8
+  add r4, r4, r3
+  ldd r4, r4, r0               ; r4 = handler6 (0 if not a 6-arg syscall)
+  popd r1                       ; restore num
+
+  beq r4, r0, .not_syscall6
+
+  ; Save SSP (handlers may still call syscall_return for legacy paths)
+  movi r5, syscall_ssp
+  std r7, r5, r0
+
+  ; Privilege check (r1 = num)
+  pshd r4                      ; save handler6 pointer
+  movi r4, oskit_kernel__syscall_check_allowed
+  jalr r6, r4
+  popd r4
+  beq r1, r0, .denied_syscall
+
+  ; Copy a0..a5 from user stack [USP+0..+40] into kernel stack in
+  ; reverse order so that [sp+0]=a0 matches TRISC multi-arg conv.
+  ; Handler is __wrap_ with signature (env, a0, a1, a2, a3, a4, a5)
+  ; — 7 args — so TRISC conv gives r1=env, [sp+0]=a0, [sp+8]=a1, ...,
+  ; [sp+40]=a5. We run under the process PTBR here so direct user-VA
+  ; loads work without a vm_v2p bounce.
+  ldd r2, r7, r0               ; r2 = USP (saved at [ssp+0])
+  addi r3, r2, 40
+  ldd r3, r3, r0
+  pshd r3                      ; push a5
+  addi r3, r2, 32
+  ldd r3, r3, r0
+  pshd r3                      ; push a4
+  addi r3, r2, 24
+  ldd r3, r3, r0
+  pshd r3                      ; push a3
+  addi r3, r2, 16
+  ldd r3, r3, r0
+  pshd r3                      ; push a2
+  addi r3, r2, 8
+  ldd r3, r3, r0
+  pshd r3                      ; push a1
+  ldd r3, r2, r0
+  pshd r3                      ; push a0 (top of stack)
+
+  ldi r1, 0                    ; r1 = env = null
+  jalr r6, r4                  ; call handler, r1 = return value
+
+  ; Drop 6 pushed args first (keeps addi immediates in 7-bit range),
+  ; then write return into saved r1 at offset 48.
+  addi r7, r7, 48
+  addi r5, r7, 48
+  std r1, r5, r0
+
+  mov r1, r7                   ; r1 = process SSP
+  bra do_schedule
+
+.not_syscall6
+  ; Legacy 1-arg path — load handler from syscall_table.
   movi r4, syscall_table
   pshd r1                       ; save syscall number
   ldi r5, 3
@@ -835,6 +901,19 @@ syscall
   ldd  r2, r7, r0      ; load arg from caller stack into r2
   trap 0                ; r1 = number, r2 = arg
   jalr r0, r6           ; return (r1 = return value from trap handler)
+
+; syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+;
+; Kernel-side wrapper (mirrors the user-side one in oskit/ulib/syscall.asm).
+; TRISC multi-arg convention already places a0..a5 on the caller's stack
+; at [sp+0..+40] (first arg in r1 is the syscall number). The kernel's
+; 6-arg dispatch path reads them straight off the user stack via the
+; saved USP — so `trap 0` is all we need.
+global syscall6, func
+
+syscall6
+  trap 0
+  jalr r0, r6
 
 ; thread_exit — trampoline for tasks that return from their entry function.
 ; create_thread sets r6 in the fake context to this address, so when a

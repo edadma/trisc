@@ -19,7 +19,7 @@ object OSKitTestData:
   lazy val rbtreeSysl: String = readLsysl("oskit/kernel/rbtree.lsysl")
   lazy val rmutexSysl: String = readLsysl("oskit/sync/rmutex.lsysl")
   lazy val qsetSysl: String = readLsysl("oskit/sync/qset.lsysl")
-  lazy val timerSysl: String = readLsysl("oskit/kernel/timer.lsysl")
+  lazy val timerSysl: String = readLsysl("oskit/arch/trisc/timer.lsysl")
   lazy val pimutexSysl: String = readLsysl("oskit/sync/pimutex.lsysl")
   lazy val memSysl: String = readLsysl("std/mem/mem.lsysl")
   lazy val halMemSysl: String = readLsysl("oskit/hal/mem_dma.lsysl")

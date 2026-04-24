@@ -45,6 +45,8 @@ object OskitDemoBuilder:
   private lazy val vfsSrvSysl: String    = readLsysl("oskit/servers/vfs.lsysl")
   private lazy val rsSrvSysl: String     = readLsysl("oskit/servers/rs.lsysl")
   private lazy val dsSrvSysl: String     = readLsysl("oskit/servers/ds.lsysl")
+  private lazy val inetSrvSysl: String   = readLsysl("oskit/servers/inet.lsysl")
+  private lazy val stdNetSysl: String    = readLsysl("std/net/net.lsysl")
   private lazy val halMemSysl: String   = readLsysl("oskit/hal/mem_dma.lsysl")
   private lazy val archVmSysl: String   = readLsysl("oskit/arch/trisc/vm.lsysl")
   private lazy val archCpuSysl: String  = readLsysl("oskit/arch/trisc/cpu.lsysl")
@@ -62,7 +64,7 @@ object OskitDemoBuilder:
       Map(
         "oskit/kernel/kernel"         -> kernelSysl,
         "oskit/services/services"     -> servicesSysl,
-        "oskit/kernel/timer"          -> timerSysl,
+        "oskit/arch/timer"            -> timerSysl,
         "oskit/sync/semaphore"        -> semaphoreSysl,
         "oskit/sync/mutex"            -> mutexSysl,
         "oskit/ipc/ipc"               -> ipcSysl,
@@ -81,7 +83,7 @@ object OskitDemoBuilder:
 import oskit.ipc.*
 import oskit.drivers.kbd.{keyboard_init}
 import oskit.config.{BOOT_INFO_ADDR}
-import oskit.arch.{vm_copy_to, vm_create_server_pt}
+import oskit.arch.{vm_copy_to, vm_create_server_pt, timer_init, timer_handler, TIMER_IRQ}
 import oskit.hal.memset
             |
             |// Read little-endian u32 from byte pointer
@@ -218,6 +220,7 @@ import oskit.hal.memset
             |        return -1
             |    resume_process(rs_pid)
             |
+            |    register_irq(TIMER_IRQ, timer_handler)
             |    timer_init(1000)
             |    first_thread_ssp()
             |""".stripMargin,
@@ -229,7 +232,7 @@ import oskit.hal.memset
       Map(
         "oskit/kernel/kernel"        -> kernelSysl,
         "oskit/services/services"    -> servicesSysl,
-        "oskit/kernel/timer"         -> timerSysl,
+        "oskit/arch/timer"           -> timerSysl,
         "oskit/sync/semaphore"       -> semaphoreSysl,
         "oskit/sync/mutex"           -> mutexSysl,
         "oskit/ipc/ipc"              -> ipcSysl,
@@ -364,6 +367,10 @@ import oskit.hal.memset
           "oskit/hal/mem"        -> halMemSysl,
         )),
       "ds"   -> compileServerTrb("oskit/servers/ds", "oskit.servers", dsSrvSysl, "ds_server"),
+      "inet" -> compileServerTrb("oskit/servers/inet", "oskit.servers", inetSrvSysl, "inet_server",
+        extraSources = Map(
+          "std/net/net" -> stdNetSysl,
+        )),
       "init"  -> compileServerTrb("oskit/apps/init/init", "oskit.apps.init", initSysl, "init",
         extraSources = Map(
           "oskit/fs/client"      -> fsClientSysl,

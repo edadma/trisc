@@ -15,6 +15,12 @@ External programs include their own copy of the trampoline
 
     extern syscall(number: int, arg: i64) -> i64
 
+Multi-arg variant for syscalls registered via `register_syscall6`.
+The asm wrapper (per-arch) arranges for the kernel's 6-arg dispatch
+path to receive a0..a5 in the appropriate saved-frame slots.
+
+    extern syscall6(number: int, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+
 Syscall numbers — must match the kernel and IPC modules.
 
     val SYS_SLEEP        = 0
@@ -63,11 +69,7 @@ Command bytes for TFS and TTY server protocols.
     val GRANT_RW    = 3
 
     grant_create(vaddr: u64, len: int, flags: int) -> int
-        var args: [3]i64
-        args[0] = i64(vaddr)
-        args[1] = len
-        args[2] = flags
-        int(syscall(SYS_GRANT_CREATE, i64(args)))
+        int(syscall6(SYS_GRANT_CREATE, i64(vaddr), i64(len), i64(flags), 0, 0, 0))
 
     grant_revoke(grant_id: int)
         syscall(SYS_GRANT_REVOKE, i64(grant_id))
@@ -91,21 +93,12 @@ in IPC message buffers.
 IPC — send a message to a server and receive a reply.
 
     ipc_send(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int) -> int
-        var args: [5]i64
-        args[0] = port
-        args[1] = i64(msg)
-        args[2] = msg_len
-        args[3] = i64(reply)
-        args[4] = reply_len
-        syscall(SYS_IPC_SEND, i64(args))
+        int(syscall6(SYS_IPC_SEND, i64(port), i64(msg), i64(msg_len), i64(reply), i64(reply_len), 0))
 
 Service discovery — look up a server port by name.
 
     port_lookup(name: string) -> int
-        var args: [2]i64
-        args[0] = i64(*byte(name))
-        args[1] = len(name)
-        syscall(SYS_PORT_LOOKUP, i64(args))
+        int(syscall6(SYS_PORT_LOOKUP, i64(*byte(name)), i64(len(name)), 0, 0, 0, 0))
 
 Thread and process queries.
 
@@ -115,8 +108,17 @@ Thread and process queries.
     get_thread_state(id: int) -> int
         syscall(SYS_THREAD_STATE, id)
 
-    get_thread_name(id: int) -> *byte
-        syscall(SYS_THREAD_NAME, id)
+Copy the name of thread `id` into the caller-provided buffer of
+`cap` bytes. Writes at most `cap-1` bytes plus a terminating NUL.
+Returns the number of name bytes copied (not counting the NUL), or
+0 if `cap <= 0`.
+
+First consumer of the 6-arg dispatch path — kills the old handler's
+INFO_PAGE_VA+0x100 scratch region. Handler runs under the caller's
+PTBR so the buffer VA is written directly.
+
+    get_thread_name(id: int, buf: *byte, cap: int) -> int
+        int(syscall6(SYS_THREAD_NAME, i64(id), i64(buf), i64(cap), 0, 0, 0))
 
     get_thread_name_len(id: int) -> int
         syscall(SYS_THREAD_NAME_LEN, id)
@@ -521,24 +523,21 @@ Kill a process by PID. Returns 0 on success.
         ipc_send(port, msg, 5, reply, 1)
         int(reply[0])
 
-Build a POSIX argv blob from an argv slice. Writes to `blob`
-starting at offset 0. Returns the total blob size, or -1 if
-it wouldn't fit in `cap` bytes.
+Serialize argv for transport to PM across the SPAWN IPC. Writes
+to `blob` starting at offset 0. Returns the total blob size, or
+-1 if it wouldn't fit in `cap` bytes.
 
-Layout (see PROG_ARGS_ADDR below for the spec):
-    [argc(4)] [pad(4)] [argv[0](8)] ... [NULL(8)] [string data]
-
-Pointers are baked as absolute addresses = PROG_ARGS_ADDR + offset,
-since PM always copies the blob to PROG_ARGS_ADDR in the child.
-
-    val PROG_ARGS_ADDR = 0xBF000
+Wire format: `[argc(4)] [pad(4)] [arg0\0 arg1\0 ... argN-1\0]`.
+No pointer array — PM walks the NUL-separated string data
+directly and builds the System V init stack frame in the child's
+address space (see `pm_build_sysv_stack`). This is a purely
+internal wire format between the client-side `pm_spawn_handles`
+helper and the PM server; user code never touches it.
 
     build_argv_blob(argv: *string, argc: int, blob: *byte, cap: int) -> int
-        val ptrs_size = (argc + 1) * 8
-        var str_off = 8 + ptrs_size
-        if str_off > cap
+        if 8 > cap
             return -1
-        // argc (little-endian i32) + padding zeros
+        // argc (little-endian i32) + 4 padding zeros.
         blob[0] = byte(argc & 0xFF)
         blob[1] = byte((argc >> 8) & 0xFF)
         blob[2] = byte((argc >> 16) & 0xFF)
@@ -547,25 +546,13 @@ since PM always copies the blob to PROG_ARGS_ADDR in the child.
         blob[5] = 0
         blob[6] = 0
         blob[7] = 0
-        var pos = str_off
+        var pos = 8
         var i = 0
         while i < argc
             val arg = argv[i]
             val alen = len(arg)
             if pos + alen + 1 > cap
                 return -1
-            // Write argv[i] pointer at offset 8 + i*8 (absolute)
-            val ptr: i64 = i64(PROG_ARGS_ADDR) + i64(pos)
-            val pbase = 8 + i * 8
-            blob[pbase]     = byte(ptr & i64(0xFF))
-            blob[pbase + 1] = byte((ptr >> 8) & i64(0xFF))
-            blob[pbase + 2] = byte((ptr >> 16) & i64(0xFF))
-            blob[pbase + 3] = byte((ptr >> 24) & i64(0xFF))
-            blob[pbase + 4] = byte((ptr >> 32) & i64(0xFF))
-            blob[pbase + 5] = byte((ptr >> 40) & i64(0xFF))
-            blob[pbase + 6] = byte((ptr >> 48) & i64(0xFF))
-            blob[pbase + 7] = byte((ptr >> 56) & i64(0xFF))
-            // Copy string bytes + NUL terminator
             val ap = *byte(arg)
             var j = 0
             while j < alen
@@ -574,12 +561,6 @@ since PM always copies the blob to PROG_ARGS_ADDR in the child.
             blob[pos + alen] = 0
             pos = pos + alen + 1
             i += 1
-        // NULL terminator at argv[argc]
-        val nbase = 8 + argc * 8
-        var z = 0
-        while z < 8
-            blob[nbase + z] = 0
-            z += 1
         pos
 
 Spawn a process with handle inheritance. handle_pairs is an

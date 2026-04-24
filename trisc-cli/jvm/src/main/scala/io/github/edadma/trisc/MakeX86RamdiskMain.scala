@@ -52,7 +52,7 @@ object MakeX86RamdiskMain:
 
     val disk = TFS.format(
       blockSize = 4096,
-      totalBlocks = 512,   // 2 MB
+      totalBlocks = 1024,  // 4 MB — bumped from 512 when adding more ramdisk bins
       maxInodes = 256,
       prefill = prefill,
       files = files,

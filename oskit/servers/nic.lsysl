@@ -1,0 +1,272 @@
+OSKit NIC server — virtio-net front door (standalone boot module)
+===================================================================
+
+Minix 3-style server that fronts the single virtio-net driver.
+Runs as an isolated boot-module process with its own page table,
+its own copy of `virtio_net.lsysl`, and an MMIO grant that maps
+virtio-mmio slot 31 (virtio-net) at a fixed VA inside the server.
+Kernel code on the aarch64 side no longer links the driver.
+
+DMA buffers (rings + RX/TX payload pages) live in the server's
+own BSS. `virtio_dma_server.lsysl` provides the `vnet_va_to_pa`
+primitive via `svc_vm_v2p`, so descriptors point the device at
+the PA of each server-owned page.
+
+Single-threaded (no user-facing `create_thread` yet). Two wake
+sources feed the main `ipc_recv_notify` loop:
+
+1. Platform virtio IRQ — the kernel's `virtio_handler()` acks the
+   device-side INT_STATUS and fires `notify_send(nic_tid, 1)`.
+   The nic registers for this once via `svc_virtio_set_notify` at
+   startup; every subsequent used-ring update wakes us.
+2. Client IPC — GET_MAC / SEND_PACKET / SUBSCRIBE_RX /
+   RECV_PACKET.
+
+Every wake runs `nic_drain_rx` first, so even rare IRQ misses
+(e.g. if the notify target was unregistered) get caught the next
+time a client pings the server. The subscriber (inet) gets a
+single notification per drained batch.
+
+IPC protocol
+------------
+
+Each request carries a 1-byte command code in `buf[0]`. Replies
+always start with a 1-byte status (0 on success, -1 on error).
+
+- GET_MAC: `cmd` → `status, mac(6)`
+- SEND_PACKET: `cmd, len(2, big-endian), frame(len)` → `status`
+- SUBSCRIBE_RX: `cmd` → `status`
+    Registers the calling thread as the single RX notification
+    target. Every subsequent drain that picks up a frame bumps
+    a `notify_send_to(subscriber_tid, 1)` on the subscriber.
+- RECV_PACKET: `cmd` → `status, len(2, big-endian), frame(len)`
+    Non-blocking fetch of the head of the RX queue. `status = 0`
+    + the frame on success; `status = -1` + `len = 0` when the
+    queue is empty.
+
+All multi-byte wire fields are big-endian to match the rest of
+the stack. Unknown commands reply `status = -1`.
+
+    module oskit.servers
+
+    import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
+    import oskit.services.{rs_ready, notify_send_to, notify_read_self,
+        thread_id, svc_virtio_set_notify}
+    import oskit.drivers.virtio.{virtio_net_init, virtio_net_get_mac,
+        virtio_net_send, virtio_net_recv, v_attach, VIRTIO_DEV_NET}
+    import oskit.arch.{MMIO_SERVER_VA}
+
+
+Command codes.
+
+    val NIC_CMD_GET_MAC      = 1
+    val NIC_CMD_SEND_PACKET  = 2
+    val NIC_CMD_SUBSCRIBE_RX = 3
+    val NIC_CMD_RECV_PACKET  = 4
+
+
+Capacity. Ethernet II without VLAN caps at 1514 bytes; IPC
+message buffer carries that plus a 3-byte header plus slop.
+
+    val NIC_MAX_FRAME = 1514
+    val NIC_MSG_BUF   = 1520
+
+
+RX queue — fixed-size circular buffer. Eight slots is plenty for
+bring-up; the size is constrained by the module-level storage
+budget more than by any protocol concern.
+
+    val NIC_RX_QUEUE = 8
+
+    struct NicRxFrame
+        data: [1514]byte
+        len: int
+
+    var nic_rx_queue: [8]NicRxFrame
+    var nic_rx_head = 0
+    var nic_rx_tail = 0
+    var nic_rx_count = 0
+    var nic_rx_drops = 0
+
+
+Single subscriber for now — inet is the sole RX consumer.
+
+    var nic_subscriber_tid = -1
+    var nic_port = -1
+
+
+virtio-mmio slot 31 on QEMU virt lives at PA `0x0a003e00`
+(`VIRTIO_MMIO_BASE + 31 * 0x200`). The RS grant maps page `0xa003`
+at `MMIO_SERVER_VA` (`0x60100000`) with Device memory attrs, so
+the virtio-net slot shows up at `0x60100e00` inside the server.
+
+    val VIRTIO_NET_SLOT_OFFSET: i64 = i64(0xe00)
+
+
+### Byte-buffer helpers
+
+    nic_read_u16(p: *byte, off: int) -> int
+        ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
+
+
+### RX drain
+
+Pull frames out of the virtio-net RX ring and park them in the
+internal queue. Called at the top of every IPC wake so each
+request implicitly polls the wire. Drops frames silently when
+the queue is full (UDP-ish semantics); bumps `nic_rx_drops` for
+diagnostics.
+
+    nic_drain_rx()
+        var buf: [1514]byte
+        var notified = 0
+        while true
+            val n = virtio_net_recv(buf, 1514)
+            if n <= 0
+                break
+            if n > NIC_MAX_FRAME
+                nic_rx_drops += 1
+            else if nic_rx_count >= NIC_RX_QUEUE
+                nic_rx_drops += 1
+            else
+                val slot = nic_rx_tail
+                nic_rx_queue[slot].len = n
+                var i = 0
+                while i < n
+                    nic_rx_queue[slot].data[i] = buf[i]
+                    i += 1
+                nic_rx_tail = (slot + 1) % NIC_RX_QUEUE
+                nic_rx_count += 1
+                notified = 1
+        if notified != 0
+            if nic_subscriber_tid >= 0
+                notify_send_to(nic_subscriber_tid, 1)
+
+
+### GET_MAC handler
+
+    nic_handle_get_mac(sender: int)
+        var reply: [7]byte
+        var mac: [6]byte
+        if virtio_net_get_mac(mac) == 0
+            reply[0] = byte(-1)
+            var i = 0
+            while i < 6
+                reply[1 + i] = 0
+                i += 1
+            ipc_reply(sender, reply, 7)
+            return
+        reply[0] = 0
+        var i = 0
+        while i < 6
+            reply[1 + i] = mac[i]
+            i += 1
+        ipc_reply(sender, reply, 7)
+
+
+### SEND_PACKET handler
+
+    nic_handle_send_packet(sender: int, buf: *byte)
+        val len = nic_read_u16(buf, 1)
+        var reply: [1]byte
+        if len <= 0 || len > NIC_MAX_FRAME
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val frame: *byte = buf + 3
+        val r = virtio_net_send(frame, len)
+        if r == 0
+            reply[0] = byte(-1)
+        else
+            reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### SUBSCRIBE_RX handler
+
+    nic_handle_subscribe_rx(sender: int)
+        nic_subscriber_tid = sender
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### RECV_PACKET handler
+
+Pop one frame off the head of the RX queue. Non-blocking: empty
+queue returns `status = -1, len = 0`.
+
+    nic_handle_recv_packet(sender: int)
+        if nic_rx_count <= 0
+            var empty: [3]byte
+            empty[0] = byte(-1)
+            empty[1] = 0
+            empty[2] = 0
+            ipc_reply(sender, empty, 3)
+            return
+        val slot = nic_rx_head
+        val len = nic_rx_queue[slot].len
+        var reply: [1517]byte
+        reply[0] = 0
+        reply[1] = byte((len >> 8) & 0xff)
+        reply[2] = byte(len & 0xff)
+        var i = 0
+        while i < len
+            reply[3 + i] = nic_rx_queue[slot].data[i]
+            i += 1
+        nic_rx_head = (slot + 1) % NIC_RX_QUEUE
+        nic_rx_count -= 1
+        ipc_reply(sender, reply, 3 + len)
+
+
+### Server main loop
+
+Attach the driver to the granted MMIO slot, bring up the device,
+register port "nic", signal RS, then service IPC. Every IPC wake
+implicitly drains the virtio RX ring first.
+
+`virtio_net_init()` may fail (e.g. if QEMU was started without
+virtio-net). We still register the port and call `rs_ready()` in
+that case — inet's nic IPC wrappers degrade to returning -1 and
+UDP loopback keeps working. Matches the inet "best effort" pattern.
+
+    nic_server()
+        v_attach(MMIO_SERVER_VA + VIRTIO_NET_SLOT_OFFSET, VIRTIO_DEV_NET)
+        virtio_net_init()
+
+        nic_port = port_create()
+        port_register(nic_port, "nic")
+
+Register this thread as the virtio IRQ notify target. On aarch64
+the kernel's `virtio_handler()` acks the device and sends us a
+notification whenever the used ring grows — `ipc_recv_notify`
+below returns -2, we drain, back to sleep. Unregistered
+(kernel-side -1 default) means polling-only; harmless on
+builds without IRQ routing wired yet.
+
+        svc_virtio_set_notify(thread_id())
+
+        rs_ready()
+
+        var buf: [1520]byte
+        while 1 == 1
+            val r = ipc_recv_notify(nic_port, buf, NIC_MSG_BUF)
+            if r == -2
+                notify_read_self()
+                nic_drain_rx()
+            else if r >= 0
+                nic_drain_rx()
+                val sender = r
+                val cmd = int(buf[0]) & 0xff
+                if cmd == NIC_CMD_GET_MAC
+                    nic_handle_get_mac(sender)
+                else if cmd == NIC_CMD_SEND_PACKET
+                    nic_handle_send_packet(sender, buf)
+                else if cmd == NIC_CMD_SUBSCRIBE_RX
+                    nic_handle_subscribe_rx(sender)
+                else if cmd == NIC_CMD_RECV_PACKET
+                    nic_handle_recv_packet(sender)
+                else
+                    var reply: [1]byte
+                    reply[0] = byte(-1)
+                    ipc_reply(sender, reply, 1)

@@ -260,6 +260,14 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("hello world")
   }
 
+  "x86 inet: UDP loopback via test_net" in {
+    // test_net opens a UDP socket on 127.0.0.1:5000, sends "hello"
+    // to itself, and prints what recvfrom returned.
+    val output = qemu.command("test_net")
+    output should include("sent=5")
+    output should include("recv=5 'hello'")
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
