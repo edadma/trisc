@@ -515,11 +515,16 @@ class SyslLLVMCodegen(target: String = "host"):
     activeOut = out
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
-      // Zero-initialize allocas that may be decremented on unexecuted paths
-      if lt == "%struct.slice" then
-        emit(s"  store %struct.slice zeroinitializer, %struct.slice* $reg")
-      else if lt == "i8*" then
+      // Zero-initialize allocas that may be decremented on unexecuted paths.
+      // Aggregate allocas (structs, arrays, strings, closures) can contain
+      // rc-tracked pointers; if a nested-scope val never gets bound (e.g. a
+      // loop `break`s before its assignment) but the hoisted alloca's cleanup
+      // still runs at function exit, we must ensure pointer fields read as
+      // null rather than stack garbage.
+      if lt == "i8*" then
         emit(s"  store i8* null, i8** $reg")
+      else if lt.startsWith("%struct.") || lt.startsWith("[") then
+        emit(s"  store $lt zeroinitializer, $lt* $reg")
     out ++= bodyBuf
 
     emit("}")
