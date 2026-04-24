@@ -45,6 +45,7 @@ object SVMRuntime:
        |global assert, func
        |global unreachable, func
        |global todo, func
+       |global write_str, func
        |
        |; putchar: TOS = char, write to stdout device
        |putchar:
@@ -81,6 +82,12 @@ object SVMRuntime:
        |  local_set 2
        |  jump .puts_loop
        |.puts_done:
+       |  ret
+       |
+       |; write_str(s: string) — same as puts: write all bytes to stdout.
+       |write_str:
+       |  frame 0
+       |  call puts
        |  ret
        |
        |; panic: TOS = address of {ptr, len} message string struct
