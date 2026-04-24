@@ -611,6 +611,40 @@ accesses, arithmetic, calls), but nested `old(old(...))` is rejected.
 
 Contracts are not yet supported on expression-body functions or on closures.
 
+**`ensure cases` — guarded postcondition table.** SPARK `Contract_Cases` equivalent:
+declares a list of `guard => postcondition` rows. Each row is a logical implication:
+"if `guard` held at entry, `postcondition` must hold at exit." The block is sugar over
+the existing `require` / `ensure` machinery — desugared to one `require` (the OR of all
+guards, for completeness on entry) plus N `ensure`s of the form `!old(guard) || post`.
+
+```sysl
+classify(x: int) -> int
+    ensure cases
+        x > 0  => result == 1
+        x == 0 => result == 0
+        x < 0  => result == -1
+    if x > 0 then return 1
+    if x < 0 then return -1
+    return 0
+```
+
+- Each row is `<guard> => <postcondition> [, "message"]` on its own line.
+- `=>` (not `->`) — semantically a logical implication, distinct from match arms.
+- Guards are evaluated at entry (the parser wraps each in `old()`); postconditions at exit.
+- **Completeness is checked at runtime**: at function entry, at least one guard must
+  hold, otherwise the function traps with `precondition check failed: ensure cases:
+  no guard matched on entry`.
+- **Disjointness is not checked at runtime**: if multiple guards hold, all of their
+  postconditions must hold at exit (each is an independent `ensure`). A future prover
+  will discharge disjointness statically; until then, overlapping cases are simply
+  conjoined obligations.
+- Composes freely with regular `require` and `ensure` clauses.
+
+The desugared form is what you would write by hand; `ensure cases` exists for
+readability and to give a future prover a single place to discharge case-analysis
+obligations. Stripped under `--no-contracts` (each desugared clause goes through the
+normal contract path).
+
 **`assume <bool> [, "msg"]`.** Statement-level Ada/SPARK `pragma Assume` equivalent:
 states a property the programmer asserts is true at this point. At runtime it is checked
 exactly like `assert` and traps if false; statically it tells a future prover to take the
