@@ -742,6 +742,18 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     val TCP_MAX_RETRIES     = 5
     val TCP_REORDER_SLOTS   = 4
 
+    // Congestion control (RFC 5681). Initial cwnd of 3 × SMSS
+    // matches the pre-RFC-6928 classical value — big enough to
+    // push a few segments in the first RTT, small enough that
+    // slow-start growth is observable in tests.
+    //
+    // SSthresh starts at a large value so we stay in slow start
+    // until the first loss or our cwnd actually catches up to a
+    // reasonable estimate of bandwidth-delay product.
+    val TCP_INIT_CWND       = 1440
+    val TCP_INIT_SSTHRESH   = 65535
+    val TCP_MIN_CWND        = 480
+
     val TCP_STATE_CLOSED      = 0
     val TCP_STATE_SYN_SENT    = 1
     val TCP_STATE_ESTABLISHED = 2
@@ -813,6 +825,8 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         rtt_sample_valid: int
         rtt_sample_seq: u32
         rtt_sample_time: int
+        snd_cwnd: int
+        snd_ssthresh: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -843,6 +857,8 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
             tcp_sockets[i].rto = TCP_RTO_INITIAL
             tcp_sockets[i].rtt_measured = 0
             tcp_sockets[i].rtt_sample_valid = 0
+            tcp_sockets[i].snd_cwnd = TCP_INIT_CWND
+            tcp_sockets[i].snd_ssthresh = TCP_INIT_SSTHRESH
             var k = 0
             while k < TCP_REORDER_SLOTS
                 tcp_sockets[i].reorder[k].in_use = 0
@@ -1166,6 +1182,8 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 tcp_sockets[i].rto = TCP_RTO_INITIAL
                 tcp_sockets[i].rtt_measured = 0
                 tcp_sockets[i].rtt_sample_valid = 0
+                tcp_sockets[i].snd_cwnd = TCP_INIT_CWND
+                tcp_sockets[i].snd_ssthresh = TCP_INIT_SSTHRESH
                 var k = 0
                 while k < TCP_REORDER_SLOTS
                     tcp_sockets[i].reorder[k].in_use = 0
@@ -1442,34 +1460,143 @@ and the ACK flag is set. seg_len counts SYN and FIN as one octet.
         inet_nic_send_packet(frame, total_len)
 
 
-send() entry — buffer, emit one segment, reply bytes written.
-Returns `n` on success (>= 0), -1 if connection is not open
-for sending. CLOSE_WAIT (peer half-closed their write side) is
-still fine: only our read side has EOF'd, so we can — and often
-must — send a final response before our own close(). MVP rejects
-overlapping sends with written = 0.
+RFC 5681 congestion-window growth. Called whenever an ACK
+advances `snd_una`. `acked` is the number of data bytes newly
+acknowledged (`eff` in the caller — so a pure FIN ACK, which
+has `eff = 0`, is a no-op here).
+
+- In slow start (`cwnd < ssthresh`): grow `cwnd` by at most
+  one SMSS per cumulative ACK (RFC 5681 §3.1 ¶2). Matches the
+  classical doubling-per-RTT behaviour.
+- In congestion avoidance (`cwnd >= ssthresh`): grow `cwnd`
+  by `SMSS * SMSS / cwnd` per ACK, rounded up to at least 1
+  so we always make forward progress. Net effect is ~one
+  SMSS per RTT under steady cumulative-ACK cadence.
+
+    inet_tcp_cwnd_on_ack(s: int, acked: int)
+        if acked <= 0
+            return
+        var cwnd = tcp_sockets[s].snd_cwnd
+        if cwnd < tcp_sockets[s].snd_ssthresh
+            // Slow start. +1 SMSS per ACK, but capped at the
+            // bytes actually acked to avoid over-inflating on
+            // a tiny tail ACK.
+            var inc = TCP_MAX_SEG
+            if inc > acked
+                inc = acked
+            cwnd += inc
+        else
+            var inc = (TCP_MAX_SEG * TCP_MAX_SEG) / cwnd
+            if inc < 1
+                inc = 1
+            cwnd += inc
+        // Runaway guard. 64 KB is far beyond anything our
+        // 1024-byte send_buf will ever exercise; acts purely
+        // as a sanity clamp so misbehaving peers can't make
+        // the cwnd integer saturate.
+        if cwnd > 65535
+            cwnd = 65535
+        tcp_sockets[s].snd_cwnd = cwnd
+
+
+RFC 5681 §3.1 ¶3 — RTO timeout collapse. Called from
+`inet_tcp_scan_timers` before retransmit. `FlightSize` is the
+bytes in flight (`snd_nxt - snd_una`) at the moment of loss;
+`ssthresh` is reset to `max(FlightSize / 2, 2 * SMSS)`,
+`cwnd` collapses to one SMSS (our `TCP_MIN_CWND`).
+
+Only applies when we have actual in-flight data — SYN / FIN
+retransmits keep their current cwnd, which is fine because
+those are handshake probes and cwnd isn't meaningful for them
+yet.
+
+    inet_tcp_cwnd_on_rto(s: int)
+        val in_flight = int(i32(
+            tcp_sockets[s].snd_nxt - tcp_sockets[s].snd_una))
+        if in_flight <= 0
+            return
+        var new_ssthresh = in_flight / 2
+        val floor = 2 * TCP_MAX_SEG
+        if new_ssthresh < floor
+            new_ssthresh = floor
+        tcp_sockets[s].snd_ssthresh = new_ssthresh
+        tcp_sockets[s].snd_cwnd = TCP_MIN_CWND
+
+
+Pump as many segments out of `send_buf` as the effective send
+window allows. Called from `inet_tcp_do_send` after buffering
+new user data, and from the ACK path after `snd_una` advances
+(to exploit the window that just opened).
+
+Effective window = `min(snd_cwnd, snd_wnd)` — standard TCP
+(RFC 5681 §2). `snd_wnd` is the receiver's advertised rwnd;
+`snd_cwnd` is our own congestion window. In-flight bytes are
+`snd_nxt - snd_una`; room is `effective_window - in_flight`.
+
+Each segment is at most `TCP_MAX_SEG` bytes (our SMSS). Stops
+when the window is full, when `send_buf` has no more unsent
+bytes, or when `snd_wnd` is zero (peer closed its window).
+
+RTT sample anchors on the last segment's tail sequence — good
+enough for coarse RTT tracking.
+
+    inet_tcp_drain_send(s: int)
+        val st = tcp_sockets[s].state
+        if st != TCP_STATE_ESTABLISHED && st != TCP_STATE_CLOSE_WAIT
+            return
+        var window = tcp_sockets[s].snd_cwnd
+        if tcp_sockets[s].snd_wnd < window
+            window = tcp_sockets[s].snd_wnd
+        var emitted_any = 0
+        while 1 == 1
+            val in_flight = int(i32(
+                tcp_sockets[s].snd_nxt - tcp_sockets[s].snd_una))
+            val unsent = tcp_sockets[s].send_len - in_flight
+            if unsent <= 0
+                break
+            val room = window - in_flight
+            if room <= 0
+                break
+            var seg_size = unsent
+            if seg_size > TCP_MAX_SEG
+                seg_size = TCP_MAX_SEG
+            if seg_size > room
+                seg_size = room
+            val seq = tcp_sockets[s].snd_nxt
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH, seq, seq, seg_size)
+            tcp_sockets[s].snd_nxt = seq + u32(seg_size)
+            emitted_any = 1
+        if emitted_any != 0
+            inet_tcp_rtt_start_sample(s, tcp_sockets[s].snd_nxt)
+            inet_tcp_arm_rtx(s)
+
+
+send() entry — append to `send_buf` and drain as much as the
+congestion + receive windows allow. Returns bytes accepted
+(>= 0), -1 if the connection isn't open for sending.
+
+CLOSE_WAIT (peer half-closed their write side) is still fine
+for sending: our read side has EOF'd but not our write side.
+Returns 0 if the send buffer is full — caller must wait for an
+ACK and retry.
 
     inet_tcp_do_send(s: int, data: *byte, len: int) -> int
         val ds_st = tcp_sockets[s].state
         if ds_st != TCP_STATE_ESTABLISHED && ds_st != TCP_STATE_CLOSE_WAIT
             return -1
-        if tcp_sockets[s].send_len > 0
-            return 0
+        val space = TCP_SEND_BUF - tcp_sockets[s].send_len
         var n = len
-        if n > TCP_SEND_BUF
-            n = TCP_SEND_BUF
-        if n > TCP_MAX_SEG
-            n = TCP_MAX_SEG
+        if n > space
+            n = space
+        if n <= 0
+            return 0
+        val start_off = tcp_sockets[s].send_len
         var i = 0
         while i < n
-            tcp_sockets[s].send_buf[i] = data[i]
+            tcp_sockets[s].send_buf[start_off + i] = data[i]
             i += 1
-        tcp_sockets[s].send_len = n
-        val seq = tcp_sockets[s].snd_nxt
-        tcp_sockets[s].snd_nxt = seq + u32(n)
-        inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH, seq, seq, n)
-        inet_tcp_rtt_start_sample(s, seq + u32(n))
-        inet_tcp_arm_rtx(s)
+        tcp_sockets[s].send_len += n
+        inet_tcp_drain_send(s)
         n
 
 
@@ -1756,10 +1883,12 @@ the connection down.
                     tcp_sockets[s].snd_una = ack
                     tcp_sockets[s].snd_wnd = wnd
                     inet_tcp_rtt_maybe_sample(s, ack)
+                    inet_tcp_cwnd_on_ack(s, eff)
                     if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
                         inet_tcp_disarm_rtx(s)
                     else
                         inet_tcp_arm_rtx(s)
+                    inet_tcp_drain_send(s)
 
         var did_data = 0
         var did_fin = 0
@@ -1871,6 +2000,7 @@ socket for retransmit and TIME_WAIT deadlines.
                             inet_tcp_close_slot(i, -1)
                         else
                             tcp_sockets[i].retries += 1
+                            inet_tcp_cwnd_on_rto(i)
                             inet_tcp_retransmit(i)
                             inet_tcp_rto_backoff(i)
                             inet_tcp_arm_rtx(i)
@@ -1890,9 +2020,19 @@ socket for retransmit and TIME_WAIT deadlines.
             return
         if st == TCP_STATE_ESTABLISHED || st == TCP_STATE_CLOSE_WAIT
             if tcp_sockets[s].send_len > 0
+                // Retransmit exactly one MSS-sized segment from the
+                // front of send_buf. cwnd has already been collapsed
+                // to TCP_MIN_CWND in scan_timers; subsequent ACKs
+                // will grow it back via slow start and drain_send
+                // will push more segments as the window opens.
+                var retx_len = tcp_sockets[s].send_len
+                if retx_len > TCP_MAX_SEG
+                    retx_len = TCP_MAX_SEG
                 inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
                     tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
-                    tcp_sockets[s].send_len)
+                    retx_len)
+                val retx_end = tcp_sockets[s].snd_una + u32(retx_len)
+                tcp_sockets[s].snd_nxt = retx_end
             return
         if st == TCP_STATE_FIN_WAIT_1
             // If data was still in flight when close() ran, resend it

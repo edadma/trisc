@@ -54,6 +54,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_GET_IP_CONFIG = 17
     val INET_CMD_RECVFROM_TIMEOUT = 18
     val INET_CMD_ARP_PROBE    = 19
+    val INET_CMD_TCP_DEBUG    = 20
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -590,6 +591,49 @@ possibly firing immediately.
         // expires, or close.
 
 
+### TCP_DEBUG handler
+
+Expose internal congestion-control state for a TCP socket so
+the test harness can assert cwnd/ssthresh behaviour without
+having to reverse-engineer it from timing. Read-only — no state
+is mutated.
+
+```
+request: cmd(1) + fd(2)               = 3 bytes
+reply:   status(1) + state(1)
+       + cwnd(4) + ssthresh(4)
+       + snd_una(4) + snd_nxt(4)
+       + snd_wnd(4) + send_len(4)     = 26 bytes
+```
+
+    inet_handle_tcp_debug(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        var reply: [26]byte
+        if fd < 0 || fd >= 16
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 26)
+            return
+        if tcp_sockets[fd].in_use == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 26)
+            return
+        reply[0] = 0
+        reply[1] = byte(tcp_sockets[fd].state & 0xff)
+        inet_dbg_write_i32(reply, 2,  tcp_sockets[fd].snd_cwnd)
+        inet_dbg_write_i32(reply, 6,  tcp_sockets[fd].snd_ssthresh)
+        inet_dbg_write_i32(reply, 10, int(tcp_sockets[fd].snd_una))
+        inet_dbg_write_i32(reply, 14, int(tcp_sockets[fd].snd_nxt))
+        inet_dbg_write_i32(reply, 18, tcp_sockets[fd].snd_wnd)
+        inet_dbg_write_i32(reply, 22, tcp_sockets[fd].send_len)
+        ipc_reply(sender, reply, 26)
+
+    inet_dbg_write_i32(p: *byte, off: int, v: int)
+        p[off]     = byte((v >> 24) & 0xff)
+        p[off + 1] = byte((v >> 16) & 0xff)
+        p[off + 2] = byte((v >>  8) & 0xff)
+        p[off + 3] = byte( v        & 0xff)
+
+
 ### ARP probe handler
 
 Four-operation command driven by dhclient for RFC 5227
@@ -1109,6 +1153,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_SET_IP_CONFIG -> inet_handle_set_ip_config(sender, buf)
                     INET_CMD_GET_IP_CONFIG -> inet_handle_get_ip_config(sender, buf)
                     INET_CMD_ARP_PROBE   -> inet_handle_arp_probe(sender, buf)
+                    INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte

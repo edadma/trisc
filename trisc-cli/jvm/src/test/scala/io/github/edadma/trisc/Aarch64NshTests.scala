@@ -308,6 +308,63 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       echoThread.join(2000)
   }
 
+  "aarch64 tcp: cwnd grows on ACK (slow start)" in {
+    // Phase 1 of TCP congestion control. Exposes snd_cwnd /
+    // snd_ssthresh via INET_CMD_TCP_DEBUG, drives a 900-byte
+    // pipelined send, and asserts cwnd is observably bigger
+    // afterward. The actual growth amount depends on how many
+    // cumulative ACKs Linux sends back (typically 1-2 for a
+    // small payload), but any growth at all proves the ACK
+    // path is feeding into inet_tcp_cwnd_on_ack.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+    val bulkEcho = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](1024)
+          var remaining = 900
+          while remaining > 0 do
+            val n = in.read(buf, 0, math.min(buf.length, remaining))
+            if n <= 0 then remaining = 0
+            else
+              out.write(buf, 0, n)
+              out.flush()
+              remaining -= n
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-cwnd-echo")
+    bulkEcho.setDaemon(true)
+    bulkEcho.start()
+
+    try
+      qemu.send("test_tcp_cwnd\n")
+      val output = qemu.waitFor("test_tcp_cwnd: ok")
+      output should include("test_tcp_cwnd: initial")
+      output should include("test_tcp_cwnd: after")
+      output should include("test_tcp_cwnd: ok")
+      // Pull the two cwnd values out of the output.
+      val initRe  = """cwnd=(\d+)\s+ssthresh=(\d+)""".r
+      val matches = initRe.findAllMatchIn(output).toList
+      matches.length shouldBe 2
+      val initialCwnd = matches(0).group(1).toInt
+      val initialSs   = matches(0).group(2).toInt
+      val afterCwnd   = matches(1).group(1).toInt
+      initialCwnd shouldBe 1440
+      initialSs   shouldBe 65535
+      assert(afterCwnd > initialCwnd,
+        s"expected cwnd growth, got initial=$initialCwnd after=$afterCwnd")
+    finally
+      server.close()
+      bulkEcho.join(2000)
+  }
+
   // RST-on-unsolicited-SYN is implemented in inet_proto.lsysl
   // (inet_tcp_emit_rst + handle_segment listen-miss dispatch) but
   // can't be validated through QEMU's user-mode slirp: hostfwd

@@ -43,6 +43,7 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_GET_IP_CONFIG = 17
     val INET_CMD_RECVFROM_TIMEOUT = 18
     val INET_CMD_ARP_PROBE    = 19
+    val INET_CMD_TCP_DEBUG    = 20
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val ARP_PROBE_OP_START    = 0
@@ -72,6 +73,13 @@ format).
 
     net_read_ipv4(p: *byte, off: int) -> u32
         ipv4(int(p[off]), int(p[off + 1]), int(p[off + 2]), int(p[off + 3]))
+
+    net_read_i32(p: *byte, off: int) -> int
+        val b0 = int(p[off]     & 0xff) << 24
+        val b1 = int(p[off + 1] & 0xff) << 16
+        val b2 = int(p[off + 2] & 0xff) << 8
+        val b3 = int(p[off + 3] & 0xff)
+        b0 | b1 | b2 | b3
 
 
 ### socket
@@ -522,6 +530,43 @@ Wire: cmd(1) + op(1) + target(4) → status(1) + seen(1).
 
     arp_probe_announce(ip: u32) -> int
         arp_probe_send_op(ARP_PROBE_OP_ANNOUNCE, ip)
+
+
+### tcp_debug (test-only)
+
+Query internal congestion-control state for an established TCP
+socket. Used by tests to assert cwnd growth + RTO collapse
+behaviour. Fills the six int fields of `out`; returns 0 on
+success, -1 if the fd is invalid.
+
+    struct TcpDebug
+        state: int
+        snd_cwnd: int
+        snd_ssthresh: int
+        snd_una: int
+        snd_nxt: int
+        snd_wnd: int
+        send_len: int
+
+    tcp_debug(fd: int, out: *TcpDebug) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_TCP_DEBUG)
+        net_write_u16(msg, 1, fd)
+        var reply: [26]byte
+        ipc_send(port, msg, 3, reply, 26)
+        if reply[0] != 0
+            return -1
+        out.state       = int(reply[1]) & 0xff
+        out.snd_cwnd    = net_read_i32(reply, 2)
+        out.snd_ssthresh = net_read_i32(reply, 6)
+        out.snd_una     = net_read_i32(reply, 10)
+        out.snd_nxt     = net_read_i32(reply, 14)
+        out.snd_wnd     = net_read_i32(reply, 18)
+        out.send_len    = net_read_i32(reply, 22)
+        0
 
 
 ### tcp_ooo_selftest (test-only)
