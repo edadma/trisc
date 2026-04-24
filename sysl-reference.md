@@ -2376,6 +2376,47 @@ double(x: int) -> int = x * 2     // no module state; allocation/IO still allowe
 
 **Adoption strategy.** Add annotations from the leaves upward. Existing code is untouched (no annotations means "effects unknown" — exactly today's behavior, with no new restrictions). The first time you mark a leaf function `#reads() #writes()`, every annotated caller must follow suit; this is the point — it propagates the discipline up to the surfaces of your program at your own pace.
 
+### `#ghost` — verification-only declarations
+
+A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost. Three places `#ghost` may appear:
+
+```
+#ghost
+var seen_count: int = 0          // module-level ghost var
+
+#ghost
+is_sorted(s: &[]int) -> bool     // module-level ghost fn — body free to read real state
+    for i in 0..<len(s)-1 do
+        if s[i] > s[i+1] then return false
+    return true
+
+sort(s: &[]int)
+    require true
+    ensure is_sorted(s)
+    #ghost var input_len = len(s)  // ghost local — captured for use in `ensure`
+    ensure len(s) == input_len
+    ...
+```
+
+**The discipline.** The compiler enforces two rules:
+
+1. **Real code cannot read ghost state.** Reading a `#ghost` variable, or calling a `#ghost` function, from real (non-ghost, non-contract) code is a static error. Ghost state has no runtime existence to read; the rule prevents accidental dependence.
+2. **Ghost code cannot write real state.** A `#ghost` function may not assign to a non-ghost module-level var (writes to its own locals are fine — they're scoped to the function). This keeps the runtime behaviour independent of whether ghost code is present.
+
+Contract clauses (`require` / `ensure` / `invariant` / `variant` / `assume` / `for all` / `for some` predicates) sit in *contract context* and may freely read both real and ghost state — that's the whole point of ghost code. The same is true for ghost var initializers, ghost-target assignment RHSes, and ghost function bodies.
+
+**The strip pass.** After analysis, the compiler removes every ghost declaration before codegen. Ghost vars produce no storage; ghost functions emit no code. Inside real-function bodies it also drops:
+
+- Statements that declare a ghost local (`#ghost var x = ...`).
+- Plain or compound assignments to a ghost name (real-code assignments to ghost are implicitly ghost statements).
+- Any `require` / `ensure` / `invariant` / `assume` clause whose expression touches a ghost name or calls a ghost function. The whole clause is dropped — there's no fallback runtime check that just covers "the real part."
+
+The runtime sees a program identical to one written without `#ghost` at all. The verifier sees the full ghost-aware AST.
+
+**Interaction with other attributes.** `#ghost` is mutually exclusive with `#pure`, `#reads(...)`, `#writes(...)` (ghost code doesn't run, so its runtime effects are irrelevant), `#address(N)` (ghost vars have no storage), and `const` (constants are inlined, not stored).
+
+**v1 limitations.** Ghost parameters, ghost struct fields, and ghost return values are not yet supported; for now, model them by lifting the relevant state into a module-level `#ghost var`. Ghost code may not yet be referenced through function pointers or interface dispatch (the strip pass would have to descend into indirect-call targets).
+
 ### `#deprecated` — warn on use
 
 Marks a function as deprecated. Calls to the function emit a warning to stderr during analysis (once per callee per compilation):

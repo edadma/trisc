@@ -424,7 +424,18 @@ class SyslParser extends StandardTokenParsers {
     "assume" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => AssumeStmtAST(e, msg) }
 
   lazy val stmt: Parser[StmtAST] =
-    asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    ghostVarStmt | asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+
+  /** `#ghost var/val name = ...` at statement position — a ghost local declaration. Only
+   *  accepts a plain var/val form (no `#address`, no `static_assert`, etc.). The resulting
+   *  `VarStmtAST` has `isGhost = true`; the analyzer and strip pass handle the rest. */
+  lazy val ghostVarStmt: Parser[StmtAST] =
+    "#" ~> ident ~ identStmt ^? ({
+      case "ghost" ~ (v: VarStmtAST) => v.copy(isGhost = true)
+    }, {
+      case "ghost" ~ other => s"#ghost at statement position must be followed by `var` or `val`, got $other"
+      case name ~ _ => s"unknown statement-level attribute '#$name'"
+    })
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
     mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut.isMutable) } |

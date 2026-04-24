@@ -23,7 +23,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  lower to `TDerefAssignStmt(TVarRef(name, *T), v)`. The caller passes an lvalue
    *  auto-wrapped with `TAddrOf*`. `typ` is still the underlying `T` (what the body
    *  sees); the pointer wrap is invisible to user code. */
-  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false, autoIndirect: Boolean = false)
+  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false, autoIndirect: Boolean = false, isGhost: Boolean = false)
   /** `modes` is parallel to `params`: one entry per parameter. Empty means "all In"
    *  (default, back-compat). `params` stores the call-side signature: for `Out`/`Inout`
    *  this is `*T` so `checkArgs` and codegen see the hidden-pointer type; the body-scope
@@ -33,7 +33,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  declared an empty set ("no module-level effects"). Resolution to the canonical
    *  mangled name + mutability/scope validation is deferred to `validateEffects`, which
    *  runs after the function body is analyzed (so all relevant globals are in scope). */
-  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None):
+  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isGhost: Boolean = false):
     def modeOf(i: Int): ParamMode = if modes.isEmpty then ParamMode.In else modes(i)
     def hasEffectAnnotations: Boolean = reads.isDefined || writes.isDefined || isPure
 
@@ -87,6 +87,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
   // Counter for uniquely naming hoisted `variant` state across nested / sibling loops.
   private var variantIdCounter: Int = 0
+
+  /** Set of mangled names for module-level `#ghost var` declarations. Used by both the
+   *  ghost-discipline post-pass (real code cannot read these) and the strip pass (writes
+   *  to these are dropped from real-function bodies before codegen). */
+  private val ghostNames = mutable.HashSet[String]()
 
   /** Type-check each invariant expression at struct declaration time. Invariants are
    *  analyzed in a scope where each field name binds to a local of the field's type, so
@@ -680,6 +685,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
             val isPure = fd.attributes.exists(_.name == "pure")
+            val isGhost = fd.attributes.exists(_.name == "ghost")
             // Extract `#reads(a, b)` / `#writes(c)` raw identifier lists. Validation that
             // each name resolves to a module-level mutable var is deferred to validateEffects
             // (run after the body is analyzed, so all relevant globals are in scope).
@@ -698,7 +704,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             val writesSet = extractIdentList("writes")
             if isPure && (readsSet.isDefined || writesSet.isDefined) then
               throw AnalysisError(s"#pure on '$name' cannot be combined with #reads/#writes (it already implies both empty)", fd)
-            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet)
+            if isGhost && isPure then
+              throw AnalysisError(s"#ghost on '$name' is incompatible with #pure (ghost code is removed before codegen, so #pure is meaningless)", fd)
+            if isGhost && (readsSet.isDefined || writesSet.isDefined) then
+              throw AnalysisError(s"#ghost on '$name' is incompatible with #reads/#writes (ghost code is removed before codegen)", fd)
+            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet, isGhost)
             // Record #deprecated info
             for attr <- fd.attributes if attr.name == "deprecated" do
               val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
@@ -897,7 +907,73 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         Nil
       case d => List(analyzeDecl(d))
     }
-    TProgram(tDecls ++ specializedDecls.toList)
+    val allDecls = tDecls ++ specializedDecls.toList
+    // Ghost strip pass: remove `#ghost var`/`#ghost fn` declarations from codegen output,
+    // and inside every real function body, drop ghost-local decls, ghost-target assignments,
+    // and contract checks that reference ghost state. Ghost discipline has already been
+    // enforced in analyzeDecl, so here the pass is a pure rewrite with no error checks.
+    val strippedDecls = stripGhostDecls(allDecls)
+    TProgram(strippedDecls)
+
+  /** Drop ghost TFunDecl / TVarDecl from the output and rewrite every remaining function's
+   *  body so no ghost state survives into codegen. Ghost functions never run (their bodies
+   *  are discarded wholesale). Real functions may contain ghost locals, ghost-target
+   *  assignments, and ghost-touching contracts — all stripped here. */
+  private def stripGhostDecls(decls: List[TDecl]): List[TDecl] =
+    // Mangled names of ghost functions, collected from the unstripped decls. Used by
+    // stripGhostStmts to recognize calls-to-ghost inside contract expressions (which get
+    // the whole contract dropped).
+    val ghostFnMangled: Set[String] =
+      decls.collect { case f: TFunDecl if f.isGhost => f.name }.toSet
+    decls.flatMap {
+      case f: TFunDecl if f.isGhost => Nil
+      case v: TVarDecl if v.isGhost => Nil
+      case f: TFunDecl =>
+        val newBody = f.body match
+          case TExprBody(e) => TExprBody(e)
+          case TBlockBody(stmts) => TBlockBody(stripGhostStmts(stmts, ghostFnMangled))
+        List(f.copy(body = newBody))
+      case other => List(other)
+    }
+
+  /** Walk a statement list, dropping ghost-only statements and contracts. `ghostLocals`
+   *  accumulates names of ghost locals as we hit their `TVarStmt(..., isGhost=true)` so
+   *  later writes to them are recognized and dropped. */
+  private def stripGhostStmts(stmts: List[TStmt], ghostFns: Set[String]): List[TStmt] =
+    val ghostLocals = mutable.HashSet[String]()
+    def isGhostVar(name: String): Boolean = ghostNames.contains(name) || ghostLocals.contains(name)
+
+    def exprTouchesGhost(e: TExpr): Boolean =
+      var touches = false
+      def walk(x: TExpr): TExpr =
+        x match
+          case TVarRef(n, _) if isGhostVar(n)  => touches = true
+          case TAddrOf(n, _) if isGhostVar(n)  => touches = true
+          case TCall(c, _, _) if ghostFns.contains(c) => touches = true
+          case _ => ()
+        x
+      mapTExpr(e)(walk)
+      touches
+
+    def stripStmt(s: TStmt): Option[TStmt] = s match
+      case TVarStmt(n, _, _, _, true) =>
+        ghostLocals += n
+        None
+      case TAssignStmt(t, _) if isGhostVar(t) => None
+      case TCompoundAssignStmt(t, _, _) if isGhostVar(t) => None
+      case TContractCheck(_, e, _) if exprTouchesGhost(e) => None
+      case TWhileStmt(c, b, lbl)           => Some(TWhileStmt(c, b.flatMap(stripStmt), lbl))
+      case TForStmt(init, c, u, b, lbl)    =>
+        val newInit = stripStmt(init).getOrElse(TMultiStmt(Nil))
+        val newUpd  = stripStmt(u).getOrElse(TMultiStmt(Nil))
+        Some(TForStmt(newInit, c, newUpd, b.flatMap(stripStmt), lbl))
+      case TDoWhileStmt(c, b, lbl)         => Some(TDoWhileStmt(c, b.flatMap(stripStmt), lbl))
+      case TLoopStmt(b, lbl)               => Some(TLoopStmt(b.flatMap(stripStmt), lbl))
+      case TDeferStmt(inner)               => stripStmt(inner).map(TDeferStmt(_))
+      case TMultiStmt(ss)                  => Some(TMultiStmt(ss.flatMap(stripStmt)))
+      case other                           => Some(other)
+
+    stmts.flatMap(stripStmt)
 
   /** Evaluate a `static_assert` at compile time and throw if the condition is false. */
   private def evalStaticAssert(sa: StaticAssertDeclAST): Unit =
@@ -1013,11 +1089,17 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         if funInfo.isPure then validatePureFn(name, tBody, funInfo.params.map(_._1))
         if funInfo.reads.isDefined || funInfo.writes.isDefined then
           validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
-        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef)
+        validateGhostDiscipline(name, funInfo, tBody)
+        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost)
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
+        val isGhost = attrs.exists(_.name == "ghost")
+        if isGhost && attrs.exists(_.name == "address") then
+          throw AnalysisError(s"#ghost on '$name' is incompatible with #address (ghost vars have no runtime storage)")
+        if isGhost && isConst then
+          throw AnalysisError(s"#ghost on '$name' is incompatible with const (ghost decls are stripped from codegen)")
         // #address(N): MMIO var. No storage; reads/writes become direct loads/stores
         // through a literal pointer. Must have an explicit type.
         attrs.find(_.name == "address") match
@@ -1036,12 +1118,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             scopeStack = null
             TConstDecl(mangledName, resolvedType) // no storage emitted
           case None =>
-            analyzeRegularVarDecl(name, typOpt, init, isPrivate, isMutable, isVolatile, isConst)
+            analyzeRegularVarDecl(name, typOpt, init, isPrivate, isMutable, isVolatile, isConst, isGhost)
 
   /** Factored path for the non-#address module-level var decl. Same logic as before — pulled
    *  into its own method so the #address branch can early-return cleanly. */
   private def analyzeRegularVarDecl(name: String, typOpt: Option[TypeAST], init: ExpressionAST,
-      isPrivate: Boolean, isMutable: Boolean, isVolatile: Boolean, isConst: Boolean): TDecl =
+      isPrivate: Boolean, isMutable: Boolean, isVolatile: Boolean, isConst: Boolean, isGhost: Boolean = false): TDecl =
     val tInit0 = analyzeExpr(init)
     val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
     val tInit1 = coerceLiteral(tInit0, declType)
@@ -1058,7 +1140,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case None =>
           throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
     // Constant folding: immutable vals with constant initializers become compile-time constants
-    val tInit = if !isMutable then
+    val tInit = if !isMutable && !isGhost then
       tryConstEval(tInit1) match
         case Some(n) =>
           val masked = maskToType(n, declType)
@@ -1069,12 +1151,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case None => tInit1
     else tInit1
     val mangledVarName = if shouldMangle(name) then mangleName(name) else name
-    globalScope(name) = SymInfo(mangledVarName, declType, isMutable, isConst = isConst)
+    globalScope(name) = SymInfo(mangledVarName, declType, isMutable, isConst = isConst, isGhost = isGhost)
+    if isGhost then ghostNames += mangledVarName
     scopeStack = null
     // `const` declarations do not generate a storage slot — callers inline the folded value
     // via compileTimeConstants lookup during VarRef analysis.
     if isConst then TConstDecl(mangledVarName, declType)
-    else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile)
+    else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile, isGhost = isGhost)
 
   private def warnDeprecated(name: String): Unit =
     if deprecations.contains(name) && !warnedDeprecations.contains(name) then
@@ -1181,7 +1264,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case TAsmExpr(_, _)                  => reject("cannot contain asm expressions")
 
     def checkStmt(s: TStmt): Unit = s match
-      case TVarStmt(n, _, init, _) =>
+      case TVarStmt(n, _, init, _, _) =>
         checkExpr(init)
         localVars += n
       case TDestructureStmt(ns, _, init) =>
@@ -1380,7 +1463,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case TAsmExpr(_, _)                  => reject("cannot contain asm expressions")
 
     def checkStmt(s: TStmt): Unit = s match
-      case TVarStmt(n, _, init, _) =>
+      case TVarStmt(n, _, init, _, _) =>
         checkExpr(init)
         localVars += n
       case TDestructureStmt(ns, _, init) =>
@@ -1441,6 +1524,164 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     body match
       case TExprBody(e) => checkExpr(e)
       case TBlockBody(stmts) => stmts.foreach(checkStmt)
+
+  /** Walk a function body to enforce ghost-code discipline:
+   *  - Real code cannot read ghost variables or call ghost functions. "Real code" is
+   *    everything outside contract clauses, ghost var initializers, ghost-target assignment
+   *    RHSes, and ghost function bodies.
+   *  - A `#ghost fn` body cannot write to real (non-ghost) module-level state. Local writes
+   *    are fine (the function's locals are intrinsically scoped to it).
+   *
+   *  Called for every function — real or ghost — because a real function may declare
+   *  ghost locals whose use in real code needs to be caught here. Ghost-context tracking
+   *  is per-expression: an expression is in ghost context iff (a) the enclosing function
+   *  is ghost, (b) it's a contract clause expression, or (c) it's the RHS of a ghost var
+   *  decl / assignment to a ghost name. */
+  private def validateGhostDiscipline(funcName: String, fi: FunInfo, body: TFunBody): Unit =
+    val ghostLocals = mutable.HashSet[String]()
+    def isGhostName(name: String): Boolean = ghostNames.contains(name) || ghostLocals.contains(name)
+    def isGhostFn(callee: String): Boolean =
+      functions.get(callee).exists(_.isGhost) ||
+        functions.values.exists(f => f.name == callee && f.isGhost)
+    def reject(msg: String): Nothing = throw AnalysisError(s"#ghost discipline in '$funcName': $msg")
+    // A name is a real (non-ghost) module-level mutable global iff it's in globalScope,
+    // not marked ghost, and not a const. Used to catch ghost-code writes to real state.
+    def isRealGlobal(name: String): Boolean =
+      globalScope.values.exists(s => s.name == name && !s.isGhost && s.mutable && !s.isConst)
+
+    def checkExpr(e: TExpr, ghostCtx: Boolean): Unit = e match
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TArrayDecl => ()
+      case _: TAddrLit | _: TFuncRef | _: TSizeof | _: TStructLit | _: TEnumConstruct => ()
+      case _: TPreInc | _: TPreDec | _: TPostInc | _: TPostDec => ()
+      case TVarRef(name, _) =>
+        if !ghostCtx && isGhostName(name) then
+          reject(s"real-code expression reads ghost variable '$name'")
+      case TAddrOf(name, _) =>
+        if !ghostCtx && isGhostName(name) then
+          reject(s"real-code expression takes address of ghost variable '$name'")
+      case TArrayLit(els, _)               => els.foreach(checkExpr(_, ghostCtx))
+      case TAddrOfIndex(a, i, _)           => checkExpr(a, ghostCtx); checkExpr(i, ghostCtx)
+      case TAddrOfField(o, _, _)           => checkExpr(o, ghostCtx)
+      case TTempAddr(inner, _)             => checkExpr(inner, ghostCtx)
+      case TDeref(inner, _)                => checkExpr(inner, ghostCtx)
+      case TIndex(arr, i, _)               => checkExpr(arr, ghostCtx); checkExpr(i, ghostCtx)
+      case TFieldAccess(o, _, _)           => checkExpr(o, ghostCtx)
+      case TFieldPreInc(o, _, _)           => checkExpr(o, ghostCtx)
+      case TFieldPreDec(o, _, _)           => checkExpr(o, ghostCtx)
+      case TFieldPostInc(o, _, _)          => checkExpr(o, ghostCtx)
+      case TFieldPostDec(o, _, _)          => checkExpr(o, ghostCtx)
+      case TStructConstruct(_, args)       => args.foreach(checkExpr(_, ghostCtx))
+      case TUnary(_, o, _)                 => checkExpr(o, ghostCtx)
+      case TBinary(l, _, r, _)             => checkExpr(l, ghostCtx); checkExpr(r, ghostCtx)
+      case TCall(callee, args, _) =>
+        if !ghostCtx && isGhostFn(callee) then
+          reject(s"real-code expression calls ghost function '$callee'")
+        args.foreach(checkExpr(_, ghostCtx))
+      case TIndirectCall(c, args, _)       => checkExpr(c, ghostCtx); args.foreach(checkExpr(_, ghostCtx))
+      case TCast(inner, _)                 => checkExpr(inner, ghostCtx)
+      case TIfExpr(c, tb, eb, _) =>
+        checkExpr(c, ghostCtx)
+        tb.foreach(checkStmt(_, ghostCtx))
+        eb.foreach(_.foreach(checkStmt(_, ghostCtx)))
+      case TQuantifier(_, _, _, lo, hi, _, pred, _) =>
+        // Quantifiers are intrinsically ghost-friendly (they only ever appear in contract
+        // clauses or other ghost contexts in practice), so descend with ghostCtx as-is.
+        checkExpr(lo, ghostCtx); checkExpr(hi, ghostCtx); checkExpr(pred, ghostCtx)
+      case TMatchExpr(scr, arms, dflt, _) =>
+        checkExpr(scr, ghostCtx)
+        for arm <- arms do
+          arm.guard.foreach(checkExpr(_, ghostCtx))
+          arm.body.foreach(checkStmt(_, ghostCtx))
+        dflt.foreach(_.foreach(checkStmt(_, ghostCtx)))
+      case TNew(_, args)                   => args.foreach(checkExpr(_, ghostCtx))
+      case TNewEnum(_, _, args)            => args.foreach(checkExpr(_, ghostCtx))
+      case TNewArray(_, sz)                => checkExpr(sz, ghostCtx)
+      case TLen(inner, _)                  => checkExpr(inner, ghostCtx)
+      case TCap(inner, _)                  => checkExpr(inner, ghostCtx)
+      case TSliceExpr(a, lo, hi, _)        => checkExpr(a, ghostCtx); lo.foreach(checkExpr(_, ghostCtx)); hi.foreach(checkExpr(_, ghostCtx))
+      case TAppend(s, el, _)               => checkExpr(s, ghostCtx); checkExpr(el, ghostCtx)
+      case TStringFromPtr(p, l, _)         => checkExpr(p, ghostCtx); checkExpr(l, ghostCtx)
+      case TStringFromSlice(s, _)          => checkExpr(s, ghostCtx)
+      case TStr(inner)                     => checkExpr(inner, ghostCtx)
+      case TFmtStr(inner, _)               => checkExpr(inner, ghostCtx)
+      case _: TClosure                     => () // Closures snapshot their environment; treat as opaque for ghost purposes.
+      case TInterfaceBox(inner, _)         => checkExpr(inner, ghostCtx)
+      case TInterfaceDispatch(v, _, args, _) => checkExpr(v, ghostCtx); args.foreach(checkExpr(_, ghostCtx))
+      case TIntrinsicCall(_, args, _)      => args.foreach(checkExpr(_, ghostCtx))
+      case TRangeCheck(inner, _, _, _)     => checkExpr(inner, ghostCtx)
+      case _: TAsmExpr                     => ()
+
+    def checkStmt(s: TStmt, ghostCtx: Boolean): Unit = s match
+      case TVarStmt(n, _, init, _, isLocalGhost) =>
+        if isLocalGhost then ghostLocals += n
+        // Ghost var declared inside a ghost function: the var is ghost too. Initializer is ghost.
+        val initIsGhost = ghostCtx || isLocalGhost
+        checkExpr(init, initIsGhost)
+      case TDestructureStmt(_, _, init) =>
+        checkExpr(init, ghostCtx)
+      case TDestructureAssignStmt(ns, _, init) =>
+        if fi.isGhost then
+          for n <- ns do if isRealGlobal(n) then reject(s"ghost function writes to real global '$n'")
+        checkExpr(init, ghostCtx)
+      case TAssignStmt(target, value) =>
+        val targetIsGhost = isGhostName(target)
+        if fi.isGhost && !targetIsGhost && isRealGlobal(target) then
+          reject(s"ghost function writes to real global '$target'")
+        // Real code assigning to a ghost name is implicitly a "ghost statement" — the
+        // strip pass drops it. The RHS evaluates in ghost context (so it may read ghost).
+        checkExpr(value, ghostCtx || targetIsGhost)
+      case TCompoundAssignStmt(target, _, value) =>
+        val targetIsGhost = isGhostName(target)
+        if fi.isGhost && !targetIsGhost && isRealGlobal(target) then
+          reject(s"ghost function writes to real global '$target'")
+        checkExpr(value, ghostCtx || targetIsGhost)
+      case TFieldAssignStmt(obj, _, value) =>
+        // Catch the simple case: `realGlobal.field = ...` from a ghost function.
+        obj match
+          case TVarRef(n, _) if fi.isGhost && isRealGlobal(n) =>
+            reject(s"ghost function writes to real global '$n'")
+          case _ => ()
+        checkExpr(obj, ghostCtx); checkExpr(value, ghostCtx)
+      case TFieldCompoundAssignStmt(obj, _, _, value) =>
+        obj match
+          case TVarRef(n, _) if fi.isGhost && isRealGlobal(n) =>
+            reject(s"ghost function writes to real global '$n'")
+          case _ => ()
+        checkExpr(obj, ghostCtx); checkExpr(value, ghostCtx)
+      case TIndexAssignStmt(arr, idx, value) =>
+        arr match
+          case TVarRef(n, _) if fi.isGhost && isRealGlobal(n) =>
+            reject(s"ghost function writes to real global '$n'")
+          case _ => ()
+        checkExpr(arr, ghostCtx); checkExpr(idx, ghostCtx); checkExpr(value, ghostCtx)
+      case TDerefAssignStmt(p, v) =>
+        checkExpr(p, ghostCtx); checkExpr(v, ghostCtx)
+      case TReturnStmt(v) =>
+        v.foreach(checkExpr(_, ghostCtx))
+      case TWhileStmt(c, b, _) =>
+        checkExpr(c, ghostCtx); b.foreach(checkStmt(_, ghostCtx))
+      case TForStmt(init, c, u, b, _) =>
+        checkStmt(init, ghostCtx); checkExpr(c, ghostCtx); checkStmt(u, ghostCtx); b.foreach(checkStmt(_, ghostCtx))
+      case TDoWhileStmt(c, b, _) =>
+        checkExpr(c, ghostCtx); b.foreach(checkStmt(_, ghostCtx))
+      case TLoopStmt(b, _) =>
+        b.foreach(checkStmt(_, ghostCtx))
+      case TBreakStmt(_) | TContinueStmt(_) | TAsmStmt(_) => ()
+      case TDeferStmt(inner) =>
+        checkStmt(inner, ghostCtx)
+      case TContractCheck(_, expr, _) =>
+        // Contract clauses are intrinsically in ghost context — they may freely read both
+        // real and ghost state. (Writes are already disallowed by the contract grammar.)
+        checkExpr(expr, true)
+      case TMultiStmt(ss) =>
+        ss.foreach(checkStmt(_, ghostCtx))
+      case TExprStmt(e) =>
+        checkExpr(e, ghostCtx)
+
+    val funIsGhost = fi.isGhost
+    body match
+      case TExprBody(e) => checkExpr(e, funIsGhost)
+      case TBlockBody(stmts) => stmts.foreach(checkStmt(_, funIsGhost))
 
   private def validateTestAttr(fd: FunDeclAST, info: FunInfo): Unit =
     fd.attributes.find(_.name == "test") match
@@ -2752,7 +2993,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   /** Apply `f` to every TExpr inside a statement tree, bottom-up via mapTExpr. */
   private def mapTStmt(s: TStmt)(f: TExpr => TExpr): TStmt =
     def goS(stmt: TStmt): TStmt = stmt match
-      case TVarStmt(n, t, init, vol)            => TVarStmt(n, t, mapTExpr(init)(f), vol)
+      case TVarStmt(n, t, init, vol, g)         => TVarStmt(n, t, mapTExpr(init)(f), vol, g)
       case TDestructureStmt(ns, ts, init)       => TDestructureStmt(ns, ts, mapTExpr(init)(f))
       case TDestructureAssignStmt(ns, ts, init) => TDestructureAssignStmt(ns, ts, mapTExpr(init)(f))
       case TAssignStmt(t, v)                    => TAssignStmt(t, mapTExpr(v)(f))
@@ -2844,7 +3085,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
   private def analyzeStmt(stmt: StmtAST): TStmt =
     stmt match
-      case VarStmtAST(name, typOpt, init, isMutable, isVolatile, isConst) =>
+      case VarStmtAST(name, typOpt, init, isMutable, isVolatile, isConst, isGhost) =>
+        if isGhost && isConst then
+          throw AnalysisError(s"#ghost on local '$name' is incompatible with const (ghost decls are stripped from codegen)")
         val declared = typOpt.map(resolveType)
         val savedExp = currentExpected
         currentExpected = declared.orElse(currentExpected)
@@ -2864,8 +3107,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               return TExprStmt(TIntLit(masked, declType)) // no-op placeholder, dropped by codegen
             case None =>
               throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
-        // Constant folding for local immutable vals
-        val tInit = if !isMutable && declType.isIntegral then
+        // Constant folding for local immutable vals (skip for ghost — ghost decls are
+        // stripped before codegen so folding has no benefit and would also short-circuit
+        // the discipline check on the initializer).
+        val tInit = if !isMutable && !isGhost && declType.isIntegral then
           tryConstEval(tInit1) match
             case Some(n) =>
               val masked = maskToType(n, declType)
@@ -2888,10 +3133,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           TExprStmt(tInitFinal)
         else
           if scopeStack != null then
-            currentScope(name) = SymInfo(name, declType, isMutable)
-          val baseStmt = TVarStmt(name, declType, tInitFinal, isVolatile)
+            currentScope(name) = SymInfo(name, declType, isMutable, isGhost = isGhost)
+          val baseStmt = TVarStmt(name, declType, tInitFinal, isVolatile, isGhost = isGhost)
           // Fire struct invariants on the freshly-initialized value, if any are declared.
-          val checks = declType match
+          // Skipped for ghost locals — there's no runtime check to fire (the decl is stripped).
+          val checks = if isGhost then Nil else declType match
             case st: StructType if structInvariants.contains(st.name) =>
               buildStructInvariantChecks(VarRefAST(name), st.name)
             case _ => Nil
@@ -3384,7 +3630,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           var L = startLocals
           for stmt <- stmts do L = scanStmtInSeq(stmt, L)
         def scanStmtInSeq(stmt: TStmt, locals: Set[String]): Set[String] = stmt match
-          case TVarStmt(name, _, init, _) =>
+          case TVarStmt(name, _, init, _, _) =>
             scanCaptures(init, locals)
             if name == "_" then locals else locals + name
           case TDestructureStmt(names, _, init) =>

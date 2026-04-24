@@ -136,7 +136,7 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, isExtern = true, sourceFile = sourceFile)
-      case TFunDecl(name, params, returnType, _, isPrivate, attrs, isDef) =>
+      case TFunDecl(name, params, returnType, _, isPrivate, attrs, isDef, _) =>
         val isPure = attrs.exists(_.name == "pure")
         // Param modes: infer from the pointer-wrapping of declared param types. The
         // analyzer stores Out/Inout params with type `*T`; the TFunDecl exposes that
@@ -146,7 +146,7 @@ object ModuleMeta:
         val modes = params.map(_.mode)
         val needModes = modes.exists(_ != ParamMode.In)
         SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef, isPure, if needModes then modes else Nil), isPrivate, sourceFile = sourceFile)
-      case TVarDecl(name, typ, _, isPrivate, _) =>
+      case TVarDecl(name, typ, _, isPrivate, _, _) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile = sourceFile)
     }
     new ModuleMeta(syms)

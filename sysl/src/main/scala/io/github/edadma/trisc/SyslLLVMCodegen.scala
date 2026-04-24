@@ -190,7 +190,7 @@ class SyslLLVMCodegen(target: String = "host"):
       decl match
         case TStructDecl(name, fields, volFields) =>
           structTypes(name) = SyslType.StructType(name, fields, volFields)
-        case TFunDecl(name, _, _, _, _, _, _) if name.endsWith("_deinit") =>
+        case TFunDecl(name, _, _, _, _, _, _, _) if name.endsWith("_deinit") =>
           val structName = name.indexOf("__") match
             case -1 => name.dropRight(7) // "Point_deinit" -> "Point"
             case i  => name.substring(i + 2).dropRight(7) // "mod__Point_deinit" -> "Point"
@@ -198,7 +198,7 @@ class SyslLLVMCodegen(target: String = "host"):
         case _ =>
 
     // Collect all function names that will be defined in this compilation unit
-    val definedFuncNames = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _) => name }.toSet
+    val definedFuncNames = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _, _) => name }.toSet
 
     // Pre-populate funcParamTypes for ALL functions before generating any code.
     // Without this, calls to functions defined later in the file would not know
@@ -236,7 +236,7 @@ class SyslLLVMCodegen(target: String = "host"):
           if !emittedFunctions.contains(f.name) then
             emittedFunctions += f.name
             genFunction(f)
-        case TVarDecl(name, typ, init, _, isVolatile) =>
+        case TVarDecl(name, typ, init, _, isVolatile, _) =>
           val initVal = constValue(init, typ)
           emit(s"@$name = global ${llvmType(typ)} $initVal")
           globalVarTypes(name) = typ
@@ -730,7 +730,7 @@ class SyslLLVMCodegen(target: String = "host"):
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
-      case TVarStmt(name, typ, init, isVolatile) =>
+      case TVarStmt(name, typ, init, isVolatile, _) =>
         val lt = llvmType(typ)
         if isStringType(typ) then
           // String locals always get a stable entry-block alloca with the descriptor copied in.

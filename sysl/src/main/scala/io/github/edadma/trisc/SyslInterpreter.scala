@@ -293,7 +293,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _, _) =>
+        case TVarDecl(name, _, init, _, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
     functions.get("main") match
@@ -321,7 +321,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _, _) =>
+        case TVarDecl(name, _, init, _, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
   /** Invoke a zero-arg function by name. Throws RuntimeError on panic. */
@@ -461,7 +461,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
-      case TVarStmt(name, _, init, _) =>
+      case TVarStmt(name, _, init, _, _) =>
         val v = evalAny(init, env)
         // Increment refcount for copies only — TNew/TNewArray already set refcount=1
         init match

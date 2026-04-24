@@ -105,7 +105,7 @@ object SyslPrettyPrinter:
   // --- Statements ---
 
   private def stmtToSource(s: StmtAST, depth: Int): String = s match
-    case VarStmtAST(name, typ, init, isMutable, _, isConst) =>
+    case VarStmtAST(name, typ, init, isMutable, _, isConst, _) =>
       val kw = if isConst then "const" else if isMutable then "var" else "val"
       val typStr = typ.map(t => s": ${typeToSource(t)}").getOrElse("")
       init match
