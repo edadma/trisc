@@ -288,6 +288,18 @@ class SyslSVMCodegen:
       case f: TFunDecl if emittedFuncs.add(f.name) => genFunction(f)
       case _ =>
 
+    // Pre-register string globals so their rodata labels are emitted in the
+    // rodata segment before the data segment references them.
+    val stringGlobalLabels = new mutable.HashMap[String, String]
+    for decl <- dataGlobals do decl match
+      case TVarDecl(name, SyslType.StringType, TStringLit(s, _), _, _) =>
+        labelCounter += 1
+        val lbl = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_${labelCounter}__g_$name"
+                  else s"__str_${labelCounter}__g_$name"
+        stringLiterals += ((lbl, s))
+        stringGlobalLabels(name) = lbl
+      case _ =>
+
     // Emit rodata segment — string literals + interface itables
     if stringLiterals.nonEmpty || itables.nonEmpty then
       emit("segment rodata")
@@ -320,9 +332,25 @@ class SyslSVMCodegen:
         case TVarDecl(name, typ, init, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
-          constEval(init) match
-            case Some(n) => emit(s"  dl $n")
-            case None => emit(s"  dl 0")
+          typ match
+            case SyslType.StringType =>
+              // Static string literal: inline 16-byte {ptr, len}. Label was
+              // pre-registered before rodata emission.
+              init match
+                case TStringLit(s, _) =>
+                  val bytes = s.getBytes("UTF-8")
+                  emit(s"  dl ${stringGlobalLabels(name)}")
+                  emit(s"  dl ${bytes.length}")
+                case _ =>
+                  emit(s"  dl 0"); emit(s"  dl 0")
+            case _ =>
+              val sizeSlots = (typ.sizeOf.max(8) / 8).toInt
+              constEval(init) match
+                case Some(n) =>
+                  emit(s"  dl $n")
+                  for _ <- 1 until sizeSlots do emit("  dl 0")
+                case None =>
+                  for _ <- 0 until sizeSlots do emit("  dl 0")
         case _ =>
 
     // Emit bss segment
@@ -332,7 +360,8 @@ class SyslSVMCodegen:
         case TVarDecl(name, typ, _, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
-          emit(s"  rl ${typ.sizeOf.max(8) / 8}")
+          val size = typ.sizeOf.max(8)
+          emit(s"  rl ${((size + 7) / 8).toInt}")
         case _ =>
 
     // Emit extern declarations
@@ -717,9 +746,16 @@ class SyslSVMCodegen:
       locals.get(name) match
         case Some(LocalInfo(idx, _)) => emit(s"  local_get $idx")
         case None =>
-          // Global variable
+          // Global. Scalars load the cell; aggregates (string / slice /
+          // struct / enum) are address-represented so the symbol's address
+          // IS the value. Scalar globals are stored as 8-byte cells (dl),
+          // so always load 8 bytes — callers doing narrow-int math will
+          // truncate on write-back. (Using narrow load would drop the sign
+          // bit for signed-negative values stored via store64.)
           emit(s"  push_i64 $name")
-          emit("  load64")
+          typ.underlying match
+            case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType => ()
+            case _ => emit("  load64")
 
     case TAddrOf(name, _) =>
       locals.get(name) match
