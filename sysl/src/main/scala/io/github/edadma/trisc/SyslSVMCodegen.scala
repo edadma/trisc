@@ -35,17 +35,36 @@ class SyslSVMCodegen:
   private def countLocals(body: TFunBody): Int =
     var count = 0
     def scanStmts(stmts: List[TStmt]): Unit = stmts.foreach(scanStmt)
+    def scanExpr(e: TExpr): Unit = e match
+      case TMatchExpr(scr, arms, default, _) =>
+        count += 1 // scrutinee slot
+        scanExpr(scr)
+        for arm <- arms do
+          for pat <- arm.patterns do
+            pat match
+              case TDestructurePattern(_, bindings, _) => count += bindings.count(_.isDefined)
+              case TVariantPattern(_, _, bindings, _) => count += bindings.count(_.isDefined)
+              case _ =>
+          arm.body.foreach(scanStmt)
+        default.foreach(_.foreach(scanStmt))
+      case TIfExpr(_, thenBody, elseBody, _) =>
+        thenBody.foreach(scanStmt)
+        elseBody.foreach(_.foreach(scanStmt))
+      case _ =>
     def scanStmt(s: TStmt): Unit = s match
-      case TVarStmt(_, _, _, _) => count += 1
+      case TVarStmt(_, _, init, _) => count += 1; scanExpr(init)
       case TWhileStmt(_, body, _) => scanStmts(body)
       case TForStmt(init, _, update, body, _) => scanStmt(init); scanStmt(update); scanStmts(body)
       case TDoWhileStmt(_, body, _) => scanStmts(body)
       case TIfExpr(_, thenBody, elseBody, _) => scanStmts(thenBody); elseBody.foreach(scanStmts)
-      case TExprStmt(TIfExpr(_, thenBody, elseBody, _)) => scanStmts(thenBody); elseBody.foreach(scanStmts)
+      case TExprStmt(e) => scanExpr(e); e match
+        case TIfExpr(_, thenBody, elseBody, _) => scanStmts(thenBody); elseBody.foreach(scanStmts)
+        case _ =>
       case TDestructureStmt(names, _, _) => count += names.length
+      case TReturnStmt(Some(e)) => scanExpr(e)
       case _ =>
     body match
-      case TExprBody(_) =>
+      case TExprBody(e) => scanExpr(e)
       case TBlockBody(stmts) => scanStmts(stmts)
     count
 
@@ -300,6 +319,27 @@ class SyslSVMCodegen:
               genExpr(arg)
               emit("  swap")
               emitStore(fieldType)
+          case TEnumConstruct(et, variantIndex, args) =>
+            // Tag at offset 0 (i32)
+            emit(s"  local_get $idx")
+            emitPushInt(variantIndex)
+            emit("  swap")
+            emit("  store32")
+            // Variant fields at dataOffset
+            val dataOff = et.dataOffset.toInt
+            val variantFields = et.variants(variantIndex)._2
+            var fieldOff = 0
+            for (arg, i) <- args.zipWithIndex do
+              val (_, fieldType) = variantFields(i)
+              val align = fieldType.alignOf.toInt.max(1)
+              fieldOff = ((fieldOff + align - 1) / align) * align
+              emit(s"  local_get $idx")
+              val totalOff = dataOff + fieldOff
+              if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
+              genExpr(arg)
+              emit("  swap")
+              emitStore(fieldType)
+              fieldOff += fieldType.sizeOf.toInt
           case _: TArrayDecl | _: TStructLit => // already zeroed
           case _ =>
             // General case: init returns an address, bulk copy into our allocation
@@ -433,6 +473,10 @@ class SyslSVMCodegen:
 
     case TContinueStmt(_) =>
       emit(s"  jump ${continueLabels.top}")
+
+    case TExprStmt(TMatchExpr(scrutinee, arms, default, matchTyp)) =>
+      genMatch(scrutinee, arms, default, matchTyp, asExpr = matchTyp != SyslType.VoidType)
+      if matchTyp != SyslType.VoidType then emit("  drop")
 
     case TExprStmt(expr) =>
       genExpr(expr)
@@ -701,6 +745,9 @@ class SyslSVMCodegen:
       genStmtsAsExpr(thenBody)
       emit(s"$endLabel:")
 
+    case TMatchExpr(scrutinee, arms, default, matchTyp) =>
+      genMatch(scrutinee, arms, default, matchTyp, asExpr = true)
+
     case TPreInc(name, _) =>
       val LocalInfo(idx, _) = locals(name): @unchecked
       emit(s"  local_get $idx")
@@ -783,6 +830,38 @@ class SyslSVMCodegen:
         emit("  push_0")
         emit("  swap")
         emit("  store64")
+
+    case TEnumConstruct(et, variantIndex, args) =>
+      // Allocate enum on memory stack, zero-init, populate tag + variant fields
+      val size = et.sizeOf
+      emitMemAlloc(size)
+      val aligned = ((size + 7) / 8 * 8).toInt
+      for i <- 0 until aligned by 8 do
+        emit("  dup")
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  push_0")
+        emit("  swap")
+        emit("  store64")
+      // Tag at offset 0 (i32)
+      emit("  dup")
+      emitPushInt(variantIndex)
+      emit("  swap")
+      emit("  store32")
+      // Variant fields at dataOffset
+      val dataOff = et.dataOffset.toInt
+      val variantFields = et.variants(variantIndex)._2
+      var fieldOff = 0
+      for (arg, i) <- args.zipWithIndex do
+        val (_, fieldType) = variantFields(i)
+        val align = fieldType.alignOf.toInt.max(1)
+        fieldOff = ((fieldOff + align - 1) / align) * align
+        emit("  dup") // keep enum addr
+        val totalOff = dataOff + fieldOff
+        if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
+        genExpr(arg)
+        emit("  swap")
+        emitStore(fieldType)
+        fieldOff += fieldType.sizeOf.toInt
 
     case TStructConstruct(structType, args) =>
       // Allocate struct on memory stack, populate fields
@@ -946,6 +1025,97 @@ class SyslSVMCodegen:
     val targetType = st.fields(fieldIndex)._2
     val align = targetType.alignOf.max(1)
     ((offset + align - 1) / align) * align
+
+  /** Generate a match expression. If asExpr, each body leaves a value on the stack. */
+  private def genMatch(scrutinee: TExpr, arms: List[TMatchArm], default: Option[List[TStmt]], matchTyp: SyslType, asExpr: Boolean): Unit =
+    val scrIdx = nextLocalIndex
+    nextLocalIndex += 1
+    genExpr(scrutinee)
+    emit(s"  local_set $scrIdx")
+    val endLabel = newLabel("match_end")
+    for arm <- arms do
+      val hitLabel = newLabel("match_hit")
+      val nextArm = newLabel("match_next")
+      for pat <- arm.patterns do pat match
+        case TWildcard =>
+          emit(s"  jump $hitLabel")
+        case TValuePattern(v) =>
+          genExpr(v)
+          emit(s"  local_get $scrIdx")
+          emit("  eq")
+          emit(s"  jumpnz $hitLabel")
+        case TRangePattern(lo, hi) =>
+          val rangeNext = newLabel("match_rng")
+          emit(s"  local_get $scrIdx")
+          genExpr(lo)
+          emit(if scrutinee.typ.isUnsigned then "  geu" else "  ge")
+          emit(s"  jumpz $rangeNext")
+          emit(s"  local_get $scrIdx")
+          genExpr(hi)
+          emit(if scrutinee.typ.isUnsigned then "  leu" else "  le")
+          emit(s"  jumpnz $hitLabel")
+          emit(s"$rangeNext:")
+        case TDestructurePattern(_, _, _) =>
+          emit(s"  jump $hitLabel")
+        case TVariantPattern(_, variantIndex, _, _) =>
+          // Load tag (i32 at offset 0 of enum), compare with variant index
+          emit(s"  local_get $scrIdx")
+          emit("  load32")
+          emitPushInt(variantIndex)
+          emit("  eq")
+          emit(s"  jumpnz $hitLabel")
+      emit(s"  jump $nextArm")
+      emit(s"$hitLabel:")
+      // Bind destructure/variant pattern fields to locals before guard
+      for pat <- arm.patterns do pat match
+        case TVariantPattern(et, variantIndex, bindings, _) =>
+          val dataOff = et.dataOffset.toInt
+          val variantFields = et.variants(variantIndex)._2
+          var fieldOff = 0
+          for (binding, i) <- bindings.zipWithIndex do
+            val (_, fieldType) = variantFields(i)
+            val align = fieldType.alignOf.toInt.max(1)
+            fieldOff = ((fieldOff + align - 1) / align) * align
+            binding.foreach { name =>
+              val localIdx = nextLocalIndex
+              nextLocalIndex += 1
+              locals(name) = LocalInfo(localIdx, fieldType)
+              emit(s"  local_get $scrIdx")
+              val totalOff = dataOff + fieldOff
+              if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
+              emitLoad(fieldType)
+              emit(s"  local_set $localIdx")
+            }
+            fieldOff += fieldType.sizeOf.toInt
+        case TDestructurePattern(st, bindings, _) =>
+          for (binding, i) <- bindings.zipWithIndex do
+            val fieldType = st.fields(i)._2
+            binding.foreach { name =>
+              val localIdx = nextLocalIndex
+              nextLocalIndex += 1
+              locals(name) = LocalInfo(localIdx, fieldType)
+              val off = fieldOffset(st, i)
+              emit(s"  local_get $scrIdx")
+              if off != 0 then { emitPushInt(off); emit("  add") }
+              emitLoad(fieldType)
+              emit(s"  local_set $localIdx")
+            }
+        case _ =>
+      arm.guard.foreach { g =>
+        genExpr(g)
+        emit(s"  jumpz $nextArm")
+      }
+      if asExpr then genStmtsAsExpr(arm.body)
+      else genStmts(arm.body)
+      emit(s"  jump $endLabel")
+      emit(s"$nextArm:")
+    default match
+      case Some(stmts) =>
+        if asExpr then genStmtsAsExpr(stmts)
+        else genStmts(stmts)
+      case None =>
+        if asExpr then emitPushInt(0)
+    emit(s"$endLabel:")
 
   private def genStructAddr(obj: TExpr): Unit = obj match
     case TDeref(ptr, _) =>

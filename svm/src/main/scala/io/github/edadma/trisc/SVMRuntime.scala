@@ -41,6 +41,10 @@ object SVMRuntime:
        |
        |global putchar, func
        |global puts, func
+       |global panic, func
+       |global assert, func
+       |global unreachable, func
+       |global todo, func
        |
        |; putchar: TOS = char, write to stdout device
        |putchar:
@@ -77,6 +81,86 @@ object SVMRuntime:
        |  local_set 2
        |  jump .puts_loop
        |.puts_done:
+       |  ret
+       |
+       |; panic: TOS = address of {ptr, len} message string struct
+       |; writes "panic: <msg>\\n" to stdout then halts the VM.
+       |panic:
+       |  frame 3
+       |  local_set 0       ; local[0] = msg struct addr
+       |  ; emit "panic: " prefix (7 bytes)
+       |  push_i8 112       ; 'p'
+       |  push_i32 STDOUT
+       |  store8
+       |  push_i8 97        ; 'a'
+       |  push_i32 STDOUT
+       |  store8
+       |  push_i8 110       ; 'n'
+       |  push_i32 STDOUT
+       |  store8
+       |  push_i8 105       ; 'i'
+       |  push_i32 STDOUT
+       |  store8
+       |  push_i8 99        ; 'c'
+       |  push_i32 STDOUT
+       |  store8
+       |  push_i8 58        ; ':'
+       |  push_i32 STDOUT
+       |  store8
+       |  push_i8 32        ; ' '
+       |  push_i32 STDOUT
+       |  store8
+       |  ; emit message bytes
+       |  local_get 0
+       |  load64             ; ptr
+       |  local_set 1
+       |  local_get 0
+       |  push_i8 8
+       |  add
+       |  load64             ; len
+       |  local_set 2
+       |.panic_loop:
+       |  local_get 2
+       |  eqz
+       |  jumpnz .panic_done
+       |  local_get 1
+       |  load8
+       |  push_i32 STDOUT
+       |  store8
+       |  local_get 1
+       |  inc
+       |  local_set 1
+       |  local_get 2
+       |  dec
+       |  local_set 2
+       |  jump .panic_loop
+       |.panic_done:
+       |  push_i8 10        ; '\\n'
+       |  push_i32 STDOUT
+       |  store8
+       |  halt
+       |
+       |; assert(cond: bool, msg: string) — no-op if cond is non-zero, else panic
+       |assert:
+       |  frame 2
+       |  local_set 1       ; msg (top of stack = 2nd arg)
+       |  local_set 0       ; cond
+       |  local_get 0
+       |  jumpnz .assert_ok
+       |  local_get 1
+       |  call panic
+       |.assert_ok:
+       |  ret
+       |
+       |; unreachable(msg: string) — always panics
+       |unreachable:
+       |  ; just forward to panic (no prefix here since std.debug usually adds "unreachable: ")
+       |  call panic
+       |  ret
+       |
+       |; todo(msg: string) — always panics
+       |todo:
+       |  call panic
        |  ret
        |""".stripMargin
 
