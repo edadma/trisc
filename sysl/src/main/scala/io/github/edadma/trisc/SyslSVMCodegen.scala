@@ -12,6 +12,10 @@ class SyslSVMCodegen:
   private case class LocalInfo(index: Int, typ: SyslType)
   private var locals: mutable.LinkedHashMap[String, LocalInfo] = null
   private var nextLocalIndex: Int = 0
+  // Names of scalar locals whose address is taken at some point in the body.
+  // These are stored on the memory stack instead of in SVM local slots so
+  // that &local and writes-through-pointer observe the same storage.
+  private var addressedLocals: mutable.HashSet[String] = null
 
   // Globals
   private val globals = new mutable.LinkedHashMap[String, SyslType]
@@ -430,6 +434,69 @@ class SyslSVMCodegen:
     locals = new mutable.LinkedHashMap
     nextLocalIndex = 0
     deferStack.clear()
+    addressedLocals = new mutable.HashSet[String]
+    // Pre-scan body for any TAddrOf(name) — those names need to be stored
+    // on the memory stack so the pointer and the local refer to the same cell.
+    def scanAddrOfE(e: TExpr): Unit = e match
+      case TAddrOf(name, _) => addressedLocals += name
+      case TBinary(l, _, r, _) => scanAddrOfE(l); scanAddrOfE(r)
+      case TUnary(_, o, _) => scanAddrOfE(o)
+      case TCall(_, args, _) => args.foreach(scanAddrOfE)
+      case TIndirectCall(c, args, _) => scanAddrOfE(c); args.foreach(scanAddrOfE)
+      case TCast(i, _) => scanAddrOfE(i)
+      case TIndex(a, i, _) => scanAddrOfE(a); scanAddrOfE(i)
+      case TDeref(p, _) => scanAddrOfE(p)
+      case TAddrOfIndex(a, i, _) => scanAddrOfE(a); scanAddrOfE(i)
+      case TAddrOfField(o, _, _) => scanAddrOfE(o)
+      case TFieldAccess(o, _, _) => scanAddrOfE(o)
+      case TIfExpr(c, tb, eb, _) => scanAddrOfE(c); tb.foreach(scanAddrOfS); eb.foreach(_.foreach(scanAddrOfS))
+      case TMatchExpr(s, arms, d, _) =>
+        scanAddrOfE(s)
+        for a <- arms do
+          a.body.foreach(scanAddrOfS)
+          a.guard.foreach(scanAddrOfE)
+        d.foreach(_.foreach(scanAddrOfS))
+      case TStructConstruct(_, args) => args.foreach(scanAddrOfE)
+      case TEnumConstruct(_, _, args) => args.foreach(scanAddrOfE)
+      case TNew(_, args) => args.foreach(scanAddrOfE)
+      case TNewArray(_, s) => scanAddrOfE(s)
+      case TAppend(s, el, _) => scanAddrOfE(s); scanAddrOfE(el)
+      case TSliceExpr(a, lo, hi, _) => scanAddrOfE(a); lo.foreach(scanAddrOfE); hi.foreach(scanAddrOfE)
+      case TArrayLit(es, _) => es.foreach(scanAddrOfE)
+      case TLen(i, _) => scanAddrOfE(i)
+      case TCap(i, _) => scanAddrOfE(i)
+      case TTempAddr(i, _) => scanAddrOfE(i)
+      case TStringFromSlice(s, _) => scanAddrOfE(s)
+      case TStringFromPtr(p, l, _) => scanAddrOfE(p); scanAddrOfE(l)
+      case TInterfaceBox(i, _) => scanAddrOfE(i)
+      case TInterfaceDispatch(v, _, args, _) => scanAddrOfE(v); args.foreach(scanAddrOfE)
+      case TRangeCheck(i, _, _, _) => scanAddrOfE(i)
+      case TStr(i) => scanAddrOfE(i)
+      case _ =>
+    def scanAddrOfS(s: TStmt): Unit = s match
+      case TVarStmt(_, _, i, _) => scanAddrOfE(i)
+      case TAssignStmt(_, v) => scanAddrOfE(v)
+      case TCompoundAssignStmt(_, _, v) => scanAddrOfE(v)
+      case TDerefAssignStmt(p, v) => scanAddrOfE(p); scanAddrOfE(v)
+      case TIndexAssignStmt(a, i, v) => scanAddrOfE(a); scanAddrOfE(i); scanAddrOfE(v)
+      case TFieldAssignStmt(o, _, v) => scanAddrOfE(o); scanAddrOfE(v)
+      case TFieldCompoundAssignStmt(o, _, _, v) => scanAddrOfE(o); scanAddrOfE(v)
+      case TWhileStmt(c, b, _) => scanAddrOfE(c); b.foreach(scanAddrOfS)
+      case TForStmt(i, c, u, b, _) => scanAddrOfS(i); scanAddrOfE(c); scanAddrOfS(u); b.foreach(scanAddrOfS)
+      case TDoWhileStmt(c, b, _) => scanAddrOfE(c); b.foreach(scanAddrOfS)
+      case TLoopStmt(b, _) => b.foreach(scanAddrOfS)
+      case TIfExpr(c, tb, eb, _) => scanAddrOfE(c); tb.foreach(scanAddrOfS); eb.foreach(_.foreach(scanAddrOfS))
+      case TExprStmt(e) => scanAddrOfE(e)
+      case TReturnStmt(Some(e)) => scanAddrOfE(e)
+      case TDestructureStmt(_, _, i) => scanAddrOfE(i)
+      case TDestructureAssignStmt(_, _, i) => scanAddrOfE(i)
+      case TMultiStmt(c) => c.foreach(scanAddrOfS)
+      case TContractCheck(_, e, _) => scanAddrOfE(e)
+      case TDeferStmt(b) => scanAddrOfS(b)
+      case _ =>
+    fun.body match
+      case TExprBody(e) => scanAddrOfE(e)
+      case TBlockBody(stmts) => stmts.foreach(scanAddrOfS)
 
     val nParams = fun.params.length
     val nBodyLocals = countLocals(fun.body)
@@ -449,6 +516,20 @@ class SyslSVMCodegen:
     for i <- (nParams - 1) to 0 by -1 do
       emit(s"  local_set $i")
     nextLocalIndex = nParams
+
+    // For any scalar param whose address is taken, promote it to a memory-
+    // stack cell and replace the local's value (raw value) with the cell's
+    // address so the addressed-local code paths observe the same storage.
+    for i <- 0 until nParams do
+      val p = fun.params(i)
+      if addressedLocals.contains(p.name) && !needsMemAlloc(p.typ)
+         && p.typ != SyslType.StringType && !p.typ.isInstanceOf[SyslType.SliceType] then
+        emitMemAlloc(8)
+        emit("  dup")         // (cell, cell)
+        emit(s"  local_get $i")
+        emit("  swap")         // (cell, value, cell)
+        emitStore(p.typ)
+        emit(s"  local_set $i")
 
     fun.body match
       case TExprBody(expr) =>
@@ -485,6 +566,19 @@ class SyslSVMCodegen:
         case other => genStmt(other); emitPushInt(0)
 
   private def genStmt(stmt: TStmt): Unit = stmt match
+    case TVarStmt(name, typ, init, _) if addressedLocals.contains(name) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
+      // Scalar local whose address is taken. Allocate an 8-byte cell on the
+      // memory stack; the local slot holds the cell's address. Loads and
+      // stores go through the pointer so &x and the local refer to the
+      // same storage.
+      val idx = allocLocal(name, typ)
+      emitMemAlloc(8)
+      emit("  dup")
+      emit(s"  local_set $idx")
+      genExpr(init)
+      emit("  swap")
+      emitStore(typ)
+
     case TVarStmt(name, typ, init, _) =>
       val idx = allocLocal(name, typ)
       if needsMemAlloc(typ) then
@@ -563,6 +657,10 @@ class SyslSVMCodegen:
     case TAssignStmt(target, value) =>
       genExpr(value)
       locals.get(target) match
+        case Some(LocalInfo(idx, typ)) if addressedLocals.contains(target) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
+          // Addressed scalar: write through the cell's pointer.
+          emit(s"  local_get $idx")
+          emitStore(typ)
         case Some(LocalInfo(idx, _)) => emit(s"  local_set $idx")
         case None if globals.contains(target) =>
           emit(s"  push_i64 $target")
@@ -575,6 +673,14 @@ class SyslSVMCodegen:
 
     case TCompoundAssignStmt(target, op, value) =>
       locals.get(target) match
+        case Some(LocalInfo(idx, typ)) if addressedLocals.contains(target) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
+          // Addressed scalar: read, compute, write through pointer.
+          emit(s"  local_get $idx")
+          emitLoad(typ)
+          genExpr(value)
+          emitBinaryOp(op, typ)
+          emit(s"  local_get $idx")
+          emitStore(typ)
         case Some(LocalInfo(idx, typ)) =>
           emit(s"  local_get $idx")
           genExpr(value)
@@ -804,6 +910,10 @@ class SyslSVMCodegen:
 
     case TVarRef(name, typ) =>
       locals.get(name) match
+        case Some(LocalInfo(idx, localTyp)) if addressedLocals.contains(name) && !needsMemAlloc(localTyp) && localTyp != SyslType.StringType && !localTyp.isInstanceOf[SyslType.SliceType] =>
+          // Addressed scalar: load through the cell's pointer.
+          emit(s"  local_get $idx")
+          emitLoad(localTyp)
         case Some(LocalInfo(idx, _)) => emit(s"  local_get $idx")
         case None =>
           // Global. Scalars load the cell; aggregates (string / slice /
@@ -821,14 +931,18 @@ class SyslSVMCodegen:
         case Some(LocalInfo(idx, typ)) if needsMemAlloc(typ) =>
           // Aggregate local: the local already holds the memory address
           emit(s"  local_get $idx")
+        case Some(LocalInfo(idx, typ)) if addressedLocals.contains(name) =>
+          // Addressed scalar: the local already holds the cell's pointer.
+          emit(s"  local_get $idx")
         case Some(LocalInfo(idx, typ)) =>
-          // Scalar local: need to spill to memory stack, return address
+          // Scalar local, not pre-flagged as addressed. Spill to a new slot
+          // — caveat: subsequent modifications through this pointer will
+          // NOT sync back to the local (fallback path for unscanned uses).
           emitMemAlloc(8)
           emit("  dup")
           emit(s"  local_get $idx")
           emit("  swap")
           emit("  store64")
-          // Note: the spilled address becomes the canonical location
         case None =>
           emit(s"  push_i64 $name")
 
