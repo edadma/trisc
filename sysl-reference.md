@@ -2376,6 +2376,35 @@ double(x: int) -> int = x * 2     // no module state; allocation/IO still allowe
 
 **Adoption strategy.** Add annotations from the leaves upward. Existing code is untouched (no annotations means "effects unknown" — exactly today's behavior, with no new restrictions). The first time you mark a leaf function `#reads() #writes()`, every annotated caller must follow suit; this is the point — it propagates the discipline up to the surfaces of your program at your own pace.
 
+### Effect signatures on function types and interface methods
+
+`#pure`, `#reads(...)`, and `#writes(...)` are also accepted as a suffix on function types and on interface methods, so callbacks and interface-dispatched code can participate in the same effect tracking as direct calls.
+
+```
+sort(arr: &[]int, cmp: (int, int) -> bool #pure)   // pure comparator
+
+interface Sink
+    push(x: int) #writes(buffer)                    // writes one global
+
+#writes(buffer)
+drain(s: Sink, arr: []int)
+    for i in 0..<len(arr) do s.push(arr[i])         // allowed — iface effect is a subset
+```
+
+**Rules at an indirect-call site.** Calling through a function-typed value `f` from a function with `#reads(R)` `#writes(W)` requires `f`'s effect signature to be one of:
+
+- `#pure` — always allowed (no module effects).
+- `#reads(Rf)` / `#writes(Wf)` — allowed iff `Rf ⊆ R ∪ W` and `Wf ⊆ W`.
+- *No signature* — **rejected**: the compiler cannot prove the call stays within the caller's declared effects.
+
+Taking a function reference (`&fn_name`) carries the function's declared effects into the produced `FuncType`. `#pure` functions yield a pure-typed function pointer; `#reads(...)`/`#writes(...)` functions yield the corresponding `RW` type; unannotated functions yield an Unknown type and can only be invoked from unannotated callers.
+
+**Rules at a boxing site.** Assigning a value of struct type `S` to a slot of interface type `I` requires every `I`-declared method's effect signature to be satisfied by the corresponding `S` method. "Satisfied" means the impl's effects are no wider than the interface declares — `#pure` impls satisfy any slot, and `#reads(Rs)` / `#writes(Ws)` impls satisfy `#reads(Ri)` / `#writes(Wi)` iff `Rs ⊆ Ri` and `Ws ⊆ Wi`. Concrete calls that violate this fail at boxing time, not at dispatch.
+
+**Rules at an interface dispatch site.** Dispatching `iface.method(...)` from an annotated function uses the interface method's *declared* effects — not the impl's — for the subset check. This means the caller's static check is unaffected by which impl is currently boxed, matching the modular-reasoning discipline every verifier expects.
+
+**Cross-module.** Effect signatures round-trip through `.smeta`, so `&imported_pure_fn` in a dependent unit produces the same effect-typed reference as `&local_pure_fn`. Closures do not yet carry effect signatures in v1 — their synthesized FuncType is `Unknown`, so they cannot be passed to a `#pure`/`#reads`/`#writes` callback slot. (A later revision will infer closure effects from the body.)
+
 ### `#ghost` — verification-only declarations
 
 A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost. Three places `#ghost` may appear:

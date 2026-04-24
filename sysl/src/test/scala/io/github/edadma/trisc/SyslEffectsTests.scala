@@ -176,11 +176,11 @@ class SyslEffectsTests extends SyslTestHelpers {
     t.getMessage should include("#reads/#writes")
   }
 
-  "annotated function rejects indirect (function-pointer) call" in {
+  "annotated function rejects indirect call to unannotated callee" in {
+    // The callee `add` has no effect annotation, so its function pointer carries
+    // an `Unknown` FuncType — incompatible with the annotated caller's regime.
     val t = intercept[Exception] {
       eval("""
-        |#reads()
-        |#writes()
         |add(a: int, b: int) -> int = a + b
         |#reads()
         |#writes()
@@ -191,6 +191,23 @@ class SyslEffectsTests extends SyslTestHelpers {
         |""".stripMargin)
     }
     t.getMessage should include("indirect")
+  }
+
+  "annotated function permits indirect call to annotated (subset) callee" in {
+    // `add` is `#reads() #writes()` — empty effects. Its function-pointer type carries
+    // the same effect signature, which is a subset of any annotated caller's, so the
+    // indirect call is allowed.
+    eval("""
+      |#reads()
+      |#writes()
+      |add(a: int, b: int) -> int = a + b
+      |#reads()
+      |#writes()
+      |use_add(a: int, b: int) -> int
+      |    var f = &add
+      |    return f(a, b)
+      |main() -> int = use_add(40, 2)
+      |""".stripMargin) shouldBe 42
   }
 
   // ===== Mutual recursion =====

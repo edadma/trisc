@@ -443,7 +443,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       val sn = shortName(sym.name)
       val localKey = shortToAlias.getOrElse(sn, sn) // use alias if provided
       sym.typ match
-        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes) =>
+        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
           if functions.contains(localKey) then
             // Allow same-module sibling re-registration (same mangled name) and externs
@@ -451,7 +451,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if !sym.isExtern && existing.name != sym.name then
               throw AnalysisError(s"imported symbol '$localKey' conflicts with existing function")
           else
-            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure, modes)
+            // Carry over the imported effect signature so `funInfoEffects` and
+            // `validateEffects` see the same information as if the function were
+            // defined locally. Pre-resolved (mangled) names round-trip directly.
+            val (reads, writes) = effects match
+              case e if e.isPure => (None, None)
+              case e if e.isUnknown => (None, None)
+              case e => (e.reads, e.writes)
+            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes)
+            // Pre-populate the resolved-effects cache so cross-module reads use the same
+            // already-mangled names without trying to look them up in this unit's globalScope.
+            if reads.isDefined || writes.isDefined then
+              resolvedEffectsCache(sym.name) = (reads.getOrElse(Set.empty), writes.getOrElse(Set.empty))
             externalSymbols += localKey
         case SymbolMeta.Kind.Data(dataType) =>
           if globalScope.contains(localKey) then
@@ -795,7 +806,17 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           val ownMethods = methodASTs.map { m =>
             val paramTypes = m.params.map(p => resolveType(p.typ))
             val retType = resolveType(m.returnType)
-            (m.name, paramTypes, retType)
+            // Resolve raw names in #reads/#writes through globalScope so subset checks at
+            // boxing/dispatch sites compare mangled names directly.
+            val resolvedEff = if m.effects.isPure || (m.effects.reads.isEmpty && m.effects.writes.isEmpty) then m.effects
+              else
+                def resolveOne(n: String, kind: String): String =
+                  globalScope.get(n) match
+                    case Some(sym) if sym.mutable && !sym.isConst => sym.name
+                    case Some(_) => throw AnalysisError(s"#$kind on interface '$name' method '${m.name}' references '$n' which is not mutable")
+                    case None    => throw AnalysisError(s"#$kind on interface '$name' method '${m.name}' references unknown global '$n'")
+                FuncEffects(m.effects.isPure, m.effects.reads.map(_.map(resolveOne(_, "reads"))), m.effects.writes.map(_.map(resolveOne(_, "writes"))))
+            (m.name, paramTypes, retType, resolvedEff)
           }
           val allMethods = embeddedMethods ++ ownMethods
           // Check for duplicate method names
@@ -806,9 +827,17 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case ImplDeclAST(_, _, _, _) =>
           // Deferred to registerImpls after all traits are known
           ()
-        case VarDeclAST(name, _, _, _, _, _, _, _) =>
+        case VarDeclAST(name, _, _, _, isMutable, attrs, _, isConst) =>
           if globalScope.contains(name) then
             throw AnalysisError(s"duplicate global: '$name'", decl)
+          // Pre-register the name so effect signatures on same-unit interface methods /
+          // function types / callbacks can resolve it during Pass 1. The real SymInfo
+          // (with correct type) is written by `analyzeRegularVarDecl` in Pass 2 and
+          // overwrites this placeholder. Fields used by effect-name resolution (`mutable`
+          // and `isConst`) are set correctly from the AST here.
+          val mangled = if shouldMangle(name) then mangleName(name) else name
+          val isGhost = attrs.exists(_.name == "ghost")
+          globalScope(name) = SymInfo(mangled, SyslType.VoidType, isMutable, isConst = isConst, isGhost = isGhost)
         case _: StaticAssertDeclAST => // evaluated in pass 2
         case _ => // other decls (e.g. CondDeclAST) handled elsewhere
 
@@ -1090,7 +1119,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         if funInfo.reads.isDefined || funInfo.writes.isDefined then
           validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
         validateGhostDiscipline(name, funInfo, tBody)
-        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost)
+        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo))
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>
         scopeStack = new mutable.ArrayBuffer
@@ -1230,7 +1259,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case TCall(callee, args, _) =>
         if !isPureCallee(callee) then reject(s"cannot call impure function '$callee'")
         args.foreach(checkExpr)
-      case TIndirectCall(_, _, _)          => reject("cannot make indirect calls (purity of callee is unknown)")
+      case TIndirectCall(callee, args, _) =>
+        // Allowed only if the callee's FuncType carries `#pure` — that's the only effect
+        // signature compatible with `#pure` discipline (no module effects, no allocation,
+        // etc.). Unknown / RW callees are rejected.
+        callee.typ match
+          case FuncType(_, _, _, eff) if eff.isPure => checkExpr(callee); args.foreach(checkExpr)
+          case _ => reject("cannot make indirect call (callee is not declared `#pure`)")
       case TCast(e, _)                     => checkExpr(e)
       case TIfExpr(c, t, el, _)            => checkExpr(c); t.foreach(checkStmt); el.foreach(_.foreach(checkStmt))
       case TMatchExpr(e, arms, deflt, _) =>
@@ -1256,7 +1291,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case TFmtStr(e, _)                   => checkExpr(e)
       case _: TClosure                     => reject("cannot construct closures (may capture mutable state)")
       case TInterfaceBox(e, _)             => checkExpr(e)
-      case TInterfaceDispatch(_, _, _, _)  => reject("cannot make interface-dispatch calls (purity of impl is unknown)")
+      case TInterfaceDispatch(ifaceVal, methodIdx, args, _) =>
+        // Allowed only if the interface method's effect signature is `#pure` — every impl
+        // is then guaranteed to satisfy the pure discipline (`satisfiesInterface` enforces
+        // this at boxing time, so we don't need to inspect the actual impl here).
+        ifaceVal.typ match
+          case InterfaceType(_, methods) if methods(methodIdx)._4.isPure =>
+            checkExpr(ifaceVal); args.foreach(checkExpr)
+          case _ =>
+            reject("cannot make interface-dispatch call (interface method is not declared `#pure`)")
       case TIntrinsicCall(name, args, _)   =>
         if !purePermittedBuiltins.contains(name) then reject(s"cannot call intrinsic '$name'")
         args.foreach(checkExpr)
@@ -1430,7 +1473,27 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case TCall(callee, args, _) =>
         checkCall(callee)
         args.foreach(checkExpr)
-      case TIndirectCall(_, _, _)          => reject("cannot make indirect calls (callee effects unknown)")
+      case TIndirectCall(callee, args, _) =>
+        // Indirect call permitted iff the callee's FuncType has an annotated effect
+        // signature whose effects are a subset of the caller's. `#pure` callees
+        // satisfy any annotated caller; `#reads(R)`/`#writes(W)` callees are checked
+        // against the caller's R∪W (for reads) and W (for writes). An absent side
+        // (e.g. `#writes(x)` with no `#reads`) is treated as an empty set.
+        callee.typ match
+          case FuncType(_, _, _, eff) if eff.isPure =>
+            checkExpr(callee); args.foreach(checkExpr)
+          case FuncType(_, _, _, eff) if !eff.isUnknown =>
+            val cR = eff.reads.getOrElse(Set.empty)
+            val cW = eff.writes.getOrElse(Set.empty)
+            val missingR = cR.diff(readsOrWrites)
+            if missingR.nonEmpty then
+              reject(s"indirect call's #reads(${missingR.mkString(", ")}) not in caller's #reads or #writes")
+            val missingW = cW.diff(writes)
+            if missingW.nonEmpty then
+              reject(s"indirect call's #writes(${missingW.mkString(", ")}) not in caller's #writes")
+            checkExpr(callee); args.foreach(checkExpr)
+          case _ =>
+            reject("cannot make indirect call (callee has no effect annotation)")
       case TCast(e, _)                     => checkExpr(e)
       case TIfExpr(c, t, el, _)            => checkExpr(c); t.foreach(checkStmt); el.foreach(_.foreach(checkStmt))
       case TQuantifier(_, _, _, lo, hi, _, pred, _) =>
@@ -1455,7 +1518,27 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case TFmtStr(e, _)                   => checkExpr(e)
       case _: TClosure                     => reject("cannot construct closures (may capture mutable state)")
       case TInterfaceBox(e, _)             => checkExpr(e)
-      case TInterfaceDispatch(_, _, _, _)  => reject("cannot make interface-dispatch calls (callee effects unknown)")
+      case TInterfaceDispatch(ifaceVal, methodIdx, args, _) =>
+        // Subset check against the interface method's declared effects (the impl is
+        // guaranteed by `satisfiesInterface` to satisfy these at boxing time).
+        ifaceVal.typ match
+          case InterfaceType(_, methods) =>
+            val (_, _, _, eff) = methods(methodIdx)
+            if eff.isPure then
+              checkExpr(ifaceVal); args.foreach(checkExpr)
+            else if eff.isUnknown then
+              reject("cannot make interface-dispatch call (interface method has no effect annotation)")
+            else
+              val cR = eff.reads.getOrElse(Set.empty)
+              val cW = eff.writes.getOrElse(Set.empty)
+              val missingR = cR.diff(readsOrWrites)
+              if missingR.nonEmpty then
+                reject(s"interface dispatch's #reads(${missingR.mkString(", ")}) not in caller's #reads or #writes")
+              val missingW = cW.diff(writes)
+              if missingW.nonEmpty then
+                reject(s"interface dispatch's #writes(${missingW.mkString(", ")}) not in caller's #writes")
+              checkExpr(ifaceVal); args.foreach(checkExpr)
+          case _ => reject("interface-dispatch on non-interface type")
       case TIntrinsicCall(name, args, _)   =>
         if !purePermittedBuiltins.contains(name) then reject(s"cannot call intrinsic '$name'")
         args.foreach(checkExpr)
@@ -1524,6 +1607,42 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     body match
       case TExprBody(e) => checkExpr(e)
       case TBlockBody(stmts) => stmts.foreach(checkStmt)
+
+  /** Build a FuncEffects from a FunInfo. The function-decl's `#pure` / `#reads` / `#writes`
+   *  attributes are reflected so that taking a function reference produces a `FuncType`
+   *  whose effect signature matches. The `reads`/`writes` are already mangled (resolved
+   *  through globalScope by the validator), so they're directly comparable at indirect
+   *  call sites. */
+  private def funInfoEffects(fi: FunInfo): FuncEffects =
+    if fi.isPure then FuncEffects.Pure
+    else if fi.reads.isDefined || fi.writes.isDefined then
+      // Resolve through the cached effects table (handles mangling once, idempotent).
+      resolveEffects(fi) match
+        case Some((r, w)) => FuncEffects(reads = Some(r), writes = Some(w))
+        case None         => FuncEffects.Unknown
+    else FuncEffects.Unknown
+
+  /** Effect subtyping for `FuncType` compatibility. Returns true iff a function with
+   *  effects `actual` can be safely placed in a slot expecting effects `slot`. The rule
+   *  is "more guarantees → fewer effects": Pure (no module effects + extra pure discipline)
+   *  satisfies any annotated slot; an `RW(R, W)` actual satisfies a slot iff its effects
+   *  are a subset of the slot's. An unknown actual satisfies only an unknown slot.
+   *
+   *  Symmetric direction matters: this is *contravariant in effects* — a slot accepting
+   *  an unknown callable must allow anything, but a slot demanding a pure callable must
+   *  receive a pure callable. Effects unknown is the most-permissive side. */
+  private def effectsSatisfy(actual: FuncEffects, slot: FuncEffects): Boolean =
+    if slot.isUnknown then true
+    else if actual.isPure then true
+    else if slot.isPure then false  // slot wants pure, actual is RW or unknown — reject
+    else if actual.isUnknown then false  // slot wants annotated, actual is unknown — reject
+    else
+      // Both annotated RW. Check subset: actual's reads ⊆ slot's reads, actual's writes ⊆ slot's writes.
+      val aR = actual.reads.getOrElse(Set.empty)
+      val aW = actual.writes.getOrElse(Set.empty)
+      val sR = slot.reads.getOrElse(Set.empty)
+      val sW = slot.writes.getOrElse(Set.empty)
+      aR.subsetOf(sR) && aW.subsetOf(sW)
 
   /** Walk a function body to enforce ghost-code discipline:
    *  - Real code cannot read ghost variables or call ghost functions. "Real code" is
@@ -1763,7 +1882,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
     case SliceTypeAST(elem) => SliceType(resolveType(elem))
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
-    case FuncTypeAST(params, ret, esc) => FuncType(params.map(resolveType), resolveType(ret), esc)
+    case FuncTypeAST(params, ret, esc, eff) =>
+      // Resolve raw names in #reads/#writes through globalScope to mangled form so subset
+      // checks at indirect-call sites compare apples-to-apples with the caller's #reads/#writes
+      // (which are also stored mangled by `resolveEffects`). Pure/Unknown carry no names.
+      val resolvedEff = if eff.isPure || (eff.reads.isEmpty && eff.writes.isEmpty) then eff
+        else
+          def resolveOne(n: String, kind: String): String =
+            globalScope.get(n) match
+              case Some(sym) if sym.mutable && !sym.isConst => sym.name
+              case Some(_) => throw AnalysisError(s"#$kind on function type references '$n' which is not mutable")
+              case None    => throw AnalysisError(s"#$kind on function type references unknown global '$n'")
+          val r = eff.reads.map(_.map(resolveOne(_, "reads")))
+          val w = eff.writes.map(_.map(resolveOne(_, "writes")))
+          FuncEffects(eff.isPure, r, w)
+      FuncType(params.map(resolveType), resolveType(ret), esc, resolvedEff)
     case RefTypeAST(inner) => RefType(resolveType(inner))
 
   /** AST-level constant evaluation for pre-pass const-initializer folding. Handles numeric
@@ -2164,11 +2297,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
   private def satisfiesInterface(st: SyslType.StructType, iface: SyslType.InterfaceType): Boolean =
     val structName = st.name
-    iface.methods.forall { (methodName, paramTypes, retType) =>
+    iface.methods.forall { (methodName, paramTypes, retType, ifaceEffects) =>
       lookupMethod(structName, methodName) match
         case Some(funInfo) =>
           val userParams = funInfo.params.drop(1).map(_._2)
-          userParams == paramTypes && funInfo.returnType == retType
+          val structuralOk = userParams == paramTypes && funInfo.returnType == retType
+          // Effect subtyping: the implementing method's effects must satisfy the interface's
+          // declared effects. If the interface method has no annotation, anything passes.
+          val effectsOk = effectsSatisfy(funInfoEffects(funInfo), ifaceEffects)
+          structuralOk && effectsOk
         case None => false
     }
 
@@ -2199,8 +2336,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       // bool and int are NOT compatible — use explicit casts
       // int ↔ pointer: NOT compatible — use explicit casts: int(ptr), *i8(addr)
       // FuncType compatibility ignores escaping flag — escaping is an optimization hint, not a type distinction
-      case (FuncType(p1, r1, _), FuncType(p2, r2, _)) =>
-        p1.length == p2.length && p1.zip(p2).forall((a, b) => compatible(a, b)) && compatible(r1, r2)
+      case (FuncType(p1, r1, _, eff1), FuncType(p2, r2, _, eff2)) =>
+        // Structural compat: arity, parameter & return types. Plus effect subtyping —
+        // the *actual* (LHS) callee must provide at least the guarantees the *expected*
+        // (RHS) slot demands. Pure ⊆ any RW ⊆ Unknown (more guarantees → fewer effects).
+        // (eff2.isAnnotated && eff1.isUnknown): slot wants annotated, actual is unknown → reject.
+        p1.length == p2.length && p1.zip(p2).forall((a, b) => compatible(a, b)) && compatible(r1, r2) &&
+          effectsSatisfy(eff1, eff2)
       case (_: FuncType, IntType(64) | UIntType(64)) => true // function pointer → i64 (entry point address)
       case (PtrType(_), PtrType(_)) => true           // any pointer ↔ any pointer (like C's void*)
       case (ArrayType(_, _), PtrType(_)) => true          // array decays to any pointer
@@ -2396,7 +2538,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case RefType(i)      => "ref" + typeToMangled(i)
     case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
     case SliceType(e)    => "slice" + typeToMangled(e)
-    case FuncType(ps, r, _) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
+    case FuncType(ps, r, _, _) => "fn" + ps.map(typeToMangled).mkString("") + "Ret" + typeToMangled(r)
     case StructType(n, _, _)    => n
     case EnumType(n, _)      => n
     case InterfaceType(n, _) => n
@@ -2427,8 +2569,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case SliceTypeAST(inner) => arg match
         case SliceType(a) => unifyTypes(inner, a, typeParams, env)
         case _ => ()
-      case FuncTypeAST(paramTypes, ret, _) => arg match
-        case FuncType(argParams, argRet, _) =>
+      case FuncTypeAST(paramTypes, ret, _, _) => arg match
+        case FuncType(argParams, argRet, _, _) =>
           if paramTypes.length == argParams.length then
             for (pt, at) <- paramTypes.zip(argParams) do unifyTypes(pt, at, typeParams, env)
           unifyTypes(ret, argRet, typeParams, env)
@@ -2471,7 +2613,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case PtrNonNullTypeAST(inner) => PtrNonNullTypeAST(substituteTypeAST(inner, subst))
     case ArrayTypeAST(size, elem) => ArrayTypeAST(size, substituteTypeAST(elem, subst))
     case SliceTypeAST(elem) => SliceTypeAST(substituteTypeAST(elem, subst))
-    case FuncTypeAST(params, ret, esc) => FuncTypeAST(params.map(substituteTypeAST(_, subst)), substituteTypeAST(ret, subst), esc)
+    case FuncTypeAST(params, ret, esc, eff) => FuncTypeAST(params.map(substituteTypeAST(_, subst)), substituteTypeAST(ret, subst), esc, eff)
     case TupleTypeAST(elems) => TupleTypeAST(elems.map(substituteTypeAST(_, subst)))
     case RefTypeAST(inner) => RefTypeAST(substituteTypeAST(inner, subst))
 
@@ -3841,7 +3983,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             // Auto-call: bare reference to a def function emits a call
             TCall(f.name, Nil, f.returnType)
           else
-            TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType))
+            TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType, effects = funInfoEffects(f)))
         else if builtinFunctions.contains(name) then
           val f = builtinFunctions(name)
           TFuncRef(name, FuncType(f.params.map(_._2), f.returnType))
@@ -3892,7 +4034,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // &name on a function (including def) gives a function pointer
         if functions.contains(name) then
           val f = functions(name)
-          TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType))
+          TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType, effects = funInfoEffects(f)))
         else
           val sym = lookup(name)
           TAddrOf(sym.name, PtrType(sym.typ))
@@ -3964,7 +4106,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
           case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
-          case SymbolMeta.Kind.Func(params, retType, _, _, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType))
+          case SymbolMeta.Kind.Func(params, retType, _, _, _, eff) => TFuncRef(sym.name, SyslType.FuncType(params, retType, effects = eff))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
           case SymbolMeta.Kind.Interface(_) => throw AnalysisError(s"'$nsName.$member' is an interface type, not a value")
@@ -4242,7 +4384,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tCallee = analyzeExpr(callee)
         val tArgs = args.map(analyzeExpr)
         tCallee.typ match
-          case FuncType(paramTypes, returnType, _) =>
+          case FuncType(paramTypes, returnType, _, _) =>
             val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
             val checkedArgs = checkArgs("<indirect>", params, tArgs)
             TIndirectCall(tCallee, checkedArgs, returnType)
@@ -4257,7 +4399,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val funcSym = meta.publicSymbols.find(s => shortName(s.name) == method)
           .getOrElse(throw AnalysisError(s"module '$nsName' has no function '$method'"))
         funcSym.typ match
-          case SymbolMeta.Kind.Func(params, returnType, _, _, modes) =>
+          case SymbolMeta.Kind.Func(params, returnType, _, _, modes, _) =>
             val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
             val checkedArgs = checkArgs(s"$nsName.$method", paramPairs, tArgs, modes)
             TCall(funcSym.name, checkedArgs, returnType)
@@ -4278,7 +4420,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case iface: InterfaceType =>
             val methodIdx = iface.methods.indexWhere(_._1 == method)
             if methodIdx < 0 then throw AnalysisError(s"interface ${iface.name} has no method '$method'")
-            val (_, paramTypes, retType) = iface.methods(methodIdx)
+            val (_, paramTypes, retType, _) = iface.methods(methodIdx)
             val params = paramTypes.zipWithIndex.map((t, i) => (s"arg$i", t))
             val checkedArgs = checkArgs(s"${iface.name}.$method", params, tArgs)
             return TInterfaceDispatch(tObj, methodIdx, checkedArgs, retType)
@@ -4326,8 +4468,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         else
           // Fall back to calling a function-typed field
           structType.fields.zipWithIndex.find(_._1._1 == method) match
-            case Some(((_, FuncType(paramTypes, returnType, esc)), idx)) =>
-              val fieldAccess = TFieldAccess(tObj, idx, FuncType(paramTypes, returnType, esc))
+            case Some(((_, FuncType(paramTypes, returnType, esc, eff)), idx)) =>
+              val fieldAccess = TFieldAccess(tObj, idx, FuncType(paramTypes, returnType, esc, eff))
               val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
               val checkedArgs = checkArgs(s"$structName.$method", params, tArgs)
               TIndirectCall(fieldAccess, checkedArgs, returnType)
@@ -4407,7 +4549,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             // Auto-call def, then indirect-call the result with the provided args
             val autoCall = TCall(funInfo.name, Nil, funInfo.returnType)
             funInfo.returnType match
-              case FuncType(fParams, fRet, _) =>
+              case FuncType(fParams, fRet, _, _) =>
                 val paramPairs = fParams.zipWithIndex.map((t, i) => (s"_p$i", t))
                 val checkedArgs = checkArgs(name, paramPairs, tArgs)
                 TIndirectCall(autoCall, checkedArgs, fRet)
@@ -4506,7 +4648,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           // Try as a variable of FuncType
           val sym = lookup(name)
           sym.typ match
-            case FuncType(paramTypes, returnType, _) =>
+            case FuncType(paramTypes, returnType, _, _) =>
               val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
               val checkedArgs = checkArgs(name, params, tArgs)
               TIndirectCall(TVarRef(name, sym.typ), checkedArgs, returnType)

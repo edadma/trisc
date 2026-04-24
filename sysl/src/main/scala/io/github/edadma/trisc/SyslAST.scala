@@ -14,7 +14,7 @@ case class PtrTypeAST(inner: TypeAST) extends TypeAST
 case class PtrNonNullTypeAST(inner: TypeAST) extends TypeAST
 case class ArrayTypeAST(size: Int, elem: TypeAST) extends TypeAST
 case class SliceTypeAST(elem: TypeAST) extends TypeAST
-case class FuncTypeAST(params: List[TypeAST], ret: TypeAST, escaping: Boolean = false) extends TypeAST
+case class FuncTypeAST(params: List[TypeAST], ret: TypeAST, escaping: Boolean = false, effects: FuncEffects = FuncEffects.Unknown) extends TypeAST
 case class TupleTypeAST(elems: List[TypeAST]) extends TypeAST
 case class RefTypeAST(inner: TypeAST) extends TypeAST
 
@@ -67,7 +67,7 @@ case class TraitMethodAST(
 ) extends Positional
 case class ImplDeclAST(traitName: String, targetType: TypeAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
-case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST) extends Positional
+case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, effects: FuncEffects = FuncEffects.Unknown) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
 // `static_assert(cond)` or `static_assert(cond, "message")` at module scope — compile-time check.
 case class StaticAssertDeclAST(cond: ExpressionAST, message: Option[String]) extends DeclAST

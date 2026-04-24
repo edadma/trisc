@@ -5,6 +5,23 @@ sealed trait TypeRange
 case class IntRange(lo: Long, hi: Long, exclusiveHi: Boolean) extends TypeRange
 case class FloatRange(lo: Double, hi: Double, exclusiveHi: Boolean) extends TypeRange
 
+/** Effect signature carried by a `FuncType` / `FuncTypeAST`. Three states:
+ *  - `isPure = false, reads = None, writes = None` → unannotated (default; effects unknown).
+ *  - `isPure = true` → `#pure` callback (no module effects, plus the strict `#pure` discipline
+ *    on allocation/IO/indirect calls when produced by a `#pure` decl). Reads/writes must be None.
+ *  - `isPure = false, reads = Some(R), writes = Some(W)` → `#reads`/`#writes` callback.
+ *
+ *  Names in `reads`/`writes` are mangled module-level variable names — already resolved through
+ *  `globalScope` at type-construction time, so cross-callsite comparison is direct set equality. */
+case class FuncEffects(isPure: Boolean = false, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None):
+  def isUnknown: Boolean = !isPure && reads.isEmpty && writes.isEmpty
+  def isAnnotated: Boolean = !isUnknown
+
+object FuncEffects:
+  val Unknown: FuncEffects = FuncEffects()
+  val Pure: FuncEffects = FuncEffects(isPure = true)
+  def rw(reads: Set[String], writes: Set[String]): FuncEffects = FuncEffects(reads = Some(reads), writes = Some(writes))
+
 enum SyslType:
   case IntType(width: Int)   // i8, i16, i32, i64
   case UIntType(width: Int)  // u8, u16, u32, u64
@@ -12,14 +29,17 @@ enum SyslType:
   case VoidType
   case PtrType(pointee: SyslType)
   case ArrayType(elem: SyslType, size: Int)
-  case FuncType(params: List[SyslType], returnType: SyslType, escaping: Boolean = false)
+  case FuncType(params: List[SyslType], returnType: SyslType, escaping: Boolean = false, effects: FuncEffects = FuncEffects.Unknown)
   case StructType(name: String, fields: List[(String, SyslType)], volatileFields: Set[Int] = Set.empty)
   case FloatType(width: Int)   // f32 (single-precision), f64 (double-precision)
   case StringType
   case SliceType(elem: SyslType)
   case RefType(inner: SyslType)  // &T — ref-counted heap reference
   case EnumType(name: String, variants: List[(String, List[(String, SyslType)])])  // tagged union
-  case InterfaceType(name: String, methods: List[(String, List[SyslType], SyslType)])  // {itable_ptr, data_ptr}
+  // Interface methods carry an optional effect signature (Pure/RW/Unknown), checked at
+  // boxing time (struct-method effects must satisfy interface-method effects) and at
+  // dispatch time (caller's effect set must include the interface method's).
+  case InterfaceType(name: String, methods: List[(String, List[SyslType], SyslType, FuncEffects)])  // {itable_ptr, data_ptr}
   // Nominal/constrained numeric type. Nominal=true means it is NOT compatible with `base`
   // (requires an explicit cast to mix). `range` carries optional runtime-checked bounds.
   // A transparent alias (nominal=false && range.isEmpty) should NOT be wrapped — resolve to base.
@@ -151,7 +171,15 @@ enum SyslType:
     case VoidType => "unit"
     case PtrType(t) => s"*$t"
     case ArrayType(t, n) => s"[$n]$t"
-    case FuncType(params, ret, esc) => s"${if esc then "@escaping " else ""}(${params.mkString(", ")}) -> $ret"
+    case FuncType(params, ret, esc, eff) =>
+      val esca = if esc then "@escaping " else ""
+      val effS = if eff.isPure then " #pure"
+        else (eff.reads, eff.writes) match
+          case (Some(r), Some(w)) => s" #reads(${r.toList.sorted.mkString(", ")}) #writes(${w.toList.sorted.mkString(", ")})"
+          case (Some(r), None)    => s" #reads(${r.toList.sorted.mkString(", ")})"
+          case (None, Some(w))    => s" #writes(${w.toList.sorted.mkString(", ")})"
+          case _                  => ""
+      s"$esca(${params.mkString(", ")}) -> $ret$effS"
     case StructType(name, _, _) => name
     case StringType => "string"
     case SliceType(t) => s"[]$t"
@@ -168,7 +196,7 @@ enum SyslType:
     case VoidType => "void"
     case PtrType(t) => s"ptr ${t.toPrefix}"
     case ArrayType(t, n) => s"arr $n ${t.toPrefix}"
-    case FuncType(params, ret, _) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
+    case FuncType(params, ret, _, _) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
     case StringType => "string"
     case SliceType(t) => s"slice ${t.toPrefix}"
     case RefType(t) => s"ref ${t.toPrefix}"
@@ -177,7 +205,15 @@ enum SyslType:
       val vs = variants.map { (vn, fields) => s"$vn ${fields.size} ${fields.map((n, t) => s"$n ${t.toPrefix}").mkString(" ")}" }.mkString(" ")
       s"enum $name ${variants.size} $vs"
     case InterfaceType(name, methods) =>
-      val ms = methods.map { (mn, params, ret) => s"$mn ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}" }.mkString(" ")
+      val ms = methods.map { (mn, params, ret, eff) =>
+        val effStr = if eff.isPure then " EFF P"
+          else if eff.isUnknown then " EFF U"
+          else
+            val r = eff.reads.getOrElse(Set.empty).toList.sorted
+            val w = eff.writes.getOrElse(Set.empty).toList.sorted
+            s" EFF RW ${r.size}${if r.nonEmpty then " " + r.mkString(" ") else ""} ${w.size}${if w.nonEmpty then " " + w.mkString(" ") else ""}"
+        s"$mn ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}$effStr"
+      }.mkString(" ")
       s"iface $name ${methods.size} $ms"
     // Named/derived types are erased to their underlying representation in serialized form.
     case NamedType(_, b, _, _, _) => b.toPrefix
@@ -213,7 +249,7 @@ object SyslType:
     case RefType(inner) => s"r${mangleType(inner)}"
     case SliceType(elem) => s"s${mangleType(elem)}"
     case ArrayType(elem, size) => s"a${size}_${mangleType(elem)}"
-    case FuncType(params, ret, _) => s"fn${params.length}_${params.map(mangleType).mkString("_")}_${mangleType(ret)}"
+    case FuncType(params, ret, _, _) => s"fn${params.length}_${params.map(mangleType).mkString("_")}_${mangleType(ret)}"
     case StructType(name, _, _) => name
     case EnumType(name, _) => name
     case InterfaceType(name, _) => name
@@ -314,7 +350,22 @@ object SyslType:
           val nparams = tokens.next().toInt
           val params = (1 to nparams).map(_ => parseType(tokens)).toList
           val ret = parseType(tokens)
-          (mname, params, ret)
+          // Read mandatory `EFF <encoding>` after each method's signature. Encoding mirrors
+          // the FuncEffects encoding used in the FUNC EFFECTS trailer.
+          val effMarker = tokens.next()
+          if effMarker != "EFF" then
+            throw IllegalArgumentException(s"expected EFF after iface method '$mname', got '$effMarker'")
+          val eff = tokens.next() match
+            case "U" => FuncEffects.Unknown
+            case "P" => FuncEffects.Pure
+            case "RW" =>
+              val nR = tokens.next().toInt
+              val r = (1 to nR).map(_ => tokens.next()).toSet
+              val nW = tokens.next().toInt
+              val w = (1 to nW).map(_ => tokens.next()).toSet
+              FuncEffects(reads = Some(r), writes = Some(w))
+            case other => throw IllegalArgumentException(s"unknown iface method effects token '$other'")
+          (mname, params, ret, eff)
         }.toList
         InterfaceType(name, methods)
       case other => throw IllegalArgumentException(s"unknown type token: '$other'")

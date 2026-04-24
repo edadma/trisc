@@ -1236,7 +1236,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case SyslType.PtrType(SyslType.StructType(name, _, _)) => name
           case SyslType.RefType(SyslType.StructType(name, _, _)) => name
           case other => throw RuntimeError(s"cannot box $other into interface")
-        val methodMap = iface.methods.map { (mname, _, _) =>
+        val methodMap = iface.methods.map { (mname, _, _, _) =>
           val shortKey = s"${structName}_$mname"
           // Try short name first, then search for mangled variant
           val funcName = functions.get(shortKey) match
@@ -1252,7 +1252,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TInterfaceDispatch(ifaceVal, methodIndex, args, _) =>
         val InterfaceVal(methodMap, dataVal, concreteType) = evalAny(ifaceVal, env): @unchecked
         val iface = ifaceVal.typ.asInstanceOf[SyslType.InterfaceType]
-        val (methodName, _, _) = iface.methods(methodIndex)
+        val (methodName, _, _, _) = iface.methods(methodIndex)
         val funcName = methodMap(methodName)
         val argValues = args.map(evalAny(_, env))
         // Build self arg — for value types, wrap in a cell so the method can modify via pointer

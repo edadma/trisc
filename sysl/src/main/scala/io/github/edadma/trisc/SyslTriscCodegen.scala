@@ -122,12 +122,12 @@ class SyslTriscCodegen(addresses: Int = 4):
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
 
     // Collect all declared function names for itable resolution
-    declaredFunctions = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _, _) => name }.toSet
+    declaredFunctions = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _, _, _) => name }.toSet
 
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
       decl match
-        case TFunDecl(name, _, _, _, _, _, _, _) if name.endsWith("_deinit") =>
+        case TFunDecl(name, _, _, _, _, _, _, _, _) if name.endsWith("_deinit") =>
           val structName = name.indexOf("__") match
             case -1 => name.dropRight(7)
             case i  => name.substring(i + 2).dropRight(7)
@@ -292,7 +292,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Emit extern declarations for malloc/free based on actual references in generated code
     val generated = out.toString
     val definedSymbols = (for decl <- program.decls yield decl match
-      case TFunDecl(name, _, _, _, _, _, _, _) => Some(name)
+      case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
       case TVarDecl(name, _, _, _, _, _) => Some(name)
       case _ => None).flatten.toSet
     if generated.contains("movi r4, malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
@@ -655,7 +655,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     // set are external (different compilation unit) and may return a heap-env
     // closure we can't inspect. Used to flag TCall-returning-FuncType
     // conservatively without over-pulling extern free for purely-local programs.
-    val localFuncs = program.decls.collect { case TFunDecl(n, _, _, _, _, _, _, _) => n }.toSet
+    val localFuncs = program.decls.collect { case TFunDecl(n, _, _, _, _, _, _, _, _) => n }.toSet
     def scanE(e: TExpr): Boolean = e match
       case TBinary(_, "+", _, SyslType.StringType) => true
       case _: TStringFromPtr | _: TStringFromSlice | _: TStr | _: TFmtStr => true
@@ -732,7 +732,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       case _ => false
 
     program.decls.exists {
-      case TFunDecl(_, _, _, body, _, _, _, _) => body match
+      case TFunDecl(_, _, _, body, _, _, _, _, _) => body match
         case TExprBody(e) => scanE(e)
         case TBlockBody(stmts) => stmts.exists(scanS)
       case TVarDecl(_, _, init, _, _, _) => scanE(init)
@@ -3363,7 +3363,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         // Resolve itable label, registering it if first time for this (struct, interface) pair
         val itableLabel = s"__itable_${structName}_${iface.name}"
         if !itables.contains(itableLabel) then
-          val funcNames = iface.methods.map { (methodName, _, _) =>
+          val funcNames = iface.methods.map { (methodName, _, _, _) =>
             val shortName = s"${structName}_$methodName"
             if declaredFunctions.contains(shortName) then shortName
             else declaredFunctions.find(_.endsWith(s"__$shortName")).getOrElse(shortName)
