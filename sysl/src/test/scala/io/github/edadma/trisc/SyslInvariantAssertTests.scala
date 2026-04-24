@@ -18,29 +18,30 @@ class SyslInvariantAssertTests extends SyslTestHelpers {
       |""".stripMargin) shouldBe 10
   }
 
-  "loop invariant traps when broken" in {
+  "loop invariant traps when broken across iterations" in {
     val thrown = intercept[RuntimeException] {
       eval("""
         |main() -> int =
         |    var i = 0
         |    while i < 5
         |        invariant i >= 0
-        |        i = i + 1
         |        i = 0 - 1
-        |        invariant i >= 0
         |    i
         |""".stripMargin)
     }
-    thrown.getMessage should include("invariant")
+    thrown.getMessage should include("loop invariant")
   }
 
-  "invariant also works as a general assertion" in {
-    eval("""
-      |main() -> int =
-      |    var x = 42
-      |    invariant x > 0
-      |    x
-      |""".stripMargin) shouldBe 42
+  "invariant outside a loop body fails to analyze" in {
+    val thrown = intercept[RuntimeException] {
+      eval("""
+        |main() -> int =
+        |    var x = 42
+        |    invariant x > 0
+        |    x
+        |""".stripMargin)
+    }
+    thrown.getMessage should include("invariant statement must appear at the top of a loop body")
   }
 
   // ===== Static assertions =====
