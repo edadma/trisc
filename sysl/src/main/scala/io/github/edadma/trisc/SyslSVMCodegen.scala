@@ -433,7 +433,9 @@ class SyslSVMCodegen:
     val totalLocals = nParams + nBodyLocals
 
     emit(s"${fun.name}:")
-    if totalLocals > 0 then emit(s"  frame $totalLocals")
+    // Always emit a frame so RET unwinds this function's call frame rather
+    // than the caller's. Even 0-local functions need it.
+    emit(s"  frame $totalLocals")
 
     // Pop args from stack into locals.
     // Caller pushes args left-to-right, so TOS = last arg pushed.
@@ -685,6 +687,22 @@ class SyslSVMCodegen:
     case TExprStmt(TMatchExpr(scrutinee, arms, default, matchTyp)) =>
       genMatch(scrutinee, arms, default, matchTyp, asExpr = matchTyp != SyslType.VoidType)
       if matchTyp != SyslType.VoidType then emit("  drop")
+
+    case TExprStmt(TIfExpr(cond, thenBody, elseBody, ifTyp)) if ifTyp == SyslType.VoidType =>
+      // Void-typed if-stmt: generate bodies as plain statements (no synthetic
+      // 0 push, which would leak onto the data stack because the outer
+      // TExprStmt won't drop void-typed values).
+      val elseLabel = newLabel("else")
+      val endLabel = newLabel("endif")
+      genExpr(cond)
+      emit(s"  jumpz $elseLabel")
+      genStmts(thenBody)
+      emit(s"  jump $endLabel")
+      emit(s"$elseLabel:")
+      elseBody match
+        case Some(stmts) => genStmts(stmts)
+        case None =>
+      emit(s"$endLabel:")
 
     case TExprStmt(expr) =>
       genExpr(expr)
