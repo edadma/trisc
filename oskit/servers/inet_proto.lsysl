@@ -742,15 +742,17 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     val TCP_MAX_RETRIES     = 5
     val TCP_REORDER_SLOTS   = 4
 
-    // Congestion control (RFC 5681). Initial cwnd of 3 × SMSS
-    // matches the pre-RFC-6928 classical value — big enough to
-    // push a few segments in the first RTT, small enough that
-    // slow-start growth is observable in tests.
+    // Congestion control (RFC 5681 + RFC 6928). Initial cwnd of
+    // 10 × SMSS matches the modern "IW10" recommendation from
+    // RFC 6928 §2 — Linux's default since ~2011. Gives enough
+    // in-flight room to pipeline a handful of segments in the
+    // first RTT so dup-ACK-driven loss detection (fast retransmit
+    // / fast recovery) has segments to work with.
     //
     // SSthresh starts at a large value so we stay in slow start
     // until the first loss or our cwnd actually catches up to a
     // reasonable estimate of bandwidth-delay product.
-    val TCP_INIT_CWND       = 1440
+    val TCP_INIT_CWND       = 4800
     val TCP_INIT_SSTHRESH   = 65535
     val TCP_MIN_CWND        = 480
 
@@ -828,6 +830,8 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         snd_cwnd: int
         snd_ssthresh: int
         dup_ack_count: int
+        fast_recovery: int
+        recovery_point: u32
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -861,6 +865,8 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
             tcp_sockets[i].snd_cwnd = TCP_INIT_CWND
             tcp_sockets[i].snd_ssthresh = TCP_INIT_SSTHRESH
             tcp_sockets[i].dup_ack_count = 0
+            tcp_sockets[i].fast_recovery = 0
+            tcp_sockets[i].recovery_point = u32(0)
             var k = 0
             while k < TCP_REORDER_SLOTS
                 tcp_sockets[i].reorder[k].in_use = 0
@@ -1187,6 +1193,8 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 tcp_sockets[i].snd_cwnd = TCP_INIT_CWND
                 tcp_sockets[i].snd_ssthresh = TCP_INIT_SSTHRESH
                 tcp_sockets[i].dup_ack_count = 0
+                tcp_sockets[i].fast_recovery = 0
+                tcp_sockets[i].recovery_point = u32(0)
                 var k = 0
                 while k < TCP_REORDER_SLOTS
                     tcp_sockets[i].reorder[k].in_use = 0
@@ -1524,18 +1532,25 @@ yet.
             new_ssthresh = floor
         tcp_sockets[s].snd_ssthresh = new_ssthresh
         tcp_sockets[s].snd_cwnd = TCP_MIN_CWND
+        // RTO supersedes fast recovery — we're clearly losing
+        // more than fast retransmit assumed, so reset to slow
+        // start from a single MSS.
+        tcp_sockets[s].fast_recovery = 0
+        tcp_sockets[s].dup_ack_count = 0
 
 
-RFC 5681 §3.2 ¶4 — fast retransmit. Fired on the third
-duplicate ACK. Halves `ssthresh` from current `FlightSize`
-(floored at 2 × SMSS) and sets `cwnd = ssthresh` — no inflate
-yet, that's Phase 3 (fast recovery). Retransmits exactly one
-MSS-sized segment at `snd_una`; `snd_nxt` is NOT reset, so any
-segments past the retransmit remain accounted as in-flight
-and drain won't spray new data during the loss episode.
+RFC 5681 §3.2 ¶4-5 — fast retransmit + enter fast recovery.
+Fired on the third duplicate ACK. Halves `ssthresh` from the
+current `FlightSize` (floored at 2 × SMSS), **inflates**
+`cwnd` to `ssthresh + 3 × SMSS` to account for the three
+segments that must have left the network to elicit the three
+dup-ACKs, and sets `fast_recovery = 1`. `recovery_point`
+records `snd_nxt` at entry so the ACK handler knows when
+recovery ends (first ACK past this seq).
 
-Expected caller: ACK handler on the 3rd pure dup-ACK. Caller
-sets `dup_ack_count = -1` after to suppress re-firing.
+Retransmits exactly one MSS-sized segment at `snd_una`.
+`snd_nxt` is NOT reset — any segments past the retransmit
+stay in-flight and drain handles window accounting correctly.
 
     inet_tcp_fast_retransmit(s: int)
         val in_flight = int(i32(
@@ -1545,7 +1560,9 @@ sets `dup_ack_count = -1` after to suppress re-firing.
         if new_ssthresh < floor
             new_ssthresh = floor
         tcp_sockets[s].snd_ssthresh = new_ssthresh
-        tcp_sockets[s].snd_cwnd = new_ssthresh
+        tcp_sockets[s].snd_cwnd = new_ssthresh + 3 * TCP_MAX_SEG
+        tcp_sockets[s].fast_recovery = 1
+        tcp_sockets[s].recovery_point = tcp_sockets[s].snd_nxt
         if tcp_sockets[s].send_len > 0
             var retx_len = tcp_sockets[s].send_len
             if retx_len > TCP_MAX_SEG
@@ -1917,7 +1934,21 @@ the connection down.
                     tcp_sockets[s].snd_wnd = wnd
                     tcp_sockets[s].dup_ack_count = 0
                     inet_tcp_rtt_maybe_sample(s, ack)
-                    inet_tcp_cwnd_on_ack(s, eff)
+                    // RFC 5681 §3.2 ¶6 — recovering ACK: if we're
+                    // in fast recovery and this ACK reaches beyond
+                    // the recovery_point captured at entry, deflate
+                    // cwnd back to ssthresh and leave recovery.
+                    // Otherwise grow cwnd via the normal slow-start
+                    // / CA path.
+                    if tcp_sockets[s].fast_recovery != 0
+                        if tcp_seq_le(tcp_sockets[s].recovery_point, ack) != 0
+                            tcp_sockets[s].snd_cwnd = tcp_sockets[s].snd_ssthresh
+                            tcp_sockets[s].fast_recovery = 0
+                        // Partial ACK inside recovery: keep cwnd
+                        // inflated, don't count this as slow-start
+                        // growth.
+                    else
+                        inet_tcp_cwnd_on_ack(s, eff)
                     if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
                         inet_tcp_disarm_rtx(s)
                     else
@@ -1926,17 +1957,25 @@ the connection down.
             else if ack == tcp_sockets[s].snd_una
                 // Potential duplicate ACK (RFC 5681 §2). Counts as
                 // a "pure" dup only if there's no payload and we
-                // still have outstanding unacked data. Three dups
-                // trigger fast retransmit (§3.2).
+                // still have outstanding unacked data.
                 if payload_len == 0
                     if tcp_sockets[s].send_len > 0
-                        if tcp_sockets[s].dup_ack_count >= 0
+                        if tcp_sockets[s].fast_recovery == 0
+                            // Count toward fast-retransmit trigger.
                             tcp_sockets[s].dup_ack_count += 1
                             if tcp_sockets[s].dup_ack_count == 3
                                 inet_tcp_fast_retransmit(s)
-                                // Sentinel so further dups in the
-                                // same loss episode don't re-fire.
-                                tcp_sockets[s].dup_ack_count = -1
+                        else
+                            // RFC 5681 §3.2 ¶7 — already in fast
+                            // recovery. Each additional dup-ACK
+                            // means another segment left the net,
+                            // so inflate cwnd by one SMSS and try
+                            // to drain (may enable a new segment
+                            // to be sent).
+                            tcp_sockets[s].snd_cwnd += TCP_MAX_SEG
+                            if tcp_sockets[s].snd_cwnd > 65535
+                                tcp_sockets[s].snd_cwnd = 65535
+                            inet_tcp_drain_send(s)
 
         var did_data = 0
         var did_fin = 0

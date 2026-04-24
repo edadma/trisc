@@ -139,6 +139,21 @@ ACKs arrive within one RTT (~tens of ms on slirp). Our RTO is
         print_int(" cwnd=", d1.snd_cwnd)
         puts("\n")
 
+Phase-3 observables: recovery exited cleanly, no data still
+unacknowledged. If either is wrong the harness catches it
+without having to reason about timing-sensitive cwnd inflate
+amounts.
+
+        print_int("test_tcp_fr: fr=", d1.fast_recovery)
+        puts("\n")
+        if d1.snd_una == d1.snd_nxt
+            puts("test_tcp_fr: una==nxt\n")
+        else
+            puts("test_tcp_fr: una!=nxt")
+            print_int(" una=", d1.snd_una)
+            print_int(" nxt=", d1.snd_nxt)
+            puts("\n")
+
 Disable drop injection so nothing on the way out is affected.
 
         nic_debug_drop_next(0)

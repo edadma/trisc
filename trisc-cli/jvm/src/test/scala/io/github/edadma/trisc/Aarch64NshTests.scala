@@ -356,7 +356,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       val initialCwnd = matches(0).group(1).toInt
       val initialSs   = matches(0).group(2).toInt
       val afterCwnd   = matches(1).group(1).toInt
-      initialCwnd shouldBe 1440
+      initialCwnd shouldBe 4800
       initialSs   shouldBe 65535
       assert(afterCwnd > initialCwnd,
         s"expected cwnd growth, got initial=$initialCwnd after=$afterCwnd")
@@ -365,17 +365,20 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       bulkEcho.join(2000)
   }
 
-  "aarch64 tcp: fast retransmit on 3 dup-ACKs" in {
-    // Phase 2 of TCP congestion control. The nic's loss-injection
-    // knob drops the first TCP data segment post-connect; the host
-    // still receives segments 2, 3, 4 out of order and emits three
-    // duplicate ACKs. Slix's dup-ACK counter reaches 3, fast
-    // retransmit fires, ssthresh is halved from its initial 65535.
+  "aarch64 tcp: fast retransmit + recovery round-trip" in {
+    // Phase 2 + Phase 3 of TCP congestion control. The nic's
+    // loss-injection knob drops the first TCP data segment
+    // post-connect; the host receives segments 2, 3, 4 out of
+    // order and emits three duplicate ACKs. Slix fires fast
+    // retransmit (Phase 2), enters fast recovery with cwnd
+    // inflated (Phase 3 §3.2 ¶5), the retransmit delivers the
+    // missing segment, the host ACKs everything cumulatively,
+    // slix deflates cwnd back to ssthresh and exits recovery.
     //
-    // The RTO in the slix stack is ~1 s at this point, and the
-    // test runs in far less than that — so any ssthresh change
-    // we observe has to come from the fast-retransmit path
-    // (`inet_tcp_fast_retransmit`), not from `inet_tcp_cwnd_on_rto`.
+    // Asserts:
+    //   - ssthresh halved from 65535 (fast retransmit fired)
+    //   - fast_recovery == 0 at end (recovery exited cleanly)
+    //   - no stuck data (snd_una == snd_nxt at end)
     val server = new java.net.ServerSocket()
     server.setReuseAddress(true)
     server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
@@ -411,13 +414,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       val ssRe = """ssthresh=(\d+)\s+cwnd=(\d+)""".r
       val matches = ssRe.findAllMatchIn(output).toList
       matches.length shouldBe 2
-      val initialSs   = matches(0).group(1).toInt
-      val afterSs     = matches(1).group(1).toInt
+      val initialSs = matches(0).group(1).toInt
+      val afterSs   = matches(1).group(1).toInt
       initialSs shouldBe 65535
       assert(afterSs < 65535,
         s"expected ssthresh halving from fast retransmit, " +
         s"got initial=$initialSs after=$afterSs " +
         s"(still at initial means fast retransmit didn't fire)")
+      // Phase 3 assertions: recovery exits cleanly.
+      output should include("test_tcp_fr: fr=0")
+      output should include("test_tcp_fr: una==nxt")
     finally
       server.close()
       bulkEcho.join(2000)
