@@ -134,6 +134,10 @@ Start a session — spawn program and record in session table.
             session_path[session_count] = path
             session_pid[session_count] = pid
             session_count += 1
+        else
+            init_print("init: spawn failed: ")
+            init_print(path)
+            init_print("\n")
 
 Spawn an external program with inherited TTY handles.
 Returns child PID or -1 on error.
