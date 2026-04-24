@@ -483,7 +483,12 @@ class SyslLLVMCodegen(target: String = "host"):
         val result = genExpr(expr)
         emitFuncReturnIncrIfBorrowed(expr, result)
         val rt = exprType(expr)
-        val finalVal = if isAggregate(expr.typ) then
+        val finalVal = if retType == "void" then
+          // Function returns void: no value to produce regardless of the
+          // last expression's type. Loading would emit `load void, void*`
+          // (illegal) or an unused aggregate load.
+          ""
+        else if isAggregate(expr.typ) then
           val loaded = newReg()
           emit(s"  $loaded = load $retType, $retType* $result")
           loaded
@@ -628,7 +633,13 @@ class SyslLLVMCodegen(target: String = "host"):
           case TExprStmt(expr) =>
             val result = genExpr(expr)
             val rt = exprType(expr)
-            val finalVal = if isAggregate(expr.typ) then
+            val finalVal = if retType == "void" then
+              // Function returns void: discard the expression's value. Loading
+              // would emit `load void, void*` when the expr is void-typed (e.g.
+              // a trailing `val _ = ...` whose aggregate RHS leaves an alloca
+              // result) or a dead aggregate load.
+              ""
+            else if isAggregate(expr.typ) then
               val loaded = newReg()
               emit(s"  $loaded = load $retType, $retType* $result")
               loaded
