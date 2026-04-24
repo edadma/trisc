@@ -2728,6 +2728,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case InvariantStmtAST(_, _) =>
         throw AnalysisError("invariant statement must appear at the top of a loop body, before any other statement")
 
+      case AssumeStmtAST(e, msg) =>
+        val te = analyzeExpr(e)
+        if te.typ != BoolType then throw AnalysisError(s"assume expression must be bool, got ${te.typ}")
+        contract("assume", te, msg.getOrElse("assume"))
+
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
 
@@ -3919,6 +3924,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case Some(TExprStmt(e)) => e.typ
           case _ => VoidType
         TIfExpr(tCond, tThen, tElse, resultType)
+
+      case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>
+        val tLo = analyzeExpr(lo)
+        val tHi = analyzeExpr(hi)
+        if !tLo.typ.isIntegral then throw AnalysisError(s"quantifier range lower bound must be integral, got ${tLo.typ}")
+        if !tHi.typ.isIntegral then throw AnalysisError(s"quantifier range upper bound must be integral, got ${tHi.typ}")
+        // Bound variable type: prefer lo's type; bumping both to a wider common type isn't
+        // worth the analyzer machinery yet — use I64 if either side is wider than I32.
+        val nameType: SyslType =
+          if tLo.typ.bitWidth > 32 || tHi.typ.bitWidth > 32 then I64 else tLo.typ
+        pushScope()
+        currentScope(name) = SymInfo(name, nameType, mutable = false)
+        val tPred = analyzeExpr(pred)
+        popScope()
+        if tPred.typ != BoolType then throw AnalysisError(s"quantifier predicate must be bool, got ${tPred.typ}")
+        TQuantifier(kind, name, nameType, tLo, tHi, inclusive, tPred)
 
       case MatchExprAST(scrutinee, arms, default) =>
         val tScrutinee = analyzeExpr(scrutinee)

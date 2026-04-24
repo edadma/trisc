@@ -611,6 +611,59 @@ accesses, arithmetic, calls), but nested `old(old(...))` is rejected.
 
 Contracts are not yet supported on expression-body functions or on closures.
 
+**`assume <bool> [, "msg"]`.** Statement-level Ada/SPARK `pragma Assume` equivalent:
+states a property the programmer asserts is true at this point. At runtime it is checked
+exactly like `assert` and traps if false; statically it tells a future prover to take the
+predicate as an axiom rather than a proof obligation. Allowed anywhere a statement is.
+
+```sysl
+ptr_size(p: *byte) -> int
+    var len = strlen(p)
+    assume len >= 0, "strlen returns non-negative"
+    int(len)
+```
+
+The runtime trap message is `assume check failed[: msg]`. Stripped under `--no-contracts`.
+
+**Quantifier expressions: `for all` / `for some`.** Ada-style universal and existential
+quantifiers over an integer range. Bool-typed expressions; can appear anywhere a bool
+expression is valid (require/ensure/invariant/assume, `if`/`while` conditions, &&/||
+chains, etc.).
+
+```sysl
+for all i in 0..<n => a[i] > 0           // ∀ i ∈ [0, n) : a[i] > 0
+for all i in 0..n  => a[i] > 0           // ∀ i ∈ [0, n] : a[i] > 0
+for some k in 0..<n => a[k] == target    // ∃ k ∈ [0, n) : a[k] == target
+```
+
+- The bound variable is visible only inside the predicate; it shadows any outer-scope
+  name and is restored afterward.
+- The body extends greedily to the end of the surrounding expression:
+  `for all x => P(x) && Q(x)` reads as `for all x => (P(x) && Q(x))`.
+- Empty range: `for all` is **vacuously true**, `for some` is **false** (no witness).
+- Both forms short-circuit (`for all` stops on first counterexample; `for some` stops
+  on first witness).
+- The range bounds must be integral; `..<` excludes the upper bound, `..` includes it.
+- Quantifiers are most useful inside contracts:
+
+```sysl
+sorted(a: *int, n: int) -> bool
+    require n >= 0
+    for all i in 0..<n - 1 => a[i] <= a[i + 1]
+
+binsearch(a: *int, n: int, target: int) -> int
+    require for all i in 0..<n - 1 => a[i] <= a[i + 1]   // input is sorted
+    ensure result == 0 - 1 || a[result] == target          // valid index or "not found"
+    // ...
+```
+
+- `all` and `some` are **contextual** keywords — they have meaning only directly after
+  `for` in expression position, so user identifiers named `all` / `some` continue to
+  work elsewhere.
+- Backend support: interpreter and LLVM are wired end-to-end. The TRISC backend traps at
+  codegen time with a clear "not yet supported" message — use `--no-contracts` to strip
+  quantifiers (along with the surrounding contract) when targeting TRISC.
+
 ### Default Parameter Values
 
 Parameters can have default values, given with `= expr` after the type. Any
@@ -2037,6 +2090,7 @@ Pass `--no-contracts` to `sysl compile` or `sysl run` to strip every contract ch
 - `require` / `ensure` clauses
 - `invariant` statements in loops
 - `variant` statements in loops (entire hoisted check state is elided)
+- `assume` statements
 - struct `invariant` clauses (no per-assignment check)
 - `where`-predicate bodies (synthesized predicate function still runs but performs no check)
 - `within`-range checks (compile-time literal check + runtime range check both skipped)

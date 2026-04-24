@@ -124,6 +124,29 @@ class SyslNoContractsTests extends AnyFreeSpec with Matchers {
       |""".stripMargin) shouldBe 2
   }
 
+  // ===== assume =====
+
+  "assume traps with contracts on" in {
+    val t = intercept[RuntimeException] {
+      evalOn("""
+        |main() -> int
+        |    var x = 5
+        |    assume x > 100
+        |    x
+        |""".stripMargin)
+    }
+    t.getMessage should include("assume")
+  }
+
+  "assume is stripped with contracts off" in {
+    evalOff("""
+      |main() -> int
+      |    var x = 5
+      |    assume x > 100
+      |    x
+      |""".stripMargin) shouldBe 5
+  }
+
   // ===== struct invariant =====
 
   "struct invariant traps with contracts on" in {

@@ -687,6 +687,7 @@ class SyslTriscCodegen(addresses: Int = 4):
       case TInterfaceBox(inner, _) => scanE(inner)
       case TIntrinsicCall(_, args, _) => args.exists(scanE)
       case TIfExpr(c, t, e, _) => scanE(c) || t.exists(scanS) || e.exists(_.exists(scanS))
+      case TQuantifier(_, _, _, lo, hi, _, pred, _) => scanE(lo) || scanE(hi) || scanE(pred)
       case TMatchExpr(scr, arms, default, _) =>
         scanE(scr) || arms.exists(a => a.guard.exists(scanE) || a.body.exists(scanS)) ||
           default.exists(_.exists(scanS))
@@ -4120,6 +4121,12 @@ class SyslTriscCodegen(addresses: Int = 4):
         stackOffset += 8
         // r1 = address of return slot (which now contains {ptr, len})
         emit("  mov r1, r7")
+
+      case TQuantifier(kind, _, _, _, _, _, _, _) =>
+        // TODO: TRISC backend codegen for quantifier expressions. The interpreter and LLVM
+        // backends both implement these; TRISC is the next chunk. Until then, emit a clear
+        // error rather than a MatchError so users get an actionable message.
+        sys.error(s"TRISC codegen does not yet support `for $kind` quantifier expressions; use the interpreter or LLVM backend, or `--no-contracts` to strip them when used only in contracts")
 
       case TIfExpr(cond, thenBody, elseBody, typ) =>
         val elseLabel = newLabel("else")

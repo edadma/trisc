@@ -913,6 +913,29 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
             case Some(stmts) => evalBlock(stmts, env)
             case None => IntVal(0)
 
+      case TQuantifier(kind, name, _, lo, hi, inclusive, pred, _) =>
+        val loVal = toLong(evalAny(lo, env))
+        val hiVal = toLong(evalAny(hi, env))
+        val end = if inclusive then hiVal else hiVal - 1
+        val saved = env.get(name)
+        val cell = new Cell(IntVal(loVal))
+        env(name) = cell
+        var result: Long = if kind == "all" then 1L else 0L
+        var i = loVal
+        var done = false
+        while i <= end && !done do
+          cell.value = IntVal(i)
+          val pv = toLong(evalAny(pred, env))
+          if kind == "all" then
+            if pv == 0L then { result = 0L; done = true }
+          else
+            if pv != 0L then { result = 1L; done = true }
+          i += 1
+        saved match
+          case Some(c) => env(name) = c
+          case None => env.remove(name)
+        IntVal(result)
+
       case TMatchExpr(scrutinee, arms, default, _) =>
         val sv = evalAny(scrutinee, env)
         val matched = arms.find { arm =>

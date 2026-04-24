@@ -92,6 +92,10 @@ case class TIndirectCall(callee: TExpr, args: List[TExpr], typ: SyslType) extend
 case class TFuncRef(name: String, typ: SyslType) extends TExpr
 case class TCast(expr: TExpr, typ: SyslType) extends TExpr
 case class TIfExpr(cond: TExpr, thenBody: List[TStmt], elseBody: Option[List[TStmt]], typ: SyslType) extends TExpr
+/** `for all`/`for some` quantifier over an integer range. `nameType` is the type of the
+ *  bound variable (i64 unless analyzer narrowed it). `inclusive` distinguishes `..` from
+ *  `..<`. Each backend lowers this to a short-circuiting loop that accumulates a bool. */
+case class TQuantifier(kind: String, name: String, nameType: SyslType, lo: TExpr, hi: TExpr, inclusive: Boolean, pred: TExpr, typ: SyslType = SyslType.BoolType) extends TExpr
 case class TMatchExpr(expr: TExpr, arms: List[TMatchArm], default: Option[List[TStmt]], typ: SyslType) extends TExpr
 case class TMatchArm(patterns: List[TMatchPattern], guard: Option[TExpr], body: List[TStmt])
 
