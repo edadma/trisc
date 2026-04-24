@@ -22,8 +22,8 @@ Pass criteria:
     import oskit.ulib.{puts, exit, exit_with, syscall6}
 
 
-    val NR_SETSOCKOPT = 208
-    val NR_GETSOCKOPT = 209
+    val NR_SETSOCKOPT = 326
+    val NR_GETSOCKOPT = 204
     val NR_SOCKET     = 337
     val NR_CLOSE      = 147
 

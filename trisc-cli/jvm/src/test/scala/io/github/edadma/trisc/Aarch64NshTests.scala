@@ -369,6 +369,22 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "sockopt: FAIL"
   }
 
+  "aarch64 posix: getsockname / getpeername" in {
+    // test_getname drives syscall 203 (getsockname) and 192
+    // (getpeername) via the POSIX shim. UDP: bound getsockname
+    // round-trips 127.0.0.1:7788, getpeername reports -ENOTCONN.
+    // TCP on a fresh socket (no connect/listen yet) reports
+    // 0.0.0.0:0 for getsockname and -ENOTCONN for getpeername.
+    qemu.send("test_getname\n")
+    val output = qemu.waitFor("getname: done")
+    output should include("getname: udp-local fam=2 port=7788 ip=127.0.0.1")
+    output should include("getname: getpeername UDP = -107")
+    output should include("getname: tcp-local-fresh fam=2 port=0 ip=0.0.0.0")
+    output should include("getname: getpeername TCP-fresh = -107")
+    output should include("getname: done")
+    output should not include "getname: FAIL"
+  }
+
   "aarch64 timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications via notify_wait/notify_read_self. Proves the

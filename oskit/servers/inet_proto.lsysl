@@ -2241,6 +2241,34 @@ the state machine is a future refinement.
             i += 1
 
 
+Query the local or peer endpoint of a TCP socket. `which == 0`
+asks for the local side (always `inet_get_our_ip()`:local_port);
+`which != 0` asks for the peer side and requires the socket to
+have reached ESTABLISHED or later — returns -ENOTCONN otherwise.
+Caller-supplied out parameters receive the port (host order) and
+IP (u32, network byte order via `ipv4(...)`). Returns 0 on
+success, -1 for an invalid fd, -107 (-ENOTCONN) for an
+unconnected peer query.
+
+    inet_tcp_getname(fd: int, which: int, out_port: *int, out_ip: *u32) -> int
+        if fd < 0
+            return -1
+        if fd >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[fd].in_use == 0
+            return -1
+        if which == 0
+            *out_port = tcp_sockets[fd].local_port
+            *out_ip = inet_get_our_ip()
+            return 0
+        val st = tcp_sockets[fd].state
+        if st != TCP_STATE_ESTABLISHED && st != TCP_STATE_CLOSE_WAIT && st != TCP_STATE_FIN_WAIT_1 && st != TCP_STATE_FIN_WAIT_2 && st != TCP_STATE_LAST_ACK && st != TCP_STATE_TIME_WAIT
+            return -107
+        *out_port = tcp_sockets[fd].remote_port
+        *out_ip = tcp_sockets[fd].remote_ip
+        0
+
+
 Inbound IPv4 protocol=6 dispatch. Parses header, verifies
 checksum, locates the matching socket, and delegates.
 

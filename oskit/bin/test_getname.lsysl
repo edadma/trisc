@@ -1,0 +1,198 @@
+test_getname — getsockname / getpeername
+=========================================
+
+Exercises syscalls 203 (getsockname) and 192 (getpeername)
+through the aarch64 POSIX shim.
+
+Covers:
+- UDP: bind to 127.0.0.1:7788, call getsockname, assert
+  family=AF_INET, port=7788, ip=127.0.0.1. getpeername on UDP
+  must return -ENOTCONN (-107).
+- TCP: unconnected — getsockname reports 0.0.0.0:0; getpeername
+  reports -ENOTCONN.
+
+    module oskit.bin.test_getname
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE        = 147
+    val NR_BIND         = 135
+    val NR_SOCKET       = 337
+    val NR_GETSOCKNAME  = 203
+    val NR_GETPEERNAME  = 192
+
+    val AF_INET_V       = 2
+    val SOCK_DGRAM_V    = 2
+    val SOCK_STREAM_V   = 1
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+    print_sdec(v: int)
+        if v < 0
+            puts("-")
+            print_sdec(-v)
+            return
+        print_udec(v)
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_getsockname(fd: int, addr: *byte, alen: *i32) -> int
+        int(syscall6(NR_GETSOCKNAME, i64(fd), i64(addr), i64(alen), 0, 0, 0))
+
+    posix_getpeername(fd: int, addr: *byte, alen: *i32) -> int
+        int(syscall6(NR_GETPEERNAME, i64(fd), i64(addr), i64(alen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+Verify `a` is an AF_INET sockaddr with the expected host-order port
+and IPv4 octets. Prints a diagnostic line and returns 1 on mismatch,
+0 on success.
+
+    check_addr(tag: string, a: *byte, want_port: int,
+               w0: int, w1: int, w2: int, w3: int) -> int
+        val fam = ((int(a[1]) & 0xff) << 8) | (int(a[0]) & 0xff)
+        val port = ((int(a[2]) & 0xff) << 8) | (int(a[3]) & 0xff)
+        val ip0 = int(a[4]) & 0xff
+        val ip1 = int(a[5]) & 0xff
+        val ip2 = int(a[6]) & 0xff
+        val ip3 = int(a[7]) & 0xff
+        puts("getname: ")
+        puts(tag)
+        puts(" fam=")
+        print_udec(fam)
+        puts(" port=")
+        print_udec(port)
+        puts(" ip=")
+        print_udec(ip0)
+        puts(".")
+        print_udec(ip1)
+        puts(".")
+        print_udec(ip2)
+        puts(".")
+        print_udec(ip3)
+        puts("\n")
+        if fam != AF_INET_V
+            return 1
+        if port != want_port
+            return 1
+        if ip0 != w0
+            return 1
+        if ip1 != w1
+            return 1
+        if ip2 != w2
+            return 1
+        if ip3 != w3
+            return 1
+        0
+
+
+    main(argv: []string)
+        val udp = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if udp < 0
+            puts("getname: socket UDP failed\n")
+            exit_with(1)
+            return
+        var baddr: [16]byte
+        fill_sockaddr(&baddr[0], 7788, 127, 0, 0, 1)
+        if posix_bind(udp, &baddr[0], 16) < 0
+            puts("getname: bind failed\n")
+            exit_with(2)
+            return
+
+        var got: [16]byte
+        var glen: i32 = i32(16)
+        val r1 = posix_getsockname(udp, &got[0], &glen)
+        puts("getname: getsockname UDP = ")
+        print_sdec(r1)
+        puts(" glen=")
+        print_sdec(int(glen))
+        puts("\n")
+        if r1 != 0
+            puts("getname: FAIL UDP getsockname\n")
+            exit_with(3)
+            return
+        if int(glen) != 16
+            puts("getname: FAIL UDP glen\n")
+            exit_with(4)
+            return
+        if check_addr("udp-local", &got[0], 7788, 127, 0, 0, 1) != 0
+            puts("getname: FAIL UDP addr mismatch\n")
+            exit_with(5)
+            return
+
+        var peer: [16]byte
+        var plen: i32 = i32(16)
+        val r2 = posix_getpeername(udp, &peer[0], &plen)
+        puts("getname: getpeername UDP = ")
+        print_sdec(r2)
+        puts("\n")
+        if r2 != -107
+            puts("getname: FAIL UDP peer (expected -107)\n")
+            exit_with(6)
+            return
+
+        posix_close(udp)
+
+        val tcp = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if tcp < 0
+            puts("getname: socket TCP failed\n")
+            exit_with(7)
+            return
+        var tsn: [16]byte
+        var tsn_len: i32 = i32(16)
+        val r3 = posix_getsockname(tcp, &tsn[0], &tsn_len)
+        puts("getname: getsockname TCP-fresh = ")
+        print_sdec(r3)
+        puts("\n")
+        if r3 != 0
+            puts("getname: FAIL TCP getsockname\n")
+            exit_with(8)
+            return
+        if check_addr("tcp-local-fresh", &tsn[0], 0, 0, 0, 0, 0) != 0
+            puts("getname: FAIL TCP fresh addr\n")
+            exit_with(9)
+            return
+
+        var tpn: [16]byte
+        var tpn_len: i32 = i32(16)
+        val r4 = posix_getpeername(tcp, &tpn[0], &tpn_len)
+        puts("getname: getpeername TCP-fresh = ")
+        print_sdec(r4)
+        puts("\n")
+        if r4 != -107
+            puts("getname: FAIL TCP fresh peer (expected -107)\n")
+            exit_with(10)
+            return
+
+        posix_close(tcp)
+        puts("getname: done\n")
+        exit()

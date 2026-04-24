@@ -58,6 +58,8 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_ICMP_SEND    = 21
     val INET_CMD_ICMP_CHECK   = 22
     val INET_CMD_PID_EXIT     = 23
+    val INET_CMD_UDP_GETNAME  = 24
+    val INET_CMD_TCP_GETNAME  = 25
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1017,6 +1019,58 @@ future RST).
         ipc_reply(sender, reply, 1)
 
 
+### inet_handle_udp_getname
+
+Return the local endpoint of a UDP socket: (port, ip). Used by
+`getsockname` from the POSIX shim. UDP has no persistent peer, so
+`getpeername` on UDP short-circuits in the shim and this command
+never fires with a "peer" variant — hence a single op with no
+which-flag. Wire: cmd(1) + fd(u8) = 2 bytes in. Reply: status(1)
++ port(2 BE) + ip(4) = 7 bytes. An unbound socket reports
+`0.0.0.0:0`.
+
+    inet_handle_udp_getname(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        var reply: [7]byte
+        if inet_fd_valid(fd) == 0
+            reply[0] = byte(-1)
+            inet_write_u16(reply, 1, 0)
+            inet_write_ipv4(reply, 3, u32(0))
+            ipc_reply(sender, reply, 7)
+            return
+        reply[0] = byte(0)
+        if inet_sockets[fd].bound != 0
+            inet_write_u16(reply, 1, inet_sockets[fd].bound_port)
+            inet_write_ipv4(reply, 3, inet_sockets[fd].bound_ip)
+        else
+            inet_write_u16(reply, 1, 0)
+            inet_write_ipv4(reply, 3, u32(0))
+        ipc_reply(sender, reply, 7)
+
+
+### inet_handle_tcp_getname
+
+Return either the local or peer endpoint of a TCP socket. Wire:
+cmd(1) + fd(u16) + which(u8) = 4 bytes in; which == 0 means
+local, which == 1 means peer. Reply: status(1) + port(2 BE) +
+ip(4) = 7 bytes. Returns `-ENOTCONN` (-107) for a peer query on
+a socket that hasn't reached ESTABLISHED. The heavy lifting lives
+in `inet_tcp_getname` (inet_proto.lsysl) because it touches
+`tcp_sockets[]` state.
+
+    inet_handle_tcp_getname(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val which = int(buf[3]) & 0xff
+        var reply: [7]byte
+        var port = 0
+        var ip = u32(0)
+        val status = inet_tcp_getname(fd, which, &port, &ip)
+        reply[0] = byte(status)
+        inet_write_u16(reply, 1, port)
+        inet_write_ipv4(reply, 3, ip)
+        ipc_reply(sender, reply, 7)
+
+
 ### inet_handle_get_ip_config
 
 Return the current (ip, mask, gw). Reply: status(1) + ip(4) +
@@ -1270,6 +1324,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_ICMP_SEND   -> inet_handle_icmp_send(sender, buf)
                     INET_CMD_ICMP_CHECK  -> inet_handle_icmp_check(sender, buf)
                     INET_CMD_PID_EXIT    -> inet_handle_pid_exit(sender, buf)
+                    INET_CMD_UDP_GETNAME -> inet_handle_udp_getname(sender, buf)
+                    INET_CMD_TCP_GETNAME -> inet_handle_tcp_getname(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
