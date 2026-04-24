@@ -46,6 +46,48 @@ object SVMRuntime:
        |global unreachable, func
        |global todo, func
        |global write_str, func
+       |global exit, func
+       |
+       |global std_io__STDIN, data, 8
+       |global std_io__STDOUT, data, 8
+       |global std_io__STDERR, data, 8
+       |global std_io__O_RDONLY, data, 8
+       |global std_io__O_WRONLY, data, 8
+       |global std_io__O_RDWR, data, 8
+       |global std_io__O_CREATE, data, 8
+       |global std_io__O_TRUNC, data, 8
+       |global std_io__O_APPEND, data, 8
+       |global std_io__SEEK_SET, data, 8
+       |global std_io__SEEK_CUR, data, 8
+       |global std_io__SEEK_END, data, 8
+       |
+       |segment data
+       |  align 8
+       |std_io__STDIN:     dl 0
+       |  align 8
+       |std_io__STDOUT:    dl 1
+       |  align 8
+       |std_io__STDERR:    dl 2
+       |  align 8
+       |std_io__O_RDONLY:  dl 0
+       |  align 8
+       |std_io__O_WRONLY:  dl 1
+       |  align 8
+       |std_io__O_RDWR:    dl 2
+       |  align 8
+       |std_io__O_CREATE:  dl 4
+       |  align 8
+       |std_io__O_TRUNC:   dl 8
+       |  align 8
+       |std_io__O_APPEND:  dl 16
+       |  align 8
+       |std_io__SEEK_SET:  dl 0
+       |  align 8
+       |std_io__SEEK_CUR:  dl 1
+       |  align 8
+       |std_io__SEEK_END:  dl 2
+       |
+       |segment code
        |
        |; putchar: TOS = char, write to stdout device
        |putchar:
@@ -169,6 +211,12 @@ object SVMRuntime:
        |todo:
        |  call panic
        |  ret
+       |
+       |; exit(code: int) — halt the VM. The code is ignored for the test runner,
+       |; since halt leaves whatever is on TOS as svm.result; tests don't call
+       |; exit directly, but modules like std.log import it from std.process.
+       |exit:
+       |  halt
        |
        |; __svm_str_concat(l: *string, r: *string) -> *string
        |; Allocates a new string buffer + fat-pointer struct on the memory stack

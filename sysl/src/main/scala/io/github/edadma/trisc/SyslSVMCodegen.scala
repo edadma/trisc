@@ -61,6 +61,9 @@ class SyslSVMCodegen:
   private var needsStrEq: Boolean = false
   private var needsNewSlice: Boolean = false
 
+  // Map: function name → parameter types (for arg-coercion at call sites).
+  private val funcParamTypes = new mutable.HashMap[String, List[SyslType]]
+
   private def emit(s: String): Unit = out ++= s + "\n"
   private def newLabel(prefix: String): String =
     labelCounter += 1
@@ -194,6 +197,33 @@ class SyslSVMCodegen:
     emit("  store64")         // write new_sp to __sp; ( new_sp ) remains
     needsSpExtern = true
 
+  // Materialize a fixed [N]T array as a slice struct {ptr, len, cap, backref}
+  // on the memory stack. Leaves the struct address on TOS.
+  private def emitArrayToSlice(arg: TExpr, size: Long): Unit =
+    emitMemAlloc(24)                 // allocate slice struct, TOS = sliceAddr
+    emit("  dup")                    // [..., sliceAddr, sliceAddr]
+    genExpr(arg)                     // [..., sliceAddr, sliceAddr, arrAddr]
+    emit("  swap")                   // [..., sliceAddr, arrAddr, sliceAddr]
+    emit("  store64")                // write ptr field; [..., sliceAddr]
+    emit("  dup")                    // [..., sliceAddr, sliceAddr]
+    emitPushInt(8)
+    emit("  add")                    // [..., sliceAddr, sliceAddr+8]
+    emitPushInt(size)
+    emit("  swap")                   // [..., sliceAddr, len, sliceAddr+8]
+    emit("  store32")                // write len (i32); [..., sliceAddr]
+    emit("  dup")                    // [..., sliceAddr, sliceAddr]
+    emitPushInt(12)
+    emit("  add")                    // [..., sliceAddr, sliceAddr+12]
+    emitPushInt(size)
+    emit("  swap")                   // [..., sliceAddr, cap, sliceAddr+12]
+    emit("  store32")                // write cap (i32); [..., sliceAddr]
+    emit("  dup")                    // [..., sliceAddr, sliceAddr]
+    emitPushInt(16)
+    emit("  add")                    // [..., sliceAddr, sliceAddr+16]
+    emit("  push_0")
+    emit("  swap")                   // [..., sliceAddr, 0, sliceAddr+16]
+    emit("  store64")                // write backref=0; [..., sliceAddr]
+
   private def allocLocal(name: String, typ: SyslType): Int =
     val idx = nextLocalIndex
     locals(name) = LocalInfo(idx, typ)
@@ -253,6 +283,7 @@ class SyslSVMCodegen:
         definedFuncNames += f.name
         f.params.foreach(p => registerType(p.typ))
         registerType(f.returnType)
+        funcParamTypes(f.name) = f.params.map(_.typ).toList
       case _ =>
 
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
@@ -347,6 +378,10 @@ class SyslSVMCodegen:
     if dataGlobals.nonEmpty then
       emit("segment data")
       for decl <- dataGlobals do decl match
+        case TVarDecl(name, typ, _, _, _) =>
+          emit(s"global $name, data, ${typ.sizeOf.max(8)}")
+        case _ =>
+      for decl <- dataGlobals do decl match
         case TVarDecl(name, typ, init, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
@@ -434,6 +469,10 @@ class SyslSVMCodegen:
     // Emit bss segment
     if bssGlobals.nonEmpty then
       emit("segment bss")
+      for decl <- bssGlobals do decl match
+        case TVarDecl(name, typ, _, _, _) =>
+          emit(s"global $name, data, ${typ.sizeOf.max(8)}")
+        case _ =>
       for decl <- bssGlobals do decl match
         case TVarDecl(name, typ, _, _, _) =>
           emit(s"  align 8")
@@ -1204,8 +1243,15 @@ class SyslSVMCodegen:
       emitCast(inner.typ, target)
 
     case TCall(name, args, _) =>
-      // Push args left-to-right
-      for arg <- args do genExpr(arg)
+      // Push args left-to-right, materializing a slice struct when the param
+      // expects a slice and the caller is handing over a fixed array.
+      val paramTypes = funcParamTypes.getOrElse(name, Nil)
+      for (arg, idx) <- args.zipWithIndex do
+        val paramType = paramTypes.lift(idx)
+        (arg.typ.underlying, paramType.map(_.underlying)) match
+          case (SyslType.ArrayType(_, size), Some(_: SyslType.SliceType)) =>
+            emitArrayToSlice(arg, size)
+          case _ => genExpr(arg)
       emit(s"  call $name")
 
     case TStr(inner) =>
@@ -1805,20 +1851,25 @@ class SyslSVMCodegen:
     val tgtFloat = to.isFloat
     if srcFloat && !tgtFloat then emit("  f2i")
     else if !srcFloat && tgtFloat then emit("  i2f")
-    else to match
-      case IntType(8) =>
-        emitPushInt(56); emit("  shl"); emitPushInt(56); emit("  sar")
-      case IntType(16) =>
-        emitPushInt(48); emit("  shl"); emitPushInt(48); emit("  sar")
-      case IntType(32) =>
-        emitPushInt(32); emit("  shl"); emitPushInt(32); emit("  sar")
-      case UIntType(8) =>
-        emitPushInt(0xff); emit("  and")
-      case UIntType(16) =>
-        emitPushInt(0xffff); emit("  and")
-      case UIntType(32) =>
-        emit("  push_i64 4294967295"); emit("  and")
-      case _ => // no-op for same-width or i64/u64/ptr
+    else (from.underlying, to.underlying) match
+      // String / slice to raw pointer: deref the struct to get the data ptr.
+      // (Arrays are already data-addressed, so array→ptr is a no-op.)
+      case (StringType | _: SliceType, _: PtrType) =>
+        emit("  load64")
+      case _ => to match
+        case IntType(8) =>
+          emitPushInt(56); emit("  shl"); emitPushInt(56); emit("  sar")
+        case IntType(16) =>
+          emitPushInt(48); emit("  shl"); emitPushInt(48); emit("  sar")
+        case IntType(32) =>
+          emitPushInt(32); emit("  shl"); emitPushInt(32); emit("  sar")
+        case UIntType(8) =>
+          emitPushInt(0xff); emit("  and")
+        case UIntType(16) =>
+          emitPushInt(0xffff); emit("  and")
+        case UIntType(32) =>
+          emit("  push_i64 4294967295"); emit("  and")
+        case _ => // no-op for same-width or i64/u64/ptr
 
   private def fieldOffset(st: SyslType.StructType, fieldIndex: Int): Long =
     if fieldIndex >= st.fields.length then
