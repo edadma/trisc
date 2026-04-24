@@ -162,13 +162,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     (invs, variantsInHeader ++ tail)
 
   /** Type-check loop invariants and lower them to contract-check statements. Called in body
-   *  scope so the invariants see for-init bindings and outer scope. */
-  private def buildLoopInvariantChecks(invs: List[(ExpressionAST, Option[String])]): List[TStmt] =
-    invs.map { case (e, msg) =>
+   *  scope so the invariants see for-init bindings and outer scope. Also drains any
+   *  `loop_entry(expr)` snapshots accumulated during analysis — returns them as TVarStmt
+   *  decls that the caller must emit before the first iteration. */
+  private def buildLoopInvariantChecks(invs: List[(ExpressionAST, Option[String])]): (List[TStmt], List[TStmt]) =
+    val savedLoopMode = inLoopInvariantAnalysis
+    val snapshotsBefore = loopEntrySnapshots.length
+    inLoopInvariantAnalysis = true
+    val checks: List[TStmt] = try invs.map { case (e, msg) =>
       val te = analyzeExpr(e)
       if te.typ != BoolType then throw AnalysisError(s"loop invariant must be bool, got ${te.typ}")
       contract("loop invariant", te, msg.getOrElse("loop invariant"))
-    }
+    } finally inLoopInvariantAnalysis = savedLoopMode
+    val captured = loopEntrySnapshots.drop(snapshotsBefore).toList
+    loopEntrySnapshots.remove(snapshotsBefore, captured.length)
+    val snapshotDecls: List[TStmt] = captured.map { (name, typ, expr) => TVarStmt(name, typ, expr) }
+    (snapshotDecls, checks)
 
   /** Extract top-level `variant <expr>` statements from a loop body. Returns a pair of
    *  AST stmt lists: (hoisted-pre-decls, rewritten-body). The caller must analyze the
@@ -277,6 +286,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   private var inEnsureAnalysis: Boolean = false
   private var oldSnapshotCounter: Int = 0
   private val oldSnapshots = mutable.ListBuffer.empty[(String, SyslType, TExpr)]
+  // While analyzing a loop invariant, `loop_entry(x)` gets intercepted and rewritten
+  // into a reference to a snapshot local captured at the moment control first reaches
+  // the loop (before the first iteration).
+  private var inLoopInvariantAnalysis: Boolean = false
+  private var loopEntrySnapshotCounter: Int = 0
+  private val loopEntrySnapshots = mutable.ListBuffer.empty[(String, SyslType, TExpr)]
 
   /** Per-function counter for naming the temps emitted at every recursive-call site of a
    *  function with a `variant` clause. Reset at each `analyzeBlockWithContracts` entry so
@@ -3610,14 +3625,17 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tInvariants = buildLoopInvariantChecks(invariants)
+        val (tSnapshotDecls, tInvariants) = buildLoopInvariantChecks(invariants)
         val tBody = tInvariants ++ analyzeBlock(rewrittenBody)
         popScope()
         val tUpdate = analyzeStmt(update)
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
         popScope()
-        val loopStmt = TForStmt(tInit, tCond, tUpdate, tBody, label)
+        // loop_entry snapshots need the for-scope bindings (including the induction var)
+        // visible — bundle them with init so they run once, after init, before cond.
+        val finalInit = if tSnapshotDecls.isEmpty then tInit else TMultiStmt(tInit :: tSnapshotDecls)
+        val loopStmt = TForStmt(finalInit, tCond, tUpdate, tBody, label)
         if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
 
       case WhileStmtAST(cond, body, label) =>
@@ -3630,13 +3648,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tInvariants = buildLoopInvariantChecks(invariants)
+        val (tSnapshotDecls, tInvariants) = buildLoopInvariantChecks(invariants)
         val tBody = tInvariants ++ analyzeBlock(rewrittenBody)
         popScope()
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
         val loopStmt = TWhileStmt(tCond, tBody, label)
-        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
+        val pre = tPreDecls ++ tSnapshotDecls
+        if pre.isEmpty then loopStmt else TMultiStmt(pre ++ List(loopStmt))
 
       case DoWhileStmtAST(cond, body, label) =>
         checkLoopLabelUnique(label)
@@ -3648,13 +3667,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tInvariants = buildLoopInvariantChecks(invariants)
+        val (tSnapshotDecls, tInvariants) = buildLoopInvariantChecks(invariants)
         val tBody = tInvariants ++ analyzeBlock(rewrittenBody)
         popScope()
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
         val loopStmt = TDoWhileStmt(tCond, tBody, label)
-        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
+        val pre = tPreDecls ++ tSnapshotDecls
+        if pre.isEmpty then loopStmt else TMultiStmt(pre ++ List(loopStmt))
 
       case LoopStmtAST(body, label) =>
         checkLoopLabelUnique(label)
@@ -3664,13 +3684,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tInvariants = buildLoopInvariantChecks(invariants)
+        val (tSnapshotDecls, tInvariants) = buildLoopInvariantChecks(invariants)
         val tBody = tInvariants ++ analyzeBlock(rewrittenBody)
         popScope()
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
         val loopStmt = TLoopStmt(tBody, label)
-        if tPreDecls.isEmpty then loopStmt else TMultiStmt(tPreDecls ++ List(loopStmt))
+        val pre = tPreDecls ++ tSnapshotDecls
+        if pre.isEmpty then loopStmt else TMultiStmt(pre ++ List(loopStmt))
 
       case VariantStmtAST(_) =>
         throw AnalysisError("variant statement must appear at the top level of a loop body")
@@ -4480,6 +4501,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         if scopeStack != null then
           currentScope(snapshotName) = SymInfo(snapshotName, tArg.typ, mutable = false)
         TVarRef(snapshotName, tArg.typ)
+
+      case CallAST("loop_entry", args) if inLoopInvariantAnalysis =>
+        if args.length != 1 then throw AnalysisError("loop_entry() takes exactly 1 argument")
+        // Suspend the intercept so nested `loop_entry(loop_entry(...))` falls through.
+        val savedMode = inLoopInvariantAnalysis
+        inLoopInvariantAnalysis = false
+        val tArg = try analyzeExpr(args.head) finally inLoopInvariantAnalysis = savedMode
+        val snapshotName = s"__loop_entry_${loopEntrySnapshotCounter}"
+        loopEntrySnapshotCounter += 1
+        loopEntrySnapshots += ((snapshotName, tArg.typ, tArg))
+        if scopeStack != null then
+          currentScope(snapshotName) = SymInfo(snapshotName, tArg.typ, mutable = false)
+        TVarRef(snapshotName, tArg.typ)
+
+      case CallAST("loop_entry", _) =>
+        throw AnalysisError("loop_entry() is only valid inside a loop invariant")
 
       case CallAST(name, args) if integerArithIntrinsics.contains(name) =>
         if args.size != 2 then throw AnalysisError(s"$name() takes exactly 2 arguments")

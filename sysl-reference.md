@@ -1647,6 +1647,21 @@ while remaining > 0
     process()
     remaining = remaining - 1
 
+// `loop_entry(expr)` — Ada/SPARK-style loop-entry snapshot, valid only inside a loop
+// invariant. Captures the value of `expr` once, at the moment control first reaches the
+// loop (after for-loop init, before the first cond check), so subsequent invariant
+// evaluations can compare against the entry value. Each enclosing loop has its own
+// snapshot scope, so nested `loop_entry(...)` always refers to the innermost loop.
+// Snapshot exprs must be visible in the surrounding scope (or, for `for`, after init).
+var x = 0
+for i = 0; i < n; i++
+    invariant x >= loop_entry(x)            // monotonic non-decrease
+    invariant loop_entry(i) == 0            // i started at 0
+    x = x + i
+
+// `loop_entry(expr)` outside a loop invariant — including in an `ensure` clause or in
+// loop-body code — is a static error. Use `old(expr)` for the function-entry snapshot.
+
 // Labeled loops — break / continue can target an outer loop by name.
 // A label is an identifier followed by `:` immediately before `for`, `while`, `do`, or `loop`.
 outer: for i in 0..<n
