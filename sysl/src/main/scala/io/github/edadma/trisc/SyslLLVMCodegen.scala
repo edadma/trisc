@@ -1712,6 +1712,29 @@ class SyslLLVMCodegen(target: String = "host"):
               val cast = newReg()
               emit(s"  $cast = bitcast $vt* $v to $expectedType")
               (cast, expectedType)
+            else if expectedType == "%struct.slice" && a.typ.isInstanceOf[SyslType.ArrayType] then
+              // Array-to-slice coercion at call site: synthesize a slice header
+              // pointing at the array's storage. Backref stays null (stack/immortal
+              // backing), so the incr/decr at both ends are no-ops.
+              val arrSize = a.typ.asInstanceOf[SyslType.ArrayType].size
+              val sliceAlloca = deferAlloca("%struct.slice")
+              val dataPtr = newReg()
+              emit(s"  $dataPtr = bitcast $vt* $v to i8*")
+              val ptrGep = newReg()
+              emit(s"  $ptrGep = getelementptr %struct.slice, %struct.slice* $sliceAlloca, i32 0, i32 0")
+              emit(s"  store i8* $dataPtr, i8** $ptrGep")
+              val lenGep = newReg()
+              emit(s"  $lenGep = getelementptr %struct.slice, %struct.slice* $sliceAlloca, i32 0, i32 1")
+              emit(s"  store i32 $arrSize, i32* $lenGep")
+              val capGep = newReg()
+              emit(s"  $capGep = getelementptr %struct.slice, %struct.slice* $sliceAlloca, i32 0, i32 2")
+              emit(s"  store i32 $arrSize, i32* $capGep")
+              val brGep = newReg()
+              emit(s"  $brGep = getelementptr %struct.slice, %struct.slice* $sliceAlloca, i32 0, i32 3")
+              emit(s"  store i8* null, i8** $brGep")
+              val loaded = newReg()
+              emit(s"  $loaded = load %struct.slice, %struct.slice* $sliceAlloca")
+              (loaded, "%struct.slice")
             else
               val loaded = newReg()
               emit(s"  $loaded = load $vt, $vt* $v")
@@ -2427,6 +2450,21 @@ class SyslLLVMCodegen(target: String = "host"):
           val loaded = newReg()
           emit(s"  $loaded = load $elt, $elt* $v")
           emit(s"  store $elt $loaded, $elt* $typedElemPtr")
+          // Increment rc on the appended element if the source is borrowed
+          // (not a freshly-constructed owned value). Without this, a local
+          // string/slice appended into a slice that's later returned gets
+          // freed by scope cleanup before the caller can read it.
+          if isSliceType(elemType) && !isSliceOwned(elem) then emitSliceBackrefIncr(typedElemPtr)
+          if isStringType(elemType) && !isOwnedString(elem) then emitStringDescrIncr(typedElemPtr)
+          elemType match
+            case _: SyslType.FuncType if !isOwnedClosure(elem) => emitClosureDescrIncr(typedElemPtr)
+            case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(elem) =>
+              emitStructStringFieldsIncr(typedElemPtr, st)
+            case et: SyslType.EnumType if structHasStringFields(et) && !isOwnedStruct(elem) =>
+              emitEnumStringFieldsIncr(typedElemPtr, et)
+            case SyslType.ArrayType(_, _) if structHasStringFields(elemType) && !isOwnedStruct(elem) =>
+              emitValueRC(typedElemPtr, elemType, incr = true)
+            case _ =>
         else
           emit(s"  store $elt $v, $elt* $typedElemPtr")
         // Build result slice
