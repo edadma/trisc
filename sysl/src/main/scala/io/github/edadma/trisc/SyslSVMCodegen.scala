@@ -26,6 +26,7 @@ class SyslSVMCodegen:
   private var needsSpExtern: Boolean = false
   private var needsStrConcat: Boolean = false
   private var needsStrEq: Boolean = false
+  private var needsNewSlice: Boolean = false
 
   private def emit(s: String): Unit = out ++= s + "\n"
   private def newLabel(prefix: String): String =
@@ -46,24 +47,57 @@ class SyslSVMCodegen:
             pat match
               case TDestructurePattern(_, bindings, _) => count += bindings.count(_.isDefined)
               case TVariantPattern(_, _, bindings, _) => count += bindings.count(_.isDefined)
+              case TValuePattern(v) => scanExpr(v)
+              case TRangePattern(lo, hi) => scanExpr(lo); scanExpr(hi)
               case _ =>
+          arm.guard.foreach(scanExpr)
           arm.body.foreach(scanStmt)
         default.foreach(_.foreach(scanStmt))
-      case TIfExpr(_, thenBody, elseBody, _) =>
+      case TIfExpr(cond, thenBody, elseBody, _) =>
+        scanExpr(cond)
         thenBody.foreach(scanStmt)
         elseBody.foreach(_.foreach(scanStmt))
+      case TSliceExpr(arr, lo, hi, _) =>
+        // TSliceExpr allocates 5 anonymous slots (base, len, lo, hi, struct)
+        count += 5
+        scanExpr(arr); lo.foreach(scanExpr); hi.foreach(scanExpr)
+      case TNewArray(_, sz) => scanExpr(sz)
+      case TBinary(l, _, r, _) => scanExpr(l); scanExpr(r)
+      case TUnary(_, o, _) => scanExpr(o)
+      case TCast(inner, _) => scanExpr(inner)
+      case TCall(_, args, _) => args.foreach(scanExpr)
+      case TIndex(a, i, _) => scanExpr(a); scanExpr(i)
+      case TFieldAccess(o, _, _) => scanExpr(o)
+      case TDeref(p, _) => scanExpr(p)
+      case TAddrOfIndex(a, i, _) => scanExpr(a); scanExpr(i)
+      case TAddrOfField(o, _, _) => scanExpr(o)
+      case TStructConstruct(_, args) => args.foreach(scanExpr)
+      case TEnumConstruct(_, _, args) => args.foreach(scanExpr)
+      case TArrayLit(elements, _) => elements.foreach(scanExpr)
+      case TRangeCheck(inner, _, _, _) => scanExpr(inner)
+      case TLen(inner, _) => scanExpr(inner)
       case _ =>
     def scanStmt(s: TStmt): Unit = s match
       case TVarStmt(_, _, init, _) => count += 1; scanExpr(init)
-      case TWhileStmt(_, body, _) => scanStmts(body)
-      case TForStmt(init, _, update, body, _) => scanStmt(init); scanStmt(update); scanStmts(body)
-      case TDoWhileStmt(_, body, _) => scanStmts(body)
-      case TIfExpr(_, thenBody, elseBody, _) => scanStmts(thenBody); elseBody.foreach(scanStmts)
+      case TAssignStmt(_, value) => scanExpr(value)
+      case TCompoundAssignStmt(_, _, value) => scanExpr(value)
+      case TDerefAssignStmt(p, v) => scanExpr(p); scanExpr(v)
+      case TIndexAssignStmt(a, i, v) => scanExpr(a); scanExpr(i); scanExpr(v)
+      case TFieldAssignStmt(o, _, v) => scanExpr(o); scanExpr(v)
+      case TFieldCompoundAssignStmt(o, _, _, v) => scanExpr(o); scanExpr(v)
+      case TWhileStmt(cond, body, _) => scanExpr(cond); scanStmts(body)
+      case TForStmt(init, cond, update, body, _) =>
+        scanStmt(init); scanExpr(cond); scanStmt(update); scanStmts(body)
+      case TDoWhileStmt(cond, body, _) => scanExpr(cond); scanStmts(body)
+      case TIfExpr(cond, thenBody, elseBody, _) =>
+        scanExpr(cond); scanStmts(thenBody); elseBody.foreach(scanStmts)
       case TExprStmt(e) => scanExpr(e); e match
         case TIfExpr(_, thenBody, elseBody, _) => scanStmts(thenBody); elseBody.foreach(scanStmts)
         case _ =>
-      case TDestructureStmt(names, _, _) => count += names.length
+      case TDestructureStmt(names, _, init) => count += names.length; scanExpr(init)
       case TReturnStmt(Some(e)) => scanExpr(e)
+      case TMultiStmt(children) => children.foreach(scanStmt)
+      case TContractCheck(_, e, _) => scanExpr(e)
       case _ =>
     body match
       case TExprBody(e) => scanExpr(e)
@@ -149,6 +183,7 @@ class SyslSVMCodegen:
     needsSpExtern = false
     needsStrConcat = false
     needsStrEq = false
+    needsNewSlice = false
 
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
 
@@ -234,6 +269,8 @@ class SyslSVMCodegen:
       emit("extern __svm_str_concat")
     if needsStrEq && !definedSymbols.contains("__svm_str_eq") then
       emit("extern __svm_str_eq")
+    if needsNewSlice && !definedSymbols.contains("__svm_new_slice") then
+      emit("extern __svm_new_slice")
 
     out.toString
 
@@ -406,10 +443,14 @@ class SyslSVMCodegen:
         case SyslType.ArrayType(e, _) => e
         case SyslType.PtrType(e) => e
         case SyslType.SliceType(e) => e
+        case SyslType.RefType(SyslType.SliceType(e)) => e
         case _ => SyslType.I64
       genExpr(value)
       genExpr(array)
-      if array.typ.isInstanceOf[SyslType.SliceType] then emit("  load64") // deref slice ptr
+      array.typ match
+        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
+          emit("  load64") // deref slice struct → data ptr
+        case _ =>
       genExpr(index)
       emitPushInt(elemType.sizeOf)
       emit("  mul")
@@ -615,8 +656,12 @@ class SyslSVMCodegen:
         case SyslType.ArrayType(e, _) => e
         case SyslType.PtrType(e) => e
         case SyslType.SliceType(e) => e
+        case SyslType.RefType(SyslType.SliceType(e)) => e
         case _ => typ
-      if array.typ.isInstanceOf[SyslType.SliceType] then emit("  load64") // deref slice → data ptr
+      array.typ match
+        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
+          emit("  load64") // deref slice struct → data ptr
+        case _ =>
       genExpr(index)
       emitPushInt(elemType.sizeOf)
       emit("  mul")
@@ -832,7 +877,7 @@ class SyslSVMCodegen:
           emitPushInt(8)
           emit("  add")
           emit("  load64")
-        case SyslType.SliceType(_) =>
+        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
           genExpr(inner)
           emitPushInt(8)
           emit("  add")
@@ -854,6 +899,108 @@ class SyslSVMCodegen:
         emit("  push_0")
         emit("  swap")
         emit("  store64")
+
+    case TNewArray(elemType, size) =>
+      // __svm_new_slice(byteSize, elemCount) — returns pointer to 24-byte slice struct
+      genExpr(size)                 // elemCount
+      emit("  dup")                 // dup for byteSize computation
+      emitPushInt(elemType.sizeOf)
+      emit("  mul")                 // byteSize on TOS
+      emit("  swap")                // (byteSize, elemCount)
+      emit("  call __svm_new_slice")
+      needsNewSlice = true
+
+    case TSliceExpr(array, lowOpt, highOpt, resultTyp) =>
+      // Allocate a 24-byte slice struct on memory stack, fill with
+      //   ptr = base + lo * elemSize
+      //   len = hi - lo
+      //   cap = hi - lo
+      //   backref = 0
+      val elemType = resultTyp match
+        case SyslType.SliceType(e) => e
+        case SyslType.RefType(SyslType.SliceType(e)) => e
+        case _ => SyslType.I64
+      // Compute base pointer + source length based on array.typ
+      val baseIdx = nextLocalIndex; nextLocalIndex += 1
+      val lenIdx = nextLocalIndex; nextLocalIndex += 1
+      array.typ match
+        case SyslType.ArrayType(_, n) =>
+          genExpr(array)
+          emit(s"  local_set $baseIdx")
+          emitPushInt(n)
+          emit(s"  local_set $lenIdx")
+        case SyslType.SliceType(_) =>
+          // array is address of 24-byte slice struct
+          genExpr(array)
+          emit("  dup")             // keep addr
+          emit("  load64")          // ptr
+          emit(s"  local_set $baseIdx")
+          emitPushInt(8)
+          emit("  add")
+          emit("  load32")          // len (i32)
+          emit(s"  local_set $lenIdx")
+        case SyslType.RefType(SyslType.SliceType(_)) =>
+          // refs are pointers to slice structs in our impl; treat as slice
+          genExpr(array)
+          emit("  dup")
+          emit("  load64")
+          emit(s"  local_set $baseIdx")
+          emitPushInt(8)
+          emit("  add")
+          emit("  load32")
+          emit(s"  local_set $lenIdx")
+        case _ =>
+          genExpr(array)
+          emit(s"  local_set $baseIdx")
+          emitPushInt(0)
+          emit(s"  local_set $lenIdx")
+      // Evaluate lo (default 0)
+      val loIdx = nextLocalIndex; nextLocalIndex += 1
+      lowOpt match
+        case Some(e) => genExpr(e); emit(s"  local_set $loIdx")
+        case None    => emitPushInt(0); emit(s"  local_set $loIdx")
+      // Evaluate hi (default len)
+      val hiIdx = nextLocalIndex; nextLocalIndex += 1
+      highOpt match
+        case Some(e) => genExpr(e); emit(s"  local_set $hiIdx")
+        case None    => emit(s"  local_get $lenIdx"); emit(s"  local_set $hiIdx")
+      // Allocate 24-byte slice struct
+      emitMemAlloc(24)
+      val structIdx = nextLocalIndex; nextLocalIndex += 1
+      emit("  dup")
+      emit(s"  local_set $structIdx")
+      // struct.ptr = base + lo * elemSize
+      emit(s"  local_get $baseIdx")
+      emit(s"  local_get $loIdx")
+      emitPushInt(elemType.sizeOf)
+      emit("  mul")
+      emit("  add")
+      emit("  swap")                // (ptr, struct_addr)
+      emit("  store64")
+      // struct.len = hi - lo
+      emit(s"  local_get $hiIdx")
+      emit(s"  local_get $loIdx")
+      emit("  sub")
+      emit(s"  local_get $structIdx")
+      emitPushInt(8)
+      emit("  add")
+      emit("  store32")
+      // struct.cap = hi - lo
+      emit(s"  local_get $hiIdx")
+      emit(s"  local_get $loIdx")
+      emit("  sub")
+      emit(s"  local_get $structIdx")
+      emitPushInt(12)
+      emit("  add")
+      emit("  store32")
+      // struct.backref = 0
+      emit("  push_0")
+      emit(s"  local_get $structIdx")
+      emitPushInt(16)
+      emit("  add")
+      emit("  store64")
+      // leave struct addr on TOS
+      emit(s"  local_get $structIdx")
 
     case TEnumConstruct(et, variantIndex, args) =>
       // Allocate enum on memory stack, zero-init, populate tag + variant fields

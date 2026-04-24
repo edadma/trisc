@@ -339,6 +339,78 @@ object SVMRuntime:
        |  drop
        |  push_0
        |  ret
+       |
+       |; __svm_new_slice(byteSize: i64, elemCount: i64) -> *slice_struct
+       |; Allocates a 24-byte slice struct + `byteSize` bytes of data on
+       |; the memory stack, zero-fills the data region, and fills the
+       |; struct with { ptr=data, len=elemCount, cap=elemCount, backref=0 }.
+       |global __svm_new_slice, func
+       |__svm_new_slice:
+       |  frame 4
+       |  local_set 1        ; elemCount (TOS)
+       |  local_set 0        ; byteSize
+       |  ; total = 24 + ((byteSize + 7) & ~7)
+       |  push_i64 __sp
+       |  dup
+       |  load64             ; (&__sp old_sp)
+       |  local_get 0
+       |  push_i8 7
+       |  add
+       |  push_i8 -8
+       |  and                ; aligned
+       |  push_i8 24
+       |  add
+       |  sub                ; new_sp
+       |  dup
+       |  rot
+       |  store64            ; write new_sp; TOS = new_sp = struct addr
+       |  local_set 2        ; struct addr
+       |  ; struct.ptr = struct + 24
+       |  local_get 2
+       |  push_i8 24
+       |  add
+       |  local_get 2
+       |  store64
+       |  ; struct.len = elemCount (i32)
+       |  local_get 1
+       |  local_get 2
+       |  push_i8 8
+       |  add
+       |  store32
+       |  ; struct.cap = elemCount (i32)
+       |  local_get 1
+       |  local_get 2
+       |  push_i8 12
+       |  add
+       |  store32
+       |  ; struct.backref = 0
+       |  push_0
+       |  local_get 2
+       |  push_i8 16
+       |  add
+       |  store64
+       |  ; zero the data
+       |  local_get 2
+       |  push_i8 24
+       |  add
+       |  local_set 3        ; dp
+       |.nslice_zloop:
+       |  local_get 0
+       |  eqz
+       |  jumpnz .nslice_done
+       |  push_0
+       |  local_get 3
+       |  store8
+       |  local_get 3
+       |  inc
+       |  local_set 3
+       |  local_get 0
+       |  dec
+       |  local_set 0
+       |  jump .nslice_zloop
+       |.nslice_done:
+       |  local_get 2
+       |  ret
        |""".stripMargin
 
   def bootTof: TOF = svmAssemble(bootSource, relocatable = true)
