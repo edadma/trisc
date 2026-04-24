@@ -1608,6 +1608,189 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case TExprBody(e) => checkExpr(e)
       case TBlockBody(stmts) => stmts.foreach(checkStmt)
 
+  /** Infer a closure's effect signature by walking its typed body. Three outcomes:
+   *
+   *  - **Pure** — no module-level reads or writes, no allocation, no impure calls, no
+   *    writes to captured outer locals, no asm.
+   *  - **RW(R, W)** — reads/writes of specific module-level mutable globals were observed,
+   *    with all called functions being annotated (or pure) so their effects were inherited.
+   *  - **Unknown** — the body contains a construct we can't summarize: a `new` allocation,
+   *    an append, an asm block, a call to an unannotated impure function, an indirect call
+   *    through an Unknown-typed callable, an interface dispatch to an unannotated method,
+   *    or a write to a captured outer local (a side effect on the enclosing scope that
+   *    can't be expressed as a set of module-level var names).
+   *
+   *  Reads of captured outer locals are permitted and do not contribute to the inferred
+   *  effect sets — captures are opaque dataflow dependencies, not module-level effects. */
+  private def inferClosureEffects(body: TFunBody, paramNames: List[String]): FuncEffects =
+    val locals = mutable.HashSet.from(paramNames)
+    val reads  = mutable.HashSet[String]()
+    val writes = mutable.HashSet[String]()
+    var bailed = false
+    def bail(): Unit = bailed = true
+
+    def mutableGlobal(n: String): Option[String] =
+      if locals.contains(n) then None
+      else globalScope.get(n) match
+        case Some(sym) if sym.mutable && !sym.isConst => Some(sym.name)
+        case _ => None
+
+    def isCapturedLocal(n: String): Boolean =
+      !locals.contains(n) && !globalScope.contains(n) && !functions.contains(n)
+
+    def absorbCallee(calleeName: String): Boolean =
+      if purePermittedBuiltins.contains(calleeName) then return true
+      val infoOpt = functions.get(calleeName).orElse(functions.values.find(_.name == calleeName))
+      infoOpt match
+        case Some(info) =>
+          if info.isPure then true
+          else resolveEffects(info) match
+            case Some((r, w)) => reads ++= r; writes ++= w; true
+            case None         => false
+        case None => false
+
+    def checkExpr(e: TExpr): Unit =
+      if bailed then return
+      e match
+        case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+        case _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl | _: TStructLit | _: TEnumConstruct => ()
+        case TVarRef(n, _) => mutableGlobal(n).foreach(reads += _)
+        case TAddrOf(n, _) => mutableGlobal(n).foreach(reads += _)
+        case TArrayLit(els, _)               => els.foreach(checkExpr)
+        case TAddrOfIndex(a, i, _)           => checkExpr(a); checkExpr(i)
+        case TAddrOfField(o, _, _)           => checkExpr(o)
+        case TTempAddr(i, _)                 => checkExpr(i)
+        case TDeref(i, _)                    => checkExpr(i)
+        case TIndex(a, i, _)                 => checkExpr(a); checkExpr(i)
+        case TFieldAccess(o, _, _)           => checkExpr(o)
+        case _: TFieldPreInc | _: TFieldPreDec | _: TFieldPostInc | _: TFieldPostDec => bail()
+        case TStructConstruct(_, args)       => args.foreach(checkExpr)
+        case TPreInc(n, _) =>
+          mutableGlobal(n) match
+            case Some(mg) => reads += mg; writes += mg
+            case None => if isCapturedLocal(n) then bail()
+        case TPreDec(n, _) =>
+          mutableGlobal(n) match
+            case Some(mg) => reads += mg; writes += mg
+            case None => if isCapturedLocal(n) then bail()
+        case TPostInc(n, _) =>
+          mutableGlobal(n) match
+            case Some(mg) => reads += mg; writes += mg
+            case None => if isCapturedLocal(n) then bail()
+        case TPostDec(n, _) =>
+          mutableGlobal(n) match
+            case Some(mg) => reads += mg; writes += mg
+            case None => if isCapturedLocal(n) then bail()
+        case TUnary(_, o, _)                 => checkExpr(o)
+        case TBinary(l, _, r, _)             => checkExpr(l); checkExpr(r)
+        case TCall(callee, args, _) =>
+          if !absorbCallee(callee) then bail()
+          args.foreach(checkExpr)
+        case TIndirectCall(callee, args, _) =>
+          callee.typ match
+            case FuncType(_, _, _, eff) if eff.isPure =>
+              checkExpr(callee); args.foreach(checkExpr)
+            case FuncType(_, _, _, eff) if !eff.isUnknown =>
+              reads ++= eff.reads.getOrElse(Set.empty)
+              writes ++= eff.writes.getOrElse(Set.empty)
+              checkExpr(callee); args.foreach(checkExpr)
+            case _ => bail()
+        case TCast(inner, _)                 => checkExpr(inner)
+        case TIfExpr(c, tb, eb, _)           => checkExpr(c); tb.foreach(checkStmt); eb.foreach(_.foreach(checkStmt))
+        case TQuantifier(_, _, _, lo, hi, _, pred, _) => checkExpr(lo); checkExpr(hi); checkExpr(pred)
+        case TMatchExpr(scr, arms, dflt, _) =>
+          checkExpr(scr)
+          for arm <- arms do
+            arm.guard.foreach(checkExpr); arm.body.foreach(checkStmt)
+          dflt.foreach(_.foreach(checkStmt))
+        case _: TNew | _: TNewEnum | _: TNewArray => bail()
+        case TLen(i, _)                      => checkExpr(i)
+        case TCap(i, _)                      => checkExpr(i)
+        case TSliceExpr(a, lo, hi, _)        => checkExpr(a); lo.foreach(checkExpr); hi.foreach(checkExpr)
+        case _: TAppend                      => bail()
+        case TStringFromPtr(p, l, _)         => checkExpr(p); checkExpr(l)
+        case TStringFromSlice(s, _)          => checkExpr(s)
+        case TStr(inner)                     => checkExpr(inner)
+        case TFmtStr(inner, _)               => checkExpr(inner)
+        case _: TClosure                     => bail()
+        case TInterfaceBox(i, _)             => checkExpr(i)
+        case TInterfaceDispatch(v, idx, args, _) =>
+          v.typ match
+            case InterfaceType(_, methods) =>
+              val eff = methods(idx)._4
+              if eff.isPure then { checkExpr(v); args.foreach(checkExpr) }
+              else if !eff.isUnknown then
+                reads ++= eff.reads.getOrElse(Set.empty)
+                writes ++= eff.writes.getOrElse(Set.empty)
+                checkExpr(v); args.foreach(checkExpr)
+              else bail()
+            case _ => bail()
+        case TIntrinsicCall(name, args, _) =>
+          if !purePermittedBuiltins.contains(name) then bail()
+          args.foreach(checkExpr)
+        case TRangeCheck(inner, _, _, _)     => checkExpr(inner)
+        case _: TAsmExpr                     => bail()
+
+    def checkStmt(s: TStmt): Unit =
+      if bailed then return
+      s match
+        case TVarStmt(n, _, init, _, _)      => checkExpr(init); locals += n
+        case TDestructureStmt(ns, _, init)   => checkExpr(init); locals ++= ns
+        case TDestructureAssignStmt(ns, _, init) =>
+          checkExpr(init)
+          for n <- ns do
+            mutableGlobal(n) match
+              case Some(mg) => writes += mg
+              case None => if isCapturedLocal(n) then bail()
+        case TAssignStmt(t, v) =>
+          mutableGlobal(t) match
+            case Some(mg) => writes += mg
+            case None => if isCapturedLocal(t) then bail()
+          checkExpr(v)
+        case TCompoundAssignStmt(t, _, v) =>
+          mutableGlobal(t) match
+            case Some(mg) => reads += mg; writes += mg
+            case None => if isCapturedLocal(t) then bail()
+          checkExpr(v)
+        case TFieldAssignStmt(o, _, v) =>
+          o match
+            case TVarRef(n, _) => mutableGlobal(n).foreach(writes += _)
+            case _ => ()
+          checkExpr(o); checkExpr(v)
+        case TFieldCompoundAssignStmt(o, _, _, v) =>
+          o match
+            case TVarRef(n, _) =>
+              mutableGlobal(n) match
+                case Some(mg) => reads += mg; writes += mg
+                case None => ()
+            case _ => ()
+          checkExpr(o); checkExpr(v)
+        case TIndexAssignStmt(a, i, v) =>
+          a match
+            case TVarRef(n, _) => mutableGlobal(n).foreach(writes += _)
+            case _ => ()
+          checkExpr(a); checkExpr(i); checkExpr(v)
+        case _: TDerefAssignStmt => bail() // pointer write — can't track target
+        case TReturnStmt(v)          => v.foreach(checkExpr)
+        case TWhileStmt(c, b, _)     => checkExpr(c); b.foreach(checkStmt)
+        case TForStmt(init, c, u, b, _) => checkStmt(init); checkExpr(c); checkStmt(u); b.foreach(checkStmt)
+        case TDoWhileStmt(c, b, _)   => checkExpr(c); b.foreach(checkStmt)
+        case TLoopStmt(b, _)         => b.foreach(checkStmt)
+        case TBreakStmt(_) | TContinueStmt(_) => ()
+        case TAsmStmt(_)             => bail()
+        case TDeferStmt(inner)       => checkStmt(inner)
+        case TContractCheck(_, e, _) => checkExpr(e)
+        case TMultiStmt(ss)          => ss.foreach(checkStmt)
+        case TExprStmt(e)            => checkExpr(e)
+
+    body match
+      case TExprBody(e) => checkExpr(e)
+      case TBlockBody(stmts) => stmts.foreach(checkStmt)
+
+    if bailed then FuncEffects.Unknown
+    else if reads.isEmpty && writes.isEmpty then FuncEffects.Pure
+    else FuncEffects(reads = Some(reads.toSet), writes = Some(writes.toSet))
+
   /** Build a FuncEffects from a FunInfo. The function-decl's `#pure` / `#reads` / `#writes`
    *  attributes are reflected so that taking a function reference produces a `FuncType`
    *  whose effect signature matches. The `reads`/`writes` are already mangled (resolved
@@ -3849,17 +4032,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val escapesFlag = expectedFunc match
           case Some(ft) => ft.escaping
           case None => true  // conservative: no context → assume escaping
-        // Infer closure effects by probing the body against the `#pure` discipline. If the
-        // probe succeeds, the closure is safe to pass to a `#pure` callback slot. Captures
-        // are handled correctly out-of-the-box: `validatePureFn` rejects writes to any name
-        // not in its localVars set, so writes to captured variables (side effects on the
-        // enclosing scope) force the probe to fail, while reads of captures — which don't
-        // mutate outer state — pass through. Impure calls, allocation, asm, indirect calls
-        // without a pure callee type: all rejected by the probe, flipping us to Unknown.
-        val inferredEffects = try
-          validatePureFn("<closure>", tBody, typedParams.map(_.name))
-          FuncEffects.Pure
-        catch case _: AnalysisError => FuncEffects.Unknown
+        // Infer closure effects from the body. The inference produces one of:
+        //   - Pure (no module-level reads/writes, no allocation, all calls pure)
+        //   - RW(R, W) (specific module-level vars read/written, all called functions
+        //     annotated so their effects could be absorbed)
+        //   - Unknown (something un-summarizable — `new`/append/asm/impure-unannotated call
+        //     or a write to a captured outer local)
+        val inferredEffects = inferClosureEffects(tBody, typedParams.map(_.name))
         TClosure(typedParams, actualRet, tBody, captures.toList, escapesFlag, inferredEffects)
 
       case AsmExprAST(code) =>

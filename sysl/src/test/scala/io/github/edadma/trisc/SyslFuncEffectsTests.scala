@@ -249,6 +249,77 @@ class SyslFuncEffectsTests extends SyslTestHelpers {
     t.getMessage should not be ""
   }
 
+  // ===== Closure #reads / #writes inference =====
+
+  "closure reading a module-level var infers #reads" in {
+    // Closure reads `threshold` (a module-level var) — inferred as #reads(threshold),
+    // which satisfies the slot's declared #reads(threshold).
+    eval("""
+      |var threshold = 5
+      |
+      |#reads(threshold)
+      |find(f: (int) -> bool #reads(threshold), arr: []int) -> int
+      |    for i in 0..<len(arr) do
+      |        if f(arr[i]) then return arr[i]
+      |    return -1
+      |
+      |main() -> int
+      |    var data: [3]int
+      |    data[0] = 3
+      |    data[1] = 7
+      |    data[2] = 1
+      |    return find((v: int) -> v > threshold, data[:])
+      |""".stripMargin) shouldBe 7
+  }
+
+  "closure writing a module-level var infers #writes" in {
+    // Single-expression closure body `() -> counter = counter + 1` isn't valid syntax
+    // because `=` isn't an expression — so the writing happens via a compound-assign
+    // expression `counter += 1` which IS expression-position as a post/pre-inc. But
+    // cleanest: wrap in a helper with block body passed by &ref.
+    eval("""
+      |var counter = 0
+      |
+      |#writes(counter)
+      |tick()
+      |    counter = counter + 1
+      |
+      |#writes(counter)
+      |run_through_closure(f: () -> unit #writes(counter), n: int)
+      |    for i in 0..<n do f()
+      |
+      |main() -> int
+      |    run_through_closure(() -> tick(), 4)
+      |    return counter
+      |""".stripMargin) shouldBe 4
+  }
+
+  "closure whose effects exceed the slot is rejected" in {
+    // Closure calls `touch_both` which writes `{counter, extra}`, exceeding the slot's
+    // declared #writes(counter). Effect inference absorbs the callee's sets into the
+    // closure, then `effectsSatisfy` flags the excess.
+    val t = intercept[Exception] {
+      eval("""
+        |var counter = 0
+        |var extra = 0
+        |
+        |#writes(counter, extra)
+        |touch_both()
+        |    counter = counter + 1
+        |    extra = extra + 1
+        |
+        |#writes(counter)
+        |run_one(f: () -> unit #writes(counter))
+        |    f()
+        |
+        |main() -> int
+        |    run_one(() -> touch_both())
+        |    return counter
+        |""".stripMargin)
+    }
+    t.getMessage should not be ""
+  }
+
   "imported #pure function reference satisfies pure callback slot in another unit" in {
     val libs = Map(
       "lib" -> """

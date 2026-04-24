@@ -2405,13 +2405,21 @@ Taking a function reference (`&fn_name`) carries the function's declared effects
 
 **Cross-module.** Effect signatures round-trip through `.smeta`, so `&imported_pure_fn` in a dependent unit produces the same effect-typed reference as `&local_pure_fn`.
 
-**Closure effect inference.** Lambda expressions synthesize a `FuncType` whose effects are inferred from the closure body. If the body passes the `#pure` discipline check — no allocation, no impure calls, no indirect calls to non-pure callees, no writes to captured variables — the synthesized type is marked `#pure`, making the closure usable as a `#pure` callback:
+**Closure effect inference.** Lambda expressions synthesize a `FuncType` whose effects are inferred from the closure body. The inference walks the typed body and produces one of three outcomes:
+
+- **`#pure`** — no module-level reads/writes, no allocation, no impure calls, no writes to captured outer locals.
+- **`#reads(R)` / `#writes(W)`** — specific module-level mutable globals were read or written, and every called function is itself annotated so its effects can be absorbed into the closure's signature. Reads/writes are unioned with the called functions' declared sets.
+- **`Unknown`** — the body contains an un-summarizable construct (`new`, `append`, asm, an unannotated impure call, an indirect call through an Unknown-typed callable, or a write to a captured outer local). Such closures can only be passed to unannotated callback slots.
 
 ```
-sort(arr, (a: int, b: int) -> a < b)       // pure comparator — accepted
+sort(arr, (a: int, b: int) -> a < b)            // pure → fits any #pure slot
+find(arr, (v: int) -> v > threshold)            // reads `threshold` → fits #reads(threshold) slot
+each(arr, (v: int) -> count = count + v)        // writes `count` → fits #writes(count) slot
 ```
 
-Reading captured immutable values inside a pure closure is fine; writing through a capture (a side effect on the enclosing scope) forces the inference to `Unknown` and the closure can then only be used in non-annotated contexts. Inference is currently binary (Pure vs Unknown); `#reads` / `#writes` on closures is a later refinement.
+Reads of captured outer locals don't contribute to the inferred sets — captures are opaque dataflow dependencies, not module-level effects. Writes through captures, by contrast, force the inference to `Unknown` (you can't summarize a write to an arbitrary outer-scope local as a fixed set of global names).
+
+When a closure is passed to a callback slot, the slot's declared effects are checked against the inferred ones via the same subset rule used everywhere else: closure effects must be a subset of the slot's `#reads ∪ #writes` for reads, and a subset of the slot's `#writes` for writes.
 
 ### `#ghost` — verification-only declarations
 
