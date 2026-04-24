@@ -251,7 +251,19 @@ class SyslSVMCodegen:
     val meta = ModuleMeta.fromProgram(program)
     val hasMain = meta.symbols.exists(s => s.name == "main" && s.typ.isInstanceOf[SymbolMeta.Kind.Func])
     if hasMain then emit("entry main")
-    out ++= meta.toAsmGlobals
+    // Deduplicate globals/externs by symbol name so repeated monomorphized
+    // generics (e.g. is_err_i64_Error used in two sibling modules' test
+    // scopes) don't produce duplicate 'global' directives.
+    val asmGlobalLines = meta.toAsmGlobals.linesIterator.toList
+    val emittedNames = new mutable.HashSet[String]
+    for line <- asmGlobalLines do
+      val trimmed = line.trim
+      val name =
+        if trimmed.startsWith("global ") then trimmed.stripPrefix("global ").takeWhile(c => c != ',' && !c.isWhitespace)
+        else if trimmed.startsWith("extern ") then trimmed.stripPrefix("extern ").takeWhile(c => c != ',' && !c.isWhitespace)
+        else ""
+      if name.nonEmpty && emittedNames.add(name) then out ++= line + "\n"
+      else if name.isEmpty then out ++= line + "\n"
 
     // Collect globals
     val dataGlobals = new mutable.ListBuffer[TDecl]
@@ -265,10 +277,12 @@ class SyslSVMCodegen:
         else dataGlobals += v
       case _ =>
 
-    // Emit code segment — functions
+    // Emit code segment — functions (deduplicated by name so repeated
+    // generic monomorphizations across sibling units don't duplicate labels)
     emit("segment code")
+    val emittedFuncs = new mutable.HashSet[String]
     for decl <- program.decls do decl match
-      case f: TFunDecl => genFunction(f)
+      case f: TFunDecl if emittedFuncs.add(f.name) => genFunction(f)
       case _ =>
 
     // Emit rodata segment — string literals + interface itables
