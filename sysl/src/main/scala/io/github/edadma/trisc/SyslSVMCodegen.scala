@@ -100,10 +100,9 @@ class SyslSVMCodegen:
         scanStmt(init); scanExpr(cond); scanStmt(update); scanStmts(body)
       case TDoWhileStmt(cond, body, _) => scanExpr(cond); scanStmts(body)
       case TIfExpr(cond, thenBody, elseBody, _) =>
+        // if-as-statement: scan bodies directly (no scanExpr — would double-count)
         scanExpr(cond); scanStmts(thenBody); elseBody.foreach(scanStmts)
-      case TExprStmt(e) => scanExpr(e); e match
-        case TIfExpr(_, thenBody, elseBody, _) => scanStmts(thenBody); elseBody.foreach(scanStmts)
-        case _ =>
+      case TExprStmt(e) => scanExpr(e)
       case TDestructureStmt(names, _, init) => count += names.length; scanExpr(init)
       case TReturnStmt(Some(e)) => scanExpr(e)
       case TMultiStmt(children) => children.foreach(scanStmt)
