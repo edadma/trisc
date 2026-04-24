@@ -24,6 +24,8 @@ class SyslSVMCodegen:
   // Current function
   private var currentFunction: TFunDecl = null
   private var needsSpExtern: Boolean = false
+  private var needsStrConcat: Boolean = false
+  private var needsStrEq: Boolean = false
 
   private def emit(s: String): Unit = out ++= s + "\n"
   private def newLabel(prefix: String): String =
@@ -145,6 +147,8 @@ class SyslSVMCodegen:
     globals.clear()
     globalConstants.clear()
     needsSpExtern = false
+    needsStrConcat = false
+    needsStrEq = false
 
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
 
@@ -226,6 +230,10 @@ class SyslSVMCodegen:
     // Emit __sp extern if memory stack was used
     if needsSpExtern && !definedSymbols.contains("__sp") then
       emit("extern __sp")
+    if needsStrConcat && !definedSymbols.contains("__svm_str_concat") then
+      emit("extern __svm_str_concat")
+    if needsStrEq && !definedSymbols.contains("__svm_str_eq") then
+      emit("extern __svm_str_eq")
 
     out.toString
 
@@ -664,6 +672,19 @@ class SyslSVMCodegen:
         emitPushInt(elemSize)
         emit("  mul")
       emitBinaryOp(op, SyslType.I64)
+
+    case TBinary(left, "+", right, SyslType.StringType) =>
+      genExpr(left)
+      genExpr(right)
+      emit("  call __svm_str_concat")
+      needsStrConcat = true
+
+    case TBinary(left, op @ ("==" | "!="), right, _) if left.typ == SyslType.StringType =>
+      genExpr(left)
+      genExpr(right)
+      emit("  call __svm_str_eq")
+      if op == "!=" then emit("  eqz")
+      needsStrEq = true
 
     case TBinary(left, op, right, typ) =>
       genExpr(left)

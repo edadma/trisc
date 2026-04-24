@@ -162,6 +162,183 @@ object SVMRuntime:
        |todo:
        |  call panic
        |  ret
+       |
+       |; __svm_str_concat(l: *string, r: *string) -> *string
+       |; Allocates a new string buffer + fat-pointer struct on the memory stack
+       |; and copies the bytes of both inputs into it.
+       |;
+       |; Args on entry (call pushes left-to-right, so TOS = r):
+       |;   local 0 = l, local 1 = r
+       |; Locals: 2 = totalLen, 3 = new struct addr, 4 = dst ptr, 5 = src ptr, 6 = remaining
+       |; Returns new struct address on TOS.
+       |global __svm_str_concat, func
+       |__svm_str_concat:
+       |  frame 7
+       |  local_set 1        ; r (top of stack)
+       |  local_set 0        ; l
+       |  ; totalLen = l.len + r.len
+       |  local_get 0
+       |  push_i8 8
+       |  add
+       |  load64
+       |  local_get 1
+       |  push_i8 8
+       |  add
+       |  load64
+       |  add
+       |  local_set 2
+       |  ; Allocate (aligned totalLen) + 16 on memory stack via __sp
+       |  push_i64 __sp
+       |  dup
+       |  load64              ; (&__sp old_sp)
+       |  local_get 2
+       |  push_i8 7
+       |  add
+       |  push_i8 -8
+       |  and                 ; alignedLen
+       |  push_i8 16
+       |  add
+       |  sub                 ; new_sp = old_sp - (alignedLen + 16)
+       |  dup
+       |  rot
+       |  store64             ; write new_sp; TOS = new_sp = struct addr
+       |  local_set 3
+       |  ; struct.ptr = struct_addr + 16 (byte buffer starts after struct)
+       |  local_get 3
+       |  push_i8 16
+       |  add
+       |  local_get 3
+       |  store64
+       |  ; struct.len = totalLen
+       |  local_get 2
+       |  local_get 3
+       |  push_i8 8
+       |  add
+       |  store64
+       |  ; dst = buffer = struct_addr + 16
+       |  local_get 3
+       |  push_i8 16
+       |  add
+       |  local_set 4
+       |  ; copy left: src = l.ptr, remaining = l.len
+       |  local_get 0
+       |  load64
+       |  local_set 5
+       |  local_get 0
+       |  push_i8 8
+       |  add
+       |  load64
+       |  local_set 6
+       |.concat_L:
+       |  local_get 6
+       |  eqz
+       |  jumpnz .concat_R_init
+       |  local_get 5
+       |  load8
+       |  local_get 4
+       |  store8
+       |  local_get 5
+       |  inc
+       |  local_set 5
+       |  local_get 4
+       |  inc
+       |  local_set 4
+       |  local_get 6
+       |  dec
+       |  local_set 6
+       |  jump .concat_L
+       |.concat_R_init:
+       |  local_get 1
+       |  load64
+       |  local_set 5
+       |  local_get 1
+       |  push_i8 8
+       |  add
+       |  load64
+       |  local_set 6
+       |.concat_R:
+       |  local_get 6
+       |  eqz
+       |  jumpnz .concat_done
+       |  local_get 5
+       |  load8
+       |  local_get 4
+       |  store8
+       |  local_get 5
+       |  inc
+       |  local_set 5
+       |  local_get 4
+       |  inc
+       |  local_set 4
+       |  local_get 6
+       |  dec
+       |  local_set 6
+       |  jump .concat_R
+       |.concat_done:
+       |  local_get 3
+       |  ret
+       |
+       |; __svm_str_eq(l: *string, r: *string) -> bool
+       |; Returns 1 if strings have equal length and contents, else 0.
+       |global __svm_str_eq, func
+       |__svm_str_eq:
+       |  frame 5
+       |  local_set 1        ; r
+       |  local_set 0        ; l
+       |  ; compare lens
+       |  local_get 0
+       |  push_i8 8
+       |  add
+       |  load64
+       |  local_get 1
+       |  push_i8 8
+       |  add
+       |  load64
+       |  over
+       |  over
+       |  neq
+       |  jumpnz .streq_no
+       |  ; lens equal; TOS has both lens still — drop one
+       |  drop
+       |  local_set 2        ; remaining
+       |  ; lp = l.ptr, rp = r.ptr
+       |  local_get 0
+       |  load64
+       |  local_set 3
+       |  local_get 1
+       |  load64
+       |  local_set 4
+       |.streq_loop:
+       |  local_get 2
+       |  eqz
+       |  jumpnz .streq_yes
+       |  local_get 3
+       |  load8
+       |  local_get 4
+       |  load8
+       |  neq
+       |  jumpnz .streq_no_clean
+       |  local_get 3
+       |  inc
+       |  local_set 3
+       |  local_get 4
+       |  inc
+       |  local_set 4
+       |  local_get 2
+       |  dec
+       |  local_set 2
+       |  jump .streq_loop
+       |.streq_yes:
+       |  push_1
+       |  ret
+       |.streq_no_clean:
+       |  push_0
+       |  ret
+       |.streq_no:
+       |  drop
+       |  drop
+       |  push_0
+       |  ret
        |""".stripMargin
 
   def bootTof: TOF = svmAssemble(bootSource, relocatable = true)
