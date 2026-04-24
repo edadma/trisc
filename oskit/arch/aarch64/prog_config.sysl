@@ -20,3 +20,9 @@ val SRV_SSP  = 0x60080000
 // definition in oskit/arch/aarch64/vm.lsysl. Sub-page register
 // blocks land at MMIO_SERVER_VA + (PA & 0xfff).
 val MMIO_SERVER_VA: i64 = 0x60100000
+
+// virtio-mmio slot 31 on QEMU virt lives at MMIO_SERVER_VA + 0xe00
+// (PA 0x0a003e00, 31 * 0x200 from VIRTIO_MMIO_BASE 0x0a000000).
+// The RS grant on this arch maps the slot 24..31 page at
+// MMIO_SERVER_VA, so the driver sees it at the offset above.
+val VIRTIO_NET_SLOT_OFFSET: i64 = 0xe00

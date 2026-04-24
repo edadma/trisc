@@ -45,13 +45,24 @@ build_disk() {
     SERVER_LINKER_SCRIPT=$orig_server_ld
 }
 
-# x86 doesn't run nic as a boot module — virtio-pci BARs live in the
-# kernel's identity map and there's no per-BAR grant syscall yet.
-# The virtio-net driver stays linked into the kernel (see build.sh's
-# app_nsh case), and x86 bootinfo omits nic so RS treats slot 6 as
-# [skipped]. Override build_nic to a no-op so `all` succeeds.
+# x86 nic server uses virtio_transport_pci (PCI) + virtio_net + the
+# server-context DMA provider (virtio_dma_server). The kernel's
+# virtio_bringup_x86 caches the cap addresses at boot; nic's
+# srv_nic_attach in prog_config.sysl fetches them via
+# svc_virtio_pci_info and calls v_attach_pci.
+#
+# Also needs pci.lsysl for VIRTIO_PCI_CAP_* constants that
+# virtio_transport_pci imports (v_find is unused on the server but
+# the transport is the same source file).
 build_nic() {
-    echo "=== Skipping nic on x86 (kernel-linked virtio-pci; see build.sh) ==="
+    build_server nic nic_server \
+        "import oskit.servers.{nic_server}" \
+        oskit/servers/nic.lsysl \
+        oskit/arch/x86_64/nic_attach.sysl \
+        oskit/arch/x86_64/pci.lsysl \
+        oskit/drivers/virtio/virtio_transport_pci.lsysl \
+        oskit/drivers/virtio/virtio_net.lsysl \
+        oskit/drivers/virtio/virtio_dma_server.lsysl
 }
 
 dispatch_servers_arg "$1"

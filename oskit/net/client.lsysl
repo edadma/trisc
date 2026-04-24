@@ -28,13 +28,31 @@ run until a program actually opens a socket.
 
 Command codes — must track `oskit/servers/inet.lsysl`.
 
-    val INET_CMD_SOCKET   = 1
-    val INET_CMD_BIND     = 2
-    val INET_CMD_SENDTO   = 3
-    val INET_CMD_RECVFROM = 4
-    val INET_CMD_CLOSE    = 5
+    val INET_CMD_SOCKET       = 1
+    val INET_CMD_BIND         = 2
+    val INET_CMD_SENDTO       = 3
+    val INET_CMD_RECVFROM     = 4
+    val INET_CMD_CLOSE        = 5
+    val INET_CMD_TCP_CONNECT  = 10
+    val INET_CMD_TCP_SEND     = 11
+    val INET_CMD_TCP_RECV     = 12
+    val INET_CMD_TCP_CLOSE    = 13
+    val INET_CMD_TCP_LISTEN   = 14
+    val INET_CMD_TCP_ACCEPT   = 15
+    val INET_CMD_SET_IP_CONFIG = 16
+    val INET_CMD_GET_IP_CONFIG = 17
+    val INET_CMD_RECVFROM_TIMEOUT = 18
+    val INET_CMD_ARP_PROBE    = 19
+    val INET_CMD_TCP_DEBUG    = 20
+    val INET_CMD_TCP_OOO_SELFTEST = 99
+
+    val ARP_PROBE_OP_START    = 0
+    val ARP_PROBE_OP_SEND     = 1
+    val ARP_PROBE_OP_CHECK    = 2
+    val ARP_PROBE_OP_ANNOUNCE = 3
 
     val INET_MAX_DATA     = 512
+    val INET_MAX_TCP_SEG  = 480
 
 
 ### Byte-buffer helpers (matching the server's big-endian wire
@@ -55,6 +73,13 @@ format).
 
     net_read_ipv4(p: *byte, off: int) -> u32
         ipv4(int(p[off]), int(p[off + 1]), int(p[off + 2]), int(p[off + 3]))
+
+    net_read_i32(p: *byte, off: int) -> int
+        val b0 = int(p[off]     & 0xff) << 24
+        val b1 = int(p[off + 1] & 0xff) << 16
+        val b2 = int(p[off + 2] & 0xff) << 8
+        val b3 = int(p[off + 3] & 0xff)
+        b0 | b1 | b2 | b3
 
 
 ### socket
@@ -169,6 +194,64 @@ payload length on success, -1 on error.
         r_len
 
 
+### recvfrom with timeout
+
+Same as `recvfrom` but bounded: waits up to `timeout_ms`
+milliseconds for a datagram. Returns:
+
+- `>0` — bytes received (payload length)
+- `0`  — timed out before a datagram arrived
+- `-1` — error
+
+A `timeout_ms` of 0 gives an immediate poll: returns queued bytes
+if any, otherwise 0. Used by retransmit/renewal loops (dhclient,
+future DNS client, etc.) that need to fail fast on a silent
+network instead of hanging forever.
+
+Wire layout: `cmd(1) + fd(1) + maxlen(2) + timeout_ms(4)` request;
+reply matches `recvfrom`. Status byte: `0` = data, `1` = timeout,
+`-1` (0xff) = error.
+
+    recvfrom_timeout(fd: int, buf: *byte, maxlen: int,
+                     src_ip: *u32, src_port: *int,
+                     timeout_ms: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        if timeout_ms < 0
+            return -1
+        var cap_len = maxlen
+        if cap_len > INET_MAX_DATA
+            cap_len = INET_MAX_DATA
+        var msg: [8]byte
+        msg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
+        msg[1] = byte(fd & 0xff)
+        net_write_u16(msg, 2, cap_len)
+        net_write_u16(msg, 4, (timeout_ms >> 16) & 0xffff)
+        net_write_u16(msg, 6, timeout_ms & 0xffff)
+        var reply: [540]byte
+        ipc_send(port, msg, 8, reply, 540)
+        val status = int(reply[0]) & 0xff
+        if status == 0xff
+            return -1
+        if status == 1
+            return 0
+        val r_port = net_read_u16(reply, 2)
+        val r_ip = net_read_ipv4(reply, 4)
+        val r_len = net_read_u16(reply, 8)
+        if i64(src_ip) != 0
+            *src_ip = r_ip
+        if i64(src_port) != 0
+            *src_port = r_port
+        var i = 0
+        while i < r_len
+            buf[i] = reply[10 + i]
+            i += 1
+        r_len
+
+
 ### close
 
 Release a socket. Returns 0 on success, -1 on error.
@@ -185,3 +268,326 @@ Release a socket. Returns 0 on success, -1 on error.
         if reply[0] != 0
             return -1
         0
+
+
+TCP client wrappers
+===================
+
+Active-open only in phase 1: `tcp_connect` blocks until
+ESTABLISHED, `tcp_send` returns once bytes are buffered (POSIX
+`write()` semantics — no ACK wait), `tcp_recv` blocks until data
+arrives or peer closes, `tcp_close` blocks until FIN is
+acknowledged. `fd` is a 16-bit raw socket index (distinct from
+UDP sockets).
+
+
+### tcp_connect
+
+Open a TCP connection to (`dst_ip`, `dst_port`). Returns the new
+socket's fd on success, -1 on failure. Blocks in the caller
+until the 3-way handshake completes or retransmits exhaust.
+
+NOTE: phase 1 returns the local ephemeral port on success in the
+`fd` channel — actual TCP socket indices are tracked server-side
+and the protocol doesn't echo one back. We use the local port
+as a handle; subsequent send/recv/close reference it.
+
+Actually — for phase 1 the server-side slot IS the fd. The
+inet_tcp_begin_connect() return value is the socket index, but
+that's not handed to the client. To keep the protocol minimal
+we'll plumb it through the status-reply so clients can pass it
+to send/recv/close.
+
+    tcp_connect(dst_ip: u32, dst_port: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [7]byte
+        msg[0] = byte(INET_CMD_TCP_CONNECT)
+        net_write_ipv4(msg, 1, dst_ip)
+        net_write_u16(msg, 5, dst_port)
+        var reply: [2]byte
+        ipc_send(port, msg, 7, reply, 2)
+        if reply[0] != 0
+            return -1
+        int(reply[1]) & 0xff
+
+
+### tcp_send
+
+Buffer `len` bytes into the socket's send buffer and put them on
+the wire. Returns the number of bytes buffered (0..len), or -1
+on error. 0 return means the send buffer still has unacked data
+from a prior call — retry after a short delay.
+
+    tcp_send(fd: int, data: *byte, len: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        if len < 0
+            return -1
+        var n = len
+        if n > INET_MAX_TCP_SEG
+            n = INET_MAX_TCP_SEG
+        var msg: [485]byte
+        msg[0] = byte(INET_CMD_TCP_SEND)
+        net_write_u16(msg, 1, fd)
+        net_write_u16(msg, 3, n)
+        var i = 0
+        while i < n
+            msg[5 + i] = data[i]
+            i += 1
+        var reply: [3]byte
+        ipc_send(port, msg, 5 + n, reply, 3)
+        if reply[0] != 0
+            return -1
+        net_read_u16(reply, 1)
+
+
+### tcp_recv
+
+Copy up to `maxlen` bytes of received data into `buf`. Returns
+the number of bytes written (>0), 0 if the peer has closed
+(EOF), or -1 on error. Blocks until data is available or FIN
+arrives.
+
+    tcp_recv(fd: int, buf: *byte, maxlen: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        var cap_len = maxlen
+        if cap_len > INET_MAX_TCP_SEG
+            cap_len = INET_MAX_TCP_SEG
+        var msg: [5]byte
+        msg[0] = byte(INET_CMD_TCP_RECV)
+        net_write_u16(msg, 1, fd)
+        net_write_u16(msg, 3, cap_len)
+        var reply: [540]byte
+        ipc_send(port, msg, 5, reply, 540)
+        if reply[0] != 0
+            return -1
+        val r_len = net_read_u16(reply, 1)
+        var i = 0
+        while i < r_len
+            buf[i] = reply[3 + i]
+            i += 1
+        r_len
+
+
+### tcp_close
+
+Emit FIN and block until the close handshake completes (or 2MSL
+TIME_WAIT elapses). Returns 0 on success, -1 on error.
+
+    tcp_close(fd: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_TCP_CLOSE)
+        net_write_u16(msg, 1, fd)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
+        if reply[0] != 0
+            return -1
+        0
+
+
+### tcp_listen
+
+Bind a listen socket to `local_port`. Returns the listen fd on
+success (usable with `tcp_accept`) or -1 on error.
+
+    tcp_listen(local_port: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_TCP_LISTEN)
+        net_write_u16(msg, 1, local_port)
+        var reply: [2]byte
+        ipc_send(port, msg, 3, reply, 2)
+        if reply[0] != 0
+            return -1
+        int(reply[1]) & 0xff
+
+
+### tcp_accept
+
+Block until a remote peer completes the three-way handshake on
+a listen socket. Fills `peer_ip` (4 bytes) and `peer_port` (2
+bytes) if non-null. Returns the child fd on success or -1 on
+error.
+
+    tcp_accept(fd: int, peer_ip: *byte, peer_port: *byte) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_TCP_ACCEPT)
+        net_write_u16(msg, 1, fd)
+        var reply: [8]byte
+        ipc_send(port, msg, 3, reply, 8)
+        if reply[0] != 0
+            return -1
+        if i64(peer_ip) != i64(0)
+            peer_ip[0] = reply[2]
+            peer_ip[1] = reply[3]
+            peer_ip[2] = reply[4]
+            peer_ip[3] = reply[5]
+        if i64(peer_port) != i64(0)
+            peer_port[0] = reply[6]
+            peer_port[1] = reply[7]
+        int(reply[1]) & 0xff
+
+
+### inet_set_ip_config
+
+Install (`ip`, `mask`, `gw`) on the inet server. The DHCP client
+(Phase B) calls this after binding a lease; tools like `ifconfig`
+could use it for manual config. Returns 0 on success, -1 on error.
+
+    inet_set_ip_config(ip: u32, mask: u32, gw: u32) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [13]byte
+        msg[0] = byte(INET_CMD_SET_IP_CONFIG)
+        net_write_ipv4(msg, 1, ip)
+        net_write_ipv4(msg, 5, mask)
+        net_write_ipv4(msg, 9, gw)
+        var reply: [1]byte
+        ipc_send(port, msg, 13, reply, 1)
+        if reply[0] != 0
+            return -1
+        0
+
+
+### inet_get_ip_config
+
+Read the current (`ip`, `mask`, `gw`). Each out pointer is written
+only if non-null, so callers can ask for a subset. Returns 0 on
+success, -1 on error.
+
+    inet_get_ip_config(ip: *u32, mask: *u32, gw: *u32) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_GET_IP_CONFIG)
+        var reply: [13]byte
+        ipc_send(port, msg, 1, reply, 13)
+        if reply[0] != 0
+            return -1
+        if i64(ip) != 0
+            *ip = net_read_ipv4(reply, 1)
+        if i64(mask) != 0
+            *mask = net_read_ipv4(reply, 5)
+        if i64(gw) != 0
+            *gw = net_read_ipv4(reply, 9)
+        0
+
+
+### ARP probe (RFC 5227 §2.1.1)
+
+Three helpers drive the server-side probe state machine:
+
+- `arp_probe_start(ip)` arms the probe with a target address.
+- `arp_probe_send(ip)` transmits one ARP probe (sender IP =
+  0.0.0.0, target IP = `ip`). The caller invokes this up to
+  PROBE_NUM times with RFC 5227 timing.
+- `arp_probe_check()` returns 1 if any defender was observed,
+  0 if the window was clean, and clears the probe state. -1
+  on transport error. Callers treat `1` as "conflict, DECLINE
+  this lease."
+
+Wire: cmd(1) + op(1) + target(4) → status(1) + seen(1).
+
+    arp_probe_send_op(op: int, ip: u32) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [6]byte
+        msg[0] = byte(INET_CMD_ARP_PROBE)
+        msg[1] = byte(op & 0xff)
+        net_write_ipv4(msg, 2, ip)
+        var reply: [2]byte
+        ipc_send(port, msg, 6, reply, 2)
+        if reply[0] != 0
+            return -1
+        int(reply[1]) & 0xff
+
+    arp_probe_start(ip: u32) -> int
+        arp_probe_send_op(ARP_PROBE_OP_START, ip)
+
+    arp_probe_send(ip: u32) -> int
+        arp_probe_send_op(ARP_PROBE_OP_SEND, ip)
+
+    arp_probe_check() -> int
+        arp_probe_send_op(ARP_PROBE_OP_CHECK, u32(0))
+
+    arp_probe_announce(ip: u32) -> int
+        arp_probe_send_op(ARP_PROBE_OP_ANNOUNCE, ip)
+
+
+### tcp_debug (test-only)
+
+Query internal congestion-control state for an established TCP
+socket. Used by tests to assert cwnd growth + RTO collapse
+behaviour. Fills the six int fields of `out`; returns 0 on
+success, -1 if the fd is invalid.
+
+    struct TcpDebug
+        state: int
+        snd_cwnd: int
+        snd_ssthresh: int
+        snd_una: int
+        snd_nxt: int
+        snd_wnd: int
+        send_len: int
+        fast_recovery: int
+        dup_ack_count: int
+        sack_ok: int
+        rexmit_count: int
+
+    tcp_debug(fd: int, out: *TcpDebug) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_TCP_DEBUG)
+        net_write_u16(msg, 1, fd)
+        var reply: [42]byte
+        ipc_send(port, msg, 3, reply, 42)
+        if reply[0] != 0
+            return -1
+        out.state         = int(reply[1]) & 0xff
+        out.snd_cwnd      = net_read_i32(reply, 2)
+        out.snd_ssthresh  = net_read_i32(reply, 6)
+        out.snd_una       = net_read_i32(reply, 10)
+        out.snd_nxt       = net_read_i32(reply, 14)
+        out.snd_wnd       = net_read_i32(reply, 18)
+        out.send_len      = net_read_i32(reply, 22)
+        out.fast_recovery = net_read_i32(reply, 26)
+        out.dup_ack_count = net_read_i32(reply, 30)
+        out.sack_ok       = net_read_i32(reply, 34)
+        out.rexmit_count  = net_read_i32(reply, 38)
+        0
+
+
+### tcp_ooo_selftest (test-only)
+
+Triggers the inet server's TCP out-of-order reassembly self-test.
+Returns 0 on pass, a nonzero error code on failure.
+
+    tcp_ooo_selftest() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_TCP_OOO_SELFTEST)
+        var reply: [1]byte
+        ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff

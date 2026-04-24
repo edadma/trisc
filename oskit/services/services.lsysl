@@ -386,3 +386,56 @@ POSIX shim syscalls without each bit being set individually.
 
     svc_grant_posix_range(pid: int)
         syscall6(SYS_GRANT_POSIX_RANGE, i64(pid), 0, 0, 0, 0, 0)
+
+Fetch the virtio-pci cap addresses cached by the kernel's
+one-shot PCI probe. Fills `out` (40 bytes = 5 × i64): common_pa,
+notify_pa, notify_mult, isr_pa, device_pa. All zero if no
+virtio-net was found or on arches without virtio-pci. x86 nic
+server uses this to `v_attach_pci(...)` without needing PCI
+config-space access.
+
+Renumbered 77 → 80 during the dev→slix merge on 2026-04-24 to
+avoid collision with dev's SYS_GETINFO.
+
+    val SYS_VIRTIO_PCI_INFO = 80
+
+    svc_virtio_pci_info(out: *byte)
+        syscall(SYS_VIRTIO_PCI_INFO, i64(out))
+
+Subscribe the calling thread to periodic timer notifications.
+Returns subscription index (>=0) or -1 on failure. Every
+`period` ticks the kernel fires `notify_send(tid, 2)` so a
+notify_wait/ipc_recv_notify loop can drive background scans
+(retransmits, TIME_WAIT expiry) without needing incoming
+frames for liveness.
+
+Renumbered 78 → 81 during the dev→slix merge to avoid
+collision with dev's SYS_SET_RS_TID.
+
+    val SYS_TIMER_SUBSCRIBE = 81
+
+    svc_timer_subscribe(period: int) -> int
+        syscall(SYS_TIMER_SUBSCRIBE, i64(period))
+
+
+Bulk write to the console. The kernel handler loops `uart_putc`
+in kernel context, avoiding the per-byte user/kernel transition
+that `SYS_PUTC` × N incurs. Used by the TTY server so every
+`puts` that reaches the UART is one syscall, not one-per-byte.
+
+Currently registered on aarch64 only (see
+`oskit/arch/aarch64/board/virt/hello.lsysl::sys_puts_handler`).
+x86 is sidelined; when it's reactivated, add a parallel
+handler registration there — otherwise tty_handle_puts on x86
+silently fails.
+
+Renumbered 79 → 82 during the dev→slix merge to avoid
+collision with dev's SYS_GRANT_POSIX_RANGE.
+
+    val SYS_PUTS = 82
+
+    svc_puts(buf: *byte, len: int) -> int
+        var args: [2]i64
+        args[0] = i64(buf)
+        args[1] = len
+        syscall(SYS_PUTS, i64(args))

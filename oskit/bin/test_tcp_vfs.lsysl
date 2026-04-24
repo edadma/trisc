@@ -1,0 +1,95 @@
+test_tcp_vfs — connect/read/write/close via VFS bridge
+=======================================================
+
+Symmetric to test_tcp_rx, but uses only VFS-level syscalls: no
+tcp_* wrappers. Proves the tcp: scheme wires INET_CMD_TCP_CONNECT/
+SEND/RECV/CLOSE through VFS, so a program that only knows read/
+write/close can still talk TCP.
+
+Dials 10.0.2.2:18081 (slirp routes to host 127.0.0.1:18081),
+drains exactly 900 bytes of pattern, accumulates count + byte-sum
+checksum, writes a 6-byte summary back (same wire shape as
+test_tcp_big's reply), closes.
+
+Prints:
+- `connected h=N`
+- `drained count=N`
+- `sent=6`
+- `ok`
+
+    module oskit.bin.test_tcp_vfs
+
+    import oskit.ulib.{puts, exit, exit_with, sleep, connect, read, write_handle, close}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+    main(argv: []string)
+        var h = -1
+        var attempts = 0
+        while h < 0 && attempts < 5
+            h = connect("tcp:10.0.2.2:18081")
+            if h < 0
+                sleep(20)
+            attempts += 1
+        if h < 0
+            puts("test_tcp_vfs: connect failed\n")
+            exit_with(1)
+            return
+        puts("test_tcp_vfs: connected h=")
+        print_udec(h)
+        puts("\n")
+
+        val expected = 900
+        var rbuf: [480]byte
+        var count = 0
+        var checksum: u32 = u32(0)
+        while count < expected
+            val got = read(h, &rbuf[0], 480)
+            if got < 0
+                puts("test_tcp_vfs: read err count=")
+                print_udec(count)
+                puts("\n")
+                close(h)
+                exit_with(2)
+                return
+            if got == 0
+                puts("test_tcp_vfs: early EOF count=")
+                print_udec(count)
+                puts("\n")
+                break
+            var j = 0
+            while j < got
+                checksum = checksum + u32(int(rbuf[j]) & 0xff)
+                j += 1
+            count += got
+        puts("test_tcp_vfs: drained count=")
+        print_udec(count)
+        puts("\n")
+
+        var reply: [6]byte
+        reply[0] = byte((count >> 8) & 0xff)
+        reply[1] = byte(count & 0xff)
+        reply[2] = byte(int(checksum >> 24) & 0xff)
+        reply[3] = byte(int(checksum >> 16) & 0xff)
+        reply[4] = byte(int(checksum >>  8) & 0xff)
+        reply[5] = byte(int(checksum      ) & 0xff)
+        val sent = write_handle(h, &reply[0], 6)
+        if sent < 0
+            puts("test_tcp_vfs: write failed\n")
+            close(h)
+            exit_with(3)
+            return
+        puts("test_tcp_vfs: sent=")
+        print_udec(sent)
+        puts("\n")
+
+        close(h)
+        puts("test_tcp_vfs: ok\n")
+        exit()

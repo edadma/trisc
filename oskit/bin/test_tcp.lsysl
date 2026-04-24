@@ -1,0 +1,85 @@
+test_tcp — TCP active-open smoke test
+============================================
+
+Connects to (10.0.2.2, 8080) via the phase-1 TCP stack, sends
+"ping\n", receives one echo segment, closes cleanly. Under QEMU
+user-mode networking, the test harness binds a host echo server
+and wires `hostfwd=tcp::<host>-:8080` so the guest's 10.0.2.2
+dial forwards to it.
+
+Prints each step so failures are visible in the serial log:
+`connected fd=N`, `sent=5`, `got 5 'ping\n'`, `closed`.
+
+Exit code is 0 on full success, non-zero on the first failing
+step. All failures are non-fatal for the connection itself —
+the socket still gets closed.
+
+    module oskit.bin.test_tcp
+
+    import oskit.ulib.{puts, exit, exit_with, sleep}
+    import oskit.net.{tcp_connect, tcp_send, tcp_recv, tcp_close}
+    import std.net.ipv4
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+    print_int(prefix: string, v: int)
+        puts(prefix)
+        if v < 0
+            puts("-")
+            print_udec(0 - v)
+        else
+            print_udec(v)
+        puts("\n")
+
+    main(argv: []string)
+        val dst = ipv4(10, 0, 2, 2)
+        // Retry connect up to 5×; boot-time ARP/MAC resolution can
+        // still be in flight when the shell first becomes usable.
+        var fd = -1
+        var attempts = 0
+        while fd < 0 && attempts < 5
+            fd = tcp_connect(dst, 18080)
+            if fd < 0
+                sleep(20)
+            attempts += 1
+        if fd < 0
+            puts("test_tcp: connect failed\n")
+            exit_with(1)
+            return
+        print_int("test_tcp: connected fd=", fd)
+
+        var msg: [5]byte
+        msg[0] = 'p'; msg[1] = 'i'; msg[2] = 'n'; msg[3] = 'g'; msg[4] = '\n'
+        val sent = tcp_send(fd, &msg[0], 5)
+        if sent < 0
+            puts("test_tcp: send failed\n")
+            tcp_close(fd)
+            exit_with(2)
+            return
+        print_int("test_tcp: sent=", sent)
+
+        var rbuf: [32]byte
+        val got = tcp_recv(fd, &rbuf[0], 32)
+        if got < 0
+            puts("test_tcp: recv failed\n")
+            tcp_close(fd)
+            exit_with(3)
+            return
+        puts("test_tcp: got ")
+        print_udec(got)
+        puts(" '")
+        puts(string(&rbuf[0], got))
+        puts("'\n")
+
+        val cr = tcp_close(fd)
+        if cr < 0
+            puts("test_tcp: close failed\n")
+            exit_with(4)
+            return
+        puts("test_tcp: closed\n")
+        exit()

@@ -1,0 +1,30 @@
+test_tcp_ooo — TCP out-of-order reassembly self-test
+=====================================================
+
+Triggers inet's OOO reorder-queue self-test via a test-only IPC
+op. Prints `test_tcp_ooo: ok` on pass or `test_tcp_ooo: failed N`
+with the inet-side error code. Used by the Scala harness to verify
+the reorder wiring without depending on slirp to actually reorder.
+
+    module oskit.bin.test_tcp_ooo
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.tcp_ooo_selftest
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+    main(argv: []string)
+        val rc = tcp_ooo_selftest()
+        if rc == 0
+            puts("test_tcp_ooo: ok\n")
+            exit()
+            return
+        puts("test_tcp_ooo: failed ")
+        print_udec(rc)
+        puts("\n")
+        exit_with(1)

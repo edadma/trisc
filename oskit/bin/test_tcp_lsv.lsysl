@@ -1,0 +1,89 @@
+test_tcp_lsv — passive-open echo via the VFS listen bridge
+===========================================================
+
+Symmetric to test_tcp_srv, but uses only VFS-level syscalls: no
+tcp_* wrappers. Proves that `connect("tcp-listen:PORT")` +
+`accept` + `read`/`write_handle`/`close` can drive a TCP server
+end-to-end through VFS.
+
+Listens on :7890, accepts one client, reads up to 32 bytes,
+echoes them back, closes. The aarch64 harness forwards host
+127.0.0.1:28080 -> guest:7890 via hostfwd.
+
+Prints each step so failures are visible in the serial log:
+`listening h=N`, `accepted ch=N from A.B.C.D:P`, `got K`,
+`sent=K`, `closed`.
+
+    module oskit.bin.test_tcp_lsv
+
+    import oskit.ulib.{puts, exit, exit_with, connect, accept, read, write_handle, close}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+    main(argv: []string)
+        val lh = connect("tcp-listen:7890")
+        if lh < 0
+            puts("test_tcp_lsv: listen failed\n")
+            exit_with(1)
+            return
+        puts("test_tcp_lsv: listening h=")
+        print_udec(lh)
+        puts("\n")
+
+        var peer_ip: [4]byte
+        var peer_port: [2]byte
+        val ch = accept(lh, &peer_ip[0], &peer_port[0])
+        if ch < 0
+            puts("test_tcp_lsv: accept failed\n")
+            close(lh)
+            exit_with(2)
+            return
+        puts("test_tcp_lsv: accepted ch=")
+        print_udec(ch)
+        puts(" from ")
+        print_udec(int(peer_ip[0]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[1]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[2]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[3]) & 0xff)
+        puts(":")
+        val pp = ((int(peer_port[0]) & 0xff) << 8) | (int(peer_port[1]) & 0xff)
+        print_udec(pp)
+        puts("\n")
+
+        var rbuf: [32]byte
+        val got = read(ch, &rbuf[0], 32)
+        if got < 0
+            puts("test_tcp_lsv: read failed\n")
+            close(ch)
+            close(lh)
+            exit_with(3)
+            return
+        puts("test_tcp_lsv: got ")
+        print_udec(got)
+        puts("\n")
+
+        val sent = write_handle(ch, &rbuf[0], got)
+        if sent < 0
+            puts("test_tcp_lsv: write failed\n")
+            close(ch)
+            close(lh)
+            exit_with(4)
+            return
+        puts("test_tcp_lsv: sent=")
+        print_udec(sent)
+        puts("\n")
+
+        close(ch)
+        close(lh)
+        puts("test_tcp_lsv: closed\n")
+        exit()

@@ -134,6 +134,10 @@ Start a session — spawn program and record in session table.
             session_path[session_count] = path
             session_pid[session_count] = pid
             session_count += 1
+        else
+            init_print("init: spawn failed: ")
+            init_print(path)
+            init_print("\n")
 
 Spawn an external program with inherited TTY handles.
 Returns child PID or -1 on error.
@@ -159,6 +163,32 @@ Returns child PID or -1 on error.
         fs_close(h_out)
         fs_close(h_err)
         pid
+
+Boot-time DHCP. Spawns `/bin/dhclient` synchronously before
+opening logins so inet has a live IP/mask/gateway the first
+time any userspace program calls out to the network. The
+client's own retransmit budget (~60 s per RFC 2131 §4.1)
+bounds how long this blocks — no external timeout needed.
+
+Exit-code-based status only: dhclient prints its own
+diagnostic lines during the handshake (DISCOVER/OFFER/bound),
+so we just add one summary line here.
+
+Failure is non-fatal. A diskless host without DHCP still has
+working loopback and can still log in; the admin can rerun
+`dhclient` by hand or set a static config.
+
+    start_dhcp()
+        val pid = spawn_program("/bin/dhclient")
+        if pid <= 0
+            init_print("network: dhcp spawn failed\n")
+            return
+        val code = pm_waitpid(pid)
+        if code == 0
+            init_print("network: dhcp ok\n")
+        else
+            init_print("network: dhcp failed\n")
+
 
 Respawn loop. Wait for any child to exit, then respawn
 the corresponding session.
@@ -193,7 +223,12 @@ the corresponding session.
         // Signal RS that init is ready (for handshake)
         rs_ready()
 
-        // All servers are up — read /etc/ttytab and spawn sessions
+        // All servers are up — acquire a DHCP lease before we
+        // open logins. Blocks for up to ~60 s on a silent
+        // network (dhclient's own retransmit budget).
+        start_dhcp()
+
+        // Now read /etc/ttytab and spawn sessions.
         init_print("Reading /etc/ttytab\n")
         spawn_sessions()
 

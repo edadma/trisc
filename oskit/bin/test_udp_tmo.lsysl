@@ -1,0 +1,72 @@
+test_udp_tmo — recvfrom_timeout sanity test
+=================================================
+
+Exercises the server-side UDP recv deadline. Binds an unused
+port, calls `recvfrom_timeout` with a 1-second timeout and no
+sender. Expected behaviour:
+
+  - return value == 0 (timeout, not error, not data)
+  - elapsed time between ~90 and ~200 scheduler ticks
+    (1000 ms ≈ 100 ticks at 100 Hz — but with one-tick
+    rounding overhead plus wake granularity, the spread is
+    realistic)
+
+If either condition fails the test exits non-zero. If
+recvfrom_timeout had been a straight pass-through of the old
+blocking recvfrom, the test would hang forever and the runner
+would time it out — so "timed out with exit 0" is what proves
+the deadline scan is driving the reply.
+
+    module oskit.bin.test_udp_tmo
+
+    import oskit.ulib.{puts, putint, exit, exit_with, uptime}
+    import oskit.net.{socket, bind, recvfrom_timeout, close_socket}
+    import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY}
+
+
+    main(argv: []string)
+        val fd = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd < 0
+            puts("test_udp_tmo: socket failed\n")
+            exit_with(1)
+            return
+        val br = bind(fd, INADDR_ANY, 7788)
+        if br < 0
+            puts("test_udp_tmo: bind failed\n")
+            close_socket(fd)
+            exit_with(2)
+            return
+
+        var rbuf: [64]byte
+        var sip: u32 = 0u32
+        var sport: int = 0
+        val t0 = uptime()
+        val got = recvfrom_timeout(fd, &rbuf[0], 64, &sip, &sport, 1000)
+        val t1 = uptime()
+        close_socket(fd)
+
+        val elapsed = t1 - t0
+        if got < 0
+            puts("test_udp_tmo: recvfrom_timeout error\n")
+            exit_with(3)
+            return
+        if got > 0
+            puts("test_udp_tmo: unexpected data got=")
+            putint(got)
+            puts("\n")
+            exit_with(4)
+            return
+        // got == 0 → timeout fired. Report elapsed and sanity-check.
+        puts("test_udp_tmo: timeout elapsed=")
+        putint(elapsed)
+        puts(" ticks\n")
+        if elapsed < 80
+            puts("test_udp_tmo: too early\n")
+            exit_with(5)
+            return
+        if elapsed > 300
+            puts("test_udp_tmo: too late\n")
+            exit_with(6)
+            return
+        puts("test_udp_tmo: ok\n")
+        exit()

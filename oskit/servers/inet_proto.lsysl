@@ -20,10 +20,11 @@ live in kernel-thread space and call `virtio_net_send` directly.
 
     module oskit.servers
 
-    import oskit.ipc.{ipc_send, port_lookup}
+    import oskit.ipc.{ipc_send, port_lookup, ipc_reply}
+    import oskit.services.uptime
     import std.net.{ETHERTYPE_IPV4, ETHERTYPE_ARP,
         ARP_OP_REQUEST, ARP_OP_REPLY,
-        IP_PROTO_ICMP, IP_PROTO_UDP,
+        IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP,
         ICMP_ECHO_REQ, ICMP_ECHO_REP,
         pkt_read_u16, pkt_write_u16,
         pkt_write_mac, pkt_write_ipv4,
@@ -31,29 +32,169 @@ live in kernel-thread space and call `virtio_net_send` directly.
         ipv4, ipv4_octet}
 
 
-The guest's IP and gateway IP under QEMU user-mode networking.
-Hardcoded to QEMU's default `-netdev user` lease (every guest
-gets the same lease so this is fine for bring-up).
+Our IP, netmask, and gateway IP. Mutable so a DHCP client can
+install a learned lease at runtime (see Phase B —
+`oskit/bin/dhclient.lsysl`). Defaults match QEMU's `-netdev user`
+lease (10.0.2.15 / 255.255.255.0 / 10.0.2.2) so a fresh boot
+without DHCP works exactly like the hardcoded era.
 
-    val INET_OUR_IP_A = 10
-    val INET_OUR_IP_B = 0
-    val INET_OUR_IP_C = 2
-    val INET_OUR_IP_D = 15
+Each octet is a separate `var` because Sysl's module-level
+variable initializers must be integer literals — `var X =
+IMPORTED_CONST` evaluates to zero at load time
+(`feedback_sysl_module_var_init.md`).
 
-    val INET_GW_IP_A = 10
-    val INET_GW_IP_B = 0
-    val INET_GW_IP_C = 2
-    val INET_GW_IP_D = 2
+    var INET_OUR_IP_A = 10
+    var INET_OUR_IP_B = 0
+    var INET_OUR_IP_C = 2
+    var INET_OUR_IP_D = 15
+
+    var INET_GW_IP_A = 10
+    var INET_GW_IP_B = 0
+    var INET_GW_IP_C = 2
+    var INET_GW_IP_D = 2
+
+    var INET_MASK_A = 255
+    var INET_MASK_B = 255
+    var INET_MASK_C = 255
+    var INET_MASK_D = 0
 
 
-Link-layer state. `*_known` flags guard every use because the
-nic may not be available (e.g. on x86 builds where the virtio-net
-stack isn't wired in), and ARP replies may not have arrived yet.
+IP-config accessors. The setter lives in this file because
+another module (later `oskit.bin.dhclient`) that imports these
+vars cannot write them — cross-module `var` writes are
+forbidden (`feedback_sysl_module_split.md`). Keeping the
+mutation local to `oskit.servers` sidesteps that.
+
+    inet_set_ip_config(ip: u32, mask: u32, gw: u32)
+        INET_OUR_IP_A = ipv4_octet(ip, 0)
+        INET_OUR_IP_B = ipv4_octet(ip, 1)
+        INET_OUR_IP_C = ipv4_octet(ip, 2)
+        INET_OUR_IP_D = ipv4_octet(ip, 3)
+        INET_MASK_A = ipv4_octet(mask, 0)
+        INET_MASK_B = ipv4_octet(mask, 1)
+        INET_MASK_C = ipv4_octet(mask, 2)
+        INET_MASK_D = ipv4_octet(mask, 3)
+        INET_GW_IP_A = ipv4_octet(gw, 0)
+        INET_GW_IP_B = ipv4_octet(gw, 1)
+        INET_GW_IP_C = ipv4_octet(gw, 2)
+        INET_GW_IP_D = ipv4_octet(gw, 3)
+
+    inet_get_our_ip() -> u32
+        ipv4(INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+
+    inet_get_mask() -> u32
+        ipv4(INET_MASK_A, INET_MASK_B, INET_MASK_C, INET_MASK_D)
+
+    inet_get_gw() -> u32
+        ipv4(INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D)
+
+
+Link-layer state. `inet_our_mac_known` guards every outbound
+build because the nic may not be available (e.g. on x86 builds
+where the virtio-net stack isn't wired in).
 
     var inet_our_mac: [6]byte
     var inet_our_mac_known: int = 0
-    var inet_gw_mac: [6]byte
-    var inet_gw_mac_known: int = 0
+
+
+### ARP cache
+
+16-entry (IP, MAC) table shared by every outbound send. Replaces
+the previous `inet_gw_mac + inet_gw_mac_known` pair so the stack
+can talk to peers other than the default gateway once their MAC
+has been learned via ARP. Full cache evicts slot 0 (FIFO-ish —
+promote to LRU if traffic starts churning).
+
+    val INET_ARP_SIZE = 16
+
+    struct InetArpEntry
+        ip: u32
+        mac: [6]byte
+        in_use: int
+
+    var inet_arp_cache: [16]InetArpEntry
+
+
+Slot index for `ip`, or -1 if not cached.
+
+    inet_arp_lookup_idx(ip: u32) -> int
+        var i = 0
+        while i < INET_ARP_SIZE
+            if inet_arp_cache[i].in_use != 0
+                if inet_arp_cache[i].ip == ip
+                    return i
+            i += 1
+        -1
+
+
+Copy the cached MAC for `ip` into `out`. Returns 1 on hit, 0 on
+miss (in which case `out` is untouched).
+
+    inet_arp_lookup(ip: u32, out: *byte) -> int
+        val idx = inet_arp_lookup_idx(ip)
+        if idx < 0
+            return 0
+        var j = 0
+        while j < 6
+            out[j] = inet_arp_cache[idx].mac[j]
+            j += 1
+        1
+
+
+Insert or update (ip, mac). Re-use an existing slot for `ip` if
+present; otherwise grab the first free slot; otherwise evict
+slot 0 (simplest FIFO-ish policy). Good enough at this scale.
+
+    inet_arp_insert(ip: u32, mac: *byte)
+        var idx = inet_arp_lookup_idx(ip)
+        if idx < 0
+            var i = 0
+            while i < INET_ARP_SIZE
+                if inet_arp_cache[i].in_use == 0
+                    idx = i
+                    i = INET_ARP_SIZE
+                else
+                    i += 1
+        if idx < 0
+            idx = 0
+        inet_arp_cache[idx].ip = ip
+        var j = 0
+        while j < 6
+            inet_arp_cache[idx].mac[j] = mac[j]
+            j += 1
+        inet_arp_cache[idx].in_use = 1
+
+
+Returns 1 if `ip` lives in our local subnet per the current
+netmask. Off-subnet destinations route via the default gateway.
+Bitwise `(ip & mask) == (ours & mask)` so CIDR widths other
+than /24 work once DHCP installs them.
+
+    inet_in_subnet(ip: u32) -> int
+        val mask = inet_get_mask()
+        val ours = inet_get_our_ip()
+        if (ip & mask) == (ours & mask)
+            return 1
+        0
+
+
+Resolve the next-hop MAC for `dst_ip`: the cached entry for
+`dst_ip` itself if on-subnet, otherwise the default gateway's
+entry. On miss, fires an ARP request for the target and returns
+0 — caller drops the packet (UDP best-effort). Returns 1 on hit
+with `out` filled.
+
+    inet_resolve_mac(dst_ip: u32, out: *byte) -> int
+        var target_ip = dst_ip
+        if inet_in_subnet(dst_ip) == 0
+            target_ip = ipv4(INET_GW_IP_A, INET_GW_IP_B,
+                INET_GW_IP_C, INET_GW_IP_D)
+        if inet_arp_lookup(target_ip, out) != 0
+            return 1
+        inet_send_arp_request(
+            ipv4_octet(target_ip, 0), ipv4_octet(target_ip, 1),
+            ipv4_octet(target_ip, 2), ipv4_octet(target_ip, 3))
+        0
 
 
 Diagnostic counters. Useful for asserting the TX / RX loop is
@@ -195,13 +336,6 @@ frame's raw length (up to `maxlen` bytes copied into `out`), or
             i += 1
         inet_our_mac_known = 1
 
-    inet_cache_gw_mac(mac: *byte)
-        var i = 0
-        while i < 6
-            inet_gw_mac[i] = mac[i]
-            i += 1
-        inet_gw_mac_known = 1
-
     inet_bump_pings_received()
         inet_pings_received += 1
 
@@ -228,6 +362,75 @@ on success, -1 on failure.
         pkt_write_mac(frame, 22, inet_our_mac)
         pkt_write_ipv4(frame, 28,
             INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        i = 0
+        while i < 6
+            frame[32 + i] = 0
+            i += 1
+        pkt_write_ipv4(frame, 38, ta, tb, tc, td)
+        inet_nic_send_packet(frame, 42)
+
+
+ARP probe per RFC 5227 §2.1.1. Wire-identical to an ARP request
+for `ta.tb.tc.td` except the sender IP field (SPA) is
+`0.0.0.0`. A zero SPA is how the target's defender knows this
+is a probe rather than a gratuitous request from an
+already-configured host — so it can answer with a REPLY whose
+sender IP equals the probed address, which our RX path matches
+against `arp_probe_target` to set `arp_probe_seen`.
+
+Returns 0 on success, -1 if our MAC isn't known yet.
+
+    inet_send_arp_probe(ta: int, tb: int, tc: int, td: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        var frame: [42]byte
+        var i = 0
+        while i < 6
+            frame[i] = 0xff
+            i += 1
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_ARP)
+        pkt_write_u16(frame, 14, 1)
+        pkt_write_u16(frame, 16, ETHERTYPE_IPV4)
+        frame[18] = 6
+        frame[19] = 4
+        pkt_write_u16(frame, 20, ARP_OP_REQUEST)
+        pkt_write_mac(frame, 22, inet_our_mac)
+        // SPA = 0.0.0.0 (the probe-distinguishing field)
+        frame[28] = 0
+        frame[29] = 0
+        frame[30] = 0
+        frame[31] = 0
+        i = 0
+        while i < 6
+            frame[32 + i] = 0
+            i += 1
+        pkt_write_ipv4(frame, 38, ta, tb, tc, td)
+        inet_nic_send_packet(frame, 42)
+
+
+Gratuitous ARP announcement per RFC 5227 §2.3. Identical to a
+probe but SPA = TPA = our newly-claimed address. Fires twice
+after a successful probe window to tell the segment that this
+host now owns the address.
+
+    inet_send_arp_announce(ta: int, tb: int, tc: int, td: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        var frame: [42]byte
+        var i = 0
+        while i < 6
+            frame[i] = 0xff
+            i += 1
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_ARP)
+        pkt_write_u16(frame, 14, 1)
+        pkt_write_u16(frame, 16, ETHERTYPE_IPV4)
+        frame[18] = 6
+        frame[19] = 4
+        pkt_write_u16(frame, 20, ARP_OP_REQUEST)
+        pkt_write_mac(frame, 22, inet_our_mac)
+        pkt_write_ipv4(frame, 28, ta, tb, tc, td)
         i = 0
         while i < 6
             frame[32 + i] = 0
@@ -271,13 +474,16 @@ in its reply so we can match replies to requests.
     inet_send_icmp_echo(id: int, seq: int) -> int
         if inet_our_mac_known == 0
             return -1
-        if inet_gw_mac_known == 0
+        var gw_mac: [6]byte
+        val gw_ip = ipv4(INET_GW_IP_A, INET_GW_IP_B,
+            INET_GW_IP_C, INET_GW_IP_D)
+        if inet_arp_lookup(gw_ip, gw_mac) == 0
             return -1
         var frame: [42]byte
 
 Ethernet header.
 
-        pkt_write_mac(frame, 0, inet_gw_mac)
+        pkt_write_mac(frame, 0, gw_mac)
         pkt_write_mac(frame, 6, inet_our_mac)
         pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
 
@@ -361,35 +567,36 @@ recompute over the full ICMP message.
         inet_nic_send_packet(frame, total_len)
 
 
-### UDP checksum (IPv4 pseudo-header)
+### L4 checksum helpers (IPv4 pseudo-header)
 
-Core one's-complement sum over `pseudo-header + UDP header +
+Core one's-complement sum over `pseudo-header + L4 header +
 payload`. Pseudo-header layout (12 bytes): src_ip (4) + dst_ip
-(4) + zero (1) + proto=17 (1) + udp_len (2). The UDP bytes come
-straight from the frame buffer at `[udp_off .. udp_off + udp_len)`
+(4) + zero (1) + proto (1) + l4_len (2). The L4 bytes come
+straight from the frame buffer at `[l4_off .. l4_off + l4_len)`
 — caller decides whether the checksum field there is zero (for
 transmit) or stored (for receive-side verify).
 
 Returns the folded 16-bit sum (not complemented). Valid transmit
 frames have the complement stored in their checksum field;
 receive-side verification expects this helper to return `0xffff`
-when the stored checksum is correct.
+when the stored checksum is correct. Shared by UDP (proto=17)
+and TCP (proto=6).
 
-    inet_udp_partial_sum(src_ip: u32, dst_ip: u32,
-                        frame: *byte, udp_off: int, udp_len: int) -> int
+    inet_l4_partial_sum(src_ip: u32, dst_ip: u32, proto: int,
+                        frame: *byte, l4_off: int, l4_len: int) -> int
         var sum = 0
         sum += (ipv4_octet(src_ip, 0) << 8) | ipv4_octet(src_ip, 1)
         sum += (ipv4_octet(src_ip, 2) << 8) | ipv4_octet(src_ip, 3)
         sum += (ipv4_octet(dst_ip, 0) << 8) | ipv4_octet(dst_ip, 1)
         sum += (ipv4_octet(dst_ip, 2) << 8) | ipv4_octet(dst_ip, 3)
-        sum += IP_PROTO_UDP
-        sum += udp_len
+        sum += proto
+        sum += l4_len
         var i = 0
-        while i + 1 < udp_len
-            sum += pkt_read_u16(frame, udp_off + i)
+        while i + 1 < l4_len
+            sum += pkt_read_u16(frame, l4_off + i)
             i += 2
-        if i < udp_len
-            sum += (int(frame[udp_off + i]) & 0xff) << 8
+        if i < l4_len
+            sum += (int(frame[l4_off + i]) & 0xff) << 8
         while (sum >> 16) != 0
             sum = (sum & 0xffff) + (sum >> 16)
         sum
@@ -402,7 +609,8 @@ written value never collides with the "no checksum" sentinel
 
     inet_udp_checksum(src_ip: u32, dst_ip: u32,
                      frame: *byte, udp_off: int, udp_len: int) -> int
-        val s = inet_udp_partial_sum(src_ip, dst_ip, frame, udp_off, udp_len)
+        val s = inet_l4_partial_sum(src_ip, dst_ip, IP_PROTO_UDP,
+                                    frame, udp_off, udp_len)
         val c = (~s) & 0xffff
         if c == 0
             return 0xffff
@@ -419,7 +627,8 @@ on valid, 0 on corrupt.
         val stored = pkt_read_u16(frame, udp_off + 6)
         if stored == 0
             return 1
-        val s = inet_udp_partial_sum(src_ip, dst_ip, frame, udp_off, udp_len)
+        val s = inet_l4_partial_sum(src_ip, dst_ip, IP_PROTO_UDP,
+                                    frame, udp_off, udp_len)
         if s == 0xffff
             return 1
         0
@@ -427,13 +636,12 @@ on valid, 0 on corrupt.
 
 ### UDP — outbound
 
-Builds a full Ethernet/IPv4/UDP frame and hands it to the nic. The
-gateway MAC is the only link-layer destination we know (no general
-ARP cache yet), and QEMU user-mode networking routes everything
-through the gateway anyway, so we send every non-loopback packet
-there. Returns 0 on success, -1 if the link isn't ready
-(`inet_our_mac_known` or `inet_gw_mac_known` still 0), if `dlen` is
-out of range, or if the nic rejects the frame.
+Builds a full Ethernet/IPv4/UDP frame and hands it to the nic.
+`inet_resolve_mac` picks the next-hop MAC: the destination's own
+cached MAC for on-subnet targets, the gateway's for off-subnet.
+Cache miss fires an ARP request and returns -1 (UDP semantics let
+the caller retry). Also returns -1 if the link isn't ready,
+`dlen` is out of range, or the nic rejects the frame.
 
 UDP checksum is computed over the IPv4 pseudo-header + UDP header
 + payload — required for IPv6 peers and recommended for IPv4.
@@ -441,18 +649,35 @@ UDP checksum is computed over the IPv4 pseudo-header + UDP header
     inet_send_udp(dst_ip: u32, dst_port: int, src_port: int, data: *byte, dlen: int) -> int
         if inet_our_mac_known == 0
             return -1
-        if inet_gw_mac_known == 0
-            return -1
         if dlen < 0
             return -1
         if dlen > 1472
             return -1
+
+Limited broadcast (255.255.255.255) skips ARP — there is no
+"MAC of the broadcast address", we simply transmit with
+Ethernet dst = `ff:ff:ff:ff:ff:ff`. We also force IP src =
+`0.0.0.0` and the UDP pseudo-header src to 0: DHCP clients
+(RFC 2131 §4.1) must use 0.0.0.0 until they bind a lease,
+because the addr they want to use is what they are asking for.
+
+        val bcast_all = ipv4(255, 255, 255, 255)
+        val is_bcast = dst_ip == bcast_all
+        var next_hop_mac: [6]byte
+        if is_bcast
+            var bi = 0
+            while bi < 6
+                next_hop_mac[bi] = byte(0xff)
+                bi += 1
+        else
+            if inet_resolve_mac(dst_ip, next_hop_mac) == 0
+                return -1
         var frame: [1514]byte
         val total_len = 14 + 20 + 8 + dlen
 
 Ethernet header.
 
-        pkt_write_mac(frame, 0, inet_gw_mac)
+        pkt_write_mac(frame, 0, next_hop_mac)
         pkt_write_mac(frame, 6, inet_our_mac)
         pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
 
@@ -466,8 +691,11 @@ IPv4 header (20 bytes, no options).
         frame[22] = 64
         frame[23] = byte(IP_PROTO_UDP)
         pkt_write_u16(frame, 24, 0)
-        pkt_write_ipv4(frame, 26,
-            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        if is_bcast
+            pkt_write_ipv4(frame, 26, 0, 0, 0, 0)
+        else
+            pkt_write_ipv4(frame, 26,
+                INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
         pkt_write_ipv4(frame, 30, ipv4_octet(dst_ip, 0), ipv4_octet(dst_ip, 1), ipv4_octet(dst_ip, 2), ipv4_octet(dst_ip, 3))
         pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
 
@@ -482,11 +710,2196 @@ the pseudo-header checksum; the result lands at offset 40.
         while i < dlen
             frame[42 + i] = data[i]
             i += 1
-        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
-            INET_OUR_IP_C, INET_OUR_IP_D)
+        var pseudo_src = inet_get_our_ip()
+        if is_bcast
+            pseudo_src = u32(0)
         pkt_write_u16(frame, 40,
-            inet_udp_checksum(our_ip, dst_ip, frame, 34, 8 + dlen))
+            inet_udp_checksum(pseudo_src, dst_ip, frame, 34, 8 + dlen))
 
         inet_nic_send_packet(frame, total_len)
 
 
+### TCP — state machine (phase 1 MVP)
+
+Active-open client only. `connect()` → SYN_SENT → ESTABLISHED,
+graceful close either side, fixed 500 ms RTO, TIME_WAIT capped
+at 2 s. No listen/accept, no out-of-order reassembly, no
+congestion control, no Nagle. Enough to echo-test against a
+host echo server via `hostfwd=tcp`.
+
+Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
+
+    val TCP_MAX_SOCKETS     = 16
+    val TCP_SEND_BUF        = 4096
+    val TCP_RECV_BUF        = 1024
+    val TCP_MSS_ADV         = 1460
+    val TCP_MAX_SEG         = 480
+    val TCP_RTO_INITIAL     = 100
+    val TCP_RTO_MIN         = 20
+    val TCP_RTO_MAX         = 6000
+    val TCP_TW_TICKS        = 200
+    val TCP_FW2_TICKS       = 6000
+    val TCP_MAX_RETRIES     = 5
+    val TCP_REORDER_SLOTS   = 4
+
+    // Congestion control (RFC 5681 + RFC 6928). Initial cwnd of
+    // 10 × SMSS matches the modern "IW10" recommendation from
+    // RFC 6928 §2 — Linux's default since ~2011. Gives enough
+    // in-flight room to pipeline a handful of segments in the
+    // first RTT so dup-ACK-driven loss detection (fast retransmit
+    // / fast recovery) has segments to work with.
+    //
+    // SSthresh starts at a large value so we stay in slow start
+    // until the first loss or our cwnd actually catches up to a
+    // reasonable estimate of bandwidth-delay product.
+    val TCP_INIT_CWND       = 4800
+    val TCP_INIT_SSTHRESH   = 65535
+    val TCP_MIN_CWND        = 480
+
+    // TCP option kinds (RFC 793, RFC 2018).
+    val TCP_OPT_EOL             = 0
+    val TCP_OPT_NOP             = 1
+    val TCP_OPT_MSS             = 2
+    val TCP_OPT_SACK_PERMITTED  = 4
+    val TCP_OPT_SACK            = 5
+
+    // Max SACK blocks we bother with on either side. RFC 2018
+    // technically allows up to 4 in a 40-byte option space; we
+    // cap at 3 so the option (26 bytes) + 2 NOPs for 4-byte
+    // alignment (28 bytes) fits comfortably alongside any other
+    // options we might carry on an ACK.
+    val TCP_MAX_SACK_BLOCKS     = 3
+
+    val TCP_STATE_CLOSED      = 0
+    val TCP_STATE_SYN_SENT    = 1
+    val TCP_STATE_ESTABLISHED = 2
+    val TCP_STATE_FIN_WAIT_1  = 3
+    val TCP_STATE_FIN_WAIT_2  = 4
+    val TCP_STATE_CLOSE_WAIT  = 5
+    val TCP_STATE_LAST_ACK    = 6
+    val TCP_STATE_TIME_WAIT   = 7
+    val TCP_STATE_LISTEN      = 8
+    val TCP_STATE_SYN_RCVD    = 9
+
+    val TCP_LISTEN_BACKLOG = 16
+
+    val TCP_F_FIN = 0x01
+    val TCP_F_SYN = 0x02
+    val TCP_F_RST = 0x04
+    val TCP_F_PSH = 0x08
+    val TCP_F_ACK = 0x10
+
+    struct TcpReorderEntry
+        in_use: int
+        seq: u32
+        len: int
+        data: [480]byte
+
+    // RFC 2018 §3: a SACK block is `[left, right)` describing a
+    // contiguous byte range the peer buffered out-of-order.
+    // `TCP_SACK_BOARD` caps the per-socket scoreboard we
+    // accumulate across ACKs during a single recovery round.
+    struct TcpSackBlock
+        in_use: int
+        left: u32
+        right: u32
+
+    val TCP_SACK_BOARD = 8
+
+    struct TcpSocket
+        in_use: int
+        state: int
+        owner_tid: int
+        local_port: int
+        remote_ip: u32
+        remote_port: int
+        iss: u32
+        irs: u32
+        snd_una: u32
+        snd_nxt: u32
+        snd_wnd: int
+        rcv_nxt: u32
+        mss: int
+        send_buf: [4096]byte
+        send_len: int
+        recv_buf: [1024]byte
+        recv_len: int
+        rtx_deadline: int
+        retries: int
+        tw_deadline: int
+        peer_fin: int
+        our_fin_sent: int
+        connect_waiter: int
+        send_waiter: int
+        send_waiter_len: int
+        recv_waiter: int
+        recv_maxlen: int
+        close_waiter: int
+        is_listen: int
+        accept_queue: [16]int
+        accept_head: int
+        accept_tail: int
+        accept_count: int
+        accept_waiter: int
+        parent_listen: int
+        reorder: [4]TcpReorderEntry
+        fin_seq: u32
+        fin_pending: int
+        srtt: int
+        rttvar: int
+        rto: int
+        rtt_measured: int
+        rtt_sample_valid: int
+        rtt_sample_seq: u32
+        rtt_sample_time: int
+        snd_cwnd: int
+        snd_ssthresh: int
+        dup_ack_count: int
+        fast_recovery: int
+        recovery_point: u32
+        sack_ok: int
+        sack_board: [8]TcpSackBlock
+        sack_rexmit_cursor: u32
+        sack_rexmit_valid: int
+        rexmit_count: int
+
+    var tcp_sockets: [16]TcpSocket
+    var tcp_iss_counter: u32 = u32(1000)
+
+    tcp_next_iss() -> u32
+        val v = tcp_iss_counter
+        tcp_iss_counter = v + u32(65536)
+        v
+
+    inet_tcp_init()
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            tcp_sockets[i].in_use = 0
+            tcp_sockets[i].state = TCP_STATE_CLOSED
+            tcp_sockets[i].connect_waiter = -1
+            tcp_sockets[i].send_waiter = -1
+            tcp_sockets[i].recv_waiter = -1
+            tcp_sockets[i].close_waiter = -1
+            tcp_sockets[i].is_listen = 0
+            tcp_sockets[i].accept_head = 0
+            tcp_sockets[i].accept_tail = 0
+            tcp_sockets[i].accept_count = 0
+            tcp_sockets[i].accept_waiter = -1
+            tcp_sockets[i].parent_listen = -1
+            tcp_sockets[i].fin_pending = 0
+            tcp_sockets[i].srtt = 0
+            tcp_sockets[i].rttvar = 0
+            tcp_sockets[i].rto = TCP_RTO_INITIAL
+            tcp_sockets[i].rtt_measured = 0
+            tcp_sockets[i].rtt_sample_valid = 0
+            tcp_sockets[i].snd_cwnd = TCP_INIT_CWND
+            tcp_sockets[i].snd_ssthresh = TCP_INIT_SSTHRESH
+            tcp_sockets[i].dup_ack_count = 0
+            tcp_sockets[i].fast_recovery = 0
+            tcp_sockets[i].recovery_point = u32(0)
+            tcp_sockets[i].sack_ok = 0
+            tcp_sockets[i].sack_rexmit_valid = 0
+            tcp_sockets[i].rexmit_count = 0
+            var k = 0
+            while k < TCP_REORDER_SLOTS
+                tcp_sockets[i].reorder[k].in_use = 0
+                k += 1
+            var bi = 0
+            while bi < TCP_SACK_BOARD
+                tcp_sockets[i].sack_board[bi].in_use = 0
+                bi += 1
+            i += 1
+
+
+32-bit sequence-number comparisons, wrapping modulo 2^32.
+
+    tcp_seq_lt(a: u32, b: u32) -> int
+        val d = i32(a - b)
+        if d < 0
+            return 1
+        0
+
+    tcp_seq_le(a: u32, b: u32) -> int
+        val d = i32(a - b)
+        if d <= 0
+            return 1
+        0
+
+
+TCP seq/ack field helpers (big-endian u32).
+
+    tcp_write_u32(frame: *byte, off: int, v: u32)
+        frame[off]     = byte((v >> 24) & u32(0xff))
+        frame[off + 1] = byte((v >> 16) & u32(0xff))
+        frame[off + 2] = byte((v >>  8) & u32(0xff))
+        frame[off + 3] = byte( v        & u32(0xff))
+
+    tcp_read_u32(frame: *byte, off: int) -> u32
+        val b0 = u32(frame[off]     & 0xff)
+        val b1 = u32(frame[off + 1] & 0xff)
+        val b2 = u32(frame[off + 2] & 0xff)
+        val b3 = u32(frame[off + 3] & 0xff)
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+
+Walk TCP options in the segment starting at `tcp_off + 20` and
+ending at `tcp_off + hdr_len`. Returns 1 if a SACK-permitted
+option (RFC 2018 §2, kind=4 len=2) is present, 0 otherwise.
+
+`kind=0` (EOL) terminates. `kind=1` (NOP) is a single-byte
+skip. Everything else has `len` at `off+1`; we bounds-check
+to tolerate malformed segments without reading past the
+header end. Unknown options are skipped.
+
+    tcp_opts_has_sack_permitted(frame: *byte, tcp_off: int,
+                                hdr_len: int) -> int
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return 0
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return 0
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return 0
+                if off + olen > opts_end
+                    return 0
+                if kind == TCP_OPT_SACK_PERMITTED
+                    if olen == 2
+                        return 1
+                off += olen
+        0
+
+
+Merge a new SACK block `[seq, end)` into socket `s`'s scoreboard.
+Coalesces with overlapping or adjacent existing blocks; drops
+blocks wholly to the left of `snd_una` (cumulative ACK already
+covers them). Caller guarantees `seq < end`.
+
+    tcp_sack_board_insert(s: int, left: u32, right: u32)
+        if tcp_seq_le(right, tcp_sockets[s].snd_una) != 0
+            return
+        var nleft = left
+        var nright = right
+        if tcp_seq_lt(nleft, tcp_sockets[s].snd_una) != 0
+            nleft = tcp_sockets[s].snd_una
+        var bi = 0
+        while bi < TCP_SACK_BOARD
+            if tcp_sockets[s].sack_board[bi].in_use != 0
+                val bleft = tcp_sockets[s].sack_board[bi].left
+                val bright = tcp_sockets[s].sack_board[bi].right
+                val overlap = tcp_seq_le(nleft, bright) != 0
+                if overlap
+                    if tcp_seq_le(bleft, nright) != 0
+                        if tcp_seq_lt(bleft, nleft) != 0
+                            nleft = bleft
+                        if tcp_seq_lt(nright, bright) != 0
+                            nright = bright
+                        tcp_sockets[s].sack_board[bi].in_use = 0
+            bi += 1
+        bi = 0
+        while bi < TCP_SACK_BOARD
+            if tcp_sockets[s].sack_board[bi].in_use == 0
+                tcp_sockets[s].sack_board[bi].in_use = 1
+                tcp_sockets[s].sack_board[bi].left = nleft
+                tcp_sockets[s].sack_board[bi].right = nright
+                return
+            bi += 1
+
+
+Purge scoreboard entries covered by the advanced `snd_una`.
+Blocks strictly to the left get dropped; blocks straddling the
+boundary get left-clipped.
+
+    tcp_sack_board_purge(s: int)
+        var bi = 0
+        while bi < TCP_SACK_BOARD
+            if tcp_sockets[s].sack_board[bi].in_use != 0
+                val bright = tcp_sockets[s].sack_board[bi].right
+                if tcp_seq_le(bright, tcp_sockets[s].snd_una) != 0
+                    tcp_sockets[s].sack_board[bi].in_use = 0
+                else
+                    val bleft = tcp_sockets[s].sack_board[bi].left
+                    if tcp_seq_lt(bleft, tcp_sockets[s].snd_una) != 0
+                        tcp_sockets[s].sack_board[bi].left = tcp_sockets[s].snd_una
+            bi += 1
+
+
+Clear all scoreboard entries. Called on full recovery exit and
+socket reuse — we don't want a stale block to influence the
+next connection or retransmit round.
+
+    tcp_sack_board_clear(s: int)
+        var bi = 0
+        while bi < TCP_SACK_BOARD
+            tcp_sockets[s].sack_board[bi].in_use = 0
+            bi += 1
+        tcp_sockets[s].sack_rexmit_valid = 0
+
+
+Parse every `Kind=5` SACK option in the TCP options area and
+insert each block into the socket's scoreboard. Unknown,
+malformed, or duplicate options are tolerated: the parser
+bails early on the first length inconsistency rather than
+reading past the header.
+
+    tcp_opts_apply_sack(s: int, frame: *byte, tcp_off: int,
+                        hdr_len: int)
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return
+                if off + olen > opts_end
+                    return
+                if kind == TCP_OPT_SACK
+                    // Block payload: (olen - 2) bytes = 8n,
+                    // n ∈ {1..4}. Anything else is malformed.
+                    val payload_len = olen - 2
+                    if payload_len >= 8
+                        if (payload_len % 8) == 0
+                            var bo = off + 2
+                            val bend_off = off + olen
+                            while bo + 8 <= bend_off
+                                val blk_left = tcp_read_u32(frame, bo)
+                                val blk_right = tcp_read_u32(frame, bo + 4)
+                                if tcp_seq_lt(blk_left, blk_right) != 0
+                                    tcp_sack_board_insert(s, blk_left, blk_right)
+                                bo += 8
+                off += olen
+
+
+Find the next un-SACKed byte `≥ cursor` within `[snd_una, snd_nxt)`,
+or `snd_nxt` if no hole remains. Straightforward scan over the
+scoreboard: if any block covers `cursor`, jump `cursor` to its
+end and restart. Terminates because each jump advances cursor
+by ≥ 1 byte and the scoreboard has at most `TCP_SACK_BOARD`
+blocks — so at most `TCP_SACK_BOARD + 1` passes.
+
+    tcp_sack_next_hole(s: int, cursor: u32) -> u32
+        var c = cursor
+        if tcp_seq_lt(c, tcp_sockets[s].snd_una) != 0
+            c = tcp_sockets[s].snd_una
+        var passes = 0
+        while passes <= TCP_SACK_BOARD
+            var moved = 0
+            var bi = 0
+            while bi < TCP_SACK_BOARD
+                if tcp_sockets[s].sack_board[bi].in_use != 0
+                    val bleft = tcp_sockets[s].sack_board[bi].left
+                    val bright = tcp_sockets[s].sack_board[bi].right
+                    if tcp_seq_le(bleft, c) != 0
+                        if tcp_seq_lt(c, bright) != 0
+                            c = bright
+                            moved = 1
+                bi += 1
+            if moved == 0
+                return c
+            passes += 1
+        c
+
+
+Build a single Ethernet + IPv4 + TCP frame for socket `s`. Payload
+is `payload_len` bytes of send_buf starting at `payload_seq`
+(relative to snd_una).
+
+TCP options attached:
+
+- SYN frames carry a 4-byte MSS option and a 2-byte
+  SACK-permitted option (RFC 2018 §2), padded to 4-byte
+  alignment with NOPs — 8 bytes of options, `hdr_bytes = 28`.
+- Non-SYN ACKs with `sack_ok` negotiated and at least one
+  reorder-queue entry carry a SACK option (RFC 2018 §3)
+  advertising up to `TCP_MAX_SACK_BLOCKS` ranges of
+  out-of-order data we have buffered. Each block is 8 bytes
+  (left, right); the option header is 2 bytes; we prefix with
+  2 NOPs for 4-byte alignment. `hdr_bytes = 20 + 4 + 8 * n`.
+- All other ACKs carry no options — `hdr_bytes = 20`.
+
+    inet_tcp_emit(s: int, flags: int, seq: u32,
+                  payload_seq: u32, payload_len: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        var next_hop_mac: [6]byte
+        if inet_resolve_mac(tcp_sockets[s].remote_ip, next_hop_mac) == 0
+            return -1
+        val is_syn = (flags & TCP_F_SYN) != 0
+        // Count SACK blocks we'd emit on this segment. SACK is
+        // only ever attached to non-SYN ACKs once both sides
+        // agreed on SACK-permitted at handshake.
+        var sack_count = 0
+        if is_syn == 0
+            if (flags & TCP_F_ACK) != 0
+                if tcp_sockets[s].sack_ok != 0
+                    var ri = 0
+                    while ri < TCP_REORDER_SLOTS
+                        if tcp_sockets[s].reorder[ri].in_use != 0
+                            if sack_count < TCP_MAX_SACK_BLOCKS
+                                sack_count += 1
+                        ri += 1
+        var hdr_bytes = 20
+        if is_syn
+            hdr_bytes = 28
+        else if sack_count > 0
+            hdr_bytes = 20 + 4 + 8 * sack_count
+        var seg_len = hdr_bytes + payload_len
+        if seg_len > 1460
+            return -1
+        var frame: [1514]byte
+        val total_len = 14 + 20 + seg_len
+        pkt_write_mac(frame, 0, next_hop_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+        frame[14] = 0x45
+        frame[15] = 0
+        pkt_write_u16(frame, 16, 20 + seg_len)
+        pkt_write_u16(frame, 18, 0)
+        pkt_write_u16(frame, 20, 0x4000)
+        frame[22] = 64
+        frame[23] = byte(IP_PROTO_TCP)
+        pkt_write_u16(frame, 24, 0)
+        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
+            INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30,
+            ipv4_octet(tcp_sockets[s].remote_ip, 0),
+            ipv4_octet(tcp_sockets[s].remote_ip, 1),
+            ipv4_octet(tcp_sockets[s].remote_ip, 2),
+            ipv4_octet(tcp_sockets[s].remote_ip, 3))
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+        val tcp_off = 34
+        pkt_write_u16(frame, tcp_off + 0, tcp_sockets[s].local_port)
+        pkt_write_u16(frame, tcp_off + 2, tcp_sockets[s].remote_port)
+        tcp_write_u32(frame, tcp_off + 4, seq)
+        var ack_val: u32 = u32(0)
+        if (flags & TCP_F_ACK) != 0
+            ack_val = tcp_sockets[s].rcv_nxt
+        tcp_write_u32(frame, tcp_off + 8, ack_val)
+        val data_off_words = hdr_bytes / 4
+        frame[tcp_off + 12] = byte((data_off_words << 4) & 0xf0)
+        frame[tcp_off + 13] = byte(flags & 0xff)
+        val stashed = inet_tcp_reorder_bytes(s)
+        var rwnd = TCP_RECV_BUF - tcp_sockets[s].recv_len - stashed
+        if rwnd < 0
+            rwnd = 0
+        pkt_write_u16(frame, tcp_off + 14, rwnd)
+        pkt_write_u16(frame, tcp_off + 16, 0)
+        pkt_write_u16(frame, tcp_off + 18, 0)
+        if is_syn
+            // MSS (RFC 793): kind=2 len=4 value=TCP_MSS_ADV
+            frame[tcp_off + 20] = byte(TCP_OPT_MSS)
+            frame[tcp_off + 21] = 4
+            pkt_write_u16(frame, tcp_off + 22, TCP_MSS_ADV)
+            // SACK-permitted (RFC 2018 §2): kind=4 len=2
+            frame[tcp_off + 24] = byte(TCP_OPT_SACK_PERMITTED)
+            frame[tcp_off + 25] = 2
+            // Pad to 4-byte alignment with NOPs.
+            frame[tcp_off + 26] = byte(TCP_OPT_NOP)
+            frame[tcp_off + 27] = byte(TCP_OPT_NOP)
+        else if sack_count > 0
+            // 2 NOPs prefix for alignment (Linux emits this
+            // pattern too) — placing SACK at a 4-byte boundary.
+            frame[tcp_off + 20] = byte(TCP_OPT_NOP)
+            frame[tcp_off + 21] = byte(TCP_OPT_NOP)
+            // SACK header: kind=5, len = 2 + 8 * nblocks.
+            frame[tcp_off + 22] = byte(TCP_OPT_SACK)
+            frame[tcp_off + 23] = byte(2 + 8 * sack_count)
+            var out_off = tcp_off + 24
+            var ri2 = 0
+            var emitted = 0
+            while ri2 < TCP_REORDER_SLOTS
+                if emitted < sack_count
+                    if tcp_sockets[s].reorder[ri2].in_use != 0
+                        val blk_left = tcp_sockets[s].reorder[ri2].seq
+                        val blk_right = blk_left + u32(tcp_sockets[s].reorder[ri2].len)
+                        tcp_write_u32(frame, out_off, blk_left)
+                        tcp_write_u32(frame, out_off + 4, blk_right)
+                        out_off += 8
+                        emitted += 1
+                ri2 += 1
+        if payload_len > 0
+            val offset = int(i32(payload_seq - tcp_sockets[s].snd_una))
+            var i = 0
+            while i < payload_len
+                frame[tcp_off + hdr_bytes + i] = tcp_sockets[s].send_buf[offset + i]
+                i += 1
+        pkt_write_u16(frame, tcp_off + 16,
+            (~inet_l4_partial_sum(our_ip, tcp_sockets[s].remote_ip,
+                IP_PROTO_TCP, frame, tcp_off, seg_len)) & 0xffff)
+        inet_nic_send_packet(frame, total_len)
+        0
+
+
+    inet_tcp_arm_rtx(s: int)
+        tcp_sockets[s].rtx_deadline = int(uptime()) + tcp_sockets[s].rto
+
+    inet_tcp_disarm_rtx(s: int)
+        tcp_sockets[s].rtx_deadline = 0
+        tcp_sockets[s].retries = 0
+
+
+RFC 6298 RTT measurement + RTO update. Caller guarantees `r` is
+ticks (clock granularity = 1 tick).
+
+First measurement: SRTT = R, RTTVAR = R/2, RTO = SRTT + 4*RTTVAR.
+Subsequent:        RTTVAR += (|SRTT - R| - RTTVAR) >> 2
+                   SRTT   += (R - SRTT) >> 3
+                   RTO    =  SRTT + 4*RTTVAR
+
+RTO is clamped to [TCP_RTO_MIN, TCP_RTO_MAX].
+
+    inet_tcp_rtt_update(s: int, r: int)
+        var rr = r
+        if rr < 1
+            rr = 1
+        if tcp_sockets[s].rtt_measured == 0
+            tcp_sockets[s].srtt = rr
+            tcp_sockets[s].rttvar = rr >> 1
+            tcp_sockets[s].rtt_measured = 1
+        else
+            var diff = tcp_sockets[s].srtt - rr
+            if diff < 0
+                diff = 0 - diff
+            val old_var = tcp_sockets[s].rttvar
+            val old_srtt = tcp_sockets[s].srtt
+            tcp_sockets[s].rttvar = (3 * old_var + diff) >> 2
+            tcp_sockets[s].srtt = (7 * old_srtt + rr) >> 3
+            if tcp_sockets[s].srtt < 1
+                tcp_sockets[s].srtt = 1
+        var new_rto = tcp_sockets[s].srtt + (tcp_sockets[s].rttvar << 2)
+        if new_rto < TCP_RTO_MIN
+            new_rto = TCP_RTO_MIN
+        if new_rto > TCP_RTO_MAX
+            new_rto = TCP_RTO_MAX
+        tcp_sockets[s].rto = new_rto
+
+Karn's rule: after a retransmit the original segment's timing is
+ambiguous, so discard any in-flight RTT sample. Doubles the RTO
+with cap.
+
+    inet_tcp_rto_backoff(s: int)
+        tcp_sockets[s].rtt_sample_valid = 0
+        var doubled = tcp_sockets[s].rto << 1
+        if doubled > TCP_RTO_MAX
+            doubled = TCP_RTO_MAX
+        tcp_sockets[s].rto = doubled
+
+Start an RTT sample for the next ACK covering `expected_ack`. If a
+sample is already in flight, keep it — measuring once per RTT is
+sufficient per RFC 6298.
+
+    inet_tcp_rtt_start_sample(s: int, expected_ack: u32)
+        if tcp_sockets[s].rtt_sample_valid != 0
+            return
+        tcp_sockets[s].rtt_sample_valid = 1
+        tcp_sockets[s].rtt_sample_seq = expected_ack
+        tcp_sockets[s].rtt_sample_time = int(uptime())
+
+If the incoming ACK covers our sample seq (ack >= sample_seq),
+take the RTT measurement and clear the sample.
+
+    inet_tcp_rtt_maybe_sample(s: int, ack: u32)
+        if tcp_sockets[s].rtt_sample_valid == 0
+            return
+        val target = tcp_sockets[s].rtt_sample_seq
+        if tcp_seq_lt(ack, target) != 0
+            return
+        val r = int(uptime()) - tcp_sockets[s].rtt_sample_time
+        tcp_sockets[s].rtt_sample_valid = 0
+        inet_tcp_rtt_update(s, r)
+
+
+One-byte status reply — close() completion.
+
+    inet_tcp_reply_status(tid: int, status: int)
+        var wr: [1]byte
+        wr[0] = byte(status & 0xff)
+        ipc_reply(tid, wr, 1)
+
+
+Two-byte connect() reply: status + fd. fd is meaningless on
+error but the client still reads it (stable wire shape).
+
+    inet_tcp_reply_connect(tid: int, status: int, fd: int)
+        var wr: [2]byte
+        wr[0] = byte(status & 0xff)
+        wr[1] = byte(fd & 0xff)
+        ipc_reply(tid, wr, 2)
+
+Parked SEND reply (MVP currently doesn't park, keep helper for
+symmetry / phase 2).
+
+    inet_tcp_reply_send(tid: int, status: int, written: int)
+        var wr: [3]byte
+        wr[0] = byte(status & 0xff)
+        pkt_write_u16(wr, 1, written)
+        ipc_reply(tid, wr, 3)
+
+RECV drain + reply. `n == 0` signals peer-closed EOF.
+
+    inet_tcp_reply_recv(s: int, n: int)
+        val tid = tcp_sockets[s].recv_waiter
+        tcp_sockets[s].recv_waiter = -1
+        var wr: [540]byte
+        wr[0] = 0
+        pkt_write_u16(wr, 1, n)
+        var i = 0
+        while i < n
+            wr[3 + i] = tcp_sockets[s].recv_buf[i]
+            i += 1
+        if n > 0
+            var j = n
+            while j < tcp_sockets[s].recv_len
+                tcp_sockets[s].recv_buf[j - n] = tcp_sockets[s].recv_buf[j]
+                j += 1
+            tcp_sockets[s].recv_len -= n
+        ipc_reply(tid, wr, 3 + n)
+
+
+Free socket `s` and wake any parked waiter with `status`. Used on
+terminal ACK and on retransmit exhaustion.
+
+Enter TIME_WAIT for 2MSL. Unblocks any parked close() caller
+immediately (the handshake is complete from the app's point of
+view) but leaves the slot live until tw_deadline fires — so the
+stack can absorb a retransmitted peer FIN and stale duplicates.
+
+    inet_tcp_enter_time_wait(s: int)
+        if tcp_sockets[s].close_waiter >= 0
+            inet_tcp_reply_status(tcp_sockets[s].close_waiter, 0)
+            tcp_sockets[s].close_waiter = -1
+        tcp_sockets[s].state = TCP_STATE_TIME_WAIT
+        tcp_sockets[s].rtx_deadline = 0
+        tcp_sockets[s].tw_deadline = int(uptime()) + TCP_TW_TICKS
+
+
+    inet_tcp_close_slot(s: int, status: int)
+        if tcp_sockets[s].connect_waiter >= 0
+            inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, status, 0)
+            tcp_sockets[s].connect_waiter = -1
+        if tcp_sockets[s].recv_waiter >= 0
+            inet_tcp_reply_recv(s, 0)
+        if tcp_sockets[s].send_waiter >= 0
+            inet_tcp_reply_send(tcp_sockets[s].send_waiter, status, 0)
+            tcp_sockets[s].send_waiter = -1
+        if tcp_sockets[s].close_waiter >= 0
+            inet_tcp_reply_status(tcp_sockets[s].close_waiter, 0)
+            tcp_sockets[s].close_waiter = -1
+        if tcp_sockets[s].accept_waiter >= 0
+            inet_tcp_reply_accept(tcp_sockets[s].accept_waiter, status, 0)
+            tcp_sockets[s].accept_waiter = -1
+        tcp_sockets[s].in_use = 0
+        tcp_sockets[s].state = TCP_STATE_CLOSED
+        tcp_sockets[s].is_listen = 0
+        tcp_sockets[s].accept_count = 0
+        tcp_sockets[s].accept_head = 0
+        tcp_sockets[s].accept_tail = 0
+        tcp_sockets[s].parent_listen = -1
+        tcp_sockets[s].rtx_deadline = 0
+        tcp_sockets[s].tw_deadline = 0
+        tcp_sockets[s].fin_pending = 0
+        tcp_sockets[s].srtt = 0
+        tcp_sockets[s].rttvar = 0
+        tcp_sockets[s].rto = TCP_RTO_INITIAL
+        tcp_sockets[s].rtt_measured = 0
+        tcp_sockets[s].rtt_sample_valid = 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            tcp_sockets[s].reorder[k].in_use = 0
+            k += 1
+        tcp_sack_board_clear(s)
+
+
+    inet_tcp_alloc() -> int
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use == 0
+                tcp_sockets[i].in_use = 1
+                tcp_sockets[i].state = TCP_STATE_CLOSED
+                tcp_sockets[i].send_len = 0
+                tcp_sockets[i].recv_len = 0
+                tcp_sockets[i].retries = 0
+                tcp_sockets[i].rtx_deadline = 0
+                tcp_sockets[i].tw_deadline = 0
+                tcp_sockets[i].peer_fin = 0
+                tcp_sockets[i].our_fin_sent = 0
+                tcp_sockets[i].connect_waiter = -1
+                tcp_sockets[i].send_waiter = -1
+                tcp_sockets[i].recv_waiter = -1
+                tcp_sockets[i].close_waiter = -1
+                tcp_sockets[i].mss = TCP_MSS_ADV
+                tcp_sockets[i].is_listen = 0
+                tcp_sockets[i].accept_head = 0
+                tcp_sockets[i].accept_tail = 0
+                tcp_sockets[i].accept_count = 0
+                tcp_sockets[i].accept_waiter = -1
+                tcp_sockets[i].parent_listen = -1
+                tcp_sockets[i].fin_pending = 0
+                tcp_sockets[i].srtt = 0
+                tcp_sockets[i].rttvar = 0
+                tcp_sockets[i].rto = TCP_RTO_INITIAL
+                tcp_sockets[i].rtt_measured = 0
+                tcp_sockets[i].rtt_sample_valid = 0
+                tcp_sockets[i].snd_cwnd = TCP_INIT_CWND
+                tcp_sockets[i].snd_ssthresh = TCP_INIT_SSTHRESH
+                tcp_sockets[i].dup_ack_count = 0
+                tcp_sockets[i].fast_recovery = 0
+                tcp_sockets[i].recovery_point = u32(0)
+                tcp_sockets[i].sack_ok = 0
+                tcp_sockets[i].sack_rexmit_valid = 0
+                tcp_sockets[i].rexmit_count = 0
+                var k = 0
+                while k < TCP_REORDER_SLOTS
+                    tcp_sockets[i].reorder[k].in_use = 0
+                    k += 1
+                var bi = 0
+                while bi < TCP_SACK_BOARD
+                    tcp_sockets[i].sack_board[bi].in_use = 0
+                    bi += 1
+                return i
+            i += 1
+        -1
+
+    inet_tcp_find(local_port: int, remote_ip: u32, remote_port: int) -> int
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if (tcp_sockets[i].in_use != 0 && tcp_sockets[i].is_listen == 0 &&
+                    tcp_sockets[i].local_port == local_port &&
+                    tcp_sockets[i].remote_port == remote_port &&
+                    tcp_sockets[i].remote_ip == remote_ip)
+                return i
+            i += 1
+        -1
+
+
+Find a listen socket bound to `local_port`. Returns slot index or -1.
+
+    inet_tcp_find_listen(local_port: int) -> int
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if (tcp_sockets[i].in_use != 0 && tcp_sockets[i].is_listen != 0 &&
+                    tcp_sockets[i].local_port == local_port)
+                return i
+            i += 1
+        -1
+
+
+TCP-private ephemeral port allocator (49152+). Distinct from UDP's
+so a TCP connect and a UDP socket can both hold 49152.
+
+    tcp_alloc_port() -> int
+        var port = 49152
+        while port < 65536
+            var taken = 0
+            var i = 0
+            while i < TCP_MAX_SOCKETS
+                if tcp_sockets[i].in_use != 0
+                    if tcp_sockets[i].local_port == port
+                        taken = 1
+                        i = TCP_MAX_SOCKETS
+                    else
+                        i += 1
+                else
+                    i += 1
+            if taken == 0
+                return port
+            port += 1
+        -1
+
+
+connect() entry — allocate slot, emit SYN, park caller. Returns
+the socket index on success (caller blocks until ESTABLISHED),
+-1 on immediate failure.
+
+    inet_tcp_begin_connect(owner_tid: int, caller_tid: int,
+                           remote_ip: u32, remote_port: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        val s = inet_tcp_alloc()
+        if s < 0
+            return -1
+        val lp = tcp_alloc_port()
+        if lp < 0
+            tcp_sockets[s].in_use = 0
+            return -1
+        val iss = tcp_next_iss()
+        tcp_sockets[s].owner_tid = owner_tid
+        tcp_sockets[s].local_port = lp
+        tcp_sockets[s].remote_ip = remote_ip
+        tcp_sockets[s].remote_port = remote_port
+        tcp_sockets[s].iss = iss
+        tcp_sockets[s].snd_una = iss
+        tcp_sockets[s].snd_nxt = iss + u32(1)
+        tcp_sockets[s].rcv_nxt = u32(0)
+        tcp_sockets[s].snd_wnd = 0
+        tcp_sockets[s].state = TCP_STATE_SYN_SENT
+        tcp_sockets[s].connect_waiter = caller_tid
+        inet_tcp_emit(s, TCP_F_SYN, iss, u32(0), 0)
+        inet_tcp_arm_rtx(s)
+        s
+
+
+listen() entry — allocate a slot bound to `local_port` in LISTEN
+state. Unlike connect(), listen() returns immediately; the caller
+reuses the returned fd for accept(). Fails with -1 if the slot
+pool is exhausted or a listen is already bound to that port.
+
+    inet_tcp_begin_listen(owner_tid: int, local_port: int) -> int
+        if inet_tcp_find_listen(local_port) >= 0
+            return -1
+        val s = inet_tcp_alloc()
+        if s < 0
+            return -1
+        tcp_sockets[s].owner_tid = owner_tid
+        tcp_sockets[s].local_port = local_port
+        tcp_sockets[s].remote_ip = u32(0)
+        tcp_sockets[s].remote_port = 0
+        tcp_sockets[s].state = TCP_STATE_LISTEN
+        tcp_sockets[s].is_listen = 1
+        s
+
+
+Handle an incoming SYN that matches no existing 4-tuple but does
+match a LISTEN socket. Allocates a child socket in SYN_RCVD,
+emits SYN-ACK, arms retransmit. The child is NOT queued for
+accept() until its SYN_RCVD → ESTABLISHED transition.
+
+    inet_tcp_handle_passive_syn(ls: int, remote_ip: u32,
+                                remote_port: int, seg_seq: u32,
+                                peer_sack_perm: int)
+        // If accept queue is already at capacity, silently drop.
+        // SYN cookies / overflow handling is phase-3.
+        if tcp_sockets[ls].accept_count >= TCP_LISTEN_BACKLOG
+            return
+        val s = inet_tcp_alloc()
+        if s < 0
+            return
+        val iss = tcp_next_iss()
+        tcp_sockets[s].owner_tid = tcp_sockets[ls].owner_tid
+        tcp_sockets[s].local_port = tcp_sockets[ls].local_port
+        tcp_sockets[s].remote_ip = remote_ip
+        tcp_sockets[s].remote_port = remote_port
+        tcp_sockets[s].iss = iss
+        tcp_sockets[s].snd_una = iss
+        tcp_sockets[s].snd_nxt = iss + u32(1)
+        tcp_sockets[s].irs = seg_seq
+        tcp_sockets[s].rcv_nxt = seg_seq + u32(1)
+        tcp_sockets[s].snd_wnd = 0
+        tcp_sockets[s].state = TCP_STATE_SYN_RCVD
+        tcp_sockets[s].parent_listen = ls
+        // RFC 2018 §2: enable SACK on this connection iff the
+        // peer included SACK-permitted in its SYN. Our SYN-ACK
+        // will echo SACK-permitted back (inet_tcp_emit always
+        // includes it on any SYN frame).
+        if peer_sack_perm != 0
+            tcp_sockets[s].sack_ok = 1
+        inet_tcp_emit(s, TCP_F_SYN | TCP_F_ACK, iss, u32(0), 0)
+        inet_tcp_arm_rtx(s)
+
+
+8-byte reply to a parked accept() caller:
+status(1) + child_fd(1) + peer_ip(4) + peer_port(2).
+
+    inet_tcp_reply_accept(tid: int, status: int, child_s: int)
+        var wr: [8]byte
+        wr[0] = byte(status & 0xff)
+        wr[1] = byte(child_s & 0xff)
+        if status == 0
+            val rip = tcp_sockets[child_s].remote_ip
+            wr[2] = byte(ipv4_octet(rip, 0) & 0xff)
+            wr[3] = byte(ipv4_octet(rip, 1) & 0xff)
+            wr[4] = byte(ipv4_octet(rip, 2) & 0xff)
+            wr[5] = byte(ipv4_octet(rip, 3) & 0xff)
+            pkt_write_u16(wr, 6, tcp_sockets[child_s].remote_port)
+        ipc_reply(tid, wr, 8)
+
+
+accept() entry — dequeue one established child (skipping dead
+entries left behind by retransmit-giveup on a half-open child).
+Returns the child socket index (caller replies immediately) or
+-1 if the caller was parked as accept_waiter. Returns -2 if
+`ls` is not a valid listen socket.
+
+A child is also acceptable in CLOSE_WAIT: the peer can send data
+and FIN while our accept() hasn't been called yet, so the child
+transitions ESTABLISHED → CLOSE_WAIT before dequeue. Returning
+it lets the caller drain buffered data and close cleanly instead
+of silently dropping the connection. Other teardown states
+(FIN_WAIT_*, LAST_ACK, TIME_WAIT) can't appear here — they only
+enter after *we* close(), which the caller hasn't done yet.
+
+    inet_tcp_do_accept(caller_tid: int, ls: int) -> int
+        if tcp_sockets[ls].in_use == 0 || tcp_sockets[ls].is_listen == 0
+            return -2
+        while tcp_sockets[ls].accept_count > 0
+            val head = tcp_sockets[ls].accept_head
+            val c = tcp_sockets[ls].accept_queue[head]
+            tcp_sockets[ls].accept_head = (head + 1) % TCP_LISTEN_BACKLOG
+            tcp_sockets[ls].accept_count -= 1
+            if tcp_sockets[c].in_use != 0
+                val cst = tcp_sockets[c].state
+                if cst == TCP_STATE_ESTABLISHED || cst == TCP_STATE_CLOSE_WAIT
+                    return c
+        // Queue empty — park caller.
+        tcp_sockets[ls].accept_waiter = caller_tid
+        -1
+
+
+Enqueue a newly-established child onto its parent listen's accept
+queue. If a caller is already parked in accept(), wake it with the
+child directly (the entry is dequeued before reply, not after).
+
+    inet_tcp_accept_enqueue(child_s: int)
+        val ls = tcp_sockets[child_s].parent_listen
+        if ls < 0 || tcp_sockets[ls].in_use == 0 || tcp_sockets[ls].is_listen == 0
+            return
+        if tcp_sockets[ls].accept_waiter >= 0
+            val tid = tcp_sockets[ls].accept_waiter
+            tcp_sockets[ls].accept_waiter = -1
+            inet_tcp_reply_accept(tid, 0, child_s)
+            return
+        if tcp_sockets[ls].accept_count >= TCP_LISTEN_BACKLOG
+            // Backlog full — the child becomes an orphan;
+            // nobody will accept() it. Close it.
+            inet_tcp_close_slot(child_s, -1)
+            return
+        val tail = tcp_sockets[ls].accept_tail
+        tcp_sockets[ls].accept_queue[tail] = child_s
+        tcp_sockets[ls].accept_tail = (tail + 1) % TCP_LISTEN_BACKLOG
+        tcp_sockets[ls].accept_count += 1
+
+
+Stateless RST emit for a segment arriving to a port with no
+matching connection or listen socket. Per RFC 793 §3.4: if the
+incoming segment has an ACK, the RST takes its seq from seg.ack
+and no ACK flag; otherwise the RST has seq=0, ACK=seg.seq+seg_len,
+and the ACK flag is set. seg_len counts SYN and FIN as one octet.
+
+    inet_tcp_emit_rst(remote_ip: u32, remote_port: int,
+                      local_port: int, seg_flags: int,
+                      seg_seq: u32, seg_ack: u32, seg_payload_len: int)
+        if inet_our_mac_known == 0
+            return
+        var next_hop_mac: [6]byte
+        if inet_resolve_mac(remote_ip, next_hop_mac) == 0
+            return
+        var rst_seq: u32 = u32(0)
+        var rst_ack: u32 = u32(0)
+        var rst_flags = TCP_F_RST
+        if (seg_flags & TCP_F_ACK) != 0
+            rst_seq = seg_ack
+        else
+            var ack_bump = seg_payload_len
+            if (seg_flags & TCP_F_SYN) != 0
+                ack_bump += 1
+            if (seg_flags & TCP_F_FIN) != 0
+                ack_bump += 1
+            rst_ack = seg_seq + u32(ack_bump)
+            rst_flags = TCP_F_RST | TCP_F_ACK
+        val hdr_bytes = 20
+        val seg_total = hdr_bytes
+        var frame: [1514]byte
+        val total_len = 14 + 20 + seg_total
+        pkt_write_mac(frame, 0, next_hop_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+        frame[14] = 0x45
+        frame[15] = 0
+        pkt_write_u16(frame, 16, 20 + seg_total)
+        pkt_write_u16(frame, 18, 0)
+        pkt_write_u16(frame, 20, 0x4000)
+        frame[22] = 64
+        frame[23] = byte(IP_PROTO_TCP)
+        pkt_write_u16(frame, 24, 0)
+        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
+            INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30,
+            ipv4_octet(remote_ip, 0), ipv4_octet(remote_ip, 1),
+            ipv4_octet(remote_ip, 2), ipv4_octet(remote_ip, 3))
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+        val tcp_off = 34
+        pkt_write_u16(frame, tcp_off + 0, local_port)
+        pkt_write_u16(frame, tcp_off + 2, remote_port)
+        tcp_write_u32(frame, tcp_off + 4, rst_seq)
+        tcp_write_u32(frame, tcp_off + 8, rst_ack)
+        frame[tcp_off + 12] = byte((5 << 4) & 0xf0)
+        frame[tcp_off + 13] = byte(rst_flags & 0xff)
+        pkt_write_u16(frame, tcp_off + 14, 0)
+        pkt_write_u16(frame, tcp_off + 16, 0)
+        pkt_write_u16(frame, tcp_off + 18, 0)
+        pkt_write_u16(frame, tcp_off + 16,
+            (~inet_l4_partial_sum(our_ip, remote_ip,
+                IP_PROTO_TCP, frame, tcp_off, seg_total)) & 0xffff)
+        inet_nic_send_packet(frame, total_len)
+
+
+RFC 5681 congestion-window growth. Called whenever an ACK
+advances `snd_una`. `acked` is the number of data bytes newly
+acknowledged (`eff` in the caller — so a pure FIN ACK, which
+has `eff = 0`, is a no-op here).
+
+- In slow start (`cwnd < ssthresh`): grow `cwnd` by at most
+  one SMSS per cumulative ACK (RFC 5681 §3.1 ¶2). Matches the
+  classical doubling-per-RTT behaviour.
+- In congestion avoidance (`cwnd >= ssthresh`): grow `cwnd`
+  by `SMSS * SMSS / cwnd` per ACK, rounded up to at least 1
+  so we always make forward progress. Net effect is ~one
+  SMSS per RTT under steady cumulative-ACK cadence.
+
+    inet_tcp_cwnd_on_ack(s: int, acked: int)
+        if acked <= 0
+            return
+        var cwnd = tcp_sockets[s].snd_cwnd
+        if cwnd < tcp_sockets[s].snd_ssthresh
+            // Slow start. +1 SMSS per ACK, but capped at the
+            // bytes actually acked to avoid over-inflating on
+            // a tiny tail ACK.
+            var inc = TCP_MAX_SEG
+            if inc > acked
+                inc = acked
+            cwnd += inc
+        else
+            var inc = (TCP_MAX_SEG * TCP_MAX_SEG) / cwnd
+            if inc < 1
+                inc = 1
+            cwnd += inc
+        // Runaway guard. 64 KB is far beyond anything our
+        // 1024-byte send_buf will ever exercise; acts purely
+        // as a sanity clamp so misbehaving peers can't make
+        // the cwnd integer saturate.
+        if cwnd > 65535
+            cwnd = 65535
+        tcp_sockets[s].snd_cwnd = cwnd
+
+
+RFC 5681 §3.1 ¶3 — RTO timeout collapse. Called from
+`inet_tcp_scan_timers` before retransmit. `FlightSize` is the
+bytes in flight (`snd_nxt - snd_una`) at the moment of loss;
+`ssthresh` is reset to `max(FlightSize / 2, 2 * SMSS)`,
+`cwnd` collapses to one SMSS (our `TCP_MIN_CWND`).
+
+Only applies when we have actual in-flight data — SYN / FIN
+retransmits keep their current cwnd, which is fine because
+those are handshake probes and cwnd isn't meaningful for them
+yet.
+
+    inet_tcp_cwnd_on_rto(s: int)
+        val in_flight = int(i32(
+            tcp_sockets[s].snd_nxt - tcp_sockets[s].snd_una))
+        if in_flight <= 0
+            return
+        var new_ssthresh = in_flight / 2
+        val floor = 2 * TCP_MAX_SEG
+        if new_ssthresh < floor
+            new_ssthresh = floor
+        tcp_sockets[s].snd_ssthresh = new_ssthresh
+        tcp_sockets[s].snd_cwnd = TCP_MIN_CWND
+        // RTO supersedes fast recovery — we're clearly losing
+        // more than fast retransmit assumed, so reset to slow
+        // start from a single MSS.
+        tcp_sockets[s].fast_recovery = 0
+        tcp_sockets[s].dup_ack_count = 0
+        // Any SACK info the peer had is worthless now: RTO means
+        // we can't trust the scoreboard was coherent with what's
+        // still in flight.
+        tcp_sack_board_clear(s)
+
+
+RFC 5681 §3.2 ¶4-5 — fast retransmit + enter fast recovery.
+Fired on the third duplicate ACK. Halves `ssthresh` from the
+current `FlightSize` (floored at 2 × SMSS), **inflates**
+`cwnd` to `ssthresh + 3 × SMSS` to account for the three
+segments that must have left the network to elicit the three
+dup-ACKs, and sets `fast_recovery = 1`. `recovery_point`
+records `snd_nxt` at entry so the ACK handler knows when
+recovery ends (first ACK past this seq).
+
+Retransmits one MSS-sized segment. Without SACK we have to
+assume the dropped segment is at `snd_una` — peer hasn't told
+us anything finer. With SACK live we point the retransmit at
+the first real hole (`tcp_sack_next_hole`) so the first
+retransmit carries data the peer is actually missing.
+
+`snd_nxt` is NOT reset — any segments past the retransmit
+stay in-flight and drain handles window accounting correctly.
+
+    inet_tcp_fast_retransmit(s: int)
+        val in_flight = int(i32(
+            tcp_sockets[s].snd_nxt - tcp_sockets[s].snd_una))
+        var new_ssthresh = in_flight / 2
+        val floor = 2 * TCP_MAX_SEG
+        if new_ssthresh < floor
+            new_ssthresh = floor
+        tcp_sockets[s].snd_ssthresh = new_ssthresh
+        tcp_sockets[s].snd_cwnd = new_ssthresh + 3 * TCP_MAX_SEG
+        tcp_sockets[s].fast_recovery = 1
+        tcp_sockets[s].recovery_point = tcp_sockets[s].snd_nxt
+        if tcp_sockets[s].send_len > 0
+            var retx_seq = tcp_sockets[s].snd_una
+            if tcp_sockets[s].sack_ok != 0
+                val hole = tcp_sack_next_hole(s, tcp_sockets[s].snd_una)
+                if tcp_seq_lt(hole, tcp_sockets[s].snd_nxt) != 0
+                    retx_seq = hole
+            val avail = int(i32(tcp_sockets[s].snd_nxt - retx_seq))
+            var retx_len = avail
+            if retx_len > TCP_MAX_SEG
+                retx_len = TCP_MAX_SEG
+            if retx_len > 0
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
+                    retx_seq, retx_seq, retx_len)
+                tcp_sockets[s].sack_rexmit_cursor = retx_seq + u32(retx_len)
+                tcp_sockets[s].sack_rexmit_valid = 1
+                tcp_sockets[s].rexmit_count += 1
+                inet_tcp_arm_rtx(s)
+
+
+Issue one more SACK-guided retransmit, picking up where the
+last one left off. Called on partial ACKs inside fast recovery
+and after SACK-driven cwnd inflation so additional holes get
+plugged promptly instead of waiting for RTO.
+
+    inet_tcp_sack_rexmit_next(s: int)
+        if tcp_sockets[s].sack_ok == 0
+            return
+        if tcp_sockets[s].send_len == 0
+            return
+        var cursor = tcp_sockets[s].snd_una
+        if tcp_sockets[s].sack_rexmit_valid != 0
+            if tcp_seq_lt(tcp_sockets[s].sack_rexmit_cursor, cursor) == 0
+                cursor = tcp_sockets[s].sack_rexmit_cursor
+        val hole = tcp_sack_next_hole(s, cursor)
+        if tcp_seq_lt(hole, tcp_sockets[s].snd_nxt) == 0
+            return
+        val avail = int(i32(tcp_sockets[s].snd_nxt - hole))
+        var retx_len = avail
+        if retx_len > TCP_MAX_SEG
+            retx_len = TCP_MAX_SEG
+        if retx_len <= 0
+            return
+        inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
+            hole, hole, retx_len)
+        tcp_sockets[s].sack_rexmit_cursor = hole + u32(retx_len)
+        tcp_sockets[s].sack_rexmit_valid = 1
+        tcp_sockets[s].rexmit_count += 1
+        inet_tcp_arm_rtx(s)
+
+
+Pump as many segments out of `send_buf` as the effective send
+window allows. Called from `inet_tcp_do_send` after buffering
+new user data, and from the ACK path after `snd_una` advances
+(to exploit the window that just opened).
+
+Effective window = `min(snd_cwnd, snd_wnd)` — standard TCP
+(RFC 5681 §2). `snd_wnd` is the receiver's advertised rwnd;
+`snd_cwnd` is our own congestion window. In-flight bytes are
+`snd_nxt - snd_una`; room is `effective_window - in_flight`.
+
+Each segment is at most `TCP_MAX_SEG` bytes (our SMSS). Stops
+when the window is full, when `send_buf` has no more unsent
+bytes, or when `snd_wnd` is zero (peer closed its window).
+
+RTT sample anchors on the last segment's tail sequence — good
+enough for coarse RTT tracking.
+
+    inet_tcp_drain_send(s: int)
+        val st = tcp_sockets[s].state
+        if st != TCP_STATE_ESTABLISHED && st != TCP_STATE_CLOSE_WAIT
+            return
+        var window = tcp_sockets[s].snd_cwnd
+        if tcp_sockets[s].snd_wnd < window
+            window = tcp_sockets[s].snd_wnd
+        var emitted_any = 0
+        while 1 == 1
+            val in_flight = int(i32(
+                tcp_sockets[s].snd_nxt - tcp_sockets[s].snd_una))
+            val unsent = tcp_sockets[s].send_len - in_flight
+            if unsent <= 0
+                break
+            val room = window - in_flight
+            if room <= 0
+                break
+            var seg_size = unsent
+            if seg_size > TCP_MAX_SEG
+                seg_size = TCP_MAX_SEG
+            if seg_size > room
+                seg_size = room
+            val seq = tcp_sockets[s].snd_nxt
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH, seq, seq, seg_size)
+            tcp_sockets[s].snd_nxt = seq + u32(seg_size)
+            emitted_any = 1
+        if emitted_any != 0
+            inet_tcp_rtt_start_sample(s, tcp_sockets[s].snd_nxt)
+            inet_tcp_arm_rtx(s)
+
+
+send() entry — append to `send_buf` and drain as much as the
+congestion + receive windows allow. Returns bytes accepted
+(>= 0), -1 if the connection isn't open for sending.
+
+CLOSE_WAIT (peer half-closed their write side) is still fine
+for sending: our read side has EOF'd but not our write side.
+Returns 0 if the send buffer is full — caller must wait for an
+ACK and retry.
+
+    inet_tcp_do_send(s: int, data: *byte, len: int) -> int
+        val ds_st = tcp_sockets[s].state
+        if ds_st != TCP_STATE_ESTABLISHED && ds_st != TCP_STATE_CLOSE_WAIT
+            return -1
+        val space = TCP_SEND_BUF - tcp_sockets[s].send_len
+        var n = len
+        if n > space
+            n = space
+        if n <= 0
+            return 0
+        val start_off = tcp_sockets[s].send_len
+        var i = 0
+        while i < n
+            tcp_sockets[s].send_buf[start_off + i] = data[i]
+            i += 1
+        tcp_sockets[s].send_len += n
+        inet_tcp_drain_send(s)
+        n
+
+
+close() entry — emit FIN (or immediately free if never opened).
+Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
+-1 on invalid state.
+
+    inet_tcp_do_close(s: int, caller_tid: int) -> int
+        val st = tcp_sockets[s].state
+        if st == TCP_STATE_CLOSED
+            tcp_sockets[s].in_use = 0
+            return 1
+        if st == TCP_STATE_LISTEN
+            // Release every child that was created via this listen —
+            // queued-but-not-yet-accepted ESTABLISHED sockets, and
+            // SYN_RCVD children still mid-handshake. Without this they
+            // orphan onto dead parent_listen and leak their slots
+            // until peer-driven teardown (which may never arrive).
+            var i = 0
+            while i < TCP_MAX_SOCKETS
+                if tcp_sockets[i].in_use != 0
+                    if tcp_sockets[i].parent_listen == s
+                        inet_tcp_close_slot(i, -1)
+                i += 1
+            // No peer to FIN; any parked accept_waiter gets woken
+            // with status=1 (error) by close_slot.
+            inet_tcp_close_slot(s, 1)
+            return 1
+        if st == TCP_STATE_ESTABLISHED
+            val seq = tcp_sockets[s].snd_nxt
+            tcp_sockets[s].snd_nxt = seq + u32(1)
+            tcp_sockets[s].our_fin_sent = 1
+            tcp_sockets[s].state = TCP_STATE_FIN_WAIT_1
+            tcp_sockets[s].close_waiter = caller_tid
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
+            inet_tcp_arm_rtx(s)
+            return 0
+        if st == TCP_STATE_CLOSE_WAIT
+            val seq = tcp_sockets[s].snd_nxt
+            tcp_sockets[s].snd_nxt = seq + u32(1)
+            tcp_sockets[s].our_fin_sent = 1
+            tcp_sockets[s].state = TCP_STATE_LAST_ACK
+            tcp_sockets[s].close_waiter = caller_tid
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
+            inet_tcp_arm_rtx(s)
+            return 0
+        if st == TCP_STATE_SYN_SENT
+            inet_tcp_close_slot(s, -1)
+            return 1
+        -1
+
+
+Inbound IPv4 protocol=6 dispatch. Parses header, verifies
+checksum, locates the matching socket, and delegates.
+
+    inet_tcp_handle_segment(frame: *byte, total_len: int, ihl_bytes: int)
+        val tcp_off = 14 + ihl_bytes
+        if total_len < tcp_off + 20
+            return
+        val src_port = pkt_read_u16(frame, tcp_off + 0)
+        val dst_port = pkt_read_u16(frame, tcp_off + 2)
+        val seq = tcp_read_u32(frame, tcp_off + 4)
+        val ack = tcp_read_u32(frame, tcp_off + 8)
+        val data_off_words = (int(frame[tcp_off + 12]) >> 4) & 0x0f
+        val tcp_hdr_len = data_off_words * 4
+        val flags = int(frame[tcp_off + 13]) & 0xff
+        val wnd = pkt_read_u16(frame, tcp_off + 14)
+        if tcp_hdr_len < 20
+            return
+        if total_len < tcp_off + tcp_hdr_len
+            return
+        val ip_total = pkt_read_u16(frame, 16)
+        val tcp_len = ip_total - ihl_bytes
+        val payload_len = tcp_len - tcp_hdr_len
+        val payload: *byte = frame + tcp_off + tcp_hdr_len
+        val src_ip = ipv4(
+            int(frame[14 + 12]) & 0xff, int(frame[14 + 13]) & 0xff,
+            int(frame[14 + 14]) & 0xff, int(frame[14 + 15]) & 0xff)
+        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
+            INET_OUR_IP_C, INET_OUR_IP_D)
+        if inet_l4_partial_sum(src_ip, our_ip, IP_PROTO_TCP,
+                frame, tcp_off, tcp_len) != 0xffff
+            return
+        // RFC 2018 SACK-permitted is negotiated once on the
+        // handshake; parse it here so both the passive-open and
+        // state-step paths can see the peer's offer.
+        val peer_sack_perm = tcp_opts_has_sack_permitted(
+            frame, tcp_off, tcp_hdr_len)
+        val s = inet_tcp_find(dst_port, src_ip, src_port)
+        if s < 0
+            // No connection match. SYN-to-a-listen gets the passive
+            // open path. Anything else that isn't already a RST gets
+            // a stateless RST per RFC 793 §3.4.
+            if (flags & TCP_F_RST) != 0
+                return
+            if (flags & TCP_F_SYN) != 0
+                val ls = inet_tcp_find_listen(dst_port)
+                if ls >= 0
+                    inet_tcp_handle_passive_syn(ls, src_ip, src_port,
+                        seq, peer_sack_perm)
+                    return
+            inet_tcp_emit_rst(src_ip, src_port, dst_port,
+                              flags, seq, ack, payload_len)
+            return
+        // RFC 2018 §4: consult the SACK option on ACKs so the sender
+        // scoreboard stays current. Only meaningful once both sides
+        // agreed on SACK-permitted — otherwise the peer's option
+        // field is garbage we shouldn't trust.
+        if tcp_sockets[s].sack_ok != 0
+            if (flags & TCP_F_ACK) != 0
+                tcp_opts_apply_sack(s, frame, tcp_off, tcp_hdr_len)
+        inet_tcp_state_step(s, flags, seq, ack, wnd, payload,
+            payload_len, peer_sack_perm)
+
+
+Reorder queue for out-of-order segments.
+
+`inet_tcp_reorder_bytes` returns the total payload bytes currently
+stashed in the reorder queue for socket `s`. Used by `inet_tcp_emit`
+to subtract stashed bytes from the advertised receive window, and
+by the stash window check so peer sees a consistent window.
+
+    inet_tcp_reorder_bytes(s: int) -> int
+        var total = 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            if tcp_sockets[s].reorder[k].in_use != 0
+                total += tcp_sockets[s].reorder[k].len
+            k += 1
+        total
+
+`inet_tcp_reorder_store` stashes a segment whose seq > rcv_nxt but
+still inside the advertised recv window. Duplicates (seq already
+stored) and partial overlaps are rejected — peer will retransmit.
+Returns 1 if stored, 0 if dropped.
+
+    inet_tcp_reorder_store(s: int, seq: u32, payload: *byte,
+                           payload_len: int) -> int
+        if payload_len <= 0
+            return 0
+        if payload_len > TCP_MAX_SEG
+            return 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            if tcp_sockets[s].reorder[k].in_use != 0
+                val e_seq = tcp_sockets[s].reorder[k].seq
+                val e_end = e_seq + u32(tcp_sockets[s].reorder[k].len)
+                val n_end = seq + u32(payload_len)
+                if tcp_seq_lt(seq, e_end) != 0
+                    if tcp_seq_lt(e_seq, n_end) != 0
+                        return 0
+            k += 1
+        var j = 0
+        while j < TCP_REORDER_SLOTS
+            if tcp_sockets[s].reorder[j].in_use == 0
+                tcp_sockets[s].reorder[j].in_use = 1
+                tcp_sockets[s].reorder[j].seq = seq
+                tcp_sockets[s].reorder[j].len = payload_len
+                var i = 0
+                while i < payload_len
+                    tcp_sockets[s].reorder[j].data[i] = payload[i]
+                    i += 1
+                return 1
+            j += 1
+        0
+
+`inet_tcp_drain_reorder` is called after a contiguous append to
+recv_buf. It scans the reorder queue for slots whose seq matches
+the new rcv_nxt, copies their bytes into recv_buf, advances
+rcv_nxt, and frees the slot. Continues until no slot lines up.
+If a pending FIN (fin_pending != 0, fin_seq == rcv_nxt) lines up,
+processes it too.
+
+Returns non-zero if any data was drained (caller uses this to
+decide whether an ACK needs to be re-emitted). Bit 0 = data,
+bit 1 = FIN processed.
+
+    inet_tcp_drain_reorder(s: int) -> int
+        var result = 0
+        var progress = 1
+        while progress != 0
+            progress = 0
+            var k = 0
+            while k < TCP_REORDER_SLOTS
+                if tcp_sockets[s].reorder[k].in_use != 0
+                    if tcp_sockets[s].reorder[k].seq == tcp_sockets[s].rcv_nxt
+                        val take = tcp_sockets[s].reorder[k].len
+                        val room = TCP_RECV_BUF - tcp_sockets[s].recv_len
+                        if take <= room
+                            var i = 0
+                            while i < take
+                                tcp_sockets[s].recv_buf[tcp_sockets[s].recv_len + i] = tcp_sockets[s].reorder[k].data[i]
+                                i += 1
+                            tcp_sockets[s].recv_len += take
+                            tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
+                            tcp_sockets[s].reorder[k].in_use = 0
+                            result = result | 1
+                            progress = 1
+                k += 1
+            if tcp_sockets[s].fin_pending != 0
+                if tcp_sockets[s].fin_seq == tcp_sockets[s].rcv_nxt
+                    tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(1)
+                    tcp_sockets[s].peer_fin = 1
+                    tcp_sockets[s].fin_pending = 0
+                    result = result | 2
+        result
+
+
+Per-socket state transition for one validated segment.
+
+    inet_tcp_state_step(s: int, flags: int, seq: u32, ack: u32,
+                        wnd: int, payload: *byte, payload_len: int,
+                        peer_sack_perm: int)
+        val st = tcp_sockets[s].state
+        if st == TCP_STATE_SYN_SENT
+            if (flags & TCP_F_RST) != 0
+                inet_tcp_close_slot(s, -1)
+                return
+            if (flags & TCP_F_SYN) == 0
+                return
+            if (flags & TCP_F_ACK) == 0
+                return
+            if ack != tcp_sockets[s].snd_nxt
+                return
+            tcp_sockets[s].irs = seq
+            tcp_sockets[s].rcv_nxt = seq + u32(1)
+            tcp_sockets[s].snd_una = ack
+            tcp_sockets[s].snd_wnd = wnd
+            tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+            // RFC 2018 §2: both our SYN and the peer's SYN-ACK
+            // must carry SACK-permitted for SACK to be enabled
+            // on this connection. We always advertise it in our
+            // SYN, so the peer's SYN-ACK option is the deciding
+            // factor.
+            if peer_sack_perm != 0
+                tcp_sockets[s].sack_ok = 1
+            inet_tcp_disarm_rtx(s)
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+            if tcp_sockets[s].connect_waiter >= 0
+                inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, 0, s)
+                tcp_sockets[s].connect_waiter = -1
+            return
+        if st == TCP_STATE_SYN_RCVD
+            if (flags & TCP_F_RST) != 0
+                inet_tcp_close_slot(s, -1)
+                return
+            if (flags & TCP_F_ACK) == 0
+                return
+            if ack != tcp_sockets[s].snd_nxt
+                return
+            tcp_sockets[s].snd_una = ack
+            tcp_sockets[s].snd_wnd = wnd
+            tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+            inet_tcp_disarm_rtx(s)
+            // Hand child to parent listen (or directly to the parked
+            // accept caller). Data in this segment is ignored — rely on
+            // the peer retransmitting once we ACK the next segment.
+            inet_tcp_accept_enqueue(s)
+            return
+
+TIME_WAIT is its own branch so the past-handshake logic below
+doesn't second-guess a quiescent socket. We re-ACK retransmitted
+FINs (peer missed our last ACK) and refresh the 2MSL timer so a
+stream of FIN retransmits keeps absorbing; new-SYN-on-TIME_WAIT
+(RFC 1122 §4.2.2.13) is silently dropped here — peer retries and
+the listen path picks it up.
+
+        if st == TCP_STATE_TIME_WAIT
+            if (flags & TCP_F_RST) != 0
+                inet_tcp_close_slot(s, 0)
+                return
+            if (flags & TCP_F_FIN) != 0
+                inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+                tcp_sockets[s].tw_deadline = int(uptime()) + TCP_TW_TICKS
+            return
+
+Past handshake: process ACK, data, FIN in that order.
+
+        if (flags & TCP_F_RST) != 0
+            inet_tcp_close_slot(s, -1)
+            return
+
+RFC 5961 §4: a SYN arriving on a synchronized connection is a
+challenge — respond with our current ACK and drop the segment.
+Covers confused peers / port-collision retries without tearing
+the connection down.
+
+        if (flags & TCP_F_SYN) != 0
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+            return
+        if (flags & TCP_F_ACK) != 0
+            if tcp_seq_lt(tcp_sockets[s].snd_una, ack) != 0
+                if tcp_seq_le(ack, tcp_sockets[s].snd_nxt) != 0
+                    val acked = int(i32(ack - tcp_sockets[s].snd_una))
+                    var eff = acked
+                    if tcp_sockets[s].our_fin_sent != 0
+                        if ack == tcp_sockets[s].snd_nxt
+                            eff -= 1
+                    if eff > tcp_sockets[s].send_len
+                        eff = tcp_sockets[s].send_len
+                    var k = eff
+                    while k < tcp_sockets[s].send_len
+                        tcp_sockets[s].send_buf[k - eff] = tcp_sockets[s].send_buf[k]
+                        k += 1
+                    tcp_sockets[s].send_len -= eff
+                    tcp_sockets[s].snd_una = ack
+                    tcp_sockets[s].snd_wnd = wnd
+                    tcp_sockets[s].dup_ack_count = 0
+                    // Cumulative ACK just swept some bytes — drop any
+                    // scoreboard entries now wholly covered. Keeps
+                    // `tcp_sack_next_hole` pointed at the right place
+                    // without stale blocks lingering.
+                    tcp_sack_board_purge(s)
+                    inet_tcp_rtt_maybe_sample(s, ack)
+                    // RFC 5681 §3.2 ¶6 — recovering ACK: if we're
+                    // in fast recovery and this ACK reaches beyond
+                    // the recovery_point captured at entry, deflate
+                    // cwnd back to ssthresh and leave recovery.
+                    // Otherwise grow cwnd via the normal slow-start
+                    // / CA path.
+                    if tcp_sockets[s].fast_recovery != 0
+                        if tcp_seq_le(tcp_sockets[s].recovery_point, ack) != 0
+                            tcp_sockets[s].snd_cwnd = tcp_sockets[s].snd_ssthresh
+                            tcp_sockets[s].fast_recovery = 0
+                            tcp_sack_board_clear(s)
+                        else
+                            // Partial ACK inside recovery: if SACK is
+                            // live, plug the next hole immediately
+                            // instead of waiting for RTO (RFC 6675
+                            // style NextSeg — slix's minimal form
+                            // issues one hole per partial ACK).
+                            if tcp_sockets[s].sack_ok != 0
+                                inet_tcp_sack_rexmit_next(s)
+                    else
+                        inet_tcp_cwnd_on_ack(s, eff)
+                    if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                        inet_tcp_disarm_rtx(s)
+                    else
+                        inet_tcp_arm_rtx(s)
+                    inet_tcp_drain_send(s)
+            else if ack == tcp_sockets[s].snd_una
+                // Potential duplicate ACK (RFC 5681 §2). Counts as
+                // a "pure" dup only if there's no payload and we
+                // still have outstanding unacked data.
+                if payload_len == 0
+                    if tcp_sockets[s].send_len > 0
+                        if tcp_sockets[s].fast_recovery == 0
+                            // Count toward fast-retransmit trigger.
+                            tcp_sockets[s].dup_ack_count += 1
+                            if tcp_sockets[s].dup_ack_count == 3
+                                inet_tcp_fast_retransmit(s)
+                        else
+                            // RFC 5681 §3.2 ¶7 — already in fast
+                            // recovery. Each additional dup-ACK
+                            // means another segment left the net,
+                            // so inflate cwnd by one SMSS and try
+                            // to drain (may enable a new segment
+                            // to be sent).
+                            tcp_sockets[s].snd_cwnd += TCP_MAX_SEG
+                            if tcp_sockets[s].snd_cwnd > 65535
+                                tcp_sockets[s].snd_cwnd = 65535
+                            // Each dup-ACK during recovery likely
+                            // brought a fresh SACK block — if a new
+                            // hole becomes visible, plug it now.
+                            if tcp_sockets[s].sack_ok != 0
+                                inet_tcp_sack_rexmit_next(s)
+                            inet_tcp_drain_send(s)
+
+        var did_data = 0
+        var did_fin = 0
+        if payload_len > 0
+            if seq == tcp_sockets[s].rcv_nxt
+                val room = TCP_RECV_BUF - tcp_sockets[s].recv_len
+                var take = payload_len
+                if take > room
+                    take = room
+                var i = 0
+                while i < take
+                    tcp_sockets[s].recv_buf[tcp_sockets[s].recv_len + i] = payload[i]
+                    i += 1
+                tcp_sockets[s].recv_len += take
+                tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
+                did_data = 1
+            else if tcp_seq_lt(tcp_sockets[s].rcv_nxt, seq) != 0
+                // seq > rcv_nxt: out-of-order. Stash if it fits in
+                // our advertised window. If the stash fails (full
+                // queue, overlap), peer will retransmit — the dup
+                // re-ACK path below still advertises rcv_nxt.
+                val seg_end = seq + u32(payload_len)
+                val rem = TCP_RECV_BUF - tcp_sockets[s].recv_len - inet_tcp_reorder_bytes(s)
+                var rem_clamped = rem
+                if rem_clamped < 0
+                    rem_clamped = 0
+                val wnd_room = u32(rem_clamped)
+                val wnd_end = tcp_sockets[s].rcv_nxt + wnd_room
+                if tcp_seq_le(seg_end, wnd_end) != 0
+                    inet_tcp_reorder_store(s, seq, payload, payload_len)
+
+        if (flags & TCP_F_FIN) != 0
+            val fin_end = seq + u32(payload_len)
+            if fin_end == tcp_sockets[s].rcv_nxt
+                tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(1)
+                tcp_sockets[s].peer_fin = 1
+                did_fin = 1
+            else if tcp_seq_lt(tcp_sockets[s].rcv_nxt, fin_end) != 0
+                // FIN is out-of-order — stash its seq and process
+                // when drain catches up.
+                tcp_sockets[s].fin_seq = fin_end
+                tcp_sockets[s].fin_pending = 1
+
+        if did_data != 0
+            val drained = inet_tcp_drain_reorder(s)
+            if (drained & 2) != 0
+                did_fin = 1
+
+        if did_data != 0
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+            if tcp_sockets[s].recv_waiter >= 0
+                val mx = tcp_sockets[s].recv_maxlen
+                var give = tcp_sockets[s].recv_len
+                if give > mx
+                    give = mx
+                inet_tcp_reply_recv(s, give)
+        if did_fin != 0
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+
+        // Re-ACK out-of-window segments (old data or dup FIN peer is
+        // retransmitting because an earlier ACK of ours was lost).
+        // Without this, peer keeps retransmitting until giveup+RST.
+        if did_data == 0 && did_fin == 0
+            if payload_len > 0 || (flags & TCP_F_FIN) != 0
+                inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+
+        val st2 = tcp_sockets[s].state
+        if st2 == TCP_STATE_ESTABLISHED
+            if did_fin != 0
+                tcp_sockets[s].state = TCP_STATE_CLOSE_WAIT
+                if tcp_sockets[s].recv_waiter >= 0
+                    if tcp_sockets[s].recv_len == 0
+                        inet_tcp_reply_recv(s, 0)
+        else if st2 == TCP_STATE_FIN_WAIT_1
+            if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                if tcp_sockets[s].peer_fin != 0
+                    // Our FIN acked and peer has FIN'd (either in this
+                    // segment — simultaneous close — or earlier while
+                    // our FIN was still unacked, which RFC 793 models
+                    // as the CLOSING state). Either way enter TIME_WAIT.
+                    inet_tcp_enter_time_wait(s)
+                else
+                    // Arm an idle timeout so the slot is reclaimed
+                    // even if the peer never FINs. Linux's default
+                    // tcp_fin_timeout is 60s; we match that.
+                    tcp_sockets[s].state = TCP_STATE_FIN_WAIT_2
+                    tcp_sockets[s].tw_deadline = int(uptime()) + TCP_FW2_TICKS
+        else if st2 == TCP_STATE_FIN_WAIT_2
+            if did_fin != 0
+                // Peer FIN after our FIN-ACK — enter TIME_WAIT.
+                inet_tcp_enter_time_wait(s)
+        else if st2 == TCP_STATE_LAST_ACK
+            if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                inet_tcp_close_slot(s, 0)
+
+
+Called from inet main loop on every wake. Scans every active
+socket for retransmit and TIME_WAIT deadlines.
+
+    inet_tcp_scan_timers()
+        val now = int(uptime())
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use != 0
+                val rtx = tcp_sockets[i].rtx_deadline
+                if rtx != 0
+                    if now >= rtx
+                        if tcp_sockets[i].retries >= TCP_MAX_RETRIES
+                            inet_tcp_close_slot(i, -1)
+                        else
+                            tcp_sockets[i].retries += 1
+                            inet_tcp_cwnd_on_rto(i)
+                            inet_tcp_retransmit(i)
+                            inet_tcp_rto_backoff(i)
+                            inet_tcp_arm_rtx(i)
+                val tw = tcp_sockets[i].tw_deadline
+                if tw != 0
+                    if now >= tw
+                        inet_tcp_close_slot(i, 0)
+            i += 1
+
+    inet_tcp_retransmit(s: int)
+        val st = tcp_sockets[s].state
+        if st == TCP_STATE_SYN_SENT
+            inet_tcp_emit(s, TCP_F_SYN, tcp_sockets[s].iss, u32(0), 0)
+            return
+        if st == TCP_STATE_SYN_RCVD
+            inet_tcp_emit(s, TCP_F_SYN | TCP_F_ACK, tcp_sockets[s].iss, u32(0), 0)
+            return
+        if st == TCP_STATE_ESTABLISHED || st == TCP_STATE_CLOSE_WAIT
+            if tcp_sockets[s].send_len > 0
+                // Retransmit exactly one MSS-sized segment from the
+                // front of send_buf. cwnd has already been collapsed
+                // to TCP_MIN_CWND in scan_timers; subsequent ACKs
+                // will grow it back via slow start and drain_send
+                // will push more segments as the window opens.
+                var retx_len = tcp_sockets[s].send_len
+                if retx_len > TCP_MAX_SEG
+                    retx_len = TCP_MAX_SEG
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
+                    tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
+                    retx_len)
+                val retx_end = tcp_sockets[s].snd_una + u32(retx_len)
+                tcp_sockets[s].snd_nxt = retx_end
+            return
+        if st == TCP_STATE_FIN_WAIT_1
+            // If data was still in flight when close() ran, resend it
+            // together with the FIN. A FIN-only retransmit leaves the
+            // peer rejecting our FIN as out-of-window until giveup.
+            if tcp_sockets[s].send_len > 0
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN | TCP_F_PSH,
+                    tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
+                    tcp_sockets[s].send_len)
+            else
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
+                    tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
+            return
+        if st == TCP_STATE_LAST_ACK
+            if tcp_sockets[s].send_len > 0
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN | TCP_F_PSH,
+                    tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
+                    tcp_sockets[s].send_len)
+            else
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
+                    tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
+            return
+
+
+Test-only: drive inet_tcp_state_step against a scratch TCP socket
+with a deliberately out-of-order segment sequence. Verifies stash,
+drain, and recv_buf ordering. Returns 0 on pass, 1..6 on failure.
+
+Sequence exercised:
+  1. Seg A at seq 200 len 50  (bytes 'B') — out-of-order, stashed.
+  2. Seg B at seq 250 len 50  (bytes 'C') — out-of-order, stashed.
+  3. Seg C at seq 100 len 100 (bytes 'A') — in-order, triggers
+     drain of the two stashed slots so rcv_nxt advances 100 → 300.
+Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
+100 'A' + 50 'B' + 50 'C'.
+
+    inet_tcp_ooo_selftest() -> int
+        val s = TCP_MAX_SOCKETS - 1
+        tcp_sockets[s].in_use = 1
+        tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+        tcp_sockets[s].rcv_nxt = u32(100)
+        tcp_sockets[s].snd_una = u32(1)
+        tcp_sockets[s].snd_nxt = u32(1)
+        tcp_sockets[s].recv_len = 0
+        tcp_sockets[s].send_len = 0
+        tcp_sockets[s].fin_pending = 0
+        tcp_sockets[s].peer_fin = 0
+        tcp_sockets[s].our_fin_sent = 0
+        tcp_sockets[s].recv_waiter = -1
+        tcp_sockets[s].send_waiter = -1
+        tcp_sockets[s].connect_waiter = -1
+        tcp_sockets[s].close_waiter = -1
+        tcp_sockets[s].accept_waiter = -1
+        tcp_sockets[s].is_listen = 0
+        tcp_sockets[s].owner_tid = -1
+        tcp_sockets[s].local_port = 0
+        tcp_sockets[s].remote_port = 0
+        tcp_sockets[s].remote_ip = u32(0)
+        tcp_sockets[s].rtx_deadline = 0
+        tcp_sockets[s].tw_deadline = 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            tcp_sockets[s].reorder[k].in_use = 0
+            k += 1
+
+        var seg_b: [50]byte
+        var i = 0
+        while i < 50
+            seg_b[i] = byte('B')
+            i += 1
+        inet_tcp_state_step(s, TCP_F_ACK, u32(200), u32(1), 1024, seg_b, 50, 0)
+        if tcp_sockets[s].rcv_nxt != u32(100)
+            inet_tcp_close_slot(s, 0)
+            return 1
+
+        var seg_c: [50]byte
+        i = 0
+        while i < 50
+            seg_c[i] = byte('C')
+            i += 1
+        inet_tcp_state_step(s, TCP_F_ACK, u32(250), u32(1), 1024, seg_c, 50, 0)
+        if tcp_sockets[s].rcv_nxt != u32(100)
+            inet_tcp_close_slot(s, 0)
+            return 2
+
+        // Two segments totalling 100 bytes are stashed — helper must
+        // report 100 so the advertised rwnd can shrink accordingly.
+        if inet_tcp_reorder_bytes(s) != 100
+            inet_tcp_close_slot(s, 0)
+            return 13
+
+        var seg_a: [100]byte
+        i = 0
+        while i < 100
+            seg_a[i] = byte('A')
+            i += 1
+        inet_tcp_state_step(s, TCP_F_ACK, u32(100), u32(1), 1024, seg_a, 100, 0)
+        if tcp_sockets[s].rcv_nxt != u32(300)
+            inet_tcp_close_slot(s, 0)
+            return 3
+        if tcp_sockets[s].recv_len != 200
+            inet_tcp_close_slot(s, 0)
+            return 4
+
+        i = 0
+        while i < 100
+            if tcp_sockets[s].recv_buf[i] != byte('A')
+                inet_tcp_close_slot(s, 0)
+                return 5
+            i += 1
+        while i < 150
+            if tcp_sockets[s].recv_buf[i] != byte('B')
+                inet_tcp_close_slot(s, 0)
+                return 5
+            i += 1
+        while i < 200
+            if tcp_sockets[s].recv_buf[i] != byte('C')
+                inet_tcp_close_slot(s, 0)
+                return 5
+            i += 1
+
+        // After drain the reorder queue is empty — helper must
+        // return 0 so rwnd is only shrunk while bytes are in flight.
+        if inet_tcp_reorder_bytes(s) != 0
+            inet_tcp_close_slot(s, 0)
+            return 14
+
+        // RFC 6298 RTO math. Scratch socket starts fresh in alloc
+        // state (rtt_measured = 0). We overwrote the above fields
+        // directly instead of going through alloc, so rebaseline
+        // the RTT state first.
+        tcp_sockets[s].srtt = 0
+        tcp_sockets[s].rttvar = 0
+        tcp_sockets[s].rto = TCP_RTO_INITIAL
+        tcp_sockets[s].rtt_measured = 0
+        tcp_sockets[s].rtt_sample_valid = 0
+
+        // First measurement R=50 → SRTT=50, RTTVAR=25, RTO=150.
+        inet_tcp_rtt_update(s, 50)
+        if tcp_sockets[s].srtt != 50
+            inet_tcp_close_slot(s, 0)
+            return 6
+        if tcp_sockets[s].rttvar != 25
+            inet_tcp_close_slot(s, 0)
+            return 7
+        if tcp_sockets[s].rto != 150
+            inet_tcp_close_slot(s, 0)
+            return 8
+
+        // Second measurement R=40.
+        //   RTTVAR = 25 + (|50-40| - 25) >> 2 = 25 + (-15 >> 2) = 25 + (-4) = 21
+        //   SRTT   = 50 + (40-50) >> 3         = 50 + (-10 >> 3) = 50 + (-2) = 48
+        //   RTO    = 48 + 4*21 = 48 + 84 = 132
+        inet_tcp_rtt_update(s, 40)
+        if tcp_sockets[s].srtt != 48
+            inet_tcp_close_slot(s, 0)
+            return 9
+        if tcp_sockets[s].rttvar != 21
+            inet_tcp_close_slot(s, 0)
+            return 10
+        if tcp_sockets[s].rto != 132
+            inet_tcp_close_slot(s, 0)
+            return 11
+
+        // Backoff doubles RTO: 132 → 264 (still below MAX=6000).
+        inet_tcp_rto_backoff(s)
+        if tcp_sockets[s].rto != 264
+            inet_tcp_close_slot(s, 0)
+            return 12
+
+        inet_tcp_close_slot(s, 0)
+
+        // IP-config round-trip: save the current triple, install a
+        // deliberately different one, verify every getter + the
+        // bitwise `inet_in_subnet`, then restore. Lets the harness
+        // prove inet_set/get + CIDR matching before a real DHCP
+        // client is live.
+        val saved_ip = inet_get_our_ip()
+        val saved_mask = inet_get_mask()
+        val saved_gw = inet_get_gw()
+        val probe_ip = ipv4(192, 168, 7, 42)
+        val probe_mask = ipv4(255, 255, 0, 0)
+        val probe_gw = ipv4(192, 168, 7, 1)
+        inet_set_ip_config(probe_ip, probe_mask, probe_gw)
+        if inet_get_our_ip() != probe_ip
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 15
+        if inet_get_mask() != probe_mask
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 16
+        if inet_get_gw() != probe_gw
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 17
+        // /16 says 192.168.99.5 is on-link; 192.169.0.5 is not.
+        if inet_in_subnet(ipv4(192, 168, 99, 5)) == 0
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 18
+        if inet_in_subnet(ipv4(192, 169, 0, 5)) != 0
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 19
+        inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+        if inet_get_our_ip() != saved_ip
+            return 20
+
+        // RFC 2018 SACK-permitted parser. QEMU's slirp doesn't carry
+        // the option in SYN-ACKs, so we can't observe negotiation
+        // over the wire in CI — verify it in isolation instead.
+        //
+        // Frame layout: 14 B Ethernet header + 20 B IPv4 header +
+        // 28 B TCP header (MSS + SACK-permitted + 2 NOPs).
+        var synframe: [54]byte
+        var bi = 0
+        while bi < 54
+            synframe[bi] = 0
+            bi += 1
+        // Data offset = 7 words (28 bytes); flags = SYN.
+        synframe[34 + 12] = byte(0x70)
+        synframe[34 + 13] = byte(TCP_F_SYN & 0xff)
+        synframe[34 + 20] = byte(TCP_OPT_MSS)
+        synframe[34 + 21] = 4
+        synframe[34 + 22] = byte(0x05)
+        synframe[34 + 23] = byte(0xb4)
+        synframe[34 + 24] = byte(TCP_OPT_SACK_PERMITTED)
+        synframe[34 + 25] = 2
+        synframe[34 + 26] = byte(TCP_OPT_NOP)
+        synframe[34 + 27] = byte(TCP_OPT_NOP)
+        if tcp_opts_has_sack_permitted(synframe, 34, 28) != 1
+            return 21
+
+        // Same frame without SACK-permitted (replace kind=4 with a
+        // 2-byte unknown option) must parse as "not permitted".
+        synframe[34 + 24] = byte(0xfe)
+        if tcp_opts_has_sack_permitted(synframe, 34, 28) != 0
+            return 22
+
+        // Exercise the SYN_SENT → ESTABLISHED transition with a
+        // synthetic peer_sack_perm = 1 and verify `sack_ok` flips.
+        val ss = TCP_MAX_SOCKETS - 1
+        tcp_sockets[ss].in_use = 1
+        tcp_sockets[ss].state = TCP_STATE_SYN_SENT
+        tcp_sockets[ss].snd_una = u32(0)
+        tcp_sockets[ss].snd_nxt = u32(1)
+        tcp_sockets[ss].recv_len = 0
+        tcp_sockets[ss].send_len = 0
+        tcp_sockets[ss].fin_pending = 0
+        tcp_sockets[ss].peer_fin = 0
+        tcp_sockets[ss].our_fin_sent = 0
+        tcp_sockets[ss].recv_waiter = -1
+        tcp_sockets[ss].send_waiter = -1
+        tcp_sockets[ss].connect_waiter = -1
+        tcp_sockets[ss].close_waiter = -1
+        tcp_sockets[ss].accept_waiter = -1
+        tcp_sockets[ss].is_listen = 0
+        tcp_sockets[ss].owner_tid = -1
+        tcp_sockets[ss].local_port = 0
+        tcp_sockets[ss].remote_port = 0
+        tcp_sockets[ss].remote_ip = u32(0)
+        tcp_sockets[ss].sack_ok = 0
+        var rk = 0
+        while rk < TCP_REORDER_SLOTS
+            tcp_sockets[ss].reorder[rk].in_use = 0
+            rk += 1
+        // state_step only inspects flags/seq/ack/wnd + peer_sack_perm
+        // when walking the SYN_SENT → ESTABLISHED edge — the payload
+        // pointer is unused for the SYN-ACK case, so pass a stub.
+        var nullbuf: [1]byte
+        inet_tcp_state_step(ss,
+            TCP_F_SYN | TCP_F_ACK,
+            u32(100), u32(1), 1024,
+            nullbuf, 0, 1)
+        if tcp_sockets[ss].sack_ok != 1
+            inet_tcp_close_slot(ss, 0)
+            return 23
+        inet_tcp_close_slot(ss, 0)
+
+        // Phase 4b sender scoreboard. Exercise the primitives
+        // the live selective-retransmit path is built on —
+        // QEMU's slirp strips SACK options so we can't drive
+        // these through a real peer; verify them in isolation.
+        val sb = TCP_MAX_SOCKETS - 1
+        tcp_sockets[sb].in_use = 1
+        tcp_sockets[sb].snd_una = u32(1000)
+        tcp_sockets[sb].snd_nxt = u32(4360)
+        var bc = 0
+        while bc < TCP_SACK_BOARD
+            tcp_sockets[sb].sack_board[bc].in_use = 0
+            bc += 1
+
+        // Single block `[2440, 3400)` — a hole under it at
+        // 1000..2440 and another at 3400..4360. `next_hole`
+        // should report 1000 first, then 3400 if the cursor
+        // has already consumed the first hole.
+        tcp_sack_board_insert(sb, u32(2440), u32(3400))
+        if tcp_sack_next_hole(sb, u32(1000)) != u32(1000)
+            inet_tcp_close_slot(sb, 0)
+            return 24
+        if tcp_sack_next_hole(sb, u32(2440)) != u32(3400)
+            inet_tcp_close_slot(sb, 0)
+            return 25
+        if tcp_sack_next_hole(sb, u32(3400)) != u32(3400)
+            inet_tcp_close_slot(sb, 0)
+            return 26
+
+        // Adjacent block `[3400, 3880)` — must coalesce with the
+        // existing one into a single `[2440, 3880)` entry so the
+        // scoreboard stays compact under heavy SACK churn.
+        tcp_sack_board_insert(sb, u32(3400), u32(3880))
+        var merged_seen = 0
+        var any_other = 0
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                if tcp_sockets[sb].sack_board[bc].left == u32(2440)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(3880)
+                        merged_seen = 1
+                    else
+                        any_other = 1
+                else
+                    any_other = 1
+            bc += 1
+        if merged_seen == 0
+            inet_tcp_close_slot(sb, 0)
+            return 27
+        if any_other != 0
+            inet_tcp_close_slot(sb, 0)
+            return 28
+
+        // Advance snd_una past the block's left edge but not its
+        // right. Purge must clip the block's left edge so the
+        // scoreboard only covers bytes still-in-flight.
+        tcp_sockets[sb].snd_una = u32(3000)
+        tcp_sack_board_purge(sb)
+        var clipped_seen = 0
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                if tcp_sockets[sb].sack_board[bc].left == u32(3000)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(3880)
+                        clipped_seen = 1
+            bc += 1
+        if clipped_seen == 0
+            inet_tcp_close_slot(sb, 0)
+            return 29
+
+        // Advance snd_una past the block's right edge. Purge
+        // must drop it entirely — no stale entry to mislead
+        // `next_hole` on the next recovery round.
+        tcp_sockets[sb].snd_una = u32(3880)
+        tcp_sack_board_purge(sb)
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                inet_tcp_close_slot(sb, 0)
+                return 30
+            bc += 1
+
+        // Drive the byte-walk that `tcp_opts_apply_sack`
+        // uses on the wire. Synthesize a TCP header with two
+        // SACK blocks — `[500, 700)` and `[1200, 1500)` —
+        // under a reset scoreboard, parse, verify both blocks
+        // landed as distinct `[left, right)` pairs. The header
+        // layout mirrors what a typical Linux dup-ACK would send:
+        // NOP + NOP + kind=5 + len=18 + 2 blocks.
+        tcp_sack_board_clear(sb)
+        tcp_sockets[sb].snd_una = u32(400)
+        var ackframe: [60]byte
+        var ai = 0
+        while ai < 60
+            ackframe[ai] = 0
+            ai += 1
+        // Data offset = 10 words (40 bytes header); flags = ACK.
+        ackframe[34 + 12] = byte(0xa0)
+        ackframe[34 + 13] = byte(TCP_F_ACK & 0xff)
+        ackframe[34 + 20] = byte(TCP_OPT_NOP)
+        ackframe[34 + 21] = byte(TCP_OPT_NOP)
+        ackframe[34 + 22] = byte(TCP_OPT_SACK)
+        ackframe[34 + 23] = byte(2 + 8 * 2)
+        // Block 1: left=500, right=700.
+        ackframe[34 + 24] = 0
+        ackframe[34 + 25] = 0
+        ackframe[34 + 26] = byte(1)
+        ackframe[34 + 27] = byte(244)
+        ackframe[34 + 28] = 0
+        ackframe[34 + 29] = 0
+        ackframe[34 + 30] = byte(2)
+        ackframe[34 + 31] = byte(188)
+        // Block 2: left=1200, right=1500.
+        ackframe[34 + 32] = 0
+        ackframe[34 + 33] = 0
+        ackframe[34 + 34] = byte(4)
+        ackframe[34 + 35] = byte(176)
+        ackframe[34 + 36] = 0
+        ackframe[34 + 37] = 0
+        ackframe[34 + 38] = byte(5)
+        ackframe[34 + 39] = byte(220)
+        tcp_opts_apply_sack(sb, ackframe, 34, 40)
+        var saw_500 = 0
+        var saw_1200 = 0
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                if tcp_sockets[sb].sack_board[bc].left == u32(500)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(700)
+                        saw_500 = 1
+                if tcp_sockets[sb].sack_board[bc].left == u32(1200)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(1500)
+                        saw_1200 = 1
+            bc += 1
+        if saw_500 == 0
+            inet_tcp_close_slot(sb, 0)
+            return 31
+        if saw_1200 == 0
+            inet_tcp_close_slot(sb, 0)
+            return 32
+        inet_tcp_close_slot(sb, 0)
+
+        0

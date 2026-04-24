@@ -60,11 +60,16 @@ Common bits (lo): sleep(0), putc(1), yield(2), exit(3), join(4),
 
     val PRIV_COMMON_LO: i64 = i64(0x7F) | (i64(7) << 21) | (i64(0xFFFFFFFF) << 24) | (i64(1) << 61)
 
-Common bits (hi): ipc_last_msg_len(65), grant_create(71), grant_revoke(72),
-  sys_getinfo(77). All servers need sys_getinfo to query RS TID +
-  ramdisk info at startup (replaces the old INFO_PAGE_VA scratch page).
+Common bits (hi): ipc_last_msg_len(65), grant_create(71),
+grant_revoke(72), sys_getinfo(77), puts(79).
 
-    val PRIV_COMMON_HI: i64 = i64(0x182) | (i64(1) << 13)
+sys_getinfo(77) replaces the old INFO_PAGE_VA scratch page —
+every server queries its RS TID + ramdisk info at startup via
+this syscall. puts(79) is the bulk-write companion to putc(1)
+in PRIV_COMMON_LO — any server that can print a character can
+print a buffer.
+
+    val PRIV_COMMON_HI: i64 = i64(0x182) | (i64(1) << 13) | (i64(1) << 18)
 
 PM extra bits (lo): vm_create_pt(44), create_proc_susp(45),
   resume_proc(46), reap_proc(47), kill_proc(48), register_pm(49),
@@ -113,9 +118,16 @@ created but before it is resumed.
             // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
             hi = hi | i64(0xE00)
         else if idx == 6
-            // nic: needs vm_v2p(66) for virtio DMA descriptors and
-            // virtio_set_notify(76) to register for device IRQ wakes.
-            hi = hi | i64(4) | i64(0x1000)
+            // nic: needs vm_v2p(66) for virtio DMA descriptors,
+            // virtio_set_notify(76) to register for device IRQ wakes,
+            // and virtio_pci_info(80) so the x86 server can fetch the
+            // kernel-cached BAR/cap addresses (no-op wire on aarch64).
+            hi = hi | i64(4) | i64(0x1000) | (i64(1) << 16)
+        else if idx == 7
+            // inet: needs timer_subscribe(81) to drive TCP
+            // retransmission / TIME_WAIT scans without relying on
+            // incoming frames for liveness.
+            hi = hi | (i64(1) << 17)
         svc_set_priv(pid, lo, hi, ipc)
 
 Per-server IPC send mask. Single source of truth — consulted
@@ -130,6 +142,7 @@ receiver. Servers not listed fall through to 0.
         val pm_port = rs_server_ports[3]
         val vfs_port = rs_server_ports[4]
         val nic_port = rs_server_ports[6]
+        val inet_port = rs_server_ports[7]
         // idx 0 (disk), 5 (ds), 6 (nic) are pure receivers → 0.
         if idx == 1
             // tfs: sends to disk
@@ -141,8 +154,14 @@ receiver. Servers not listed fall through to 0.
             // pm: sends to vfs
             return 1 << vfs_port
         else if idx == 4
-            // vfs: sends to tfs and tty
-            return (1 << tfs_port) | (1 << tty_port)
+            // vfs: sends to tfs and tty; also to inet when the TCP
+            // scheme bridge (connect("tcp:...")) routes read/write/close
+            // through INET_CMD_TCP_*. Missing inet leaves the bit clear
+            // and vfs_lookup_inet returns -1, short-circuiting the bridge.
+            var m = (1 << tfs_port) | (1 << tty_port)
+            if inet_port >= 0
+                m = m | (1 << inet_port)
+            return m
         else if idx == 7
             // inet: sends to nic (ARP replies, ICMP replies,
             // UDP-over-wire). Missing nic leaves the mask at 0 and
