@@ -4122,11 +4122,72 @@ class SyslTriscCodegen(addresses: Int = 4):
         // r1 = address of return slot (which now contains {ptr, len})
         emit("  mov r1, r7")
 
-      case TQuantifier(kind, _, _, _, _, _, _, _) =>
-        // TODO: TRISC backend codegen for quantifier expressions. The interpreter and LLVM
-        // backends both implement these; TRISC is the next chunk. Until then, emit a clear
-        // error rather than a MatchError so users get an actionable message.
-        sys.error(s"TRISC codegen does not yet support `for $kind` quantifier expressions; use the interpreter or LLVM backend, or `--no-contracts` to strip them when used only in contracts")
+      case TQuantifier(kind, name, nameType, lo, hi, inclusive, pred, _) =>
+        // Lower `for all/some x in lo..hi => P(x)` as a short-circuiting counted loop
+        // that accumulates a bool. `all` seeds result=1 and bails out with 0 on the first
+        // counterexample; `some` seeds 0 and bails out with 1 on the first witness.
+        // Using direct `iter < hi` / `iter <= hi` comparisons avoids the underflow that
+        // would occur if we precomputed `end = hi - 1` for an unsigned empty range.
+        enterScope()
+        val resultLocal = allocLocal("__quant_result", SyslType.I64)
+        val initBit = if kind == "all" then 1 else 0
+        emit(s"  ldi r1, $initBit")
+        emitAddImm(2, 5, resultLocal.offset)
+        emit("  std r1, r2, r0")
+
+        val iterLocal = allocLocal(name, nameType)
+        genExpr(lo)
+        emitAddImm(2, 5, iterLocal.offset)
+        emitStore(1, 2, nameType)
+
+        val hiLocal = allocLocal("__quant_hi", nameType)
+        genExpr(hi)
+        emitAddImm(2, 5, hiLocal.offset)
+        emitStore(1, 2, nameType)
+
+        val condLbl = newLabel("quant_cond")
+        val endLbl  = newLabel("quant_end")
+        val contLbl = newLabel("quant_cont")
+        emit(s"$condLbl")
+        emitAddImm(1, 5, iterLocal.offset)
+        emitLoad(1, 1, nameType)
+        emitAddImm(2, 5, hiLocal.offset)
+        emitLoad(2, 2, nameType)
+        val cmpOp = if nameType.isSigned then "slt" else "sltu"
+        if inclusive then
+          // Continue while iter <= hi; bail when hi < iter.
+          emit(s"  $cmpOp r3, r2, r1")
+          emit(s"  bne r3, r0, $endLbl")
+        else
+          // Continue while iter < hi; bail when !(iter < hi).
+          emit(s"  $cmpOp r3, r1, r2")
+          emit(s"  beq r3, r0, $endLbl")
+
+        genExpr(pred)
+        if kind == "all" then
+          emit(s"  bne r1, r0, $contLbl")
+          emit("  ldi r1, 0")
+          emitAddImm(2, 5, resultLocal.offset)
+          emit("  std r1, r2, r0")
+          emit(s"  bra $endLbl")
+        else
+          emit(s"  beq r1, r0, $contLbl")
+          emit("  ldi r1, 1")
+          emitAddImm(2, 5, resultLocal.offset)
+          emit("  std r1, r2, r0")
+          emit(s"  bra $endLbl")
+
+        emit(s"$contLbl")
+        emitAddImm(1, 5, iterLocal.offset)
+        emitLoad(2, 1, nameType)
+        emit("  addi r2, r2, 1")
+        emitStore(2, 1, nameType)
+        emit(s"  bra $condLbl")
+
+        emit(s"$endLbl")
+        emitAddImm(1, 5, resultLocal.offset)
+        emit("  ldd r1, r1, r0")
+        leaveScope()
 
       case TIfExpr(cond, thenBody, elseBody, typ) =>
         val elseLabel = newLabel("else")
