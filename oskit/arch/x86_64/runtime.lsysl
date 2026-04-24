@@ -229,6 +229,24 @@ Main entry point, called by boot.s before kernel_init.
         uart_puts("SLIX x86_64: runtime ready\n")
 
 
+Bulk-puts syscall handler. Caller packs `(buf, len)` into a
+two-slot i64 array and passes its address. We're on the caller's
+PTBR (no copy-in needed) so `uart_putc` walks the bytes directly.
+aarch64 has the same handler in `board/virt/hello.lsysl`; x86's
+copy lives here so `tty_handle_puts` via SYS_PUTS actually
+reaches the UART instead of falling into the "no handler" path.
+
+    sys_puts_handler(arg: int)
+        var args: *i64 = *i64(i64(arg))
+        val buf = *byte(args[0])
+        val len = int(args[1])
+        var i = 0
+        while i < len
+            uart_putc(int(buf[i]) & 0xFF)
+            i += 1
+        syscall_return(i64(0))
+
+
 Serial receive handler (called from boot.s serial_isr_entry).
 Reads characters from COM1 and pushes them into the kernel's
 keyboard buffer as raw ASCII events. The TTY server picks them
@@ -240,7 +258,8 @@ Event format: (ascii << 24) | (1 << 17) | (1 << 16)
 - Bit 16: press flag (1 = key press)
 
     import oskit.kernel.{kb_enqueue, kb_notify_tid, notify_send,
-        virtio_pci_isr, virtio_notify_tid}
+        virtio_pci_isr, virtio_notify_tid, register_syscall,
+        syscall_return}
 
     serial_handler()
         var lsr = inb(0x3FD)
