@@ -124,6 +124,11 @@ case class InvariantStmtAST(expr: ExpressionAST, message: Option[String] = None)
 // loop body. The expression must strictly decrease between iterations and stay >= 0; both
 // are runtime-asserted. Analyzer hoists a prev-value / init-flag pair into the enclosing scope.
 case class VariantStmtAST(expr: ExpressionAST) extends StmtAST
+// `assume <bool> [, "msg"]` statement — Ada/SPARK pragma Assume equivalent. At runtime the
+// expression is checked exactly like assert (traps if false); statically it tells a future
+// prover to take the predicate as an axiom rather than a proof obligation. Stripped under
+// `--no-contracts`. Allowed anywhere a statement is allowed.
+case class AssumeStmtAST(expr: ExpressionAST, message: Option[String] = None) extends StmtAST
 case class AsmExprAST(code: String) extends ExpressionAST
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 

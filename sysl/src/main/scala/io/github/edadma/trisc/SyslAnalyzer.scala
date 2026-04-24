@@ -2728,6 +2728,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case InvariantStmtAST(_, _) =>
         throw AnalysisError("invariant statement must appear at the top of a loop body, before any other statement")
 
+      case AssumeStmtAST(e, msg) =>
+        val te = analyzeExpr(e)
+        if te.typ != BoolType then throw AnalysisError(s"assume expression must be bool, got ${te.typ}")
+        contract("assume", te, msg.getOrElse("assume"))
+
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
 

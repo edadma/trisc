@@ -611,6 +611,20 @@ accesses, arithmetic, calls), but nested `old(old(...))` is rejected.
 
 Contracts are not yet supported on expression-body functions or on closures.
 
+**`assume <bool> [, "msg"]`.** Statement-level Ada/SPARK `pragma Assume` equivalent:
+states a property the programmer asserts is true at this point. At runtime it is checked
+exactly like `assert` and traps if false; statically it tells a future prover to take the
+predicate as an axiom rather than a proof obligation. Allowed anywhere a statement is.
+
+```sysl
+ptr_size(p: *byte) -> int
+    var len = strlen(p)
+    assume len >= 0, "strlen returns non-negative"
+    int(len)
+```
+
+The runtime trap message is `assume check failed[: msg]`. Stripped under `--no-contracts`.
+
 ### Default Parameter Values
 
 Parameters can have default values, given with `= expr` after the type. Any
@@ -2037,6 +2051,7 @@ Pass `--no-contracts` to `sysl compile` or `sysl run` to strip every contract ch
 - `require` / `ensure` clauses
 - `invariant` statements in loops
 - `variant` statements in loops (entire hoisted check state is elided)
+- `assume` statements
 - struct `invariant` clauses (no per-assignment check)
 - `where`-predicate bodies (synthesized predicate function still runs but performs no check)
 - `within`-range checks (compile-time literal check + runtime range check both skipped)

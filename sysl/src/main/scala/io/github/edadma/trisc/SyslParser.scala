@@ -419,8 +419,11 @@ class SyslParser extends StandardTokenParsers {
   lazy val variantStmt: Parser[VariantStmtAST] =
     "variant" ~> expr ^^ VariantStmtAST.apply
 
+  lazy val assumeStmt: Parser[AssumeStmtAST] =
+    "assume" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => AssumeStmtAST(e, msg) }
+
   lazy val stmt: Parser[StmtAST] =
-    asmStmt | invariantStmt | variantStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
     mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut.isMutable) } |
