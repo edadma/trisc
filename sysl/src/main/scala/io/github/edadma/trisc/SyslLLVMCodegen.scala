@@ -1894,6 +1894,66 @@ class SyslLLVMCodegen(target: String = "host"):
               phi
             else "0"
 
+      case TQuantifier(kind, name, nameType, lo, hi, inclusive, pred, _) =>
+        val nt = llvmType(nameType)
+        val resultAlloca = deferAlloca("i8")
+        val initBit = if kind == "all" then "1" else "0"
+        emit(s"  store i8 $initBit, i8* $resultAlloca")
+        val loVal = genExpr(lo)
+        val loExt = emitSextIfNeeded(loVal, exprType(lo), nt, lo.typ.isSigned)
+        val iterAlloca = deferAlloca(nt)
+        emit(s"  store $nt $loExt, $nt* $iterAlloca")
+        val hiVal = genExpr(hi)
+        val hiExt = emitSextIfNeeded(hiVal, exprType(hi), nt, hi.typ.isSigned)
+        val endVal = if inclusive then hiExt else
+          val tmp = newReg()
+          emit(s"  $tmp = sub $nt $hiExt, 1")
+          tmp
+        val condLbl = newLabel("quant_cond")
+        val bodyLbl = newLabel("quant_body")
+        val hitLbl  = newLabel("quant_hit")    // counterexample (all) or witness (some)
+        val incLbl  = newLabel("quant_inc")
+        val endLbl  = newLabel("quant_end")
+        emit(s"  br label %$condLbl")
+        emitLabel(condLbl)
+        val curReg = newReg()
+        emit(s"  $curReg = load $nt, $nt* $iterAlloca")
+        val cmpReg = newReg()
+        val cmpOp = if nameType.isSigned then "icmp sle" else "icmp ule"
+        emit(s"  $cmpReg = $cmpOp $nt $curReg, $endVal")
+        emit(s"  br i1 $cmpReg, label %$bodyLbl, label %$endLbl")
+        emitLabel(bodyLbl)
+        // Bind the loop variable as a local so genExpr(pred) finds it. Save any prior
+        // binding under the same name so an outer-scope `name` is restored after.
+        val savedLocal = locals.get(name)
+        locals(name) = LocalVar(name, iterAlloca, nameType)
+        val pVal = genExpr(pred)
+        val pt = exprType(pred)
+        val pBool = newReg()
+        emit(s"  $pBool = icmp ne $pt $pVal, 0")
+        // for all: false → hit (set 0, exit); for some: true → hit (set 1, exit)
+        if kind == "all" then
+          emit(s"  br i1 $pBool, label %$incLbl, label %$hitLbl")
+        else
+          emit(s"  br i1 $pBool, label %$hitLbl, label %$incLbl")
+        emitLabel(hitLbl)
+        val hitBit = if kind == "all" then "0" else "1"
+        emit(s"  store i8 $hitBit, i8* $resultAlloca")
+        emit(s"  br label %$endLbl")
+        emitLabel(incLbl)
+        val nextReg = newReg()
+        emit(s"  $nextReg = add $nt $curReg, 1")
+        emit(s"  store $nt $nextReg, $nt* $iterAlloca")
+        emit(s"  br label %$condLbl")
+        emitLabel(endLbl)
+        // Restore prior binding (if any) and remove the synthetic one
+        savedLocal match
+          case Some(lv) => locals(name) = lv
+          case None => locals.remove(name)
+        val result = newReg()
+        emit(s"  $result = load i8, i8* $resultAlloca")
+        result
+
       case TStructConstruct(st, args) =>
         // Alloca, zero-init, then fill fields
         val lt = llvmType(st)

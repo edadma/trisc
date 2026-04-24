@@ -3925,6 +3925,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case _ => VoidType
         TIfExpr(tCond, tThen, tElse, resultType)
 
+      case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>
+        val tLo = analyzeExpr(lo)
+        val tHi = analyzeExpr(hi)
+        if !tLo.typ.isIntegral then throw AnalysisError(s"quantifier range lower bound must be integral, got ${tLo.typ}")
+        if !tHi.typ.isIntegral then throw AnalysisError(s"quantifier range upper bound must be integral, got ${tHi.typ}")
+        // Bound variable type: prefer lo's type; bumping both to a wider common type isn't
+        // worth the analyzer machinery yet — use I64 if either side is wider than I32.
+        val nameType: SyslType =
+          if tLo.typ.bitWidth > 32 || tHi.typ.bitWidth > 32 then I64 else tLo.typ
+        pushScope()
+        currentScope(name) = SymInfo(name, nameType, mutable = false)
+        val tPred = analyzeExpr(pred)
+        popScope()
+        if tPred.typ != BoolType then throw AnalysisError(s"quantifier predicate must be bool, got ${tPred.typ}")
+        TQuantifier(kind, name, nameType, tLo, tHi, inclusive, tPred)
+
       case MatchExprAST(scrutinee, arms, default) =>
         val tScrutinee = analyzeExpr(scrutinee)
         val tArms = arms.map { arm =>

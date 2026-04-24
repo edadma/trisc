@@ -675,6 +675,24 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val expr: Parser[ExpressionAST] = closureExpr | matchExpr | ifIsExpr | ifExpr | logicalOr
 
+  /** Contextual keywords `all` / `some` — only meaningful directly after `for` in an
+   *  expression position. Not reserved at the lexer level so user identifiers named
+   *  `all` or `some` still work everywhere else. */
+  private lazy val quantKw: Parser[String] = ident ^? { case k @ ("all" | "some") => k }
+
+  /** `for all x in lo..hi => P(x)` and `for some x in lo..hi => P(x)`. Lives in `primary`
+   *  (reachable from any expression position including `if cond`/`while cond`/`require`).
+   *  The body uses `expr` so it greedy-extends to the end of the surrounding expression
+   *  — `for all x => P(x) && Q(x)` reads as `for all x => (P(x) && Q(x))`, matching Ada
+   *  semantics. The for-loop parsers also start with `for` but require `<ident> = ...`
+   *  or `<ident> in <iter> <body>`; neither matches `for all <ident> in ...`, so this
+   *  alternative falls out cleanly on backtrack. */
+  lazy val quantifierExpr: Parser[QuantifierAST] =
+    "for" ~> quantKw ~ ident ~ ("in" ~> bitwiseOr) ~ (("..<" | "..") ~ bitwiseOr) ~ ("=>" ~> expr) ^^ {
+      case kind ~ name ~ lo ~ (op ~ hi) ~ pred =>
+        QuantifierAST(kind, name, lo, hi, op == "..", pred)
+    }
+
   /** `if expr is Pattern then body [else elseBody]` — desugars to match. */
   lazy val ifIsExpr: Parser[MatchExprAST] =
     "if" ~> logicalOr ~ ("is" ~> matchPattern) ~ ("then" ~> thenBody) ^^ {
@@ -903,7 +921,8 @@ class SyslParser extends StandardTokenParsers {
     castType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(NamedTypeAST(t), e) }
 
   lazy val primary: Parser[ExpressionAST] =
-    numericLit ^^ { n =>
+    quantifierExpr |
+      numericLit ^^ { n =>
       if n.contains(':') then
         val Array(value, suffix) = n.split(':')
         TypedIntLitAST(value.toLong, suffix)

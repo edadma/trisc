@@ -129,6 +129,11 @@ case class VariantStmtAST(expr: ExpressionAST) extends StmtAST
 // prover to take the predicate as an axiom rather than a proof obligation. Stripped under
 // `--no-contracts`. Allowed anywhere a statement is allowed.
 case class AssumeStmtAST(expr: ExpressionAST, message: Option[String] = None) extends StmtAST
+// `for all x in lo..hi => P(x)` / `for some x in lo..hi => P(x)` — Ada-style universal /
+// existential quantifier expression over an integer range. Bool-typed; short-circuits.
+// Range is inclusive (`..`) or exclusive (`..<`); empty ranges give `true` for `all`
+// (vacuous truth) and `false` for `some`. The bound variable is visible only in `pred`.
+case class QuantifierAST(kind: String, name: String, lo: ExpressionAST, hi: ExpressionAST, inclusive: Boolean, pred: ExpressionAST) extends ExpressionAST
 case class AsmExprAST(code: String) extends ExpressionAST
 case class ExprStmtAST(expr: ExpressionAST) extends StmtAST
 
