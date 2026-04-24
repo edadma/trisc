@@ -1529,6 +1529,25 @@ while remaining > 0
     variant remaining          // monotonic-decrease witness
     remaining = remaining - step()
 
+// `invariant <bool> [, "msg"]` — Ada/SPARK-style loop invariant. Must appear in the
+// leading "header" of a loop body (variants may interleave); the analyzer hoists the
+// check to the loop's *cut point* and runs it at the top of every iteration, regardless
+// of how the source was laid out. Multiple invariants are allowed; all are checked. A
+// false invariant traps with `loop invariant check failed[: msg]`. An invariant placed
+// after a non-invariant statement, nested inside an `if`/`match`, or outside any loop
+// is a static error.
+for i = 0; i < n; i++
+    invariant i >= 0
+    invariant i <= n, "i in range"   // optional message like require/ensure
+    body()
+
+// Invariants and variants can be freely interleaved in the leading header.
+while remaining > 0
+    invariant total >= 0
+    variant remaining
+    process()
+    remaining = remaining - 1
+
 // Labeled loops — break / continue can target an outer loop by name.
 // A label is an identifier followed by `:` immediately before `for`, `while`, `do`, or `loop`.
 outer: for i in 0..<n

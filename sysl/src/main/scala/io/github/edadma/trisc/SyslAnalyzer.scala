@@ -136,6 +136,29 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           contract("invariant", tExpr, s"$structName invariant")
         }
 
+  /** Extract Ada/SPARK-style loop invariants from the leading "header" of a loop body.
+   *  An invariant must appear before any non-invariant / non-variant statement; variants are
+   *  allowed to interleave with invariants in the header (and are returned in `bodyOut` so
+   *  `extractVariants` can still find them). Any `InvariantStmtAST` not extracted here will
+   *  fall through to the analyzer's catch-all error case. */
+  private def extractLeadingInvariants(body: List[StmtAST]): (List[(ExpressionAST, Option[String])], List[StmtAST]) =
+    val (header, tail) = body.span {
+      case _: InvariantStmtAST | _: VariantStmtAST => true
+      case _ => false
+    }
+    val invs = header.collect { case InvariantStmtAST(e, m) => (e, m) }
+    val variantsInHeader = header.filter { case _: VariantStmtAST => true; case _ => false }
+    (invs, variantsInHeader ++ tail)
+
+  /** Type-check loop invariants and lower them to contract-check statements. Called in body
+   *  scope so the invariants see for-init bindings and outer scope. */
+  private def buildLoopInvariantChecks(invs: List[(ExpressionAST, Option[String])]): List[TStmt] =
+    invs.map { case (e, msg) =>
+      val te = analyzeExpr(e)
+      if te.typ != BoolType then throw AnalysisError(s"loop invariant must be bool, got ${te.typ}")
+      contract("loop invariant", te, msg.getOrElse("loop invariant"))
+    }
+
   /** Extract top-level `variant <expr>` statements from a loop body. Returns a pair of
    *  AST stmt lists: (hoisted-pre-decls, rewritten-body). The caller must analyze the
    *  pre-decls in the current scope (outside the loop) and the rewritten body in the
@@ -2604,8 +2627,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case ForStmtAST(init, cond, update, body, label) =>
         checkLoopLabelUnique(label)
+        val (invariants, bodyAfterInvs) = extractLeadingInvariants(body)
         // Hoist variant state to caller scope (before pushScope for for-init).
-        val (preDecls, rewrittenBody) = extractVariants(body)
+        val (preDecls, rewrittenBody) = extractVariants(bodyAfterInvs)
         val tPreDecls = preDecls.map(analyzeStmt)
         pushScope()
         val tInit = analyzeStmt(init)
@@ -2614,7 +2638,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(rewrittenBody)
+        val tInvariants = buildLoopInvariantChecks(invariants)
+        val tBody = tInvariants ++ analyzeBlock(rewrittenBody)
         popScope()
         val tUpdate = analyzeStmt(update)
         loopLabelStack.remove(loopLabelStack.length - 1)
@@ -2625,14 +2650,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case WhileStmtAST(cond, body, label) =>
         checkLoopLabelUnique(label)
-        val (preDecls, rewrittenBody) = extractVariants(body)
+        val (invariants, bodyAfterInvs) = extractLeadingInvariants(body)
+        val (preDecls, rewrittenBody) = extractVariants(bodyAfterInvs)
         val tPreDecls = preDecls.map(analyzeStmt)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(rewrittenBody)
+        val tInvariants = buildLoopInvariantChecks(invariants)
+        val tBody = tInvariants ++ analyzeBlock(rewrittenBody)
         popScope()
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
@@ -2641,14 +2668,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case DoWhileStmtAST(cond, body, label) =>
         checkLoopLabelUnique(label)
-        val (preDecls, rewrittenBody) = extractVariants(body)
+        val (invariants, bodyAfterInvs) = extractLeadingInvariants(body)
+        val (preDecls, rewrittenBody) = extractVariants(bodyAfterInvs)
         val tPreDecls = preDecls.map(analyzeStmt)
         val tCond = analyzeExpr(cond)
         if tCond.typ != BoolType then throw AnalysisError(s"do/while condition must be bool, got ${tCond.typ}")
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(rewrittenBody)
+        val tInvariants = buildLoopInvariantChecks(invariants)
+        val tBody = tInvariants ++ analyzeBlock(rewrittenBody)
         popScope()
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
@@ -2657,12 +2686,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case LoopStmtAST(body, label) =>
         checkLoopLabelUnique(label)
-        val (preDecls, rewrittenBody) = extractVariants(body)
+        val (invariants, bodyAfterInvs) = extractLeadingInvariants(body)
+        val (preDecls, rewrittenBody) = extractVariants(bodyAfterInvs)
         val tPreDecls = preDecls.map(analyzeStmt)
         loopDepth += 1
         loopLabelStack += label
         pushScope()
-        val tBody = analyzeBlock(rewrittenBody)
+        val tInvariants = buildLoopInvariantChecks(invariants)
+        val tBody = tInvariants ++ analyzeBlock(rewrittenBody)
         popScope()
         loopLabelStack.remove(loopLabelStack.length - 1)
         loopDepth -= 1
@@ -2694,10 +2725,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case AsmStmtAST(code) =>
         TAsmStmt(code)
 
-      case InvariantStmtAST(e) =>
-        val te = analyzeExpr(e)
-        if te.typ != BoolType then throw AnalysisError(s"invariant expression must be bool, got ${te.typ}")
-        contract("invariant", te, "invariant")
+      case InvariantStmtAST(_, _) =>
+        throw AnalysisError("invariant statement must appear at the top of a loop body, before any other statement")
 
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))

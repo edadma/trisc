@@ -414,7 +414,7 @@ class SyslParser extends StandardTokenParsers {
     "asm" ~> "(" ~> stringLit <~ ")" ^^ AsmStmtAST.apply
 
   lazy val invariantStmt: Parser[InvariantStmtAST] =
-    "invariant" ~> expr ^^ InvariantStmtAST.apply
+    "invariant" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => InvariantStmtAST(e, msg) }
 
   lazy val variantStmt: Parser[VariantStmtAST] =
     "variant" ~> expr ^^ VariantStmtAST.apply

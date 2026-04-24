@@ -115,9 +115,11 @@ case class BreakStmtAST(label: Option[String] = None) extends StmtAST
 case class ContinueStmtAST(label: Option[String] = None) extends StmtAST
 case class DeferStmtAST(body: StmtAST) extends StmtAST
 case class AsmStmtAST(code: String) extends StmtAST
-// `invariant <bool>` statement — traps on false. Essentially `assert` with nicer name; intended
-// at the top of loop bodies for loop-invariant documentation/checking.
-case class InvariantStmtAST(expr: ExpressionAST) extends StmtAST
+// `invariant <bool> [, "msg"]` statement — Ada/SPARK-style loop invariant. Must appear in the
+// leading "header" of a loop body (before any non-invariant/non-variant statement). The
+// analyzer extracts these and emits the runtime check at the cut point — top of the typed body
+// each iteration — regardless of how they were laid out in source.
+case class InvariantStmtAST(expr: ExpressionAST, message: Option[String] = None) extends StmtAST
 // `variant <expr>` statement — loop termination witness. Must appear at the top level of a
 // loop body. The expression must strictly decrease between iterations and stay >= 0; both
 // are runtime-asserted. Analyzer hoists a prev-value / init-flag pair into the enclosing scope.
