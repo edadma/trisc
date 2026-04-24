@@ -536,6 +536,45 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       got.exists(_.startsWith(s"ping$i#")) shouldBe true
   }
 
+  "aarch64 tcp: minimal HTTP/1.0 interop (httpd)" in {
+    // httpd listens on :8080. QEMU's hostfwd=tcp::28083-:8080
+    // forwards host dials of 127.0.0.1:28083 into the guest. This
+    // is the Phase-5-ish interop milestone — end-to-end proof that
+    // the slix TCP stack coexists with real-world HTTP clients,
+    // not just our own echo tests.
+    qemu.send("httpd\n")
+    qemu.waitFor("httpd: listening on :8080 fd=")
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(10000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28083), 5000)
+    val body = try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write("GET / HTTP/1.0\r\nHost: slix\r\n\r\n".getBytes("UTF-8"))
+      out.flush()
+      val buf = new Array[Byte](256)
+      var total = 0
+      var done  = false
+      while !done && total < buf.length do
+        val r = in.read(buf, total, buf.length - total)
+        if r <= 0 then done = true
+        else total += r
+      new String(buf, 0, total, "UTF-8")
+    finally sock.close()
+
+    body should startWith("HTTP/1.0 200 OK")
+    body should include("Content-Type: text/plain")
+    body should include("Content-Length: 6")
+    body should endWith("hello\n")
+
+    val output = qemu.waitFor("httpd: done")
+    output should include("httpd: accepted cfd=")
+    output should include("httpd: request hdr_end=")
+    output should include("httpd: sent=")
+    output should include("httpd: done")
+  }
+
   "aarch64 tcp: 900-byte multi-segment transfer" in {
     // test_tcp_big listens on :7892. Host writes exactly 900 bytes
     // of a known pattern (byte i -> i & 0xff), reads a 6-byte

@@ -41,7 +41,9 @@ class QemuAarch64TestHarness(
     // the phase-2 test_tcp_srv passive-open smoke test.
     // hostfwd=tcp::28082-:7892 forwards host:28082 to guest:7892 for
     // the large-transfer stress (test_tcp_big).
-    cmd.add("-netdev"); cmd.add("user,id=n0,hostfwd=udp::17777-:7777,hostfwd=tcp::28080-:7890,hostfwd=tcp::28082-:7892")
+    // hostfwd=tcp::28083-:8080 forwards host:28083 to guest:8080 for
+    // the tiny HTTP/1.0 server (httpd) end-to-end interop test.
+    cmd.add("-netdev"); cmd.add("user,id=n0,hostfwd=udp::17777-:7777,hostfwd=tcp::28080-:7890,hostfwd=tcp::28082-:7892,hostfwd=tcp::28083-:8080")
     cmd.add("-device"); cmd.add("virtio-net-device,netdev=n0,mac=52:54:00:12:34:56")
     if new java.io.File(bootinfoPath).exists() then
       cmd.add("-device")

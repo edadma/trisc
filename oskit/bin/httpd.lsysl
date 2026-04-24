@@ -1,0 +1,155 @@
+httpd — minimal HTTP/1.0 echo server
+=====================================
+
+Phase-5-ish milestone: prove the slix TCP stack coexists with a
+real-world host-side HTTP client. Listens on port 8080, accepts one
+client, drains the request headers until `\r\n\r\n`, replies with a
+canned `HTTP/1.0 200 OK` + `hello\n`, closes, exits.
+
+Single-shot by design — multi-client concurrency is the follow-up
+chunk. The test harness starts us via `httpd` (foreground), waits
+for the `listening` log line, dials through QEMU's
+`hostfwd=tcp::28083-:8080` into the guest, reads until close, and
+asserts the response shape. We exit after one served request so
+the shell gets its prompt back.
+
+Out of scope:
+
+- HTTP/1.1 keep-alive, HEAD, chunked bodies, routing, 404s.
+- Multiple concurrent accepts (needs the `test_tcp_mcl` fix first).
+
+    module oskit.bin.httpd
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{tcp_listen, tcp_accept, tcp_send, tcp_recv, tcp_close}
+
+
+Decimal helper — used only for diagnostic log lines.
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+Scan `req[0..used)` for the first occurrence of `\r\n\r\n`.
+Returns the index one past the last byte of the match (so the
+caller can tell where the body would start), or `-1` if the
+marker is not present. `stop = used - 3` ensures the 4-byte
+lookahead never runs past the buffer.
+
+    find_header_end(req: *byte, used: int) -> int
+        if used < 4
+            return -1
+        val stop = used - 3
+        var i = 0
+        while i < stop
+            if req[i] == byte(0x0d) && req[i+1] == byte(0x0a) && req[i+2] == byte(0x0d) && req[i+3] == byte(0x0a)
+                return i + 4
+            i += 1
+        return -1
+
+
+Main. Listen on :8080, accept one client, drain its headers, reply,
+close both sides, exit. Each step prints a tagged log line so a
+failing run is visible in the serial trace.
+
+    main(argv: []string)
+        val lfd = tcp_listen(8080)
+        if lfd < 0
+            puts("httpd: listen failed\n")
+            exit_with(1)
+            return
+        puts("httpd: listening on :8080 fd=")
+        print_udec(lfd)
+        puts("\n")
+
+        var peer_ip: [4]byte
+        var peer_port: [2]byte
+        val cfd = tcp_accept(lfd, &peer_ip[0], &peer_port[0])
+        if cfd < 0
+            puts("httpd: accept failed\n")
+            tcp_close(lfd)
+            exit_with(2)
+            return
+        puts("httpd: accepted cfd=")
+        print_udec(cfd)
+        puts(" from ")
+        print_udec(int(peer_ip[0]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[1]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[2]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[3]) & 0xff)
+        val pp = ((int(peer_port[0]) & 0xff) << 8) | (int(peer_port[1]) & 0xff)
+        puts(":")
+        print_udec(pp)
+        puts("\n")
+
+Read loop. The request is TCP-stream data: each `tcp_recv` returns
+whatever chunk of bytes has arrived so far. We accumulate into
+`rbuf` and re-scan after every recv. 1024 bytes holds the request
+line plus any curl-style headers with huge room to spare.
+
+        var rbuf: [1024]byte
+        var used = 0
+        var hdr_end = -1
+        while used < 1024 && hdr_end < 0
+            val got = tcp_recv(cfd, &rbuf[used], 1024 - used)
+            if got < 0
+                puts("httpd: recv failed\n")
+                tcp_close(cfd)
+                tcp_close(lfd)
+                exit_with(3)
+                return
+            if got == 0
+                break
+            used += got
+            hdr_end = find_header_end(&rbuf[0], used)
+        if hdr_end < 0
+            puts("httpd: bad request (no CRLFCRLF in ")
+            print_udec(used)
+            puts(" bytes)\n")
+            tcp_close(cfd)
+            tcp_close(lfd)
+            exit_with(4)
+            return
+        puts("httpd: request hdr_end=")
+        print_udec(hdr_end)
+        puts("\n")
+
+Canned response. 73 bytes — well under the 480-byte `tcp_send`
+cap, so one call suffices. The `Content-Length: 6` matches
+`hello\n` exactly so HTTP/1.0 clients that respect the length
+(rare — most just read until close) get an accurate frame.
+
+        val resp = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\n\r\nhello\n"
+        val rlen = len(resp)
+        val rptr = *byte(resp)
+        val sent = tcp_send(cfd, rptr, rlen)
+        if sent < 0
+            puts("httpd: send failed\n")
+            tcp_close(cfd)
+            tcp_close(lfd)
+            exit_with(5)
+            return
+        puts("httpd: sent=")
+        print_udec(sent)
+        puts("\n")
+
+        val cr = tcp_close(cfd)
+        if cr < 0
+            puts("httpd: close cfd failed\n")
+            tcp_close(lfd)
+            exit_with(6)
+            return
+        val lr = tcp_close(lfd)
+        if lr < 0
+            puts("httpd: close lfd failed\n")
+            exit_with(7)
+            return
+        puts("httpd: done\n")
+        exit()
