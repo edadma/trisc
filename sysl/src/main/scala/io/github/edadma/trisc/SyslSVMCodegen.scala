@@ -638,13 +638,19 @@ class SyslSVMCodegen:
   // ========================================================================
   private def genStmts(stmts: List[TStmt]): Unit = stmts.foreach(genStmt)
 
-  /** Generate statements where the last one leaves its value on the stack (for if-expr, match-expr, function bodies). */
+  /** Generate statements where the last one leaves its value on the stack (for if-expr, match-expr, function bodies).
+    * Always pushes exactly 1 value on the stack. If the last expression is void-typed (which can occur when an
+    * if-expression's branches have mismatched types — the analyzer types the enclosing expression based on the
+    * first branch only), synthesize a push_0 so the stack stays balanced.
+    */
   private def genStmtsAsExpr(stmts: List[TStmt]): Unit =
     if stmts.isEmpty then emitPushInt(0)
     else
       genStmts(stmts.init)
       stmts.last match
-        case TExprStmt(expr) => genExpr(expr)
+        case TExprStmt(expr) =>
+          genExpr(expr)
+          if expr.typ == SyslType.VoidType then emitPushInt(0)
         case TReturnStmt(Some(expr)) => genExpr(expr); emitDefers(); emit("  ret")
         case other => genStmt(other); emitPushInt(0)
 
@@ -1303,18 +1309,32 @@ class SyslSVMCodegen:
       val endLabel = newLabel("endif")
       genExpr(cond)
       emit(s"  jumpz $elseLabel")
-      genStmtsAsExpr(thenBody)
+      if typ == SyslType.VoidType then genStmts(thenBody) else genStmtsAsExpr(thenBody)
       emit(s"  jump $endLabel")
       emit(s"$elseLabel:")
-      genStmtsAsExpr(elseBody)
+      if typ == SyslType.VoidType then genStmts(elseBody) else genStmtsAsExpr(elseBody)
       emit(s"$endLabel:")
 
     case TIfExpr(cond, thenBody, None, typ) =>
-      val endLabel = newLabel("endif")
-      genExpr(cond)
-      emit(s"  jumpz $endLabel")
-      genStmtsAsExpr(thenBody)
-      emit(s"$endLabel:")
+      if typ == SyslType.VoidType then
+        val endLabel = newLabel("endif")
+        genExpr(cond)
+        emit(s"  jumpz $endLabel")
+        genStmts(thenBody)
+        emit(s"$endLabel:")
+      else
+        // Non-void if-without-else: skip path needs a synthetic value so the
+        // stack is balanced regardless of branch taken. (Analyzer types such
+        // expressions non-void based on the then-body's last expression.)
+        val elseLabel = newLabel("else")
+        val endLabel = newLabel("endif")
+        genExpr(cond)
+        emit(s"  jumpz $elseLabel")
+        genStmtsAsExpr(thenBody)
+        emit(s"  jump $endLabel")
+        emit(s"$elseLabel:")
+        emitPushInt(0)
+        emit(s"$endLabel:")
 
     case TMatchExpr(scrutinee, arms, default, matchTyp) =>
       genMatch(scrutinee, arms, default, matchTyp, asExpr = true)
