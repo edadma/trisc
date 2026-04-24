@@ -298,6 +298,8 @@ class SyslSVMCodegen:
     // Pre-register string globals so their rodata labels are emitted in the
     // rodata segment before the data segment references them.
     val stringGlobalLabels = new mutable.HashMap[String, String]
+    // For arrays of strings: per-element labels, indexed by (arrayName, i).
+    val stringArrayElemLabels = new mutable.HashMap[(String, Int), String]
     for decl <- dataGlobals do decl match
       case TVarDecl(name, SyslType.StringType, TStringLit(s, _), _, _) =>
         labelCounter += 1
@@ -305,6 +307,15 @@ class SyslSVMCodegen:
                   else s"__str_${labelCounter}__g_$name"
         stringLiterals += ((lbl, s))
         stringGlobalLabels(name) = lbl
+      case TVarDecl(name, SyslType.ArrayType(SyslType.StringType, _), TArrayLit(elements, _), _, _) =>
+        for (e, idx) <- elements.zipWithIndex do e match
+          case TStringLit(s, _) =>
+            labelCounter += 1
+            val lbl = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_${labelCounter}__g_${name}_$idx"
+                      else s"__str_${labelCounter}__g_${name}_$idx"
+            stringLiterals += ((lbl, s))
+            stringArrayElemLabels((name, idx)) = lbl
+          case _ =>
       case _ =>
 
     // Emit rodata segment — string literals + interface itables
@@ -350,6 +361,22 @@ class SyslSVMCodegen:
                   emit(s"  dl ${bytes.length}")
                 case _ =>
                   emit(s"  dl 0"); emit(s"  dl 0")
+            case SyslType.ArrayType(SyslType.StringType, arrSize) =>
+              // Array of strings: emit inline {ptr, len} per element.
+              init match
+                case TArrayLit(elements, _) =>
+                  for (e, idx) <- elements.zipWithIndex do e match
+                    case TStringLit(s, _) =>
+                      val bytes = s.getBytes("UTF-8")
+                      emit(s"  dl ${stringArrayElemLabels((name, idx))}")
+                      emit(s"  dl ${bytes.length}")
+                    case _ =>
+                      emit(s"  dl 0"); emit(s"  dl 0")
+                  for _ <- elements.length until arrSize.toInt do
+                    emit("  dl 0"); emit("  dl 0")
+                case _ =>
+                  for _ <- 0 until arrSize.toInt do
+                    emit("  dl 0"); emit("  dl 0")
             case SyslType.ArrayType(SyslType.UIntType(8) | SyslType.IntType(8) | SyslType.BoolType, arrSize) =>
               // Byte array with string-literal / array-literal init.
               init match
@@ -365,18 +392,27 @@ class SyslSVMCodegen:
                 case _ =>
                   for _ <- 0 until arrSize.toInt do emit("  db 0")
             case SyslType.ArrayType(elem, arrSize) =>
-              // Wider-element array: fall back to zero-init for now.
               val elemBytes = elem.sizeOf.toInt
-              val totalBytes = (arrSize.toInt * elemBytes).max(8)
-              val slots = (totalBytes + 7) / 8
+              val directive = elemBytes match
+                case 1 => "db"
+                case 2 => "ds"
+                case 4 => "dw"
+                case _ => "dl"
+              val mask = elemBytes match
+                case 1 => 0xffL
+                case 2 => 0xffffL
+                case 4 => 0xffffffffL
+                case _ => -1L
               init match
-                case TArrayLit(elements, _) if elemBytes == 8 =>
+                case TArrayLit(elements, _) =>
                   for e <- elements do
-                    val n = constEval(e).getOrElse(0L)
-                    emit(s"  dl $n")
-                  for _ <- elements.length until slots do emit("  dl 0")
+                    val n = constEval(e).getOrElse(0L) & mask
+                    emit(s"  $directive $n")
+                  for _ <- elements.length until arrSize.toInt do
+                    emit(s"  $directive 0")
                 case _ =>
-                  for _ <- 0 until slots do emit("  dl 0")
+                  for _ <- 0 until arrSize.toInt do
+                    emit(s"  $directive 0")
             case _ =>
               val sizeSlots = (typ.sizeOf.max(8) / 8).toInt
               constEval(init) match

@@ -497,7 +497,16 @@ object SyslCli:
       svm.reset()
       svm.run()
     catch case e: Throwable =>
-      return Fail(s"SVM runtime error: ${e.getClass.getSimpleName}: ${e.getMessage}", outputBuf.toString)
+      if System.getenv("SVM_TRACE") != null then
+        e.printStackTrace()
+        val ip = svm.ip
+        val allSyms = for seg <- linked.segments; sym <- seg.symbols yield (sym.name, seg.org + sym.offset)
+        val sorted = allSyms.sortBy(_._2)
+        val before = sorted.filter { case (_, addr) => addr <= ip }.takeRight(3)
+        val after = sorted.filter { case (_, addr) => addr > ip }.take(3)
+        System.err.println(s"SVM_TRACE: context near 0x${ip.toHexString}:")
+        for (n, a) <- before ++ after do System.err.println(f"  0x$a%x $n")
+      return Fail(s"SVM runtime error: ${e.getClass.getSimpleName}: ${e.getMessage} at IP=0x${svm.ip.toHexString}", outputBuf.toString)
     val captured = outputBuf.toString
     if svm.result == sentinel then
       if t.shouldPanic then Fail("expected panic, got normal return", captured) else Pass
