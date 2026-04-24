@@ -30,13 +30,15 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
     import oskit.kernel.{kernel_init, create_thread, create_thread_pri,
         first_thread_ssp,
         kernel_stack_usp, kernel_stack_ssp, schedule,
-        syscall_table, syscall_ssp_set, syscall_check_allowed,
+        syscall_table, syscall_table_6, syscall_ssp_set, syscall_check_allowed,
         create_process_suspended, resume_process,
         register_syscall, syscall_return,
+        terminate_current,
         kb_enqueue, kb_notify_tid, notify_send,
         virtio_notify_tid,
+        kernel_set_system_info,
         current_thread, ticks}
-    import oskit.config.{NUM_PRIORITIES}
+    import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
     import oskit.services.{get_thread_count, uptime, sleep, yield}
@@ -45,6 +47,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE, VIRTIO_MMIO_MAX, VIRTIO_DEV_NET}
 
     extern arch_syscall_call(arg: i64, handler: i64)
+    extern arch_syscall_call6(handler: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
 
     val DEMO_MODE = 5             // 0=kernel+IPC, 1=ad-hoc, 2=EL0 legacy, 3=user proc, 4=user+kern IPC, 5=rs-as-userspace
 
@@ -326,7 +329,7 @@ kernel isn't in play.
                 uart_puts("]\n")
                 abort()
 
-        if num < 0 || num >= 96
+        if num < 0 || num >= MAX_SYSCALLS
             fp[0] = i64(-1)
             return
 
@@ -351,6 +354,32 @@ kernel isn't in play.
             skip_schedule = true
             return
 
+        // POSIX shim range (128-511): multi-arg handlers. Musl-linked
+        // programs enter here with x0..x5 carrying up to six args in
+        // standard AArch64 ABI order. The native single-arg
+        // arch_syscall_call path (below) can't express that, so these
+        // syscalls route through posix_dispatch which picks the args
+        // it needs off the saved frame.
+        if num >= 128
+            syscall_ssp_set(i64(frame))
+            if syscall_check_allowed(num) == 0
+                fp[0] = i64(-1)
+                return
+            fp[0] = posix_dispatch(num, fp[0], fp[1], fp[2], fp[3], fp[4], fp[5])
+            return
+
+        // 6-arg path: check syscall_table_6 first. Handlers here
+        // take all six i64 args and return i64; dispatcher writes
+        // the result to fp[0].
+        val handler6 = syscall_table_6[num]
+        if handler6 != i64(0)
+            syscall_ssp_set(i64(frame))
+            if syscall_check_allowed(num) == 0
+                fp[0] = i64(-1)
+                return
+            fp[0] = arch_syscall_call6(handler6, fp[0], fp[1], fp[2], fp[3], fp[4], fp[5])
+            return
+
         val handler = syscall_table[num]
         if handler == i64(0)
             fp[0] = i64(-1)
@@ -363,6 +392,40 @@ kernel isn't in play.
             return
 
         arch_syscall_call(a0, handler)
+
+POSIX shim dispatch. Musl's aarch64-slix arch/ uses SLIX-local
+syscall numbers starting at 128 (see `slix/musl/arch/aarch64-slix
+/bits/syscall.h.in`). Handlers take the raw user-space args and
+return bytes-written / 0-on-success / -errno as i64, which the
+dispatcher writes into the saved x0 slot. Only the Phase-1
+minimum is wired up today — SYS_WRITE to stdout/stderr and
+SYS_EXIT_GROUP (alias of SLIX native SYS_EXIT).
+
+    posix_dispatch(num: int, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        if num == 128
+            return sys_write(int(a0), a1, int(a2))
+        if num == 129
+            terminate_current(int(a0))
+            return i64(0)
+        i64(-38)            // -ENOSYS
+
+SYS_WRITE shim. fd=1 (stdout) and fd=2 (stderr) write directly to
+the PL011 UART; any other fd returns -EBADF. The user's buffer
+lives in the current process's EL0-accessible carve-out and is
+already mapped in the active PT (which we're running under since
+EL1 inherits TTBR0_EL1 from EL0), so we dereference it directly
+without vm_copy_from. A future commit will extend this to route
+non-TTY fds through the VFS server.
+
+    sys_write(fd: int, buf: i64, len: int) -> i64
+        if fd == 1 || fd == 2
+            var p: *byte = *byte(buf)
+            var i = 0
+            while i < len
+                uart_putc(int(p[i]))
+                i += 1
+            return i64(len)
+        i64(-9)             // -EBADF
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a
 is the echo server: creates a port, registers "echo", then
@@ -691,8 +754,17 @@ line per 64 bytes of code.
         user_load_program(new_pt, blob_start, blob_len)
         user_sync_icache(new_pt, blob_len)
 
+        // Build a minimal argc=0 System V init stack (40 bytes →
+        // 48 for 16-byte alignment, all zeros) so the user program's
+        // `_start` (which reads argc from [sp]) sees a valid empty
+        // frame instead of whatever lives at PROG_USP.
+        var user_stack_buf: [48]byte
+        memset(&user_stack_buf[0], 0, 48)
+        val user_sp = i64(PROG_USP) - 48
+        vm_copy_to(new_pt, u64(user_sp), user_stack_buf, 48)
+
         val pid = create_process_suspended(
-            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            i64(0x60000000), user_sp, i64(PROG_SSP),
             "user1", new_pt)
         if pid <= 0
             uart_puts("[user] create_process_suspended failed pid=")
@@ -755,8 +827,15 @@ ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
         user_load_program(new_pt, blob_start, blob_len)
         user_sync_icache(new_pt, blob_len)
 
+        // argc=0 SysV frame — see comment on the same pattern in
+        // kernel_main_user_process above.
+        var uipc_stack_buf: [48]byte
+        memset(&uipc_stack_buf[0], 0, 48)
+        val uipc_sp = i64(PROG_USP) - 48
+        vm_copy_to(new_pt, u64(uipc_sp), uipc_stack_buf, 48)
+
         val pid = create_process_suspended(
-            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            i64(0x60000000), uipc_sp, i64(PROG_SSP),
             "user1", new_pt)
         if pid <= 0
             uart_puts("[uipc] create_process_suspended failed\n")
@@ -796,6 +875,11 @@ which is the baseline we want for this commit).
         register_syscall(1, sys_putc_handler)
         register_syscall(79, sys_puts_handler)
 
+        // Populate kernel-side system info so sys_getinfo can
+        // answer RS and server queries without the per-process
+        // INFO_PAGE_VA scratch page.
+        kernel_set_system_info(i64(0x50000000), i64(0x200000), i64(BOOT_INFO_PA))
+
         // Create the idle thread at the lowest priority. It runs
         // `arch_sti(); wfi()` in a loop on its own kernel stack
         // (slot 0), so when every real thread is blocked the
@@ -827,46 +911,8 @@ which is the baseline we want for this commit).
         user_load_program(new_pt, blob_start, blob_len)
         user_sync_icache(new_pt, blob_len)
 
-        // Build the info page in a local buffer, then vm_copy_to
-        // into RS's PT. Layout matches x86 app_nsh.sysl:
-        //   +0:  RS TID placeholder (RS overwrites with thread_id())
-        //   +8:  ramdisk base (hardcoded 0x50000000 on aarch64 —
-        //        matches -device loader,file=ramdisk.img,addr=0x50000000
-        //        in build.sh / run-test.sh)
-        //  +16:  ramdisk size (hardcoded 0x200000 / 2MB — matches
-        //        MakeAarch64RamdiskMain's TFS.format(512 blocks * 4KB))
-        //  +24:  boot info header copy (SLIX magic + module entries),
-        //        with per-entry offsets converted to absolute PAs.
-        var info_page: [512]byte
-        memset(info_page, 0, 512)
-        var ramdisk_base_p: *i64 = *i64(&info_page[8])
-        *ramdisk_base_p = i64(0x50000000)
-        var ramdisk_size_p: *i64 = *i64(&info_page[16])
-        *ramdisk_size_p = i64(0x400000)
-        // Copy boot info header (magic + count + per-module entries)
-        val mod_count = bi_module_count()
-        if mod_count < 0
-            uart_puts("[rs] bad boot info magic\n")
-            abort()
-        val bi_copy_len = 8 + mod_count * 24
-        if bi_copy_len + 24 > 512
-            uart_puts("[rs] boot info too big for info page\n")
-            abort()
-        val bi_base: *byte = *byte(BOOT_INFO_PA)
-        var ci = 0
-        while ci < bi_copy_len
-            info_page[ci + 24] = bi_base[ci]
-            ci += 1
-        // Convert relative offsets in copied entries to absolute PAs
-        var fi = 0
-        while fi < mod_count
-            val addr_off = 24 + 8 + fi * 24 + 8
-            var p: *i64 = *i64(&info_page[addr_off])
-            val orig_off = *p
-            *p = i64(BOOT_INFO_PA) + orig_off
-            fi += 1
-
-        vm_copy_to(new_pt, u64(0x60090000), info_page, 512)
+        // RS reads ramdisk info + boot info blob via sys_getinfo at
+        // startup — no per-process info page to build or copy.
 
         val pid = create_process_suspended(
             i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),

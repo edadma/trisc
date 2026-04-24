@@ -1,31 +1,27 @@
 // aarch64 program startup — entry point for standalone SLIX binaries.
 //
-// Mirrors oskit/arch/x86_64/prog_start.s. Reads argc/argv from the
-// POSIX blob PM writes to the info page at INFO_PAGE_VA
-// (0x60090000 on aarch64, matching oskit.arch.INFO_PAGE_VA), calls
-// `oskit_ulib__sysl_start`, and exits via SYS_EXIT.
+// SLIX uses the System V Application Binary Interface process-
+// initialization layout (same as Linux / NetBSD / Minix 3). PM
+// builds the frame on the new process's stack before resuming it,
+// so at entry SP_EL0 points at argc:
+//
+//   [sp + 0x00]   argc          (i64)
+//   [sp + 0x08]   argv[0]       (pointer)
+//   ...
+//   [sp + 8+8*argc]  NULL        (argv terminator)
+//   [sp + 16+8*argc] envp[0]...  NULL (envp terminator)
+//   [sp + after envp] auxv pairs, AT_NULL terminated
+//   [sp + after auxv] string data argv/envp point into
+//
+// Hands (argc, &argv[0]) to sysl_start, which wraps the C-style
+// argv into a sysl `[]string` and calls the program's main.
 
 .section .text
 .global _start
 
-.set PROG_ARGS_ADDR, 0x60090000
-
-// Entry point. Layout at PROG_ARGS_ADDR:
-//   +0   argc (i32)
-//   +4   padding
-//   +8   argv[0] pointer
-//   ...
-//   +8+8*argc  NULL
-//   +16+8*argc string data
-//
-// PM copies this blob into the child's page table before resuming.
-// When no PM has run (kernel-direct spawn for bring-up tests), the
-// page is still mapped but zero-filled, so argc=0 and sysl_start
-// falls through to main() with an empty []string.
 _start:
-    ldr  x2, =PROG_ARGS_ADDR
-    ldr  w0, [x2]                // argc (i32)
-    add  x1, x2, #8              // &argv[0]
+    ldr  w0, [sp]                // argc (low 32 bits of the i64 slot)
+    add  x1, sp, #8              // &argv[0]
     bl   oskit_ulib__sysl_start
 
     // sysl_start normally exits via syscall(SYS_EXIT, 0). If it
@@ -43,6 +39,24 @@ _start:
 syscall:
     mov x8, x0
     mov x0, x1
+    svc #0
+    ret
+
+// syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+//   AAPCS64 call site: x0=num, x1=a0, x2=a1, x3=a2, x4=a3, x5=a4, x6=a5.
+//   SLIX 6-arg dispatcher reads x8=num, x0..x5=a0..a5 from the saved
+//   frame, so the wrapper shifts the args one register down and hoists
+//   num into x8 before the SVC. x0 already carries the return value on
+//   resume.
+.global syscall6
+syscall6:
+    mov x8, x0
+    mov x0, x1
+    mov x1, x2
+    mov x2, x3
+    mov x3, x4
+    mov x4, x5
+    mov x5, x6
     svc #0
     ret
 

@@ -20,9 +20,9 @@ IPC commands:
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
-    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid}
+    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range}
     import oskit.loader.load_tof_to_ptbr
-    import oskit.arch.{PROG_USP, PROG_SSP, INFO_PAGE_VA}
+    import oskit.arch.{PROG_USP, PROG_SSP}
 
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
@@ -243,17 +243,12 @@ Handle SPAWN: create a new process from a binary path.
 Request: [cmd(1), path_len(1), blob_len_lo(1), blob_len_hi(1), num_handles(1), path(N), blob(M), handle_pairs(H*2)]
 Reply:   [status(1), pid(4)]
 
-The `blob` is an opaque POSIX argv image (see ulib's
-PROG_ARGS_ADDR). PM doesn't parse it — just copies it verbatim
-to the child's SPAWN_PROG_ARGS_ADDR. The thread name comes from
-`path`, not argv.
-
-    // SPAWN_PROG_ARGS_ADDR lived here as a hardcoded 0xBF000 but the
-    // VA is arch-specific (0xBF000 on x86/TRISC, 0x60090000 on
-    // aarch64). Use the imported INFO_PAGE_VA constant directly at
-    // call sites instead — module-level expression evaluation of
-    // imported consts isn't reliable across backends.
-    val SPAWN_PROG_ARGS_MAX  = 4096
+The `blob` is the PM-SPAWN wire-format argv image (see
+`build_argv_blob`): a 4-byte argc + 4 pad bytes + the
+NUL-separated argv string data. PM parses it and builds a
+System V ABI init stack frame in the child's user stack (see
+`pm_build_sysv_stack`). The thread name comes from `path`, not
+argv.
 
     pm_handle_spawn(sender: int, buf: *byte)
         val path_len = int(buf[1])
@@ -281,15 +276,25 @@ to the child's SPAWN_PROG_ARGS_ADDR. The thread name comes from
 
 
 
-        // Copy argv blob verbatim to child's args address
-        if blob_len > 0
-            val blob_src: *byte = buf + 5 + path_len
-            svc_vm_copy_to(proc_pt, u64(INFO_PAGE_VA), blob_src, blob_len)
+        // Build the System V init stack frame (argc + argv + envp +
+        // auxv + string data) in a local buffer, then copy to the
+        // child's stack. The child's initial SP points at argc — the
+        // bottom of the frame — and `_start` on each arch loads argc
+        // and &argv[0] from [sp] before calling sysl_start.
+        var stack_buf: [4096]byte
+        val fsz = pm_build_sysv_stack(buf + 5 + path_len, blob_len,
+                                      &stack_buf[0], 4096, PROG_USP)
+        if fsz < 0
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        val child_sp = PROG_USP - i64(fsz)
+        svc_vm_copy_to(proc_pt, u64(child_sp), &stack_buf[0], fsz)
 
-
-
-        // Create the process suspended — it won't run until we resume it
-        val pid = svc_create_proc_susp(entry, PROG_USP, PROG_SSP, path, proc_pt)
+        // Create the process suspended — it won't run until we resume it.
+        // `child_sp` (bottom of the SysV frame) is the initial user SP.
+        val pid = svc_create_proc_susp(entry, child_sp, PROG_SSP, path, proc_pt)
 
 
 
@@ -298,6 +303,12 @@ to the child's SPAWN_PROG_ARGS_ADDR. The thread name comes from
             reply[0] = -1
             ipc_reply(sender, reply, 1)
         else
+            // aarch64 and x86 spawn ELF binaries; enable the POSIX
+            // syscall range (128-511) unconditionally so musl-linked
+            // programs can invoke write/read/exit_group/etc. TRISC
+            // will load TRB here in future; granting bits for
+            // POSIX syscalls that TRISC never issues is harmless.
+            svc_grant_posix_range(pid)
             // Copy handles from parent to child via VFS (child is suspended)
             if num_handles > 0
                 val sender_pid = svc_get_thread_pid(sender)
@@ -407,12 +418,11 @@ with PM via IPC.
             return -1
         pm_msg_read_i32(reply, 1)
 
-Build the POSIX argv blob. See ulib.build_argv_blob for format.
+Build the PM-SPAWN wire-format argv blob. Mirror of
+ulib.build_argv_blob; see that one for the format spec.
 
     pm_build_argv_blob(argv: *string, argc: int, blob: *byte, cap: int) -> int
-        val ptrs_size = (argc + 1) * 8
-        var str_off = 8 + ptrs_size
-        if str_off > cap
+        if 8 > cap
             return -1
         blob[0] = byte(argc & 0xFF)
         blob[1] = byte((argc >> 8) & 0xFF)
@@ -422,23 +432,13 @@ Build the POSIX argv blob. See ulib.build_argv_blob for format.
         blob[5] = 0
         blob[6] = 0
         blob[7] = 0
-        var pos = str_off
+        var pos = 8
         var i = 0
         while i < argc
             val arg = argv[i]
             val alen = len(arg)
             if pos + alen + 1 > cap
                 return -1
-            val ptr: i64 = INFO_PAGE_VA + i64(pos)
-            val pbase = 8 + i * 8
-            blob[pbase]     = byte(ptr & i64(0xFF))
-            blob[pbase + 1] = byte((ptr >> 8) & i64(0xFF))
-            blob[pbase + 2] = byte((ptr >> 16) & i64(0xFF))
-            blob[pbase + 3] = byte((ptr >> 24) & i64(0xFF))
-            blob[pbase + 4] = byte((ptr >> 32) & i64(0xFF))
-            blob[pbase + 5] = byte((ptr >> 40) & i64(0xFF))
-            blob[pbase + 6] = byte((ptr >> 48) & i64(0xFF))
-            blob[pbase + 7] = byte((ptr >> 56) & i64(0xFF))
             val ap = *byte(arg)
             var j = 0
             while j < alen
@@ -447,12 +447,121 @@ Build the POSIX argv blob. See ulib.build_argv_blob for format.
             blob[pos + alen] = 0
             pos = pos + alen + 1
             i += 1
-        val nbase = 8 + argc * 8
-        var z = 0
-        while z < 8
-            blob[nbase + z] = 0
-            z += 1
         pos
+
+Build a System V Application Binary Interface process initialization
+stack frame in `out`. Layout matches what musl's / NetBSD's / glibc's
+`_start` expects — argc at the bottom, then argv pointer array (inc
+NULL terminator), then envp pointer array (inc NULL terminator),
+then auxv (just AT_NULL pair today), then the string data argv
+points into. PM copies the whole frame into the new process's stack
+region and hands the bottom address to `svc_create_proc_susp` as
+the initial SP_EL0 / RSP / r7.
+
+`src` is the client-side wire-format argv blob (see
+`build_argv_blob`): `[argc(4) pad(4) arg0\0 arg1\0 ...]`.
+
+`child_sp_top` is the top of the new process's user stack region
+(PROG_USP). `frame_size` is rounded up to a 16-byte boundary and
+returned; the initial SP the caller passes to create_proc_susp
+is `child_sp_top - frame_size`.
+
+Returns the frame size on success, -1 if the frame wouldn't fit
+in `cap` or the blob is malformed.
+
+    pm_build_sysv_stack(src: *byte, src_len: int, out: *byte, cap: int, child_sp_top: i64) -> int
+        // Parse argc from the first 4 bytes of the source blob (i32 LE).
+        // blob_len==0 → no args, build an empty argv / envp / auxv frame.
+        var argc = 0
+        if src_len >= 4
+            argc = (int(src[0]) & 0xFF) | ((int(src[1]) & 0xFF) << 8) | ((int(src[2]) & 0xFF) << 16) | ((int(src[3]) & 0xFF) << 24)
+        if argc < 0
+            return -1
+
+        // Source string data starts right after the 8-byte header
+        // (argc(4) + 4 bytes pad).
+        val src_str_off = 8
+
+        // Walk the string area to sum up total bytes (argv[i] + NUL each).
+        var s_total = 0
+        if argc > 0
+            if src_str_off > src_len
+                return -1
+            var k = 0
+            while k < argc
+                var slen = 0
+                while src[src_str_off + s_total + slen] != 0
+                    slen += 1
+                    if src_str_off + s_total + slen >= src_len
+                        return -1
+                s_total += slen + 1
+                k += 1
+
+        // Frame size: argc(8) + argv+NULL((argc+1)*8) + envp NULL(8)
+        //             + auxv AT_NULL pair(16) + string bytes.
+        val s_argv = (argc + 1) * 8
+        val s_envp = 1 * 8
+        val s_auxv = 2 * 8
+        var frame_size = 8 + s_argv + s_envp + s_auxv + s_total
+
+        // 16-byte align (SysV ABI / AArch64 SP alignment requirement).
+        frame_size = ((frame_size + 15) / 16) * 16
+
+        if frame_size > cap
+            return -1
+
+        // Zero the frame buffer up front so pointer slots, NULL
+        // terminators, AT_NULL pair and any alignment padding are
+        // all zero without extra writes below.
+        var ci = 0
+        while ci < frame_size
+            out[ci] = 0
+            ci += 1
+
+        // Where the frame will land in the child's address space.
+        val child_sp = child_sp_top - i64(frame_size)
+
+        // argc (i64 LE) at offset 0.
+        out[0] = byte(argc & 0xFF)
+        out[1] = byte((argc >> 8) & 0xFF)
+        out[2] = byte((argc >> 16) & 0xFF)
+        out[3] = byte((argc >> 24) & 0xFF)
+        // bytes 4..7 already zero.
+
+        // String data lands after argc + argv + envp + auxv.
+        val dst_str_off = 8 + s_argv + s_envp + s_auxv
+        var buf_sp = 0
+        var dst_sp = dst_str_off
+        var ai = 0
+        while ai < argc
+            var slen = 0
+            while src[src_str_off + buf_sp + slen] != 0
+                slen += 1
+            // Copy string + NUL into the output buffer.
+            var j = 0
+            while j <= slen
+                out[dst_sp + j] = src[src_str_off + buf_sp + j]
+                j += 1
+            // Write argv[ai] = child VA of this string (child_sp + dst_sp).
+            val ptr = child_sp + i64(dst_sp)
+            val pbase = 8 + ai * 8
+            out[pbase]     = byte(ptr & i64(0xFF))
+            out[pbase + 1] = byte((ptr >> 8) & i64(0xFF))
+            out[pbase + 2] = byte((ptr >> 16) & i64(0xFF))
+            out[pbase + 3] = byte((ptr >> 24) & i64(0xFF))
+            out[pbase + 4] = byte((ptr >> 32) & i64(0xFF))
+            out[pbase + 5] = byte((ptr >> 40) & i64(0xFF))
+            out[pbase + 6] = byte((ptr >> 48) & i64(0xFF))
+            out[pbase + 7] = byte((ptr >> 56) & i64(0xFF))
+            dst_sp += slen + 1
+            buf_sp += slen + 1
+            ai += 1
+
+        // argv NULL (at pbase = 8 + argc*8), envp NULL (at 8 + s_argv),
+        // AT_NULL pair (at 8 + s_argv + s_envp), and alignment padding
+        // are all already zero from the clear above.
+
+        frame_size
 
     pm_spawn(path: string, argv: *string, argc: int) -> int
         pm_spawn_handles(path, argv, argc, *byte(0), 0)

@@ -6,7 +6,7 @@ case class SymbolMeta(name: String, typ: SymbolMeta.Kind, isPrivate: Boolean, is
 
 object SymbolMeta:
   enum Kind:
-    case Func(params: List[SyslType], returnType: SyslType, isDef: Boolean = false)
+    case Func(params: List[SyslType], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil)
     case Data(dataType: SyslType)
     case Struct(structType: SyslType.StructType)
     case Enum(enumType: SyslType.EnumType)
@@ -28,9 +28,28 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
         currentSource = sym.sourceFile
       val vis = if sym.isPrivate then "PRIVATE " else ""
       sym.typ match
-        case SymbolMeta.Kind.Func(params, ret, isDef) =>
-          val kw = if isDef then "DEFFUNC" else "FUNC"
-          buf ++= s"${vis}$kw ${sym.name} ${SyslType.funcSigToPrefix(params, ret)}\n"
+        case SymbolMeta.Kind.Func(params, ret, isDef, isPure, modes) =>
+          // Pure variants append 'P' to the keyword so old smeta files (without 'P')
+          // continue to round-trip as impure. SMETA_VERSION bump handles format changes.
+          val kw = (isDef, isPure) match
+            case (true, true)   => "DEFFUNCP"
+            case (true, false)  => "DEFFUNC"
+            case (false, true)  => "FUNCP"
+            case (false, false) => "FUNC"
+          val sig = SyslType.funcSigToPrefix(params, ret)
+          // Modes suffix: only emit if any param has a non-default (non-In) mode. Encoding:
+          // a single string of N single-letter codes after the marker MODES — I=In, O=Out,
+          // U=Inout. Omitted when all-In, for readability and back-compat-ish trimming.
+          val modeSuffix =
+            if modes.nonEmpty && modes.exists(_ != ParamMode.In) then
+              val codes = modes.map {
+                case ParamMode.In    => 'I'
+                case ParamMode.Out   => 'O'
+                case ParamMode.Inout => 'U'
+              }.mkString
+              s" MODES $codes"
+            else ""
+          buf ++= s"${vis}$kw ${sym.name} $sig$modeSuffix\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"${vis}DATA ${sym.name} ${dataType.toPrefix}\n"
         case SymbolMeta.Kind.Struct(st) =>
@@ -63,7 +82,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
       if sym.isExtern then
         buf ++= s"extern ${sym.name}\n"
       else sym.typ match
-        case SymbolMeta.Kind.Func(params, ret, _) =>
+        case SymbolMeta.Kind.Func(params, ret, _, _, _) =>
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
@@ -95,8 +114,10 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
 
 object ModuleMeta:
 
-  /** Bump this whenever the .smeta format changes. Stale files are silently ignored. */
-  val SMETA_VERSION = 7
+  /** Bump this whenever the .smeta format changes. Stale files are silently ignored.
+   *  v9 adds optional `MODES <IOU…>` trailer on FUNC lines to carry Ada-style param
+   *  modes (out/inout) across module boundaries. */
+  val SMETA_VERSION = 9
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =
     val syms = program.decls.collect {
@@ -115,8 +136,16 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, isExtern = true, sourceFile = sourceFile)
-      case TFunDecl(name, params, returnType, _, isPrivate, _, isDef) =>
-        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef), isPrivate, sourceFile = sourceFile)
+      case TFunDecl(name, params, returnType, _, isPrivate, attrs, isDef) =>
+        val isPure = attrs.exists(_.name == "pure")
+        // Param modes: infer from the pointer-wrapping of declared param types. The
+        // analyzer stores Out/Inout params with type `*T`; the TFunDecl exposes that
+        // same type and marks the param with a `mode` attribute. We carry an explicit
+        // `ParamMode` list here so the importing unit can re-apply autoIndirect + call
+        // auto-wrap without needing to re-derive mode from the type alone.
+        val modes = params.map(_.mode)
+        val needModes = modes.exists(_ != ParamMode.In)
+        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef, isPure, if needModes then modes else Nil), isPrivate, sourceFile = sourceFile)
       case TVarDecl(name, typ, _, isPrivate, _) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile = sourceFile)
     }
@@ -178,12 +207,30 @@ object ModuleMeta:
               val kind = tokens.next()
               val name = tokens.next()
               kind match
-                case "FUNC" | "DEFFUNC" =>
-                  val isDef = kind == "DEFFUNC"
+                case "FUNC" | "DEFFUNC" | "FUNCP" | "DEFFUNCP" =>
+                  val isDef = kind == "DEFFUNC" || kind == "DEFFUNCP"
+                  val isPure = kind == "FUNCP" || kind == "DEFFUNCP"
                   val nparams = tokens.next().toInt
                   val params = (1 to nparams).map(_ => SyslType.parseType(tokens)).toList
                   val ret = SyslType.parseType(tokens)
-                  syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret, isDef), isPrivate, sourceFile = currentSource)
+                  // Optional `MODES <IOU…>` trailer — present only when any param has
+                  // a non-In mode (Ada `out` / `inout`). Absence means "all In".
+                  val modes =
+                    if tokens.hasNext then
+                      val marker = tokens.next()
+                      if marker == "MODES" then
+                        val codes = tokens.next()
+                        if codes.length != nparams then
+                          throw IllegalArgumentException(s"line $lineNum: MODES length ${codes.length} != param count $nparams")
+                        codes.map {
+                          case 'I' => ParamMode.In
+                          case 'O' => ParamMode.Out
+                          case 'U' => ParamMode.Inout
+                          case c   => throw IllegalArgumentException(s"line $lineNum: unknown mode code '$c'")
+                        }.toList
+                      else throw IllegalArgumentException(s"line $lineNum: unexpected token after FUNC signature: '$marker'")
+                    else Nil
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret, isDef, isPure, modes), isPrivate, sourceFile = currentSource)
                 case "DATA" =>
                   val dataType = SyslType.parseType(tokens)
                   syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
@@ -207,7 +254,7 @@ object ModuleMeta:
           parser.parseProgram(templateBuf.toString) match
             case Right(ast) =>
               ast.decls.filter {
-                case StructDeclAST(_, _, tps, _)           => tps.nonEmpty
+                case StructDeclAST(_, _, tps, _, _)        => tps.nonEmpty
                 case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
                 case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
                 case _: TraitDeclAST                        => true

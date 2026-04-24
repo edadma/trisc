@@ -1,10 +1,22 @@
 std.encoding.base64 — Base64 encoding
-======================================
+=====================================
 
-Encodes and decodes byte slices as base64 strings per RFC 4648,
-matching Go's `encoding/base64` package (standard alphabet with
-padding).
+Encodes and decodes byte slices as base64 strings per
+[RFC 4648](https://datatracker.ietf.org/doc/html/rfc4648), matching
+Go's `encoding/base64` standard alphabet **with** padding (the
+`StdEncoding` variant in Go terms).
 
+Base64 packs three input bytes (24 bits) into four 6-bit alphabet
+characters, padding the encoded form with `=` when the input length
+is not a multiple of three. The output is exactly $\lceil n/3 \rceil
+\times 4$ characters for an $n$-byte input. Decoding is the inverse,
+with input-validation errors surfaced via a `bool` "ok" flag in the
+return tuple.
+
+The alphabet is the standard one — A–Z, a–z, 0–9, `+`, `/` — so
+strings produced here interoperate cleanly with any RFC-4648-compliant
+decoder. The URL-safe variant (with `-`, `_` substituted) and the
+no-padding variant are not yet provided.
 
     module std.encoding.base64
 
@@ -14,8 +26,8 @@ padding).
 Constants
 ---------
 
-The standard base64 alphabet (A–Z, a–z, 0–9, +, /) and the
-padding character.
+The 64-character standard alphabet, indexed 0..63, plus the padding
+character `=`.
 
     val ENCODE: [64]byte = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
     val PAD: byte = byte('=')
@@ -24,11 +36,12 @@ padding character.
 Helpers
 -------
 
-### decode_char
+### `decode_char` — alphabet character → 6-bit value
 
-`decode_char(c)` maps a base64 character to its 6-bit value
-(0–63). Returns -1 for the padding character '=' and -2 for
-any invalid character.
+`decode_char(c)` maps a base64 character to its numeric value 0..63,
+returning `-1` for the padding character `'='` and `-2` for any other
+non-alphabet byte. Callers branch on the negative values to drive
+state-machine decisions in `decode_string`.
 
     decode_char(c: byte) -> int
         if c >= byte('A') && c <= byte('Z')
@@ -42,26 +55,40 @@ any invalid character.
         if c == byte('/')
             return 63
         if c == byte('=')
-            return -1
-        return -2
+            return -1                             // padding sentinel
+        return -2                                 // invalid sentinel
 
 
 Encoding
 --------
 
-### encoded_len
+### `encoded_len`
 
-`encoded_len(n)` returns the length of the base64 encoding of
-`n` bytes, including padding.
+The encoded length of `n` input bytes, including padding. Each
+3-byte chunk produces 4 alphabet characters; partial trailing chunks
+are padded out to 4 with `=`. Algebraically:
+$\mathrm{encoded\_len}(n) = 4 \lceil n/3 \rceil$.
 
     encoded_len(n: int) -> int = (n + 2) / 3 * 4
 
 
-### encode_to_string
+### `encode_to_string` — bytes → base64 string
 
-`encode_to_string(src)` returns the base64 encoding of `src`
-as a string. Processes three input bytes at a time, producing
-four base64 characters per group, with padding as needed.
+Walks `src` in 3-byte chunks. Each chunk yields four 6-bit values
+extracted by shifts and masks across the 24-bit window:
+
+$$
+\text{out}_0 = \text{src}_0 \gg 2,\quad
+\text{out}_1 = (\text{src}_0 \,\&\, 3) \ll 4 \;|\; \text{src}_1 \gg 4
+$$
+
+$$
+\text{out}_2 = (\text{src}_1 \,\&\, 15) \ll 2 \;|\; \text{src}_2 \gg 6,\quad
+\text{out}_3 = \text{src}_2 \,\&\, 63
+$$
+
+The remainder branch handles 1- or 2-byte tails by zero-extending
+the missing bits and emitting `=` characters in their slots.
 
     encode_to_string(src: []byte) -> string
         val n = len(src)
@@ -73,7 +100,8 @@ four base64 characters per group, with padding as needed.
         val full = n / 3
         var pos = 0
 
-        // Process complete 3-byte groups
+Main loop: complete 3-byte → 4-character groups.
+
         for i in 0..<full
             val off = i * 3
             val b0 = int(src[off])
@@ -85,7 +113,8 @@ four base64 characters per group, with padding as needed.
             buf[pos + 3] = ENCODE[b2 & 63]
             pos = pos + 4
 
-        // Handle remaining bytes
+Tail: 1 byte → 2 chars + `==`, 2 bytes → 3 chars + `=`.
+
         val rem = n % 3
         if rem == 1
             val b0 = int(src[n - 1])
@@ -107,20 +136,24 @@ four base64 characters per group, with padding as needed.
 Decoding
 --------
 
-### decoded_len
+### `decoded_len`
 
-`decoded_len(n)` returns the maximum number of bytes that an
-`n`-character base64 string could decode to (before accounting
-for padding).
+Upper bound on the decoded length of an `n`-character base64 string,
+not yet accounting for padding. Each 4-character group decodes to up
+to 3 bytes: $\mathrm{decoded\_len}(n) = 3 \lfloor n/4 \rfloor$.
 
     decoded_len(n: int) -> int = n / 4 * 3
 
 
-### decode_string
+### `decode_string` — base64 string → bytes
 
-`decode_string(s)` decodes a base64 string into a byte slice.
-Returns `(bytes, ok)` where `ok` is false if the input contains
-invalid characters or has incorrect padding.
+Returns `(bytes, ok)` where `ok` is `false` if the input contains
+invalid characters, has length not divisible by four, or has
+padding in any but the last 4-character group.
+
+The output buffer is sized exactly: take the maximum from
+`decoded_len`, then subtract one for each `=` in the final group
+(0, 1, or 2).
 
     decode_string(s: string) -> ([]byte, bool)
         val n = len(s)
@@ -129,17 +162,23 @@ invalid characters or has incorrect padding.
             val empty = (new [0]byte)[:]
             return empty, true
 
-        // Base64 strings must be a multiple of 4
+A well-formed standard-base64 string with padding is always a multiple
+of four characters. Anything else is malformed.
+
         if n % 4 != 0
             val empty = (new [0]byte)[:]
             return empty, false
 
-        // Convert string to byte slice
+Snapshot the string into a byte slice for indexed access.
+
         val src = (new [n]byte)[:]
         for i in 0..<n
             src[i] = byte(s[i])
 
-        // Count padding to determine actual output length
+Examine the last two characters to count trailing padding (0, 1, or
+2 `=` signs); subtract that from the maximum decoded length to get
+the exact output size.
+
         var pad_count = 0
         if src[n - 1] == PAD
             pad_count = pad_count + 1
@@ -158,41 +197,45 @@ invalid characters or has incorrect padding.
             val c2 = decode_char(src[off + 2])
             val c3 = decode_char(src[off + 3])
 
-            // First two chars must always be valid data
+The first two characters of every group must be alphabet characters
+— never padding, never invalid.
+
             if c0 < 0 || c1 < 0
                 val empty = (new [0]byte)[:]
                 return empty, false
 
-            // Third char: valid data or pad (only in last group)
+The third and fourth characters may be padding (`-1`) but never
+invalid (`-2`).
+
             if c2 == -2
                 val empty = (new [0]byte)[:]
                 return empty, false
 
-            // Fourth char: valid data or pad (only in last group)
             if c3 == -2
                 val empty = (new [0]byte)[:]
                 return empty, false
 
-            // Padding only allowed in the last group
+Padding is only legal in the last 4-character group. Reject any
+padding that appears earlier.
+
             val is_last = i == groups - 1
             if !is_last
                 if c2 == -1 || c3 == -1
                     val empty = (new [0]byte)[:]
                     return empty, false
 
-            // Decode the group
+Emit one, two, or three output bytes depending on how much padding
+the final group carries.
+
             if c2 == -1
-                // Two pads: only one output byte
-                out[pos] = byte((c0 << 2) | (c1 >> 4))
+                out[pos] = byte((c0 << 2) | (c1 >> 4))                  // two pads → 1 byte
                 pos = pos + 1
             else if c3 == -1
-                // One pad: two output bytes
-                out[pos]     = byte((c0 << 2) | (c1 >> 4))
+                out[pos]     = byte((c0 << 2) | (c1 >> 4))              // one pad → 2 bytes
                 out[pos + 1] = byte(((c1 & 15) << 4) | (c2 >> 2))
                 pos = pos + 2
             else
-                // No padding: three output bytes
-                out[pos]     = byte((c0 << 2) | (c1 >> 4))
+                out[pos]     = byte((c0 << 2) | (c1 >> 4))              // no pad → 3 bytes
                 out[pos + 1] = byte(((c1 & 15) << 4) | (c2 >> 2))
                 out[pos + 2] = byte(((c2 & 3) << 6) | c3)
                 pos = pos + 3
@@ -203,10 +246,11 @@ invalid characters or has incorrect padding.
 Tests
 =====
 
+### RFC 4648 §10 reference vectors
 
-### RFC 4648 test vectors
-
-The canonical test vectors from RFC 4648 section 10.
+The seven canonical encode tests cover every padding case (`""`
+through `"foobar"`), exercising the `(no pad, ==, =)` final-group
+branches.
 
     #test
     test_encode_empty() -> unit
@@ -244,7 +288,7 @@ The canonical test vectors from RFC 4648 section 10.
         assert(encode_to_string(src[:]) == "Zm9vYmFy", "foobar")
 
 
-### encode — other cases
+### `encode_to_string` — additional vectors
 
     #test
     test_encode_hello_world() -> unit
@@ -257,7 +301,7 @@ The canonical test vectors from RFC 4648 section 10.
         assert(encode_to_string(src[:]) == "//79/A==", "binary high bytes")
 
 
-### decode — RFC 4648 vectors
+### `decode_string` — RFC 4648 vectors
 
     #test
     test_decode_empty() -> unit
@@ -298,7 +342,7 @@ The canonical test vectors from RFC 4648 section 10.
         assert(out[5] == byte('r'), "r")
 
 
-### decode — other cases
+### `decode_string` — additional vectors
 
     #test
     test_decode_hello_world() -> unit
@@ -309,7 +353,10 @@ The canonical test vectors from RFC 4648 section 10.
         assert(out[12] == byte('!'), "!")
 
 
-### round-trip tests
+### Round trips
+
+`encode_to_string` followed by `decode_string` must recover the
+original bytes exactly, including 0x00 and 0xFF.
 
     #test
     test_roundtrip_foo() -> unit
@@ -342,7 +389,10 @@ The canonical test vectors from RFC 4648 section 10.
             assert(decoded[i] == src[i], s"byte $i")
 
 
-### invalid input rejection
+### Invalid input rejection
+
+`decode_string` must reject non-alphabet characters, lengths that are
+not a multiple of 4, and embedded whitespace.
 
     #test
     test_decode_rejects_bad_char() -> unit
@@ -360,7 +410,7 @@ The canonical test vectors from RFC 4648 section 10.
         assert(!ok, "space rejected")
 
 
-### decode_char
+### `decode_char`
 
     #test
     test_decode_char_A() -> unit

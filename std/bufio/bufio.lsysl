@@ -210,12 +210,10 @@ Tests
         val b1, ok1 = r.peek()
         assert(ok1, "ok1")
         assert(b1 == 97, "peeked a")
-        // peek doesn't consume
-        val b2, ok2 = r.peek()
+        val b2, ok2 = r.peek()                   // peek is idempotent — does not advance
         assert(ok2, "ok2")
         assert(b2 == 97, "still a")
-        // read consumes
-        val b3, _ = r.read_byte()
+        val b3, _ = r.read_byte()                // read advances
         assert(b3 == 97, "read a")
         val b4, _ = r.peek()
         assert(b4 == 98, "peek b")

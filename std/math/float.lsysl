@@ -200,8 +200,12 @@ All angles are in radians.
 
 ### asin / acos / atan
 
+The Taylor series for $\arctan$ converges painfully slowly at
+$|x| = 1$, so we hard-code the exact result for $\pm 1$ and use the
+identity $\arctan(x) = \pm\pi/2 - \arctan(1/x)$ to reflect any
+$|x| > 1$ argument back into the well-conditioned region.
+
     atan(x: double) -> double
-        // Special-case: Taylor series converges too slowly at |x|=1
         if x == 1.0 then return PI / 4.0
         if x == -1.0 then return -PI / 4.0
         if x > 1.0 then return PI / 2.0 - atan(1.0 / x)
@@ -510,8 +514,7 @@ float arithmetic may introduce small rounding errors.
     #test
     test_atan_atan2() -> unit
         assert(near(atan(0.0), 0.0, TOL), "atan(0)")
-        // atan Taylor series converges slowly at x=1; use wider tolerance
-        assert(near(atan(1.0), PI / 4.0, 1.0e-6), "atan(1)")
+        assert(near(atan(1.0), PI / 4.0, 1.0e-6), "atan(1)")        // wider tolerance: atan series is slow near x=1
         assert(near(atan2(1.0, 1.0), PI / 4.0, 1.0e-6), "atan2(1,1)")
         assert(near(atan2(0.0, -1.0), PI, TOL), "atan2(0,-1)")
 

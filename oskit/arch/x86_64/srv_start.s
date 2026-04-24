@@ -23,6 +23,15 @@ syscall:
     int $0x80
     retq
 
+# syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+# SysV passes args in rdi/rsi/rdx/rcx/r8/r9/[rsp+8]. The 6-arg dispatcher
+# reads a5 from r10, so lift it off the stack before the trap.
+.global syscall6
+syscall6:
+    movq 8(%rsp), %r10
+    int $0x80
+    retq
+
 # thread_exit — called when a thread function returns
 .global thread_exit
 thread_exit:

@@ -5,8 +5,9 @@
  * conversion is trivial: argc/argv are already POSIX-style, so
  * sysl_start just forwards unchanged.
  *
- * The arch-specific _start in prog_start.s reads the argv blob from
- * PROG_ARGS_ADDR and calls oskit_ulib__sysl_start(argc, argv). Sysl
+ * The arch-specific _start in prog_start.s loads argc from [sp] and
+ * &argv[0] from sp+8 (System V ABI process init stack, built by PM
+ * during spawn) and calls oskit_ulib__sysl_start(argc, argv). Sysl
  * programs pull that symbol from oskit/ulib/srt0.lsysl; C programs
  * get it from this file instead (link against crt0.o instead of
  * srt0.o).

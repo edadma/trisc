@@ -24,7 +24,7 @@ so the scheduler can reference them).
     import oskit.kernel.*
     import oskit.arch.{vm_v2p, vm_copy_cross, SYSCALL_RETURN_OFFSET}
     import oskit.config.{MAX_PORTS, MAX_THREADS, KERNEL_L1_BASE, DEFAULT_QUANTUM}
-    import oskit.services.syscall
+    import oskit.services.{syscall, syscall6}
     import oskit.hal.memcpy
 
     val IPC_PORT_FREE = -1
@@ -147,16 +147,16 @@ syscall handlers. Call from kernel_main before creating threads.
             port_name_len[i] = 0
             i += 1
         register_syscall(SYS_PORT_CREATE, ipc_port_create_handler)
-        register_syscall(SYS_IPC_SEND, ipc_send_handler)
-        register_syscall(SYS_IPC_RECV, ipc_recv_handler)
-        register_syscall(SYS_IPC_REPLY, ipc_reply_handler)
+        register_syscall6(SYS_IPC_SEND, ipc_send_handler)
+        register_syscall6(SYS_IPC_RECV, ipc_recv_handler)
+        register_syscall6(SYS_IPC_REPLY, ipc_reply_handler)
         register_syscall(SYS_PORT_CLOSE, ipc_port_close_handler)
-        register_syscall(SYS_PORT_REGISTER, ipc_port_register_handler)
-        register_syscall(SYS_PORT_LOOKUP, ipc_port_lookup_handler)
-        register_syscall(SYS_IPC_SEND_TIMED, ipc_send_timed_handler)
-        register_syscall(SYS_IPC_RECV_NOTIFY, ipc_recv_notify_handler)
+        register_syscall6(SYS_PORT_REGISTER, ipc_port_register_handler)
+        register_syscall6(SYS_PORT_LOOKUP, ipc_port_lookup_handler)
+        register_syscall6(SYS_IPC_SEND_TIMED, ipc_send_timed_handler)
+        register_syscall6(SYS_IPC_RECV_NOTIFY, ipc_recv_notify_handler)
         register_syscall(65, ipc_last_msg_len_handler)
-        register_syscall(68, ipc_port_transfer_handler)
+        register_syscall6(68, ipc_port_transfer_handler)
 
     ipc_last_msg_len_handler(arg: int)
         syscall_return(ipc_ctx[current_thread].actual_len)
@@ -166,21 +166,18 @@ Transfer port ownership to another thread. Used by RS to hand
 a dead server's port to the restarted replacement. Clients with
 cached port IDs continue to work transparently.
 
-    ipc_port_transfer_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val port = int(args[0])
-        val new_owner = int(args[1])
+    ipc_port_transfer_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val port = int(a0)
+        val new_owner = int(a1)
         if port < 0
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port >= port_count
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         port_owner[port] = new_owner
-        syscall_return(0)
         ipc_continue_current()
+        i64(0)
 
 Create a new port owned by the current thread. If the current
 thread already owns a port (e.g. transferred by RS before
@@ -212,34 +209,29 @@ a packed argument block: [port, msg_ptr, msg_len, reply_ptr, reply_len].
 Blocks the sender until the server calls reply().
 Returns 0 on success, -1 on error (invalid port, port closed).
 
-    ipc_send_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val port = int(args[0])
-        val msg_ptr = args[1]
-        val msg_len = int(args[2])
-        val rply_buf = args[3]
-        val rply_len = int(args[4])
+    ipc_send_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val port = int(a0)
+        val msg_ptr = a1
+        val msg_len = int(a2)
+        val rply_buf = a3
+        val rply_len = int(a4)
         val me = current_thread
 
         // Validate port
         if port < 0
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port >= port_count
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port_owner[port] == IPC_PORT_FREE
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
 
         // IPC send permission check
         if ipc_check_send_allowed(port) == 0
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
 
         // Store sender's IPC context
         ipc_ctx[me].buf = msg_ptr
@@ -254,7 +246,7 @@ Returns 0 on success, -1 on error (invalid port, port closed).
             ipc_deliver_and_wake(owner, me, msg_ptr, msg_len)
             threads[me].state = STATE_SEND_BLOCKED
             threads[me].wake_tick = 0
-            return
+            return i64(0)
 
         // Server not waiting — enqueue sender in port's FIFO
         ipc_queue_push(port, me)
@@ -262,6 +254,7 @@ Returns 0 on success, -1 on error (invalid port, port closed).
         // Block the sender (waits for reply, no timeout)
         threads[me].state = STATE_SEND_BLOCKED
         threads[me].wake_tick = 0
+        i64(0)
 
 Check if a server is waiting for a message on a given port.
 Returns 1 if waiting (RECV_BLOCKED or RECV_NOTIFY_BLOCKED), 0 otherwise.
@@ -318,26 +311,22 @@ argument block: [port, buf_ptr, buf_len].
 Returns sender's thread ID, or -1 on error.
 Blocks until a client sends a message.
 
-    ipc_recv_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val port = int(args[0])
-        val buf_ptr = args[1]
-        val buf_len = int(args[2])
+    ipc_recv_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val port = int(a0)
+        val buf_ptr = a1
+        val buf_len = int(a2)
         val me = current_thread
 
         // Validate: must own the port
         if port < 0
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port >= port_count
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port_owner[port] != me
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
 
         // Store receiver's IPC context
         ipc_ctx[me].buf = buf_ptr
@@ -352,45 +341,39 @@ Blocks until a client sends a message.
                 // Found a valid sender — deliver their message
                 ipc_deliver(me, sender, ipc_ctx[sender].buf, ipc_ctx[sender].len)
 
-                // Return sender ID to the server
-                syscall_return(sender)
-
                 // Server stays runnable (re-enqueue)
                 threads[me].state = STATE_READY
                 threads[me].quantum = DEFAULT_QUANTUM
                 enqueue(threads[me].priority, me)
-                return
+                return i64(sender)
             // Stale entry (timed out) — skip and try next
             sender = ipc_queue_pop(port)
 
         // No sender waiting — block the receiver
         threads[me].state = STATE_RECV_BLOCKED
+        i64(0)
 
 Reply to a client. The arg is a pointer to a packed argument
 block: [caller_tid, msg_ptr, msg_len].
 Copies the reply to the client's reply buffer and unblocks it.
 The server continues running (no block).
 
-    ipc_reply_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val caller = int(args[0])
-        val msg_ptr = args[1]
-        val msg_len = int(args[2])
+    ipc_reply_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val caller = int(a0)
+        val msg_ptr = a1
+        val msg_len = int(a2)
         val me = current_thread
 
         // Validate caller
         if caller < 0
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if caller >= thread_count
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if threads[caller].state != STATE_SEND_BLOCKED
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
 
         // Copy reply from server (me) to caller's reply buffer.
         // Handles cross-address-space copies via page table walks.
@@ -415,6 +398,7 @@ The server continues running (no block).
 
         // Server re-enqueues itself
         ipc_continue_current()
+        i64(0)
 
 Close a port. Wakes all blocked senders with error (-1).
 Only the port owner can close it.
@@ -451,29 +435,24 @@ Only the port owner can close it.
         syscall_return(0)
         ipc_continue_current()
 
-Register a name for a port. The arg is a pointer to a packed
-argument block: [port, name_ptr, name_len]. Only the port owner
-can register a name. Returns 0 on success, -1 on error.
+Register a name for a port. Args: a0=port, a1=name_ptr, a2=name_len.
+Only the port owner can register a name. Returns 0 on success, -1 on error.
 
-    ipc_port_register_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val port = int(args[0])
-        val src: *byte = *byte(args[1])
-        val slen = int(args[2])
+    ipc_port_register_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val port = int(a0)
+        val src: *byte = *byte(a1)
+        val slen = int(a2)
         val me = current_thread
 
         if port < 0
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port >= port_count
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port_owner[port] != me
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
 
         // Clear any existing port with the same name (handles stale ports
         // from dead servers so the new registration wins in lookups)
@@ -495,63 +474,54 @@ can register a name. Returns 0 on success, -1 on error.
             port_name_buf[base + ni] = src[ni]
             ni += 1
         port_name_len[port] = nlen
-        syscall_return(0)
         ipc_continue_current()
+        i64(0)
 
-Look up a port by name. The arg is a pointer to a packed
-argument block: [name_ptr, name_len]. Returns port ID, or
--1 if not found.
+Look up a port by name. Args: a0=name_ptr, a1=name_len.
+Returns port ID, or -1 if not found.
 
-    ipc_port_lookup_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val name: *byte = *byte(args[0])
-        val nlen = int(args[1])
+    ipc_port_lookup_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val name: *byte = *byte(a0)
+        val nlen = int(a1)
         var i = 0
         while i < port_count
             if port_owner[i] != IPC_PORT_FREE
                 if port_name_len[i] > 0
                     if ipc_strcmp(name, nlen, &port_name_buf[i * 8], port_name_len[i]) == 0
-                        syscall_return(i)
                         ipc_continue_current()
-                        return
+                        return i64(i)
             i += 1
-        syscall_return(-1)
         ipc_continue_current()
+        i64(-1)
 
 Send with timeout. Same as ipc_send but with a tick deadline.
-The arg is a pointer to a packed argument block:
-[port, msg_ptr, msg_len, reply_ptr, reply_len, timeout_ticks].
-Returns 0 on success, -1 on error, -2 on timeout.
+Args: a0=port, a1=msg_ptr, a2=msg_len, a3=reply_ptr, a4=reply_len,
+a5=timeout_ticks. Returns 0 on success, -1 on error, -2 on timeout.
 
-    ipc_send_timed_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val port = int(args[0])
-        val msg_ptr = args[1]
-        val msg_len = int(args[2])
-        val rply_buf = args[3]
-        val rply_len = int(args[4])
-        val timeout = int(args[5])
+    ipc_send_timed_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val port = int(a0)
+        val msg_ptr = a1
+        val msg_len = int(a2)
+        val rply_buf = a3
+        val rply_len = int(a4)
+        val timeout = int(a5)
         val me = current_thread
 
         // Validate port
         if port < 0
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port >= port_count
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port_owner[port] == IPC_PORT_FREE
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
 
         // IPC send permission check
         if ipc_check_send_allowed(port) == 0
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
 
         // Store sender's IPC context
         ipc_ctx[me].buf = msg_ptr
@@ -568,39 +538,36 @@ Returns 0 on success, -1 on error, -2 on timeout.
             threads[me].state = STATE_SEND_BLOCKED
             threads[me].wake_tick = ticks + timeout
             sleepq_insert(me)
-            return
+            return i64(0)
 
         // Server not waiting — enqueue with timeout
         ipc_queue_push(port, me)
         threads[me].state = STATE_SEND_BLOCKED
         threads[me].wake_tick = ticks + timeout
         sleepq_insert(me)
+        i64(0)
 
 Receive a message OR notification. Like ipc_recv but also
 wakes when a notification is sent to this thread.
 Returns sender ID for IPC messages, -2 for notifications.
 On notification, call notify_read() to get the value.
 
-    ipc_recv_notify_handler(arg: int)
-        var args: *i64 = *i64(i64(arg))
-        val port = int(args[0])
-        val buf_ptr = args[1]
-        val buf_len = int(args[2])
+    ipc_recv_notify_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val port = int(a0)
+        val buf_ptr = a1
+        val buf_len = int(a2)
         val me = current_thread
 
         // Validate: must own the port
         if port < 0
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port >= port_count
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
         if port_owner[port] != me
-            syscall_return(-1)
             ipc_continue_current()
-            return
+            return i64(-1)
 
         // Store receiver's IPC context
         ipc_ctx[me].buf = buf_ptr
@@ -613,23 +580,22 @@ On notification, call notify_read() to get the value.
         while sender != IPC_QUEUE_EMPTY
             if threads[sender].state == STATE_SEND_BLOCKED
                 ipc_deliver(me, sender, ipc_ctx[sender].buf, ipc_ctx[sender].len)
-                syscall_return(sender)
                 threads[me].state = STATE_READY
                 threads[me].quantum = DEFAULT_QUANTUM
                 enqueue(threads[me].priority, me)
-                return
+                return i64(sender)
             sender = ipc_queue_pop(port)
 
         // No IPC message — check for pending notification
         if threads[me].notify_pending == 1
             // No message delivered — do not leave a stale actual_len from a prior recv.
             ipc_ctx[me].actual_len = 0
-            syscall_return(-2)
             ipc_continue_current()
-            return
+            return i64(-2)
 
         // No sender, no notification — block waiting for either
         threads[me].state = STATE_RECV_NOTIFY_BLOCKED
+        i64(0)
 
 Returns the actual byte count of the last received IPC message.
 Call after ipc_recv returns to get the message length.
@@ -646,54 +612,22 @@ Userspace wrappers. These pack arguments and invoke syscalls.
         syscall(SYS_PORT_CLOSE, port)
 
     port_register(port: int, name: string) -> int
-        var args: [3]i64
-        args[0] = port
-        args[1] = i64(*byte(name))
-        args[2] = len(name)
-        syscall(SYS_PORT_REGISTER, i64(args))
+        int(syscall6(SYS_PORT_REGISTER, i64(port), i64(*byte(name)), i64(len(name)), 0, 0, 0))
 
     port_lookup(name: string) -> int
-        var args: [2]i64
-        args[0] = i64(*byte(name))
-        args[1] = len(name)
-        syscall(SYS_PORT_LOOKUP, i64(args))
+        int(syscall6(SYS_PORT_LOOKUP, i64(*byte(name)), i64(len(name)), 0, 0, 0, 0))
 
     ipc_send(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int) -> int
-        var args: [5]i64
-        args[0] = port
-        args[1] = i64(msg)
-        args[2] = msg_len
-        args[3] = i64(reply)
-        args[4] = reply_len
-        syscall(SYS_IPC_SEND, i64(args))
+        int(syscall6(SYS_IPC_SEND, i64(port), i64(msg), i64(msg_len), i64(reply), i64(reply_len), 0))
 
     ipc_recv(port: int, buf: *byte, buf_len: int) -> int
-        var args: [3]i64
-        args[0] = port
-        args[1] = i64(buf)
-        args[2] = buf_len
-        syscall(SYS_IPC_RECV, i64(args))
+        int(syscall6(SYS_IPC_RECV, i64(port), i64(buf), i64(buf_len), 0, 0, 0))
 
     ipc_reply(caller: int, msg: *byte, msg_len: int)
-        var args: [3]i64
-        args[0] = caller
-        args[1] = i64(msg)
-        args[2] = msg_len
-        syscall(SYS_IPC_REPLY, i64(args))
+        syscall6(SYS_IPC_REPLY, i64(caller), i64(msg), i64(msg_len), 0, 0, 0)
 
     ipc_recv_notify(port: int, buf: *byte, buf_len: int) -> int
-        var args: [3]i64
-        args[0] = port
-        args[1] = i64(buf)
-        args[2] = buf_len
-        syscall(SYS_IPC_RECV_NOTIFY, i64(args))
+        int(syscall6(SYS_IPC_RECV_NOTIFY, i64(port), i64(buf), i64(buf_len), 0, 0, 0))
 
     ipc_send_timeout(port: int, msg: *byte, msg_len: int, reply: *byte, reply_len: int, timeout: int) -> int
-        var args: [6]i64
-        args[0] = port
-        args[1] = i64(msg)
-        args[2] = msg_len
-        args[3] = i64(reply)
-        args[4] = reply_len
-        args[5] = timeout
-        syscall(SYS_IPC_SEND_TIMED, i64(args))
+        int(syscall6(SYS_IPC_SEND_TIMED, i64(port), i64(msg), i64(msg_len), i64(reply), i64(reply_len), i64(timeout)))

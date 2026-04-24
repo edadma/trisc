@@ -90,6 +90,23 @@ syscall:
     svc #0
     ret
 
+// syscall6(number, a0, a1, a2, a3, a4, a5) -> i64
+//   Kernel-side wrapper (mirrors the one in prog_start.s for user
+//   programs). AAPCS64 call site: x0=num, x1=a0, x2=a1, x3=a2, x4=a3,
+//   x5=a4, x6=a5. The 6-arg dispatcher reads x8=num and x0..x5=a0..a5
+//   from the saved frame, so shift args down and hoist num into x8.
+.global syscall6
+syscall6:
+    mov x8, x0
+    mov x0, x1
+    mov x1, x2
+    mov x2, x3
+    mov x3, x4
+    mov x4, x5
+    mov x5, x6
+    svc #0
+    ret
+
 // arch_syscall_call(arg: i64, handler: i64)
 //   Tail-call a syscall handler whose address came from syscall_table.
 //   register_syscall stores the address of a __wrap_ trampoline
@@ -102,6 +119,22 @@ arch_syscall_call:
     mov x1, x0
     mov x0, #0
     br  x2
+
+// arch_syscall_call6(handler: i64, a0..a5: i64) -> i64
+//   Tail-call a 6-arg syscall handler whose address came from
+//   syscall_table_6. Handlers registered via register_syscall6 are
+//   __wrap_ trampolines with closure ABI:
+//       (i8* env, i64 a0, i64 a1, i64 a2, i64 a3, i64 a4, i64 a5) -> i64
+//   AAPCS64 passes 7 args in x0..x6 — x0=handler, x1..x6=a0..a5.
+//   The handler expects x0=env (null), x1..x6=a0..a5, which is
+//   exactly the current layout after we stash the handler in x8
+//   and zero x0. Tail call via br; handler's return in x0
+//   propagates to our caller.
+.global arch_syscall_call6
+arch_syscall_call6:
+    mov x8, x0
+    mov x0, #0
+    br  x8
 
 // user_svc_test — tiny EL0 entry used to sanity-check the EL1->EL0
 // transition. Issues `svc #0x42` so the exception reporter in

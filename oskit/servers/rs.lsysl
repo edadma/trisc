@@ -29,10 +29,10 @@ starts the next server.
 
     module oskit.servers
 
-    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask}
+    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask, svc_set_rs_tid_self, svc_get_ramdisk_base, svc_get_ramdisk_size, svc_getinfo, GETINFO_BOOT_INFO}
     import oskit.ipc.{ipc_recv_notify, port_create, port_lookup}
     import oskit.hal.memset
-    import oskit.arch.{SRV_USP, SRV_SSP, INFO_PAGE_VA}
+    import oskit.arch.{SRV_USP, SRV_SSP}
 
 Server tracking. PIDs and MMIO page grants for each server
 in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=ds,
@@ -61,13 +61,15 @@ Common bits (lo): sleep(0), putc(1), yield(2), exit(3), join(4),
     val PRIV_COMMON_LO: i64 = i64(0x7F) | (i64(7) << 21) | (i64(0xFFFFFFFF) << 24) | (i64(1) << 61)
 
 Common bits (hi): ipc_last_msg_len(65), grant_create(71),
-grant_revoke(72), puts(79).
+grant_revoke(72), sys_getinfo(77), puts(79).
 
-puts(79) is the bulk-write companion to putc(1) in
-PRIV_COMMON_LO — any server that can print a character can
+sys_getinfo(77) replaces the old INFO_PAGE_VA scratch page —
+every server queries its RS TID + ramdisk info at startup via
+this syscall. puts(79) is the bulk-write companion to putc(1)
+in PRIV_COMMON_LO — any server that can print a character can
 print a buffer.
 
-    val PRIV_COMMON_HI: i64 = i64(0x182) | (i64(1) << 15)
+    val PRIV_COMMON_HI: i64 = i64(0x182) | (i64(1) << 13) | (i64(1) << 18)
 
 PM extra bits (lo): vm_create_pt(44), create_proc_susp(45),
   resume_proc(46), reap_proc(47), kill_proc(48), register_pm(49),
@@ -108,7 +110,10 @@ created but before it is resumed.
             hi = hi | i64(1)
         else if idx == 3
             // pm: needs process management syscalls (44-60, 62)
+            // and grant_posix_range(79) to enable POSIX shim range
+            // for newly-spawned ELF (musl) processes.
             lo = lo | (i64(0x5FFFF) << 44)
+            hi = hi | (i64(1) << 15)
         else if idx == 4
             // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
             hi = hi | i64(0xE00)
@@ -482,24 +487,31 @@ Returns the PID on success, 0 on failure.
         if entry < 0
             return 0
 
+        // Build a minimal argc=0 System V init stack frame at the
+        // bottom of the new process's user stack. Required so that
+        // programs using the prog_start.s convention (which does
+        // `ldr w0, [sp]` to read argc) see a valid argc=0 instead
+        // of whatever happens to live at SRV_USP. Servers using
+        // srv_start.s (which just `bl main`) don't read the frame
+        // but it's harmless sitting there.
+        //
+        // Frame: argc(8) + argv NULL(8) + envp NULL(8) + AT_NULL
+        // pair(16) = 40 bytes, rounded up to 48 for 16-byte SP
+        // alignment. All bytes are zero.
+        var rs_stack_buf: [48]byte
+        memset(&rs_stack_buf[0], 0, 48)
+        val child_sp = SRV_USP - 48
+        svc_vm_copy_to(ptbr, u64(child_sp), &rs_stack_buf[0], 48)
+
         // Create process suspended — no PTBR switch needed;
         // create_process_suspended uses vm_copy_to for the stack frame
         val sname = string(name, nlen)
-        val pid = svc_create_proc_susp(entry, SRV_USP, SRV_SSP, sname, ptbr)
+        val pid = svc_create_proc_susp(entry, child_sp, SRV_SSP, sname, ptbr)
         if pid < 0
             return 0
 
-        // Write RS info page (arch-specific — x86/TRISC 0xBF000,
-        // aarch64 0x60090000). Layout:
-        //   +0: RS TID (i64)
-        //   +8: ramdisk base (i64) — used by disk server
-        //  +16: ramdisk size (i64) — used by disk server
-        var info_buf: [24]byte
-        var ip: *i64 = *i64(info_buf)
-        ip[0] = i64(thread_id())
-        ip[1] = i64(rs_ramdisk_base)
-        ip[2] = i64(rs_ramdisk_size)
-        svc_vm_copy_to(ptbr, u64(INFO_PAGE_VA), info_buf, 24)
+        // Server reads RS TID + ramdisk info via sys_getinfo from its
+        // own wrapper at startup — no per-process info page needed.
 
         // Resume the process
         svc_resume_proc(pid)
@@ -589,23 +601,20 @@ bytes into the page; server VA = MMIO_SERVER_VA + 0xe00).
 
     rs_main()
         rs_set_tid(thread_id())
+        // Register ourselves with the kernel so system servers can
+        // query our TID via sys_getinfo(GETINFO_RS_TID).
+        svc_set_rs_tid_self()
 
-        // Read info page (x86/TRISC 0xBF000, aarch64 0x60090000)
-        val info = *i64(INFO_PAGE_VA)
-        rs_ramdisk_base = int(info[1])
-        rs_ramdisk_size = int(info[2])
+        // Read ramdisk info + boot info blob from the kernel.
+        // Replaces the old per-process INFO_PAGE_VA scratch page.
+        rs_ramdisk_base = int(svc_get_ramdisk_base())
+        rs_ramdisk_size = int(svc_get_ramdisk_size())
 
-        // Copy boot info header from info page (+24)
-        val bi_src = *byte(INFO_PAGE_VA + i64(24))
-        // Read module count to determine copy size
-        val mod_count = int(rs_read_u32_le(bi_src + 4))
-        rs_boot_info_len = 8 + mod_count * 24
-        if rs_boot_info_len > 512
-            rs_boot_info_len = 512
-        var ci = 0
-        while ci < rs_boot_info_len
-            rs_boot_info[ci] = bi_src[ci]
-            ci += 1
+        val n = int(svc_getinfo(GETINFO_BOOT_INFO, &rs_boot_info[0], 512))
+        if n <= 0
+            rs_print("rs: sys_getinfo(BOOT_INFO) failed\n")
+            return
+        rs_boot_info_len = n
 
         rs_init_boot_order()
 

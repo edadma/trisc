@@ -39,6 +39,7 @@ SYSL_FILES=(
     oskit/kernel/spinlock.lsysl
     oskit/services/services.lsysl
     oskit/ipc/ipc.lsysl
+    std/debug/debug.lsysl
     std/alloc/alloc.lsysl
     std/net/net.lsysl
     std/net/packet.lsysl

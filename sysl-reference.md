@@ -138,6 +138,34 @@ struct Node
     next: *Node       // recursive via pointer
 ```
 
+**Struct invariants.** A struct may declare one or more `invariant <bool>` clauses
+among its fields. Each invariant is checked after every field assignment or compound
+assignment on a value of that struct type. Bare field names are in scope in the
+invariant; so are module-level consts and globals. Non-bool invariants are rejected
+at declaration time.
+
+```sysl
+struct Account
+    balance: int
+    limit: int
+    invariant balance >= -limit
+
+struct Range
+    lo: int
+    hi: int
+    invariant lo <= hi
+    invariant hi - lo <= 100      // multiple clauses: all must hold
+```
+
+A violating mutation traps via the standard contract-check path. The invariant is
+re-evaluated at each check site — so an invariant that refers to an expression
+with side effects re-runs those side effects. Checks fire on:
+
+- var init with a struct-typed value: `var a: Account = Account(...)`
+- whole-struct reassignment: `a = Account(...)`
+- field assignment: `s.field = v` (including through a pointer/ref: `(*p).field = v`)
+- field compound assignment: `s.field op= v`
+
 ### Enum Types (Simple)
 
 Simple enums are integer constants with auto-incrementing values:
@@ -308,6 +336,66 @@ Plain aliases are the first form above — a transparent name for a type:
 type IntPtr = *int
 type Callback = (int) -> int
 ```
+
+### Type Attributes (`T::Attr`)
+
+Range-constrained types and simple enums expose their metadata through `::`-suffixed
+attributes. They work like Ada's `'Attr` notation, retargeted to sysl's `::` separator.
+
+```sysl
+type Age = int within 0..150
+enum Day { Mon; Tue; Wed; Thu; Fri; Sat; Sun }
+
+Age::First     // 0
+Age::Last      // 150
+Age::Range     // used only in `for i in Age::Range` — iterates 0..150 inclusive
+
+Day::First     // Mon (value 0)
+Day::Last      // Sun (value 6)
+Day::Image(d)  // "Tue" for d = Day.Tue
+Day::Pos(d)    // 1    for d = Day.Tue
+Day::Val(2)    // Day.Wed
+Day::Succ(d)    // Wed  for d = Day.Tue
+Day::Pred(d)    // Mon  for d = Day.Tue
+Age::Succ(a)    // a+1, traps if a is already 150
+Age::Pred(a)    // a-1, traps if a is already 0
+Day::Value("Tue")  // Day.Tue — parses a string back to its variant
+Age::Valid(raw)    // bool — true iff `raw` is in range, never traps
+```
+
+| Attribute     | Applies to                              | Result                                              |
+|---------------|-----------------------------------------|-----------------------------------------------------|
+| `T::First`    | `within`-constrained int, simple enum   | lower bound / first variant's value                 |
+| `T::Last`     | `within`-constrained int, simple enum   | upper bound (minus 1 if `..<`) / last variant       |
+| `T::Range`    | same                                    | only valid in `for i in T::Range` — inclusive scan  |
+| `T::Image(x)` | simple enum, constrained numeric type   | variant name string / `str(x)` for numerics         |
+| `T::Value(s)` | simple enum                             | variant whose name equals `s`; traps on no match    |
+| `T::Valid(x)` | `within`-constrained int, simple enum   | bool — does `x` satisfy the constraint? never traps |
+| `T::Pos(x)`   | simple enum                             | 0-based declaration position                        |
+| `T::Val(n)`   | simple enum                             | variant at position `n`; traps on out-of-range      |
+| `T::Succ(x)`  | `within`-constrained int, simple enum   | next value; traps at the upper end                  |
+| `T::Pred(x)`  | `within`-constrained int, simple enum   | previous value; traps at the lower end              |
+
+`::First` and `::Last` fold to compile-time constants; `::Valid` on a `within`-int type
+folds to an inline `x >= lo && x <= hi` (or `< hi` for `..<`). The rest lower to synthesized
+helper functions (`__image_T`, `__value_T`, `__valid_T`, `__pos_T`, `__val_T`, `__succ_T`,
+`__pred_T`) generated once per target type. `::Pos` / `::Value` on an unknown input,
+`::Val` on an out-of-range position, `::Succ` past the upper bound, and `::Pred` past the
+lower bound all trap via the standard contract-check path. `::Valid` is the non-throwing
+complement — it returns a bool so the caller can branch. Typical guard-style use:
+
+```sysl
+if Age::Valid(raw) then
+    var a: Age = raw          // safe: the range check will pass
+```
+
+`::Value` and `::Image` round-trip: `T::Value(T::Image(x)) == x` for every variant `x`.
+
+`::Range` is syntactic sugar: `for i in T::Range body` parses as
+`for i in T::First..T::Last body`. `for i in reverse T::Range` desugars the other way,
+`for i in T::Last downTo T::First`. Using `::Range` outside a for-loop is a compile error.
+
+Float-based `within` types do not yet support `::First` / `::Last`.
 
 ---
 
@@ -575,6 +663,88 @@ Errors:
 Named arguments are currently supported for regular function calls,
 struct constructors, and builtins — not yet for generic function
 instantiation, method calls, or trait methods.
+
+### Parameter Modes — `in` / `out` / `inout`
+
+Each parameter can carry an Ada-style mode prefix that states **how** the argument
+is passed:
+
+- **`in x: T`** (default) — pass-by-value. The body sees a local copy; the caller's
+  value is not affected by writes inside the function. This is the same as a plain
+  `x: T` declaration.
+- **`out x: T`** — caller passes an **lvalue** (a variable, field, or array element).
+  The body writes into it through a hidden pointer; whatever value the body last
+  assigned is visible at the call site after the call returns. The caller doesn't
+  need to have initialized the lvalue beforehand.
+- **`inout x: T`** — same as `out`, but the body also reads the initial value the
+  caller supplied. Useful for accumulating / transforming a variable in place.
+
+```sysl
+// Out: initialize a caller-supplied variable.
+set_to(out x: int, v: int)
+    x = v
+
+// Inout: read initial, write updated.
+inc_by(inout x: int, by: int)
+    x = x + by
+
+main() -> int
+    var v: int = 0
+    set_to(v, 42)   // v is now 42
+    inc_by(v, 5)    // v is now 47
+    return v
+```
+
+Writes inside the body use plain assignment — the body always sees the parameter
+as type `T`, not `*T`. The hidden pointer indirection is invisible:
+
+```sysl
+swap(inout a: int, inout b: int)
+    val t: int = a
+    a = b
+    b = t
+
+split(x: int, out q: int, out r: int)
+    q = x / 10
+    r = x % 10
+```
+
+At a call site, the compiler auto-takes the address of the argument — you do
+not write `&v`:
+
+```sysl
+inc(inout n: int)
+    n += 1
+
+struct Point
+    x: int
+    y: int
+
+main() -> int
+    var p: Point = Point(10, 20)
+    inc(p.x)              // field lvalue — OK
+    var arr: [3]int = [0, 0, 0]
+    inc(arr[1])           // index lvalue — OK
+    // inc(p.x + 1)       // error: not an lvalue
+    // inc(42)            // error: not an lvalue
+    return p.x + p.y + arr[1]
+```
+
+Errors:
+- Passing a literal, arithmetic expression, or call result to an `out`/`inout` param.
+- A default value on an `out`/`inout` parameter (only `in` can have defaults).
+- `out` or `inout` on the implicit method receiver `self`.
+- `out` or `inout` parameters on a generic function (not yet supported in V1).
+
+`out` and `inout` interact with `#pure`: writing to such a parameter is a write to
+the caller's memory and will be rejected by the purity checker. Read-only
+(`in`) parameters are fine in pure functions.
+
+Internally the body auto-dereferences reads and writes: `x` in the body lowers to
+`*ptr_x`, and `x = v` to `*ptr_x = v`. Both behaviors mean there is **no early-return
+write-back**: every assignment commits immediately. Contextual-keyword rules: `in`
+is already reserved; `out` and `inout` are contextual, so user identifiers with
+those names still work outside parameter position.
 
 ### `def` — Auto-Call Functions
 
@@ -1294,6 +1464,11 @@ do
     body
 while cond
 
+// loop — Ada-style infinite loop; exit only via break (or return).
+loop
+    if done then break
+    body
+
 // for (C-style)
 for i = 0; i < 10; i++
     body
@@ -1325,6 +1500,10 @@ for i in 20 downTo 0 step 4     // 20, 16, 12, 8, 4, 0
 for v in arr
     body                       // v = each element
 
+// Iterate backward — over a T::Range or over a collection
+for i in reverse Day::Range    // last variant down to first
+for v in reverse arr           // index len-1 down to 0
+
 // Iterate with index and value
 for i, v in arr
     body                       // i = index, v = arr[i]
@@ -1340,6 +1519,95 @@ while true
     if done then break
     if skip then continue
     process()
+
+// `variant <expr>` — loop termination witness. The expression must strictly decrease
+// between iterations and stay >= 0. On the first iteration nothing is checked (there's
+// no prior value); on every subsequent one the analyzer-emitted check traps if either
+// condition is violated. Must appear at the top level of a loop body.
+var remaining = 100
+while remaining > 0
+    variant remaining          // monotonic-decrease witness
+    remaining = remaining - step()
+
+// `invariant <bool> [, "msg"]` — Ada/SPARK-style loop invariant. Must appear in the
+// leading "header" of a loop body (variants may interleave); the analyzer hoists the
+// check to the loop's *cut point* and runs it at the top of every iteration, regardless
+// of how the source was laid out. Multiple invariants are allowed; all are checked. A
+// false invariant traps with `loop invariant check failed[: msg]`. An invariant placed
+// after a non-invariant statement, nested inside an `if`/`match`, or outside any loop
+// is a static error.
+for i = 0; i < n; i++
+    invariant i >= 0
+    invariant i <= n, "i in range"   // optional message like require/ensure
+    body()
+
+// Invariants and variants can be freely interleaved in the leading header.
+while remaining > 0
+    invariant total >= 0
+    variant remaining
+    process()
+    remaining = remaining - 1
+
+// Labeled loops — break / continue can target an outer loop by name.
+// A label is an identifier followed by `:` immediately before `for`, `while`, `do`, or `loop`.
+outer: for i in 0..<n
+    for j in 0..<m
+        if grid[i][j] == target then break outer      // exits both loops
+        if grid[i][j] == 0 then continue outer        // next iteration of outer
+        use(grid[i][j])
+
+// Unlabeled `break` / `continue` always target the innermost enclosing loop,
+// regardless of whether that loop has a label.
+// A label cannot be reused on a nested loop (would make `break label` ambiguous),
+// but the same name can appear on sibling (non-nested) loops.
+
+// Optional `end <kw>` terminators (Scala 3 style) — every block construct accepts
+// an optional matching `end <keyword>` after its body. Useful for long blocks
+// where the matching indentation is hard to see; always optional.
+if cond
+    big_body()
+end if
+
+while running
+    tick()
+end while
+
+for i = 0; i < n; i++
+    process(i)
+end for
+
+loop
+    if done then break
+    work()
+end loop
+
+x match
+    1 -> "one"
+    else -> "other"
+end match
+
+struct Point
+    x: int
+    y: int
+end struct
+
+enum Color
+    Red
+    Green
+    Blue
+end enum
+
+trait Eq[T]
+    eq(self: T, other: T) -> bool
+end trait
+
+impl Eq[int]
+    eq(self: int, other: int) -> bool = self == other
+end impl
+
+interface Closer
+    close() -> int
+end interface
 ```
 
 ### Destructuring and Parallel Assignment
@@ -1762,6 +2030,22 @@ The codegen emits `trap 1` for runtime errors. On the OS, the trap handler termi
 | 3 | `abort()` called |
 | 4 | `panic()` or `assert()` failure |
 
+### Disabling Contracts
+
+Pass `--no-contracts` to `sysl compile` or `sysl run` to strip every contract check at compile time:
+
+- `require` / `ensure` clauses
+- `invariant` statements in loops
+- `variant` statements in loops (entire hoisted check state is elided)
+- struct `invariant` clauses (no per-assignment check)
+- `where`-predicate bodies (synthesized predicate function still runs but performs no check)
+- `within`-range checks (compile-time literal check + runtime range check both skipped)
+- enum `::Pos` / `::Val` / `::Value` / `::Succ` / `::Pred` and within `::Succ` / `::Pred` traps (helper still returns a value, but invalid input yields garbage: `-1` for enum helpers, `v+1` / `v-1` past the bound for within helpers)
+
+This is Ada's `pragma Assertion_Policy(Disable)` equivalent — the user takes responsibility for correctness in exchange for no runtime overhead. Contract clauses still **type-check** at compile time regardless of the flag; only the runtime traps are elided.
+
+`::Valid(x)` is *not* a contract — it is non-throwing introspection — and is never stripped.
+
 ---
 
 ## Conditional Compilation
@@ -1883,6 +2167,71 @@ Exit code is 0 iff all tests pass. Failing tests print the source file and line 
 
 **Test output capture:** Any output from `print`, `println`, `puts`, or `puti` inside a test function is captured and displayed below the failure message if the test fails. This is useful for debugging intermediate values.
 
+### `#address(N)` — map a var to a fixed physical address
+
+Binds a module-level `var` declaration to a fixed physical address. Reads and writes become direct loads and stores at that address. No storage is emitted for the variable — it is just a typed handle on hardware. Intended for MMIO device registers:
+
+```sysl
+#address(0x1000_0000)
+var uart_data: u32
+
+#address(0x1000_0004)
+var uart_status: u32
+
+main() -> int
+    uart_data = 0x41       // write 'A' to the transmit register
+    while uart_status & 1 == 0 do ()  // poll the ready bit
+    return 0
+```
+
+- The var must have an explicit type (no inferred type).
+- `#address` cannot be combined with `const`.
+- The attribute argument must be a single integer literal (decimal or hex).
+- Compound assignment (`reg += v`, `reg |= mask`, …) lowers to a read-modify-write: `*(N as *T) = *(N as *T) op v`.
+- In the interpreter, writes persist in a virtual MMIO map for the duration of the run; reads from untouched addresses return 0. On real hardware (LLVM / TRISC output), the load/store goes straight to the physical address.
+
+Ada-equivalent: `for X use at 16#1000_0000#` in a representation clause.
+
+### `#pure` — mark side-effect-free functions
+
+A function marked `#pure` is checked by the compiler to have no observable side effects. Pure functions are a discipline enforcement tool: any violation is a compile-time error, not a warning.
+
+```
+#pure
+square(x: int) -> int = x * x
+
+#pure
+fact(n: int) -> int
+    if n <= 1 then return 1
+    return n * fact(n - 1)
+```
+
+**What a `#pure` function may do:**
+- Read its parameters and module-level `const`s
+- Declare and mutate **local** variables (can't escape)
+- Call other `#pure` functions (same or different file)
+- Recurse (including mutually)
+- Use arithmetic, comparison, casts, control flow (if/while/for/match/break/continue)
+- Call `assert(cond, msg)` — termination is the only side effect, consistent with Ada `pragma Assert` policy
+
+**What a `#pure` function may NOT do:**
+- Call any non-`#pure` user function
+- Call IO builtins (`puts`, `print`, `println`, `putchar`, `puti`)
+- Call allocation builtins (`malloc`, `free`, `calloc`, `realloc`, `sbrk`)
+- Call `panic` / `abort` / `expect` (side-effecting traps with observable output)
+- Write to module-level `var`s
+- Write through a pointer (`*p = v`), indexed slot (`arr[i] = v`), or struct field (`p.f = v`) — callers might see the write
+- Increment/decrement struct fields (`p.f++`)
+- Heap-allocate (`new`), append to a slice, construct closures
+- Make indirect (function-pointer) calls or interface-dispatch calls
+- Contain `asm` blocks
+
+**Cross-module propagation:** `#pure` is carried through `.smeta` files. A `#pure` function in one module can call a `#pure` function in another module. Imported functions without `#pure` are impure, so annotate library functions you intend to call from pure code.
+
+**Interaction with `--no-contracts`:** `#pure` checking is not a contract — it is a static enforcement and always runs. Only the runtime verification that contracts describe is elided by `--no-contracts`.
+
+Future work: allow `#pure` calls inside `const` initializers and as default-parameter expressions, so that `const TABLE = build_table(16)` becomes legal at compile time.
+
 ### `#deprecated` — warn on use
 
 Marks a function as deprecated. Calls to the function emit a warning to stderr during analysis (once per callee per compilation):
@@ -1963,7 +2312,7 @@ The `.lsysl` renderer supports:
 - **Horizontal rules** (`---`)
 - **Links** (`[text](url)`)
 - **HTML comments** (`<!-- -->`)
-- **LaTeX math** via KaTeX — inline `\(x^2\)` and display `\[equation\]`
+- **LaTeX math** via KaTeX — inline `$x^2$` and display `$$equation$$` (CommonMark/Pandoc convention; the markdown processor emits the right `\(..\)` / `\[..\]` delimiters for KaTeX automatically). Do not write `\(..\)` or `\[..\]` directly in source — the markdown parser strips the backslashes before KaTeX sees them.
 
 ### Commands
 

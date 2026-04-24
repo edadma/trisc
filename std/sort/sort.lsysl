@@ -1,30 +1,34 @@
-std.sort — Sorting
-====================
+std.sort — In-place sorting for slices
+======================================
 
-The `std.sort` module provides in-place sorting for slices.
-Three algorithms are available:
+The `std.sort` module sorts slices in place via comparison-based
+algorithms. Three implementations are exposed; pick by trade-off:
 
-- **heapsort** — O(n log n) worst case, no recursion
-- **quicksort** — fast average case, median-of-three pivot,
-  insertion sort for small partitions
-- **introsort** — quicksort that falls back to heapsort on
-  deep recursion (the default)
+| Function           | Complexity           | Stable? | Extra memory | Use when |
+|--------------------|----------------------|---------|--------------|----------|
+| `sort_by`          | $O(n \log n)$ avg & worst | no | $O(\log n)$ stack | **default** — introsort |
+| `quick_sort_by`    | $O(n \log n)$ avg, $O(n^2)$ worst | no | $O(\log n)$ stack | known-friendly inputs, fastest avg case |
+| `heap_sort_by`     | $O(n \log n)$ worst   | no | none — no recursion | hard real-time, embedded |
+| `stable_sort_by`   | $O(n \log n)$ worst   | yes | $O(n)$ heap | preserve equal-key order |
+| `stable_sort_buf_by` | $O(n \log n)$ worst | yes | caller-supplied $O(n)$ | embedded / no allocator |
 
-The primary entry point is `sort_by`, which uses introsort.
-Use `heap_sort_by` or `quick_sort_by` directly if you need
-a specific algorithm.
+Comparators take two values of the element type and return a
+three-way `int`: negative for `a < b`, zero for `a == b`, positive
+for `a > b`. The standard `cmp_int` and `cmp_i64` helpers are
+provided; for descending order use `cmp_desc(a, b) = b - a`.
 
 Dependencies: none.
-
 
     module std.sort
 
 
-sort_by — introsort (default)
------------------------------
+`sort_by` — introsort (default)
+-------------------------------
 
-`sort_by(s, cmp)` sorts `s` in-place using introsort.
-This is the recommended general-purpose sort.
+`sort_by(s, cmp)` sorts `s` in place using introsort. This is the
+recommended general-purpose sort: quicksort's average speed with
+heapsort's worst-case guarantee. See "Introsort" below for the
+algorithm.
 
     sort_by[T](s: []T, cmp: (T, T) -> int)
         intro_sort_by(s, cmp)
@@ -33,24 +37,38 @@ This is the recommended general-purpose sort.
 Heapsort
 --------
 
-### heap_sort_by
+Heapsort puts the array into a max-heap, then repeatedly extracts the
+maximum into the back of the array. It runs in $O(n \log n)$ worst
+case using only $O(1)$ extra memory and no recursion — both desirable
+when the call stack is tight or the schedule is adversarial. The
+trade-off is a 2–3× constant-factor slowdown versus quicksort on
+average inputs because the swap pattern thrashes the cache.
 
-`heap_sort_by(s, cmp)` sorts `s` in-place using heapsort.
-O(n log n) worst case, no extra memory, no recursion.
+A binary heap stored in a contiguous array uses the indexing rules
+$\text{parent}(i) = (i-1)/2$, $\text{left}(i) = 2i+1$,
+$\text{right}(i) = 2i+2$. Phase 1 builds the heap bottom-up by
+sifting down each non-leaf node. Phase 2 swaps `s[0]` (the current
+max) with `s[hi]`, shrinks the heap, and re-sifts the new root.
+
+### `heap_sort_by`
 
     heap_sort_by[T](s: []T, cmp: (T, T) -> int)
         val n = len(s)
 
         if n < 2 then return
 
-        // Phase 1: build max-heap (bottom-up)
+Phase 1 — bottom-up max-heap construction. Start at the last
+non-leaf node ($i = n/2 - 1$) and sift each one down.
+
         var i = n / 2 - 1
 
         while i >= 0
             sift_down(s, i, n, cmp)
             i--
 
-        // Phase 2: extract max repeatedly
+Phase 2 — repeatedly swap the max into position `hi`, shrink the
+heap, and re-sift.
+
         var hi = n - 1
 
         while hi > 0
@@ -60,6 +78,12 @@ O(n log n) worst case, no extra memory, no recursion.
 
             sift_down(s, 0, hi, cmp)
             hi--
+
+### `sift_down`
+
+Restore the max-heap invariant at `root`, given a heap of `size`
+elements rooted at `s[0]`. Compares `s[root]` with the larger of its
+two children; if a child is bigger, swap and continue down.
 
     sift_down[T](s: []T, root: int, size: int, cmp: (T, T) -> int)
         var r = root
@@ -83,11 +107,20 @@ O(n log n) worst case, no extra memory, no recursion.
 Quicksort
 ---------
 
-### quick_sort_by
+Recursive partition-around-pivot. The classic divide-and-conquer
+sort: average $O(n \log n)$ with low constants, but worst case
+$O(n^2)$ when every pivot is the smallest or largest element of its
+partition. Two well-known mitigations are applied here:
 
-`quick_sort_by(s, cmp)` sorts `s` in-place using quicksort
-with median-of-three pivot selection and insertion sort for
-small partitions. O(n log n) average, O(n²) worst case.
+1. **Median-of-three pivot.** Sort `s[lo]`, `s[mid]`, `s[hi]` and use
+   `s[mid]` as the pivot. This makes the worst case essentially
+   impossible to hit by accident — sorted, reverse-sorted, and
+   nearly-sorted inputs all become favourable.
+2. **Insertion sort for small partitions.** Below 16 elements,
+   insertion sort beats quicksort because of its lower constant
+   factor and predictable cache behaviour.
+
+### `quick_sort_by`
 
     quick_sort_by[T](s: []T, cmp: (T, T) -> int)
         qsort_rec(s, 0, len(s) - 1, cmp)
@@ -103,9 +136,11 @@ small partitions. O(n log n) average, O(n²) worst case.
         qsort_rec(s, pivot + 1, hi, cmp)
 
 
-### insertion_sort_range
+### `insertion_sort_range`
 
-Insertion sort for small partitions.
+In-place insertion sort over the inclusive range `[lo, hi]`. $O(k^2)$
+on a partition of size $k$, but with constants small enough that for
+$k < 16$ it wins decisively over recursion overhead.
 
     insertion_sort_range[T](s: []T, lo: int, hi: int, cmp: (T, T) -> int)
         for i in (lo + 1)..(hi)
@@ -119,10 +154,13 @@ Insertion sort for small partitions.
             s[j + 1] = key
 
 
-### median_of_three
+### `median_of_three`
 
-Sorts `s[lo]`, `s[mid]`, `s[hi]` and returns the median
-index. The median becomes the pivot.
+Sorts the three values `s[lo]`, `s[mid]`, `s[hi]` in place. After the
+call, `s[mid]` holds the median of the three. This is the cheapest
+defence against adversarial inputs: it catches the sorted /
+reverse-sorted / single-spike worst cases at the cost of three
+comparisons and at most three swaps.
 
     median_of_three[T](s: []T, lo: int, mid: int, hi: int, cmp: (T, T) -> int) -> int
         if cmp(s[lo], s[mid]) > 0
@@ -143,18 +181,23 @@ index. The median becomes the pivot.
         return mid
 
 
-### partition
+### `partition`
 
-Hoare-style partition around median-of-three pivot.
-Pivot is moved to `hi-1`, then elements are swapped
-around it.
+Hoare-style partition around a median-of-three pivot. The pivot is
+swapped to position `hi - 1` (a "sentinel" slot), then `i` scans up
+from `lo` for an element $\geq$ pivot and `j` scans down from `hi - 2`
+for an element $\leq$ pivot; mismatched pairs are swapped. When the
+pointers cross, the pivot is moved into position `i` — its final
+sorted location — and `i` is returned.
 
     partition[T](s: []T, lo: int, hi: int, cmp: (T, T) -> int) -> int
         val mid = lo + (hi - lo) / 2
 
         median_of_three(s, lo, mid, hi, cmp)
 
-        // Move pivot to hi-1
+Move the median-of-three pivot to the sentinel slot `hi - 1`, just
+inside the right boundary.
+
         val tmp_p: T = s[mid]
         s[mid] = s[hi - 1]
         s[hi - 1] = tmp_p
@@ -177,7 +220,9 @@ around it.
             i++
             j--
 
-        // Put pivot in final position
+Restore the pivot to its final position `i`. Everything to the left of
+`i` is now $\leq$ pivot; everything to the right, $\geq$ pivot.
+
         val tmp_f: T = s[i]
         s[i] = s[hi - 1]
         s[hi - 1] = tmp_f
@@ -188,19 +233,24 @@ around it.
 Introsort
 ---------
 
-### intro_sort_by
+Introsort, due to David Musser (1997), wraps quicksort with a depth
+limit. While the recursion stays shallow it behaves exactly like
+quicksort — fast on the typical case. If the recursion ever exceeds
+$2 \lfloor \log_2 n \rfloor$ — the maximum sane depth for a balanced
+divide-and-conquer — the algorithm bails out to heapsort on the
+remaining range, guaranteeing $O(n \log n)$ even on inputs crafted to
+hit quicksort's quadratic worst case.
 
-`intro_sort_by(s, cmp)` uses quicksort but falls back to
-heapsort if recursion depth exceeds 2 * floor(log2(n)).
-Guarantees O(n log n) worst case with quicksort's average
-performance.
+### `intro_sort_by`
 
     intro_sort_by[T](s: []T, cmp: (T, T) -> int)
         val n = len(s)
 
         if n < 2 then return
 
-        // Compute max depth: 2 * floor(log2(n))
+Compute the depth limit $2 \lfloor \log_2 n \rfloor$ by counting how
+many times $n$ can be halved before reaching 1.
+
         var depth = 0
         var v = n
 
@@ -212,13 +262,21 @@ performance.
 
         intro_rec(s, 0, n - 1, depth, cmp)
 
+### `intro_rec`
+
+The recursive worker. Three cases per call:
+
+- Small partition ($k < 16$): switch to insertion sort.
+- Depth budget exhausted: switch to heapsort on this range.
+- Otherwise: median-of-three partition, recurse on both sides with
+  `depth - 1`.
+
     intro_rec[T](s: []T, lo: int, hi: int, depth: int, cmp: (T, T) -> int)
         if hi - lo < 16
             insertion_sort_range(s, lo, hi, cmp)
             return
 
         if depth == 0
-            // Fell too deep — switch to heapsort for this range
             heap_sort_range(s, lo, hi, cmp)
             return
 
@@ -228,23 +286,27 @@ performance.
         intro_rec(s, pivot + 1, hi, depth - 1, cmp)
 
 
-### heap_sort_range
+### `heap_sort_range`
 
-Heapsort on a subrange `s[lo..hi]`.
+Heapsort restricted to the inclusive subrange `s[lo..hi]`. Same
+algorithm as `heap_sort_by`, but every index is offset by `lo` so the
+heap lives in-place inside the parent quicksort partition.
 
     heap_sort_range[T](s: []T, lo: int, hi: int, cmp: (T, T) -> int)
         val n = hi - lo + 1
 
         if n < 2 then return
 
-        // Build max-heap
+Phase 1 — build the max-heap rooted at `s[lo]`.
+
         var i = n / 2 - 1
 
         while i >= 0
             sift_down_range(s, lo, i, n, cmp)
             i--
 
-        // Extract
+Phase 2 — repeatedly extract the max into the back of the range.
+
         var k = n - 1
 
         while k > 0
@@ -275,21 +337,30 @@ Heapsort on a subrange `s[lo..hi]`.
 
 
 Stable merge sort
-------------------
+-----------------
 
-### stable_sort_buf_by
+Bottom-up iterative merge sort — $O(n \log n)$ worst case, **stable**
+(equal-key elements keep their original relative order), and free of
+recursion. Requires $O(n)$ auxiliary memory for merging. The two
+public entry points differ only in who allocates the buffer:
 
-`stable_sort_buf_by(s, buf, cmp)` sorts `s` in-place using
-bottom-up merge sort. `buf` must be at least `len(s)`
-elements. This is the non-allocating variant for embedded
-use.
+- `stable_sort_buf_by` takes a caller-supplied buffer (for embedded
+  or no-allocator contexts).
+- `stable_sort_by` allocates the buffer itself for callers in
+  ordinary heap-using contexts.
+
+### `stable_sort_buf_by`
+
+The bottom-up loop iteratively merges adjacent runs of width
+$1, 2, 4, 8, \ldots$ until one run covers the whole array. After the
+$k$-th outer iteration, every $2^k$-element block is sorted; the
+$(k{+}1)$-st iteration merges adjacent blocks pairwise.
 
     stable_sort_buf_by[T](s: []T, buf: []T, cmp: (T, T) -> int)
         val n = len(s)
 
         if n < 2 then return
 
-        // Bottom-up: merge runs of width 1, 2, 4, 8, ...
         var width = 1
 
         while width < n
@@ -308,8 +379,17 @@ use.
 
             width = width * 2
 
+### `merge`
+
+Merge two sorted adjacent runs `s[lo..mid)` and `s[mid..hi)` in place,
+using `buf` as scratch. Stability comes from the `<=` comparison on
+the left run: ties always take from the left first.
+
     merge[T](s: []T, buf: []T, lo: int, mid: int, hi: int, cmp: (T, T) -> int)
-        // Copy range to buf
+
+Snapshot the merge region into `buf`. After this point we can
+overwrite `s[lo..hi)` freely while reading from `buf`.
+
         for i in lo..<hi
             buf[i] = s[i]
 
@@ -326,20 +406,22 @@ use.
                 j++
             k++
 
-        // Copy remaining left
+When the right run is exhausted first, the left run's tail still
+needs to be drained from the buffer. The right run's leftover (if
+any) is **already in place** in `s` — we never overwrote it past `j`,
+and the merge region was fully snapshot-then-rewritten only up to `k`.
+
         while i < mid
             s[k] = buf[i]
             i++
             k++
 
-        // Right side already in place (in s)
 
+### `stable_sort_by`
 
-### stable_sort_by
-
-`stable_sort_by(s, cmp)` allocates a temp buffer and
-calls `stable_sort_buf_by`. Convenience wrapper for
-when allocation is acceptable.
+Convenience wrapper: allocates a fresh `[n]T` buffer and forwards to
+`stable_sort_buf_by`. Use this when allocation is acceptable;
+otherwise pass your own buffer to `stable_sort_buf_by`.
 
     stable_sort_by[T](s: []T, cmp: (T, T) -> int)
         val n = len(s)
@@ -351,11 +433,12 @@ when allocation is acceptable.
         stable_sort_buf_by(s, buf, cmp)
 
 
-is_sorted
----------
+`is_sorted` — sortedness check
+------------------------------
 
-`is_sorted(s, cmp)` returns `true` iff `s` is in non-
-decreasing order according to `cmp`.
+`is_sorted(s, cmp)` returns `true` iff `s` is non-decreasing
+according to `cmp`. Useful as a post-condition in tests and as a
+cheap "did sort actually do anything" sanity check.
 
     is_sorted[T](s: []T, cmp: (T, T) -> int) -> bool
         val n = len(s)
@@ -369,9 +452,11 @@ decreasing order according to `cmp`.
 Convenience wrappers
 --------------------
 
-### cmp_int / cmp_i64
+### `cmp_int` / `cmp_i64`
 
-Standard comparators for the common integer types.
+Three-way comparators for the two common signed integer types.
+Branchless `a - b` would overflow on extreme values, so this uses an
+explicit branch.
 
     cmp_int(a: int, b: int) -> int
         if a < b then -1
@@ -384,36 +469,41 @@ Standard comparators for the common integer types.
         else 0
 
 
-### sort_int / sort_i64
+### `sort_int` / `sort_i64`
+
+Type-specialized aliases for the most common sorts.
 
     sort_int(s: []int) = sort_by(s, cmp_int)
 
     sort_i64(s: []i64) = sort_by(s, cmp_i64)
 
 
-### stable_sort_int / stable_sort_i64
+### `stable_sort_int` / `stable_sort_i64`
+
+Stable variants of the integer sorts.
 
     stable_sort_int(s: []int) = stable_sort_by(s, cmp_int)
 
     stable_sort_i64(s: []i64) = stable_sort_by(s, cmp_i64)
 
+Use `is_sorted(s, cmp_int)` or `is_sorted(s, cmp_i64)` to check
+ordering after sorting.
 
-Use `is_sorted(s, cmp_int)` or `is_sorted(s, cmp_i64)` to
-check ordering.
 
+### `sort_int_desc` — descending sort for `[]int`
 
-### sort_int_desc
-
-Descending sort for `[]int`. Without closures, a negating
-comparator wrapper isn't possible, so this is a dedicated
-implementation.
+A dedicated descending sort. Without closures-with-captures it isn't
+possible to write a generic "negate this comparator" wrapper, so
+descending sort gets its own copy of the heapsort core with the
+comparison flipped. (The "max-heap with reversed compare" is
+arithmetically a min-heap, which extracted into the back of the array
+yields a descending sort.)
 
     sort_int_desc(s: []int)
         val n = len(s)
 
         if n < 2 then return
 
-        // Build max-heap using reversed comparator (min-heap effect)
         var i = n / 2 - 1
 
         while i >= 0
@@ -452,7 +542,11 @@ implementation.
 Tests
 =====
 
-### sort_int
+The tests cover each algorithm independently. Common cases exercised
+across all sorts: basic random input, already-sorted, reverse-sorted,
+duplicates, single-element, empty, all-same, large random.
+
+### `sort_int` — the default int sort
 
     #test
     test_sort_int_basic() -> unit
@@ -559,7 +653,7 @@ Tests
         assert(s[3] == 7, "3")
 
 
-### sort_int_desc
+### `sort_int_desc`
 
     #test
     test_sort_int_desc() -> unit
@@ -579,7 +673,7 @@ Tests
         assert(s[4] == 1, "4")
 
 
-### is_sorted
+### `is_sorted`
 
     #test
     test_is_sorted_yes() -> unit
@@ -612,7 +706,10 @@ Tests
         assert(is_sorted(s[:], cmp_int), "single is sorted")
 
 
-### sort then verify with is_sorted
+### Sort then verify with `is_sorted`
+
+A round-trip check: the array is unsorted before the call and sorted
+after, with the right min and max in their final positions.
 
     #test
     test_sort_then_check() -> unit
@@ -633,7 +730,10 @@ Tests
         assert(s[7] == 99, "max")
 
 
-### sort_by with custom comparator
+### `sort_by` with a custom comparator
+
+Verifies that user-supplied comparators dispatch correctly through
+the generic `sort_by` entry point. `cmp_desc` reverses the order.
 
     cmp_desc(a: int, b: int) -> int = b - a
 
@@ -653,7 +753,7 @@ Tests
         assert(s[3] == 1, "3")
 
 
-### sort_i64
+### `sort_i64`
 
     #test
     test_sort_i64() -> unit
@@ -672,6 +772,11 @@ Tests
 
 
 ### Quicksort tests
+
+Same suite of cases run directly against `quick_sort_by`, including
+already-sorted (a worst-case input for naive quicksort, but tractable
+under median-of-three) and a 20-element shuffle that exercises the
+recursion.
 
     #test
     test_quick_sort_basic() -> unit
@@ -793,6 +898,11 @@ Tests
 
 ### Introsort tests
 
+`sort_by` is the public face; `intro_sort_by` is the implementation
+underneath. The first test confirms `intro_sort_by` directly; the
+`sort_by` test verifies the delegation; the `heap_sort_by` test
+confirms the heapsort entry point still works on its own.
+
     #test
     test_intro_sort_basic() -> unit
         val s = new [8]int
@@ -827,7 +937,6 @@ Tests
 
     #test
     test_sort_by_is_introsort() -> unit
-        // sort_by delegates to intro_sort_by
         val s = new [5]int
         s[0] = 5
         s[1] = 3
@@ -841,7 +950,6 @@ Tests
 
     #test
     test_heap_sort_by() -> unit
-        // heap_sort_by is still available directly
         val s = new [5]int
         s[0] = 5
         s[1] = 3
@@ -855,6 +963,9 @@ Tests
 
 
 ### Stable sort tests
+
+Same case grid as quicksort, plus a check of the no-allocator
+buffered variant.
 
     #test
     test_stable_sort_basic() -> unit
@@ -926,9 +1037,11 @@ Tests
         val s = new [0]int
         stable_sort_int(s[:])
 
+The non-allocating variant takes a caller-provided buffer of at
+least `len(s)` elements.
+
     #test
     test_stable_sort_buf() -> unit
-        // Non-allocating variant with caller-provided buffer
         val s = new [5]int
         s[0] = 5
         s[1] = 3
@@ -976,26 +1089,31 @@ Tests
 Design notes
 ------------
 
-**Introsort as default.** `sort_by` uses introsort: quicksort
-with median-of-three pivot and insertion sort for small
-partitions, falling back to heapsort if recursion depth
-exceeds 2 * floor(log2(n)). This gives quicksort's average
-performance with heapsort's O(n log n) guarantee.
+**Introsort as the default.** `sort_by` delegates to `intro_sort_by`:
+quicksort with median-of-three partitioning and insertion-sort
+cutoffs, falling back to heapsort once recursion depth exceeds
+$2 \lfloor \log_2 n \rfloor$. This combination retains quicksort's
+average performance while preserving heapsort's $O(n \log n)$
+worst-case guarantee — the standard pick for general-purpose
+comparison sorts since Musser's 1997 paper.
 
-**Three algorithms.** `quick_sort_by` for best average
-performance, `heap_sort_by` for guaranteed O(n log n) with
-no recursion, `intro_sort_by` (the default) for the best
+**Three top-level algorithms.** `quick_sort_by` for raw average
+speed (when the input distribution is friendly), `heap_sort_by` for
+guaranteed worst-case complexity with no recursion (real-time /
+embedded), `intro_sort_by` (the default via `sort_by`) for the best
 of both.
 
-**Insertion sort cutoff.** Partitions smaller than 16 elements
-use insertion sort. Below this size, insertion sort's low
-overhead and good cache behavior outperform divide-and-conquer.
+**Insertion-sort cutoff at 16.** Below this size, insertion sort's
+low constants and predictable cache pattern beat divide-and-conquer.
+The cutoff matches the value used in `libstdc++` and Go's `sort`.
 
-**Median-of-three.** Pivot selection examines `s[lo]`,
-`s[mid]`, `s[hi]` and uses the median. This avoids the O(n²)
-worst case on already-sorted or reverse-sorted input.
+**Median-of-three pivot.** Sorting `s[lo]`, `s[mid]`, `s[hi]` and
+using the median as pivot defeats the canonical adversarial inputs
+(sorted, reverse-sorted, single-spike) at the cost of three
+comparisons per partition.
 
-**Stable merge sort.** `stable_sort_by` uses bottom-up merge
-sort — O(n log n), stable, iterative (no recursion). Requires
-O(n) auxiliary memory. `stable_sort_buf_by` takes a caller-
-provided buffer for embedded/no-alloc contexts.
+**Stable merge sort is bottom-up.** Iterative — no recursion stack —
+and runs in $O(n \log n)$. Stability comes from the `<=` tie-break in
+the merge step, which always prefers the left run on equality. The
+buffered variant lets embedded callers avoid heap allocation by
+supplying their own scratch space.

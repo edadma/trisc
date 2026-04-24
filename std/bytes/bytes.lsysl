@@ -307,7 +307,10 @@ Empty `old` inserts `repl` between every byte of `s`.
         var out = tmp[:0]
 
         if m == 0
-            // insert 'repl' between every byte and at both ends
+
+Empty pattern: per Go's semantics, insert `repl` at the start, after
+every byte, and at the end — yielding `n + 1` total insertions.
+
             for j in 0..<k
                 out = append(out, repl[j])
 
@@ -424,7 +427,10 @@ with `sep` between each pair.
             val empty = new [0]byte
             return empty[:]
 
-        // Calculate total size
+Two-pass build: first sum the lengths to size the output buffer
+exactly, then copy each part with the separator between consecutive
+ones.
+
         var total = 0
         var i = 0
 

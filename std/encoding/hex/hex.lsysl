@@ -102,8 +102,7 @@ Returns `(bytes, ok)`.
             return empty, false
 
         val out = (new [n / 2]byte)[:]
-        // Convert string to byte slice for decode
-        val src = (new [n]byte)[:]
+        val src = (new [n]byte)[:]               // copy chars into a byte buffer for indexed decode
         for i in 0..<n
             src[i] = byte(s[i])
 

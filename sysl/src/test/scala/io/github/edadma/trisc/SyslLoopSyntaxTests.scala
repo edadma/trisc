@@ -235,4 +235,81 @@ class SyslLoopSyntaxTests extends SyslTestHelpers {
         |    count
         |""".stripMargin) shouldBe 3
   }
+
+  // ===== loop (Ada-style infinite loop) =====
+
+  "loop: must be exited via break" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    loop
+        |        if i == 5 then break
+        |        i += 1
+        |    i
+        |""".stripMargin) shouldBe 5
+  }
+
+  "loop: continue jumps to top" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    sum = 0
+        |    loop
+        |        i += 1
+        |        if i > 10 then break
+        |        if i % 2 == 0 then continue
+        |        sum += i
+        |    sum
+        |""".stripMargin) shouldBe 25  // 1+3+5+7+9
+  }
+
+  "loop: nested with labeled break" in {
+    eval(
+      """main() -> int
+        |    found = 0
+        |    outer: loop
+        |        loop
+        |            found = 42
+        |            break outer
+        |        found = 0
+        |    found
+        |""".stripMargin) shouldBe 42
+  }
+
+  "loop: with optional end loop terminator" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    loop
+        |        if i == 3 then break
+        |        i += 1
+        |    end loop
+        |    i
+        |""".stripMargin) shouldBe 3
+  }
+
+  "loop: end loop optional, omitted form still works" in {
+    eval(
+      """main() -> int
+        |    i = 0
+        |    loop
+        |        if i == 3 then break
+        |        i += 1
+        |    i
+        |""".stripMargin) shouldBe 3
+  }
+
+  "loop: nested with end loop on inner only" in {
+    eval(
+      """main() -> int
+        |    sum = 0
+        |    outer: loop
+        |        if sum >= 6 then break
+        |        loop
+        |            sum += 1
+        |            if sum % 3 == 0 then break
+        |        end loop
+        |    sum
+        |""".stripMargin) shouldBe 6
+  }
 }

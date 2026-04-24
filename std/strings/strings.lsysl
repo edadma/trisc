@@ -322,7 +322,10 @@ and at both ends, matching Go's behavior.
         var b = new_builder_cap(n)
 
         if m == 0
-            // insert 'repl' between every byte and at both ends
+
+Empty pattern: per Go's semantics, insert `repl` at the start, after
+every byte, and at the end — yielding `n + 1` insertions.
+
             b.write(repl)
 
             for i in 0..<n
@@ -349,7 +352,10 @@ and at both ends, matching Go's behavior.
                 b.write_byte(s[i])
                 i++
 
-        // emit any remaining bytes that couldn't start a match
+The main loop only iterates while a match could still start (`i <=
+n - m`); the trailing $m - 1$ bytes can't begin a pattern of length
+$m$, so flush them straight into the output.
+
         while i < n
             b.write_byte(s[i])
             i++
@@ -388,7 +394,11 @@ empty strings in the result.
         val m = len(sep)
 
         if m == 0
-            // split into single-byte strings
+
+Empty separator splits the string into individual single-byte
+strings — matches Go's `strings.Split` (and is the natural inverse
+of `join` with `sep == ""`).
+
             val n = len(s)
             val parts = new [n]string
 
@@ -456,7 +466,11 @@ whitespace characters are treated as a single separator.
     fields(s: string) -> []string
         val slen = len(s)
 
-        // Count fields first
+Two-pass: first count the number of fields so we can allocate the
+result slice once with the exact size, then walk again to populate
+it. Single-pass `append` would allocate logarithmically; the
+prepass avoids the wasted intermediate buffers.
+
         var nf = 0
         var in_word = false
         var i = 0
