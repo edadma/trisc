@@ -406,7 +406,10 @@ class SyslSVMCodegen:
               init match
                 case TArrayLit(elements, _) =>
                   for e <- elements do
-                    val n = constEval(e).getOrElse(0L) & mask
+                    val n = e match
+                      case TFloatLit(d, _) if elemBytes == 8 =>
+                        java.lang.Double.doubleToLongBits(d)
+                      case _ => constEval(e).getOrElse(0L) & mask
                     emit(s"  $directive $n")
                   for _ <- elements.length until arrSize.toInt do
                     emit(s"  $directive 0")
@@ -415,12 +418,17 @@ class SyslSVMCodegen:
                     emit(s"  $directive 0")
             case _ =>
               val sizeSlots = (typ.sizeOf.max(8) / 8).toInt
-              constEval(init) match
-                case Some(n) =>
-                  emit(s"  dl $n")
+              init match
+                case TFloatLit(d, _) =>
+                  emit(s"  dl ${java.lang.Double.doubleToLongBits(d)}")
                   for _ <- 1 until sizeSlots do emit("  dl 0")
-                case None =>
-                  for _ <- 0 until sizeSlots do emit("  dl 0")
+                case _ =>
+                  constEval(init) match
+                    case Some(n) =>
+                      emit(s"  dl $n")
+                      for _ <- 1 until sizeSlots do emit("  dl 0")
+                    case None =>
+                      for _ <- 0 until sizeSlots do emit("  dl 0")
         case _ =>
 
     // Emit bss segment
