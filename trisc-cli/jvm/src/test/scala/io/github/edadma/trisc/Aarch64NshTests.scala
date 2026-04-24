@@ -51,15 +51,19 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("Hello")
   }
 
-  "aarch64 musl: hello world via write(1, ...) + exit" in {
+  "aarch64 musl: write(1, ...) + read(0, ...) + exit" in {
     // mhello is a C program cross-compiled against slix's musl fork
     // (slix/test/hello.c, built by slix/test/build-hello.sh). It
-    // invokes write(1, "hello from musl\n", 16) and returns 0, so
-    // the POSIX shim path (SYS_WRITE=128 + SYS_EXIT_GROUP=129) must
-    // be granted on spawn. Proves svc_grant_posix_range in
-    // pm_handle_spawn is wired correctly.
+    // exercises SYS_WRITE=128, SYS_READ=130 and SYS_EXIT_GROUP=129
+    // through the POSIX shim granted by pm_handle_spawn's
+    // svc_grant_posix_range call.
+    //
+    // The SYS_READ stopgap returns EOF (0) for fd=0 — see the
+    // posix_fd_bridge memory. "read=0" is the proof the dispatch
+    // entry is wired and the syscall returns a valid value.
     val output = qemu.command("mhello")
     output should include("hello from musl")
+    output should include("read=0")
   }
 
   "aarch64 login: uptime command" in {

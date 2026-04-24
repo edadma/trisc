@@ -397,9 +397,15 @@ POSIX shim dispatch. Musl's aarch64-slix arch/ uses SLIX-local
 syscall numbers starting at 128 (see `slix/musl/arch/aarch64-slix
 /bits/syscall.h.in`). Handlers take the raw user-space args and
 return bytes-written / 0-on-success / -errno as i64, which the
-dispatcher writes into the saved x0 slot. Only the Phase-1
-minimum is wired up today — SYS_WRITE to stdout/stderr and
-SYS_EXIT_GROUP (alias of SLIX native SYS_EXIT).
+dispatcher writes into the saved x0 slot.
+
+The shim is intentionally minimal: every fd branch is hardcoded
+(fd==1||fd==2 goes to the UART for write, fd==0 is currently an
+EOF stub for read). The real design — per-process POSIX fd table
+routing into VFS/TTY/pipe backends — is captured separately; see
+`project_musl_phase2_posix_fd_bridge.md` in memory. Don't keep
+piling fd==N special cases onto this dispatch; the next syscall
+that needs a real backend should trigger the fd-table migration.
 
     posix_dispatch(num: int, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
         if num == 128
@@ -407,6 +413,8 @@ SYS_EXIT_GROUP (alias of SLIX native SYS_EXIT).
         if num == 129
             terminate_current(int(a0))
             return i64(0)
+        if num == 130
+            return sys_read(int(a0), a1, int(a2))
         i64(-38)            // -ENOSYS
 
 SYS_WRITE shim. fd=1 (stdout) and fd=2 (stderr) write directly to
@@ -414,8 +422,7 @@ the PL011 UART; any other fd returns -EBADF. The user's buffer
 lives in the current process's EL0-accessible carve-out and is
 already mapped in the active PT (which we're running under since
 EL1 inherits TTBR0_EL1 from EL0), so we dereference it directly
-without vm_copy_from. A future commit will extend this to route
-non-TTY fds through the VFS server.
+without vm_copy_from.
 
     sys_write(fd: int, buf: i64, len: int) -> i64
         if fd == 1 || fd == 2
@@ -426,6 +433,20 @@ non-TTY fds through the VFS server.
                 i += 1
             return i64(len)
         i64(-9)             // -EBADF
+
+SYS_READ stopgap. fd=0 (stdin) returns 0 (EOF) immediately —
+there is no kernel-side input buffer wired to this path yet.
+The TTY server is the actual consumer of UART RX; POSIX reads
+need to go through a per-process fd table that routes into
+TTY/VFS/pipe backends (not yet built). Any other fd → -EBADF.
+Programs that `read(0,...)` will observe EOF on every call, which
+is well-defined and lets musl code that checks for EOF run
+without crashing.
+
+    sys_read(fd: int, buf: i64, len: int) -> i64
+        if fd == 0
+            return i64(0)       // EOF — see posix_fd_bridge memory
+        i64(-9)                 // -EBADF
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a
 is the echo server: creates a port, registers "echo", then
