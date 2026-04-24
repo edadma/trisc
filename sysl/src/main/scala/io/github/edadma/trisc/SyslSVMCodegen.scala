@@ -104,6 +104,7 @@ class SyslSVMCodegen:
       case TStringFromSlice(s, _) => count += 2; scanExpr(s)
       case TStringFromPtr(p, l, _) => count += 3; scanExpr(p); scanExpr(l)
       case TCall(_, args, _) => args.foreach(scanExpr)
+      case TTempAddr(e, _) => scanExpr(e)
       case TIndirectCall(c, args, _) => scanExpr(c); args.foreach(scanExpr)
       case TIndex(a, i, _) => scanExpr(a); scanExpr(i)
       case TFieldAccess(o, _, _) => scanExpr(o)
@@ -1034,6 +1035,22 @@ class SyslSVMCodegen:
       // Push args left-to-right
       for arg <- args do genExpr(arg)
       emit(s"  call $name")
+
+    case TTempAddr(inner, _) =>
+      inner.typ.underlying match
+        case _: SyslType.StructType | _: SyslType.EnumType
+           | SyslType.StringType | _: SyslType.SliceType
+           | _: SyslType.ArrayType =>
+          // Address-represented aggregate: genExpr already returns an address.
+          genExpr(inner)
+        case _ =>
+          // Scalar: spill to 8-byte slot on the memory stack, return slot addr.
+          genExpr(inner)
+          emitMemAlloc(8)
+          emit("  dup")           // (val, slot, slot)
+          emit("  rot")           // (slot, slot, val)
+          emit("  swap")          // (slot, val, slot)
+          emit("  store64")       // stack: (slot)
 
     case TIfExpr(cond, thenBody, Some(elseBody), typ) =>
       val elseLabel = newLabel("else")
