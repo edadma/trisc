@@ -409,6 +409,55 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "nonblock: FAIL"
   }
 
+  "aarch64 posix: shutdown(SHUT_WR) half-close" in {
+    // test_shutdown connects to a host peer that reads all bytes
+    // until EOF then replies with the consumed byte count. The
+    // shim's shutdown(fd, SHUT_WR) must emit FIN (not RST, not
+    // nothing) so the peer's read loop terminates and the reply
+    // comes back. Without real half-close this test times out.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18082))
+    server.setSoTimeout(15000)
+
+    val peerThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](128)
+          var total = 0
+          var n = in.read(buf, total, buf.length - total)
+          while n > 0 do
+            total += n
+            n = in.read(buf, total, buf.length - total)
+          // n == -1 → peer (guest) sent FIN. Reply with count.
+          val reply = s"got $total".getBytes
+          out.write(reply)
+          out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-shutdown-peer")
+    peerThread.setDaemon(true)
+    peerThread.start()
+
+    try
+      qemu.send("test_shutdown\n")
+      val output = qemu.waitFor("shutdown: done")
+      output should include("shutdown: connected")
+      output should include("shutdown: wrote 11")
+      output should include("shutdown: shutdown SHUT_WR = 0")
+      output should include("shutdown: read got 'got 11")
+      output should include("shutdown: done")
+      output should not include "shutdown: FAIL"
+    finally
+      server.close()
+      peerThread.join(2000)
+  }
+
   "aarch64 timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications via notify_wait/notify_read_self. Proves the

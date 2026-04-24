@@ -1,0 +1,146 @@
+test_shutdown — shutdown(SHUT_WR) half-close
+============================================
+
+Connects to a host-side TCP peer at 10.0.2.2:18082 (slirp
+forwards it), writes a request, then calls `shutdown(fd, 1)`
+to emit FIN without closing the socket. The peer reads until
+EOF — proving our FIN actually arrived — then writes a reply
+back. We then `read` the reply and `close`.
+
+Pass criterion: prints the byte count returned in the reply
+line, matching what we sent. Without half-close support the
+peer would block in read() and the test would time out; if
+shutdown tears the socket down ungracefully (RST instead of
+FIN), the read after shutdown fails too.
+
+    module oskit.bin.test_shutdown
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE    = 147
+    val NR_CONNECT  = 148
+    val NR_READ     = 130
+    val NR_SHUTDOWN = 334
+    val NR_SOCKET   = 337
+    val NR_WRITE    = 128
+
+    val AF_INET_V    = 2
+    val SOCK_STREAM_V = 1
+    val SHUT_WR      = 1
+
+
+    print_sdec(v: int)
+        if v < 0
+            puts("-")
+            print_sdec(-v)
+            return
+        if v >= 10
+            print_sdec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, len: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(len), 0, 0, 0))
+
+    posix_read(fd: int, buf: *byte, len: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(len), 0, 0, 0))
+
+    posix_shutdown(fd: int, how: int) -> int
+        int(syscall6(NR_SHUTDOWN, i64(fd), i64(how), 0, 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        val fd = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if fd < 0
+            puts("shutdown: socket failed\n")
+            exit_with(1)
+            return
+
+        var addr: [16]byte
+        fill_sockaddr(&addr[0], 18082, 10, 0, 2, 2)
+        if posix_connect(fd, &addr[0], 16) < 0
+            puts("shutdown: connect failed\n")
+            exit_with(2)
+            return
+        puts("shutdown: connected\n")
+
+        var req: [11]byte
+        req[0]  = byte('h')
+        req[1]  = byte('e')
+        req[2]  = byte('l')
+        req[3]  = byte('l')
+        req[4]  = byte('o')
+        req[5]  = byte(' ')
+        req[6]  = byte('t')
+        req[7]  = byte('h')
+        req[8]  = byte('e')
+        req[9]  = byte('r')
+        req[10] = byte('e')
+        val w = posix_write(fd, &req[0], 11)
+        puts("shutdown: wrote ")
+        print_sdec(w)
+        puts("\n")
+        if w != 11
+            puts("shutdown: FAIL write\n")
+            exit_with(3)
+            return
+
+        val s = posix_shutdown(fd, SHUT_WR)
+        puts("shutdown: shutdown SHUT_WR = ")
+        print_sdec(s)
+        puts("\n")
+        if s != 0
+            puts("shutdown: FAIL shutdown\n")
+            exit_with(4)
+            return
+
+        var rbuf: [64]byte
+        var total = 0
+        while total < 64
+            val n = posix_read(fd, &rbuf[total], 64 - total)
+            if n <= 0
+                total = 64
+            else
+                total = total + n
+        // `total` ends up as 64 if we hit EOF after some reads, or
+        // just the consumed count. We only need to see the prefix
+        // the peer sent.
+        puts("shutdown: read got '")
+        var i = 0
+        while i < 15
+            if rbuf[i] != byte(0)
+                var one: [1]byte
+                one[0] = rbuf[i]
+                puts(string(&one[0], 1))
+            i += 1
+        puts("'\n")
+
+        posix_close(fd)
+        puts("shutdown: done\n")
+        exit()

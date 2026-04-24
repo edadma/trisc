@@ -2237,8 +2237,68 @@ the state machine is a future refinement.
         while i < TCP_MAX_SOCKETS
             if tcp_sockets[i].in_use != 0
                 if tcp_sockets[i].owner_tid == tid
-                    inet_tcp_close_slot(i, -1)
+                    // Try graceful close first — emits FIN and lets
+                    // the state machine + scan_timers handle the
+                    // rest. do_close returns -1 for states it can't
+                    // handle (SYN_RCVD, FIN_WAIT_*, LAST_ACK,
+                    // TIME_WAIT); fall back to force-free for those.
+                    // caller_tid = -1 so no waiter is parked on
+                    // close_waiter; the state-step path already
+                    // guards `close_waiter >= 0` before replying.
+                    val r = inet_tcp_do_close(i, -1)
+                    if r < 0
+                        inet_tcp_close_slot(i, -1)
             i += 1
+
+
+Combined fd/ownership check for the TCP handlers. Returns 1 when
+the slot is in-range, in-use, AND owned by `sender`; 0 otherwise.
+Replaces the earlier pattern of "bounds check + in_use check" —
+adds the missing owner_tid guard the inet_fd_valid memo flagged.
+
+    inet_tcp_slot_owned(fd: int, sender: int) -> int
+        if fd < 0
+            return 0
+        if fd >= TCP_MAX_SOCKETS
+            return 0
+        if tcp_sockets[fd].in_use == 0
+            return 0
+        if tcp_sockets[fd].owner_tid != sender
+            return 0
+        1
+
+
+Half-close the write side of socket `s`. Transitions ESTABLISHED
+→ FIN_WAIT_1 (or CLOSE_WAIT → LAST_ACK) and emits our FIN, but
+does NOT set `close_waiter` — the caller is not parked, and the
+read side remains readable until the peer FINs. The blocking
+path (inet_tcp_do_close) would otherwise block shutdown() the
+same as close(), which isn't what POSIX wants for SHUT_WR.
+
+Idempotent: returns 0 in every case, including already-shutdown
+states (the caller shouldn't care if the FIN was a no-op).
+
+    inet_tcp_do_shutdown_wr(s: int) -> int
+        val st = tcp_sockets[s].state
+        if tcp_sockets[s].our_fin_sent != 0
+            return 0
+        if st == TCP_STATE_ESTABLISHED
+            val seq = tcp_sockets[s].snd_nxt
+            tcp_sockets[s].snd_nxt = seq + u32(1)
+            tcp_sockets[s].our_fin_sent = 1
+            tcp_sockets[s].state = TCP_STATE_FIN_WAIT_1
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
+            inet_tcp_arm_rtx(s)
+            return 0
+        if st == TCP_STATE_CLOSE_WAIT
+            val seq = tcp_sockets[s].snd_nxt
+            tcp_sockets[s].snd_nxt = seq + u32(1)
+            tcp_sockets[s].our_fin_sent = 1
+            tcp_sockets[s].state = TCP_STATE_LAST_ACK
+            inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
+            inet_tcp_arm_rtx(s)
+            return 0
+        0
 
 
 Query the local or peer endpoint of a TCP socket. `which == 0`

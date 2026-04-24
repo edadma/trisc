@@ -61,6 +61,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_UDP_GETNAME  = 24
     val INET_CMD_TCP_GETNAME  = 25
     val INET_CMD_TCP_RECV_NB  = 26
+    val INET_CMD_TCP_SHUTDOWN = 27
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -376,23 +377,31 @@ waiter. `maxlen` caps how many payload bytes we hand back.
         ipc_reply(sender, reply, 2)
 
 
-Validate an fd. Returns 1 if the slot is in use, 0 otherwise.
-Does not enforce ownership yet — that's a TODO once PIDs are
-plumbed through.
+Validate an fd belongs to `sender`. Rejects out-of-range fds,
+free slots, and slots whose `owner_tid` points at a different
+thread — the latter is the ownership check that prevents process
+A from issuing IPC with process B's inet fd (A would need to
+guess the fd number today, but the guard makes the surface
+explicit regardless). Returns 1 if OK, 0 otherwise. Call sites
+pass the IPC `sender` argument.
 
-    inet_fd_valid(fd: int) -> int
+    inet_fd_valid(fd: int, sender: int) -> int
         if fd < 0
             return 0
         if fd >= INET_MAX_SOCKETS
             return 0
-        inet_sockets[fd].in_use
+        if inet_sockets[fd].in_use == 0
+            return 0
+        if inet_sockets[fd].owner_tid != sender
+            return 0
+        1
 
 
 ### BIND handler
 
     inet_handle_bind(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
-        if inet_fd_valid(fd) == 0
+        if inet_fd_valid(fd, sender) == 0
             var err: [1]byte
             err[0] = byte(-1)
             ipc_reply(sender, err, 1)
@@ -441,7 +450,7 @@ let us drop unmatched loopback targets silently with
 
     inet_handle_sendto(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
-        if inet_fd_valid(fd) == 0
+        if inet_fd_valid(fd, sender) == 0
             var err: [3]byte
             err[0] = byte(-1)
             err[1] = 0
@@ -519,7 +528,7 @@ programs; multi-waiter support is on the list.
 
     inet_handle_recvfrom(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
-        if inet_fd_valid(fd) == 0
+        if inet_fd_valid(fd, sender) == 0
             var err: [10]byte
             err[0] = byte(-1)
             ipc_reply(sender, err, 10)
@@ -562,7 +571,7 @@ possibly firing immediately.
 
     inet_handle_recvfrom_timeout(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
-        if inet_fd_valid(fd) == 0
+        if inet_fd_valid(fd, sender) == 0
             var err: [10]byte
             err[0] = byte(-1)
             ipc_reply(sender, err, 10)
@@ -617,11 +626,7 @@ reply:   status(1) + state(1)
     inet_handle_tcp_debug(sender: int, buf: *byte)
         val fd = inet_read_u16(buf, 1) & 0xffff
         var reply: [42]byte
-        if fd < 0 || fd >= 16
-            reply[0] = byte(-1)
-            ipc_reply(sender, reply, 42)
-            return
-        if tcp_sockets[fd].in_use == 0
+        if inet_tcp_slot_owned(fd, sender) == 0
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 42)
             return
@@ -798,7 +803,7 @@ the caller doesn't block forever.
 
     inet_handle_close(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
-        if inet_fd_valid(fd) == 0
+        if inet_fd_valid(fd, sender) == 0
             var err: [1]byte
             err[0] = byte(-1)
             ipc_reply(sender, err, 1)
@@ -857,13 +862,7 @@ high byte (0), second (offset 2) is the low byte / index.
         val fd = inet_read_u16(buf, 1) & 0xffff
         val dlen = inet_read_u16(buf, 3)
         val data: *byte = buf + 5
-        if fd < 0 || fd >= TCP_MAX_SOCKETS
-            var err: [3]byte
-            err[0] = byte(-1)
-            inet_write_u16(err, 1, 0)
-            ipc_reply(sender, err, 3)
-            return
-        if tcp_sockets[fd].in_use == 0
+        if inet_tcp_slot_owned(fd, sender) == 0
             var err: [3]byte
             err[0] = byte(-1)
             inet_write_u16(err, 1, 0)
@@ -887,13 +886,7 @@ high byte (0), second (offset 2) is the low byte / index.
         var maxlen = maxlen_raw
         if maxlen > 500
             maxlen = 500
-        if fd < 0 || fd >= TCP_MAX_SOCKETS
-            var err: [3]byte
-            err[0] = byte(-1)
-            inet_write_u16(err, 1, 0)
-            ipc_reply(sender, err, 3)
-            return
-        if tcp_sockets[fd].in_use == 0
+        if inet_tcp_slot_owned(fd, sender) == 0
             var err: [3]byte
             err[0] = byte(-1)
             inet_write_u16(err, 1, 0)
@@ -927,13 +920,7 @@ the NB variant when `O_NONBLOCK` is set on the fd.
         var maxlen = maxlen_raw
         if maxlen > 500
             maxlen = 500
-        if fd < 0 || fd >= TCP_MAX_SOCKETS
-            var err: [3]byte
-            err[0] = byte(-1)
-            inet_write_u16(err, 1, 0)
-            ipc_reply(sender, err, 3)
-            return
-        if tcp_sockets[fd].in_use == 0
+        if inet_tcp_slot_owned(fd, sender) == 0
             var err: [3]byte
             err[0] = byte(-1)
             inet_write_u16(err, 1, 0)
@@ -957,14 +944,31 @@ the NB variant when `O_NONBLOCK` is set on the fd.
         inet_write_u16(eagain, 1, 0)
         ipc_reply(sender, eagain, 3)
 
+shutdown(fd, how). `how` values: 0 = SHUT_RD, 1 = SHUT_WR,
+2 = SHUT_RDWR. SHUT_RD is a no-op today — we don't track a
+separate "read shut down" state, so the peer sees no effect and
+subsequent recvs still deliver data. SHUT_WR emits our FIN via
+`inet_tcp_do_shutdown_wr` without parking the caller. SHUT_RDWR
+is treated as SHUT_WR (a proper SHUT_RDWR would also drop
+buffered recv; deferred). Wire: cmd(1) + fd(u16) + how(u8) = 4.
+Reply: status(1).
+
+    inet_handle_tcp_shutdown(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val how = int(buf[3]) & 0xff
+        var reply: [1]byte
+        if inet_tcp_slot_owned(fd, sender) == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        if how != 0
+            val _ = inet_tcp_do_shutdown_wr(fd)
+        reply[0] = byte(0)
+        ipc_reply(sender, reply, 1)
+
     inet_handle_tcp_close(sender: int, buf: *byte)
         val fd = inet_read_u16(buf, 1) & 0xffff
-        if fd < 0 || fd >= TCP_MAX_SOCKETS
-            var err: [1]byte
-            err[0] = byte(-1)
-            ipc_reply(sender, err, 1)
-            return
-        if tcp_sockets[fd].in_use == 0
+        if inet_tcp_slot_owned(fd, sender) == 0
             var err: [1]byte
             err[0] = byte(-1)
             ipc_reply(sender, err, 1)
@@ -997,7 +1001,7 @@ the NB variant when `O_NONBLOCK` is set on the fd.
 
     inet_handle_tcp_accept(sender: int, buf: *byte)
         val fd = inet_read_u16(buf, 1) & 0xffff
-        if fd < 0 || fd >= TCP_MAX_SOCKETS
+        if inet_tcp_slot_owned(fd, sender) == 0
             var err: [8]byte
             err[0] = byte(-1)
             ipc_reply(sender, err, 8)
@@ -1078,7 +1082,7 @@ which-flag. Wire: cmd(1) + fd(u8) = 2 bytes in. Reply: status(1)
     inet_handle_udp_getname(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
         var reply: [7]byte
-        if inet_fd_valid(fd) == 0
+        if inet_fd_valid(fd, sender) == 0
             reply[0] = byte(-1)
             inet_write_u16(reply, 1, 0)
             inet_write_ipv4(reply, 3, u32(0))
@@ -1108,6 +1112,12 @@ in `inet_tcp_getname` (inet_proto.lsysl) because it touches
         val fd = inet_read_u16(buf, 1) & 0xffff
         val which = int(buf[3]) & 0xff
         var reply: [7]byte
+        if inet_tcp_slot_owned(fd, sender) == 0
+            reply[0] = byte(-1)
+            inet_write_u16(reply, 1, 0)
+            inet_write_ipv4(reply, 3, u32(0))
+            ipc_reply(sender, reply, 7)
+            return
         var port = 0
         var ip = u32(0)
         val status = inet_tcp_getname(fd, which, &port, &ip)
@@ -1362,6 +1372,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_SEND    -> inet_handle_tcp_send(sender, buf)
                     INET_CMD_TCP_RECV    -> inet_handle_tcp_recv(sender, buf)
                     INET_CMD_TCP_CLOSE   -> inet_handle_tcp_close(sender, buf)
+                    INET_CMD_TCP_SHUTDOWN -> inet_handle_tcp_shutdown(sender, buf)
                     INET_CMD_TCP_LISTEN  -> inet_handle_tcp_listen(sender, buf)
                     INET_CMD_TCP_ACCEPT  -> inet_handle_tcp_accept(sender, buf)
                     INET_CMD_SET_IP_CONFIG -> inet_handle_set_ip_config(sender, buf)
