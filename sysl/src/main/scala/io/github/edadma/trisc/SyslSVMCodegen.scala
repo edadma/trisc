@@ -844,6 +844,7 @@ class SyslSVMCodegen:
       genExpr(operand)
       if isFloat(operand.typ) then emit("  fneg")
       else emit("  neg")
+      truncateForNarrow(operand.typ)
 
     case TUnary("!", operand, _) =>
       genExpr(operand)
@@ -852,6 +853,7 @@ class SyslSVMCodegen:
     case TUnary("~", operand, _) =>
       genExpr(operand)
       emit("  not")
+      truncateForNarrow(operand.typ)
 
     case TRangeCheck(inner, range, _, _) =>
       genExpr(inner) // stack: [val]
@@ -1403,9 +1405,9 @@ class SyslSVMCodegen:
     val f = isFloat(operandType)
     val u = isUnsigned(operandType)
     op match
-      case "+" => emit(if f then "  fadd" else "  add")
-      case "-" => emit(if f then "  fsub" else "  sub")
-      case "*" => emit(if f then "  fmul" else "  mul")
+      case "+" => emit(if f then "  fadd" else "  add"); truncateForNarrow(operandType)
+      case "-" => emit(if f then "  fsub" else "  sub"); truncateForNarrow(operandType)
+      case "*" => emit(if f then "  fmul" else "  mul"); truncateForNarrow(operandType)
       case "/" => emit(if f then "  fdiv" else if u then "  divu" else "  div")
       case "%" => emit(if f then "  fmod" else if u then "  modu" else "  mod")
       case "==" => emit(if f then "  feq" else "  eq")
@@ -1417,9 +1419,20 @@ class SyslSVMCodegen:
       case "&" => emit("  and")
       case "|" => emit("  or")
       case "^" => emit("  xor")
-      case "<<" => emit("  shl")
+      case "<<" => emit("  shl"); truncateForNarrow(operandType)
       case ">>" => emit(if u then "  shr" else "  sar")
       case _ => sys.error(s"unsupported binary operator: $op")
+
+  /** Mask / sign-extend the 64-bit TOS back to the narrow-int range so
+    * overflow in (u)i{8,16,32} arithmetic matches the source-level type. */
+  private def truncateForNarrow(t: SyslType): Unit = t.underlying match
+    case SyslType.UIntType(8)  => emitPushInt(0xff); emit("  and")
+    case SyslType.UIntType(16) => emitPushInt(0xffff); emit("  and")
+    case SyslType.UIntType(32) => emit("  push_i64 4294967295"); emit("  and")
+    case SyslType.IntType(8)   => emitPushInt(56); emit("  shl"); emitPushInt(56); emit("  sar")
+    case SyslType.IntType(16)  => emitPushInt(48); emit("  shl"); emitPushInt(48); emit("  sar")
+    case SyslType.IntType(32)  => emitPushInt(32); emit("  shl"); emitPushInt(32); emit("  sar")
+    case _ =>
 
   private def emitLoad(typ: SyslType): Unit = typ match
     case SyslType.IntType(8) => emit("  load8s")
