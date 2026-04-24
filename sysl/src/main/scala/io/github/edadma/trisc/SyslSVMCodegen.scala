@@ -104,6 +104,7 @@ class SyslSVMCodegen:
       case TStringFromSlice(s, _) => count += 2; scanExpr(s)
       case TStringFromPtr(p, l, _) => count += 3; scanExpr(p); scanExpr(l)
       case TCall(_, args, _) => args.foreach(scanExpr)
+      case TIndirectCall(c, args, _) => scanExpr(c); args.foreach(scanExpr)
       case TIndex(a, i, _) => scanExpr(a); scanExpr(i)
       case TFieldAccess(o, _, _) => scanExpr(o)
       case TDeref(p, _) => scanExpr(p)
@@ -987,6 +988,14 @@ class SyslSVMCodegen:
 
     case TFuncRef(name, _) =>
       emit(s"  push_i64 $name")
+
+    case TIndirectCall(callee, args, _) =>
+      // Call through a function pointer. No closure env support — the
+      // callee is treated as a plain function pointer (8 bytes, just an fn
+      // address). Captures are not supported here.
+      for a <- args do genExpr(a)
+      genExpr(callee) // leaves function pointer on TOS
+      emit("  callr")
 
     case TLen(inner, _) =>
       inner.typ match
