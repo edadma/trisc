@@ -57,6 +57,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_DEBUG    = 20
     val INET_CMD_ICMP_SEND    = 21
     val INET_CMD_ICMP_CHECK   = 22
+    val INET_CMD_PID_EXIT     = 23
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -983,6 +984,39 @@ cmd(1) + ip(4) + mask(4) + gw(4) = 13 bytes in; 1 byte status out.
         ipc_reply(sender, reply, 1)
 
 
+### inet_handle_pid_exit
+
+Reclaim every socket owned by a terminated thread. PM sends the
+dead process's main_tid as a big-endian i32 at buf[1..5]; inet
+scans both the UDP and TCP tables and closes any socket whose
+`owner_tid` matches. This is how we prevent inet_sockets[] /
+tcp_sockets[] slots from leaking when a process exits without
+calling close(). Wire format: cmd(1) + tid(4) = 5 in, status(1)
+out. Cleanup is ungraceful — TCP sockets skip FIN and go straight
+to CLOSED, which is fine for the pid-exit case (the process is
+gone and the peer will observe connection loss via timeout or a
+future RST).
+
+    inet_handle_pid_exit(sender: int, buf: *byte)
+        val tid = ((int(buf[1]) & 0xff) << 24) | ((int(buf[2]) & 0xff) << 16) | ((int(buf[3]) & 0xff) << 8) | (int(buf[4]) & 0xff)
+        var i = 0
+        while i < INET_MAX_SOCKETS
+            if inet_sockets[i].in_use != 0
+                if inet_sockets[i].owner_tid == tid
+                    inet_sockets[i].in_use = 0
+                    inet_sockets[i].bound = 0
+                    inet_sockets[i].q_count = 0
+                    inet_sockets[i].q_head = 0
+                    inet_sockets[i].q_tail = 0
+                    inet_sockets[i].pending_tid = -1
+                    inet_sockets[i].recv_deadline = 0
+            i += 1
+        inet_tcp_cleanup_owner(tid)
+        var reply: [1]byte
+        reply[0] = byte(0)
+        ipc_reply(sender, reply, 1)
+
+
 ### inet_handle_get_ip_config
 
 Return the current (ip, mask, gw). Reply: status(1) + ip(4) +
@@ -1235,6 +1269,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_ARP_PROBE   -> inet_handle_arp_probe(sender, buf)
                     INET_CMD_ICMP_SEND   -> inet_handle_icmp_send(sender, buf)
                     INET_CMD_ICMP_CHECK  -> inet_handle_icmp_check(sender, buf)
+                    INET_CMD_PID_EXIT    -> inet_handle_pid_exit(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->

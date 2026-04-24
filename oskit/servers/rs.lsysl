@@ -151,8 +151,14 @@ receiver. Servers not listed fall through to 0.
             // tty: sends to pm (Ctrl-C → PM_CMD_SIGINT)
             return 1 << pm_port
         else if idx == 3
-            // pm: sends to vfs
-            return 1 << vfs_port
+            // pm: sends to vfs (fd cleanup on exit) and inet
+            // (POSIX socket cleanup on exit via PID_EXIT). Missing
+            // inet leaves that bit clear and the helper short-
+            // circuits when port_lookup fails.
+            var m = 1 << vfs_port
+            if inet_port >= 0
+                m = m | (1 << inet_port)
+            return m
         else if idx == 4
             // vfs: sends to tfs and tty; also to inet when the TCP
             // scheme bridge (connect("tcp:...")) routes read/write/close

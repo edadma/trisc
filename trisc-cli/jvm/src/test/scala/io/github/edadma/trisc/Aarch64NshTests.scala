@@ -331,6 +331,24 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       echoThread.join(2000)
   }
 
+  "aarch64 posix: inet sockets reclaimed on pid exit" in {
+    // test_sockleak opens 30 UDP sockets and exits without
+    // close(). The inet server has 32 slots, so a second run can
+    // only succeed if PM's PID_EXIT IPC caused inet to reclaim
+    // the dying process's sockets. Without the cleanup, run 2
+    // would hit -1 on the third socket() and print
+    // `sockleak: failed_at_2`. Pass = two `all_opened` markers.
+    qemu.send("test_sockleak\n")
+    val run1 = qemu.waitFor("sockleak: all_opened")
+    run1 should include("sockleak: all_opened")
+    run1 should not include "sockleak: failed_at_"
+
+    qemu.send("test_sockleak\n")
+    val run2 = qemu.waitFor("sockleak: all_opened")
+    run2 should include("sockleak: all_opened")
+    run2 should not include "sockleak: failed_at_"
+  }
+
   "aarch64 timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications via notify_wait/notify_read_self. Proves the

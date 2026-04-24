@@ -78,11 +78,18 @@ If no waiter, the zombie stays until waitpid is called.
             return
         if pid >= MAX_PROCESSES
             return
-        // Save parent TID before any reaping (reap clears process entry)
+        // Save parent TID and dead main TID before any reaping —
+        // both are needed for cleanup fan-out and reap clears the
+        // process entry.
         val dead_parent_tid = svc_proc_parent_tid(pid)
+        val dead_main_tid = svc_proc_main_tid(pid)
         // Close the dead process's VFS handles (stdin/stdout/stderr etc.)
         // before reaping, so OFT slots are freed for reuse.
         pm_vfs_close_handles(pid)
+        // Reclaim any POSIX sockets the process was holding. The inet
+        // server tracks sockets by owner_tid, not pid, so we send the
+        // dead main_tid. No-op if inet isn't running.
+        pm_inet_close_sockets(dead_main_tid)
         // Check if a parent is already waiting for this PID
         var i = 0
         while i < MAX_WAITERS
@@ -102,11 +109,10 @@ If no waiter, the zombie stays until waitpid is called.
 
         // Reparent any children of the exiting process to init (thread 0).
         // This ensures orphaned processes can still be reaped.
-        val exited_tid = svc_proc_main_tid(pid)
         var j = 1
         while j < MAX_PROCESSES
             if svc_proc_state(j) == PROC_RUNNING
-                if svc_proc_parent_tid(j) == exited_tid
+                if svc_proc_parent_tid(j) == dead_main_tid
                     svc_proc_set_parent_tid(j, 0)
             j += 1
 
@@ -352,6 +358,23 @@ Tell VFS to close all handles for a dead process.
         pm_msg_write_i32(msg, 1, pid)
         var vfs_reply: [1]byte
         ipc_send(fs_port, msg, 5, vfs_reply, 1)
+
+Tell the inet server to reclaim any POSIX sockets a dead process
+was holding. Sockets track `owner_tid`, not pid — the inet server
+would otherwise leak one slot per socket for every process that
+exits without calling close(). The inet port may not be registered
+(boot without NIC, test configurations), in which case we silently
+skip — no network stack means no leak to clean up.
+
+    pm_inet_close_sockets(dead_tid: int)
+        val inet_port = port_lookup("inet")
+        if inet_port < 0
+            return
+        var msg: [5]byte
+        msg[0] = 23  // INET_CMD_PID_EXIT
+        pm_msg_write_i32(msg, 1, dead_tid)
+        var inet_reply: [1]byte
+        ipc_send(inet_port, msg, 5, inet_reply, 1)
 
 PM server main loop. Uses ipc_recv_notify to wait for either
 IPC messages (waitpid/kill from userspace) or notifications

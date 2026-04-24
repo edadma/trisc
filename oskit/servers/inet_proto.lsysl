@@ -2222,6 +2222,25 @@ Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
         -1
 
 
+Reclaim every TCP slot whose `owner_tid` matches a terminated
+thread. Called from the PID_EXIT IPC path when PM notifies inet
+that a process is dying. Children of a listen() inherit
+`owner_tid` from the listener at passive-open time, so the same
+loop catches queued-but-not-yet-accepted connections. Ungraceful
+close via `inet_tcp_close_slot` — peers of ESTABLISHED sockets
+won't see a FIN (they'd get one had the process called close()
+itself); a graceful variant that sends RST or drives FIN through
+the state machine is a future refinement.
+
+    inet_tcp_cleanup_owner(tid: int)
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use != 0
+                if tcp_sockets[i].owner_tid == tid
+                    inet_tcp_close_slot(i, -1)
+            i += 1
+
+
 Inbound IPv4 protocol=6 dispatch. Parses header, verifies
 checksum, locates the matching socket, and delegates.
 

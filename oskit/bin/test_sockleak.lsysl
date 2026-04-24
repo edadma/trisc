@@ -1,0 +1,60 @@
+test_sockleak — pid-exit socket reclaim
+=======================================
+
+Opens 30 UDP sockets in a tight loop (the inet server has 32
+slots), prints a marker, then exits WITHOUT calling close() on
+any of them. Running this binary twice back-to-back is a direct
+test of PM's inet pid-exit cleanup:
+
+- Without cleanup, run 1 leaves 30 slots permanently occupied.
+  Run 2 fails the third socket() with -1 because the table is
+  full. The test binary would print `sockleak: failed_at_2` (or
+  similar) instead of `sockleak: all_opened`.
+
+- With cleanup, PM fans out a PID_EXIT IPC to inet when the
+  process ends; inet scans both UDP and TCP tables and frees any
+  slot whose `owner_tid` matches. Run 2 sees all 30 slots free
+  and the second pass prints `all_opened` too.
+
+    module oskit.bin.test_sockleak
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_SOCKET     = 337
+
+    val AF_INET_V     = 2
+    val SOCK_DGRAM_V  = 2
+
+
+Decimal writer for small ints.
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+
+    main(argv: []string)
+        val N = 30
+        var i = 0
+        while i < N
+            val fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+            if fd < 0
+                puts("sockleak: failed_at_")
+                print_udec(i)
+                puts("\n")
+                exit_with(1)
+                return
+            i += 1
+        puts("sockleak: all_opened\n")
+        // Intentionally exit WITHOUT closing — this is the whole
+        // point. If PM's inet pid-exit cleanup works, the slots
+        // get reclaimed when the process dies.
+        exit()
