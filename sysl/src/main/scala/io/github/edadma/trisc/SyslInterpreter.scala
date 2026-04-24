@@ -1220,7 +1220,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TFuncRef(name, _) => FuncVal(name)
 
-      case TClosure(params, _, body, captures, _) =>
+      case TClosure(params, _, body, captures, _, _) =>
         // Capture current values by value (copy)
         val capturedEnv = new mutable.LinkedHashMap[String, Cell]
         for (varName, _) <- captures do

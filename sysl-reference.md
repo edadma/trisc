@@ -2403,7 +2403,15 @@ Taking a function reference (`&fn_name`) carries the function's declared effects
 
 **Rules at an interface dispatch site.** Dispatching `iface.method(...)` from an annotated function uses the interface method's *declared* effects — not the impl's — for the subset check. This means the caller's static check is unaffected by which impl is currently boxed, matching the modular-reasoning discipline every verifier expects.
 
-**Cross-module.** Effect signatures round-trip through `.smeta`, so `&imported_pure_fn` in a dependent unit produces the same effect-typed reference as `&local_pure_fn`. Closures do not yet carry effect signatures in v1 — their synthesized FuncType is `Unknown`, so they cannot be passed to a `#pure`/`#reads`/`#writes` callback slot. (A later revision will infer closure effects from the body.)
+**Cross-module.** Effect signatures round-trip through `.smeta`, so `&imported_pure_fn` in a dependent unit produces the same effect-typed reference as `&local_pure_fn`.
+
+**Closure effect inference.** Lambda expressions synthesize a `FuncType` whose effects are inferred from the closure body. If the body passes the `#pure` discipline check — no allocation, no impure calls, no indirect calls to non-pure callees, no writes to captured variables — the synthesized type is marked `#pure`, making the closure usable as a `#pure` callback:
+
+```
+sort(arr, (a: int, b: int) -> a < b)       // pure comparator — accepted
+```
+
+Reading captured immutable values inside a pure closure is fine; writing through a capture (a side effect on the enclosing scope) forces the inference to `Unknown` and the closure can then only be used in non-annotated contexts. Inference is currently binary (Pure vs Unknown); `#reads` / `#writes` on closures is a later refinement.
 
 ### `#ghost` — verification-only declarations
 

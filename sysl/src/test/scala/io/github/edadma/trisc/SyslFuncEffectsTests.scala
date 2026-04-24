@@ -205,6 +205,50 @@ class SyslFuncEffectsTests extends SyslTestHelpers {
 
   // ===== P4: SMETA round-trip via cross-unit imports =====
 
+  // ===== Closure effect inference =====
+
+  "pure lambda passed to a #pure callback slot is accepted" in {
+    // The closure `(a, b) -> a + b` has no side effects, no allocation, no impure calls —
+    // the analyzer probes it with `validatePureFn` and marks the synthesized FuncType as
+    // `#pure`, so it satisfies the slot.
+    eval("""
+      |#pure
+      |apply(f: (int, int) -> int #pure, x: int, y: int) -> int = f(x, y)
+      |
+      |main() -> int = apply((a: int, b: int) -> a + b, 20, 22)
+      |""".stripMargin) shouldBe 42
+  }
+
+  "closure reading a captured local is still pure" in {
+    // Reading captures is permitted in pure probes — closure only reads, doesn't mutate.
+    eval("""
+      |#pure
+      |apply(f: (int) -> int #pure, x: int) -> int = f(x)
+      |
+      |main() -> int
+      |    val offset = 10
+      |    return apply((v: int) -> v + offset, 32)
+      |""".stripMargin) shouldBe 42
+  }
+
+  "closure calling an impure function is not pure" in {
+    val t = intercept[Exception] {
+      eval("""
+        |var counter = 0
+        |
+        |bump() -> int
+        |    counter = counter + 1
+        |    return counter
+        |
+        |#pure
+        |apply(f: (int) -> int #pure, x: int) -> int = f(x)
+        |
+        |main() -> int = apply((v: int) -> v + bump(), 10)
+        |""".stripMargin)
+    }
+    t.getMessage should not be ""
+  }
+
   "imported #pure function reference satisfies pure callback slot in another unit" in {
     val libs = Map(
       "lib" -> """

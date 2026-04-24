@@ -3761,7 +3761,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case TStringFromPtr(ptr, len, _) => scanCaptures(ptr, locals); scanCaptures(len, locals)
           case TStringFromSlice(slc, _) => scanCaptures(slc, locals)
           case TStr(e) => scanCaptures(e, locals)
-          case TClosure(innerParams, _, innerBody, _, _) =>
+          case TClosure(innerParams, _, innerBody, _, _, _) =>
             val innerLocals = locals ++ innerParams.map(_.name).toSet
             innerBody match
               case TExprBody(e) => scanCaptures(e, innerLocals)
@@ -3849,7 +3849,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val escapesFlag = expectedFunc match
           case Some(ft) => ft.escaping
           case None => true  // conservative: no context → assume escaping
-        TClosure(typedParams, actualRet, tBody, captures.toList, escapesFlag)
+        // Infer closure effects by probing the body against the `#pure` discipline. If the
+        // probe succeeds, the closure is safe to pass to a `#pure` callback slot. Captures
+        // are handled correctly out-of-the-box: `validatePureFn` rejects writes to any name
+        // not in its localVars set, so writes to captured variables (side effects on the
+        // enclosing scope) force the probe to fail, while reads of captures — which don't
+        // mutate outer state — pass through. Impure calls, allocation, asm, indirect calls
+        // without a pure callee type: all rejected by the probe, flipping us to Unknown.
+        val inferredEffects = try
+          validatePureFn("<closure>", tBody, typedParams.map(_.name))
+          FuncEffects.Pure
+        catch case _: AnalysisError => FuncEffects.Unknown
+        TClosure(typedParams, actualRet, tBody, captures.toList, escapesFlag, inferredEffects)
 
       case AsmExprAST(code) =>
         TAsmExpr(code, currentReturnType)

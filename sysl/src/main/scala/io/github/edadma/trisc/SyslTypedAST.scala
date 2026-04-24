@@ -118,8 +118,8 @@ case class TStringFromSlice(slice: TExpr, typ: SyslType) extends TExpr
 case class TStr(expr: TExpr) extends TExpr { def typ: SyslType = SyslType.StringType }
 case class FmtSpec(verb: Char, width: Int = 0, zeroPad: Boolean = false, leftAlign: Boolean = false, showSign: Boolean = false, upperCase: Boolean = false)
 case class TFmtStr(expr: TExpr, spec: FmtSpec) extends TExpr { def typ: SyslType = SyslType.StringType }
-case class TClosure(params: List[TParam], returnType: SyslType, body: TFunBody, captures: List[(String, SyslType)], escapes: Boolean = true) extends TExpr {
-  def typ: SyslType = SyslType.FuncType(params.map(_.typ), returnType)
+case class TClosure(params: List[TParam], returnType: SyslType, body: TFunBody, captures: List[(String, SyslType)], escapes: Boolean = true, effects: FuncEffects = FuncEffects.Unknown) extends TExpr {
+  def typ: SyslType = SyslType.FuncType(params.map(_.typ), returnType, effects = effects)
 }
 case class TInterfaceBox(expr: TExpr, iface: SyslType.InterfaceType) extends TExpr {
   def typ: SyslType = iface
