@@ -14,7 +14,7 @@ case class PtrTypeAST(inner: TypeAST) extends TypeAST
 case class PtrNonNullTypeAST(inner: TypeAST) extends TypeAST
 case class ArrayTypeAST(size: Int, elem: TypeAST) extends TypeAST
 case class SliceTypeAST(elem: TypeAST) extends TypeAST
-case class FuncTypeAST(params: List[TypeAST], ret: TypeAST, escaping: Boolean = false) extends TypeAST
+case class FuncTypeAST(params: List[TypeAST], ret: TypeAST, escaping: Boolean = false, effects: FuncEffects = FuncEffects.Unknown) extends TypeAST
 case class TupleTypeAST(elems: List[TypeAST]) extends TypeAST
 case class RefTypeAST(inner: TypeAST) extends TypeAST
 
@@ -45,6 +45,10 @@ case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: O
 case class ExternVarDeclAST(name: String, typ: TypeAST, attributes: List[Attribute] = Nil) extends DeclAST
 case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil, typeBounds: Map[String, List[String]] = Map.empty, attributes: List[Attribute] = Nil, isDef: Boolean = false) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true, attributes: List[Attribute] = Nil, isVolatile: Boolean = false, isConst: Boolean = false) extends DeclAST
+// `#ghost` marker for `var`/`val` at statement position. Ghost locals exist only for
+// the verifier; the strip pass drops them (and any assignment to them, and any contract
+// clause that references them) before codegen. Discipline: real-code expressions cannot
+// read ghost names.
 case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, invariants: List[ExpressionAST] = Nil) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])], attributes: List[Attribute] = Nil) extends DeclAST
 case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil) extends DeclAST
@@ -63,7 +67,7 @@ case class TraitMethodAST(
 ) extends Positional
 case class ImplDeclAST(traitName: String, targetType: TypeAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
-case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST) extends Positional
+case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, effects: FuncEffects = FuncEffects.Unknown) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
 // `static_assert(cond)` or `static_assert(cond, "message")` at module scope — compile-time check.
 case class StaticAssertDeclAST(cond: ExpressionAST, message: Option[String]) extends DeclAST
@@ -94,11 +98,16 @@ case class BlockBodyAST(stmts: List[StmtAST], contracts: List[ContractClauseAST]
 sealed trait ContractKind
 case object ContractRequire extends ContractKind
 case object ContractEnsure extends ContractKind
+/** Function-level termination witness. The expression is evaluated at function entry
+ *  (snapshot) and at every direct recursive call site (with parameters substituted by
+ *  the call args); the call-site value must be strictly less than the snapshot AND ≥ 0.
+ *  Used by a future verifier to discharge termination obligations on recursive functions. */
+case object ContractVariant extends ContractKind
 case class ContractClauseAST(kind: ContractKind, expr: ExpressionAST, message: Option[String] = None) extends Positional
 
 // Statements
 trait StmtAST extends Positional
-case class VarStmtAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isMutable: Boolean = true, isVolatile: Boolean = false, isConst: Boolean = false) extends StmtAST
+case class VarStmtAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isMutable: Boolean = true, isVolatile: Boolean = false, isConst: Boolean = false, isGhost: Boolean = false) extends StmtAST
 case class DestructureStmtAST(names: List[String], init: ExpressionAST, isMutable: Boolean = false) extends StmtAST
 case class AssignStmtAST(target: String, value: ExpressionAST) extends StmtAST
 case class CompoundAssignStmtAST(target: String, op: String, value: ExpressionAST) extends StmtAST

@@ -266,13 +266,24 @@ today (other servers pass 0 and skip the MMIO grant entirely).
         val pml4 = vm_create_process_pt()
         if pml4 == 0
             return 0
-        // Grant user access to page 0xBF (0xBF000) for RS info page
-        // (RS TID, ramdisk base/size written before server starts)
         val pdpt = u64(vm_read_pte64(pml4) & PTE_ADDR_MASK)
         val pd = u64(vm_read_pte64(pdpt) & PTE_ADDR_MASK)
         val pt = u64(vm_read_pte64(pd) & PTE_ADDR_MASK)
-        val old_pte = vm_read_pte64(pt + u64(0xBF) * 8)
-        vm_write_pte64(pt + u64(0xBF) * 8, old_pte | PTE_U)
+
+        // Expand server user region downward: replace kernel-identity
+        // mappings at PT[0x40..0xCA] with fresh user pages. The server
+        // binary loads at 0x40000 with _heap_end = 0xCB000 (guard),
+        // giving ~555KB for code+BSS. Needed because inet grew past
+        // the old 0xD4000..0x100000 slot (~176KB) and its zero-fill
+        // was corrupting the kernel's identity-mapped code at 1MB+.
+        var si = 0x40
+        while si <= 0xCA
+            val npage = page_alloc()
+            if npage == 0
+                return 0
+            vm_write_pte64(pt + u64(si) * 8,
+                i64(npage) | PTE_P | PTE_W | PTE_U)
+            si += 1
 
         if io_page != 0
             // Build a fresh PD for 3-4GB with PTE_U=1 on every 2MB

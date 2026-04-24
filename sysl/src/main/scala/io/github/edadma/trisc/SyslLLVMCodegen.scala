@@ -190,7 +190,7 @@ class SyslLLVMCodegen(target: String = "host"):
       decl match
         case TStructDecl(name, fields, volFields) =>
           structTypes(name) = SyslType.StructType(name, fields, volFields)
-        case TFunDecl(name, _, _, _, _, _, _) if name.endsWith("_deinit") =>
+        case TFunDecl(name, _, _, _, _, _, _, _, _) if name.endsWith("_deinit") =>
           val structName = name.indexOf("__") match
             case -1 => name.dropRight(7) // "Point_deinit" -> "Point"
             case i  => name.substring(i + 2).dropRight(7) // "mod__Point_deinit" -> "Point"
@@ -198,7 +198,7 @@ class SyslLLVMCodegen(target: String = "host"):
         case _ =>
 
     // Collect all function names that will be defined in this compilation unit
-    val definedFuncNames = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _) => name }.toSet
+    val definedFuncNames = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _, _, _) => name }.toSet
 
     // Pre-populate funcParamTypes for ALL functions before generating any code.
     // Without this, calls to functions defined later in the file would not know
@@ -236,7 +236,7 @@ class SyslLLVMCodegen(target: String = "host"):
           if !emittedFunctions.contains(f.name) then
             emittedFunctions += f.name
             genFunction(f)
-        case TVarDecl(name, typ, init, _, isVolatile) =>
+        case TVarDecl(name, typ, init, _, isVolatile, _) =>
           val initVal = constValue(init, typ)
           emit(s"@$name = global ${llvmType(typ)} $initVal")
           globalVarTypes(name) = typ
@@ -285,7 +285,7 @@ class SyslLLVMCodegen(target: String = "host"):
     // end so all referenced methods are already defined.
     for (name, (iface, structName)) <- itables do
       val n = iface.methods.length
-      val entries = iface.methods.map { (mName, mParams, mRet) =>
+      val entries = iface.methods.map { (mName, mParams, mRet, _) =>
         val shortName = s"${structName}_$mName"
         val fnName = if funcParamTypes.contains(shortName) then shortName
           else funcParamTypes.keys.find(_.endsWith(s"__$shortName")).getOrElse(shortName)
@@ -730,7 +730,7 @@ class SyslLLVMCodegen(target: String = "host"):
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
-      case TVarStmt(name, typ, init, isVolatile) =>
+      case TVarStmt(name, typ, init, isVolatile, _) =>
         val lt = llvmType(typ)
         if isStringType(typ) then
           // String locals always get a stable entry-block alloca with the descriptor copied in.
@@ -3027,7 +3027,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val wrapperName = funcWrappers.getOrElseUpdate(name, {
           val wn = s"__wrap_$name"
           typ match
-            case SyslType.FuncType(params, retType, _) =>
+            case SyslType.FuncType(params, retType, _, _) =>
               pendingWrappers += ((wn, name, params, retType))
             case _ =>
           wn
@@ -3038,7 +3038,7 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $fpGep = getelementptr %struct.closure, %struct.closure* $alloca, i32 0, i32 0")
         val fpCast = newReg()
         typ match
-          case SyslType.FuncType(params, retType, _) =>
+          case SyslType.FuncType(params, retType, _, _) =>
             val paramStr = ("i8*" +: params.map(llvmType)).mkString(", ")
             emit(s"  $fpCast = bitcast ${llvmType(retType)} ($paramStr)* @$wrapperName to i8*")
           case _ =>
@@ -3177,7 +3177,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val envPtr = newReg()
         emit(s"  $envPtr = load i8*, i8** $envGep")
         callee.typ match
-          case SyslType.FuncType(params, retType, _) =>
+          case SyslType.FuncType(params, retType, _, _) =>
             val paramTypes = params.map(llvmType)
             val argVals = args.zip(paramTypes).map { (a, pt) =>
               val v = genExpr(a)
@@ -3633,7 +3633,7 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $selfPtr = load i8*, i8** $dataGep")
         val iface = ifaceVal.typ.underlying.asInstanceOf[SyslType.InterfaceType]
         val nMethods = iface.methods.length
-        val (_, methodParams, methodRet) = iface.methods(methodIndex)
+        val (_, methodParams, methodRet, _) = iface.methods(methodIndex)
         val retLt = llvmType(methodRet)
         val paramLts = methodParams.map(llvmType)
         val fnParamStr = ("i8*" :: paramLts).mkString(", ")
