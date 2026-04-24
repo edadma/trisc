@@ -543,16 +543,25 @@ class SyslLLVMCodegen(target: String = "host"):
     activeOut = out
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
-      // Zero-initialize allocas that may be decremented on unexecuted paths.
-      // Aggregate allocas (structs, arrays, strings, closures) can contain
-      // rc-tracked pointers; if a nested-scope val never gets bound (e.g. a
-      // loop `break`s before its assignment) but the hoisted alloca's cleanup
-      // still runs at function exit, we must ensure pointer fields read as
-      // null rather than stack garbage.
+      // Zero-initialize allocas whose cleanup walks rc-tracked pointers, so
+      // unexecuted-path alloca reads see null rather than stack garbage. Covers
+      // %struct.slice (backref), %struct.string (data ptr), %struct.closure
+      // (env_ptr), %struct.iface (itable/data ptrs), and any user struct that
+      // recursively contains strings / closures. Skip plain aggregates like
+      // [N x byte] and rc-free user structs — on aarch64 these showed up
+      // as large RS/kernel work buffers that were slower with zero-init and
+      // (anecdotally) tickled a codegen bug that broke boot.
       if lt == "i8*" then
         emit(s"  store i8* null, i8** $reg")
-      else if lt.startsWith("%struct.") || lt.startsWith("[") then
+      else if lt == "%struct.slice" || lt == "%struct.string"
+           || lt == "%struct.closure" || lt == "%struct.iface" then
         emit(s"  store $lt zeroinitializer, $lt* $reg")
+      else if lt.startsWith("%struct.") then
+        val name = lt.stripPrefix("%struct.")
+        structTypes.get(name) match
+          case Some(st) if structHasStringFields(st) =>
+            emit(s"  store $lt zeroinitializer, $lt* $reg")
+          case _ =>
     out ++= bodyBuf
 
     emit("}")
