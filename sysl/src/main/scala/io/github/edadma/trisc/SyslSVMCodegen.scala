@@ -37,6 +37,7 @@ class SyslSVMCodegen:
   // Pre-count locals needed for a function body
   private def countLocals(body: TFunBody): Int =
     var count = 0
+    val seen = new mutable.HashSet[String]
     def scanStmts(stmts: List[TStmt]): Unit = stmts.foreach(scanStmt)
     def scanExpr(e: TExpr): Unit = e match
       case TMatchExpr(scr, arms, default, _) =>
@@ -84,8 +85,11 @@ class SyslSVMCodegen:
       case TLen(inner, _) => scanExpr(inner)
       case _ =>
     def scanStmt(s: TStmt): Unit = s match
-      case TVarStmt(_, _, init, _) => count += 1; scanExpr(init)
-      case TAssignStmt(_, value) => scanExpr(value)
+      case TVarStmt(name, _, init, _) => seen += name; count += 1; scanExpr(init)
+      case TAssignStmt(target, value) =>
+        scanExpr(value)
+        if !seen.contains(target) && !globals.contains(target) then
+          seen += target; count += 1
       case TCompoundAssignStmt(_, _, value) => scanExpr(value)
       case TDerefAssignStmt(p, v) => scanExpr(p); scanExpr(v)
       case TIndexAssignStmt(a, i, v) => scanExpr(a); scanExpr(i); scanExpr(v)
@@ -415,10 +419,14 @@ class SyslSVMCodegen:
       genExpr(value)
       locals.get(target) match
         case Some(LocalInfo(idx, _)) => emit(s"  local_set $idx")
-        case None =>
-          // Global
+        case None if globals.contains(target) =>
           emit(s"  push_i64 $target")
           emit("  store64")
+        case None =>
+          // Implicit local declaration (e.g. `v = expr?` sugar lowered by the
+          // analyzer into `TAssignStmt` with a fresh target).
+          val idx = allocLocal(target, value.typ)
+          emit(s"  local_set $idx")
 
     case TCompoundAssignStmt(target, op, value) =>
       locals.get(target) match
