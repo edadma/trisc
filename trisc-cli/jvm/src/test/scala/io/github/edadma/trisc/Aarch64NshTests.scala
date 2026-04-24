@@ -365,6 +365,64 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       bulkEcho.join(2000)
   }
 
+  "aarch64 tcp: fast retransmit on 3 dup-ACKs" in {
+    // Phase 2 of TCP congestion control. The nic's loss-injection
+    // knob drops the first TCP data segment post-connect; the host
+    // still receives segments 2, 3, 4 out of order and emits three
+    // duplicate ACKs. Slix's dup-ACK counter reaches 3, fast
+    // retransmit fires, ssthresh is halved from its initial 65535.
+    //
+    // The RTO in the slix stack is ~1 s at this point, and the
+    // test runs in far less than that — so any ssthresh change
+    // we observe has to come from the fast-retransmit path
+    // (`inet_tcp_fast_retransmit`), not from `inet_tcp_cwnd_on_rto`.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+    val bulkEcho = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](2048)
+          var remaining = 1920
+          while remaining > 0 do
+            val n = in.read(buf, 0, math.min(buf.length, remaining))
+            if n <= 0 then remaining = 0
+            else
+              out.write(buf, 0, n)
+              out.flush()
+              remaining -= n
+          Thread.sleep(200)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-fr-echo")
+    bulkEcho.setDaemon(true)
+    bulkEcho.start()
+
+    try
+      qemu.send("test_tcp_fr\n")
+      val output = qemu.waitFor("test_tcp_fr: ok")
+      output should include("test_tcp_fr: arm drop_next=1")
+      output should include("test_tcp_fr: sent=1920")
+      val ssRe = """ssthresh=(\d+)\s+cwnd=(\d+)""".r
+      val matches = ssRe.findAllMatchIn(output).toList
+      matches.length shouldBe 2
+      val initialSs   = matches(0).group(1).toInt
+      val afterSs     = matches(1).group(1).toInt
+      initialSs shouldBe 65535
+      assert(afterSs < 65535,
+        s"expected ssthresh halving from fast retransmit, " +
+        s"got initial=$initialSs after=$afterSs " +
+        s"(still at initial means fast retransmit didn't fire)")
+    finally
+      server.close()
+      bulkEcho.join(2000)
+  }
+
   // RST-on-unsolicited-SYN is implemented in inet_proto.lsysl
   // (inet_tcp_emit_rst + handle_segment listen-miss dispatch) but
   // can't be validated through QEMU's user-mode slirp: hostfwd

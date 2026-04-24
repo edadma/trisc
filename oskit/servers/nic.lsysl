@@ -63,6 +63,7 @@ Command codes.
     val NIC_CMD_SEND_PACKET  = 2
     val NIC_CMD_SUBSCRIBE_RX = 3
     val NIC_CMD_RECV_PACKET  = 4
+    val NIC_CMD_DEBUG_DROP_NEXT = 5
 
 
 Capacity. Ethernet II without VLAN caps at 1514 bytes; IPC
@@ -93,6 +94,21 @@ Single subscriber for now — inet is the sole RX consumer.
 
     var nic_subscriber_tid = -1
     var nic_port = -1
+
+
+Test-only loss injection. When `nic_debug_drop_next > 0`, each
+outgoing frame decrements the counter; the frame that brings
+it to zero is dropped silently (`virtio_net_send` is skipped
+but the caller sees status=0). Used by the TCP congestion
+control test harness to simulate a dropped segment so the
+dup-ACK / fast retransmit path can be exercised against an
+otherwise lossless slirp.
+
+Never set in production paths. The test sends
+`NIC_CMD_DEBUG_DROP_NEXT(n)` to arm it, then triggers the TX
+pattern it wants to punish; the counter is one-shot.
+
+    var nic_debug_drop_next: int = 0
 
 
 ### Byte-buffer helpers
@@ -165,12 +181,39 @@ diagnostics.
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 1)
             return
+        // Loss injection for the TCP fast-retransmit test harness.
+        // When armed, drop silently and report success.
+        if nic_debug_drop_next > 0
+            nic_debug_drop_next -= 1
+            if nic_debug_drop_next == 0
+                reply[0] = 0
+                ipc_reply(sender, reply, 1)
+                return
         val frame: *byte = buf + 3
         val r = virtio_net_send(frame, len)
         if r == 0
             reply[0] = byte(-1)
         else
             reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### DEBUG_DROP_NEXT handler
+
+```
+request: cmd(1) + n_hi(2) + n_lo(2)    = 5 bytes
+reply:   status(1)                      = 1 byte
+```
+
+N > 0: pass N-1 frames normally, then drop the Nth.
+N = 0: disable dropping.
+
+    nic_handle_debug_drop_next(sender: int, buf: *byte)
+        val hi = nic_read_u16(buf, 1)
+        val lo = nic_read_u16(buf, 3)
+        nic_debug_drop_next = (hi << 16) | lo
+        var reply: [1]byte
+        reply[0] = 0
         ipc_reply(sender, reply, 1)
 
 
@@ -258,6 +301,8 @@ builds without IRQ routing wired yet.
                     nic_handle_subscribe_rx(sender)
                 else if cmd == NIC_CMD_RECV_PACKET
                     nic_handle_recv_packet(sender)
+                else if cmd == NIC_CMD_DEBUG_DROP_NEXT
+                    nic_handle_debug_drop_next(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)

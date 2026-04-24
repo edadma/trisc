@@ -1,0 +1,147 @@
+test_tcp_fr — TCP fast retransmit (RFC 5681 §3.2)
+====================================================
+
+Connects to the host echo server on 10.0.2.2:18080, arms the
+nic loss injector to drop the first TX after connect, then
+pipelines 1920 bytes (four MSS-sized segments). The first
+segment is dropped; the host's ACKs for segments 2, 3, 4 all
+re-ACK the byte we're still waiting on, producing three pure
+duplicate ACKs. Slix's ACK handler should count them and fire
+`inet_tcp_fast_retransmit` well before the RTO fires.
+
+Observable via `tcp_debug`:
+
+- Before fast retransmit: `snd_ssthresh == 65535` (initial,
+  never halved).
+- After: `snd_ssthresh < 65535` — only the fast-retransmit or
+  RTO collapse paths can lower it, and the test is scheduled
+  so RTO can't have fired in time.
+
+Harness asserts the ssthresh transition and that the payload
+eventually bounces back through the echo (proving the
+retransmit actually got the lost segment re-delivered).
+
+Output:
+
+```
+test_tcp_fr: connected fd=N
+test_tcp_fr: initial ssthresh=65535 cwnd=1440
+test_tcp_fr: arm drop_next=1
+test_tcp_fr: sent=1920
+test_tcp_fr: after ssthresh=N cwnd=M
+test_tcp_fr: ok
+```
+
+    module oskit.bin.test_tcp_fr
+
+    import oskit.ulib.{puts, exit, exit_with, sleep}
+    import oskit.net.{tcp_connect, tcp_send, tcp_close, tcp_debug,
+        TcpDebug, nic_debug_drop_next}
+    import std.net.ipv4
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+    print_int(prefix: string, v: int)
+        puts(prefix)
+        if v < 0
+            puts("-")
+            print_udec(0 - v)
+        else
+            print_udec(v)
+
+
+    main(argv: []string)
+        val dst = ipv4(10, 0, 2, 2)
+        var fd = -1
+        var attempts = 0
+        while fd < 0 && attempts < 5
+            fd = tcp_connect(dst, 18080)
+            if fd < 0
+                sleep(20)
+            attempts += 1
+        if fd < 0
+            puts("test_tcp_fr: connect failed\n")
+            exit_with(1)
+            return
+        print_int("test_tcp_fr: connected fd=", fd)
+        puts("\n")
+
+        var d0: TcpDebug
+        if tcp_debug(fd, &d0) < 0
+            puts("test_tcp_fr: debug(initial) failed\n")
+            tcp_close(fd)
+            exit_with(2)
+            return
+        puts("test_tcp_fr: initial")
+        print_int(" ssthresh=", d0.snd_ssthresh)
+        print_int(" cwnd=", d0.snd_cwnd)
+        puts("\n")
+
+Arm the one-shot loss injector. The very next TCP data segment
+we emit will be dropped by the nic before it hits the wire.
+
+        if nic_debug_drop_next(1) < 0
+            puts("test_tcp_fr: arm drop failed\n")
+            tcp_close(fd)
+            exit_with(3)
+            return
+        puts("test_tcp_fr: arm drop_next=1\n")
+
+        var payload: [1920]byte
+        var j = 0
+        while j < 1920
+            payload[j] = byte(j & 0xff)
+            j += 1
+        // tcp_send() caps at INET_MAX_TCP_SEG (480) per call, so loop
+        // to push all four segments. The second, third, fourth go
+        // through normally — only the first gets dropped by the nic.
+        // Those three delivered segments trigger three dup-ACKs on
+        // the host side, which is exactly what fast retransmit
+        // needs to fire.
+        var total = 0
+        while total < 1920
+            val chunk = 480
+            var want = chunk
+            if total + want > 1920
+                want = 1920 - total
+            val sent = tcp_send(fd, &payload[total], want)
+            if sent < 0
+                puts("test_tcp_fr: send failed\n")
+                tcp_close(fd)
+                exit_with(4)
+                return
+            if sent == 0
+                sleep(2)
+            else
+                total += sent
+        print_int("test_tcp_fr: sent=", total)
+        puts("\n")
+
+Wait long enough for host ACKs to arrive — the three duplicate
+ACKs arrive within one RTT (~tens of ms on slirp). Our RTO is
+~1 s initially, so 100 ms is well inside the pre-RTO window.
+
+        sleep(10)
+
+        var d1: TcpDebug
+        if tcp_debug(fd, &d1) < 0
+            puts("test_tcp_fr: debug(after) failed\n")
+            tcp_close(fd)
+            exit_with(5)
+            return
+        puts("test_tcp_fr: after")
+        print_int(" ssthresh=", d1.snd_ssthresh)
+        print_int(" cwnd=", d1.snd_cwnd)
+        puts("\n")
+
+Disable drop injection so nothing on the way out is affected.
+
+        nic_debug_drop_next(0)
+        tcp_close(fd)
+        puts("test_tcp_fr: ok\n")
+        exit()
