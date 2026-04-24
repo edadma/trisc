@@ -83,11 +83,7 @@ class SyslTriscQuantifierTests extends SyslCodegenHelpers {
         |""".stripMargin) shouldBe 1L
   }
 
-  // TODO: un-ignore when TRISC branch relaxation handles tight nested quantifier layouts.
-  // The generated conditional-branch displacement sits right at the ±126-byte short-form
-  // boundary; the assembler's relaxation pass currently emits a short form and the bne
-  // immediate validator rejects it. Single-level quantifiers (all other tests here) work.
-  "nested: for all of for some" ignore {
+  "nested: for all of for some" in {
     compileAndRun(
       """main() -> int
         |    if for all i in 0..3 => for some j in 0..3 => i + j == 3 then 1 else 0

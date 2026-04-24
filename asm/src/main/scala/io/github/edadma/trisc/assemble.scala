@@ -934,10 +934,15 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         addInstruction(3 -> baseOpcode, 3 -> r1, 3 -> r2, 7 -> (addresses * 2 + 2) / 2) // skip long jump
         emitLongBranch(o3)
       else
+        // Synthesized form: cond branch (2B) + bra (2B). fold returns n = target - (PC+2)
+        // for the synthesized START. The bra inside is at PC+2; its 7-bit signed field
+        // encodes (target - (PC+4))/2, so the actual constraint is n - 2 ∈ [-128, 126]
+        // i.e. n ∈ [-126, 128]. The relaxation pass at the top of this file uses the same
+        // (n - 2) form when shortSize > 2 — keep the two checks in sync.
         val imm =
           fold(o3, immediate = true) match
             case _: DoubleExprAST                                      => problem(o3, "immediate must be integral")
-            case LongExprAST(n) if -128 <= n && n <= 126 && n % 2 == 0 => (n - 2).toInt
+            case LongExprAST(n) if -126 <= n && n <= 128 && n % 2 == 0 => (n - 2).toInt
             case _: LongExprAST => problem(o3, "immediate must be an even signed 8-bit value")
         addInstruction(3 -> baseOpcode, 3 -> r1, 3 -> r2, 7 -> 1)
         addInstruction(3 -> 2, 3 -> 0, 3 -> 0, 7 -> imm / 2)
