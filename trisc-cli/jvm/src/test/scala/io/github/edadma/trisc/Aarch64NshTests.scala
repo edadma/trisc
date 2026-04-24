@@ -628,6 +628,102 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       dns.close()
   }
 
+  "aarch64 wget: resolve + fetch via mock DNS and mock HTTP" in {
+    // End-to-end "real internet" proof: guest parses URL, resolves
+    // name via our mock DNS (which answers any query with an A
+    // record = 10.0.2.2), opens TCP to 10.0.2.2:<httpPort> which
+    // slirp forwards to the host's mock HTTP server on
+    // 127.0.0.1:<httpPort>. Mock HTTP replies with "hello wget\n"
+    // and closes. Guest reads until EOF, prints body to stdout,
+    // emits `wget: done`.
+    val http = new java.net.ServerSocket()
+    http.setReuseAddress(true)
+    http.bind(new java.net.InetSocketAddress("127.0.0.1", 0))
+    http.setSoTimeout(10000)
+    val httpPort = http.getLocalPort
+
+    val dns = new java.net.DatagramSocket(
+      new java.net.InetSocketAddress("127.0.0.1", 0))
+    val dnsPort = dns.getLocalPort
+
+    val httpAnswered = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val dnsAnswered  = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+    val dnsThread = new Thread(() => {
+      try
+        val qbuf = new Array[Byte](512)
+        val inPkt = new java.net.DatagramPacket(qbuf, qbuf.length)
+        dns.setSoTimeout(10000)
+        dns.receive(inPkt)
+        val qlen = inPkt.getLength
+        val resp = new Array[Byte](qlen + 16)
+        System.arraycopy(qbuf, 0, resp, 0, qlen)
+        resp(2) = (resp(2) | 0x80.toByte).toByte
+        resp(6) = 0
+        resp(7) = 1
+        var off = qlen
+        resp(off)      = 0xc0.toByte
+        resp(off + 1)  = 0x0c.toByte
+        resp(off + 2)  = 0; resp(off + 3)  = 1
+        resp(off + 4)  = 0; resp(off + 5)  = 1
+        resp(off + 6)  = 0; resp(off + 7)  = 0
+        resp(off + 8)  = 0; resp(off + 9)  = 60.toByte
+        resp(off + 10) = 0; resp(off + 11) = 4
+        resp(off + 12) = 10
+        resp(off + 13) = 0
+        resp(off + 14) = 2
+        resp(off + 15) = 2
+        dns.send(new java.net.DatagramPacket(
+          resp, resp.length, inPkt.getAddress, inPkt.getPort))
+        dnsAnswered.set(true)
+      catch case _: Throwable => ()
+    }, "mock-dns-wget")
+    dnsThread.setDaemon(true)
+    dnsThread.start()
+
+    val httpThread = new Thread(() => {
+      try
+        val client = http.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val rbuf = new Array[Byte](2048)
+          var total = 0
+          var done  = false
+          while !done && total < rbuf.length do
+            val r = in.read(rbuf, total, rbuf.length - total)
+            if r <= 0 then done = true
+            else
+              total += r
+              val s = new String(rbuf, 0, total, "UTF-8")
+              if s.contains("\r\n\r\n") then done = true
+          val body = "hello wget\n"
+          val respStr = s"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body"
+          out.write(respStr.getBytes("UTF-8"))
+          out.flush()
+          httpAnswered.set(true)
+        finally client.close()
+      catch case _: Throwable => ()
+    }, "mock-http-wget")
+    httpThread.setDaemon(true)
+    httpThread.start()
+
+    try
+      qemu.send(s"wget http://example.local:$httpPort/hello 10.0.2.2 $dnsPort\n")
+      val output = qemu.waitFor("wget: done")
+      output should include("wget: resolved example.local -> 10.0.2.2")
+      output should include("wget: status=200")
+      output should include("hello wget")
+      output should include("wget: done")
+      dnsThread.join(5000)
+      httpThread.join(5000)
+      dnsAnswered.get()  shouldBe true
+      httpAnswered.get() shouldBe true
+    finally
+      dns.close()
+      http.close()
+  }
+
   "aarch64 tcp: multi-request httpd accept loop" in {
     // Three back-to-back dials to a single httpd process. The
     // server serves 3 requests in a sequential accept loop and
