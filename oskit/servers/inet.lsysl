@@ -605,19 +605,19 @@ reply:   status(1) + state(1)
        + snd_una(4)       + snd_nxt(4)
        + snd_wnd(4)       + send_len(4)
        + fast_recovery(4) + dup_ack_count(4)
-       + sack_ok(4)                          = 38 bytes
+       + sack_ok(4)       + rexmit_count(4)     = 42 bytes
 ```
 
     inet_handle_tcp_debug(sender: int, buf: *byte)
         val fd = inet_read_u16(buf, 1) & 0xffff
-        var reply: [38]byte
+        var reply: [42]byte
         if fd < 0 || fd >= 16
             reply[0] = byte(-1)
-            ipc_reply(sender, reply, 38)
+            ipc_reply(sender, reply, 42)
             return
         if tcp_sockets[fd].in_use == 0
             reply[0] = byte(-1)
-            ipc_reply(sender, reply, 38)
+            ipc_reply(sender, reply, 42)
             return
         reply[0] = 0
         reply[1] = byte(tcp_sockets[fd].state & 0xff)
@@ -630,7 +630,8 @@ reply:   status(1) + state(1)
         inet_dbg_write_i32(reply, 26, tcp_sockets[fd].fast_recovery)
         inet_dbg_write_i32(reply, 30, tcp_sockets[fd].dup_ack_count)
         inet_dbg_write_i32(reply, 34, tcp_sockets[fd].sack_ok)
-        ipc_reply(sender, reply, 38)
+        inet_dbg_write_i32(reply, 38, tcp_sockets[fd].rexmit_count)
+        ipc_reply(sender, reply, 42)
 
     inet_dbg_write_i32(p: *byte, off: int, v: int)
         p[off]     = byte((v >> 24) & 0xff)

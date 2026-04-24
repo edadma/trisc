@@ -795,6 +795,17 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         len: int
         data: [480]byte
 
+    // RFC 2018 §3: a SACK block is `[left, right)` describing a
+    // contiguous byte range the peer buffered out-of-order.
+    // `TCP_SACK_BOARD` caps the per-socket scoreboard we
+    // accumulate across ACKs during a single recovery round.
+    struct TcpSackBlock
+        in_use: int
+        left: u32
+        right: u32
+
+    val TCP_SACK_BOARD = 8
+
     struct TcpSocket
         in_use: int
         state: int
@@ -847,7 +858,10 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         fast_recovery: int
         recovery_point: u32
         sack_ok: int
-        peer_sack_seen: int
+        sack_board: [8]TcpSackBlock
+        sack_rexmit_cursor: u32
+        sack_rexmit_valid: int
+        rexmit_count: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -884,11 +898,16 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
             tcp_sockets[i].fast_recovery = 0
             tcp_sockets[i].recovery_point = u32(0)
             tcp_sockets[i].sack_ok = 0
-            tcp_sockets[i].peer_sack_seen = 0
+            tcp_sockets[i].sack_rexmit_valid = 0
+            tcp_sockets[i].rexmit_count = 0
             var k = 0
             while k < TCP_REORDER_SLOTS
                 tcp_sockets[i].reorder[k].in_use = 0
                 k += 1
+            var bi = 0
+            while bi < TCP_SACK_BOARD
+                tcp_sockets[i].sack_board[bi].in_use = 0
+                bi += 1
             i += 1
 
 
@@ -955,6 +974,143 @@ header end. Unknown options are skipped.
                         return 1
                 off += olen
         0
+
+
+Merge a new SACK block `[seq, end)` into socket `s`'s scoreboard.
+Coalesces with overlapping or adjacent existing blocks; drops
+blocks wholly to the left of `snd_una` (cumulative ACK already
+covers them). Caller guarantees `seq < end`.
+
+    tcp_sack_board_insert(s: int, left: u32, right: u32)
+        if tcp_seq_le(right, tcp_sockets[s].snd_una) != 0
+            return
+        var nleft = left
+        var nright = right
+        if tcp_seq_lt(nleft, tcp_sockets[s].snd_una) != 0
+            nleft = tcp_sockets[s].snd_una
+        var bi = 0
+        while bi < TCP_SACK_BOARD
+            if tcp_sockets[s].sack_board[bi].in_use != 0
+                val bleft = tcp_sockets[s].sack_board[bi].left
+                val bright = tcp_sockets[s].sack_board[bi].right
+                val overlap = tcp_seq_le(nleft, bright) != 0
+                if overlap
+                    if tcp_seq_le(bleft, nright) != 0
+                        if tcp_seq_lt(bleft, nleft) != 0
+                            nleft = bleft
+                        if tcp_seq_lt(nright, bright) != 0
+                            nright = bright
+                        tcp_sockets[s].sack_board[bi].in_use = 0
+            bi += 1
+        bi = 0
+        while bi < TCP_SACK_BOARD
+            if tcp_sockets[s].sack_board[bi].in_use == 0
+                tcp_sockets[s].sack_board[bi].in_use = 1
+                tcp_sockets[s].sack_board[bi].left = nleft
+                tcp_sockets[s].sack_board[bi].right = nright
+                return
+            bi += 1
+
+
+Purge scoreboard entries covered by the advanced `snd_una`.
+Blocks strictly to the left get dropped; blocks straddling the
+boundary get left-clipped.
+
+    tcp_sack_board_purge(s: int)
+        var bi = 0
+        while bi < TCP_SACK_BOARD
+            if tcp_sockets[s].sack_board[bi].in_use != 0
+                val bright = tcp_sockets[s].sack_board[bi].right
+                if tcp_seq_le(bright, tcp_sockets[s].snd_una) != 0
+                    tcp_sockets[s].sack_board[bi].in_use = 0
+                else
+                    val bleft = tcp_sockets[s].sack_board[bi].left
+                    if tcp_seq_lt(bleft, tcp_sockets[s].snd_una) != 0
+                        tcp_sockets[s].sack_board[bi].left = tcp_sockets[s].snd_una
+            bi += 1
+
+
+Clear all scoreboard entries. Called on full recovery exit and
+socket reuse — we don't want a stale block to influence the
+next connection or retransmit round.
+
+    tcp_sack_board_clear(s: int)
+        var bi = 0
+        while bi < TCP_SACK_BOARD
+            tcp_sockets[s].sack_board[bi].in_use = 0
+            bi += 1
+        tcp_sockets[s].sack_rexmit_valid = 0
+
+
+Parse every `Kind=5` SACK option in the TCP options area and
+insert each block into the socket's scoreboard. Unknown,
+malformed, or duplicate options are tolerated: the parser
+bails early on the first length inconsistency rather than
+reading past the header.
+
+    tcp_opts_apply_sack(s: int, frame: *byte, tcp_off: int,
+                        hdr_len: int)
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return
+                if off + olen > opts_end
+                    return
+                if kind == TCP_OPT_SACK
+                    // Block payload: (olen - 2) bytes = 8n,
+                    // n ∈ {1..4}. Anything else is malformed.
+                    val payload_len = olen - 2
+                    if payload_len >= 8
+                        if (payload_len % 8) == 0
+                            var bo = off + 2
+                            val bend_off = off + olen
+                            while bo + 8 <= bend_off
+                                val blk_left = tcp_read_u32(frame, bo)
+                                val blk_right = tcp_read_u32(frame, bo + 4)
+                                if tcp_seq_lt(blk_left, blk_right) != 0
+                                    tcp_sack_board_insert(s, blk_left, blk_right)
+                                bo += 8
+                off += olen
+
+
+Find the next un-SACKed byte `≥ cursor` within `[snd_una, snd_nxt)`,
+or `snd_nxt` if no hole remains. Straightforward scan over the
+scoreboard: if any block covers `cursor`, jump `cursor` to its
+end and restart. Terminates because each jump advances cursor
+by ≥ 1 byte and the scoreboard has at most `TCP_SACK_BOARD`
+blocks — so at most `TCP_SACK_BOARD + 1` passes.
+
+    tcp_sack_next_hole(s: int, cursor: u32) -> u32
+        var c = cursor
+        if tcp_seq_lt(c, tcp_sockets[s].snd_una) != 0
+            c = tcp_sockets[s].snd_una
+        var passes = 0
+        while passes <= TCP_SACK_BOARD
+            var moved = 0
+            var bi = 0
+            while bi < TCP_SACK_BOARD
+                if tcp_sockets[s].sack_board[bi].in_use != 0
+                    val bleft = tcp_sockets[s].sack_board[bi].left
+                    val bright = tcp_sockets[s].sack_board[bi].right
+                    if tcp_seq_le(bleft, c) != 0
+                        if tcp_seq_lt(c, bright) != 0
+                            c = bright
+                            moved = 1
+                bi += 1
+            if moved == 0
+                return c
+            passes += 1
+        c
 
 
 Build a single Ethernet + IPv4 + TCP frame for socket `s`. Payload
@@ -1266,6 +1422,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         while k < TCP_REORDER_SLOTS
             tcp_sockets[s].reorder[k].in_use = 0
             k += 1
+        tcp_sack_board_clear(s)
 
 
     inet_tcp_alloc() -> int
@@ -1304,11 +1461,16 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 tcp_sockets[i].fast_recovery = 0
                 tcp_sockets[i].recovery_point = u32(0)
                 tcp_sockets[i].sack_ok = 0
-                tcp_sockets[i].peer_sack_seen = 0
+                tcp_sockets[i].sack_rexmit_valid = 0
+                tcp_sockets[i].rexmit_count = 0
                 var k = 0
                 while k < TCP_REORDER_SLOTS
                     tcp_sockets[i].reorder[k].in_use = 0
                     k += 1
+                var bi = 0
+                while bi < TCP_SACK_BOARD
+                    tcp_sockets[i].sack_board[bi].in_use = 0
+                    bi += 1
                 return i
             i += 1
         -1
@@ -1654,6 +1816,10 @@ yet.
         // start from a single MSS.
         tcp_sockets[s].fast_recovery = 0
         tcp_sockets[s].dup_ack_count = 0
+        // Any SACK info the peer had is worthless now: RTO means
+        // we can't trust the scoreboard was coherent with what's
+        // still in flight.
+        tcp_sack_board_clear(s)
 
 
 RFC 5681 §3.2 ¶4-5 — fast retransmit + enter fast recovery.
@@ -1665,7 +1831,12 @@ dup-ACKs, and sets `fast_recovery = 1`. `recovery_point`
 records `snd_nxt` at entry so the ACK handler knows when
 recovery ends (first ACK past this seq).
 
-Retransmits exactly one MSS-sized segment at `snd_una`.
+Retransmits one MSS-sized segment. Without SACK we have to
+assume the dropped segment is at `snd_una` — peer hasn't told
+us anything finer. With SACK live we point the retransmit at
+the first real hole (`tcp_sack_next_hole`) so the first
+retransmit carries data the peer is actually missing.
+
 `snd_nxt` is NOT reset — any segments past the retransmit
 stay in-flight and drain handles window accounting correctly.
 
@@ -1681,13 +1852,53 @@ stay in-flight and drain handles window accounting correctly.
         tcp_sockets[s].fast_recovery = 1
         tcp_sockets[s].recovery_point = tcp_sockets[s].snd_nxt
         if tcp_sockets[s].send_len > 0
-            var retx_len = tcp_sockets[s].send_len
+            var retx_seq = tcp_sockets[s].snd_una
+            if tcp_sockets[s].sack_ok != 0
+                val hole = tcp_sack_next_hole(s, tcp_sockets[s].snd_una)
+                if tcp_seq_lt(hole, tcp_sockets[s].snd_nxt) != 0
+                    retx_seq = hole
+            val avail = int(i32(tcp_sockets[s].snd_nxt - retx_seq))
+            var retx_len = avail
             if retx_len > TCP_MAX_SEG
                 retx_len = TCP_MAX_SEG
-            inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
-                tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
-                retx_len)
-            inet_tcp_arm_rtx(s)
+            if retx_len > 0
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
+                    retx_seq, retx_seq, retx_len)
+                tcp_sockets[s].sack_rexmit_cursor = retx_seq + u32(retx_len)
+                tcp_sockets[s].sack_rexmit_valid = 1
+                tcp_sockets[s].rexmit_count += 1
+                inet_tcp_arm_rtx(s)
+
+
+Issue one more SACK-guided retransmit, picking up where the
+last one left off. Called on partial ACKs inside fast recovery
+and after SACK-driven cwnd inflation so additional holes get
+plugged promptly instead of waiting for RTO.
+
+    inet_tcp_sack_rexmit_next(s: int)
+        if tcp_sockets[s].sack_ok == 0
+            return
+        if tcp_sockets[s].send_len == 0
+            return
+        var cursor = tcp_sockets[s].snd_una
+        if tcp_sockets[s].sack_rexmit_valid != 0
+            if tcp_seq_lt(tcp_sockets[s].sack_rexmit_cursor, cursor) == 0
+                cursor = tcp_sockets[s].sack_rexmit_cursor
+        val hole = tcp_sack_next_hole(s, cursor)
+        if tcp_seq_lt(hole, tcp_sockets[s].snd_nxt) == 0
+            return
+        val avail = int(i32(tcp_sockets[s].snd_nxt - hole))
+        var retx_len = avail
+        if retx_len > TCP_MAX_SEG
+            retx_len = TCP_MAX_SEG
+        if retx_len <= 0
+            return
+        inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
+            hole, hole, retx_len)
+        tcp_sockets[s].sack_rexmit_cursor = hole + u32(retx_len)
+        tcp_sockets[s].sack_rexmit_valid = 1
+        tcp_sockets[s].rexmit_count += 1
+        inet_tcp_arm_rtx(s)
 
 
 Pump as many segments out of `send_buf` as the effective send
@@ -1868,6 +2079,13 @@ checksum, locates the matching socket, and delegates.
             inet_tcp_emit_rst(src_ip, src_port, dst_port,
                               flags, seq, ack, payload_len)
             return
+        // RFC 2018 §4: consult the SACK option on ACKs so the sender
+        // scoreboard stays current. Only meaningful once both sides
+        // agreed on SACK-permitted — otherwise the peer's option
+        // field is garbage we shouldn't trust.
+        if tcp_sockets[s].sack_ok != 0
+            if (flags & TCP_F_ACK) != 0
+                tcp_opts_apply_sack(s, frame, tcp_off, tcp_hdr_len)
         inet_tcp_state_step(s, flags, seq, ack, wnd, payload,
             payload_len, peer_sack_perm)
 
@@ -2065,6 +2283,11 @@ the connection down.
                     tcp_sockets[s].snd_una = ack
                     tcp_sockets[s].snd_wnd = wnd
                     tcp_sockets[s].dup_ack_count = 0
+                    // Cumulative ACK just swept some bytes — drop any
+                    // scoreboard entries now wholly covered. Keeps
+                    // `tcp_sack_next_hole` pointed at the right place
+                    // without stale blocks lingering.
+                    tcp_sack_board_purge(s)
                     inet_tcp_rtt_maybe_sample(s, ack)
                     // RFC 5681 §3.2 ¶6 — recovering ACK: if we're
                     // in fast recovery and this ACK reaches beyond
@@ -2076,9 +2299,15 @@ the connection down.
                         if tcp_seq_le(tcp_sockets[s].recovery_point, ack) != 0
                             tcp_sockets[s].snd_cwnd = tcp_sockets[s].snd_ssthresh
                             tcp_sockets[s].fast_recovery = 0
-                        // Partial ACK inside recovery: keep cwnd
-                        // inflated, don't count this as slow-start
-                        // growth.
+                            tcp_sack_board_clear(s)
+                        else
+                            // Partial ACK inside recovery: if SACK is
+                            // live, plug the next hole immediately
+                            // instead of waiting for RTO (RFC 6675
+                            // style NextSeg — slix's minimal form
+                            // issues one hole per partial ACK).
+                            if tcp_sockets[s].sack_ok != 0
+                                inet_tcp_sack_rexmit_next(s)
                     else
                         inet_tcp_cwnd_on_ack(s, eff)
                     if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
@@ -2107,6 +2336,11 @@ the connection down.
                             tcp_sockets[s].snd_cwnd += TCP_MAX_SEG
                             if tcp_sockets[s].snd_cwnd > 65535
                                 tcp_sockets[s].snd_cwnd = 65535
+                            // Each dup-ACK during recovery likely
+                            // brought a fresh SACK block — if a new
+                            // hole becomes visible, plug it now.
+                            if tcp_sockets[s].sack_ok != 0
+                                inet_tcp_sack_rexmit_next(s)
                             inet_tcp_drain_send(s)
 
         var did_data = 0
@@ -2526,4 +2760,146 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
             inet_tcp_close_slot(ss, 0)
             return 23
         inet_tcp_close_slot(ss, 0)
+
+        // Phase 4b sender scoreboard. Exercise the primitives
+        // the live selective-retransmit path is built on —
+        // QEMU's slirp strips SACK options so we can't drive
+        // these through a real peer; verify them in isolation.
+        val sb = TCP_MAX_SOCKETS - 1
+        tcp_sockets[sb].in_use = 1
+        tcp_sockets[sb].snd_una = u32(1000)
+        tcp_sockets[sb].snd_nxt = u32(4360)
+        var bc = 0
+        while bc < TCP_SACK_BOARD
+            tcp_sockets[sb].sack_board[bc].in_use = 0
+            bc += 1
+
+        // Single block `[2440, 3400)` — a hole under it at
+        // 1000..2440 and another at 3400..4360. `next_hole`
+        // should report 1000 first, then 3400 if the cursor
+        // has already consumed the first hole.
+        tcp_sack_board_insert(sb, u32(2440), u32(3400))
+        if tcp_sack_next_hole(sb, u32(1000)) != u32(1000)
+            inet_tcp_close_slot(sb, 0)
+            return 24
+        if tcp_sack_next_hole(sb, u32(2440)) != u32(3400)
+            inet_tcp_close_slot(sb, 0)
+            return 25
+        if tcp_sack_next_hole(sb, u32(3400)) != u32(3400)
+            inet_tcp_close_slot(sb, 0)
+            return 26
+
+        // Adjacent block `[3400, 3880)` — must coalesce with the
+        // existing one into a single `[2440, 3880)` entry so the
+        // scoreboard stays compact under heavy SACK churn.
+        tcp_sack_board_insert(sb, u32(3400), u32(3880))
+        var merged_seen = 0
+        var any_other = 0
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                if tcp_sockets[sb].sack_board[bc].left == u32(2440)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(3880)
+                        merged_seen = 1
+                    else
+                        any_other = 1
+                else
+                    any_other = 1
+            bc += 1
+        if merged_seen == 0
+            inet_tcp_close_slot(sb, 0)
+            return 27
+        if any_other != 0
+            inet_tcp_close_slot(sb, 0)
+            return 28
+
+        // Advance snd_una past the block's left edge but not its
+        // right. Purge must clip the block's left edge so the
+        // scoreboard only covers bytes still-in-flight.
+        tcp_sockets[sb].snd_una = u32(3000)
+        tcp_sack_board_purge(sb)
+        var clipped_seen = 0
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                if tcp_sockets[sb].sack_board[bc].left == u32(3000)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(3880)
+                        clipped_seen = 1
+            bc += 1
+        if clipped_seen == 0
+            inet_tcp_close_slot(sb, 0)
+            return 29
+
+        // Advance snd_una past the block's right edge. Purge
+        // must drop it entirely — no stale entry to mislead
+        // `next_hole` on the next recovery round.
+        tcp_sockets[sb].snd_una = u32(3880)
+        tcp_sack_board_purge(sb)
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                inet_tcp_close_slot(sb, 0)
+                return 30
+            bc += 1
+
+        // Drive the byte-walk that `tcp_opts_apply_sack`
+        // uses on the wire. Synthesize a TCP header with two
+        // SACK blocks — `[500, 700)` and `[1200, 1500)` —
+        // under a reset scoreboard, parse, verify both blocks
+        // landed as distinct `[left, right)` pairs. The header
+        // layout mirrors what a typical Linux dup-ACK would send:
+        // NOP + NOP + kind=5 + len=18 + 2 blocks.
+        tcp_sack_board_clear(sb)
+        tcp_sockets[sb].snd_una = u32(400)
+        var ackframe: [60]byte
+        var ai = 0
+        while ai < 60
+            ackframe[ai] = 0
+            ai += 1
+        // Data offset = 10 words (40 bytes header); flags = ACK.
+        ackframe[34 + 12] = byte(0xa0)
+        ackframe[34 + 13] = byte(TCP_F_ACK & 0xff)
+        ackframe[34 + 20] = byte(TCP_OPT_NOP)
+        ackframe[34 + 21] = byte(TCP_OPT_NOP)
+        ackframe[34 + 22] = byte(TCP_OPT_SACK)
+        ackframe[34 + 23] = byte(2 + 8 * 2)
+        // Block 1: left=500, right=700.
+        ackframe[34 + 24] = 0
+        ackframe[34 + 25] = 0
+        ackframe[34 + 26] = byte(1)
+        ackframe[34 + 27] = byte(244)
+        ackframe[34 + 28] = 0
+        ackframe[34 + 29] = 0
+        ackframe[34 + 30] = byte(2)
+        ackframe[34 + 31] = byte(188)
+        // Block 2: left=1200, right=1500.
+        ackframe[34 + 32] = 0
+        ackframe[34 + 33] = 0
+        ackframe[34 + 34] = byte(4)
+        ackframe[34 + 35] = byte(176)
+        ackframe[34 + 36] = 0
+        ackframe[34 + 37] = 0
+        ackframe[34 + 38] = byte(5)
+        ackframe[34 + 39] = byte(220)
+        tcp_opts_apply_sack(sb, ackframe, 34, 40)
+        var saw_500 = 0
+        var saw_1200 = 0
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                if tcp_sockets[sb].sack_board[bc].left == u32(500)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(700)
+                        saw_500 = 1
+                if tcp_sockets[sb].sack_board[bc].left == u32(1200)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(1500)
+                        saw_1200 = 1
+            bc += 1
+        if saw_500 == 0
+            inet_tcp_close_slot(sb, 0)
+            return 31
+        if saw_1200 == 0
+            inet_tcp_close_slot(sb, 0)
+            return 32
+        inet_tcp_close_slot(sb, 0)
+
         0

@@ -550,6 +550,7 @@ success, -1 if the fd is invalid.
         fast_recovery: int
         dup_ack_count: int
         sack_ok: int
+        rexmit_count: int
 
     tcp_debug(fd: int, out: *TcpDebug) -> int
         val port = inet_get_port()
@@ -558,8 +559,8 @@ success, -1 if the fd is invalid.
         var msg: [3]byte
         msg[0] = byte(INET_CMD_TCP_DEBUG)
         net_write_u16(msg, 1, fd)
-        var reply: [38]byte
-        ipc_send(port, msg, 3, reply, 38)
+        var reply: [42]byte
+        ipc_send(port, msg, 3, reply, 42)
         if reply[0] != 0
             return -1
         out.state         = int(reply[1]) & 0xff
@@ -572,6 +573,7 @@ success, -1 if the fd is invalid.
         out.fast_recovery = net_read_i32(reply, 26)
         out.dup_ack_count = net_read_i32(reply, 30)
         out.sack_ok       = net_read_i32(reply, 34)
+        out.rexmit_count  = net_read_i32(reply, 38)
         0
 
 

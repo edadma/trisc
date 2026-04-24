@@ -64,6 +64,7 @@ Command codes.
     val NIC_CMD_SUBSCRIBE_RX = 3
     val NIC_CMD_RECV_PACKET  = 4
     val NIC_CMD_DEBUG_DROP_NEXT = 5
+    val NIC_CMD_DEBUG_DROP_MASK = 9
 
 
 Capacity. Ethernet II without VLAN caps at 1514 bytes; IPC
@@ -109,6 +110,18 @@ Never set in production paths. The test sends
 pattern it wants to punish; the counter is one-shot.
 
     var nic_debug_drop_next: int = 0
+
+Multi-drop companion to `nic_debug_drop_next`. Bit `i` (LSB-first)
+means "drop the `i`-th frame emitted after arming." Consumed
+bit-by-bit on each SEND; the frame is dropped if the low bit is
+1 and passed otherwise, then the mask right-shifts. At most 32
+frames can be scripted per arm. Set to 0 to disable.
+
+Used by the SACK selective-retransmit harness, which needs to
+drop two non-adjacent segments out of a single burst so the
+sender sees multiple holes in flight simultaneously.
+
+    var nic_debug_drop_mask: int = 0
 
 
 ### Byte-buffer helpers
@@ -189,6 +202,16 @@ diagnostics.
                 reply[0] = 0
                 ipc_reply(sender, reply, 1)
                 return
+        // SACK test harness — drop each frame whose bit in
+        // `nic_debug_drop_mask` is set, consuming the mask LSB
+        // first so the next frame's fate sits in bit 0.
+        if nic_debug_drop_mask != 0
+            val drop_this = nic_debug_drop_mask & 1
+            nic_debug_drop_mask = (nic_debug_drop_mask >> 1) & 0x7fffffff
+            if drop_this != 0
+                reply[0] = 0
+                ipc_reply(sender, reply, 1)
+                return
         val frame: *byte = buf + 3
         val r = virtio_net_send(frame, len)
         if r == 0
@@ -212,6 +235,25 @@ N = 0: disable dropping.
         val hi = nic_read_u16(buf, 1)
         val lo = nic_read_u16(buf, 3)
         nic_debug_drop_next = (hi << 16) | lo
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### DEBUG_DROP_MASK handler
+
+```
+request: cmd(1) + mask_hi(2) + mask_lo(2)  = 5 bytes
+reply:   status(1)                          = 1 byte
+```
+
+Bit `i` (LSB-first) = drop the `i`-th frame after arming.
+`mask = 0` disables dropping.
+
+    nic_handle_debug_drop_mask(sender: int, buf: *byte)
+        val hi = nic_read_u16(buf, 1)
+        val lo = nic_read_u16(buf, 3)
+        nic_debug_drop_mask = (hi << 16) | lo
         var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, reply, 1)
@@ -303,6 +345,8 @@ builds without IRQ routing wired yet.
                     nic_handle_recv_packet(sender)
                 else if cmd == NIC_CMD_DEBUG_DROP_NEXT
                     nic_handle_debug_drop_next(sender, buf)
+                else if cmd == NIC_CMD_DEBUG_DROP_MASK
+                    nic_handle_debug_drop_mask(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)
