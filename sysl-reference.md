@@ -664,6 +664,52 @@ binsearch(a: *int, n: int, target: int) -> int
   codegen time with a clear "not yet supported" message — use `--no-contracts` to strip
   quantifiers (along with the surrounding contract) when targeting TRISC.
 
+**Function-level `variant <expr>` — recursion termination witness.** A SPARK-style
+`Subprogram_Variant` clause: declares an integer expression that strictly decreases at
+every direct recursive call. Used by a future verifier to discharge termination obligations
+on recursive functions, and at runtime as a guard against unbounded recursion.
+
+```sysl
+fact(n: int) -> int
+    variant n
+    if n <= 1 then return 1
+    return n * fact(n - 1)
+
+gcd(a: int, b: int) -> int
+    variant b
+    if b == 0 then return a
+    return gcd(b, a % b)
+```
+
+- The expression must be integral; it is cast to `i64` for the snapshot.
+- Snapshotted at function entry into a hidden local `__variant_entry__`.
+- At every **direct recursive call** (a TCall to the enclosing function), the variant is
+  re-evaluated with the call's arguments substituted for the function's parameters; the
+  result must be strictly less than the entry snapshot AND ≥ 0. Failure traps with
+  `"<fn> variant decreased fail"`.
+- Lives at the contract-clause position alongside `require` / `ensure` (must precede the
+  first regular statement). At most one `variant` per function.
+- **Mutual recursion** (a calls b, b calls a, both annotated): each function's variant
+  catches only its own direct self-calls at runtime, so a mutual-recursion divergence
+  *would* slip past the runtime check. A future verifier sees the obligation across calls.
+- Stripped under `--no-contracts` — neither the snapshot nor the per-call check is emitted.
+
+```sysl
+// Variant alongside other contracts. Standard pattern.
+fact(n: int) -> int
+    require n >= 0
+    variant n
+    ensure result >= 1
+    if n <= 1 then return 1
+    return n * fact(n - 1)
+```
+
+Lowering: each recursive call `f(args)` is rewritten to a TIfExpr whose body binds the
+args to fresh temps (so each is evaluated exactly once), computes the substituted variant,
+asserts the decrease, and then performs the actual call. Because TIfExpr's last expression
+is its value, the wrapper is transparent to the surrounding expression — `n * fact(n - 1)`
+keeps its meaning.
+
 ### Default Parameter Values
 
 Parameters can have default values, given with `= expr` after the type. Any

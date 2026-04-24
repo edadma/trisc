@@ -273,6 +273,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   private var oldSnapshotCounter: Int = 0
   private val oldSnapshots = mutable.ListBuffer.empty[(String, SyslType, TExpr)]
 
+  /** Per-function counter for naming the temps emitted at every recursive-call site of a
+   *  function with a `variant` clause. Reset at each `analyzeBlockWithContracts` entry so
+   *  the names are stable per function. */
+  private var variantCallCounter: Int = 0
+
   // Built-in binary operator → (trait name, method name). Extensible via #operator("sym") on trait methods.
   private val builtinBinaryOperatorTraits: Map[String, (String, String)] = Map(
     "<"  -> ("Ord", "lt"),  "<=" -> ("Ord", "le"),
@@ -990,7 +995,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             val checked = if funInfo.returnType != VoidType then applyTargetType(tExpr, funInfo.returnType) else tExpr
             TExprBody(checked)
           case BlockBodyAST(stmts, contracts) =>
-            analyzeBlockWithContracts(stmts, contracts, funInfo.returnType)
+            analyzeBlockWithContracts(stmts, contracts, funInfo.returnType, funInfo.name, funInfo.params.map(_._1))
         finally currentExpected = savedExp
         // For def functions with no explicit return type, infer from body
         val retType = if funInfo.isDef && funInfo.returnType == VoidType then
@@ -2576,8 +2581,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   /** Analyze a function block body together with its `require` / `ensure` contract clauses.
    * Generates require checks at entry, injects a `__result__` local, and rewrites every
    * `return v` so it stores v into `__result__`, runs ensure checks, then returns. */
-  private def analyzeBlockWithContracts(stmts: List[StmtAST], contracts: List[ContractClauseAST], returnType: SyslType): TFunBody =
+  private def analyzeBlockWithContracts(
+      stmts: List[StmtAST],
+      contracts: List[ContractClauseAST],
+      returnType: SyslType,
+      selfMangledName: String = "",
+      paramNames: List[String] = Nil,
+  ): TFunBody =
     if contracts.isEmpty then return TBlockBody(analyzeBlock(stmts))
+    variantCallCounter = 0
+    val variantClauses = contracts.collect { case c @ ContractClauseAST(ContractVariant, _, _) => c }
+    if variantClauses.length > 1 then
+      throw AnalysisError(s"function may declare at most one `variant` clause, got ${variantClauses.length}")
     // Pre-declare __result__ in the function scope so that `result` aliased to it resolves
     // during ensure analysis, and later references inside the injected rewrite work.
     val hasResult = returnType != VoidType
@@ -2609,12 +2624,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     // `__result__` stays in scope — the body rewrite references it.
     if hasResult then currentScope.remove("result")
     val tStmts = analyzeBlock(stmts)
-    val rewritten = rewriteReturnsForEnsure(tStmts, returnType, ensureChecks)
+    // Lower the optional `variant` clause: snapshot at entry, wrap every direct recursive
+    // call with a runtime check. The snapshot decl is prepended to the final body.
+    val (variantPrefix, variantBody) = variantClauses.headOption match
+      case Some(vc) if selfMangledName.nonEmpty =>
+        lowerFunctionVariant(selfMangledName, paramNames, vc, tStmts)
+      case _ => (Nil, tStmts)
+    val rewritten = rewriteReturnsForEnsure(variantBody, returnType, ensureChecks)
     val finalized = finalizeFallThroughReturn(rewritten, returnType, ensureChecks)
     val resultDecl: List[TStmt] =
       if hasResult then List(TVarStmt("__result__", returnType, zeroExprFor(returnType)))
       else Nil
-    TBlockBody(snapshotDecls ++ resultDecl ++ requireChecks ++ finalized)
+    TBlockBody(snapshotDecls ++ variantPrefix ++ resultDecl ++ requireChecks ++ finalized)
 
   /** Zero-value expression for a scalar/pointer return type. */
   private def zeroExprFor(t: SyslType): TExpr = t.underlying match
@@ -2675,6 +2696,151 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case _: TReturnStmt => true
     case TMultiStmt(xs) => xs.lastOption.exists(isTerminalReturn)
     case _ => false
+
+  /** Apply `f` to every TExpr in the typed AST tree rooted at `e`, bottom-up. Used by the
+   *  function-variant lowering for two purposes: substitute parameter references in the
+   *  variant expression, and locate every recursive TCall to wrap with a check. The walker
+   *  is exhaustive on TExpr cases — adding a new TExpr node requires extending it. */
+  private def mapTExpr(e: TExpr)(f: TExpr => TExpr): TExpr =
+    def go(x: TExpr): TExpr = f(x match
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => x
+      case _: TArrayDecl | _: TVarRef | _: TAddrOf | _: TAddrLit | _: TFuncRef | _: TSizeof => x
+      case _: TStructLit | _: TEnumConstruct => x
+      case TArrayLit(els, t)               => TArrayLit(els.map(go), t)
+      case TAddrOfIndex(a, i, t)           => TAddrOfIndex(go(a), go(i), t)
+      case TAddrOfField(o, idx, t)         => TAddrOfField(go(o), idx, t)
+      case TTempAddr(inner, t)             => TTempAddr(go(inner), t)
+      case TDeref(inner, t)                => TDeref(go(inner), t)
+      case TIndex(arr, i, t)               => TIndex(go(arr), go(i), t)
+      case TFieldAccess(o, idx, t)         => TFieldAccess(go(o), idx, t)
+      case TFieldPreInc(o, idx, t)         => TFieldPreInc(go(o), idx, t)
+      case TFieldPreDec(o, idx, t)         => TFieldPreDec(go(o), idx, t)
+      case TFieldPostInc(o, idx, t)        => TFieldPostInc(go(o), idx, t)
+      case TFieldPostDec(o, idx, t)        => TFieldPostDec(go(o), idx, t)
+      case TStructConstruct(st, args)      => TStructConstruct(st, args.map(go))
+      case TPreInc(_, _) | TPreDec(_, _) | TPostInc(_, _) | TPostDec(_, _) => x
+      case TUnary(op, o, t)                => TUnary(op, go(o), t)
+      case TBinary(l, op, r, t)            => TBinary(go(l), op, go(r), t)
+      case TCall(name, args, t)            => TCall(name, args.map(go), t)
+      case TIndirectCall(callee, args, t)  => TIndirectCall(go(callee), args.map(go), t)
+      case TCast(inner, t)                 => TCast(go(inner), t)
+      case TIfExpr(c, tb, eb, t)           => TIfExpr(go(c), tb.map(s => mapTStmt(s)(f)), eb.map(_.map(s => mapTStmt(s)(f))), t)
+      case TQuantifier(k, n, nt, lo, hi, inc, p, t) => TQuantifier(k, n, nt, go(lo), go(hi), inc, go(p), t)
+      case TMatchExpr(scr, arms, dflt, t)  =>
+        val newArms = arms.map(a => TMatchArm(a.patterns, a.guard.map(go), a.body.map(s => mapTStmt(s)(f))))
+        TMatchExpr(go(scr), newArms, dflt.map(_.map(s => mapTStmt(s)(f))), t)
+      case TNew(st, args)                  => TNew(st, args.map(go))
+      case TNewEnum(et, idx, args)         => TNewEnum(et, idx, args.map(go))
+      case TNewArray(et, sz)               => TNewArray(et, go(sz))
+      case TLen(inner, t)                  => TLen(go(inner), t)
+      case TCap(inner, t)                  => TCap(go(inner), t)
+      case TSliceExpr(a, lo, hi, t)        => TSliceExpr(go(a), lo.map(go), hi.map(go), t)
+      case TAppend(s, el, t)               => TAppend(go(s), go(el), t)
+      case TStringFromPtr(p, l, t)         => TStringFromPtr(go(p), go(l), t)
+      case TStringFromSlice(s, t)          => TStringFromSlice(go(s), t)
+      case TStr(inner)                     => TStr(go(inner))
+      case TFmtStr(inner, spec)            => TFmtStr(go(inner), spec)
+      case _: TClosure                     => x // closures captured environments — don't descend
+      case TInterfaceBox(inner, iface)     => TInterfaceBox(go(inner), iface)
+      case TInterfaceDispatch(v, m, args, rt) => TInterfaceDispatch(go(v), m, args.map(go), rt)
+      case TIntrinsicCall(n, args, t)      => TIntrinsicCall(n, args.map(go), t)
+      case TRangeCheck(inner, r, an, t)    => TRangeCheck(go(inner), r, an, t)
+      case _: TAsmExpr                     => x
+    )
+    go(e)
+
+  /** Apply `f` to every TExpr inside a statement tree, bottom-up via mapTExpr. */
+  private def mapTStmt(s: TStmt)(f: TExpr => TExpr): TStmt =
+    def goS(stmt: TStmt): TStmt = stmt match
+      case TVarStmt(n, t, init, vol)            => TVarStmt(n, t, mapTExpr(init)(f), vol)
+      case TDestructureStmt(ns, ts, init)       => TDestructureStmt(ns, ts, mapTExpr(init)(f))
+      case TDestructureAssignStmt(ns, ts, init) => TDestructureAssignStmt(ns, ts, mapTExpr(init)(f))
+      case TAssignStmt(t, v)                    => TAssignStmt(t, mapTExpr(v)(f))
+      case TCompoundAssignStmt(t, op, v)        => TCompoundAssignStmt(t, op, mapTExpr(v)(f))
+      case TDerefAssignStmt(p, v)               => TDerefAssignStmt(mapTExpr(p)(f), mapTExpr(v)(f))
+      case TIndexAssignStmt(a, i, v)            => TIndexAssignStmt(mapTExpr(a)(f), mapTExpr(i)(f), mapTExpr(v)(f))
+      case TFieldAssignStmt(o, idx, v)          => TFieldAssignStmt(mapTExpr(o)(f), idx, mapTExpr(v)(f))
+      case TFieldCompoundAssignStmt(o, idx, op, v) => TFieldCompoundAssignStmt(mapTExpr(o)(f), idx, op, mapTExpr(v)(f))
+      case TReturnStmt(v)                       => TReturnStmt(v.map(e => mapTExpr(e)(f)))
+      case TWhileStmt(c, b, lbl)                => TWhileStmt(mapTExpr(c)(f), b.map(goS), lbl)
+      case TForStmt(init, c, upd, b, lbl)       => TForStmt(goS(init), mapTExpr(c)(f), goS(upd), b.map(goS), lbl)
+      case TDoWhileStmt(c, b, lbl)              => TDoWhileStmt(mapTExpr(c)(f), b.map(goS), lbl)
+      case TLoopStmt(b, lbl)                    => TLoopStmt(b.map(goS), lbl)
+      case TBreakStmt(_) | TContinueStmt(_) | TAsmStmt(_) => stmt
+      case TDeferStmt(inner)                    => TDeferStmt(goS(inner))
+      case TContractCheck(k, e, m)              => TContractCheck(k, mapTExpr(e)(f), m)
+      case TMultiStmt(xs)                       => TMultiStmt(xs.map(goS))
+      case TExprStmt(e)                         => TExprStmt(mapTExpr(e)(f))
+    goS(s)
+
+  /** Lower a function's `variant <expr>` clause: snapshot the variant at entry, then wrap
+   *  every direct recursive call (TCall to `selfMangledName`) with a runtime check that
+   *  the variant evaluated at the call args is strictly less than the entry snapshot AND
+   *  ≥ 0. Returns `(prefixDecls, transformedBody)`. Skipped under `--no-contracts`.
+   *
+   *  Each recursive call is rewritten to a TIfExpr-with-statements:
+   *  ```
+   *  if true then
+   *      var __vc_arg_N_0 = arg0; var __vc_arg_N_1 = arg1; ...
+   *      var __vc_at_N : i64 = (variant with params -> __vc_arg_N_*) as i64
+   *      assert(__vc_at_N < __variant_entry__ && __vc_at_N >= 0, "...")
+   *      f(__vc_arg_N_0, __vc_arg_N_1, ...)
+   *  ```
+   *  Because TIfExpr's body's last expression is its value, the wrapper preserves the
+   *  call's return value. Args are bound to temps so they're evaluated exactly once and
+   *  the variant-substituted expression refers to the same evaluation. */
+  private def lowerFunctionVariant(
+      selfMangledName: String,
+      paramNames: List[String],
+      variantClause: ContractClauseAST,
+      tBody: List[TStmt],
+  ): (List[TStmt], List[TStmt]) =
+    if !contractsEnabled then return (Nil, tBody)
+    val tVariantRaw = analyzeExpr(variantClause.expr)
+    if !tVariantRaw.typ.isIntegral then
+      throw AnalysisError(s"variant expression must have integer type, got ${tVariantRaw.typ}")
+    val tVariantI64 = if tVariantRaw.typ == I64 then tVariantRaw else TCast(tVariantRaw, I64)
+    val entryName = "__variant_entry__"
+    if scopeStack != null then
+      currentScope(entryName) = SymInfo(entryName, I64, mutable = false)
+    val snapshotDecl = TVarStmt(entryName, I64, tVariantI64)
+
+    val transformer: TExpr => TExpr = {
+      case TCall(name, args, retType) if name == selfMangledName =>
+        variantCallCounter += 1
+        val id = variantCallCounter
+        // Bind each call arg to a fresh local so it's evaluated once and the variant
+        // expression can reference its value via the temp.
+        val argTemps: List[(String, TExpr, SyslType)] = args.zipWithIndex.map { case (a, i) =>
+          (s"__vc_arg_${id}_$i", a, a.typ)
+        }
+        val tempBinds: List[TStmt] = argTemps.map { case (n, a, t) => TVarStmt(n, t, a) }
+        val paramToTemp: Map[String, TExpr] = paramNames.zip(argTemps).map {
+          case (p, (tmpName, _, t)) => (p, TVarRef(tmpName, t))
+        }.toMap
+        val substVariant = mapTExpr(tVariantRaw) {
+          case TVarRef(n, _) if paramToTemp.contains(n) => paramToTemp(n)
+          case other => other
+        }
+        val substI64 = if substVariant.typ == I64 then substVariant else TCast(substVariant, I64)
+        val atCallName = s"__vc_at_$id"
+        val atCallDecl: TStmt = TVarStmt(atCallName, I64, substI64)
+        val atCallRef = TVarRef(atCallName, I64)
+        val entryRef = TVarRef(entryName, I64)
+        val checkExpr = TBinary(
+          TBinary(atCallRef, "<", entryRef, BoolType),
+          "&&",
+          TBinary(atCallRef, ">=", TIntLit(0L, I64), BoolType),
+          BoolType,
+        )
+        val checkStmt: TStmt = contract("variant", checkExpr, s"$selfMangledName variant decreased fail")
+        val newCall = TCall(name, argTemps.map { case (n, _, t) => TVarRef(n, t) }, retType)
+        val body: List[TStmt] = tempBinds ++ List(atCallDecl, checkStmt, TExprStmt(newCall))
+        TIfExpr(TBoolLit(true, BoolType), body, None, retType)
+      case other => other
+    }
+    val transformed = tBody.map(s => mapTStmt(s)(transformer))
+    (List(snapshotDecl), transformed)
 
   private def analyzeStmt(stmt: StmtAST): TStmt =
     stmt match

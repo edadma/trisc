@@ -94,6 +94,11 @@ case class BlockBodyAST(stmts: List[StmtAST], contracts: List[ContractClauseAST]
 sealed trait ContractKind
 case object ContractRequire extends ContractKind
 case object ContractEnsure extends ContractKind
+/** Function-level termination witness. The expression is evaluated at function entry
+ *  (snapshot) and at every direct recursive call site (with parameters substituted by
+ *  the call args); the call-site value must be strictly less than the snapshot AND ≥ 0.
+ *  Used by a future verifier to discharge termination obligations on recursive functions. */
+case object ContractVariant extends ContractKind
 case class ContractClauseAST(kind: ContractKind, expr: ExpressionAST, message: Option[String] = None) extends Positional
 
 // Statements
