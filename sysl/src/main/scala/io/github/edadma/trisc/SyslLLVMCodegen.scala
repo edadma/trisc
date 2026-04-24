@@ -1513,7 +1513,12 @@ class SyslLLVMCodegen(target: String = "host"):
             emit(s"  $result = zext i1 $cmp to $t")
           case "!=" =>
             val cmp = newReg()
-            if isFloat then emit(s"  $cmp = fcmp one $lt $l, $r")
+            // Must be `une` (unordered or not equal), not `one` (ordered and
+            // not equal): IEEE 754 says NaN != NaN is true, and `is_nan(x)`
+            // is implemented as `x != x`. With `one`, NaN != NaN would be
+            // false (both operands unordered fails the "ordered" half) and
+            // is_nan would always return false.
+            if isFloat then emit(s"  $cmp = fcmp une $lt $l, $r")
             else emit(s"  $cmp = icmp ne $lt $l, $r")
             emit(s"  $result = zext i1 $cmp to $t")
           case "<" =>
