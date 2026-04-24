@@ -753,7 +753,7 @@ line per 64 bytes of code.
         kernel_init()
         ipc_init()
         register_syscall(1, sys_putc_handler)
-        register_syscall(79, sys_puts_handler)
+        register_syscall(82, sys_puts_handler)
 
         uart_puts("[user] creating process PT\n")
         val new_pt = vm_create_process_pt()
@@ -824,7 +824,7 @@ ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
         kernel_init()
         ipc_init()
         register_syscall(1, sys_putc_handler)
-        register_syscall(79, sys_puts_handler)
+        register_syscall(82, sys_puts_handler)
 
         uart_puts("[uipc] creating echo server thread\n")
         create_thread(i64(&kentry_a), kernel_stack_usp(0),
@@ -894,12 +894,12 @@ which is the baseline we want for this commit).
         kernel_init()
         ipc_init()
         register_syscall(1, sys_putc_handler)
-        register_syscall(79, sys_puts_handler)
+        register_syscall(82, sys_puts_handler)
 
         // Populate kernel-side system info so sys_getinfo can
         // answer RS and server queries without the per-process
         // INFO_PAGE_VA scratch page.
-        kernel_set_system_info(i64(0x50000000), i64(0x200000), i64(BOOT_INFO_PA))
+        kernel_set_system_info(i64(0x50000000), i64(0x400000), i64(BOOT_INFO_PA))
 
         // Create the idle thread at the lowest priority. It runs
         // `arch_sti(); wfi()` in a loop on its own kernel stack

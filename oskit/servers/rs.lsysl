@@ -120,14 +120,14 @@ created but before it is resumed.
         else if idx == 6
             // nic: needs vm_v2p(66) for virtio DMA descriptors,
             // virtio_set_notify(76) to register for device IRQ wakes,
-            // and virtio_pci_info(77) so the x86 server can fetch the
+            // and virtio_pci_info(80) so the x86 server can fetch the
             // kernel-cached BAR/cap addresses (no-op wire on aarch64).
-            hi = hi | i64(4) | i64(0x1000) | i64(0x2000)
+            hi = hi | i64(4) | i64(0x1000) | (i64(1) << 16)
         else if idx == 7
-            // inet: needs timer_subscribe(78) to drive TCP
+            // inet: needs timer_subscribe(81) to drive TCP
             // retransmission / TIME_WAIT scans without relying on
             // incoming frames for liveness.
-            hi = hi | i64(0x4000)
+            hi = hi | (i64(1) << 17)
         svc_set_priv(pid, lo, hi, ipc)
 
 Per-server IPC send mask. Single source of truth — consulted
