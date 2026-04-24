@@ -20,6 +20,13 @@ class SyslSVMCodegen:
   // Canonical struct types (name -> field-populated StructType). Placeholders
   // (StructType(_, Nil)) can leak into expression types; this map resolves them.
   private val structTypes = new mutable.HashMap[String, SyslType.StructType]
+
+  // Interface itables encountered during codegen. Key = itable symbol name,
+  // value = (iface type, concrete struct name). Emitted in rodata at EOF.
+  private val itables = new mutable.LinkedHashMap[String, (SyslType.InterfaceType, String)]
+
+  // Set of function names defined in this module (for method name resolution).
+  private val definedFuncNames = new mutable.HashSet[String]
   private def canonicalStruct(st: SyslType.StructType): SyslType.StructType =
     if st.fields.isEmpty then structTypes.getOrElse(st.name, st) else st
 
@@ -85,6 +92,8 @@ class SyslSVMCodegen:
       case TAppend(sl, el, _) =>
         count += 6 // slice, oldPtr, oldLen, new, dst, rem
         scanExpr(sl); scanExpr(el)
+      case TInterfaceBox(inner, _) => count += 2; scanExpr(inner)
+      case TInterfaceDispatch(v, _, args, _) => count += 1; scanExpr(v); args.foreach(scanExpr)
       case TBinary(l, _, r, _) => scanExpr(l); scanExpr(r)
       case TUnary(_, o, _) => scanExpr(o)
       case TCast(inner, _) => scanExpr(inner)
@@ -208,6 +217,8 @@ class SyslSVMCodegen:
     globals.clear()
     globalConstants.clear()
     structTypes.clear()
+    itables.clear()
+    definedFuncNames.clear()
     needsSpExtern = false
     needsStrConcat = false
     needsStrEq = false
@@ -224,6 +235,7 @@ class SyslSVMCodegen:
       case _ =>
     for decl <- program.decls do decl match
       case f: TFunDecl =>
+        definedFuncNames += f.name
         f.params.foreach(p => registerType(p.typ))
         registerType(f.returnType)
       case _ =>
@@ -254,18 +266,30 @@ class SyslSVMCodegen:
       case f: TFunDecl => genFunction(f)
       case _ =>
 
-    // Emit rodata segment — string literals
-    if stringLiterals.nonEmpty then
+    // Emit rodata segment — string literals + interface itables
+    if stringLiterals.nonEmpty || itables.nonEmpty then
       emit("segment rodata")
       for (label, value) <- stringLiterals do
         val bytes = value.getBytes("UTF-8")
         emit(s"global $label, data, ${bytes.length + 9}")
+      for (iname, (iface, _)) <- itables do
+        emit(s"global $iname, data, ${iface.methods.length * 8}")
       for (label, value) <- stringLiterals do
         val bytes = value.getBytes("UTF-8")
         emit(s"  dl -1") // immortal refcount header
         emit(s"$label:")
         for b <- bytes do emit(s"  db ${b & 0xff}")
         emit("  db 0")
+      // Each itable: array of function pointers for the interface's methods
+      for (iname, (iface, structName)) <- itables do
+        emit(s"  align 8")
+        emit(s"$iname:")
+        for ((mName, _, _) <- iface.methods) do
+          val shortName = s"${structName}_$mName"
+          val fnName =
+            if definedFuncNames.contains(shortName) then shortName
+            else definedFuncNames.find(_.endsWith(s"__$shortName")).getOrElse(shortName)
+          emit(s"  dl $fnName")
 
     // Emit data segment
     if dataGlobals.nonEmpty then
@@ -1057,6 +1081,62 @@ class SyslSVMCodegen:
       emitStore(elemType)
       // Leave new slice addr on TOS
       emit(s"  local_get $newIdx")
+
+    case TInterfaceBox(inner, iface) =>
+      // Box a concrete value into a 16-byte {itable_ptr, data_ptr} struct
+      // on the memory stack. For struct values the data_ptr is the struct's
+      // backing address; for pointer/ref types the pointer IS the data_ptr.
+      val structName = inner.typ.underlying match
+        case SyslType.StructType(n, _, _) => n
+        case SyslType.PtrType(s) => s.underlying match
+          case SyslType.StructType(n, _, _) => n
+          case other => sys.error(s"TInterfaceBox: unsupported $other")
+        case SyslType.RefType(s) => s.underlying match
+          case SyslType.StructType(n, _, _) => n
+          case other => sys.error(s"TInterfaceBox: unsupported $other")
+        case other => sys.error(s"TInterfaceBox: unsupported $other")
+      val itableName = s"__itable_${structName}_${iface.name}"
+      if !itables.contains(itableName) then
+        itables(itableName) = (iface, structName)
+      // Evaluate inner — for struct types genExpr leaves the struct address
+      // on TOS; for ptr/ref types it leaves the pointer value.
+      genExpr(inner)
+      val dataIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $dataIdx")
+      // Allocate 16-byte iface struct
+      emitMemAlloc(16)
+      val ifaceIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $ifaceIdx")
+      // struct.itable = &itableName
+      emit(s"  push_i64 $itableName")
+      emit(s"  local_get $ifaceIdx")
+      emit("  store64")
+      // struct.data = dataPtr
+      emit(s"  local_get $dataIdx")
+      emit(s"  local_get $ifaceIdx")
+      emitPushInt(8)
+      emit("  add")
+      emit("  store64")
+      emit(s"  local_get $ifaceIdx")
+
+    case TInterfaceDispatch(ifaceVal, methodIndex, args, _) =>
+      // Load data_ptr (becomes first arg, as implicit self), push user args,
+      // then call through itable[methodIndex].
+      genExpr(ifaceVal)                      // iface struct addr
+      val ifaceIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $ifaceIdx")
+      emit(s"  local_get $ifaceIdx")
+      emitPushInt(8)
+      emit("  add")
+      emit("  load64")                        // data_ptr → pushed as first arg
+      for a <- args do genExpr(a)
+      emit(s"  local_get $ifaceIdx")
+      emit("  load64")                        // itable_ptr
+      if methodIndex != 0 then
+        emitPushInt(methodIndex * 8)
+        emit("  add")
+      emit("  load64")                        // method fn ptr
+      emit("  callr")
 
     case TNew(structType, args) =>
       // Allocate on memory stack (no real heap in SVM); behaves like
