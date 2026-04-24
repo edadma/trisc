@@ -17,6 +17,24 @@ class SyslSVMCodegen:
   private val globals = new mutable.LinkedHashMap[String, SyslType]
   private val globalConstants = new mutable.LinkedHashMap[String, Long]
 
+  // Canonical struct types (name -> field-populated StructType). Placeholders
+  // (StructType(_, Nil)) can leak into expression types; this map resolves them.
+  private val structTypes = new mutable.HashMap[String, SyslType.StructType]
+  private def canonicalStruct(st: SyslType.StructType): SyslType.StructType =
+    if st.fields.isEmpty then structTypes.getOrElse(st.name, st) else st
+
+  /** Extract the canonical StructType from any expression's type (handles
+    * NamedType / RefType / PtrType wrappers and empty placeholder structs). */
+  private def structOf(t: SyslType): SyslType.StructType = t.underlying match
+    case s: SyslType.StructType => canonicalStruct(s)
+    case SyslType.RefType(s) => s.underlying match
+      case ss: SyslType.StructType => canonicalStruct(ss)
+      case _ => sys.error(s"not a struct type: $t")
+    case SyslType.PtrType(s) => s.underlying match
+      case ss: SyslType.StructType => canonicalStruct(ss)
+      case _ => sys.error(s"not a struct type: $t")
+    case _ => sys.error(s"not a struct type: $t")
+
   // Loop labels for break/continue
   private val breakLabels = new mutable.Stack[String]
   private val continueLabels = new mutable.Stack[String]
@@ -189,10 +207,26 @@ class SyslSVMCodegen:
     stringLiterals.clear()
     globals.clear()
     globalConstants.clear()
+    structTypes.clear()
     needsSpExtern = false
     needsStrConcat = false
     needsStrEq = false
     needsNewSlice = false
+
+    // Register canonical struct types so stale placeholder StructType(_, Nil)
+    // values in expression types can be resolved back to their real fields.
+    def registerType(t: SyslType): Unit = t match
+      case st: SyslType.StructType if st.fields.nonEmpty => structTypes(st.name) = st
+      case _ =>
+    for decl <- program.decls do decl match
+      case TStructDecl(name, fields, _) =>
+        structTypes(name) = SyslType.StructType(name, fields)
+      case _ =>
+    for decl <- program.decls do decl match
+      case f: TFunDecl =>
+        f.params.foreach(p => registerType(p.typ))
+        registerType(f.returnType)
+      case _ =>
 
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
 
@@ -471,7 +505,7 @@ class SyslSVMCodegen:
       emitStore(elemType)
 
     case TFieldAssignStmt(obj, fieldIndex, value) =>
-      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val st = structOf(obj.typ)
       val off = fieldOffset(st, fieldIndex)
       val fieldType = st.fields(fieldIndex)._2
       genExpr(value)
@@ -565,7 +599,7 @@ class SyslSVMCodegen:
       emit(s"$pass:")
 
     case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
-      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val st = structOf(obj.typ)
       val off = fieldOffset(st, fieldIndex)
       val fieldType = st.fields(fieldIndex)._2
       // Load current value
@@ -687,11 +721,15 @@ class SyslSVMCodegen:
 
     case TFieldAccess(obj, fieldIndex, typ) =>
       genStructAddr(obj)
-      val st = obj.typ match
+      val st = canonicalStruct(obj.typ.underlying match
         case s: SyslType.StructType => s
-        case SyslType.RefType(s: SyslType.StructType) => s
-        case SyslType.PtrType(s: SyslType.StructType) => s
-        case _ => sys.error(s"field access on non-struct: ${obj.typ}")
+        case SyslType.RefType(s) => s.underlying match
+          case ss: SyslType.StructType => ss
+          case _ => sys.error(s"field access on non-struct: ${obj.typ}")
+        case SyslType.PtrType(s) => s.underlying match
+          case ss: SyslType.StructType => ss
+          case _ => sys.error(s"field access on non-struct: ${obj.typ}")
+        case _ => sys.error(s"field access on non-struct: ${obj.typ}"))
       val off = fieldOffset(st, fieldIndex)
       if off != 0 then
         emitPushInt(off)
@@ -1189,7 +1227,7 @@ class SyslSVMCodegen:
         emitStore(fieldType)
 
     case TFieldPreInc(obj, fieldIndex, typ) =>
-      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val st = structOf(obj.typ)
       val off = fieldOffset(st, fieldIndex)
       val fieldType = st.fields(fieldIndex)._2
       genStructAddr(obj)
@@ -1202,7 +1240,7 @@ class SyslSVMCodegen:
       emitStore(fieldType)
 
     case TFieldPreDec(obj, fieldIndex, typ) =>
-      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val st = structOf(obj.typ)
       val off = fieldOffset(st, fieldIndex)
       val fieldType = st.fields(fieldIndex)._2
       genStructAddr(obj)
@@ -1215,7 +1253,7 @@ class SyslSVMCodegen:
       emitStore(fieldType)
 
     case TFieldPostInc(obj, fieldIndex, typ) =>
-      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val st = structOf(obj.typ)
       val off = fieldOffset(st, fieldIndex)
       val fieldType = st.fields(fieldIndex)._2
       genStructAddr(obj)
@@ -1228,7 +1266,7 @@ class SyslSVMCodegen:
       emitStore(fieldType)
 
     case TFieldPostDec(obj, fieldIndex, typ) =>
-      val st = obj.typ.asInstanceOf[SyslType.StructType]
+      val st = structOf(obj.typ)
       val off = fieldOffset(st, fieldIndex)
       val fieldType = st.fields(fieldIndex)._2
       genStructAddr(obj)
@@ -1319,6 +1357,8 @@ class SyslSVMCodegen:
       case _ => // no-op for same-width or i64/u64/ptr
 
   private def fieldOffset(st: SyslType.StructType, fieldIndex: Int): Long =
+    if fieldIndex >= st.fields.length then
+      sys.error(s"fieldOffset: index $fieldIndex out of range for struct '${st.name}' with ${st.fields.length} fields")
     var offset = 0L
     for i <- 0 until fieldIndex do
       val fType = st.fields(i)._2

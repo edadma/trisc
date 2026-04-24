@@ -461,7 +461,9 @@ object SyslCli:
     val outputBuf = new StringBuilder
     val asm =
       try (new SyslSVMCodegen).generate(program)
-      catch case e: Throwable => return Fail(s"SVM codegen failed: ${e.getMessage}")
+      catch case e: Throwable =>
+        if System.getenv("SVM_TRACE") != null then e.printStackTrace()
+        return Fail(s"SVM codegen failed: ${e.getClass.getSimpleName}: ${e.getMessage}")
     if System.getenv("SVM_DUMP_ASM") != null then
       java.nio.file.Files.writeString(java.nio.file.Paths.get(s"/tmp/svm_${t.unitName.replace("/", "_")}.s"), asm)
     val sentinel = 0x5AFE_FADE_5AFE_FADEL
