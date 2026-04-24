@@ -62,9 +62,15 @@ class SyslSVMCodegen:
         count += 5
         scanExpr(arr); lo.foreach(scanExpr); hi.foreach(scanExpr)
       case TNewArray(_, sz) => scanExpr(sz)
+      case TNew(_, args) => args.foreach(scanExpr)
+      case TAppend(sl, el, _) =>
+        count += 6 // slice, oldPtr, oldLen, new, dst, rem
+        scanExpr(sl); scanExpr(el)
       case TBinary(l, _, r, _) => scanExpr(l); scanExpr(r)
       case TUnary(_, o, _) => scanExpr(o)
       case TCast(inner, _) => scanExpr(inner)
+      case TStringFromSlice(s, _) => count += 2; scanExpr(s)
+      case TStringFromPtr(p, l, _) => count += 3; scanExpr(p); scanExpr(l)
       case TCall(_, args, _) => args.foreach(scanExpr)
       case TIndex(a, i, _) => scanExpr(a); scanExpr(i)
       case TFieldAccess(o, _, _) => scanExpr(o)
@@ -648,7 +654,10 @@ class SyslSVMCodegen:
 
     case TDeref(ptr, typ) =>
       genExpr(ptr)
-      emitLoad(typ)
+      // Aggregates are address-represented; dereferencing a pointer to one
+      // is a no-op — the pointer value IS the aggregate "value".
+      if !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] then
+        emitLoad(typ)
 
     case TIndex(array, index, typ) =>
       genExpr(array)
@@ -657,10 +666,11 @@ class SyslSVMCodegen:
         case SyslType.PtrType(e) => e
         case SyslType.SliceType(e) => e
         case SyslType.RefType(SyslType.SliceType(e)) => e
+        case SyslType.StringType => SyslType.UIntType(8)
         case _ => typ
       array.typ match
-        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
-          emit("  load64") // deref slice struct → data ptr
+        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) | SyslType.StringType =>
+          emit("  load64") // deref struct → data ptr (strings and slices both start with ptr at offset 0)
         case _ =>
       genExpr(index)
       emitPushInt(elemType.sizeOf)
@@ -787,6 +797,35 @@ class SyslSVMCodegen:
       emit("  halt")
       emit(s"$passLbl:")
 
+    case TStringFromSlice(slice, _) =>
+      // []byte -> string: allocate fresh 16-byte {ptr, len i64}, copy slice ptr/len
+      genExpr(slice)
+      val srcIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $srcIdx")
+      emitMemAlloc(16)
+      val dstIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $dstIdx")
+      emit(s"  local_get $srcIdx"); emit("  load64")
+      emit(s"  local_get $dstIdx"); emit("  store64")
+      emit(s"  local_get $srcIdx"); emitPushInt(8); emit("  add"); emit("  load32")
+      emit(s"  local_get $dstIdx"); emitPushInt(8); emit("  add"); emit("  store64")
+      emit(s"  local_get $dstIdx")
+
+    case TStringFromPtr(ptr, len, _) =>
+      // string(ptr, len) -> string: allocate 16-byte {ptr, len}, fill both
+      genExpr(ptr)
+      val ptrIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $ptrIdx")
+      genExpr(len)
+      val lenIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $lenIdx")
+      emitMemAlloc(16)
+      val dstIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $dstIdx")
+      emit(s"  local_get $ptrIdx"); emit(s"  local_get $dstIdx"); emit("  store64")
+      emit(s"  local_get $lenIdx"); emit(s"  local_get $dstIdx"); emitPushInt(8); emit("  add"); emit("  store64")
+      emit(s"  local_get $dstIdx")
+
     case TCast(inner, target) =>
       genExpr(inner)
       emitCast(inner.typ, target)
@@ -909,6 +948,92 @@ class SyslSVMCodegen:
       emit("  swap")                // (byteSize, elemCount)
       emit("  call __svm_new_slice")
       needsNewSlice = true
+
+    case TAppend(slice, elem, SyslType.SliceType(elemType)) =>
+      val elemSize = elemType.sizeOf
+      // Eval slice addr, save to local
+      genExpr(slice)
+      val sliceIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $sliceIdx")
+      // oldPtr = slice.ptr
+      emit(s"  local_get $sliceIdx")
+      emit("  load64")
+      val oldPtrIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $oldPtrIdx")
+      // oldLen = slice.len
+      emit(s"  local_get $sliceIdx")
+      emitPushInt(8)
+      emit("  add")
+      emit("  load32")
+      val oldLenIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $oldLenIdx")
+      // Allocate new slice of (oldLen + 1) elements
+      emit(s"  local_get $oldLenIdx")
+      emit("  inc")
+      emit("  dup")
+      emitPushInt(elemSize)
+      emit("  mul")
+      emit("  swap")
+      emit("  call __svm_new_slice")
+      val newIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $newIdx")
+      needsNewSlice = true
+      // dst = new.ptr
+      emit(s"  local_get $newIdx")
+      emit("  load64")
+      val dstIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $dstIdx")
+      // remaining = oldLen * elemSize
+      emit(s"  local_get $oldLenIdx")
+      emitPushInt(elemSize)
+      emit("  mul")
+      val remIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_set $remIdx")
+      // byte copy loop
+      val loop = newLabel("app_copy")
+      val done = newLabel("app_copy_done")
+      emit(s"$loop:")
+      emit(s"  local_get $remIdx"); emit("  eqz"); emit(s"  jumpnz $done")
+      emit(s"  local_get $oldPtrIdx"); emit("  load8")
+      emit(s"  local_get $dstIdx"); emit("  store8")
+      emit(s"  local_get $oldPtrIdx"); emit("  inc"); emit(s"  local_set $oldPtrIdx")
+      emit(s"  local_get $dstIdx"); emit("  inc"); emit(s"  local_set $dstIdx")
+      emit(s"  local_get $remIdx"); emit("  dec"); emit(s"  local_set $remIdx")
+      emit(s"  jump $loop")
+      emit(s"$done:")
+      // Store new element at new.ptr + oldLen * elemSize
+      genExpr(elem)
+      emit(s"  local_get $newIdx")
+      emit("  load64")
+      emit(s"  local_get $oldLenIdx")
+      emitPushInt(elemSize)
+      emit("  mul")
+      emit("  add")
+      emitStore(elemType)
+      // Leave new slice addr on TOS
+      emit(s"  local_get $newIdx")
+
+    case TNew(structType, args) =>
+      // Allocate on memory stack (no real heap in SVM); behaves like
+      // TStructConstruct but the type is RefType(StructType) rather than
+      // the struct itself. Resulting TOS is the struct's base address.
+      val size = structType.sizeOf
+      emitMemAlloc(size)
+      val aligned = ((size + 7) / 8 * 8).toInt
+      for i <- 0 until aligned by 8 do
+        emit("  dup")
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  push_0")
+        emit("  swap")
+        emit("  store64")
+      for (arg, i) <- args.zipWithIndex do
+        val off = fieldOffset(structType, i)
+        val fieldType = structType.fields(i)._2
+        emit("  dup")
+        if off != 0 then { emitPushInt(off); emit("  add") }
+        genExpr(arg)
+        emit("  swap")
+        emitStore(fieldType)
 
     case TSliceExpr(array, lowOpt, highOpt, resultTyp) =>
       // Allocate a 24-byte slice struct on memory stack, fill with
