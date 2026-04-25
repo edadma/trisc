@@ -636,6 +636,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     // on a TCall's return-typed temp. Two iterations: first pass resolves each declaration's
     // fields in source order (forward struct-to-struct refs still see placeholders); second
     // pass re-resolves so captured references inside struct fields point to fully-filled types.
+    // Pre-register simple (no-payload) enums so data-enum variant fields and
+    // struct fields can reference them during the resolveStructsAndEnums passes
+    // below. The main declaration pass (~line 782) repopulates simpleEnumTypes
+    // with the same value plus the variant→enum bindings; this just gets the
+    // type known to `resolveType` before any field resolution runs.
+    for decl <- program.decls do
+      decl match
+        case EnumDeclAST(name, members, _) =>
+          if !simpleEnumTypes.contains(name) then
+            val variants = members.map((vname, _) => (vname, Nil: List[(String, SyslType)]))
+            simpleEnumTypes(name) = SyslType.EnumType(name, variants)
+        case _ => ()
+
     def resolveStructsAndEnums(): Unit =
       for decl <- program.decls do
         decl match
