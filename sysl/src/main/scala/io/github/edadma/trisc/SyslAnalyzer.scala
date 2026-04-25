@@ -2763,6 +2763,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     if globalScope.contains(name) then Some(globalScope(name))
     else None
 
+  /** Like `tryLookup` but stops at the function boundary — returns only bindings from
+   *  scopes pushed inside the current function (parameters, locals, match-bound names,
+   *  destructuring binders). Used by the call-site resolver to honor local-shadows-
+   *  global semantics for callable values: a pattern-bound `f: (string) -> int` must
+   *  shadow a top-level `f(int) -> int` even though the global is registered earlier. */
+  private def lookupLocal(name: String): Option[SymInfo] =
+    if scopeStack != null then
+      var i = scopeStack.length - 1
+      while i >= 0 do
+        if scopeStack(i).contains(name) then return Some(scopeStack(i)(name))
+        i -= 1
+    None
+
   private def lookupOrCreate(name: String, typ: SyslType): SymInfo =
     if scopeStack != null then
       var i = scopeStack.length - 1
@@ -4765,6 +4778,27 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
+        // Local shadow: if `name` is bound in the current function's scope chain
+        // AND the binding is a function/closure value, treat the call as an indirect
+        // call through that local. This must run BEFORE the global-function lookup
+        // below — without it, a pattern-bound `f: (string) -> int` from a destructured
+        // variant field would silently fall through to a like-named top-level
+        // `f(int) -> int`, causing a misleading argument-type error.
+        lookupLocal(name) match
+          case Some(sym) =>
+            sym.typ match
+              case ft: FuncType =>
+                val expectedTypes = ft.params.map(t => Some(t): Option[SyslType])
+                val tArgs = args.zip(expectedTypes.padTo(args.length, None)).map { case (a, exp) =>
+                  val saved = currentExpected
+                  currentExpected = exp.orElse(saved)
+                  try analyzeExpr(a) finally currentExpected = saved
+                }
+                val paramPairs = ft.params.zipWithIndex.map((t, i) => (s"_p$i", t))
+                val checkedArgs = checkArgs(name, paramPairs, tArgs)
+                return TIndirectCall(TVarRef(name, sym.typ), checkedArgs, ft.returnType)
+              case _ => () // local exists but isn't callable — fall through to global
+          case None => ()
         // For each param, the expected arg type during analysis. For Out/Inout the
         // body-visible type is the inner T (not the hidden `*T`), so the user-written
         // arg is analyzed against T — matching what's actually written at the call site.
