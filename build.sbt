@@ -210,7 +210,7 @@ lazy val syslCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     name := "sysl-cli",
     libraryDependencies += "com.github.scopt" %%% "scopt" % "4.1.0",
   )
-  .dependsOn(sysl, asm, tof)
+  .dependsOn(sysl, asm, tof, svm, cpu)
   .jsSettings(jsSettings)
   .jsSettings(
     scalaJSUseMainModuleInitializer := true,

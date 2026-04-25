@@ -154,10 +154,10 @@ object SyslCli:
               )
             ),
           opt[String]("backend")
-            .text("Backend: interpreter (default) | llvm-host | trisc | all")
+            .text("Backend: interpreter (default) | llvm-host | svm-host | trisc | all")
             .validate(v =>
-              if Seq("interpreter", "llvm-host", "trisc", "all").contains(v) then success
-              else failure(s"Unknown backend: $v (expected interpreter, llvm-host, trisc, all)")
+              if Seq("interpreter", "llvm-host", "svm-host", "trisc", "all").contains(v) then success
+              else failure(s"Unknown backend: $v (expected interpreter, llvm-host, svm-host, trisc, all)")
             )
             .action((v, c) =>
               c.copy(command = c.command match
@@ -478,6 +478,76 @@ object SyslCli:
               case _ => Pass
           else Fail(s"panic: $panicMsg (exit $exit)", output)
 
+  /** Compile + run a single test on the SVM bytecode interpreter.
+    *
+    * Strategy: codegen the test's scoped program to SVM asm, append a tiny
+    * `main` wrapper that calls the target test function and pushes a unique
+    * sentinel value before halting. Assemble, link with the SVM runtime
+    * (boot + io), and run under a fresh SVM instance. If the post-run
+    * top-of-stack equals the sentinel, the test returned normally; any other
+    * TOS indicates the VM halted via `halt` (contract failure, assert, etc.).
+    */
+  private def runOneSVM(program: TProgram, t: DiscoveredTest): TestOutcome =
+    val outputBuf = new StringBuilder
+    val asm =
+      try (new SyslSVMCodegen).generate(program)
+      catch case e: Throwable =>
+        if System.getenv("SVM_TRACE") != null then e.printStackTrace()
+        return Fail(s"SVM codegen failed: ${e.getClass.getSimpleName}: ${e.getMessage}")
+    if System.getenv("SVM_DUMP_ASM") != null then
+      java.nio.file.Files.writeString(java.nio.file.Paths.get(s"/tmp/svm_${t.unitName.replace("/", "_")}.s"), asm)
+    val sentinel = 0x5AFE_FADE_5AFE_FADEL
+    val wrapperAsm =
+      s"""|extern ${t.fn.name}
+          |global main, func
+          |entry main
+          |
+          |segment code
+          |main:
+          |  call ${t.fn.name}
+          |  push_i64 $sentinel
+          |  halt
+          |""".stripMargin
+    val programTof =
+      try svmAssemble(asm, relocatable = true)
+      catch case e: Throwable => return Fail(s"SVM assembly failed: ${e.getMessage}", outputBuf.toString)
+    val wrapperTof =
+      try svmAssemble(wrapperAsm, relocatable = true)
+      catch case e: Throwable => return Fail(s"SVM wrapper assembly failed: ${e.getMessage}", outputBuf.toString)
+    val linked =
+      try Linker.link(Seq(SVMRuntime.bootTof, programTof, wrapperTof, SVMRuntime.ioTof))
+      catch case e: Throwable => return Fail(s"SVM link failed: ${e.getMessage}", outputBuf.toString)
+    val stdout = new Stdout(SVMRuntime.stdoutAddress, s => outputBuf ++= s)
+    val ram = new RAM(0, SVMRuntime.stdoutAddress.toInt)
+    val mem = new Memory("Memory", ram, stdout)
+    try linked.load(mem)
+    catch case e: Throwable => return Fail(s"SVM load failed: ${e.getMessage}", outputBuf.toString)
+    val svm = new SVM(mem) { limit = 50_000_000 }
+    try
+      svm.reset()
+      svm.run()
+    catch case e: Throwable =>
+      if System.getenv("SVM_TRACE") != null then
+        e.printStackTrace()
+        val ip = svm.ip
+        val allSyms = for seg <- linked.segments; sym <- seg.symbols yield (sym.name, seg.org + sym.offset)
+        val sorted = allSyms.sortBy(_._2)
+        val before = sorted.filter { case (_, addr) => addr <= ip }.takeRight(3)
+        val after = sorted.filter { case (_, addr) => addr > ip }.take(3)
+        System.err.println(s"SVM_TRACE: context near 0x${ip.toHexString}:")
+        for (n, a) <- before ++ after do System.err.println(f"  0x$a%x $n")
+      return Fail(s"SVM runtime error: ${e.getClass.getSimpleName}: ${e.getMessage} at IP=0x${svm.ip.toHexString}", outputBuf.toString)
+    val captured = outputBuf.toString
+    if svm.result == sentinel then
+      if t.shouldPanic then Fail("expected panic, got normal return", captured) else Pass
+    else
+      if t.shouldPanic then
+        t.expectedMsg match
+          case Some(substr) if !captured.contains(substr) =>
+            Fail(s"panic message did not contain '$substr'", captured)
+          case _ => Pass
+      else Fail(s"panic (halt): svm.result=0x${svm.result.toHexString}", captured)
+
   private def runOneInterpreter(program: TProgram, stdlibImports: Set[String], t: DiscoveredTest): TestOutcome =
     val outputBuf = new StringBuilder
     val interp = new SyslInterpreter(s => outputBuf ++= s)
@@ -500,7 +570,7 @@ object SyslCli:
 
   private def executeTest(cmd: TestCommand): Unit =
     if cmd.backend == "trisc" || cmd.backend == "all" then
-      System.err.println(s"error: backend '${cmd.backend}' not yet implemented (use 'interpreter' or 'llvm-host')")
+      System.err.println(s"error: backend '${cmd.backend}' not yet implemented (use 'interpreter', 'llvm-host', or 'svm-host')")
       throw CliError("unsupported backend")
 
     // Always use project root as base so module paths resolve correctly.
@@ -589,6 +659,7 @@ object SyslCli:
       val start = System.nanoTime()
       val outcome = cmd.backend match
         case "llvm-host" => runOneLLVM(programFor(t.unitName), t, llvmBinCache)
+        case "svm-host"  => runOneSVM(programFor(t.unitName), t)
         case _           => runOneInterpreter(programFor(t.unitName), stdlibImports, t)
       val elapsedMs = (System.nanoTime() - start) / 1e6
       outcome match

@@ -630,6 +630,34 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           currentModule = Some(path.mkString("_"))
         case _ =>
 
+    // Pass 0.5: resolve struct and data-enum FIELDS before any function signature.
+    // Functions declared before their referenced structs/enums would otherwise capture
+    // a placeholder with empty fields (sizeOf = 0), breaking backends that read typ.sizeOf
+    // on a TCall's return-typed temp. Two iterations: first pass resolves each declaration's
+    // fields in source order (forward struct-to-struct refs still see placeholders); second
+    // pass re-resolves so captured references inside struct fields point to fully-filled types.
+    def resolveStructsAndEnums(): Unit =
+      for decl <- program.decls do
+        decl match
+          case StructDeclAST(name, fields, typeParams, _, invariants) if typeParams.isEmpty =>
+            if !genericStructs.contains(name) then
+              val resolvedFields = fields.map((n, t, _) => (n, resolveType(t)))
+              val volSet = fields.zipWithIndex.collect { case ((_, _, true), i) => i }.toSet
+              structTypes(name) = SyslType.StructType(name, resolvedFields, volSet)
+              if invariants.nonEmpty then structInvariants(name) = invariants
+          case DataEnumDeclAST(name, variants, typeParams, _) if typeParams.isEmpty =>
+            val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
+              val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
+              (vname, resolvedFields)
+            }
+            val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)
+            dataEnumTypes(name) = et
+            for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
+              variantToEnum(vname) = (et, idx)
+          case _ => ()
+    resolveStructsAndEnums()
+    resolveStructsAndEnums() // second pass: fix forward struct-to-struct refs in field types
+
     // First pass: register all functions and globals
     for decl <- program.decls do
       decl match
@@ -656,11 +684,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             genericStructs(name) = sd
           else
             if genericStructs.contains(name) then throw AnalysisError(s"duplicate struct: '$name'", decl)
-            val resolvedFields = fields.map((n, t, _) => (n, resolveType(t)))
-            val volSet = fields.zipWithIndex.collect { case ((_, _, true), i) => i }.toSet
-            // Update the placeholder with resolved fields
-            structTypes(name) = SyslType.StructType(name, resolvedFields, volSet)
-            if invariants.nonEmpty then structInvariants(name) = invariants
+            // Fields already resolved by pass 0.5 (resolveStructsAndEnums).
+            // Do not re-assign structTypes here — that would invalidate references captured
+            // by function signatures processed later in this same source-order loop.
         case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _, isDef) =>
           // Duplicate-parameter-name check.
           val seenParams = mutable.HashSet[String]()
@@ -793,15 +819,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           else
             if enumTypes.contains(name) || genericEnums.contains(name) then
               throw AnalysisError(s"duplicate enum: '$name'", decl)
-            val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
-              val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
-              (vname, resolvedFields)
-            }
-            val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)
-            // Update the placeholder with resolved variants
-            dataEnumTypes(name) = et
-            for ((vname, _), idx) <- resolvedVariants.zipWithIndex do
-              variantToEnum(vname) = (et, idx)
+            // Variants already resolved by pass 0.5 (resolveStructsAndEnums).
+            // Do not re-assign dataEnumTypes here — same reason as StructDeclAST above.
         case TypeAliasDeclAST(name, target, tparams, _, isNew, range, predicate) =>
           if typeAliases.contains(name) || genericTypeAliases.contains(name) then
             throw AnalysisError(s"duplicate type alias: '$name'", decl)
@@ -4946,9 +4965,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tThen = analyzeBlock(thenBody)
         popScope()
         val tElse = elseBody.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
-        val resultType = tThen.lastOption match
+        // Pick a non-void branch type if one exists (e.g., `if cond then panic("...") else x`
+        // — first branch is void but overall expression is x's type). Fall back to the then
+        // branch's type, or VoidType if the then branch has no trailing expression.
+        val branchLastTypes = (tThen.lastOption :: tElse.toList.flatMap(_.lastOption.map(Some(_)))).collect {
           case Some(TExprStmt(e)) => e.typ
-          case _ => VoidType
+        }
+        val resultType = branchLastTypes.find(_ != VoidType).orElse(branchLastTypes.headOption).getOrElse(VoidType)
         TIfExpr(tCond, tThen, tElse, resultType)
 
       case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>
@@ -5002,9 +5025,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                   s"non-exhaustive match on enum '${et.name}': missing variant(s): ${missing.mkString(", ")}"
                 )
           case _ => // non-enum or has default — skip
-        val resultType = tArms.headOption.flatMap(_.body.lastOption) match
-          case Some(TExprStmt(e)) => e.typ
-          case _ => VoidType
+        // Pick a non-void arm type if one exists (e.g., one arm panics, another returns a value).
+        // Fall back to the first arm's last-expression type, or VoidType if no arm ends with an expression.
+        val armLastTypes = tArms.flatMap(_.body.lastOption).collect { case TExprStmt(e) => e.typ } ++
+          tDefault.toList.flatMap(_.lastOption).collect { case TExprStmt(e) => e.typ }
+        val resultType = armLastTypes.find(_ != VoidType).orElse(armLastTypes.headOption).getOrElse(VoidType)
         TMatchExpr(tScrutinee, tArms, tDefault, resultType)
 
   private def analyzeInterpolatedString(s: String): TExpr =
