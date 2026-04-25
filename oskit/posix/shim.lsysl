@@ -508,6 +508,8 @@ to the same UDP stack that native sysl programs use via
             return sys_read(int(a0), a1, int(a2))
         if num == 131
             return sys_accept(int(a0), a1, a2)
+        if num == 132
+            return sys_accept4(int(a0), a1, a2, int(a3))
         if num == 135
             return sys_bind(int(a0), a1, int(a2))
         if num == 147
@@ -1336,6 +1338,39 @@ CLOSE_WAIT on arrival — read/close paths handle that already.
             ipc_send(port, close_msg, 3, close_rep, 1)
             return i64(-24)             // -EMFILE
         i64(new_fd)
+
+SYS_ACCEPT4.  Linux's accept(2) variant that takes a `flags`
+argument so the accepted child fd can be born non-blocking
+(`SOCK_NONBLOCK = 0x800` = same value as `O_NONBLOCK`) and/or
+close-on-exec (`SOCK_CLOEXEC = 0x80000`) atomically — without
+the racy `accept` + `fcntl(F_SETFL, O_NONBLOCK)` dance servers
+otherwise have to do.  The shim is single-threaded so the race
+isn't observable here either way, but matching the contract
+keeps libuv / Node.js / glibc happy.
+
+`SOCK_NONBLOCK` is honoured: the child PosixFd carries
+`POSIX_O_NONBLOCK` from birth, so its first read/write/etc.
+already routes through the non-blocking inet path.
+`SOCK_CLOEXEC` is accept-and-ignore for now (no fork/exec
+story yet — see `feedback_no_workarounds_build_it.md` for the
+follow-up arc).  Unknown flag bits return -EINVAL.
+
+    val POSIX_SOCK_NONBLOCK = 2048
+    val POSIX_SOCK_CLOEXEC  = 524288
+
+    sys_accept4(fd: int, addr_ptr: i64, addrlen_ptr: i64, flags: int) -> i64
+        val known = POSIX_SOCK_NONBLOCK | POSIX_SOCK_CLOEXEC
+        if (flags & ~known) != 0
+            return i64(-22)             // -EINVAL
+        val r = sys_accept(fd, addr_ptr, addrlen_ptr)
+        if r < i64(0)
+            return r
+        val new_fd = int(r)
+        if (flags & POSIX_SOCK_NONBLOCK) != 0
+            val cur = posix_fd_flags(new_fd)
+            posix_fd_set_flags(new_fd, cur | POSIX_O_NONBLOCK)
+        i64(new_fd)
+
 
 SYS_SHUTDOWN. Real half-close via `INET_CMD_TCP_SHUTDOWN`. `how`
 values (Linux): 0 = SHUT_RD (no-op — we don't track a read-shut
