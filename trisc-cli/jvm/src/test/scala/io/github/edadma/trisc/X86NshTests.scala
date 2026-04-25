@@ -16,15 +16,6 @@ import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
   * These tests boot through login (root/toor) before testing the shell. */
 class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
 
-  // x86 is sidelined per project_slix_x86_sidelined.md — keep the
-  // suite compilable but excluded from the default `sbt test` run.
-  // Also avoids QEMU hostfwd port collisions with Aarch64NshTests
-  // when both suites would otherwise launch in parallel and fight
-  // over tcp::28080/28082. Run explicitly via `sbt testSlow` once
-  // x86 is brought back online.
-  override def tags: Map[String, Set[String]] =
-    testNames.map(_ -> Set("io.github.edadma.trisc.Slow")).toMap
-
   private var qemu: QemuTestHarness = null
 
   private def requirePrebuilt(): Unit =

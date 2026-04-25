@@ -21,6 +21,15 @@ class QemuTestHarness(
   private var readerThread: Thread = null
 
   def start(): Unit =
+    QemuLock.acquire()
+    var ok = false
+    try
+      doStart()
+      ok = true
+    finally
+      if !ok then QemuLock.release()
+
+  private def doStart(): Unit =
     val cmd = new java.util.ArrayList[String]()
     cmd.add("qemu-system-x86_64")
     cmd.add("-m"); cmd.add("512M")  // 128 MB ramdisk + kernel needs more than the 128 MB default
@@ -108,8 +117,11 @@ class QemuTestHarness(
 
   def close(): Unit =
     if process != null then
-      process.destroyForcibly()
-      process.waitFor(5, TimeUnit.SECONDS)
-      // Drain remaining output
-      while outputQueue.peek() != null do
-        outputBuf.append(outputQueue.poll())
+      try
+        process.destroyForcibly()
+        process.waitFor(5, TimeUnit.SECONDS)
+        // Drain remaining output
+        while outputQueue.peek() != null do
+          outputBuf.append(outputQueue.poll())
+      finally
+        QemuLock.release()
