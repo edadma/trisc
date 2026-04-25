@@ -1838,15 +1838,44 @@ class SyslSVMCodegen:
     case SyslType.IntType(16) | SyslType.UIntType(16) => emit("  store16")
     case SyslType.IntType(32) | SyslType.UIntType(32) => emit("  store32")
     case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType =>
-      // Inline aggregate: stack has ( src_addr dest_addr ). Copy sizeOf bytes.
-      val size = ((typ.sizeOf + 7) / 8 * 8).toInt
-      for i <- 0 until size by 8 do
+      // Inline aggregate: stack has ( src_addr dest_addr ). Copy EXACTLY sizeOf
+      // bytes — never round up. Rounding up to 8 would overwrite the slot after
+      // the dst element (e.g. for 12-byte structs in a tight slice, clobbering
+      // element[i+1]'s first field).
+      val total = typ.sizeOf.toInt
+      var off = 0
+      while off + 8 <= total do
         emit("  over")
-        if i > 0 then { emitPushInt(i); emit("  add") }
+        if off > 0 then { emitPushInt(off); emit("  add") }
         emit("  load64")
         emit("  over")
-        if i > 0 then { emitPushInt(i); emit("  add") }
+        if off > 0 then { emitPushInt(off); emit("  add") }
         emit("  store64")
+        off += 8
+      while off + 4 <= total do
+        emit("  over")
+        if off > 0 then { emitPushInt(off); emit("  add") }
+        emit("  load32")
+        emit("  over")
+        if off > 0 then { emitPushInt(off); emit("  add") }
+        emit("  store32")
+        off += 4
+      while off + 2 <= total do
+        emit("  over")
+        if off > 0 then { emitPushInt(off); emit("  add") }
+        emit("  load16")
+        emit("  over")
+        if off > 0 then { emitPushInt(off); emit("  add") }
+        emit("  store16")
+        off += 2
+      while off < total do
+        emit("  over")
+        if off > 0 then { emitPushInt(off); emit("  add") }
+        emit("  load8")
+        emit("  over")
+        if off > 0 then { emitPushInt(off); emit("  add") }
+        emit("  store8")
+        off += 1
       emit("  drop")
       emit("  drop")
     case _ => emit("  store64")
