@@ -133,11 +133,16 @@ _start:
     orl  $0x03, %eax
     movl %eax, pdpt + 24
 
-    # PD[0..15] -> identity-map first 32MB via 2MB pages
+    # PD[0..511] -> identity-map first 1GB via 2MB pages
     # PS bit (0x80) = 2MB page, present + writable + PS
+    # Was 32MB; bumped to a full 1GB so multiboot modules
+    # (ramdisk + boot info) load anywhere in low memory without
+    # page-faulting in kernel_main when the kernel reads them.
+    # 128MB ramdisk pushes the boot info module past the 32MB
+    # window QEMU's multiboot loader used to fit within.
     movl $pd, %edi
     movl $0x00000083, %eax     # 0MB, present+write+PS
-    movl $16, %ecx             # 16 entries = 32MB
+    movl $512, %ecx            # 512 entries × 2MB = 1GB
 1:
     movl %eax, (%edi)
     movl $0, 4(%edi)
