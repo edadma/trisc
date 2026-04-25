@@ -10,13 +10,18 @@ trait SyslSVMCodegenHelpers extends AnyFreeSpec with Matchers {
     val typed = (new SyslAnalyzer).analyze(ast)
     (new SyslSVMCodegen).generate(typed)
 
+  // Pass a no-op writer to Stdout so guest puts/print calls don't
+  // leak into the test runner's stdout (the default writer is `print`,
+  // which makes random "foobar"-style strings show up between
+  // unrelated tests when sbt parallelizes suites).
+  private def silentStdout(): Stdout = new Stdout(SVMRuntime.stdoutAddress, _ => ())
+
   def compileAndRun(source: String, maxCycles: Int = 100000): Long =
     val asm = compile(source)
     val tof = svmAssemble(asm, relocatable = true)
     val linked = Linker.link(Seq(SVMRuntime.bootTof, tof, SVMRuntime.ioTof))
-    val stdout = new Stdout(SVMRuntime.stdoutAddress)
     val ram = new RAM(0, SVMRuntime.stdoutAddress.toInt)
-    val mem = new Memory("Memory", ram, stdout)
+    val mem = new Memory("Memory", ram, silentStdout())
     linked.load(mem)
     val svm = new SVM(mem) { limit = maxCycles }
     svm.reset()
@@ -31,9 +36,8 @@ trait SyslSVMCodegenHelpers extends AnyFreeSpec with Matchers {
       val asm = codegen.generate(unit.typed)
       svmAssemble(asm, relocatable = true)
     val linked = Linker.link(Seq(SVMRuntime.bootTof) ++ tofs ++ Seq(SVMRuntime.ioTof))
-    val stdout = new Stdout(SVMRuntime.stdoutAddress)
     val ram = new RAM(0, SVMRuntime.stdoutAddress.toInt)
-    val mem = new Memory("Memory", ram, stdout)
+    val mem = new Memory("Memory", ram, silentStdout())
     linked.load(mem)
     val svm = new SVM(mem) { limit = maxCycles }
     svm.reset()
