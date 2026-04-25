@@ -46,14 +46,15 @@ typedef union epoll_data {
 	uint64_t u64;
 } epoll_data_t;
 
+/* SLIX uses the naturally-aligned aarch64 layout on every arch
+ * (events:u32 @0, padding @4, data:u64 @8 → 16 bytes) so the
+ * kernel's posix shim can read offset 8 unconditionally. Upstream
+ * musl packs this on x86_64 to match Linux's wire format; SLIX
+ * does not need that compatibility because it isn't Linux. */
 struct epoll_event {
 	uint32_t events;
 	epoll_data_t data;
-}
-#ifdef __x86_64__
-__attribute__ ((__packed__))
-#endif
-;
+};
 
 struct epoll_params {
 	uint32_t busy_poll_usecs;

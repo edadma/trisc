@@ -1519,4 +1519,71 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     val after = qemu.command("cat /etc/ttytab")
     after should include("tty0 login")
   }
+
+  "aarch64 musl: per-fd EPOLLET edge isolation" in {
+    // mepoll_multi (slix/test/epoll_multi.c): two UDP sockets share
+    // an epoll instance, both EPOLLIN | EPOLLET. Firing one must
+    // not re-deliver the other. Before the per-fd fire counter
+    // landed, the shim's notify-wake bulk-cleared every entry's
+    // `last_reported`, so an unrelated edge re-fired siblings.
+    qemu.send("epoll_multi\n")
+    val output = qemu.waitFor("mepoll_multi: done")
+    output should include("mepoll_multi: after_a=1 data=10")
+    output should include("mepoll_multi: idle=0")
+    output should include("mepoll_multi: after_b=1 data0=11")
+    output should not include "mepoll_multi: after_b=2"
+    output should include("mepoll_multi: done")
+  }
+
+  "aarch64 musl: listen backlog enforcement (Phase F)" in {
+    // mlbacklog (slix/test/lbacklog.c): listen() with backlog=2,
+    // four parallel host connects. Two of the four SYNs land in
+    // the queue immediately; the other two are dropped at SYN
+    // time and only succeed after the peer's automatic retransmit
+    // — proves both that the cap is enforced AND that a peer can
+    // recover via its standard retry path. All four eventually
+    // get served once the accept loop drains the queue.
+    qemu.send("mlbacklog\n")
+    qemu.waitFor("mlbacklog: ready")
+
+    val tags = "abcd".toList
+    val replies = new java.util.concurrent.ConcurrentHashMap[Char, String]()
+    val errors = new java.util.concurrent.ConcurrentLinkedQueue[Throwable]()
+    val threads: List[Thread] = tags.map { tag =>
+      val runnable: Runnable = () => {
+        try
+          val sock = new java.net.Socket()
+          sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 8000)
+          try
+            sock.getOutputStream.write(Array(tag.toByte))
+            sock.getOutputStream.flush()
+            val in = sock.getInputStream
+            val buf = new Array[Byte](16)
+            val n = in.read(buf)
+            replies.put(tag, if n > 0 then new String(buf, 0, n) else "")
+          finally sock.close()
+        catch case e: Throwable => errors.add(e)
+        ()
+      }
+      val t = new Thread(runnable, s"aarch64-mlbacklog-client-$tag")
+      t.setDaemon(true)
+      t.start()
+      t
+    }
+
+    qemu.waitFor("mlbacklog: done")
+    threads.foreach(t => t.join(8000))
+
+    val output = qemu.allOutput
+    output should include("mlbacklog: ready")
+    for i <- 0 until 4 do
+      output should include(s"mlbacklog: child[$i]")
+    output should include("mlbacklog: done")
+
+    errors.size shouldBe 0
+    replies.size shouldBe 4
+    tags.foreach { tag =>
+      replies.get(tag) should include("ack")
+    }
+  }
 }

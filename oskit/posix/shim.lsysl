@@ -379,6 +379,13 @@ the shim copies bytes 0..3 and 8..15 of the user struct.
         data_lo: i64
         last_reported: int   // for EPOLLET: bits last delivered
         armed: int           // 0 if EPOLLONESHOT fired and disarmed
+        // Cached per-fd fire counter (returned by INET_CMD_POLL /
+        // VFS_CMD_POLL). When the live counter advances past this,
+        // the fd actually crossed an edge — we clear `last_reported`
+        // so EPOLLET re-fires. Initialised to 0 on EPOLL_CTL_ADD,
+        // -1 sentinel could've worked but 0 lines up with the
+        // server-side counter starting at 0 for fresh slots.
+        last_seen_seq: int
 
     struct EpollInstance
         in_use: int
@@ -398,6 +405,7 @@ the shim copies bytes 0..3 and 8..15 of the user struct.
             epoll_table[idx].entries[i].data_lo = i64(0)
             epoll_table[idx].entries[i].last_reported = 0
             epoll_table[idx].entries[i].armed = 0
+            epoll_table[idx].entries[i].last_seen_seq = 0
             i += 1
 
     epoll_alloc_inst() -> int
@@ -1164,11 +1172,19 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         val port = inet_get_port()
         if port < 0
             return i64(-19)
-        var msg: [3]byte
+        var msg: [5]byte
         msg[0] = byte(INET_CMD_TCP_LISTEN)
         shim_write_u16(msg, 1, local_port)
+        // Pass user's `backlog` through; inet caps at TCP_LISTEN_BACKLOG
+        // and normalises 0 to 1. Negative values are clamped to 1 too.
+        var bl = backlog
+        if bl < 0
+            bl = 0
+        if bl > 0xffff
+            bl = 0xffff
+        shim_write_u16(msg, 3, bl)
         var reply: [2]byte
-        val r = ipc_send(port, msg, 3, reply, 2)
+        val r = ipc_send(port, msg, 5, reply, 2)
         if r < 0
             return i64(-5)
         if reply[0] != 0
@@ -1914,6 +1930,12 @@ without poll support.
                     epoll_table[inst].entries[i].data_lo = data_in
                     epoll_table[inst].entries[i].last_reported = 0
                     epoll_table[inst].entries[i].armed = 1
+                    // Start at 0; the first POLL will sync against
+                    // the server's current value. If the fd already
+                    // had fires before ADD, the first scan sees seq
+                    // advanced and (correctly) treats the current
+                    // ready bits as a fresh edge.
+                    epoll_table[inst].entries[i].last_seen_seq = 0
                     epoll_subscribe(target_fd, inst)
                     return i64(0)
                 i += 1
@@ -1931,6 +1953,9 @@ without poll support.
                         // before — matches Linux's MOD-rearm semantics.
                         epoll_table[inst].entries[i].last_reported = 0
                         epoll_table[inst].entries[i].armed = 1
+                        // Treat MOD as a fresh-edge boundary: forget
+                        // the cached seq so the next POLL re-syncs.
+                        epoll_table[inst].entries[i].last_seen_seq = 0
                         return i64(0)
                 i += 1
             return i64(-2)              // -ENOENT
@@ -1949,9 +1974,15 @@ without poll support.
 Query a single watched fd's readiness. Returns the bits the
 shim should report, masked against the user's requested events
 + EPOLLERR/EPOLLHUP (which are always reported regardless of
-what the user asked for, per Linux semantics).
+what the user asked for, per Linux semantics). Also writes the
+per-fd `fire_seq` (returned by both INET_CMD_POLL and
+VFS_CMD_POLL) into `*seq_out` so `epoll_scan_once` can detect
+"this specific fd actually fired since the last scan" without
+the per-instance bulk last_reported clear that over-fires
+multi-fd EPOLLET loops.
 
-    epoll_query_ready(target_fd: int, want: int) -> int
+    epoll_query_ready(target_fd: int, want: int, seq_out: *int) -> int
+        *seq_out = 0
         val k = posix_fd_kind(target_fd)
         if k == POSIX_FD_FREE
             return POSIX_EPOLLERR
@@ -1966,13 +1997,14 @@ what the user asked for, per Linux semantics).
             else
                 msg[1] = byte(2)
             shim_write_u16(msg, 2, posix_fd_target(target_fd))
-            var reply: [3]byte
-            val r = ipc_send(port, msg, 4, reply, 3)
+            var reply: [7]byte
+            val r = ipc_send(port, msg, 4, reply, 7)
             if r < 0
                 return POSIX_EPOLLERR
             if reply[0] != 0
                 return POSIX_EPOLLERR
             val raw = shim_read_u16(reply, 1)
+            *seq_out = (int(reply[3]) & 0xff) | ((int(reply[4]) & 0xff) << 8) | ((int(reply[5]) & 0xff) << 16) | ((int(reply[6]) & 0xff) << 24)
             // Mask: caller's requested events plus error/hangup
             // which are always reported.
             return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
@@ -1991,13 +2023,14 @@ what the user asked for, per Linux semantics).
             msg[2] = byte((handle >> 16) & 0xff)
             msg[3] = byte((handle >> 8) & 0xff)
             msg[4] = byte(handle & 0xff)
-            var reply: [3]byte
-            val r = ipc_send(port, msg, 5, reply, 3)
+            var reply: [7]byte
+            val r = ipc_send(port, msg, 5, reply, 7)
             if r < 0
                 return POSIX_EPOLLERR
             if reply[0] != 0
                 return POSIX_EPOLLERR
             val raw = (int(reply[1]) & 0xff) | ((int(reply[2]) & 0xff) << 8)
+            *seq_out = (int(reply[3]) & 0xff) | ((int(reply[4]) & 0xff) << 8) | ((int(reply[5]) & 0xff) << 16) | ((int(reply[6]) & 0xff) << 24)
             return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         if k == POSIX_FD_STDIN
             return 0
@@ -2022,7 +2055,18 @@ the number of events written.
                 if epoll_table[inst].entries[i].armed != 0
                     val tfd = epoll_table[inst].entries[i].watched_fd
                     val want = epoll_table[inst].entries[i].events
-                    val ready = epoll_query_ready(tfd, want)
+                    var seq = 0
+                    val ready = epoll_query_ready(tfd, want, &seq)
+                    // Per-fd edge detection: when the server-side
+                    // counter advances past our cached value, the
+                    // fd actually fired since the last scan. Reset
+                    // `last_reported` so EPOLLET sees the live bits
+                    // as rising again — without clobbering siblings
+                    // in the same epoll instance whose counters
+                    // didn't move.
+                    if seq != epoll_table[inst].entries[i].last_seen_seq
+                        epoll_table[inst].entries[i].last_reported = 0
+                        epoll_table[inst].entries[i].last_seen_seq = seq
                     var deliver = ready
                     if (want & POSIX_EPOLLET) != 0
                         // Only the bits that just became ready since
@@ -2048,25 +2092,20 @@ the number of events written.
             i += 1
         produced
 
-Reset every entry's `last_reported` to 0 — invoked when a
-notify wake arrives, since each fire from inet represents a
-true readiness edge at the source. Without this, an
-EPOLLET subscriber that drained its socket between waits and
-then saw new data would never re-fire (the bit looks identical
-to the last reported snapshot, so `rising == 0`).
-
-    epoll_clear_last_reported(inst: int)
-        var i = 0
-        while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
-            epoll_table[inst].entries[i].last_reported = 0
-            i += 1
-
 SYS_EPOLL_PWAIT. Phase A2: blocks via the kernel notify
 primitive (or `sleep_or_notify` for finite timeouts) instead of
 the old sleep-1-tick loop. inet and VFS each maintain a per-fd
 subscriber list that fires `notify_send_to(tid, 1)` on every
 readiness boundary, so a wait wakes within a syscall hop of the
 change. `sigmask` is ignored (no signal delivery yet).
+
+The earlier per-instance `last_reported` bulk clear has been
+replaced with per-entry seq comparison inside `epoll_scan_once`:
+each POLL reply carries the server's monotonic per-fd fire
+counter, and only entries whose counter advanced since our last
+scan get their `last_reported` reset. `notify_read_self()` is
+still drained here so the kernel's notify_pending gauge clears
+and `notify_wait()` can block again on the next iteration.
 
     sys_epoll_pwait(epfd: int, events_array: i64, max_events: int, timeout_ms: int) -> i64
         if posix_fd_kind(epfd) != POSIX_FD_EPOLL
@@ -2085,13 +2124,11 @@ change. `sigmask` is ignored (no signal delivery yet).
         var iter = 0
         while iter < 100000             // runaway-loop guard
             iter += 1
-            // Each notify is an edge. If one is pending — either
-            // arrived between waits or while we were sleeping —
-            // clear last_reported so EPOLLET subscribers see the
-            // freshly-ready bits as rising again.
-            val pending_value = notify_read_self()
-            if pending_value != 0
-                epoll_clear_last_reported(inst)
+            // Drain any pending notify so notify_wait() can block
+            // cleanly on the next loop iteration. The seq-based
+            // edge detection inside epoll_scan_once handles the
+            // EPOLLET clearing now — no per-instance bulk reset.
+            val _ = notify_read_self()
             val produced = epoll_scan_once(inst, out, max_events)
             if produced > 0
                 return i64(produced)

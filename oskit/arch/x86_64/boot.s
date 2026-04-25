@@ -707,9 +707,15 @@ syscall_entry:
     movq 56(%rsp), %r8         # a3
     movq 48(%rsp), %r9         # a4
     movq 40(%rsp), %r11        # a5 (scratch reg; pushed below)
+    # SysV AMD64 ABI requires RSP to be 16-byte aligned at the moment
+    # of CALL. After 15 pushq's RSP is 0 mod 16, so a single `pushq %r11`
+    # would leave 8 mod 16 — the callee then aligns to 8 mod 16 internally
+    # and any SSE movaps on `0xN0(%rsp)` faults #GP. The 8-byte padding
+    # below restores the 0-mod-16 invariant.
+    subq $8, %rsp              # alignment padding for SysV ABI
     pushq %r11                 # 7th arg goes on the stack
     call oskit_posix__posix_dispatch
-    addq $8, %rsp              # drop the pushed a5
+    addq $16, %rsp             # drop padding + pushed a5
     movq %rax, 112(%rsp)       # write i64 return into saved RAX
 
     jmp do_schedule
@@ -754,10 +760,12 @@ syscall_entry:
     movq 56(%rsp), %r8
     movq 48(%rsp), %r9
     movq 40(%rsp), %r11
+    # See alignment comment in the .posix path above — same fix.
+    subq $8, %rsp              # alignment padding for SysV ABI
     pushq %r11                 # a5 on stack for the call
     xorq %rdi, %rdi            # env = null
     call *%rax
-    addq $8, %rsp              # drop the pushed a5
+    addq $16, %rsp             # drop padding + pushed a5
     movq %rax, 112(%rsp)       # write handler return into saved RAX
 
     jmp do_schedule

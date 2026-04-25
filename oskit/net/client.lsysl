@@ -400,17 +400,32 @@ TIME_WAIT elapses). Returns 0 on success, -1 on error.
 ### tcp_listen
 
 Bind a listen socket to `local_port`. Returns the listen fd on
-success (usable with `tcp_accept`) or -1 on error.
+success (usable with `tcp_accept`) or -1 on error. Uses the
+default backlog (TCP_LISTEN_BACKLOG, the upper cap inet enforces);
+sysl callers wanting a smaller queue use `tcp_listen_backlog`.
 
     tcp_listen(local_port: int) -> int
+        tcp_listen_backlog(local_port, 16)
+
+`tcp_listen_backlog` is the explicit-backlog form: caller picks
+the queue depth (clamped by inet to the TCP_LISTEN_BACKLOG ceiling
+and `<=0` is normalised to 1 inside the server).
+
+    tcp_listen_backlog(local_port: int, backlog: int) -> int
         val port = inet_get_port()
         if port < 0
             return -1
-        var msg: [3]byte
+        var msg: [5]byte
         msg[0] = byte(INET_CMD_TCP_LISTEN)
         net_write_u16(msg, 1, local_port)
+        var bl = backlog
+        if bl < 0
+            bl = 0
+        if bl > 0xffff
+            bl = 0xffff
+        net_write_u16(msg, 3, bl)
         var reply: [2]byte
-        ipc_send(port, msg, 3, reply, 2)
+        ipc_send(port, msg, 5, reply, 2)
         if reply[0] != 0
             return -1
         int(reply[1]) & 0xff

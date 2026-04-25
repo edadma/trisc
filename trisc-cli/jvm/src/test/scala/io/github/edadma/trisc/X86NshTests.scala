@@ -415,4 +415,243 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     val after = qemu.command("cat /etc/ttytab")
     after should include("tty0 login")
   }
+
+  "x86 musl: write(1, ...) + read(0, ...) + exit" in {
+    // Mirror of the aarch64 mhello test. The C source is shared
+    // (slix/test/hello.c) — only the build target differs. Validates
+    // the x86 POSIX shim's SYS_WRITE/SYS_READ/SYS_EXIT_GROUP path and
+    // the musl __set_thread_area override that lands TLS via WRFSBASE.
+    val output = qemu.command("mhello")
+    output should include("hello from musl")
+    output should include("read=0")
+  }
+
+  "x86 musl: socket/connect/shutdown/read via libc wrappers" in {
+    // Mirror of the aarch64 msocket test. Host peer on
+    // 127.0.0.1:18083 reads until EOF and replies with the byte
+    // count; guest dials it via slirp's outbound NAT.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18083))
+    server.setSoTimeout(15000)
+
+    val peerThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](256)
+          var total = 0
+          var n = in.read(buf, total, buf.length - total)
+          while n > 0 do
+            total += n
+            n = in.read(buf, total, buf.length - total)
+          val reply = s"got $total bytes".getBytes
+          out.write(reply)
+          out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-msocket-peer-x86")
+    peerThread.setDaemon(true)
+    peerThread.start()
+
+    try
+      qemu.send("msocket\n")
+      val output = qemu.waitFor("msocket: done")
+      output should include("msocket: socket=3")
+      output should include("msocket: connect=0")
+      output should include("msocket: getsockname=0 family=2")
+      output should include("msocket: write=23")
+      output should include("msocket: shutdown=0")
+      output should include("msocket: read=12 reply='got 23 bytes'")
+      output should include("msocket: done")
+    finally
+      server.close()
+      peerThread.join(2000)
+  }
+
+  "x86 musl: open/read/lseek/close on /etc/passwd" in {
+    qemu.send("mfile\n")
+    val output = qemu.waitFor("mfile: done")
+    output should include("mfile: open=3")
+    output should include("mfile: read=")
+    output should not include "mfile: read=0"
+    output should not include "mfile: read=-"
+    output should include("mfile: lseek=0")
+    output should include("mfile: read2=16")
+    output should include("mfile: done")
+  }
+
+  "x86 musl: epoll_create1/ctl/wait on a UDP socket" in {
+    qemu.send("mepoll\n")
+    val output = qemu.waitFor("mepoll: done")
+    output should include("mepoll: create=3")
+    output should include("mepoll: bind=0")
+    output should include("mepoll: ctl_add=0")
+    output should include("mepoll: wait_idle=0")
+    output should include("mepoll: sendto=13")
+    output should include("mepoll: wait_after_send=1 events=0x00000001 data_ok=1")
+    output should include("mepoll: recv=13")
+    output should include("mepoll: wait_after_drain=0")
+    output should include("mepoll: ctl_del=0")
+    output should include("mepoll: done")
+  }
+
+  "x86 musl: epoll EPOLLET + EPOLLONESHOT (Phase A2)" in {
+    qemu.send("mepoll2\n")
+    val output = qemu.waitFor("mepoll2: done")
+    output should include("mepoll2: et_first=1")
+    output should include("mepoll2: et_no_redeliver=0")
+    output should include("mepoll2: et_second=1")
+    output should include("mepoll2: oneshot_first=1")
+    output should include("mepoll2: oneshot_disarmed=0")
+    output should include("mepoll2: oneshot_rearmed=1")
+    output should include("mepoll2: done")
+  }
+
+  "x86 musl: non-blocking accept (Phase B)" in {
+    qemu.send("mnbacc\n")
+    val pre = qemu.waitFor("mnbacc: ready")
+    val client = new java.net.Socket()
+    client.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    try
+      client.getOutputStream.write("ping".getBytes())
+      client.getOutputStream.flush()
+      val post = qemu.waitFor("mnbacc: done")
+      pre should include("mnbacc: empty=-1 errno=11")
+      post should include("mnbacc: wait=1")
+      post should not include "mnbacc: accept=-1"
+      post should include("mnbacc: read=4 data='ping'")
+      post should include("mnbacc: done")
+    finally client.close()
+  }
+
+  "x86 musl: non-blocking connect (Phase B)" in {
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+    val echoThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](64)
+          val n = in.read(buf)
+          if n > 0 then
+            out.write(buf, 0, n)
+            out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch case _: Throwable => ()
+    }, "tcp-echo-server-mnbcon-x86")
+    echoThread.setDaemon(true)
+    echoThread.start()
+    try
+      qemu.send("mnbcon\n")
+      val output = qemu.waitFor("mnbcon: done")
+      output should include("mnbcon: connect=-1 errno=115")
+      output should include("mnbcon: wait=1")
+      output should include("mnbcon: sent=10")
+      output should include("mnbcon: read=10 data='nbcon-ping'")
+      output should include("mnbcon: done")
+    finally
+      server.close()
+      echoThread.join(2000)
+  }
+
+  "x86 musl: pipe2 + write + read + EOF" in {
+    qemu.send("mpipe\n")
+    val output = qemu.waitFor("mpipe: done")
+    output should include("mpipe: pipe2=0")
+    output should include("mpipe: write=17")
+    output should include("mpipe: read=17 data='ping through pipe'")
+    output should include("mpipe: read_after_close=0")
+    output should include("mpipe: done")
+  }
+
+  "x86 musl: sendmsg/recvmsg via libc wrappers" in {
+    qemu.send("mmsg\n")
+    val output = qemu.waitFor("mmsg: done")
+    output should include("mmsg: socket=3")
+    output should include("mmsg: bind=0")
+    output should include("mmsg: sendmsg=12")
+    output should include("mmsg: recvmsg=12 data='hello msghdr'")
+    output should include("mmsg: src_port=7790")
+    output should include("mmsg: done")
+  }
+
+  "x86 musl: listen backlog enforcement (Phase F)" in {
+    runBacklogTest("x86")
+  }
+
+  "x86 musl: per-fd EPOLLET edge isolation" in {
+    // mepoll_multi (slix/test/epoll_multi.c): two UDP sockets share
+    // an epoll instance, both EPOLLIN | EPOLLET. Firing one must
+    // not re-deliver the other. Before the per-fd fire counter
+    // landed, the shim's notify-wake bulk-cleared every entry's
+    // `last_reported`, so an unrelated edge re-fired siblings.
+    qemu.send("epoll_multi\n")
+    val output = qemu.waitFor("mepoll_multi: done")
+    output should include("mepoll_multi: after_a=1 data=10")
+    output should include("mepoll_multi: idle=0")
+    // After the second send only B (data=11) reports — A stays
+    // quiet because its last edge was already consumed.
+    output should include("mepoll_multi: after_b=1 data0=11")
+    output should not include "mepoll_multi: after_b=2"
+    output should include("mepoll_multi: done")
+  }
+
+  /** Shared body for the Phase F listen-backlog test (also used by
+    * Aarch64NshTests). Listens with backlog=2; fires four parallel
+    * host connects so two SYNs are dropped on first arrival and only
+    * succeed after the peer's automatic retransmit (which fires once
+    * the guest accept loop drains the queue). */
+  private def runBacklogTest(label: String): Unit =
+    qemu.send("mlbacklog\n")
+    qemu.waitFor("mlbacklog: ready")
+
+    val tags = "abcd".toList
+    val replies = new java.util.concurrent.ConcurrentHashMap[Char, String]()
+    val errors = new java.util.concurrent.ConcurrentLinkedQueue[Throwable]()
+    val threads: List[Thread] = tags.map { tag =>
+      val runnable: Runnable = () => {
+        try
+          val sock = new java.net.Socket()
+          sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 8000)
+          try
+            sock.getOutputStream.write(Array(tag.toByte))
+            sock.getOutputStream.flush()
+            val in = sock.getInputStream
+            val buf = new Array[Byte](16)
+            val n = in.read(buf)
+            replies.put(tag, if n > 0 then new String(buf, 0, n) else "")
+          finally sock.close()
+        catch case e: Throwable => errors.add(e)
+        ()
+      }
+      val t = new Thread(runnable, s"$label-mlbacklog-client-$tag")
+      t.setDaemon(true)
+      t.start()
+      t
+    }
+
+    qemu.waitFor("mlbacklog: done")
+    threads.foreach(t => t.join(8000))
+
+    val output = qemu.allOutput
+    output should include("mlbacklog: ready")
+    for i <- 0 until 4 do
+      output should include(s"mlbacklog: child[$i]")
+    output should include("mlbacklog: done")
+
+    errors.size shouldBe 0
+    replies.size shouldBe 4
+    tags.foreach { tag =>
+      replies.get(tag) should include("ack")
+    }
 }

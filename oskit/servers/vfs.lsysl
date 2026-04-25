@@ -29,6 +29,11 @@ index, and reference count. A slot is free when refcount is 0.
     var oft_pipe_id: [32]int
     var oft_pipe_write: [32]int
     var oft_tcp_fd: [32]int
+    // Per-OFT monotonic fire counter — bumped by `vfs_epoll_fire`
+    // and returned in VFS_CMD_POLL replies so the shim's per-entry
+    // EPOLLET tracker can detect "this fd actually fired" without
+    // a per-instance bulk last_reported clear.
+    var oft_fire_seq: [32]int
 
 Pipe infrastructure. Each pipe is a 512-byte circular buffer
 managed entirely within VFS. Deferred-reply pattern: when a
@@ -82,6 +87,10 @@ or -1 if the table is full.
                 oft_ref[i] = 1
                 oft_type[i] = ftype
                 oft_console[i] = 0
+                // A recycled OFT slot must start at 0 so the new
+                // user's first POLL doesn't think the previous
+                // owner's edges belonged to them.
+                oft_fire_seq[i] = 0
                 return i
             i += 1
         -1
@@ -156,6 +165,12 @@ that could flip a readiness bit must call this so non-blocking
 clients waiting in `epoll_pwait` see the edge.
 
     vfs_epoll_fire(oft_idx: int)
+        // Bump the per-OFT fire counter so the shim's per-entry
+        // last_seen_seq tracker can recognise "this fd just fired"
+        // even when other fds in the same epoll instance also
+        // got notified between waits.
+        if oft_idx >= 0 && oft_idx < VFS_MAX_OPEN_FILES
+            oft_fire_seq[oft_idx] = oft_fire_seq[oft_idx] + 1
         var i = 0
         while i < VFS_MAX_EPOLL_SUBS
             if vfs_epoll_in_use[i] != 0
@@ -490,25 +505,32 @@ callers can short-circuit with -EBADF.
 
 Handle VFS_CMD_POLL: report current readiness bits for a handle.
 Request:  [cmd(1), handle_be(4)]
-Reply:    [status(1), bits_le_u16(2)]
+Reply:    [status(1), bits_le_u16(2), fire_seq_le_u32(4)] = 7 bytes.
 
 `bits` is little-endian u16 (matches the `epoll_event.events`
-on-the-wire format already used by the shim). Status = 0 on
-success, -EBADF on bad handle.
+on-the-wire format already used by the shim). `fire_seq` is the
+per-OFT monotonic counter that `vfs_epoll_fire` bumps — see
+the same field on the inet POLL reply for the rationale. Status
+= 0 on success, -EBADF on bad handle.
 
     vfs_handle_poll(sender: int, buf: *byte)
         val handle = vfs_msg_read_i32(buf, 1)
         val oft = vfs_resolve_handle_to_oft(sender, handle)
-        var reply: [3]byte
+        var reply: [7]byte
         if oft < 0
             reply[0] = byte(-9)             // -EBADF
-            ipc_reply(sender, reply, 3)
+            ipc_reply(sender, reply, 7)
             return
         val bits = vfs_oft_poll_bits(oft)
+        val seq = oft_fire_seq[oft]
         reply[0] = 0
         reply[1] = byte(bits & 0xff)
         reply[2] = byte((bits >> 8) & 0xff)
-        ipc_reply(sender, reply, 3)
+        reply[3] = byte(seq & 0xff)
+        reply[4] = byte((seq >> 8) & 0xff)
+        reply[5] = byte((seq >> 16) & 0xff)
+        reply[6] = byte((seq >> 24) & 0xff)
+        ipc_reply(sender, reply, 7)
 
 
 Handle VFS_CMD_EPOLL_SUB: register an epoll subscription on
@@ -1186,8 +1208,12 @@ Close on it funnels through vfs_tcp_close_end, which sends
 INET_CMD_TCP_CLOSE — inet already handles LISTEN in that path.
 
 Wire for INET_CMD_TCP_LISTEN (oskit/servers/inet.lsysl):
-  request:  [cmd(1), port(2)]
+  request:  [cmd(1), port(2), backlog(2)]
   reply:    [status(1), fd(1)]
+
+The VFS bridge has no API for callers to specify a backlog
+(connect("tcp-listen:7890") is the only entry), so we pass the
+default 16 — same as `tcp_listen` in oskit/net/client.lsysl.
 
     vfs_handle_connect_tcp_listen(sender: int, name: *byte, colon: int, name_len: int)
         val pid = svc_get_thread_pid(sender)
@@ -1219,12 +1245,14 @@ Wire for INET_CMD_TCP_LISTEN (oskit/servers/inet.lsysl):
             ipc_reply(sender, err, 1)
             return
 
-        var msg: [3]byte
+        var msg: [5]byte
         msg[0] = 14  // INET_CMD_TCP_LISTEN
         msg[1] = byte((port >> 8) & 0xFF)
         msg[2] = byte(port & 0xFF)
+        msg[3] = 0   // backlog hi
+        msg[4] = 16  // backlog lo — matches TCP_LISTEN_BACKLOG default
         var icreply: [2]byte
-        ipc_send(inet, msg, 3, icreply, 2)
+        ipc_send(inet, msg, 5, icreply, 2)
         if icreply[0] != 0
             var err: [1]byte
             err[0] = byte(-1)

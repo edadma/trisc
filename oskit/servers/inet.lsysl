@@ -211,6 +211,11 @@ client can reach us.
             inet_sockets[i].pending_tid = -1
             inet_sockets[i].recv_deadline = 0
             i += 1
+        // Note: `inet_udp_fire_seq` (in inet_proto.lsysl) is left at
+        // its default-zeroed state. The shim re-syncs `last_seen_seq`
+        // on every EPOLL_CTL_ADD anyway, so a recycled slot's stale
+        // counter is harmless — first scan treats it as the live
+        // baseline.
 
 
 ### Locate a bound socket
@@ -389,6 +394,8 @@ waiter. `maxlen` caps how many payload bytes we hand back.
         inet_sockets[idx].q_count = 0
         inet_sockets[idx].pending_tid = -1
         inet_sockets[idx].recv_deadline = 0
+        // No need to reset inet_udp_fire_seq[idx] — see
+        // `inet_init_sockets` for why a stale counter is harmless.
         var reply: [2]byte
         reply[0] = 0
         reply[1] = byte(idx & 0xff)
@@ -991,7 +998,14 @@ implementation. Caller passes (kind, fd) and gets back a
 as Linux's `EPOLLIN` / `EPOLLOUT` / `EPOLLERR` / `EPOLLHUP`.
 
 Wire: [cmd(1), kind(1), fd(u16)] = 4 bytes.
-Reply: [status(1), mask(u16)] = 3 bytes.
+Reply: [status(1), mask(u16), fire_seq(u32 le)] = 7 bytes.
+
+`fire_seq` is the per-fd monotonic counter that
+`inet_epoll_fire` bumps on every readiness edge — the shim
+caches it per `epoll_table` entry and clears that entry's
+`last_reported` only when the seq advances, so EPOLLET
+subscribers don't over-fire on unrelated fds in the same
+instance.
 
 kind: 1 = UDP, 2 = TCP (listen sockets are detected by state).
 
@@ -1006,6 +1020,7 @@ ready child.
         val kind = int(buf[1]) & 0xff
         val fd = inet_read_u16(buf, 2) & 0xffff
         var mask = 0
+        var seq = 0
         if kind == 1
             // UDP — owner check via inet_fd_valid which scopes
             // by sender PTBR/tid.
@@ -1013,6 +1028,7 @@ ready child.
                 if inet_sockets[fd].q_count > 0
                     mask = mask | 0x1
                 mask = mask | 0x4
+                seq = inet_udp_fire_seq[fd]
         else if kind == 2
             if inet_tcp_slot_owned(fd, sender) != 0
                 val st = tcp_sockets[fd].state
@@ -1026,15 +1042,22 @@ ready child.
                         mask = mask | 0x1
                         mask = mask | 0x10
                     if st == TCP_STATE_ESTABLISHED || st == TCP_STATE_CLOSE_WAIT
-                        if tcp_sockets[fd].send_len < TCP_SEND_BUF
+                        if tcp_sockets[fd].send_len < tcp_sockets[fd].send_buf_size
                             mask = mask | 0x4
                     if st == TCP_STATE_CLOSED
                         mask = mask | 0x8
                         mask = mask | 0x10
-        var reply: [3]byte
+                seq = tcp_sockets[fd].fire_seq
+        var reply: [7]byte
         reply[0] = byte(0)
         inet_write_u16(reply, 1, mask)
-        ipc_reply(sender, reply, 3)
+        // fire_seq little-endian (matches the shim's epoll-event
+        // serialization throughout `oskit.posix.shim`).
+        reply[3] = byte(seq & 0xff)
+        reply[4] = byte((seq >> 8) & 0xff)
+        reply[5] = byte((seq >> 16) & 0xff)
+        reply[6] = byte((seq >> 24) & 0xff)
+        ipc_reply(sender, reply, 7)
 
 shutdown(fd, how). `how` values: 0 = SHUT_RD, 1 = SHUT_WR,
 2 = SHUT_RDWR. SHUT_RD is a no-op today — we don't track a
@@ -1080,7 +1103,8 @@ Reply: status(1).
 
     inet_handle_tcp_listen(sender: int, buf: *byte)
         val port = inet_read_u16(buf, 1)
-        val s = inet_tcp_begin_listen(sender, port)
+        val backlog = inet_read_u16(buf, 3) & 0xffff
+        val s = inet_tcp_begin_listen(sender, port, backlog)
         var reply: [2]byte
         if s < 0
             reply[0] = byte(-1)
