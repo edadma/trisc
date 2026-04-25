@@ -12,6 +12,10 @@ package io.github.edadma.trisc
 class SyslWhyMLBackend(moduleName: String = "M"):
   private val out = new StringBuilder
   private var indentLevel = 0
+  /** Set of enum (no-payload) type names declared in this program. Used by `formatExpr` to
+   *  recognize `EnumName.Variant` field access and rewrite to just `Variant` (WhyML
+   *  constructors live in the module-level namespace, not under the type). */
+  private var enumNames: Set[String] = Set.empty
 
   private def indent: String = "  " * indentLevel
   private def line(s: String): Unit =
@@ -27,6 +31,9 @@ class SyslWhyMLBackend(moduleName: String = "M"):
   def generate(program: ProgramAST): String =
     out.clear()
     indentLevel = 0
+    val enums = program.decls.collect { case e: EnumDeclAST => e }
+    enumNames = enums.map(_.name).toSet
+    val fns = program.decls.collect { case f: FunDeclAST => f }
     line(s"module $moduleName")
     indentLevel += 1
     line("use int.Int")
@@ -35,8 +42,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     // since it matches sysl's interpreter and codegen behavior. Always-imported is harmless.
     line("use int.ComputerDivision")
     blank()
-    val fns = program.decls.collect { case f: FunDeclAST => f }
     var first = true
+    for e <- enums do
+      if !first then blank()
+      first = false
+      emitEnum(e)
     for fn <- fns do
       if !first then blank()
       first = false
@@ -44,6 +54,17 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     indentLevel -= 1
     line("end")
     out.toString
+
+  /** sysl `enum Color { Red, Green, Blue }` → WhyML `type color = Red | Green | Blue`.
+   *  The integer values that sysl assigns (auto-incrementing or explicit) are dropped —
+   *  WhyML algebraic types don't expose a numeric tag, and proofs typically reason about
+   *  variant identity rather than its underlying int. WhyML type names are conventionally
+   *  lowercase; constructor names stay as-written (sysl convention is also uppercase). */
+  private def emitEnum(e: EnumDeclAST): Unit =
+    val typeName = e.name.head.toLower + e.name.tail
+    val ctors = e.members.map { case (name, _) => name }
+    if ctors.isEmpty then unsupported("empty enum", e.name)
+    line(s"type $typeName = ${ctors.mkString(" | ")}")
 
   /** True iff `fn` calls itself by name anywhere in its body (Phase 1 detects only direct
    *  self-recursion — mutual recursion would need a cross-decl scan and `with` syntax in WhyML). */
@@ -159,6 +180,9 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" |
            "byte" | "char" | "rune" => "int"
       case "bool" => "bool"
+      case n if enumNames(n) =>
+        // Lowercase the first letter to match the enum type name in `emitEnum`.
+        n.head.toLower + n.tail
       case other  => unsupported("type", other)
     case other => unsupported("type form", other.toString)
 
@@ -192,6 +216,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       s"($opStr${formatExpr(x)})"
     case CallAST("old", List(arg)) =>
       s"(old ${formatExpr(arg)})"
+    case FieldAccessAST(VarRefAST(t), member) if enumNames(t) =>
+      // sysl `EnumName.Variant` → WhyML bare `Variant`. WhyML constructors live at module
+      // scope, not under their type, so we just drop the type prefix.
+      member
     case CallAST(n, args) =>
       val argStr = if args.isEmpty then "" else args.map(formatExpr).mkString(" ", " ", "")
       s"(${sanitizeName(n)}$argStr)"

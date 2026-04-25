@@ -361,6 +361,53 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  "simple enum becomes a WhyML algebraic type with bare-constructor variants" in {
+    val mlw = translate(
+      """enum Color
+        |    Red
+        |    Green
+        |    Blue
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  type color = Red | Green | Blue
+        |end
+        |""".stripMargin
+  }
+
+  "EnumName.Variant in contract position strips the type prefix" in {
+    // Inside contracts WhyML's `=` is structural and works on any type, so enum equality
+    // composes there directly. Body-position use needs a `match` expression — deferred to a
+    // later piece — so this test exercises only the contract path.
+    val mlw = translate(
+      """enum Color
+        |    Red
+        |    Green
+        |    Blue
+        |
+        |def first_color(c: Color) -> int
+        |    require c == Color.Red
+        |    ensure result == 0
+        |    0
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  type color = Red | Green | Blue
+        |
+        |  let function first_color (c: color) : int
+        |    requires { c = Red }
+        |    ensures  { result = 0 }
+        |    = 0
+        |end
+        |""".stripMargin
+  }
+
   "unsupported expression form yields a clear error naming the gap" in {
     val ex = intercept[RuntimeException](translate(
       """def s() -> int
