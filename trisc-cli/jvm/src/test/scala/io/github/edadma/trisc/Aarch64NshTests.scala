@@ -588,6 +588,23 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mepoll2: done")
   }
 
+  "aarch64 musl: epoll on a pipe (Phase A2 closeout)" in {
+    // epoll_pipe (slix/test/epoll_pipe.c): exercise VFS_CMD_POLL
+    // + the VFS epoll subscriber list landed in this chunk. Empty
+    // pipe → 0 events; write end fires EPOLLIN via vfs_epoll_fire
+    // → notify_send_to → sleep_or_notify wake; close-write-end
+    // surfaces EPOLLHUP+EPOLLIN (Linux semantics: EOF reads as
+    // readable). Without this work the EPOLLIN edge would never
+    // surface — POSIX_FD_FILE used to report want unconditionally.
+    qemu.send("epoll_pipe\n")
+    val output = qemu.waitFor("mepoll_pipe: done")
+    output should include("mepoll_pipe: empty=0")
+    output should include("mepoll_pipe: after_write=1 events=1")
+    // EPOLLHUP=0x10, EPOLLIN=0x01 → 0x11 = 17.
+    output should include("mepoll_pipe: after_close=1 events=17")
+    output should include("mepoll_pipe: done")
+  }
+
   "aarch64 musl: non-blocking accept (Phase B)" in {
     // mnbacc (slix/test/nbacc.c): non-blocking listen fd that
     // first accepts on an empty queue (-EAGAIN), then waits via

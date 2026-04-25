@@ -55,6 +55,7 @@ Syscall numbers:
     val SYS_EVENT_WAIT     = 26
     val SYS_EVENT_SET      = 27
     val SYS_EVENT_CLEAR    = 28
+    val SYS_SLEEP_OR_NOTIFY = 83
 
     sleep(ticks: int)
         syscall(SYS_SLEEP, ticks)
@@ -133,6 +134,9 @@ Syscall numbers:
 
     notify_wait()
         syscall(SYS_NOTIFY_WAIT, 0)
+
+    sleep_or_notify(ticks: int)
+        syscall(SYS_SLEEP_OR_NOTIFY, ticks)
 
     notify_read_self() -> int
         syscall(SYS_NOTIFY_READ, 0)

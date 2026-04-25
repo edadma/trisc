@@ -246,6 +246,12 @@ blocks with a wake_tick deadline (sleep, IPC timeout).
 
     val STATE_NOTIFY_WAIT = 10
     val STATE_MUTEX_WAIT = 11
+    // STATE_SLEEP_OR_NOTIFY: thread sits in the sleep heap with
+    // wake_tick set, but ALSO wakes on notify_send. Used by
+    // sys_epoll_pwait's finite-timeout path so the shim doesn't
+    // have to spin-poll between sleeps when waiting for an inet/
+    // VFS edge that may arrive before the deadline.
+    val STATE_SLEEP_OR_NOTIFY = 12
 
 Syscall dispatch tables. Each slot holds a function pointer
 (i64) for a slow-path syscall handler.
@@ -1190,6 +1196,7 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall6(79, sys_grant_posix_range_handler)
         register_syscall(80, sys_virtio_pci_info_handler)
         register_syscall(81, sys_timer_subscribe_handler)
+        register_syscall(83, sys_sleep_or_notify_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -1749,6 +1756,14 @@ Steps:
                 threads[tid].state = STATE_READY
                 threads[tid].quantum = DEFAULT_QUANTUM
                 enqueue(threads[tid].priority, tid)
+            else if threads[tid].state == STATE_SLEEP_OR_NOTIFY
+                // Tick deadline reached without a notify. Wake on the
+                // ready queue; the sys_sleep_or_notify wrapper checks
+                // notify_pending after returning to detect which path
+                // fired (timeout vs early notify).
+                threads[tid].state = STATE_READY
+                threads[tid].quantum = DEFAULT_QUANTUM
+                enqueue(threads[tid].priority, tid)
             else if threads[tid].state == STATE_SEND_BLOCKED
                 if threads[tid].wake_tick > 0
                     // IPC send timeout expired — wake with -2 in saved r1
@@ -1899,6 +1914,14 @@ it is woken and re-enqueued.
             threads[target_id].state = STATE_READY
             threads[target_id].quantum = DEFAULT_QUANTUM
             enqueue(threads[target_id].priority, target_id)
+        else if st == STATE_SLEEP_OR_NOTIFY
+            // Thread is in the sleep heap; lazy deletion in the
+            // tick-wake path will skip it once it's STATE_READY.
+            // wake_tick stays set — the heap pop sees state != BLOCKED
+            // and ignores the stale entry.
+            threads[target_id].state = STATE_READY
+            threads[target_id].quantum = DEFAULT_QUANTUM
+            enqueue(threads[target_id].priority, target_id)
 
 If a notification is already pending, returns immediately.
 Otherwise sets state to STATE_NOTIFY_WAIT and the scheduler
@@ -1909,6 +1932,22 @@ will skip this thread until notify_send wakes it.
             return
         threads[current_thread].state = STATE_NOTIFY_WAIT
         threads[current_thread].consec_quanta = 0
+
+Sleep for `nticks` OR until a notification arrives, whichever
+comes first. If a notification is already pending, returns
+immediately (matching `notify_wait_current`'s fast path so the
+shim doesn't have to check both before calling). Caller checks
+`notify_read_self()` afterwards to learn which path fired.
+
+    sleep_or_notify_current(nticks: int)
+        if threads[current_thread].notify_pending == 1
+            return
+        if nticks <= 0
+            return
+        threads[current_thread].state = STATE_SLEEP_OR_NOTIFY
+        threads[current_thread].wake_tick = ticks + nticks
+        threads[current_thread].consec_quanta = 0
+        sleepq_insert(current_thread)
 
 Syscall handlers for the notification system. The services layer
 packs target_id and value into a single i64 argument:
@@ -1922,6 +1961,9 @@ notify_send: (id << 24) | (value & 0xFFFFFF)
 
     sys_notify_wait_handler(arg: int)
         notify_wait_current()
+
+    sys_sleep_or_notify_handler(arg: int)
+        sleep_or_notify_current(arg)
 
     sys_notify_read_handler(arg: int)
         val v = notify_read(current_thread)

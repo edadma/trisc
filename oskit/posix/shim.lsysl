@@ -36,7 +36,7 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
     module oskit.posix
 
     import oskit.ipc.{port_lookup, ipc_send}
-    import oskit.services.{sleep, notify_wait, notify_read_self}
+    import oskit.services.{sleep, notify_wait, notify_read_self, sleep_or_notify, uptime}
     import oskit.kernel.{current_thread, terminate_current,
         kernel_grant_create_inline, kernel_grant_revoke_inline,
         kernel_get_thread_pid, kernel_get_process_main_tid}
@@ -293,6 +293,11 @@ the way out so it doesn't leak.
     val VFS_CMD_SEEK_C    = 14
     val VFS_CMD_CONNECT_C = 15
     val VFS_CMD_PIPE_C    = 18
+    // Phase A2 epoll bridge — mirrors INET_CMD_EPOLL_*.
+    val VFS_CMD_POLL_C              = 20
+    val VFS_CMD_EPOLL_SUB_C         = 21
+    val VFS_CMD_EPOLL_UNSUB_C       = 22
+    val VFS_CMD_EPOLL_INST_CLOSE_C  = 23
 
 `GRANT_READ` / `GRANT_WRITE` mirror the values in `oskit.kernel`'s
 private grant table (1 = read by mapper, 2 = write by mapper).
@@ -718,7 +723,7 @@ still -1) skip the inet call — no backend was ever allocated.
                     var reply: [1]byte
                     ipc_send(port, msg, 5, reply, 1)
             if k == POSIX_FD_EPOLL
-                epoll_inst_close_inet(target)
+                epoll_inst_close_all(target)
                 epoll_inst_release(target)
         posix_fd_clear(fd)
         i64(0)
@@ -1751,6 +1756,80 @@ through entries with UNSUB.
         ipc_send(port, msg, 2, reply, 1)
 
 
+`epoll_vfs_subscribe` mirrors the inet helper for VFS-backed fds
+(POSIX_FD_FILE — pipes, regular files, TTYs). VFS resolves the
+shipped handle to its `oft_idx` and keys the subscription on
+`(oft_idx, sender_tid, inst)` so two fds aliasing the same OFT
+(e.g. dup'd pipe ends) share one wake.
+
+The wire layout matches `INET_CMD_EPOLL_SUB` after the cmd byte:
+  [cmd(1), handle_be(4), inst(1)]
+which is `vfs_msg_write_i32`-format (big-endian) for the handle
+to stay consistent with the rest of the VFS protocol.
+
+    epoll_vfs_subscribe(target_fd: int, inst: int)
+        if posix_fd_kind(target_fd) != POSIX_FD_FILE
+            return
+        val port = vfs_get_port()
+        if port < 0
+            return
+        val handle = posix_fd_target(target_fd)
+        var msg: [6]byte
+        msg[0] = byte(VFS_CMD_EPOLL_SUB_C)
+        msg[1] = byte((handle >> 24) & 0xff)
+        msg[2] = byte((handle >> 16) & 0xff)
+        msg[3] = byte((handle >> 8) & 0xff)
+        msg[4] = byte(handle & 0xff)
+        msg[5] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 6, reply, 1)
+
+    epoll_vfs_unsubscribe(target_fd: int, inst: int)
+        if posix_fd_kind(target_fd) != POSIX_FD_FILE
+            return
+        val port = vfs_get_port()
+        if port < 0
+            return
+        val handle = posix_fd_target(target_fd)
+        var msg: [6]byte
+        msg[0] = byte(VFS_CMD_EPOLL_UNSUB_C)
+        msg[1] = byte((handle >> 24) & 0xff)
+        msg[2] = byte((handle >> 16) & 0xff)
+        msg[3] = byte((handle >> 8) & 0xff)
+        msg[4] = byte(handle & 0xff)
+        msg[5] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 6, reply, 1)
+
+    epoll_inst_close_vfs(inst: int)
+        val port = vfs_get_port()
+        if port < 0
+            return
+        var msg: [2]byte
+        msg[0] = byte(VFS_CMD_EPOLL_INST_CLOSE_C)
+        msg[1] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 2, reply, 1)
+
+
+Combined sub/unsub helpers — single call site for the
+`epoll_ctl` path, no need to teach it about the kind/owner
+split. Each underlying helper short-circuits if the fd doesn't
+belong to it, so calling both is safe and idempotent.
+
+    epoll_subscribe(target_fd: int, inst: int)
+        epoll_inet_subscribe(target_fd, inst)
+        epoll_vfs_subscribe(target_fd, inst)
+
+    epoll_unsubscribe(target_fd: int, inst: int)
+        epoll_inet_unsubscribe(target_fd, inst)
+        epoll_vfs_unsubscribe(target_fd, inst)
+
+    epoll_inst_close_all(inst: int)
+        epoll_inst_close_inet(inst)
+        epoll_inst_close_vfs(inst)
+
+
 SYS_EPOLL_CREATE1. Allocates a fresh epoll instance and parks
 it in a `POSIX_FD_EPOLL` slot. `flags` would carry
 `EPOLL_CLOEXEC` / `EPOLL_NONBLOCK`; we honour O_NONBLOCK in
@@ -1835,7 +1914,7 @@ without poll support.
                     epoll_table[inst].entries[i].data_lo = data_in
                     epoll_table[inst].entries[i].last_reported = 0
                     epoll_table[inst].entries[i].armed = 1
-                    epoll_inet_subscribe(target_fd, inst)
+                    epoll_subscribe(target_fd, inst)
                     return i64(0)
                 i += 1
             return i64(-28)             // -ENOSPC
@@ -1860,7 +1939,7 @@ without poll support.
             while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
                 if epoll_table[inst].entries[i].in_use != 0
                     if epoll_table[inst].entries[i].watched_fd == target_fd
-                        epoll_inet_unsubscribe(target_fd, inst)
+                        epoll_unsubscribe(target_fd, inst)
                         epoll_table[inst].entries[i].in_use = 0
                         return i64(0)
                 i += 1
@@ -1898,12 +1977,28 @@ what the user asked for, per Linux semantics).
             // which are always reported.
             return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         if k == POSIX_FD_FILE
-            // No VFS poll command yet — treat as always ready
-            // for the user's requested bits. Good enough for
-            // EPOLLIN/EPOLLOUT on regular files (which Linux
-            // also reports always-ready) and pipes that
-            // already have data.
-            return want
+            // VFS_CMD_POLL: shim ships the handle, vfs reports the
+            // OFT-derived bits (regular files always-ready,
+            // pipes per buffer count + peer-end state, TTYs
+            // output-only).
+            val port = vfs_get_port()
+            if port < 0
+                return 0
+            val handle = posix_fd_target(target_fd)
+            var msg: [5]byte
+            msg[0] = byte(VFS_CMD_POLL_C)
+            msg[1] = byte((handle >> 24) & 0xff)
+            msg[2] = byte((handle >> 16) & 0xff)
+            msg[3] = byte((handle >> 8) & 0xff)
+            msg[4] = byte(handle & 0xff)
+            var reply: [3]byte
+            val r = ipc_send(port, msg, 5, reply, 3)
+            if r < 0
+                return POSIX_EPOLLERR
+            if reply[0] != 0
+                return POSIX_EPOLLERR
+            val raw = (int(reply[1]) & 0xff) | ((int(reply[2]) & 0xff) << 8)
+            return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         if k == POSIX_FD_STDIN
             return 0
         if k == POSIX_FD_STDOUT || k == POSIX_FD_STDERR
@@ -1967,14 +2062,11 @@ to the last reported snapshot, so `rising == 0`).
             i += 1
 
 SYS_EPOLL_PWAIT. Phase A2: blocks via the kernel notify
-primitive instead of the old sleep-1-tick loop. inet's per-fd
-subscriber list (added in `inet_handle_epoll_sub`) fires
-`notify_send_to(tid, 1)` on every readiness boundary, so an
-indefinite wait wakes within a syscall hop of the change.
-Finite timeouts still poll at 10ms granularity because the
-kernel doesn't expose "sleep with notify wake" yet —
-acceptable for the typical Node.js loop pattern (mostly
-`timeout = -1`). `sigmask` is ignored (no signal delivery yet).
+primitive (or `sleep_or_notify` for finite timeouts) instead of
+the old sleep-1-tick loop. inet and VFS each maintain a per-fd
+subscriber list that fires `notify_send_to(tid, 1)` on every
+readiness boundary, so a wait wakes within a syscall hop of the
+change. `sigmask` is ignored (no signal delivery yet).
 
     sys_epoll_pwait(epfd: int, events_array: i64, max_events: int, timeout_ms: int) -> i64
         if posix_fd_kind(epfd) != POSIX_FD_EPOLL
@@ -2008,11 +2100,21 @@ acceptable for the typical Node.js loop pattern (mostly
             if ticks_left == 0
                 return i64(0)
             if timeout_ms < 0
-                // Block until inet (or someone) wakes us. Spurious
+                // Block until inet/VFS (or someone) wakes us. Spurious
                 // wakes loop back to the scan above — no-op cost.
                 notify_wait()
             else
-                sleep(1)
-                if ticks_left > 0
-                    ticks_left -= 1
+                // sleep_or_notify(ticks_left) wakes on either deadline
+                // or notify. Spurious wakes lose at most one extra
+                // pass; we record uptime() before/after to charge the
+                // actual elapsed ticks to ticks_left so a chain of
+                // spurious wakes still respects the deadline.
+                val before = uptime()
+                sleep_or_notify(ticks_left)
+                val after = uptime()
+                val elapsed = after - before
+                if elapsed >= ticks_left
+                    ticks_left = 0
+                else
+                    ticks_left -= elapsed
         i64(0)

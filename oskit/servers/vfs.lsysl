@@ -7,7 +7,7 @@ via the mount table. Currently only root ("/") is mounted on TFS.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.services.{sleep, rs_ready, svc_get_thread_pid, svc_grant_create, svc_grant_revoke, svc_grant_map, svc_grant_unmap, thread_id, GRANT_READ}
+    import oskit.services.{sleep, rs_ready, svc_get_thread_pid, svc_grant_create, svc_grant_revoke, svc_grant_map, svc_grant_unmap, thread_id, notify_send_to, GRANT_READ}
     import oskit.config.MAX_PROCESSES
 
 Open file table. Each open file tracks inode, position, mount
@@ -37,6 +37,26 @@ not reply until a writer provides data (or write end closes).
 
     val MAX_PIPES = 4
     val PIPE_BUF_SIZE = 512
+
+Phase A2: epoll subscriber table for VFS-backed fds (pipes, TTY,
+regular files). Mirrors `inet_proto`'s `inet_epoll_subs` table.
+Each subscription is keyed on `(oft_idx, owner_tid, epoll_inst)`;
+the readiness scan re-queries `vfs_oft_poll_bits(oft_idx)` after
+a notify wake. Pipe writes/reads/closes call `vfs_epoll_fire`
+on the appropriate oft so non-blocking readers/writers wake on
+the edge instead of polling.
+
+    val VFS_MAX_EPOLL_SUBS = 32
+
+    var vfs_epoll_oft:        [32]int
+    var vfs_epoll_owner_tid:  [32]int
+    var vfs_epoll_inst:       [32]int
+    var vfs_epoll_in_use:     [32]int
+
+    val POSIX_EPOLLIN_BIT   = 0x0001
+    val POSIX_EPOLLOUT_BIT  = 0x0004
+    val POSIX_EPOLLERR_BIT  = 0x0008
+    val POSIX_EPOLLHUP_BIT  = 0x0010
 
     var pipe_buf: [4][512]byte
     var pipe_head: [4]int
@@ -80,6 +100,111 @@ reaches 0, mark that end as closed and wake blocked readers.
                         vfs_tcp_close_end(fid)
                     else if oft_type[fid] == OFT_TYPE_TCP_LISTEN
                         vfs_tcp_close_end(fid)
+
+Compute readiness bits for a given oft_idx. Used both by the
+shim's `VFS_CMD_POLL` query and by `vfs_epoll_fire` to skip
+notifications when the readiness state didn't actually change
+between callers. Regular files are always-ready (matches Linux
+`poll(2)` semantics for ordinary files); pipes derive
+EPOLLIN/EPOLLOUT/EPOLLHUP from the buffer count and peer-end
+state; TTYs are output-ready and never input-ready (we don't
+yet route TTY input through a subscriber path — see project
+`musl_phase2_posix_fd_bridge`); TCP/TCP_LISTEN delegate to
+inet via the existing `INET_CMD_POLL`.
+
+    vfs_oft_poll_bits(oft_idx: int) -> int
+        if oft_idx < 0
+            return POSIX_EPOLLERR_BIT
+        if oft_idx >= VFS_MAX_OPEN_FILES
+            return POSIX_EPOLLERR_BIT
+        if oft_ref[oft_idx] <= 0
+            return POSIX_EPOLLERR_BIT
+        val t = oft_type[oft_idx]
+        if t == OFT_TYPE_FILE
+            return POSIX_EPOLLIN_BIT | POSIX_EPOLLOUT_BIT
+        if t == OFT_TYPE_TTY
+            return POSIX_EPOLLOUT_BIT
+        if t == OFT_TYPE_PIPE
+            val pipe_id = oft_pipe_id[oft_idx]
+            var bits = 0
+            if oft_pipe_write[oft_idx] == 1
+                // Write end: EPOLLOUT when there's space; HUP when
+                // peer (read end) closed.
+                if pipe_count[pipe_id] < PIPE_BUF_SIZE
+                    bits = bits | POSIX_EPOLLOUT_BIT
+                if pipe_read_oft[pipe_id] == -1
+                    bits = bits | POSIX_EPOLLHUP_BIT | POSIX_EPOLLERR_BIT
+            else
+                // Read end: EPOLLIN when there's data; HUP when peer
+                // (write end) closed AND buffer is drained.
+                if pipe_count[pipe_id] > 0
+                    bits = bits | POSIX_EPOLLIN_BIT
+                if pipe_write_oft[pipe_id] == -1
+                    bits = bits | POSIX_EPOLLHUP_BIT
+                    if pipe_count[pipe_id] == 0
+                        bits = bits | POSIX_EPOLLIN_BIT
+            return bits
+        // TCP / TCP_LISTEN: defer to inet (handled by the shim's
+        // direct INET_CMD_POLL path; VFS_CMD_POLL on these isn't a
+        // current code path but report not-ready as a safe default).
+        0
+
+
+Walk the subscriber table and wake every owner_tid registered for
+`oft_idx`. Called from pipe writes/reads/closes — any state change
+that could flip a readiness bit must call this so non-blocking
+clients waiting in `epoll_pwait` see the edge.
+
+    vfs_epoll_fire(oft_idx: int)
+        var i = 0
+        while i < VFS_MAX_EPOLL_SUBS
+            if vfs_epoll_in_use[i] != 0
+                if vfs_epoll_oft[i] == oft_idx
+                    notify_send_to(vfs_epoll_owner_tid[i], 1)
+            i += 1
+
+    vfs_epoll_init()
+        var i = 0
+        while i < VFS_MAX_EPOLL_SUBS
+            vfs_epoll_in_use[i] = 0
+            i += 1
+
+    vfs_epoll_find_sub(oft_idx: int, owner_tid: int, inst: int) -> int
+        var i = 0
+        while i < VFS_MAX_EPOLL_SUBS
+            if vfs_epoll_in_use[i] != 0
+                if vfs_epoll_oft[i] == oft_idx
+                    if vfs_epoll_owner_tid[i] == owner_tid
+                        if vfs_epoll_inst[i] == inst
+                            return i
+            i += 1
+        -1
+
+    vfs_epoll_alloc_sub() -> int
+        var i = 0
+        while i < VFS_MAX_EPOLL_SUBS
+            if vfs_epoll_in_use[i] == 0
+                return i
+            i += 1
+        -1
+
+    vfs_epoll_drop_inst(owner_tid: int, inst: int)
+        var i = 0
+        while i < VFS_MAX_EPOLL_SUBS
+            if vfs_epoll_in_use[i] != 0
+                if vfs_epoll_owner_tid[i] == owner_tid
+                    if vfs_epoll_inst[i] == inst
+                        vfs_epoll_in_use[i] = 0
+            i += 1
+
+    vfs_epoll_drop_owner(owner_tid: int)
+        var i = 0
+        while i < VFS_MAX_EPOLL_SUBS
+            if vfs_epoll_in_use[i] != 0
+                if vfs_epoll_owner_tid[i] == owner_tid
+                    vfs_epoll_in_use[i] = 0
+            i += 1
+
 
 Per-process handle table. Each process has up to MAX_HANDLES
 entries. A handle maps to an open file table index. The table
@@ -240,6 +365,12 @@ Read from a pipe. Blocks if empty and write end open.
                 pipe_count[pipe_id] = avail - n
                 svc_grant_unmap(grant_id)
 
+            // Wake any epoll subscribers on the write-end oft so a
+            // non-blocking writer stuck on EPOLLOUT sees the freed
+            // buffer space.
+            if pipe_write_oft[pipe_id] >= 0
+                vfs_epoll_fire(pipe_write_oft[pipe_id])
+
             var reply: [5]byte
             reply[0] = 0
             vfs_msg_write_i32(reply, 1, n)
@@ -302,6 +433,12 @@ Write to a pipe. Wakes any deferred reader.
         if pipe_reader_tid[pipe_id] >= 0
             vfs_pipe_wake_reader(pipe_id)
 
+        // Wake any epoll subscribers on the read-end oft so a
+        // non-blocking reader stuck in epoll_pwait sees EPOLLIN
+        // without having to re-poll.
+        if pipe_read_oft[pipe_id] >= 0
+            vfs_epoll_fire(pipe_read_oft[pipe_id])
+
         var reply: [5]byte
         reply[0] = 0
         vfs_msg_write_i32(reply, 1, n)
@@ -341,6 +478,101 @@ Wake a deferred reader.
         ipc_reply(reader, reply, 5)
         pipe_reader_tid[pipe_id] = -1
 
+Resolve a per-process handle to its oft index.
+Used by the epoll bridge — the shim ships a VFS handle, we look
+up the oft to key the subscription on. Returns -1 on miss so
+callers can short-circuit with -EBADF.
+
+    vfs_resolve_handle_to_oft(sender: int, handle: int) -> int
+        val pid = svc_get_thread_pid(sender)
+        vfs_handle_lookup(pid, handle)
+
+
+Handle VFS_CMD_POLL: report current readiness bits for a handle.
+Request:  [cmd(1), handle_be(4)]
+Reply:    [status(1), bits_le_u16(2)]
+
+`bits` is little-endian u16 (matches the `epoll_event.events`
+on-the-wire format already used by the shim). Status = 0 on
+success, -EBADF on bad handle.
+
+    vfs_handle_poll(sender: int, buf: *byte)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val oft = vfs_resolve_handle_to_oft(sender, handle)
+        var reply: [3]byte
+        if oft < 0
+            reply[0] = byte(-9)             // -EBADF
+            ipc_reply(sender, reply, 3)
+            return
+        val bits = vfs_oft_poll_bits(oft)
+        reply[0] = 0
+        reply[1] = byte(bits & 0xff)
+        reply[2] = byte((bits >> 8) & 0xff)
+        ipc_reply(sender, reply, 3)
+
+
+Handle VFS_CMD_EPOLL_SUB: register an epoll subscription on
+a handle. Idempotent — duplicate `(oft, owner_tid, inst)`
+tuples are no-op success so the shim can call SUB on every
+EPOLL_CTL_ADD/MOD without de-dup logic.
+Request:  [cmd(1), handle_be(4), inst(1)]
+Reply:    [status(1)]
+
+    vfs_handle_epoll_sub(sender: int, buf: *byte)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val inst = int(buf[5]) & 0xff
+        var reply: [1]byte
+        val oft = vfs_resolve_handle_to_oft(sender, handle)
+        if oft < 0
+            reply[0] = byte(-9)
+            ipc_reply(sender, reply, 1)
+            return
+        val existing = vfs_epoll_find_sub(oft, sender, inst)
+        if existing >= 0
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
+        val slot = vfs_epoll_alloc_sub()
+        if slot < 0
+            reply[0] = byte(-28)            // -ENOSPC
+            ipc_reply(sender, reply, 1)
+            return
+        vfs_epoll_oft[slot] = oft
+        vfs_epoll_owner_tid[slot] = sender
+        vfs_epoll_inst[slot] = inst
+        vfs_epoll_in_use[slot] = 1
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+Handle VFS_CMD_EPOLL_UNSUB. Drop a single subscription if it
+exists; missing tuples are a no-op success.
+
+    vfs_handle_epoll_unsub(sender: int, buf: *byte)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val inst = int(buf[5]) & 0xff
+        var reply: [1]byte
+        val oft = vfs_resolve_handle_to_oft(sender, handle)
+        if oft >= 0
+            val slot = vfs_epoll_find_sub(oft, sender, inst)
+            if slot >= 0
+                vfs_epoll_in_use[slot] = 0
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+Handle VFS_CMD_EPOLL_INST_CLOSE. Drop every subscription
+belonging to a `(sender, inst)` pair in one IPC — saves the
+shim from looping with UNSUB when the epoll fd itself closes.
+
+    vfs_handle_epoll_inst_close(sender: int, buf: *byte)
+        val inst = int(buf[1]) & 0xff
+        vfs_epoll_drop_inst(sender, inst)
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
 Handle pipe end close.
 
     vfs_pipe_close_end(fid: int)
@@ -353,8 +585,14 @@ Handle pipe end close.
                 vfs_msg_write_i32(reply, 1, 0)
                 ipc_reply(pipe_reader_tid[pipe_id], reply, 5)
                 pipe_reader_tid[pipe_id] = -1
+            // Surviving read end: peer closed → EPOLLHUP edge.
+            if pipe_read_oft[pipe_id] >= 0
+                vfs_epoll_fire(pipe_read_oft[pipe_id])
         else
             pipe_read_oft[pipe_id] = -1
+            // Surviving write end: peer closed → EPOLLERR/HUP edge.
+            if pipe_write_oft[pipe_id] >= 0
+                vfs_epoll_fire(pipe_write_oft[pipe_id])
 
 Scheme registry. Maps scheme names to handler ports. When a
 client calls connect("scheme:resource"), VFS looks up the scheme
@@ -493,6 +731,11 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_EXIT    = 17
     val VFS_CMD_PIPE    = 18
     val VFS_CMD_ACCEPT  = 19
+    // Phase A2 epoll bridge — mirrors INET_CMD_EPOLL_*.
+    val VFS_CMD_POLL              = 20
+    val VFS_CMD_EPOLL_SUB         = 21
+    val VFS_CMD_EPOLL_UNSUB       = 22
+    val VFS_CMD_EPOLL_INST_CLOSE  = 23
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
@@ -517,6 +760,8 @@ reply is always 1 byte. On success, length depends on command.
             return 9
         if cmd == VFS_CMD_ACCEPT
             return 11
+        if cmd == VFS_CMD_POLL
+            return 3
         1
 
 Big-endian message helpers (local to VFS).
@@ -1645,9 +1890,10 @@ come up, mounts root on TFS, then proxies all requests to
 the appropriate backend.
 
     vfs_server()
-        // Initialize handle table and pipe state
+        // Initialize handle table, pipe state, and epoll subscribers
         vfs_handle_init()
         vfs_pipe_init()
+        vfs_epoll_init()
 
         // Register as "fs"
         vfs_port = port_create()
@@ -1707,10 +1953,21 @@ the appropriate backend.
                     vfs_handle_pipe(sender)
                 else if cmd == VFS_CMD_ACCEPT
                     vfs_handle_accept(sender, buf)
+                else if cmd == VFS_CMD_POLL
+                    vfs_handle_poll(sender, buf)
+                else if cmd == VFS_CMD_EPOLL_SUB
+                    vfs_handle_epoll_sub(sender, buf)
+                else if cmd == VFS_CMD_EPOLL_UNSUB
+                    vfs_handle_epoll_unsub(sender, buf)
+                else if cmd == VFS_CMD_EPOLL_INST_CLOSE
+                    vfs_handle_epoll_inst_close(sender, buf)
                 else if cmd == VFS_CMD_EXIT
-                    // Process exited — close all its handles
+                    // Process exited — close all its handles AND drop
+                    // any epoll subscriptions registered against the
+                    // sender thread so a crashed peer doesn't leak slots.
                     val exit_pid = vfs_msg_read_i32(buf, 1)
                     vfs_handle_close_all(exit_pid)
+                    vfs_epoll_drop_owner(sender)
                     var exit_reply: [1]byte
                     exit_reply[0] = 0
                     ipc_reply(sender, exit_reply, 1)
