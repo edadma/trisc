@@ -2549,6 +2549,23 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case None => false
     }
 
+  /** Strict-but-name-aware element equality for slice/array element types. Plain `==`
+   *  fails when two `EnumType` instances share a name but capture different snapshots
+   *  of the variant list (e.g. the field type stored in a recursive enum variant
+   *  declaration was resolved with a stale placeholder). For nominal types we trust the
+   *  name; for primitives and structural types we keep `==` (no widening — `[]i8` must
+   *  not silently flow into `[]i64`). Recurses through nested slice/array/ref/ptr so
+   *  shapes like `[][]Tree` work. */
+  private def nominallyEqual(a: SyslType, b: SyslType): Boolean = (a, b) match
+    case _ if a == b => true
+    case (StructType(n1, _, _), StructType(n2, _, _)) => n1 == n2
+    case (EnumType(n1, _), EnumType(n2, _))           => n1 == n2
+    case (SliceType(e1), SliceType(e2))               => nominallyEqual(e1, e2)
+    case (ArrayType(e1, n1), ArrayType(e2, n2))       => n1 == n2 && nominallyEqual(e1, e2)
+    case (RefType(e1), RefType(e2))                   => nominallyEqual(e1, e2)
+    case (PtrType(e1), PtrType(e2))                   => nominallyEqual(e1, e2)
+    case _                                            => false
+
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
       case (a, b) if a == b => true
@@ -2587,9 +2604,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case (PtrType(_), PtrType(_)) => true           // any pointer ↔ any pointer (like C's void*)
       case (ArrayType(_, _), PtrType(_)) => true          // array decays to any pointer
       case (StringType, PtrType(I8 | U8)) => true          // string decays to *i8 / *byte
-      case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
-      case (ArrayType(e1, _), SliceType(e2)) if e1 == e2 => true  // fixed array → slice
-      case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
+      case (ArrayType(e1, _), ArrayType(e2, _)) if nominallyEqual(e1, e2) => true
+      case (ArrayType(e1, _), SliceType(e2)) if nominallyEqual(e1, e2) => true  // fixed array → slice
+      case (SliceType(e1), SliceType(e2)) if nominallyEqual(e1, e2) => true
       case (RefType(a), RefType(b)) if compatible(a, b) => true // same ref type (recursive check handles nominal types)
       case (RefType(inner), PtrType(_)) => true             // &T → *U (ref decays to pointer)
       // Note: *T → T is NOT compatible. Implicit deref-and-copy hides cost (memcpy of pointee).
