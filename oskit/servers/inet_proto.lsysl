@@ -914,13 +914,17 @@ the pseudo-header checksum; the result lands at offset 40.
         inet_nic_send_packet(frame, total_len)
 
 
-### TCP — state machine (phase 1 MVP)
+### TCP — state machine
 
-Active-open client only. `connect()` → SYN_SENT → ESTABLISHED,
-graceful close either side, fixed 500 ms RTO, TIME_WAIT capped
-at 2 s. No listen/accept, no out-of-order reassembly, no
-congestion control, no Nagle. Enough to echo-test against a
-host echo server via `hostfwd=tcp`.
+Full state machine for active and passive opens, graceful close
+from either side, real TIME_WAIT (2*MSL), out-of-order receive
+reassembly (bounded reorder queue), Reno congestion control with
+SACK-assisted fast recovery, and RFC 6298 RTO estimation
+(SRTT/RTTVAR). Exposes both blocking and non-blocking recv, half-
+close via FIN-without-close, and owner-keyed cleanup on process
+exit. Implemented in cooperation with `inet.lsysl` — inet.lsysl
+hosts the IPC dispatch, the heavy lifting (state transitions,
+emit/retransmit, scoreboard) lives here.
 
 Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
 

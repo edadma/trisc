@@ -1105,11 +1105,13 @@ CLOSE_WAIT on arrival — read/close paths handle that already.
             return i64(-24)             // -EMFILE
         i64(new_fd)
 
-SYS_SHUTDOWN. MVP implementation: no-op returning success. Proper
-half-close (SHUT_WR sends FIN while leaving reads open) requires
-a dedicated inet IPC op that phase 2 doesn't land; programs that
-depend on peer seeing EOF without our close() will hang until we
-do. Documented in the phase-2 handoff memory.
+SYS_SHUTDOWN. Real half-close via `INET_CMD_TCP_SHUTDOWN`. `how`
+values (Linux): 0 = SHUT_RD (no-op — we don't track a read-shut
+state, reads continue), 1 = SHUT_WR (inet emits FIN via
+`inet_tcp_do_shutdown_wr`, leaves socket readable until peer
+FINs, does NOT park the caller), 2 = SHUT_RDWR (treated as
+SHUT_WR for now — a proper SHUT_RDWR would also drop buffered
+recv data). Not valid on non-TCP fds.
 
     sys_shutdown(fd: int, how: int) -> i64
         val k = posix_fd_kind(fd)

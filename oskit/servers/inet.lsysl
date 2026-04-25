@@ -1,31 +1,42 @@
-OSKit INET Server — Internet Sockets (loopback skeleton)
-========================================================
+OSKit INET Server — Internet Sockets
+====================================
 
-Minix 3-style socket server. First cut only implements UDP-style
-datagram sockets over the loopback address (127.0.0.1). That's
-enough to exercise the full IPC socket API from userspace without
-any NIC driver or packet layer behind it — the datagrams never
-leave the server, they just move between per-socket queues.
+Minix 3-style socket server. Fronts the NIC driver (virtio-net)
+with an ARP cache + IPv4 stack + UDP + TCP (Reno + SACK) +
+ICMP echo. Loopback (127.0.0.1) is served from per-socket queues
+without touching the NIC; everything else goes through
+`inet_nic_send_packet` / the RX subscription.
 
-Follow-up phases will plug a real NIC driver server in behind
-this one and grow the protocol set (ARP / IP / ICMP / UDP / TCP).
+Protocol surface
+----------------
 
-IPC protocol
-------------
+UDP + raw-ish ops:
+- SOCKET (1), BIND (2), SENDTO (3), RECVFROM (4), CLOSE (5)
+- RECVFROM_TIMEOUT (18) — used for both timed recv and the
+  O_NONBLOCK path (timeout_ms=0 ⇒ immediate EAGAIN via status=1)
+- ARP_PROBE (19) — RFC 5227 conflict detection, driven by dhclient
+- ICMP_SEND (21) / ICMP_CHECK (22) — ping utility
+- SET_IP_CONFIG (16) / GET_IP_CONFIG (17) — driven by dhclient
 
-Each request has a 1-byte command code in `buf[0]`, followed by
-a command-specific payload. Replies always start with a 1-byte
-status (0 on success, -1 on error).
+TCP:
+- TCP_CONNECT (10), TCP_SEND (11), TCP_RECV (12), TCP_CLOSE (13),
+  TCP_LISTEN (14), TCP_ACCEPT (15)
+- TCP_DEBUG (20) — internal state dump for test harness
+- TCP_RECV_NB (26) — non-blocking recv returning -EAGAIN (-11)
+- TCP_SHUTDOWN (27) — SHUT_WR emits FIN without parking caller
+- TCP_GETNAME (25) / UDP_GETNAME (24) — sockaddr_in for
+  getsockname / getpeername
 
-- SOCKET: `cmd, family, sock_type, proto` → `status, fd`
-- BIND: `cmd, fd, family, port(2), ip(4)` → `status`
-- SENDTO: `cmd, fd, family, port(2), ip(4), len(2), data...` → `status, nsent(2)`
-- RECVFROM: `cmd, fd, maxlen(2)` → `status, family, port(2), ip(4), len(2), data...` (deferred until a packet arrives)
-- CLOSE: `cmd, fd` → `status`
+Housekeeping:
+- PID_EXIT (23) — PM-driven cleanup of sockets whose owner_tid
+  matches a terminated thread
 
-All multi-byte integers are big-endian. Unsupported SOCKET
-families / types, and any unknown command code, return
-`status = -1`.
+All multi-byte integers are big-endian. Each request has a
+1-byte command code in `buf[0]`; replies start with a 1-byte
+status (0 on success, -errno on failure, -1 for opaque error).
+Handlers enforce per-fd ownership: `owner_tid == sender` is
+required alongside in-use, so process A can't issue ops on
+process B's sockets.
 
     module oskit.servers
 
