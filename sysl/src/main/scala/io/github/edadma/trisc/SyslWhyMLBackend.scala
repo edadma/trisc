@@ -97,8 +97,15 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     val params =
       if fn.params.isEmpty then "()"
       else fn.params.map(p => s"(${sanitizeName(p.name)}: ${typeOf(p.typ)})").mkString(" ")
-    val (contracts, bodyExpr) = splitBody(fn)
+    val (contracts, bodyStmts) = splitBody(fn)
     val isGhost = fn.attributes.exists(_.name == "ghost")
+    val bodyStr = formatBlockBody(bodyStmts)
+    // For predicate-shape detection we need the trailing expression of a single-stmt body.
+    // Multi-statement bodies can never be predicate-shaped (a let-chain isn't a prop).
+    val singleBodyExpr: Option[ExpressionAST] = bodyStmts match
+      case List(ExprStmtAST(e))         => Some(e)
+      case List(ReturnStmtAST(Some(e))) => Some(e)
+      case _                            => None
 
     // Lift to a logic-level `predicate` when the shape is right: `def f(...) -> bool` whose
     // body IS a quantifier and which carries no contracts. Why3's `forall`/`exists` are
@@ -110,9 +117,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     val returnsBool = fn.returnType match
       case Some(NamedTypeAST("bool", Nil)) => true
       case _                               => false
-    val isPredicateShape = fn.isDef && returnsBool && contracts.isEmpty && isFormula(bodyExpr)
+    val isPredicateShape = fn.isDef && returnsBool && contracts.isEmpty &&
+      singleBodyExpr.exists(isFormula)
     if isPredicateShape then
-      line(s"predicate $name $params = ${stripOuterParens(formatExpr(bodyExpr))}")
+      line(s"predicate $name $params = ${stripOuterParens(formatExpr(singleBodyExpr.get))}")
       return
 
     val recKw = if isRecursive(fn) then "rec " else ""
@@ -126,7 +134,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     line(s"let $recKw$ghostKw" + s"function $name $params : $ret")
     indentLevel += 1
     for c <- contracts do emitContract(c)
-    line(s"= ${formatExpr(bodyExpr)}")
+    line(s"= $bodyStr")
     indentLevel -= 1
 
   /** True if `e` is a formula-shaped expression — currently just a top-level quantifier.
@@ -135,18 +143,43 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case _: QuantifierAST => true
     case _                => false
 
-  private def splitBody(fn: FunDeclAST): (List[ContractClauseAST], ExpressionAST) =
+  private def splitBody(fn: FunDeclAST): (List[ContractClauseAST], List[StmtAST]) =
     fn.body match
-      case ExprBodyAST(e) => (Nil, e)
-      case BlockBodyAST(stmts, contracts) =>
-        val bodyExpr = stmts match
-          case List(ReturnStmtAST(Some(e))) => e
-          case List(ExprStmtAST(e))         => e
-          case _ =>
+      case ExprBodyAST(e) => (Nil, List(ExprStmtAST(e)))
+      case BlockBodyAST(stmts, contracts) => (contracts, stmts)
+
+  /** Lower a sequence of body statements to a single WhyML expression string. Phase 3b
+   *  supports `val`-binding chains followed by a single trailing expression / return:
+   *
+   *      val x = e1                  let x = e1 in
+   *      val y = e2          →       let y = e2 in
+   *      x + y                       (x + y)
+   *
+   *  The `var` form is accepted only when not subsequently reassigned (Phase 3b treats it as
+   *  an immutable binding); reassignment, loops, and other statement forms remain unsupported
+   *  pending broader Phase 3+ work. */
+  private def formatBlockBody(stmts: List[StmtAST]): String =
+    stmts match
+      case Nil => unsupported("empty function body", "must have a trailing expression or return")
+      case List(s) => stmtAsTrailingExpr(s)
+      case head :: rest =>
+        val binding = head match
+          case VarStmtAST(name, _, init, _, _, _, isGhost) =>
+            val ghostKw = if isGhost then "ghost " else ""
+            s"let $ghostKw${sanitizeName(name)} = ${formatExpr(init)} in"
+          case other =>
             unsupported(
-              "block-bodied function with non-trivial body",
-              s"${fn.name}: Phase 1 only supports a single expression or a single `return <expr>`")
-        (contracts, bodyExpr)
+              "non-binding statement in function body",
+              s"only `val name = expr` chains followed by a trailing expression are supported in Phase 3b; got ${other.getClass.getSimpleName}")
+        s"$binding ${formatBlockBody(rest)}"
+
+  private def stmtAsTrailingExpr(s: StmtAST): String = s match
+    case ReturnStmtAST(Some(e)) => formatExpr(e)
+    case ExprStmtAST(e)         => formatExpr(e)
+    case other =>
+      unsupported(
+        "non-expression trailing statement",
+        s"function body must end with `return <expr>` or a bare expression; got ${other.getClass.getSimpleName}")
 
   private def emitContract(c: ContractClauseAST): Unit =
     val keyword = c.kind match

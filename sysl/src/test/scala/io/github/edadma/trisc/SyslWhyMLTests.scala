@@ -480,6 +480,74 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  "single val binding lowers to `let x = e in body`" in {
+    val mlw = translate(
+      """def plus_one(x: int) -> int
+        |    val y = x + 1
+        |    y
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let function plus_one (x: int) : int
+        |    = let y = (x + 1) in y
+        |end
+        |""".stripMargin
+  }
+
+  "multiple val bindings chain into nested lets" in {
+    val mlw = translate(
+      """def compute(x: int) -> int
+        |    require x >= 0
+        |    ensure result >= 0
+        |    val doubled = x * 2
+        |    val plus_one = doubled + 1
+        |    plus_one
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let function compute (x: int) : int
+        |    requires { x >= 0 }
+        |    ensures  { result >= 0 }
+        |    = let doubled = (x * 2) in let plus_one = (doubled + 1) in plus_one
+        |end
+        |""".stripMargin
+  }
+
+  "ghost-marked local becomes a ghost let-binding" in {
+    val mlw = translate(
+      """def identity(x: int) -> int
+        |    ensure result == x
+        |    #ghost val snap = x
+        |    x
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let function identity (x: int) : int
+        |    ensures  { result = x }
+        |    = let ghost snap = x in x
+        |end
+        |""".stripMargin
+  }
+
+  "non-binding statement in body is rejected with a clear message" in {
+    val ex = intercept[RuntimeException](translate(
+      """def f(x: int) -> int
+        |    var y = 0
+        |    y = x
+        |    y
+        |""".stripMargin))
+    ex.getMessage should include("non-binding statement")
+  }
+
   "unsupported expression form yields a clear error naming the gap" in {
     val ex = intercept[RuntimeException](translate(
       """def s() -> int
