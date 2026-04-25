@@ -1024,7 +1024,9 @@ VFS's ipc_send blocks here — same pattern as vfs_tty_read.
         // Send INET_CMD_TCP_CONNECT. Reply is deferred by inet until
         // ESTABLISHED, so ipc_send blocks VFS — one TCP connect at a
         // time per VFS, matching our single-threaded server pattern.
-        var msg: [7]byte
+        // Wire is 11 bytes since Phase E (sndbuf/rcvbuf trailer; the
+        // VFS bridge always asks for inet defaults).
+        var msg: [11]byte
         msg[0] = 10  // INET_CMD_TCP_CONNECT
         msg[1] = byte(octets[0])
         msg[2] = byte(octets[1])
@@ -1032,8 +1034,12 @@ VFS's ipc_send blocks here — same pattern as vfs_tty_read.
         msg[4] = byte(octets[3])
         msg[5] = byte((port >> 8) & 0xFF)
         msg[6] = byte(port & 0xFF)
+        msg[7] = 0
+        msg[8] = 0
+        msg[9] = 0
+        msg[10] = 0
         var icreply: [2]byte
-        ipc_send(inet, msg, 7, icreply, 2)
+        ipc_send(inet, msg, 11, icreply, 2)
         if icreply[0] != 0
             var err: [1]byte
             err[0] = byte(-1)
@@ -1245,14 +1251,20 @@ default 16 — same as `tcp_listen` in oskit/net/client.lsysl.
             ipc_reply(sender, err, 1)
             return
 
-        var msg: [5]byte
+        // Wire is 9 bytes since Phase E (sndbuf/rcvbuf trailer; VFS
+        // listeners always ask for inet defaults).
+        var msg: [9]byte
         msg[0] = 14  // INET_CMD_TCP_LISTEN
         msg[1] = byte((port >> 8) & 0xFF)
         msg[2] = byte(port & 0xFF)
         msg[3] = 0   // backlog hi
         msg[4] = 16  // backlog lo — matches TCP_LISTEN_BACKLOG default
+        msg[5] = 0
+        msg[6] = 0
+        msg[7] = 0
+        msg[8] = 0
         var icreply: [2]byte
-        ipc_send(inet, msg, 5, icreply, 2)
+        ipc_send(inet, msg, 9, icreply, 2)
         if icreply[0] != 0
             var err: [1]byte
             err[0] = byte(-1)

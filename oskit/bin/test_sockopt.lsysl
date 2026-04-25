@@ -1,21 +1,29 @@
-test_sockopt — setsockopt / getsockopt accept-and-ignore
-========================================================
+test_sockopt — setsockopt / getsockopt accept-and-ignore + bufsize
+==================================================================
 
-Exercises the MVP setsockopt (208) / getsockopt (209) paths in
-the aarch64 POSIX shim. The shim doesn't actually track option
-state; it just accepts a handful of well-known `(level, optname)`
-pairs (SO_REUSEADDR, SO_BROADCAST, SO_KEEPALIVE, SO_REUSEPORT,
-SO_ERROR, TCP_NODELAY) and returns success. Anything outside the
-accept-list should return `-ENOPROTOOPT` (-92).
+Exercises the setsockopt / getsockopt paths in the POSIX shim:
 
-Pass criteria:
+- The accept-and-ignore set (SO_REUSEADDR, SO_BROADCAST,
+  SO_KEEPALIVE, SO_REUSEPORT, TCP_NODELAY) on a UDP fd —
+  always returns 0, getsockopt writes 0.
+- Phase E real plumbing for SO_SNDBUF / SO_RCVBUF on a TCP fd:
+  setsockopt persists the requested size on the shim fd, and
+  getsockopt echoes it back.  At connect/listen time the size
+  is forwarded to inet via the extended CONNECT/LISTEN wire.
+
+Pass criteria (UDP):
 - `setsockopt SO_REUSEADDR = 1` returns 0
 - `setsockopt SO_BROADCAST = 1` returns 0
 - `setsockopt TCP_NODELAY = 1` returns 0
 - `setsockopt <unknown>` returns -92
 - `getsockopt SO_REUSEADDR` returns 0, writes value=0, optlen=4
 - `getsockopt <unknown>` returns -92
-- `sockopt: done` marker printed at the end
+
+Pass criteria (TCP):
+- `setsockopt SO_SNDBUF = 2048` returns 0; getsockopt echoes 2048
+- `setsockopt SO_RCVBUF = 4096` returns 0; getsockopt echoes 4096
+
+Final marker: `sockopt: done`.
 
     module oskit.bin.test_sockopt
 
@@ -29,10 +37,13 @@ Pass criteria:
 
     val AF_INET_V     = 2
     val SOCK_DGRAM_V  = 2
+    val SOCK_STREAM_V = 1
 
     val SOL_SOCKET    = 1
     val SO_REUSEADDR  = 2
     val SO_BROADCAST  = 6
+    val SO_SNDBUF     = 7
+    val SO_RCVBUF     = 8
     val IPPROTO_TCP   = 6
     val TCP_NODELAY   = 1
 
@@ -160,5 +171,90 @@ Raw POSIX syscall wrappers.
             return
 
         posix_close(fd)
+
+        // Phase E: TCP fd round-trip for SO_SNDBUF / SO_RCVBUF.
+        val tfd = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if tfd < 0
+            puts("sockopt: tcp socket failed\n")
+            exit_with(10)
+            return
+
+        var sb: [4]byte
+        sb[0] = byte(0)
+        sb[1] = byte(8)        // 0x0800 LE = 2048
+        sb[2] = byte(0)
+        sb[3] = byte(0)
+        val r7 = posix_setsockopt(tfd, SOL_SOCKET, SO_SNDBUF, &sb[0], 4)
+        puts("sockopt: set SO_SNDBUF = ")
+        print_sdec(r7)
+        puts("\n")
+        if r7 != 0
+            puts("sockopt: FAIL set SO_SNDBUF\n")
+            exit_with(11)
+            return
+
+        var rb: [4]byte
+        rb[0] = byte(0)
+        rb[1] = byte(16)       // 0x1000 LE = 4096
+        rb[2] = byte(0)
+        rb[3] = byte(0)
+        val r8 = posix_setsockopt(tfd, SOL_SOCKET, SO_RCVBUF, &rb[0], 4)
+        puts("sockopt: set SO_RCVBUF = ")
+        print_sdec(r8)
+        puts("\n")
+        if r8 != 0
+            puts("sockopt: FAIL set SO_RCVBUF\n")
+            exit_with(12)
+            return
+
+        // Echo back via getsockopt — pre-connect, the shim returns
+        // the pending value (no inet slot yet).
+        var snd_out: [4]byte
+        snd_out[0] = byte(0xff)
+        snd_out[1] = byte(0xff)
+        snd_out[2] = byte(0xff)
+        snd_out[3] = byte(0xff)
+        var snd_olen: i32 = i32(4)
+        val r9 = posix_getsockopt(tfd, SOL_SOCKET, SO_SNDBUF,
+                                  &snd_out[0], &snd_olen)
+        val snd_b0 = int(snd_out[0]) & 0xff
+        val snd_b1 = int(snd_out[1]) & 0xff
+        val snd_b2 = int(snd_out[2]) & 0xff
+        val snd_b3 = int(snd_out[3]) & 0xff
+        val snd_val = snd_b0 | (snd_b1 << 8) | (snd_b2 << 16) | (snd_b3 << 24)
+        puts("sockopt: get SO_SNDBUF = ")
+        print_sdec(r9)
+        puts(" val=")
+        print_sdec(snd_val)
+        puts("\n")
+        if r9 != 0 || snd_val != 2048
+            puts("sockopt: FAIL get SO_SNDBUF round-trip\n")
+            exit_with(13)
+            return
+
+        var rcv_out: [4]byte
+        rcv_out[0] = byte(0xff)
+        rcv_out[1] = byte(0xff)
+        rcv_out[2] = byte(0xff)
+        rcv_out[3] = byte(0xff)
+        var rcv_olen: i32 = i32(4)
+        val r10 = posix_getsockopt(tfd, SOL_SOCKET, SO_RCVBUF,
+                                   &rcv_out[0], &rcv_olen)
+        val rcv_b0 = int(rcv_out[0]) & 0xff
+        val rcv_b1 = int(rcv_out[1]) & 0xff
+        val rcv_b2 = int(rcv_out[2]) & 0xff
+        val rcv_b3 = int(rcv_out[3]) & 0xff
+        val rcv_val = rcv_b0 | (rcv_b1 << 8) | (rcv_b2 << 16) | (rcv_b3 << 24)
+        puts("sockopt: get SO_RCVBUF = ")
+        print_sdec(r10)
+        puts(" val=")
+        print_sdec(rcv_val)
+        puts("\n")
+        if r10 != 0 || rcv_val != 4096
+            puts("sockopt: FAIL get SO_RCVBUF round-trip\n")
+            exit_with(14)
+            return
+
+        posix_close(tfd)
         puts("sockopt: done\n")
         exit()
