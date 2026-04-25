@@ -1085,6 +1085,16 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     // 16 sockets at 8 KB+8 KB worst case that's 256 KB, comfortable).
     val TCP_BUF_MIN          = 256
     val TCP_BUF_MAX          = 8192
+    // SO_KEEPALIVE timing (ticks at the inet ~10ms timer base).
+    // Linux defaults are 7200/75/9 ticks (in seconds) which would
+    // be 720000/7500 ticks at slix's resolution — useless for
+    // testing.  Slix uses tighter defaults so test cases see the
+    // probe/giveup cycle in seconds rather than hours.  Real
+    // workloads can tune later via setsockopt(TCP_KEEPIDLE / etc.)
+    // once those options are wired (deferred follow-up).
+    val TCP_KEEPALIVE_IDLE       = 1000   // ~10s of silence before first probe
+    val TCP_KEEPALIVE_INTVL      = 500    // ~5s between probes
+    val TCP_KEEPALIVE_MAX_PROBES = 3      // close after this many unanswered
     val TCP_MSS_ADV         = 1460
     val TCP_MAX_SEG         = 480
     val TCP_RTO_INITIAL     = 100
@@ -1261,6 +1271,17 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         ts_ok: int
         ts_recent: u32
         ts_offset: u32
+        // SO_KEEPALIVE state.  `keepalive_on != 0` activates the
+        // probe/giveup cycle.  `last_recv_tick` is the absolute
+        // tick of the most recent inbound segment — the idle-
+        // timer baseline.  `keepalive_probes` counts unanswered
+        // probes; `keepalive_next_probe` is the absolute tick at
+        // which the next probe (or first probe after idle) fires
+        // (0 = none scheduled, recomputed lazily in scan_timers).
+        keepalive_on: int
+        last_recv_tick: int
+        keepalive_probes: int
+        keepalive_next_probe: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -1997,6 +2018,10 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].rcv_wscale = 0
         tcp_sockets[s].ts_ok = 0
         tcp_sockets[s].ts_recent = u32(0)
+        tcp_sockets[s].keepalive_on = 0
+        tcp_sockets[s].last_recv_tick = 0
+        tcp_sockets[s].keepalive_probes = 0
+        tcp_sockets[s].keepalive_next_probe = 0
         // Release the heap-backed buffers. `free(null)` is a no-op
         // (std.alloc), so close paths hit on slots that never
         // allocated (e.g. listen sockets in early-reject paths) are
@@ -2086,6 +2111,10 @@ success, -1 when the slot is already closed (idempotent).
                 // back-to-back connections from the same socket
                 // pool don't share an offset.
                 tcp_sockets[i].ts_offset = u32(uptime()) ^ u32(i * 1000003) ^ tcp_iss_counter
+                tcp_sockets[i].keepalive_on = 0
+                tcp_sockets[i].last_recv_tick = int(uptime())
+                tcp_sockets[i].keepalive_probes = 0
+                tcp_sockets[i].keepalive_next_probe = 0
                 // Heap-backed buffers are allocated lazily on alloc.
                 // close_slot frees + nulls the pointers, so re-using a
                 // slot doesn't double-allocate.  std.alloc returns 0 on
@@ -2156,6 +2185,32 @@ out-of-range kind.
             free(tcp_sockets[s].recv_buf_ptr)
             tcp_sockets[s].recv_buf_ptr = malloc(i64(clamped))
             tcp_sockets[s].recv_buf_size = clamped
+        0
+
+
+setsockopt(SO_KEEPALIVE) — flips the per-socket keepalive flag.
+Turning it on baselines `last_recv_tick` to now and clears any
+in-flight probe count, so a freshly-enabled socket waits a full
+`TCP_KEEPALIVE_IDLE` from this point before the first probe.
+Turning it off zeroes the schedule.
+
+Idempotent (no-op for same-state calls).  Returns 0 on success,
+-1 on bad fd / closed slot.
+
+    inet_tcp_set_keepalive(s: int, on: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if on != 0
+            tcp_sockets[s].keepalive_on = 1
+            tcp_sockets[s].last_recv_tick = int(uptime())
+            tcp_sockets[s].keepalive_probes = 0
+            tcp_sockets[s].keepalive_next_probe = 0
+        else
+            tcp_sockets[s].keepalive_on = 0
+            tcp_sockets[s].keepalive_probes = 0
+            tcp_sockets[s].keepalive_next_probe = 0
         0
 
 
@@ -2326,6 +2381,12 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
             inet_tcp_resize_buf(s, 0, parent_sndbuf)
         if parent_rcvbuf != tcp_sockets[s].recv_buf_size
             inet_tcp_resize_buf(s, 1, parent_rcvbuf)
+        // Inherit SO_KEEPALIVE — Linux semantics: accepted child
+        // carries the listening socket's keepalive flag.  The
+        // probe schedule starts fresh from accept (last_recv_tick
+        // already points at "now" via alloc).
+        if tcp_sockets[ls].keepalive_on != 0
+            inet_tcp_set_keepalive(s, 1)
         val iss = tcp_next_iss()
         tcp_sockets[s].owner_tid = tcp_sockets[ls].owner_tid
         tcp_sockets[s].local_port = tcp_sockets[ls].local_port
@@ -2961,6 +3022,13 @@ checksum, locates the matching socket, and delegates.
         if tcp_sockets[s].sack_ok != 0
             if (flags & TCP_F_ACK) != 0
                 tcp_opts_apply_sack(s, frame, tcp_off, tcp_hdr_len)
+        // SO_KEEPALIVE: any inbound segment for this connection
+        // resets the idle clock, so an active flow never trips the
+        // probe path.  Bumping unconditionally (not just on data) is
+        // what Linux does — a peer ACK on idle counts as liveness.
+        tcp_sockets[s].last_recv_tick = int(uptime())
+        tcp_sockets[s].keepalive_probes = 0
+        tcp_sockets[s].keepalive_next_probe = 0
         inet_tcp_state_step(s, flags, seq, ack, wnd, payload,
             payload_len, peer_sack_perm, peer_has_ws, ws_shift,
             peer_has_ts, ts_val, ts_ecr)
@@ -3410,6 +3478,34 @@ socket for retransmit and TIME_WAIT deadlines.
                 if tw != 0
                     if now >= tw
                         inet_tcp_close_slot(i, 0)
+                // SO_KEEPALIVE — only fires on ESTABLISHED /
+                // CLOSE_WAIT (real connections with a peer to probe).
+                // SYN_SENT / SYN_RCVD have their own retransmit
+                // timer; LISTEN / TIME_WAIT have nothing to keep alive.
+                if tcp_sockets[i].in_use != 0
+                    if tcp_sockets[i].keepalive_on != 0
+                        val kst = tcp_sockets[i].state
+                        if kst == TCP_STATE_ESTABLISHED || kst == TCP_STATE_CLOSE_WAIT
+                            if tcp_sockets[i].keepalive_next_probe == 0
+                                // Idle timer just (re)started — schedule
+                                // first probe `IDLE` ticks after last recv.
+                                val first_probe = tcp_sockets[i].last_recv_tick + TCP_KEEPALIVE_IDLE
+                                tcp_sockets[i].keepalive_next_probe = first_probe
+                            if now >= tcp_sockets[i].keepalive_next_probe
+                                if tcp_sockets[i].keepalive_probes >= TCP_KEEPALIVE_MAX_PROBES
+                                    // Peer is dead. Close as -ETIMEDOUT.
+                                    inet_tcp_close_slot(i, -1)
+                                else
+                                    // Probe: empty ACK at snd_una - 1
+                                    // (Linux's "1 byte before unacked"
+                                    // pattern). Peer ACKs back with the
+                                    // current ack number, which our
+                                    // handle_segment treats as fresh
+                                    // liveness and resets probes.
+                                    val probe_seq = tcp_sockets[i].snd_una - u32(1)
+                                    inet_tcp_emit(i, TCP_F_ACK, probe_seq, u32(0), 0)
+                                    tcp_sockets[i].keepalive_probes += 1
+                                    tcp_sockets[i].keepalive_next_probe = now + TCP_KEEPALIVE_INTVL
             i += 1
 
     inet_tcp_retransmit(s: int)

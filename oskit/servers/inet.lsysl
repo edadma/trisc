@@ -82,6 +82,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_SETBUF   = 34
     val INET_CMD_TCP_GETBUF   = 35
     val INET_CMD_TCP_ABORT_CLOSE = 36
+    val INET_CMD_TCP_SET_KEEPALIVE = 37
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1108,6 +1109,24 @@ Reply: status(1).
             return
         // Deferred reply — state step delivers when FIN is acked.
 
+SO_KEEPALIVE on/off.  Wire: cmd(1) + fd(u16 BE) + on(1) = 4 bytes
+in; reply: 1-byte status.  Inet enforces the probe/giveup cycle in
+`inet_tcp_scan_timers` for sockets that are in ESTABLISHED or
+CLOSE_WAIT with `keepalive_on != 0`.
+
+    inet_handle_tcp_set_keepalive(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val on = int(buf[3]) & 0xff
+        var reply: [1]byte
+        if inet_tcp_slot_owned(fd, sender) == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val rc = inet_tcp_set_keepalive(fd, on)
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+
 SO_LINGER `l_linger = 0` close path.  Shim sends this when the
 caller has set linger-on with a zero timeout: emit RST, free
 slot, no FIN, no TIME_WAIT.  Reply is immediate (1-byte status)
@@ -1662,6 +1681,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_SETBUF  -> inet_handle_tcp_setbuf(sender, buf)
                     INET_CMD_TCP_GETBUF  -> inet_handle_tcp_getbuf(sender, buf)
                     INET_CMD_TCP_ABORT_CLOSE -> inet_handle_tcp_abort_close(sender, buf)
+                    INET_CMD_TCP_SET_KEEPALIVE -> inet_handle_tcp_set_keepalive(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->

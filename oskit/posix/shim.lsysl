@@ -281,6 +281,7 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_TCP_SETBUF  = 34
     val INET_CMD_TCP_GETBUF  = 35
     val INET_CMD_TCP_ABORT_CLOSE = 36
+    val INET_CMD_TCP_SET_KEEPALIVE = 37
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -1219,6 +1220,12 @@ dst_port (BE u16) at the usual offsets.
             return i64(-111)            // -ECONNREFUSED
         val inet_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = inet_fd
+        // Apply pending SO_KEEPALIVE now that the slot exists.
+        // Bufsize already shipped through the extended CONNECT
+        // wire; keepalive uses a follow-up IPC since it's a
+        // post-handshake property (only fires in ESTABLISHED).
+        if posix_fd_table[idx].flag_keepalive != 0
+            shim_inet_set_keepalive(inet_fd, 1)
         // Non-blocking connect: surface -EINPROGRESS so the user
         // can poll EPOLLOUT for completion. The slot is already
         // SYN_SENT; once it reaches ESTABLISHED the existing
@@ -1274,6 +1281,10 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
             return i64(-98)             // -EADDRINUSE
         val listen_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = listen_fd
+        // Apply pending SO_KEEPALIVE — accepted children inherit
+        // the listener's flag via inet's handle_passive_syn.
+        if posix_fd_table[idx].flag_keepalive != 0
+            shim_inet_set_keepalive(listen_fd, 1)
         i64(0)
 
 SYS_ACCEPT. Blocks until a child connection arrives unless the
@@ -1402,6 +1413,28 @@ recv data). Not valid on non-TCP fds.
             return i64(-5)
         i64(0)
 
+Send INET_CMD_TCP_SET_KEEPALIVE.  Returns 0 / negative errno.
+Used at setsockopt(SO_KEEPALIVE) time on a TCP fd that already
+has an inet slot, and at connect/listen time to apply a flag the
+caller stashed pre-slot.
+
+    shim_inet_set_keepalive(inet_fd: int, on: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [4]byte
+        msg[0] = byte(INET_CMD_TCP_SET_KEEPALIVE)
+        shim_write_u16(msg, 1, inet_fd)
+        msg[3] = byte(on & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 4, reply, 1)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            return -22
+        0
+
+
 Send INET_CMD_TCP_SETBUF for one buffer.  `is_send` selects which.
 Returns 0 on success, negative errno on failure.
 
@@ -1486,6 +1519,14 @@ as -EINVAL).
                 if shim_sockopt_read_int(optval, optlen, v) != 0
                     return i64(-22)
                 posix_fd_table[tidx].flag_keepalive = v
+                // Push to inet immediately when a slot exists so
+                // the probe/giveup cycle either starts (v != 0) or
+                // stops (v == 0) right now. Pre-slot calls just
+                // persist; sys_connect / sys_listen apply later.
+                if k == POSIX_FD_TCP_SOCKET
+                    val ka_inet_fd = posix_fd_target(fd)
+                    if ka_inet_fd >= 0
+                        shim_inet_set_keepalive(ka_inet_fd, v)
                 return i64(0)
             if optname == 15
                 var v = 0
