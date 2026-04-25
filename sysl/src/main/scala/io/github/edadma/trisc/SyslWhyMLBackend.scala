@@ -95,18 +95,58 @@ class SyslWhyMLBackend(moduleName: String = "M"):
 
   /** sysl `struct Point { x: int; y: int }` → WhyML `type point = { x: int; y: int }`.
    *  WhyML records are immutable by default; field updates are functional (`{ p with x = 5 }`).
-   *  This first cut handles only value structs — no `mutable` fields, no struct invariants
-   *  (deferred to a follow-up). Generic structs (with type params) are rejected. The struct
-   *  type name is lowercased like enums (WhyML convention; uppercase is for constructors). */
+   *  Generic structs (with type params) are rejected.
+   *
+   *  Struct invariants — sysl `invariant <expr>` clauses translate to WhyML
+   *  `invariant { <expr> }` immediately after the field list. WhyML requires a non-empty
+   *  witness for any record-with-invariant (the type must be inhabited), provided via a
+   *  `by { f = default }` clause. We synthesize defaults from field types: `int` → 0,
+   *  `bool` → false. Default-derivable types only — exotic field types in an invariant-bearing
+   *  struct are rejected (the user could split: keep the data struct invariant-free, layer the
+   *  invariant on a wrapper).
+   *
+   *  Multiple invariants are joined with `&&` (WhyML accepts conjunction in invariant
+   *  clauses). The generated `by` witness must satisfy all of them simultaneously — for
+   *  typical numeric invariants like `lo <= hi` or `balance >= -limit`, the all-zeros
+   *  witness works. If a user invariant rejects the all-zeros witness, Why3 will report
+   *  the failed witness goal and the user can refactor. */
   private def emitStruct(s: StructDeclAST): Unit =
     if s.typeParams.nonEmpty then unsupported("generic struct", s.name)
-    if s.invariants.nonEmpty then unsupported("struct invariant", s"${s.name}: deferred to a follow-up")
     if s.fields.isEmpty then unsupported("empty struct", s.name)
     val typeName = s"${s.name.head.toLower}${s.name.tail}"
     val fieldStr = s.fields.map { case (fname, ftyp, _) =>
       s"$fname: ${typeOf(ftyp)}"
     }.mkString("; ")
-    line(s"type $typeName = { $fieldStr }")
+    if s.invariants.isEmpty then
+      line(s"type $typeName = { $fieldStr }")
+    else
+      val invStr = s.invariants
+        .map(e => stripOuterParens(formatExpr(e)))
+        .mkString(" && ")
+      val witness = s.fields.map { case (fname, ftyp, _) =>
+        s"$fname = ${defaultValue(ftyp, s.name, fname)}"
+      }.mkString("; ")
+      line(s"type $typeName = { $fieldStr }")
+      indentLevel += 1
+      line(s"invariant { $invStr }")
+      line(s"by { $witness }")
+      indentLevel -= 1
+
+  /** Default value for a field's type, used to synthesize a `by { ... }` witness for
+   *  invariant-bearing records. Only the trivially-derivable types are supported; anything
+   *  else fails fast with a useful message. */
+  private def defaultValue(t: TypeAST, structName: String, fieldName: String): String = t match
+    case NamedTypeAST("bool", Nil) => "false"
+    case NamedTypeAST(name, Nil) if isInteger(name) => "0"
+    case other =>
+      unsupported(
+        "default-value synthesis for invariant witness",
+        s"$structName.$fieldName has type $other; only int / bool fields are supported in invariant-bearing structs")
+
+  private def isInteger(n: String): Boolean = n match
+    case "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" |
+         "byte" | "char" | "rune" => true
+    case _ => false
 
   /** sysl `enum Color { Red, Green, Blue }` → WhyML `type color = Red | Green | Blue`.
    *  The integer values that sysl assigns (auto-incrementing or explicit) are dropped —

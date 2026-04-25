@@ -906,6 +906,51 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  "struct invariants emit a WhyML record invariant + synthesized `by` witness" in {
+    // Multiple `invariant` clauses join with `&&`. The `by` witness uses 0 for int fields
+    // and false for bool — sufficient for typical numeric invariants like `balance >= -limit`
+    // (0 >= -0 holds). Why3 generates a witness goal which Alt-Ergo discharges trivially
+    // when the witness satisfies the invariant.
+    val mlw = translate(
+      """struct Account
+        |    balance: int
+        |    limit: int
+        |    invariant balance >= -limit
+        |    invariant limit >= 0
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type account = { balance: int; limit: int }
+        |    invariant { balance >= (- limit) && limit >= 0 }
+        |    by { balance = 0; limit = 0 }
+        |end
+        |""".stripMargin
+  }
+
+  "single invariant on a struct is emitted without join operator" in {
+    val mlw = translate(
+      """struct Range
+        |    lo: int
+        |    hi: int
+        |    invariant lo <= hi
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type range = { lo: int; hi: int }
+        |    invariant { lo <= hi }
+        |    by { lo = 0; hi = 0 }
+        |end
+        |""".stripMargin
+  }
+
   "boolean conjunction `&&` in body position uses WhyML's bool && operator" in {
     // WhyML `/\` is formula-only — using it in a body that returns bool is a syntax error.
     // The translator emits `&&` / `||` everywhere; Why3 implicitly coerces bool to prop in
