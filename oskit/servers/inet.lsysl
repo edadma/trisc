@@ -1416,6 +1416,18 @@ Dropping on no-match matches standard UDP semantics.
             return
         val target = inet_find_bound_port(dst_port)
         if target < 0
+            // No socket bound — emit ICMP Port Unreachable so the
+            // peer's connect()ed UDP fd can return -ECONNREFUSED
+            // immediately instead of timing out (Linux semantics).
+            // Skip when the destination wasn't unicast to us — RFC
+            // 1812 §4.3.2.7 forbids ICMP errors for broadcast /
+            // multicast / 0.0.0.0 destinations to prevent
+            // amplification.  Slix only owns one IP, so we check
+            // dst_ip against ours and bail otherwise.
+            if pkt_match_ipv4(frame, 14 + 16, INET_OUR_IP_A,
+                              INET_OUR_IP_B, INET_OUR_IP_C,
+                              INET_OUR_IP_D) != 0
+                inet_send_icmp_port_unreach(frame, total_len)
             return
         if inet_sockets[target].pending_tid >= 0
             inet_deliver_to_waiter(target, src_ip, src_port, data, payload_len)
