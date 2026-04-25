@@ -173,7 +173,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |
         |  let function abs (x: int) : int
         |    ensures  { result >= 0 }
-        |    ensures  { (result = x) \/ (result = (- x)) }
+        |    ensures  { (result = x) || (result = (- x)) }
         |    = (if (x >= 0) then x else (- x))
         |end
         |""".stripMargin
@@ -796,6 +796,140 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |  let countdown (n: int) : int
         |    requires { n >= 0 }
         |    = let s = ref 0 in let i = ref n in (while (!i >= 0) do invariant { !s >= 0 } variant { !i + 1 } s := (!s + 1); i := (!i - 1) done); !s
+        |end
+        |""".stripMargin
+  }
+
+  // ====================================================================================
+  // Phase 4-structs — value structs ↔ WhyML records
+  // ====================================================================================
+
+  "struct decl emits a WhyML record type with lowercased name" in {
+    val mlw = translate(
+      """struct Point
+        |    x: int
+        |    y: int
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type point = { x: int; y: int }
+        |end
+        |""".stripMargin
+  }
+
+  "struct field access uses dot notation (same as WhyML)" in {
+    val mlw = translate(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |def magnitude_sq(p: Point) -> int
+        |    require p.x >= 0
+        |    require p.y >= 0
+        |    ensure result >= 0
+        |    p.x * p.x + p.y * p.y
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type point = { x: int; y: int }
+        |
+        |  let function magnitude_sq (p: point) : int
+        |    requires { p.x >= 0 }
+        |    requires { p.y >= 0 }
+        |    ensures  { result >= 0 }
+        |    = ((p.x * p.x) + (p.y * p.y))
+        |end
+        |""".stripMargin
+  }
+
+  "struct construction call lowers to a record literal in field-declaration order" in {
+    // Sysl `Point(0, 0)` is positional construction. Sysl also supports named-arg form
+    // `Point(x=0, y=0)` which the parser binds positionally too. Either way we emit
+    // `{ x = ...; y = ... }` — record literals are name-keyed in WhyML so we look up the
+    // field names by struct name, then zip with the actual arg expressions.
+    val mlw = translate(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |def origin() -> Point
+        |    Point(0, 0)
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type point = { x: int; y: int }
+        |
+        |  let function origin () : point
+        |    = { x = 0; y = 0 }
+        |end
+        |""".stripMargin
+  }
+
+  "struct returned from a function with `result.field` ensures clauses" in {
+    val mlw = translate(
+      """struct Range
+        |    lo: int
+        |    hi: int
+        |
+        |def make_range(lo: int, hi: int) -> Range
+        |    require lo <= hi
+        |    ensure result.lo == lo
+        |    ensure result.hi == hi
+        |    Range(lo, hi)
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type range = { lo: int; hi: int }
+        |
+        |  let function make_range (lo: int) (hi: int) : range
+        |    requires { lo <= hi }
+        |    ensures  { result.lo = lo }
+        |    ensures  { result.hi = hi }
+        |    = { lo = lo; hi = hi }
+        |end
+        |""".stripMargin
+  }
+
+  "boolean conjunction `&&` in body position uses WhyML's bool && operator" in {
+    // WhyML `/\` is formula-only — using it in a body that returns bool is a syntax error.
+    // The translator emits `&&` / `||` everywhere; Why3 implicitly coerces bool to prop in
+    // formula contexts, so contracts still parse correctly.
+    val mlw = translate(
+      """struct Range
+        |    lo: int
+        |    hi: int
+        |
+        |def contains(r: Range, x: int) -> bool
+        |    ensure result == (x >= r.lo && x <= r.hi)
+        |    x >= r.lo && x <= r.hi
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type range = { lo: int; hi: int }
+        |
+        |  let function contains (r: range) (x: int) : bool
+        |    ensures  { result = ((x >= r.lo) && (x <= r.hi)) }
+        |    = ((x >= r.lo) && (x <= r.hi))
         |end
         |""".stripMargin
   }

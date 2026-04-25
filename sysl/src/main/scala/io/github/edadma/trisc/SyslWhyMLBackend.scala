@@ -16,6 +16,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  recognize `EnumName.Variant` field access and rewrite to just `Variant` (WhyML
    *  constructors live in the module-level namespace, not under the type). */
   private var enumNames: Set[String] = Set.empty
+  /** Map of struct name → ordered field names. Used by `formatExpr` to translate struct
+   *  construction calls `Point(1, 2)` into WhyML record literals `{ x = 1; y = 2 }` (need
+   *  field names since records are name-keyed) and to recognize struct types in `typeOf`. */
+  private var structFields: Map[String, List[String]] = Map.empty
   /** Names currently bound as WhyML `ref`s in scope. Reads of these get `!name`; assignments
    *  get `name := expr`. Populated during `formatBlockBody` when a sysl `var` is detected to
    *  be reassigned later in the same scope; popped on the way out. Phase 4a does not handle
@@ -39,6 +43,8 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     refScope.clear()
     val enums = program.decls.collect { case e: EnumDeclAST => e }
     enumNames = enums.map(_.name).toSet
+    val structs = program.decls.collect { case s: StructDeclAST => s }
+    structFields = structs.map(s => s.name -> s.fields.map(_._1)).toMap
     val constants = program.decls.collect { case v: VarDeclAST => v }
     val fns = program.decls.collect { case f: FunDeclAST => f }
     line(s"module $moduleName")
@@ -58,6 +64,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       if !first then blank()
       first = false
       emitEnum(e)
+    for s <- structs do
+      if !first then blank()
+      first = false
+      emitStruct(s)
     for c <- constants do
       if !first then blank()
       first = false
@@ -82,6 +92,21 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     // `let`, the constant is logic-only and Why3 reports "logical symbol used in a non-ghost
     // context" when a `let function` body references it.
     line(s"let constant ${sanitizeName(v.name)} : ${typeOf(t)} = ${formatExpr(v.init)}")
+
+  /** sysl `struct Point { x: int; y: int }` → WhyML `type point = { x: int; y: int }`.
+   *  WhyML records are immutable by default; field updates are functional (`{ p with x = 5 }`).
+   *  This first cut handles only value structs — no `mutable` fields, no struct invariants
+   *  (deferred to a follow-up). Generic structs (with type params) are rejected. The struct
+   *  type name is lowercased like enums (WhyML convention; uppercase is for constructors). */
+  private def emitStruct(s: StructDeclAST): Unit =
+    if s.typeParams.nonEmpty then unsupported("generic struct", s.name)
+    if s.invariants.nonEmpty then unsupported("struct invariant", s"${s.name}: deferred to a follow-up")
+    if s.fields.isEmpty then unsupported("empty struct", s.name)
+    val typeName = s"${s.name.head.toLower}${s.name.tail}"
+    val fieldStr = s.fields.map { case (fname, ftyp, _) =>
+      s"$fname: ${typeOf(ftyp)}"
+    }.mkString("; ")
+    line(s"type $typeName = { $fieldStr }")
 
   /** sysl `enum Color { Red, Green, Blue }` → WhyML `type color = Red | Green | Blue`.
    *  The integer values that sysl assigns (auto-incrementing or explicit) are dropped —
@@ -445,8 +470,8 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" |
            "byte" | "char" | "rune" => "int"
       case "bool" => "bool"
-      case n if enumNames(n) =>
-        // Lowercase the first letter to match the enum type name in `emitEnum`.
+      case n if enumNames(n) || structFields.contains(n) =>
+        // Lowercase the first letter to match the lowered type name (enum or struct).
         s"${n.head.toLower}${n.tail}"
       case other  => unsupported("type", other)
     case other => unsupported("type form", other.toString)
@@ -489,6 +514,23 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       // sysl `EnumName.Variant` → WhyML bare `Variant`. WhyML constructors live at module
       // scope, not under their type, so we just drop the type prefix.
       member
+    case FieldAccessAST(obj, field) =>
+      // Struct field access. WhyML records use the same `.` syntax: `p.x`. Sanitize the
+      // field name for keyword collisions; the obj formats recursively (handles parenthesized
+      // sub-expressions, deref of refs, etc).
+      s"${formatExpr(obj)}.${sanitizeName(field)}"
+    case CallAST(n, args) if structFields.contains(n) =>
+      // Struct construction: `Point(1, 2)` → WhyML record literal `{ x = 1; y = 2 }`. Sysl
+      // also allows named-arg construction (`Point(x=1, y=2)`); the parser already binds
+      // those positionally by this point. Arg count must match field count exactly.
+      val fields = structFields(n)
+      if args.length != fields.length then
+        unsupported("struct construction arity mismatch",
+                    s"$n expects ${fields.length} fields, got ${args.length} args")
+      val pairs = fields.zip(args).map { case (fname, av) =>
+        s"$fname = ${formatExpr(av)}"
+      }.mkString("; ")
+      s"{ $pairs }"
     case CallAST(n, args) =>
       val argStr = if args.isEmpty then "" else args.map(formatExpr).mkString(" ", " ", "")
       s"(${sanitizeName(n)}$argStr)"
@@ -585,8 +627,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
   private def mapBinaryOp(op: String): String = op match
     case "==" => "="
     case "!=" => "<>"
-    case "&&" => "/\\"
-    case "||" => "\\/"
+    // WhyML: `&&` / `||` work in both program (bool) and contract (prop) positions; Why3
+    // coerces bool to prop in formula contexts. Formula-only `/\` / `\/` are emitted directly
+    // by the quantifier translator (where the surrounding context is guaranteed to be a prop).
+    case "&&" => "&&"
+    case "||" => "||"
     // `/` and `%` route through int.ComputerDivision's `div` / `mod` — the only sense in
     // which integer division is total in WhyML. The lexer treats `mod` as an identifier;
     // it is recognized as the operator only because we imported ComputerDivision.
