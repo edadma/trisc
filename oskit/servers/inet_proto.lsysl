@@ -21,7 +21,7 @@ live in kernel-thread space and call `virtio_net_send` directly.
     module oskit.servers
 
     import oskit.ipc.{ipc_send, port_lookup, ipc_reply}
-    import oskit.services.uptime
+    import oskit.services.{uptime, notify_send_to}
     import std.net.{ETHERTYPE_IPV4, ETHERTYPE_ARP,
         ARP_OP_REQUEST, ARP_OP_REPLY,
         IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP,
@@ -95,6 +95,125 @@ where the virtio-net stack isn't wired in).
 
     var inet_our_mac: [6]byte
     var inet_our_mac_known: int = 0
+
+
+### Epoll subscribers
+
+Phase A2: per-socket subscriber list keyed on
+`(owner_tid, epoll_inst, kind, inet_fd)`. The shim registers a
+subscription when `epoll_ctl(EPOLL_CTL_ADD)` fires; we send a
+`notify_send_to(owner_tid, value=1)` whenever readiness changes
+on the watched socket. The notify is a generic "wake up and
+re-scan" — the shim will replay `INET_CMD_POLL` for every active
+entry to discover what's ready, so we don't need to communicate
+which fd changed. This keeps the protocol minimal while still
+freeing the caller from the polling loop.
+
+This state lives in `inet_proto.lsysl` (not the higher-level
+`inet.lsysl`) so the readiness-edge call sites in this file —
+`inet_tcp_close_slot`, `inet_tcp_drain_reorder`,
+`inet_tcp_state_step`, `inet_tcp_accept_enqueue` — can call
+`inet_epoll_fire` without forming a cross-file cycle (sibling
+imports in sysl multi-file modules require an acyclic call
+graph; see `feedback_sysl_module_split.md`).
+
+Subscriptions are flat (single global table) rather than per-
+socket so cleanup paths (PID exit, epoll instance close) can
+linear-scan once. 32 slots — generous for the test workloads
+since each watched fd costs one slot. Ownership is by
+`(owner_tid, epoll_inst)` because a single tid can hold
+multiple epoll instances.
+
+    val INET_MAX_EPOLL_SUBS = 32
+
+    struct InetEpollSub
+        in_use: int
+        kind: int           // 1=UDP, 2=TCP, matches INET_CMD_POLL kind
+        inet_fd: int        // index into inet_sockets[] or tcp_sockets[]
+        owner_tid: int
+        epoll_inst: int     // shim-side epoll instance number
+
+    var inet_epoll_subs: [32]InetEpollSub
+
+    inet_epoll_init()
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            inet_epoll_subs[i].in_use = 0
+            i += 1
+
+
+Find an existing subscription matching all four keys. Used for
+both upsert (SUB on an existing entry just updates) and unsub.
+Returns the slot index or -1.
+
+    inet_epoll_find_sub(kind: int, inet_fd: int, owner_tid: int, epoll_inst: int) -> int
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use != 0
+                if inet_epoll_subs[i].kind == kind
+                    if inet_epoll_subs[i].inet_fd == inet_fd
+                        if inet_epoll_subs[i].owner_tid == owner_tid
+                            if inet_epoll_subs[i].epoll_inst == epoll_inst
+                                return i
+            i += 1
+        -1
+
+
+Allocate a fresh subscription slot. Returns -1 if the table is
+full — caller maps that to ENOSPC.
+
+    inet_epoll_alloc_sub() -> int
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use == 0
+                return i
+            i += 1
+        -1
+
+
+Walk the subscriber table and notify every (owner_tid) that has
+a subscription matching `(kind, inet_fd)`. Caller invokes this
+on every readiness boundary; the shim re-queries via
+`INET_CMD_POLL` to figure out the actual ready bits. Multiple
+subscribers on the same socket are allowed (e.g., a child that
+inherited the fd plus the parent), and each gets its own wake.
+
+    inet_epoll_fire(kind: int, inet_fd: int)
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use != 0
+                if inet_epoll_subs[i].kind == kind
+                    if inet_epoll_subs[i].inet_fd == inet_fd
+                        notify_send_to(inet_epoll_subs[i].owner_tid, 1)
+            i += 1
+
+
+Drop every subscription belonging to a particular epoll
+instance. Called by `INET_CMD_EPOLL_INST_CLOSE` when the shim's
+last reference to an epoll fd goes away.
+
+    inet_epoll_drop_inst(owner_tid: int, epoll_inst: int)
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use != 0
+                if inet_epoll_subs[i].owner_tid == owner_tid
+                    if inet_epoll_subs[i].epoll_inst == epoll_inst
+                        inet_epoll_subs[i].in_use = 0
+            i += 1
+
+
+Drop every subscription belonging to a particular owner_tid.
+Called from `inet_handle_pid_exit` (in `inet.lsysl`) so a
+process that died without closing its epoll fds doesn't leak
+subscriber slots.
+
+    inet_epoll_drop_owner(owner_tid: int)
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use != 0
+                if inet_epoll_subs[i].owner_tid == owner_tid
+                    inet_epoll_subs[i].in_use = 0
+            i += 1
 
 
 ### ARP cache
@@ -1588,6 +1707,13 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
 
 
     inet_tcp_close_slot(s: int, status: int)
+        // Fire epoll readiness *before* tearing the slot down so any
+        // EPOLL_CTL_DEL on the slot still reaches the right sub list.
+        // The shim re-queries via INET_CMD_POLL on wake; once the slot
+        // is in_use=0 the poll returns mask=0 and the shim simply
+        // reports nothing — preferring the wasted wake over an extra
+        // pre-tear-down readiness state.
+        inet_epoll_fire(2, s)
         if tcp_sockets[s].connect_waiter >= 0
             inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, status, 0)
             tcp_sockets[s].connect_waiter = -1
@@ -1881,6 +2007,7 @@ child directly (the entry is dequeued before reply, not after).
         tcp_sockets[ls].accept_queue[tail] = child_s
         tcp_sockets[ls].accept_tail = (tail + 1) % TCP_LISTEN_BACKLOG
         tcp_sockets[ls].accept_count += 1
+        inet_epoll_fire(2, ls)
 
 
 Stateless RST emit for a segment arriving to a port with no
@@ -2486,6 +2613,10 @@ bit 1 = FIN processed.
                     tcp_sockets[s].peer_fin = 1
                     tcp_sockets[s].fin_pending = 0
                     result = result | 2
+        // One fire covers both newly-drained data and resolved FIN —
+        // the shim's poll re-derives the actual mask either way.
+        if result != 0
+            inet_epoll_fire(2, s)
         result
 
 
@@ -2522,6 +2653,10 @@ Per-socket state transition for one validated segment.
             if tcp_sockets[s].connect_waiter >= 0
                 inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, 0, s)
                 tcp_sockets[s].connect_waiter = -1
+            // Connect completed → EPOLLOUT becomes deliverable on the
+            // socket (Linux semantics: writability transitions on the
+            // SYN-ACK).
+            inet_epoll_fire(2, s)
             return
         if st == TCP_STATE_SYN_RCVD
             if (flags & TCP_F_RST) != 0
@@ -2589,6 +2724,11 @@ the connection down.
                     tcp_sockets[s].snd_una = ack
                     tcp_sockets[s].snd_wnd = wnd
                     tcp_sockets[s].dup_ack_count = 0
+                    // Send-buffer drained — wake any epoll waiter on
+                    // EPOLLOUT. We over-fire (no full→drain check) on
+                    // purpose; the shim filters via INET_CMD_POLL.
+                    if eff > 0
+                        inet_epoll_fire(2, s)
                     // Cumulative ACK just swept some bytes — drop any
                     // scoreboard entries now wholly covered. Keeps
                     // `tcp_sack_next_hole` pointed at the right place
@@ -2664,6 +2804,11 @@ the connection down.
                 tcp_sockets[s].recv_len += take
                 tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
                 did_data = 1
+                // Bytes arrived in-order — fire EPOLLIN. drain_reorder
+                // below has its own fire so OOO-then-in-order doesn't
+                // miss a wake either.
+                if take > 0
+                    inet_epoll_fire(2, s)
             else if tcp_seq_lt(tcp_sockets[s].rcv_nxt, seq) != 0
                 // seq > rcv_nxt: out-of-order. Stash if it fits in
                 // our advertised window. If the stash fails (full
@@ -2685,6 +2830,9 @@ the connection down.
                 tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(1)
                 tcp_sockets[s].peer_fin = 1
                 did_fin = 1
+                // peer_fin transitions readability + hangup — fire so
+                // an epoll waiter sees EPOLLIN | EPOLLHUP immediately.
+                inet_epoll_fire(2, s)
             else if tcp_seq_lt(tcp_sockets[s].rcv_nxt, fin_end) != 0
                 // FIN is out-of-order — stash its seq and process
                 // when drain catches up.

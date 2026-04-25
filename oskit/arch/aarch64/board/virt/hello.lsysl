@@ -43,7 +43,8 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
     import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
-    import oskit.services.{get_thread_count, uptime, sleep, yield}
+    import oskit.services.{get_thread_count, uptime, sleep, yield,
+        notify_wait, notify_read_self}
     import oskit.hal.memset
     import oskit.drivers.virtio.{virtio_device_id, virtio_present,
         VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE, VIRTIO_MMIO_MAX, VIRTIO_DEV_NET}
@@ -582,6 +583,9 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_TCP_RECV_NB = 26
     val INET_CMD_TCP_SHUTDOWN = 27
     val INET_CMD_POLL        = 28
+    val INET_CMD_EPOLL_SUB   = 29
+    val INET_CMD_EPOLL_UNSUB = 30
+    val INET_CMD_EPOLL_INST_CLOSE = 31
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -693,10 +697,12 @@ previous tenant of the pid is reset on first touch.
 
 EPOLL_* event bits (must match musl's `<sys/epoll.h>`).
 
-    val POSIX_EPOLLIN  = 0x001
-    val POSIX_EPOLLOUT = 0x004
-    val POSIX_EPOLLERR = 0x008
-    val POSIX_EPOLLHUP = 0x010
+    val POSIX_EPOLLIN       = 0x001
+    val POSIX_EPOLLOUT      = 0x004
+    val POSIX_EPOLLERR      = 0x008
+    val POSIX_EPOLLHUP      = 0x010
+    val POSIX_EPOLLONESHOT  = 0x40000000
+    val POSIX_EPOLLET       = -2147483648    // 1 << 31, signed view
 
 EPOLL_CTL_* opcodes.
 
@@ -716,6 +722,8 @@ struct.
         watched_fd: int
         events: int
         data_lo: i64
+        last_reported: int   // for EPOLLET: bits last delivered
+        armed: int           // 0 if EPOLLONESHOT fired and disarmed
 
     struct EpollInstance
         in_use: int
@@ -733,6 +741,8 @@ struct.
             epoll_table[idx].entries[i].watched_fd = 0
             epoll_table[idx].entries[i].events = 0
             epoll_table[idx].entries[i].data_lo = i64(0)
+            epoll_table[idx].entries[i].last_reported = 0
+            epoll_table[idx].entries[i].armed = 0
             i += 1
 
     epoll_alloc_inst() -> int
@@ -1056,6 +1066,7 @@ still -1) skip the inet call — no backend was ever allocated.
                     var reply: [1]byte
                     ipc_send(port, msg, 5, reply, 1)
             if k == POSIX_FD_EPOLL
+                epoll_inst_close_inet(target)
                 epoll_inst_release(target)
         posix_fd_clear(fd)
         i64(0)
@@ -1999,6 +2010,76 @@ exec lands.
         fdp[1] = wfd
         i64(0)
 
+### Epoll → inet subscription helpers
+
+`epoll_inet_kind_for_fd` returns the inet-side `kind` byte
+(1=UDP, 2=TCP) for a watched POSIX fd, or 0 if it's not a
+socket — files / pipes / stdio don't talk to inet, so the SUB
+roundtrip is skipped for them and they fall back to the
+always-ready stopgap in `epoll_query_ready`.
+
+    epoll_inet_kind_for_fd(target_fd: int) -> int
+        val k = posix_fd_kind(target_fd)
+        if k == POSIX_FD_UDP_SOCKET
+            return 1
+        if k == POSIX_FD_TCP_SOCKET
+            return 2
+        0
+
+Send `INET_CMD_EPOLL_SUB` for a watched socket fd. Inet's
+subscriber table is keyed on (sender_tid, kind, inet_fd,
+epoll_inst); duplicates are no-ops so we don't have to
+remember whether we've already subscribed. Errors are
+swallowed — the worst case is that wake-on-edge degrades to
+the polling fallback (which `sys_epoll_pwait` keeps doing on
+timeouts anyway).
+
+    epoll_inet_subscribe(target_fd: int, inst: int)
+        val kind = epoll_inet_kind_for_fd(target_fd)
+        if kind == 0
+            return
+        val port = inet_get_port()
+        if port < 0
+            return
+        var msg: [5]byte
+        msg[0] = byte(INET_CMD_EPOLL_SUB)
+        msg[1] = byte(kind)
+        shim_write_u16(msg, 2, posix_fd_target(target_fd))
+        msg[4] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 5, reply, 1)
+
+    epoll_inet_unsubscribe(target_fd: int, inst: int)
+        val kind = epoll_inet_kind_for_fd(target_fd)
+        if kind == 0
+            return
+        val port = inet_get_port()
+        if port < 0
+            return
+        var msg: [5]byte
+        msg[0] = byte(INET_CMD_EPOLL_UNSUB)
+        msg[1] = byte(kind)
+        shim_write_u16(msg, 2, posix_fd_target(target_fd))
+        msg[4] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 5, reply, 1)
+
+`epoll_inst_close_inet` is called when the epoll fd itself
+closes — INST_CLOSE drops every subscriber inet was holding for
+this (sender_tid, inst) pair in one IPC, instead of looping
+through entries with UNSUB.
+
+    epoll_inst_close_inet(inst: int)
+        val port = inet_get_port()
+        if port < 0
+            return
+        var msg: [2]byte
+        msg[0] = byte(INET_CMD_EPOLL_INST_CLOSE)
+        msg[1] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 2, reply, 1)
+
+
 SYS_EPOLL_CREATE1. Allocates a fresh epoll instance and parks
 it in a `POSIX_FD_EPOLL` slot. `flags` would carry
 `EPOLL_CLOEXEC` / `EPOLL_NONBLOCK`; we honour O_NONBLOCK in
@@ -2081,6 +2162,9 @@ without poll support.
                     epoll_table[inst].entries[i].watched_fd = target_fd
                     epoll_table[inst].entries[i].events = events_in
                     epoll_table[inst].entries[i].data_lo = data_in
+                    epoll_table[inst].entries[i].last_reported = 0
+                    epoll_table[inst].entries[i].armed = 1
+                    epoll_inet_subscribe(target_fd, inst)
                     return i64(0)
                 i += 1
             return i64(-28)             // -ENOSPC
@@ -2091,6 +2175,12 @@ without poll support.
                     if epoll_table[inst].entries[i].watched_fd == target_fd
                         epoll_table[inst].entries[i].events = events_in
                         epoll_table[inst].entries[i].data_lo = data_in
+                        // MOD re-arms a one-shot entry and resets the
+                        // edge-trigger memory so the next ready check
+                        // can fire even if the bits look the same as
+                        // before — matches Linux's MOD-rearm semantics.
+                        epoll_table[inst].entries[i].last_reported = 0
+                        epoll_table[inst].entries[i].armed = 1
                         return i64(0)
                 i += 1
             return i64(-2)              // -ENOENT
@@ -2099,6 +2189,7 @@ without poll support.
             while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
                 if epoll_table[inst].entries[i].in_use != 0
                     if epoll_table[inst].entries[i].watched_fd == target_fd
+                        epoll_inet_unsubscribe(target_fd, inst)
                         epoll_table[inst].entries[i].in_use = 0
                         return i64(0)
                 i += 1
@@ -2148,17 +2239,71 @@ what the user asked for, per Linux semantics).
             return want & POSIX_EPOLLOUT
         0
 
-SYS_EPOLL_PWAIT. Linux's epoll_pwait blocks the caller until
-at least one watched fd is ready or the timeout expires. We
-implement level-triggered behaviour with a polling loop: scan
-every active entry, write ready events into `events_array`,
-and either return the count or sleep one tick and retry. The
-sleep granularity is OK for an MVP — Phase A will replace it
-with a real subscribe/notify path.
+`epoll_scan_once` walks the instance's entries, queries inet
+once per active entry, and writes ready events into
+`events_array`. EPOLLET filters down to the rising edges since
+the last report (`last_reported`); EPOLLONESHOT disarms the
+entry after firing once (re-armed by `EPOLL_CTL_MOD`). Returns
+the number of events written.
 
-`timeout` is in milliseconds: 0 = poll-once, -1 = wait
-indefinitely, otherwise budget the loop in ticks. `sigmask`
-is ignored (no signal delivery yet).
+    epoll_scan_once(inst: int, out: *byte, max_events: int) -> int
+        var produced = 0
+        var i = 0
+        while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
+            if produced >= max_events
+                break
+            if epoll_table[inst].entries[i].in_use != 0
+                if epoll_table[inst].entries[i].armed != 0
+                    val tfd = epoll_table[inst].entries[i].watched_fd
+                    val want = epoll_table[inst].entries[i].events
+                    val ready = epoll_query_ready(tfd, want)
+                    var deliver = ready
+                    if (want & POSIX_EPOLLET) != 0
+                        // Only the bits that just became ready since
+                        // the last report. If the user fully drained
+                        // the fd they'd have called recv until -EAGAIN
+                        // (we don't simulate that — readiness is
+                        // computed each time from the live socket
+                        // state), so any rising edge fires once.
+                        val rising = ready & ~epoll_table[inst].entries[i].last_reported
+                        deliver = rising
+                    epoll_table[inst].entries[i].last_reported = ready
+                    if deliver != 0
+                        val off = produced * POSIX_EPOLL_EVENT_SIZE
+                        shim_write_le_u32(out, off, deliver)
+                        shim_write_le_i64(out, off + 8,
+                            epoll_table[inst].entries[i].data_lo)
+                        produced += 1
+                        if (want & POSIX_EPOLLONESHOT) != 0
+                            // Disarm — entry stays in_use=1 so a
+                            // subsequent EPOLL_CTL_MOD can re-arm it,
+                            // but no further fires until then.
+                            epoll_table[inst].entries[i].armed = 0
+            i += 1
+        produced
+
+Reset every entry's `last_reported` to 0 — invoked when a
+notify wake arrives, since each fire from inet represents a
+true readiness edge at the source. Without this, an
+EPOLLET subscriber that drained its socket between waits and
+then saw new data would never re-fire (the bit looks identical
+to the last reported snapshot, so `rising == 0`).
+
+    epoll_clear_last_reported(inst: int)
+        var i = 0
+        while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
+            epoll_table[inst].entries[i].last_reported = 0
+            i += 1
+
+SYS_EPOLL_PWAIT. Phase A2: blocks via the kernel notify
+primitive instead of the old sleep-1-tick loop. inet's per-fd
+subscriber list (added in `inet_handle_epoll_sub`) fires
+`notify_send_to(tid, 1)` on every readiness boundary, so an
+indefinite wait wakes within a syscall hop of the change.
+Finite timeouts still poll at 10ms granularity because the
+kernel doesn't expose "sleep with notify wake" yet —
+acceptable for the typical Node.js loop pattern (mostly
+`timeout = -1`). `sigmask` is ignored (no signal delivery yet).
 
     sys_epoll_pwait(epfd: int, events_array: i64, max_events: int, timeout_ms: int) -> i64
         if posix_fd_kind(epfd) != POSIX_FD_EPOLL
@@ -2171,43 +2316,34 @@ is ignored (no signal delivery yet).
         if events_array == i64(0)
             return i64(-14)
         val out: *byte = *byte(events_array)
-        // Approximate ticks budget. The kernel timer fires at
-        // 100 Hz today, so 10 ticks ≈ 100 ms. We err on the
-        // side of slightly-over rather than starving callers.
         var ticks_left = -1
         if timeout_ms >= 0
             ticks_left = (timeout_ms + 9) / 10
         var iter = 0
-        while iter < 100000     // hard cap to avoid runaway loops
+        while iter < 100000             // runaway-loop guard
             iter += 1
-            var produced = 0
-            var i = 0
-            while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
-                if produced >= max_events
-                    break
-                if epoll_table[inst].entries[i].in_use != 0
-                    val tfd = epoll_table[inst].entries[i].watched_fd
-                    val want = epoll_table[inst].entries[i].events
-                    val ready = epoll_query_ready(tfd, want)
-                    if ready != 0
-                        val off = produced * POSIX_EPOLL_EVENT_SIZE
-                        shim_write_le_u32(out, off, ready)
-                        // Padding bytes at offset 4..7 — leave
-                        // alone; the user's struct is theirs.
-                        shim_write_le_i64(out, off + 8,
-                            epoll_table[inst].entries[i].data_lo)
-                        produced += 1
-                i += 1
+            // Each notify is an edge. If one is pending — either
+            // arrived between waits or while we were sleeping —
+            // clear last_reported so EPOLLET subscribers see the
+            // freshly-ready bits as rising again.
+            val pending_value = notify_read_self()
+            if pending_value != 0
+                epoll_clear_last_reported(inst)
+            val produced = epoll_scan_once(inst, out, max_events)
             if produced > 0
                 return i64(produced)
             if timeout_ms == 0
                 return i64(0)
             if ticks_left == 0
                 return i64(0)
-            // Sleep ~10ms (one tick at 100Hz) and retry.
-            sleep(1)
-            if ticks_left > 0
-                ticks_left -= 1
+            if timeout_ms < 0
+                // Block until inet (or someone) wakes us. Spurious
+                // wakes loop back to the scan above — no-op cost.
+                notify_wait()
+            else
+                sleep(1)
+                if ticks_left > 0
+                    ticks_left -= 1
         i64(0)
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a

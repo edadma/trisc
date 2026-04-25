@@ -74,6 +74,9 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_RECV_NB  = 26
     val INET_CMD_TCP_SHUTDOWN = 27
     val INET_CMD_POLL         = 28
+    val INET_CMD_EPOLL_SUB    = 29
+    val INET_CMD_EPOLL_UNSUB  = 30
+    val INET_CMD_EPOLL_INST_CLOSE = 31
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -284,6 +287,7 @@ packet per UDP semantics).
         inet_sockets[fd].queue[slot].data_len = copy_len
         inet_sockets[fd].q_tail = (slot + 1) % INET_MAX_QUEUE
         inet_sockets[fd].q_count += 1
+        inet_epoll_fire(1, fd)
         1
 
 
@@ -1128,6 +1132,7 @@ future RST).
                     inet_sockets[i].recv_deadline = 0
             i += 1
         inet_tcp_cleanup_owner(tid)
+        inet_epoll_drop_owner(tid)
         var reply: [1]byte
         reply[0] = byte(0)
         ipc_reply(sender, reply, 1)
@@ -1387,6 +1392,59 @@ UDP loopback works either way.
         1
 
 
+### inet_handle_epoll_sub / unsub / inst_close
+
+Wire format for SUB/UNSUB: cmd(1) + kind(1) + fd(2 BE) +
+epoll_inst(1) = 5 bytes in. INST_CLOSE: cmd(1) + epoll_inst(1)
+= 2 bytes in. Reply is always status(1).
+
+SUB upserts — if the same (kind, fd, owner_tid, epoll_inst)
+quad is already registered, it's a no-op success. The shim
+calls SUB on every CTL_ADD and CTL_MOD; the `events` mask isn't
+shipped because inet's job is just "wake on edge", not filtering.
+
+    inet_handle_epoll_sub(sender: int, buf: *byte)
+        val kind = int(buf[1]) & 0xff
+        val fd = inet_read_u16(buf, 2) & 0xffff
+        val inst = int(buf[4]) & 0xff
+        var reply: [1]byte
+        val existing = inet_epoll_find_sub(kind, fd, sender, inst)
+        if existing >= 0
+            reply[0] = byte(0)
+            ipc_reply(sender, reply, 1)
+            return
+        val slot = inet_epoll_alloc_sub()
+        if slot < 0
+            reply[0] = byte(-28)            // -ENOSPC
+            ipc_reply(sender, reply, 1)
+            return
+        inet_epoll_subs[slot].in_use = 1
+        inet_epoll_subs[slot].kind = kind
+        inet_epoll_subs[slot].inet_fd = fd
+        inet_epoll_subs[slot].owner_tid = sender
+        inet_epoll_subs[slot].epoll_inst = inst
+        reply[0] = byte(0)
+        ipc_reply(sender, reply, 1)
+
+    inet_handle_epoll_unsub(sender: int, buf: *byte)
+        val kind = int(buf[1]) & 0xff
+        val fd = inet_read_u16(buf, 2) & 0xffff
+        val inst = int(buf[4]) & 0xff
+        var reply: [1]byte
+        val slot = inet_epoll_find_sub(kind, fd, sender, inst)
+        if slot >= 0
+            inet_epoll_subs[slot].in_use = 0
+        reply[0] = byte(0)
+        ipc_reply(sender, reply, 1)
+
+    inet_handle_epoll_inst_close(sender: int, buf: *byte)
+        val inst = int(buf[1]) & 0xff
+        inet_epoll_drop_inst(sender, inst)
+        var reply: [1]byte
+        reply[0] = byte(0)
+        ipc_reply(sender, reply, 1)
+
+
 ### Server main loop
 
 Uses `ipc_recv_notify` so the same loop wakes on both socket IPC
@@ -1404,6 +1462,7 @@ silently skip link-layer setup and still serve UDP loopback.
     inet_server()
         inet_init_sockets()
         inet_tcp_init()
+        inet_epoll_init()
         inet_port = port_create()
         port_register(inet_port, "inet")
         rs_ready()
@@ -1449,6 +1508,9 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_GETNAME -> inet_handle_tcp_getname(sender, buf)
                     INET_CMD_TCP_RECV_NB -> inet_handle_tcp_recv_nb(sender, buf)
                     INET_CMD_POLL        -> inet_handle_poll(sender, buf)
+                    INET_CMD_EPOLL_SUB   -> inet_handle_epoll_sub(sender, buf)
+                    INET_CMD_EPOLL_UNSUB -> inet_handle_epoll_unsub(sender, buf)
+                    INET_CMD_EPOLL_INST_CLOSE -> inet_handle_epoll_inst_close(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->

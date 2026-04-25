@@ -570,6 +570,24 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mepoll: done")
   }
 
+  "aarch64 musl: epoll EPOLLET + EPOLLONESHOT (Phase A2)" in {
+    // mepoll2 (slix/test/epoll2.c) validates the Phase A2
+    // edge-trigger and one-shot semantics layered on the
+    // inet→shim notify path. ET fires on rising edges only;
+    // ONESHOT disarms after first wake and re-arms via MOD.
+    qemu.send("mepoll2\n")
+    val output = qemu.waitFor("mepoll2: done")
+    output should include("mepoll2: et_first=1")
+    // Edge-triggered: a second wait without new data must NOT
+    // re-report. Level-triggered would say 1 here.
+    output should include("mepoll2: et_no_redeliver=0")
+    output should include("mepoll2: et_second=1")
+    output should include("mepoll2: oneshot_first=1")
+    output should include("mepoll2: oneshot_disarmed=0")
+    output should include("mepoll2: oneshot_rearmed=1")
+    output should include("mepoll2: done")
+  }
+
   "aarch64 musl: pipe2 + write + read + EOF" in {
     // mpipe (slix/test/pipe.c) creates a pipe, writes a string,
     // reads it back, closes the write end, then reads again
