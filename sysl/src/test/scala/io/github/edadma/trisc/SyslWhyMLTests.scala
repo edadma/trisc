@@ -1209,6 +1209,105 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  // ====================================================================================
+  // Phase 4-data+ — panic / assert / `?` propagation
+  // ====================================================================================
+
+  "panic call lowers to WhyML `absurd`" in {
+    // `absurd` claims unreachability; the verifier requires a proof that this branch
+    // never executes. Without a precondition, this proof fails (correctly): it tells
+    // the user that calling unwrap on None genuinely panics. Adding `requires { is_some o }`
+    // discharges the obligation cleanly.
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def is_some[T](o: Option[T]) -> bool
+        |    o match
+        |        Some(_) -> true
+        |        None -> false
+        |
+        |def unwrap[T](o: Option[T]) -> T
+        |    require is_some(o)
+        |    o match
+        |        Some(v) -> v
+        |        None -> panic("unwrap on None")
+        |""".stripMargin)
+    mlw should include("None -> absurd")
+    mlw should include("requires { is_some o }")
+  }
+
+  "assert call in body lowers to WhyML `assert { ... }`" in {
+    val mlw = translate(
+      """def double_pos(x: int) -> int
+        |    require x >= 0
+        |    val r = x * 2
+        |    assert(r >= x, "doubling preserves order")
+        |    r
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |  use string.String
+        |
+        |  let function double_pos (x: int) : int
+        |    requires { x >= 0 }
+        |    = let r = (x * 2) in assert { r >= x }; r
+        |end
+        |""".stripMargin
+  }
+
+  "`?` on Option binds success and propagates None" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def safe_div(a: int, b: int) -> Option[int]
+        |    if b == 0 then
+        |        return None
+        |    Some(a / b)
+        |
+        |def half_of_quotient(a: int, b: int) -> Option[int]
+        |    val q = safe_div(a, b)?
+        |    safe_div(q, 2)
+        |""".stripMargin)
+    mlw should include("(match (safe_div a b) with | Some _try_v_q -> let q = _try_v_q in (safe_div q 2) | None -> None end)")
+  }
+
+  "`?` on Result reconstructs the failure variant with bound payload" in {
+    val mlw = translate(
+      """enum Result[T, E]
+        |    Ok(value: T)
+        |    Err(error: E)
+        |
+        |def attempt(x: int) -> Result[int, int]
+        |    if x < 0 then
+        |        return Err(x)
+        |    Ok(x + 1)
+        |
+        |def chain(a: int) -> Result[int, int]
+        |    val y = attempt(a)?
+        |    Ok(y + 1)
+        |""".stripMargin)
+    mlw should include("Err _try_e0 -> (Err _try_e0)")
+  }
+
+  "`?` outside top-level binding is rejected with a clear gap message" in {
+    val ex = intercept[RuntimeException](translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def f(o: Option[int]) -> Option[int]
+        |    Some(o? + 1)
+        |""".stripMargin))
+    ex.getMessage should include("`?` operator outside top-level")
+  }
+
   "module-level `var` is rejected with a clear message" in {
     val ex = intercept[RuntimeException](translate(
       """var counter: int = 0
@@ -1217,9 +1316,11 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
   }
 
   "unsupported expression form yields a clear error naming the gap" in {
+    // Slices aren't part of any verification phase yet — translator should reject
+    // them up front rather than silently produce ill-formed WhyML.
     val ex = intercept[RuntimeException](translate(
-      """def s() -> int
-        |    "hello".length
+      """def s(xs: []int) -> int
+        |    xs[0]
         |""".stripMargin))
     ex.getMessage should include("WhyML translator: unsupported")
   }

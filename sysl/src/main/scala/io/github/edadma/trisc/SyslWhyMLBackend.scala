@@ -33,6 +33,12 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  we begin emitting a generic function and cleared after — module-level scope has no
    *  active type variables, only declared inside functions or generic types. */
   private var currentTypeParams: Set[String] = Set.empty
+  /** Return type of the function being emitted. Used by `?` (TryAST) to know which
+   *  data-enum failure variant to emit when the operator early-exits. Sysl convention
+   *  (enforced by the analyzer): `?` requires the enclosing function's return type to
+   *  match the inner expression's enum, so this is the canonical source of "what does
+   *  the failure value look like?". */
+  private var currentFunctionReturnType: Option[TypeAST] = None
   /** Names currently bound as WhyML `ref`s in scope. Reads of these get `!name`; assignments
    *  get `name := expr`. Populated during `formatBlockBody` when a sysl `var` is detected to
    *  be reassigned later in the same scope; popped on the way out. Phase 4a does not handle
@@ -74,6 +80,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     // Phase 4a. Always-imported is harmless: programs that don't use refs simply never
     // reference these symbols. Without this import Why3 reports "unbound symbol 'ref'".
     line("use ref.Ref")
+    // string.String provides the built-in `string` type. Only imported when a program
+    // actually mentions `string` — keeps the preamble minimal for the common case
+    // (verification rarely involves strings since they're opaque to the prover).
+    if usesString(program) then line("use string.String")
     blank()
     var first = true
     for e <- enums do
@@ -168,6 +178,51 @@ class SyslWhyMLBackend(moduleName: String = "M"):
          "byte" | "char" | "rune" => true
     case _ => false
 
+  /** Quick scan: does any function signature or expression mention sysl's `string`?
+   *  Used to gate `use string.String` import — most verification code never touches
+   *  strings, and importing it unconditionally bloats the preamble for tests/snapshots. */
+  private def usesString(program: ProgramAST): Boolean =
+    def hasStringInType(t: TypeAST): Boolean = t match
+      case NamedTypeAST("string", _) => true
+      case NamedTypeAST(_, args)     => args.exists(hasStringInType)
+      case _                         => false
+    program.decls.exists {
+      case fn: FunDeclAST =>
+        fn.params.exists(p => hasStringInType(p.typ)) ||
+          fn.returnType.exists(hasStringInType) ||
+          containsStringLit(fn.body)
+      case v: VarDeclAST  => v.typ.exists(hasStringInType)
+      case _              => false
+    }
+
+  private def containsStringLit(b: FunBodyAST): Boolean = b match
+    case ExprBodyAST(e)         => containsStringLitExpr(e)
+    case BlockBodyAST(stmts, _) => stmts.exists(containsStringLitStmt)
+
+  private def containsStringLitExpr(e: ExpressionAST): Boolean = e match
+    case _: StringLitAST | _: StringLitExprAST => true
+    case BinaryAST(l, _, r) => containsStringLitExpr(l) || containsStringLitExpr(r)
+    case UnaryAST(_, x)     => containsStringLitExpr(x)
+    case CallAST(_, args)   => args.exists(containsStringLitExpr)
+    case IfExprAST(c, t, e) =>
+      containsStringLitExpr(c) ||
+        t.exists(containsStringLitStmt) ||
+        e.exists(_.exists(containsStringLitStmt))
+    case TryAST(inner)      => containsStringLitExpr(inner)
+    case _                  => false
+
+  private def containsStringLitStmt(s: StmtAST): Boolean = s match
+    case ExprStmtAST(e)             => containsStringLitExpr(e)
+    case ReturnStmtAST(Some(e))     => containsStringLitExpr(e)
+    case VarStmtAST(_, _, init, _, _, _, _) => containsStringLitExpr(init)
+    case AssignStmtAST(_, v)        => containsStringLitExpr(v)
+    case CompoundAssignStmtAST(_, _, v) => containsStringLitExpr(v)
+    case WhileStmtAST(c, body, _)   => containsStringLitExpr(c) || body.exists(containsStringLitStmt)
+    case ForStmtAST(init, c, u, body, _) =>
+      containsStringLitStmt(init) || containsStringLitExpr(c) ||
+        containsStringLitStmt(u) || body.exists(containsStringLitStmt)
+    case _ => false
+
   /** sysl `enum Color { Red, Green, Blue }` → WhyML `type color = Red | Green | Blue`.
    *  The integer values that sysl assigns (auto-incrementing or explicit) are dropped —
    *  WhyML algebraic types don't expose a numeric tag, and proofs typically reason about
@@ -230,9 +285,13 @@ class SyslWhyMLBackend(moduleName: String = "M"):
   private def emitFunction(fn: FunDeclAST): Unit =
     if fn.attributes.exists(_.name == "test") then return
     val savedTypeParams = currentTypeParams
+    val savedReturnType = currentFunctionReturnType
     if fn.typeParams.nonEmpty then currentTypeParams = fn.typeParams.toSet
+    currentFunctionReturnType = fn.returnType
     try emitFunctionImpl(fn)
-    finally currentTypeParams = savedTypeParams
+    finally
+      currentTypeParams = savedTypeParams
+      currentFunctionReturnType = savedReturnType
 
   private def emitFunctionImpl(fn: FunDeclAST): Unit =
     val name = sanitizeName(fn.name)
@@ -314,6 +373,17 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case List(s) => stmtAsTrailingExpr(s)
       case head :: rest =>
         head match
+          // `val name = e?` — propagate failure or bind success. Lower the whole tail
+          // (this binding + everything after) into a single match against `e`. The success
+          // arm binds the unwrapped value to `name` and recurses on `rest`; the failure
+          // arm reconstructs the failure variant of the enclosing function's return type.
+          case VarStmtAST(name, _, TryAST(inner), _, _, _, isGhost) =>
+            val sname = sanitizeName(name)
+            val ghostKw = if isGhost then "ghost " else ""
+            val (succPat, succExpr, failArm) = tryDesugarPieces(bindName = Some(name))
+            s"(match ${formatExpr(inner)} with " +
+              s"| $succPat -> let $ghostKw$sname = $succExpr in ${formatBlockBody(rest)} " +
+              s"| $failArm end)"
           case VarStmtAST(name, _, init, isMutable, _, _, isGhost) =>
             val sname = sanitizeName(name)
             val ghostKw = if isGhost then "ghost " else ""
@@ -328,6 +398,15 @@ class SyslWhyMLBackend(moduleName: String = "M"):
               finally refScope -= name
             else
               s"let $ghostKw$sname = ${formatExpr(init)} in ${formatBlockBody(rest)}"
+
+          // Bare `e?` as a statement — evaluates `e`, ignores the success value, and
+          // propagates failure. Lower to a match where the success arm continues with
+          // `rest` (unwrapped value discarded with `_`) and the failure arm exits.
+          case ExprStmtAST(TryAST(inner)) =>
+            val (succPat, _, failArm) = tryDesugarPieces(bindName = None)
+            s"(match ${formatExpr(inner)} with " +
+              s"| $succPat -> ${formatBlockBody(rest)} " +
+              s"| $failArm end)"
 
           case AssignStmtAST(target, value) =>
             if !refScope(target) then
@@ -375,6 +454,19 @@ class SyslWhyMLBackend(moduleName: String = "M"):
           case ExprStmtAST(PostDecAST(name)) =>
             if !refScope(name) then unsupported("post-decrement of non-mutable binding", name)
             s"${sanitizeName(name)} := (!${sanitizeName(name)} - 1); ${formatBlockBody(rest)}"
+
+          // `assert(cond, msg)` in statement position → WhyML `assert { cond }; rest`.
+          // The message is dropped — Why3's assert reports the source location and the
+          // failed condition, which is enough to locate the violation. The condition is
+          // a sysl bool; WhyML accepts bool in assert via implicit coercion to prop.
+          case ExprStmtAST(CallAST("assert", List(cond, _))) =>
+            s"assert { ${stripOuterParens(formatExpr(cond))} }; ${formatBlockBody(rest)}"
+          case ExprStmtAST(CallAST("assert", List(cond))) =>
+            s"assert { ${stripOuterParens(formatExpr(cond))} }; ${formatBlockBody(rest)}"
+
+          // `panic(...)` in statement position is no-return — anything after it is dead
+          // code in sysl semantics. Emit `absurd` and drop the rest entirely.
+          case ExprStmtAST(CallAST("panic", _)) => "absurd"
 
           // Mid-body early-exit: `if cond then return e` (no else) followed by more stmts
           // lowers to `if cond then <e> else <rest>`. The then-branch must end in a return
@@ -434,6 +526,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case CompoundAssignStmtAST(target, op, value) =>
       if !refScope(target) then unsupported("compound assignment in loop", target)
       formatCompoundAssign(target, op, value)
+    case ExprStmtAST(CallAST("assert", List(cond, _))) =>
+      s"assert { ${stripOuterParens(formatExpr(cond))} }"
+    case ExprStmtAST(CallAST("assert", List(cond))) =>
+      s"assert { ${stripOuterParens(formatExpr(cond))} }"
     case WhileStmtAST(cond, body, _) => formatWhile(cond, body)
     case ExprStmtAST(PostIncAST(name)) =>
       if !refScope(name) then unsupported("post-increment of non-mutable binding in loop", name)
@@ -561,6 +657,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" |
            "byte" | "char" | "rune" => "int"
       case "bool" => "bool"
+      case "string" => "string"
       case n if currentTypeParams(n) =>
         // Sysl convention: single-letter or short uppercase type params (T, U, K, V).
         // WhyML type variables must start with `'` and be lowercase: `'t`, `'u`, …
@@ -580,6 +677,45 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       s"$typeName ${argStrs.mkString(" ")}"
     case other => unsupported("type form", other.toString)
 
+  /** Build the three pieces needed to desugar a `?` operator: success pattern, success
+   *  expression (the value bound), and the failure arm (`pattern -> reconstruct`).
+   *
+   *  Conventions follow the analyzer (`SyslAnalyzer.scala::TryAST`):
+   *    - Variant 0 of the data enum is the success variant (`Some`, `Ok`).
+   *    - Variant 1 is the failure variant (`None`, `Err`).
+   *    - Failure-variant fields are bound with fresh names and re-emitted as the
+   *      failure value (so `Err(e)?` reconstructs `Err e`).
+   *
+   *  Single-field success unwraps directly; multi-field success would lower to a
+   *  tuple, which we don't support yet (the analyzer hasn't built one for std.option /
+   *  std.result, the only realistic Phase 4-data+ targets). */
+  private def tryDesugarPieces(bindName: Option[String]): (String, String, String) =
+    val retType = currentFunctionReturnType.getOrElse(
+      unsupported("`?` operator", "enclosing function has no declared return type"))
+    val enumName = retType match
+      case NamedTypeAST(n, _) if dataEnumNames.contains(n) => n
+      case other => unsupported(
+        "`?` operator",
+        s"enclosing function returns $other, not a generic data enum (Option/Result)")
+    val variants = dataEnumNames(enumName)
+    if variants.length != 2 then unsupported(
+      "`?` operator", s"data enum $enumName has ${variants.length} variants; `?` requires exactly 2")
+    val (succName, succFields) = variants.head
+    val (failName, failFields) = variants(1)
+    if succFields.length != 1 then unsupported(
+      "`?` operator", s"success variant $succName has ${succFields.length} fields; only 1-field success supported")
+    val succBindName = bindName match
+      case Some(n) => s"_try_v_${sanitizeName(n)}"
+      case None    => "_"
+    val succPat = s"$succName $succBindName"
+    val succExpr = if bindName.isEmpty then "()" else succBindName
+    val failBindNames = failFields.indices.map(i => s"_try_e$i").toList
+    val failPat = if failFields.isEmpty then failName else s"$failName " + failBindNames.mkString(" ")
+    val failReconstruct =
+      if failFields.isEmpty then failName
+      else s"($failName " + failBindNames.mkString(" ") + ")"
+    (succPat, succExpr, s"$failPat -> $failReconstruct")
+
   /** Format an expression as a WhyML expression string. Operator translation is identical
    *  in code and contract positions for the Phase 1 subset (= and <>); we don't switch
    *  between `&&`/`/\` because either form is accepted in both positions in WhyML. */
@@ -587,6 +723,13 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case IntLitAST(v) =>
       if v < 0 then s"(- ${-v})" else v.toString
     case BoolLitAST(v) => v.toString
+    case StringLitAST(v) =>
+      // Sysl strings are opaque to verification — they only flow into panic/assert
+      // (where we drop them) or unused parameters. We emit them as Why3 string literals
+      // so the type lines up; the actual content is irrelevant to the proof.
+      s"\"${v.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+    case StringLitExprAST(v) =>
+      s"\"${v.replace("\\", "\\\\").replace("\"", "\\\"")}\""
     case VarRefAST(name) =>
       // `result` is WhyML's reserved name for a function's return value (only valid inside
       // ensures clauses). A bare reference to a no-payload data-enum variant (`None`) is a
@@ -617,6 +760,20 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       s"($opStr${formatExpr(x)})"
     case CallAST("old", List(arg)) =>
       s"(old ${formatExpr(arg)})"
+    case CallAST("panic", _) =>
+      // sysl `panic("msg")` is no-return. WhyML's `absurd` claims unreachability and
+      // emits a `false` proof obligation — the user must prove via preconditions that
+      // execution never reaches this point. Exactly the SPARK-style discipline we want
+      // (e.g. `unwrap` panics on None ⇒ caller must `requires { is_some o }`). The
+      // message argument is dropped — verification cares about reachability, not text.
+      "absurd"
+    case _: TryAST =>
+      // `?` only desugars cleanly when it's the init of a `val name = e?` binding or a
+      // bare `e?` statement (handled in `formatBlockBody`). Nested usage like `f(e?)`
+      // would need CPS lowering — flag it so the user knows this is a translator gap.
+      unsupported(
+        "`?` operator outside top-level binding/statement",
+        "supported forms: `val name = e?` and bare `e?` as a statement")
     case FieldAccessAST(VarRefAST(t), member) if enumNames(t) =>
       // sysl `EnumName.Variant` → WhyML bare `Variant`. WhyML constructors live at module
       // scope, not under their type, so we just drop the type prefix.
