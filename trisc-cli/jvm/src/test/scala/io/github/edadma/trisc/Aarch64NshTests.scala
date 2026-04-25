@@ -531,6 +531,39 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       peerThread.join(2000)
   }
 
+  "aarch64 musl: open/read/lseek/close on /etc/passwd" in {
+    // mfile (slix/test/file.c) opens /etc/passwd through musl's
+    // open(2), reads ~256 bytes, lseeks back to 0, reads 16 more.
+    // Validates that the shim's POSIX_FD_FILE kind, sys_openat,
+    // sys_lseek, and the VFS read/write grant plumbing all line
+    // up. The first read should return >0 bytes; the lseek should
+    // return 0 (new absolute position); the second read should
+    // return 16 starting from the same offset.
+    qemu.send("mfile\n")
+    val output = qemu.waitFor("mfile: done")
+    output should include("mfile: open=3")
+    output should include("mfile: read=")
+    output should not include "mfile: read=0"
+    output should not include "mfile: read=-"
+    output should include("mfile: lseek=0")
+    output should include("mfile: read2=16")
+    output should include("mfile: done")
+  }
+
+  "aarch64 musl: pipe2 + write + read + EOF" in {
+    // mpipe (slix/test/pipe.c) creates a pipe, writes a string,
+    // reads it back, closes the write end, then reads again
+    // expecting EOF. Exercises sys_pipe2 → VFS_CMD_PIPE → two
+    // POSIX_FD_FILE handles, plus the VFS pipe close-end path.
+    qemu.send("mpipe\n")
+    val output = qemu.waitFor("mpipe: done")
+    output should include("mpipe: pipe2=0")
+    output should include("mpipe: write=17")
+    output should include("mpipe: read=17 data='ping through pipe'")
+    output should include("mpipe: read_after_close=0")
+    output should include("mpipe: done")
+  }
+
   "aarch64 musl: sendmsg/recvmsg via libc wrappers" in {
     // mmsg validates the shim's msghdr offset parsing by going
     // through musl's real sendmsg(3) / recvmsg(3) — those build

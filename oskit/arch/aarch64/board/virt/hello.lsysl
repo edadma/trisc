@@ -38,6 +38,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         virtio_notify_tid,
         kernel_set_system_info,
         kernel_get_thread_pid, kernel_get_process_main_tid,
+        kernel_grant_create_inline, kernel_grant_revoke_inline,
         current_thread, ticks}
     import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
@@ -412,6 +413,11 @@ Slot kinds:
 - `POSIX_FD_UDP_SOCKET` — `target` holds the inet server's
   socket id; read/write/close/sendto/recvfrom route through
   `ipc_send` to the inet port.
+- `POSIX_FD_FILE` — `target` holds a VFS handle (file, TTY,
+  pipe end, or TCP via VFS scheme); all read/write/close/lseek
+  forward to the VFS port. `pos` is unused (VFS tracks
+  position server-side). `flags` carries POSIX flags
+  (O_NONBLOCK, etc.) the shim consults locally.
 
 Generation tracking uses `processes[pid].main_tid` as the sentinel:
 when a pid slot is reused by a new process, the new `main_tid`
@@ -430,6 +436,7 @@ posix_fd_bridge memory.
     val POSIX_FD_STDERR      = 3
     val POSIX_FD_UDP_SOCKET  = 4
     val POSIX_FD_TCP_SOCKET  = 5
+    val POSIX_FD_FILE        = 6
 
     val POSIX_FDS_PER_PROC   = 64
 
@@ -609,6 +616,53 @@ fcntl command codes (`<fcntl.h>` in musl arch).
         ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
 
 
+VFS client helpers (shim-side)
+------------------------------
+
+The shim talks to VFS the same way `oskit/fs/client.lsysl` does:
+big-endian wire format, command numbers from `oskit/servers
+/vfs.lsysl`. We replicate the writers locally to avoid pulling
+the user-space FS module into the kernel link.
+
+VFS read/write protocol uses memory grants — the shim creates a
+grant against the *user* buffer (granter_pid = current pid) and
+hands the grant id to VFS, which `grant_map`s the page into its
+own address space, copies, and returns. The grant is revoked on
+the way out so it doesn't leak.
+
+    val VFS_CMD_OPEN_C    = 1
+    val VFS_CMD_READ_C    = 2
+    val VFS_CMD_WRITE_C   = 3
+    val VFS_CMD_CLOSE_C   = 13
+    val VFS_CMD_SEEK_C    = 14
+    val VFS_CMD_CONNECT_C = 15
+    val VFS_CMD_PIPE_C    = 18
+
+`GRANT_READ` / `GRANT_WRITE` mirror the values in `oskit.kernel`'s
+private grant table (1 = read by mapper, 2 = write by mapper).
+
+    val SHIM_GRANT_READ  = 1
+    val SHIM_GRANT_WRITE = 2
+
+    var vfs_port_cached = -1
+
+    vfs_get_port() -> int
+        if vfs_port_cached < 0
+            vfs_port_cached = port_lookup("fs")
+        vfs_port_cached
+
+Big-endian 32-bit helpers for the VFS wire format.
+
+    shim_write_be_i32(p: *byte, off: int, v: int)
+        p[off]     = byte((v >> 24) & 0xff)
+        p[off + 1] = byte((v >> 16) & 0xff)
+        p[off + 2] = byte((v >> 8) & 0xff)
+        p[off + 3] = byte(v & 0xff)
+
+    shim_read_be_i32(p: *byte, off: int) -> int
+        ((int(p[off]) & 0xff) << 24) | ((int(p[off + 1]) & 0xff) << 16) | ((int(p[off + 2]) & 0xff) << 8) | (int(p[off + 3]) & 0xff)
+
+
 POSIX shim dispatch. Musl's aarch64-slix arch/ uses SLIX-local
 syscall numbers starting at 128 (see `slix/musl/arch/aarch64-slix
 /bits/syscall.h.in`). Handlers take the raw user-space args and
@@ -665,6 +719,12 @@ to the same UDP stack that native sysl programs use via
             return sys_shutdown(int(a0), int(a1))
         if num == 337
             return sys_socket(int(a0), int(a1), int(a2))
+        if num == 254
+            return sys_openat(int(a0), a1, int(a2), int(a3))
+        if num == 221
+            return sys_lseek(int(a0), a1, int(a2))
+        if num == 256
+            return sys_pipe2(a0, int(a1))
         i64(-38)            // -ENOSYS
 
 SYS_WRITE. Looks up `fd` in the process's POSIX fd table and
@@ -727,12 +787,17 @@ inherits, so pointers dereference directly without vm_copy_from.
                     return i64(sent_total)
                 sent_total += n
             return i64(sent_total)
+        if k == POSIX_FD_FILE
+            return shim_vfs_write(posix_fd_target(fd), buf, len)
         i64(-9)             // -EBADF
 
 SYS_READ. STDIN returns 0 (EOF) — no kernel-side keyboard path
 yet; TTY routing is on the bridge memory's todo list. TCP sockets
 block in the inet server until data arrives or peer FINs. Write-
 only STDIO kinds and UDP (which should use recvfrom) are rejected.
+File-kind reads (`POSIX_FD_FILE`) forward to VFS, which dispatches
+on its OFT type — files seek server-side, pipes block, TTY
+handles read from the TTY driver.
 
     sys_read(fd: int, buf: i64, len: int) -> i64
         val k = posix_fd_kind(fd)
@@ -777,7 +842,69 @@ only STDIO kinds and UDP (which should use recvfrom) are rejected.
                 ubuf[i] = reply[3 + i]
                 i += 1
             return i64(rlen)
+        if k == POSIX_FD_FILE
+            return shim_vfs_read(posix_fd_target(fd), buf, len)
         i64(-9)             // -EBADF
+
+VFS read/write helpers. Both create a grant against the user's
+buffer (granter_pid = current pid), send the appropriate VFS
+command, and revoke the grant on the way out. The shim is in EL1
+with the user's PT active, so `u64(buf)` is a valid user vaddr
+that VFS can resolve via `svc_grant_map`. Length is unbounded —
+VFS streams as much as it has buffered and reports the actual
+count.
+
+    shim_vfs_read(handle: int, buf: i64, len: int) -> i64
+        if len <= 0
+            return i64(0)
+        if handle < 0
+            return i64(-9)      // -EBADF
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)     // -ENODEV
+        val pid = posix_fd_current_pid()
+        val gid = kernel_grant_create_inline(pid, u64(buf), len, SHIM_GRANT_WRITE)
+        if gid < 0
+            return i64(-12)     // -ENOMEM
+        var msg: [13]byte
+        msg[0] = byte(VFS_CMD_READ_C)
+        shim_write_be_i32(msg, 1, handle)
+        shim_write_be_i32(msg, 5, len)
+        shim_write_be_i32(msg, 9, gid)
+        var reply: [5]byte
+        val r = ipc_send(port, msg, 13, reply, 5)
+        kernel_grant_revoke_inline(pid, gid)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-5)
+        i64(shim_read_be_i32(reply, 1))
+
+    shim_vfs_write(handle: int, buf: i64, len: int) -> i64
+        if len <= 0
+            return i64(0)
+        if handle < 0
+            return i64(-9)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)
+        val pid = posix_fd_current_pid()
+        val gid = kernel_grant_create_inline(pid, u64(buf), len, SHIM_GRANT_READ)
+        if gid < 0
+            return i64(-12)
+        var msg: [13]byte
+        msg[0] = byte(VFS_CMD_WRITE_C)
+        shim_write_be_i32(msg, 1, handle)
+        shim_write_be_i32(msg, 5, len)
+        shim_write_be_i32(msg, 9, gid)
+        var reply: [5]byte
+        val r = ipc_send(port, msg, 13, reply, 5)
+        kernel_grant_revoke_inline(pid, gid)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-5)
+        i64(shim_read_be_i32(reply, 1))
 
 SYS_CLOSE. For socket kinds, tell the inet server to drop the
 backend record; the fd slot is cleared either way so a subsequent
@@ -810,6 +937,14 @@ still -1) skip the inet call — no backend was ever allocated.
                         shim_write_u16(msg, 1, target)
                         var reply: [1]byte
                         ipc_send(port, msg, 3, reply, 1)
+            if k == POSIX_FD_FILE
+                val port = vfs_get_port()
+                if port >= 0
+                    var msg: [5]byte
+                    msg[0] = byte(VFS_CMD_CLOSE_C)
+                    shim_write_be_i32(msg, 1, target)
+                    var reply: [1]byte
+                    ipc_send(port, msg, 5, reply, 1)
         posix_fd_clear(fd)
         i64(0)
 
@@ -1614,6 +1749,143 @@ Unknown command → -EINVAL so real misuse surfaces.
         if cmd == POSIX_F_DUPFD
             return i64(-22)             // -EINVAL (no dup yet)
         i64(-22)
+
+SYS_OPENAT. The user passes `(dirfd, pathname, flags, mode)`. We
+ignore `dirfd` (musl always sends `AT_FDCWD = -100` once the cwd
+arc lands; for now the path must be absolute) and `mode` (file
+creation isn't routed yet). The path is null-terminated in user
+memory; we copy it into a stack buffer and forward to VFS as
+`VFS_CMD_OPEN_C` (path-based, file scheme). Scheme-prefixed
+paths ("tty:0", "tcp:host:port") would need `VFS_CMD_CONNECT_C`
+instead, but that path requires VFS to route by command byte
+which it doesn't today — adding it is a follow-up if we need
+TTY/socket-via-open. The returned VFS handle is parked in a
+fresh `POSIX_FD_FILE` slot.
+
+    sys_openat(dirfd: int, path_ptr: i64, oflags: int, mode: int) -> i64
+        if path_ptr == i64(0)
+            return i64(-14)             // -EFAULT
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)             // -ENODEV
+        var path: [128]byte
+        val up: *byte = *byte(path_ptr)
+        var n = 0
+        while n < 127
+            val c = up[n]
+            if c == byte(0)
+                break
+            path[n] = c
+            n += 1
+        var msg: [129]byte
+        msg[0] = byte(VFS_CMD_OPEN_C)
+        var i = 0
+        while i < n
+            msg[1 + i] = path[i]
+            i += 1
+        var reply: [9]byte
+        val r = ipc_send(port, msg, 1 + n, reply, 9)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-2)              // -ENOENT
+        val handle = shim_read_be_i32(reply, 1)
+        val pfd = posix_fd_alloc(POSIX_FD_FILE, handle)
+        if pfd < 0
+            // Couldn't park the handle — VFS already counted it,
+            // so close the backend before reporting EMFILE.
+            var cmsg: [5]byte
+            cmsg[0] = byte(VFS_CMD_CLOSE_C)
+            shim_write_be_i32(cmsg, 1, handle)
+            var crep: [1]byte
+            ipc_send(port, cmsg, 5, crep, 1)
+            return i64(-24)             // -EMFILE
+        posix_fd_set_flags(pfd, oflags & POSIX_O_NONBLOCK)
+        i64(pfd)
+
+SYS_LSEEK. VFS tracks file position server-side, so we just
+forward `whence` (0=SEEK_SET, 1=SEEK_CUR; SEEK_END not yet
+supported by VFS) and the offset. VFS replies with the new
+absolute position. Non-file kinds (sockets, STDIO) report ESPIPE
+the way Linux does for unseekable fds.
+
+    sys_lseek(fd: int, offset: i64, whence: int) -> i64
+        val k = posix_fd_kind(fd)
+        if k == POSIX_FD_FREE
+            return i64(-9)              // -EBADF
+        if k != POSIX_FD_FILE
+            return i64(-29)             // -ESPIPE
+        val handle = posix_fd_target(fd)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)
+        var msg: [10]byte
+        msg[0] = byte(VFS_CMD_SEEK_C)
+        shim_write_be_i32(msg, 1, handle)
+        shim_write_be_i32(msg, 5, int(offset))
+        msg[9] = byte(whence)
+        var reply: [5]byte
+        val r = ipc_send(port, msg, 10, reply, 5)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-22)             // -EINVAL
+        i64(shim_read_be_i32(reply, 1))
+
+SYS_PIPE2. Asks VFS to allocate a pipe and hand back two
+handles; we install both in fresh `POSIX_FD_FILE` slots and
+write the pair into `pipefd_array[0..1]` in user memory. Flags
+(`O_NONBLOCK` / `O_CLOEXEC`) are stored on each slot — non-block
+takes effect on subsequent reads, CLOEXEC is a placeholder until
+exec lands.
+
+    sys_pipe2(pipefd_array: i64, pipe_flags: int) -> i64
+        if pipefd_array == i64(0)
+            return i64(-14)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)
+        var msg: [1]byte
+        msg[0] = byte(VFS_CMD_PIPE_C)
+        var reply: [9]byte
+        val r = ipc_send(port, msg, 1, reply, 9)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-24)             // -EMFILE
+        val rh = shim_read_be_i32(reply, 1)
+        val wh = shim_read_be_i32(reply, 5)
+        val rfd = posix_fd_alloc(POSIX_FD_FILE, rh)
+        val wfd = posix_fd_alloc(POSIX_FD_FILE, wh)
+        if rfd < 0
+            // Couldn't park the handles — close the backends so
+            // VFS doesn't leak the pipe.
+            var c1: [5]byte
+            c1[0] = byte(VFS_CMD_CLOSE_C)
+            shim_write_be_i32(c1, 1, rh)
+            var crep: [1]byte
+            ipc_send(port, c1, 5, crep, 1)
+            shim_write_be_i32(c1, 1, wh)
+            ipc_send(port, c1, 5, crep, 1)
+            if wfd >= 0
+                posix_fd_clear(wfd)
+            return i64(-24)
+        if wfd < 0
+            sys_close(rfd)
+            var c1: [5]byte
+            c1[0] = byte(VFS_CMD_CLOSE_C)
+            shim_write_be_i32(c1, 1, wh)
+            var crep: [1]byte
+            ipc_send(port, c1, 5, crep, 1)
+            return i64(-24)
+        val nb = pipe_flags & POSIX_O_NONBLOCK
+        if nb != 0
+            posix_fd_set_flags(rfd, nb)
+            posix_fd_set_flags(wfd, nb)
+        var fdp: *int = *int(pipefd_array)
+        fdp[0] = rfd
+        fdp[1] = wfd
+        i64(0)
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a
 is the echo server: creates a port, registers "echo", then

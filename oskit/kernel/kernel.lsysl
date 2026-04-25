@@ -602,6 +602,36 @@ Revoke all grants for a process. Called on process reap.
                     grant_table[i].in_use = 0
             i += 1
 
+In-kernel grant helpers used by the POSIX shim. Same logic as
+the syscall handlers but without the `kernel_continue_current()`
+side effect (the shim is already running on the user thread's
+kernel stack and will return to it via the SVC path).
+
+    kernel_grant_create_inline(pid: int, vaddr: u64, glen: int, flags: int) -> int
+        var i = 0
+        while i < MAX_GRANTS
+            if grant_table[i].in_use == 0
+                grant_table[i].granter_pid = pid
+                grant_table[i].vaddr = vaddr
+                grant_table[i].len = glen
+                grant_table[i].flags = flags
+                grant_table[i].in_use = 1
+                return i
+            i += 1
+        -1
+
+    kernel_grant_revoke_inline(pid: int, gid: int)
+        if gid < 0
+            return
+        if gid >= MAX_GRANTS
+            return
+        if grant_table[gid].in_use == 0
+            return
+        if grant_table[gid].granter_pid != pid
+            return
+        grant_unmap_if_mapped(gid)
+        grant_table[gid].in_use = 0
+
 Get a thread's page table base register.
 
     kernel_get_thread_ptbr(tid: int) -> u64
