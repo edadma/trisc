@@ -645,6 +645,10 @@ to the same UDP stack that native sysl programs use via
             return sys_listen(int(a0), int(a1))
         if num == 276
             return sys_recvfrom(int(a0), a1, int(a2), int(a3), a4, a5)
+        if num == 278
+            return sys_recvmsg(int(a0), a1, int(a2))
+        if num == 306
+            return sys_sendmsg(int(a0), a1, int(a2))
         if num == 307
             return sys_sendto(int(a0), a1, int(a2), int(a3), a4, int(a5))
         if num == 171
@@ -1013,6 +1017,173 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
             ubuf[i] = reply[10 + i]
             i += 1
         i64(copy_len)
+
+SYS_SENDMSG / SYS_RECVMSG. MVP that handles `msg_iov` gather/
+scatter and `msg_name` for UDP datagrams. Ancillary data
+(`msg_control`) is ignored — programs that pass control buffers
+won't observe them coming back. `msg_flags` is currently a
+no-op; O_NONBLOCK still comes from the fd's flags via fcntl.
+
+Aarch64 LP64 little-endian struct layout (matches musl's
+`<sys/socket.h>` for this arch):
+
+```
+struct msghdr {
+    void         *msg_name;        // off  0, 8 bytes
+    socklen_t     msg_namelen;     // off  8, 4 bytes (+ 4 pad)
+    struct iovec *msg_iov;         // off 16, 8 bytes
+    int           msg_iovlen;      // off 24, 4 bytes (+ 4 __pad1)
+    void         *msg_control;     // off 32, 8 bytes
+    socklen_t     msg_controllen;  // off 40, 4 bytes (+ 4 pad)
+    int           msg_flags;       // off 48, 4 bytes
+};
+struct iovec { void *iov_base; size_t iov_len; }; // 16 bytes
+```
+
+To keep the gather/scatter buffer bounded, we cap `iovlen` at
+`SHIM_IOV_MAX = 8` and total bytes at `SHIM_MSG_MAX = 512` —
+matches the inet UDP datagram cap and is plenty for the TCP
+chunk-at-a-time path.
+
+    val SHIM_IOV_MAX        = 8
+    val SHIM_MSG_MAX        = 512
+
+    shim_read_ptr(p: *byte, off: int) -> i64
+        var v: i64 = 0
+        var i = 0
+        while i < 8
+            v = v | (i64(int(p[off + i]) & 0xff) << (i * 8))
+            i += 1
+        v
+
+    shim_read_i32(p: *byte, off: int) -> int
+        (int(p[off]) & 0xff) | ((int(p[off + 1]) & 0xff) << 8) | ((int(p[off + 2]) & 0xff) << 16) | ((int(p[off + 3]) & 0xff) << 24)
+
+    shim_write_i32(p: *byte, off: int, v: int)
+        p[off]     = byte(v & 0xff)
+        p[off + 1] = byte((v >> 8) & 0xff)
+        p[off + 2] = byte((v >> 16) & 0xff)
+        p[off + 3] = byte((v >> 24) & 0xff)
+
+    sys_sendmsg(fd: int, msghdr_ptr: i64, flags: int) -> i64
+        val k = posix_fd_kind(fd)
+        if k != POSIX_FD_UDP_SOCKET
+            if k != POSIX_FD_TCP_SOCKET
+                return i64(-9)
+        if msghdr_ptr == i64(0)
+            return i64(-14)
+        val mh: *byte = *byte(msghdr_ptr)
+        val name_ptr  = shim_read_ptr(mh, 0)
+        val name_len  = shim_read_i32(mh, 8)
+        val iov_ptr   = shim_read_ptr(mh, 16)
+        val iov_len   = shim_read_i32(mh, 24)
+        if iov_len < 0
+            return i64(-22)
+        if iov_len > SHIM_IOV_MAX
+            return i64(-22)
+        if iov_len > 0
+            if iov_ptr == i64(0)
+                return i64(-14)
+        var gather: [512]byte
+        var total = 0
+        val iov_base: *byte = *byte(iov_ptr)
+        var ii = 0
+        while ii < iov_len
+            val ent_off = ii * 16
+            val base    = shim_read_ptr(iov_base, ent_off)
+            val seg_len = int(shim_read_ptr(iov_base, ent_off + 8))
+            if seg_len > 0
+                if base == i64(0)
+                    return i64(-14)
+                val src: *byte = *byte(base)
+                var jj = 0
+                while jj < seg_len
+                    if total < SHIM_MSG_MAX
+                        gather[total] = src[jj]
+                        total += 1
+                    jj += 1
+            ii += 1
+        if k == POSIX_FD_UDP_SOCKET
+            if name_ptr == i64(0)
+                return i64(-22)
+            if name_len < 16
+                return i64(-22)
+            return sys_sendto(fd, i64(&gather[0]), total, flags, name_ptr, 16)
+        sys_write(fd, i64(&gather[0]), total)
+
+    sys_recvmsg(fd: int, msghdr_ptr: i64, flags: int) -> i64
+        val k = posix_fd_kind(fd)
+        if k != POSIX_FD_UDP_SOCKET
+            if k != POSIX_FD_TCP_SOCKET
+                return i64(-9)
+        if msghdr_ptr == i64(0)
+            return i64(-14)
+        val mh: *byte = *byte(msghdr_ptr)
+        val name_ptr  = shim_read_ptr(mh, 0)
+        val iov_ptr   = shim_read_ptr(mh, 16)
+        val iov_len   = shim_read_i32(mh, 24)
+        if iov_len < 0
+            return i64(-22)
+        if iov_len > SHIM_IOV_MAX
+            return i64(-22)
+        if iov_len > 0
+            if iov_ptr == i64(0)
+                return i64(-14)
+        // Compute total scatter capacity across iovs.
+        var cap = 0
+        val iov_base: *byte = *byte(iov_ptr)
+        var ii = 0
+        while ii < iov_len
+            val ent_off = ii * 16
+            val seg_len = int(shim_read_ptr(iov_base, ent_off + 8))
+            if seg_len > 0
+                cap += seg_len
+            ii += 1
+        if cap > SHIM_MSG_MAX
+            cap = SHIM_MSG_MAX
+        var scratch: [512]byte
+        // Stage the receive into the scratch buffer; sys_recvfrom
+        // / sys_read writes there, then we scatter into the iovs.
+        var got: i64 = i64(0)
+        var src_addr: [16]byte
+        var src_len: i32 = i32(16)
+        if k == POSIX_FD_UDP_SOCKET
+            // For UDP, write src into msg_name if the user gave one.
+            if name_ptr != i64(0)
+                got = sys_recvfrom(fd, i64(&scratch[0]), cap, flags,
+                    name_ptr, msghdr_ptr + i64(8))
+            else
+                got = sys_recvfrom(fd, i64(&scratch[0]), cap, flags,
+                    i64(&src_addr[0]), i64(&src_len))
+        else
+            got = sys_read(fd, i64(&scratch[0]), cap)
+        if got < i64(0)
+            return got
+        // Scatter into iovs.
+        val nbytes = int(got)
+        var written = 0
+        ii = 0
+        while ii < iov_len
+            val ent_off = ii * 16
+            val base    = shim_read_ptr(iov_base, ent_off)
+            val seg_len = int(shim_read_ptr(iov_base, ent_off + 8))
+            if seg_len > 0
+                if base != i64(0)
+                    val dst: *byte = *byte(base)
+                    var take = nbytes - written
+                    if take > seg_len
+                        take = seg_len
+                    var jj = 0
+                    while jj < take
+                        dst[jj] = scratch[written + jj]
+                        jj += 1
+                    written += take
+            ii += 1
+        // Clear msg_controllen and msg_flags in the user's struct
+        // (signal "no ancillary, no flags" cleanly).
+        shim_write_i32(mh, 40, 0)
+        shim_write_i32(mh, 48, 0)
+        i64(nbytes)
 
 SYS_CONNECT. TCP active open. Issues `INET_CMD_TCP_CONNECT` which
 parks the caller until ESTABLISHED; on success the inet server

@@ -531,6 +531,23 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       peerThread.join(2000)
   }
 
+  "aarch64 musl: sendmsg/recvmsg via libc wrappers" in {
+    // mmsg validates the shim's msghdr offset parsing by going
+    // through musl's real sendmsg(3) / recvmsg(3) — those build
+    // the struct with the layout from
+    // slix/musl/include/sys/socket.h. UDP loopback round-trip
+    // with a 2-iov gather and a single-iov scatter; payload is
+    // "hello msghdr" and src_port mirrors the bound port (7790).
+    qemu.send("mmsg\n")
+    val output = qemu.waitFor("mmsg: done")
+    output should include("mmsg: socket=3")
+    output should include("mmsg: bind=0")
+    output should include("mmsg: sendmsg=12")
+    output should include("mmsg: recvmsg=12 data='hello msghdr'")
+    output should include("mmsg: src_port=7790")
+    output should include("mmsg: done")
+  }
+
   "aarch64 timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications via notify_wait/notify_read_self. Proves the
