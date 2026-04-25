@@ -408,6 +408,78 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  "match on enum dispatches with bare-constructor patterns" in {
+    val mlw = translate(
+      """enum Color
+        |    Red
+        |    Green
+        |    Blue
+        |
+        |def color_code(c: Color) -> int
+        |    ensure result >= 0
+        |    c match
+        |        Color.Red   -> 1
+        |        Color.Green -> 2
+        |        Color.Blue  -> 3
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  type color = Red | Green | Blue
+        |
+        |  let function color_code (c: color) : int
+        |    ensures  { result >= 0 }
+        |    = (match c with | Red -> 1 | Green -> 2 | Blue -> 3 end)
+        |end
+        |""".stripMargin
+  }
+
+  "match with else-default emits a wildcard arm" in {
+    val mlw = translate(
+      """enum Color
+        |    Red
+        |    Green
+        |    Blue
+        |
+        |def is_warm(c: Color) -> int
+        |    c match
+        |        Color.Red -> 1
+        |        else      -> 0
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  type color = Red | Green | Blue
+        |
+        |  let function is_warm (c: color) : int
+        |    = (match c with | Red -> 1 | _ -> 0 end)
+        |end
+        |""".stripMargin
+  }
+
+  "match on integer literals lowers to an if-chain (WhyML rejects literal patterns)" in {
+    val mlw = translate(
+      """def categorize(n: int) -> int
+        |    n match
+        |        0    -> 100
+        |        1    -> 200
+        |        else -> 0
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let function categorize (n: int) : int
+        |    = (if n = 0 then 100 else if n = 1 then 200 else 0)
+        |end
+        |""".stripMargin
+  }
+
   "unsupported expression form yields a clear error naming the gap" in {
     val ex = intercept[RuntimeException](translate(
       """def s() -> int

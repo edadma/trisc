@@ -229,6 +229,53 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         case Some(stmts) => stmtsAsExpr(stmts)
         case None        => unsupported("if without else", "WhyML requires both branches")
       s"(if ${formatExpr(c)} then $tExpr else $eExpr)"
+    case MatchExprAST(scrutinee, arms, default) =>
+      // WhyML: `match e with | pat -> body | ... end`. Each arm's body must be a single
+      // expression in Phase 3a — multi-statement arm bodies (let-bindings, sequencing) come
+      // with the broader multi-stmt support in a later piece. Guards and multi-pattern arms
+      // are also deferred. The default arm (sysl `else`) becomes a wildcard `_ -> ...`.
+      //
+      // WhyML restricts match patterns to ADT constructors and `_`/variables — integer and
+      // bool literal patterns are NOT allowed. Sysl `n match { 0 -> a; 1 -> b; else -> c }`
+      // therefore lowers to an if-chain `(if n = 0 then a else if n = 1 then b else c)`
+      // when the scrutinee is not an enum value. Detection is syntactic: if every non-default
+      // arm's pattern is an ADT constructor, emit `match`; otherwise lower to if-chain.
+      if arms.exists(_.guard.isDefined) then unsupported("match arm with guard", "Phase 3a")
+      if arms.exists(_.patterns.size > 1) then unsupported("match arm with multiple patterns", "Phase 3a")
+      val allCtorArms = arms.forall { a =>
+        a.patterns.head match
+          case ValuePatternAST(FieldAccessAST(VarRefAST(t), _)) if enumNames(t) => true
+          case WildcardPatternAST => true
+          case _                  => false
+      }
+      if allCtorArms then
+        val sb = new StringBuilder
+        sb.append(s"(match ${formatExpr(scrutinee)} with")
+        for arm <- arms do
+          sb.append(s" | ${formatPattern(arm.patterns.head)} -> ${stmtsAsExpr(arm.body)}")
+        default match
+          case Some(stmts) => sb.append(s" | _ -> ${stmtsAsExpr(stmts)}")
+          case None        =>
+        sb.append(" end)")
+        sb.toString
+      else
+        // Lower literal-pattern match to an if-chain. The scrutinee is evaluated once and
+        // each pattern becomes an `=` test against it. Default → final `else`.
+        val scr = formatExpr(scrutinee)
+        val defaultExpr = default match
+          case Some(stmts) => stmtsAsExpr(stmts)
+          case None        => unsupported("literal-pattern match without `else` default",
+                                          "WhyML cannot pattern-match int/bool literals — needs an exhaustive else")
+        val sb = new StringBuilder
+        sb.append("(")
+        for arm <- arms do
+          val key = arm.patterns.head match
+            case ValuePatternAST(e)   => formatExpr(e)
+            case WildcardPatternAST   => unsupported("wildcard before else in literal match", "Phase 3a")
+            case other                => unsupported("literal-pattern shape", other.getClass.getSimpleName)
+          sb.append(s"if $scr = $key then ${stmtsAsExpr(arm.body)} else ")
+        sb.append(s"$defaultExpr)")
+        sb.toString
     case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>
       // sysl `for all x in lo..hi => P`  → `forall x: int. lo <= x <= hi -> P`
       // sysl `for all x in lo..<hi => P` → `forall x: int. lo <= x <  hi -> P`
@@ -252,6 +299,19 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       unsupported(
         "if-branch with non-trivial body",
         "Phase 1 supports only a single expression or single `return <expr>` per branch")
+
+  /** Format a sysl match pattern as a WhyML pattern. Phase 3a covers the wildcard, integer
+   *  literal patterns, and enum constructor patterns (the most common shapes for verifying
+   *  algebraic-type case analysis). Range and destructuring patterns are deferred. */
+  private def formatPattern(p: MatchPatternAST): String = p match
+    case WildcardPatternAST => "_"
+    case ValuePatternAST(IntLitAST(v))   => if v < 0 then s"(- ${-v})" else v.toString
+    case ValuePatternAST(BoolLitAST(v))  => v.toString
+    case ValuePatternAST(FieldAccessAST(VarRefAST(t), member)) if enumNames(t) => member
+    case ValuePatternAST(VarRefAST(name)) => sanitizeName(name)
+    case ValuePatternAST(other) => unsupported("match value pattern", other.getClass.getSimpleName)
+    case _: RangePatternAST     => unsupported("range match pattern", "Phase 3a")
+    case _: DestructurePatternAST => unsupported("destructuring match pattern", "Phase 3a")
 
   private def mapBinaryOp(op: String): String = op match
     case "==" => "="
