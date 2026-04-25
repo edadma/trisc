@@ -367,12 +367,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("sockopt: set SO_BROADCAST = 0")
     output should include("sockopt: set TCP_NODELAY = 0")
     output should include("sockopt: set unknown = -92")
-    output should include("sockopt: get SO_REUSEADDR = 0 olen=4 val=0")
+    // SO_REUSEADDR was set to 1 in the test program; persistence
+    // pass echoes the actually-set value.
+    output should include("sockopt: get SO_REUSEADDR = 0 olen=4 val=1")
     output should include("sockopt: get unknown = -92")
     output should include("sockopt: set SO_SNDBUF = 0")
     output should include("sockopt: set SO_RCVBUF = 0")
     output should include("sockopt: get SO_SNDBUF = 0 val=2048")
     output should include("sockopt: get SO_RCVBUF = 0 val=4096")
+    output should include("sockopt: get TCP_NODELAY = 0 val=1")
     output should include("sockopt: done")
     output should not include "sockopt: FAIL"
   }

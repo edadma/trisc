@@ -155,8 +155,10 @@ Raw POSIX syscall wrappers.
             puts("sockopt: FAIL olen not 4\n")
             exit_with(7)
             return
-        if int(outv[0]) != 0
-            puts("sockopt: FAIL val not zero\n")
+        // The persistence pass echoes the actually-set value; we set
+        // SO_REUSEADDR=1 above, so getsockopt must read back 1.
+        if int(outv[0]) != 1
+            puts("sockopt: FAIL val not 1 (expected echoed REUSEADDR=1)\n")
             exit_with(8)
             return
 
@@ -253,6 +255,41 @@ Raw POSIX syscall wrappers.
         if r10 != 0 || rcv_val != 4096
             puts("sockopt: FAIL get SO_RCVBUF round-trip\n")
             exit_with(14)
+            return
+
+        // TCP_NODELAY round-trip: the persistence pass echoes the
+        // set value via getsockopt.  No behavioural enforcement
+        // (slix has no Nagle), so this is option-introspection only.
+        var nd: [4]byte
+        nd[0] = byte(1)
+        nd[1] = byte(0)
+        nd[2] = byte(0)
+        nd[3] = byte(0)
+        val r11 = posix_setsockopt(tfd, IPPROTO_TCP, TCP_NODELAY, &nd[0], 4)
+        puts("sockopt: set TCP_NODELAY tfd = ")
+        print_sdec(r11)
+        puts("\n")
+        if r11 != 0
+            puts("sockopt: FAIL set TCP_NODELAY tfd\n")
+            exit_with(15)
+            return
+
+        var nd_out: [4]byte
+        nd_out[0] = byte(0xff)
+        nd_out[1] = byte(0xff)
+        nd_out[2] = byte(0xff)
+        nd_out[3] = byte(0xff)
+        var nd_olen: i32 = i32(4)
+        val r12 = posix_getsockopt(tfd, IPPROTO_TCP, TCP_NODELAY,
+                                   &nd_out[0], &nd_olen)
+        puts("sockopt: get TCP_NODELAY = ")
+        print_sdec(r12)
+        puts(" val=")
+        print_sdec(int(nd_out[0]))
+        puts("\n")
+        if r12 != 0 || int(nd_out[0]) != 1
+            puts("sockopt: FAIL get TCP_NODELAY round-trip\n")
+            exit_with(16)
             return
 
         posix_close(tfd)

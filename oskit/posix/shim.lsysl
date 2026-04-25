@@ -101,6 +101,17 @@ posix_fd_bridge memory.
         // immediately after connect/listen establishes the slot.
         pending_sndbuf: int
         pending_rcvbuf: int
+        // Persisted setsockopt flag values so getsockopt echoes the
+        // actually-requested value instead of zero (Linux-compat for
+        // option introspection).  These flags are not yet enforced
+        // — REUSEADDR doesn't relax bind, KEEPALIVE has no idle
+        // timer, NODELAY would only matter if Nagle existed.  Real
+        // enforcement is its own follow-up.
+        flag_reuseaddr: int
+        flag_broadcast: int
+        flag_keepalive: int
+        flag_reuseport: int
+        flag_nodelay: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -115,6 +126,11 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].pos = i64(0)
             posix_fd_table[base + i].pending_sndbuf = 0
             posix_fd_table[base + i].pending_rcvbuf = 0
+            posix_fd_table[base + i].flag_reuseaddr = 0
+            posix_fd_table[base + i].flag_broadcast = 0
+            posix_fd_table[base + i].flag_keepalive = 0
+            posix_fd_table[base + i].flag_reuseport = 0
+            posix_fd_table[base + i].flag_nodelay = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -171,6 +187,11 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].pos = i64(0)
                 posix_fd_table[base + i].pending_sndbuf = 0
                 posix_fd_table[base + i].pending_rcvbuf = 0
+                posix_fd_table[base + i].flag_reuseaddr = 0
+                posix_fd_table[base + i].flag_broadcast = 0
+                posix_fd_table[base + i].flag_keepalive = 0
+                posix_fd_table[base + i].flag_reuseport = 0
+                posix_fd_table[base + i].flag_nodelay = 0
                 return i
             i += 1
         -1
@@ -1348,32 +1369,70 @@ Returns 0 on success, negative errno on failure.
             return -22
         0
 
-SYS_SETSOCKOPT / SYS_GETSOCKOPT. Mostly accept-and-ignore: the inet
-server tracks `SO_SNDBUF` / `SO_RCVBUF` (since Phase E) but the
-remaining options (SO_REUSEADDR, SO_BROADCAST, SO_KEEPALIVE,
-SO_REUSEPORT, TCP_NODELAY) are still no-ops — kept on the accept
-list so DHCP clients / TCP servers / latency-sensitive clients
-that reflexively set them don't trip on `-ENOPROTOOPT`. Anything
-outside the list still returns `-ENOPROTOOPT`.
+SYS_SETSOCKOPT / SYS_GETSOCKOPT. The inet server tracks
+`SO_SNDBUF` / `SO_RCVBUF` (since Phase E bufsize chunk).  The
+remaining accept-list options (SO_REUSEADDR, SO_BROADCAST,
+SO_KEEPALIVE, SO_REUSEPORT, TCP_NODELAY) are persisted on the
+shim fd so getsockopt echoes the actually-set value (Linux-compat
+introspection) but their behavioural enforcement is a follow-up:
+
+- SO_REUSEADDR — slix is already permissive (no strict TIME_WAIT
+  bind-block today), so the flag is informational.
+- SO_BROADCAST — UDP send always allows broadcast destinations.
+- SO_KEEPALIVE — no idle timer wired in inet yet.
+- SO_REUSEPORT — same as REUSEADDR for the no-strict-bind case.
+- TCP_NODELAY — slix doesn't implement Nagle, so segments already
+  go out immediately; the flag is effectively pinned to "on".
+
+Anything outside the accept-list returns `-ENOPROTOOPT`.
 
 Linux `SOL_SOCKET = 1`; `SO_REUSEADDR = 2`, `SO_ERROR = 4`,
 `SO_BROADCAST = 6`, `SO_SNDBUF = 7`, `SO_RCVBUF = 8`,
 `SO_KEEPALIVE = 9`, `SO_REUSEPORT = 15`. `IPPROTO_TCP = 6`;
 `TCP_NODELAY = 1`.
 
+Read a 4-byte i32 out of the user's optval buffer.  Bounds + null-
+pointer checks return non-zero on failure (caller should propagate
+as -EINVAL).
+
+    shim_sockopt_read_int(optval: i64, optlen: int, out v: int) -> int
+        if optlen < 4 || optval == i64(0)
+            return -1
+        val vp: *i32 = *i32(optval)
+        v = int(*vp)
+        0
+
     sys_setsockopt(fd: int, level: int, optname: int, optval: i64, optlen: int) -> i64
         val k = posix_fd_kind(fd)
         if k != POSIX_FD_UDP_SOCKET
             if k != POSIX_FD_TCP_SOCKET
                 return i64(-9)          // -EBADF
+        val pid = posix_fd_current_pid()
+        val tidx = pid * POSIX_FDS_PER_PROC + fd
         if level == 1
             if optname == 2
+                var v = 0
+                if shim_sockopt_read_int(optval, optlen, v) != 0
+                    return i64(-22)
+                posix_fd_table[tidx].flag_reuseaddr = v
                 return i64(0)
             if optname == 6
+                var v = 0
+                if shim_sockopt_read_int(optval, optlen, v) != 0
+                    return i64(-22)
+                posix_fd_table[tidx].flag_broadcast = v
                 return i64(0)
             if optname == 9
+                var v = 0
+                if shim_sockopt_read_int(optval, optlen, v) != 0
+                    return i64(-22)
+                posix_fd_table[tidx].flag_keepalive = v
                 return i64(0)
             if optname == 15
+                var v = 0
+                if shim_sockopt_read_int(optval, optlen, v) != 0
+                    return i64(-22)
+                posix_fd_table[tidx].flag_reuseport = v
                 return i64(0)
             // SO_SNDBUF / SO_RCVBUF.  Persist on the shim fd so the
             // value survives until connect/listen creates an inet
@@ -1384,18 +1443,15 @@ Linux `SOL_SOCKET = 1`; `SO_REUSEADDR = 2`, `SO_ERROR = 4`,
             if optname == 7 || optname == 8
                 if k != POSIX_FD_TCP_SOCKET
                     return i64(0)
-                if optlen < 4 || optval == i64(0)
-                    return i64(-22)     // -EINVAL
-                val vp: *i32 = *i32(optval)
-                var requested = int(*vp)
+                var requested = 0
+                if shim_sockopt_read_int(optval, optlen, requested) != 0
+                    return i64(-22)
                 if requested < 0
                     requested = 0
-                val pid = posix_fd_current_pid()
-                val idx = pid * POSIX_FDS_PER_PROC + fd
                 if optname == 7
-                    posix_fd_table[idx].pending_sndbuf = requested
+                    posix_fd_table[tidx].pending_sndbuf = requested
                 else
-                    posix_fd_table[idx].pending_rcvbuf = requested
+                    posix_fd_table[tidx].pending_rcvbuf = requested
                 val inet_fd = posix_fd_target(fd)
                 if inet_fd < 0
                     return i64(0)
@@ -1405,16 +1461,23 @@ Linux `SOL_SOCKET = 1`; `SO_REUSEADDR = 2`, `SO_ERROR = 4`,
                 return i64(0)
         if level == 6
             if optname == 1
+                var v = 0
+                if shim_sockopt_read_int(optval, optlen, v) != 0
+                    return i64(-22)
+                posix_fd_table[tidx].flag_nodelay = v
                 return i64(0)
         i64(-92)                        // -ENOPROTOOPT
 
 `val` is a pointer to the option buffer; `len_ptr` points at an
 i32 that the caller seeded with the buffer capacity. We write 0
-into the first 4 bytes (every option we support is an int-sized
-boolean/integer and we never actually track its state) and set
-`*len_ptr = 4`. `-ENOPROTOOPT` is returned for anything outside
-the accept-list (same set as setsockopt); the option buffer is
-left untouched in that case.
+For SO_SNDBUF/SO_RCVBUF the value comes from inet (or the persisted
+pending size when there's no slot yet).  For the other accept-list
+flags (SO_REUSEADDR / SO_BROADCAST / SO_KEEPALIVE / SO_REUSEPORT /
+TCP_NODELAY) we echo the actually-set value out of the shim fd
+table.  SO_ERROR — which slix doesn't track per-socket — still
+returns 0 (clean state).  `*len_ptr = 4` in every accepted case.
+`-ENOPROTOOPT` is returned for anything outside the accept-list;
+the option buffer is left untouched in that case.
 
     sys_getsockopt(fd: int, level: int, optname: int, optval: i64, len_ptr: i64) -> i64
         val k = posix_fd_kind(fd)
@@ -1498,7 +1561,26 @@ left untouched in that case.
                 *vp = i32(shim_read_u16(reply, 1))
                 *lp = i32(4)
                 return i64(0)
-        *vp = i32(0)
+        // Echo the persisted flag value for the accept-list options
+        // (SO_REUSEADDR / SO_BROADCAST / SO_KEEPALIVE / SO_REUSEPORT
+        // / TCP_NODELAY).  SO_ERROR (4) has no per-socket state in
+        // slix; it falls through with value 0 (clean state).
+        val pid = posix_fd_current_pid()
+        val gidx = pid * POSIX_FDS_PER_PROC + fd
+        var echoed = 0
+        if level == 1
+            if optname == 2
+                echoed = posix_fd_table[gidx].flag_reuseaddr
+            if optname == 6
+                echoed = posix_fd_table[gidx].flag_broadcast
+            if optname == 9
+                echoed = posix_fd_table[gidx].flag_keepalive
+            if optname == 15
+                echoed = posix_fd_table[gidx].flag_reuseport
+        if level == 6
+            if optname == 1
+                echoed = posix_fd_table[gidx].flag_nodelay
+        *vp = i32(echoed)
         *lp = i32(4)
         i64(0)
 
