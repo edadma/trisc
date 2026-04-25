@@ -64,6 +64,19 @@ class SyslSVMCodegen:
   // Map: function name → parameter types (for arg-coercion at call sites).
   private val funcParamTypes = new mutable.HashMap[String, List[SyslType]]
 
+  // Closures: hoisted bodies generated alongside regular functions. The hoisted
+  // function's first param is a hidden env_ptr (stored in local 0).
+  private var closureCounter = 0
+  private val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
+  // While compiling a hoisted closure body: capture name → (env offset, type).
+  // TVarRef checks this first.
+  private var closureCaptures: Map[String, (Long, SyslType)] = Map.empty
+  // Per-function shims: ignore env_ptr and forward to plain function.
+  private val emittedShims = new mutable.HashSet[String]
+  private val pendingShims = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)]
+  // (shimName, targetName, paramTypes, returnType)
+  private def shimNameFor(target: String): String = s"__shim__$target"
+
   private def emit(s: String): Unit = out ++= s + "\n"
   private def newLabel(prefix: String): String =
     labelCounter += 1
@@ -182,6 +195,7 @@ class SyslSVMCodegen:
     case _: SyslType.ArrayType => true
     case _: SyslType.StructType => true
     case _: SyslType.EnumType => true
+    case _: SyslType.FuncType => true     // 16-byte {func_ptr, env_ptr} closure descriptor
     case _ => false
 
   /** Emit code to allocate `size` bytes on the memory stack. Leaves address on data stack. */
@@ -325,6 +339,16 @@ class SyslSVMCodegen:
     for decl <- program.decls do decl match
       case f: TFunDecl if emittedFuncs.add(f.name) => genFunction(f)
       case _ =>
+
+    // Emit hoisted closure bodies (collected during gen of expression-context closures).
+    // Each one is a regular function with a hidden env_ptr first param at local 0.
+    while pendingClosures.nonEmpty do
+      val (name, c) = pendingClosures.remove(0)
+      genHoistedClosure(name, c)
+
+    // Emit per-function shims for plain function pointers taken via TFuncRef.
+    for (shim, target, paramTypes, retType) <- pendingShims do
+      genShim(shim, target, paramTypes, retType)
 
     // Pre-register string globals so their rodata labels are emitted in the
     // rodata segment before the data segment references them.
@@ -632,6 +656,172 @@ class SyslSVMCodegen:
           if !stmts.lastOption.exists(_.isInstanceOf[TReturnStmt]) then
             emitDefers()
             emit("  ret")
+
+  // ========================================================================
+  // Closure layout helpers
+  // ========================================================================
+  /** Compute env layout: list of (name, offset, type) and total size. */
+  private def envLayout(captures: List[(String, SyslType)]): (List[(String, Long, SyslType)], Long) =
+    var off: Long = 0L
+    val items = captures.map { (n, t) =>
+      val align = t.alignOf.max(1)
+      off = (off + align - 1) / align * align
+      val item = (n, off, t)
+      off += t.sizeOf
+      item
+    }
+    (items, off)
+
+  /** Emit code at the construction site to build a 16-byte closure descriptor
+    * on the memory stack and leave its address on TOS. */
+  private def genClosureExpr(c: TClosure): Unit =
+    closureCounter += 1
+    val cName = s"__closure_${closureCounter}"
+    pendingClosures += ((cName, c))
+    val (layout, envSize) = envLayout(c.captures)
+    // Allocate env (or use null when no captures).
+    val envIdx = nextLocalIndex
+    nextLocalIndex += 1
+    if c.captures.isEmpty then
+      emit("  push_0")
+      emit(s"  local_set $envIdx")
+    else
+      emitMemAlloc(envSize)
+      emit(s"  local_set $envIdx")
+      // Store each capture into env at its offset.
+      for (capName, off, capTyp) <- layout do
+        emit(s"  local_get $envIdx")
+        if off > 0 then { emitPushInt(off); emit("  add") }
+        // Read the captured value from caller's local/global, then store into env.
+        genExpr(TVarRef(capName, capTyp))
+        // For aggregates the genExpr returned an address; we want to copy bytes.
+        // For scalars we want to store the loaded value.
+        emit("  swap")
+        emitStore(capTyp)
+    // Allocate descriptor (16 bytes).
+    emitMemAlloc(16)
+    emit("  dup")
+    emit(s"  push_i64 $cName")
+    emit("  swap")
+    emit("  store64")          // descr[0] = func_ptr
+    emit("  dup")
+    emitPushInt(8)
+    emit("  add")
+    emit(s"  local_get $envIdx")
+    emit("  swap")
+    emit("  store64")          // descr[8] = env_ptr
+
+  /** Emit a hoisted closure body as a regular function. The first param is a
+    * hidden env_ptr (local 0); explicit params follow. Captures are accessed
+    * via env_ptr+offset using `closureCaptures`. */
+  private def genHoistedClosure(name: String, c: TClosure): Unit =
+    emit(s"global $name, func")
+    val (layout, _) = envLayout(c.captures)
+    val captureMap = layout.map { case (n, off, t) => (n, (off, t)) }.toMap
+
+    // Build a synthetic TFunDecl-like context. We'll call genFunction-style
+    // logic but with closureCaptures populated.
+    val savedCaptures = closureCaptures
+    val savedLocals = locals
+    val savedNextIdx = nextLocalIndex
+    val savedAddressed = addressedLocals
+    val savedDeferStack = deferStack.toList
+    val savedFunc = currentFunction
+
+    closureCaptures = captureMap
+    locals = new mutable.LinkedHashMap
+    nextLocalIndex = 0
+    addressedLocals = new mutable.HashSet[String]
+    deferStack.clear()
+
+    // Pre-scan body for &x on locals (skip captures — they're not addressable
+    // through this scan since they live in env).
+    def scanAddrOfE(e: TExpr): Unit = e match
+      case TAddrOf(n, _) if !captureMap.contains(n) => addressedLocals += n
+      case TBinary(l, _, r, _) => scanAddrOfE(l); scanAddrOfE(r)
+      case TUnary(_, o, _) => scanAddrOfE(o)
+      case TCall(_, args, _) => args.foreach(scanAddrOfE)
+      case TIndirectCall(cc, args, _) => scanAddrOfE(cc); args.foreach(scanAddrOfE)
+      case TCast(i, _) => scanAddrOfE(i)
+      case TIndex(a, i, _) => scanAddrOfE(a); scanAddrOfE(i)
+      case TDeref(p, _) => scanAddrOfE(p)
+      case TFieldAccess(o, _, _) => scanAddrOfE(o)
+      case TIfExpr(cc, tb, eb, _) => scanAddrOfE(cc); tb.foreach(scanAddrOfS); eb.foreach(_.foreach(scanAddrOfS))
+      case _ =>
+    def scanAddrOfS(s: TStmt): Unit = s match
+      case TVarStmt(_, _, i, _) => scanAddrOfE(i)
+      case TAssignStmt(_, v) => scanAddrOfE(v)
+      case TExprStmt(e) => scanAddrOfE(e)
+      case TReturnStmt(Some(e)) => scanAddrOfE(e)
+      case TWhileStmt(cc, b, _) => scanAddrOfE(cc); b.foreach(scanAddrOfS)
+      case TForStmt(i, cc, u, b, _) => scanAddrOfS(i); scanAddrOfE(cc); scanAddrOfS(u); b.foreach(scanAddrOfS)
+      case _ =>
+    c.body match
+      case TExprBody(e) => scanAddrOfE(e)
+      case TBlockBody(stmts) => stmts.foreach(scanAddrOfS)
+
+    // Reserve local 0 for env_ptr. Explicit params start at local 1.
+    val nParams = c.params.length
+    val nBodyLocals = countLocals(c.body)
+    val totalLocals = 1 + nParams + nBodyLocals
+
+    emit(s"$name:")
+    emit(s"  frame $totalLocals")
+    // Pop args+env: stack is (env, p0, p1, ..., pN-1) with pN-1 on top.
+    // Reverse-pop: pN-1 → local nParams, ..., p0 → local 1, env → local 0.
+    for i <- (nParams - 1) to 0 by -1 do
+      locals(c.params(i).name) = LocalInfo(i + 1, c.params(i).typ)
+      emit(s"  local_set ${i + 1}")
+    emit(s"  local_set 0")          // env_ptr → local 0
+    nextLocalIndex = 1 + nParams
+
+    // Body
+    c.body match
+      case TExprBody(e) =>
+        genExpr(e)
+        emitDefers()
+        emit("  ret")
+      case TBlockBody(stmts) =>
+        if stmts.isEmpty then
+          emitDefers()
+          emit("  ret")
+        else if c.returnType != SyslType.VoidType then
+          genStmtsAsExpr(stmts)
+          emitDefers()
+          emit("  ret")
+        else
+          genStmts(stmts)
+          if !stmts.lastOption.exists(_.isInstanceOf[TReturnStmt]) then
+            emitDefers()
+            emit("  ret")
+
+    // Restore
+    closureCaptures = savedCaptures
+    locals = savedLocals
+    nextLocalIndex = savedNextIdx
+    addressedLocals = savedAddressed
+    deferStack.clear()
+    deferStack.pushAll(savedDeferStack.reverse)
+    currentFunction = savedFunc
+
+  /** Emit a per-function shim: takes (env_ptr, ...args), tail-calls target
+    * with (...args). Used so plain function pointers (TFuncRef) work uniformly
+    * with the closure indirect-call convention. */
+  private def genShim(shim: String, target: String, paramTypes: List[SyslType], retType: SyslType): Unit =
+    val nParams = paramTypes.length
+    val totalLocals = 1 + nParams
+    emit(s"global $shim, func")
+    emit(s"$shim:")
+    emit(s"  frame $totalLocals")
+    // Stack at entry: (env, arg1, ..., argN), argN on top.
+    for i <- (nParams - 1) to 0 by -1 do
+      emit(s"  local_set ${i + 1}")
+    emit(s"  local_set 0")        // env (discarded)
+    // Push args back in order, then tail-call.
+    for i <- 0 until nParams do
+      emit(s"  local_get ${i + 1}")
+    emit(s"  call $target")
+    emit(s"  ret")
 
   // ========================================================================
   // genStmts / genStmt
@@ -998,6 +1188,17 @@ class SyslSVMCodegen:
     case TSizeof(size, _) => emitPushInt(size)
 
     case TVarRef(name, typ) =>
+      // Captures (when compiling a hoisted closure body): read from env_ptr
+      // (local 0) at the capture's offset.
+      closureCaptures.get(name) match
+        case Some((off, capTyp)) =>
+          emit("  local_get 0")               // env_ptr
+          if off > 0 then { emitPushInt(off); emit("  add") }
+          // For aggregates, the address into env IS the value. For scalars, load.
+          if !needsMemAlloc(capTyp) && capTyp != SyslType.StringType && !capTyp.isInstanceOf[SyslType.SliceType] then
+            emitLoad(capTyp)
+          return
+        case None =>
       locals.get(name) match
         case Some(LocalInfo(idx, localTyp)) if addressedLocals.contains(name) && !needsMemAlloc(localTyp) && localTyp != SyslType.StringType && !localTyp.isInstanceOf[SyslType.SliceType] =>
           // Addressed scalar: load through the cell's pointer.
@@ -1389,16 +1590,61 @@ class SyslSVMCodegen:
     case TAsmExpr(code, _) =>
       emit(s"  $code")
 
-    case TFuncRef(name, _) =>
-      emit(s"  push_i64 $name")
+    case TFuncRef(name, typ) =>
+      // FuncType is a 16-byte aggregate {func_ptr, env_ptr}. Construct a
+      // descriptor on the memory stack pointing at a per-function shim that
+      // ignores env and forwards to `name`. Without the shim, an indirect
+      // call would push env_ptr as a hidden first arg that `name` does not
+      // accept.
+      val (paramTypes, retType) = typ match
+        case SyslType.FuncType(p, r, _) => (p, r)
+        case _ => (Nil, SyslType.VoidType)
+      val shim = shimNameFor(name)
+      if !emittedShims.contains(shim) then
+        emittedShims += shim
+        pendingShims += ((shim, name, paramTypes, retType))
+      emitMemAlloc(16)
+      emit("  dup")
+      emit(s"  push_i64 $shim")
+      emit("  swap")
+      emit("  store64")            // descr[0] = shim_ptr
+      emit("  dup")
+      emitPushInt(8)
+      emit("  add")
+      emit("  push_0")
+      emit("  swap")
+      emit("  store64")            // descr[8] = 0 (no env)
+
+    case c: TClosure =>
+      genClosureExpr(c)
 
     case TIndirectCall(callee, args, _) =>
-      // Call through a function pointer. No closure env support — the
-      // callee is treated as a plain function pointer (8 bytes, just an fn
-      // address). Captures are not supported here.
-      for a <- args do genExpr(a)
-      genExpr(callee) // leaves function pointer on TOS
-      emit("  callr")
+      // Closure-style indirect call: callee evaluates to a 16-byte descriptor
+      // address. We push env_ptr as a hidden first arg, then explicit args,
+      // then load the func_ptr and `callr`. Plain function pointers go through
+      // their per-function shim (constructed by TFuncRef) which ignores env.
+      callee.typ match
+        case _: SyslType.FuncType =>
+          genExpr(callee)               // descr_addr
+          val descrIdx = nextLocalIndex
+          nextLocalIndex += 1
+          emit(s"  local_set $descrIdx")
+          // Push env_ptr (hidden first arg)
+          emit(s"  local_get $descrIdx")
+          emitPushInt(8)
+          emit("  add")
+          emit("  load64")
+          // Push explicit args
+          for a <- args do genExpr(a)
+          // Push func_ptr and callr
+          emit(s"  local_get $descrIdx")
+          emit("  load64")
+          emit("  callr")
+        case _ =>
+          // Legacy/non-FuncType callee: treat as raw 8-byte function pointer.
+          for a <- args do genExpr(a)
+          genExpr(callee)
+          emit("  callr")
 
     case TLen(inner, _) =>
       inner.typ match
@@ -1837,7 +2083,8 @@ class SyslSVMCodegen:
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => emit("  store8")
     case SyslType.IntType(16) | SyslType.UIntType(16) => emit("  store16")
     case SyslType.IntType(32) | SyslType.UIntType(32) => emit("  store32")
-    case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType =>
+    case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType
+       | _: SyslType.FuncType =>
       // Inline aggregate: stack has ( src_addr dest_addr ). Copy EXACTLY sizeOf
       // bytes — never round up. Rounding up to 8 would overwrite the slot after
       // the dst element (e.g. for 12-byte structs in a tight slice, clobbering
@@ -1890,7 +2137,7 @@ class SyslSVMCodegen:
     // Inline aggregates are address-represented — the 'load' is a no-op,
     // leaving the field/slot address on the stack.
     case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType
-       | _: SyslType.SliceType | _: SyslType.ArrayType =>
+       | _: SyslType.SliceType | _: SyslType.ArrayType | _: SyslType.FuncType =>
       ()
     case _ => emit("  load64")
 
