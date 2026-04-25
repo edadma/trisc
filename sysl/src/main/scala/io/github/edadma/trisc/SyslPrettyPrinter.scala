@@ -34,7 +34,15 @@ object SyslPrettyPrinter:
     case PtrNonNullTypeAST(inner)   => s"*${typeToSource(inner)} not null"
     case ArrayTypeAST(size, elem)   => s"[$size]${typeToSource(elem)}"
     case SliceTypeAST(elem)         => s"[]${typeToSource(elem)}"
-    case FuncTypeAST(params, ret, esc) => s"${if esc then "@escaping " else ""}(${params.map(typeToSource).mkString(", ")}) -> ${typeToSource(ret)}"
+    case FuncTypeAST(params, ret, esc, eff) =>
+      val esca = if esc then "@escaping " else ""
+      val effS = if eff.isPure then " #pure"
+        else (eff.reads, eff.writes) match
+          case (Some(r), Some(w)) => s" #reads(${r.toList.sorted.mkString(", ")}) #writes(${w.toList.sorted.mkString(", ")})"
+          case (Some(r), None)    => s" #reads(${r.toList.sorted.mkString(", ")})"
+          case (None, Some(w))    => s" #writes(${w.toList.sorted.mkString(", ")})"
+          case _                  => ""
+      s"$esca(${params.map(typeToSource).mkString(", ")}) -> ${typeToSource(ret)}$effS"
     case TupleTypeAST(elems)        => s"(${elems.map(typeToSource).mkString(", ")})"
     case RefTypeAST(inner)          => s"&${typeToSource(inner)}"
 
@@ -105,7 +113,7 @@ object SyslPrettyPrinter:
   // --- Statements ---
 
   private def stmtToSource(s: StmtAST, depth: Int): String = s match
-    case VarStmtAST(name, typ, init, isMutable, _, isConst) =>
+    case VarStmtAST(name, typ, init, isMutable, _, isConst, _) =>
       val kw = if isConst then "const" else if isMutable then "var" else "val"
       val typStr = typ.map(t => s": ${typeToSource(t)}").getOrElse("")
       init match

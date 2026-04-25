@@ -190,8 +190,8 @@ class SyslParser extends StandardTokenParsers {
       }
 
   lazy val interfaceMember: Parser[Either[String, InterfaceMethodAST]] =
-    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ opt("->" ~> typeRef) ^^ {
-      case name ~ params ~ rt => Right(InterfaceMethodAST(name, params, rt.getOrElse(NamedTypeAST("void"))))
+    ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ opt("->" ~> typeRef) ~ funcTypeEffects ^^ {
+      case name ~ params ~ rt ~ eff => Right(InterfaceMethodAST(name, params, rt.getOrElse(NamedTypeAST("void")), eff))
     } |
     ident ^^ (name => Left(name))
 
@@ -323,7 +323,8 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val contractClause: Parser[ContractClauseAST] =
     "require" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => ContractClauseAST(ContractRequire, e, msg) } |
-    "ensure" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => ContractClauseAST(ContractEnsure, e, msg) }
+    "ensure" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => ContractClauseAST(ContractEnsure, e, msg) } |
+    "variant" ~> expr ^^ { case e => ContractClauseAST(ContractVariant, e, None) }
 
   /** A function block body: zero or more contract clauses at the top, followed by statements. */
   lazy val funBlockBody: Parser[BlockBodyAST] =
@@ -384,15 +385,43 @@ class SyslParser extends StandardTokenParsers {
       "&" ~> typeRef ^^ RefTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ SliceTypeAST.apply |
       "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t => ArrayTypeAST(n.toInt, t) } |
-      "@" ~> "escaping" ~> funcTypeRef ^^ { case FuncTypeAST(p, r, _) => FuncTypeAST(p, r, escaping = true); case t => t } |
+      "@" ~> "escaping" ~> funcTypeRef ^^ { case FuncTypeAST(p, r, _, eff) => FuncTypeAST(p, r, escaping = true, effects = eff); case t => t } |
       funcTypeRef |
       "(" ~> rep1sep(typeRef, ",") <~ ")" ^^ TupleTypeAST.apply |
       typeName
 
+  /** Optional effect suffix on a function type: `#pure`, or any combination of
+   *  `#reads(a, b)` / `#writes(c)` repeated. Distinguishes the three FuncEffects states
+   *  used in subset-check (caller-vs-callee) at every indirect call site:
+   *  - no suffix → Unknown (can only be called from unannotated callers)
+   *  - `#pure` → Pure (callable from any annotated caller)
+   *  - `#reads`/`#writes` → RW(reads, writes) (callable when subset of caller's effect set) */
+  lazy val funcTypeEffects: Parser[FuncEffects] =
+    rep("#" ~> ident ~ opt("(" ~> repsep(ident, ",") <~ ")")) ^^ { items =>
+      var isPure = false
+      var reads: Option[Set[String]] = None
+      var writes: Option[Set[String]] = None
+      for (name ~ args) <- items do
+        name match
+          case "pure" =>
+            if args.exists(_.nonEmpty) then throw new RuntimeException("#pure on a function type takes no arguments")
+            isPure = true
+          case "reads" =>
+            val r = args.getOrElse(Nil).toSet
+            reads = Some(reads.getOrElse(Set.empty) ++ r)
+          case "writes" =>
+            val w = args.getOrElse(Nil).toSet
+            writes = Some(writes.getOrElse(Set.empty) ++ w)
+          case other => throw new RuntimeException(s"unknown effect annotation '#$other' on function type")
+      if isPure && (reads.isDefined || writes.isDefined) then
+        throw new RuntimeException("#pure on a function type cannot be combined with #reads/#writes")
+      FuncEffects(isPure, reads, writes)
+    }
+
   lazy val funcTypeRef: Parser[TypeAST] =
-    // (int, int) -> int   or   () -> unit
-    "(" ~> repsep(typeRef, ",") ~ (")" ~> "->" ~> typeRef) ^^ {
-      case params ~ ret => FuncTypeAST(params, ret)
+    // (int, int) -> int #pure    or   () -> unit #reads(g) #writes(h)    or just (...) -> ...
+    "(" ~> repsep(typeRef, ",") ~ (")" ~> "->" ~> typeRef) ~ funcTypeEffects ^^ {
+      case params ~ ret ~ eff => FuncTypeAST(params, ret, effects = eff)
     }
 
   // Array type for uninitialized declarations: [5]int
@@ -423,7 +452,18 @@ class SyslParser extends StandardTokenParsers {
     "assume" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => AssumeStmtAST(e, msg) }
 
   lazy val stmt: Parser[StmtAST] =
-    asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    ghostVarStmt | asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+
+  /** `#ghost var/val name = ...` at statement position — a ghost local declaration. Only
+   *  accepts a plain var/val form (no `#address`, no `static_assert`, etc.). The resulting
+   *  `VarStmtAST` has `isGhost = true`; the analyzer and strip pass handle the rest. */
+  lazy val ghostVarStmt: Parser[StmtAST] =
+    "#" ~> ident ~ identStmt ^? ({
+      case "ghost" ~ (v: VarStmtAST) => v.copy(isGhost = true)
+    }, {
+      case "ghost" ~ other => s"#ghost at statement position must be followed by `var` or `val`, got $other"
+      case name ~ _ => s"unknown statement-level attribute '#$name'"
+    })
 
   lazy val destructureStmt: Parser[DestructureStmtAST] =
     mutability ~ ("(" ~> rep1sep(bindName, ",") <~ ")") ~ ("=" ~> tupleExpr) ^^ { case mut ~ names ~ init => DestructureStmtAST(names, init, mut.isMutable) } |

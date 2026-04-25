@@ -30,20 +30,47 @@ families / types, and any unknown command code, return
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
-    import oskit.services.{rs_ready, notify_read_self}
+    import oskit.services.{rs_ready, notify_read_self, svc_timer_subscribe, uptime}
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet,
         ETHERTYPE_IPV4, ETHERTYPE_ARP, ARP_OP_REQUEST, ARP_OP_REPLY,
-        IP_PROTO_ICMP, IP_PROTO_UDP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
+        IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
         pkt_read_u16, pkt_match_ipv4}
 
 
 Protocol command codes (byte value of buf[0]).
 
-    val INET_CMD_SOCKET   = 1
-    val INET_CMD_BIND     = 2
-    val INET_CMD_SENDTO   = 3
-    val INET_CMD_RECVFROM = 4
-    val INET_CMD_CLOSE    = 5
+    val INET_CMD_SOCKET       = 1
+    val INET_CMD_BIND         = 2
+    val INET_CMD_SENDTO       = 3
+    val INET_CMD_RECVFROM     = 4
+    val INET_CMD_CLOSE        = 5
+    val INET_CMD_TCP_CONNECT  = 10
+    val INET_CMD_TCP_SEND     = 11
+    val INET_CMD_TCP_RECV     = 12
+    val INET_CMD_TCP_CLOSE    = 13
+    val INET_CMD_TCP_LISTEN   = 14
+    val INET_CMD_TCP_ACCEPT   = 15
+    val INET_CMD_SET_IP_CONFIG = 16
+    val INET_CMD_GET_IP_CONFIG = 17
+    val INET_CMD_RECVFROM_TIMEOUT = 18
+    val INET_CMD_ARP_PROBE    = 19
+    val INET_CMD_TCP_DEBUG    = 20
+    val INET_CMD_TCP_OOO_SELFTEST = 99
+
+
+Sub-ops for INET_CMD_ARP_PROBE. A single command code fans out
+into three operations so RFC 5227 conflict detection can be
+driven from userspace:
+
+- `START` arms the probe state with a target IP.
+- `SEND` transmits one ARP probe (sender IP = 0.0.0.0).
+- `CHECK` returns whether any defending ARP was observed and
+  clears the probe state.
+
+    val ARP_PROBE_OP_START    = 0
+    val ARP_PROBE_OP_SEND     = 1
+    val ARP_PROBE_OP_CHECK    = 2
+    val ARP_PROBE_OP_ANNOUNCE = 3
 
 
 Capacity limits.
@@ -79,9 +106,52 @@ reserved for auto-bind, which isn't implemented yet).
         q_count: int
         pending_tid: int
         pending_maxlen: int
+        recv_deadline: int
 
     var inet_sockets: [32]InetSocket
     var inet_port = -1
+
+
+RFC 5227 ARP probe state. `arp_probe_target` is the IPv4
+address currently being probed (0 = no probe active).
+`arp_probe_seen` is set by the ARP RX path when any ARP
+request OR reply arrives whose sender IP matches
+`arp_probe_target` and whose sender MAC is not our own (NIC
+loopback guard per §2.1.1). The dhclient-side probe loop
+clears both fields via the CHECK op when the probe window
+ends.
+
+    var arp_probe_target: u32 = u32(0)
+    var arp_probe_seen:   int = 0
+
+
+Returns 1 if `frame` is an ARP packet whose sender IP matches
+the probe target AND whose sender MAC is not our own. Returns
+0 otherwise (including when no probe is active, when the
+target doesn't match, or when the frame came from our own MAC
+via NIC loopback). Used by the ARP RX path to flag defenders.
+
+    inet_arp_probe_matches(frame: *byte) -> int
+        if arp_probe_target == u32(0)
+            return 0
+        val sender_ip = ipv4(
+            int(frame[14 + 14]) & 0xff,
+            int(frame[14 + 15]) & 0xff,
+            int(frame[14 + 16]) & 0xff,
+            int(frame[14 + 17]) & 0xff)
+        if sender_ip != arp_probe_target
+            return 0
+        // Sender MAC lives at frame+14+8..13 (ARP SHA field).
+        // Compare against our own MAC to filter out NIC loopback.
+        var i = 0
+        var same = 1
+        while i < 6
+            if frame[14 + 8 + i] != inet_our_mac[i]
+                same = 0
+            i += 1
+        if same != 0
+            return 0
+        1
 
 
 ### Byte-buffer helpers
@@ -115,6 +185,7 @@ client can reach us.
         while i < INET_MAX_SOCKETS
             inet_sockets[i].in_use = 0
             inet_sockets[i].pending_tid = -1
+            inet_sockets[i].recv_deadline = 0
             i += 1
 
 
@@ -208,6 +279,7 @@ replies via IPC.
         val waiter = inet_sockets[fd].pending_tid
         val mlen = inet_sockets[fd].pending_maxlen
         inet_sockets[fd].pending_tid = -1
+        inet_sockets[fd].recv_deadline = 0
         var wr: [540]byte
         var deliver_len = dlen
         if deliver_len > mlen
@@ -291,6 +363,7 @@ waiter. `maxlen` caps how many payload bytes we hand back.
         inet_sockets[idx].q_tail = 0
         inet_sockets[idx].q_count = 0
         inet_sockets[idx].pending_tid = -1
+        inet_sockets[idx].recv_deadline = 0
         var reply: [2]byte
         reply[0] = 0
         reply[1] = byte(idx & 0xff)
@@ -464,6 +537,190 @@ programs; multi-waiter support is on the list.
         // No reply — deferred until a dgram arrives or close.
 
 
+### RECVFROM_TIMEOUT handler
+
+Same as RECVFROM but with a bounded wait. Request layout:
+`cmd(1) + fd(1) + maxlen(2) + timeout_ms(4)` = 8 bytes. The
+reply shape matches RECVFROM so callers can use the same parser.
+
+Status byte in the reply distinguishes outcomes:
+- `0` — data delivered
+- `1` — timed out (no datagram within `timeout_ms`)
+- `-1` — error
+
+`inet_udp_scan_timeouts()` in the server main loop replies with
+status=1 when `now >= recv_deadline`. The deadline is expressed
+in scheduler ticks (100 Hz → 10 ms each). We round timeout up so
+a `1 ms` request still fires on the next tick rather than
+possibly firing immediately.
+
+    inet_handle_recvfrom_timeout(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if inet_fd_valid(fd) == 0
+            var err: [10]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 10)
+            return
+        val maxlen_raw = inet_read_u16(buf, 2)
+        var maxlen = maxlen_raw
+        if maxlen > INET_MAX_DATA
+            maxlen = INET_MAX_DATA
+        val tms_hi = inet_read_u16(buf, 4)
+        val tms_lo = inet_read_u16(buf, 6)
+        val timeout_ms = (tms_hi << 16) | tms_lo
+        if inet_sockets[fd].q_count > 0
+            var reply: [540]byte
+            val n = inet_deliver_head(fd, maxlen, reply)
+            ipc_reply(sender, reply, n)
+            return
+        if inet_sockets[fd].pending_tid >= 0
+            var err: [10]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 10)
+            return
+        if timeout_ms <= 0
+            var tr: [10]byte
+            tr[0] = byte(1)
+            ipc_reply(sender, tr, 10)
+            return
+        val ticks = (timeout_ms + 9) / 10
+        inet_sockets[fd].pending_tid = sender
+        inet_sockets[fd].pending_maxlen = maxlen
+        inet_sockets[fd].recv_deadline = int(uptime()) + ticks
+        // No reply — deferred until a dgram arrives, timeout
+        // expires, or close.
+
+
+### TCP_DEBUG handler
+
+Expose internal congestion-control state for a TCP socket so
+the test harness can assert cwnd / ssthresh / recovery-state
+behaviour without having to reverse-engineer it from timing.
+Read-only — no state is mutated.
+
+```
+request: cmd(1) + fd(2)                 = 3 bytes
+reply:   status(1) + state(1)
+       + cwnd(4)          + ssthresh(4)
+       + snd_una(4)       + snd_nxt(4)
+       + snd_wnd(4)       + send_len(4)
+       + fast_recovery(4) + dup_ack_count(4)
+       + sack_ok(4)       + rexmit_count(4)     = 42 bytes
+```
+
+    inet_handle_tcp_debug(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        var reply: [42]byte
+        if fd < 0 || fd >= 16
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 42)
+            return
+        if tcp_sockets[fd].in_use == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 42)
+            return
+        reply[0] = 0
+        reply[1] = byte(tcp_sockets[fd].state & 0xff)
+        inet_dbg_write_i32(reply, 2,  tcp_sockets[fd].snd_cwnd)
+        inet_dbg_write_i32(reply, 6,  tcp_sockets[fd].snd_ssthresh)
+        inet_dbg_write_i32(reply, 10, int(tcp_sockets[fd].snd_una))
+        inet_dbg_write_i32(reply, 14, int(tcp_sockets[fd].snd_nxt))
+        inet_dbg_write_i32(reply, 18, tcp_sockets[fd].snd_wnd)
+        inet_dbg_write_i32(reply, 22, tcp_sockets[fd].send_len)
+        inet_dbg_write_i32(reply, 26, tcp_sockets[fd].fast_recovery)
+        inet_dbg_write_i32(reply, 30, tcp_sockets[fd].dup_ack_count)
+        inet_dbg_write_i32(reply, 34, tcp_sockets[fd].sack_ok)
+        inet_dbg_write_i32(reply, 38, tcp_sockets[fd].rexmit_count)
+        ipc_reply(sender, reply, 42)
+
+    inet_dbg_write_i32(p: *byte, off: int, v: int)
+        p[off]     = byte((v >> 24) & 0xff)
+        p[off + 1] = byte((v >> 16) & 0xff)
+        p[off + 2] = byte((v >>  8) & 0xff)
+        p[off + 3] = byte( v        & 0xff)
+
+
+### ARP probe handler
+
+Four-operation command driven by dhclient for RFC 5227
+conflict detection.
+
+```
+request: cmd(1) + op(1) + target_ip(4)   = 6 bytes
+reply:   status(1) + seen(1)             = 2 bytes
+```
+
+`seen` is meaningful only for `CHECK` and is 1 if any
+defender was observed since the preceding `START`.
+
+    inet_handle_arp_probe(sender: int, buf: *byte)
+        val op = int(buf[1]) & 0xff
+        val target_ip = ipv4(
+            int(buf[2]) & 0xff,
+            int(buf[3]) & 0xff,
+            int(buf[4]) & 0xff,
+            int(buf[5]) & 0xff)
+        var reply: [2]byte
+        reply[0] = 0
+        reply[1] = 0
+        if op == ARP_PROBE_OP_START
+            arp_probe_target = target_ip
+            arp_probe_seen = 0
+        else if op == ARP_PROBE_OP_SEND
+            val rc = inet_send_arp_probe(
+                ipv4_octet(target_ip, 0),
+                ipv4_octet(target_ip, 1),
+                ipv4_octet(target_ip, 2),
+                ipv4_octet(target_ip, 3))
+            if rc < 0
+                reply[0] = byte(-1)
+        else if op == ARP_PROBE_OP_CHECK
+            reply[1] = byte(arp_probe_seen & 0xff)
+            arp_probe_target = u32(0)
+            arp_probe_seen = 0
+        else if op == ARP_PROBE_OP_ANNOUNCE
+            val arc = inet_send_arp_announce(
+                ipv4_octet(target_ip, 0),
+                ipv4_octet(target_ip, 1),
+                ipv4_octet(target_ip, 2),
+                ipv4_octet(target_ip, 3))
+            if arc < 0
+                reply[0] = byte(-1)
+        else
+            reply[0] = byte(-1)
+        ipc_reply(sender, reply, 2)
+
+
+### UDP recv-timeout scanner
+
+Called from the inet main loop on every wake. Scans every
+socket with a pending recvfrom that has a non-zero deadline, and
+when the deadline has passed replies with status=1 (timeout). We
+clear the waiter before replying so a datagram arriving on the
+same tick doesn't wake the thread twice.
+
+Timer wakes happen every ~50 ms (`svc_timer_subscribe(5)` in
+inet_server), so worst-case overshoot on an idle port is one
+tick period. Good enough for DHCP-scale retransmits.
+
+    inet_udp_scan_timeouts()
+        val now = int(uptime())
+        var i = 0
+        while i < INET_MAX_SOCKETS
+            if inet_sockets[i].in_use != 0
+                if inet_sockets[i].pending_tid >= 0
+                    val dl = inet_sockets[i].recv_deadline
+                    if dl != 0
+                        if now >= dl
+                            val waiter = inet_sockets[i].pending_tid
+                            inet_sockets[i].pending_tid = -1
+                            inet_sockets[i].recv_deadline = 0
+                            var tr: [10]byte
+                            tr[0] = byte(1)
+                            ipc_reply(waiter, tr, 10)
+            i += 1
+
+
 ### CLOSE handler
 
 Closes the slot. If a recv was pending, reply with an error so
@@ -479,6 +736,7 @@ the caller doesn't block forever.
         if inet_sockets[fd].pending_tid >= 0
             val waiter = inet_sockets[fd].pending_tid
             inet_sockets[fd].pending_tid = -1
+            inet_sockets[fd].recv_deadline = 0
             var wr: [10]byte
             wr[0] = byte(-1)
             ipc_reply(waiter, wr, 10)
@@ -489,6 +747,199 @@ the caller doesn't block forever.
         inet_sockets[fd].q_tail = 0
         var reply: [1]byte
         reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### TCP command handlers
+
+All four commands are blocking: they do NOT reply before the
+wakeup condition is met. Handlers stash the caller tid in the
+per-socket waiter slot (connect_waiter / recv_waiter / close_waiter)
+and the state machine / timer scan delivers the reply later.
+SEND is the one exception — POSIX `write()` semantics mean it
+replies as soon as bytes land in the send buffer.
+
+Wire layout (all big-endian u16):
+- TCP_CONNECT: cmd(1), ip(4), port(2) -> status(1)
+- TCP_SEND: cmd(1), fd(2), len(2), data(len) -> status(1), written(2)
+- TCP_RECV: cmd(1), fd(2), maxlen(2) -> status(1), len(2), data(len); len=0 means EOF
+- TCP_CLOSE: cmd(1), fd(2) -> status(1)
+
+`fd` is a 16-bit raw socket index. First byte at offset 1 is the
+high byte (0), second (offset 2) is the low byte / index.
+
+    inet_read_u16_at(buf: *byte, off: int) -> int
+        inet_read_u16(buf, off)
+
+    inet_handle_tcp_connect(sender: int, buf: *byte)
+        val ip = inet_read_ipv4(buf, 1)
+        val port = inet_read_u16(buf, 5)
+        val s = inet_tcp_begin_connect(sender, sender, ip, port)
+        if s < 0
+            var err: [2]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            ipc_reply(sender, err, 2)
+            return
+        // Deferred reply — inet_tcp_state_step replies when ESTABLISHED.
+
+    inet_handle_tcp_send(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val dlen = inet_read_u16(buf, 3)
+        val data: *byte = buf + 5
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        if tcp_sockets[fd].in_use == 0
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        val n = inet_tcp_do_send(fd, data, dlen)
+        if n < 0
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        var reply: [3]byte
+        reply[0] = 0
+        inet_write_u16(reply, 1, n)
+        ipc_reply(sender, reply, 3)
+
+    inet_handle_tcp_recv(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val maxlen_raw = inet_read_u16(buf, 3)
+        var maxlen = maxlen_raw
+        if maxlen > 500
+            maxlen = 500
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        if tcp_sockets[fd].in_use == 0
+            var err: [3]byte
+            err[0] = byte(-1)
+            inet_write_u16(err, 1, 0)
+            ipc_reply(sender, err, 3)
+            return
+        tcp_sockets[fd].recv_waiter = sender
+        tcp_sockets[fd].recv_maxlen = maxlen
+        if tcp_sockets[fd].recv_len > 0
+            var give = tcp_sockets[fd].recv_len
+            if give > maxlen
+                give = maxlen
+            inet_tcp_reply_recv(fd, give)
+            return
+        if tcp_sockets[fd].peer_fin != 0
+            inet_tcp_reply_recv(fd, 0)
+            return
+        // Deferred reply — state step delivers when data arrives.
+
+    inet_handle_tcp_close(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        if tcp_sockets[fd].in_use == 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        val r = inet_tcp_do_close(fd, sender)
+        if r == 1
+            var reply: [1]byte
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
+        if r < 0
+            var err: [1]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 1)
+            return
+        // Deferred reply — state step delivers when FIN is acked.
+
+    inet_handle_tcp_listen(sender: int, buf: *byte)
+        val port = inet_read_u16(buf, 1)
+        val s = inet_tcp_begin_listen(sender, port)
+        var reply: [2]byte
+        if s < 0
+            reply[0] = byte(-1)
+            reply[1] = 0
+            ipc_reply(sender, reply, 2)
+            return
+        reply[0] = 0
+        reply[1] = byte(s & 0xff)
+        ipc_reply(sender, reply, 2)
+
+    inet_handle_tcp_accept(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            var err: [8]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 8)
+            return
+        val child = inet_tcp_do_accept(sender, fd)
+        if child == -2
+            var err: [8]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 8)
+            return
+        if child >= 0
+            inet_tcp_reply_accept(sender, 0, child)
+            return
+        // child == -1 → caller parked; state_step will reply once a
+        // SYN_RCVD child reaches ESTABLISHED.
+
+
+### inet_handle_set_ip_config
+
+Install a new (ip, mask, gw) triple via `inet_set_ip_config`. Used
+by the DHCP client once a lease is bound, and exposed as an IPC op
+so any userspace tool (ifconfig, tests) can drive it. Wire format:
+cmd(1) + ip(4) + mask(4) + gw(4) = 13 bytes in; 1 byte status out.
+
+    inet_handle_set_ip_config(sender: int, buf: *byte)
+        val ip = inet_read_ipv4(buf, 1)
+        val mask = inet_read_ipv4(buf, 5)
+        val gw = inet_read_ipv4(buf, 9)
+        inet_set_ip_config(ip, mask, gw)
+        var reply: [1]byte
+        reply[0] = byte(0)
+        ipc_reply(sender, reply, 1)
+
+
+### inet_handle_get_ip_config
+
+Return the current (ip, mask, gw). Reply: status(1) + ip(4) +
+mask(4) + gw(4) = 13 bytes. Payload-less request (just cmd).
+
+    inet_handle_get_ip_config(sender: int, buf: *byte)
+        var reply: [13]byte
+        reply[0] = byte(0)
+        inet_write_ipv4(reply, 1, inet_get_our_ip())
+        inet_write_ipv4(reply, 5, inet_get_mask())
+        inet_write_ipv4(reply, 9, inet_get_gw())
+        ipc_reply(sender, reply, 13)
+
+
+Test-only: drive inet_tcp_state_step through a deliberately out-of-
+order segment sequence against a scratch socket and verify the
+reorder queue yields the right rcv_nxt / recv_buf contents. Reply
+is 1 byte: 0 on pass, nonzero error code on failure.
+
+    inet_handle_tcp_ooo_selftest(sender: int, buf: *byte)
+        val rc = inet_tcp_ooo_selftest()
+        var reply: [1]byte
+        reply[0] = byte(rc & 0xff)
         ipc_reply(sender, reply, 1)
 
 
@@ -513,7 +964,10 @@ Dropping on no-match matches standard UDP semantics.
         val payload_len = udp_len - 8
         val data: *byte = frame + udp_off + 8
         val src_ip = ipv4(int(frame[14 + 12]) & 0xff, int(frame[14 + 13]) & 0xff, int(frame[14 + 14]) & 0xff, int(frame[14 + 15]) & 0xff)
-        val dst_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        // Read dst from the wire rather than hardcoding our own IP:
+        // broadcast UDP (DHCP OFFER/ACK) arrives with dst=255.255.255.255
+        // and the checksum must pseudo-header it accordingly.
+        val dst_ip = ipv4(int(frame[14 + 16]) & 0xff, int(frame[14 + 17]) & 0xff, int(frame[14 + 18]) & 0xff, int(frame[14 + 19]) & 0xff)
         if inet_udp_verify(src_ip, dst_ip, frame, udp_off, udp_len) == 0
             return
         val target = inet_find_bound_port(dst_port)
@@ -541,16 +995,39 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
             if len < 14 + 28
                 return 0
             val op = pkt_read_u16(frame, 14 + 6)
+            // ARP probe conflict detection (RFC 5227 §2.1.1).
+            // Every ARP frame whose sender IP matches the address
+            // being probed counts as a defender — *unless* its
+            // sender MAC matches ours, in which case it's our own
+            // probe looped back through the NIC. We watch both
+            // REQUEST and REPLY since a defender can use either.
+            if inet_arp_probe_matches(frame) != 0
+                arp_probe_seen = 1
             if op == ARP_OP_REQUEST
                 if pkt_match_ipv4(frame, 14 + 24, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D) == 0
                     return 0
                 inet_send_arp_reply(frame)
                 return 1
             if op == ARP_OP_REPLY
+                // Cache (sender IP, sender MAC) for any reply — the
+                // payer stack wants to know anyone who answered, not
+                // just the gateway. ARP frame layout:
+                //   14..19 HTYPE/PTYPE/HLEN/PLEN
+                //   20..21 OPER
+                //   22..27 SHA (sender MAC)   <- frame + 14 + 8
+                //   28..31 SPA (sender IPv4)  <- frame + 14 + 14
+                val sender_ip = ipv4(
+                    int(frame[14 + 14]) & 0xff,
+                    int(frame[14 + 15]) & 0xff,
+                    int(frame[14 + 16]) & 0xff,
+                    int(frame[14 + 17]) & 0xff)
+                inet_arp_insert(sender_ip, frame + 14 + 8)
+                // Keep the boot-demo ICMP echo on the first gateway
+                // reply so the existing pcap regression still shows
+                // the full ARP → ICMP round-trip.
                 if pkt_match_ipv4(frame, 14 + 14, INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D) != 0
-                    inet_cache_gw_mac(frame + 14 + 8)
                     inet_send_icmp_echo(0x1234, 1)
-                    return 1
+                return 1
             return 0
         if etype == ETHERTYPE_IPV4
             if len < 14 + 20
@@ -558,8 +1035,16 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
             val ihl_bytes = (int(frame[14]) & 0x0f) * 4
             if ihl_bytes < 20
                 return 0
-            if pkt_match_ipv4(frame, 14 + 16, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D) == 0
-                return 0
+            // Accept unicast to us OR the limited-broadcast
+            // 255.255.255.255. The broadcast allowance lets DHCP
+            // OFFER/ACK through pre-lease (we have no IP yet at
+            // DISCOVER time, so the server replies by broadcast
+            // per RFC 2131 §4.1).
+            val is_unicast = pkt_match_ipv4(frame, 14 + 16, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+            val is_bcast = pkt_match_ipv4(frame, 14 + 16, 255, 255, 255, 255)
+            if is_unicast == 0
+                if is_bcast == 0
+                    return 0
             val proto = int(frame[14 + 9]) & 0xff
             if proto == IP_PROTO_ICMP
                 val icmp_off = 14 + ihl_bytes
@@ -575,6 +1060,9 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
                 return 0
             if proto == IP_PROTO_UDP
                 inet_handle_udp(frame, len, ihl_bytes)
+                return 1
+            if proto == IP_PROTO_TCP
+                inet_tcp_handle_segment(frame, len, ihl_bytes)
                 return 1
             return 0
         0
@@ -633,32 +1121,47 @@ silently skip link-layer setup and still serve UDP loopback.
 
     inet_server()
         inet_init_sockets()
+        inet_tcp_init()
         inet_port = port_create()
         port_register(inet_port, "inet")
         rs_ready()
 
         inet_link_init()
 
+        // Periodic wakeup for TCP retransmit / TIME_WAIT scans.
+        // 5 ticks ≈ 50 ms on a 100 Hz scheduler timer.
+        svc_timer_subscribe(5)
+
         var buf: [540]byte
         while 1 == 1
             val r = ipc_recv_notify(inet_port, buf, INET_MSG_BUF)
+            inet_tcp_scan_timers()
+            inet_udp_scan_timeouts()
             if r == -2
                 notify_read_self()
                 inet_drain_rx()
             else if r >= 0
                 val sender = r
                 val cmd = int(buf[0]) & 0xff
-                if cmd == INET_CMD_SOCKET
-                    inet_handle_socket(sender, buf)
-                else if cmd == INET_CMD_BIND
-                    inet_handle_bind(sender, buf)
-                else if cmd == INET_CMD_SENDTO
-                    inet_handle_sendto(sender, buf)
-                else if cmd == INET_CMD_RECVFROM
-                    inet_handle_recvfrom(sender, buf)
-                else if cmd == INET_CMD_CLOSE
-                    inet_handle_close(sender, buf)
-                else
-                    var reply: [1]byte
-                    reply[0] = byte(-1)
-                    ipc_reply(sender, reply, 1)
+                cmd match
+                    INET_CMD_SOCKET      -> inet_handle_socket(sender, buf)
+                    INET_CMD_BIND        -> inet_handle_bind(sender, buf)
+                    INET_CMD_SENDTO      -> inet_handle_sendto(sender, buf)
+                    INET_CMD_RECVFROM    -> inet_handle_recvfrom(sender, buf)
+                    INET_CMD_RECVFROM_TIMEOUT -> inet_handle_recvfrom_timeout(sender, buf)
+                    INET_CMD_CLOSE       -> inet_handle_close(sender, buf)
+                    INET_CMD_TCP_CONNECT -> inet_handle_tcp_connect(sender, buf)
+                    INET_CMD_TCP_SEND    -> inet_handle_tcp_send(sender, buf)
+                    INET_CMD_TCP_RECV    -> inet_handle_tcp_recv(sender, buf)
+                    INET_CMD_TCP_CLOSE   -> inet_handle_tcp_close(sender, buf)
+                    INET_CMD_TCP_LISTEN  -> inet_handle_tcp_listen(sender, buf)
+                    INET_CMD_TCP_ACCEPT  -> inet_handle_tcp_accept(sender, buf)
+                    INET_CMD_SET_IP_CONFIG -> inet_handle_set_ip_config(sender, buf)
+                    INET_CMD_GET_IP_CONFIG -> inet_handle_get_ip_config(sender, buf)
+                    INET_CMD_ARP_PROBE   -> inet_handle_arp_probe(sender, buf)
+                    INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
+                    INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
+                    else ->
+                        var reply: [1]byte
+                        reply[0] = byte(-1)
+                        ipc_reply(sender, reply, 1)

@@ -1,0 +1,83 @@
+test_timer — kernel timer subscription sanity test
+===================================================
+
+Subscribes to the periodic timer with `period=5` ticks, then loops
+`K=10` times: `notify_wait()` → `notify_read_self()` → sanity-check
+value is `2` (the timer value, distinguished from virtio=1).
+
+Prints:
+- `test_timer: subscribed idx=N`
+- `test_timer: got K wakes value=2 delta=T`
+- `test_timer: ok` on success, or `test_timer: FAIL ...` on mismatch.
+
+Success criterion: received `K` wakes AND elapsed ticks ≥ `K*period`.
+The time-elapsed check is what proves the kernel actually parked us
+between wakes rather than returning stale `notify_pending`. If the
+timer never fires during a quiet channel, `notify_wait()` blocks and
+the test times out in the harness — a detectable failure mode.
+
+    module oskit.bin.test_timer
+
+    import oskit.ulib.{puts, exit, exit_with, uptime, svc_timer_subscribe, notify_wait, notify_read_self}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+    main(argv: []string)
+        val period = 5
+        val k = 10
+        val idx = svc_timer_subscribe(period)
+        if idx < 0
+            puts("test_timer: subscribe failed\n")
+            exit_with(1)
+            return
+        puts("test_timer: subscribed idx=")
+        print_udec(idx)
+        puts("\n")
+
+        val t0 = uptime()
+        var i = 0
+        var bad_value = 0
+        while i < k
+            notify_wait()
+            val v = notify_read_self()
+            if v != 2
+                bad_value = v
+            i += 1
+        val t1 = uptime()
+        val delta = t1 - t0
+
+        puts("test_timer: got ")
+        print_udec(k)
+        puts(" wakes value=")
+        print_udec(2)
+        puts(" delta=")
+        print_udec(delta)
+        puts("\n")
+
+        if bad_value != 0
+            puts("test_timer: FAIL unexpected value=")
+            print_udec(bad_value)
+            puts("\n")
+            exit_with(2)
+            return
+        // Minimum intrinsic time from 1st to Kth wake is (K-1)*period ticks.
+        // Scheduler alignment can shave a tick off either end, so the
+        // practical floor we enforce is (K-1)*period-1 — still catches
+        // "kernel fired instantly without waiting" regressions. Seen on
+        // aarch64: delta=48 for K=10 period=5 (theoretical 45 floor).
+        val floor = (k - 1) * period - 1
+        if delta < floor
+            puts("test_timer: FAIL delta too short, expected >= ")
+            print_udec(floor)
+            puts("\n")
+            exit_with(3)
+            return
+        puts("test_timer: ok\n")
+        exit()

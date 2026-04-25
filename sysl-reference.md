@@ -664,6 +664,52 @@ binsearch(a: *int, n: int, target: int) -> int
   codegen time with a clear "not yet supported" message — use `--no-contracts` to strip
   quantifiers (along with the surrounding contract) when targeting TRISC.
 
+**Function-level `variant <expr>` — recursion termination witness.** A SPARK-style
+`Subprogram_Variant` clause: declares an integer expression that strictly decreases at
+every direct recursive call. Used by a future verifier to discharge termination obligations
+on recursive functions, and at runtime as a guard against unbounded recursion.
+
+```sysl
+fact(n: int) -> int
+    variant n
+    if n <= 1 then return 1
+    return n * fact(n - 1)
+
+gcd(a: int, b: int) -> int
+    variant b
+    if b == 0 then return a
+    return gcd(b, a % b)
+```
+
+- The expression must be integral; it is cast to `i64` for the snapshot.
+- Snapshotted at function entry into a hidden local `__variant_entry__`.
+- At every **direct recursive call** (a TCall to the enclosing function), the variant is
+  re-evaluated with the call's arguments substituted for the function's parameters; the
+  result must be strictly less than the entry snapshot AND ≥ 0. Failure traps with
+  `"<fn> variant decreased fail"`.
+- Lives at the contract-clause position alongside `require` / `ensure` (must precede the
+  first regular statement). At most one `variant` per function.
+- **Mutual recursion** (a calls b, b calls a, both annotated): each function's variant
+  catches only its own direct self-calls at runtime, so a mutual-recursion divergence
+  *would* slip past the runtime check. A future verifier sees the obligation across calls.
+- Stripped under `--no-contracts` — neither the snapshot nor the per-call check is emitted.
+
+```sysl
+// Variant alongside other contracts. Standard pattern.
+fact(n: int) -> int
+    require n >= 0
+    variant n
+    ensure result >= 1
+    if n <= 1 then return 1
+    return n * fact(n - 1)
+```
+
+Lowering: each recursive call `f(args)` is rewritten to a TIfExpr whose body binds the
+args to fresh temps (so each is evaluated exactly once), computes the substituted variant,
+asserts the decrease, and then performs the actual call. Because TIfExpr's last expression
+is its value, the wrapper is transparent to the surrounding expression — `n * fact(n - 1)`
+keeps its meaning.
+
 ### Default Parameter Values
 
 Parameters can have default values, given with `= expr` after the type. Any
@@ -2285,6 +2331,136 @@ fact(n: int) -> int
 **Interaction with `--no-contracts`:** `#pure` checking is not a contract — it is a static enforcement and always runs. Only the runtime verification that contracts describe is elided by `--no-contracts`.
 
 Future work: allow `#pure` calls inside `const` initializers and as default-parameter expressions, so that `const TABLE = build_table(16)` becomes legal at compile time.
+
+### `#reads(...)` / `#writes(...)` — declare module-level effects
+
+A looser sibling of `#pure`. The two attributes declare which module-level (file-scope or imported) mutable variables a function may read or write. They are the Sysl equivalent of SPARK's `Global => (Input => ..., Output => ..., In_Out => ...)` aspect, and are the static foundation a future verifier (Why3 / Boogie) needs to do sound weakest-precondition reasoning across function calls.
+
+```
+var config_root: int = 0
+var io_buffer: [256]byte
+var io_pos = 0i32
+
+#reads(config_root)
+get_max_threads() -> int = config_root
+
+#reads(io_buffer)
+#writes(io_pos)
+write_byte(b: byte)
+    io_buffer[io_pos] = b
+    io_pos += 1
+
+#reads()
+#writes()
+double(x: int) -> int = x * 2     // no module state; allocation/IO still allowed
+```
+
+**Syntax.** Each attribute goes on its own line above the declaration (matching `#pure` / `#deprecated` style). Either may be omitted; absence-of-both keeps the function in the unannotated default — see "Strict closure" below. Identifiers must resolve to module-level mutable `var`s (or `#address(N)` MMIO vars). `val`s and `const`s are immutable and cannot appear; pass them around freely without declaring an effect.
+
+**The three rules the compiler enforces:**
+
+1. **Body conformance.** In a function with `#reads(R)` and `#writes(W)`:
+   - Every read of a module-level var V requires V ∈ R ∪ W.
+   - Every write to a module-level var V requires V ∈ W.
+   - Reads inside `require` / `ensure` / `invariant` / `assume` / `variant` clauses, and inside `for all` / `for some` predicates, count as reads.
+2. **Call-site subset.** A call to a function with `#reads(R')` `#writes(W')` requires R' ⊆ R ∪ W and W' ⊆ W. The compiler computes both subsets at the call site and reports the offending variable name on mismatch.
+3. **Strict closure.** An annotated function may only call other annotated functions (or `#pure` functions, which count as `#reads() #writes()`) and the pure builtins. Indirect calls, interface dispatch, `new`, `asm`, and unannotated functions are rejected. The intent is leaves-up adoption: annotate the bottom of the call graph first, then work upward.
+
+**Relationship to `#pure`.** `#pure` keeps its existing stricter discipline — no allocation, no I/O, no indirect calls, no closure construction — and is shorthand for `#reads() #writes()` plus those extra bans. Combining `#pure` with explicit `#reads`/`#writes` is rejected as redundant.
+
+**Compound assignment.** `counter += n` is a read-then-write of `counter`. By Rule 1, the implicit read is permitted whenever `counter` is in `#reads ∪ #writes`, so declaring `#writes(counter)` alone is sufficient. (SPARK's stricter `Output` vs `In_Out` distinction is deliberately not modeled in v1.)
+
+**Indirect calls and interfaces.** Function-pointer types and interface types do not yet carry effect annotations, so they have no callable bound on what they touch. Calls through them inside an annotated function are rejected for v1. v2 will lift this once `FuncType` / `InterfaceType` grow optional effect signatures.
+
+**Allocation.** `new`, `new []T`, slice `append`, and closure construction are all rejected from annotated function bodies. Allocation is an effect that the v1 model does not track; a future `#allocates(...)` attribute will handle it.
+
+**Adoption strategy.** Add annotations from the leaves upward. Existing code is untouched (no annotations means "effects unknown" — exactly today's behavior, with no new restrictions). The first time you mark a leaf function `#reads() #writes()`, every annotated caller must follow suit; this is the point — it propagates the discipline up to the surfaces of your program at your own pace.
+
+### Effect signatures on function types and interface methods
+
+`#pure`, `#reads(...)`, and `#writes(...)` are also accepted as a suffix on function types and on interface methods, so callbacks and interface-dispatched code can participate in the same effect tracking as direct calls.
+
+```
+sort(arr: &[]int, cmp: (int, int) -> bool #pure)   // pure comparator
+
+interface Sink
+    push(x: int) #writes(buffer)                    // writes one global
+
+#writes(buffer)
+drain(s: Sink, arr: []int)
+    for i in 0..<len(arr) do s.push(arr[i])         // allowed — iface effect is a subset
+```
+
+**Rules at an indirect-call site.** Calling through a function-typed value `f` from a function with `#reads(R)` `#writes(W)` requires `f`'s effect signature to be one of:
+
+- `#pure` — always allowed (no module effects).
+- `#reads(Rf)` / `#writes(Wf)` — allowed iff `Rf ⊆ R ∪ W` and `Wf ⊆ W`.
+- *No signature* — **rejected**: the compiler cannot prove the call stays within the caller's declared effects.
+
+Taking a function reference (`&fn_name`) carries the function's declared effects into the produced `FuncType`. `#pure` functions yield a pure-typed function pointer; `#reads(...)`/`#writes(...)` functions yield the corresponding `RW` type; unannotated functions yield an Unknown type and can only be invoked from unannotated callers.
+
+**Rules at a boxing site.** Assigning a value of struct type `S` to a slot of interface type `I` requires every `I`-declared method's effect signature to be satisfied by the corresponding `S` method. "Satisfied" means the impl's effects are no wider than the interface declares — `#pure` impls satisfy any slot, and `#reads(Rs)` / `#writes(Ws)` impls satisfy `#reads(Ri)` / `#writes(Wi)` iff `Rs ⊆ Ri` and `Ws ⊆ Wi`. Concrete calls that violate this fail at boxing time, not at dispatch.
+
+**Rules at an interface dispatch site.** Dispatching `iface.method(...)` from an annotated function uses the interface method's *declared* effects — not the impl's — for the subset check. This means the caller's static check is unaffected by which impl is currently boxed, matching the modular-reasoning discipline every verifier expects.
+
+**Cross-module.** Effect signatures round-trip through `.smeta`, so `&imported_pure_fn` in a dependent unit produces the same effect-typed reference as `&local_pure_fn`.
+
+**Closure effect inference.** Lambda expressions synthesize a `FuncType` whose effects are inferred from the closure body. The inference walks the typed body and produces one of three outcomes:
+
+- **`#pure`** — no module-level reads/writes, no allocation, no impure calls, no writes to captured outer locals.
+- **`#reads(R)` / `#writes(W)`** — specific module-level mutable globals were read or written, and every called function is itself annotated so its effects can be absorbed into the closure's signature. Reads/writes are unioned with the called functions' declared sets.
+- **`Unknown`** — the body contains an un-summarizable construct (`new`, `append`, asm, an unannotated impure call, an indirect call through an Unknown-typed callable, or a write to a captured outer local). Such closures can only be passed to unannotated callback slots.
+
+```
+sort(arr, (a: int, b: int) -> a < b)            // pure → fits any #pure slot
+find(arr, (v: int) -> v > threshold)            // reads `threshold` → fits #reads(threshold) slot
+each(arr, (v: int) -> count = count + v)        // writes `count` → fits #writes(count) slot
+```
+
+Reads of captured outer locals don't contribute to the inferred sets — captures are opaque dataflow dependencies, not module-level effects. Writes through captures, by contrast, force the inference to `Unknown` (you can't summarize a write to an arbitrary outer-scope local as a fixed set of global names).
+
+When a closure is passed to a callback slot, the slot's declared effects are checked against the inferred ones via the same subset rule used everywhere else: closure effects must be a subset of the slot's `#reads ∪ #writes` for reads, and a subset of the slot's `#writes` for writes.
+
+### `#ghost` — verification-only declarations
+
+A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost. Three places `#ghost` may appear:
+
+```
+#ghost
+var seen_count: int = 0          // module-level ghost var
+
+#ghost
+is_sorted(s: &[]int) -> bool     // module-level ghost fn — body free to read real state
+    for i in 0..<len(s)-1 do
+        if s[i] > s[i+1] then return false
+    return true
+
+sort(s: &[]int)
+    require true
+    ensure is_sorted(s)
+    #ghost var input_len = len(s)  // ghost local — captured for use in `ensure`
+    ensure len(s) == input_len
+    ...
+```
+
+**The discipline.** The compiler enforces two rules:
+
+1. **Real code cannot read ghost state.** Reading a `#ghost` variable, or calling a `#ghost` function, from real (non-ghost, non-contract) code is a static error. Ghost state has no runtime existence to read; the rule prevents accidental dependence.
+2. **Ghost code cannot write real state.** A `#ghost` function may not assign to a non-ghost module-level var (writes to its own locals are fine — they're scoped to the function). This keeps the runtime behaviour independent of whether ghost code is present.
+
+Contract clauses (`require` / `ensure` / `invariant` / `variant` / `assume` / `for all` / `for some` predicates) sit in *contract context* and may freely read both real and ghost state — that's the whole point of ghost code. The same is true for ghost var initializers, ghost-target assignment RHSes, and ghost function bodies.
+
+**The strip pass.** After analysis, the compiler removes every ghost declaration before codegen. Ghost vars produce no storage; ghost functions emit no code. Inside real-function bodies it also drops:
+
+- Statements that declare a ghost local (`#ghost var x = ...`).
+- Plain or compound assignments to a ghost name (real-code assignments to ghost are implicitly ghost statements).
+- Any `require` / `ensure` / `invariant` / `assume` clause whose expression touches a ghost name or calls a ghost function. The whole clause is dropped — there's no fallback runtime check that just covers "the real part."
+
+The runtime sees a program identical to one written without `#ghost` at all. The verifier sees the full ghost-aware AST.
+
+**Interaction with other attributes.** `#ghost` is mutually exclusive with `#pure`, `#reads(...)`, `#writes(...)` (ghost code doesn't run, so its runtime effects are irrelevant), `#address(N)` (ghost vars have no storage), and `const` (constants are inlined, not stored).
+
+**v1 limitations.** Ghost parameters, ghost struct fields, and ghost return values are not yet supported; for now, model them by lifting the relevant state into a module-level `#ghost var`. Ghost code may not yet be referenced through function pointers or interface dispatch (the strip pass would have to descend into indirect-call targets).
 
 ### `#deprecated` — warn on use
 

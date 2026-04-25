@@ -15,7 +15,8 @@ x86-specific only because it talks to the COM1 UART via
 
     module oskit.drivers.virtio
 
-    import oskit.arch.x86_64.{uart_puts, uart_putc}
+    import oskit.arch.x86_64.{uart_puts, uart_putc, pci_read8, virtio_irq_wire}
+    import oskit.kernel.virtio_pci_info_set
 
 
 Render `v` as two hex nibbles (no 0x prefix) to the UART.
@@ -42,29 +43,30 @@ One-nibble renderer for the fail-code.
             uart_putc(int('a') + v - 10)
 
 
-Probe + init virtio-net. On failure, log a small numeric code
-from `virtio_net_last_fail` (1=not found, 2=no VERSION_1,
-3=FEATURES_OK rejected, 4=RX queue setup, 5=TX queue setup).
-On success, log the negotiated MAC.
+Probe virtio-net and cache the BAR/cap addresses in the kernel
+so the nic server (boot module) can fetch them via
+`svc_virtio_pci_info` and `v_attach_pci(...)` without ring-0 PCI
+config-space access of its own.
 
-Must run before any networking code depends on `virtio_net_send`
-/ `virtio_net_recv`.
+Does NOT init the device — that happens in the nic server's own
+address space, so the server's copy of the transport module-level
+vars (`vpci_common`, `vpci_notify`, …) is the one that drives the
+ring programming. Running `virtio_net_init` here would leave the
+device in DRIVER_OK under the kernel's vpci_* state, and the
+server would then re-init on top, tearing down the first bring-up.
+
+Logs a one-line MAC-agnostic probe result. `virtio_net_last_fail`
+remains reserved for the server-side init failure.
 
     virtio_net_bringup()
-        if virtio_net_init() == 0
-            uart_puts("virtio-net: init failed, code=")
-            vb_put_nibble(virtio_net_last_fail())
-            uart_puts("\n")
+        if v_find(VIRTIO_DEV_NET) == 0
+            uart_puts("virtio-net: probe failed (no device)\n")
             return
-        var mac: [6]byte
-        if virtio_net_get_mac(mac) != 0
-            uart_puts("virtio-net: MAC=")
-            var i = 0
-            while i < 6
-                vb_put_byte_hex(int(mac[i]) & 0xff)
-                if i < 5
-                    uart_putc(int(':'))
-                i += 1
-            uart_puts("\n")
-        else
-            uart_puts("virtio-net: no MAC configured\n")
+        virtio_pci_info_set(
+            vpci_common, vpci_notify, vpci_notify_mult,
+            vpci_isr, vpci_device)
+        val irq_line = pci_read8(vpci_bdf, 0x3C) & 0xff
+        virtio_irq_wire(irq_line)
+        uart_puts("virtio-net: probe ok (caps cached, IRQ=")
+        vb_put_byte_hex(irq_line)
+        uart_puts(")\n")

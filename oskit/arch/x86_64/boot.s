@@ -775,6 +775,57 @@ serial_isr_entry:
     iretq
 
 # ============================================================================
+# Virtio ISR — virtio-pci INTx (vector 32 + irq_line, typically 43 for IRQ 11)
+# ============================================================================
+# Dispatches to the sysl handler which reads the device ISR register
+# (which acks the device-side interrupt) and wakes virtio_notify_tid.
+# EOI goes to both PICs (slave first, then master) because virtio IRQs
+# >= 8 route through the cascade.
+
+.global virtio_isr_entry
+virtio_isr_entry:
+    cli
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+
+    call oskit_arch_x86_64__virtio_handler
+
+    # EOI: slave first (IRQ 8..15), then master (IRQ 2 cascade ack)
+    movb $0x20, %al
+    outb %al, $PIC2_CMD
+    outb %al, $PIC1_CMD
+
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    iretq
+
+# ============================================================================
 # Exception stubs
 # ============================================================================
 

@@ -53,10 +53,10 @@ Commands:
 Block I/O bridge: provides the rd_read/rd_write that the TFS
 library externs expect, forwarding to the disk server via IPC.
 
-    rd_read(lba: int, addr: *byte)
+    rd_read(lba: int, addr: *byte) -> int
         disk_read(lba, addr)
 
-    rd_write(lba: int, addr: *byte)
+    rd_write(lba: int, addr: *byte) -> int
         disk_write(lba, addr)
 
 Big-endian message helpers (local to this server).

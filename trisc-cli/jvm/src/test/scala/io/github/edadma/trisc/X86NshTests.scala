@@ -262,10 +262,125 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
 
   "x86 inet: UDP loopback via test_net" in {
     // test_net opens a UDP socket on 127.0.0.1:5000, sends "hello"
-    // to itself, and prints what recvfrom returned.
+    // to itself, and prints what recvfrom returned. Phase 2 also
+    // exercises real-wire sendto without an explicit bind so the
+    // `wire sent=5` line covers inet's auto-bind path via the
+    // isolated nic server.
     val output = qemu.command("test_net")
     output should include("sent=5")
     output should include("recv=5 'hello'")
+    output should include("wire sent=5")
+  }
+
+  "x86 async RX: unsolicited UDP reaches recvfrom via virtio IRQ" in {
+    // test_udp_echo binds :7777, blocks in recvfrom. The harness's
+    // netdev forwards host localhost:17777 → guest:7777. Sending a
+    // datagram from Scala arrives at the guest unsolicited, travels
+    // through the virtio-pci INTx path (PIC IRQ → virtio_handler →
+    // nic → inet → deferred recvfrom reply), and test_udp_echo
+    // prints the payload. Without the IRQ path, recvfrom would
+    // block forever.
+    qemu.send("test_udp_echo\n")
+    qemu.waitFor("listening on :7777")
+
+    val sock = new java.net.DatagramSocket()
+    try
+      val payload = "ping!".getBytes("UTF-8")
+      val addr = java.net.InetAddress.getByName("127.0.0.1")
+      sock.send(new java.net.DatagramPacket(payload, payload.length, addr, 17777))
+    finally sock.close()
+
+    val output = qemu.waitFor("'ping!'")
+    output should include("test_udp_echo: got 5 from ")
+    output should include("'ping!'")
+  }
+
+  "x86 timer: subscribe fires expected count in N ticks" in {
+    // test_timer subscribes to a period=5 timer and waits for 10
+    // notifications. Proves svc_timer_subscribe fires reliably
+    // during a quiet channel — required before phase-2 can trust
+    // the timer path with real TIME_WAIT parking.
+    qemu.send("test_timer\n")
+    val output = qemu.waitFor("test_timer: ok")
+    output should include("test_timer: subscribed idx=")
+    output should include("test_timer: got 10 wakes value=2 delta=")
+    output should include("test_timer: ok")
+    output should not include "test_timer: FAIL"
+  }
+
+  "x86 tcp: connect, send, receive echo, close" in {
+    // Host-side TCP echo server on 127.0.0.1:18080. QEMU's
+    // user-mode networking routes guest dials of 10.0.2.2:18080
+    // to the host's matching port, so no hostfwd is needed for
+    // outbound. test_tcp sends "ping\n", expects it echoed
+    // back, then closes.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+
+    val echoThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](64)
+          val n = in.read(buf)
+          if n > 0 then
+            out.write(buf, 0, n)
+            out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-echo-server")
+    echoThread.setDaemon(true)
+    echoThread.start()
+
+    try
+      qemu.send("test_tcp\n")
+      val output = qemu.waitFor("test_tcp: closed")
+      output should include("test_tcp: connected fd=")
+      output should include("test_tcp: sent=5")
+      output should include("test_tcp: got 5 'ping")
+      output should include("test_tcp: closed")
+    finally
+      server.close()
+      echoThread.join(2000)
+  }
+
+  // RST-on-unsolicited-SYN is implemented in inet_proto.lsysl but
+  // can't be validated through QEMU's user-mode slirp (see the
+  // mirrored note in Aarch64NshTests). Needs tap networking or a
+  // guest-side pcap to assert the outbound RST frame.
+
+  "x86 tcp: passive open, accept, echo, close" in {
+    // test_tcp_srv listens on :7890. QEMU's hostfwd=tcp::28080-:7890
+    // routes host dials of 127.0.0.1:28080 into the guest. Send
+    // "ping\n", receive echo, close cleanly.
+    qemu.send("test_tcp_srv\n")
+    qemu.waitFor("test_tcp_srv: listening fd=")
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(10000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write("ping\n".getBytes("UTF-8"))
+      out.flush()
+      val buf = new Array[Byte](32)
+      val n = in.read(buf)
+      n should be > 0
+      new String(buf, 0, n, "UTF-8") should include("ping")
+    finally sock.close()
+
+    val output = qemu.waitFor("test_tcp_srv: closed")
+    output should include("test_tcp_srv: accepted cfd=")
+    output should include("test_tcp_srv: got ")
+    output should include("test_tcp_srv: sent=")
+    output should include("test_tcp_srv: closed")
   }
 
   "x86 crash recovery: kill tfs and restart" in {

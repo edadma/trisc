@@ -74,3 +74,18 @@ void exit(int status) {
 }
 
 void abort(void) { exit(-1); }
+
+/* I/O port externs used by pci.lsysl. The nic server links
+ * virtio_transport_pci for v_attach_pci but never calls v_find
+ * (kernel does the probe at boot, server just takes the cached
+ * cap addresses), so these are unreachable in practice — but the
+ * linker still resolves them. Ring 3 code can't do port I/O
+ * anyway, so abort loudly if something does call through.
+ */
+unsigned char inb(int port) { (void)port; abort(); return 0; }
+void outb(int port, unsigned char v) { (void)port; (void)v; abort(); }
+unsigned short inw(int port) { (void)port; abort(); return 0; }
+void outw(int port, unsigned short v) { (void)port; (void)v; abort(); }
+unsigned int inl(int port) { (void)port; abort(); return 0; }
+void outl(int port, unsigned int v) { (void)port; (void)v; abort(); }
+void io_wait(void) {}

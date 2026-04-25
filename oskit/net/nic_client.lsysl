@@ -34,6 +34,8 @@ Command codes — must track `oskit/servers/nic.lsysl`.
     val NIC_CLI_CMD_SEND_PACKET  = 2
     val NIC_CLI_CMD_SUBSCRIBE_RX = 3
     val NIC_CLI_CMD_RECV_PACKET  = 4
+    val NIC_CLI_CMD_DEBUG_DROP_NEXT = 5
+    val NIC_CLI_CMD_DEBUG_DROP_MASK = 9
 
     val NIC_CLI_MAX_FRAME = 1514
 
@@ -145,3 +147,59 @@ full frame bytes, so this is purely a caller-side clamp).
             out[i] = reply[3 + i]
             i += 1
         raw_len
+
+
+### nic_debug_drop_next (test-only)
+
+Arms the nic's loss injector: pass the next N-1 frames
+normally, drop the Nth. One-shot — setting N = 0 disables.
+Returns 0 on success, -1 on IPC error.
+
+Used exclusively by the TCP congestion-control test harness
+(`test_tcp_fastretx`). Never call from production code.
+
+    nic_debug_drop_next(n: int) -> int
+        val port = nic_get_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(NIC_CLI_CMD_DEBUG_DROP_NEXT)
+        msg[1] = byte((n >> 24) & 0xff)
+        msg[2] = byte((n >> 16) & 0xff)
+        msg[3] = byte((n >>  8) & 0xff)
+        msg[4] = byte( n        & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, &msg[0], 5, &reply[0], 1)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        0
+
+
+### nic_debug_drop_mask (test-only)
+
+Arms the nic's multi-drop injector. Bit `i` in `mask` (LSB-first)
+means drop the `i`-th outgoing frame after this call; the rest
+pass. Up to 32 frames scripted per arm; `mask = 0` disables.
+
+Dedicated to the SACK retransmit harness (two non-adjacent drops
+in a single send burst). Never call from production code.
+
+    nic_debug_drop_mask(mask: int) -> int
+        val port = nic_get_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(NIC_CLI_CMD_DEBUG_DROP_MASK)
+        msg[1] = byte((mask >> 24) & 0xff)
+        msg[2] = byte((mask >> 16) & 0xff)
+        msg[3] = byte((mask >>  8) & 0xff)
+        msg[4] = byte( mask        & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, &msg[0], 5, &reply[0], 1)
+        if r < 0
+            return -1
+        if int(reply[0]) != 0
+            return -1
+        0

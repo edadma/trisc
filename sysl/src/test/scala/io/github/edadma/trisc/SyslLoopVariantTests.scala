@@ -122,12 +122,16 @@ class SyslLoopVariantTests extends SyslTestHelpers {
 
   // ===== Variant outside a loop =====
 
-  "variant outside a loop body fails" in {
+  "variant in mid-body (not a function contract, not a loop) fails" in {
+    // `variant <expr>` is now legal as a function-level contract (top of body) or as a
+    // loop-header clause. Anywhere else — e.g. interleaved between regular statements —
+    // it's still rejected by the catch-all in the analyzer.
     val thrown = intercept[RuntimeException] {
       eval("""
         |main() -> int
+        |    var x = 5
         |    variant 5
-        |    0
+        |    return x
         |""".stripMargin)
     }
     thrown.getMessage should include("must appear at the top level of a loop body")

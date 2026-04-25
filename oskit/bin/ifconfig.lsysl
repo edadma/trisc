@@ -1,0 +1,66 @@
+ifconfig — show the current network interface config
+======================================================
+
+Minimal read-only network diagnostic — the classic "what IP
+did I get?" command. Calls `inet_get_ip_config` and renders
+the three fields in the familiar dotted-quad form.
+
+Slix has exactly one logical interface right now (the virtio
+nic), so there's no interface name to iterate or pass. A
+future multi-NIC build would turn this into `ifconfig <ifname>`
+with a per-interface table.
+
+Sample output:
+
+```
+ip:      10.0.2.15
+mask:    255.255.255.0
+gateway: 10.0.2.2
+```
+
+Pairs naturally with `dhclient` — dhclient sets the lease,
+ifconfig shows what's installed.
+
+    module oskit.bin.ifconfig
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.inet_get_ip_config
+    import std.net.ipv4_octet
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    print_ipv4(ip: u32)
+        print_udec(ipv4_octet(ip, 0))
+        puts(".")
+        print_udec(ipv4_octet(ip, 1))
+        puts(".")
+        print_udec(ipv4_octet(ip, 2))
+        puts(".")
+        print_udec(ipv4_octet(ip, 3))
+
+
+    main(argv: []string)
+        var ip: u32 = u32(0)
+        var mask: u32 = u32(0)
+        var gw: u32 = u32(0)
+        if inet_get_ip_config(&ip, &mask, &gw) < 0
+            puts("ifconfig: inet_get_ip_config failed\n")
+            exit_with(1)
+            return
+        puts("ip:      ")
+        print_ipv4(ip)
+        puts("\n")
+        puts("mask:    ")
+        print_ipv4(mask)
+        puts("\n")
+        puts("gateway: ")
+        print_ipv4(gw)
+        puts("\n")
+        exit()

@@ -1,0 +1,21 @@
+// x86 hook: wire the nic server's virtio-pci transport.
+//
+// Kernel-side virtio_bringup_x86 ran v_find at boot and cached the
+// four cap BAR+offset addresses plus the notify multiplier via
+// `virtio_pci_info_set`. The server fetches them via
+// `svc_virtio_pci_info` and hands them to `v_attach_pci`.
+//
+// Lives in its own file (not prog_config.sysl) because ordinary
+// user programs don't link the virtio driver — importing
+// v_attach_pci from prog_config would drag virtio transport symbols
+// into every /bin/* ELF and fail at link time.
+
+module oskit.arch
+
+import oskit.drivers.virtio.v_attach_pci
+import oskit.services.svc_virtio_pci_info
+
+srv_nic_attach()
+    var caps: [5]i64
+    svc_virtio_pci_info(*byte(caps))
+    v_attach_pci(caps[0], caps[1], caps[2], caps[3], caps[4])

@@ -1,0 +1,116 @@
+test_tcp_big — multi-segment TCP transfer test
+================================================
+
+Listens on port 7892. Accepts one client, drain-reads up to 1024
+bytes (the TCP recv-buf size), accumulates a count and a running
+byte-sum checksum, echoes the 6-byte summary back, closes. Host
+sends a known pattern (byte `i & 0xff`) and verifies the reply.
+
+Exercises:
+- Multi-segment receive (900+ bytes spans multiple segments even
+  at MSS=1460, since peer OS may choose smaller).
+- recv drain loop (first recv call returns whatever's buffered;
+  subsequent calls either return more data or zero on peer FIN /
+  negative on error).
+- send from ESTABLISHED while peer still has half-open (peer
+  hasn't shut down its read side yet), i.e. a short server reply
+  under a classic "read-then-reply" protocol.
+
+Reply wire shape (6 bytes, big-endian):
+    [0..2)  count (u16)       — total bytes read from client
+    [2..6)  checksum (u32)    — sum of every received byte
+
+    module oskit.bin.test_tcp_big
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{tcp_listen, tcp_accept, tcp_send, tcp_recv, tcp_close}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+    main(argv: []string)
+        val lfd = tcp_listen(7892)
+        if lfd < 0
+            puts("test_tcp_big: listen failed\n")
+            exit_with(1)
+            return
+        puts("test_tcp_big: listening fd=")
+        print_udec(lfd)
+        puts("\n")
+
+        var peer_ip: [4]byte
+        var peer_port: [2]byte
+        val cfd = tcp_accept(lfd, &peer_ip[0], &peer_port[0])
+        if cfd < 0
+            puts("test_tcp_big: accept failed\n")
+            tcp_close(lfd)
+            exit_with(2)
+            return
+        puts("test_tcp_big: accepted cfd=")
+        print_udec(cfd)
+        puts("\n")
+
+        val expected = 900
+        var buf: [480]byte
+        var count = 0
+        var checksum: u32 = u32(0)
+        while count < expected
+            val got = tcp_recv(cfd, &buf[0], 480)
+            if got < 0
+                puts("test_tcp_big: recv err count=")
+                print_udec(count)
+                puts("\n")
+                tcp_close(cfd)
+                tcp_close(lfd)
+                exit_with(3)
+                return
+            if got == 0
+                // Peer closed before sending `expected` bytes.
+                puts("test_tcp_big: early EOF count=")
+                print_udec(count)
+                puts("\n")
+                break
+            var j = 0
+            while j < got
+                checksum = checksum + u32(int(buf[j]) & 0xff)
+                j += 1
+            count += got
+        puts("test_tcp_big: drained count=")
+        print_udec(count)
+        puts("\n")
+
+        // Reply shape: count(u16) + checksum(u32), big-endian.
+        var reply: [6]byte
+        reply[0] = byte((count >> 8) & 0xff)
+        reply[1] = byte(count & 0xff)
+        reply[2] = byte(int(checksum >> 24) & 0xff)
+        reply[3] = byte(int(checksum >> 16) & 0xff)
+        reply[4] = byte(int(checksum >>  8) & 0xff)
+        reply[5] = byte(int(checksum      ) & 0xff)
+        val sent = tcp_send(cfd, &reply[0], 6)
+        if sent < 0
+            puts("test_tcp_big: send failed\n")
+            tcp_close(cfd)
+            tcp_close(lfd)
+            exit_with(4)
+            return
+
+        val cr = tcp_close(cfd)
+        if cr < 0
+            puts("test_tcp_big: close cfd failed\n")
+            tcp_close(lfd)
+            exit_with(5)
+            return
+        val lr = tcp_close(lfd)
+        if lr < 0
+            puts("test_tcp_big: close lfd failed\n")
+            exit_with(6)
+            return
+        puts("test_tcp_big: ok\n")
+        exit()

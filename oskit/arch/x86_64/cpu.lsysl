@@ -98,7 +98,9 @@ loading SS:RSP from the frame (user stack).
         sp -= 8
         *(*i64(sp)) = i64(0x23)         // SS  (user data, RPL=3)
         sp -= 8
-        *(*i64(sp)) = usp - 8           // RSP (user stack)
+        *(*i64(sp)) = usp               // RSP (user stack) — points at SysV
+                                        // init frame that PM built at `usp`.
+                                        // aarch64 sets SP_EL0 = usp similarly.
         sp -= 8
         *(*i64(sp)) = i64(0x202)        // RFLAGS (IF=1)
         sp -= 8

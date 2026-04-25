@@ -1,0 +1,102 @@
+test_tcp_rx — active-open large-transfer receive test
+======================================================
+
+Dials the host echo-pattern server at (10.0.2.2, 18081), drain-
+recvs exactly 900 bytes, accumulates count + byte-sum checksum,
+sends a 6-byte summary back (same wire shape as test_tcp_big's
+reply), closes.
+
+Prints:
+- `connected fd=N`
+- `drained count=N` after the full payload lands
+- `sent=6` after the reply
+- `ok` on clean close
+
+Symmetric with test_tcp_big but from the active-open side. The
+host acts as server (writes the known pattern, reads the reply),
+and asserts count + checksum match exactly, proving every byte
+was delivered in order to the guest's drain loop.
+
+    module oskit.bin.test_tcp_rx
+
+    import oskit.ulib.{puts, exit, exit_with, sleep}
+    import oskit.net.{tcp_connect, tcp_send, tcp_recv, tcp_close}
+    import std.net.ipv4
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+    main(argv: []string)
+        val dst = ipv4(10, 0, 2, 2)
+        var fd = -1
+        var attempts = 0
+        while fd < 0 && attempts < 5
+            fd = tcp_connect(dst, 18081)
+            if fd < 0
+                sleep(20)
+            attempts += 1
+        if fd < 0
+            puts("test_tcp_rx: connect failed\n")
+            exit_with(1)
+            return
+        puts("test_tcp_rx: connected fd=")
+        print_udec(fd)
+        puts("\n")
+
+        val expected = 900
+        var rbuf: [480]byte
+        var count = 0
+        var checksum: u32 = u32(0)
+        while count < expected
+            val got = tcp_recv(fd, &rbuf[0], 480)
+            if got < 0
+                puts("test_tcp_rx: recv err count=")
+                print_udec(count)
+                puts("\n")
+                tcp_close(fd)
+                exit_with(2)
+                return
+            if got == 0
+                puts("test_tcp_rx: early EOF count=")
+                print_udec(count)
+                puts("\n")
+                break
+            var j = 0
+            while j < got
+                checksum = checksum + u32(int(rbuf[j]) & 0xff)
+                j += 1
+            count += got
+        puts("test_tcp_rx: drained count=")
+        print_udec(count)
+        puts("\n")
+
+        var reply: [6]byte
+        reply[0] = byte((count >> 8) & 0xff)
+        reply[1] = byte(count & 0xff)
+        reply[2] = byte(int(checksum >> 24) & 0xff)
+        reply[3] = byte(int(checksum >> 16) & 0xff)
+        reply[4] = byte(int(checksum >>  8) & 0xff)
+        reply[5] = byte(int(checksum      ) & 0xff)
+        val sent = tcp_send(fd, &reply[0], 6)
+        if sent < 0
+            puts("test_tcp_rx: send failed\n")
+            tcp_close(fd)
+            exit_with(3)
+            return
+        puts("test_tcp_rx: sent=")
+        print_udec(sent)
+        puts("\n")
+
+        val cr = tcp_close(fd)
+        if cr < 0
+            puts("test_tcp_rx: close failed\n")
+            exit_with(4)
+            return
+        puts("test_tcp_rx: ok\n")
+        exit()

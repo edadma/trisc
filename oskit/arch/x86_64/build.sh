@@ -44,14 +44,15 @@ SYSL_FILES=(
 # App-specific extra modules
 case "$APP" in
     app_nsh)
-        # All servers are boot modules. nsh pulls in virtio-net
-        # so the nic server (boot module in a later commit) can
-        # attach to a ready driver.
+        # All servers are boot modules. Kernel only needs the PCI
+        # probe layer — virtio_net + virtio_dma_kernel used to live
+        # here when bringup was kernel-linked, but the nic server
+        # now owns virtio_net and its own DMA (virtio_dma_server).
+        # Kernel just resolves the 4 cap BARs and caches them for
+        # svc_virtio_pci_info.
         SYSL_FILES+=(
             oskit/arch/x86_64/pci.lsysl
             oskit/drivers/virtio/virtio_transport_pci.lsysl
-            oskit/drivers/virtio/virtio_net.lsysl
-            oskit/drivers/virtio/virtio_dma_kernel.lsysl
             oskit/drivers/virtio/virtio_bringup_x86.lsysl
         )
         ;;

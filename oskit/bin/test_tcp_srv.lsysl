@@ -1,0 +1,110 @@
+test_tcp_srv — TCP passive-open echo smoke test
+================================================
+
+Opens a listen socket on port 7890, accepts one client, reads up
+to 32 bytes, echoes them back, closes both sides. The QEMU test
+harness forwards host port 28080 → guest:7890 via `hostfwd`, so
+a host-side Scala client dials 127.0.0.1:28080 to reach us.
+
+Prints each step so failures are visible in the serial log:
+`listening fd=N`, `accepted cfd=N from A.B.C.D:P`, `got K 'ping'`,
+`sent=K`, `closed`.
+
+Exit 0 on success, non-zero on first failing step.
+
+    module oskit.bin.test_tcp_srv
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{tcp_listen, tcp_accept, tcp_send, tcp_recv, tcp_close}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+    print_int(prefix: string, v: int)
+        puts(prefix)
+        if v < 0
+            puts("-")
+            print_udec(0 - v)
+        else
+            print_udec(v)
+        puts("\n")
+
+
+    main(argv: []string)
+        val lfd = tcp_listen(7890)
+        if lfd < 0
+            puts("test_tcp_srv: listen failed\n")
+            exit_with(1)
+            return
+        print_int("test_tcp_srv: listening fd=", lfd)
+
+        var peer_ip: [4]byte
+        var peer_port: [2]byte
+        val cfd = tcp_accept(lfd, &peer_ip[0], &peer_port[0])
+        if cfd < 0
+            puts("test_tcp_srv: accept failed\n")
+            tcp_close(lfd)
+            exit_with(2)
+            return
+        puts("test_tcp_srv: accepted cfd=")
+        print_udec(cfd)
+        puts(" from ")
+        print_udec(int(peer_ip[0]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[1]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[2]) & 0xff)
+        puts(".")
+        print_udec(int(peer_ip[3]) & 0xff)
+        puts(":")
+        val pp = ((int(peer_port[0]) & 0xff) << 8) | (int(peer_port[1]) & 0xff)
+        print_udec(pp)
+        puts("\n")
+
+        var rbuf: [32]byte
+        val got = tcp_recv(cfd, &rbuf[0], 32)
+        if got < 0
+            puts("test_tcp_srv: recv failed\n")
+            tcp_close(cfd)
+            tcp_close(lfd)
+            exit_with(3)
+            return
+        puts("test_tcp_srv: got ")
+        print_udec(got)
+        puts(" '")
+        var i = 0
+        while i < got
+            if rbuf[i] != '\n'
+                var ch: [1]byte
+                ch[0] = rbuf[i]
+                puts(string(&ch[0], 1))
+            i += 1
+        puts("'\n")
+
+        val sent = tcp_send(cfd, &rbuf[0], got)
+        if sent < 0
+            puts("test_tcp_srv: send failed\n")
+            tcp_close(cfd)
+            tcp_close(lfd)
+            exit_with(4)
+            return
+        print_int("test_tcp_srv: sent=", sent)
+
+        val cr = tcp_close(cfd)
+        if cr < 0
+            puts("test_tcp_srv: close cfd failed\n")
+            tcp_close(lfd)
+            exit_with(5)
+            return
+        val lr = tcp_close(lfd)
+        if lr < 0
+            puts("test_tcp_srv: close lfd failed\n")
+            exit_with(6)
+            return
+        puts("test_tcp_srv: closed\n")
+        exit()

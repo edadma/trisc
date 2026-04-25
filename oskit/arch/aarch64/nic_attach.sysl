@@ -1,0 +1,13 @@
+// aarch64 hook: wire the nic server's virtio-mmio transport.
+//
+// Lives in its own file (not prog_config.sysl) because ordinary
+// user programs don't link the virtio driver — importing v_attach
+// from prog_config would drag VIRTIO_DEV_NET into every /bin/*
+// ELF and fail at link time.
+
+module oskit.arch
+
+import oskit.drivers.virtio.{v_attach, VIRTIO_DEV_NET}
+
+srv_nic_attach()
+    v_attach(MMIO_SERVER_VA + VIRTIO_NET_SLOT_OFFSET, VIRTIO_DEV_NET)

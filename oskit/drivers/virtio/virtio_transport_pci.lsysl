@@ -142,6 +142,27 @@ Transport ops — same signatures as `virtio_transport_mmio.lsysl`.
 ========================================================================
 
 
+Server-friendly entry point. `v_find` walks PCI config space via
+CF8/CFC port I/O (ring-0 only); ring-3 servers get the already-
+resolved cap addresses from the kernel via `svc_virtio_pci_info`
+and hand them straight to `v_attach_pci` — mirrors the aarch64
+transport's `v_attach(base, dev_id)` contract.
+
+All five args come from the kernel's boot-time probe: common_pa
+/ notify_pa / isr_pa / device_pa are BAR+offset addresses, and
+notify_mult is the per-queue-stride multiplier from the NOTIFY
+cap header. Zeros from the kernel mean "no virtio-net probed" —
+caller should check `v_have_device()` afterwards.
+
+    v_attach_pci(common: i64, notify: i64, notify_mult: i64,
+                 isr: i64, device: i64)
+        vpci_common = common
+        vpci_notify = notify
+        vpci_notify_mult = notify_mult
+        vpci_isr = isr
+        vpci_device = device
+
+
 Locate a virtio-PCI device of `dev_id`, enable memory + bus-
 master decoding, and resolve the four virtio caps into MMIO
 addresses. Returns 1 if all four required regions mapped, 0

@@ -9,8 +9,8 @@ case class TModuleDecl(path: List[String]) extends TDecl
 case class TImportDecl(path: String) extends TDecl
 case class TExternFuncDecl(name: String, params: List[SyslType], returnType: SyslType) extends TDecl
 case class TExternVarDecl(name: String, typ: SyslType) extends TDecl
-case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil, isDef: Boolean = false) extends TDecl
-case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false, isVolatile: Boolean = false) extends TDecl
+case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil, isDef: Boolean = false, isGhost: Boolean = false, effects: FuncEffects = FuncEffects.Unknown) extends TDecl
+case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false, isVolatile: Boolean = false, isGhost: Boolean = false) extends TDecl
 case class TStructDecl(name: String, fields: List[(String, SyslType)], volatileFields: Set[Int] = Set.empty) extends TDecl
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
 case class TDataEnumDecl(name: String, enumType: SyslType.EnumType) extends TDecl
@@ -28,7 +28,7 @@ case class TBlockBody(stmts: List[TStmt]) extends TFunBody
 
 // Statements
 trait TStmt
-case class TVarStmt(name: String, typ: SyslType, init: TExpr, isVolatile: Boolean = false) extends TStmt
+case class TVarStmt(name: String, typ: SyslType, init: TExpr, isVolatile: Boolean = false, isGhost: Boolean = false) extends TStmt
 case class TDestructureStmt(names: List[String], types: List[SyslType], init: TExpr) extends TStmt
 case class TDestructureAssignStmt(names: List[String], types: List[SyslType], init: TExpr) extends TStmt
 case class TAssignStmt(target: String, value: TExpr) extends TStmt
@@ -118,8 +118,8 @@ case class TStringFromSlice(slice: TExpr, typ: SyslType) extends TExpr
 case class TStr(expr: TExpr) extends TExpr { def typ: SyslType = SyslType.StringType }
 case class FmtSpec(verb: Char, width: Int = 0, zeroPad: Boolean = false, leftAlign: Boolean = false, showSign: Boolean = false, upperCase: Boolean = false)
 case class TFmtStr(expr: TExpr, spec: FmtSpec) extends TExpr { def typ: SyslType = SyslType.StringType }
-case class TClosure(params: List[TParam], returnType: SyslType, body: TFunBody, captures: List[(String, SyslType)], escapes: Boolean = true) extends TExpr {
-  def typ: SyslType = SyslType.FuncType(params.map(_.typ), returnType)
+case class TClosure(params: List[TParam], returnType: SyslType, body: TFunBody, captures: List[(String, SyslType)], escapes: Boolean = true, effects: FuncEffects = FuncEffects.Unknown) extends TExpr {
+  def typ: SyslType = SyslType.FuncType(params.map(_.typ), returnType, effects = effects)
 }
 case class TInterfaceBox(expr: TExpr, iface: SyslType.InterfaceType) extends TExpr {
   def typ: SyslType = iface

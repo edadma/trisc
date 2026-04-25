@@ -53,8 +53,8 @@ the stack. Unknown commands reply `status = -1`.
     import oskit.services.{rs_ready, notify_send_to, notify_read_self,
         thread_id, svc_virtio_set_notify}
     import oskit.drivers.virtio.{virtio_net_init, virtio_net_get_mac,
-        virtio_net_send, virtio_net_recv, v_attach, VIRTIO_DEV_NET}
-    import oskit.arch.{MMIO_SERVER_VA}
+        virtio_net_send, virtio_net_recv}
+    import oskit.arch.srv_nic_attach
 
 
 Command codes.
@@ -63,6 +63,8 @@ Command codes.
     val NIC_CMD_SEND_PACKET  = 2
     val NIC_CMD_SUBSCRIBE_RX = 3
     val NIC_CMD_RECV_PACKET  = 4
+    val NIC_CMD_DEBUG_DROP_NEXT = 5
+    val NIC_CMD_DEBUG_DROP_MASK = 9
 
 
 Capacity. Ethernet II without VLAN caps at 1514 bytes; IPC
@@ -95,12 +97,31 @@ Single subscriber for now — inet is the sole RX consumer.
     var nic_port = -1
 
 
-virtio-mmio slot 31 on QEMU virt lives at PA `0x0a003e00`
-(`VIRTIO_MMIO_BASE + 31 * 0x200`). The RS grant maps page `0xa003`
-at `MMIO_SERVER_VA` (`0x60100000`) with Device memory attrs, so
-the virtio-net slot shows up at `0x60100e00` inside the server.
+Test-only loss injection. When `nic_debug_drop_next > 0`, each
+outgoing frame decrements the counter; the frame that brings
+it to zero is dropped silently (`virtio_net_send` is skipped
+but the caller sees status=0). Used by the TCP congestion
+control test harness to simulate a dropped segment so the
+dup-ACK / fast retransmit path can be exercised against an
+otherwise lossless slirp.
 
-    val VIRTIO_NET_SLOT_OFFSET: i64 = i64(0xe00)
+Never set in production paths. The test sends
+`NIC_CMD_DEBUG_DROP_NEXT(n)` to arm it, then triggers the TX
+pattern it wants to punish; the counter is one-shot.
+
+    var nic_debug_drop_next: int = 0
+
+Multi-drop companion to `nic_debug_drop_next`. Bit `i` (LSB-first)
+means "drop the `i`-th frame emitted after arming." Consumed
+bit-by-bit on each SEND; the frame is dropped if the low bit is
+1 and passed otherwise, then the mask right-shifts. At most 32
+frames can be scripted per arm. Set to 0 to disable.
+
+Used by the SACK selective-retransmit harness, which needs to
+drop two non-adjacent segments out of a single burst so the
+sender sees multiple holes in flight simultaneously.
+
+    var nic_debug_drop_mask: int = 0
 
 
 ### Byte-buffer helpers
@@ -173,12 +194,68 @@ diagnostics.
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 1)
             return
+        // Loss injection for the TCP fast-retransmit test harness.
+        // When armed, drop silently and report success.
+        if nic_debug_drop_next > 0
+            nic_debug_drop_next -= 1
+            if nic_debug_drop_next == 0
+                reply[0] = 0
+                ipc_reply(sender, reply, 1)
+                return
+        // SACK test harness — drop each frame whose bit in
+        // `nic_debug_drop_mask` is set, consuming the mask LSB
+        // first so the next frame's fate sits in bit 0.
+        if nic_debug_drop_mask != 0
+            val drop_this = nic_debug_drop_mask & 1
+            nic_debug_drop_mask = (nic_debug_drop_mask >> 1) & 0x7fffffff
+            if drop_this != 0
+                reply[0] = 0
+                ipc_reply(sender, reply, 1)
+                return
         val frame: *byte = buf + 3
         val r = virtio_net_send(frame, len)
         if r == 0
             reply[0] = byte(-1)
         else
             reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### DEBUG_DROP_NEXT handler
+
+```
+request: cmd(1) + n_hi(2) + n_lo(2)    = 5 bytes
+reply:   status(1)                      = 1 byte
+```
+
+N > 0: pass N-1 frames normally, then drop the Nth.
+N = 0: disable dropping.
+
+    nic_handle_debug_drop_next(sender: int, buf: *byte)
+        val hi = nic_read_u16(buf, 1)
+        val lo = nic_read_u16(buf, 3)
+        nic_debug_drop_next = (hi << 16) | lo
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### DEBUG_DROP_MASK handler
+
+```
+request: cmd(1) + mask_hi(2) + mask_lo(2)  = 5 bytes
+reply:   status(1)                          = 1 byte
+```
+
+Bit `i` (LSB-first) = drop the `i`-th frame after arming.
+`mask = 0` disables dropping.
+
+    nic_handle_debug_drop_mask(sender: int, buf: *byte)
+        val hi = nic_read_u16(buf, 1)
+        val lo = nic_read_u16(buf, 3)
+        nic_debug_drop_mask = (hi << 16) | lo
+        var reply: [1]byte
+        reply[0] = 0
         ipc_reply(sender, reply, 1)
 
 
@@ -231,7 +308,7 @@ that case — inet's nic IPC wrappers degrade to returning -1 and
 UDP loopback keeps working. Matches the inet "best effort" pattern.
 
     nic_server()
-        v_attach(MMIO_SERVER_VA + VIRTIO_NET_SLOT_OFFSET, VIRTIO_DEV_NET)
+        srv_nic_attach()
         virtio_net_init()
 
         nic_port = port_create()
@@ -266,6 +343,10 @@ builds without IRQ routing wired yet.
                     nic_handle_subscribe_rx(sender)
                 else if cmd == NIC_CMD_RECV_PACKET
                     nic_handle_recv_packet(sender)
+                else if cmd == NIC_CMD_DEBUG_DROP_NEXT
+                    nic_handle_debug_drop_next(sender, buf)
+                else if cmd == NIC_CMD_DEBUG_DROP_MASK
+                    nic_handle_debug_drop_mask(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)

@@ -293,7 +293,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _, _) =>
+        case TVarDecl(name, _, init, _, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
     functions.get("main") match
@@ -321,7 +321,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _, _) =>
+        case TVarDecl(name, _, init, _, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
   /** Invoke a zero-arg function by name. Throws RuntimeError on panic. */
@@ -461,7 +461,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
-      case TVarStmt(name, _, init, _) =>
+      case TVarStmt(name, _, init, _, _) =>
         val v = evalAny(init, env)
         // Increment refcount for copies only — TNew/TNewArray already set refcount=1
         init match
@@ -1220,7 +1220,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TFuncRef(name, _) => FuncVal(name)
 
-      case TClosure(params, _, body, captures, _) =>
+      case TClosure(params, _, body, captures, _, _) =>
         // Capture current values by value (copy)
         val capturedEnv = new mutable.LinkedHashMap[String, Cell]
         for (varName, _) <- captures do
@@ -1236,7 +1236,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case SyslType.PtrType(SyslType.StructType(name, _, _)) => name
           case SyslType.RefType(SyslType.StructType(name, _, _)) => name
           case other => throw RuntimeError(s"cannot box $other into interface")
-        val methodMap = iface.methods.map { (mname, _, _) =>
+        val methodMap = iface.methods.map { (mname, _, _, _) =>
           val shortKey = s"${structName}_$mname"
           // Try short name first, then search for mangled variant
           val funcName = functions.get(shortKey) match
@@ -1252,7 +1252,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TInterfaceDispatch(ifaceVal, methodIndex, args, _) =>
         val InterfaceVal(methodMap, dataVal, concreteType) = evalAny(ifaceVal, env): @unchecked
         val iface = ifaceVal.typ.asInstanceOf[SyslType.InterfaceType]
-        val (methodName, _, _) = iface.methods(methodIndex)
+        val (methodName, _, _, _) = iface.methods(methodIndex)
         val funcName = methodMap(methodName)
         val argValues = args.map(evalAny(_, env))
         // Build self arg — for value types, wrap in a cell so the method can modify via pointer

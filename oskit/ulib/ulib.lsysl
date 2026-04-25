@@ -56,10 +56,15 @@ Command bytes for TFS and TTY server protocols.
     val FS_CMD_SEEK    = 14
     val FS_CMD_CONNECT = 15
     val FS_CMD_PIPE    = 18
+    val FS_CMD_ACCEPT  = 19
     val TTY_CMD_PUTS   = 3
 
     val SYS_GETUID  = 61
     val SYS_SETUID  = 62
+
+    val SYS_NOTIFY_WAIT      = 24
+    val SYS_NOTIFY_READ      = 25
+    val SYS_TIMER_SUBSCRIBE  = 81
 
     val SYS_GRANT_CREATE = 71
     val SYS_GRANT_REVOKE = 72
@@ -157,10 +162,38 @@ Write a string to stdout (handle 1) via VFS.
     val STDOUT = 1
     val STDERR = 2
 
+    val WRITE_INLINE_MAX = 100
+
     write_handle(handle: int, data: *byte, wlen: int) -> int
         val port = fs_port()
         if port < 0
             return -1
+        // Short writes skip the grant-create/revoke dance entirely
+        // and inline the payload into the FS_CMD_WRITE message
+        // itself. VFS already buffers through a 128-byte scratch,
+        // so the server-side grant_map + copy + unmap chain is
+        // pure overhead for anything that fits. grant_id = -1 is
+        // the "inline" sentinel; data starts at offset 13.
+        if wlen >= 0 && wlen <= WRITE_INLINE_MAX
+            var msg: [128]byte
+            msg[0] = byte(FS_CMD_WRITE)
+            msg_write_i32(msg, 1, handle)
+            msg_write_i32(msg, 5, wlen)
+            msg_write_i32(msg, 9, -1)
+            var i = 0
+            while i < wlen
+                msg[13 + i] = data[i]
+                i += 1
+            var reply: [5]byte
+            val result = ipc_send(port, msg, 13 + wlen, reply, 5)
+            if result != 0
+                return -1
+            if reply[0] != 0
+                return -1
+            return msg_read_i32(reply, 1)
+        // Long writes still go via a grant — the server-side
+        // mapping avoids copying the whole payload into our IPC
+        // buffer just to copy it again on the far side.
         val gid = grant_create(u64(data), wlen, GRANT_READ)
         if gid < 0
             return -1
@@ -417,6 +450,21 @@ System queries and control.
     setuid(uid: int)
         syscall(SYS_SETUID, uid)
 
+Periodic timer / notify wrappers for user programs. `svc_timer_subscribe`
+registers the calling thread for a periodic `notify_send(tid, 2)` every
+`period` ticks — used by tests that need to prove the kernel timer path
+fires reliably during a quiet channel. `notify_wait` blocks until any
+notify arrives; `notify_read_self` reads and clears the pending value.
+
+    svc_timer_subscribe(period: int) -> int
+        syscall(SYS_TIMER_SUBSCRIBE, i64(period))
+
+    notify_wait()
+        syscall(SYS_NOTIFY_WAIT, 0)
+
+    notify_read_self() -> int
+        syscall(SYS_NOTIFY_READ, 0)
+
 Read one byte from stdin (handle 0). Blocks until data
 is available. Returns the byte value or -1 on error.
 
@@ -445,6 +493,34 @@ Returns a handle or -1 on error.
         ipc_send(port, msg, nlen + 1, reply, 9)
         if reply[0] != 0
             return -1
+        msg_read_i32(reply, 1)
+
+Accept a connection on a `tcp-listen:` handle. Blocks until a
+peer completes the three-way handshake, then returns a new
+handle that `read`/`write_handle`/`close` already work on — no
+tcp_* wrappers needed. Fills `peer_ip` (4 bytes) and `peer_port`
+(2 bytes, big-endian) if non-null. Returns the child handle on
+success or -1 on error.
+
+    accept(h: int, peer_ip: *byte, peer_port: *byte) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(FS_CMD_ACCEPT)
+        msg_write_i32(msg, 1, h)
+        var reply: [11]byte
+        ipc_send(port, msg, 5, reply, 11)
+        if reply[0] != 0
+            return -1
+        if i64(peer_ip) != i64(0)
+            peer_ip[0] = reply[5]
+            peer_ip[1] = reply[6]
+            peer_ip[2] = reply[7]
+            peer_ip[3] = reply[8]
+        if i64(peer_port) != i64(0)
+            peer_port[0] = reply[9]
+            peer_port[1] = reply[10]
         msg_read_i32(reply, 1)
 
 Seek to a position in an open file.
