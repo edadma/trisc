@@ -488,6 +488,19 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "dup: FAIL"
   }
 
+  "aarch64 net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
+    // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
+    // inet to inject a synthetic ICMP type-3 / code-3 frame whose
+    // inner UDP src port is 7801, then non-blocking recvfrom: must
+    // return -111 (-ECONNREFUSED) once, then -11 (-EAGAIN) on the
+    // follow-up since the error byte is one-shot.
+    qemu.send("test_icmperr\n")
+    val output = qemu.waitFor("test_icmperr: ok")
+    output should include("test_icmperr: ok")
+    output should not include "test_icmperr: expected"
+    output should not include "test_icmperr: failed"
+  }
+
   "aarch64 musl: socket/connect/shutdown/read via libc wrappers" in {
     // msocket is a C program linked against slix's musl fork; uses
     // socket(), connect(), write(), shutdown(), read(), close(),

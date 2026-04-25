@@ -46,6 +46,7 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_ICMP_SEND    = 21
     val INET_CMD_ICMP_CHECK   = 22
     val INET_CMD_TCP_DEBUG    = 20
+    val INET_CMD_ICMP_UNREACH_INJECT = 38
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val ARP_PROBE_OP_START    = 0
@@ -675,4 +676,28 @@ Returns 0 on pass, a nonzero error code on failure.
         msg[0] = byte(INET_CMD_TCP_OOO_SELFTEST)
         var reply: [1]byte
         ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### icmp_unreach_inject (test-only)
+
+Synthesizes an inbound ICMP type-3 / code-3 frame whose inner
+UDP header carries `local_port` as its source port, and feeds it
+through the inet server's RX dispatch. After this call, a UDP
+socket bound to `local_port` will see ECONNREFUSED on its next
+recvfrom (or have any parked recvfrom woken with the same).
+
+Pairs with the egress emit landed in chunk 7 to close the
+both-sides UDP error story.
+
+    icmp_unreach_inject(local_port: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_ICMP_UNREACH_INJECT)
+        msg[1] = byte((local_port >> 8) & 0xff)
+        msg[2] = byte(local_port & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
         int(reply[0]) & 0xff

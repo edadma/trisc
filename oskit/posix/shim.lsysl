@@ -959,6 +959,8 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
                 return i64(-5)
             if reply[0] == byte(1)
                 return i64(-11)         // -EAGAIN
+            if reply[0] == byte(2)
+                return i64(-111)        // -ECONNREFUSED (ICMP error)
             if reply[0] != 0
                 return i64(-5)
         else
@@ -970,6 +972,8 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
             val r = ipc_send(port, msg, 4, reply, 540)
             if r < 0
                 return i64(-5)
+            if reply[0] == byte(2)
+                return i64(-111)        // -ECONNREFUSED (ICMP error)
             if reply[0] != 0
                 return i64(-5)
         val src_port = shim_read_u16(reply, 2)

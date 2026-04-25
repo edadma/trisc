@@ -1,0 +1,113 @@
+test_icmperr — inbound ICMP Port Unreachable consumption
+==============================================================
+
+Pairs with chunk 7 (egress emit) to close the both-sides UDP
+error story. We can't easily provoke a real on-the-wire ICMP from
+slirp, so this test uses a synthetic-frame injection IPC the inet
+server exposes to feed `inet_handle_icmp_dest_unreach` directly.
+
+The test:
+
+  1. POSIX `socket(AF_INET, SOCK_DGRAM)` + `bind` to 127.0.0.1:7801.
+  2. Inject a synthetic ICMP error whose inner UDP src port is
+     7801 — so the inet server attributes it to our slot.
+  3. `recvfrom(MSG_DONTWAIT)` and check the return is
+     -ECONNREFUSED (-111).
+
+Pass criterion: prints `test_icmperr: ok`.
+
+    module oskit.bin.test_icmperr
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+    import oskit.net.icmp_unreach_inject
+
+
+    val NR_SOCKET   = 337
+    val NR_BIND     = 135
+    val NR_RECVFROM = 276
+    val NR_CLOSE    = 147
+
+    val AF_INET_V    = 2
+    val SOCK_DGRAM_V = 2
+
+    val ECONNREFUSED = -111
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (n % 10))
+        puts(string(&buf[0], 1))
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+                   addr: *byte, addrlen_ptr: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_ptr)))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        val fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if fd < 0
+            puts("test_icmperr: socket failed\n")
+            exit_with(1)
+            return
+
+        var addr: [16]byte
+        fill_sockaddr(&addr[0], 7801, 127, 0, 0, 1)
+        if posix_bind(fd, &addr[0], 16) < 0
+            puts("test_icmperr: bind failed\n")
+            exit_with(2)
+            return
+
+        if icmp_unreach_inject(7801) != 0
+            puts("test_icmperr: inject failed\n")
+            exit_with(3)
+            return
+
+        var rbuf: [32]byte
+        // Blocking recvfrom — but pending_error is set on the slot
+        // by the inject above, so the inet handler replies status=2
+        // immediately and the shim translates to -ECONNREFUSED.
+        var src: [16]byte
+        var src_len: i32 = i32(16)
+        val got = posix_recvfrom(fd, &rbuf[0], 32, 0, &src[0], &src_len)
+        if got != ECONNREFUSED
+            puts("test_icmperr: expected ECONNREFUSED got ")
+            print_idec(got)
+            puts("\n")
+            exit_with(4)
+            return
+
+        posix_close(fd)
+        puts("test_icmperr: ok\n")
+        exit()

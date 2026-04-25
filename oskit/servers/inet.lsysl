@@ -45,7 +45,7 @@ process B's sockets.
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet,
         ETHERTYPE_IPV4, ETHERTYPE_ARP, ARP_OP_REQUEST, ARP_OP_REPLY,
         IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
-        pkt_read_u16, pkt_match_ipv4}
+        ICMP_DEST_UNREACH, pkt_read_u16, pkt_match_ipv4}
 
 
 Protocol command codes (byte value of buf[0]).
@@ -83,6 +83,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_GETBUF   = 35
     val INET_CMD_TCP_ABORT_CLOSE = 36
     val INET_CMD_TCP_SET_KEEPALIVE = 37
+    val INET_CMD_ICMP_UNREACH_INJECT = 38
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -135,6 +136,7 @@ reserved for auto-bind, which isn't implemented yet).
         pending_tid: int
         pending_maxlen: int
         recv_deadline: int
+        pending_error: int
 
     var inet_sockets: [32]InetSocket
     var inet_port = -1
@@ -214,6 +216,7 @@ client can reach us.
             inet_sockets[i].in_use = 0
             inet_sockets[i].pending_tid = -1
             inet_sockets[i].recv_deadline = 0
+            inet_sockets[i].pending_error = 0
             i += 1
         // Note: `inet_udp_fire_seq` (in inet_proto.lsysl) is left at
         // its default-zeroed state. The shim re-syncs `last_seen_seq`
@@ -398,6 +401,7 @@ waiter. `maxlen` caps how many payload bytes we hand back.
         inet_sockets[idx].q_count = 0
         inet_sockets[idx].pending_tid = -1
         inet_sockets[idx].recv_deadline = 0
+        inet_sockets[idx].pending_error = 0
         // No need to reset inet_udp_fire_seq[idx] — see
         // `inet_init_sockets` for why a stale counter is harmless.
         var reply: [2]byte
@@ -566,6 +570,15 @@ programs; multi-waiter support is on the list.
         var maxlen = maxlen_raw
         if maxlen > INET_MAX_DATA
             maxlen = INET_MAX_DATA
+        // Pending ICMP error wins over queued data — Linux returns
+        // -ECONNREFUSED on the next recv() and only then resumes
+        // delivering normal datagrams. We mirror that.
+        if inet_sockets[fd].pending_error != 0
+            inet_sockets[fd].pending_error = 0
+            var er: [10]byte
+            er[0] = byte(2)
+            ipc_reply(sender, er, 10)
+            return
         if inet_sockets[fd].q_count > 0
             var reply: [540]byte
             val n = inet_deliver_head(fd, maxlen, reply)
@@ -612,6 +625,12 @@ possibly firing immediately.
         val tms_hi = inet_read_u16(buf, 4)
         val tms_lo = inet_read_u16(buf, 6)
         val timeout_ms = (tms_hi << 16) | tms_lo
+        if inet_sockets[fd].pending_error != 0
+            inet_sockets[fd].pending_error = 0
+            var er: [10]byte
+            er[0] = byte(2)
+            ipc_reply(sender, er, 10)
+            return
         if inet_sockets[fd].q_count > 0
             var reply: [540]byte
             val n = inet_deliver_head(fd, maxlen, reply)
@@ -849,6 +868,7 @@ the caller doesn't block forever.
         inet_sockets[fd].q_count = 0
         inet_sockets[fd].q_head = 0
         inet_sockets[fd].q_tail = 0
+        inet_sockets[fd].pending_error = 0
         var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, reply, 1)
@@ -1435,6 +1455,106 @@ Dropping on no-match matches standard UDP semantics.
             inet_enqueue(target, src_ip, src_port, data, payload_len)
 
 
+### Inbound ICMP Destination Unreachable → connected UDP socket
+
+Pairs with `inet_send_icmp_port_unreach`: when a peer reports our
+UDP datagram couldn't be delivered, surface the error on the
+socket that originated the send. RFC 792 §3.4 puts the offending
+frame's IP header + first 8 bytes of L4 in the ICMP body, so we
+parse the inner UDP header to find our local source port and look
+the socket up by it.
+
+We only handle UDP for now — the inner-protocol check skips TCP
+and others. TCP error consumption (RST-on-ICMP) is its own piece
+of work; the UDP path is what unblocks the typical
+`connect()` / `sendto()` / `recvfrom()` loop returning
+`-ECONNREFUSED` instead of timing out.
+
+We don't validate the inner peer address against any
+connect()ed peer — Linux does, but slix's UDP is permissive
+enough that local-port match is good enough. A pathological
+program with multiple sendto destinations from the same local
+port may flag the wrong one, but that's bounded scope.
+
+    val ICMP_ERRNO_ECONNREFUSED = 111
+
+    inet_handle_icmp_dest_unreach(frame: *byte, len: int, icmp_off: int)
+        val body_off = icmp_off + 8
+        if len < body_off + 20
+            return
+        val inner_ihl = (int(frame[body_off]) & 0x0f) * 4
+        if inner_ihl < 20
+            return
+        val inner_proto = int(frame[body_off + 9]) & 0xff
+        if inner_proto != IP_PROTO_UDP
+            return
+        val inner_udp_off = body_off + inner_ihl
+        if len < inner_udp_off + 8
+            return
+        val inner_src_port = pkt_read_u16(frame, inner_udp_off + 0)
+        val target = inet_find_bound_port(inner_src_port)
+        if target < 0
+            return
+        inet_sockets[target].pending_error = ICMP_ERRNO_ECONNREFUSED
+        // If a recvfrom is parked on this socket, deliver the error
+        // immediately so the caller wakes up; otherwise the next
+        // recvfrom will pick the error up from pending_error.
+        if inet_sockets[target].pending_tid >= 0
+            val waiter = inet_sockets[target].pending_tid
+            inet_sockets[target].pending_tid = -1
+            inet_sockets[target].recv_deadline = 0
+            inet_sockets[target].pending_error = 0
+            var er: [10]byte
+            er[0] = byte(2)
+            ipc_reply(waiter, er, 10)
+        // Wake any epoll waiter so a poll loop notices via EPOLLERR
+        // (the user will then call recvfrom and get -ECONNREFUSED).
+        inet_epoll_fire(1, target)
+
+
+### Synthetic ICMP-error injection (test-only)
+
+Drives `inet_handle_icmp_dest_unreach` from a test program without
+needing a real on-the-wire ICMP error. Caller passes the local
+UDP source port that originally sent the (fictitious) datagram;
+we synthesize the minimal RFC 792 "outer ICMP + inner IP+UDP"
+frame with that port at the inner UDP src offset, and feed it
+through the real parser.
+
+Wire layout:
+- request: cmd(1) + local_port(2)         = 3 bytes
+- reply:   status(1)                       = 1 byte (0 always; the
+  parser is fire-and-forget — failures show up as -ECONNREFUSED
+  not arriving on recvfrom)
+
+    inet_handle_icmp_unreach_inject(sender: int, buf: *byte)
+        val local_port = inet_read_u16(buf, 1)
+        // Layout (offset / size):
+        //   0  / 14  ETH placeholder
+        //  14 / 20  IPv4 outer (only IHL nibble matters)
+        //  34 / 8   ICMP outer (type+code rest unused)
+        //  42 / 20  inner IPv4 (proto field at +9 must be UDP)
+        //  62 / 8   inner UDP   (src_port at +0 = our local port)
+        // = 70 bytes total.
+        var frame: [70]byte
+        var k = 0
+        while k < 70
+            frame[k] = byte(0)
+            k += 1
+        frame[14] = byte(0x45)               // ver=4, IHL=5
+        frame[34] = byte(ICMP_DEST_UNREACH)
+        frame[35] = byte(3)                  // PORT_UNREACH
+        frame[42] = byte(0x45)               // inner ver=4, IHL=5
+        frame[42 + 9] = byte(IP_PROTO_UDP)   // inner protocol
+        frame[42 + 20 + 0] = byte((local_port >> 8) & 0xff)
+        frame[42 + 20 + 1] = byte(local_port & 0xff)
+        // icmp_off = 14 + 20 = 34
+        inet_handle_icmp_dest_unreach(frame, 70, 34)
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
 ### EtherType dispatch
 
 Called by the RX drain for every frame. ARP requests for us ->
@@ -1520,6 +1640,9 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
                         int(frame[14 + 14]) & 0xff,
                         int(frame[14 + 15]) & 0xff)
                     inet_ping_deliver(rep_src, rep_id, rep_seq, int(uptime()))
+                    return 1
+                if itype == ICMP_DEST_UNREACH
+                    inet_handle_icmp_dest_unreach(frame, len, icmp_off)
                     return 1
                 return 0
             if proto == IP_PROTO_UDP
@@ -1695,6 +1818,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_ABORT_CLOSE -> inet_handle_tcp_abort_close(sender, buf)
                     INET_CMD_TCP_SET_KEEPALIVE -> inet_handle_tcp_set_keepalive(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
+                    INET_CMD_ICMP_UNREACH_INJECT -> inet_handle_icmp_unreach_inject(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte
