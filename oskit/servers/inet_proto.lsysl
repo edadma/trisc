@@ -135,6 +135,15 @@ multiple epoll instances.
 
     var inet_epoll_subs: [32]InetEpollSub
 
+    // Per-UDP-fd monotonic fire counter. Lives here (not in
+    // InetSocket which is in inet.lsysl) so `inet_epoll_fire`
+    // — a sibling of the data — can mutate it without forcing
+    // inet_proto.lsysl to take a sibling read on inet.lsysl,
+    // which would create an analyzer cycle with `inet_our_mac`.
+    // TCP's counter sits as a struct field on TcpSocket since
+    // that struct lives in this file.
+    var inet_udp_fire_seq: [32]int
+
     inet_epoll_init()
         var i = 0
         while i < INET_MAX_EPOLL_SUBS
@@ -179,6 +188,20 @@ subscribers on the same socket are allowed (e.g., a child that
 inherited the fd plus the parent), and each gets its own wake.
 
     inet_epoll_fire(kind: int, inet_fd: int)
+        // Bump the per-fd fire counter so the shim's per-entry
+        // last_seen_seq tracker can detect "this specific fd
+        // crossed an edge" without a per-instance bulk clear of
+        // last_reported (which over-fires on multi-fd loops).
+        // UDP's counter is a sibling parallel array (`inet_udp_fire_seq`
+        // above); TCP's lives on the TcpSocket struct further down
+        // in this file — same-file forward references to a struct
+        // type and array trip the analyzer, so we go through a
+        // helper (`inet_tcp_bump_fire_seq`) defined after the
+        // TcpSocket declaration.
+        if kind == 1 && inet_fd >= 0 && inet_fd < 32
+            inet_udp_fire_seq[inet_fd] = inet_udp_fire_seq[inet_fd] + 1
+        else if kind == 2
+            inet_tcp_bump_fire_seq(inet_fd)
         var i = 0
         while i < INET_MAX_EPOLL_SUBS
             if inet_epoll_subs[i].in_use != 0
@@ -1184,9 +1207,22 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         sack_rexmit_cursor: u32
         sack_rexmit_valid: int
         rexmit_count: int
+        // Per-fd fire counter for TCP — bumped on every readiness
+        // edge by `inet_tcp_bump_fire_seq` (called from
+        // `inet_epoll_fire`), returned to the shim by
+        // `inet_handle_poll` so EPOLLET tracks per-fd edges.
+        fire_seq: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
+
+    // Bump the per-TCP-fd fire counter. Defined here, after the
+    // TcpSocket declaration, so `inet_epoll_fire` (further up in
+    // this file) can call it as a forward function reference —
+    // the analyzer handles forward fn refs but not forward var refs.
+    inet_tcp_bump_fire_seq(s: int)
+        if s >= 0 && s < TCP_MAX_SOCKETS
+            tcp_sockets[s].fire_seq = tcp_sockets[s].fire_seq + 1
 
     tcp_next_iss() -> u32
         val v = tcp_iss_counter
@@ -1223,6 +1259,7 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
             tcp_sockets[i].sack_ok = 0
             tcp_sockets[i].sack_rexmit_valid = 0
             tcp_sockets[i].rexmit_count = 0
+            tcp_sockets[i].fire_seq = 0
             var k = 0
             while k < TCP_REORDER_SLOTS
                 tcp_sockets[i].reorder[k].in_use = 0
@@ -1795,6 +1832,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 tcp_sockets[i].sack_ok = 0
                 tcp_sockets[i].sack_rexmit_valid = 0
                 tcp_sockets[i].rexmit_count = 0
+                tcp_sockets[i].fire_seq = 0
                 var k = 0
                 while k < TCP_REORDER_SLOTS
                     tcp_sockets[i].reorder[k].in_use = 0

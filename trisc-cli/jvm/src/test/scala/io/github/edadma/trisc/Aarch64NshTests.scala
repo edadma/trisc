@@ -1520,6 +1520,21 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     after should include("tty0 login")
   }
 
+  "aarch64 musl: per-fd EPOLLET edge isolation" in {
+    // mepoll_multi (slix/test/epoll_multi.c): two UDP sockets share
+    // an epoll instance, both EPOLLIN | EPOLLET. Firing one must
+    // not re-deliver the other. Before the per-fd fire counter
+    // landed, the shim's notify-wake bulk-cleared every entry's
+    // `last_reported`, so an unrelated edge re-fired siblings.
+    qemu.send("epoll_multi\n")
+    val output = qemu.waitFor("mepoll_multi: done")
+    output should include("mepoll_multi: after_a=1 data=10")
+    output should include("mepoll_multi: idle=0")
+    output should include("mepoll_multi: after_b=1 data0=11")
+    output should not include "mepoll_multi: after_b=2"
+    output should include("mepoll_multi: done")
+  }
+
   "aarch64 musl: listen backlog enforcement (Phase F)" in {
     // mlbacklog (slix/test/lbacklog.c): listen() with backlog=2,
     // four parallel host connects. Two of the four SYNs land in
