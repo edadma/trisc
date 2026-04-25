@@ -466,6 +466,449 @@ object SVMRuntime:
        |.nslice_done:
        |  local_get 2
        |  ret
+       |
+       |; __svm_str_from_i64(n: i64) -> *string
+       |; Convert a signed 64-bit integer to its decimal string representation.
+       |; Allocates a 16-byte string struct + 24-byte digit buffer on the memory
+       |; stack and returns the struct address. Handles LONG_MIN correctly via
+       |; unsigned digit extraction on the absolute value (negation is computed
+       |; with `0 - n` which wraps for LONG_MIN, but we then mask via two's
+       |; complement: the magnitude as a u64 is what we extract digits from).
+       |;
+       |; Locals: 0=n, 1=u (u64 magnitude), 2=is_neg, 3=digit_count,
+       |;         4=write_ptr (descends), 5=struct_addr.
+       |global __svm_str_from_i64, func
+       |__svm_str_from_i64:
+       |  frame 6
+       |  local_set 0          ; n
+       |  ; Allocate 40 bytes (16 struct + 24 digit buffer)
+       |  push_i64 __sp
+       |  dup
+       |  load64
+       |  push_i8 40
+       |  sub
+       |  dup
+       |  rot
+       |  store64
+       |  local_set 5          ; struct_addr
+       |  ; is_neg = (n < 0)
+       |  local_get 0
+       |  push_0
+       |  lt
+       |  local_set 2
+       |  ; u = is_neg ? -n : n  (using `0 - n` for LONG_MIN safety)
+       |  local_get 2
+       |  jumpz .strn_pos
+       |  push_0
+       |  local_get 0
+       |  sub
+       |  jump .strn_have_u
+       |.strn_pos:
+       |  local_get 0
+       |.strn_have_u:
+       |  local_set 1          ; u
+       |  ; write_ptr = struct_addr + 40 (one past end)
+       |  local_get 5
+       |  push_i8 40
+       |  add
+       |  local_set 4
+       |  push_0
+       |  local_set 3          ; digit_count
+       |  ; do { write_ptr--; *write_ptr = '0' + (u % 10); u = u / 10; digit_count++ } while u != 0
+       |.strn_loop:
+       |  local_get 4
+       |  dec
+       |  local_set 4
+       |  local_get 1
+       |  push_i8 10
+       |  modu
+       |  push_i8 48           ; '0'
+       |  add
+       |  local_get 4
+       |  store8
+       |  local_get 1
+       |  push_i8 10
+       |  divu
+       |  local_set 1
+       |  local_get 3
+       |  inc
+       |  local_set 3
+       |  local_get 1
+       |  jumpnz .strn_loop
+       |  ; Prepend '-' if negative
+       |  local_get 2
+       |  jumpz .strn_no_neg
+       |  local_get 4
+       |  dec
+       |  local_set 4
+       |  push_i8 45           ; '-'
+       |  local_get 4
+       |  store8
+       |  local_get 3
+       |  inc
+       |  local_set 3
+       |.strn_no_neg:
+       |  ; struct.ptr = write_ptr; struct.len = digit_count
+       |  local_get 4
+       |  local_get 5
+       |  store64
+       |  local_get 3
+       |  local_get 5
+       |  push_i8 8
+       |  add
+       |  store64
+       |  local_get 5
+       |  ret
+       |
+       |; __svm_str_from_bool(b: bool) -> *string
+       |; Returns "true" or "false". Allocates a 16-byte string struct on the
+       |; memory stack pointing at the appropriate static rodata buffer.
+       |global __svm_str_from_bool, func
+       |__svm_str_from_bool:
+       |  frame 2
+       |  local_set 0
+       |  push_i64 __sp
+       |  dup
+       |  load64
+       |  push_i8 16
+       |  sub
+       |  dup
+       |  rot
+       |  store64
+       |  local_set 1
+       |  local_get 0
+       |  jumpz .strb_false
+       |  ; "true"
+       |  push_i64 __svm_str_true_data
+       |  local_get 1
+       |  store64
+       |  push_i8 4
+       |  local_get 1
+       |  push_i8 8
+       |  add
+       |  store64
+       |  local_get 1
+       |  ret
+       |.strb_false:
+       |  push_i64 __svm_str_false_data
+       |  local_get 1
+       |  store64
+       |  push_i8 5
+       |  local_get 1
+       |  push_i8 8
+       |  add
+       |  store64
+       |  local_get 1
+       |  ret
+       |
+       |; __svm_str_fmt_i64(n: i64, base: i32, width: i32, flags: i32) -> *string
+       |; Format a signed 64-bit integer with the given base (2/8/10/16) and
+       |; padding width.
+       |;   flags bit 0x1: zero-pad (right-aligned with '0' fill; ignored if
+       |;                  leftAlign is set)
+       |;   flags bit 0x2: left-align (with space fill)
+       |;   flags bit 0x4: show-sign (always emit '+' for non-negative)
+       |;   flags bit 0x8: upper-case hex digits
+       |; Allocates a 16-byte string struct + 64-byte buffer on the memory
+       |; stack (enough for u64 in binary plus sign and padding).
+       |;
+       |; Locals: 0=n, 1=base, 2=width, 3=flags, 4=u (magnitude), 5=is_neg,
+       |;         6=digit_count, 7=write_ptr, 8=struct_addr, 9=sign_char,
+       |;         10=total_len, 11=pad_count, 12=tmp.
+       |global __svm_str_fmt_i64, func
+       |__svm_str_fmt_i64:
+       |  frame 13
+       |  local_set 3          ; flags
+       |  local_set 2          ; width
+       |  local_set 1          ; base
+       |  local_set 0          ; n
+       |  ; Allocate 16 + 64 = 80 bytes
+       |  push_i64 __sp
+       |  dup
+       |  load64
+       |  push_i8 80
+       |  sub
+       |  dup
+       |  rot
+       |  store64
+       |  local_set 8
+       |  ; is_neg = (base == 10) && (n < 0)
+       |  ; For non-decimal bases we treat n as unsigned (no sign char).
+       |  push_0
+       |  local_set 5
+       |  local_get 1
+       |  push_i8 10
+       |  eq
+       |  jumpz .fmt_skip_sign_check
+       |  local_get 0
+       |  push_0
+       |  lt
+       |  local_set 5
+       |.fmt_skip_sign_check:
+       |  ; u = is_neg ? -n : n
+       |  local_get 5
+       |  jumpz .fmt_pos
+       |  push_0
+       |  local_get 0
+       |  sub
+       |  jump .fmt_have_u
+       |.fmt_pos:
+       |  local_get 0
+       |.fmt_have_u:
+       |  local_set 4
+       |  ; write_ptr = struct_addr + 80 (one past end)
+       |  local_get 8
+       |  push_i8 80
+       |  add
+       |  local_set 7
+       |  push_0
+       |  local_set 6          ; digit_count
+       |.fmt_loop:
+       |  local_get 7
+       |  dec
+       |  local_set 7
+       |  ; digit = u % base
+       |  local_get 4
+       |  local_get 1
+       |  modu
+       |  ; if digit < 10: char = '0' + digit; else char = (uppercase ? 'A' : 'a') + digit - 10
+       |  dup
+       |  push_i8 10
+       |  ltu
+       |  jumpz .fmt_letter
+       |  push_i8 48           ; '0'
+       |  add
+       |  jump .fmt_store_d
+       |.fmt_letter:
+       |  push_i8 10
+       |  sub
+       |  ; uppercase if flags & 0x8
+       |  local_get 3
+       |  push_i8 8
+       |  and
+       |  jumpz .fmt_lower
+       |  push_i8 65           ; 'A'
+       |  add
+       |  jump .fmt_store_d
+       |.fmt_lower:
+       |  push_i8 97           ; 'a'
+       |  add
+       |.fmt_store_d:
+       |  local_get 7
+       |  store8
+       |  local_get 4
+       |  local_get 1
+       |  divu
+       |  local_set 4
+       |  local_get 6
+       |  inc
+       |  local_set 6
+       |  local_get 4
+       |  jumpnz .fmt_loop
+       |  ; sign_char: '-' if is_neg; '+' if (flags & 0x4) && !is_neg && base==10; else 0
+       |  push_0
+       |  local_set 9
+       |  local_get 5
+       |  jumpz .fmt_sign_check_plus
+       |  push_i8 45           ; '-'
+       |  local_set 9
+       |  jump .fmt_sign_done
+       |.fmt_sign_check_plus:
+       |  local_get 3
+       |  push_i8 4
+       |  and
+       |  jumpz .fmt_sign_done
+       |  local_get 1
+       |  push_i8 10
+       |  eq
+       |  jumpz .fmt_sign_done
+       |  push_i8 43           ; '+'
+       |  local_set 9
+       |.fmt_sign_done:
+       |  ; total_len_no_pad = digit_count + (sign_char ? 1 : 0)
+       |  local_get 6
+       |  local_get 9
+       |  push_0
+       |  neq
+       |  add
+       |  local_set 10
+       |  ; pad_count = max(0, width - total_len_no_pad)
+       |  local_get 2
+       |  local_get 10
+       |  sub
+       |  dup
+       |  push_0
+       |  lt
+       |  jumpz .fmt_pad_ok
+       |  drop
+       |  push_0
+       |.fmt_pad_ok:
+       |  local_set 11
+       |  ; Determine fill char and order:
+       |  ;   leftAlign (flag 0x2): space fill, append after digits
+       |  ;   else if zeroPad (flag 0x1): '0' fill, prepend BEFORE digits but AFTER sign
+       |  ;   else: space fill, prepend BEFORE sign
+       |  local_get 3
+       |  push_i8 2
+       |  and
+       |  jumpz .fmt_check_zeropad
+       |  ; leftAlign: emit sign, then digits, then space-pad on right
+       |  ; First write sign at write_ptr-1 if any
+       |  local_get 9
+       |  jumpz .fmt_la_no_sign
+       |  local_get 7
+       |  dec
+       |  local_set 7
+       |  local_get 9
+       |  local_get 7
+       |  store8
+       |  local_get 10
+       |  local_set 6
+       |  jump .fmt_la_pad
+       |.fmt_la_no_sign:
+       |  local_get 6
+       |  local_set 6
+       |.fmt_la_pad:
+       |  ; Append (digit_count + sign) -- already there. Now emit pad spaces at end of digits.
+       |  ; The digits live at [write_ptr, struct_addr+80). We need to append spaces AFTER them.
+       |  ; total chars = digit_count + sign_count. After: pad_count spaces.
+       |  ; We'll write spaces starting at write_ptr + (digits + sign).
+       |  local_get 7
+       |  local_get 6
+       |  add
+       |  local_set 12         ; tail pointer
+       |.fmt_la_loop:
+       |  local_get 11
+       |  eqz
+       |  jumpnz .fmt_la_done
+       |  push_i8 32           ; ' '
+       |  local_get 12
+       |  store8
+       |  local_get 12
+       |  inc
+       |  local_set 12
+       |  local_get 11
+       |  dec
+       |  local_set 11
+       |  jump .fmt_la_loop
+       |.fmt_la_done:
+       |  ; Now total length is digit_count + sign + width-padding (already accounted)
+       |  ; Compute final length: total_len + pad_count_remaining (which is 0 here)
+       |  ; Reset: final length = (write_ptr to struct+80) - actually let's compute it.
+       |  local_get 12
+       |  local_get 7
+       |  sub
+       |  local_set 6
+       |  jump .fmt_finish
+       |.fmt_check_zeropad:
+       |  local_get 3
+       |  push_i8 1
+       |  and
+       |  jumpz .fmt_space_pad
+       |  ; zero-pad: emit '0' pad_count times BEFORE digits, sign emitted FIRST
+       |  ; Emit padding zeros before the digits (lower address):
+       |.fmt_zp_loop:
+       |  local_get 11
+       |  eqz
+       |  jumpnz .fmt_zp_done
+       |  local_get 7
+       |  dec
+       |  local_set 7
+       |  push_i8 48           ; '0'
+       |  local_get 7
+       |  store8
+       |  local_get 11
+       |  dec
+       |  local_set 11
+       |  jump .fmt_zp_loop
+       |.fmt_zp_done:
+       |  ; Then emit sign at the very front
+       |  local_get 9
+       |  jumpz .fmt_zp_no_sign
+       |  local_get 7
+       |  dec
+       |  local_set 7
+       |  local_get 9
+       |  local_get 7
+       |  store8
+       |.fmt_zp_no_sign:
+       |  ; final length = total_len + initial_pad_count = original (10) + (width-10) = width-ish.
+       |  ; recompute as (struct_addr + 80) - write_ptr
+       |  local_get 8
+       |  push_i8 80
+       |  add
+       |  local_get 7
+       |  sub
+       |  local_set 6
+       |  jump .fmt_finish
+       |.fmt_space_pad:
+       |  ; Right-align with space fill: emit sign first, then space-pad before digits
+       |  ; Order in memory (low to high): [spaces][sign][digits]
+       |  ; We have digits at [write_ptr, write_ptr+digit_count). We need to prepend
+       |  ; sign (if any), then pad_count spaces before that.
+       |  local_get 9
+       |  jumpz .fmt_sp_no_sign
+       |  local_get 7
+       |  dec
+       |  local_set 7
+       |  local_get 9
+       |  local_get 7
+       |  store8
+       |.fmt_sp_no_sign:
+       |.fmt_sp_loop:
+       |  local_get 11
+       |  eqz
+       |  jumpnz .fmt_sp_done
+       |  local_get 7
+       |  dec
+       |  local_set 7
+       |  push_i8 32           ; ' '
+       |  local_get 7
+       |  store8
+       |  local_get 11
+       |  dec
+       |  local_set 11
+       |  jump .fmt_sp_loop
+       |.fmt_sp_done:
+       |  local_get 8
+       |  push_i8 80
+       |  add
+       |  local_get 7
+       |  sub
+       |  local_set 6
+       |.fmt_finish:
+       |  ; struct.ptr = write_ptr; struct.len = digit_count
+       |  local_get 7
+       |  local_get 8
+       |  store64
+       |  local_get 6
+       |  local_get 8
+       |  push_i8 8
+       |  add
+       |  store64
+       |  local_get 8
+       |  ret
+       |
+       |segment rodata
+       |global __svm_str_true_data, data, 5
+       |global __svm_str_false_data, data, 6
+       |  align 8
+       |  dl -1                ; rc=-1 (immortal)
+       |__svm_str_true_data:
+       |  db 116                ; 't'
+       |  db 114                ; 'r'
+       |  db 117                ; 'u'
+       |  db 101                ; 'e'
+       |  db 0
+       |  align 8
+       |  dl -1
+       |__svm_str_false_data:
+       |  db 102                ; 'f'
+       |  db 97                 ; 'a'
+       |  db 108                ; 'l'
+       |  db 115                ; 's'
+       |  db 101                ; 'e'
+       |  db 0
        |""".stripMargin
 
   def bootTof: TOF = svmAssemble(bootSource, relocatable = true)

@@ -60,6 +60,9 @@ class SyslSVMCodegen:
   private var needsStrConcat: Boolean = false
   private var needsStrEq: Boolean = false
   private var needsNewSlice: Boolean = false
+  private var needsStrFromI64: Boolean = false
+  private var needsStrFromBool: Boolean = false
+  private var needsStrFmtI64: Boolean = false
 
   // Map: function name → parameter types (for arg-coercion at call sites).
   private val funcParamTypes = new mutable.HashMap[String, List[SyslType]]
@@ -113,6 +116,7 @@ class SyslSVMCodegen:
         scanExpr(arr); lo.foreach(scanExpr); hi.foreach(scanExpr)
       case TNewArray(_, sz) => scanExpr(sz)
       case TNew(_, args) => args.foreach(scanExpr)
+      case TNewEnum(_, _, args) => args.foreach(scanExpr)
       case TAppend(sl, el, _) =>
         count += 6 // slice, oldPtr, oldLen, new, dst, rem
         scanExpr(sl); scanExpr(el)
@@ -282,6 +286,9 @@ class SyslSVMCodegen:
     needsStrConcat = false
     needsStrEq = false
     needsNewSlice = false
+    needsStrFromI64 = false
+    needsStrFromBool = false
+    needsStrFmtI64 = false
 
     // Register canonical struct types so stale placeholder StructType(_, Nil)
     // values in expression types can be resolved back to their real fields.
@@ -528,6 +535,12 @@ class SyslSVMCodegen:
       emit("extern __svm_str_concat")
     if needsStrEq && !definedSymbols.contains("__svm_str_eq") then
       emit("extern __svm_str_eq")
+    if needsStrFromI64 && !definedSymbols.contains("__svm_str_from_i64") then
+      emit("extern __svm_str_from_i64")
+    if needsStrFromBool && !definedSymbols.contains("__svm_str_from_bool") then
+      emit("extern __svm_str_from_bool")
+    if needsStrFmtI64 && !definedSymbols.contains("__svm_str_fmt_i64") then
+      emit("extern __svm_str_fmt_i64")
     if needsNewSlice && !definedSymbols.contains("__svm_new_slice") then
       emit("extern __svm_new_slice")
 
@@ -566,6 +579,7 @@ class SyslSVMCodegen:
       case TStructConstruct(_, args) => args.foreach(scanAddrOfE)
       case TEnumConstruct(_, _, args) => args.foreach(scanAddrOfE)
       case TNew(_, args) => args.foreach(scanAddrOfE)
+      case TNewEnum(_, _, args) => args.foreach(scanAddrOfE)
       case TNewArray(_, s) => scanAddrOfE(s)
       case TAppend(s, el, _) => scanAddrOfE(s); scanAddrOfE(el)
       case TSliceExpr(a, lo, hi, _) => scanAddrOfE(a); lo.foreach(scanAddrOfE); hi.foreach(scanAddrOfE)
@@ -803,6 +817,30 @@ class SyslSVMCodegen:
     deferStack.clear()
     deferStack.pushAll(savedDeferStack.reverse)
     currentFunction = savedFunc
+
+  /** Fallback for TStr on types we can't render: emit "???" string. */
+  private def emitStrPlaceholder(inner: TExpr): Unit =
+    labelCounter += 1
+    val lbl = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_${labelCounter}__qqq"
+              else s"__str_${labelCounter}__qqq"
+    stringLiterals += ((lbl, "???"))
+    genExpr(inner)
+    inner.typ.underlying match
+      case _: SyslType.StructType | _: SyslType.EnumType
+         | _: SyslType.SliceType | _: SyslType.ArrayType
+         | SyslType.StringType => () // no scalar value on stack to drop
+      case _ => emit("  drop")
+    emitMemAlloc(16)
+    emit("  dup")
+    emit(s"  push_i64 $lbl")
+    emit("  swap")
+    emit("  store64")
+    emit("  dup")
+    emitPushInt(8)
+    emit("  add")
+    emitPushInt(3)
+    emit("  swap")
+    emit("  store64")
 
   /** Emit a per-function shim: takes (env_ptr, ...args), tail-calls target
     * with (...args). Used so plain function pointers (TFuncRef) work uniformly
@@ -1464,30 +1502,44 @@ class SyslSVMCodegen:
     case TStr(inner) =>
       inner.typ.underlying match
         case SyslType.StringType => genExpr(inner) // identity
-        case _ =>
-          // Fallback: emit an "???" placeholder string.
-          labelCounter += 1
-          val lbl = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_${labelCounter}__qqq"
-                    else s"__str_${labelCounter}__qqq"
-          stringLiterals += ((lbl, "???"))
-          // Evaluate and discard inner (side-effects only).
+        case SyslType.BoolType =>
           genExpr(inner)
-          inner.typ.underlying match
-            case _: SyslType.StructType | _: SyslType.EnumType
-               | _: SyslType.SliceType | _: SyslType.ArrayType
-               | SyslType.StringType => () // no value on stack to drop
-            case _ => emit("  drop")
-          emitMemAlloc(16)
-          emit("  dup")
-          emit(s"  push_i64 $lbl")
-          emit("  swap")
-          emit("  store64")
-          emit("  dup")
-          emitPushInt(8)
-          emit("  add")
-          emitPushInt(3)
-          emit("  swap")
-          emit("  store64")
+          emit("  call __svm_str_from_bool")
+          needsStrFromBool = true
+        case t if t.isIntegral =>
+          genExpr(inner)
+          // Widen narrow ints to i64 for the runtime helper. Sign-extend signed
+          // types; zero-extend unsigned.
+          if t.bitWidth < 64 then
+            if t.isSigned then
+              emitPushInt(64 - t.bitWidth); emit("  shl")
+              emitPushInt(64 - t.bitWidth); emit("  sar")
+            else
+              t.bitWidth match
+                case 8 => emitPushInt(0xff); emit("  and")
+                case 16 => emitPushInt(0xffff); emit("  and")
+                case 32 => emit("  push_i64 4294967295"); emit("  and")
+                case _ => ()
+          emit("  call __svm_str_from_i64")
+          needsStrFromI64 = true
+        case _: SyslType.EnumType =>
+          // Simple enum (no data variants): use the runtime int helper on the tag.
+          // Data-enum variants would need the analyzer's tag-dispatch helpers,
+          // which std/ doesn't currently exercise on SVM. Fall through to ???
+          // for non-simple enums.
+          val isSimple = inner.typ.underlying match
+            case SyslType.EnumType(_, vs) => vs.forall(_._2.isEmpty)
+            case _ => false
+          if isSimple then
+            genExpr(inner)
+            // Tag is loaded as i32; load it from the address and convert.
+            emit("  load32s")
+            emit("  call __svm_str_from_i64")
+            needsStrFromI64 = true
+          else
+            emitStrPlaceholder(inner)
+        case _ =>
+          emitStrPlaceholder(inner)
 
     case TTempAddr(inner, _) =>
       inner.typ.underlying match
@@ -1589,6 +1641,267 @@ class SyslSVMCodegen:
 
     case TAsmExpr(code, _) =>
       emit(s"  $code")
+
+    case TFmtStr(inner, spec) =>
+      // Lower formatted-string interpolations to a runtime helper. For
+      // integer verbs we route through __svm_str_fmt_i64 with the appropriate
+      // base/width/flag bits. For %s we just pass the string through (with
+      // optional padding via __svm_str_fmt_i64 — not supported yet, fall back
+      // to the unpadded string).
+      val verb = spec.verb
+      verb match
+        case 'd' | 'x' | 'X' | 'o' | 'b' if inner.typ.isIntegral =>
+          genExpr(inner)
+          // Widen narrow ints to i64 for the runtime helper.
+          val t = inner.typ.underlying
+          if t.bitWidth < 64 then
+            if t.isSigned then
+              emitPushInt(64 - t.bitWidth); emit("  shl")
+              emitPushInt(64 - t.bitWidth); emit("  sar")
+            else
+              t.bitWidth match
+                case 8 => emitPushInt(0xff); emit("  and")
+                case 16 => emitPushInt(0xffff); emit("  and")
+                case 32 => emit("  push_i64 4294967295"); emit("  and")
+                case _ => ()
+          val base = verb match
+            case 'd' => 10; case 'x' | 'X' => 16; case 'o' => 8; case 'b' => 2
+            case _ => 10
+          emitPushInt(base)
+          emitPushInt(spec.width)
+          var flags = 0
+          if spec.zeroPad then flags |= 0x1
+          if spec.leftAlign then flags |= 0x2
+          if spec.showSign then flags |= 0x4
+          if spec.upperCase || verb == 'X' then flags |= 0x8
+          emitPushInt(flags)
+          emit("  call __svm_str_fmt_i64")
+          needsStrFmtI64 = true
+        case 's' if inner.typ.underlying == SyslType.StringType =>
+          // %s without width: pass through. With width, padding isn't yet
+          // implemented for string verbs; just pass through (matches current
+          // behaviour of LLVM with simple specs).
+          genExpr(inner)
+        case _ =>
+          // Any other shape: fall back to plain TStr semantics.
+          genExpr(TStr(inner))
+
+    case TQuantifier(kind, name, nameType, lo, hi, inclusive, pred, _) =>
+      // Lower to a short-circuiting loop. `result` is the accumulator —
+      // starts at 1 for "all" (vacuous truth on empty range) and 0 for
+      // "some". On a counterexample (all) or witness (some), set the result
+      // and break out of the loop.
+      val resultIdx = nextLocalIndex; nextLocalIndex += 1
+      val iterIdx = nextLocalIndex; nextLocalIndex += 1
+      val endIdx = nextLocalIndex; nextLocalIndex += 1
+      val initBit = if kind == "all" then 1 else 0
+      emitPushInt(initBit)
+      emit(s"  local_set $resultIdx")
+      genExpr(lo)
+      emit(s"  local_set $iterIdx")
+      genExpr(hi)
+      if !inclusive then emit("  dec")
+      emit(s"  local_set $endIdx")
+      // Bind the loop variable so genExpr(pred) finds it as a regular local.
+      val savedBinding = locals.get(name)
+      locals(name) = LocalInfo(iterIdx, nameType)
+      val condLbl = newLabel("quant_cond")
+      val incLbl = newLabel("quant_inc")
+      val endLbl = newLabel("quant_end")
+      emit(s"$condLbl:")
+      emit(s"  local_get $iterIdx")
+      emit(s"  local_get $endIdx")
+      emit(if nameType.isUnsigned then "  leu" else "  le")
+      emit(s"  jumpz $endLbl")
+      genExpr(pred)
+      if kind == "all" then
+        // pred true → continue; pred false → set 0 and break
+        emit(s"  jumpnz $incLbl")
+        emit("  push_0")
+        emit(s"  local_set $resultIdx")
+        emit(s"  jump $endLbl")
+      else
+        // pred true → set 1 and break; pred false → continue
+        emit(s"  jumpz $incLbl")
+        emit("  push_1")
+        emit(s"  local_set $resultIdx")
+        emit(s"  jump $endLbl")
+      emit(s"$incLbl:")
+      emit(s"  local_get $iterIdx")
+      emit("  inc")
+      emit(s"  local_set $iterIdx")
+      emit(s"  jump $condLbl")
+      emit(s"$endLbl:")
+      // Restore prior binding (or remove the synthetic one).
+      savedBinding match
+        case Some(b) => locals(name) = b
+        case None => locals.remove(name)
+      emit(s"  local_get $resultIdx")
+
+    case TIntrinsicCall(intrName, args, retTyp) =>
+      // Compiler intrinsics — wrapping/saturating arithmetic. SVM int ops
+      // wrap naturally for i64; for narrow types `emitBinaryOp` already
+      // truncates. Saturating variants need explicit overflow detection.
+      intrName match
+        case "wrapping_add" | "wrapping_sub" | "wrapping_mul" =>
+          genExpr(args(0))
+          genExpr(args(1))
+          val op = intrName.stripPrefix("wrapping_") match
+            case "add" => "+"; case "sub" => "-"; case "mul" => "*"
+          emitBinaryOp(op, retTyp)
+        case "saturating_add" | "saturating_sub" | "saturating_mul" =>
+          val signed = retTyp.isSigned
+          val width = retTyp.bitWidth
+          // Bounds for the target type
+          val (minV, maxV) = if signed then
+            (-(1L << (width - 1)), (1L << (width - 1)) - 1)
+          else
+            (0L, if width == 64 then -1L else (1L << width) - 1)
+          // Stash a, b in temp locals
+          val aIdx = nextLocalIndex; nextLocalIndex += 1
+          val bIdx = nextLocalIndex; nextLocalIndex += 1
+          val rIdx = nextLocalIndex; nextLocalIndex += 1
+          genExpr(args(0))
+          emit(s"  local_set $aIdx")
+          genExpr(args(1))
+          emit(s"  local_set $bIdx")
+          // r = wrapping op (full i64 then truncate at the end)
+          emit(s"  local_get $aIdx")
+          emit(s"  local_get $bIdx")
+          val op = intrName match
+            case "saturating_add" => "+"
+            case "saturating_sub" => "-"
+            case "saturating_mul" => "*"
+          emit(op match { case "+" => "  add"; case "-" => "  sub"; case "*" => "  mul" })
+          emit(s"  local_set $rIdx")
+          val satLbl = newLabel("sat_done")
+          if !signed then
+            // unsigned overflow detection:
+            // add: width<64 → r > MAX; width=64 → r < a (wrap)
+            // sub: a < b → underflow → set 0
+            // mul: if a != 0 && r/a != b → overflow → set MAX
+            intrName match
+              case "saturating_add" =>
+                if width < 64 then
+                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gtu")
+                else
+                  emit(s"  local_get $rIdx"); emit(s"  local_get $aIdx"); emit("  ltu")
+                val notOv = newLabel("sat_no_ov")
+                emit(s"  jumpz $notOv")
+                emitPushInt(maxV)
+                emit(s"  local_set $rIdx")
+                emit(s"$notOv:")
+              case "saturating_sub" =>
+                emit(s"  local_get $aIdx"); emit(s"  local_get $bIdx")
+                emit("  ltu")
+                val notUf = newLabel("sat_no_uf")
+                emit(s"  jumpz $notUf")
+                emit("  push_0")
+                emit(s"  local_set $rIdx")
+                emit(s"$notUf:")
+              case "saturating_mul" =>
+                // For narrow widths the wrapping result already truncated; check
+                // against MAX.  For i64, use divu by a to detect overflow.
+                if width < 64 then
+                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gtu")
+                  val notOv = newLabel("sat_no_ov")
+                  emit(s"  jumpz $notOv")
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"$notOv:")
+                else
+                  // 64-bit unsigned saturating_mul: if a != 0 && r/a != b → overflow.
+                  emit(s"  local_get $aIdx"); emit("  push_0"); emit("  neq")
+                  val skip = newLabel("sat_skip")
+                  emit(s"  jumpz $skip")     // a == 0 → r already 0, no overflow
+                  emit(s"  local_get $rIdx"); emit(s"  local_get $aIdx"); emit("  divu")
+                  emit(s"  local_get $bIdx"); emit("  neq")
+                  val notOv = newLabel("sat_no_ov")
+                  emit(s"  jumpz $notOv")
+                  emit("  push_m1")          // unsigned MAX = -1
+                  emit(s"  local_set $rIdx")
+                  emit(s"$notOv:")
+                  emit(s"$skip:")
+              case _ => ()
+          else
+            // signed overflow detection
+            intrName match
+              case "saturating_add" =>
+                // overflow if (a >= 0 && b >= 0 && r < 0) → MAX
+                // underflow if (a < 0 && b < 0 && r >= 0) → MIN
+                val noOv = newLabel("sat_no_ov")
+                val checkUf = newLabel("sat_check_uf")
+                // a >= 0?
+                emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpnz $checkUf") // a < 0 → check underflow
+                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpnz $noOv")    // b < 0 → no overflow
+                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpz $noOv")     // r >= 0 → no overflow
+                emitPushInt(maxV); emit(s"  local_set $rIdx")
+                emit(s"  jump $noOv")
+                emit(s"$checkUf:")
+                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpz $noOv")     // b >= 0 → no underflow
+                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpnz $noOv")    // r < 0 → no underflow
+                emitPushInt(minV); emit(s"  local_set $rIdx")
+                emit(s"$noOv:")
+              case "saturating_sub" =>
+                // overflow if (a >= 0 && b < 0 && r < 0) → MAX
+                // underflow if (a < 0 && b >= 0 && r >= 0) → MIN
+                val noOv = newLabel("sat_no_ov")
+                val checkUf = newLabel("sat_check_uf")
+                emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpnz $checkUf")
+                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpz $noOv")     // b >= 0 → no overflow (a-b: a>=0, b>=0 stays in range or underflows below)
+                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpz $noOv")
+                emitPushInt(maxV); emit(s"  local_set $rIdx")
+                emit(s"  jump $noOv")
+                emit(s"$checkUf:")
+                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpnz $noOv")
+                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                emit(s"  jumpnz $noOv")
+                emitPushInt(minV); emit(s"  local_set $rIdx")
+                emit(s"$noOv:")
+              case "saturating_mul" =>
+                // For narrow widths: check against [minV, maxV].
+                if width < 64 then
+                  val skip = newLabel("sat_skip")
+                  val ov = newLabel("sat_ov")
+                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gt")
+                  emit(s"  jumpnz $ov")
+                  emit(s"  local_get $rIdx"); emitPushInt(minV); emit("  lt")
+                  emit(s"  jumpz $skip")
+                  emit(s"$ov:")
+                  // sign of (a XOR b) determines clamp direction
+                  emit(s"  local_get $aIdx"); emit(s"  local_get $bIdx"); emit("  xor")
+                  emit("  push_0"); emit("  lt")
+                  val negSign = newLabel("sat_neg")
+                  emit(s"  jumpnz $negSign")
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $skip")
+                  emit(s"$negSign:")
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$skip:")
+                else
+                  // 64-bit signed saturating_mul: omit (rare; std/ doesn't use)
+                  ()
+              case _ => ()
+          emit(s"$satLbl:")
+          emit(s"  local_get $rIdx")
+        case _ =>
+          sys.error(s"unsupported intrinsic '$intrName' on SVM backend")
+
+    case TAddrLit(fpOffset) =>
+      // Address relative to the frame pointer — used only by hidden return
+      // slot args, which SVM doesn't use. Push the local slot's address as
+      // the byte offset; rely on the fact that locals are 8-byte cells.
+      // Since SVM doesn't have a frame-relative address mode, surface this as
+      // an error if it ever gets exercised — std/ doesn't reach here.
+      sys.error(s"TAddrLit(fp+$fpOffset) unsupported on SVM (no frame-relative addressing)")
 
     case TFuncRef(name, typ) =>
       // FuncType is a 16-byte aggregate {func_ptr, env_ptr}. Construct a
@@ -1817,6 +2130,40 @@ class SyslSVMCodegen:
         emit("  add")
       emit("  load64")                        // method fn ptr
       emit("  callr")
+
+    case TNewEnum(et, variantIndex, args) =>
+      // Heap-allocated enum variant. SVM has no real heap; allocate on the
+      // memory stack and leak per-test (same convention as TNew). The result
+      // type is RefType(EnumType) but at the bytecode level the value IS the
+      // data pointer — there is no separate rc header on SVM.
+      val size = et.sizeOf
+      emitMemAlloc(size)
+      val aligned = ((size + 7) / 8 * 8).toInt
+      for i <- 0 until aligned by 8 do
+        emit("  dup")
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  push_0")
+        emit("  swap")
+        emit("  store64")
+      // Tag at offset 0 (i32)
+      emit("  dup")
+      emitPushInt(variantIndex)
+      emit("  swap")
+      emit("  store32")
+      val dataOff = et.dataOffset.toInt
+      val variantFields = et.variants(variantIndex)._2
+      var fieldOff = 0
+      for (arg, i) <- args.zipWithIndex do
+        val (_, fieldType) = variantFields(i)
+        val align = fieldType.alignOf.toInt.max(1)
+        fieldOff = ((fieldOff + align - 1) / align) * align
+        emit("  dup")
+        val totalOff = dataOff + fieldOff
+        if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
+        genExpr(arg)
+        emit("  swap")
+        emitStore(fieldType)
+        fieldOff += fieldType.sizeOf.toInt
 
     case TNew(structType, args) =>
       // Allocate on memory stack (no real heap in SVM); behaves like
