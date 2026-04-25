@@ -233,6 +233,76 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw should not include "smoke"
   }
 
+  "for all in a contract-less def-bool body lifts to a logic-level `predicate`" in {
+    // WhyML's forall / exists are formula-level (return prop), not value-level (bool).
+    // A `def f -> bool` whose body IS a quantifier maps cleanly to WhyML's `predicate`,
+    // which is exactly the right construct for a pure prop-valued query function.
+    val mlw = translate(
+      """def all_nonneg(n: int) -> bool
+        |    for all i in 0..n => i >= 0
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  predicate all_nonneg (n: int) = forall i: int. 0 <= i <= n -> (i >= 0)
+        |end
+        |""".stripMargin
+  }
+
+  "for all over exclusive range uses strict less-than at the upper bound" in {
+    val mlw = translate(
+      """def under_n(n: int) -> bool
+        |    for all i in 0..<n => i < n
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  predicate under_n (n: int) = forall i: int. 0 <= i < n -> (i < n)
+        |end
+        |""".stripMargin
+  }
+
+  "for some translates to bounded exists with conjunction" in {
+    val mlw = translate(
+      """def has_zero(n: int) -> bool
+        |    for some i in 0..n => i == 0
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  predicate has_zero (n: int) = exists i: int. 0 <= i <= n /\ (i = 0)
+        |end
+        |""".stripMargin
+  }
+
+  "quantifier in an ensure clause threads through (contract is formula position)" in {
+    // The body here is a function call (not a quantifier), so the ensure clause carries
+    // the formula and the function stays as a `let function`.
+    val mlw = translate(
+      """def verify(n: int) -> bool
+        |    require n >= 0
+        |    ensure result == (for all i in 0..<n => i >= 0)
+        |    n >= 0
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let function verify (n: int) : bool
+        |    requires { n >= 0 }
+        |    ensures  { result = (forall i: int. 0 <= i < n -> (i >= 0)) }
+        |    = (n >= 0)
+        |end
+        |""".stripMargin
+  }
+
   "unsupported expression form yields a clear error naming the gap" in {
     val ex = intercept[RuntimeException](translate(
       """def s() -> int

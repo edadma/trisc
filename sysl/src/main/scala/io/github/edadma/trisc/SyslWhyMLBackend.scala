@@ -72,20 +72,41 @@ class SyslWhyMLBackend(moduleName: String = "M"):
   private def emitFunction(fn: FunDeclAST): Unit =
     if fn.attributes.exists(_.name == "test") then return
     if fn.typeParams.nonEmpty then unsupported("generic function", fn.name)
-    val recKw = if isRecursive(fn) then "rec " else ""
     val name = sanitizeName(fn.name)
     val params =
       if fn.params.isEmpty then "()"
       else fn.params.map(p => s"(${sanitizeName(p.name)}: ${typeOf(p.typ)})").mkString(" ")
+    val (contracts, bodyExpr) = splitBody(fn)
+
+    // Lift to a logic-level `predicate` when the shape is right: `def f(...) -> bool` whose
+    // body IS a quantifier and which carries no contracts. Why3's `forall`/`exists` are
+    // formula-level (return `prop`), so they cannot appear in `let function`'s value-typed
+    // body — only in contract positions or as the body of `predicate` / formula-valued
+    // logic definitions. `predicate` is exactly the right WhyML construct here, and matches
+    // sysl's runtime semantics for `def`-with-quantifier (a pure boolean-valued query).
+    val returnsBool = fn.returnType match
+      case Some(NamedTypeAST("bool", Nil)) => true
+      case _                               => false
+    val isPredicateShape = fn.isDef && returnsBool && contracts.isEmpty && isFormula(bodyExpr)
+    if isPredicateShape then
+      line(s"predicate $name $params = ${stripOuterParens(formatExpr(bodyExpr))}")
+      return
+
+    val recKw = if isRecursive(fn) then "rec " else ""
     val ret = fn.returnType match
-      case None       => unsupported("function without explicit return type", fn.name)
-      case Some(t)    => typeOf(t)
+      case None    => unsupported("function without explicit return type", fn.name)
+      case Some(t) => typeOf(t)
     line(s"let ${recKw}function $name $params : $ret")
     indentLevel += 1
-    val (contracts, bodyExpr) = splitBody(fn)
     for c <- contracts do emitContract(c)
     line(s"= ${formatExpr(bodyExpr)}")
     indentLevel -= 1
+
+  /** True if `e` is a formula-shaped expression — currently just a top-level quantifier.
+   *  Extended in later phases to recognize boolean connectives joining quantifiers. */
+  private def isFormula(e: ExpressionAST): Boolean = e match
+    case _: QuantifierAST => true
+    case _                => false
 
   private def splitBody(fn: FunDeclAST): (List[ContractClauseAST], ExpressionAST) =
     fn.body match
@@ -174,6 +195,20 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         case Some(stmts) => stmtsAsExpr(stmts)
         case None        => unsupported("if without else", "WhyML requires both branches")
       s"(if ${formatExpr(c)} then $tExpr else $eExpr)"
+    case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>
+      // sysl `for all x in lo..hi => P`  → `forall x: int. lo <= x <= hi -> P`
+      // sysl `for all x in lo..<hi => P` → `forall x: int. lo <= x <  hi -> P`
+      // sysl `for some` mirrors with `exists` and conjunction (/\) instead of implication.
+      // The bound is `int` because Phase 1 collapses every sysl int width to mathematical int.
+      val cmp = if inclusive then "<=" else "<"
+      val v = sanitizeName(name)
+      val loS = formatExpr(lo)
+      val hiS = formatExpr(hi)
+      val predS = formatExpr(pred)
+      kind match
+        case "all"  => s"(forall $v: int. $loS <= $v $cmp $hiS -> $predS)"
+        case "some" => s"(exists $v: int. $loS <= $v $cmp $hiS /\\ $predS)"
+        case other  => unsupported("quantifier kind", other)
     case other => unsupported("expression", other.getClass.getSimpleName)
 
   private def stmtsAsExpr(stmts: List[StmtAST]): String = stmts match
