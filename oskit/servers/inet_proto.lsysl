@@ -1097,12 +1097,20 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     val TCP_INIT_SSTHRESH   = 65535
     val TCP_MIN_CWND        = 480
 
-    // TCP option kinds (RFC 793, RFC 2018).
+    // TCP option kinds (RFC 793, RFC 2018, RFC 7323).
     val TCP_OPT_EOL             = 0
     val TCP_OPT_NOP             = 1
     val TCP_OPT_MSS             = 2
+    val TCP_OPT_WSCALE          = 3
     val TCP_OPT_SACK_PERMITTED  = 4
     val TCP_OPT_SACK            = 5
+    val TCP_OPT_TS              = 8
+
+    // Receive-window scale shift we always advertise. With
+    // TCP_RECV_BUF=4096 this is overkill; once C3's variable
+    // buffers land, scale=7 (× 128) lets a 256 KB rcv_buf advertise
+    // up through 32 MB of window, well above the 16-bit raw field.
+    val TCP_RCV_WSCALE          = 7
 
     // Max SACK blocks we bother with on either side. RFC 2018
     // technically allows up to 4 in a 40-byte option space; we
@@ -1212,6 +1220,26 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         // `inet_epoll_fire`), returned to the shim by
         // `inet_handle_poll` so EPOLLET tracks per-fd edges.
         fire_seq: int
+        // RFC 7323 §2 window scale (negotiated on the SYN
+        // exchange). `snd_wscale` is the shift the peer announced
+        // — every inbound non-SYN window field gets `<< snd_wscale`
+        // before storing in `snd_wnd`. `rcv_wscale` is the shift
+        // *we* announce — every outbound non-SYN window field gets
+        // `>> rcv_wscale` before writing.  Both default to 0 when
+        // either side fails to send the WS option.
+        snd_wscale: int
+        rcv_wscale: int
+        // RFC 7323 §3 timestamps. `ts_ok` is set iff both sides
+        // advertised TS in the SYN exchange — only then do we
+        // include TS on subsequent segments. `ts_recent` is the
+        // last in-window TSval we've seen from the peer; we echo
+        // it as TSecr on every outbound segment. `ts_offset` is a
+        // per-connection bias added to our outbound TSval so the
+        // raw kernel tick count doesn't leak (and so RTT math
+        // stays consistent: RTT = now - tsecr + ts_offset).
+        ts_ok: int
+        ts_recent: u32
+        ts_offset: u32
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -1331,6 +1359,76 @@ header end. Unknown options are skipped.
                     return 0
                 if kind == TCP_OPT_SACK_PERMITTED
                     if olen == 2
+                        return 1
+                off += olen
+        0
+
+
+RFC 7323 §2 Window Scale option parser. Returns 1 (with `shift`
+filled in, clamped to 0..14 per §2.3) if a WS option is present
+in the TCP header, 0 otherwise. Only meaningful on SYN segments
+since the option is exchanged exactly once during the handshake.
+
+    tcp_opts_get_wscale(frame: *byte, tcp_off: int, hdr_len: int,
+                        out shift: int) -> int
+        shift = 0
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return 0
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return 0
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return 0
+                if off + olen > opts_end
+                    return 0
+                if kind == TCP_OPT_WSCALE
+                    if olen == 3
+                        var s = int(frame[off + 2]) & 0xff
+                        if s > 14
+                            s = 14
+                        shift = s
+                        return 1
+                off += olen
+        0
+
+
+RFC 7323 §3 Timestamps option parser. Returns 1 (with `tsval`
+and `tsecr` filled in) if a TS option is present, 0 otherwise.
+Caller is responsible for the PAWS check and for echoing
+`tsval` back as `tsecr` on the next outbound segment via
+`ts_recent`.
+
+    tcp_opts_get_ts(frame: *byte, tcp_off: int, hdr_len: int,
+                    out tsval: u32, out tsecr: u32) -> int
+        tsval = u32(0)
+        tsecr = u32(0)
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return 0
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return 0
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return 0
+                if off + olen > opts_end
+                    return 0
+                if kind == TCP_OPT_TS
+                    if olen == 10
+                        tsval = tcp_read_u32(frame, off + 2)
+                        tsecr = tcp_read_u32(frame, off + 6)
                         return 1
                 off += olen
         0
@@ -1479,16 +1577,14 @@ is `payload_len` bytes of send_buf starting at `payload_seq`
 
 TCP options attached:
 
-- SYN frames carry a 4-byte MSS option and a 2-byte
-  SACK-permitted option (RFC 2018 §2), padded to 4-byte
-  alignment with NOPs — 8 bytes of options, `hdr_bytes = 28`.
-- Non-SYN ACKs with `sack_ok` negotiated and at least one
-  reorder-queue entry carry a SACK option (RFC 2018 §3)
-  advertising up to `TCP_MAX_SACK_BLOCKS` ranges of
-  out-of-order data we have buffered. Each block is 8 bytes
-  (left, right); the option header is 2 bytes; we prefix with
-  2 NOPs for 4-byte alignment. `hdr_bytes = 20 + 4 + 8 * n`.
-- All other ACKs carry no options — `hdr_bytes = 20`.
+- Active SYN frames advertise MSS + SACK-permitted + Timestamps
+  + Window-scale: 20 bytes of options, `hdr_bytes = 40`.
+- SYN-ACK frames echo TS / WS only if the peer's SYN advertised
+  them.  The exact layout follows from the include flags below.
+- Post-handshake segments include a 12-byte TS block (2 NOPs +
+  10-byte option) once TS has been negotiated, plus an optional
+  SACK block when reorder slots are populated.
+- All other segments carry no options — `hdr_bytes = 20`.
 
     inet_tcp_emit(s: int, flags: int, seq: u32,
                   payload_seq: u32, payload_len: int) -> int
@@ -1511,11 +1607,44 @@ TCP options attached:
                             if sack_count < TCP_MAX_SACK_BLOCKS
                                 sack_count += 1
                         ri += 1
+        // RFC 7323 negotiate-and-echo rules. Active SYN (no ACK
+        // bit) advertises everything we support. SYN-ACK only
+        // includes options the peer's SYN already opted into.
+        // Post-handshake includes TS on every segment iff TS was
+        // negotiated.
+        var include_ts = 0
+        var include_ws = 0
+        if is_syn
+            if (flags & TCP_F_ACK) == 0
+                include_ts = 1
+                include_ws = 1
+            else
+                if tcp_sockets[s].ts_ok != 0
+                    include_ts = 1
+                if tcp_sockets[s].rcv_wscale != 0
+                    include_ws = 1
+        else
+            if tcp_sockets[s].ts_ok != 0
+                include_ts = 1
         var hdr_bytes = 20
         if is_syn
-            hdr_bytes = 28
-        else if sack_count > 0
-            hdr_bytes = 20 + 4 + 8 * sack_count
+            // MSS(4) + SACK_PERM(2) = 6, then variable trailers
+            // chosen so the total stays 4-byte aligned.
+            if include_ts != 0 && include_ws != 0
+                hdr_bytes = 40
+            else if include_ts != 0
+                hdr_bytes = 36
+            else if include_ws != 0
+                hdr_bytes = 32
+            else
+                hdr_bytes = 28
+        else
+            if include_ts != 0
+                hdr_bytes = 32
+                if sack_count > 0
+                    hdr_bytes = 32 + 4 + 8 * sack_count
+            else if sack_count > 0
+                hdr_bytes = 20 + 4 + 8 * sack_count
         var seg_len = hdr_bytes + payload_len
         if seg_len > 1460
             return -1
@@ -1557,9 +1686,25 @@ TCP options attached:
         var rwnd = TCP_RECV_BUF - tcp_sockets[s].recv_len - stashed
         if rwnd < 0
             rwnd = 0
-        pkt_write_u16(frame, tcp_off + 14, rwnd)
+        // RFC 7323 §2.2: SYN segments advertise the unscaled
+        // window field; non-SYN segments advertise (rwnd >>
+        // rcv_wscale). When `rcv_wscale == 0` (no negotiation)
+        // the shift is a no-op.
+        var rwnd_field = rwnd
+        if is_syn == 0
+            rwnd_field = rwnd >> tcp_sockets[s].rcv_wscale
+        if rwnd_field > 0xffff
+            rwnd_field = 0xffff
+        pkt_write_u16(frame, tcp_off + 14, rwnd_field)
         pkt_write_u16(frame, tcp_off + 16, 0)
         pkt_write_u16(frame, tcp_off + 18, 0)
+        // Compute the values we'll write into the TS option.
+        // tsval baked from a per-connection random offset so
+        // the host kernel's tick count doesn't leak; tsecr
+        // mirrors `ts_recent`, which is 0 on the initial active
+        // SYN (peer hasn't advertised yet).
+        val tsval = u32(uptime()) + tcp_sockets[s].ts_offset
+        val tsecr = tcp_sockets[s].ts_recent
         if is_syn
             // MSS (RFC 793): kind=2 len=4 value=TCP_MSS_ADV
             frame[tcp_off + 20] = byte(TCP_OPT_MSS)
@@ -1568,30 +1713,66 @@ TCP options attached:
             // SACK-permitted (RFC 2018 §2): kind=4 len=2
             frame[tcp_off + 24] = byte(TCP_OPT_SACK_PERMITTED)
             frame[tcp_off + 25] = 2
-            // Pad to 4-byte alignment with NOPs.
-            frame[tcp_off + 26] = byte(TCP_OPT_NOP)
-            frame[tcp_off + 27] = byte(TCP_OPT_NOP)
-        else if sack_count > 0
-            // 2 NOPs prefix for alignment (Linux emits this
-            // pattern too) — placing SACK at a 4-byte boundary.
-            frame[tcp_off + 20] = byte(TCP_OPT_NOP)
-            frame[tcp_off + 21] = byte(TCP_OPT_NOP)
-            // SACK header: kind=5, len = 2 + 8 * nblocks.
-            frame[tcp_off + 22] = byte(TCP_OPT_SACK)
-            frame[tcp_off + 23] = byte(2 + 8 * sack_count)
-            var out_off = tcp_off + 24
-            var ri2 = 0
-            var emitted = 0
-            while ri2 < TCP_REORDER_SLOTS
-                if emitted < sack_count
-                    if tcp_sockets[s].reorder[ri2].in_use != 0
-                        val blk_left = tcp_sockets[s].reorder[ri2].seq
-                        val blk_right = blk_left + u32(tcp_sockets[s].reorder[ri2].len)
-                        tcp_write_u32(frame, out_off, blk_left)
-                        tcp_write_u32(frame, out_off + 4, blk_right)
-                        out_off += 8
-                        emitted += 1
-                ri2 += 1
+            if include_ts != 0 && include_ws != 0
+                // TS at +26..35, NOP at +36, WS at +37..39.
+                frame[tcp_off + 26] = byte(TCP_OPT_TS)
+                frame[tcp_off + 27] = 10
+                tcp_write_u32(frame, tcp_off + 28, tsval)
+                tcp_write_u32(frame, tcp_off + 32, tsecr)
+                frame[tcp_off + 36] = byte(TCP_OPT_NOP)
+                frame[tcp_off + 37] = byte(TCP_OPT_WSCALE)
+                frame[tcp_off + 38] = 3
+                frame[tcp_off + 39] = byte(TCP_RCV_WSCALE)
+            else if include_ts != 0
+                // TS at +26..35, already aligned.
+                frame[tcp_off + 26] = byte(TCP_OPT_TS)
+                frame[tcp_off + 27] = 10
+                tcp_write_u32(frame, tcp_off + 28, tsval)
+                tcp_write_u32(frame, tcp_off + 32, tsecr)
+            else if include_ws != 0
+                // 2 NOPs at +26..27, WS at +28..30, NOP at +31.
+                frame[tcp_off + 26] = byte(TCP_OPT_NOP)
+                frame[tcp_off + 27] = byte(TCP_OPT_NOP)
+                frame[tcp_off + 28] = byte(TCP_OPT_WSCALE)
+                frame[tcp_off + 29] = 3
+                frame[tcp_off + 30] = byte(TCP_RCV_WSCALE)
+                frame[tcp_off + 31] = byte(TCP_OPT_NOP)
+            else
+                // Pad to 4-byte alignment with NOPs (legacy layout).
+                frame[tcp_off + 26] = byte(TCP_OPT_NOP)
+                frame[tcp_off + 27] = byte(TCP_OPT_NOP)
+        else
+            var opts_cur = tcp_off + 20
+            if include_ts != 0
+                // 2 NOPs + TS option = 12 bytes, naturally aligned.
+                frame[opts_cur] = byte(TCP_OPT_NOP)
+                frame[opts_cur + 1] = byte(TCP_OPT_NOP)
+                frame[opts_cur + 2] = byte(TCP_OPT_TS)
+                frame[opts_cur + 3] = 10
+                tcp_write_u32(frame, opts_cur + 4, tsval)
+                tcp_write_u32(frame, opts_cur + 8, tsecr)
+                opts_cur += 12
+            if sack_count > 0
+                // 2 NOPs prefix for alignment (Linux emits this
+                // pattern too) — placing SACK at a 4-byte boundary.
+                frame[opts_cur]     = byte(TCP_OPT_NOP)
+                frame[opts_cur + 1] = byte(TCP_OPT_NOP)
+                // SACK header: kind=5, len = 2 + 8 * nblocks.
+                frame[opts_cur + 2] = byte(TCP_OPT_SACK)
+                frame[opts_cur + 3] = byte(2 + 8 * sack_count)
+                var out_off = opts_cur + 4
+                var ri2 = 0
+                var emitted = 0
+                while ri2 < TCP_REORDER_SLOTS
+                    if emitted < sack_count
+                        if tcp_sockets[s].reorder[ri2].in_use != 0
+                            val blk_left = tcp_sockets[s].reorder[ri2].seq
+                            val blk_right = blk_left + u32(tcp_sockets[s].reorder[ri2].len)
+                            tcp_write_u32(frame, out_off, blk_left)
+                            tcp_write_u32(frame, out_off + 4, blk_right)
+                            out_off += 8
+                            emitted += 1
+                    ri2 += 1
         if payload_len > 0
             val offset = int(i32(payload_seq - tcp_sockets[s].snd_una))
             var i = 0
@@ -1791,6 +1972,10 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
             tcp_sockets[s].reorder[k].in_use = 0
             k += 1
         tcp_sack_board_clear(s)
+        tcp_sockets[s].snd_wscale = 0
+        tcp_sockets[s].rcv_wscale = 0
+        tcp_sockets[s].ts_ok = 0
+        tcp_sockets[s].ts_recent = u32(0)
 
 
     inet_tcp_alloc() -> int
@@ -1833,6 +2018,14 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 tcp_sockets[i].sack_rexmit_valid = 0
                 tcp_sockets[i].rexmit_count = 0
                 tcp_sockets[i].fire_seq = 0
+                tcp_sockets[i].snd_wscale = 0
+                tcp_sockets[i].rcv_wscale = 0
+                tcp_sockets[i].ts_ok = 0
+                tcp_sockets[i].ts_recent = u32(0)
+                // Mix slot index, alloc seq, and uptime so two
+                // back-to-back connections from the same socket
+                // pool don't share an offset.
+                tcp_sockets[i].ts_offset = u32(uptime()) ^ u32(i * 1000003) ^ tcp_iss_counter
                 var k = 0
                 while k < TCP_REORDER_SLOTS
                     tcp_sockets[i].reorder[k].in_use = 0
@@ -1962,7 +2155,9 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
 
     inet_tcp_handle_passive_syn(ls: int, remote_ip: u32,
                                 remote_port: int, seg_seq: u32,
-                                peer_sack_perm: int)
+                                peer_sack_perm: int,
+                                peer_has_ws: int, ws_shift: int,
+                                peer_has_ts: int, ts_val: u32)
         // If accept queue is already at capacity, silently drop.
         // SYN cookies / overflow handling is phase-3. The peer's
         // SYN retransmit will retry once a slot frees up.
@@ -1990,6 +2185,19 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         // includes it on any SYN frame).
         if peer_sack_perm != 0
             tcp_sockets[s].sack_ok = 1
+        // RFC 7323 §1.3: WS is enabled only if both sides
+        // advertised it. We always offer; mirror peer's shift
+        // for inbound and set our own (TCP_RCV_WSCALE) for the
+        // SYN-ACK we're about to emit.
+        if peer_has_ws != 0
+            tcp_sockets[s].snd_wscale = ws_shift
+            tcp_sockets[s].rcv_wscale = TCP_RCV_WSCALE
+        // RFC 7323 §1.3: TS is enabled only if both sides
+        // advertised it. Seed `ts_recent` from the SYN's TSval
+        // so the SYN-ACK echoes a non-zero TSecr.
+        if peer_has_ts != 0
+            tcp_sockets[s].ts_ok = 1
+            tcp_sockets[s].ts_recent = ts_val
         inet_tcp_emit(s, TCP_F_SYN | TCP_F_ACK, iss, u32(0), 0)
         inet_tcp_arm_rtx(s)
 
@@ -2559,6 +2767,16 @@ checksum, locates the matching socket, and delegates.
         // state-step paths can see the peer's offer.
         val peer_sack_perm = tcp_opts_has_sack_permitted(
             frame, tcp_off, tcp_hdr_len)
+        // RFC 7323 WS + TS — also handshake-negotiated, but TS
+        // appears on every segment once enabled so we parse on
+        // every inbound and let state_step decide.
+        var ws_shift = 0
+        val peer_has_ws = tcp_opts_get_wscale(frame, tcp_off,
+            tcp_hdr_len, ws_shift)
+        var ts_val: u32 = u32(0)
+        var ts_ecr: u32 = u32(0)
+        val peer_has_ts = tcp_opts_get_ts(frame, tcp_off,
+            tcp_hdr_len, ts_val, ts_ecr)
         val s = inet_tcp_find(dst_port, src_ip, src_port)
         if s < 0
             // No connection match. SYN-to-a-listen gets the passive
@@ -2570,7 +2788,8 @@ checksum, locates the matching socket, and delegates.
                 val ls = inet_tcp_find_listen(dst_port)
                 if ls >= 0
                     inet_tcp_handle_passive_syn(ls, src_ip, src_port,
-                        seq, peer_sack_perm)
+                        seq, peer_sack_perm, peer_has_ws, ws_shift,
+                        peer_has_ts, ts_val)
                     return
             inet_tcp_emit_rst(src_ip, src_port, dst_port,
                               flags, seq, ack, payload_len)
@@ -2583,7 +2802,8 @@ checksum, locates the matching socket, and delegates.
             if (flags & TCP_F_ACK) != 0
                 tcp_opts_apply_sack(s, frame, tcp_off, tcp_hdr_len)
         inet_tcp_state_step(s, flags, seq, ack, wnd, payload,
-            payload_len, peer_sack_perm)
+            payload_len, peer_sack_perm, peer_has_ws, ws_shift,
+            peer_has_ts, ts_val, ts_ecr)
 
 
 Reorder queue for out-of-order segments.
@@ -2687,7 +2907,9 @@ Per-socket state transition for one validated segment.
 
     inet_tcp_state_step(s: int, flags: int, seq: u32, ack: u32,
                         wnd: int, payload: *byte, payload_len: int,
-                        peer_sack_perm: int)
+                        peer_sack_perm: int,
+                        peer_has_ws: int, ws_shift: int,
+                        peer_has_ts: int, ts_val: u32, ts_ecr: u32)
         val st = tcp_sockets[s].state
         if st == TCP_STATE_SYN_SENT
             if (flags & TCP_F_RST) != 0
@@ -2702,6 +2924,9 @@ Per-socket state transition for one validated segment.
             tcp_sockets[s].irs = seq
             tcp_sockets[s].rcv_nxt = seq + u32(1)
             tcp_sockets[s].snd_una = ack
+            // RFC 7323 §2.2: SYN window field is unscaled. Apply
+            // shift only after the SYN-ACK lands and we know the
+            // peer's wscale.
             tcp_sockets[s].snd_wnd = wnd
             tcp_sockets[s].state = TCP_STATE_ESTABLISHED
             // RFC 2018 §2: both our SYN and the peer's SYN-ACK
@@ -2711,6 +2936,16 @@ Per-socket state transition for one validated segment.
             // factor.
             if peer_sack_perm != 0
                 tcp_sockets[s].sack_ok = 1
+            // RFC 7323 §1.3: WS / TS only stick if the peer
+            // echoes them in the SYN-ACK. Otherwise our SYN's
+            // offer is silently dropped — leave snd_wscale=0 and
+            // ts_ok=0 (already initialised in alloc).
+            if peer_has_ws != 0
+                tcp_sockets[s].snd_wscale = ws_shift
+                tcp_sockets[s].rcv_wscale = TCP_RCV_WSCALE
+            if peer_has_ts != 0
+                tcp_sockets[s].ts_ok = 1
+                tcp_sockets[s].ts_recent = ts_val
             inet_tcp_disarm_rtx(s)
             inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
             if tcp_sockets[s].connect_waiter >= 0
@@ -2730,7 +2965,9 @@ Per-socket state transition for one validated segment.
             if ack != tcp_sockets[s].snd_nxt
                 return
             tcp_sockets[s].snd_una = ack
-            tcp_sockets[s].snd_wnd = wnd
+            // RFC 7323 §2.3: this is the first non-SYN segment from
+            // the peer, so apply our negotiated `snd_wscale`.
+            tcp_sockets[s].snd_wnd = wnd << tcp_sockets[s].snd_wscale
             tcp_sockets[s].state = TCP_STATE_ESTABLISHED
             inet_tcp_disarm_rtx(s)
             // Hand child to parent listen (or directly to the parked
@@ -2754,6 +2991,27 @@ the listen path picks it up.
                 inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
                 tcp_sockets[s].tw_deadline = int(uptime()) + TCP_TW_TICKS
             return
+
+RFC 7323 §5.3 PAWS: a stale duplicate's TSval will be older than
+the highest TSval we've recorded for the connection. If the gap is
+big enough we drop the segment (but still ACK current rcv_nxt so
+the peer doesn't keep retransmitting). The check only runs once
+both sides have agreed on TS during the handshake.
+
+After PAWS clears, advance `ts_recent` so subsequent retransmit
+duplicates of this segment will be filtered. We use the loose
+"any TSval ≥ recent" rule rather than the stricter §4.3 form
+(SEG.SEQ ≤ Last.ACK.sent) — the difference only matters when
+peer aggressively reorders.
+
+        if tcp_sockets[s].ts_ok != 0
+            if peer_has_ts != 0
+                if tcp_seq_lt(ts_val, tcp_sockets[s].ts_recent) != 0
+                    inet_tcp_emit(s, TCP_F_ACK,
+                        tcp_sockets[s].snd_nxt, u32(0), 0)
+                    return
+                if tcp_seq_lt(tcp_sockets[s].ts_recent, ts_val) != 0
+                    tcp_sockets[s].ts_recent = ts_val
 
 Past handshake: process ACK, data, FIN in that order.
 
@@ -2785,7 +3043,10 @@ the connection down.
                         k += 1
                     tcp_sockets[s].send_len -= eff
                     tcp_sockets[s].snd_una = ack
-                    tcp_sockets[s].snd_wnd = wnd
+                    // RFC 7323 §2.3: shift the raw header field by
+                    // the negotiated peer scale.  Defaults to 0
+                    // (no-op) when WS wasn't agreed on.
+                    tcp_sockets[s].snd_wnd = wnd << tcp_sockets[s].snd_wscale
                     tcp_sockets[s].dup_ack_count = 0
                     // Send-buffer drained — wake any epoll waiter on
                     // EPOLLOUT. We over-fire (no full→drain check) on
@@ -2797,7 +3058,18 @@ the connection down.
                     // `tcp_sack_next_hole` pointed at the right place
                     // without stale blocks lingering.
                     tcp_sack_board_purge(s)
-                    inet_tcp_rtt_maybe_sample(s, ack)
+                    // Prefer the TS-based RTT sample (RFC 7323 §4):
+                    // it isn't ambiguous on retransmits the way Karn's
+                    // sequence sampling is, so we get fresh
+                    // measurements even after loss.  Falls back to
+                    // Karn's algorithm when TS isn't negotiated.
+                    if tcp_sockets[s].ts_ok != 0 && peer_has_ts != 0 && ts_ecr != u32(0)
+                        val r = int(uptime()) - int(i32(ts_ecr - tcp_sockets[s].ts_offset))
+                        if r >= 0 && r <= TCP_RTO_MAX
+                            tcp_sockets[s].rtt_sample_valid = 0
+                            inet_tcp_rtt_update(s, r)
+                    else
+                        inet_tcp_rtt_maybe_sample(s, ack)
                     // RFC 5681 §3.2 ¶6 — recovering ACK: if we're
                     // in fast recovery and this ACK reaches beyond
                     // the recovery_point captured at entry, deflate
@@ -3073,7 +3345,8 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         while i < 50
             seg_b[i] = byte('B')
             i += 1
-        inet_tcp_state_step(s, TCP_F_ACK, u32(200), u32(1), 1024, seg_b, 50, 0)
+        inet_tcp_state_step(s, TCP_F_ACK, u32(200), u32(1), 1024,
+            seg_b, 50, 0, 0, 0, 0, u32(0), u32(0))
         if tcp_sockets[s].rcv_nxt != u32(100)
             inet_tcp_close_slot(s, 0)
             return 1
@@ -3083,7 +3356,8 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         while i < 50
             seg_c[i] = byte('C')
             i += 1
-        inet_tcp_state_step(s, TCP_F_ACK, u32(250), u32(1), 1024, seg_c, 50, 0)
+        inet_tcp_state_step(s, TCP_F_ACK, u32(250), u32(1), 1024,
+            seg_c, 50, 0, 0, 0, 0, u32(0), u32(0))
         if tcp_sockets[s].rcv_nxt != u32(100)
             inet_tcp_close_slot(s, 0)
             return 2
@@ -3099,7 +3373,8 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         while i < 100
             seg_a[i] = byte('A')
             i += 1
-        inet_tcp_state_step(s, TCP_F_ACK, u32(100), u32(1), 1024, seg_a, 100, 0)
+        inet_tcp_state_step(s, TCP_F_ACK, u32(100), u32(1), 1024,
+            seg_a, 100, 0, 0, 0, 0, u32(0), u32(0))
         if tcp_sockets[s].rcv_nxt != u32(300)
             inet_tcp_close_slot(s, 0)
             return 3
@@ -3272,7 +3547,7 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         inet_tcp_state_step(ss,
             TCP_F_SYN | TCP_F_ACK,
             u32(100), u32(1), 1024,
-            nullbuf, 0, 1)
+            nullbuf, 0, 1, 0, 0, 0, u32(0), u32(0))
         if tcp_sockets[ss].sack_ok != 1
             inet_tcp_close_slot(ss, 0)
             return 23
