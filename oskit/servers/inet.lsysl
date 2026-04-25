@@ -84,6 +84,8 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_ABORT_CLOSE = 36
     val INET_CMD_TCP_SET_KEEPALIVE = 37
     val INET_CMD_ICMP_UNREACH_INJECT = 38
+    val INET_CMD_TCP_SET_KEEPOPT = 39
+    val INET_CMD_TCP_GET_KEEPOPT = 40
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1147,6 +1149,53 @@ CLOSE_WAIT with `keepalive_on != 0`.
         ipc_reply(sender, reply, 1)
 
 
+setsockopt(IPPROTO_TCP, TCP_KEEPIDLE/INTVL/CNT) — set a per-socket
+override.  Wire: cmd(1) + fd(u16 BE) + kind(1) + value(u32 BE)
+= 8 bytes in; reply: 1-byte status.  `kind` = 0 (idle), 1 (intvl),
+2 (cnt).  Idle/intvl arrive as ticks (shim has converted from
+seconds at the boundary); cnt is a raw count.
+
+    inet_handle_tcp_set_keepopt(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val kind = int(buf[3]) & 0xff
+        val v_hi = inet_read_u16(buf, 4)
+        val v_lo = inet_read_u16(buf, 6)
+        val value = (v_hi << 16) | v_lo
+        var reply: [1]byte
+        if inet_tcp_slot_owned(fd, sender) == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val rc = inet_tcp_set_keepopt(fd, kind, value)
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+
+getsockopt(IPPROTO_TCP, TCP_KEEPIDLE/INTVL/CNT) — read the per-socket
+override.  Wire: cmd(1) + fd(u16 BE) + kind(1) = 4 bytes in;
+reply: status(1) + value(u32 BE) = 5 bytes.
+
+    inet_handle_tcp_get_keepopt(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val kind = int(buf[3]) & 0xff
+        var reply: [5]byte
+        if inet_tcp_slot_owned(fd, sender) == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        val v = inet_tcp_get_keepopt(fd, kind)
+        if v < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        reply[0] = 0
+        reply[1] = byte((v >> 24) & 0xff)
+        reply[2] = byte((v >> 16) & 0xff)
+        reply[3] = byte((v >>  8) & 0xff)
+        reply[4] = byte( v        & 0xff)
+        ipc_reply(sender, reply, 5)
+
+
 SO_LINGER `l_linger = 0` close path.  Shim sends this when the
 caller has set linger-on with a zero timeout: emit RST, free
 slot, no FIN, no TIME_WAIT.  Reply is immediate (1-byte status)
@@ -1817,6 +1866,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_GETBUF  -> inet_handle_tcp_getbuf(sender, buf)
                     INET_CMD_TCP_ABORT_CLOSE -> inet_handle_tcp_abort_close(sender, buf)
                     INET_CMD_TCP_SET_KEEPALIVE -> inet_handle_tcp_set_keepalive(sender, buf)
+                    INET_CMD_TCP_SET_KEEPOPT -> inet_handle_tcp_set_keepopt(sender, buf)
+                    INET_CMD_TCP_GET_KEEPOPT -> inet_handle_tcp_get_keepopt(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_ICMP_UNREACH_INJECT -> inet_handle_icmp_unreach_inject(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)

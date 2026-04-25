@@ -378,6 +378,12 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("sockopt: get TCP_NODELAY = 0 val=1")
     output should include("sockopt: set SO_LINGER = 0")
     output should include("sockopt: get SO_LINGER = 0 olen=8 on=1 secs=0")
+    // TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT round-trip the
+    // requested seconds / count via the persisted shim values; a
+    // pre-connect TCP fd carries the user value verbatim.
+    output should include("sockopt: get TCP_KEEPIDLE = 0 val=60")
+    output should include("sockopt: get TCP_KEEPINTVL = 0 val=15")
+    output should include("sockopt: get TCP_KEEPCNT = 0 val=7")
     output should include("sockopt: done")
     output should not include "sockopt: FAIL"
   }

@@ -119,6 +119,15 @@ posix_fd_bridge memory.
         // flush-or-timeout semantics aren't enforced yet.
         linger_on: int
         linger_secs: int
+        // setsockopt(IPPROTO_TCP, TCP_KEEPIDLE/INTVL/CNT) — caller-
+        // requested per-socket keepalive overrides. 0 = "no override,
+        // use the inet-side default".  Idle/intvl persisted as the
+        // user's seconds value (the conversion to ticks happens at
+        // the IPC boundary so getsockopt round-trips the seconds
+        // unchanged); cnt is a raw probe count.
+        keep_idle_secs: int
+        keep_intvl_secs: int
+        keep_cnt: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -140,6 +149,9 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].flag_nodelay = 0
             posix_fd_table[base + i].linger_on = 0
             posix_fd_table[base + i].linger_secs = 0
+            posix_fd_table[base + i].keep_idle_secs = 0
+            posix_fd_table[base + i].keep_intvl_secs = 0
+            posix_fd_table[base + i].keep_cnt = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -203,6 +215,9 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].flag_nodelay = 0
                 posix_fd_table[base + i].linger_on = 0
                 posix_fd_table[base + i].linger_secs = 0
+                posix_fd_table[base + i].keep_idle_secs = 0
+                posix_fd_table[base + i].keep_intvl_secs = 0
+                posix_fd_table[base + i].keep_cnt = 0
                 return i
             i += 1
         -1
@@ -282,6 +297,8 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_TCP_GETBUF  = 35
     val INET_CMD_TCP_ABORT_CLOSE = 36
     val INET_CMD_TCP_SET_KEEPALIVE = 37
+    val INET_CMD_TCP_SET_KEEPOPT = 39
+    val INET_CMD_TCP_GET_KEEPOPT = 40
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -1230,6 +1247,19 @@ dst_port (BE u16) at the usual offsets.
         // post-handshake property (only fires in ESTABLISHED).
         if posix_fd_table[idx].flag_keepalive != 0
             shim_inet_set_keepalive(inet_fd, 1)
+        // Apply persisted TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT.
+        // Same shape as keepalive: pre-slot setsockopt landed only
+        // on the shim, so the slot starts with defaults until we
+        // replay the per-option IPC here.
+        if posix_fd_table[idx].keep_idle_secs > 0
+            shim_inet_set_keepopt(inet_fd, 0,
+                posix_fd_table[idx].keep_idle_secs * 100)
+        if posix_fd_table[idx].keep_intvl_secs > 0
+            shim_inet_set_keepopt(inet_fd, 1,
+                posix_fd_table[idx].keep_intvl_secs * 100)
+        if posix_fd_table[idx].keep_cnt > 0
+            shim_inet_set_keepopt(inet_fd, 2,
+                posix_fd_table[idx].keep_cnt)
         // Non-blocking connect: surface -EINPROGRESS so the user
         // can poll EPOLLOUT for completion. The slot is already
         // SYN_SENT; once it reaches ESTABLISHED the existing
@@ -1289,6 +1319,18 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         // the listener's flag via inet's handle_passive_syn.
         if posix_fd_table[idx].flag_keepalive != 0
             shim_inet_set_keepalive(listen_fd, 1)
+        // Apply pending TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT —
+        // accepted children also inherit these via
+        // inet_tcp_handle_passive_syn.
+        if posix_fd_table[idx].keep_idle_secs > 0
+            shim_inet_set_keepopt(listen_fd, 0,
+                posix_fd_table[idx].keep_idle_secs * 100)
+        if posix_fd_table[idx].keep_intvl_secs > 0
+            shim_inet_set_keepopt(listen_fd, 1,
+                posix_fd_table[idx].keep_intvl_secs * 100)
+        if posix_fd_table[idx].keep_cnt > 0
+            shim_inet_set_keepopt(listen_fd, 2,
+                posix_fd_table[idx].keep_cnt)
         i64(0)
 
 SYS_ACCEPT. Blocks until a child connection arrives unless the
@@ -1465,6 +1507,60 @@ Returns 0 on success, negative errno on failure.
             return -22
         0
 
+Send INET_CMD_TCP_SET_KEEPOPT.  `kind` selects IDLE (0), INTVL
+(1), or CNT (2).  `value` is in *ticks* for IDLE/INTVL — this
+helper does NOT do unit conversion; the caller has already
+converted seconds→ticks. Returns 0 on success, negative errno on
+failure.
+
+    shim_inet_set_keepopt(inet_fd: int, kind: int, value: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [8]byte
+        msg[0] = byte(INET_CMD_TCP_SET_KEEPOPT)
+        shim_write_u16(msg, 1, inet_fd)
+        msg[3] = byte(kind & 0xff)
+        msg[4] = byte((value >> 24) & 0xff)
+        msg[5] = byte((value >> 16) & 0xff)
+        msg[6] = byte((value >>  8) & 0xff)
+        msg[7] = byte( value        & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 8, reply, 1)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            return -22
+        0
+
+
+Send INET_CMD_TCP_GET_KEEPOPT.  Returns the per-socket value in
+*ticks* (or count for CNT) on success via the `out v` parameter,
+or a negative errno via the function return.  Caller-side does
+the ticks→seconds conversion before handing back to userspace.
+
+    shim_inet_get_keepopt(inet_fd: int, kind: int, out v: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [4]byte
+        msg[0] = byte(INET_CMD_TCP_GET_KEEPOPT)
+        shim_write_u16(msg, 1, inet_fd)
+        msg[3] = byte(kind & 0xff)
+        var reply: [5]byte
+        val r = ipc_send(port, msg, 4, reply, 5)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            return -22
+        val b1 = (int(reply[1]) & 0xff) << 24
+        val b2 = (int(reply[2]) & 0xff) << 16
+        val b3 = (int(reply[3]) & 0xff) <<  8
+        val b4 =  int(reply[4]) & 0xff
+        v = b1 | b2 | b3 | b4
+        0
+
+
 SYS_SETSOCKOPT / SYS_GETSOCKOPT. The inet server tracks
 `SO_SNDBUF` / `SO_RCVBUF` (since Phase E bufsize chunk).  The
 remaining accept-list options (SO_REUSEADDR, SO_BROADCAST,
@@ -1587,6 +1683,40 @@ as -EINVAL).
                     return i64(-22)
                 posix_fd_table[tidx].flag_nodelay = v
                 return i64(0)
+            // TCP_KEEPIDLE (4) / TCP_KEEPINTVL (5) — seconds.
+            // TCP_KEEPCNT (6) — count.
+            if optname == 4 || optname == 5 || optname == 6
+                if k != POSIX_FD_TCP_SOCKET
+                    return i64(-92)
+                var v = 0
+                if shim_sockopt_read_int(optval, optlen, v) != 0
+                    return i64(-22)
+                if v < 0
+                    v = 0
+                if optname == 4
+                    posix_fd_table[tidx].keep_idle_secs = v
+                else if optname == 5
+                    posix_fd_table[tidx].keep_intvl_secs = v
+                else
+                    posix_fd_table[tidx].keep_cnt = v
+                // Push to inet immediately if a slot exists; pre-slot
+                // calls just persist on the shim fd. Slot creation
+                // (sys_connect / sys_listen) replays them via the
+                // same path.
+                val ko_inet_fd = posix_fd_target(fd)
+                if ko_inet_fd >= 0
+                    var kind = 0
+                    if optname == 5
+                        kind = 1
+                    else if optname == 6
+                        kind = 2
+                    var ticks = v
+                    if optname != 6
+                        ticks = v * 100        // sec → tick @ 100 Hz
+                    val rc = shim_inet_set_keepopt(ko_inet_fd, kind, ticks)
+                    if rc != 0
+                        return i64(rc)
+                return i64(0)
         i64(-92)                        // -ENOPROTOOPT
 
 `val` is a pointer to the option buffer; `len_ptr` points at an
@@ -1625,6 +1755,8 @@ the option buffer is left untouched in that case.
                 accept = 1
         if level == 6
             if optname == 1
+                accept = 1
+            if optname == 4 || optname == 5 || optname == 6
                 accept = 1
         if accept == 0
             return i64(-92)             // -ENOPROTOOPT
@@ -1699,6 +1831,31 @@ the option buffer is left untouched in that case.
                 if reply[0] != 0
                     return i64(-22)
                 *vp = i32(shim_read_u16(reply, 1))
+                *lp = i32(4)
+                return i64(0)
+        // TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT.  Always answer
+        // from the shim's persisted value — that's the source of
+        // truth for what the user set, and round-tripping through
+        // the inet ticks representation would lose the original
+        // seconds (60 sec → 6000 ticks → 60 sec is fine, but small
+        // values can drift if the user passes 0 / 1 in seconds and
+        // we'd return the default rather than the persisted 0).
+        if level == 6
+            if optname == 4 || optname == 5 || optname == 6
+                if k != POSIX_FD_TCP_SOCKET
+                    *vp = i32(0)
+                    *lp = i32(4)
+                    return i64(0)
+                val pid_k = posix_fd_current_pid()
+                val kidx = pid_k * POSIX_FDS_PER_PROC + fd
+                var kv = 0
+                if optname == 4
+                    kv = posix_fd_table[kidx].keep_idle_secs
+                else if optname == 5
+                    kv = posix_fd_table[kidx].keep_intvl_secs
+                else
+                    kv = posix_fd_table[kidx].keep_cnt
+                *vp = i32(kv)
                 *lp = i32(4)
                 return i64(0)
         // Echo the persisted flag value for the accept-list options

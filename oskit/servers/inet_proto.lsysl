@@ -1367,6 +1367,14 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         last_recv_tick: int
         keepalive_probes: int
         keepalive_next_probe: int
+        // Per-socket keepalive overrides (TCP_KEEPIDLE / TCP_KEEPINTVL
+        // / TCP_KEEPCNT). 0 = use the global TCP_KEEPALIVE_* default.
+        // Idle/intvl are stored as ticks (already converted from
+        // seconds at the shim boundary); cnt is the probe-giveup
+        // threshold.
+        keepalive_idle: int
+        keepalive_intvl: int
+        keepalive_cnt: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -2107,6 +2115,9 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].last_recv_tick = 0
         tcp_sockets[s].keepalive_probes = 0
         tcp_sockets[s].keepalive_next_probe = 0
+        tcp_sockets[s].keepalive_idle = 0
+        tcp_sockets[s].keepalive_intvl = 0
+        tcp_sockets[s].keepalive_cnt = 0
         // Release the heap-backed buffers. `free(null)` is a no-op
         // (std.alloc), so close paths hit on slots that never
         // allocated (e.g. listen sockets in early-reject paths) are
@@ -2200,6 +2211,9 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].last_recv_tick = int(uptime())
                 tcp_sockets[i].keepalive_probes = 0
                 tcp_sockets[i].keepalive_next_probe = 0
+                tcp_sockets[i].keepalive_idle = 0
+                tcp_sockets[i].keepalive_intvl = 0
+                tcp_sockets[i].keepalive_cnt = 0
                 // Heap-backed buffers are allocated lazily on alloc.
                 // close_slot frees + nulls the pointers, so re-using a
                 // slot doesn't double-allocate.  std.alloc returns 0 on
@@ -2297,6 +2311,78 @@ Idempotent (no-op for same-state calls).  Returns 0 on success,
             tcp_sockets[s].keepalive_probes = 0
             tcp_sockets[s].keepalive_next_probe = 0
         0
+
+
+setsockopt(TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT) — write a
+per-socket override that scan_timers consults instead of the
+global default. `kind` selects which option (0 = idle, 1 = intvl,
+2 = cnt). Idle/intvl arrive in *ticks* (the shim has already
+converted from seconds at 100 Hz); cnt is a raw probe count.
+Clamp to a non-zero positive — 0 is reserved internally to mean
+"use default", so a caller passing 0 still routes to the global
+constant. Resets the probe schedule so the new cadence takes
+effect on the next scan, regardless of any in-flight probe.
+
+Returns 0 on success, -1 on bad fd / unknown kind.
+
+    inet_tcp_set_keepopt(s: int, kind: int, value: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        var v = value
+        if v < 0
+            v = 0
+        if kind == 0
+            tcp_sockets[s].keepalive_idle = v
+        else if kind == 1
+            tcp_sockets[s].keepalive_intvl = v
+        else if kind == 2
+            tcp_sockets[s].keepalive_cnt = v
+        else
+            return -1
+        // Force a reschedule on the next scan: any cached probe
+        // deadline was derived from the old cadence and would
+        // misbehave (probe too soon / too late) under the new
+        // values.
+        tcp_sockets[s].keepalive_next_probe = 0
+        0
+
+
+getsockopt(TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT) — read the
+persisted per-socket override. Returns the *ticks* / count. The
+caller (typically the shim) is responsible for converting back
+to seconds. Returns -1 on bad fd / unknown kind. A 0 reply means
+"using the global default" — distinct from a real 0, which is
+forbidden by the setter clamp.
+
+    inet_tcp_get_keepopt(s: int, kind: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if kind == 0
+            return tcp_sockets[s].keepalive_idle
+        if kind == 1
+            return tcp_sockets[s].keepalive_intvl
+        if kind == 2
+            return tcp_sockets[s].keepalive_cnt
+        -1
+
+
+Resolve the effective keepalive timing for socket `s`. Returns
+the values scan_timers should use, falling back to the global
+default whenever a per-socket override is 0. Centralized so the
+fallback rule stays in one place rather than duplicated three
+times in scan_timers.
+
+    inet_tcp_eff_keepalive(s: int, out idle: int, out intvl: int, out cnt: int)
+        val raw_idle = tcp_sockets[s].keepalive_idle
+        val raw_intvl = tcp_sockets[s].keepalive_intvl
+        val raw_cnt = tcp_sockets[s].keepalive_cnt
+        idle = if raw_idle != 0 then raw_idle else TCP_KEEPALIVE_IDLE
+        intvl = if raw_intvl != 0 then raw_intvl else TCP_KEEPALIVE_INTVL
+        cnt = if raw_cnt != 0 then raw_cnt else TCP_KEEPALIVE_MAX_PROBES
 
 
     inet_tcp_get_bufsize(s: int, kind: int) -> int
@@ -2472,6 +2558,13 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         // already points at "now" via alloc).
         if tcp_sockets[ls].keepalive_on != 0
             inet_tcp_set_keepalive(s, 1)
+        // Per-socket TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT
+        // overrides also inherit. 0 on either side just means
+        // "use the global default", so copying through is a no-op
+        // for a listener that never tuned these.
+        tcp_sockets[s].keepalive_idle = tcp_sockets[ls].keepalive_idle
+        tcp_sockets[s].keepalive_intvl = tcp_sockets[ls].keepalive_intvl
+        tcp_sockets[s].keepalive_cnt = tcp_sockets[ls].keepalive_cnt
         val iss = tcp_next_iss()
         tcp_sockets[s].owner_tid = tcp_sockets[ls].owner_tid
         tcp_sockets[s].local_port = tcp_sockets[ls].local_port
@@ -3571,13 +3664,17 @@ socket for retransmit and TIME_WAIT deadlines.
                     if tcp_sockets[i].keepalive_on != 0
                         val kst = tcp_sockets[i].state
                         if kst == TCP_STATE_ESTABLISHED || kst == TCP_STATE_CLOSE_WAIT
+                            var idle_eff = 0
+                            var intvl_eff = 0
+                            var cnt_eff = 0
+                            inet_tcp_eff_keepalive(i, idle_eff, intvl_eff, cnt_eff)
                             if tcp_sockets[i].keepalive_next_probe == 0
                                 // Idle timer just (re)started — schedule
-                                // first probe `IDLE` ticks after last recv.
-                                val first_probe = tcp_sockets[i].last_recv_tick + TCP_KEEPALIVE_IDLE
+                                // first probe `idle_eff` ticks after last recv.
+                                val first_probe = tcp_sockets[i].last_recv_tick + idle_eff
                                 tcp_sockets[i].keepalive_next_probe = first_probe
                             if now >= tcp_sockets[i].keepalive_next_probe
-                                if tcp_sockets[i].keepalive_probes >= TCP_KEEPALIVE_MAX_PROBES
+                                if tcp_sockets[i].keepalive_probes >= cnt_eff
                                     // Peer is dead. Close as -ETIMEDOUT.
                                     inet_tcp_close_slot(i, -1)
                                 else
@@ -3590,7 +3687,7 @@ socket for retransmit and TIME_WAIT deadlines.
                                     val probe_seq = tcp_sockets[i].snd_una - u32(1)
                                     inet_tcp_emit(i, TCP_F_ACK, probe_seq, u32(0), 0)
                                     tcp_sockets[i].keepalive_probes += 1
-                                    tcp_sockets[i].keepalive_next_probe = now + TCP_KEEPALIVE_INTVL
+                                    tcp_sockets[i].keepalive_next_probe = now + intvl_eff
             i += 1
 
     inet_tcp_retransmit(s: int)
