@@ -376,6 +376,8 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("sockopt: get SO_SNDBUF = 0 val=2048")
     output should include("sockopt: get SO_RCVBUF = 0 val=4096")
     output should include("sockopt: get TCP_NODELAY = 0 val=1")
+    output should include("sockopt: set SO_LINGER = 0")
+    output should include("sockopt: get SO_LINGER = 0 olen=8 on=1 secs=0")
     output should include("sockopt: done")
     output should not include "sockopt: FAIL"
   }

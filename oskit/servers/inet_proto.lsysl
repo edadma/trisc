@@ -2010,6 +2010,34 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].recv_buf_size = 0
 
 
+SO_LINGER `l_linger=0` close path. Emit RST + close the slot,
+skipping FIN/TIME_WAIT entirely (Linux's "abort close" pattern —
+the application is done with the connection and wants the peer
+to see RST so a half-broken transfer fails fast).
+
+Caller is responsible for owner_tid validation.  Returns 0 on
+success, -1 when the slot is already closed (idempotent).
+
+    inet_tcp_abort(s: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        // Only emit RST when the connection has progressed past
+        // active SYN — a slot that never reached SYN_RCVD has no
+        // peer mac to send to.  For SYN_SENT we still RST so the
+        // peer's listening socket clears its half-open state.
+        val st = tcp_sockets[s].state
+        if st != TCP_STATE_CLOSED
+            if st != TCP_STATE_LISTEN
+                inet_tcp_emit(s,
+                    TCP_F_RST | TCP_F_ACK,
+                    tcp_sockets[s].snd_nxt,
+                    u32(0), 0)
+        inet_tcp_close_slot(s, 0)
+        0
+
+
     inet_tcp_alloc() -> int
         var i = 0
         while i < TCP_MAX_SOCKETS

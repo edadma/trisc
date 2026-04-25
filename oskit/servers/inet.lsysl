@@ -81,6 +81,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_CONNECT_NB = 33
     val INET_CMD_TCP_SETBUF   = 34
     val INET_CMD_TCP_GETBUF   = 35
+    val INET_CMD_TCP_ABORT_CLOSE = 36
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1107,6 +1108,22 @@ Reply: status(1).
             return
         // Deferred reply — state step delivers when FIN is acked.
 
+SO_LINGER `l_linger = 0` close path.  Shim sends this when the
+caller has set linger-on with a zero timeout: emit RST, free
+slot, no FIN, no TIME_WAIT.  Reply is immediate (1-byte status)
+since no FIN handshake happens.
+
+    inet_handle_tcp_abort_close(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        var reply: [1]byte
+        if inet_tcp_slot_owned(fd, sender) == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val rc = inet_tcp_abort(fd)
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
     inet_handle_tcp_listen(sender: int, buf: *byte)
         val port = inet_read_u16(buf, 1)
         val backlog = inet_read_u16(buf, 3) & 0xffff
@@ -1644,6 +1661,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_CONNECT_NB -> inet_handle_tcp_connect_nb(sender, buf)
                     INET_CMD_TCP_SETBUF  -> inet_handle_tcp_setbuf(sender, buf)
                     INET_CMD_TCP_GETBUF  -> inet_handle_tcp_getbuf(sender, buf)
+                    INET_CMD_TCP_ABORT_CLOSE -> inet_handle_tcp_abort_close(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
