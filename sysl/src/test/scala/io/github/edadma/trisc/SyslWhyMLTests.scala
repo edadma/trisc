@@ -1092,6 +1092,123 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  // ====================================================================================
+  // Phase 4-data — generic data enums (Option, Result)
+  // ====================================================================================
+
+  "generic data enum with one type param emits a parametric WhyML ADT" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type option 't = Some 't | None
+        |end
+        |""".stripMargin
+  }
+
+  "generic data enum with two type params emits both as positional WhyML type vars" in {
+    val mlw = translate(
+      """enum Result[T, E]
+        |    Ok(value: T)
+        |    Err(error: E)
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type result 't 'e = Ok 't | Err 'e
+        |end
+        |""".stripMargin
+  }
+
+  "match on data enum with destructure binds the payload" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def unwrap_or[T](o: Option[T], default: T) -> T
+        |    o match
+        |        Some(v) -> v
+        |        None -> default
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type option 't = Some 't | None
+        |
+        |  let function unwrap_or (o: option 't) (default: 't) : 't
+        |    = (match o with | Some v -> v | None -> default end)
+        |end
+        |""".stripMargin
+  }
+
+  "wildcard inside destructure pattern emits as `Some _`" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def is_some[T](o: Option[T]) -> bool
+        |    o match
+        |        Some(_) -> true
+        |        None -> false
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type option 't = Some 't | None
+        |
+        |  let function is_some (o: option 't) : bool
+        |    = (match o with | Some _ -> true | None -> false end)
+        |end
+        |""".stripMargin
+  }
+
+  "constructor call `Some(42)` lowers to `(Some 42)` and bare `None` emits as-is" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def of_int(x: int) -> Option[int]
+        |    Some(x)
+        |
+        |def empty() -> Option[int]
+        |    None
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type option 't = Some 't | None
+        |
+        |  let function of_int (x: int) : option int
+        |    = (Some x)
+        |
+        |  let function empty () : option int
+        |    = None
+        |end
+        |""".stripMargin
+  }
+
   "module-level `var` is rejected with a clear message" in {
     val ex = intercept[RuntimeException](translate(
       """var counter: int = 0

@@ -20,6 +20,19 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  construction calls `Point(1, 2)` into WhyML record literals `{ x = 1; y = 2 }` (need
    *  field names since records are name-keyed) and to recognize struct types in `typeOf`. */
   private var structFields: Map[String, List[String]] = Map.empty
+  /** Map of data-enum type name → list of `(variantName, fields)` (fields are positional
+   *  WhyML constructor arguments). Drives data-enum type emission, constructor-call
+   *  recognition in `formatExpr`, and destructure-pattern emission in `formatPattern`. */
+  private var dataEnumNames: Map[String, List[(String, List[(String, TypeAST)])]] = Map.empty
+  /** Reverse-lookup: variant name → enclosing data-enum type name. Used to recognize bare
+   *  (no-payload) variant references (`None`) and constructor calls (`Some(42)`) without
+   *  the user qualifying them. Sysl variant names are globally unique across data enums. */
+  private var dataEnumVariantOf: Map[String, String] = Map.empty
+  /** Type parameters currently in scope for the function being emitted. Recognized in
+   *  `typeOf` and rendered as WhyML type variables (`T` → `'t`, `U` → `'u`). Pushed when
+   *  we begin emitting a generic function and cleared after — module-level scope has no
+   *  active type variables, only declared inside functions or generic types. */
+  private var currentTypeParams: Set[String] = Set.empty
   /** Names currently bound as WhyML `ref`s in scope. Reads of these get `!name`; assignments
    *  get `name := expr`. Populated during `formatBlockBody` when a sysl `var` is detected to
    *  be reassigned later in the same scope; popped on the way out. Phase 4a does not handle
@@ -45,6 +58,9 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     enumNames = enums.map(_.name).toSet
     val structs = program.decls.collect { case s: StructDeclAST => s }
     structFields = structs.map(s => s.name -> s.fields.map(_._1)).toMap
+    val dataEnums = program.decls.collect { case d: DataEnumDeclAST => d }
+    dataEnumNames = dataEnums.map(d => d.name -> d.variants.map(v => (v.name, v.fields))).toMap
+    dataEnumVariantOf = (for d <- dataEnums; v <- d.variants yield v.name -> d.name).toMap
     val constants = program.decls.collect { case v: VarDeclAST => v }
     val fns = program.decls.collect { case f: FunDeclAST => f }
     line(s"module $moduleName")
@@ -64,6 +80,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       if !first then blank()
       first = false
       emitEnum(e)
+    for d <- dataEnums do
+      if !first then blank()
+      first = false
+      emitDataEnum(d)
     for s <- structs do
       if !first then blank()
       first = false
@@ -159,6 +179,30 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     if ctors.isEmpty then unsupported("empty enum", e.name)
     line(s"type $typeName = ${ctors.mkString(" | ")}")
 
+  /** sysl `enum Option[T] { Some(value: T); None }` → WhyML
+   *  `type option 'a = Some 'a | None`. WhyML data-enum variants are positional, so we
+   *  drop the sysl field names (`value:`) and emit each field's translated type in order.
+   *  No-payload variants (`None`) emit as bare constructors with no trailing types.
+   *
+   *  Type parameters are pushed into `currentTypeParams` so `typeOf` can recognize them
+   *  and emit `'a` / `'b` / etc. inside the variant payload types. They are popped after
+   *  emission so other declarations don't accidentally see them. */
+  private def emitDataEnum(d: DataEnumDeclAST): Unit =
+    if d.variants.isEmpty then unsupported("empty data enum", d.name)
+    val typeName = s"${d.name.head.toLower}${d.name.tail}"
+    val savedTypeParams = currentTypeParams
+    currentTypeParams = d.typeParams.toSet
+    try
+      val typeParamsStr =
+        if d.typeParams.isEmpty then ""
+        else " " + d.typeParams.map(p => s"'${p.toLowerCase}").mkString(" ")
+      val variantStrs = d.variants.map { v =>
+        if v.fields.isEmpty then v.name
+        else s"${v.name} " + v.fields.map((_, t) => typeOf(t)).mkString(" ")
+      }
+      line(s"type $typeName$typeParamsStr = ${variantStrs.mkString(" | ")}")
+    finally currentTypeParams = savedTypeParams
+
   /** True iff `fn` calls itself by name anywhere in its body (Phase 1 detects only direct
    *  self-recursion — mutual recursion would need a cross-decl scan and `with` syntax in WhyML). */
   private def isRecursive(fn: FunDeclAST): Boolean =
@@ -185,7 +229,12 @@ class SyslWhyMLBackend(moduleName: String = "M"):
 
   private def emitFunction(fn: FunDeclAST): Unit =
     if fn.attributes.exists(_.name == "test") then return
-    if fn.typeParams.nonEmpty then unsupported("generic function", fn.name)
+    val savedTypeParams = currentTypeParams
+    if fn.typeParams.nonEmpty then currentTypeParams = fn.typeParams.toSet
+    try emitFunctionImpl(fn)
+    finally currentTypeParams = savedTypeParams
+
+  private def emitFunctionImpl(fn: FunDeclAST): Unit =
     val name = sanitizeName(fn.name)
     val params =
       if fn.params.isEmpty then "()"
@@ -504,16 +553,31 @@ class SyslWhyMLBackend(moduleName: String = "M"):
 
   /** Map a sysl type AST to a WhyML type. Phase 1 collapses every signed/unsigned int width
    *  to mathematical `int` — overflow is a separate verification problem we layer on later
-   *  via Why3's `Int32` / `Int64` modules. `bool` maps directly. */
+   *  via Why3's `Int32` / `Int64` modules. `bool` maps directly. Type parameters in scope
+   *  (e.g. `T` inside `def f[T](...)`) lower to WhyML type variables (`T` → `'t`). Generic
+   *  data enums applied to type args (`Option[int]` → `option int`) emit positionally. */
   private def typeOf(t: TypeAST): String = t match
     case NamedTypeAST(name, Nil) => name match
       case "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" |
            "byte" | "char" | "rune" => "int"
       case "bool" => "bool"
-      case n if enumNames(n) || structFields.contains(n) =>
-        // Lowercase the first letter to match the lowered type name (enum or struct).
+      case n if currentTypeParams(n) =>
+        // Sysl convention: single-letter or short uppercase type params (T, U, K, V).
+        // WhyML type variables must start with `'` and be lowercase: `'t`, `'u`, …
+        s"'${n.toLowerCase}"
+      case n if enumNames(n) || structFields.contains(n) || dataEnumNames.contains(n) =>
+        // Lowercase the first letter to match the lowered type name (enum, struct, data enum).
         s"${n.head.toLower}${n.tail}"
       case other  => unsupported("type", other)
+    case NamedTypeAST(name, args) if dataEnumNames.contains(name) =>
+      // Generic data-enum application: `Option[int]` → `option int`. Type args are
+      // emitted positionally and parenthesized when complex (multi-token).
+      val typeName = s"${name.head.toLower}${name.tail}"
+      val argStrs = args.map { a =>
+        val s = typeOf(a)
+        if s.contains(' ') then s"($s)" else s
+      }
+      s"$typeName ${argStrs.mkString(" ")}"
     case other => unsupported("type form", other.toString)
 
   /** Format an expression as a WhyML expression string. Operator translation is identical
@@ -525,8 +589,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case BoolLitAST(v) => v.toString
     case VarRefAST(name) =>
       // `result` is WhyML's reserved name for a function's return value (only valid inside
-      // ensures clauses). Otherwise: deref if the name names a WhyML ref, else plain.
+      // ensures clauses). A bare reference to a no-payload data-enum variant (`None`) is a
+      // nullary constructor — emit the constructor name as-is. Otherwise: deref if the
+      // name names a WhyML ref, else plain.
       if name == "result" then "result"
+      else if dataEnumVariantOf.contains(name) then name
       else if refScope(name) then s"!${sanitizeName(name)}"
       else sanitizeName(name)
     case BinaryAST(l, op, r) =>
@@ -571,6 +638,12 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         s"$fname = ${formatExpr(av)}"
       }.mkString("; ")
       s"{ $pairs }"
+    case CallAST(n, args) if dataEnumVariantOf.contains(n) =>
+      // Data-enum constructor application: `Some(42)` → `(Some 42)`. WhyML constructors are
+      // curried-style — arguments follow the constructor name with spaces, no parens at the
+      // call site. Outer parens group the whole constructor application as a single value.
+      if args.isEmpty then n
+      else s"($n ${args.map(formatExpr).mkString(" ")})"
     case CallAST(n, args) =>
       val argStr = if args.isEmpty then "" else args.map(formatExpr).mkString(" ", " ", "")
       s"(${sanitizeName(n)}$argStr)"
@@ -596,6 +669,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       val allCtorArms = arms.forall { a =>
         a.patterns.head match
           case ValuePatternAST(FieldAccessAST(VarRefAST(t), _)) if enumNames(t) => true
+          // Bare reference to a no-payload data-enum variant: `None`.
+          case ValuePatternAST(VarRefAST(n)) if dataEnumVariantOf.contains(n) => true
+          // Destructured payload-bearing variant: `Some(v)` / `Some(_)`.
+          case DestructurePatternAST(n, _) if dataEnumVariantOf.contains(n) => true
           case WildcardPatternAST => true
           case _                  => false
       }
@@ -651,17 +728,24 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         "if-branch with non-trivial body",
         "Phase 1 supports only a single expression or single `return <expr>` per branch")
 
-  /** Format a sysl match pattern as a WhyML pattern. Phase 3a covers the wildcard, integer
-   *  literal patterns, and enum constructor patterns (the most common shapes for verifying
-   *  algebraic-type case analysis). Range and destructuring patterns are deferred. */
+  /** Format a sysl match pattern as a WhyML pattern. Covers the wildcard, integer
+   *  literal patterns, simple enum constructor patterns, bare no-payload data-enum
+   *  variant references (`None`), and destructured data-enum variant patterns
+   *  (`Some(v)`, `Some(_)`). Range patterns remain deferred. */
   private def formatPattern(p: MatchPatternAST): String = p match
     case WildcardPatternAST => "_"
     case ValuePatternAST(IntLitAST(v))   => if v < 0 then s"(- ${-v})" else v.toString
     case ValuePatternAST(BoolLitAST(v))  => v.toString
     case ValuePatternAST(FieldAccessAST(VarRefAST(t), member)) if enumNames(t) => member
+    case ValuePatternAST(VarRefAST(n)) if dataEnumVariantOf.contains(n) => n
     case ValuePatternAST(VarRefAST(name)) => sanitizeName(name)
     case ValuePatternAST(other) => unsupported("match value pattern", other.getClass.getSimpleName)
     case _: RangePatternAST     => unsupported("range match pattern", "Phase 3a")
+    case DestructurePatternAST(n, fields) if dataEnumVariantOf.contains(n) =>
+      // `Some(v)` → `Some v`, `Some(_)` → `Some _`. Each sub-pattern formats recursively
+      // (today only wildcards and bare names; nested destructuring works the same way).
+      if fields.isEmpty then n
+      else s"$n " + fields.map(formatPattern).mkString(" ")
     case _: DestructurePatternAST => unsupported("destructuring match pattern", "Phase 3a")
 
   private def mapBinaryOp(op: String): String = op match
