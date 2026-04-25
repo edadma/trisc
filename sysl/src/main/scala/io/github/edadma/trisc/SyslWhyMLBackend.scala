@@ -181,15 +181,26 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case Nil => unsupported("empty function body", "must have a trailing expression or return")
       case List(s) => stmtAsTrailingExpr(s)
       case head :: rest =>
-        val binding = head match
+        head match
           case VarStmtAST(name, _, init, _, _, _, isGhost) =>
             val ghostKw = if isGhost then "ghost " else ""
-            s"let $ghostKw${sanitizeName(name)} = ${formatExpr(init)} in"
+            s"let $ghostKw${sanitizeName(name)} = ${formatExpr(init)} in ${formatBlockBody(rest)}"
+
+          // Mid-body early-exit: `if cond then return e` (no else) followed by more stmts
+          // lowers to `if cond then <e> else <rest>`. The then-branch must end in a return
+          // (otherwise it would fall through into the rest, which has different semantics).
+          case ExprStmtAST(IfExprAST(cond, thenStmts, None)) if thenStmts.exists(isReturn) =>
+            val thenExpr = stmtsAsExpr(thenStmts)
+            s"(if ${formatExpr(cond)} then $thenExpr else ${formatBlockBody(rest)})"
+
           case other =>
             unsupported(
               "non-binding statement in function body",
-              s"only `val name = expr` chains followed by a trailing expression are supported in Phase 3b; got ${other.getClass.getSimpleName}")
-        s"$binding ${formatBlockBody(rest)}"
+              s"supported mid-body forms are `val name = expr` and `if cond then return expr`; got ${other.getClass.getSimpleName}")
+
+  private def isReturn(s: StmtAST): Boolean = s match
+    case _: ReturnStmtAST => true
+    case _                => false
 
   private def stmtAsTrailingExpr(s: StmtAST): String = s match
     case ReturnStmtAST(Some(e)) => formatExpr(e)

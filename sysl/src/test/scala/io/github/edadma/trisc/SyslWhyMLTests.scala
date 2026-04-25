@@ -545,7 +545,66 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |    y = x
         |    y
         |""".stripMargin))
-    ex.getMessage should include("non-binding statement")
+    ex.getMessage should include("supported mid-body forms")
+  }
+
+  "single early-exit lowers to if-else terminating in the rest of the body" in {
+    val mlw = translate(
+      """def clamp_low(x: int) -> int
+        |    ensure result >= 0
+        |    if x < 0 then return 0
+        |    x
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let function clamp_low (x: int) : int
+        |    ensures  { result >= 0 }
+        |    = (if (x < 0) then 0 else x)
+        |end
+        |""".stripMargin
+  }
+
+  "stacked early-exit guards chain into nested if-else" in {
+    val mlw = translate(
+      """def clamp(x: int) -> int
+        |    ensure result >= 0
+        |    ensure result <= 100
+        |    if x < 0   then return 0
+        |    if x > 100 then return 100
+        |    x
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let function clamp (x: int) : int
+        |    ensures  { result >= 0 }
+        |    ensures  { result <= 100 }
+        |    = (if (x < 0) then 0 else (if (x > 100) then 100 else x))
+        |end
+        |""".stripMargin
+  }
+
+  "early exit composes with val let-bindings before and after" in {
+    val mlw = translate(
+      """def safe_div(a: int, b: int) -> int
+        |    if b == 0 then return 0
+        |    val q = a / b
+        |    q
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let function safe_div (a: int) (b: int) : int
+        |    = (if (b = 0) then 0 else let q = (div a b) in q)
+        |end
+        |""".stripMargin
   }
 
   "module-level `val` becomes a WhyML `constant`" in {
