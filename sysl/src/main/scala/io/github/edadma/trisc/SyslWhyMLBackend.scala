@@ -89,7 +89,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  variant identity rather than its underlying int. WhyML type names are conventionally
    *  lowercase; constructor names stay as-written (sysl convention is also uppercase). */
   private def emitEnum(e: EnumDeclAST): Unit =
-    val typeName = e.name.head.toLower + e.name.tail
+    val typeName = s"${e.name.head.toLower}${e.name.tail}"
     val ctors = e.members.map { case (name, _) => name }
     if ctors.isEmpty then unsupported("empty enum", e.name)
     line(s"type $typeName = ${ctors.mkString(" | ")}")
@@ -447,7 +447,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case "bool" => "bool"
       case n if enumNames(n) =>
         // Lowercase the first letter to match the enum type name in `emitEnum`.
-        n.head.toLower + n.tail
+        s"${n.head.toLower}${n.tail}"
       case other  => unsupported("type", other)
     case other => unsupported("type form", other.toString)
 
@@ -612,7 +612,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     val lc =
       if bare.nonEmpty && bare.head.isUpper then
         if bare.forall(c => c.isUpper || c == '_' || c.isDigit) then bare.toLowerCase
-        else bare.head.toLower + bare.tail
+        else s"${bare.head.toLower}${bare.tail}"
       else bare
     lc match
       case "function" | "let" | "in" | "with" | "match" | "end" | "module" | "use" |

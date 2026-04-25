@@ -3843,7 +3843,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case _: SyslType.FuncType => "%struct.closure"
     // Named/derived types are erased to their base at the LLVM layer.
     case SyslType.NamedType(_, base, _, _, _) => llvmType(base)
-    case _ => "i64"
+    case null => "i64"
 
   // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings)
   private def llvmSizeOf(t: SyslType): Long = t match
