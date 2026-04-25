@@ -1164,11 +1164,19 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         val port = inet_get_port()
         if port < 0
             return i64(-19)
-        var msg: [3]byte
+        var msg: [5]byte
         msg[0] = byte(INET_CMD_TCP_LISTEN)
         shim_write_u16(msg, 1, local_port)
+        // Pass user's `backlog` through; inet caps at TCP_LISTEN_BACKLOG
+        // and normalises 0 to 1. Negative values are clamped to 1 too.
+        var bl = backlog
+        if bl < 0
+            bl = 0
+        if bl > 0xffff
+            bl = 0xffff
+        shim_write_u16(msg, 3, bl)
         var reply: [2]byte
-        val r = ipc_send(port, msg, 3, reply, 2)
+        val r = ipc_send(port, msg, 5, reply, 2)
         if r < 0
             return i64(-5)
         if reply[0] != 0

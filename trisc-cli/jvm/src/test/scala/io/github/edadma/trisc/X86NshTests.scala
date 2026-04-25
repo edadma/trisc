@@ -584,4 +584,57 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mmsg: src_port=7790")
     output should include("mmsg: done")
   }
+
+  "x86 musl: listen backlog enforcement (Phase F)" in {
+    runBacklogTest("x86")
+  }
+
+  /** Shared body for the Phase F listen-backlog test (also used by
+    * Aarch64NshTests). Listens with backlog=2; fires four parallel
+    * host connects so two SYNs are dropped on first arrival and only
+    * succeed after the peer's automatic retransmit (which fires once
+    * the guest accept loop drains the queue). */
+  private def runBacklogTest(label: String): Unit =
+    qemu.send("mlbacklog\n")
+    qemu.waitFor("mlbacklog: ready")
+
+    val tags = "abcd".toList
+    val replies = new java.util.concurrent.ConcurrentHashMap[Char, String]()
+    val errors = new java.util.concurrent.ConcurrentLinkedQueue[Throwable]()
+    val threads: List[Thread] = tags.map { tag =>
+      val runnable: Runnable = () => {
+        try
+          val sock = new java.net.Socket()
+          sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 8000)
+          try
+            sock.getOutputStream.write(Array(tag.toByte))
+            sock.getOutputStream.flush()
+            val in = sock.getInputStream
+            val buf = new Array[Byte](16)
+            val n = in.read(buf)
+            replies.put(tag, if n > 0 then new String(buf, 0, n) else "")
+          finally sock.close()
+        catch case e: Throwable => errors.add(e)
+        ()
+      }
+      val t = new Thread(runnable, s"$label-mlbacklog-client-$tag")
+      t.setDaemon(true)
+      t.start()
+      t
+    }
+
+    qemu.waitFor("mlbacklog: done")
+    threads.foreach(t => t.join(8000))
+
+    val output = qemu.allOutput
+    output should include("mlbacklog: ready")
+    for i <- 0 until 4 do
+      output should include(s"mlbacklog: child[$i]")
+    output should include("mlbacklog: done")
+
+    errors.size shouldBe 0
+    replies.size shouldBe 4
+    tags.foreach { tag =>
+      replies.get(tag) should include("ack")
+    }
 }

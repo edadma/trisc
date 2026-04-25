@@ -1080,7 +1080,8 @@ Reply: status(1).
 
     inet_handle_tcp_listen(sender: int, buf: *byte)
         val port = inet_read_u16(buf, 1)
-        val s = inet_tcp_begin_listen(sender, port)
+        val backlog = inet_read_u16(buf, 3) & 0xffff
+        val s = inet_tcp_begin_listen(sender, port, backlog)
         var reply: [2]byte
         if s < 0
             reply[0] = byte(-1)

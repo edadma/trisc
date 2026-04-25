@@ -1158,6 +1158,10 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         accept_head: int
         accept_tail: int
         accept_count: int
+        // Max queue depth requested by listen()'s `backlog` arg.
+        // Capped to TCP_LISTEN_BACKLOG (the array size). 0 is
+        // treated as 1 — Linux's "negative or zero → 1" rule.
+        accept_backlog: int
         accept_waiter: int
         parent_listen: int
         reorder: [4]TcpReorderEntry
@@ -1202,6 +1206,7 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
             tcp_sockets[i].accept_head = 0
             tcp_sockets[i].accept_tail = 0
             tcp_sockets[i].accept_count = 0
+            tcp_sockets[i].accept_backlog = 0
             tcp_sockets[i].accept_waiter = -1
             tcp_sockets[i].parent_listen = -1
             tcp_sockets[i].fin_pending = 0
@@ -1734,6 +1739,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].accept_count = 0
         tcp_sockets[s].accept_head = 0
         tcp_sockets[s].accept_tail = 0
+        tcp_sockets[s].accept_backlog = 0
         tcp_sockets[s].parent_listen = -1
         tcp_sockets[s].rtx_deadline = 0
         tcp_sockets[s].tw_deadline = 0
@@ -1772,6 +1778,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 tcp_sockets[i].accept_head = 0
                 tcp_sockets[i].accept_tail = 0
                 tcp_sockets[i].accept_count = 0
+                tcp_sockets[i].accept_backlog = 0
                 tcp_sockets[i].accept_waiter = -1
                 tcp_sockets[i].parent_listen = -1
                 tcp_sockets[i].fin_pending = 0
@@ -1884,18 +1891,29 @@ state. Unlike connect(), listen() returns immediately; the caller
 reuses the returned fd for accept(). Fails with -1 if the slot
 pool is exhausted or a listen is already bound to that port.
 
-    inet_tcp_begin_listen(owner_tid: int, local_port: int) -> int
+`backlog` is capped at TCP_LISTEN_BACKLOG (the array size); a
+value <= 0 is normalised to 1, matching Linux's "0 → 1" rule
+so a tiny but positive queue depth is always available.
+
+    inet_tcp_begin_listen(owner_tid: int, local_port: int,
+                          backlog: int) -> int
         if inet_tcp_find_listen(local_port) >= 0
             return -1
         val s = inet_tcp_alloc()
         if s < 0
             return -1
+        var b = backlog
+        if b <= 0
+            b = 1
+        if b > TCP_LISTEN_BACKLOG
+            b = TCP_LISTEN_BACKLOG
         tcp_sockets[s].owner_tid = owner_tid
         tcp_sockets[s].local_port = local_port
         tcp_sockets[s].remote_ip = u32(0)
         tcp_sockets[s].remote_port = 0
         tcp_sockets[s].state = TCP_STATE_LISTEN
         tcp_sockets[s].is_listen = 1
+        tcp_sockets[s].accept_backlog = b
         s
 
 
@@ -1908,8 +1926,9 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
                                 remote_port: int, seg_seq: u32,
                                 peer_sack_perm: int)
         // If accept queue is already at capacity, silently drop.
-        // SYN cookies / overflow handling is phase-3.
-        if tcp_sockets[ls].accept_count >= TCP_LISTEN_BACKLOG
+        // SYN cookies / overflow handling is phase-3. The peer's
+        // SYN retransmit will retry once a slot frees up.
+        if tcp_sockets[ls].accept_count >= tcp_sockets[ls].accept_backlog
             return
         val s = inet_tcp_alloc()
         if s < 0
@@ -2004,7 +2023,7 @@ child directly (the entry is dequeued before reply, not after).
             tcp_sockets[ls].accept_waiter = -1
             inet_tcp_reply_accept(tid, 0, child_s)
             return
-        if tcp_sockets[ls].accept_count >= TCP_LISTEN_BACKLOG
+        if tcp_sockets[ls].accept_count >= tcp_sockets[ls].accept_backlog
             // Backlog full — the child becomes an orphan;
             // nobody will accept() it. Close it.
             inet_tcp_close_slot(child_s, -1)
