@@ -207,3 +207,18 @@ arch_resume_process:
     ldp  x0,  x1,  [sp, #0x000]
     add  sp, sp, #0x110
     eret
+
+// shim_uart_putc(c: int)
+//   Write the low byte of x0 to the PL011 UART data register at
+//   0x09000000. Spin-waits for TX FIFO drain via UARTFR.TXFF (bit 5).
+//   Used by the shared POSIX shim (oskit/posix/shim.lsysl) for the
+//   STDOUT/STDERR fast path. Defined here as a no-mangle global so
+//   the shim can `extern` it without going through module mangling.
+.global shim_uart_putc
+shim_uart_putc:
+    mov  x1, #0x09000000
+.Lshim_uart_putc_wait:
+    ldr  w2, [x1, #0x18]   // UARTFR
+    tbnz w2, #5, .Lshim_uart_putc_wait
+    strb w0, [x1]
+    ret
