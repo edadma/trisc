@@ -56,7 +56,7 @@ object SVMAssemblerParser extends RegexParsers:
   // --- Expressions (no registers — SVM is a stack machine) ---
 
   private lazy val primary: Parser[ExprAST] =
-    hexLit ^^ (s => LongExprAST(java.lang.Long.parseLong(s.drop(2), 16)))
+    hexLit ^^ (s => LongExprAST(java.lang.Long.parseUnsignedLong(s.drop(2), 16)))
     | floatLit ^^ (s => DoubleExprAST(s.toDouble))
     | charLit ^^ (n => LongExprAST(n))
     | intLit ^^ (s => LongExprAST(s.toLong))
@@ -159,7 +159,7 @@ object SVMAssemblerParser extends RegexParsers:
             val raw = s.drop(2)
             raw.nonEmpty && raw.forall(c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
           else s.nonEmpty && s.forall(_.isDigit)
-        val parseNum = (s: String) => if s.startsWith("0x") then java.lang.Long.parseLong(s.drop(2), 16) else s.toLong
+        val parseNum = (s: String) => if s.startsWith("0x") then java.lang.Long.parseUnsignedLong(s.drop(2), 16) else s.toLong
         val (symSize, typeInfo) = fields match
           case Nil => (None, None)
           case List(tokens) =>

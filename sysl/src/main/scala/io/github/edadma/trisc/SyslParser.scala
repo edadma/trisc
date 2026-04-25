@@ -321,20 +321,54 @@ class SyslParser extends StandardTokenParsers {
       "=" ~> bodyExprOrBlock ^^ { body => (None, body) } |
       funBlockBody ^^ { body => (None, body) }
 
-  lazy val contractClause: Parser[ContractClauseAST] =
-    "require" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => ContractClauseAST(ContractRequire, e, msg) } |
-    "ensure" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => ContractClauseAST(ContractEnsure, e, msg) } |
-    "variant" ~> expr ^^ { case e => ContractClauseAST(ContractVariant, e, None) }
+  /** One parsed contract clause, possibly expanded into multiple clauses (e.g. `ensure cases`
+   *  desugars to one require-OR for completeness + N ensures for per-case implication). */
+  lazy val contractClause: Parser[List[ContractClauseAST]] =
+    ensureCasesBlock |
+    "require" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => List(ContractClauseAST(ContractRequire, e, msg)) } |
+    "ensure" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => List(ContractClauseAST(ContractEnsure, e, msg)) } |
+    "variant" ~> expr ^^ { case e => List(ContractClauseAST(ContractVariant, e, None)) }
+
+  /** `ensure cases` block: `guard => postcondition [, "msg"]`, one per line, at least one case.
+   *  Desugared here into a require (OR of guards — completeness) + N ensures
+   *  (`!old(guard_i) || postcondition_i` — per-case implication with entry-state guard). */
+  lazy val ensureCasesBlock: Parser[List[ContractClauseAST]] =
+    "ensure" ~> (ident ^? { case "cases" => () }) ~>
+      Newline ~> Indent ~> rep1(ensureCase <~ rep1(stmtSep)) <~ opt(Newline) <~ Dedent ^^ {
+      cases => desugarEnsureCases(cases)
+    }
+
+  lazy val ensureCase: Parser[(ExpressionAST, ExpressionAST, Option[String])] =
+    expr ~ ("=>" ~> expr) ~ opt("," ~> stringLit) ^^ {
+      case guard ~ post ~ msg => (guard, post, msg)
+    }
+
+  private def desugarEnsureCases(cases: List[(ExpressionAST, ExpressionAST, Option[String])]): List[ContractClauseAST] =
+    val guards = cases.map(_._1)
+    val completenessExpr = guards.reduce((a, b) => BinaryAST(a, "||", b))
+    val completenessClause = ContractClauseAST(
+      ContractRequire, completenessExpr,
+      Some("ensure cases: no guard matched on entry"),
+    )
+    val perCase = cases.zipWithIndex.map { case ((g, p, msg), i) =>
+      val oldG = CallAST("old", List(g))
+      val implExpr = BinaryAST(UnaryAST("!", oldG), "||", p)
+      ContractClauseAST(
+        ContractEnsure, implExpr,
+        Some(msg.getOrElse(s"ensure cases: case ${i + 1} violated")),
+      )
+    }
+    completenessClause :: perCase
 
   /** A function block body: zero or more contract clauses at the top, followed by statements. */
   lazy val funBlockBody: Parser[BlockBodyAST] =
     Newline ~> Indent ~> rep(contractClause <~ rep1(stmtSep)) ~ stmts <~ opt(Newline) <~ Dedent ^^ {
-      case contracts ~ stmts => BlockBodyAST(stmts, contracts)
+      case contracts ~ stmts => BlockBodyAST(stmts, contracts.flatten)
     }
 
   lazy val bodyExprOrBlock: Parser[FunBodyAST] =
     Newline ~> Indent ~> rep(contractClause <~ rep1(stmtSep)) ~ stmts <~ opt(Newline) <~ Dedent ^^ {
-      case contracts ~ stmts => BlockBodyAST(stmts, contracts)
+      case contracts ~ stmts => BlockBodyAST(stmts, contracts.flatten)
     } |
       forStmt ^^ (s => BlockBodyAST(List(s))) |
       whileStmt ^^ (s => BlockBodyAST(List(s))) |

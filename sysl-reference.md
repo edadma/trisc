@@ -611,6 +611,40 @@ accesses, arithmetic, calls), but nested `old(old(...))` is rejected.
 
 Contracts are not yet supported on expression-body functions or on closures.
 
+**`ensure cases` — guarded postcondition table.** SPARK `Contract_Cases` equivalent:
+declares a list of `guard => postcondition` rows. Each row is a logical implication:
+"if `guard` held at entry, `postcondition` must hold at exit." The block is sugar over
+the existing `require` / `ensure` machinery — desugared to one `require` (the OR of all
+guards, for completeness on entry) plus N `ensure`s of the form `!old(guard) || post`.
+
+```sysl
+classify(x: int) -> int
+    ensure cases
+        x > 0  => result == 1
+        x == 0 => result == 0
+        x < 0  => result == -1
+    if x > 0 then return 1
+    if x < 0 then return -1
+    return 0
+```
+
+- Each row is `<guard> => <postcondition> [, "message"]` on its own line.
+- `=>` (not `->`) — semantically a logical implication, distinct from match arms.
+- Guards are evaluated at entry (the parser wraps each in `old()`); postconditions at exit.
+- **Completeness is checked at runtime**: at function entry, at least one guard must
+  hold, otherwise the function traps with `precondition check failed: ensure cases:
+  no guard matched on entry`.
+- **Disjointness is not checked at runtime**: if multiple guards hold, all of their
+  postconditions must hold at exit (each is an independent `ensure`). A future prover
+  will discharge disjointness statically; until then, overlapping cases are simply
+  conjoined obligations.
+- Composes freely with regular `require` and `ensure` clauses.
+
+The desugared form is what you would write by hand; `ensure cases` exists for
+readability and to give a future prover a single place to discharge case-analysis
+obligations. Stripped under `--no-contracts` (each desugared clause goes through the
+normal contract path).
+
 **`assume <bool> [, "msg"]`.** Statement-level Ada/SPARK `pragma Assume` equivalent:
 states a property the programmer asserts is true at this point. At runtime it is checked
 exactly like `assert` and traps if false; statically it tells a future prover to take the
@@ -845,25 +879,50 @@ write-back**: every assignment commits immediately. Contextual-keyword rules: `i
 is already reserved; `out` and `inout` are contextual, so user identifiers with
 those names still work outside parameter position.
 
-### `def` — Auto-Call Functions
+### `def` — Expression Functions
 
-`def` declares a zero-argument function that is automatically called when
-referenced by bare name. Unlike `val`, a `def` is re-evaluated on every
-reference, and supports forward references (enabling mutual recursion).
+`def` declares an **expression function** — a proof-friendly abstraction in the
+Ada/SPARK sense. Every `def` is implicitly `#pure`: no side effects, no global
+mutation, no heap allocation, no calls to impure functions. These restrictions
+exist so a future prover can inline the body directly into contract contexts
+without re-deriving anything; the same rules make expression functions natural
+as abstraction predicates inside `require` / `ensure` / `invariant` / `assume`.
+
+A zero-argument `def` is *auto-called* at each bare-name reference — unlike a
+`val`, it is re-evaluated on every reference, and supports forward references
+(enabling mutual recursion between pure functions).
 
 ```sysl
-var counter = 0
-def next_id = counter++      // return type inferred from body
+def is_even(x: int) -> bool = x % 2 == 0
+def sq(x: int) -> int = x * x
 
-def pi -> int = 314           // explicit return type
+def pi -> int = 314           // zero-arg, auto-called
 
 def greeting -> string        // block body
     "hello"
 
 main() -> int
-    val a = next_id           // auto-called: returns 0
-    val b = next_id           // auto-called: returns 1
-    a + b + pi                // 0 + 1 + 314 = 315
+    val a = pi                // auto-called: returns 314
+    val b = sq(7)             // 49
+    if is_even(b) then a else a + 1
+```
+
+**Abstraction predicates in contracts.** Because `def` functions are pure and
+side-effect-free, they plug straight into contract clauses without risking
+observable behavior changes:
+
+```sysl
+def is_positive(x: int) -> bool = x > 0
+def non_negative(x: int) -> bool = x >= 0
+
+f(n: int) -> int
+    require is_positive(n)
+    ensure is_positive(result)
+    var s = 0
+    for i = 0; i < n; i++
+        invariant non_negative(s)
+        s = s + 1
+    return s
 ```
 
 **Function pointer:** `&name` gives the function pointer for a `def`:
@@ -872,16 +931,24 @@ main() -> int
 apply_thunk(f: () -> int) -> int = f()
 
 main() -> int
-    counter = 0
-    apply_thunk(&next_id)     // passes next_id as a function pointer
+    apply_thunk(&pi)           // passes pi as a function pointer
 ```
 
-**On parametric functions:** `def` is also accepted before functions with
-parameters, where it is purely documentary (no behavior change):
+**Rejected patterns (implicitly pure):**
 
 ```sysl
-def add(a: int, b: int) -> int = a + b   // same as: add(a: int, b: int) -> int = a + b
+var counter = 0
+
+def bumped -> int              // error: def function 'bumped' cannot mutate non-local 'counter'
+    counter = counter + 1
+    return counter
+
+#reads(counter)                 // error: 'def peek' cannot carry #reads/#writes —
+def peek -> int = counter       //        def functions are implicitly pure
 ```
+
+Use a regular (non-`def`) function when side effects are required. The `#pure`
+attribute may still be written on a `def`, but it is redundant.
 
 ### Generic Functions
 
@@ -1646,6 +1713,21 @@ while remaining > 0
     variant remaining
     process()
     remaining = remaining - 1
+
+// `loop_entry(expr)` — Ada/SPARK-style loop-entry snapshot, valid only inside a loop
+// invariant. Captures the value of `expr` once, at the moment control first reaches the
+// loop (after for-loop init, before the first cond check), so subsequent invariant
+// evaluations can compare against the entry value. Each enclosing loop has its own
+// snapshot scope, so nested `loop_entry(...)` always refers to the innermost loop.
+// Snapshot exprs must be visible in the surrounding scope (or, for `for`, after init).
+var x = 0
+for i = 0; i < n; i++
+    invariant x >= loop_entry(x)            // monotonic non-decrease
+    invariant loop_entry(i) == 0            // i started at 0
+    x = x + i
+
+// `loop_entry(expr)` outside a loop invariant — including in an `ensure` clause or in
+// loop-body code — is a static error. Use `old(expr)` for the function-entry snapshot.
 
 // Labeled loops — break / continue can target an outer loop by name.
 // A label is an identifier followed by `:` immediately before `for`, `while`, `do`, or `loop`.
