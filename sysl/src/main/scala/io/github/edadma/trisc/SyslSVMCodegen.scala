@@ -143,7 +143,7 @@ class SyslSVMCodegen:
       case TCap(inner, _) => scanExpr(inner)
       case _ =>
     def scanStmt(s: TStmt): Unit = s match
-      case TVarStmt(name, _, init, _) => seen += name; count += 1; scanExpr(init)
+      case TVarStmt(name, _, init, _, _) => seen += name; count += 1; scanExpr(init)
       case TAssignStmt(target, value) =>
         scanExpr(value)
         if !seen.contains(target) && !globals.contains(target) then
@@ -332,7 +332,7 @@ class SyslSVMCodegen:
     val bssGlobals = new mutable.ListBuffer[TDecl]
 
     for decl <- program.decls do decl match
-      case v @ TVarDecl(_, typ, init, _, _) =>
+      case v @ TVarDecl(_, typ, init, _, _, _) =>
         globals(v.name) = typ
         constEval(init).foreach(n => globalConstants(v.name) = n)
         if isZeroInit(typ, init) then bssGlobals += v
@@ -363,13 +363,13 @@ class SyslSVMCodegen:
     // For arrays of strings: per-element labels, indexed by (arrayName, i).
     val stringArrayElemLabels = new mutable.HashMap[(String, Int), String]
     for decl <- dataGlobals do decl match
-      case TVarDecl(name, SyslType.StringType, TStringLit(s, _), _, _) =>
+      case TVarDecl(name, SyslType.StringType, TStringLit(s, _), _, _, _) =>
         labelCounter += 1
         val lbl = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_${labelCounter}__g_$name"
                   else s"__str_${labelCounter}__g_$name"
         stringLiterals += ((lbl, s))
         stringGlobalLabels(name) = lbl
-      case TVarDecl(name, SyslType.ArrayType(SyslType.StringType, _), TArrayLit(elements, _), _, _) =>
+      case TVarDecl(name, SyslType.ArrayType(SyslType.StringType, _), TArrayLit(elements, _), _, _, _) =>
         for (e, idx) <- elements.zipWithIndex do e match
           case TStringLit(s, _) =>
             labelCounter += 1
@@ -398,7 +398,7 @@ class SyslSVMCodegen:
       for (iname, (iface, structName)) <- itables do
         emit(s"  align 8")
         emit(s"$iname:")
-        for ((mName, _, _) <- iface.methods) do
+        for ((mName, _, _, _) <- iface.methods) do
           val shortName = s"${structName}_$mName"
           val fnName =
             if definedFuncNames.contains(shortName) then shortName
@@ -409,11 +409,11 @@ class SyslSVMCodegen:
     if dataGlobals.nonEmpty then
       emit("segment data")
       for decl <- dataGlobals do decl match
-        case TVarDecl(name, typ, _, _, _) =>
+        case TVarDecl(name, typ, _, _, _, _) =>
           emit(s"global $name, data, ${typ.sizeOf.max(8)}")
         case _ =>
       for decl <- dataGlobals do decl match
-        case TVarDecl(name, typ, init, _, _) =>
+        case TVarDecl(name, typ, init, _, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           typ match
@@ -501,11 +501,11 @@ class SyslSVMCodegen:
     if bssGlobals.nonEmpty then
       emit("segment bss")
       for decl <- bssGlobals do decl match
-        case TVarDecl(name, typ, _, _, _) =>
+        case TVarDecl(name, typ, _, _, _, _) =>
           emit(s"global $name, data, ${typ.sizeOf.max(8)}")
         case _ =>
       for decl <- bssGlobals do decl match
-        case TVarDecl(name, typ, _, _, _) =>
+        case TVarDecl(name, typ, _, _, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           val size = typ.sizeOf.max(8)
@@ -515,8 +515,8 @@ class SyslSVMCodegen:
     // Emit extern declarations
     val generated = out.toString
     val definedSymbols = program.decls.flatMap {
-      case TFunDecl(name, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _, _) => Some(name)
+      case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _, _) => Some(name)
       case _ => None
     }.toSet
     val metaSymbols = meta.symbols.map(_.name).toSet
@@ -595,7 +595,7 @@ class SyslSVMCodegen:
       case TStr(i) => scanAddrOfE(i)
       case _ =>
     def scanAddrOfS(s: TStmt): Unit = s match
-      case TVarStmt(_, _, i, _) => scanAddrOfE(i)
+      case TVarStmt(_, _, i, _, _) => scanAddrOfE(i)
       case TAssignStmt(_, v) => scanAddrOfE(v)
       case TCompoundAssignStmt(_, _, v) => scanAddrOfE(v)
       case TDerefAssignStmt(p, v) => scanAddrOfE(p); scanAddrOfE(v)
@@ -763,7 +763,7 @@ class SyslSVMCodegen:
       case TIfExpr(cc, tb, eb, _) => scanAddrOfE(cc); tb.foreach(scanAddrOfS); eb.foreach(_.foreach(scanAddrOfS))
       case _ =>
     def scanAddrOfS(s: TStmt): Unit = s match
-      case TVarStmt(_, _, i, _) => scanAddrOfE(i)
+      case TVarStmt(_, _, i, _, _) => scanAddrOfE(i)
       case TAssignStmt(_, v) => scanAddrOfE(v)
       case TExprStmt(e) => scanAddrOfE(e)
       case TReturnStmt(Some(e)) => scanAddrOfE(e)
@@ -883,7 +883,7 @@ class SyslSVMCodegen:
         case other => genStmt(other); emitPushInt(0)
 
   private def genStmt(stmt: TStmt): Unit = stmt match
-    case TVarStmt(name, typ, init, _) if addressedLocals.contains(name) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
+    case TVarStmt(name, typ, init, _, _) if addressedLocals.contains(name) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
       // Scalar local whose address is taken. Allocate an 8-byte cell on the
       // memory stack; the local slot holds the cell's address. Loads and
       // stores go through the pointer so &x and the local refer to the
@@ -896,7 +896,7 @@ class SyslSVMCodegen:
       emit("  swap")
       emitStore(typ)
 
-    case TVarStmt(name, typ, init, _) =>
+    case TVarStmt(name, typ, init, _, _) =>
       val idx = allocLocal(name, typ)
       if needsMemAlloc(typ) then
         // Allocate memory on the memory stack, store address in local
@@ -1910,7 +1910,7 @@ class SyslSVMCodegen:
       // call would push env_ptr as a hidden first arg that `name` does not
       // accept.
       val (paramTypes, retType) = typ match
-        case SyslType.FuncType(p, r, _) => (p, r)
+        case SyslType.FuncType(p, r, _, _) => (p, r)
         case _ => (Nil, SyslType.VoidType)
       val shim = shimNameFor(name)
       if !emittedShims.contains(shim) then
