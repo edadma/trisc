@@ -77,6 +77,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       if fn.params.isEmpty then "()"
       else fn.params.map(p => s"(${sanitizeName(p.name)}: ${typeOf(p.typ)})").mkString(" ")
     val (contracts, bodyExpr) = splitBody(fn)
+    val isGhost = fn.attributes.exists(_.name == "ghost")
 
     // Lift to a logic-level `predicate` when the shape is right: `def f(...) -> bool` whose
     // body IS a quantifier and which carries no contracts. Why3's `forall`/`exists` are
@@ -84,6 +85,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     // body — only in contract positions or as the body of `predicate` / formula-valued
     // logic definitions. `predicate` is exactly the right WhyML construct here, and matches
     // sysl's runtime semantics for `def`-with-quantifier (a pure boolean-valued query).
+    // `#ghost` is redundant on predicates (they're inherently logic-level), so we drop it.
     val returnsBool = fn.returnType match
       case Some(NamedTypeAST("bool", Nil)) => true
       case _                               => false
@@ -93,10 +95,14 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       return
 
     val recKw = if isRecursive(fn) then "rec " else ""
+    // WhyML's `ghost` qualifier marks a function as proof-only — it is checked but erased
+    // before extraction. Maps 1:1 from sysl's `#ghost`. The required keyword order is
+    // `let [rec] [ghost] function f ...` — ghost must follow rec, not precede it.
+    val ghostKw = if isGhost then "ghost " else ""
     val ret = fn.returnType match
       case None    => unsupported("function without explicit return type", fn.name)
       case Some(t) => typeOf(t)
-    line(s"let ${recKw}function $name $params : $ret")
+    line(s"let $recKw$ghostKw" + s"function $name $params : $ret")
     indentLevel += 1
     for c <- contracts do emitContract(c)
     line(s"= ${formatExpr(bodyExpr)}")

@@ -303,6 +303,64 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  "#ghost on a let-function emits the WhyML ghost qualifier" in {
+    val mlw = translate(
+      """#ghost
+        |helper(x: int) -> int
+        |    require x >= 0
+        |    ensure result == x + 1
+        |    x + 1
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let ghost function helper (x: int) : int
+        |    requires { x >= 0 }
+        |    ensures  { result = (x + 1) }
+        |    = (x + 1)
+        |end
+        |""".stripMargin
+  }
+
+  "#ghost combines with `rec` for recursive ghost helpers" in {
+    val mlw = translate(
+      """#ghost
+        |def gsum(n: int) -> int
+        |    require n >= 0
+        |    variant n
+        |    if n == 0 then 0 else n + gsum(n - 1)
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let rec ghost function gsum (n: int) : int
+        |    requires { n >= 0 }
+        |    variant  { n }
+        |    = (if (n = 0) then 0 else (n + (gsum (n - 1))))
+        |end
+        |""".stripMargin
+  }
+
+  "#ghost on a predicate-shape def is dropped (predicates are inherently logic-level)" in {
+    val mlw = translate(
+      """#ghost
+        |def all_pos(n: int) -> bool
+        |    for all i in 1..n => i >= 1
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  predicate all_pos (n: int) = forall i: int. 1 <= i <= n -> (i >= 1)
+        |end
+        |""".stripMargin
+  }
+
   "unsupported expression form yields a clear error naming the gap" in {
     val ex = intercept[RuntimeException](translate(
       """def s() -> int
