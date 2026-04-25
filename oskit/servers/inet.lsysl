@@ -79,6 +79,8 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_EPOLL_INST_CLOSE = 31
     val INET_CMD_TCP_ACCEPT_NB = 32
     val INET_CMD_TCP_CONNECT_NB = 33
+    val INET_CMD_TCP_SETBUF   = 34
+    val INET_CMD_TCP_GETBUF   = 35
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -874,7 +876,9 @@ high byte (0), second (offset 2) is the low byte / index.
     inet_handle_tcp_connect(sender: int, buf: *byte)
         val ip = inet_read_ipv4(buf, 1)
         val port = inet_read_u16(buf, 5)
-        val s = inet_tcp_begin_connect(sender, sender, ip, port)
+        val sndbuf = inet_read_u16(buf, 7)
+        val rcvbuf = inet_read_u16(buf, 9)
+        val s = inet_tcp_begin_connect(sender, sender, ip, port, sndbuf, rcvbuf)
         if s < 0
             var err: [2]byte
             err[0] = byte(-1)
@@ -894,7 +898,9 @@ existing `inet_epoll_fire(2, s)` at SYN_SENT → ESTABLISHED.
     inet_handle_tcp_connect_nb(sender: int, buf: *byte)
         val ip = inet_read_ipv4(buf, 1)
         val port = inet_read_u16(buf, 5)
-        val s = inet_tcp_begin_connect(sender, -1, ip, port)
+        val sndbuf = inet_read_u16(buf, 7)
+        val rcvbuf = inet_read_u16(buf, 9)
+        val s = inet_tcp_begin_connect(sender, -1, ip, port, sndbuf, rcvbuf)
         var reply: [2]byte
         if s < 0
             reply[0] = byte(-1)
@@ -1104,7 +1110,9 @@ Reply: status(1).
     inet_handle_tcp_listen(sender: int, buf: *byte)
         val port = inet_read_u16(buf, 1)
         val backlog = inet_read_u16(buf, 3) & 0xffff
-        val s = inet_tcp_begin_listen(sender, port, backlog)
+        val sndbuf = inet_read_u16(buf, 5)
+        val rcvbuf = inet_read_u16(buf, 7)
+        val s = inet_tcp_begin_listen(sender, port, backlog, sndbuf, rcvbuf)
         var reply: [2]byte
         if s < 0
             reply[0] = byte(-1)
@@ -1269,6 +1277,52 @@ in `inet_tcp_getname` (inet_proto.lsysl) because it touches
         inet_write_u16(reply, 1, port)
         inet_write_ipv4(reply, 3, ip)
         ipc_reply(sender, reply, 7)
+
+
+### inet_handle_tcp_setbuf / inet_handle_tcp_getbuf
+
+setsockopt(SO_SNDBUF) / setsockopt(SO_RCVBUF). The shim translates
+the user `int optval` into a 16-bit BE size on the wire (clamped on
+the inet side to [TCP_BUF_MIN, TCP_BUF_MAX]). `kind == 0` selects
+SNDBUF, `kind == 1` selects RCVBUF.
+
+SET wire: cmd(1) + fd(u16 BE) + kind(1) + size(u16 BE) = 6 bytes in;
+reply is 1 byte status (0 = ok, -1 = bad fd / bad kind).
+
+GET wire: cmd(1) + fd(u16 BE) + kind(1) = 4 bytes in; reply is
+1 byte status + u16 BE size = 3 bytes out (size 0 on error).
+
+    inet_handle_tcp_setbuf(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val kind = int(buf[3]) & 0xff
+        val size = inet_read_u16(buf, 4)
+        var reply: [1]byte
+        if inet_tcp_slot_owned(fd, sender) == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val rc = inet_tcp_resize_buf(fd, kind, size)
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+    inet_handle_tcp_getbuf(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val kind = int(buf[3]) & 0xff
+        var reply: [3]byte
+        if inet_tcp_slot_owned(fd, sender) == 0
+            reply[0] = byte(-1)
+            inet_write_u16(reply, 1, 0)
+            ipc_reply(sender, reply, 3)
+            return
+        val sz = inet_tcp_get_bufsize(fd, kind)
+        if sz < 0
+            reply[0] = byte(-1)
+            inet_write_u16(reply, 1, 0)
+            ipc_reply(sender, reply, 3)
+            return
+        reply[0] = 0
+        inet_write_u16(reply, 1, sz)
+        ipc_reply(sender, reply, 3)
 
 
 ### inet_handle_get_ip_config
@@ -1588,6 +1642,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_EPOLL_INST_CLOSE -> inet_handle_epoll_inst_close(sender, buf)
                     INET_CMD_TCP_ACCEPT_NB -> inet_handle_tcp_accept_nb(sender, buf)
                     INET_CMD_TCP_CONNECT_NB -> inet_handle_tcp_connect_nb(sender, buf)
+                    INET_CMD_TCP_SETBUF  -> inet_handle_tcp_setbuf(sender, buf)
+                    INET_CMD_TCP_GETBUF  -> inet_handle_tcp_getbuf(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->

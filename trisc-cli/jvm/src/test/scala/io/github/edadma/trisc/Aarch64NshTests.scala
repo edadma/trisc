@@ -355,14 +355,12 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     run2 should not include "sockleak: failed_at_"
   }
 
-  "aarch64 posix: setsockopt / getsockopt accept+ignore" in {
-    // test_sockopt drives syscall 208 / 209 through the POSIX
-    // shim. Accept list includes SOL_SOCKET + SO_REUSEADDR /
-    // SO_BROADCAST / SO_KEEPALIVE / SO_REUSEPORT / SO_ERROR, and
-    // IPPROTO_TCP + TCP_NODELAY. Unknown pairs must report
-    // -ENOPROTOOPT (-92). Pass = all five accepted set calls
-    // succeed, unknown is rejected, getsockopt returns zero with
-    // optlen=4 for an accepted option, and rejects unknown.
+  "aarch64 posix: setsockopt / getsockopt accept+ignore + bufsize" in {
+    // test_sockopt drives the POSIX shim's setsockopt / getsockopt
+    // paths.  UDP fd: accept-and-ignore for SO_REUSEADDR /
+    // SO_BROADCAST / TCP_NODELAY (always 0); unknown pair returns
+    // -ENOPROTOOPT.  TCP fd: SO_SNDBUF / SO_RCVBUF round-trip —
+    // setsockopt persists, getsockopt echoes the requested size.
     qemu.send("test_sockopt\n")
     val output = qemu.waitFor("sockopt: done")
     output should include("sockopt: set SO_REUSEADDR = 0")
@@ -371,6 +369,10 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("sockopt: set unknown = -92")
     output should include("sockopt: get SO_REUSEADDR = 0 olen=4 val=0")
     output should include("sockopt: get unknown = -92")
+    output should include("sockopt: set SO_SNDBUF = 0")
+    output should include("sockopt: set SO_RCVBUF = 0")
+    output should include("sockopt: get SO_SNDBUF = 0 val=2048")
+    output should include("sockopt: get SO_RCVBUF = 0 val=4096")
     output should include("sockopt: done")
     output should not include "sockopt: FAIL"
   }

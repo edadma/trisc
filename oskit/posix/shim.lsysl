@@ -95,6 +95,12 @@ posix_fd_bridge memory.
         target: int
         flags: int
         pos: i64
+        // setsockopt(SO_SNDBUF/SO_RCVBUF) requested sizes that
+        // arrived before the inet slot existed.  0 = "no override,
+        // use the inet-side default".  Applied via INET_CMD_TCP_SETBUF
+        // immediately after connect/listen establishes the slot.
+        pending_sndbuf: int
+        pending_rcvbuf: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -107,6 +113,8 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].target = 0
             posix_fd_table[base + i].flags = 0
             posix_fd_table[base + i].pos = i64(0)
+            posix_fd_table[base + i].pending_sndbuf = 0
+            posix_fd_table[base + i].pending_rcvbuf = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -161,6 +169,8 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].target = target
                 posix_fd_table[base + i].flags = 0
                 posix_fd_table[base + i].pos = i64(0)
+                posix_fd_table[base + i].pending_sndbuf = 0
+                posix_fd_table[base + i].pending_rcvbuf = 0
                 return i
             i += 1
         -1
@@ -236,6 +246,8 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_EPOLL_INST_CLOSE = 31
     val INET_CMD_TCP_ACCEPT_NB = 32
     val INET_CMD_TCP_CONNECT_NB = 33
+    val INET_CMD_TCP_SETBUF  = 34
+    val INET_CMD_TCP_GETBUF  = 35
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -1127,7 +1139,11 @@ dst_port (BE u16) at the usual offsets.
             return i64(-19)
         val a: *byte = *byte(addr_ptr)
         val nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
-        var msg: [7]byte
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + fd
+        val pending_snd = posix_fd_table[idx].pending_sndbuf
+        val pending_rcv = posix_fd_table[idx].pending_rcvbuf
+        var msg: [11]byte
         if nb != 0
             msg[0] = byte(INET_CMD_TCP_CONNECT_NB)
         else
@@ -1138,15 +1154,24 @@ dst_port (BE u16) at the usual offsets.
         msg[4] = a[7]
         msg[5] = a[2]                   // sin_port high byte (already BE)
         msg[6] = a[3]                   // sin_port low byte
+        // SO_SNDBUF / SO_RCVBUF the caller stashed pre-connect via
+        // setsockopt. 0 means "use the inet-side default".
+        var snd_clamped = pending_snd
+        if snd_clamped > 0xffff
+            snd_clamped = 0xffff
+        var rcv_clamped = pending_rcv
+        if rcv_clamped > 0xffff
+            rcv_clamped = 0xffff
+        shim_write_u16(msg, 7, snd_clamped)
+        shim_write_u16(msg, 9, rcv_clamped)
         var reply: [2]byte
-        val r = ipc_send(port, msg, 7, reply, 2)
+        val r = ipc_send(port, msg, 11, reply, 2)
         if r < 0
             return i64(-5)
         if reply[0] != 0
             return i64(-111)            // -ECONNREFUSED
         val inet_fd = int(reply[1]) & 0xff
-        val pid = posix_fd_current_pid()
-        posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].target = inet_fd
+        posix_fd_table[idx].target = inet_fd
         // Non-blocking connect: surface -EINPROGRESS so the user
         // can poll EPOLLOUT for completion. The slot is already
         // SYN_SENT; once it reaches ESTABLISHED the existing
@@ -1166,13 +1191,14 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         if posix_fd_target(fd) >= 0
             return i64(-22)             // already listening or connected
         val pid = posix_fd_current_pid()
-        val local_port = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].pos)
+        val idx = pid * POSIX_FDS_PER_PROC + fd
+        val local_port = int(posix_fd_table[idx].pos)
         if local_port <= 0
             return i64(-22)             // -EINVAL — must bind first
         val port = inet_get_port()
         if port < 0
             return i64(-19)
-        var msg: [5]byte
+        var msg: [9]byte
         msg[0] = byte(INET_CMD_TCP_LISTEN)
         shim_write_u16(msg, 1, local_port)
         // Pass user's `backlog` through; inet caps at TCP_LISTEN_BACKLOG
@@ -1183,14 +1209,24 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         if bl > 0xffff
             bl = 0xffff
         shim_write_u16(msg, 3, bl)
+        // Pre-listen SO_SNDBUF / SO_RCVBUF — accepted children inherit
+        // the listening socket's sizes (Linux semantics).
+        var snd_clamped = posix_fd_table[idx].pending_sndbuf
+        if snd_clamped > 0xffff
+            snd_clamped = 0xffff
+        var rcv_clamped = posix_fd_table[idx].pending_rcvbuf
+        if rcv_clamped > 0xffff
+            rcv_clamped = 0xffff
+        shim_write_u16(msg, 5, snd_clamped)
+        shim_write_u16(msg, 7, rcv_clamped)
         var reply: [2]byte
-        val r = ipc_send(port, msg, 5, reply, 2)
+        val r = ipc_send(port, msg, 9, reply, 2)
         if r < 0
             return i64(-5)
         if reply[0] != 0
             return i64(-98)             // -EADDRINUSE
         val listen_fd = int(reply[1]) & 0xff
-        posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].target = listen_fd
+        posix_fd_table[idx].target = listen_fd
         i64(0)
 
 SYS_ACCEPT. Blocks until a child connection arrives unless the
@@ -1286,18 +1322,44 @@ recv data). Not valid on non-TCP fds.
             return i64(-5)
         i64(0)
 
-SYS_SETSOCKOPT / SYS_GETSOCKOPT. Accept-and-ignore MVP: the inet
-server doesn't track per-socket options today, so we accept the
-handful of `(level, optname)` pairs that real programs reflexively
-call before doing anything (DHCP clients setting SO_BROADCAST, TCP
-servers setting SO_REUSEADDR, latency-sensitive clients toggling
-TCP_NODELAY) and return success without any side effect. Anything
-outside the accept-list returns `-ENOPROTOOPT` so genuine
-misconfiguration still surfaces.
+Send INET_CMD_TCP_SETBUF for one buffer.  `is_send` selects which.
+Returns 0 on success, negative errno on failure.
+
+    shim_inet_setbuf(inet_fd: int, is_send: bool, size: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [6]byte
+        msg[0] = byte(INET_CMD_TCP_SETBUF)
+        shim_write_u16(msg, 1, inet_fd)
+        if is_send
+            msg[3] = byte(0)
+        else
+            msg[3] = byte(1)
+        var sz = size
+        if sz > 0xffff
+            sz = 0xffff
+        shim_write_u16(msg, 4, sz)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 6, reply, 1)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            return -22
+        0
+
+SYS_SETSOCKOPT / SYS_GETSOCKOPT. Mostly accept-and-ignore: the inet
+server tracks `SO_SNDBUF` / `SO_RCVBUF` (since Phase E) but the
+remaining options (SO_REUSEADDR, SO_BROADCAST, SO_KEEPALIVE,
+SO_REUSEPORT, TCP_NODELAY) are still no-ops — kept on the accept
+list so DHCP clients / TCP servers / latency-sensitive clients
+that reflexively set them don't trip on `-ENOPROTOOPT`. Anything
+outside the list still returns `-ENOPROTOOPT`.
 
 Linux `SOL_SOCKET = 1`; `SO_REUSEADDR = 2`, `SO_ERROR = 4`,
-`SO_BROADCAST = 6`, `SO_KEEPALIVE = 9`, `SO_REUSEPORT = 15`.
-`IPPROTO_TCP = 6`; `TCP_NODELAY = 1`.
+`SO_BROADCAST = 6`, `SO_SNDBUF = 7`, `SO_RCVBUF = 8`,
+`SO_KEEPALIVE = 9`, `SO_REUSEPORT = 15`. `IPPROTO_TCP = 6`;
+`TCP_NODELAY = 1`.
 
     sys_setsockopt(fd: int, level: int, optname: int, optval: i64, optlen: int) -> i64
         val k = posix_fd_kind(fd)
@@ -1312,6 +1374,34 @@ Linux `SOL_SOCKET = 1`; `SO_REUSEADDR = 2`, `SO_ERROR = 4`,
             if optname == 9
                 return i64(0)
             if optname == 15
+                return i64(0)
+            // SO_SNDBUF / SO_RCVBUF.  Persist on the shim fd so the
+            // value survives until connect/listen creates an inet
+            // slot, then apply via INET_CMD_TCP_SETBUF if a slot
+            // already exists. UDP buffers aren't sized per-socket
+            // today, so silently accept and ignore for UDP (matches
+            // Linux's tolerance).
+            if optname == 7 || optname == 8
+                if k != POSIX_FD_TCP_SOCKET
+                    return i64(0)
+                if optlen < 4 || optval == i64(0)
+                    return i64(-22)     // -EINVAL
+                val vp: *i32 = *i32(optval)
+                var requested = int(*vp)
+                if requested < 0
+                    requested = 0
+                val pid = posix_fd_current_pid()
+                val idx = pid * POSIX_FDS_PER_PROC + fd
+                if optname == 7
+                    posix_fd_table[idx].pending_sndbuf = requested
+                else
+                    posix_fd_table[idx].pending_rcvbuf = requested
+                val inet_fd = posix_fd_target(fd)
+                if inet_fd < 0
+                    return i64(0)
+                val rc = shim_inet_setbuf(inet_fd, optname == 7, requested)
+                if rc != 0
+                    return i64(rc)
                 return i64(0)
         if level == 6
             if optname == 1
@@ -1339,6 +1429,10 @@ left untouched in that case.
                 accept = 1
             if optname == 6
                 accept = 1
+            if optname == 7
+                accept = 1
+            if optname == 8
+                accept = 1
             if optname == 9
                 accept = 1
             if optname == 15
@@ -1357,6 +1451,53 @@ left untouched in that case.
         if optval == i64(0)
             return i64(-14)
         val vp: *i32 = *i32(optval)
+        // SO_SNDBUF / SO_RCVBUF: ask the inet server for the actual
+        // per-socket size.  Pre-connect TCP fds (no inet slot yet)
+        // report the pending value the caller stashed via setsockopt
+        // (or the inet-side default) so a setsockopt + getsockopt
+        // round-trip on a fresh fd echoes the requested size — code
+        // that introspects its own option ahead of bind/connect
+        // wants a sane number.
+        if level == 1
+            if optname == 7 || optname == 8
+                if k != POSIX_FD_TCP_SOCKET
+                    *vp = i32(0)
+                    *lp = i32(4)
+                    return i64(0)
+                val inet_fd = posix_fd_target(fd)
+                if inet_fd < 0
+                    val pid = posix_fd_current_pid()
+                    val idx = pid * POSIX_FDS_PER_PROC + fd
+                    var pending = 0
+                    if optname == 7
+                        pending = posix_fd_table[idx].pending_sndbuf
+                        if pending == 0
+                            pending = 4096
+                    else
+                        pending = posix_fd_table[idx].pending_rcvbuf
+                        if pending == 0
+                            pending = 1024
+                    *vp = i32(pending)
+                    *lp = i32(4)
+                    return i64(0)
+                val port = inet_get_port()
+                if port < 0
+                    return i64(-5)
+                var msg: [4]byte
+                msg[0] = byte(INET_CMD_TCP_GETBUF)
+                shim_write_u16(msg, 1, inet_fd)
+                msg[3] = byte(0)
+                if optname == 8
+                    msg[3] = byte(1)
+                var reply: [3]byte
+                val r = ipc_send(port, msg, 4, reply, 3)
+                if r < 0
+                    return i64(-5)
+                if reply[0] != 0
+                    return i64(-22)
+                *vp = i32(shim_read_u16(reply, 1))
+                *lp = i32(4)
+                return i64(0)
         *vp = i32(0)
         *lp = i32(4)
         i64(0)

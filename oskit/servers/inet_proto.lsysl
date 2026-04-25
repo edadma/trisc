@@ -1079,6 +1079,12 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     // can vary the size without re-running alloc.
     val TCP_SEND_BUF_DEFAULT = 4096
     val TCP_RECV_BUF_DEFAULT = 1024
+    // setsockopt(SO_SNDBUF/SO_RCVBUF) clamps. Min keeps a useful
+    // amount of data flowing; max is bounded by the inet server's
+    // heap budget (post-C3 heap on x86 server.ld is ~395 KB; with
+    // 16 sockets at 8 KB+8 KB worst case that's 256 KB, comfortable).
+    val TCP_BUF_MIN          = 256
+    val TCP_BUF_MAX          = 8192
     val TCP_MSS_ADV         = 1460
     val TCP_MAX_SEG         = 480
     val TCP_RTO_INITIAL     = 100
@@ -2074,6 +2080,68 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
             i += 1
         -1
 
+
+setsockopt(SO_SNDBUF) / setsockopt(SO_RCVBUF) implementation. Resizes
+the heap-backed send or recv buffer on socket `s`. `kind` selects
+which buffer (0 = SNDBUF, 1 = RCVBUF). `size` is the requested new
+size in bytes (clamped to [TCP_BUF_MIN, TCP_BUF_MAX]).
+
+Resize only happens in the CLOSED state with no buffered data. After
+connect/listen/accept, Linux silently accepts the call but ignores
+the new value (`tcp_set_rcvbuf` warns at most once); we mirror that
+"return 0, no-op" behavior so well-behaved servers that call
+`setsockopt` after `accept` don't get spurious EINVALs. Returns 0 on
+success (whether or not a resize actually happened), -1 on bad fd or
+out-of-range kind.
+
+    inet_tcp_resize_buf(s: int, kind: int, size: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if kind != 0 && kind != 1
+            return -1
+        var clamped = size
+        if clamped < TCP_BUF_MIN
+            clamped = TCP_BUF_MIN
+        if clamped > TCP_BUF_MAX
+            clamped = TCP_BUF_MAX
+        // Only the CLOSED state with empty buffers is a safe resize
+        // window: connect/listen latch the buffer pointer into flow-
+        // control state, and copying live in-flight data on a
+        // realloc would race the receive path.
+        if tcp_sockets[s].state != TCP_STATE_CLOSED
+            return 0
+        if kind == 0
+            if tcp_sockets[s].send_len != 0
+                return 0
+            if clamped == tcp_sockets[s].send_buf_size
+                return 0
+            free(tcp_sockets[s].send_buf_ptr)
+            tcp_sockets[s].send_buf_ptr = malloc(i64(clamped))
+            tcp_sockets[s].send_buf_size = clamped
+        else
+            if tcp_sockets[s].recv_len != 0
+                return 0
+            if clamped == tcp_sockets[s].recv_buf_size
+                return 0
+            free(tcp_sockets[s].recv_buf_ptr)
+            tcp_sockets[s].recv_buf_ptr = malloc(i64(clamped))
+            tcp_sockets[s].recv_buf_size = clamped
+        0
+
+
+    inet_tcp_get_bufsize(s: int, kind: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if kind == 0
+            return tcp_sockets[s].send_buf_size
+        if kind == 1
+            return tcp_sockets[s].recv_buf_size
+        -1
+
     inet_tcp_find(local_port: int, remote_ip: u32, remote_port: int) -> int
         var i = 0
         while i < TCP_MAX_SOCKETS
@@ -2126,7 +2194,8 @@ the socket index on success (caller blocks until ESTABLISHED),
 -1 on immediate failure.
 
     inet_tcp_begin_connect(owner_tid: int, caller_tid: int,
-                           remote_ip: u32, remote_port: int) -> int
+                           remote_ip: u32, remote_port: int,
+                           sndbuf_override: int, rcvbuf_override: int) -> int
         if inet_our_mac_known == 0
             return -1
         val s = inet_tcp_alloc()
@@ -2136,6 +2205,14 @@ the socket index on success (caller blocks until ESTABLISHED),
         if lp < 0
             tcp_sockets[s].in_use = 0
             return -1
+        // Apply any setsockopt(SO_SNDBUF / SO_RCVBUF) the caller
+        // stashed pre-connect.  resize_buf no-ops below TCP_BUF_MIN
+        // and clamps to TCP_BUF_MAX. Done here while state is still
+        // CLOSED — once we transition to SYN_SENT, resize is locked.
+        if sndbuf_override > 0
+            inet_tcp_resize_buf(s, 0, sndbuf_override)
+        if rcvbuf_override > 0
+            inet_tcp_resize_buf(s, 1, rcvbuf_override)
         val iss = tcp_next_iss()
         tcp_sockets[s].owner_tid = owner_tid
         tcp_sockets[s].local_port = lp
@@ -2163,12 +2240,21 @@ value <= 0 is normalised to 1, matching Linux's "0 → 1" rule
 so a tiny but positive queue depth is always available.
 
     inet_tcp_begin_listen(owner_tid: int, local_port: int,
-                          backlog: int) -> int
+                          backlog: int,
+                          sndbuf_override: int, rcvbuf_override: int) -> int
         if inet_tcp_find_listen(local_port) >= 0
             return -1
         val s = inet_tcp_alloc()
         if s < 0
             return -1
+        // Pre-listen setsockopt sizing — see begin_connect.  The
+        // listening socket carries its sizes through to children
+        // in handle_passive_syn (Linux semantics: accepted child
+        // inherits the listener's SO_SNDBUF / SO_RCVBUF).
+        if sndbuf_override > 0
+            inet_tcp_resize_buf(s, 0, sndbuf_override)
+        if rcvbuf_override > 0
+            inet_tcp_resize_buf(s, 1, rcvbuf_override)
         var b = backlog
         if b <= 0
             b = 1
@@ -2202,6 +2288,16 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         val s = inet_tcp_alloc()
         if s < 0
             return
+        // Inherit the listener's per-socket buffer sizes (Linux:
+        // accepted children carry the listening socket's
+        // SO_SNDBUF / SO_RCVBUF). resize_buf no-ops when the size
+        // already matches, so default-sized listeners pay nothing.
+        val parent_sndbuf = tcp_sockets[ls].send_buf_size
+        val parent_rcvbuf = tcp_sockets[ls].recv_buf_size
+        if parent_sndbuf != tcp_sockets[s].send_buf_size
+            inet_tcp_resize_buf(s, 0, parent_sndbuf)
+        if parent_rcvbuf != tcp_sockets[s].recv_buf_size
+            inet_tcp_resize_buf(s, 1, parent_rcvbuf)
         val iss = tcp_next_iss()
         tcp_sockets[s].owner_tid = tcp_sockets[ls].owner_tid
         tcp_sockets[s].local_port = tcp_sockets[ls].local_port
