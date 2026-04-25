@@ -550,6 +550,26 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mfile: done")
   }
 
+  "aarch64 musl: epoll_create1/ctl/wait on a UDP socket" in {
+    // mepoll (slix/test/epoll.c) walks the level-triggered epoll
+    // path: empty wait times out, sendto-self makes the fd
+    // readable, drain returns to idle. Validates the shim's
+    // POSIX_FD_EPOLL kind, the entry table, and inet's
+    // INET_CMD_POLL non-consuming readiness query.
+    qemu.send("mepoll\n")
+    val output = qemu.waitFor("mepoll: done")
+    output should include("mepoll: create=3")
+    output should include("mepoll: bind=0")
+    output should include("mepoll: ctl_add=0")
+    output should include("mepoll: wait_idle=0")
+    output should include("mepoll: sendto=13")
+    output should include("mepoll: wait_after_send=1 events=0x00000001 data_ok=1")
+    output should include("mepoll: recv=13")
+    output should include("mepoll: wait_after_drain=0")
+    output should include("mepoll: ctl_del=0")
+    output should include("mepoll: done")
+  }
+
   "aarch64 musl: pipe2 + write + read + EOF" in {
     // mpipe (slix/test/pipe.c) creates a pipe, writes a string,
     // reads it back, closes the write end, then reads again

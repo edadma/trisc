@@ -73,6 +73,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_GETNAME  = 25
     val INET_CMD_TCP_RECV_NB  = 26
     val INET_CMD_TCP_SHUTDOWN = 27
+    val INET_CMD_POLL         = 28
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -955,6 +956,58 @@ the NB variant when `O_NONBLOCK` is set on the fd.
         inet_write_u16(eagain, 1, 0)
         ipc_reply(sender, eagain, 3)
 
+Non-consuming readiness query for the shim's epoll
+implementation. Caller passes (kind, fd) and gets back a
+`ready_mask` packed into the reply: bit 0 = readable, bit 2
+= writable, bit 3 = error, bit 4 = hangup. Same bit positions
+as Linux's `EPOLLIN` / `EPOLLOUT` / `EPOLLERR` / `EPOLLHUP`.
+
+Wire: [cmd(1), kind(1), fd(u16)] = 4 bytes.
+Reply: [status(1), mask(u16)] = 3 bytes.
+
+kind: 1 = UDP, 2 = TCP (listen sockets are detected by state).
+
+For UDP, readable iff there's a queued datagram; writable
+always. For TCP regular sockets, readable iff recv_len > 0 or
+peer_fin (so an EOF read won't block); writable iff there is
+send-buffer space and we're connected; hangup iff peer_fin.
+For TCP listen sockets, readable iff the accept queue has a
+ready child.
+
+    inet_handle_poll(sender: int, buf: *byte)
+        val kind = int(buf[1]) & 0xff
+        val fd = inet_read_u16(buf, 2) & 0xffff
+        var mask = 0
+        if kind == 1
+            // UDP — owner check via inet_fd_valid which scopes
+            // by sender PTBR/tid.
+            if inet_fd_valid(fd, sender) != 0
+                if inet_sockets[fd].q_count > 0
+                    mask = mask | 0x1
+                mask = mask | 0x4
+        else if kind == 2
+            if inet_tcp_slot_owned(fd, sender) != 0
+                val st = tcp_sockets[fd].state
+                if st == TCP_STATE_LISTEN
+                    if tcp_sockets[fd].accept_head != tcp_sockets[fd].accept_tail
+                        mask = mask | 0x1
+                else
+                    if tcp_sockets[fd].recv_len > 0
+                        mask = mask | 0x1
+                    if tcp_sockets[fd].peer_fin != 0
+                        mask = mask | 0x1
+                        mask = mask | 0x10
+                    if st == TCP_STATE_ESTABLISHED || st == TCP_STATE_CLOSE_WAIT
+                        if tcp_sockets[fd].send_len < TCP_SEND_BUF
+                            mask = mask | 0x4
+                    if st == TCP_STATE_CLOSED
+                        mask = mask | 0x8
+                        mask = mask | 0x10
+        var reply: [3]byte
+        reply[0] = byte(0)
+        inet_write_u16(reply, 1, mask)
+        ipc_reply(sender, reply, 3)
+
 shutdown(fd, how). `how` values: 0 = SHUT_RD, 1 = SHUT_WR,
 2 = SHUT_RDWR. SHUT_RD is a no-op today — we don't track a
 separate "read shut down" state, so the peer sees no effect and
@@ -1395,6 +1448,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_UDP_GETNAME -> inet_handle_udp_getname(sender, buf)
                     INET_CMD_TCP_GETNAME -> inet_handle_tcp_getname(sender, buf)
                     INET_CMD_TCP_RECV_NB -> inet_handle_tcp_recv_nb(sender, buf)
+                    INET_CMD_POLL        -> inet_handle_poll(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->

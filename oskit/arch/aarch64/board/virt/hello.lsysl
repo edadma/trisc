@@ -437,6 +437,7 @@ posix_fd_bridge memory.
     val POSIX_FD_UDP_SOCKET  = 4
     val POSIX_FD_TCP_SOCKET  = 5
     val POSIX_FD_FILE        = 6
+    val POSIX_FD_EPOLL       = 7
 
     val POSIX_FDS_PER_PROC   = 64
 
@@ -580,6 +581,7 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_RECVFROM_TIMEOUT = 18
     val INET_CMD_TCP_RECV_NB = 26
     val INET_CMD_TCP_SHUTDOWN = 27
+    val INET_CMD_POLL        = 28
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -663,6 +665,108 @@ Big-endian 32-bit helpers for the VFS wire format.
         ((int(p[off]) & 0xff) << 24) | ((int(p[off + 1]) & 0xff) << 16) | ((int(p[off + 2]) & 0xff) << 8) | (int(p[off + 3]) & 0xff)
 
 
+epoll instance table (shim-side)
+--------------------------------
+
+Per-process level-triggered epoll. Each `POSIX_FD_EPOLL` slot
+points at an instance row here; the row holds a small array of
+watched (fd, events_mask, user_data) tuples. `events_mask` is
+the user's request bits (`EPOLLIN`/`EPOLLOUT`/...); `user_data`
+is the 8-byte cookie from `struct epoll_event.data` echoed
+back unchanged on every wake.
+
+`epoll_pwait` polls each watched fd's readiness via
+`INET_CMD_POLL` (sockets) or by treating files/pipes as
+always-ready (a stopgap until VFS grows a polling primitive).
+A short sleep is used between iterations so a non-zero
+timeout doesn't spin the CPU.
+
+The table is sized for 4 instances per process, 32 watched
+fds each — way more than the smoke tests need but cheap.
+Generation tracking via `posix_fd_last_gen` reuses the same
+sentinel as `posix_fd_table` so a stale instance from a
+previous tenant of the pid is reset on first touch.
+
+    val POSIX_EPOLL_INSTANCES_PER_PROC = 4
+    val POSIX_EPOLL_ENTRIES_PER_INSTANCE = 32
+    val POSIX_EPOLL_TABLE_SIZE = 64    // 16 procs * 4 instances
+
+EPOLL_* event bits (must match musl's `<sys/epoll.h>`).
+
+    val POSIX_EPOLLIN  = 0x001
+    val POSIX_EPOLLOUT = 0x004
+    val POSIX_EPOLLERR = 0x008
+    val POSIX_EPOLLHUP = 0x010
+
+EPOLL_CTL_* opcodes.
+
+    val POSIX_EPOLL_CTL_ADD = 1
+    val POSIX_EPOLL_CTL_DEL = 2
+    val POSIX_EPOLL_CTL_MOD = 3
+
+`struct epoll_event` on aarch64 LP64: events @0 (4), pad @4
+(4), data @8 (8) = 16 bytes total. We store events as int and
+data as i64; the shim copies bytes 0..3 and 8..15 of the user
+struct.
+
+    val POSIX_EPOLL_EVENT_SIZE = 16
+
+    struct EpollEntry
+        in_use: int
+        watched_fd: int
+        events: int
+        data_lo: i64
+
+    struct EpollInstance
+        in_use: int
+        owner_gen: int     // matches kernel_get_process_main_tid
+        entries: [32]EpollEntry
+
+    var epoll_table: [64]EpollInstance
+
+    epoll_inst_init(idx: int)
+        epoll_table[idx].in_use = 0
+        epoll_table[idx].owner_gen = 0
+        var i = 0
+        while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
+            epoll_table[idx].entries[i].in_use = 0
+            epoll_table[idx].entries[i].watched_fd = 0
+            epoll_table[idx].entries[i].events = 0
+            epoll_table[idx].entries[i].data_lo = i64(0)
+            i += 1
+
+    epoll_alloc_inst() -> int
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return -1
+        if pid >= 16
+            return -1
+        val gen = kernel_get_process_main_tid(pid)
+        val base = pid * POSIX_EPOLL_INSTANCES_PER_PROC
+        var i = 0
+        while i < POSIX_EPOLL_INSTANCES_PER_PROC
+            if epoll_table[base + i].in_use == 0
+                epoll_inst_init(base + i)
+                epoll_table[base + i].in_use = 1
+                epoll_table[base + i].owner_gen = gen
+                return base + i
+            // Stale instance from a dead tenant — reclaim it.
+            if epoll_table[base + i].owner_gen != gen
+                epoll_inst_init(base + i)
+                epoll_table[base + i].in_use = 1
+                epoll_table[base + i].owner_gen = gen
+                return base + i
+            i += 1
+        -1
+
+    epoll_inst_release(idx: int)
+        if idx < 0
+            return
+        if idx >= POSIX_EPOLL_TABLE_SIZE
+            return
+        epoll_inst_init(idx)
+
+
 POSIX shim dispatch. Musl's aarch64-slix arch/ uses SLIX-local
 syscall numbers starting at 128 (see `slix/musl/arch/aarch64-slix
 /bits/syscall.h.in`). Handlers take the raw user-space args and
@@ -725,6 +829,12 @@ to the same UDP stack that native sysl programs use via
             return sys_lseek(int(a0), a1, int(a2))
         if num == 256
             return sys_pipe2(a0, int(a1))
+        if num == 153
+            return sys_epoll_create1(int(a0))
+        if num == 154
+            return sys_epoll_ctl(int(a0), int(a1), int(a2), a3)
+        if num == 155
+            return sys_epoll_pwait(int(a0), a1, int(a2), int(a3))
         i64(-38)            // -ENOSYS
 
 SYS_WRITE. Looks up `fd` in the process's POSIX fd table and
@@ -945,6 +1055,8 @@ still -1) skip the inet call — no backend was ever allocated.
                     shim_write_be_i32(msg, 1, target)
                     var reply: [1]byte
                     ipc_send(port, msg, 5, reply, 1)
+            if k == POSIX_FD_EPOLL
+                epoll_inst_release(target)
         posix_fd_clear(fd)
         i64(0)
 
@@ -1885,6 +1997,217 @@ exec lands.
         var fdp: *int = *int(pipefd_array)
         fdp[0] = rfd
         fdp[1] = wfd
+        i64(0)
+
+SYS_EPOLL_CREATE1. Allocates a fresh epoll instance and parks
+it in a `POSIX_FD_EPOLL` slot. `flags` would carry
+`EPOLL_CLOEXEC` / `EPOLL_NONBLOCK`; we honour O_NONBLOCK in
+the slot but exec/CLOEXEC isn't tracked yet — see the
+posix_fd_bridge memory.
+
+    sys_epoll_create1(epoll_flags: int) -> i64
+        val inst = epoll_alloc_inst()
+        if inst < 0
+            return i64(-24)             // -EMFILE
+        val pfd = posix_fd_alloc(POSIX_FD_EPOLL, inst)
+        if pfd < 0
+            epoll_inst_release(inst)
+            return i64(-24)
+        posix_fd_set_flags(pfd, epoll_flags & POSIX_O_NONBLOCK)
+        i64(pfd)
+
+`epoll_event` field readers. Layout on aarch64 LP64 is
+`events: u32 @0`, padding @4, `data: u64 @8`. We need byte-
+level reads because the user pointer might not be aligned.
+
+    shim_read_le_u32(p: *byte, off: int) -> int
+        (int(p[off]) & 0xff) | ((int(p[off + 1]) & 0xff) << 8) | ((int(p[off + 2]) & 0xff) << 16) | ((int(p[off + 3]) & 0xff) << 24)
+
+    shim_write_le_u32(p: *byte, off: int, v: int)
+        p[off]     = byte(v & 0xff)
+        p[off + 1] = byte((v >> 8) & 0xff)
+        p[off + 2] = byte((v >> 16) & 0xff)
+        p[off + 3] = byte((v >> 24) & 0xff)
+
+    shim_read_le_i64(p: *byte, off: int) -> i64
+        var v = i64(0)
+        var i = 7
+        while i >= 0
+            v = (v << i64(8)) | i64(int(p[off + i]) & 0xff)
+            i -= 1
+        v
+
+    shim_write_le_i64(p: *byte, off: int, v: i64)
+        var i = 0
+        while i < 8
+            p[off + i] = byte(int((v >> i64(8 * i))) & 0xff)
+            i += 1
+
+SYS_EPOLL_CTL. ADD finds a free entry (and rejects if `fd` is
+already registered, like Linux); MOD updates an existing
+entry's events/data; DEL drops it. Returns 0 on success, errno
+on failure. We don't validate that `fd` is one of the kinds we
+can actually poll (sockets, pipes, files) because epoll_pwait
+will just see "always not ready" for unknown kinds — same
+end-user effect as Linux's "polled but never fires" for fds
+without poll support.
+
+    sys_epoll_ctl(epfd: int, op: int, target_fd: int, ev_ptr: i64) -> i64
+        if posix_fd_kind(epfd) != POSIX_FD_EPOLL
+            return i64(-22)             // -EINVAL
+        val inst = posix_fd_target(epfd)
+        if inst < 0
+            return i64(-22)
+        var events_in = 0
+        var data_in = i64(0)
+        if op != POSIX_EPOLL_CTL_DEL
+            if ev_ptr == i64(0)
+                return i64(-14)         // -EFAULT
+            val up: *byte = *byte(ev_ptr)
+            events_in = shim_read_le_u32(up, 0)
+            data_in = shim_read_le_i64(up, 8)
+        if op == POSIX_EPOLL_CTL_ADD
+            // Reject duplicate fd registrations.
+            var i = 0
+            while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
+                if epoll_table[inst].entries[i].in_use != 0
+                    if epoll_table[inst].entries[i].watched_fd == target_fd
+                        return i64(-17)     // -EEXIST
+                i += 1
+            i = 0
+            while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
+                if epoll_table[inst].entries[i].in_use == 0
+                    epoll_table[inst].entries[i].in_use = 1
+                    epoll_table[inst].entries[i].watched_fd = target_fd
+                    epoll_table[inst].entries[i].events = events_in
+                    epoll_table[inst].entries[i].data_lo = data_in
+                    return i64(0)
+                i += 1
+            return i64(-28)             // -ENOSPC
+        if op == POSIX_EPOLL_CTL_MOD
+            var i = 0
+            while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
+                if epoll_table[inst].entries[i].in_use != 0
+                    if epoll_table[inst].entries[i].watched_fd == target_fd
+                        epoll_table[inst].entries[i].events = events_in
+                        epoll_table[inst].entries[i].data_lo = data_in
+                        return i64(0)
+                i += 1
+            return i64(-2)              // -ENOENT
+        if op == POSIX_EPOLL_CTL_DEL
+            var i = 0
+            while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
+                if epoll_table[inst].entries[i].in_use != 0
+                    if epoll_table[inst].entries[i].watched_fd == target_fd
+                        epoll_table[inst].entries[i].in_use = 0
+                        return i64(0)
+                i += 1
+            return i64(-2)
+        i64(-22)
+
+Query a single watched fd's readiness. Returns the bits the
+shim should report, masked against the user's requested events
++ EPOLLERR/EPOLLHUP (which are always reported regardless of
+what the user asked for, per Linux semantics).
+
+    epoll_query_ready(target_fd: int, want: int) -> int
+        val k = posix_fd_kind(target_fd)
+        if k == POSIX_FD_FREE
+            return POSIX_EPOLLERR
+        if k == POSIX_FD_UDP_SOCKET || k == POSIX_FD_TCP_SOCKET
+            val port = inet_get_port()
+            if port < 0
+                return 0
+            var msg: [4]byte
+            msg[0] = byte(INET_CMD_POLL)
+            if k == POSIX_FD_UDP_SOCKET
+                msg[1] = byte(1)
+            else
+                msg[1] = byte(2)
+            shim_write_u16(msg, 2, posix_fd_target(target_fd))
+            var reply: [3]byte
+            val r = ipc_send(port, msg, 4, reply, 3)
+            if r < 0
+                return POSIX_EPOLLERR
+            if reply[0] != 0
+                return POSIX_EPOLLERR
+            val raw = shim_read_u16(reply, 1)
+            // Mask: caller's requested events plus error/hangup
+            // which are always reported.
+            return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
+        if k == POSIX_FD_FILE
+            // No VFS poll command yet — treat as always ready
+            // for the user's requested bits. Good enough for
+            // EPOLLIN/EPOLLOUT on regular files (which Linux
+            // also reports always-ready) and pipes that
+            // already have data.
+            return want
+        if k == POSIX_FD_STDIN
+            return 0
+        if k == POSIX_FD_STDOUT || k == POSIX_FD_STDERR
+            return want & POSIX_EPOLLOUT
+        0
+
+SYS_EPOLL_PWAIT. Linux's epoll_pwait blocks the caller until
+at least one watched fd is ready or the timeout expires. We
+implement level-triggered behaviour with a polling loop: scan
+every active entry, write ready events into `events_array`,
+and either return the count or sleep one tick and retry. The
+sleep granularity is OK for an MVP — Phase A will replace it
+with a real subscribe/notify path.
+
+`timeout` is in milliseconds: 0 = poll-once, -1 = wait
+indefinitely, otherwise budget the loop in ticks. `sigmask`
+is ignored (no signal delivery yet).
+
+    sys_epoll_pwait(epfd: int, events_array: i64, max_events: int, timeout_ms: int) -> i64
+        if posix_fd_kind(epfd) != POSIX_FD_EPOLL
+            return i64(-22)
+        val inst = posix_fd_target(epfd)
+        if inst < 0
+            return i64(-22)
+        if max_events <= 0
+            return i64(-22)
+        if events_array == i64(0)
+            return i64(-14)
+        val out: *byte = *byte(events_array)
+        // Approximate ticks budget. The kernel timer fires at
+        // 100 Hz today, so 10 ticks ≈ 100 ms. We err on the
+        // side of slightly-over rather than starving callers.
+        var ticks_left = -1
+        if timeout_ms >= 0
+            ticks_left = (timeout_ms + 9) / 10
+        var iter = 0
+        while iter < 100000     // hard cap to avoid runaway loops
+            iter += 1
+            var produced = 0
+            var i = 0
+            while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
+                if produced >= max_events
+                    break
+                if epoll_table[inst].entries[i].in_use != 0
+                    val tfd = epoll_table[inst].entries[i].watched_fd
+                    val want = epoll_table[inst].entries[i].events
+                    val ready = epoll_query_ready(tfd, want)
+                    if ready != 0
+                        val off = produced * POSIX_EPOLL_EVENT_SIZE
+                        shim_write_le_u32(out, off, ready)
+                        // Padding bytes at offset 4..7 — leave
+                        // alone; the user's struct is theirs.
+                        shim_write_le_i64(out, off + 8,
+                            epoll_table[inst].entries[i].data_lo)
+                        produced += 1
+                i += 1
+            if produced > 0
+                return i64(produced)
+            if timeout_ms == 0
+                return i64(0)
+            if ticks_left == 0
+                return i64(0)
+            // Sleep ~10ms (one tick at 100Hz) and retry.
+            sleep(1)
+            if ticks_left > 0
+                ticks_left -= 1
         i64(0)
 
 Kernel-thread entries for the kernel-integrated demo. kentry_a
