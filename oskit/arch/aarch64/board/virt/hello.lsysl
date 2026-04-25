@@ -508,6 +508,29 @@ posix_fd_bridge memory.
             i += 1
         -1
 
+Iteration-based "is there another fd in this process pointing
+at the same backend?" check. Used by `sys_close` to avoid issuing
+an inet close while a `dup`-ped fd still references the same
+inet record. STDIO kinds share kind/target = (1/2/3, 0), so dup
+of STDOUT works the same way: don't tear down anything when one
+of two pointing at the same target closes.
+
+    posix_fd_other_dup_exists(fd: int, kind: int, target: int) -> int
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return 0
+        if pid >= 16
+            return 0
+        val base = pid * POSIX_FDS_PER_PROC
+        var i = 0
+        while i < POSIX_FDS_PER_PROC
+            if i != fd
+                if posix_fd_table[base + i].kind == kind
+                    if posix_fd_table[base + i].target == target
+                        return 1
+            i += 1
+        0
+
     posix_fd_clear(fd: int)
         val pid = posix_fd_current_pid()
         if pid <= 0
@@ -614,6 +637,10 @@ to the same UDP stack that native sysl programs use via
             return sys_close(int(a0))
         if num == 148
             return sys_connect(int(a0), a1, int(a2))
+        if num == 151
+            return sys_dup(int(a0))
+        if num == 152
+            return sys_dup3(int(a0), int(a1), int(a2))
         if num == 217
             return sys_listen(int(a0), int(a1))
         if num == 276
@@ -757,25 +784,28 @@ still -1) skip the inet call — no backend was ever allocated.
         val k = posix_fd_kind(fd)
         if k == POSIX_FD_FREE
             return i64(-9)  // -EBADF
-        if k == POSIX_FD_UDP_SOCKET
-            val inet_fd = posix_fd_target(fd)
-            val port = inet_get_port()
-            if port >= 0
-                var msg: [2]byte
-                msg[0] = byte(INET_CMD_CLOSE)
-                msg[1] = byte(inet_fd & 0xff)
-                var reply: [1]byte
-                ipc_send(port, msg, 2, reply, 1)
-        if k == POSIX_FD_TCP_SOCKET
-            val inet_fd = posix_fd_target(fd)
-            if inet_fd >= 0
+        val target = posix_fd_target(fd)
+        // If this fd was duped, another slot still owns the inet
+        // record — clear our slot but leave the backend alone.
+        val has_dup = posix_fd_other_dup_exists(fd, k, target)
+        if has_dup == 0
+            if k == POSIX_FD_UDP_SOCKET
                 val port = inet_get_port()
                 if port >= 0
-                    var msg: [3]byte
-                    msg[0] = byte(INET_CMD_TCP_CLOSE)
-                    shim_write_u16(msg, 1, inet_fd)
+                    var msg: [2]byte
+                    msg[0] = byte(INET_CMD_CLOSE)
+                    msg[1] = byte(target & 0xff)
                     var reply: [1]byte
-                    ipc_send(port, msg, 3, reply, 1)
+                    ipc_send(port, msg, 2, reply, 1)
+            if k == POSIX_FD_TCP_SOCKET
+                if target >= 0
+                    val port = inet_get_port()
+                    if port >= 0
+                        var msg: [3]byte
+                        msg[0] = byte(INET_CMD_TCP_CLOSE)
+                        shim_write_u16(msg, 1, target)
+                        var reply: [1]byte
+                        ipc_send(port, msg, 3, reply, 1)
         posix_fd_clear(fd)
         i64(0)
 
@@ -1331,6 +1361,53 @@ peer short-circuit.
         shim_write_sockaddr(addr_ptr, p, &reply[3])
         shim_write_addrlen(addrlen_ptr, 16)
         i64(0)
+
+SYS_DUP / SYS_DUP3. POSIX fd aliasing for the socket fd table.
+The new fd shares `kind`, `target`, and `flags` with the old —
+the inet record (or stdio kind) lives across both. Real refcount
+is implicit: `sys_close` scans the rest of the table and skips
+the inet close if any other slot still references the same
+target. CLOEXEC (`flags & 1` in the dup3 call) is accepted but
+not tracked, since SLIX has no `exec` yet.
+
+`dup` allocates the lowest free fd via the standard table walk;
+`dup3` writes the explicit `newfd`, closing whatever was there
+first (also dup-aware via `sys_close`). dup3 with `oldfd ==
+newfd` reports -EINVAL per Linux.
+
+    sys_dup(oldfd: int) -> i64
+        val k = posix_fd_kind(oldfd)
+        if k == POSIX_FD_FREE
+            return i64(-9)              // -EBADF
+        val target = posix_fd_target(oldfd)
+        val flags = posix_fd_flags(oldfd)
+        val newfd = posix_fd_alloc(k, target)
+        if newfd < 0
+            return i64(-24)             // -EMFILE
+        posix_fd_set_flags(newfd, flags)
+        i64(newfd)
+
+    sys_dup3(oldfd: int, newfd: int, dup_flags: int) -> i64
+        if oldfd == newfd
+            return i64(-22)             // -EINVAL
+        val k = posix_fd_kind(oldfd)
+        if k == POSIX_FD_FREE
+            return i64(-9)
+        if newfd < 0
+            return i64(-9)
+        if newfd >= POSIX_FDS_PER_PROC
+            return i64(-9)
+        if posix_fd_kind(newfd) != POSIX_FD_FREE
+            val _ = sys_close(newfd)
+        val target = posix_fd_target(oldfd)
+        val ofl = posix_fd_flags(oldfd)
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + newfd
+        posix_fd_table[idx].kind = k
+        posix_fd_table[idx].target = target
+        posix_fd_table[idx].flags = ofl
+        posix_fd_table[idx].pos = i64(0)
+        i64(newfd)
 
 SYS_FCNTL. MVP dispatch for the handful of cmd codes musl programs
 actually exercise before doing I/O:

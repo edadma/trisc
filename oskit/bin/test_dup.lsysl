@@ -1,0 +1,153 @@
+test_dup — dup/dup3 for POSIX fds
+=================================
+
+Exercises syscalls 151 (dup) and 152 (dup3) in the aarch64 POSIX
+shim. Three scenarios:
+
+1. `dup(STDOUT)` returns a fresh fd; writes via the duplicate land
+   on the same UART stream.
+2. `dup3(udpfd, 5, 0)` aliases a UDP socket onto fd 5. close(5)
+   leaves the original udpfd usable (sendto must still succeed).
+   Then close(udpfd) tears down the inet record for real.
+3. `dup3(fd, fd, 0)` returns -EINVAL per Linux.
+
+Pass = `dup: done` with no `FAIL` markers.
+
+    module oskit.bin.test_dup
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE  = 147
+    val NR_SOCKET = 337
+    val NR_BIND   = 135
+    val NR_SENDTO = 307
+    val NR_DUP    = 151
+    val NR_DUP3   = 152
+
+    val AF_INET_V    = 2
+    val SOCK_DGRAM_V = 2
+
+
+    print_sdec(v: int)
+        if v < 0
+            puts("-")
+            print_sdec(-v)
+            return
+        if v >= 10
+            print_sdec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int,
+                 addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_dup(oldfd: int) -> int
+        int(syscall6(NR_DUP, i64(oldfd), 0, 0, 0, 0, 0))
+
+    posix_dup3(oldfd: int, newfd: int, flags: int) -> int
+        int(syscall6(NR_DUP3, i64(oldfd), i64(newfd), i64(flags), 0, 0, 0))
+
+
+    main(argv: []string)
+        // 1. dup(STDOUT). Both fds should write to the same place.
+        val dup_stdout = posix_dup(1)
+        puts("dup: stdout dup = ")
+        print_sdec(dup_stdout)
+        puts("\n")
+        if dup_stdout < 3
+            puts("dup: FAIL stdout dup\n")
+            exit_with(1)
+            return
+
+        // 2. UDP socket + dup3 onto fd 5. Close the alias; the
+        // original must still send.
+        val udp = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if udp < 0
+            puts("dup: socket failed\n")
+            exit_with(2)
+            return
+        var baddr: [16]byte
+        fill_sockaddr(&baddr[0], 7787, 127, 0, 0, 1)
+        if posix_bind(udp, &baddr[0], 16) < 0
+            puts("dup: bind failed\n")
+            exit_with(3)
+            return
+        puts("dup: udp = ")
+        print_sdec(udp)
+        puts("\n")
+
+        val r1 = posix_dup3(udp, 5, 0)
+        puts("dup: dup3(udp, 5, 0) = ")
+        print_sdec(r1)
+        puts("\n")
+        if r1 != 5
+            puts("dup: FAIL dup3 newfd\n")
+            exit_with(4)
+            return
+
+        // Close the alias — the inet record must NOT be torn down.
+        if posix_close(5) != 0
+            puts("dup: FAIL close alias\n")
+            exit_with(5)
+            return
+
+        // Send through the original. If close(5) tore down the
+        // inet socket prematurely this returns -EBADF / -EIO.
+        var dst: [16]byte
+        fill_sockaddr(&dst[0], 7787, 127, 0, 0, 1)
+        var msg: [3]byte
+        msg[0] = byte('h')
+        msg[1] = byte('i')
+        msg[2] = byte('!')
+        val sent = posix_sendto(udp, &msg[0], 3, 0, &dst[0], 16)
+        puts("dup: sendto via udp = ")
+        print_sdec(sent)
+        puts("\n")
+        if sent != 3
+            puts("dup: FAIL sendto after alias close\n")
+            exit_with(6)
+            return
+
+        // 3. dup3 with same old/new is -EINVAL.
+        val r2 = posix_dup3(udp, udp, 0)
+        puts("dup: dup3(udp,udp,0) = ")
+        print_sdec(r2)
+        puts("\n")
+        if r2 != -22
+            puts("dup: FAIL dup3 self-EINVAL\n")
+            exit_with(7)
+            return
+
+        posix_close(udp)
+        posix_close(dup_stdout)
+        puts("dup: done\n")
+        exit()

@@ -458,6 +458,24 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       peerThread.join(2000)
   }
 
+  "aarch64 posix: dup / dup3 fd aliasing" in {
+    // test_dup exercises dup (151) + dup3 (152). Three checks:
+    //   (a) dup(STDOUT) returns a fresh fd >= 3
+    //   (b) dup3(udp, 5, 0): closing fd 5 must NOT tear down
+    //       the inet UDP record — sendto via the original
+    //       still works. Validates the iteration-based refcount
+    //       in posix_fd_other_dup_exists.
+    //   (c) dup3(fd, fd, 0) reports -EINVAL per Linux.
+    qemu.send("test_dup\n")
+    val output = qemu.waitFor("dup: done")
+    output should include("dup: stdout dup = ")
+    output should include("dup: dup3(udp, 5, 0) = 5")
+    output should include("dup: sendto via udp = 3")
+    output should include("dup: dup3(udp,udp,0) = -22")
+    output should include("dup: done")
+    output should not include "dup: FAIL"
+  }
+
   "aarch64 musl: socket/connect/shutdown/read via libc wrappers" in {
     // msocket is a C program linked against slix's musl fork; uses
     // socket(), connect(), write(), shutdown(), read(), close(),
