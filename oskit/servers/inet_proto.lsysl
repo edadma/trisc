@@ -22,6 +22,7 @@ live in kernel-thread space and call `virtio_net_send` directly.
 
     import oskit.ipc.{ipc_send, port_lookup, ipc_reply}
     import oskit.services.{uptime, notify_send_to}
+    import std.alloc.{malloc, free}
     import std.net.{ETHERTYPE_IPV4, ETHERTYPE_ARP,
         ARP_OP_REQUEST, ARP_OP_REPLY,
         IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP,
@@ -1071,8 +1072,13 @@ emit/retransmit, scoreboard) lives here.
 Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
 
     val TCP_MAX_SOCKETS     = 16
-    val TCP_SEND_BUF        = 4096
-    val TCP_RECV_BUF        = 1024
+    // Default heap-backed buffer sizes per socket. Allocated lazily
+    // in `inet_tcp_alloc` and freed in `inet_tcp_close_slot`. The
+    // per-socket size is recorded in `send_buf_size` / `recv_buf_size`
+    // so future setsockopt(SO_SNDBUF) / setsockopt(SO_RCVBUF) work
+    // can vary the size without re-running alloc.
+    val TCP_SEND_BUF_DEFAULT = 4096
+    val TCP_RECV_BUF_DEFAULT = 1024
     val TCP_MSS_ADV         = 1460
     val TCP_MAX_SEG         = 480
     val TCP_RTO_INITIAL     = 100
@@ -1106,10 +1112,13 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     val TCP_OPT_SACK            = 5
     val TCP_OPT_TS              = 8
 
-    // Receive-window scale shift we always advertise. With
-    // TCP_RECV_BUF=4096 this is overkill; once C3's variable
-    // buffers land, scale=7 (× 128) lets a 256 KB rcv_buf advertise
-    // up through 32 MB of window, well above the 16-bit raw field.
+    // Receive-window scale shift we always advertise. With the
+    // refactor-only C3 default (`TCP_RECV_BUF_DEFAULT=1024`) the
+    // shift granularity (128 B per advert) is coarser than the
+    // buffer itself — silly window kicks in early. Once setsockopt
+    // can grow the buffer, scale=7 (× 128) lets a 256 KB recv_buf
+    // advertise up through 32 MB of window, well above the 16-bit
+    // raw field.
     val TCP_RCV_WSCALE          = 7
 
     // Max SACK blocks we bother with on either side. RFC 2018
@@ -1169,9 +1178,15 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         snd_wnd: int
         rcv_nxt: u32
         mss: int
-        send_buf: [4096]byte
+        // Heap-backed send/recv buffers. `*_ptr` is null when the
+        // slot is free (in_use == 0). `*_size` records the alloc
+        // size so flow-control math (rwnd advert, send-buf space)
+        // works against the per-socket capacity.
+        send_buf_ptr: *byte
+        send_buf_size: int
         send_len: int
-        recv_buf: [1024]byte
+        recv_buf_ptr: *byte
+        recv_buf_size: int
         recv_len: int
         rtx_deadline: int
         retries: int
@@ -1683,7 +1698,7 @@ TCP options attached:
         frame[tcp_off + 12] = byte((data_off_words << 4) & 0xf0)
         frame[tcp_off + 13] = byte(flags & 0xff)
         val stashed = inet_tcp_reorder_bytes(s)
-        var rwnd = TCP_RECV_BUF - tcp_sockets[s].recv_len - stashed
+        var rwnd = tcp_sockets[s].recv_buf_size - tcp_sockets[s].recv_len - stashed
         if rwnd < 0
             rwnd = 0
         // RFC 7323 §2.2: SYN segments advertise the unscaled
@@ -1777,7 +1792,7 @@ TCP options attached:
             val offset = int(i32(payload_seq - tcp_sockets[s].snd_una))
             var i = 0
             while i < payload_len
-                frame[tcp_off + hdr_bytes + i] = tcp_sockets[s].send_buf[offset + i]
+                frame[tcp_off + hdr_bytes + i] = tcp_sockets[s].send_buf_ptr[offset + i]
                 i += 1
         pkt_write_u16(frame, tcp_off + 16,
             (~inet_l4_partial_sum(our_ip, tcp_sockets[s].remote_ip,
@@ -1901,12 +1916,12 @@ RECV drain + reply. `n == 0` signals peer-closed EOF.
         pkt_write_u16(wr, 1, n)
         var i = 0
         while i < n
-            wr[3 + i] = tcp_sockets[s].recv_buf[i]
+            wr[3 + i] = tcp_sockets[s].recv_buf_ptr[i]
             i += 1
         if n > 0
             var j = n
             while j < tcp_sockets[s].recv_len
-                tcp_sockets[s].recv_buf[j - n] = tcp_sockets[s].recv_buf[j]
+                tcp_sockets[s].recv_buf_ptr[j - n] = tcp_sockets[s].recv_buf_ptr[j]
                 j += 1
             tcp_sockets[s].recv_len -= n
         ipc_reply(tid, wr, 3 + n)
@@ -1976,6 +1991,17 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].rcv_wscale = 0
         tcp_sockets[s].ts_ok = 0
         tcp_sockets[s].ts_recent = u32(0)
+        // Release the heap-backed buffers. `free(null)` is a no-op
+        // (std.alloc), so close paths hit on slots that never
+        // allocated (e.g. listen sockets in early-reject paths) are
+        // safe.  Null the pointers + zero the sizes so a fresh
+        // alloc starts from a clean slate.
+        free(tcp_sockets[s].send_buf_ptr)
+        free(tcp_sockets[s].recv_buf_ptr)
+        tcp_sockets[s].send_buf_ptr = *byte(0)
+        tcp_sockets[s].recv_buf_ptr = *byte(0)
+        tcp_sockets[s].send_buf_size = 0
+        tcp_sockets[s].recv_buf_size = 0
 
 
     inet_tcp_alloc() -> int
@@ -2026,6 +2052,16 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
                 // back-to-back connections from the same socket
                 // pool don't share an offset.
                 tcp_sockets[i].ts_offset = u32(uptime()) ^ u32(i * 1000003) ^ tcp_iss_counter
+                // Heap-backed buffers are allocated lazily on alloc.
+                // close_slot frees + nulls the pointers, so re-using a
+                // slot doesn't double-allocate.  std.alloc returns 0 on
+                // OOM; we accept the leak rather than fail open since
+                // a fresh boot won't exhaust the inet heap and the
+                // soft-failure path would race the rest of the init.
+                tcp_sockets[i].send_buf_ptr = malloc(i64(TCP_SEND_BUF_DEFAULT))
+                tcp_sockets[i].send_buf_size = TCP_SEND_BUF_DEFAULT
+                tcp_sockets[i].recv_buf_ptr = malloc(i64(TCP_RECV_BUF_DEFAULT))
+                tcp_sockets[i].recv_buf_size = TCP_RECV_BUF_DEFAULT
                 var k = 0
                 while k < TCP_REORDER_SLOTS
                     tcp_sockets[i].reorder[k].in_use = 0
@@ -2559,7 +2595,7 @@ ACK and retry.
         val ds_st = tcp_sockets[s].state
         if ds_st != TCP_STATE_ESTABLISHED && ds_st != TCP_STATE_CLOSE_WAIT
             return -1
-        val space = TCP_SEND_BUF - tcp_sockets[s].send_len
+        val space = tcp_sockets[s].send_buf_size - tcp_sockets[s].send_len
         var n = len
         if n > space
             n = space
@@ -2568,7 +2604,7 @@ ACK and retry.
         val start_off = tcp_sockets[s].send_len
         var i = 0
         while i < n
-            tcp_sockets[s].send_buf[start_off + i] = data[i]
+            tcp_sockets[s].send_buf_ptr[start_off + i] = data[i]
             i += 1
         tcp_sockets[s].send_len += n
         inet_tcp_drain_send(s)
@@ -2878,11 +2914,11 @@ bit 1 = FIN processed.
                 if tcp_sockets[s].reorder[k].in_use != 0
                     if tcp_sockets[s].reorder[k].seq == tcp_sockets[s].rcv_nxt
                         val take = tcp_sockets[s].reorder[k].len
-                        val room = TCP_RECV_BUF - tcp_sockets[s].recv_len
+                        val room = tcp_sockets[s].recv_buf_size - tcp_sockets[s].recv_len
                         if take <= room
                             var i = 0
                             while i < take
-                                tcp_sockets[s].recv_buf[tcp_sockets[s].recv_len + i] = tcp_sockets[s].reorder[k].data[i]
+                                tcp_sockets[s].recv_buf_ptr[tcp_sockets[s].recv_len + i] = tcp_sockets[s].reorder[k].data[i]
                                 i += 1
                             tcp_sockets[s].recv_len += take
                             tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
@@ -3039,7 +3075,7 @@ the connection down.
                         eff = tcp_sockets[s].send_len
                     var k = eff
                     while k < tcp_sockets[s].send_len
-                        tcp_sockets[s].send_buf[k - eff] = tcp_sockets[s].send_buf[k]
+                        tcp_sockets[s].send_buf_ptr[k - eff] = tcp_sockets[s].send_buf_ptr[k]
                         k += 1
                     tcp_sockets[s].send_len -= eff
                     tcp_sockets[s].snd_una = ack
@@ -3128,13 +3164,13 @@ the connection down.
         var did_fin = 0
         if payload_len > 0
             if seq == tcp_sockets[s].rcv_nxt
-                val room = TCP_RECV_BUF - tcp_sockets[s].recv_len
+                val room = tcp_sockets[s].recv_buf_size - tcp_sockets[s].recv_len
                 var take = payload_len
                 if take > room
                     take = room
                 var i = 0
                 while i < take
-                    tcp_sockets[s].recv_buf[tcp_sockets[s].recv_len + i] = payload[i]
+                    tcp_sockets[s].recv_buf_ptr[tcp_sockets[s].recv_len + i] = payload[i]
                     i += 1
                 tcp_sockets[s].recv_len += take
                 tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
@@ -3150,7 +3186,7 @@ the connection down.
                 // queue, overlap), peer will retransmit — the dup
                 // re-ACK path below still advertises rcv_nxt.
                 val seg_end = seq + u32(payload_len)
-                val rem = TCP_RECV_BUF - tcp_sockets[s].recv_len - inet_tcp_reorder_bytes(s)
+                val rem = tcp_sockets[s].recv_buf_size - tcp_sockets[s].recv_len - inet_tcp_reorder_bytes(s)
                 var rem_clamped = rem
                 if rem_clamped < 0
                     rem_clamped = 0
@@ -3312,33 +3348,20 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
 100 'A' + 50 'B' + 50 'C'.
 
     inet_tcp_ooo_selftest() -> int
-        val s = TCP_MAX_SOCKETS - 1
-        tcp_sockets[s].in_use = 1
+        // Use inet_tcp_alloc so the heap-backed send/recv buffers
+        // exist — the in-order seg below copies its payload through
+        // recv_buf_ptr, which is null on a manually-initialised slot.
+        val s = inet_tcp_alloc()
+        if s < 0
+            return 100
         tcp_sockets[s].state = TCP_STATE_ESTABLISHED
         tcp_sockets[s].rcv_nxt = u32(100)
         tcp_sockets[s].snd_una = u32(1)
         tcp_sockets[s].snd_nxt = u32(1)
-        tcp_sockets[s].recv_len = 0
-        tcp_sockets[s].send_len = 0
-        tcp_sockets[s].fin_pending = 0
-        tcp_sockets[s].peer_fin = 0
-        tcp_sockets[s].our_fin_sent = 0
-        tcp_sockets[s].recv_waiter = -1
-        tcp_sockets[s].send_waiter = -1
-        tcp_sockets[s].connect_waiter = -1
-        tcp_sockets[s].close_waiter = -1
-        tcp_sockets[s].accept_waiter = -1
-        tcp_sockets[s].is_listen = 0
         tcp_sockets[s].owner_tid = -1
         tcp_sockets[s].local_port = 0
         tcp_sockets[s].remote_port = 0
         tcp_sockets[s].remote_ip = u32(0)
-        tcp_sockets[s].rtx_deadline = 0
-        tcp_sockets[s].tw_deadline = 0
-        var k = 0
-        while k < TCP_REORDER_SLOTS
-            tcp_sockets[s].reorder[k].in_use = 0
-            k += 1
 
         var seg_b: [50]byte
         var i = 0
@@ -3384,17 +3407,17 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
 
         i = 0
         while i < 100
-            if tcp_sockets[s].recv_buf[i] != byte('A')
+            if tcp_sockets[s].recv_buf_ptr[i] != byte('A')
                 inet_tcp_close_slot(s, 0)
                 return 5
             i += 1
         while i < 150
-            if tcp_sockets[s].recv_buf[i] != byte('B')
+            if tcp_sockets[s].recv_buf_ptr[i] != byte('B')
                 inet_tcp_close_slot(s, 0)
                 return 5
             i += 1
         while i < 200
-            if tcp_sockets[s].recv_buf[i] != byte('C')
+            if tcp_sockets[s].recv_buf_ptr[i] != byte('C')
                 inet_tcp_close_slot(s, 0)
                 return 5
             i += 1
