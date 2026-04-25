@@ -458,6 +458,61 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       peerThread.join(2000)
   }
 
+  "aarch64 musl: socket/connect/shutdown/read via libc wrappers" in {
+    // msocket is a C program linked against slix's musl fork; uses
+    // socket(), connect(), write(), shutdown(), read(), close(),
+    // getsockname() through real libc wrappers. Validates that the
+    // aarch64-slix syscall numbers (337/148/128/334/130/147/203)
+    // match what musl's arch/aarch64-slix/bits/syscall.h.in says.
+    // If this fails with -ENOSYS inside a wrapper, the shim and the
+    // musl header are out of sync.
+    //
+    // Host peer on 127.0.0.1:18083 reads until EOF, replies with
+    // the byte count. See build-c.sh for the build recipe (C source
+    // at slix/test/socket.c).
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18083))
+    server.setSoTimeout(15000)
+
+    val peerThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](256)
+          var total = 0
+          var n = in.read(buf, total, buf.length - total)
+          while n > 0 do
+            total += n
+            n = in.read(buf, total, buf.length - total)
+          val reply = s"got $total bytes".getBytes
+          out.write(reply)
+          out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-msocket-peer")
+    peerThread.setDaemon(true)
+    peerThread.start()
+
+    try
+      qemu.send("msocket\n")
+      val output = qemu.waitFor("msocket: done")
+      output should include("msocket: socket=3")
+      output should include("msocket: connect=0")
+      output should include("msocket: getsockname=0 family=2")
+      output should include("msocket: write=23")
+      output should include("msocket: shutdown=0")
+      output should include("msocket: read=12 reply='got 23 bytes'")
+      output should include("msocket: done")
+    finally
+      server.close()
+      peerThread.join(2000)
+  }
+
   "aarch64 timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications via notify_wait/notify_read_self. Proves the
