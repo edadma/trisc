@@ -665,6 +665,46 @@ syscall_entry:
     jmp restore_context
 .not_uptime:
 
+    # --- POSIX shim path: numbers >= 128 route to oskit.posix.posix_dispatch ---
+    # SLIX-local syscall numbers from slix/musl/arch/x86_64-slix/bits/syscall.h.in.
+    # The shim is shared with aarch64 and takes (int num, i64 a0..a5) — 7 args,
+    # SysV-amd64 puts 6 in regs and the 7th on the stack.
+    cmpq $128, %rbx
+    jl .not_posix
+    cmpq $512, %rbx
+    jge .bad_syscall
+
+    # Save SSP so the shim's grant helpers can read user pointers.
+    leaq syscall_ssp(%rip), %rcx
+    movq %rsp, (%rcx)
+
+    # Privilege check.
+    movl %ebx, %edi
+    call oskit_kernel__syscall_check_allowed
+    testl %eax, %eax
+    jz .denied_syscall
+
+    # Load 6 args from saved context (same offsets as the 6-arg path
+    # below). Saved layout after 15 pushes:
+    #   +40:R10 +48:R9 +56:R8 +80:RSI +88:RDX +96:RCX +112:RAX
+    # We expect the user-side syscall to set:
+    #   rdi=num, rsi=a0, rdx=a1, rcx=a2, r8=a3, r9=a4, r10=a5
+    movl %ebx, %edi            # num (low 32 bits ok — int)
+    movq 80(%rsp), %rsi        # a0
+    movq 88(%rsp), %rdx        # a1
+    movq 96(%rsp), %rcx        # a2
+    movq 56(%rsp), %r8         # a3
+    movq 48(%rsp), %r9         # a4
+    movq 40(%rsp), %r11        # a5 (scratch reg; pushed below)
+    pushq %r11                 # 7th arg goes on the stack
+    call oskit_posix__posix_dispatch
+    addq $8, %rsp              # drop the pushed a5
+    movq %rax, 112(%rsp)       # write i64 return into saved RAX
+
+    jmp do_schedule
+
+.not_posix:
+
     # --- Slow path: table dispatch ---
     # Bounds check
     cmpq $512, %rbx            # MAX_SYSCALLS
