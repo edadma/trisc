@@ -586,6 +586,8 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_EPOLL_SUB   = 29
     val INET_CMD_EPOLL_UNSUB = 30
     val INET_CMD_EPOLL_INST_CLOSE = 31
+    val INET_CMD_TCP_ACCEPT_NB = 32
+    val INET_CMD_TCP_CONNECT_NB = 33
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -1461,8 +1463,12 @@ dst_port (BE u16) at the usual offsets.
         if port < 0
             return i64(-19)
         val a: *byte = *byte(addr_ptr)
+        val nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
         var msg: [7]byte
-        msg[0] = byte(INET_CMD_TCP_CONNECT)
+        if nb != 0
+            msg[0] = byte(INET_CMD_TCP_CONNECT_NB)
+        else
+            msg[0] = byte(INET_CMD_TCP_CONNECT)
         msg[1] = a[4]
         msg[2] = a[5]
         msg[3] = a[6]
@@ -1478,6 +1484,12 @@ dst_port (BE u16) at the usual offsets.
         val inet_fd = int(reply[1]) & 0xff
         val pid = posix_fd_current_pid()
         posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].target = inet_fd
+        // Non-blocking connect: surface -EINPROGRESS so the user
+        // can poll EPOLLOUT for completion. The slot is already
+        // SYN_SENT; once it reaches ESTABLISHED the existing
+        // inet_epoll_fire path delivers the readiness wake.
+        if nb != 0
+            return i64(-115)            // -EINPROGRESS
         i64(0)
 
 SYS_LISTEN. Requires a prior bind() to have set the local port in
@@ -1510,7 +1522,9 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].target = listen_fd
         i64(0)
 
-SYS_ACCEPT. Blocks until a child connection arrives. inet replies
+SYS_ACCEPT. Blocks until a child connection arrives unless the
+listen fd is `O_NONBLOCK`, in which case the inet NB variant
+returns -EAGAIN immediately when the queue is empty. inet replies
 with the child's socket id + peer's ip/port; we allocate a fresh
 POSIX slot for the child, populate `*addr` with the peer's
 sockaddr_in (if non-null), and return the new POSIX fd. Inet may
@@ -1526,13 +1540,20 @@ CLOSE_WAIT on arrival — read/close paths handle that already.
         val port = inet_get_port()
         if port < 0
             return i64(-19)
+        val nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
         var msg: [3]byte
-        msg[0] = byte(INET_CMD_TCP_ACCEPT)
+        if nb != 0
+            msg[0] = byte(INET_CMD_TCP_ACCEPT_NB)
+        else
+            msg[0] = byte(INET_CMD_TCP_ACCEPT)
         shim_write_u16(msg, 1, listen_fd)
         var reply: [8]byte
         val r = ipc_send(port, msg, 3, reply, 8)
         if r < 0
             return i64(-5)
+        if reply[0] == byte(-11)
+            // NB variant returns -EAGAIN when queue is empty.
+            return i64(-11)
         if reply[0] != 0
             return i64(-5)
         val child_inet_fd = int(reply[1]) & 0xff

@@ -588,6 +588,67 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mepoll2: done")
   }
 
+  "aarch64 musl: non-blocking accept (Phase B)" in {
+    // mnbacc (slix/test/nbacc.c): non-blocking listen fd that
+    // first accepts on an empty queue (-EAGAIN), then waits via
+    // epoll_wait for EPOLLIN, then accepts the queued child.
+    // Host side connects to localhost:28080 (slirp forwards to
+    // guest port 7890) once the guest prints "mnbacc: ready".
+    qemu.send("mnbacc\n")
+    val pre = qemu.waitFor("mnbacc: ready")
+    val client = new java.net.Socket()
+    client.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    try
+      client.getOutputStream.write("ping".getBytes())
+      client.getOutputStream.flush()
+      val post = qemu.waitFor("mnbacc: done")
+      pre should include("mnbacc: empty=-1 errno=11")    // EAGAIN
+      post should include("mnbacc: wait=1")
+      post should not include "mnbacc: accept=-1"
+      post should include("mnbacc: read=4 data='ping'")
+      post should include("mnbacc: done")
+    finally client.close()
+  }
+
+  "aarch64 musl: non-blocking connect (Phase B)" in {
+    // mnbcon (slix/test/nbcon.c): O_NONBLOCK connect to
+    // 10.0.2.2:18080 (slirp routes to host 127.0.0.1:18080)
+    // surfaces -EINPROGRESS, EPOLLOUT fires once SYN-ACK lands,
+    // and the round-trip works end-to-end.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+    val echoThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](64)
+          val n = in.read(buf)
+          if n > 0 then
+            out.write(buf, 0, n)
+            out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch case _: Throwable => ()
+    }, "tcp-echo-server-mnbcon")
+    echoThread.setDaemon(true)
+    echoThread.start()
+    try
+      qemu.send("mnbcon\n")
+      val output = qemu.waitFor("mnbcon: done")
+      output should include("mnbcon: connect=-1 errno=115") // EINPROGRESS
+      output should include("mnbcon: wait=1")
+      output should include("mnbcon: sent=10")
+      output should include("mnbcon: read=10 data='nbcon-ping'")
+      output should include("mnbcon: done")
+    finally
+      server.close()
+      echoThread.join(2000)
+  }
+
   "aarch64 musl: pipe2 + write + read + EOF" in {
     // mpipe (slix/test/pipe.c) creates a pipe, writes a string,
     // reads it back, closes the write end, then reads again

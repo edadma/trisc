@@ -1968,7 +1968,7 @@ of silently dropping the connection. Other teardown states
 (FIN_WAIT_*, LAST_ACK, TIME_WAIT) can't appear here — they only
 enter after *we* close(), which the caller hasn't done yet.
 
-    inet_tcp_do_accept(caller_tid: int, ls: int) -> int
+    inet_tcp_try_accept(ls: int) -> int
         if tcp_sockets[ls].in_use == 0 || tcp_sockets[ls].is_listen == 0
             return -2
         while tcp_sockets[ls].accept_count > 0
@@ -1980,9 +1980,15 @@ enter after *we* close(), which the caller hasn't done yet.
                 val cst = tcp_sockets[c].state
                 if cst == TCP_STATE_ESTABLISHED || cst == TCP_STATE_CLOSE_WAIT
                     return c
-        // Queue empty — park caller.
-        tcp_sockets[ls].accept_waiter = caller_tid
         -1
+
+    inet_tcp_do_accept(caller_tid: int, ls: int) -> int
+        val r = inet_tcp_try_accept(ls)
+        if r == -1
+            // Queue empty — park caller; state_step delivers when a
+            // SYN_RCVD child reaches ESTABLISHED.
+            tcp_sockets[ls].accept_waiter = caller_tid
+        r
 
 
 Enqueue a newly-established child onto its parent listen's accept

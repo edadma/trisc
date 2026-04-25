@@ -77,6 +77,8 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_EPOLL_SUB    = 29
     val INET_CMD_EPOLL_UNSUB  = 30
     val INET_CMD_EPOLL_INST_CLOSE = 31
+    val INET_CMD_TCP_ACCEPT_NB = 32
+    val INET_CMD_TCP_CONNECT_NB = 33
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -874,6 +876,28 @@ high byte (0), second (offset 2) is the low byte / index.
             return
         // Deferred reply — inet_tcp_state_step replies when ESTABLISHED.
 
+Non-blocking connect. Allocate slot + emit SYN like the
+blocking variant, but pass `-1` for `caller_tid` so the slot's
+connect_waiter is the unset sentinel and the SYN-ACK path
+won't try to deliver an IPC reply. Reply immediately with the
+slot fd; the shim translates that to `-EINPROGRESS` for the
+user. EPOLLOUT delivery once ESTABLISHED comes through the
+existing `inet_epoll_fire(2, s)` at SYN_SENT → ESTABLISHED.
+
+    inet_handle_tcp_connect_nb(sender: int, buf: *byte)
+        val ip = inet_read_ipv4(buf, 1)
+        val port = inet_read_u16(buf, 5)
+        val s = inet_tcp_begin_connect(sender, -1, ip, port)
+        var reply: [2]byte
+        if s < 0
+            reply[0] = byte(-1)
+            reply[1] = 0
+            ipc_reply(sender, reply, 2)
+            return
+        reply[0] = byte(0)
+        reply[1] = byte(s & 0xff)
+        ipc_reply(sender, reply, 2)
+
     inet_handle_tcp_send(sender: int, buf: *byte)
         val fd = inet_read_u16(buf, 1) & 0xffff
         val dlen = inet_read_u16(buf, 3)
@@ -1085,6 +1109,33 @@ Reply: status(1).
             return
         // child == -1 → caller parked; state_step will reply once a
         // SYN_RCVD child reaches ESTABLISHED.
+
+Non-blocking accept. Identical wire to `INET_CMD_TCP_ACCEPT` but
+never parks the caller — replies -EAGAIN if the queue is empty
+so an event-loop client can drive accept() entirely from epoll
+notifications. The shim picks this variant when the listen fd
+has `O_NONBLOCK` set.
+
+    inet_handle_tcp_accept_nb(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        if inet_tcp_slot_owned(fd, sender) == 0
+            var err: [8]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 8)
+            return
+        val child = inet_tcp_try_accept(fd)
+        if child == -2
+            var err: [8]byte
+            err[0] = byte(-1)
+            ipc_reply(sender, err, 8)
+            return
+        if child >= 0
+            inet_tcp_reply_accept(sender, 0, child)
+            return
+        // Queue empty — return -EAGAIN without parking.
+        var eagain: [8]byte
+        eagain[0] = byte(-11)
+        ipc_reply(sender, eagain, 8)
 
 
 ### inet_handle_set_ip_config
@@ -1511,6 +1562,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_EPOLL_SUB   -> inet_handle_epoll_sub(sender, buf)
                     INET_CMD_EPOLL_UNSUB -> inet_handle_epoll_unsub(sender, buf)
                     INET_CMD_EPOLL_INST_CLOSE -> inet_handle_epoll_inst_close(sender, buf)
+                    INET_CMD_TCP_ACCEPT_NB -> inet_handle_tcp_accept_nb(sender, buf)
+                    INET_CMD_TCP_CONNECT_NB -> inet_handle_tcp_connect_nb(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
