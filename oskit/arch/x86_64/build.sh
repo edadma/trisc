@@ -39,6 +39,7 @@ SYSL_FILES=(
     oskit/ipc/ipc.lsysl
     oskit/services/services.lsysl
     std/alloc/alloc.lsysl
+    oskit/posix/shim.lsysl
 )
 
 # App-specific extra modules

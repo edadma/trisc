@@ -395,6 +395,27 @@ inl:
     retq
 
 # ============================================================================
+# shim_uart_putc — write one byte to COM1 (port 0x3F8)
+# ============================================================================
+# Used by oskit/posix/shim.lsysl for the STDOUT/STDERR fast path.
+# Defined as a no-mangle global so the shim can `extern` it without
+# going through module mangling. Spin-waits for COM1 LSR bit 5
+# (transmit-holding-register-empty) before writing the byte.
+#
+# rdi = char (low 8 bits)
+.global shim_uart_putc
+shim_uart_putc:
+    movw $0x3FD, %dx           # COM1 LSR (Line Status Register)
+1:
+    inb %dx, %al
+    testb $0x20, %al           # bit 5 = TX holding register empty
+    jz 1b
+    movw $0x3F8, %dx           # COM1 data register
+    movb %dil, %al
+    outb %al, %dx
+    retq
+
+# ============================================================================
 # load_idt — Load IDT register
 # ============================================================================
 # rdi = idt table base, esi = limit (e.g. 4095)
