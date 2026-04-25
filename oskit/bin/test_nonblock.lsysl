@@ -25,9 +25,12 @@ Pass = `nonblock: done` at the end with no `FAIL` markers.
     val NR_RECVFROM = 276
     val NR_SOCKET   = 337
     val NR_FCNTL    = 171
+    val NR_LISTEN   = 217
+    val NR_ACCEPT4  = 132
 
-    val AF_INET_V    = 2
-    val SOCK_DGRAM_V = 2
+    val AF_INET_V     = 2
+    val SOCK_DGRAM_V  = 2
+    val SOCK_STREAM_V = 1
 
     val F_DUPFD      = 0
     val F_GETFD      = 1
@@ -35,6 +38,9 @@ Pass = `nonblock: done` at the end with no `FAIL` markers.
     val F_GETFL      = 3
     val F_SETFL      = 4
     val O_NONBLOCK   = 2048
+
+    val SOCK_NONBLOCK_V = 2048
+    val SOCK_CLOEXEC_V  = 524288
 
 
     print_udec(v: int)
@@ -83,6 +89,13 @@ Pass = `nonblock: done` at the end with no `FAIL` markers.
 
     posix_fcntl(fd: int, cmd: int, arg: int) -> int
         int(syscall6(NR_FCNTL, i64(fd), i64(cmd), i64(arg), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept4(fd: int, addr: *byte, addrlen_ptr: *i32, flags: int) -> int
+        int(syscall6(NR_ACCEPT4, i64(fd), i64(addr), i64(addrlen_ptr),
+            i64(flags), 0, 0))
 
 
     main(argv: []string)
@@ -166,5 +179,54 @@ Pass = `nonblock: done` at the end with no `FAIL` markers.
             return
 
         posix_close(fd)
+
+        // accept4 surface check.  Bind + listen on a fresh TCP fd,
+        // then call accept4 with SOCK_NONBLOCK on the empty queue —
+        // must return -EAGAIN (queue empty) without blocking.  Also
+        // verify accept4 rejects unknown flag bits with -EINVAL.
+        val tfd = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if tfd < 0
+            puts("nonblock: tcp socket failed\n")
+            exit_with(10)
+            return
+        var taddr: [16]byte
+        fill_sockaddr(&taddr[0], 7787, 127, 0, 0, 1)
+        if posix_bind(tfd, &taddr[0], 16) < 0
+            puts("nonblock: tcp bind failed\n")
+            exit_with(11)
+            return
+        if posix_listen(tfd, 1) < 0
+            puts("nonblock: tcp listen failed\n")
+            exit_with(12)
+            return
+        // The listen fd needs to be non-blocking too so accept4
+        // can short-circuit on empty queue (the inet NB-accept
+        // path is selected by the listen fd's O_NONBLOCK flag).
+        posix_fcntl(tfd, F_SETFL, O_NONBLOCK)
+
+        var paddr: [16]byte
+        var palen: i32 = i32(16)
+        val a4_eagain = posix_accept4(tfd, &paddr[0], &palen, SOCK_NONBLOCK_V)
+        puts("nonblock: accept4 NB empty = ")
+        print_sdec(a4_eagain)
+        puts("\n")
+        if a4_eagain != -11
+            puts("nonblock: FAIL accept4 NB empty (expected -11)\n")
+            exit_with(13)
+            return
+
+        // Unknown flag bit (0x4000) is rejected client-side.  The
+        // listening fd is unaffected since the accept never reaches
+        // inet.
+        val a4_einval = posix_accept4(tfd, &paddr[0], &palen, 0x4000)
+        puts("nonblock: accept4 bad flag = ")
+        print_sdec(a4_einval)
+        puts("\n")
+        if a4_einval != -22
+            puts("nonblock: FAIL accept4 bad flag (expected -22)\n")
+            exit_with(14)
+            return
+
+        posix_close(tfd)
         puts("nonblock: done\n")
         exit()
