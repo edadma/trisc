@@ -33,6 +33,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     indentLevel = 0
     val enums = program.decls.collect { case e: EnumDeclAST => e }
     enumNames = enums.map(_.name).toSet
+    val constants = program.decls.collect { case v: VarDeclAST => v }
     val fns = program.decls.collect { case f: FunDeclAST => f }
     line(s"module $moduleName")
     indentLevel += 1
@@ -47,6 +48,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       if !first then blank()
       first = false
       emitEnum(e)
+    for c <- constants do
+      if !first then blank()
+      first = false
+      emitConstant(c)
     for fn <- fns do
       if !first then blank()
       first = false
@@ -54,6 +59,19 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     indentLevel -= 1
     line("end")
     out.toString
+
+  /** Module-level `val NAME : T = expr` (or `const NAME : T = expr`) becomes a WhyML
+   *  `constant`. Mutable `var` at module scope would need WhyML refs and is deferred —
+   *  most proof-relevant module-level data is naturally immutable (limits, sentinels,
+   *  shared math constants), so `val` covers the common case. */
+  private def emitConstant(v: VarDeclAST): Unit =
+    if v.isMutable then
+      unsupported("module-level `var`", s"${v.name}: only `val` / `const` (immutable) module-level bindings are supported in Phase 3c")
+    val t = v.typ.getOrElse(unsupported("module-level val without type annotation", v.name))
+    // `let constant` (program-level) — usable from both contracts and code bodies. Without
+    // `let`, the constant is logic-only and Why3 reports "logical symbol used in a non-ghost
+    // context" when a `let function` body references it.
+    line(s"let constant ${sanitizeName(v.name)} : ${typeOf(t)} = ${formatExpr(v.init)}")
 
   /** sysl `enum Color { Red, Green, Blue }` → WhyML `type color = Red | Green | Blue`.
    *  The integer values that sysl assigns (auto-incrementing or explicit) are dropped —
@@ -360,18 +378,30 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case "+" | "-" | "*" | "<" | ">" | "<=" | ">=" => op
     case other => unsupported("binary operator", other)
 
-  /** Strip module-qualified prefixes for now; map sysl identifiers that collide with WhyML
-   *  keywords to safe names. Phase 1 keeps this near-identity since the test surface is small. */
+  /** Strip module-qualified prefixes; lowercase the first letter (WhyML reserves
+   *  uppercase-first identifiers for constructors / modules); map sysl identifiers that
+   *  collide with WhyML keywords to safe names. Constructor names go through a separate
+   *  path (formatPattern / FieldAccessAST handling), so they retain their original case. */
   private def sanitizeName(n: String): String =
     val bare = n.indexOf("__") match
       case -1 => n
       case i  => n.substring(i + 2)
-    bare match
+    // WhyML rejects uppercase-first identifiers in value position (those are constructors).
+    // For all-uppercase identifiers like `MAX_AGE`, lowercase the entire string to avoid
+    // ugly half-cased names like `mAX_AGE`. Mixed-case identifiers (`MyValue`) only need
+    // the first letter lowered (`myValue`). The transformation is consistent across decl
+    // and use sites because it's the same function.
+    val lc =
+      if bare.nonEmpty && bare.head.isUpper then
+        if bare.forall(c => c.isUpper || c == '_' || c.isDigit) then bare.toLowerCase
+        else bare.head.toLower + bare.tail
+      else bare
+    lc match
       case "function" | "let" | "in" | "with" | "match" | "end" | "module" | "use" |
            "type" | "begin" | "rec" | "and" | "or" | "fun" | "if" | "then" | "else" |
            "for" | "to" | "do" | "done" | "while" | "result" | "old" | "lemma" |
            "axiom" | "theory" | "predicate" | "exception" | "assert" | "assume" |
            "check" | "ghost" | "pure" | "absurd" | "raise" | "any" | "ref" |
            "writes" | "reads" | "requires" | "ensures" | "variant" | "invariant" =>
-        bare + "_"
-      case _ => bare
+        lc + "_"
+      case _ => lc

@@ -548,6 +548,62 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     ex.getMessage should include("non-binding statement")
   }
 
+  "module-level `val` becomes a WhyML `constant`" in {
+    val mlw = translate(
+      """val max_age: int = 150
+        |
+        |def is_alive(age: int) -> bool
+        |    require age >= 0
+        |    require age <= max_age
+        |    age < max_age
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let constant max_age : int = 150
+        |
+        |  let function is_alive (age: int) : bool
+        |    requires { age >= 0 }
+        |    requires { age <= max_age }
+        |    = (age < max_age)
+        |end
+        |""".stripMargin
+  }
+
+  "all-uppercase identifier is fully lowercased (WhyML rejects uppercase-first values)" in {
+    // Sysl convention is `MAX_AGE` for constants, but WhyML treats uppercase-first
+    // identifiers as constructor names. We lowercase the whole word for clarity rather than
+    // emitting a half-cased `mAX_AGE`. References use the same sanitizer so they line up.
+    val mlw = translate(
+      """val MAX_AGE: int = 150
+        |
+        |def is_alive(age: int) -> bool
+        |    require age <= MAX_AGE
+        |    age < MAX_AGE
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |
+        |  let constant max_age : int = 150
+        |
+        |  let function is_alive (age: int) : bool
+        |    requires { age <= max_age }
+        |    = (age < max_age)
+        |end
+        |""".stripMargin
+  }
+
+  "module-level `var` is rejected with a clear message" in {
+    val ex = intercept[RuntimeException](translate(
+      """var counter: int = 0
+        |""".stripMargin))
+    ex.getMessage should include("module-level `var`")
+  }
+
   "unsupported expression form yields a clear error naming the gap" in {
     val ex = intercept[RuntimeException](translate(
       """def s() -> int
