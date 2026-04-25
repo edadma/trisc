@@ -228,6 +228,40 @@ class SyslWhyMLBackend(moduleName: String = "M"):
           case WhileStmtAST(cond, body, _) =>
             s"${formatWhile(cond, body)}; ${formatBlockBody(rest)}"
 
+          // Sysl `for i in lo..<hi <body>` parses to a C-style ForStmtAST(init, cond, update, body).
+          // When the shape is canonical (immutable counter, increment-by-1, `<`/`<=` cond, body
+          // doesn't reassign the counter), emit a native WhyML `for i = lo to hi do ... done`,
+          // whose termination is by construction (no `variant` needed). Otherwise lower to a
+          // while-equivalent and recurse — the init's VarStmt naturally goes through ref-form.
+          case fs: ForStmtAST =>
+            canonicalForLoop(fs) match
+              case Some((counterName, lo, hi, body)) =>
+                val (annotations, realBody) = body.span {
+                  // WhyML `for` accepts only `invariant`; user `variant` is redundant for native
+                  // for-loops (loop bound is finite by construction) and silently dropped.
+                  case _: InvariantStmtAST | _: VariantStmtAST => true
+                  case _                                        => false
+                }
+                val invariants = annotations.collect {
+                  case InvariantStmtAST(e, _) => s"invariant { ${stripOuterParens(formatExpr(e))} }"
+                }.mkString(" ")
+                val bodyStr = formatLoopBody(realBody)
+                val sep = if invariants.isEmpty || bodyStr.isEmpty then "" else " "
+                val sname = sanitizeName(counterName)
+                s"(for $sname = ${formatExpr(lo)} to ${formatExpr(hi)} do $invariants$sep$bodyStr done); ${formatBlockBody(rest)}"
+              case None =>
+                val whileEquivalent = fs.init :: WhileStmtAST(fs.cond, fs.body :+ fs.update, None) :: rest
+                formatBlockBody(whileEquivalent)
+
+          // Bare expression-statements that we know how to lower to a unit-typed step:
+          // `i++` / `i--` are sugar for the corresponding compound assignment.
+          case ExprStmtAST(PostIncAST(name)) =>
+            if !refScope(name) then unsupported("post-increment of non-mutable binding", name)
+            s"${sanitizeName(name)} := (!${sanitizeName(name)} + 1); ${formatBlockBody(rest)}"
+          case ExprStmtAST(PostDecAST(name)) =>
+            if !refScope(name) then unsupported("post-decrement of non-mutable binding", name)
+            s"${sanitizeName(name)} := (!${sanitizeName(name)} - 1); ${formatBlockBody(rest)}"
+
           // Mid-body early-exit: `if cond then return e` (no else) followed by more stmts
           // lowers to `if cond then <e> else <rest>`. The then-branch must end in a return
           // (otherwise it would fall through into the rest, which has different semantics).
@@ -287,11 +321,46 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       if !refScope(target) then unsupported("compound assignment in loop", target)
       formatCompoundAssign(target, op, value)
     case WhileStmtAST(cond, body, _) => formatWhile(cond, body)
+    case ExprStmtAST(PostIncAST(name)) =>
+      if !refScope(name) then unsupported("post-increment of non-mutable binding in loop", name)
+      val n = sanitizeName(name); s"$n := (!$n + 1)"
+    case ExprStmtAST(PostDecAST(name)) =>
+      if !refScope(name) then unsupported("post-decrement of non-mutable binding in loop", name)
+      val n = sanitizeName(name); s"$n := (!$n - 1)"
     case ExprStmtAST(e)              => formatExpr(e)
     case other =>
       unsupported(
         "loop body statement",
         s"loops support assignments, compound assignments, nested while, and expression stmts; got ${other.getClass.getSimpleName}")
+
+  /** Recognize a sysl ForStmtAST shape that maps cleanly to WhyML's native `for i = lo to hi`:
+   *    - init  is `var i = lo` (mutable)
+   *    - update is `i++` / `i = i + 1` / `i += 1` (increment by 1)
+   *    - cond  is `i < hi` (effective hi = `hi - 1`) or `i <= hi` (effective hi = `hi`)
+   *    - body  doesn't reassign the counter (WhyML for-loop counters are immutable in body)
+   *  Returns (counterName, lo, effectiveHi, body) for emission, or None to fall back to while. */
+  private def canonicalForLoop(fs: ForStmtAST): Option[(String, ExpressionAST, ExpressionAST, List[StmtAST])] =
+    fs.init match
+      case VarStmtAST(name, _, lo, true, _, _, _) =>
+        val incBy1 = fs.update match
+          case ExprStmtAST(PostIncAST(n)) if n == name => true
+          case ExprStmtAST(PreIncAST(n))  if n == name => true
+          case CompoundAssignStmtAST(n, "+", IntLitAST(1)) if n == name => true
+          case AssignStmtAST(n, BinaryAST(VarRefAST(m), "+", IntLitAST(1))) if n == name && m == name => true
+          case _ => false
+        if !incBy1 then None
+        else fs.cond match
+          case BinaryAST(VarRefAST(n1), op, hi) if n1 == name =>
+            val effectiveHi = op match
+              case "<"  => Some(BinaryAST(hi, "-", IntLitAST(1)))
+              case "<=" => Some(hi)
+              case _    => None
+            effectiveHi.flatMap { ehi =>
+              if isReassigned(name, fs.body) then None
+              else Some((name, lo, ehi, fs.body))
+            }
+          case _ => None
+      case _ => None
 
   /** True iff any statement in `stmts` (or any of its nested loops/branches/matches) reassigns
    *  the variable named `name`. Used by `formatBlockBody` to decide whether a `var` should be
@@ -302,6 +371,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
   private def stmtAssignsTo(name: String, s: StmtAST): Boolean = s match
     case AssignStmtAST(t, _) if t == name           => true
     case CompoundAssignStmtAST(t, _, _) if t == name => true
+    case ExprStmtAST(PostIncAST(t)) if t == name    => true
+    case ExprStmtAST(PostDecAST(t)) if t == name    => true
+    case ExprStmtAST(PreIncAST(t))  if t == name    => true
+    case ExprStmtAST(PreDecAST(t))  if t == name    => true
     case WhileStmtAST(_, body, _)                   => isReassigned(name, body)
     case ForStmtAST(init, _, update, body, _) =>
       stmtAssignsTo(name, init) || stmtAssignsTo(name, update) || isReassigned(name, body)
@@ -321,6 +394,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
   private def stmtIsImpure(s: StmtAST): Boolean = s match
     case _: AssignStmtAST | _: CompoundAssignStmtAST              => true
     case _: WhileStmtAST | _: ForStmtAST | _: DoWhileStmtAST | _: LoopStmtAST => true
+    case ExprStmtAST(_: PostIncAST | _: PostDecAST | _: PreIncAST | _: PreDecAST) => true
     case ExprStmtAST(IfExprAST(_, t, e)) =>
       isImpure(t) || e.exists(isImpure)
     case ExprStmtAST(MatchExprAST(_, arms, default)) =>

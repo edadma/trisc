@@ -722,6 +722,84 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  // ====================================================================================
+  // Phase 4b+ — for-loops (canonical range emits native WhyML `for i = lo to hi`)
+  // ====================================================================================
+
+  "canonical `for i in 0..<n` emits native WhyML for-loop with hi = n - 1" in {
+    // The counter `i` is implicitly immutable in a WhyML for-loop, so reads are bare `i`
+    // (no `!`). Only the mutable accumulator `s` is a ref. WhyML's for-loop has implicit
+    // termination — no `variant` clause, even if the user wrote one.
+    val mlw = translate(
+      """def loop_count(n: int) -> int
+        |    require n >= 0
+        |    var s = 0
+        |    for i in 0..<n
+        |        s = s + i
+        |    s
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  let loop_count (n: int) : int
+        |    requires { n >= 0 }
+        |    = let s = ref 0 in (for i = 0 to (n - 1) do s := (!s + i) done); !s
+        |end
+        |""".stripMargin
+  }
+
+  "inclusive `for i in 0..n` keeps the upper bound as-is (WhyML's `to` is inclusive)" in {
+    val mlw = translate(
+      """def gauss_for(n: int) -> int
+        |    require n >= 0
+        |    var s = 0
+        |    for i in 0..n
+        |        invariant 2 * s == i * (i - 1)
+        |        s = s + i
+        |    s
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  let gauss_for (n: int) : int
+        |    requires { n >= 0 }
+        |    = let s = ref 0 in (for i = 0 to n do invariant { (2 * !s) = (i * (i - 1)) } s := (!s + i) done); !s
+        |end
+        |""".stripMargin
+  }
+
+  "non-canonical for (downTo) falls back to a while-equivalent" in {
+    // Sysl `downTo` has `>=` cond + `-` update, neither of which matches WhyML's natural
+    // `for i = lo to hi`. Lower to while; the user must supply a `variant` for termination.
+    val mlw = translate(
+      """def countdown(n: int) -> int
+        |    require n >= 0
+        |    var s = 0
+        |    for i in n downTo 0
+        |        invariant s >= 0
+        |        variant i + 1
+        |        s += 1
+        |    s
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  let countdown (n: int) : int
+        |    requires { n >= 0 }
+        |    = let s = ref 0 in let i = ref n in (while (!i >= 0) do invariant { !s >= 0 } variant { !i + 1 } s := (!s + 1); i := (!i - 1) done); !s
+        |end
+        |""".stripMargin
+  }
+
   "single early-exit lowers to if-else terminating in the rest of the body" in {
     val mlw = translate(
       """def clamp_low(x: int) -> int
