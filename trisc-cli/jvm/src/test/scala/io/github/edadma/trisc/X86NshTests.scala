@@ -295,16 +295,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("'ping!'")
   }
 
-  // TODO: un-ignore once x86 process PTs include the 0x60000000
-  // user carve-out that aarch64 already has. Today the musl
-  // linker script (`slix/test/slix-prog.ld`) targets that VA on
-  // both arches, but x86's `vm_create_process_pt` only maps the
-  // tiny 0xCC000–0xDFFFF stack region — every musl binary takes
-  // a page-fault at rip=0x60000000 the moment PM resumes it.
-  // The Phase A2 kernel/VFS plumbing itself is arch-neutral and
-  // verified on aarch64; bringing the test online on x86 just
-  // needs the process-PT carve-out work.
-  "x86 musl: epoll on a pipe (Phase A2 closeout)" ignore {
+  "x86 musl: epoll on a pipe (Phase A2 closeout)" in {
     qemu.send("epoll_pipe\n")
     val output = qemu.waitFor("mepoll_pipe: done")
     output should include("mepoll_pipe: empty=0")

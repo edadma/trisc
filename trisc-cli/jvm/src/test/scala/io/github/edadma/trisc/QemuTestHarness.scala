@@ -33,6 +33,10 @@ class QemuTestHarness(
     val cmd = new java.util.ArrayList[String]()
     cmd.add("qemu-system-x86_64")
     cmd.add("-m"); cmd.add("512M")  // 128 MB ramdisk + kernel needs more than the 128 MB default
+    // -cpu max exposes FSGSBASE so musl's __set_thread_area can use
+    // WRFSBASE for TLS init. Default qemu64 lacks it and the
+    // instruction would #UD in ring 3.
+    cmd.add("-cpu"); cmd.add("max")
     cmd.add("-kernel")
     cmd.add(kernelPath)
     cmd.add("-chardev")

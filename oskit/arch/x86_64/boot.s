@@ -232,7 +232,13 @@ entry64:
     orq  $0x2, %rax           # set CR0.MP
     movq %rax, %cr0
     movq %cr4, %rax
-    orq  $0x600, %rax         # CR4.OSFXSR + CR4.OSXMMEXCPT
+    # CR4.OSFXSR (bit 9) + CR4.OSXMMEXCPT (bit 10) = SSE state.
+    # CR4.FSGSBASE (bit 16) lets ring 3 set FS/GS base via
+    # RDFSBASE/WRFSBASE/RDGSBASE/WRGSBASE — used by the
+    # x86_64-slix musl arch override for __set_thread_area so
+    # TLS init doesn't need a kernel syscall (musl upstream
+    # uses arch_prctl(SET_FS), which we don't implement).
+    orq  $0x10600, %rax       # OSFXSR | OSXMMEXCPT | FSGSBASE
     movq %rax, %cr4
 
     # --- TSS setup ---

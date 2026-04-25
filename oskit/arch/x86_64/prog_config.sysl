@@ -1,15 +1,19 @@
 // Address layout for x86_64 user programs and servers.
 //
-// Programs: code at 0xE0000, 80KB stack (0xCC000..0xDFFFF).
-// On x86 everything runs in ring 0, so syscall handlers share the
-// program stack; generous stack space is essential.
+// Programs: musl-linked binaries land in the high user carve-out
+// at VA 0x60000000 (matches aarch64 — same `slix-prog.ld` script).
+// USP = 0x60090000 puts the initial SP at the top of the 16-page
+// stack region (0x60080000..0x60090000) that vm_create_process_pt
+// installs under PD[256] of PDPT[1]. The legacy 0xCC000..0xFFFFF
+// region still exists for native sysl programs but isn't used as
+// a stack anymore.
 //
 // Servers: code at 0xD4000, 32KB stack. Servers have large BSS
 // (RS ~128KB) and need ~176KB to 0x100000.
 
 module oskit.arch
 
-val PROG_USP = 0xE0000
-val PROG_SSP = 0xDF000
+val PROG_USP = 0x60090000
+val PROG_SSP = 0x60080000
 val SRV_USP  = 0xD4000
 val SRV_SSP  = 0xD3000

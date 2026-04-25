@@ -211,15 +211,45 @@ Returns PML4 address, or 0 on failure.
                 vm_write_pte64(pd + u64(j) * 8, k_pde)
             j += 1
 
-        // PDPT[1..3]: copy kernel's hi PDs covering 1-4GB. Kernel
-        // mode (ring 0) ISRs must be able to reach MMIO regardless
-        // of which process's cr3 is live — otherwise the virtio
-        // IRQ handler faults while dereferencing vpci_isr from an
-        // unrelated process's context. The underlying pd_hi{1,2,3}
-        // entries carry U=0 (see boot.s), so ring 3 user code still
-        // can't touch 1-4GB — vm_create_server_pt separately
-        // installs a U=1 PD[3] for the nic server.
-        var pi = 1
+        // PDPT[1]: per-process PD covering 1-2GB. Mirrors the kernel's
+        // pd_hi1 entries byte-for-byte (so ring 0 ISRs still reach
+        // MMIO at 1-2GB), but with PD[256] replaced by a 4KB-page PT
+        // for the musl user carve-out at VA 0x60000000-0x601FFFFF.
+        // Mirrors aarch64's vm_create_process_pt (L3[0..143] under
+        // L2[256]); same VA so the musl link script `slix-prog.ld`
+        // stays arch-neutral.
+        //
+        // 144 user pages = 128 code/data/heap (USER_CODE_PAGES) + 16
+        // stack (USER_STACK_PAGES). Stack grows down from 0x60090000.
+        val pd1 = page_alloc_zero()
+        if pd1 == 0
+            return 0
+        val k_pd1 = u64(vm_read_pte64(k_pdpt + u64(8)) & PTE_ADDR_MASK)
+        var i1 = 0
+        while i1 < 512
+            if i1 != 256
+                val pde = vm_read_pte64(k_pd1 + u64(i1) * 8)
+                vm_write_pte64(pd1 + u64(i1) * 8, pde)
+            i1 += 1
+        val user_pt = page_alloc_zero()
+        if user_pt == 0
+            return 0
+        var up = 0
+        while up < 144
+            val upage = page_alloc_zero()
+            if upage == 0
+                return 0
+            vm_write_pte64(user_pt + u64(up) * 8,
+                i64(upage) | PTE_P | PTE_W | PTE_U)
+            up += 1
+        vm_write_pte64(pd1 + u64(256) * 8,
+            i64(user_pt) | PTE_P | PTE_W | PTE_U)
+        vm_write_pte64(pdpt + u64(8), i64(pd1) | PTE_P | PTE_W | PTE_U)
+
+        // PDPT[2..3]: still share kernel pd_hi2/pd_hi3 byte-for-byte
+        // (no per-process carve-out needed in 2-4GB; vm_create_server_pt
+        // overrides PDPT[3] separately for the nic server).
+        var pi = 2
         while pi < 4
             val k_pdpte = vm_read_pte64(k_pdpt + u64(pi) * 8)
             vm_write_pte64(pdpt + u64(pi) * 8, k_pdpte)
