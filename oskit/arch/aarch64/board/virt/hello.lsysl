@@ -844,7 +844,7 @@ which is the baseline we want for this commit).
         // Populate kernel-side system info so sys_getinfo can
         // answer RS and server queries without the per-process
         // INFO_PAGE_VA scratch page.
-        kernel_set_system_info(i64(0x50000000), i64(0x800000), i64(BOOT_INFO_PA))
+        kernel_set_system_info(i64(0x50000000), i64(0x8000000), i64(BOOT_INFO_PA))
 
         // Create the idle thread at the lowest priority. It runs
         // `arch_sti(); wfi()` in a loop on its own kernel stack

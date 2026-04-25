@@ -23,6 +23,7 @@ class QemuTestHarness(
   def start(): Unit =
     val cmd = new java.util.ArrayList[String]()
     cmd.add("qemu-system-x86_64")
+    cmd.add("-m"); cmd.add("512M")  // 128 MB ramdisk + kernel needs more than the 128 MB default
     cmd.add("-kernel")
     cmd.add(kernelPath)
     cmd.add("-chardev")

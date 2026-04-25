@@ -93,7 +93,7 @@ echo "=== Built: $OUT/kernel.elf ($APP) ==="
 
 if [ "$RUN" = "run" ]; then
     echo "=== QEMU (Ctrl-A X to quit) ==="
-    QEMU_ARGS="-kernel $OUT/kernel.elf -serial stdio -no-reboot -display none"
+    QEMU_ARGS="-m 512M -kernel $OUT/kernel.elf -serial stdio -no-reboot -display none"
     # virtio-net on the default pc machine (i440fx). User-mode
     # networking is enough for bringup — the guest gets a
     # 10.0.2.x address and can ping 10.0.2.2.

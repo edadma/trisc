@@ -55,8 +55,8 @@ object MakeAarch64RamdiskMain:
 
     val disk = TFS.format(
       blockSize = 4096,
-      totalBlocks = 2048,  // 8 MB — bumped from 1024 (4 MB) once TCP test binaries pushed us over
-      maxInodes = 256,
+      totalBlocks = 32768, // 128 MB — well under TFS' ~256 MB cap (65535 × 4096) and gives plenty of room for the musl-test corpus on both arches
+      maxInodes = 1024,
       prefill = prefill,
       files = files,
     )
