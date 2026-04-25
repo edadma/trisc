@@ -23,6 +23,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function twice (x: int) : int
         |    = (x * 2)
@@ -39,6 +40,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function is_pos (x: int) : bool
         |    = (x > 0)
@@ -56,6 +58,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function incr (x: int) : int
         |    requires { x > 0 }
@@ -75,6 +78,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function incr (x: int) : int
         |    requires { x > 0 }
@@ -97,6 +101,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module Factorial
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let rec function fact (n: int) : int
         |    requires { n >= 0 }
@@ -119,6 +124,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let rec function gcd (a: int) (b: int) : int
         |    requires { a >= 0 }
@@ -141,6 +147,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function twice (x: int) : int
         |    = (x * 2)
@@ -162,6 +169,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function abs (x: int) : int
         |    ensures  { result >= 0 }
@@ -180,6 +188,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function neq (x: int) (y: int) : bool
         |    = (x <> y)
@@ -196,6 +205,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function sum (a: int) (b: int) : int
         |    = (a + b)
@@ -212,6 +222,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function neg () : int
         |    = (- 5)
@@ -245,6 +256,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  predicate all_nonneg (n: int) = forall i: int. 0 <= i <= n -> (i >= 0)
         |end
@@ -260,6 +272,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  predicate under_n (n: int) = forall i: int. 0 <= i < n -> (i < n)
         |end
@@ -275,6 +288,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  predicate has_zero (n: int) = exists i: int. 0 <= i <= n /\ (i = 0)
         |end
@@ -294,6 +308,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function verify (n: int) : bool
         |    requires { n >= 0 }
@@ -315,6 +330,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let ghost function helper (x: int) : int
         |    requires { x >= 0 }
@@ -336,6 +352,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let rec ghost function gsum (n: int) : int
         |    requires { n >= 0 }
@@ -355,6 +372,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  predicate all_pos (n: int) = forall i: int. 1 <= i <= n -> (i >= 1)
         |end
@@ -372,6 +390,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  type color = Red | Green | Blue
         |end
@@ -397,6 +416,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  type color = Red | Green | Blue
         |
@@ -426,6 +446,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  type color = Red | Green | Blue
         |
@@ -452,6 +473,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  type color = Red | Green | Blue
         |
@@ -473,6 +495,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function categorize (n: int) : int
         |    = (if n = 0 then 100 else if n = 1 then 200 else 0)
@@ -490,6 +513,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function plus_one (x: int) : int
         |    = let y = (x + 1) in y
@@ -510,6 +534,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function compute (x: int) : int
         |    requires { x >= 0 }
@@ -530,6 +555,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function identity (x: int) : int
         |    ensures  { result = x }
@@ -538,14 +564,162 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
-  "non-binding statement in body is rejected with a clear message" in {
-    val ex = intercept[RuntimeException](translate(
-      """def f(x: int) -> int
+  // ====================================================================================
+  // Phase 4a — mutable refs and assignment
+  // ====================================================================================
+
+  "var that is later reassigned becomes a WhyML ref" in {
+    // Two signals trigger ref-form: declared `var` AND reassigned somewhere later in scope.
+    // Reads of the name pick up `!`, the assignment becomes `:=`, and the surrounding
+    // function loses its `function` keyword (a `let function` body must be pure expr).
+    val mlw = translate(
+      """def assign_test(x: int) -> int
         |    var y = 0
         |    y = x
         |    y
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  let assign_test (x: int) : int
+        |    = let y = ref 0 in y := x; !y
+        |end
+        |""".stripMargin
+  }
+
+  "compound assignment `s += x` desugars to `s := !s + x`" in {
+    val mlw = translate(
+      """def add_them(a: int, b: int) -> int
+        |    var s = 0
+        |    s += a
+        |    s += b
+        |    s
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  let add_them (a: int) (b: int) : int
+        |    = let s = ref 0 in s := (!s + a); s := (!s + b); !s
+        |end
+        |""".stripMargin
+  }
+
+  "var that is never reassigned stays as an immutable let (function keyword preserved)" in {
+    // `var` alone doesn't force ref form — only actual reassignment does. Avoids Why3
+    // imposing the impure-call restriction on something effectively pure.
+    val mlw = translate(
+      """def echo(x: int) -> int
+        |    var y = x
+        |    y
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  let function echo (x: int) : int
+        |    = let y = x in y
+        |end
+        |""".stripMargin
+  }
+
+  "assignment to a non-mutable binding is rejected with a clear message" in {
+    val ex = intercept[RuntimeException](translate(
+      """def f(x: int) -> int
+        |    val y = 0
+        |    y = x
+        |    y
         |""".stripMargin))
-    ex.getMessage should include("supported mid-body forms")
+    ex.getMessage should include("assignment to non-mutable binding")
+  }
+
+  // ====================================================================================
+  // Phase 4b — while loops with invariant / variant
+  // ====================================================================================
+
+  "while loop with invariants and variant translates to WhyML loop annotations" in {
+    // The invariant / variant statements inside the loop body get hoisted into WhyML
+    // annotations between `do` and the body. The loop counter `i` is mutated, so it's a ref;
+    // the read in the loop guard becomes `!i`.
+    val mlw = translate(
+      """def count_up(n: int) -> int
+        |    require n >= 0
+        |    ensure result == n
+        |    var i = 0
+        |    while i < n
+        |        invariant 0 <= i
+        |        invariant i <= n
+        |        variant n - i
+        |        i += 1
+        |    i
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  let count_up (n: int) : int
+        |    requires { n >= 0 }
+        |    ensures  { result = n }
+        |    = let i = ref 0 in (while (!i < n) do invariant { 0 <= !i } invariant { !i <= n } variant { n - !i } i := (!i + 1) done); !i
+        |end
+        |""".stripMargin
+  }
+
+  "while loop with no annotations still parses (annotations are optional in WhyML)" in {
+    val mlw = translate(
+      """def drain(n: int) -> int
+        |    require n >= 0
+        |    var i = 0
+        |    while i < n
+        |        i += 1
+        |    i
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  let drain (n: int) : int
+        |    requires { n >= 0 }
+        |    = let i = ref 0 in (while (!i < n) do i := (!i + 1) done); !i
+        |end
+        |""".stripMargin
+  }
+
+  "loop body with two assignments sequences with `;`" in {
+    val mlw = translate(
+      """def gauss(n: int) -> int
+        |    require n >= 0
+        |    var s = 0
+        |    var i = 0
+        |    while i <= n
+        |        invariant 2 * s == i * (i - 1)
+        |        variant n - i + 1
+        |        s = s + i
+        |        i = i + 1
+        |    s
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  let gauss (n: int) : int
+        |    requires { n >= 0 }
+        |    = let s = ref 0 in let i = ref 0 in (while (!i <= n) do invariant { (2 * !s) = (!i * (!i - 1)) } variant { (n - !i) + 1 } s := (!s + !i); i := (!i + 1) done); !s
+        |end
+        |""".stripMargin
   }
 
   "single early-exit lowers to if-else terminating in the rest of the body" in {
@@ -559,6 +733,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function clamp_low (x: int) : int
         |    ensures  { result >= 0 }
@@ -580,6 +755,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function clamp (x: int) : int
         |    ensures  { result >= 0 }
@@ -600,6 +776,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let function safe_div (a: int) (b: int) : int
         |    = (if (b = 0) then 0 else let q = (div a b) in q)
@@ -620,6 +797,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let constant max_age : int = 150
         |
@@ -646,6 +824,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
       """module M
         |  use int.Int
         |  use int.ComputerDivision
+        |  use ref.Ref
         |
         |  let constant max_age : int = 150
         |

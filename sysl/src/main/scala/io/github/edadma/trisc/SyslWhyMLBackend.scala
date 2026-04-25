@@ -16,6 +16,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  recognize `EnumName.Variant` field access and rewrite to just `Variant` (WhyML
    *  constructors live in the module-level namespace, not under the type). */
   private var enumNames: Set[String] = Set.empty
+  /** Names currently bound as WhyML `ref`s in scope. Reads of these get `!name`; assignments
+   *  get `name := expr`. Populated during `formatBlockBody` when a sysl `var` is detected to
+   *  be reassigned later in the same scope; popped on the way out. Phase 4a does not handle
+   *  shadowing — a function with two same-named locals in disjoint scopes would conflate them. */
+  private val refScope: scala.collection.mutable.Set[String] = scala.collection.mutable.Set.empty
 
   private def indent: String = "  " * indentLevel
   private def line(s: String): Unit =
@@ -31,6 +36,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
   def generate(program: ProgramAST): String =
     out.clear()
     indentLevel = 0
+    refScope.clear()
     val enums = program.decls.collect { case e: EnumDeclAST => e }
     enumNames = enums.map(_.name).toSet
     val constants = program.decls.collect { case v: VarDeclAST => v }
@@ -42,6 +48,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     // define `/` or `%` because their semantics are debatable; we pin to the C-style choice
     // since it matches sysl's interpreter and codegen behavior. Always-imported is harmless.
     line("use int.ComputerDivision")
+    // ref.Ref provides the `ref` constructor, `(!)` deref, and `(:=)` assignment used by
+    // Phase 4a. Always-imported is harmless: programs that don't use refs simply never
+    // reference these symbols. Without this import Why3 reports "unbound symbol 'ref'".
+    line("use ref.Ref")
     blank()
     var first = true
     for e <- enums do
@@ -146,10 +156,17 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     // before extraction. Maps 1:1 from sysl's `#ghost`. The required keyword order is
     // `let [rec] [ghost] function f ...` — ghost must follow rec, not precede it.
     val ghostKw = if isGhost then "ghost " else ""
+    // `let function` is reflected to the logic and must be a pure expression — it cannot use
+    // mutable refs, sequenced assignments, or loops. When the body uses any of those (Phase 4),
+    // drop the `function` keyword and emit a plain `let`. The function is still verified
+    // against its contracts; it just isn't usable inside contract expressions of OTHER
+    // functions. Pure functions (Phase 1–3) keep `function` so they can be called from
+    // contracts as well.
+    val funKw = if isImpure(bodyStmts) then "" else "function "
     val ret = fn.returnType match
       case None    => unsupported("function without explicit return type", fn.name)
       case Some(t) => typeOf(t)
-    line(s"let $recKw$ghostKw" + s"function $name $params : $ret")
+    line(s"let $recKw$ghostKw" + funKw + s"$name $params : $ret")
     indentLevel += 1
     for c <- contracts do emitContract(c)
     line(s"= $bodyStr")
@@ -166,25 +183,50 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case ExprBodyAST(e) => (Nil, List(ExprStmtAST(e)))
       case BlockBodyAST(stmts, contracts) => (contracts, stmts)
 
-  /** Lower a sequence of body statements to a single WhyML expression string. Phase 3b
-   *  supports `val`-binding chains followed by a single trailing expression / return:
+  /** Lower a sequence of body statements to a single WhyML expression string.
    *
-   *      val x = e1                  let x = e1 in
-   *      val y = e2          →       let y = e2 in
-   *      x + y                       (x + y)
-   *
-   *  The `var` form is accepted only when not subsequently reassigned (Phase 3b treats it as
-   *  an immutable binding); reassignment, loops, and other statement forms remain unsupported
-   *  pending broader Phase 3+ work. */
+   *  Supported mid-body forms (Phase 3 + 4a/b):
+   *    - `val name = expr`                  → `let name = expr in <rest>`
+   *    - `var name = expr` (immutable use)  → `let name = expr in <rest>`
+   *    - `var name = expr` (later reassigned) → `let name = ref expr in <rest>` + add to refScope
+   *    - `name = expr`                      → `name := expr; <rest>` (must be in refScope)
+   *    - `name op= expr`                    → `name := (!name op expr); <rest>`
+   *    - `if cond then return e` (no else)  → `(if cond then e else <rest>)`
+   *    - `while cond do body done`          → `(while ... done); <rest>` (with invariant/variant)
+   */
   private def formatBlockBody(stmts: List[StmtAST]): String =
     stmts match
       case Nil => unsupported("empty function body", "must have a trailing expression or return")
       case List(s) => stmtAsTrailingExpr(s)
       case head :: rest =>
         head match
-          case VarStmtAST(name, _, init, _, _, _, isGhost) =>
+          case VarStmtAST(name, _, init, isMutable, _, _, isGhost) =>
+            val sname = sanitizeName(name)
             val ghostKw = if isGhost then "ghost " else ""
-            s"let $ghostKw${sanitizeName(name)} = ${formatExpr(init)} in ${formatBlockBody(rest)}"
+            // Detect ref-shape: declared mutable AND actually reassigned later in scope.
+            // A `var` that's never reassigned can stay as an immutable `let` — it's pure
+            // and Why3 prefers pure where possible.
+            val mutableUse = isMutable && isReassigned(name, rest)
+            if mutableUse then
+              refScope += name
+              try
+                s"let $ghostKw$sname = ref ${formatExpr(init)} in ${formatBlockBody(rest)}"
+              finally refScope -= name
+            else
+              s"let $ghostKw$sname = ${formatExpr(init)} in ${formatBlockBody(rest)}"
+
+          case AssignStmtAST(target, value) =>
+            if !refScope(target) then
+              unsupported("assignment to non-mutable binding", target)
+            s"${sanitizeName(target)} := ${formatExpr(value)}; ${formatBlockBody(rest)}"
+
+          case CompoundAssignStmtAST(target, op, value) =>
+            if !refScope(target) then
+              unsupported("compound assignment to non-mutable binding", target)
+            s"${formatCompoundAssign(target, op, value)}; ${formatBlockBody(rest)}"
+
+          case WhileStmtAST(cond, body, _) =>
+            s"${formatWhile(cond, body)}; ${formatBlockBody(rest)}"
 
           // Mid-body early-exit: `if cond then return e` (no else) followed by more stmts
           // lowers to `if cond then <e> else <rest>`. The then-branch must end in a return
@@ -196,7 +238,94 @@ class SyslWhyMLBackend(moduleName: String = "M"):
           case other =>
             unsupported(
               "non-binding statement in function body",
-              s"supported mid-body forms are `val name = expr` and `if cond then return expr`; got ${other.getClass.getSimpleName}")
+              s"supported mid-body forms are val/var bindings, assignments, while loops, and `if cond then return expr`; got ${other.getClass.getSimpleName}")
+
+  /** Format a compound-assignment `target op= value` as `target := (!target op value)`.
+   *  `/` and `%` route through int.ComputerDivision's prefix `div` / `mod`; everything else is
+   *  infix. The `op` string carries the trailing `=`, e.g. `+=`, which we strip before mapping. */
+  private def formatCompoundAssign(target: String, op: String, value: ExpressionAST): String =
+    val tname = sanitizeName(target)
+    val baseOp = if op.endsWith("=") then op.dropRight(1) else op
+    val rhs = baseOp match
+      case "/" => s"(div !$tname ${formatExpr(value)})"
+      case "%" => s"(mod !$tname ${formatExpr(value)})"
+      case _   => s"(!$tname ${mapBinaryOp(baseOp)} ${formatExpr(value)})"
+    s"$tname := $rhs"
+
+  /** Format a sysl `while cond <body>` as a WhyML `while cond do invariant{} variant{} body done`.
+   *  Sysl interleaves `invariant` and `variant` statements with the loop body; WhyML wants them
+   *  immediately after `do`. The split is positional: leading invariant/variant stmts become
+   *  WhyML annotations, the rest becomes the loop body proper. WhyML allows multiple `invariant`
+   *  clauses but at most one `variant` — Phase 4b doesn't enforce that, leaving it to Why3 to
+   *  reject. The body sequences with `;`. The whole `while ... done` is unit-typed. */
+  private def formatWhile(cond: ExpressionAST, body: List[StmtAST]): String =
+    val (annotations, realBody) = body.span {
+      case _: InvariantStmtAST | _: VariantStmtAST => true
+      case _                                        => false
+    }
+    val annoStr = annotations.map {
+      case InvariantStmtAST(e, _) => s"invariant { ${stripOuterParens(formatExpr(e))} }"
+      case VariantStmtAST(e)      => s"variant { ${stripOuterParens(formatExpr(e))} }"
+      case other                  => unsupported("loop annotation", other.getClass.getSimpleName)
+    }.mkString(" ")
+    val bodyStr = formatLoopBody(realBody)
+    val sep = if annoStr.isEmpty || bodyStr.isEmpty then "" else " "
+    s"(while ${formatExpr(cond)} do $annoStr$sep$bodyStr done)"
+
+  /** Format the *body* of a loop — a sequence of unit-typed statements joined with `;`.
+   *  Unlike `formatBlockBody`, there is no trailing expression: every statement contributes to
+   *  the body's side effects and the loop itself is unit-typed. Supported: assignment, compound
+   *  assignment, nested while. */
+  private def formatLoopBody(stmts: List[StmtAST]): String =
+    stmts.map(formatLoopStmt).mkString("; ")
+
+  private def formatLoopStmt(s: StmtAST): String = s match
+    case AssignStmtAST(target, value) =>
+      if !refScope(target) then unsupported("assignment to non-mutable binding in loop", target)
+      s"${sanitizeName(target)} := ${formatExpr(value)}"
+    case CompoundAssignStmtAST(target, op, value) =>
+      if !refScope(target) then unsupported("compound assignment in loop", target)
+      formatCompoundAssign(target, op, value)
+    case WhileStmtAST(cond, body, _) => formatWhile(cond, body)
+    case ExprStmtAST(e)              => formatExpr(e)
+    case other =>
+      unsupported(
+        "loop body statement",
+        s"loops support assignments, compound assignments, nested while, and expression stmts; got ${other.getClass.getSimpleName}")
+
+  /** True iff any statement in `stmts` (or any of its nested loops/branches/matches) reassigns
+   *  the variable named `name`. Used by `formatBlockBody` to decide whether a `var` should be
+   *  emitted as a WhyML ref or as an immutable let. */
+  private def isReassigned(name: String, stmts: List[StmtAST]): Boolean =
+    stmts.exists(stmtAssignsTo(name, _))
+
+  private def stmtAssignsTo(name: String, s: StmtAST): Boolean = s match
+    case AssignStmtAST(t, _) if t == name           => true
+    case CompoundAssignStmtAST(t, _, _) if t == name => true
+    case WhileStmtAST(_, body, _)                   => isReassigned(name, body)
+    case ForStmtAST(init, _, update, body, _) =>
+      stmtAssignsTo(name, init) || stmtAssignsTo(name, update) || isReassigned(name, body)
+    case DoWhileStmtAST(_, body, _)                 => isReassigned(name, body)
+    case LoopStmtAST(body, _)                       => isReassigned(name, body)
+    case ExprStmtAST(IfExprAST(_, t, e)) =>
+      isReassigned(name, t) || e.exists(isReassigned(name, _))
+    case ExprStmtAST(MatchExprAST(_, arms, default)) =>
+      arms.exists(a => isReassigned(name, a.body)) || default.exists(isReassigned(name, _))
+    case _ => false
+
+  /** True iff the function body uses any imperative construct (loops, assignment) that prevents
+   *  it from being declared as `let function` (which Why3 reflects to logic). Pure function
+   *  bodies — even those with local `let` bindings, conditionals, or matches — keep `function`. */
+  private def isImpure(stmts: List[StmtAST]): Boolean = stmts.exists(stmtIsImpure)
+
+  private def stmtIsImpure(s: StmtAST): Boolean = s match
+    case _: AssignStmtAST | _: CompoundAssignStmtAST              => true
+    case _: WhileStmtAST | _: ForStmtAST | _: DoWhileStmtAST | _: LoopStmtAST => true
+    case ExprStmtAST(IfExprAST(_, t, e)) =>
+      isImpure(t) || e.exists(isImpure)
+    case ExprStmtAST(MatchExprAST(_, arms, default)) =>
+      arms.exists(a => isImpure(a.body)) || default.exists(isImpure)
+    case _ => false
 
   private def isReturn(s: StmtAST): Boolean = s match
     case _: ReturnStmtAST => true
@@ -256,7 +385,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       if v < 0 then s"(- ${-v})" else v.toString
     case BoolLitAST(v) => v.toString
     case VarRefAST(name) =>
-      if name == "result" then "result" else sanitizeName(name)
+      // `result` is WhyML's reserved name for a function's return value (only valid inside
+      // ensures clauses). Otherwise: deref if the name names a WhyML ref, else plain.
+      if name == "result" then "result"
+      else if refScope(name) then s"!${sanitizeName(name)}"
+      else sanitizeName(name)
     case BinaryAST(l, op, r) =>
       // `div` and `mod` from int.ComputerDivision are plain prefix functions in WhyML,
       // not infix operators — `a div b` would parse as `a` applied to `div b`. Emit them
