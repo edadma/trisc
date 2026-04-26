@@ -613,6 +613,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udpcon: bad"
   }
 
+  "x86 udp: connected fd drops non-peer datagrams (recv filter)" in {
+    // POSIX/Linux: a UDP fd with a saved peer (via connect())
+    // drops datagrams whose source != peer. Slix enforces this
+    // at recv time — sys_recvfrom loops past non-peer datagrams
+    // until a matching one arrives or EAGAIN.
+    val output = qemu.command("test_udp_filt")
+    output should include("udpfilt: ok")
+    output should not include "udpfilt: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
