@@ -363,6 +363,20 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_icmperr: failed"
   }
 
+  "x86 net: NB-connect failure surfaces as SO_ERROR=ECONNREFUSED" in {
+    // test_nbconfail issues a non-blocking connect (returns
+    // -EINPROGRESS), then synthesises a SYN_SENT failure on the inet
+    // slot via INET_CMD_TCP_INJECT_FAIL. The slot's pending_error
+    // (111 = ECONNREFUSED) survives close_slot's tear-down and
+    // surfaces via getsockopt(SO_ERROR) — closing the async-path side
+    // of the SO_ERROR contract. Second getsockopt reads 0 (cleared).
+    qemu.send("test_nbconfail\n")
+    val output = qemu.waitFor("nbconfail: ok")
+    output should include("nbconfail: ok")
+    output should not include "nbconfail: expected"
+    output should not include "nbconfail: failed"
+  }
+
   "x86 musl: epoll on a pipe (Phase A2 closeout)" in {
     qemu.send("epoll_pipe\n")
     val output = qemu.waitFor("mepoll_pipe: done")

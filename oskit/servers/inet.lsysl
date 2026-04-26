@@ -86,6 +86,8 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_ICMP_UNREACH_INJECT = 38
     val INET_CMD_TCP_SET_KEEPOPT = 39
     val INET_CMD_TCP_GET_KEEPOPT = 40
+    val INET_CMD_TCP_GET_ERR     = 41
+    val INET_CMD_TCP_INJECT_FAIL = 42
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1196,6 +1198,67 @@ reply: status(1) + value(u32 BE) = 5 bytes.
         ipc_reply(sender, reply, 5)
 
 
+Read-and-clear the asynchronous-error channel for SO_ERROR.  Wire:
+`cmd(1) + fd(u16) = 3` bytes.  Reply: `status(1) + errno(u8) = 2`
+bytes — 0 errno means "no pending error".
+
+This intentionally bypasses `inet_tcp_slot_owned`'s `in_use=0`
+check: by the time the shim queries us, `close_slot` has almost
+always already torn the slot down (that's the whole reason the
+field exists).  We still gate on `owner_tid == sender` so a
+different process can't read another's pending error in the
+window before alloc reuses the slot — alloc resets the field, so
+a same-pid reuse just sees 0, which is correct.
+
+    inet_handle_tcp_get_err(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        var reply: [2]byte
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            reply[0] = byte(-1)
+            reply[1] = byte(0)
+            ipc_reply(sender, reply, 2)
+            return
+        if tcp_sockets[fd].owner_tid != sender
+            reply[0] = byte(-1)
+            reply[1] = byte(0)
+            ipc_reply(sender, reply, 2)
+            return
+        val e = tcp_sockets[fd].pending_error
+        tcp_sockets[fd].pending_error = 0
+        reply[0] = byte(0)
+        reply[1] = byte(e & 0xff)
+        ipc_reply(sender, reply, 2)
+
+
+Test-only: synthesize a SYN_SENT failure on whichever in_use slot
+is currently waiting on `remote_port`.  Sets `pending_error = 111`
+and runs `close_slot`, mirroring what an inbound RST in SYN_SENT
+would do — without depending on slirp's RST timing.  Wire:
+`cmd(1) + remote_port_be(u16) = 3` bytes.  Reply: 1-byte status
+(0 = found-and-injected, -1 = no slot matched).
+
+    inet_handle_tcp_inject_fail(sender: int, buf: *byte)
+        val rport = inet_read_u16(buf, 1) & 0xffff
+        var reply: [1]byte
+        var i = 0
+        var hit = -1
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use != 0
+                if tcp_sockets[i].state == TCP_STATE_SYN_SENT
+                    if tcp_sockets[i].remote_port == rport
+                        hit = i
+                        i = TCP_MAX_SOCKETS
+            i += 1
+        if hit < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        tcp_sockets[hit].pending_error = 111  // ECONNREFUSED
+        inet_tcp_close_slot(hit, -1)
+        reply[0] = byte(0)
+        ipc_reply(sender, reply, 1)
+
+
 SO_LINGER `l_linger = 0` close path.  Shim sends this when the
 caller has set linger-on with a zero timeout: emit RST, free
 slot, no FIN, no TIME_WAIT.  Reply is immediate (1-byte status)
@@ -1868,6 +1931,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_SET_KEEPALIVE -> inet_handle_tcp_set_keepalive(sender, buf)
                     INET_CMD_TCP_SET_KEEPOPT -> inet_handle_tcp_set_keepopt(sender, buf)
                     INET_CMD_TCP_GET_KEEPOPT -> inet_handle_tcp_get_keepopt(sender, buf)
+                    INET_CMD_TCP_GET_ERR -> inet_handle_tcp_get_err(sender, buf)
+                    INET_CMD_TCP_INJECT_FAIL -> inet_handle_tcp_inject_fail(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_ICMP_UNREACH_INJECT -> inet_handle_icmp_unreach_inject(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)

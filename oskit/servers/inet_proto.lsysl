@@ -1375,6 +1375,16 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         keepalive_idle: int
         keepalive_intvl: int
         keepalive_cnt: int
+        // Asynchronous-error channel for SO_ERROR.  Holds the positive
+        // errno of a connection-level failure (RST in SYN_SENT/SYN_RCVD,
+        // post-handshake RST, retransmit/keepalive timeout) so that
+        // `getsockopt(SO_ERROR)` can surface it after `close_slot` has
+        // already torn the slot down — the slot's `in_use` is cleared
+        // *before* the EPOLL fire so the shim's wake-poll sees mask=0,
+        // and a separate field (read-and-cleared via the
+        // `INET_CMD_TCP_GET_ERR` IPC) is the only way to recover the
+        // reason. Survives `close_slot`; reset by `inet_tcp_alloc`.
+        pending_error: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -2214,6 +2224,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].keepalive_idle = 0
                 tcp_sockets[i].keepalive_intvl = 0
                 tcp_sockets[i].keepalive_cnt = 0
+                tcp_sockets[i].pending_error = 0
                 // Heap-backed buffers are allocated lazily on alloc.
                 // close_slot frees + nulls the pointers, so re-using a
                 // slot doesn't double-allocate.  std.alloc returns 0 on
@@ -3319,6 +3330,11 @@ Per-socket state transition for one validated segment.
         val st = tcp_sockets[s].state
         if st == TCP_STATE_SYN_SENT
             if (flags & TCP_F_RST) != 0
+                // RFC 793: RST in response to a SYN means the peer is
+                // not listening (or refused). NB-connect surfaces this
+                // as ECONNREFUSED via SO_ERROR after close_slot tears
+                // down the slot.
+                tcp_sockets[s].pending_error = 111
                 inet_tcp_close_slot(s, -1)
                 return
             if (flags & TCP_F_SYN) == 0
@@ -3364,6 +3380,7 @@ Per-socket state transition for one validated segment.
             return
         if st == TCP_STATE_SYN_RCVD
             if (flags & TCP_F_RST) != 0
+                tcp_sockets[s].pending_error = 104  // ECONNRESET
                 inet_tcp_close_slot(s, -1)
                 return
             if (flags & TCP_F_ACK) == 0
@@ -3422,6 +3439,7 @@ peer aggressively reorders.
 Past handshake: process ACK, data, FIN in that order.
 
         if (flags & TCP_F_RST) != 0
+            tcp_sockets[s].pending_error = 104  // ECONNRESET
             inet_tcp_close_slot(s, -1)
             return
 
@@ -3645,6 +3663,7 @@ socket for retransmit and TIME_WAIT deadlines.
                 if rtx != 0
                     if now >= rtx
                         if tcp_sockets[i].retries >= TCP_MAX_RETRIES
+                            tcp_sockets[i].pending_error = 110  // ETIMEDOUT
                             inet_tcp_close_slot(i, -1)
                         else
                             tcp_sockets[i].retries += 1
@@ -3676,6 +3695,7 @@ socket for retransmit and TIME_WAIT deadlines.
                             if now >= tcp_sockets[i].keepalive_next_probe
                                 if tcp_sockets[i].keepalive_probes >= cnt_eff
                                     // Peer is dead. Close as -ETIMEDOUT.
+                                    tcp_sockets[i].pending_error = 110  // ETIMEDOUT
                                     inet_tcp_close_slot(i, -1)
                                 else
                                     // Probe: empty ACK at snd_una - 1

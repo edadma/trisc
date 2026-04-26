@@ -356,6 +356,7 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_TCP_SET_KEEPALIVE = 37
     val INET_CMD_TCP_SET_KEEPOPT = 39
     val INET_CMD_TCP_GET_KEEPOPT = 40
+    val INET_CMD_TCP_GET_ERR     = 41
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -1801,6 +1802,30 @@ the ticks→seconds conversion before handing back to userspace.
         0
 
 
+Send `INET_CMD_TCP_GET_ERR`.  Returns 0 on success with the
+positive errno written into `out err` (0 = no pending error), or
+a negative errno on IPC failure.  inet clears its side as part
+of the read so the SO_ERROR read-and-clear contract holds even
+across the slot teardown.
+
+    shim_inet_get_tcp_err(inet_fd: int, out err: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_TCP_GET_ERR)
+        shim_write_u16(msg, 1, inet_fd)
+        var reply: [2]byte
+        val r = ipc_send(port, msg, 3, reply, 2)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            err = 0
+            return 0
+        err = int(reply[1]) & 0xff
+        0
+
+
 SYS_SETSOCKOPT / SYS_GETSOCKOPT. The inet server tracks
 `SO_SNDBUF` / `SO_RCVBUF` (since Phase E bufsize chunk).  The
 remaining accept-list options (SO_REUSEADDR, SO_BROADCAST,
@@ -2105,12 +2130,32 @@ is left untouched in that case.
         // when they return an error to the user) and resets to 0.
         // A fresh socket reads back 0; a socket whose previous
         // syscall failed reads back the errno once.
+        //
+        // For TCP sockets we also consult inet's `pending_error`
+        // channel via `INET_CMD_TCP_GET_ERR`. That covers the
+        // asynchronous-failure path where a connection error (RST in
+        // SYN_SENT, post-handshake RST, retransmit/keepalive timeout)
+        // happens *after* the user has stopped issuing syscalls and
+        // is sitting in epoll — the shim's local `last_error` won't
+        // catch those because no syscall returned the errno. Only
+        // query when local is 0 so the local "most recent syscall
+        // failure" has priority (and one read still clears both
+        // sources atomically — inet clears as part of the read).
         if level == 1
             if optname == 4
                 val pid_e = posix_fd_current_pid()
                 val eidx = pid_e * POSIX_FDS_PER_PROC + fd
-                *vp = i32(posix_fd_table[eidx].last_error)
+                var e_val = posix_fd_table[eidx].last_error
                 posix_fd_table[eidx].last_error = 0
+                if e_val == 0
+                    if k == POSIX_FD_TCP_SOCKET
+                        val inet_fd = posix_fd_target(fd)
+                        if inet_fd >= 0
+                            var ie = 0
+                            val rr = shim_inet_get_tcp_err(inet_fd, ie)
+                            if rr == 0
+                                e_val = ie
+                *vp = i32(e_val)
                 *lp = i32(4)
                 return i64(0)
         // Echo the persisted flag value for the accept-list options

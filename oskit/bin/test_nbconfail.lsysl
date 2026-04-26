@@ -1,0 +1,174 @@
+test_nbconfail — non-blocking connect failure → SO_ERROR
+==========================================================
+
+Closes the async-path side of the SO_ERROR contract (Phase E).
+
+Linux's NB-connect rule: `connect` on an `O_NONBLOCK` socket
+returns -EINPROGRESS, the caller waits for EPOLLOUT, and on wake
+checks `getsockopt(SO_ERROR)` — 0 = connected, errno = failure
+reason.
+
+The shim's `last_error` field on its own only catches errors
+that flow back through a syscall.  An async failure (RST in
+SYN_SENT, post-handshake RST, retransmit/keepalive timeout) hits
+the inet server while the user is parked in epoll, and the inet
+slot's `pending_error` channel is the only way to recover the
+errno after `inet_tcp_close_slot` tears the slot down. The shim's
+`getsockopt(SO_ERROR)` consults that channel via
+`INET_CMD_TCP_GET_ERR` when its local cache is 0.
+
+Steps:
+
+  1. POSIX TCP socket, set O_NONBLOCK.
+  2. `connect(10.0.2.2:18086)` returns -EINPROGRESS.
+  3. `tcp_inject_fail(18086)` synthesizes a SYN_SENT failure on
+     the slot (sets `pending_error = 111`, runs close_slot).
+  4. `getsockopt(SO_ERROR)` returns 111 (ECONNREFUSED).
+  5. Second `getsockopt(SO_ERROR)` returns 0 (cleared).
+
+Pass criterion: prints `nbconfail: ok`.
+
+    module oskit.bin.test_nbconfail
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+    import oskit.net.tcp_inject_fail
+
+
+    val NR_SOCKET     = 337
+    val NR_CONNECT    = 148
+    val NR_FCNTL      = 171
+    val NR_GETSOCKOPT = 204
+    val NR_CLOSE      = 147
+
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+    val SOL_SOCKET    = 1
+    val SO_ERROR      = 4
+    val F_SETFL       = 4
+    val O_NONBLOCK    = 2048
+
+    val EINPROGRESS   = -115
+    val ECONNREFUSED  = 111
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (n % 10))
+        puts(string(&buf[0], 1))
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_fcntl(fd: int, cmd: int, arg: int) -> int
+        int(syscall6(NR_FCNTL, i64(fd), i64(cmd), i64(arg), 0, 0, 0))
+
+    posix_getsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, lenp: *i32) -> int
+        int(syscall6(NR_GETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(lenp), 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        val fd = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if fd < 0
+            puts("nbconfail: socket failed\n")
+            exit_with(1)
+            return
+
+        if posix_fcntl(fd, F_SETFL, O_NONBLOCK) != 0
+            puts("nbconfail: F_SETFL O_NONBLOCK failed\n")
+            exit_with(2)
+            return
+
+        var addr: [16]byte
+        fill_sockaddr(&addr[0], 18086, 10, 0, 2, 2)
+        val cr = posix_connect(fd, &addr[0], 16)
+        if cr != EINPROGRESS
+            puts("nbconfail: expected EINPROGRESS got ")
+            print_idec(cr)
+            puts("\n")
+            exit_with(3)
+            return
+
+        // Synthesize the failure on the SYN_SENT slot. The injector
+        // sets `pending_error = 111` and runs `close_slot`, so the
+        // slot is now `in_use=0` but the error survives until the
+        // shim reads it via INET_CMD_TCP_GET_ERR.
+        //
+        // Race tolerance: slirp may also send a real RST very quickly
+        // (10.0.2.2:18086 has no host-side listener → host TCP RSTs
+        // back through slirp).  In that case the SYN_SENT-receives-RST
+        // code path *already* set `pending_error = 111` and tore the
+        // slot down before the injector's IPC arrived.  Treat
+        // inject_fail's "no slot found" as a non-failure — the
+        // SO_ERROR check below verifies the actual contract either
+        // way.
+        val ir = tcp_inject_fail(18086)
+        puts("nbconfail: inject=")
+        print_idec(ir)
+        puts("\n")
+
+        var ev: [4]byte
+        ev[0] = byte(0xff)
+        ev[1] = byte(0xff)
+        ev[2] = byte(0xff)
+        ev[3] = byte(0xff)
+        var elen: i32 = i32(4)
+        val gr1 = posix_getsockopt(fd, SOL_SOCKET, SO_ERROR, &ev[0], &elen)
+        val ev_b0 = int(ev[0]) & 0xff
+        val ev_b1 = int(ev[1]) & 0xff
+        val ev_val = ev_b0 | (ev_b1 << 8)
+        if gr1 != 0 || ev_val != ECONNREFUSED
+            puts("nbconfail: expected SO_ERROR=111 got ")
+            print_idec(ev_val)
+            puts("\n")
+            exit_with(5)
+            return
+
+        ev[0] = byte(0xff)
+        ev[1] = byte(0xff)
+        ev[2] = byte(0xff)
+        ev[3] = byte(0xff)
+        elen = i32(4)
+        val gr2 = posix_getsockopt(fd, SOL_SOCKET, SO_ERROR, &ev[0], &elen)
+        val ev2_b0 = int(ev[0]) & 0xff
+        val ev2_b1 = int(ev[1]) & 0xff
+        val ev2_val = ev2_b0 | (ev2_b1 << 8)
+        if gr2 != 0 || ev2_val != 0
+            puts("nbconfail: expected SO_ERROR cleared got ")
+            print_idec(ev2_val)
+            puts("\n")
+            exit_with(6)
+            return
+
+        posix_close(fd)
+        puts("nbconfail: ok\n")
+        exit()
