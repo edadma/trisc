@@ -583,6 +583,10 @@ class SyslLLVMCodegen(target: String = "host"):
       case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
     }.toSet
     closureLocalKind.clear()
+    // Synthesize a currentFunction so TReturnStmt and other return-aware code can
+    // see the closure's return type. Required for inner-def closures whose bodies
+    // contain explicit `return` statements.
+    currentFunction = TFunDecl(name, closure.params, closure.returnType, closure.body)
 
     val retLt = llvmType(closure.returnType)
     val paramStrs = "i8* %env" +: closure.params.map(p => s"${llvmType(p.typ)} %${p.name}_arg")
@@ -655,6 +659,7 @@ class SyslLLVMCodegen(target: String = "host"):
     locals = null
     captureBorrows = Set.empty
     funcBorrowParams = Set.empty
+    currentFunction = null
 
   /** Generate a wrapper function that adapts a plain function to the closure ABI (env as first param). */
   private def emitFuncWrapper(wrapperName: String, origName: String, params: List[SyslType], retType: SyslType): Unit =
@@ -3071,30 +3076,32 @@ class SyslLLVMCodegen(target: String = "host"):
             val ep = newReg()
             emit(s"  $ep = bitcast [$envSize x i8]* $rawAlloca to i8*")
             // Store captures (no incr — StackEnv has no rc-bearing captures).
+            // Skip the self-slot (if any) — it's wired below from the descriptor.
             var offset = 0L
             for (capName, capType) <- c.captures do
-              val lt = llvmType(capType)
-              val v = if locals.contains(capName) then
-                val local = locals(capName)
-                if isAggregate(local.typ) then local.reg
+              if !c.selfName.contains(capName) then
+                val lt = llvmType(capType)
+                val v = if locals.contains(capName) then
+                  val local = locals(capName)
+                  if isAggregate(local.typ) then local.reg
+                  else
+                    val r = newReg()
+                    emit(s"  $r = load $lt, $lt* ${local.reg}")
+                    r
                 else
                   val r = newReg()
-                  emit(s"  $r = load $lt, $lt* ${local.reg}")
+                  emit(s"  $r = load $lt, $lt* @$capName")
                   r
-              else
-                val r = newReg()
-                emit(s"  $r = load $lt, $lt* @$capName")
-                r
-              val envFieldPtr = newReg()
-              emit(s"  $envFieldPtr = getelementptr i8, i8* $ep, i64 $offset")
-              val typedEnvPtr = newReg()
-              emit(s"  $typedEnvPtr = bitcast i8* $envFieldPtr to $lt*")
-              if isAggregate(capType) then
-                val loaded = newReg()
-                emit(s"  $loaded = load $lt, $lt* $v")
-                emit(s"  store $lt $loaded, $lt* $typedEnvPtr")
-              else
-                emit(s"  store $lt $v, $lt* $typedEnvPtr")
+                val envFieldPtr = newReg()
+                emit(s"  $envFieldPtr = getelementptr i8, i8* $ep, i64 $offset")
+                val typedEnvPtr = newReg()
+                emit(s"  $typedEnvPtr = bitcast i8* $envFieldPtr to $lt*")
+                if isAggregate(capType) then
+                  val loaded = newReg()
+                  emit(s"  $loaded = load $lt, $lt* $v")
+                  emit(s"  store $lt $loaded, $lt* $typedEnvPtr")
+                else
+                  emit(s"  store $lt $v, $lt* $typedEnvPtr")
               offset += llvmSizeOf(capType)
             ep
           case FuncKind.HeapEnv =>
@@ -3123,32 +3130,34 @@ class SyslLLVMCodegen(target: String = "host"):
             val ep = newReg()
             emit(s"  $ep = getelementptr i8, i8* $base, i64 16")
             // Store captures + Phase A: incr borrowed rc-bearing captures.
+            // Skip the self-slot (if any) — it's wired below from the descriptor.
             var offset = 0L
             for (capName, capType) <- c.captures do
-              val lt = llvmType(capType)
-              val v = if locals.contains(capName) then
-                val local = locals(capName)
-                if isAggregate(local.typ) then local.reg
+              if !c.selfName.contains(capName) then
+                val lt = llvmType(capType)
+                val v = if locals.contains(capName) then
+                  val local = locals(capName)
+                  if isAggregate(local.typ) then local.reg
+                  else
+                    val r = newReg()
+                    emit(s"  $r = load $lt, $lt* ${local.reg}")
+                    r
                 else
                   val r = newReg()
-                  emit(s"  $r = load $lt, $lt* ${local.reg}")
+                  emit(s"  $r = load $lt, $lt* @$capName")
                   r
-              else
-                val r = newReg()
-                emit(s"  $r = load $lt, $lt* @$capName")
-                r
-              val envFieldPtr = newReg()
-              emit(s"  $envFieldPtr = getelementptr i8, i8* $ep, i64 $offset")
-              val typedEnvPtr = newReg()
-              emit(s"  $typedEnvPtr = bitcast i8* $envFieldPtr to $lt*")
-              if isAggregate(capType) then
-                val loaded = newReg()
-                emit(s"  $loaded = load $lt, $lt* $v")
-                emit(s"  store $lt $loaded, $lt* $typedEnvPtr")
-              else
-                emit(s"  store $lt $v, $lt* $typedEnvPtr")
-              if structHasStringFields(capType) then
-                emitValueRC(typedEnvPtr, capType, incr = true)
+                val envFieldPtr = newReg()
+                emit(s"  $envFieldPtr = getelementptr i8, i8* $ep, i64 $offset")
+                val typedEnvPtr = newReg()
+                emit(s"  $typedEnvPtr = bitcast i8* $envFieldPtr to $lt*")
+                if isAggregate(capType) then
+                  val loaded = newReg()
+                  emit(s"  $loaded = load $lt, $lt* $v")
+                  emit(s"  store $lt $loaded, $lt* $typedEnvPtr")
+                else
+                  emit(s"  store $lt $v, $lt* $typedEnvPtr")
+                if structHasStringFields(capType) then
+                  emitValueRC(typedEnvPtr, capType, incr = true)
               offset += llvmSizeOf(capType)
             ep
         // Build %struct.closure
@@ -3163,6 +3172,23 @@ class SyslLLVMCodegen(target: String = "host"):
         val envGep = newReg()
         emit(s"  $envGep = getelementptr %struct.closure, %struct.closure* $alloca, i32 0, i32 1")
         emit(s"  store i8* $envPtr, i8** $envGep")
+        // Inner-def self-recursion: backfill env[self_offset] with a copy of the
+        // descriptor now that it exists. The closure body resolves the self-call
+        // through the standard capture path (TVarRef → env load).
+        for selfN <- c.selfName do
+          var off = 0L
+          var selfOff: Long = -1L
+          for (capName, capType) <- c.captures do
+            if capName == selfN then selfOff = off
+            off += llvmSizeOf(capType)
+          if selfOff >= 0 then
+            val selfFieldPtr = newReg()
+            emit(s"  $selfFieldPtr = getelementptr i8, i8* $envPtr, i64 $selfOff")
+            val typedSelfPtr = newReg()
+            emit(s"  $typedSelfPtr = bitcast i8* $selfFieldPtr to %struct.closure*")
+            val loadedSelf = newReg()
+            emit(s"  $loadedSelf = load %struct.closure, %struct.closure* $alloca")
+            emit(s"  store %struct.closure $loadedSelf, %struct.closure* $typedSelfPtr")
         alloca
 
       case TIndirectCall(callee, args, typ) =>

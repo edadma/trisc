@@ -12,6 +12,9 @@ object SymbolMeta:
     case Enum(enumType: SyslType.EnumType)
     case Interface(ifaceType: SyslType.InterfaceType)
     case Impl(traitName: String, targetType: SyslType, methods: Map[String, String]) // methodName → mangledFuncName
+    /** A module-level `const NAME: T = K`. Carries both the type AND the folded value
+     *  so importing files can populate their `compileTimeConstants` for VarRef folding. */
+    case Const(constType: SyslType, value: Long)
 
 case class TraitImplMeta(traitName: String, targetType: SyslType, methods: Map[String, String]) // methodName → mangledFuncName
 case class GenericEnumInstanceMeta(mangledName: String, baseName: String, typeArgs: List[SyslType])
@@ -61,6 +64,8 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
         case SymbolMeta.Kind.Impl(traitName, targetType, methods) =>
           val m = methods.map((k, v) => s"$k=$v").mkString(" ")
           buf ++= s"IMPL $traitName ${targetType.toPrefix} $m\n"
+        case SymbolMeta.Kind.Const(constType, value) =>
+          buf ++= s"${vis}CONST ${sym.name} ${constType.toPrefix} $value\n"
     // Emit generic enum instance mappings
     for inst <- genericEnumInstances do
       buf ++= s"GENINST ${inst.mangledName} ${inst.baseName} ${inst.typeArgs.length} ${inst.typeArgs.map(_.toPrefix).mkString(" ")}\n"
@@ -87,6 +92,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
         case SymbolMeta.Kind.Data(dataType) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
         case SymbolMeta.Kind.Struct(_) | SymbolMeta.Kind.Enum(_) | SymbolMeta.Kind.Interface(_) | SymbolMeta.Kind.Impl(_, _, _) => // type-only, no asm global
+        case SymbolMeta.Kind.Const(_, _) => // const has no storage — folded at use sites
     buf.toString
 
   def publicSymbols: List[SymbolMeta] =
@@ -117,8 +123,10 @@ object ModuleMeta:
   /** Bump this whenever the .smeta format changes. Stale files are silently ignored.
    *  v10 adds optional `EFFECTS <U|P|RW nR <names…> nW <names…>>` trailer on FUNC lines
    *  to carry `#reads`/`#writes` signatures across modules, and the same encoding inline
-   *  on each IFACE method so per-method effect sigs round-trip. */
-  val SMETA_VERSION = 10
+   *  on each IFACE method so per-method effect sigs round-trip.
+   *  v11 adds `CONST <name> <type> <value>` lines so module-level `const` declarations
+   *  are visible (with their folded value) to sibling files of the same module. */
+  val SMETA_VERSION = 11
 
   /** Encode a FuncEffects as space-separated tokens — `U` (Unknown), `P` (Pure), or
    *  `RW <nReads> <readsNames…> <nWrites> <writesNames…>`. Used both in the FUNC-line
@@ -174,6 +182,8 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef, isPure, if needModes then modes else Nil, effects), isPrivate, sourceFile = sourceFile)
       case TVarDecl(name, typ, _, isPrivate, _, _) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile = sourceFile)
+      case TConstDecl(name, typ, value) =>
+        SymbolMeta(name, SymbolMeta.Kind.Const(typ, value), isPrivate = false, sourceFile = sourceFile)
     }
     new ModuleMeta(syms)
 
@@ -272,6 +282,10 @@ object ModuleMeta:
                 case "IFACE" =>
                   val it = SyslType.parseType(tokens).asInstanceOf[SyslType.InterfaceType]
                   syms += SymbolMeta(name, SymbolMeta.Kind.Interface(it), isPrivate, sourceFile = currentSource)
+                case "CONST" =>
+                  val constType = SyslType.parseType(tokens)
+                  val value = tokens.next().toLong
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Const(constType, value), isPrivate, sourceFile = currentSource)
                 case other =>
                   throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")
 

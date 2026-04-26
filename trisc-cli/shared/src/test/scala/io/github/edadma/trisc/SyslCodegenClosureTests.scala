@@ -187,4 +187,62 @@ class SyslCodegenClosureTests extends SyslCodegenHelpers {
         |main() -> int = apply(x -> x + 1, 20) + apply(x -> x + 1, 20)
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Inner def declarations (recursive named local closures) =====
+  //
+  // `def name(params) -> ret body` inside a function body declares a
+  // recursively-callable named local closure. The codegen wires a copy of the
+  // just-built descriptor into the captured env at the self-name's offset, so
+  // the body can resolve the recursive call via the standard env-lookup path.
+
+  "inner def with self-recursion (factorial)" in {
+    compileMultiAndRun(allocSources(
+      """import posix.stdlib.*
+        |
+        |outer() -> int
+        |    def fact(n: int) -> int
+        |        if n == 0 then return 1
+        |        n * fact(n - 1)
+        |    fact(5)
+        |
+        |main() -> int = outer()
+        |""".stripMargin)) shouldBe 120
+  }
+
+  "inner def captures outer parameter" in {
+    compileMultiAndRun(allocSources(
+      """import posix.stdlib.*
+        |
+        |outer(base: int) -> int
+        |    def add_base(n: int) -> int
+        |        n + base
+        |    add_base(7)
+        |
+        |main() -> int = outer(35)
+        |""".stripMargin)) shouldBe 42
+  }
+
+  "inner def with self-recursion uses captured outer local" in {
+    compileMultiAndRun(allocSources(
+      """import posix.stdlib.*
+        |
+        |outer(bonus: int) -> int
+        |    def sum_with_bonus(n: int) -> int
+        |        if n == 0 then return 0
+        |        n + bonus + sum_with_bonus(n - 1)
+        |    sum_with_bonus(3)
+        |
+        |main() -> int = outer(10)
+        |""".stripMargin)) shouldBe 36
+  }
+
+  "inner def with zero parameters" in {
+    compileAndRun(
+      """outer() -> int
+        |    def constant() -> int = 42
+        |    constant()
+        |
+        |main() -> int = outer()
+        |""".stripMargin) shouldBe 42
+  }
 }

@@ -315,13 +315,14 @@ class SyslTypeSyntaxTests extends SyslTestHelpers {
         |    *p
         |""".stripMargin): @unchecked
     val typed = (new SyslAnalyzer).analyze(ast)
-    // p should be inferred as *int
+    // p should be inferred as *int. Bare `p = expr` (no `var`/`val`) creates a fresh
+    // local on first occurrence, so the analyzer emits TVarStmt — not TAssignStmt.
     val main = typed.decls.collectFirst { case f: TFunDecl if f.name == "main" => f }.get
     main.body match
       case TBlockBody(stmts) =>
         stmts(1) match
-          case TAssignStmt("p", TAddrOf("x", PtrType(SyslType.IntType(32)))) => // correct
-          case other => fail(s"expected TAssignStmt with PtrType(I32), got $other")
+          case TVarStmt("p", PtrType(SyslType.IntType(32)), TAddrOf("x", PtrType(SyslType.IntType(32))), _, _) => // correct
+          case other => fail(s"expected TVarStmt with PtrType(I32), got $other")
       case _ => fail("expected block body")
   }
 }

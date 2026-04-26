@@ -337,6 +337,21 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def releaseRefs(env: Env): Unit =
     for (_, cell) <- env do refDecr(cell.value)
 
+  /** Invoke a closure value with the given arguments. Public so JVM hosts can grab a
+   *  ClosureVal out of an interpreted program (via globals or a returned function value)
+   *  and call back into it without re-entering the AST eval path. */
+  def invokeClosure(c: ClosureVal, args: List[Value]): Value =
+    val closureEnv: Env = new mutable.LinkedHashMap
+    for (name, cell) <- c.captured do
+      closureEnv(name) = new Cell(cell.value)
+    for (param, arg) <- c.params.zip(args) do
+      closureEnv(param.name) = new Cell(arg)
+    c.body match
+      case TExprBody(expr) => evalAny(expr, closureEnv)
+      case TBlockBody(stmts) =>
+        try evalBlock(stmts, closureEnv)
+        catch case ReturnException(v) => v
+
   private def call(fun: TFunDecl, args: List[Value]): Value =
     val env: Env = new mutable.LinkedHashMap
     val savedSize = deferStack.size
@@ -1220,13 +1235,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TFuncRef(name, _) => FuncVal(name)
 
-      case TClosure(params, _, body, captures, _, _) =>
-        // Capture current values by value (copy)
+      case TClosure(params, _, body, captures, _, _, selfName) =>
+        // Capture current values by value (copy). The self-name (if any) is bound to a
+        // fresh cell after the ClosureVal is built so the body can recurse via name.
         val capturedEnv = new mutable.LinkedHashMap[String, Cell]
-        for (varName, _) <- captures do
+        for (varName, _) <- captures if !selfName.contains(varName) do
           val cell = lookupCell(varName, env)
           capturedEnv(varName) = new Cell(cell.value) // copy value, not share cell
-        ClosureVal(body, params, capturedEnv)
+        val closureVal = ClosureVal(body, params, capturedEnv)
+        selfName.foreach { n => capturedEnv(n) = new Cell(closureVal) }
+        closureVal
 
       case TInterfaceBox(expr, iface) =>
         val dataVal = evalAny(expr, env)
@@ -1286,18 +1304,5 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
                 builtins.get(name) match
                   case Some(f) => f(argValues)
                   case None => throw RuntimeError(s"undefined function: $name")
-          case ClosureVal(body, closureParams, captured) =>
-            val closureEnv: Env = new mutable.LinkedHashMap
-            // Pre-populate with captured values (by-value copies)
-            for (name, cell) <- captured do
-              closureEnv(name) = new Cell(cell.value)
-            // Bind parameters
-            for (param, arg) <- closureParams.zip(argValues) do
-              closureEnv(param.name) = new Cell(arg)
-            // Evaluate body
-            body match
-              case TExprBody(expr) => evalAny(expr, closureEnv)
-              case TBlockBody(stmts) =>
-                try evalBlock(stmts, closureEnv)
-                catch case ReturnException(v) => v
+          case c: ClosureVal => invokeClosure(c, argValues)
           case other => throw RuntimeError(s"cannot call ${other}")

@@ -60,4 +60,51 @@ class SyslSVMFuncPtrTests extends SyslSVMCodegenHelpers {
         |    acc.n
         |""".stripMargin) shouldBe 6
   }
+
+  // ===== Inner def declarations (recursive named local closures) =====
+
+  "inner def with self-recursion (factorial)" in {
+    compileAndRun(
+      """outer() -> i64
+        |    def fact(n: i64) -> i64
+        |        if n == 0 then return 1i64
+        |        n * fact(n - 1)
+        |    fact(5i64)
+        |
+        |main() -> i64 = outer()
+        |""".stripMargin) shouldBe 120
+  }
+
+  "inner def captures outer parameter" in {
+    compileAndRun(
+      """outer(base: i64) -> i64
+        |    def add_base(n: i64) -> i64
+        |        n + base
+        |    add_base(7i64)
+        |
+        |main() -> i64 = outer(35i64)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "inner def with self-recursion uses captured outer local" in {
+    compileAndRun(
+      """outer(bonus: i64) -> i64
+        |    def sum_with_bonus(n: i64) -> i64
+        |        if n == 0 then return 0i64
+        |        n + bonus + sum_with_bonus(n - 1)
+        |    sum_with_bonus(3i64)
+        |
+        |main() -> i64 = outer(10i64)
+        |""".stripMargin) shouldBe 36
+  }
+
+  "inner def with zero parameters" in {
+    compileAndRun(
+      """outer() -> i64
+        |    def constant() -> i64 = 42i64
+        |    constant()
+        |
+        |main() -> i64 = outer()
+        |""".stripMargin) shouldBe 42
+  }
 }

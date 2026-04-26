@@ -702,8 +702,10 @@ class SyslSVMCodegen:
     else
       emitMemAlloc(envSize)
       emit(s"  local_set $envIdx")
-      // Store each capture into env at its offset.
-      for (capName, off, capTyp) <- layout do
+      // Store each capture into env at its offset. The self-name slot (if any) is
+      // skipped here and wired below after the descriptor exists — its value is
+      // the descriptor address itself, which doesn't exist yet at this point.
+      for (capName, off, capTyp) <- layout if !c.selfName.contains(capName) do
         emit(s"  local_get $envIdx")
         if off > 0 then { emitPushInt(off); emit("  add") }
         // Read the captured value from caller's local/global, then store into env.
@@ -724,6 +726,21 @@ class SyslSVMCodegen:
     emit(s"  local_get $envIdx")
     emit("  swap")
     emit("  store64")          // descr[8] = env_ptr
+    // Inner-def self-recursion: backfill env[self_offset] with a copy of the 16-byte
+    // descriptor we just built. Aggregate captures are stored inline by value (the
+    // env slot for a FuncType holds the full {func_ptr, env_ptr} struct, not a
+    // pointer to it), so the closure body's standard TVarRef→env-lookup path
+    // returns the address of env+self_offset and treats it as the descriptor.
+    for selfName <- c.selfName do
+      val selfOffOpt = layout.find(_._1 == selfName).map(_._2)
+      for selfOff <- selfOffOpt do
+        // Stack: [d]   d = freshly-built descriptor address
+        emit("  dup")                                    // [d, d]   keep d for return
+        emit(s"  local_get $envIdx")                     // [d, d, env]
+        if selfOff > 0 then { emitPushInt(selfOff); emit("  add") } // [d, d, env+off]
+        // emitStore for FuncType copies 16 bytes from src to dest and pops both.
+        emitStore(SyslType.FuncType(Nil, SyslType.VoidType))
+        // Stack after emitStore: [d]
 
   /** Emit a hoisted closure body as a regular function. The first param is a
     * hidden env_ptr (local 0); explicit params follow. Captures are accessed

@@ -173,7 +173,7 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |
         |  let function abs (x: int) : int
         |    ensures  { result >= 0 }
-        |    ensures  { (result = x) \/ (result = (- x)) }
+        |    ensures  { (result = x) || (result = (- x)) }
         |    = (if (x >= 0) then x else (- x))
         |end
         |""".stripMargin
@@ -800,6 +800,185 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  // ====================================================================================
+  // Phase 4-structs — value structs ↔ WhyML records
+  // ====================================================================================
+
+  "struct decl emits a WhyML record type with lowercased name" in {
+    val mlw = translate(
+      """struct Point
+        |    x: int
+        |    y: int
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type point = { x: int; y: int }
+        |end
+        |""".stripMargin
+  }
+
+  "struct field access uses dot notation (same as WhyML)" in {
+    val mlw = translate(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |def magnitude_sq(p: Point) -> int
+        |    require p.x >= 0
+        |    require p.y >= 0
+        |    ensure result >= 0
+        |    p.x * p.x + p.y * p.y
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type point = { x: int; y: int }
+        |
+        |  let function magnitude_sq (p: point) : int
+        |    requires { p.x >= 0 }
+        |    requires { p.y >= 0 }
+        |    ensures  { result >= 0 }
+        |    = ((p.x * p.x) + (p.y * p.y))
+        |end
+        |""".stripMargin
+  }
+
+  "struct construction call lowers to a record literal in field-declaration order" in {
+    // Sysl `Point(0, 0)` is positional construction. Sysl also supports named-arg form
+    // `Point(x=0, y=0)` which the parser binds positionally too. Either way we emit
+    // `{ x = ...; y = ... }` — record literals are name-keyed in WhyML so we look up the
+    // field names by struct name, then zip with the actual arg expressions.
+    val mlw = translate(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |def origin() -> Point
+        |    Point(0, 0)
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type point = { x: int; y: int }
+        |
+        |  let function origin () : point
+        |    = { x = 0; y = 0 }
+        |end
+        |""".stripMargin
+  }
+
+  "struct returned from a function with `result.field` ensures clauses" in {
+    val mlw = translate(
+      """struct Range
+        |    lo: int
+        |    hi: int
+        |
+        |def make_range(lo: int, hi: int) -> Range
+        |    require lo <= hi
+        |    ensure result.lo == lo
+        |    ensure result.hi == hi
+        |    Range(lo, hi)
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type range = { lo: int; hi: int }
+        |
+        |  let function make_range (lo: int) (hi: int) : range
+        |    requires { lo <= hi }
+        |    ensures  { result.lo = lo }
+        |    ensures  { result.hi = hi }
+        |    = { lo = lo; hi = hi }
+        |end
+        |""".stripMargin
+  }
+
+  "struct invariants emit a WhyML record invariant + synthesized `by` witness" in {
+    // Multiple `invariant` clauses join with `&&`. The `by` witness uses 0 for int fields
+    // and false for bool — sufficient for typical numeric invariants like `balance >= -limit`
+    // (0 >= -0 holds). Why3 generates a witness goal which Alt-Ergo discharges trivially
+    // when the witness satisfies the invariant.
+    val mlw = translate(
+      """struct Account
+        |    balance: int
+        |    limit: int
+        |    invariant balance >= -limit
+        |    invariant limit >= 0
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type account = { balance: int; limit: int }
+        |    invariant { balance >= (- limit) && limit >= 0 }
+        |    by { balance = 0; limit = 0 }
+        |end
+        |""".stripMargin
+  }
+
+  "single invariant on a struct is emitted without join operator" in {
+    val mlw = translate(
+      """struct Range
+        |    lo: int
+        |    hi: int
+        |    invariant lo <= hi
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type range = { lo: int; hi: int }
+        |    invariant { lo <= hi }
+        |    by { lo = 0; hi = 0 }
+        |end
+        |""".stripMargin
+  }
+
+  "boolean conjunction `&&` in body position uses WhyML's bool && operator" in {
+    // WhyML `/\` is formula-only — using it in a body that returns bool is a syntax error.
+    // The translator emits `&&` / `||` everywhere; Why3 implicitly coerces bool to prop in
+    // formula contexts, so contracts still parse correctly.
+    val mlw = translate(
+      """struct Range
+        |    lo: int
+        |    hi: int
+        |
+        |def contains(r: Range, x: int) -> bool
+        |    ensure result == (x >= r.lo && x <= r.hi)
+        |    x >= r.lo && x <= r.hi
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type range = { lo: int; hi: int }
+        |
+        |  let function contains (r: range) (x: int) : bool
+        |    ensures  { result = ((x >= r.lo) && (x <= r.hi)) }
+        |    = ((x >= r.lo) && (x <= r.hi))
+        |end
+        |""".stripMargin
+  }
+
   "single early-exit lowers to if-else terminating in the rest of the body" in {
     val mlw = translate(
       """def clamp_low(x: int) -> int
@@ -913,6 +1092,222 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
   }
 
+  // ====================================================================================
+  // Phase 4-data — generic data enums (Option, Result)
+  // ====================================================================================
+
+  "generic data enum with one type param emits a parametric WhyML ADT" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type option 't = Some 't | None
+        |end
+        |""".stripMargin
+  }
+
+  "generic data enum with two type params emits both as positional WhyML type vars" in {
+    val mlw = translate(
+      """enum Result[T, E]
+        |    Ok(value: T)
+        |    Err(error: E)
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type result 't 'e = Ok 't | Err 'e
+        |end
+        |""".stripMargin
+  }
+
+  "match on data enum with destructure binds the payload" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def unwrap_or[T](o: Option[T], default: T) -> T
+        |    o match
+        |        Some(v) -> v
+        |        None -> default
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type option 't = Some 't | None
+        |
+        |  let function unwrap_or (o: option 't) (default: 't) : 't
+        |    = (match o with | Some v -> v | None -> default end)
+        |end
+        |""".stripMargin
+  }
+
+  "wildcard inside destructure pattern emits as `Some _`" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def is_some[T](o: Option[T]) -> bool
+        |    o match
+        |        Some(_) -> true
+        |        None -> false
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type option 't = Some 't | None
+        |
+        |  let function is_some (o: option 't) : bool
+        |    = (match o with | Some _ -> true | None -> false end)
+        |end
+        |""".stripMargin
+  }
+
+  "constructor call `Some(42)` lowers to `(Some 42)` and bare `None` emits as-is" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def of_int(x: int) -> Option[int]
+        |    Some(x)
+        |
+        |def empty() -> Option[int]
+        |    None
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |
+        |  type option 't = Some 't | None
+        |
+        |  let function of_int (x: int) : option int
+        |    = (Some x)
+        |
+        |  let function empty () : option int
+        |    = None
+        |end
+        |""".stripMargin
+  }
+
+  // ====================================================================================
+  // Phase 4-data+ — panic / assert / `?` propagation
+  // ====================================================================================
+
+  "panic call lowers to WhyML `absurd`" in {
+    // `absurd` claims unreachability; the verifier requires a proof that this branch
+    // never executes. Without a precondition, this proof fails (correctly): it tells
+    // the user that calling unwrap on None genuinely panics. Adding `requires { is_some o }`
+    // discharges the obligation cleanly.
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def is_some[T](o: Option[T]) -> bool
+        |    o match
+        |        Some(_) -> true
+        |        None -> false
+        |
+        |def unwrap[T](o: Option[T]) -> T
+        |    require is_some(o)
+        |    o match
+        |        Some(v) -> v
+        |        None -> panic("unwrap on None")
+        |""".stripMargin)
+    mlw should include("None -> absurd")
+    mlw should include("requires { is_some o }")
+  }
+
+  "assert call in body lowers to WhyML `assert { ... }`" in {
+    val mlw = translate(
+      """def double_pos(x: int) -> int
+        |    require x >= 0
+        |    val r = x * 2
+        |    assert(r >= x, "doubling preserves order")
+        |    r
+        |""".stripMargin)
+    mlw shouldBe
+      """module M
+        |  use int.Int
+        |  use int.ComputerDivision
+        |  use ref.Ref
+        |  use string.String
+        |
+        |  let function double_pos (x: int) : int
+        |    requires { x >= 0 }
+        |    = let r = (x * 2) in assert { r >= x }; r
+        |end
+        |""".stripMargin
+  }
+
+  "`?` on Option binds success and propagates None" in {
+    val mlw = translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def safe_div(a: int, b: int) -> Option[int]
+        |    if b == 0 then
+        |        return None
+        |    Some(a / b)
+        |
+        |def half_of_quotient(a: int, b: int) -> Option[int]
+        |    val q = safe_div(a, b)?
+        |    safe_div(q, 2)
+        |""".stripMargin)
+    mlw should include("(match (safe_div a b) with | Some _try_v_q -> let q = _try_v_q in (safe_div q 2) | None -> None end)")
+  }
+
+  "`?` on Result reconstructs the failure variant with bound payload" in {
+    val mlw = translate(
+      """enum Result[T, E]
+        |    Ok(value: T)
+        |    Err(error: E)
+        |
+        |def attempt(x: int) -> Result[int, int]
+        |    if x < 0 then
+        |        return Err(x)
+        |    Ok(x + 1)
+        |
+        |def chain(a: int) -> Result[int, int]
+        |    val y = attempt(a)?
+        |    Ok(y + 1)
+        |""".stripMargin)
+    mlw should include("Err _try_e0 -> (Err _try_e0)")
+  }
+
+  "`?` outside top-level binding is rejected with a clear gap message" in {
+    val ex = intercept[RuntimeException](translate(
+      """enum Option[T]
+        |    Some(value: T)
+        |    None
+        |
+        |def f(o: Option[int]) -> Option[int]
+        |    Some(o? + 1)
+        |""".stripMargin))
+    ex.getMessage should include("`?` operator outside top-level")
+  }
+
   "module-level `var` is rejected with a clear message" in {
     val ex = intercept[RuntimeException](translate(
       """var counter: int = 0
@@ -921,9 +1316,11 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
   }
 
   "unsupported expression form yields a clear error naming the gap" in {
+    // Slices aren't part of any verification phase yet — translator should reject
+    // them up front rather than silently produce ill-formed WhyML.
     val ex = intercept[RuntimeException](translate(
-      """def s() -> int
-        |    "hello".length
+      """def s(xs: []int) -> int
+        |    xs[0]
         |""".stripMargin))
     ex.getMessage should include("WhyML translator: unsupported")
   }

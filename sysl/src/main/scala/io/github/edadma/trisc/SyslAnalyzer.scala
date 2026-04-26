@@ -487,6 +487,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           else
             globalScope(localKey) = SymInfo(sym.name, dataType, mutable = false)
             externalSymbols += localKey
+        case SymbolMeta.Kind.Const(constType, value) =>
+          // Cross-file `const`: register in globalScope (so VarRef name resolution
+          // succeeds) AND in compileTimeConstants under both the local-key short name
+          // and the fully-mangled name so the analyzer's constant-folding paths
+          // (VarRef → TIntLit substitution) find the value either way.
+          if globalScope.contains(localKey) then
+            val existing = globalScope(localKey)
+            if !sym.isExtern && existing.name != sym.name then
+              throw AnalysisError(s"imported const '$localKey' conflicts with existing global")
+          else
+            globalScope(localKey) = SymInfo(sym.name, constType, mutable = false, isConst = true)
+            externalSymbols += localKey
+          compileTimeConstants(localKey) = value
+          compileTimeConstants(sym.name) = value
         case SymbolMeta.Kind.Struct(st) =>
           structTypes(shortName(sym.name)) = st
         case SymbolMeta.Kind.Interface(it) =>
@@ -1201,7 +1215,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             fixedAddressVars(mangledName) = (addr, resolvedType)
             globalScope(name) = SymInfo(mangledName, resolvedType, isMutable)
             scopeStack = null
-            TConstDecl(mangledName, resolvedType) // no storage emitted
+            // #address vars don't carry a foldable value at compile time —
+            // 0 is a placeholder, not used by anything (caller emits MMIO loads/stores).
+            TConstDecl(mangledName, resolvedType, 0L) // no storage emitted
           case None =>
             analyzeRegularVarDecl(name, typOpt, init, isPrivate, isMutable, isVolatile, isConst, isGhost)
 
@@ -1240,8 +1256,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     if isGhost then ghostNames += mangledVarName
     scopeStack = null
     // `const` declarations do not generate a storage slot — callers inline the folded value
-    // via compileTimeConstants lookup during VarRef analysis.
-    if isConst then TConstDecl(mangledVarName, declType)
+    // via compileTimeConstants lookup during VarRef analysis. The value is also carried on
+    // the typed decl so cross-file ModuleMeta serialization can publish it to sibling files.
+    if isConst then TConstDecl(mangledVarName, declType, compileTimeConstants(mangledVarName))
     else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile, isGhost = isGhost)
 
   private def warnDeprecated(name: String): Unit =
@@ -2549,6 +2566,23 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case None => false
     }
 
+  /** Strict-but-name-aware element equality for slice/array element types. Plain `==`
+   *  fails when two `EnumType` instances share a name but capture different snapshots
+   *  of the variant list (e.g. the field type stored in a recursive enum variant
+   *  declaration was resolved with a stale placeholder). For nominal types we trust the
+   *  name; for primitives and structural types we keep `==` (no widening — `[]i8` must
+   *  not silently flow into `[]i64`). Recurses through nested slice/array/ref/ptr so
+   *  shapes like `[][]Tree` work. */
+  private def nominallyEqual(a: SyslType, b: SyslType): Boolean = (a, b) match
+    case _ if a == b => true
+    case (StructType(n1, _, _), StructType(n2, _, _)) => n1 == n2
+    case (EnumType(n1, _), EnumType(n2, _))           => n1 == n2
+    case (SliceType(e1), SliceType(e2))               => nominallyEqual(e1, e2)
+    case (ArrayType(e1, n1), ArrayType(e2, n2))       => n1 == n2 && nominallyEqual(e1, e2)
+    case (RefType(e1), RefType(e2))                   => nominallyEqual(e1, e2)
+    case (PtrType(e1), PtrType(e2))                   => nominallyEqual(e1, e2)
+    case _                                            => false
+
   private def compatible(from: SyslType, to: SyslType): Boolean =
     (from, to) match
       case (a, b) if a == b => true
@@ -2587,9 +2621,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case (PtrType(_), PtrType(_)) => true           // any pointer ↔ any pointer (like C's void*)
       case (ArrayType(_, _), PtrType(_)) => true          // array decays to any pointer
       case (StringType, PtrType(I8 | U8)) => true          // string decays to *i8 / *byte
-      case (ArrayType(e1, _), ArrayType(e2, _)) if e1 == e2 => true
-      case (ArrayType(e1, _), SliceType(e2)) if e1 == e2 => true  // fixed array → slice
-      case (SliceType(e1), SliceType(e2)) if e1 == e2 => true
+      case (ArrayType(e1, _), ArrayType(e2, _)) if nominallyEqual(e1, e2) => true
+      case (ArrayType(e1, _), SliceType(e2)) if nominallyEqual(e1, e2) => true  // fixed array → slice
+      case (SliceType(e1), SliceType(e2)) if nominallyEqual(e1, e2) => true
       case (RefType(a), RefType(b)) if compatible(a, b) => true // same ref type (recursive check handles nominal types)
       case (RefType(inner), PtrType(_)) => true             // &T → *U (ref decays to pointer)
       // Note: *T → T is NOT compatible. Implicit deref-and-copy hides cost (memcpy of pointee).
@@ -2745,6 +2779,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         i -= 1
     if globalScope.contains(name) then Some(globalScope(name))
     else None
+
+  /** Like `tryLookup` but stops at the function boundary — returns only bindings from
+   *  scopes pushed inside the current function (parameters, locals, match-bound names,
+   *  destructuring binders). Used by the call-site resolver to honor local-shadows-
+   *  global semantics for callable values: a pattern-bound `f: (string) -> int` must
+   *  shadow a top-level `f(int) -> int` even though the global is registered earlier. */
+  private def lookupLocal(name: String): Option[SymInfo] =
+    if scopeStack != null then
+      var i = scopeStack.length - 1
+      while i >= 0 do
+        if scopeStack(i).contains(name) then return Some(scopeStack(i)(name))
+        i -= 1
+    None
 
   private def lookupOrCreate(name: String, typ: SyslType): SymInfo =
     if scopeStack != null then
@@ -3562,6 +3609,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case AssignStmtAST(target, value) =>
         val tValue0 = analyzeExpr(value)
+        // Did this name already exist (param, prior decl, or global), or are we about
+        // to implicitly create a fresh local? Capture this BEFORE `lookupOrCreate` so the
+        // newly-bound case can be distinguished. Bare `name = expr` (no `var`/`val`)
+        // inside a function body is sysl's implicit-local syntax — when the analyzer
+        // creates a fresh local, downstream passes need to see it as a binding (TVarStmt),
+        // not a write to an existing variable (TAssignStmt). Closure capture-detection
+        // walks TAssignStmt as an assignment to an outer name, so emitting TAssignStmt
+        // here would incorrectly mark a freshly-created inner local as a captured outer.
+        val existedBefore = tryLookup(target).isDefined
         val sym = lookupOrCreate(target, tValue0.typ)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = applyTargetType(tValue0, sym.typ)
@@ -3569,6 +3625,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // the caller's lvalue.
         val baseStmt: TStmt =
           if sym.autoIndirect then TDerefAssignStmt(TVarRef(sym.name, PtrType(sym.typ)), tValue)
+          else if !existedBefore then TVarStmt(sym.name, sym.typ, tValue)
           else TAssignStmt(sym.name, tValue)
         val checks = sym.typ match
           case st: StructType if structInvariants.contains(st.name) =>
@@ -3767,6 +3824,40 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val te = analyzeExpr(e)
         if te.typ != BoolType then throw AnalysisError(s"assume expression must be bool, got ${te.typ}")
         contract("assume", te, msg.getOrElse("assume"))
+
+      case InnerFunStmtAST(decl) =>
+        // `def name(params) -> ret body` inside a function body — desugar to a named
+        // local closure with self-reference support. The name is pre-bound so calls
+        // inside the body resolve locally; the resulting TClosure carries selfName so
+        // the interpreter can wire a self-cell into the captured env after construction.
+        if decl.typeParams.nonEmpty then
+          throw AnalysisError(s"inner def '${decl.name}' cannot declare type parameters")
+        val retTypeAST = decl.returnType.getOrElse(
+          throw AnalysisError(s"inner def '${decl.name}' must declare an explicit return type")
+        )
+        val retType = resolveType(retTypeAST)
+        val paramTypes = decl.params.map(p => resolveType(p.typ))
+        val funcType: SyslType = FuncType(paramTypes, retType, escaping = true)
+        // Pre-bind the name in the enclosing scope so self-references in the body resolve.
+        if scopeStack != null then
+          currentScope(decl.name) = SymInfo(decl.name, funcType, mutable = false)
+        // Reuse the closure analyzer by synthesizing a ClosureAST and pinning its expected
+        // type. The closure analyzer pushes its own scope for params, analyzes the body,
+        // and runs capture detection — which will pick up the self-name as a capture.
+        val closureParams = decl.params.map(p => ClosureParamAST(p.name, Some(p.typ)))
+        val closureAST = ClosureAST(closureParams, decl.body)
+        val savedExp = currentExpected
+        currentExpected = Some(funcType)
+        val tClosure0 = try analyzeExpr(closureAST) finally currentExpected = savedExp
+        val tClosure = tClosure0 match
+          case c: TClosure =>
+            // Only set selfName when the body actually self-references — otherwise
+            // there's nothing to wire (and capture detection won't have added the
+            // name to captures, so backends don't need a slot for it).
+            val isSelfReferenced = c.captures.exists(_._1 == decl.name)
+            if isSelfReferenced then c.copy(selfName = Some(decl.name)) else c
+          case other => throw AnalysisError(s"inner def '${decl.name}': expected closure, got $other")
+        TVarStmt(decl.name, funcType, tClosure)
 
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
@@ -4007,7 +4098,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case TStringFromPtr(ptr, len, _) => scanCaptures(ptr, locals); scanCaptures(len, locals)
           case TStringFromSlice(slc, _) => scanCaptures(slc, locals)
           case TStr(e) => scanCaptures(e, locals)
-          case TClosure(innerParams, _, innerBody, _, _, _) =>
+          case TClosure(innerParams, _, innerBody, _, _, _, _) =>
             val innerLocals = locals ++ innerParams.map(_.name).toSet
             innerBody match
               case TExprBody(e) => scanCaptures(e, innerLocals)
@@ -4227,8 +4318,23 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // each codegen can emit a volatile load at the literal address.
         if fixedAddressVars.contains(name) then
           val (addr, typ) = fixedAddressVars(name)
-          TDeref(TCast(TIntLit(addr, I64), PtrType(typ)), typ)
-        else
+          return TDeref(TCast(TIntLit(addr, I64), PtrType(typ)), typ)
+        // Local shadow: a function-local binding (param, val, var, pattern-binder,
+        // implicit local from bare `name = expr`) takes precedence over any like-named
+        // global function. Without this, `dispatch = (a: int) -> a` followed by a bare
+        // `dispatch` reference would resolve to a global `dispatch(...)` function instead
+        // of the just-created local closure value. See also the matching check in CallAST.
+        lookupLocal(name) match
+          case Some(sym) if sym.isConst =>
+            val v = compileTimeConstants.getOrElse(sym.name,
+              compileTimeConstants.getOrElse(name,
+                throw AnalysisError(s"const '$name' missing folded value")))
+            return TIntLit(v, sym.typ)
+          case Some(sym) if sym.autoIndirect =>
+            return TDeref(TVarRef(sym.name, PtrType(sym.typ)), sym.typ)
+          case Some(sym) =>
+            return TVarRef(sym.name, sym.typ)
+          case None => ()
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
           val f = functions(name)
@@ -4359,6 +4465,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
           case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
+          case SymbolMeta.Kind.Const(constType, value) => TIntLit(value, constType)
           case SymbolMeta.Kind.Func(params, retType, _, _, _, eff) => TFuncRef(sym.name, SyslType.FuncType(params, retType, effects = eff))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
@@ -4748,6 +4855,27 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               throw AnalysisError(s"struct $structName has no method or field '$method'")
 
       case CallAST(name, args) =>
+        // Local shadow: if `name` is bound in the current function's scope chain
+        // AND the binding is a function/closure value, treat the call as an indirect
+        // call through that local. This must run BEFORE the global-function lookup
+        // below — without it, a pattern-bound `f: (string) -> int` from a destructured
+        // variant field would silently fall through to a like-named top-level
+        // `f(int) -> int`, causing a misleading argument-type error.
+        lookupLocal(name) match
+          case Some(sym) =>
+            sym.typ match
+              case ft: FuncType =>
+                val expectedTypes = ft.params.map(t => Some(t): Option[SyslType])
+                val tArgs = args.zip(expectedTypes.padTo(args.length, None)).map { case (a, exp) =>
+                  val saved = currentExpected
+                  currentExpected = exp.orElse(saved)
+                  try analyzeExpr(a) finally currentExpected = saved
+                }
+                val paramPairs = ft.params.zipWithIndex.map((t, i) => (s"_p$i", t))
+                val checkedArgs = checkArgs(name, paramPairs, tArgs)
+                return TIndirectCall(TVarRef(name, sym.typ), checkedArgs, ft.returnType)
+              case _ => () // local exists but isn't callable — fall through to global
+          case None => ()
         // For each param, the expected arg type during analysis. For Out/Inout the
         // body-visible type is the inner T (not the hidden `*T`), so the user-written
         // arg is analyzed against T — matching what's actually written at the call site.

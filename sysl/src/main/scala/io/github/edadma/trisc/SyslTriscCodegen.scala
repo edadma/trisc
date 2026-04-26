@@ -2,8 +2,11 @@ package io.github.edadma.trisc
 
 import scala.collection.mutable
 
-class SyslTriscCodegen(addresses: Int = 4):
-  private val out = new StringBuilder
+class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
+  // Output is accumulated as structured Line values (parsed once at emit time) so
+  // the peephole optimizer can run over typed instructions without a string round-trip.
+  // Stringified once at the end of generate().
+  private val out = mutable.ArrayBuffer.empty[TriscPeephole.Line]
   private var labelCounter = 0
   private var modulePrefix = "" // unique prefix for this compilation unit
   private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)
@@ -72,6 +75,18 @@ class SyslTriscCodegen(addresses: Int = 4):
   private def captureNeedsRc(t: SyslType): Boolean =
     t.isInstanceOf[SyslType.RefType] || structHasStringFields(t)
 
+  /** Compute the env data area size for a closure, with each capture placed at
+   *  its natural alignment (so mixed int+FuncType captures don't violate the
+   *  CPU's 8-byte-aligned ldd/std requirement). Mirrors the layout used by the
+   *  env-store, env-unpack and env-deinit walkers. */
+  private def closureEnvSize(captures: List[(String, SyslType)]): Int =
+    var off = 0
+    for (_, t) <- captures do
+      val a = stackAlign(t)
+      off = ((off + a - 1) / a) * a
+      off += stackSize(t).toInt
+    off
+
   /** Decide the env kind for a freshly-constructed TClosure based on capture
     * analysis. Stack env is only used for non-escaping closures whose captures
     * are all non-rc-bearing — in that case no rc header / malloc / free is
@@ -138,7 +153,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     val meta = ModuleMeta.fromProgram(program)
     val hasMain = meta.symbols.exists(s => s.name == "main" && s.typ.isInstanceOf[SymbolMeta.Kind.Func])
     if hasMain then emit("entry main")
-    out ++= meta.toAsmGlobals
+    // Parse the multi-line string from ModuleMeta into structured Lines.
+    for line <- meta.toAsmGlobals.linesIterator do emit(line)
 
     // Collect globals into data (initialized) and bss (zero-initialized) lists
     val dataGlobals = new mutable.ListBuffer[TDecl]
@@ -289,16 +305,26 @@ class SyslTriscCodegen(addresses: Int = 4):
                 emit(s"  rb ${stackSize(typ)}")
           case _ =>
 
-    // Emit extern declarations for malloc/free based on actual references in generated code
-    val generated = out.toString
+    // Emit extern declarations for malloc/free based on actual references in generated code.
+    // Scan the structured Instr array directly — no string formatting needed.
     val definedSymbols = (for decl <- program.decls yield decl match
       case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
       case TVarDecl(name, _, _, _, _, _) => Some(name)
       case _ => None).flatten.toSet
-    if generated.contains("movi r4, malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
-    if generated.contains("movi r4, free") && !definedSymbols.contains("free") then emit("extern free")
+    def referencesSymbol(sym: String): Boolean =
+      out.exists {
+        case TriscPeephole.Instr("movi", List(_, `sym`)) => true
+        case _ => false
+      }
+    if referencesSymbol("malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
+    if referencesSymbol("free") && !definedSymbols.contains("free") then emit("extern free")
 
-    out.toString
+    // Run the peephole optimizer over the structured output, then render to asm.
+    if peepholeEnabled then
+      val (optimized, _) = TriscPeephole.optimize(out)
+      TriscPeephole.render(optimized)
+    else
+      TriscPeephole.render(out)
 
   private case class LocalVar(name: String, offset: Int, typ: SyslType)
 
@@ -369,6 +395,11 @@ class SyslTriscCodegen(addresses: Int = 4):
       emitAddImm(7, 7, savedOffset - stackOffset)
       stackOffset = savedOffset
   private var currentFunction: TFunDecl = null
+  // True while generating a closure body. Closure prologues push an extra slot for
+  // the env pointer (r3), so the epilogue needs to skip 8 more bytes than a regular
+  // function. Used by emitEpilogue (called from TReturnStmt) so early-return paths
+  // pop the same number of bytes as the implicit-return path through emitClosureEpilogue.
+  private var inClosureBody: Boolean = false
 
   // Determine if a global variable should go in bss (zero-initialized) vs data
   private def isZeroInit(typ: SyslType, init: TExpr): Boolean =
@@ -626,7 +657,13 @@ class SyslTriscCodegen(addresses: Int = 4):
     emitAddImm(3, ptrReg, -headerOff) // r3 = &refcount (reload)
     emit("  std r4, r3, r0")          // store back
     emit(s"  bne r4, r0, $noFree")
-    // refcount == 0 → call deinit then free(base)
+    // refcount == 0 → write -1 sentinel, call deinit, free(base). Writing -1
+    // BEFORE deinit prevents a self-referential cycle: e.g., a closure-env's
+    // self-cell capture stores a copy of the descriptor whose env_ptr is the
+    // same env. When the deinit walks that capture and tries to decr the env
+    // again, the sentinel check (refcount == -1 → skip) makes it a no-op.
+    emit("  addi r4, r0, -1")         // r4 = -1 (sentinel)
+    emit("  std r4, r3, r0")          // rc = -1 (mark as being freed)
     emit("  pshd r1")                 // save r1
     deinitFunc.foreach { name =>
       // Call deinit(dataPtr) — dataPtr is ptrReg (past header). r3 holds the
@@ -999,8 +1036,11 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  pshd r5")
     emit("  mov r5, r7")
     emit("  pshd r1")                  // save env_ptr at fp-8 (r5-8)
+    // Walk captures at their natural alignment so offsets match the env-store layout.
     var envOffset = 0
     for (_, capType) <- closure.captures do
+      val capAlign = stackAlign(capType)
+      envOffset = ((envOffset + capAlign - 1) / capAlign) * capAlign
       if structHasStringFields(capType) then
         emitAddImm(2, 5, -8)            // r2 = &saved env_ptr
         emit("  ldd r2, r2, r0")        // r2 = env_ptr
@@ -1416,6 +1456,7 @@ class SyslTriscCodegen(addresses: Int = 4):
     // Create a TFunDecl for the closure so we can reuse epilogue/return machinery
     val fun = TFunDecl(name, closure.params, closure.returnType, closure.body, isPrivate = false)
     currentFunction = fun
+    inClosureBody = true
     locals = new mutable.LinkedHashMap
     refParams = new mutable.LinkedHashMap
     stringBorrowParams = fun.params.collect { case p if p.typ == SyslType.StringType => p.name }.toSet
@@ -1564,19 +1605,23 @@ class SyslTriscCodegen(addresses: Int = 4):
           emitStructStringFieldsRC(5, newLocal.offset, st, incr = true)
         case _ =>
 
-    // Load captured variables from env into locals
+    // Load captured variables from env into locals.
+    // Mirror the env-store layout: each capture lives at its natural alignment in
+    // env (otherwise mixed-alignment captures hit the CPU's alignment check).
     if closure.captures.nonEmpty then
       // env_ptr is saved at [fp+16] (above saved r6 and r5)
       emitAddImm(1, 5, 16)       // r1 = fp+16
       emit("  ldd r1, r1, r0")   // r1 = env_ptr
       var envOffset = 0
       for (capName, capType) <- closure.captures do
-        val size = stackSize(capType)
+        val size = stackSize(capType).toInt
+        val capAlign = stackAlign(capType)
+        envOffset = ((envOffset + capAlign - 1) / capAlign) * capAlign
         capType match
           case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType |
                _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
             // Aggregate: copy size bytes into a local slot
-            val aligned = ((size + 7) & ~7).toInt
+            val aligned = ((size + 7) & ~7)
             emitAddImm(7, 7, -aligned)
             stackOffset -= aligned
             for i <- 0 until aligned by 8 do
@@ -1594,7 +1639,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             emit("  mov r3, r7")
             emitStore(2, 3, capType)
             locals(capName) = LocalVar(capName, stackOffset, capType)
-        envOffset += size.toInt
+        envOffset += size
 
     // Generate body
     fun.body match
@@ -1610,6 +1655,7 @@ class SyslTriscCodegen(addresses: Int = 4):
 
     locals = null
     currentFunction = null
+    inClosureBody = false
     stringBorrowParams = Set.empty
     funcBorrowParams = Set.empty
     captureBorrows = Set.empty
@@ -1746,14 +1792,19 @@ class SyslTriscCodegen(addresses: Int = 4):
     emit("  mov r7, r5")
     emit("  popd r5")
     emit("  popd r6")
-    // Skip past pre-prologue pushed register params (including hidden return ptr if any)
+    // Skip past pre-prologue pushed register params (including hidden return ptr if any).
+    // Closure bodies additionally push the env pointer (r3) before r6/r5, so when an
+    // early `return` triggers this epilogue we need to skip that slot too — otherwise
+    // the stack ends up 8 bytes off and the caller's frame is corrupted.
     val nRegPushed = if currentFunction != null then
       val sr = returnsViaPointer(currentFunction.returnType)
       val allSlots = (if sr then 1 else 0) + currentFunction.params.length
       allSlots.min(1)
     else 0
-    if nRegPushed > 0 then
-      emitAddImm(7, 7, nRegPushed * 8)
+    val extraEnvSkip = if inClosureBody then 8 else 0
+    val skip = nRegPushed * 8 + extraEnvSkip
+    if skip > 0 then
+      emitAddImm(7, 7, skip)
     emit("  jalr r0, r6")
 
   // Break/continue label stacks
@@ -1912,7 +1963,7 @@ class SyslTriscCodegen(addresses: Int = 4):
             // the expression's frame and lives at function scope.
             init match
               case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
-                val envSize = c.captures.map((_, t) => stackSize(t)).sum
+                val envSize = closureEnvSize(c.captures)
                 val alignedEnvSize = (envSize + 7) & ~7
                 allocLocal(s"__env_$closureCounter", SyslType.IntType(64), alignedEnvSize)
               case _ =>
@@ -3181,7 +3232,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         emit("  std r0, r2, r0")       // env_ptr = null at [sp+8]
         emit("  mov r1, r7")           // r1 = address of the pair
 
-      case c @ TClosure(params, returnType, body, captures, escapes, _) =>
+      case c @ TClosure(params, returnType, body, captures, escapes, _, _) =>
         // Generate a unique name and defer the closure function body
         val closureName = if modulePrefix.nonEmpty then s"__closure_${modulePrefix}_$closureCounter"
                           else s"__closure_$closureCounter"
@@ -3223,45 +3274,58 @@ class SyslTriscCodegen(addresses: Int = 4):
 
             // Copy captures into env. No incr (StackEnv kind has no rc-bearing
             // captures by construction — closureKindOf would have returned
-            // HeapEnv otherwise).
+            // HeapEnv otherwise). Skip the self-slot (if any) — wired below
+            // from the just-built descriptor. Captures are placed at their
+            // natural alignment so mixed-alignment captures don't violate the
+            // CPU's strict 8-byte alignment check.
             var envOffset = 0
+            var selfOffStack = -1
             for (name, typ) <- captures do
-              val size = stackSize(typ)
-              emit("  ldd r2, r7, r0")
-              if envOffset != 0 then emitAddImm(2, 2, envOffset)
-              if locals != null && locals.contains(name) then
-                val local = locals(name)
-                typ match
-                  case _: SyslType.StructType | _: SyslType.ArrayType |
-                       _: SyslType.SliceType | _: SyslType.EnumType |
-                       _: SyslType.FuncType | _: SyslType.InterfaceType |
-                       SyslType.StringType =>
-                    emitAddImm(3, 5, local.offset)
-                    for i <- 0 until size.toInt by 8 do
-                      emitAddImm(4, 3, i)
-                      emit("  ldd r4, r4, r0")
-                      emitAddImm(1, 2, i)
-                      emit("  std r4, r1, r0")
-                  case _ =>
-                    emitAddImm(3, 5, local.offset)
-                    emitLoad(3, 3, typ)
-                    emitStore(3, 2, typ)
+              val size = stackSize(typ).toInt
+              val capAlign = stackAlign(typ)
+              envOffset = ((envOffset + capAlign - 1) / capAlign) * capAlign
+              if c.selfName.contains(name) then
+                selfOffStack = envOffset
               else
-                emit(s"  movi r3, $name")
-                typ match
-                  case _: SyslType.ArrayType | _: SyslType.StructType |
-                       _: SyslType.SliceType | _: SyslType.EnumType |
-                       _: SyslType.FuncType | _: SyslType.InterfaceType |
-                       SyslType.StringType =>
-                    for i <- 0 until size.toInt by 8 do
-                      emitAddImm(4, 3, i)
-                      emit("  ldd r4, r4, r0")
-                      emitAddImm(1, 2, i)
-                      emit("  std r4, r1, r0")
-                  case _ =>
-                    emitLoad(3, 3, typ)
-                    emitStore(3, 2, typ)
-              envOffset += size.toInt
+                emit("  ldd r2, r7, r0")
+                if envOffset != 0 then emitAddImm(2, 2, envOffset)
+                if locals != null && locals.contains(name) then
+                  val local = locals(name)
+                  typ match
+                    case _: SyslType.StructType | _: SyslType.ArrayType |
+                         _: SyslType.SliceType | _: SyslType.EnumType |
+                         _: SyslType.FuncType | _: SyslType.InterfaceType |
+                         SyslType.StringType =>
+                      emitAddImm(3, 5, local.offset)
+                      for i <- 0 until size by 8 do
+                        emitAddImm(4, 3, i)
+                        emit("  ldd r4, r4, r0")
+                        emitAddImm(1, 2, i)
+                        emit("  std r4, r1, r0")
+                    case _ =>
+                      // Use local.typ for the load — params are stored in 8-byte
+                      // I64 slots (big-endian; ldw at the slot base reads the
+                      // wrong half), but emitStore uses the capture type so the
+                      // env slot keeps the natural width.
+                      emitAddImm(3, 5, local.offset)
+                      emitLoad(3, 3, local.typ)
+                      emitStore(3, 2, typ)
+                else
+                  emit(s"  movi r3, $name")
+                  typ match
+                    case _: SyslType.ArrayType | _: SyslType.StructType |
+                         _: SyslType.SliceType | _: SyslType.EnumType |
+                         _: SyslType.FuncType | _: SyslType.InterfaceType |
+                         SyslType.StringType =>
+                      for i <- 0 until size by 8 do
+                        emitAddImm(4, 3, i)
+                        emit("  ldd r4, r4, r0")
+                        emitAddImm(1, 2, i)
+                        emit("  std r4, r1, r0")
+                    case _ =>
+                      emitLoad(3, 3, typ)
+                      emitStore(3, 2, typ)
+              envOffset += size
 
             // Build {func_ptr, env_ptr} pair on stack (16 bytes)
             emit("  popd r2")              // r2 = env_ptr
@@ -3273,17 +3337,36 @@ class SyslTriscCodegen(addresses: Int = 4):
             emitAddImm(3, 7, 8)
             emit("  std r2, r3, r0")
             emit("  mov r1, r7")
+            // Inner-def self-recursion: copy the just-built 16-byte descriptor into
+            // env[selfOff]. r2 still holds env_ptr; r7 points at the descriptor.
+            if selfOffStack >= 0 then
+              for i <- 0 until 16 by 8 do
+                emitAddImm(4, 7, i)
+                emit("  ldd r4, r4, r0")
+                emitAddImm(3, 2, selfOffStack + i)
+                emit("  std r4, r3, r0")
 
           case FuncKind.HeapEnv =>
             // Escaping closure or any rc-bearing captures: heap env with
             // [rc:8 | deinit_ptr:8 | data] header. env_ptr = base + 16.
+            // Captures are laid out at their natural alignment so that mixed-alignment
+            // captures (e.g. int + FuncType) don't end up at addresses that fail the
+            // CPU's strict 8-byte alignment check on ldd/std.
             needsAllocExtern = true
             val deinitOpt = closureEnvDeinitFor(closureName, c)
-            val envLayout = captures.map { (name, typ) =>
-              val size = stackSize(typ)
-              (name, typ, size)
+            val envLayout = {
+              var off = 0
+              captures.map { (name, typ) =>
+                val size = stackSize(typ).toInt
+                val align = stackAlign(typ)
+                off = ((off + align - 1) / align) * align
+                val rec = (name, typ, off, size)
+                off += size
+                rec
+              }
             }
-            val envSize = envLayout.map(_._3).sum
+            val envSize = if envLayout.isEmpty then 0
+                          else envLayout.last._3 + envLayout.last._4
             val totalSize = envSize + 16
 
             // malloc(totalSize)
@@ -3305,42 +3388,49 @@ class SyslTriscCodegen(addresses: Int = 4):
             stackOffset -= 8
 
             // Copy captures into env + Phase A: incr borrowed rc-bearing captures.
-            var envOffset = 0
-            for (name, typ, size) <- envLayout do
-              emit("  ldd r2, r7, r0")
-              if envOffset != 0 then emitAddImm(2, 2, envOffset)
-              if locals != null && locals.contains(name) then
-                val local = locals(name)
-                typ match
-                  case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType |
-                       _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
-                    emitAddImm(3, 5, local.offset)
-                    for i <- 0 until size.toInt by 8 do
-                      emitAddImm(4, 3, i)
-                      emit("  ldd r4, r4, r0")
-                      emitAddImm(1, 2, i)
-                      emit("  std r4, r1, r0")
-                  case _ =>
-                    emitAddImm(3, 5, local.offset)
-                    emitLoad(3, 3, typ)
-                    emitStore(3, 2, typ)
+            // Skip the self-slot (if any) — wired below from the just-built descriptor.
+            var selfOffHeap = -1
+            for (name, typ, envOffset, size) <- envLayout do
+              if c.selfName.contains(name) then
+                selfOffHeap = envOffset
               else
-                emit(s"  movi r3, $name")
-                typ match
-                  case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType |
-                       _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
-                    for i <- 0 until size.toInt by 8 do
-                      emitAddImm(4, 3, i)
-                      emit("  ldd r4, r4, r0")
-                      emitAddImm(1, 2, i)
-                      emit("  std r4, r1, r0")
-                  case _ =>
-                    emitLoad(3, 3, typ)
-                    emitStore(3, 2, typ)
-              if structHasStringFields(typ) then
                 emit("  ldd r2, r7, r0")
-                emitValueRC(2, envOffset, typ, incr = true)
-              envOffset += size.toInt
+                if envOffset != 0 then emitAddImm(2, 2, envOffset)
+                if locals != null && locals.contains(name) then
+                  val local = locals(name)
+                  typ match
+                    case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType |
+                         _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
+                      emitAddImm(3, 5, local.offset)
+                      for i <- 0 until size by 8 do
+                        emitAddImm(4, 3, i)
+                        emit("  ldd r4, r4, r0")
+                        emitAddImm(1, 2, i)
+                        emit("  std r4, r1, r0")
+                    case _ =>
+                      // Use local.typ for the load — params are stored in 8-byte
+                      // I64 slots (big-endian; ldw at the slot base reads the
+                      // wrong half), but emitStore uses the capture type so the
+                      // env slot keeps the natural width.
+                      emitAddImm(3, 5, local.offset)
+                      emitLoad(3, 3, local.typ)
+                      emitStore(3, 2, typ)
+                else
+                  emit(s"  movi r3, $name")
+                  typ match
+                    case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType |
+                         _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
+                      for i <- 0 until size by 8 do
+                        emitAddImm(4, 3, i)
+                        emit("  ldd r4, r4, r0")
+                        emitAddImm(1, 2, i)
+                        emit("  std r4, r1, r0")
+                    case _ =>
+                      emitLoad(3, 3, typ)
+                      emitStore(3, 2, typ)
+                if structHasStringFields(typ) then
+                  emit("  ldd r2, r7, r0")
+                  emitValueRC(2, envOffset, typ, incr = true)
 
             emit("  popd r2")             // r2 = env_ptr
             stackOffset += 8
@@ -3351,6 +3441,14 @@ class SyslTriscCodegen(addresses: Int = 4):
             emitAddImm(3, 7, 8)
             emit("  std r2, r3, r0")
             emit("  mov r1, r7")
+            // Inner-def self-recursion: copy the just-built 16-byte descriptor into
+            // env[selfOff]. r2 still holds env_ptr; r7 points at the descriptor.
+            if selfOffHeap >= 0 then
+              for i <- 0 until 16 by 8 do
+                emitAddImm(4, 7, i)
+                emit("  ldd r4, r4, r0")
+                emitAddImm(3, 2, selfOffHeap + i)
+                emit("  std r4, r3, r0")
 
       case TInterfaceBox(expr, iface) =>
         // Box a concrete value into an interface: {itable_ptr, data_ptr}
@@ -3460,7 +3558,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         var envPreallocCounter = closureCounter
         for arg <- args do arg match
           case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
-            val envSize = c.captures.map((_, t) => stackSize(t)).sum
+            val envSize = closureEnvSize(c.captures)
             val alignedEnvSize = (envSize + 7) & ~7
             allocLocal(s"__env_$envPreallocCounter", SyslType.IntType(64), alignedEnvSize)
             envPreallocCounter += 1
@@ -3566,7 +3664,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         var envPreallocCounter = closureCounter
         for arg <- allArgs do arg match
           case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
-            val envSize = c.captures.map((_, t) => stackSize(t)).sum
+            val envSize = closureEnvSize(c.captures)
             val alignedEnvSize = (envSize + 7) & ~7
             allocLocal(s"__env_$envPreallocCounter", SyslType.IntType(64), alignedEnvSize)
             envPreallocCounter += 1
@@ -3736,7 +3834,7 @@ class SyslTriscCodegen(addresses: Int = 4):
         var envPreallocCounter = closureCounter
         for arg <- allArgs do arg match
           case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
-            val envSize = c.captures.map((_, t) => stackSize(t)).sum
+            val envSize = closureEnvSize(c.captures)
             val alignedEnvSize = (envSize + 7) & ~7
             allocLocal(s"__env_$envPreallocCounter", SyslType.IntType(64), alignedEnvSize)
             envPreallocCounter += 1
@@ -5826,6 +5924,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     emitAddImm(7, 7, 8)            // skip 1 reg param
     emit("  jalr r0, r6")
 
+  /** Push one line of TRISC asm into the output array. The line is parsed into a
+   *  structured `TriscPeephole.Line` (Instr / Label / Directive / Comment / Blank)
+   *  so the peephole optimizer can pattern-match operands without re-parsing. */
   private def emit(line: String): Unit =
-    out ++= line
-    out += '\n'
+    out += TriscPeephole.parseLine(line)
