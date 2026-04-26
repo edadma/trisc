@@ -49,6 +49,8 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_ICMP_UNREACH_INJECT = 38
     val INET_CMD_TCP_INJECT_FAIL = 42
     val INET_CMD_IP_REASM_SELFTEST = 44
+    val INET_CMD_IP_REASM_OVERLAP_TEST = 45
+    val INET_CMD_IP_REASM_TIMEOUT_TEST = 46
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val ARP_PROBE_OP_START    = 0
@@ -695,6 +697,43 @@ inject failure.
             return -1
         var msg: [1]byte
         msg[0] = byte(INET_CMD_IP_REASM_SELFTEST)
+        var reply: [1]byte
+        ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### ip_reasm_overlap_test (test-only)
+
+Triggers the inet server's RFC 5722 overlap-fragment test. Two
+fragments are injected for the same `(src, dst, id, proto)` tuple
+where the second overlaps the first; the slot must be poisoned in
+response. Returns 0 on pass, nonzero on failure.
+
+    ip_reasm_overlap_test() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_IP_REASM_OVERLAP_TEST)
+        var reply: [1]byte
+        ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### ip_reasm_timeout_test (test-only)
+
+Triggers the inet server's reassembly-timeout self-test. Injects
+one first-fragment, force-expires its deadline, runs the scan
+sweep, and verifies `inet_ip_reasm_timeouts_sent` advanced by one
+(i.e. ICMP Time Exceeded emit was attempted). Returns 0 on pass,
+nonzero on failure.
+
+    ip_reasm_timeout_test() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_IP_REASM_TIMEOUT_TEST)
         var reply: [1]byte
         ipc_send(port, msg, 1, reply, 1)
         int(reply[0]) & 0xff

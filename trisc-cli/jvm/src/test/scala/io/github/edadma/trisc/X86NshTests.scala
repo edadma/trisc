@@ -582,6 +582,18 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_ip_reasm: failed"
   }
 
+  "x86 ip: fragmentation RFC corners (overlap + timeout)" in {
+    // test_ip_reasm2 covers two RFC corners of the reassembly path:
+    //   1. RFC 5722 overlap-fragment drop — a fragment overlapping
+    //      a previously received range must poison the slot.
+    //   2. ICMP Time Exceeded emit on RFC 791 30-s timeout — the
+    //      scan sweep must call inet_send_icmp_time_exceeded for
+    //      slots that timed out with have_first=1.
+    val output = qemu.command("test_ip_reasm2")
+    output should include("test_ip_reasm2: ok")
+    output should not include "test_ip_reasm2: failed"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

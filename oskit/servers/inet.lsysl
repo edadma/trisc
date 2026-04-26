@@ -90,6 +90,8 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_INJECT_FAIL = 42
     val INET_CMD_TCP_GET_INFO    = 43
     val INET_CMD_IP_REASM_SELFTEST = 44
+    val INET_CMD_IP_REASM_OVERLAP_TEST = 45
+    val INET_CMD_IP_REASM_TIMEOUT_TEST = 46
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1768,6 +1770,80 @@ inspect ETH dst once we're past the NIC.
         0
 
 
+Test-only: RFC 5722 overlap-fragment enforcement. Inject a
+first-fragment ('X' x 16) at offset=0, then an overlapping
+fragment ('Y' x 8) at offset=8 — overlapping bytes 8..16 of the
+existing range. The reassembly slot must be poisoned in
+response. Reply 1 byte: 0 on pass, nonzero on failure.
+
+    inet_handle_ip_reasm_overlap_test(sender: int, buf: *byte)
+        val rc = inet_ip_reasm_overlap_test_run()
+        var reply: [1]byte
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+    inet_ip_reasm_overlap_test_run() -> int
+        val id_v = 0xCAFE
+        var ud: [24]byte
+        var bi = 0
+        while bi < 16
+            ud[bi] = byte('X')
+            bi += 1
+        bi = 0
+        while bi < 8
+            ud[16 + bi] = byte('Y')
+            bi += 1
+        if inet_ip_reasm_inject_frag(id_v, 0, 1, ud, 0, 16) != 0
+            return 1
+        if inet_ip_reasm_inject_frag(id_v, 8, 1, ud, 16, 8) != 0
+            return 2
+        val s = inet_ip_reasm_find(ipv4(10, 0, 2, 99), inet_get_our_ip(),
+                                   id_v, IP_PROTO_UDP)
+        if s < 0
+            return 3
+        val was_poisoned = inet_ip_reasm_table[s].poisoned
+        inet_ip_reasm_force_expire(s)
+        inet_ip_reasm_scan_timeouts()
+        if was_poisoned == 0
+            return 4
+        0
+
+
+Test-only: ICMP Time Exceeded emit on reassembly timeout. Inject
+one first-fragment, force its deadline past, run the scan sweep,
+and verify `inet_ip_reasm_timeouts_sent` advanced by exactly one.
+Reply 1 byte: 0 on pass, nonzero on failure.
+
+    inet_handle_ip_reasm_timeout_test(sender: int, buf: *byte)
+        val rc = inet_ip_reasm_timeout_test_run()
+        var reply: [1]byte
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+    inet_ip_reasm_timeout_test_run() -> int
+        val before = inet_ip_reasm_timeouts_sent
+        val id_v = 0xBABE
+        var ud: [16]byte
+        var i = 0
+        while i < 16
+            ud[i] = byte('Q')
+            i += 1
+        if inet_ip_reasm_inject_frag(id_v, 0, 1, ud, 0, 16) != 0
+            return 1
+        val s = inet_ip_reasm_find(ipv4(10, 0, 2, 99), inet_get_our_ip(),
+                                   id_v, IP_PROTO_UDP)
+        if s < 0
+            return 2
+        inet_ip_reasm_force_expire(s)
+        inet_ip_reasm_scan_timeouts()
+        val after = inet_ip_reasm_timeouts_sent
+        if after - before != 1
+            return 3
+        if inet_ip_reasm_table[s].in_use != 0
+            return 4
+        0
+
+
 ### UDP — inbound
 
 Dispatch an IPv4/UDP frame that already passed the destination-IP
@@ -2215,6 +2291,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_ICMP_UNREACH_INJECT -> inet_handle_icmp_unreach_inject(sender, buf)
                     INET_CMD_IP_REASM_SELFTEST -> inet_handle_ip_reasm_selftest(sender, buf)
+                    INET_CMD_IP_REASM_OVERLAP_TEST -> inet_handle_ip_reasm_overlap_test(sender, buf)
+                    INET_CMD_IP_REASM_TIMEOUT_TEST -> inet_handle_ip_reasm_timeout_test(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte
