@@ -494,6 +494,24 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "dup: FAIL"
   }
 
+  "aarch64 musl: eventfd2 + epoll integration" in {
+    // meventfd binds the eventfd2 syscall (slix-musl 156). Tests
+    // empty-NB read returns EAGAIN, write 7 / read 7 round-trip,
+    // epoll EPOLLIN fires when count > 0 and quiesces after drain,
+    // and EFD_SEMAPHORE mode hands back 1 per read.
+    qemu.send("eventfd\n")
+    val output = qemu.waitFor("meventfd: done")
+    output should include("meventfd: empty_read=-1 errno=11")
+    output should include("meventfd: after_write7=7")
+    output should include("meventfd: epoll_after_write=1 events=1")
+    output should include("meventfd: epoll_after_drain=0")
+    output should include("meventfd: sem1=1")
+    output should include("meventfd: sem2=1")
+    output should include("meventfd: sem3=1")
+    output should include("meventfd: sem4=-1 errno=11")
+    output should include("meventfd: done")
+  }
+
   "aarch64 net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

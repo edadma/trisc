@@ -295,6 +295,23 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("'ping!'")
   }
 
+  "x86 musl: eventfd2 + epoll integration" in {
+    // Mirror of the aarch64 meventfd test — exercises slix-musl
+    // syscall 156, the new POSIX_FD_EVENTFD shim path, and the
+    // EFD_SEMAPHORE counter-decrement mode.
+    qemu.send("eventfd\n")
+    val output = qemu.waitFor("meventfd: done")
+    output should include("meventfd: empty_read=-1 errno=11")
+    output should include("meventfd: after_write7=7")
+    output should include("meventfd: epoll_after_write=1 events=1")
+    output should include("meventfd: epoll_after_drain=0")
+    output should include("meventfd: sem1=1")
+    output should include("meventfd: sem2=1")
+    output should include("meventfd: sem3=1")
+    output should include("meventfd: sem4=-1 errno=11")
+    output should include("meventfd: done")
+  }
+
   "x86 net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

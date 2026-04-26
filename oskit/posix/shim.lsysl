@@ -87,6 +87,7 @@ posix_fd_bridge memory.
     val POSIX_FD_TCP_SOCKET  = 5
     val POSIX_FD_FILE        = 6
     val POSIX_FD_EPOLL       = 7
+    val POSIX_FD_EVENTFD     = 8
 
     val POSIX_FDS_PER_PROC   = 64
 
@@ -128,6 +129,14 @@ posix_fd_bridge memory.
         keep_idle_secs: int
         keep_intvl_secs: int
         keep_cnt: int
+        // POSIX_FD_EVENTFD state. `eventfd_count` is the running
+        // counter; read returns the count and resets it (or
+        // decrements to 0 in semaphore mode), write adds to it.
+        // `eventfd_semaphore` records EFD_SEMAPHORE so successive
+        // reads decrement by 1 instead of returning the full
+        // counter at once.
+        eventfd_count: i64
+        eventfd_semaphore: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -152,6 +161,8 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].keep_idle_secs = 0
             posix_fd_table[base + i].keep_intvl_secs = 0
             posix_fd_table[base + i].keep_cnt = 0
+            posix_fd_table[base + i].eventfd_count = i64(0)
+            posix_fd_table[base + i].eventfd_semaphore = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -218,6 +229,8 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].keep_idle_secs = 0
                 posix_fd_table[base + i].keep_intvl_secs = 0
                 posix_fd_table[base + i].keep_cnt = 0
+                posix_fd_table[base + i].eventfd_count = i64(0)
+                posix_fd_table[base + i].eventfd_semaphore = 0
                 return i
             i += 1
         -1
@@ -574,6 +587,8 @@ to the same UDP stack that native sysl programs use via
             return sys_epoll_ctl(int(a0), int(a1), int(a2), a3)
         if num == 155
             return sys_epoll_pwait(int(a0), a1, int(a2), int(a3))
+        if num == 156
+            return sys_eventfd2(int(a0), int(a1))
         i64(-38)            // -ENOSYS
 
 SYS_WRITE. Looks up `fd` in the process's POSIX fd table and
@@ -639,6 +654,44 @@ vm_copy_from.
             return i64(sent_total)
         if k == POSIX_FD_FILE
             return shim_vfs_write(posix_fd_target(fd), buf, len)
+        if k == POSIX_FD_EVENTFD
+            // Linux requires len >= 8.
+            if len < 8 || buf == i64(0)
+                return i64(-22)             // -EINVAL
+            val ubuf: *byte = *byte(buf)
+            var add = i64(0)
+            var bi = 0
+            while bi < 8
+                add = add | (i64(int(ubuf[bi]) & 0xff) << (bi * 8))
+                bi += 1
+            // Linux rejects the value u64::MAX (-1 as i64) — that
+            // bit pattern is reserved as "invalid".
+            if add == i64(-1)
+                return i64(-22)
+            val pid_w = posix_fd_current_pid()
+            val widx = pid_w * POSIX_FDS_PER_PROC + fd
+            // Counter is unsigned u64-1 max; we treat i64 sign as
+            // "high bit set" → near-overflow.  Accept the add if
+            // current + add < 2^64 - 1.  Practically: detect
+            // overflow on signed addition by checking whether the
+            // sum wraps below either operand (works because we
+            // never exceed i64::MAX before this point).
+            val cur = posix_fd_table[widx].eventfd_count
+            val sum = cur + add
+            // Overflow detection — same operands both unsigned-wise.
+            if u64(sum) < u64(cur)
+                if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                    return i64(-11)         // -EAGAIN
+                // Blocking mode: slix has no inter-thread notify
+                // path that wakes a write blocked on counter
+                // headroom yet, so return -EAGAIN even in blocking
+                // mode (matches musl when no waiter exists). Real
+                // behaviour for the threaded "writer waits for
+                // reader" case lands with the inter-thread notify
+                // chunk.
+                return i64(-11)
+            posix_fd_table[widx].eventfd_count = sum
+            return i64(8)
         i64(-9)             // -EBADF
 
 SYS_READ. STDIN returns 0 (EOF) — no kernel-side keyboard path
@@ -694,6 +747,35 @@ handles read from the TTY driver.
             return i64(rlen)
         if k == POSIX_FD_FILE
             return shim_vfs_read(posix_fd_target(fd), buf, len)
+        if k == POSIX_FD_EVENTFD
+            if len < 8 || buf == i64(0)
+                return i64(-22)
+            val pid_r = posix_fd_current_pid()
+            val ridx = pid_r * POSIX_FDS_PER_PROC + fd
+            val cur = posix_fd_table[ridx].eventfd_count
+            if cur == i64(0)
+                if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                    return i64(-11)         // -EAGAIN
+                // Blocking semantics: see write-side note above —
+                // slix doesn't yet have an inter-thread notify
+                // for eventfd, so return -EAGAIN in blocking mode
+                // too. Single-threaded user code that writes
+                // before reading hits the cur != 0 path naturally.
+                return i64(-11)
+            // Semaphore mode hands back 1 per read; default mode
+            // returns the full counter and resets to 0.
+            var deliver = cur
+            var remain = i64(0)
+            if posix_fd_table[ridx].eventfd_semaphore != 0
+                deliver = i64(1)
+                remain = cur - i64(1)
+            posix_fd_table[ridx].eventfd_count = remain
+            val ubuf: *byte = *byte(buf)
+            var bi = 0
+            while bi < 8
+                ubuf[bi] = byte(int((deliver >> i64(bi * 8))) & 0xff)
+                bi += 1
+            return i64(8)
         i64(-9)             // -EBADF
 
 VFS read/write helpers. Both create a grant against the user's
@@ -2372,6 +2454,43 @@ it in a `POSIX_FD_EPOLL` slot. `flags` would carry
 the slot but exec/CLOEXEC isn't tracked yet — see the
 posix_fd_bridge memory.
 
+SYS_EVENTFD2 (slix-musl syscall 156, sits next to the
+epoll triplet at 153/154/155). Allocates an
+eventfd backing slot with `initval` as the starting counter.
+`flags` honors:
+
+- `EFD_NONBLOCK` (0x800 = 2048) — same bit as `O_NONBLOCK`,
+  recorded on the slot's flags so read/write pick the
+  EAGAIN path on starvation.
+- `EFD_CLOEXEC`  (0x80000 = 524288) — slix doesn't track CLOEXEC
+  yet; accepted and ignored (matches the existing accept4 stance).
+- `EFD_SEMAPHORE` (1) — read decrements the counter by 1 instead
+  of returning the full count and zeroing it.
+
+Returns the allocated POSIX fd, or -EMFILE if no slot is free.
+
+    val POSIX_EFD_SEMAPHORE = 1
+    val POSIX_EFD_CLOEXEC   = 524288
+    val POSIX_EFD_NONBLOCK  = 2048
+
+    sys_eventfd2(initval: int, flags: int) -> i64
+        val pfd = posix_fd_alloc(POSIX_FD_EVENTFD, 0)
+        if pfd < 0
+            return i64(-24)
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + pfd
+        posix_fd_table[idx].eventfd_count = i64(initval)
+        var sem = 0
+        if (flags & POSIX_EFD_SEMAPHORE) != 0
+            sem = 1
+        posix_fd_table[idx].eventfd_semaphore = sem
+        var fd_flags = 0
+        if (flags & POSIX_EFD_NONBLOCK) != 0
+            fd_flags = fd_flags | POSIX_O_NONBLOCK
+        posix_fd_set_flags(pfd, fd_flags)
+        i64(pfd)
+
+
     sys_epoll_create1(epoll_flags: int) -> i64
         val inst = epoll_alloc_inst()
         if inst < 0
@@ -2556,6 +2675,21 @@ multi-fd EPOLLET loops.
             return 0
         if k == POSIX_FD_STDOUT || k == POSIX_FD_STDERR
             return want & POSIX_EPOLLOUT
+        if k == POSIX_FD_EVENTFD
+            // Readable when count > 0; writable when count <
+            // u64-1 (i.e. add of 1 wouldn't overflow). Counter is
+            // i64 internally with i64::MAX representing "near max"
+            // — a tighter bound than Linux's u64::MAX-1, but the
+            // gap is irrelevant for any practical use.
+            val pid_e = posix_fd_current_pid()
+            val eidx = pid_e * POSIX_FDS_PER_PROC + target_fd
+            val cnt = posix_fd_table[eidx].eventfd_count
+            var ev = 0
+            if cnt > i64(0)
+                ev = ev | POSIX_EPOLLIN
+            if cnt < i64(0x7fffffffffffffff)
+                ev = ev | POSIX_EPOLLOUT
+            return ev & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         0
 
 `epoll_scan_once` walks the instance's entries, queries inet
