@@ -3834,10 +3834,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tClosure0 = try analyzeExpr(closureAST) finally currentExpected = savedExp
         val tClosure = tClosure0 match
           case c: TClosure =>
-            // Drop the self-name from captures so backends don't try to read it from
-            // the enclosing env at construction time. The interpreter wires the
-            // self-cell in itself once the ClosureVal exists (see selfName).
-            c.copy(captures = c.captures.filterNot(_._1 == decl.name), selfName = Some(decl.name))
+            // Only set selfName when the body actually self-references — otherwise
+            // there's nothing to wire (and capture detection won't have added the
+            // name to captures, so backends don't need a slot for it).
+            val isSelfReferenced = c.captures.exists(_._1 == decl.name)
+            if isSelfReferenced then c.copy(selfName = Some(decl.name)) else c
           case other => throw AnalysisError(s"inner def '${decl.name}': expected closure, got $other")
         TVarStmt(decl.name, funcType, tClosure)
 
