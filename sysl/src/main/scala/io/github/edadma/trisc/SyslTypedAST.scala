@@ -16,7 +16,7 @@ case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
 case class TDataEnumDecl(name: String, enumType: SyslType.EnumType) extends TDecl
 case class TTypeAliasDecl(name: String, target: SyslType) extends TDecl
 // Compile-time constant — no storage, no symbol, fully folded at use sites by the analyzer.
-case class TConstDecl(name: String, typ: SyslType) extends TDecl
+case class TConstDecl(name: String, typ: SyslType, value: Long) extends TDecl
 case class TInterfaceDecl(name: String, ifaceType: SyslType.InterfaceType) extends TDecl
 
 case class TParam(name: String, typ: SyslType, default: Option[TExpr] = None, mode: ParamMode = ParamMode.In)

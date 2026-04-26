@@ -487,6 +487,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           else
             globalScope(localKey) = SymInfo(sym.name, dataType, mutable = false)
             externalSymbols += localKey
+        case SymbolMeta.Kind.Const(constType, value) =>
+          // Cross-file `const`: register in globalScope (so VarRef name resolution
+          // succeeds) AND in compileTimeConstants under both the local-key short name
+          // and the fully-mangled name so the analyzer's constant-folding paths
+          // (VarRef → TIntLit substitution) find the value either way.
+          if globalScope.contains(localKey) then
+            val existing = globalScope(localKey)
+            if !sym.isExtern && existing.name != sym.name then
+              throw AnalysisError(s"imported const '$localKey' conflicts with existing global")
+          else
+            globalScope(localKey) = SymInfo(sym.name, constType, mutable = false, isConst = true)
+            externalSymbols += localKey
+          compileTimeConstants(localKey) = value
+          compileTimeConstants(sym.name) = value
         case SymbolMeta.Kind.Struct(st) =>
           structTypes(shortName(sym.name)) = st
         case SymbolMeta.Kind.Interface(it) =>
@@ -1201,7 +1215,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             fixedAddressVars(mangledName) = (addr, resolvedType)
             globalScope(name) = SymInfo(mangledName, resolvedType, isMutable)
             scopeStack = null
-            TConstDecl(mangledName, resolvedType) // no storage emitted
+            // #address vars don't carry a foldable value at compile time —
+            // 0 is a placeholder, not used by anything (caller emits MMIO loads/stores).
+            TConstDecl(mangledName, resolvedType, 0L) // no storage emitted
           case None =>
             analyzeRegularVarDecl(name, typOpt, init, isPrivate, isMutable, isVolatile, isConst, isGhost)
 
@@ -1240,8 +1256,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     if isGhost then ghostNames += mangledVarName
     scopeStack = null
     // `const` declarations do not generate a storage slot — callers inline the folded value
-    // via compileTimeConstants lookup during VarRef analysis.
-    if isConst then TConstDecl(mangledVarName, declType)
+    // via compileTimeConstants lookup during VarRef analysis. The value is also carried on
+    // the typed decl so cross-file ModuleMeta serialization can publish it to sibling files.
+    if isConst then TConstDecl(mangledVarName, declType, compileTimeConstants(mangledVarName))
     else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile, isGhost = isGhost)
 
   private def warnDeprecated(name: String): Unit =
@@ -4448,6 +4465,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
           case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
+          case SymbolMeta.Kind.Const(constType, value) => TIntLit(value, constType)
           case SymbolMeta.Kind.Func(params, retType, _, _, _, eff) => TFuncRef(sym.name, SyslType.FuncType(params, retType, effects = eff))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
