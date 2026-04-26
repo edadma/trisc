@@ -4257,8 +4257,23 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // each codegen can emit a volatile load at the literal address.
         if fixedAddressVars.contains(name) then
           val (addr, typ) = fixedAddressVars(name)
-          TDeref(TCast(TIntLit(addr, I64), PtrType(typ)), typ)
-        else
+          return TDeref(TCast(TIntLit(addr, I64), PtrType(typ)), typ)
+        // Local shadow: a function-local binding (param, val, var, pattern-binder,
+        // implicit local from bare `name = expr`) takes precedence over any like-named
+        // global function. Without this, `dispatch = (a: int) -> a` followed by a bare
+        // `dispatch` reference would resolve to a global `dispatch(...)` function instead
+        // of the just-created local closure value. See also the matching check in CallAST.
+        lookupLocal(name) match
+          case Some(sym) if sym.isConst =>
+            val v = compileTimeConstants.getOrElse(sym.name,
+              compileTimeConstants.getOrElse(name,
+                throw AnalysisError(s"const '$name' missing folded value")))
+            return TIntLit(v, sym.typ)
+          case Some(sym) if sym.autoIndirect =>
+            return TDeref(TVarRef(sym.name, PtrType(sym.typ)), sym.typ)
+          case Some(sym) =>
+            return TVarRef(sym.name, sym.typ)
+          case None => ()
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
           val f = functions(name)
