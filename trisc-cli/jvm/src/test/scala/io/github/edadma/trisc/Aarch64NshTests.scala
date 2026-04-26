@@ -497,6 +497,20 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "dup: FAIL"
   }
 
+  "aarch64 musl: O_NONBLOCK on stdin returns EAGAIN before key" in {
+    // Pre-check via TTY_CMD_POLL: with O_NONBLOCK set, sys_read on
+    // fd 0 must return -EAGAIN when the tty input ring is empty;
+    // after a key arrives, the same read returns 1.
+    qemu.send("nbstdin\n")
+    val pre = qemu.waitFor("mnbstdin: ready_for_input")
+    pre should include("mnbstdin: setfl=0")
+    pre should include("mnbstdin: empty=-1 errno=11")
+    qemu.send("Y")
+    val output = qemu.waitFor("mnbstdin: done")
+    output should include("mnbstdin: woke=1 byte=89") // 'Y' = 0x59 = 89
+    output should include("mnbstdin: done")
+  }
+
   "aarch64 musl: epoll on stdin (TTY input subscriber)" in {
     // estdin adds fd 0 to an epoll instance and waits. Pre-injection
     // poll reports 0 events. After the harness sends a keystroke the

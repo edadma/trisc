@@ -750,11 +750,12 @@ handles read from the TTY driver.
             // process is bound to console 0 — multi-tty isn't a
             // thing yet. Returns 1 byte per call (TTY_CMD_READ
             // hands back one char); musl's read loops as needed.
-            // The tty server blocks until a key arrives, so a
-            // blocking read here just defers to that wake path.
-            // Non-blocking stdin (O_NONBLOCK on fd 0) isn't yet
-            // honoured — stdin is mostly used line-edit-style
-            // anyway; epoll on stdin works through TTY_CMD_POLL.
+            // O_NONBLOCK pre-checks via TTY_CMD_POLL and returns
+            // -EAGAIN if no byte is queued, so a non-blocking
+            // stdin read never sits inside TTY_CMD_READ's blocking
+            // path. Blocking mode falls through to TTY_CMD_READ
+            // which parks the caller on the tty server's
+            // pending_reader slot until input arrives.
             if len <= 0
                 return i64(0)
             if buf == i64(0)
@@ -762,6 +763,19 @@ handles read from the TTY driver.
             val port = tty_get_port()
             if port < 0
                 return i64(-19)
+            if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                var pmsg: [2]byte
+                pmsg[0] = byte(TTY_CMD_POLL_C)
+                pmsg[1] = byte(0)
+                var preply: [7]byte
+                val pr = ipc_send(port, pmsg, 2, preply, 7)
+                if pr < 0
+                    return i64(-5)
+                if preply[0] != 0
+                    return i64(-5)
+                val pbits = (int(preply[1]) & 0xff) | ((int(preply[2]) & 0xff) << 8)
+                if (pbits & POSIX_EPOLLIN) == 0
+                    return i64(-11)         // -EAGAIN
             var msg: [2]byte
             msg[0] = byte(TTY_CMD_READ_C)
             msg[1] = byte(0)
