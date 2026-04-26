@@ -295,6 +295,18 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("'ping!'")
   }
 
+  "x86 musl: epoll on stdin (TTY input subscriber)" in {
+    // Mirror of the aarch64 estdin test.
+    qemu.send("estdin\n")
+    val pre = qemu.waitFor("mepoll_stdin: ready_for_input")
+    pre should include("mepoll_stdin: idle=0")
+    qemu.send("Z")
+    val output = qemu.waitFor("mepoll_stdin: done")
+    output should include("mepoll_stdin: woke=1 events=1")
+    output should include("mepoll_stdin: read=1 byte=90")
+    output should include("mepoll_stdin: done")
+  }
+
   "x86 musl: timerfd_create / settime / gettime + epoll" in {
     // Mirror of the aarch64 mtimerfd test.
     qemu.send("timerfd\n")
@@ -465,9 +477,11 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     // (slix/test/hello.c) — only the build target differs. Validates
     // the x86 POSIX shim's SYS_WRITE/SYS_READ/SYS_EXIT_GROUP path and
     // the musl __set_thread_area override that lands TLS via WRFSBASE.
-    val output = qemu.command("mhello")
-    output should include("hello from musl")
-    output should include("read=0")
+    qemu.send("mhello\n")
+    qemu.waitFor("hello from musl")
+    qemu.send("X")
+    val output = qemu.waitFor("read=1")
+    output should include("read=1")
   }
 
   "x86 musl: socket/connect/shutdown/read via libc wrappers" in {

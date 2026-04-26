@@ -404,6 +404,25 @@ private grant table (1 = read by mapper, 2 = write by mapper).
             vfs_port_cached = port_lookup("fs")
         vfs_port_cached
 
+
+    var tty_port_cached = -1
+
+    tty_get_port() -> int
+        if tty_port_cached < 0
+            tty_port_cached = port_lookup("tty")
+        tty_port_cached
+
+
+TTY IPC commands (must track oskit/drivers/tty/tty.lsysl).
+The shim only uses READ + POLL + EPOLL_SUB/UNSUB/INST_CLOSE;
+the WRITE/PUTS/SWITCH commands are driven from the legacy ulib.
+
+    val TTY_CMD_READ_C            = 2
+    val TTY_CMD_POLL_C            = 5
+    val TTY_CMD_EPOLL_SUB_C       = 6
+    val TTY_CMD_EPOLL_UNSUB_C     = 7
+    val TTY_CMD_EPOLL_INST_CLOSE_C = 8
+
 Big-endian 32-bit helpers for the VFS wire format.
 
     shim_write_be_i32(p: *byte, off: int, v: int)
@@ -727,7 +746,34 @@ handles read from the TTY driver.
     sys_read(fd: int, buf: i64, len: int) -> i64
         val k = posix_fd_kind(fd)
         if k == POSIX_FD_STDIN
-            return i64(0)
+            // Route through the TTY server. Currently every slix
+            // process is bound to console 0 — multi-tty isn't a
+            // thing yet. Returns 1 byte per call (TTY_CMD_READ
+            // hands back one char); musl's read loops as needed.
+            // The tty server blocks until a key arrives, so a
+            // blocking read here just defers to that wake path.
+            // Non-blocking stdin (O_NONBLOCK on fd 0) isn't yet
+            // honoured — stdin is mostly used line-edit-style
+            // anyway; epoll on stdin works through TTY_CMD_POLL.
+            if len <= 0
+                return i64(0)
+            if buf == i64(0)
+                return i64(-14)
+            val port = tty_get_port()
+            if port < 0
+                return i64(-19)
+            var msg: [2]byte
+            msg[0] = byte(TTY_CMD_READ_C)
+            msg[1] = byte(0)
+            var reply: [2]byte
+            val r = ipc_send(port, msg, 2, reply, 2)
+            if r < 0
+                return i64(-5)
+            if reply[0] != 0
+                return i64(-5)
+            val ubuf: *byte = *byte(buf)
+            ubuf[0] = reply[1]
+            return i64(1)
         if k == POSIX_FD_TCP_SOCKET
             val inet_fd = posix_fd_target(fd)
             if inet_fd < 0
@@ -2488,6 +2534,48 @@ to stay consistent with the rest of the VFS protocol.
         ipc_send(port, msg, 2, reply, 1)
 
 
+`epoll_tty_subscribe` covers POSIX_FD_STDIN. The TTY server
+keys subscriptions on (console, sender_tid, inst); we hardcode
+console=0 since slix's per-process tty assignment is single-
+console today.
+
+    epoll_tty_subscribe(target_fd: int, inst: int)
+        if posix_fd_kind(target_fd) != POSIX_FD_STDIN
+            return
+        val port = tty_get_port()
+        if port < 0
+            return
+        var msg: [3]byte
+        msg[0] = byte(TTY_CMD_EPOLL_SUB_C)
+        msg[1] = byte(0)        // console
+        msg[2] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
+
+    epoll_tty_unsubscribe(target_fd: int, inst: int)
+        if posix_fd_kind(target_fd) != POSIX_FD_STDIN
+            return
+        val port = tty_get_port()
+        if port < 0
+            return
+        var msg: [3]byte
+        msg[0] = byte(TTY_CMD_EPOLL_UNSUB_C)
+        msg[1] = byte(0)
+        msg[2] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
+
+    epoll_inst_close_tty(inst: int)
+        val port = tty_get_port()
+        if port < 0
+            return
+        var msg: [2]byte
+        msg[0] = byte(TTY_CMD_EPOLL_INST_CLOSE_C)
+        msg[1] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 2, reply, 1)
+
+
 Combined sub/unsub helpers — single call site for the
 `epoll_ctl` path, no need to teach it about the kind/owner
 split. Each underlying helper short-circuits if the fd doesn't
@@ -2496,14 +2584,17 @@ belong to it, so calling both is safe and idempotent.
     epoll_subscribe(target_fd: int, inst: int)
         epoll_inet_subscribe(target_fd, inst)
         epoll_vfs_subscribe(target_fd, inst)
+        epoll_tty_subscribe(target_fd, inst)
 
     epoll_unsubscribe(target_fd: int, inst: int)
         epoll_inet_unsubscribe(target_fd, inst)
         epoll_vfs_unsubscribe(target_fd, inst)
+        epoll_tty_unsubscribe(target_fd, inst)
 
     epoll_inst_close_all(inst: int)
         epoll_inst_close_inet(inst)
         epoll_inst_close_vfs(inst)
+        epoll_inst_close_tty(inst)
 
 
 SYS_EPOLL_CREATE1. Allocates a fresh epoll instance and parks
@@ -2910,7 +3001,24 @@ multi-fd EPOLLET loops.
             *seq_out = (int(reply[3]) & 0xff) | ((int(reply[4]) & 0xff) << 8) | ((int(reply[5]) & 0xff) << 16) | ((int(reply[6]) & 0xff) << 24)
             return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         if k == POSIX_FD_STDIN
-            return 0
+            // Ask the tty server for readiness on console 0 plus
+            // its per-console fire_seq. Reply mirrors VFS_CMD_POLL
+            // so the existing 7-byte parse layout is reused.
+            val port_t = tty_get_port()
+            if port_t < 0
+                return 0
+            var msg: [2]byte
+            msg[0] = byte(TTY_CMD_POLL_C)
+            msg[1] = byte(0)
+            var reply: [7]byte
+            val r = ipc_send(port_t, msg, 2, reply, 7)
+            if r < 0
+                return 0
+            if reply[0] != 0
+                return 0
+            val raw = (int(reply[1]) & 0xff) | ((int(reply[2]) & 0xff) << 8)
+            *seq_out = (int(reply[3]) & 0xff) | ((int(reply[4]) & 0xff) << 8) | ((int(reply[5]) & 0xff) << 16) | ((int(reply[6]) & 0xff) << 24)
+            return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         if k == POSIX_FD_STDOUT || k == POSIX_FD_STDERR
             return want & POSIX_EPOLLOUT
         if k == POSIX_FD_EVENTFD
