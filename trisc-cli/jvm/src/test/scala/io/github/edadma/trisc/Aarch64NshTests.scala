@@ -1627,6 +1627,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpinfo: bad"
   }
 
+  "aarch64 time: clock_gettime / gettimeofday / clock_getres / nanosleep" in {
+    // POSIX time syscalls fed off uptime() at 100Hz. Verifies
+    // clock_getres reports 10ms, clock_gettime + gettimeofday
+    // agree within 20ms, and nanosleep(50ms) advances the
+    // clock by at least 40ms.
+    val output = qemu.command("test_clock")
+    output should include("clock: ok")
+    output should not include "clock: bad"
+  }
+
   "aarch64 fs: fsync / fdatasync / sync / syncfs no-op stubs" in {
     // No on-disk persistence yet; these return 0 (or -EBADF for
     // bad fds) so defensive sqlite/log-writer patterns don't

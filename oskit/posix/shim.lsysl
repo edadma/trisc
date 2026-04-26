@@ -668,6 +668,16 @@ to the same UDP stack that native sysl programs use via
             return sys_timerfd_gettime(int(a0), a1)
         if num == 358
             return sys_timerfd_settime(int(a0), int(a1), a2, a3)
+        if num == 142
+            return sys_clock_getres(int(a0), a1)
+        if num == 143
+            return sys_clock_gettime(int(a0), a1)
+        if num == 144
+            return sys_clock_nanosleep(int(a0), int(a1), a2, a3)
+        if num == 206
+            return sys_gettimeofday(a0, a1)
+        if num == 251
+            return sys_nanosleep(a0, a1)
         // fsync/fdatasync/sync/syncfs: slix has no on-disk
         // persistence yet (TFS is in RAM), so there's nothing to
         // flush. Returning 0 lets programs that defensively call
@@ -3043,6 +3053,129 @@ state is always coherent at the moment the user observes it.
             if remaining < 0
                 remaining = 0
         shim_ticks_to_itimerspec(cp, 16, remaining)
+        i64(0)
+
+
+### POSIX time syscalls
+
+`clock_gettime` / `gettimeofday` / `clock_getres` / `nanosleep` /
+`clock_nanosleep`. All clocks (REALTIME, MONOTONIC, BOOTTIME,
+PROCESS_CPUTIME, THREAD_CPUTIME, *_RAW, *_COARSE) collapse to
+the kernel's `uptime()` tick counter at 100 Hz — slix has no
+wallclock or per-thread CPU accounting yet, but apps that
+just need a monotonic timestamp (the overwhelming majority)
+keep working. timerfd already takes the same shortcut.
+
+    sys_clock_gettime(clockid: int, tp: i64) -> i64
+        if tp == i64(0)
+            return i64(-14)             // -EFAULT
+        val p: *byte = *byte(tp)
+        shim_ticks_to_itimerspec(p, 0, int(uptime()))
+        i64(0)
+
+    sys_clock_getres(clockid: int, tp: i64) -> i64
+        if tp == i64(0)
+            return i64(0)               // Linux: NULL is allowed for clock_getres
+        val p: *byte = *byte(tp)
+        // Resolution = 10ms = 10_000_000 ns. Reuse the helper
+        // by passing 1 tick.
+        shim_ticks_to_itimerspec(p, 0, 1)
+        i64(0)
+
+`gettimeofday` predates `clock_gettime`. Layout differs by one
+field: `tv_usec` (microseconds) instead of `tv_nsec`. The
+`tz` arg has been deprecated since the 1990s — Linux ignores
+it but accepts the pointer. We do the same.
+
+    sys_gettimeofday(tv: i64, tz: i64) -> i64
+        if tv == i64(0)
+            return i64(-14)
+        val p: *byte = *byte(tv)
+        val ticks = int(uptime())
+        val sec = i64(ticks / 100)
+        val usec = i64((ticks % 100) * 10000)
+        var bi = 0
+        while bi < 8
+            p[bi] = byte(int((sec >> i64(bi * 8))) & 0xff)
+            bi += 1
+        bi = 0
+        while bi < 8
+            p[8 + bi] = byte(int((usec >> i64(bi * 8))) & 0xff)
+            bi += 1
+        // tz: write {0, 0} if non-null. Most callers pass NULL
+        // these days but glibc still accepts it.
+        if tz != i64(0)
+            val tzp: *byte = *byte(tz)
+            var ti = 0
+            while ti < 8
+                tzp[ti] = byte(0)
+                ti += 1
+        i64(0)
+
+`nanosleep` and `clock_nanosleep` block for the requested
+duration, rounded up to the next 10ms tick. We don't have
+signals so the call always completes — `rem` (if non-null) is
+zeroed to indicate "no time left". TIMER_ABSTIME (clock_nanosleep
+flag = 1) means the request is an absolute deadline — convert
+to relative by subtracting `uptime()`.
+
+    shim_timespec_to_ticks(p: *byte) -> int
+        // Read tv_sec (i64) + tv_nsec (i64), convert to a
+        // tick count rounded up so a 1ns sleep yields 1 tick
+        // (10 ms) instead of 0.
+        var sec = i64(0)
+        var i = 7
+        while i >= 0
+            sec = (sec << i64(8)) | i64(int(p[i]) & 0xff)
+            i -= 1
+        var nsec = i64(0)
+        i = 7
+        while i >= 0
+            nsec = (nsec << i64(8)) | i64(int(p[8 + i]) & 0xff)
+            i -= 1
+        // ticks = sec*100 + ceil(nsec / 10_000_000)
+        val tick_from_sec = int(sec) * 100
+        val tick_from_ns = int((nsec + i64(9999999)) / i64(10000000))
+        var t = tick_from_sec + tick_from_ns
+        if t < 0
+            t = 0
+        t
+
+    sys_nanosleep(req: i64, rem: i64) -> i64
+        if req == i64(0)
+            return i64(-14)
+        val rp: *byte = *byte(req)
+        val ticks = shim_timespec_to_ticks(rp)
+        if ticks > 0
+            sleep(ticks)
+        if rem != i64(0)
+            val remp: *byte = *byte(rem)
+            var ri = 0
+            while ri < 16
+                remp[ri] = byte(0)
+                ri += 1
+        i64(0)
+
+    sys_clock_nanosleep(clockid: int, flags: int, req: i64, rem: i64) -> i64
+        if req == i64(0)
+            return i64(-14)
+        val rp: *byte = *byte(req)
+        var ticks = shim_timespec_to_ticks(rp)
+        // TIMER_ABSTIME = 1: req is an absolute time. Convert to
+        // relative by subtracting current uptime.
+        if (flags & 1) != 0
+            val now_t = int(uptime())
+            ticks = ticks - now_t
+            if ticks < 0
+                ticks = 0
+        if ticks > 0
+            sleep(ticks)
+        if rem != i64(0)
+            val remp: *byte = *byte(rem)
+            var ri = 0
+            while ri < 16
+                remp[ri] = byte(0)
+                ri += 1
         i64(0)
 
 
