@@ -1782,6 +1782,14 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpdw: bad"
   }
 
+  "aarch64 tcp: sendto / send() round-trip" in {
+    // sys_sendto now accepts TCP fds — libc lowers send() to
+    // sendto(NULL, 0). Previously rejected with -EBADF.
+    val output = qemu.command("test_tcp_send")
+    output should include("tcpsnd: ok")
+    output should not include "tcpsnd: bad"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

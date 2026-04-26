@@ -1222,13 +1222,68 @@ family(2), port(2, BE), addr(4), zero(8).
             return i64(-98)     // -EADDRINUSE
         i64(0)
 
+TCP variant of `sendto`.  `addr_ptr` is ignored — TCP is
+connected, the peer was set at connect time. The body mirrors
+sys_write's TCP loop (chunked at INET_MAX_TCP_SEG) but honors
+POSIX MSG_DONTWAIT (0x40) for the EAGAIN-on-empty-send branch.
+
+    sys_sendto_tcp(fd: int, buf: i64, len: int, flags: int) -> i64
+        val inet_fd = posix_fd_target(fd)
+        if inet_fd < 0
+            return i64(-107)            // -ENOTCONN
+        if len < 0
+            return i64(-22)
+        if len == 0
+            return i64(0)
+        val port = inet_get_port()
+        if port < 0
+            return i64(-19)
+        val nb_eff = (posix_fd_flags(fd) & POSIX_O_NONBLOCK) | (flags & 0x40)
+        val ubuf: *byte = *byte(buf)
+        var sent_total = 0
+        while sent_total < len
+            var chunk = len - sent_total
+            if chunk > INET_MAX_TCP_SEG
+                chunk = INET_MAX_TCP_SEG
+            var msg: [485]byte
+            msg[0] = byte(INET_CMD_TCP_SEND)
+            shim_write_u16(msg, 1, inet_fd)
+            shim_write_u16(msg, 3, chunk)
+            var i = 0
+            while i < chunk
+                msg[5 + i] = ubuf[sent_total + i]
+                i += 1
+            var reply: [3]byte
+            val r = ipc_send(port, msg, 5 + chunk, reply, 3)
+            if r < 0
+                if sent_total > 0
+                    return i64(sent_total)
+                return i64(-5)
+            if reply[0] != 0
+                if sent_total > 0
+                    return i64(sent_total)
+                return i64(-32)         // -EPIPE
+            val n = shim_read_u16(reply, 1)
+            if n <= 0
+                if sent_total == 0
+                    if nb_eff != 0
+                        return i64(-11)
+                return i64(sent_total)
+            sent_total += n
+        i64(sent_total)
+
+
 SYS_SENDTO. Args: (fd, buf, len, flags, dst_addr, addrlen).
 Copies the payload into an in-kernel staging buffer (avoids
 re-reading user memory during ipc_deliver's cross-PT walk) and
-forwards to the inet server. `flags` is ignored for v1.
+forwards to the inet server. `flags` is mostly ignored;
+MSG_DONTWAIT (0x40) is honored for TCP via sys_sendto_tcp.
 
     sys_sendto(fd: int, buf: i64, len: int, flags: int, addr_ptr: i64, addrlen: int) -> i64
-        if posix_fd_kind(fd) != POSIX_FD_UDP_SOCKET
+        val k0 = posix_fd_kind(fd)
+        if k0 == POSIX_FD_TCP_SOCKET
+            return sys_sendto_tcp(fd, buf, len, flags)
+        if k0 != POSIX_FD_UDP_SOCKET
             return i64(-9)
         if len < 0
             return i64(-22)

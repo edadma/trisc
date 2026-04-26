@@ -1,0 +1,175 @@
+test_tcp_send — TCP sendto / send() round-trip
+================================================
+
+POSIX `send(fd, buf, len)` is libc-lowered to `sendto(fd, buf,
+len, 0, NULL, 0)`. Slix used to reject sendto on TCP fds with
+-EBADF, forcing libc to fall back to sys_write. Now sendto on
+TCP routes through the same INET_CMD_TCP_SEND chain as write,
+so the libc shape just works.
+
+Test:
+  1. Listen 127.0.0.1:9102, connect, accept.
+  2. sendto(client, "send", 4, 0, NULL, 0) → 4 bytes.
+  3. read on child returns "send".
+  4. sendto(client, "more", 4, MSG_DONTWAIT, NULL, 0) → 4 bytes
+     (uses the per-call NB code path, which still succeeds since
+     the send buffer has room).
+  5. read on child returns "more".
+
+Pass = `tcpsnd: ok`.
+
+    module oskit.bin.test_tcp_send
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_READ       = 130
+    val NR_ACCEPT     = 131
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_CONNECT    = 148
+    val NR_LISTEN     = 217
+    val NR_SENDTO     = 307
+    val NR_SOCKET     = 337
+
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+    val MSG_DONTWAIT  = 0x40
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail_with(code: int)
+        puts("tcpsnd: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, addrlen: *int) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_send(fd: int, buf: *byte, blen: int, flags: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), 0, 0))
+
+    posix_read(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        val ls = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if ls < 0
+            fail_with(1)
+            return
+        var bind_addr: [16]byte
+        fill_sockaddr(&bind_addr[0], 9102, 0, 0, 0, 0)
+        if posix_bind(ls, &bind_addr[0], 16) != 0
+            fail_with(2)
+            return
+        if posix_listen(ls, 4) != 0
+            fail_with(3)
+            return
+
+        val cl = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if cl < 0
+            fail_with(4)
+            return
+        var conn_addr: [16]byte
+        fill_sockaddr(&conn_addr[0], 9102, 127, 0, 0, 1)
+        if posix_connect(cl, &conn_addr[0], 16) != 0
+            fail_with(5)
+            return
+
+        var peer: [16]byte
+        var peer_len = 16
+        val ch = posix_accept(ls, &peer[0], &peer_len)
+        if ch < 0
+            fail_with(6)
+            return
+
+        // sendto with no flags + NULL addr (libc `send()`).
+        var m1: [4]byte
+        m1[0] = byte('s')
+        m1[1] = byte('e')
+        m1[2] = byte('n')
+        m1[3] = byte('d')
+        if posix_send(cl, &m1[0], 4, 0) != 4
+            fail_with(7)
+            return
+
+        var rbuf: [4]byte
+        var got = 0
+        while got < 4
+            val r = posix_read(ch, &rbuf[got], 4 - got)
+            if r <= 0
+                fail_with(8)
+                return
+            got += r
+        if rbuf[0] != byte('s') || rbuf[3] != byte('d')
+            fail_with(9)
+            return
+
+        // sendto with MSG_DONTWAIT — buffer has room so still 4.
+        var m2: [4]byte
+        m2[0] = byte('m')
+        m2[1] = byte('o')
+        m2[2] = byte('r')
+        m2[3] = byte('e')
+        if posix_send(cl, &m2[0], 4, MSG_DONTWAIT) != 4
+            fail_with(10)
+            return
+
+        var rbuf2: [4]byte
+        got = 0
+        while got < 4
+            val r = posix_read(ch, &rbuf2[got], 4 - got)
+            if r <= 0
+                fail_with(11)
+                return
+            got += r
+        if rbuf2[0] != byte('m') || rbuf2[3] != byte('e')
+            fail_with(12)
+            return
+
+        posix_close(ch)
+        posix_close(cl)
+        posix_close(ls)
+        puts("tcpsnd: ok\n")
+        exit()

@@ -669,6 +669,14 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "tcpdw: bad"
   }
 
+  "x86 tcp: sendto / send() round-trip" in {
+    // sys_sendto now accepts TCP fds — libc lowers send() to
+    // sendto(NULL, 0). Previously rejected with -EBADF.
+    val output = qemu.command("test_tcp_send")
+    output should include("tcpsnd: ok")
+    output should not include "tcpsnd: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
