@@ -112,4 +112,25 @@ class SyslClosureTests extends SyslTestHelpers {
         |main() -> int = apply(x -> x + 1, 20) + apply(x -> x + 1, 20)
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Nested closure declarations =====
+
+  "closure-typed local declared inside another closure body resolves correctly" in {
+    // Regression: bare `name = (...) -> ...` inside a function body parses as
+    // AssignStmtAST, which the analyzer used to lower to TAssignStmt regardless of
+    // whether the name was a fresh binding. When it occurred inside another closure's
+    // body, the capture-detection pass walked TAssignStmt as a write to an outer name
+    // and added the freshly-created `inner` to the outer closure's capture list. At
+    // runtime the outer closure tried to look up `inner` in its captured environment
+    // and failed with "undefined variable: inner". Fix: emit TVarStmt for fresh-local
+    // creation so capture detection sees the binding.
+    eval(
+      """main() -> int
+        |    outer = (a: int) ->
+        |        inner = (b: int) ->
+        |            a + b
+        |        inner(5)
+        |    outer(2)
+        |""".stripMargin) shouldBe 7
+  }
 }

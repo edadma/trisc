@@ -3592,6 +3592,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case AssignStmtAST(target, value) =>
         val tValue0 = analyzeExpr(value)
+        // Did this name already exist (param, prior decl, or global), or are we about
+        // to implicitly create a fresh local? Capture this BEFORE `lookupOrCreate` so the
+        // newly-bound case can be distinguished. Bare `name = expr` (no `var`/`val`)
+        // inside a function body is sysl's implicit-local syntax — when the analyzer
+        // creates a fresh local, downstream passes need to see it as a binding (TVarStmt),
+        // not a write to an existing variable (TAssignStmt). Closure capture-detection
+        // walks TAssignStmt as an assignment to an outer name, so emitting TAssignStmt
+        // here would incorrectly mark a freshly-created inner local as a captured outer.
+        val existedBefore = tryLookup(target).isDefined
         val sym = lookupOrCreate(target, tValue0.typ)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = applyTargetType(tValue0, sym.typ)
@@ -3599,6 +3608,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // the caller's lvalue.
         val baseStmt: TStmt =
           if sym.autoIndirect then TDerefAssignStmt(TVarRef(sym.name, PtrType(sym.typ)), tValue)
+          else if !existedBefore then TVarStmt(sym.name, sym.typ, tValue)
           else TAssignStmt(sym.name, tValue)
         val checks = sym.typ match
           case st: StructType if structInvariants.contains(st.name) =>
