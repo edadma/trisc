@@ -376,6 +376,8 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("sockopt: get SO_SNDBUF = 0 val=2048")
     output should include("sockopt: get SO_RCVBUF = 0 val=4096")
     output should include("sockopt: get TCP_NODELAY = 0 val=1")
+    output should include("sockopt: set SO_LINGER = 0")
+    output should include("sockopt: get SO_LINGER = 0 olen=8 on=1 secs=0")
     output should include("sockopt: done")
     output should not include "sockopt: FAIL"
   }
@@ -396,11 +398,14 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "getname: FAIL"
   }
 
-  "aarch64 posix: fcntl + O_NONBLOCK non-blocking recv" in {
-    // test_nonblock drives syscall 171 (fcntl) and asserts that
-    // recvfrom on an empty UDP queue returns -EAGAIN (-11) when
-    // O_NONBLOCK is set. Also covers F_GETFL/F_SETFL round-trip,
-    // F_GETFD/F_SETFD accept+ignore, F_DUPFD -EINVAL stub.
+  "aarch64 posix: fcntl + O_NONBLOCK + accept4 SOCK_NONBLOCK" in {
+    // test_nonblock drives syscall 171 (fcntl) and 132 (accept4).
+    // Verifies recvfrom on an empty UDP queue returns -EAGAIN
+    // when O_NONBLOCK is set; F_GETFL/F_SETFL round-trip;
+    // F_GETFD/F_SETFD accept+ignore; F_DUPFD -EINVAL stub.  Then
+    // creates a TCP listener, sets it non-blocking, and asserts
+    // accept4(SOCK_NONBLOCK) returns -EAGAIN on an empty queue
+    // and accept4 with an unknown flag bit returns -EINVAL.
     qemu.send("test_nonblock\n")
     val output = qemu.waitFor("nonblock: done")
     output should include("nonblock: F_GETFL pre = 0")
@@ -410,6 +415,8 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("nonblock: F_GETFD = 0")
     output should include("nonblock: F_SETFD(FD_CLOEXEC) = 0")
     output should include("nonblock: F_DUPFD = -22")
+    output should include("nonblock: accept4 NB empty = -11")
+    output should include("nonblock: accept4 bad flag = -22")
     output should include("nonblock: done")
     output should not include "nonblock: FAIL"
   }

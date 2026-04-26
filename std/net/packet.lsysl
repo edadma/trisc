@@ -54,10 +54,21 @@ ICMP
 ----
 
 Type codes for the 1-byte `type` field at the start of the ICMP
-message. We only handle echo request / echo reply today.
+message. Echo request/reply for ping; Destination Unreachable
+(type 3) for error reporting back to the originator (Port
+Unreachable on UDP-to-unbound-port, Frag Needed for PMTU).
 
     val ICMP_ECHO_REQ = 8
     val ICMP_ECHO_REP = 0
+    val ICMP_DEST_UNREACH = 3
+
+ICMP code values for type 3 (Destination Unreachable).
+
+    val ICMP_CODE_NET_UNREACH    = 0
+    val ICMP_CODE_HOST_UNREACH   = 1
+    val ICMP_CODE_PROTO_UNREACH  = 2
+    val ICMP_CODE_PORT_UNREACH   = 3
+    val ICMP_CODE_FRAG_NEEDED    = 4
 
 
 Byte-buffer helpers

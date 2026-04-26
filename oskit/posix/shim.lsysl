@@ -112,6 +112,13 @@ posix_fd_bridge memory.
         flag_keepalive: int
         flag_reuseport: int
         flag_nodelay: int
+        // SO_LINGER state. `linger_on != 0` activates the option;
+        // `linger_secs == 0` (with linger_on) is the "abort-on-close
+        // → RST instead of FIN" shortcut, the only enforcement
+        // landed so far. Non-zero linger_secs is persisted but its
+        // flush-or-timeout semantics aren't enforced yet.
+        linger_on: int
+        linger_secs: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -131,6 +138,8 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].flag_keepalive = 0
             posix_fd_table[base + i].flag_reuseport = 0
             posix_fd_table[base + i].flag_nodelay = 0
+            posix_fd_table[base + i].linger_on = 0
+            posix_fd_table[base + i].linger_secs = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -192,6 +201,8 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].flag_keepalive = 0
                 posix_fd_table[base + i].flag_reuseport = 0
                 posix_fd_table[base + i].flag_nodelay = 0
+                posix_fd_table[base + i].linger_on = 0
+                posix_fd_table[base + i].linger_secs = 0
                 return i
             i += 1
         -1
@@ -269,6 +280,8 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_TCP_CONNECT_NB = 33
     val INET_CMD_TCP_SETBUF  = 34
     val INET_CMD_TCP_GETBUF  = 35
+    val INET_CMD_TCP_ABORT_CLOSE = 36
+    val INET_CMD_TCP_SET_KEEPALIVE = 37
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -496,6 +509,8 @@ to the same UDP stack that native sysl programs use via
             return sys_read(int(a0), a1, int(a2))
         if num == 131
             return sys_accept(int(a0), a1, a2)
+        if num == 132
+            return sys_accept4(int(a0), a1, a2, int(a3))
         if num == 135
             return sys_bind(int(a0), a1, int(a2))
         if num == 147
@@ -750,8 +765,20 @@ still -1) skip the inet call — no backend was ever allocated.
                 if target >= 0
                     val port = inet_get_port()
                     if port >= 0
+                        // SO_LINGER l_onoff=1 + l_linger=0: send RST
+                        // instead of FIN (Linux's "abort close"). Any
+                        // other linger configuration falls through to
+                        // the standard FIN close — flush-or-timeout
+                        // semantics aren't enforced yet.
+                        val pid = posix_fd_current_pid()
+                        val cidx = pid * POSIX_FDS_PER_PROC + fd
+                        val linger_on = posix_fd_table[cidx].linger_on
+                        val linger_secs = posix_fd_table[cidx].linger_secs
                         var msg: [3]byte
-                        msg[0] = byte(INET_CMD_TCP_CLOSE)
+                        if linger_on != 0 && linger_secs == 0
+                            msg[0] = byte(INET_CMD_TCP_ABORT_CLOSE)
+                        else
+                            msg[0] = byte(INET_CMD_TCP_CLOSE)
                         shim_write_u16(msg, 1, target)
                         var reply: [1]byte
                         ipc_send(port, msg, 3, reply, 1)
@@ -1193,6 +1220,12 @@ dst_port (BE u16) at the usual offsets.
             return i64(-111)            // -ECONNREFUSED
         val inet_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = inet_fd
+        // Apply pending SO_KEEPALIVE now that the slot exists.
+        // Bufsize already shipped through the extended CONNECT
+        // wire; keepalive uses a follow-up IPC since it's a
+        // post-handshake property (only fires in ESTABLISHED).
+        if posix_fd_table[idx].flag_keepalive != 0
+            shim_inet_set_keepalive(inet_fd, 1)
         // Non-blocking connect: surface -EINPROGRESS so the user
         // can poll EPOLLOUT for completion. The slot is already
         // SYN_SENT; once it reaches ESTABLISHED the existing
@@ -1248,6 +1281,10 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
             return i64(-98)             // -EADDRINUSE
         val listen_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = listen_fd
+        // Apply pending SO_KEEPALIVE — accepted children inherit
+        // the listener's flag via inet's handle_passive_syn.
+        if posix_fd_table[idx].flag_keepalive != 0
+            shim_inet_set_keepalive(listen_fd, 1)
         i64(0)
 
 SYS_ACCEPT. Blocks until a child connection arrives unless the
@@ -1313,6 +1350,39 @@ CLOSE_WAIT on arrival — read/close paths handle that already.
             return i64(-24)             // -EMFILE
         i64(new_fd)
 
+SYS_ACCEPT4.  Linux's accept(2) variant that takes a `flags`
+argument so the accepted child fd can be born non-blocking
+(`SOCK_NONBLOCK = 0x800` = same value as `O_NONBLOCK`) and/or
+close-on-exec (`SOCK_CLOEXEC = 0x80000`) atomically — without
+the racy `accept` + `fcntl(F_SETFL, O_NONBLOCK)` dance servers
+otherwise have to do.  The shim is single-threaded so the race
+isn't observable here either way, but matching the contract
+keeps libuv / Node.js / glibc happy.
+
+`SOCK_NONBLOCK` is honoured: the child PosixFd carries
+`POSIX_O_NONBLOCK` from birth, so its first read/write/etc.
+already routes through the non-blocking inet path.
+`SOCK_CLOEXEC` is accept-and-ignore for now (no fork/exec
+story yet — see `feedback_no_workarounds_build_it.md` for the
+follow-up arc).  Unknown flag bits return -EINVAL.
+
+    val POSIX_SOCK_NONBLOCK = 2048
+    val POSIX_SOCK_CLOEXEC  = 524288
+
+    sys_accept4(fd: int, addr_ptr: i64, addrlen_ptr: i64, flags: int) -> i64
+        val known = POSIX_SOCK_NONBLOCK | POSIX_SOCK_CLOEXEC
+        if (flags & ~known) != 0
+            return i64(-22)             // -EINVAL
+        val r = sys_accept(fd, addr_ptr, addrlen_ptr)
+        if r < i64(0)
+            return r
+        val new_fd = int(r)
+        if (flags & POSIX_SOCK_NONBLOCK) != 0
+            val cur = posix_fd_flags(new_fd)
+            posix_fd_set_flags(new_fd, cur | POSIX_O_NONBLOCK)
+        i64(new_fd)
+
+
 SYS_SHUTDOWN. Real half-close via `INET_CMD_TCP_SHUTDOWN`. `how`
 values (Linux): 0 = SHUT_RD (no-op — we don't track a read-shut
 state, reads continue), 1 = SHUT_WR (inet emits FIN via
@@ -1342,6 +1412,28 @@ recv data). Not valid on non-TCP fds.
         if reply[0] != 0
             return i64(-5)
         i64(0)
+
+Send INET_CMD_TCP_SET_KEEPALIVE.  Returns 0 / negative errno.
+Used at setsockopt(SO_KEEPALIVE) time on a TCP fd that already
+has an inet slot, and at connect/listen time to apply a flag the
+caller stashed pre-slot.
+
+    shim_inet_set_keepalive(inet_fd: int, on: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [4]byte
+        msg[0] = byte(INET_CMD_TCP_SET_KEEPALIVE)
+        shim_write_u16(msg, 1, inet_fd)
+        msg[3] = byte(on & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 4, reply, 1)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            return -22
+        0
+
 
 Send INET_CMD_TCP_SETBUF for one buffer.  `is_send` selects which.
 Returns 0 on success, negative errno on failure.
@@ -1427,12 +1519,37 @@ as -EINVAL).
                 if shim_sockopt_read_int(optval, optlen, v) != 0
                     return i64(-22)
                 posix_fd_table[tidx].flag_keepalive = v
+                // Push to inet immediately when a slot exists so
+                // the probe/giveup cycle either starts (v != 0) or
+                // stops (v == 0) right now. Pre-slot calls just
+                // persist; sys_connect / sys_listen apply later.
+                if k == POSIX_FD_TCP_SOCKET
+                    val ka_inet_fd = posix_fd_target(fd)
+                    if ka_inet_fd >= 0
+                        shim_inet_set_keepalive(ka_inet_fd, v)
                 return i64(0)
             if optname == 15
                 var v = 0
                 if shim_sockopt_read_int(optval, optlen, v) != 0
                     return i64(-22)
                 posix_fd_table[tidx].flag_reuseport = v
+                return i64(0)
+            // SO_LINGER. Wire is `struct linger { i32 l_onoff;
+            // i32 l_linger; }` — 8 bytes.  Persist both fields;
+            // sys_close consults them at close time to pick
+            // FIN-vs-RST.  Negative l_linger is clamped to 0
+            // (matches Linux glibc behaviour).
+            if optname == 13
+                if optlen < 8 || optval == i64(0)
+                    return i64(-22)
+                val lp_on: *i32 = *i32(optval)
+                val lp_secs: *i32 = *i32(optval + i64(4))
+                var l_on = int(*lp_on)
+                var l_secs = int(*lp_secs)
+                if l_secs < 0
+                    l_secs = 0
+                posix_fd_table[tidx].linger_on = l_on
+                posix_fd_table[tidx].linger_secs = l_secs
                 return i64(0)
             // SO_SNDBUF / SO_RCVBUF.  Persist on the shim fd so the
             // value survives until connect/listen creates an inet
@@ -1498,6 +1615,8 @@ the option buffer is left untouched in that case.
                 accept = 1
             if optname == 9
                 accept = 1
+            if optname == 13
+                accept = 1
             if optname == 15
                 accept = 1
         if level == 6
@@ -1509,10 +1628,27 @@ the option buffer is left untouched in that case.
             return i64(-14)             // -EFAULT
         val lp: *i32 = *i32(len_ptr)
         val cap = int(*lp)
-        if cap < 4
+        // SO_LINGER returns a struct linger (8 bytes); everything
+        // else is an int (4 bytes).
+        val need = if optname == 13 then 8 else 4
+        if cap < need
             return i64(-22)             // -EINVAL
         if optval == i64(0)
             return i64(-14)
+        // SO_LINGER: write back the persisted struct.  Pre-connect
+        // / post-close fds carry the user's most recent set call
+        // (or zero-init).  No inet round-trip needed since the
+        // shim is the source of truth for linger state.
+        if level == 1
+            if optname == 13
+                val pid = posix_fd_current_pid()
+                val lidx = pid * POSIX_FDS_PER_PROC + fd
+                val on_ptr: *i32 = *i32(optval)
+                val secs_ptr: *i32 = *i32(optval + i64(4))
+                *on_ptr = i32(posix_fd_table[lidx].linger_on)
+                *secs_ptr = i32(posix_fd_table[lidx].linger_secs)
+                *lp = i32(8)
+                return i64(0)
         val vp: *i32 = *i32(optval)
         // SO_SNDBUF / SO_RCVBUF: ask the inet server for the actual
         // per-socket size.  Pre-connect TCP fds (no inet slot yet)

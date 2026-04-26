@@ -44,6 +44,7 @@ Final marker: `sockopt: done`.
     val SO_BROADCAST  = 6
     val SO_SNDBUF     = 7
     val SO_RCVBUF     = 8
+    val SO_LINGER     = 13
     val IPPROTO_TCP   = 6
     val TCP_NODELAY   = 1
 
@@ -290,6 +291,59 @@ Raw POSIX syscall wrappers.
         if r12 != 0 || int(nd_out[0]) != 1
             puts("sockopt: FAIL get TCP_NODELAY round-trip\n")
             exit_with(16)
+            return
+
+        // SO_LINGER round-trip — struct linger is (i32 l_onoff,
+        // i32 l_linger) = 8 bytes. Set l_onoff=1 l_linger=0 (the
+        // abort-close shortcut) and verify both come back.
+        var ls: [8]byte
+        ls[0] = byte(1)        // l_onoff i32 LE = 1
+        ls[1] = byte(0)
+        ls[2] = byte(0)
+        ls[3] = byte(0)
+        ls[4] = byte(0)        // l_linger i32 LE = 0
+        ls[5] = byte(0)
+        ls[6] = byte(0)
+        ls[7] = byte(0)
+        val r13 = posix_setsockopt(tfd, SOL_SOCKET, SO_LINGER, &ls[0], 8)
+        puts("sockopt: set SO_LINGER = ")
+        print_sdec(r13)
+        puts("\n")
+        if r13 != 0
+            puts("sockopt: FAIL set SO_LINGER\n")
+            exit_with(17)
+            return
+
+        var ls_out: [8]byte
+        var i = 0
+        while i < 8
+            ls_out[i] = byte(0xff)
+            i += 1
+        var ls_olen: i32 = i32(8)
+        val r14 = posix_getsockopt(tfd, SOL_SOCKET, SO_LINGER,
+                                   &ls_out[0], &ls_olen)
+        val on_lo = int(ls_out[0]) & 0xff
+        val secs_lo = int(ls_out[4]) & 0xff
+        puts("sockopt: get SO_LINGER = ")
+        print_sdec(r14)
+        puts(" olen=")
+        print_sdec(int(ls_olen))
+        puts(" on=")
+        print_sdec(on_lo)
+        puts(" secs=")
+        print_sdec(secs_lo)
+        puts("\n")
+        if r14 != 0
+            puts("sockopt: FAIL get SO_LINGER\n")
+            exit_with(18)
+            return
+        if int(ls_olen) != 8
+            puts("sockopt: FAIL SO_LINGER olen not 8\n")
+            exit_with(19)
+            return
+        if on_lo != 1 || secs_lo != 0
+            puts("sockopt: FAIL SO_LINGER round-trip values\n")
+            exit_with(20)
             return
 
         posix_close(tfd)
