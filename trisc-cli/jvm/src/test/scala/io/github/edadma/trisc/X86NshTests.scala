@@ -660,6 +660,15 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udppeer: bad"
   }
 
+  "x86 tcp: recvfrom with MSG_DONTWAIT" in {
+    // sys_recvfrom now accepts TCP fds (previously -EBADF) and
+    // honors MSG_DONTWAIT for per-call NB. The pre-data recv
+    // returns -EAGAIN; after write, recv returns the bytes.
+    val output = qemu.command("test_tcp_dwait")
+    output should include("tcpdw: ok")
+    output should not include "tcpdw: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

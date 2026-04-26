@@ -1297,8 +1297,74 @@ Blocks until a datagram is available. Writes the source's family
 + port + addr into `src_addr` (16-byte sockaddr_in) if non-null,
 updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
 
+TCP variant of `recvfrom`.  Uses the same INET_CMD_TCP_RECV /
+INET_CMD_TCP_RECV_NB IPC as `sys_read` but honors POSIX
+MSG_DONTWAIT (0x40) — flag-based per-call NB override even when
+the fd is in blocking mode. `addr_ptr` is filled with zeros if
+non-null; Linux's recvfrom on TCP doesn't reliably populate the
+src-addr for stream sockets, and apps that want the connected
+peer call `getpeername`.
+
+    sys_recvfrom_tcp(fd: int, buf: i64, len: int, flags: int,
+                     addr_ptr: i64, addrlen_ptr: i64) -> i64
+        val inet_fd = posix_fd_target(fd)
+        if inet_fd < 0
+            return i64(-107)            // -ENOTCONN
+        if len <= 0
+            return i64(0)
+        val port = inet_get_port()
+        if port < 0
+            return i64(-19)
+        var cap_len = len
+        if cap_len > INET_MAX_TCP_SEG
+            cap_len = INET_MAX_TCP_SEG
+        var nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
+        if (flags & 0x40) != 0
+            nb = POSIX_O_NONBLOCK
+        var msg: [5]byte
+        if nb != 0
+            msg[0] = byte(INET_CMD_TCP_RECV_NB)
+        else
+            msg[0] = byte(INET_CMD_TCP_RECV)
+        shim_write_u16(msg, 1, inet_fd)
+        shim_write_u16(msg, 3, cap_len)
+        var reply: [540]byte
+        val r = ipc_send(port, msg, 5, reply, 540)
+        if r < 0
+            return i64(-5)
+        if nb != 0
+            val raw = int(reply[0]) & 0xff
+            if raw != 0
+                if raw >= 128
+                    return i64(raw - 256)
+                return i64(raw)
+        if reply[0] != 0
+            return i64(-5)
+        val rlen = shim_read_u16(reply, 1)
+        val ubuf: *byte = *byte(buf)
+        var i = 0
+        while i < rlen
+            ubuf[i] = reply[3 + i]
+            i += 1
+        // addr_ptr/addrlen_ptr write: Linux leaves the fields
+        // undefined for TCP recvfrom but most callers expect them
+        // unmodified-but-valid. Zero-fill if addr_ptr was supplied.
+        if addr_ptr != i64(0)
+            var zero: [4]byte
+            zero[0] = byte(0)
+            zero[1] = byte(0)
+            zero[2] = byte(0)
+            zero[3] = byte(0)
+            shim_write_sockaddr(addr_ptr, 0, &zero[0])
+            shim_write_addrlen(addrlen_ptr, 16)
+        i64(rlen)
+
+
     sys_recvfrom(fd: int, buf: i64, len: int, flags: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
-        if posix_fd_kind(fd) != POSIX_FD_UDP_SOCKET
+        val k0 = posix_fd_kind(fd)
+        if k0 == POSIX_FD_TCP_SOCKET
+            return sys_recvfrom_tcp(fd, buf, len, flags, addr_ptr, addrlen_ptr)
+        if k0 != POSIX_FD_UDP_SOCKET
             return i64(-9)
         if len < 0
             return i64(-22)

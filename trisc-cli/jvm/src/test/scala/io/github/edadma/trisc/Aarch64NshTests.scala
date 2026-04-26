@@ -1773,6 +1773,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udppeer: bad"
   }
 
+  "aarch64 tcp: recvfrom with MSG_DONTWAIT" in {
+    // sys_recvfrom now accepts TCP fds (previously -EBADF) and
+    // honors MSG_DONTWAIT for per-call NB. The pre-data recv
+    // returns -EAGAIN; after write, recv returns the bytes.
+    val output = qemu.command("test_tcp_dwait")
+    output should include("tcpdw: ok")
+    output should not include "tcpdw: bad"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and
