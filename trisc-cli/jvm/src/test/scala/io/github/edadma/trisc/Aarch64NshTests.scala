@@ -1616,6 +1616,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("1 sent, 1 received")
   }
 
+  "aarch64 sockopt: SO_TYPE/DOMAIN/PROTOCOL/ACCEPTCONN" in {
+    // test_sockinfo verifies the four read-only introspection
+    // getsockopts the shim now reports off the fd kind +
+    // is_listen flag. Three fds: UDP, TCP pre-listen, TCP
+    // post-listen.
+    val output = qemu.command("test_sockinfo")
+    output should include("sockinfo: ok")
+    output should not include "sockinfo: bad"
+  }
+
   "aarch64 tcp: out-of-order reassembly self-test" in {
     // test_tcp_ooo triggers inet's reorder-queue self-test via a
     // dedicated IPC op. The test exercises the stash → drain path

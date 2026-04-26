@@ -518,6 +518,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("1 sent, 1 received")
   }
 
+  "x86 sockopt: SO_TYPE/DOMAIN/PROTOCOL/ACCEPTCONN" in {
+    // test_sockinfo verifies the four read-only introspection
+    // getsockopts the shim now reports off the fd kind +
+    // is_listen flag. Three fds: UDP, TCP pre-listen, TCP
+    // post-listen.
+    val output = qemu.command("test_sockinfo")
+    output should include("sockinfo: ok")
+    output should not include "sockinfo: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

@@ -153,6 +153,12 @@ posix_fd_bridge memory.
         // socket.  getsockopt(SOL_SOCKET, SO_ERROR) returns it and
         // clears it back to 0 — Linux read-and-reset semantics.
         last_error: int
+        // SO_ACCEPTCONN read-side flag. Set when sys_listen succeeds
+        // on this TCP fd; getsockopt(SO_ACCEPTCONN) returns it.
+        // Stays 1 across the listen socket's lifetime — Linux clears
+        // it only on close. Children produced by accept() are fresh
+        // fds with is_listen = 0.
+        is_listen: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -183,6 +189,7 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].timerfd_next_tick = 0
             posix_fd_table[base + i].timerfd_expirations = i64(0)
             posix_fd_table[base + i].last_error = 0
+            posix_fd_table[base + i].is_listen = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -255,6 +262,7 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].timerfd_next_tick = 0
                 posix_fd_table[base + i].timerfd_expirations = i64(0)
                 posix_fd_table[base + i].last_error = 0
+                posix_fd_table[base + i].is_listen = 0
                 return i
             i += 1
         -1
@@ -1556,6 +1564,7 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
             return i64(-98)             // -EADDRINUSE
         val listen_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = listen_fd
+        posix_fd_table[idx].is_listen = 1
         // Apply pending SO_KEEPALIVE — accepted children inherit
         // the listener's flag via inet's handle_passive_syn.
         if posix_fd_table[idx].flag_keepalive != 0
@@ -2005,6 +2014,8 @@ is left untouched in that case.
         if level == 1
             if optname == 2
                 accept = 1
+            if optname == 3
+                accept = 1
             if optname == 4
                 accept = 1
             if optname == 6
@@ -2018,6 +2029,12 @@ is left untouched in that case.
             if optname == 13
                 accept = 1
             if optname == 15
+                accept = 1
+            if optname == 30
+                accept = 1
+            if optname == 38
+                accept = 1
+            if optname == 39
                 accept = 1
         if level == 6
             if optname == 1
@@ -2052,6 +2069,41 @@ is left untouched in that case.
                 *lp = i32(8)
                 return i64(0)
         val vp: *i32 = *i32(optval)
+        // Read-only introspection getsockopts. SO_TYPE / SO_PROTOCOL
+        // are derived from the fd kind; SO_DOMAIN is always AF_INET
+        // (slix has no AF_UNIX or AF_INET6); SO_ACCEPTCONN reflects
+        // the per-fd is_listen flag set in sys_listen. Real Linux
+        // also reports these and several libraries probe via them
+        // (e.g. libuv's socket-type detection on accept'd fds).
+        if level == 1
+            if optname == 3
+                // SO_TYPE: SOCK_STREAM = 1, SOCK_DGRAM = 2
+                if k == POSIX_FD_TCP_SOCKET
+                    *vp = i32(1)
+                else
+                    *vp = i32(2)
+                *lp = i32(4)
+                return i64(0)
+            if optname == 30
+                // SO_ACCEPTCONN: 1 iff post-listen, else 0
+                val pid_ac = posix_fd_current_pid()
+                val acidx = pid_ac * POSIX_FDS_PER_PROC + fd
+                *vp = i32(posix_fd_table[acidx].is_listen)
+                *lp = i32(4)
+                return i64(0)
+            if optname == 38
+                // SO_PROTOCOL: IPPROTO_TCP = 6, IPPROTO_UDP = 17
+                if k == POSIX_FD_TCP_SOCKET
+                    *vp = i32(6)
+                else
+                    *vp = i32(17)
+                *lp = i32(4)
+                return i64(0)
+            if optname == 39
+                // SO_DOMAIN: always AF_INET (2)
+                *vp = i32(2)
+                *lp = i32(4)
+                return i64(0)
         // SO_SNDBUF / SO_RCVBUF: ask the inet server for the actual
         // per-socket size.  Pre-connect TCP fds (no inet slot yet)
         // report the pending value the caller stashed via setsockopt
