@@ -668,6 +668,26 @@ to the same UDP stack that native sysl programs use via
             return sys_timerfd_gettime(int(a0), a1)
         if num == 358
             return sys_timerfd_settime(int(a0), int(a1), a2, a3)
+        // fsync/fdatasync/sync/syncfs: slix has no on-disk
+        // persistence yet (TFS is in RAM), so there's nothing to
+        // flush. Returning 0 lets programs that defensively call
+        // these after writes (sqlite, log writers, ...) keep
+        // moving instead of crashing on -ENOSYS. fsync/fdatasync/
+        // syncfs validate fd; sync takes no args.
+        if num == 172
+            if posix_fd_kind(int(a0)) == POSIX_FD_FREE
+                return i64(-9)              // -EBADF
+            return i64(0)
+        if num == 180
+            if posix_fd_kind(int(a0)) == POSIX_FD_FREE
+                return i64(-9)
+            return i64(0)
+        if num == 345
+            return i64(0)
+        if num == 347
+            if posix_fd_kind(int(a0)) == POSIX_FD_FREE
+                return i64(-9)
+            return i64(0)
         i64(-38)            // -ENOSYS
 
 SYS_WRITE. Looks up `fd` in the process's POSIX fd table and

@@ -1627,6 +1627,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpinfo: bad"
   }
 
+  "aarch64 fs: fsync / fdatasync / sync / syncfs no-op stubs" in {
+    // No on-disk persistence yet; these return 0 (or -EBADF for
+    // bad fds) so defensive sqlite/log-writer patterns don't
+    // crash on -ENOSYS.
+    val output = qemu.command("test_fsync")
+    output should include("fsync: ok")
+    output should not include "fsync: bad"
+  }
+
   "aarch64 sockopt: SO_TYPE/DOMAIN/PROTOCOL/ACCEPTCONN" in {
     // test_sockinfo verifies the four read-only introspection
     // getsockopts the shim now reports off the fd kind +

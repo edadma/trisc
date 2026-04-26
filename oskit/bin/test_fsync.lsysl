@@ -1,0 +1,78 @@
+test_fsync — fsync / fdatasync / sync / syncfs no-op stubs
+==========================================================
+
+slix's TFS is in RAM, so there's nothing to flush. The shim
+implements these as zero-cost no-ops returning 0 (success)
+or -EBADF for bad fds. This lets defensive sqlite/log-writer
+patterns keep working without -ENOSYS surprises.
+
+Pass criteria:
+  - fsync(stdout=1)              -> 0
+  - fdatasync(stderr=2)          -> 0
+  - syncfs(stdin=0)              -> 0
+  - sync()                       -> 0
+  - fsync(-1)                    -> -EBADF (-9)
+  - fdatasync(99)                -> -EBADF (-9)
+
+Output: `fsync: ok` / `fsync: bad <code>`.
+
+    module oskit.bin.test_fsync
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_FDATASYNC = 172
+    val NR_FSYNC     = 180
+    val NR_SYNC      = 345
+    val NR_SYNCFS    = 347
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    posix_fsync(fd: int) -> int
+        int(syscall6(NR_FSYNC, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_fdatasync(fd: int) -> int
+        int(syscall6(NR_FDATASYNC, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_sync() -> int
+        int(syscall6(NR_SYNC, 0, 0, 0, 0, 0, 0))
+
+    posix_syncfs(fd: int) -> int
+        int(syscall6(NR_SYNCFS, i64(fd), 0, 0, 0, 0, 0))
+
+
+    fail_with(code: int)
+        puts("fsync: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        if posix_fsync(1) != 0
+            fail_with(1)
+            return
+        if posix_fdatasync(2) != 0
+            fail_with(2)
+            return
+        if posix_syncfs(0) != 0
+            fail_with(3)
+            return
+        if posix_sync() != 0
+            fail_with(4)
+            return
+        if posix_fsync(-1) != -9
+            fail_with(5)
+            return
+        if posix_fdatasync(99) != -9
+            fail_with(6)
+            return
+        puts("fsync: ok\n")
+        exit()
