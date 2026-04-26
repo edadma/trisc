@@ -52,6 +52,7 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_IP_REASM_OVERLAP_TEST = 45
     val INET_CMD_IP_REASM_TIMEOUT_TEST = 46
     val INET_CMD_TCP_SEND_PARK_TEST = 47
+    val INET_CMD_TCP_ARP_REPLAY_TEST = 48
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val ARP_PROBE_OP_START    = 0
@@ -754,6 +755,25 @@ the parked slot.  Returns 0 on pass, 1..6 on the failure step.
             return -1
         var msg: [1]byte
         msg[0] = byte(INET_CMD_TCP_SEND_PARK_TEST)
+        var reply: [1]byte
+        ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### tcp_arp_replay_test (test-only)
+
+Triggers the inet server's ARP-driven TCP retransmit self-test
+(Phase 1 chunk 2 of the net-stack quality plan).  Forces a
+synthetic TCP slot to look "ARP-miss pending", inserts the
+matching ARP entry, and verifies the drain pipeline clears the
+flag.  Returns 0 on pass, 1..3 on the failure step.
+
+    tcp_arp_replay_test() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_TCP_ARP_REPLAY_TEST)
         var reply: [1]byte
         ipc_send(port, msg, 1, reply, 1)
         int(reply[0]) & 0xff

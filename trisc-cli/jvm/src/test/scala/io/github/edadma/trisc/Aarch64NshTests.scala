@@ -1840,6 +1840,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcp_park: failed"
   }
 
+  "aarch64 net: ARP-driven TCP retransmit (Phase 1 quality)" in {
+    // Phase 1 chunk 2: inet_tcp_emit now records arp_pending=1
+    // when the next-hop MAC isn't cached, and inet_arp_drain_pending
+    // walks TCP on a fresh ARP entry, clearing the flag and
+    // re-emitting via inet_tcp_retransmit.  Saves a full RTO on
+    // the first SYN to any off-cache peer.
+    val output = qemu.command("test_arpretx")
+    output should include("arpretx: ok")
+    output should not include "arpretx: failed"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

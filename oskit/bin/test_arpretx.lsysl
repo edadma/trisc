@@ -1,0 +1,44 @@
+test_arpretx — ARP-driven TCP retransmit self-test
+====================================================
+
+Phase 1 chunk 2 of the net-stack quality plan: when
+`inet_tcp_emit` hits an ARP miss for a non-loopback peer it now
+sets `tcp_sockets[s].arp_pending = 1`.  When the matching ARP
+reply later lands, `inet_arp_drain_pending` walks TCP, clears
+the flag, and force-retransmits via `inet_tcp_retransmit`.
+Saves a full RTO on the first SYN to any off-cache peer.
+
+This test triggers the inet self-test that drives the state
+machine synthetically — no real network, no real ARP.
+
+Prints `arpretx: ok` on pass or `arpretx: failed N` where N is
+the failure-step code returned by the inet self-test.
+
+    module oskit.bin.test_arpretx
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{tcp_arp_replay_test}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("arpretx: failed ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val rc = tcp_arp_replay_test()
+        if rc != 0
+            fail(rc)
+            return
+        puts("arpretx: ok\n")
+        exit()

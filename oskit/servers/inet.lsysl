@@ -93,6 +93,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_IP_REASM_OVERLAP_TEST = 45
     val INET_CMD_IP_REASM_TIMEOUT_TEST = 46
     val INET_CMD_TCP_SEND_PARK_TEST = 47
+    val INET_CMD_TCP_ARP_REPLAY_TEST = 48
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1716,6 +1717,17 @@ fake waiter, drain, watch the helper clear the slot.
         ipc_reply(sender, reply, 1)
 
 
+Test-only: drive `inet_tcp_arp_replay_selftest` to verify that
+landing an ARP reply re-emits any TCP socket that previously
+hit a MAC-miss in `inet_tcp_emit`.
+
+    inet_handle_tcp_arp_replay_test(sender: int, buf: *byte)
+        val rc = inet_tcp_arp_replay_selftest()
+        var reply: [1]byte
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+
 Test-only: synthesize three IPv4 fragments of a 32-byte UDP
 datagram bound for our IP at port 9100, inject them into
 `inet_handle_frame` in out-of-order sequence (frag 2, frag 3,
@@ -2324,6 +2336,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_IP_REASM_OVERLAP_TEST -> inet_handle_ip_reasm_overlap_test(sender, buf)
                     INET_CMD_IP_REASM_TIMEOUT_TEST -> inet_handle_ip_reasm_timeout_test(sender, buf)
                     INET_CMD_TCP_SEND_PARK_TEST -> inet_handle_tcp_send_park_test(sender, buf)
+                    INET_CMD_TCP_ARP_REPLAY_TEST -> inet_handle_tcp_arp_replay_test(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte

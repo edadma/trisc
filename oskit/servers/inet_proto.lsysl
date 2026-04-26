@@ -682,6 +682,12 @@ ARP cache — the lookup will hit and the frame is emitted.
                         payload, dlen)
             i += 1
 
+        // Walk TCP sockets that previously failed to emit because
+        // of an ARP miss.  Defined later in the file (after
+        // `tcp_sockets`) so the analyzer's forward function
+        // resolution carries us through the reference.
+        inet_tcp_arp_drain(ip)
+
 
 Returns 1 if `ip` lives in our local subnet per the current
 netmask. Off-subnet destinations route via the default gateway.
@@ -1698,6 +1704,12 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         // `INET_CMD_TCP_GET_ERR` IPC) is the only way to recover the
         // reason. Survives `close_slot`; reset by `inet_tcp_alloc`.
         pending_error: int
+        // Set by `inet_tcp_emit` when the next-hop MAC isn't in the
+        // ARP cache; cleared (and the socket retransmitted) by
+        // `inet_arp_drain_pending` when the matching ARP reply
+        // lands.  Without this we waste an RTO on the first SYN to
+        // any off-cache peer; the retx-on-drain path saves that RTT.
+        arp_pending: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -1714,6 +1726,30 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         val v = tcp_iss_counter
         tcp_iss_counter = v + u32(65536)
         v
+
+
+Walk TCP sockets that recorded `arp_pending=1` and whose
+next-hop matches the freshly-cached `ip`.  Clear the flag and
+re-emit via `inet_tcp_retransmit` so the first SYN/segment can
+go out immediately instead of waiting an RTO.  Defined here
+because `tcp_sockets` is a forward-var reference from
+`inet_arp_drain_pending` higher up — the analyzer accepts a
+forward fn ref but not a forward var ref.
+
+    inet_tcp_arp_drain(ip: u32)
+        var ti = 0
+        while ti < TCP_MAX_SOCKETS
+            if tcp_sockets[ti].in_use != 0
+                if tcp_sockets[ti].arp_pending != 0
+                    var next_hop = tcp_sockets[ti].remote_ip
+                    if inet_in_subnet(next_hop) == 0
+                        next_hop = ipv4(INET_GW_IP_A, INET_GW_IP_B,
+                            INET_GW_IP_C, INET_GW_IP_D)
+                    if next_hop == ip
+                        tcp_sockets[ti].arp_pending = 0
+                        inet_tcp_retransmit(ti)
+            ti += 1
+
 
     inet_tcp_init()
         var i = 0
@@ -2061,6 +2097,10 @@ TCP options attached:
                 mi += 1
         else
             if inet_resolve_mac(tcp_sockets[s].remote_ip, next_hop_mac) == 0
+                // ARP request now in-flight.  Mark the slot so
+                // `inet_arp_drain_pending` can re-emit when the
+                // reply lands, instead of waiting an RTO.
+                tcp_sockets[s].arp_pending = 1
                 return -1
         val is_syn = (flags & TCP_F_SYN) != 0
         // Count SACK blocks we'd emit on this segment. SACK is
@@ -2595,6 +2635,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].keepalive_intvl = 0
                 tcp_sockets[i].keepalive_cnt = 0
                 tcp_sockets[i].pending_error = 0
+                tcp_sockets[i].arp_pending = 0
                 // Heap-backed buffers are allocated lazily on alloc.
                 // close_slot frees + nulls the pointers, so re-using a
                 // slot doesn't double-allocate.  std.alloc returns 0 on
@@ -4557,6 +4598,58 @@ Steps:
      cleared) and must not crash.
 
 Returns 0 on full pass; 1..6 on the failure step.
+
+Test-only: prove the ARP-driven TCP retransmit hook works.
+
+  1. Pin a deterministic IP config (10.0.2.15/24 with gw
+     10.0.2.2) so the next-hop math is predictable, regardless of
+     whether DHCP has run.
+  2. Allocate a TCP slot, force ESTABLISHED, point it at an IP
+     in subnet (10.0.2.99) so its next-hop is itself, not the
+     gateway.
+  3. Set `arp_pending = 1` directly — the same flag that
+     `inet_tcp_emit` sets on a real MAC miss.
+  4. Insert a fake ARP entry for 10.0.2.99 via `inet_arp_insert`,
+     which fires `inet_arp_drain_pending` at the end.  The drain
+     walks TCP, finds our slot with `arp_pending=1`, clears it,
+     and calls `inet_tcp_retransmit`.
+  5. Verify `arp_pending == 0` afterwards.
+
+Returns 0 on pass, 1..3 on the failure step.
+
+    inet_tcp_arp_replay_selftest() -> int
+        val saved_ip = inet_get_our_ip()
+        val saved_mask = inet_get_mask()
+        val saved_gw = inet_get_gw()
+        inet_set_ip_config(ipv4(10, 0, 2, 15), ipv4(255, 255, 255, 0),
+            ipv4(10, 0, 2, 2))
+
+        val s = inet_tcp_alloc()
+        if s < 0
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 1
+        tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+        tcp_sockets[s].owner_tid = -1
+        val test_ip = ipv4(10, 0, 2, 99)
+        tcp_sockets[s].remote_ip = test_ip
+        tcp_sockets[s].arp_pending = 1
+
+        var fake_mac: [6]byte
+        var i = 0
+        while i < 6
+            fake_mac[i] = byte(0x10 + i)
+            i += 1
+        inet_arp_insert(test_ip, fake_mac)
+
+        val rc = if tcp_sockets[s].arp_pending == 0 then 0 else 2
+
+        val idx = inet_arp_lookup_idx(test_ip)
+        if idx >= 0
+            inet_arp_cache[idx].in_use = 0
+        inet_tcp_close_slot(s, 0)
+        inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+        rc
+
 
     inet_tcp_send_park_selftest() -> int
         val s = inet_tcp_alloc()

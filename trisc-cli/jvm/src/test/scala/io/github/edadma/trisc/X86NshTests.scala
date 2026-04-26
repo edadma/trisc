@@ -727,6 +727,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "tcp_park: failed"
   }
 
+  "x86 net: ARP-driven TCP retransmit (Phase 1 quality)" in {
+    // Phase 1 chunk 2: inet_tcp_emit now records arp_pending=1
+    // when the next-hop MAC isn't cached, and inet_arp_drain_pending
+    // walks TCP on a fresh ARP entry, clearing the flag and
+    // re-emitting via inet_tcp_retransmit.  Saves a full RTO on
+    // the first SYN to any off-cache peer.
+    val output = qemu.command("test_arpretx")
+    output should include("arpretx: ok")
+    output should not include "arpretx: failed"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
