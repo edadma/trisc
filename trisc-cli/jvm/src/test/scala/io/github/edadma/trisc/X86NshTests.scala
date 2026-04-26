@@ -705,6 +705,15 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "stubs: bad"
   }
 
+  "x86 fs: faccessat path-exists probe" in {
+    // POSIX faccessat. Slix has no real permission model so
+    // F_OK / R_OK / W_OK / X_OK collapse into "VFS opens it".
+    // -ENOENT for missing paths.
+    val output = qemu.command("test_access")
+    output should include("access: ok")
+    output should not include "access: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

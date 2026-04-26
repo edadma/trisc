@@ -721,6 +721,18 @@ to the same UDP stack that native sysl programs use via
             return sys_pwrite64(int(a0), a1, int(a2), a3)
         // Defensive stubs — universally probed by libc/jemalloc/
         // glibc-compat shims. Returning 0 (or zeros) is safe.
+        if num == 159
+            // faccessat(dirfd, path, mode, flags) — POSIX path
+            // existence + permission probe. Slix has no real
+            // permission bits yet, so we treat success-of-open
+            // as "exists and accessible". F_OK / R_OK / W_OK /
+            // X_OK collapse into the same probe.
+            return sys_faccessat(int(a0), a1, int(a2), int(a3))
+        if num == 160
+            // faccessat2 — same as faccessat with an explicit
+            // flags arg in a4 instead of a3. We map to the same
+            // helper (slix doesn't honor AT_SYMLINK_NOFOLLOW yet).
+            return sys_faccessat(int(a0), a1, int(a2), int(a3))
         if num == 223
             // madvise(addr, len, advice) — unconditional 0. Slix
             // has no swap or page reclaim, so MADV_DONTNEED /
@@ -2919,6 +2931,51 @@ instead, but that path requires VFS to route by command byte
 which it doesn't today — adding it is a follow-up if we need
 TTY/socket-via-open. The returned VFS handle is parked in a
 fresh `POSIX_FD_FILE` slot.
+
+SYS_FACCESSAT (159) / SYS_FACCESSAT2 (160). Path probe: does
+the file exist + is it accessible. Slix has no real permission
+model yet, so we treat "VFS opens it" as "accessible" — F_OK
+(0) / R_OK (4) / W_OK (2) / X_OK (1) collapse into one probe.
+
+Returns 0 on success, -ENOENT on miss.
+
+    sys_faccessat(dirfd: int, path_ptr: i64, mode: int, flags: int) -> i64
+        if path_ptr == i64(0)
+            return i64(-14)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)
+        var path: [128]byte
+        val up: *byte = *byte(path_ptr)
+        var n = 0
+        while n < 127
+            val c = up[n]
+            if c == byte(0)
+                break
+            path[n] = c
+            n += 1
+        var msg: [129]byte
+        msg[0] = byte(VFS_CMD_OPEN_C)
+        var i = 0
+        while i < n
+            msg[1 + i] = path[i]
+            i += 1
+        var reply: [9]byte
+        val r = ipc_send(port, msg, 1 + n, reply, 9)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-2)              // -ENOENT
+        // Open succeeded — close the handle immediately, we just
+        // wanted the existence check.
+        val handle = shim_read_be_i32(reply, 1)
+        var cmsg: [5]byte
+        cmsg[0] = byte(VFS_CMD_CLOSE_C)
+        shim_write_be_i32(cmsg, 1, handle)
+        var crep: [1]byte
+        ipc_send(port, cmsg, 5, crep, 1)
+        i64(0)
+
 
     sys_openat(dirfd: int, path_ptr: i64, oflags: int, mode: int) -> i64
         if path_ptr == i64(0)

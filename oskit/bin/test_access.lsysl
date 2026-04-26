@@ -1,0 +1,94 @@
+test_access — faccessat path probe
+====================================
+
+POSIX faccessat (Linux) probes whether a path exists and is
+accessible. Slix has no real permission model yet, so we treat
+"VFS opens it" as success.
+
+Test:
+  1. faccessat(AT_FDCWD, "/etc/passwd", F_OK, 0) → 0.
+  2. faccessat(AT_FDCWD, "/nonexistent", F_OK, 0) → -ENOENT.
+  3. faccessat with R_OK / W_OK / X_OK on existing file → 0.
+
+Pass = `access: ok`.
+
+    module oskit.bin.test_access
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_FACCESSAT  = 159
+
+    val AT_FDCWD      = -100
+    val F_OK          = 0
+    val R_OK          = 4
+    val W_OK          = 2
+    val X_OK          = 1
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail_with(code: int)
+        puts("access: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_faccessat(dirfd: int, path: *byte, mode: int, flags: int) -> int
+        int(syscall6(NR_FACCESSAT, i64(dirfd), i64(path),
+            i64(mode), i64(flags), 0, 0))
+
+
+    main(argv: []string)
+        var p1: [12]byte
+        p1[0] = byte('/')
+        p1[1] = byte('e')
+        p1[2] = byte('t')
+        p1[3] = byte('c')
+        p1[4] = byte('/')
+        p1[5] = byte('p')
+        p1[6] = byte('a')
+        p1[7] = byte('s')
+        p1[8] = byte('s')
+        p1[9] = byte('w')
+        p1[10] = byte('d')
+        p1[11] = byte(0)
+        if posix_faccessat(AT_FDCWD, &p1[0], F_OK, 0) != 0
+            fail_with(1)
+            return
+        if posix_faccessat(AT_FDCWD, &p1[0], R_OK, 0) != 0
+            fail_with(2)
+            return
+        if posix_faccessat(AT_FDCWD, &p1[0], W_OK, 0) != 0
+            fail_with(3)
+            return
+        if posix_faccessat(AT_FDCWD, &p1[0], X_OK, 0) != 0
+            fail_with(4)
+            return
+
+        var p2: [13]byte
+        p2[0] = byte('/')
+        p2[1] = byte('n')
+        p2[2] = byte('o')
+        p2[3] = byte('s')
+        p2[4] = byte('u')
+        p2[5] = byte('c')
+        p2[6] = byte('h')
+        p2[7] = byte('p')
+        p2[8] = byte('a')
+        p2[9] = byte('t')
+        p2[10] = byte('h')
+        p2[11] = byte(0)
+        if posix_faccessat(AT_FDCWD, &p2[0], F_OK, 0) != -2
+            fail_with(5)
+            return
+
+        puts("access: ok\n")
+        exit()

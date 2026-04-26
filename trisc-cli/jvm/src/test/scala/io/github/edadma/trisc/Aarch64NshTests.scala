@@ -1818,6 +1818,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "stubs: bad"
   }
 
+  "aarch64 fs: faccessat path-exists probe" in {
+    // POSIX faccessat. Slix has no real permission model so
+    // F_OK / R_OK / W_OK / X_OK collapse into "VFS opens it".
+    // -ENOENT for missing paths.
+    val output = qemu.command("test_access")
+    output should include("access: ok")
+    output should not include "access: bad"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and
