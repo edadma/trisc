@@ -1893,6 +1893,11 @@ recv data). Not valid on non-TCP fds.
 
     sys_shutdown(fd: int, how: int) -> i64
         val k = posix_fd_kind(fd)
+        if k == POSIX_FD_UDP_SOCKET
+            // Linux accepts shutdown on UDP as a no-op; some apps
+            // call shutdown(udp_fd, SHUT_WR) before close as a
+            // best-effort flush hint.
+            return i64(0)
         if k != POSIX_FD_TCP_SOCKET
             return i64(-9)
         val inet_fd = posix_fd_target(fd)
@@ -2617,7 +2622,22 @@ peer short-circuit.
     sys_getpeername(fd: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
         val k = posix_fd_kind(fd)
         if k == POSIX_FD_UDP_SOCKET
-            return i64(-107)               // -ENOTCONN (no connected UDP)
+            // Linux: connected UDP fd returns its saved peer; an
+            // unconnected UDP fd returns -ENOTCONN. The shim's
+            // udp_connected/peer fields are the source of truth
+            // since inet doesn't track per-socket peers for UDP.
+            val pid = posix_fd_current_pid()
+            val idx = pid * POSIX_FDS_PER_PROC + fd
+            if posix_fd_table[idx].udp_connected == 0
+                return i64(-107)
+            var oct: [4]byte
+            oct[0] = byte(posix_fd_table[idx].udp_peer_a & 0xff)
+            oct[1] = byte(posix_fd_table[idx].udp_peer_b & 0xff)
+            oct[2] = byte(posix_fd_table[idx].udp_peer_c & 0xff)
+            oct[3] = byte(posix_fd_table[idx].udp_peer_d & 0xff)
+            shim_write_sockaddr(addr_ptr, posix_fd_table[idx].udp_peer_port, &oct[0])
+            shim_write_addrlen(addrlen_ptr, 16)
+            return i64(0)
         if k != POSIX_FD_TCP_SOCKET
             return i64(-9)
         val tcp_fd = posix_fd_target(fd)

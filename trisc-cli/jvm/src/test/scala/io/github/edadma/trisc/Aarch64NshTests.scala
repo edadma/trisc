@@ -1763,6 +1763,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "mdwait: bad"
   }
 
+  "aarch64 udp: getpeername after connect + shutdown no-op" in {
+    // POSIX: getpeername on a connected UDP fd returns the saved
+    // peer; pre-connect returns -ENOTCONN. shutdown on UDP is
+    // accepted as a no-op (Linux compat). Both behaviors changed
+    // from earlier "always fail" returns.
+    val output = qemu.command("test_udp_pname")
+    output should include("udppeer: ok")
+    output should not include "udppeer: bad"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

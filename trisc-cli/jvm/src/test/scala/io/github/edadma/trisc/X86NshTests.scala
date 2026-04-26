@@ -651,6 +651,15 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "mdwait: bad"
   }
 
+  "x86 udp: getpeername after connect + shutdown no-op" in {
+    // POSIX: getpeername on a connected UDP fd returns the saved
+    // peer; pre-connect returns -ENOTCONN. shutdown on UDP is
+    // accepted as a no-op (Linux compat).
+    val output = qemu.command("test_udp_pname")
+    output should include("udppeer: ok")
+    output should not include "udppeer: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
