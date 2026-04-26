@@ -1809,6 +1809,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "pread: bad"
   }
 
+  "aarch64 misc: madvise / sched_yield / prctl / getrusage stubs" in {
+    // Defensive syscall stubs. libc startup, jemalloc, glibc
+    // compat layers all probe these routinely; -ENOSYS would
+    // crash or push them onto slow fallback paths.
+    val output = qemu.command("test_stubs")
+    output should include("stubs: ok")
+    output should not include "stubs: bad"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

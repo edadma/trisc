@@ -719,6 +719,41 @@ to the same UDP stack that native sysl programs use via
             return sys_pread64(int(a0), a1, int(a2), a3)
         if num == 268
             return sys_pwrite64(int(a0), a1, int(a2), a3)
+        // Defensive stubs — universally probed by libc/jemalloc/
+        // glibc-compat shims. Returning 0 (or zeros) is safe.
+        if num == 223
+            // madvise(addr, len, advice) — unconditional 0. Slix
+            // has no swap or page reclaim, so MADV_DONTNEED /
+            // MADV_FREE / MADV_RANDOM are all no-ops.
+            return i64(0)
+        if num == 299
+            // sched_yield — slix has no real scheduler hint path;
+            // return 0 (Linux semantics). The caller will be
+            // re-entered next tick anyway.
+            return i64(0)
+        if num == 259
+            // prctl(option, ...) — Linux has dozens of subops. We
+            // accept and 0-return PR_SET_NAME (15) / PR_GET_NAME
+            // (16) since they're commonly called by pthread setup;
+            // anything else is -EINVAL so libc fallback paths fire.
+            if int(a0) == 15
+                return i64(0)
+            if int(a0) == 16
+                return i64(0)
+            return i64(-22)
+        if num == 201
+            // getrusage(who, *rusage) — zero-fill the 144-byte
+            // struct so RUSAGE_SELF / RUSAGE_CHILDREN both report
+            // "no resources used yet". Real per-process accounting
+            // is its own follow-up.
+            if a1 == i64(0)
+                return i64(-14)
+            val rp: *byte = *byte(a1)
+            var ri = 0
+            while ri < 144
+                rp[ri] = byte(0)
+                ri += 1
+            return i64(0)
         if num == 274
             return sys_readv(int(a0), a1, int(a2))
         if num == 372

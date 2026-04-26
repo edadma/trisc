@@ -1,0 +1,91 @@
+test_stubs — defensive syscall stubs
+=====================================
+
+Verifies four commonly-probed syscalls that should never fail:
+
+- madvise (223): always 0; slix has no reclaim path so all
+  advice values are no-ops.
+- sched_yield (299): always 0; slix scheduler has no hint API.
+- prctl (259): 0 for PR_SET_NAME/PR_GET_NAME; -EINVAL otherwise.
+- getrusage (201): zero-fills 144-byte struct.
+
+These are routinely called by libc startup, jemalloc, glibc
+compat layers, etc. Without them returning 0, programs hit
+-ENOSYS and either crash or fall back to slow paths.
+
+    module oskit.bin.test_stubs
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_GETRUSAGE  = 201
+    val NR_MADVISE    = 223
+    val NR_PRCTL      = 259
+    val NR_SCHED_YIELD = 299
+
+    val PR_SET_NAME   = 15
+    val PR_GET_NAME   = 16
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail_with(code: int)
+        puts("stubs: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        // madvise(addr, len, MADV_DONTNEED=4) → 0
+        if int(syscall6(NR_MADVISE, i64(0x10000), i64(4096), i64(4), 0, 0, 0)) != 0
+            fail_with(1)
+            return
+
+        // sched_yield → 0
+        if int(syscall6(NR_SCHED_YIELD, 0, 0, 0, 0, 0, 0)) != 0
+            fail_with(2)
+            return
+
+        // prctl(PR_SET_NAME, "x") → 0
+        var name: [16]byte
+        name[0] = byte('x')
+        name[1] = byte(0)
+        if int(syscall6(NR_PRCTL, i64(PR_SET_NAME), i64(&name[0]), 0, 0, 0, 0)) != 0
+            fail_with(3)
+            return
+
+        // prctl(PR_GET_NAME, buf) → 0
+        if int(syscall6(NR_PRCTL, i64(PR_GET_NAME), i64(&name[0]), 0, 0, 0, 0)) != 0
+            fail_with(4)
+            return
+
+        // prctl(99, ...) → -EINVAL (-22)
+        if int(syscall6(NR_PRCTL, i64(99), 0, 0, 0, 0, 0)) != -22
+            fail_with(5)
+            return
+
+        // getrusage(RUSAGE_SELF=0, &ru) → 0 + zeros.
+        var ru: [144]byte
+        var i = 0
+        while i < 144
+            ru[i] = byte(0xCC)              // sentinel
+            i += 1
+        if int(syscall6(NR_GETRUSAGE, i64(0), i64(&ru[0]), 0, 0, 0, 0)) != 0
+            fail_with(6)
+            return
+        i = 0
+        while i < 144
+            if ru[i] != byte(0)
+                fail_with(7)
+                return
+            i += 1
+
+        puts("stubs: ok\n")
+        exit()

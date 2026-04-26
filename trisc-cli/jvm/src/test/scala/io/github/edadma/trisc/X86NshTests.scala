@@ -696,6 +696,15 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "pread: bad"
   }
 
+  "x86 misc: madvise / sched_yield / prctl / getrusage stubs" in {
+    // Defensive syscall stubs. libc startup, jemalloc, glibc
+    // compat layers all probe these routinely; -ENOSYS would
+    // crash or push them onto slow fallback paths.
+    val output = qemu.command("test_stubs")
+    output should include("stubs: ok")
+    output should not include "stubs: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
