@@ -518,6 +518,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("1 sent, 1 received")
   }
 
+  "x86 tcp: getsockopt(TCP_INFO) on ESTABLISHED loopback fd" in {
+    // test_tcp_info opens an in-guest 127.0.0.1 connection and
+    // probes getsockopt(IPPROTO_TCP, TCP_INFO). Verifies the
+    // 104-byte struct is fully written, tcpi_state maps to 1
+    // (TCP_ESTABLISHED), and tcpi_snd_mss decodes as a sane
+    // little-endian u32.
+    val output = qemu.command("test_tcp_info")
+    output should include("tcpinfo: ok")
+    output should not include "tcpinfo: bad"
+  }
+
   "x86 sockopt: SO_TYPE/DOMAIN/PROTOCOL/ACCEPTCONN" in {
     // test_sockinfo verifies the four read-only introspection
     // getsockopts the shim now reports off the fd kind +

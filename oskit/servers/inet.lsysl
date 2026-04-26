@@ -88,6 +88,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_GET_KEEPOPT = 40
     val INET_CMD_TCP_GET_ERR     = 41
     val INET_CMD_TCP_INJECT_FAIL = 42
+    val INET_CMD_TCP_GET_INFO    = 43
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1242,6 +1243,164 @@ would do — without depending on slirp's RST timing.  Wire:
 `cmd(1) + remote_port_be(u16) = 3` bytes.  Reply: 1-byte status
 (0 = found-and-injected, -1 = no slot matched).
 
+### inet_handle_tcp_get_info
+
+Populates a Linux-compatible `struct tcp_info` (104 bytes) for
+the slot. Field offsets and units (microseconds for RTT) match
+what `getsockopt(IPPROTO_TCP, TCP_INFO)` returns on Linux so
+libuv / Go-net-stack diagnostics that probe specific offsets
+keep working. Fields we don't track (delivery-rate, fackets,
+last_data_*, pmtu, rcv_rtt, etc.) stay zero.
+
+State enum is mapped from our local `TCP_STATE_*` values
+(0 = CLOSED, 1 = SYN_SENT, ...) to Linux's
+(1 = ESTABLISHED, 2 = SYN_SENT, ...). The shim doesn't try to
+interpret it — it's a number the user reads.
+
+RTT/RTTvar conversion: our `srtt` / `rttvar` live in scheduler
+ticks (10 ms). Linux reports tcpi_rtt in microseconds, so we
+multiply by 10000.
+
+Wire: cmd(1) + fd_be(2) = 3 bytes. Reply: status(1) + 104-byte
+struct = 105 bytes. Status -1 if fd out of range or not owned.
+
+    inet_handle_tcp_get_info(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        var reply: [105]byte
+        var z = 0
+        while z < 105
+            reply[z] = byte(0)
+            z += 1
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 105)
+            return
+        if tcp_sockets[fd].owner_tid != sender
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 105)
+            return
+        if tcp_sockets[fd].in_use == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 105)
+            return
+        // Map slix TCP_STATE_* → Linux's struct tcp_info state.
+        var lstate = 0
+        val s = tcp_sockets[fd].state
+        if s == TCP_STATE_CLOSED
+            lstate = 7
+        else if s == TCP_STATE_SYN_SENT
+            lstate = 2
+        else if s == TCP_STATE_ESTABLISHED
+            lstate = 1
+        else if s == TCP_STATE_FIN_WAIT_1
+            lstate = 4
+        else if s == TCP_STATE_FIN_WAIT_2
+            lstate = 5
+        else if s == TCP_STATE_CLOSE_WAIT
+            lstate = 8
+        else if s == TCP_STATE_LAST_ACK
+            lstate = 9
+        else if s == TCP_STATE_TIME_WAIT
+            lstate = 6
+        else if s == TCP_STATE_LISTEN
+            lstate = 10
+        else if s == TCP_STATE_SYN_RCVD
+            lstate = 3
+        reply[0] = byte(0)                          // status
+        // struct tcp_info begins at reply[1].  Offsets below are
+        // relative to the struct base.
+        reply[1 + 0] = byte(lstate & 0xff)          // tcpi_state @ 0
+        reply[1 + 1] = byte(0)                      // tcpi_ca_state @ 1 (open)
+        var rxmit = tcp_sockets[fd].retries
+        if rxmit > 255
+            rxmit = 255
+        reply[1 + 2] = byte(rxmit & 0xff)           // tcpi_retransmits @ 2
+        var probes = tcp_sockets[fd].keepalive_probes
+        if probes > 255
+            probes = 255
+        reply[1 + 3] = byte(probes & 0xff)          // tcpi_probes @ 3
+        reply[1 + 4] = byte(0)                      // tcpi_backoff @ 4
+        // tcpi_options bitmap: bit 0 = TCPI_OPT_TIMESTAMPS,
+        // bit 2 = TCPI_OPT_SACK, bit 3 = TCPI_OPT_WSCALE.
+        var opts = 0
+        if tcp_sockets[fd].ts_ok != 0
+            opts = opts | 1
+        if tcp_sockets[fd].sack_ok != 0
+            opts = opts | 2
+        if tcp_sockets[fd].snd_wscale != 0 || tcp_sockets[fd].rcv_wscale != 0
+            opts = opts | 4
+        reply[1 + 5] = byte(opts & 0xff)            // tcpi_options @ 5
+        // Wscales packed: low 4 bits = snd, high 4 bits = rcv.
+        val wscales = ((tcp_sockets[fd].snd_wscale & 0xf) | ((tcp_sockets[fd].rcv_wscale & 0xf) << 4))
+        reply[1 + 6] = byte(wscales & 0xff)         // tcpi_*_wscale @ 6
+        reply[1 + 7] = byte(0)                      // delivery_rate_app_limited @ 7
+        // u32 fields. Inline little-endian writes — both arches
+        // we target are LE and Linux's struct tcp_info is host-
+        // endian, so this matches what real Linux apps expect.
+        // tcpi_rto @ 8: our rto is in ticks; Linux uses
+        // microseconds.  10ms/tick → 10000us/tick.
+        val rto_us = tcp_sockets[fd].rto * 10000
+        reply[1 +  8] = byte(rto_us & 0xff)
+        reply[1 +  9] = byte((rto_us >> 8) & 0xff)
+        reply[1 + 10] = byte((rto_us >> 16) & 0xff)
+        reply[1 + 11] = byte((rto_us >> 24) & 0xff)
+        // tcpi_ato @ 12 — delayed-ack timeout. We don't do
+        // delayed ACKs, leave 0.
+        // tcpi_snd_mss @ 16
+        val smss = tcp_sockets[fd].mss
+        reply[1 + 16] = byte(smss & 0xff)
+        reply[1 + 17] = byte((smss >> 8) & 0xff)
+        reply[1 + 18] = byte((smss >> 16) & 0xff)
+        reply[1 + 19] = byte((smss >> 24) & 0xff)
+        // tcpi_rcv_mss @ 20 — same.
+        reply[1 + 20] = byte(smss & 0xff)
+        reply[1 + 21] = byte((smss >> 8) & 0xff)
+        reply[1 + 22] = byte((smss >> 16) & 0xff)
+        reply[1 + 23] = byte((smss >> 24) & 0xff)
+        // tcpi_unacked @ 24 — bytes in flight.
+        val unacked = int(i32(tcp_sockets[fd].snd_nxt - tcp_sockets[fd].snd_una))
+        reply[1 + 24] = byte(unacked & 0xff)
+        reply[1 + 25] = byte((unacked >> 8) & 0xff)
+        reply[1 + 26] = byte((unacked >> 16) & 0xff)
+        reply[1 + 27] = byte((unacked >> 24) & 0xff)
+        // tcpi_retrans @ 36 — retransmits in current burst.
+        reply[1 + 36] = byte(tcp_sockets[fd].rexmit_count & 0xff)
+        reply[1 + 37] = byte((tcp_sockets[fd].rexmit_count >> 8) & 0xff)
+        reply[1 + 38] = byte((tcp_sockets[fd].rexmit_count >> 16) & 0xff)
+        reply[1 + 39] = byte((tcp_sockets[fd].rexmit_count >> 24) & 0xff)
+        // tcpi_rtt @ 68 in microseconds, tcpi_rttvar @ 72.
+        val rtt_us = tcp_sockets[fd].srtt * 10000
+        reply[1 + 68] = byte(rtt_us & 0xff)
+        reply[1 + 69] = byte((rtt_us >> 8) & 0xff)
+        reply[1 + 70] = byte((rtt_us >> 16) & 0xff)
+        reply[1 + 71] = byte((rtt_us >> 24) & 0xff)
+        val rttvar_us = tcp_sockets[fd].rttvar * 10000
+        reply[1 + 72] = byte(rttvar_us & 0xff)
+        reply[1 + 73] = byte((rttvar_us >> 8) & 0xff)
+        reply[1 + 74] = byte((rttvar_us >> 16) & 0xff)
+        reply[1 + 75] = byte((rttvar_us >> 24) & 0xff)
+        // tcpi_snd_ssthresh @ 76, tcpi_snd_cwnd @ 80.
+        reply[1 + 76] = byte(tcp_sockets[fd].snd_ssthresh & 0xff)
+        reply[1 + 77] = byte((tcp_sockets[fd].snd_ssthresh >> 8) & 0xff)
+        reply[1 + 78] = byte((tcp_sockets[fd].snd_ssthresh >> 16) & 0xff)
+        reply[1 + 79] = byte((tcp_sockets[fd].snd_ssthresh >> 24) & 0xff)
+        reply[1 + 80] = byte(tcp_sockets[fd].snd_cwnd & 0xff)
+        reply[1 + 81] = byte((tcp_sockets[fd].snd_cwnd >> 8) & 0xff)
+        reply[1 + 82] = byte((tcp_sockets[fd].snd_cwnd >> 16) & 0xff)
+        reply[1 + 83] = byte((tcp_sockets[fd].snd_cwnd >> 24) & 0xff)
+        // tcpi_advmss @ 84 — same as snd_mss for us.
+        reply[1 + 84] = byte(smss & 0xff)
+        reply[1 + 85] = byte((smss >> 8) & 0xff)
+        reply[1 + 86] = byte((smss >> 16) & 0xff)
+        reply[1 + 87] = byte((smss >> 24) & 0xff)
+        // tcpi_total_retrans @ 100
+        reply[1 + 100] = byte(tcp_sockets[fd].rexmit_count & 0xff)
+        reply[1 + 101] = byte((tcp_sockets[fd].rexmit_count >> 8) & 0xff)
+        reply[1 + 102] = byte((tcp_sockets[fd].rexmit_count >> 16) & 0xff)
+        reply[1 + 103] = byte((tcp_sockets[fd].rexmit_count >> 24) & 0xff)
+        ipc_reply(sender, reply, 105)
+
+
     inet_handle_tcp_inject_fail(sender: int, buf: *byte)
         val rport = inet_read_u16(buf, 1) & 0xffff
         var reply: [1]byte
@@ -1938,6 +2097,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_GET_KEEPOPT -> inet_handle_tcp_get_keepopt(sender, buf)
                     INET_CMD_TCP_GET_ERR -> inet_handle_tcp_get_err(sender, buf)
                     INET_CMD_TCP_INJECT_FAIL -> inet_handle_tcp_inject_fail(sender, buf)
+                    INET_CMD_TCP_GET_INFO -> inet_handle_tcp_get_info(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_ICMP_UNREACH_INJECT -> inet_handle_icmp_unreach_inject(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)

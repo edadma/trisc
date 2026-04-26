@@ -365,6 +365,7 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_TCP_SET_KEEPOPT = 39
     val INET_CMD_TCP_GET_KEEPOPT = 40
     val INET_CMD_TCP_GET_ERR     = 41
+    val INET_CMD_TCP_GET_INFO    = 43
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -2041,15 +2042,22 @@ is left untouched in that case.
                 accept = 1
             if optname == 4 || optname == 5 || optname == 6
                 accept = 1
+            if optname == 11
+                accept = 1
         if accept == 0
             return i64(-92)             // -ENOPROTOOPT
         if len_ptr == i64(0)
             return i64(-14)             // -EFAULT
         val lp: *i32 = *i32(len_ptr)
         val cap = int(*lp)
-        // SO_LINGER returns a struct linger (8 bytes); everything
-        // else is an int (4 bytes).
-        val need = if optname == 13 then 8 else 4
+        // SO_LINGER returns 8 bytes, TCP_INFO can fill up to 104
+        // (we truncate to caller's cap), everything else is an int.
+        var need = 4
+        if optname == 13
+            need = 8
+        if level == 6
+            if optname == 11
+                need = 1                // Linux fills as much as cap
         if cap < need
             return i64(-22)             // -EINVAL
         if optval == i64(0)
@@ -2067,6 +2075,39 @@ is left untouched in that case.
                 *on_ptr = i32(posix_fd_table[lidx].linger_on)
                 *secs_ptr = i32(posix_fd_table[lidx].linger_secs)
                 *lp = i32(8)
+                return i64(0)
+        // TCP_INFO (level=IPPROTO_TCP=6, optname=11). Fetch the
+        // 104-byte struct from inet via INET_CMD_TCP_GET_INFO and
+        // copy as much as the caller's buffer holds — Linux
+        // truncates silently rather than rejecting smaller bufs.
+        if level == 6
+            if optname == 11
+                if k != POSIX_FD_TCP_SOCKET
+                    return i64(-92)         // -ENOPROTOOPT
+                val info_inet_fd = posix_fd_target(fd)
+                if info_inet_fd < 0
+                    return i64(-22)         // pre-connect TCP fd
+                val iport = inet_get_port()
+                if iport < 0
+                    return i64(-5)
+                var imsg: [3]byte
+                imsg[0] = byte(INET_CMD_TCP_GET_INFO)
+                shim_write_u16(imsg, 1, info_inet_fd)
+                var ireply: [105]byte
+                val ir = ipc_send(iport, imsg, 3, ireply, 105)
+                if ir < 0
+                    return i64(-5)
+                if ireply[0] != 0
+                    return i64(-22)
+                val ubuf: *byte = *byte(optval)
+                var cw = cap
+                if cw > 104
+                    cw = 104
+                var ci = 0
+                while ci < cw
+                    ubuf[ci] = ireply[1 + ci]
+                    ci += 1
+                *lp = i32(cw)
                 return i64(0)
         val vp: *i32 = *i32(optval)
         // Read-only introspection getsockopts. SO_TYPE / SO_PROTOCOL
