@@ -715,6 +715,10 @@ to the same UDP stack that native sysl programs use via
             return sys_gettimeofday(a0, a1)
         if num == 251
             return sys_nanosleep(a0, a1)
+        if num == 260
+            return sys_pread64(int(a0), a1, int(a2), a3)
+        if num == 268
+            return sys_pwrite64(int(a0), a1, int(a2), a3)
         if num == 274
             return sys_readv(int(a0), a1, int(a2))
         if num == 372
@@ -3583,6 +3587,57 @@ without a real CSPRNG. Returns the byte count on success,
                 remp[ri] = byte(0)
                 ri += 1
         i64(0)
+
+
+SYS_PREAD64 (260) / SYS_PWRITE64 (268). Positional read/write
+on file fds. POSIX semantics: do the I/O at `offset` without
+disturbing the fd's current position. Used by sqlite, page-
+cache layers, log writers — any code that holds multiple
+positions on one fd or does parallel-style I/O.
+
+We synthesize the positional behavior by saving the fd's
+current pos via SEEK_CUR, seeking to the requested offset,
+doing the read/write, then restoring pos. 3-4 IPC round-trips
+per call but POSIX-correct. A future VFS_CMD_PREAD/PWRITE
+extension would cut to 1.
+
+Only POSIX_FD_FILE is supported; sockets / fifos return
+-ESPIPE (Linux behavior).
+
+    sys_pread64(fd: int, buf: i64, len: int, offset: i64) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_FILE
+            return i64(-29)             // -ESPIPE
+        if offset < i64(0)
+            return i64(-22)
+        // Save current pos; SEEK_CUR=1 with offset=0 just reads it.
+        val saved = sys_lseek(fd, i64(0), 1)
+        if saved < i64(0)
+            return saved
+        val sk = sys_lseek(fd, offset, 0)            // SEEK_SET
+        if sk < i64(0)
+            return sk
+        val n = sys_read(fd, buf, len)
+        // Restore pos best-effort. If the seek-back fails, prefer
+        // returning the read result over the seek error — most apps
+        // never re-read from this fd, so a subtle pos drift is less
+        // bad than swallowing the data.
+        sys_lseek(fd, saved, 0)
+        n
+
+    sys_pwrite64(fd: int, buf: i64, len: int, offset: i64) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_FILE
+            return i64(-29)
+        if offset < i64(0)
+            return i64(-22)
+        val saved = sys_lseek(fd, i64(0), 1)
+        if saved < i64(0)
+            return saved
+        val sk = sys_lseek(fd, offset, 0)
+        if sk < i64(0)
+            return sk
+        val n = sys_write(fd, buf, len)
+        sys_lseek(fd, saved, 0)
+        n
 
 
 SYS_WRITEV (372) / SYS_READV (274). POSIX vectored I/O over an

@@ -687,6 +687,15 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "iov: bad"
   }
 
+  "x86 io: pread64 preserves file position" in {
+    // POSIX pread reads at offset without disturbing the fd's
+    // current pos. Slix synthesizes via save/seek/read/restore
+    // of VFS file pos.
+    val output = qemu.command("test_pread")
+    output should include("pread: ok")
+    output should not include "pread: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

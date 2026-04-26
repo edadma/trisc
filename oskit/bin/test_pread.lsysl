@@ -1,0 +1,129 @@
+test_pread — sys_pread64 preserves file position
+==================================================
+
+POSIX pread(fd, buf, len, offset) reads at the given offset
+without modifying the fd's current position. Used by sqlite,
+log writers, page-cache layers — anywhere the same fd has
+multiple logical readers.
+
+Test:
+  1. openat(/etc/passwd, O_RDONLY).
+  2. lseek to byte 5 (SEEK_SET).
+  3. pread(buf, 4, offset=0) → must return "root" (the first 4
+     bytes of /etc/passwd, regardless of current pos).
+  4. lseek(0, SEEK_CUR) → must return 5 (pos preserved across
+     pread).
+  5. read(1 byte) → must return 'x' (the byte at offset 5,
+     i.e. position before the pread).
+
+Pass = `pread: ok`.
+
+    module oskit.bin.test_pread
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_READ      = 130
+    val NR_PREAD64   = 260
+    val NR_LSEEK     = 221
+    val NR_CLOSE     = 147
+    val NR_OPENAT    = 254
+
+    val AT_FDCWD     = -100
+    val O_RDONLY     = 0
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail_with(code: int)
+        puts("pread: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_openat(dirfd: int, path: *byte, oflags: int, mode: int) -> int
+        int(syscall6(NR_OPENAT, i64(dirfd), i64(path),
+            i64(oflags), i64(mode), 0, 0))
+
+    posix_lseek(fd: int, offset: i64, whence: int) -> i64
+        syscall6(NR_LSEEK, i64(fd), offset, i64(whence), 0, 0, 0)
+
+    posix_read(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_pread64(fd: int, buf: *byte, blen: int, offset: i64) -> int
+        int(syscall6(NR_PREAD64, i64(fd), i64(buf), i64(blen),
+            offset, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        var path: [12]byte
+        path[0] = byte('/')
+        path[1] = byte('e')
+        path[2] = byte('t')
+        path[3] = byte('c')
+        path[4] = byte('/')
+        path[5] = byte('p')
+        path[6] = byte('a')
+        path[7] = byte('s')
+        path[8] = byte('s')
+        path[9] = byte('w')
+        path[10] = byte('d')
+        path[11] = byte(0)
+        val fd = posix_openat(AT_FDCWD, &path[0], O_RDONLY, 0)
+        if fd < 0
+            fail_with(1)
+            return
+
+        if posix_lseek(fd, i64(5), 0) != i64(5)
+            fail_with(2)
+            return
+
+        var pbuf: [4]byte
+        val pn = posix_pread64(fd, &pbuf[0], 4, i64(0))
+        if pn != 4
+            fail_with(3)
+            return
+        if pbuf[0] != byte('r')
+            fail_with(4)
+            return
+        if pbuf[1] != byte('o')
+            fail_with(5)
+            return
+        if pbuf[2] != byte('o')
+            fail_with(6)
+            return
+        if pbuf[3] != byte('t')
+            fail_with(7)
+            return
+
+        // Pos preserved across pread? SEEK_CUR with offset=0 reports
+        // current position.
+        val cur = posix_lseek(fd, i64(0), 1)
+        if cur != i64(5)
+            fail_with(8)
+            return
+
+        // Subsequent read uses pos=5, byte at offset 5 in /etc/passwd
+        // is 'x' (root:x:0:0:...).
+        var rbuf: [1]byte
+        if posix_read(fd, &rbuf[0], 1) != 1
+            fail_with(9)
+            return
+        if rbuf[0] != byte('x')
+            fail_with(10)
+            return
+
+        posix_close(fd)
+        puts("pread: ok\n")
+        exit()
