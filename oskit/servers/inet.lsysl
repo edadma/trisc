@@ -113,23 +113,29 @@ driven from userspace:
 Capacity limits.
 
     val INET_MAX_SOCKETS = 32
-    val INET_MAX_QUEUE   = 4
-    val INET_MAX_DATA    = 512
-    val INET_MSG_BUF     = 540   // cmd(1)+fd(1)+hdr(9)+maxlen(2)+data(512)+slop
+    val INET_MAX_QUEUE   = 2
+    val INET_MAX_DATA    = 1472
+    val INET_MSG_BUF     = 1500  // cmd(1)+fd(1)+hdr(9)+maxlen(2)+data(1472)+slop
 
 
 A queued datagram awaiting recvfrom. Source address is stored
-host-order to simplify comparisons.
+host-order to simplify comparisons. Sized to the full Ethernet
+MTU (1500 - 20 IP - 8 UDP = 1472) so DNS/EDNS(0), QUIC, and
+real-world UDP traffic fit without truncation.
 
     struct InetDgram
         src_ip: u32
         src_port: int
-        data: [512]byte
+        data: [1472]byte
         data_len: int
 
 
 Per-socket state. `bound_port == 0` means unbound (port 0 is
-reserved for auto-bind, which isn't implemented yet).
+reserved for auto-bind, which isn't implemented yet). Queue
+depth dropped from 4 → 2 when InetDgram payload jumped from 512
+→ 1472 bytes; keeps the inet server binary inside the rs module
+buffer cap. Two slots is plenty of burst absorption for normal
+traffic.
 
     struct InetSocket
         in_use: int
@@ -137,7 +143,7 @@ reserved for auto-bind, which isn't implemented yet).
         bound: int
         bound_ip: u32
         bound_port: int
-        queue: [4]InetDgram
+        queue: [2]InetDgram
         q_head: int
         q_tail: int
         q_count: int
@@ -325,7 +331,7 @@ replies via IPC.
         val mlen = inet_sockets[fd].pending_maxlen
         inet_sockets[fd].pending_tid = -1
         inet_sockets[fd].recv_deadline = 0
-        var wr: [540]byte
+        var wr: [1500]byte
         var deliver_len = dlen
         if deliver_len > mlen
             deliver_len = mlen
@@ -593,7 +599,7 @@ programs; multi-waiter support is on the list.
             ipc_reply(sender, er, 10)
             return
         if inet_sockets[fd].q_count > 0
-            var reply: [540]byte
+            var reply: [1500]byte
             val n = inet_deliver_head(fd, maxlen, reply)
             ipc_reply(sender, reply, n)
             return
@@ -645,7 +651,7 @@ possibly firing immediately.
             ipc_reply(sender, er, 10)
             return
         if inet_sockets[fd].q_count > 0
-            var reply: [540]byte
+            var reply: [1500]byte
             val n = inet_deliver_head(fd, maxlen, reply)
             ipc_reply(sender, reply, n)
             return
@@ -2238,7 +2244,7 @@ silently skip link-layer setup and still serve UDP loopback.
         // 5 ticks ≈ 50 ms on a 100 Hz scheduler timer.
         svc_timer_subscribe(5)
 
-        var buf: [540]byte
+        var buf: [1500]byte
         while 1 == 1
             val r = ipc_recv_notify(inet_port, buf, INET_MSG_BUF)
             inet_tcp_scan_timers()

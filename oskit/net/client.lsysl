@@ -58,7 +58,7 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val ARP_PROBE_OP_CHECK    = 2
     val ARP_PROBE_OP_ANNOUNCE = 3
 
-    val INET_MAX_DATA     = 512
+    val INET_MAX_DATA     = 1472
     val INET_MAX_TCP_SEG  = 480
 
 
@@ -145,7 +145,7 @@ bytes accepted, or -1 on error.
             return -1
         if dlen > INET_MAX_DATA
             return -1
-        var msg: [523]byte
+        var msg: [1483]byte
         msg[0] = byte(INET_CMD_SENDTO)
         msg[1] = byte(fd & 0xff)
         msg[2] = byte(AF_INET & 0xff)
@@ -183,8 +183,8 @@ payload length on success, -1 on error.
         msg[0] = byte(INET_CMD_RECVFROM)
         msg[1] = byte(fd & 0xff)
         net_write_u16(msg, 2, cap_len)
-        var reply: [540]byte
-        ipc_send(port, msg, 4, reply, 540)
+        var reply: [1500]byte
+        ipc_send(port, msg, 4, reply, 1500)
         if reply[0] != 0
             return -1
         val r_port = net_read_u16(reply, 2)
@@ -238,8 +238,8 @@ reply matches `recvfrom`. Status byte: `0` = data, `1` = timeout,
         net_write_u16(msg, 2, cap_len)
         net_write_u16(msg, 4, (timeout_ms >> 16) & 0xffff)
         net_write_u16(msg, 6, timeout_ms & 0xffff)
-        var reply: [540]byte
-        ipc_send(port, msg, 8, reply, 540)
+        var reply: [1500]byte
+        ipc_send(port, msg, 8, reply, 1500)
         val status = int(reply[0]) & 0xff
         if status == 0xff
             return -1

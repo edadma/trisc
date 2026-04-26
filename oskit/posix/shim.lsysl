@@ -1197,7 +1197,7 @@ forwards to the inet server. `flags` is ignored for v1.
             return i64(-22)
         if len < 0
             return i64(-22)
-        if len > 512
+        if len > 1472
             return i64(-90)     // -EMSGSIZE
         val inet_fd = posix_fd_target(fd)
         val port = inet_get_port()
@@ -1206,7 +1206,7 @@ forwards to the inet server. `flags` is ignored for v1.
         val a: *byte = *byte(addr_ptr)
         val dst_port = shim_read_u16(a, 2)
         val ubuf: *byte = *byte(buf)
-        var msg: [523]byte
+        var msg: [1483]byte
         msg[0] = byte(INET_CMD_SENDTO)
         msg[1] = byte(inet_fd & 0xff)
         msg[2] = byte(POSIX_AF_INET)
@@ -1247,10 +1247,10 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
         if port < 0
             return i64(-19)
         var cap_len = len
-        if cap_len > 512
-            cap_len = 512
+        if cap_len > 1472
+            cap_len = 1472
         val nonblock = posix_fd_flags(fd) & POSIX_O_NONBLOCK
-        var reply: [540]byte
+        var reply: [1500]byte
         if nonblock != 0
             // Non-blocking: reuse RECVFROM_TIMEOUT with a zero
             // timeout — the inet handler will reply with status=1
@@ -1264,7 +1264,7 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
             nmsg[5] = byte(0)
             nmsg[6] = byte(0)
             nmsg[7] = byte(0)
-            val nr = ipc_send(port, nmsg, 8, reply, 540)
+            val nr = ipc_send(port, nmsg, 8, reply, 1500)
             if nr < 0
                 posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
@@ -1282,7 +1282,7 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
             msg[1] = byte(inet_fd & 0xff)
             msg[2] = byte((cap_len >> 8) & 0xff)
             msg[3] = byte(cap_len & 0xff)
-            val r = ipc_send(port, msg, 4, reply, 540)
+            val r = ipc_send(port, msg, 4, reply, 1500)
             if r < 0
                 posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
@@ -1344,12 +1344,12 @@ struct iovec { void *iov_base; size_t iov_len; }; // 16 bytes
 ```
 
 To keep the gather/scatter buffer bounded, we cap `iovlen` at
-`SHIM_IOV_MAX = 8` and total bytes at `SHIM_MSG_MAX = 512` —
-matches the inet UDP datagram cap and is plenty for the TCP
-chunk-at-a-time path.
+`SHIM_IOV_MAX = 8` and total bytes at `SHIM_MSG_MAX = 1472` —
+matches the inet UDP datagram cap (full Ethernet MTU) and is
+plenty for the TCP chunk-at-a-time path.
 
     val SHIM_IOV_MAX        = 8
-    val SHIM_MSG_MAX        = 512
+    val SHIM_MSG_MAX        = 1472
 
     shim_read_ptr(p: *byte, off: int) -> i64
         var v: i64 = 0
@@ -1387,7 +1387,7 @@ chunk-at-a-time path.
         if iov_len > 0
             if iov_ptr == i64(0)
                 return i64(-14)
-        var gather: [512]byte
+        var gather: [1472]byte
         var total = 0
         val iov_base: *byte = *byte(iov_ptr)
         var ii = 0
@@ -1444,7 +1444,7 @@ chunk-at-a-time path.
             ii += 1
         if cap > SHIM_MSG_MAX
             cap = SHIM_MSG_MAX
-        var scratch: [512]byte
+        var scratch: [1472]byte
         // Stage the receive into the scratch buffer; sys_recvfrom
         // / sys_read writes there, then we scatter into the iovs.
         var got: i64 = i64(0)

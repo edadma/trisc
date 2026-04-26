@@ -594,6 +594,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_ip_reasm2: failed"
   }
 
+  "x86 udp: 1024-byte datagram via 127.0.0.1 loopback" in {
+    // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
+    // 1024-byte body with byte i = (i & 0xff), recvfrom-validates
+    // the full body comes through. Catches truncation at the old
+    // 512 boundary plus any reply-buffer overflow / underflow.
+    val output = qemu.command("test_udp_big")
+    output should include("udpbig: ok")
+    output should not include "udpbig: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
