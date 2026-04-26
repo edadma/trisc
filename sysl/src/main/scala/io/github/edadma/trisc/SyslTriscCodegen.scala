@@ -2,8 +2,11 @@ package io.github.edadma.trisc
 
 import scala.collection.mutable
 
-class SyslTriscCodegen(addresses: Int = 4):
-  private val out = new StringBuilder
+class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
+  // Output is accumulated as structured Line values (parsed once at emit time) so
+  // the peephole optimizer can run over typed instructions without a string round-trip.
+  // Stringified once at the end of generate().
+  private val out = mutable.ArrayBuffer.empty[TriscPeephole.Line]
   private var labelCounter = 0
   private var modulePrefix = "" // unique prefix for this compilation unit
   private val stringLiterals = new mutable.ListBuffer[(String, String)]() // (label, value)
@@ -150,7 +153,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     val meta = ModuleMeta.fromProgram(program)
     val hasMain = meta.symbols.exists(s => s.name == "main" && s.typ.isInstanceOf[SymbolMeta.Kind.Func])
     if hasMain then emit("entry main")
-    out ++= meta.toAsmGlobals
+    // Parse the multi-line string from ModuleMeta into structured Lines.
+    for line <- meta.toAsmGlobals.linesIterator do emit(line)
 
     // Collect globals into data (initialized) and bss (zero-initialized) lists
     val dataGlobals = new mutable.ListBuffer[TDecl]
@@ -301,16 +305,26 @@ class SyslTriscCodegen(addresses: Int = 4):
                 emit(s"  rb ${stackSize(typ)}")
           case _ =>
 
-    // Emit extern declarations for malloc/free based on actual references in generated code
-    val generated = out.toString
+    // Emit extern declarations for malloc/free based on actual references in generated code.
+    // Scan the structured Instr array directly — no string formatting needed.
     val definedSymbols = (for decl <- program.decls yield decl match
       case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
       case TVarDecl(name, _, _, _, _, _) => Some(name)
       case _ => None).flatten.toSet
-    if generated.contains("movi r4, malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
-    if generated.contains("movi r4, free") && !definedSymbols.contains("free") then emit("extern free")
+    def referencesSymbol(sym: String): Boolean =
+      out.exists {
+        case TriscPeephole.Instr("movi", List(_, `sym`)) => true
+        case _ => false
+      }
+    if referencesSymbol("malloc") && !definedSymbols.contains("malloc") then emit("extern malloc")
+    if referencesSymbol("free") && !definedSymbols.contains("free") then emit("extern free")
 
-    out.toString
+    // Run the peephole optimizer over the structured output, then render to asm.
+    if peepholeEnabled then
+      val (optimized, _) = TriscPeephole.optimize(out)
+      TriscPeephole.render(optimized)
+    else
+      TriscPeephole.render(out)
 
   private case class LocalVar(name: String, offset: Int, typ: SyslType)
 
@@ -5910,6 +5924,8 @@ class SyslTriscCodegen(addresses: Int = 4):
     emitAddImm(7, 7, 8)            // skip 1 reg param
     emit("  jalr r0, r6")
 
+  /** Push one line of TRISC asm into the output array. The line is parsed into a
+   *  structured `TriscPeephole.Line` (Instr / Label / Directive / Comment / Blank)
+   *  so the peephole optimizer can pattern-match operands without re-parsing. */
   private def emit(line: String): Unit =
-    out ++= line
-    out += '\n'
+    out += TriscPeephole.parseLine(line)
