@@ -31,7 +31,7 @@ Prints `udpfilt: ok` on pass or `udpfilt: bad <step>` on failure.
     val NR_RECVFROM   = 276
     val NR_SENDTO     = 307
     val NR_SOCKET     = 337
-    val NR_FCNTL      = 25
+    val NR_FCNTL      = 171
 
     val AF_INET_V     = 2
     val SOCK_DGRAM_V  = 2
@@ -149,9 +149,6 @@ Prints `udpfilt: ok` on pass or `udpfilt: bad <step>` on failure.
 
         // Make rx non-blocking so the recv that follows the
         // (filtered) BAD doesn't park if no peer datagram arrives.
-        // Order matters: we set NB after BOTH datagrams are queued,
-        // so the recv loop dequeues both synchronously without
-        // racing the inet receiver.
         if posix_fcntl(rx, F_SETFL, O_NONBLOCK) != 0
             fail_with(8)
             return
@@ -166,6 +163,13 @@ Prints `udpfilt: ok` on pass or `udpfilt: bad <step>` on failure.
             return
         if rbuf[1] != byte('K')
             fail_with(13)
+            return
+
+        // Second NB recv: BAD was filtered, OK was consumed, queue
+        // is empty — must return -EAGAIN.
+        val got2 = posix_recv_nb(rx, &rbuf[0], 16)
+        if got2 != -11
+            fail_with(14)
             return
 
         posix_close(tx2)

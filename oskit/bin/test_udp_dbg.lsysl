@@ -1,0 +1,84 @@
+test_udp_dbg — Sanity check: NB recv on empty UDP socket
+==========================================================
+
+Reproduce a possible recvfrom-hang bug minimally: bind, fcntl
+NB, recv → expect EAGAIN. No sendto, no connect, no filter
+loop. If this hangs, the problem is in the basic recvfrom
+path; if not, the problem is sequence-specific.
+
+    module oskit.bin.test_udp_dbg
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE      = 147
+    val NR_BIND       = 135
+    val NR_RECVFROM   = 276
+    val NR_SOCKET     = 337
+    val NR_FCNTL      = 171
+
+    val AF_INET_V     = 2
+    val SOCK_DGRAM_V  = 2
+    val F_SETFL       = 4
+    val O_NONBLOCK    = 0x800
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail_with(code: int)
+        puts("udpdbg: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    main(argv: []string)
+        val fd = int(syscall6(NR_SOCKET, i64(AF_INET_V), i64(SOCK_DGRAM_V), 0, 0, 0, 0))
+        if fd < 0
+            fail_with(1)
+            return
+        var addr: [16]byte
+        fill_sockaddr(&addr[0], 7780, 127, 0, 0, 1)
+        if int(syscall6(NR_BIND, i64(fd), i64(&addr[0]), 16, 0, 0, 0)) < 0
+            fail_with(2)
+            return
+        if int(syscall6(NR_FCNTL, i64(fd), i64(F_SETFL), i64(O_NONBLOCK), 0, 0, 0)) != 0
+            fail_with(3)
+            return
+        puts("udpdbg: about to recv\n")
+        var rbuf: [16]byte
+        val got = int(syscall6(NR_RECVFROM, i64(fd), i64(&rbuf[0]), 16, 0, 0, 0))
+        puts("udpdbg: got=")
+        if got < 0
+            puts("-")
+            print_udec(-got)
+        else
+            print_udec(got)
+        puts("\n")
+        if got != -11
+            fail_with(4)
+            return
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+        puts("udpdbg: ok\n")
+        exit()

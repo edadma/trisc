@@ -1735,6 +1735,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udpfilt: bad"
   }
 
+  "aarch64 udp: NB recv on empty queue returns EAGAIN" in {
+    // Minimal regression check: socket → bind → fcntl(NONBLOCK)
+    // → recvfrom → must return -EAGAIN. Catches future
+    // sys_recvfrom regressions in the empty-queue path
+    // independently of the connect/filter loop.
+    val output = qemu.command("test_udp_dbg")
+    output should include("udpdbg: ok")
+    output should not include "udpdbg: bad"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

@@ -616,11 +616,21 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
   "x86 udp: connected fd drops non-peer datagrams (recv filter)" in {
     // POSIX/Linux: a UDP fd with a saved peer (via connect())
     // drops datagrams whose source != peer. Slix enforces this
-    // at recv time — sys_recvfrom loops past non-peer datagrams
-    // until a matching one arrives or EAGAIN.
+    // at recv time — sys_recvfrom recurses past non-peer
+    // datagrams until a matching one arrives or EAGAIN.
     val output = qemu.command("test_udp_filt")
     output should include("udpfilt: ok")
     output should not include "udpfilt: bad"
+  }
+
+  "x86 udp: NB recv on empty queue returns EAGAIN" in {
+    // Minimal regression check: socket → bind → fcntl(NONBLOCK)
+    // → recvfrom → must return -EAGAIN. Catches future
+    // sys_recvfrom regressions in the empty-queue path
+    // independently of the connect/filter loop.
+    val output = qemu.command("test_udp_dbg")
+    output should include("udpdbg: ok")
+    output should not include "udpdbg: bad"
   }
 
   "x86 crash recovery: kill tfs and restart" in {

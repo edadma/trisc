@@ -1301,72 +1301,67 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
             cap_len = 1472
         val nonblock = posix_fd_flags(fd) & POSIX_O_NONBLOCK
         var reply: [1500]byte
+        if nonblock != 0
+            // Non-blocking: reuse RECVFROM_TIMEOUT with a zero
+            // timeout — the inet handler will reply with status=1
+            // (no data) immediately if the queue is empty.
+            var nmsg: [8]byte
+            nmsg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
+            nmsg[1] = byte(inet_fd & 0xff)
+            nmsg[2] = byte((cap_len >> 8) & 0xff)
+            nmsg[3] = byte(cap_len & 0xff)
+            nmsg[4] = byte(0)
+            nmsg[5] = byte(0)
+            nmsg[6] = byte(0)
+            nmsg[7] = byte(0)
+            val nr = ipc_send(port, nmsg, 8, reply, 1500)
+            if nr < 0
+                posix_fd_set_error(fd, i64(-5))
+                return i64(-5)
+            if reply[0] == byte(1)
+                return i64(-11)         // -EAGAIN
+            if reply[0] == byte(2)
+                posix_fd_set_error(fd, i64(-111))
+                return i64(-111)        // -ECONNREFUSED (ICMP error)
+            if reply[0] != 0
+                posix_fd_set_error(fd, i64(-5))
+                return i64(-5)
+        else
+            var msg: [4]byte
+            msg[0] = byte(INET_CMD_RECVFROM)
+            msg[1] = byte(inet_fd & 0xff)
+            msg[2] = byte((cap_len >> 8) & 0xff)
+            msg[3] = byte(cap_len & 0xff)
+            val r = ipc_send(port, msg, 4, reply, 1500)
+            if r < 0
+                posix_fd_set_error(fd, i64(-5))
+                return i64(-5)
+            if reply[0] == byte(2)
+                posix_fd_set_error(fd, i64(-111))
+                return i64(-111)        // -ECONNREFUSED (ICMP error)
+            if reply[0] != 0
+                posix_fd_set_error(fd, i64(-5))
+                return i64(-5)
         // Connected-UDP filter (Linux semantics): if a peer was
-        // saved via sys_connect_udp, drop datagrams from any other
-        // source. Loop the recv until a matching datagram arrives,
-        // EAGAIN, or an error. Each non-matching datagram has
-        // already been dequeued from inet by the time we see it,
-        // so it's effectively dropped on the floor.
-        var got_match = 0
-        while got_match == 0
-            if nonblock != 0
-                // Non-blocking: reuse RECVFROM_TIMEOUT with a zero
-                // timeout — the inet handler will reply with
-                // status=1 (no data) immediately if empty.
-                var nmsg: [8]byte
-                nmsg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
-                nmsg[1] = byte(inet_fd & 0xff)
-                nmsg[2] = byte((cap_len >> 8) & 0xff)
-                nmsg[3] = byte(cap_len & 0xff)
-                nmsg[4] = byte(0)
-                nmsg[5] = byte(0)
-                nmsg[6] = byte(0)
-                nmsg[7] = byte(0)
-                val nr = ipc_send(port, nmsg, 8, reply, 1500)
-                if nr < 0
-                    posix_fd_set_error(fd, i64(-5))
-                    return i64(-5)
-                if reply[0] == byte(1)
-                    return i64(-11)         // -EAGAIN
-                if reply[0] == byte(2)
-                    posix_fd_set_error(fd, i64(-111))
-                    return i64(-111)        // -ECONNREFUSED (ICMP error)
-                if reply[0] != 0
-                    posix_fd_set_error(fd, i64(-5))
-                    return i64(-5)
-            else
-                var msg: [4]byte
-                msg[0] = byte(INET_CMD_RECVFROM)
-                msg[1] = byte(inet_fd & 0xff)
-                msg[2] = byte((cap_len >> 8) & 0xff)
-                msg[3] = byte(cap_len & 0xff)
-                val r = ipc_send(port, msg, 4, reply, 1500)
-                if r < 0
-                    posix_fd_set_error(fd, i64(-5))
-                    return i64(-5)
-                if reply[0] == byte(2)
-                    posix_fd_set_error(fd, i64(-111))
-                    return i64(-111)        // -ECONNREFUSED (ICMP error)
-                if reply[0] != 0
-                    posix_fd_set_error(fd, i64(-5))
-                    return i64(-5)
-            if posix_fd_table[idx].udp_connected == 0
-                got_match = 1
-            else
-                val r_port = shim_read_u16(reply, 2)
-                var matches = 1
-                if r_port != posix_fd_table[idx].udp_peer_port
-                    matches = 0
-                if (int(reply[4]) & 0xff) != posix_fd_table[idx].udp_peer_a
-                    matches = 0
-                if (int(reply[5]) & 0xff) != posix_fd_table[idx].udp_peer_b
-                    matches = 0
-                if (int(reply[6]) & 0xff) != posix_fd_table[idx].udp_peer_c
-                    matches = 0
-                if (int(reply[7]) & 0xff) != posix_fd_table[idx].udp_peer_d
-                    matches = 0
-                if matches != 0
-                    got_match = 1
+        // saved via sys_connect_udp and the source doesn't match,
+        // recurse to drop the datagram and try again. Each non-
+        // matching datagram is already dequeued from inet, so it's
+        // effectively dropped on the floor.
+        if posix_fd_table[idx].udp_connected != 0
+            val r_port = shim_read_u16(reply, 2)
+            var matches = 1
+            if r_port != posix_fd_table[idx].udp_peer_port
+                matches = 0
+            if (int(reply[4]) & 0xff) != posix_fd_table[idx].udp_peer_a
+                matches = 0
+            if (int(reply[5]) & 0xff) != posix_fd_table[idx].udp_peer_b
+                matches = 0
+            if (int(reply[6]) & 0xff) != posix_fd_table[idx].udp_peer_c
+                matches = 0
+            if (int(reply[7]) & 0xff) != posix_fd_table[idx].udp_peer_d
+                matches = 0
+            if matches == 0
+                return sys_recvfrom(fd, buf, len, flags, addr_ptr, addrlen_ptr)
         val src_port = shim_read_u16(reply, 2)
         val payload_len = shim_read_u16(reply, 8)
         if addr_ptr != i64(0)
