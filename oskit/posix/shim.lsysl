@@ -715,6 +715,10 @@ to the same UDP stack that native sysl programs use via
             return sys_gettimeofday(a0, a1)
         if num == 251
             return sys_nanosleep(a0, a1)
+        if num == 274
+            return sys_readv(int(a0), a1, int(a2))
+        if num == 372
+            return sys_writev(int(a0), a1, int(a2))
         // Process / thread identity. Multi-threading isn't a thing
         // in slix yet, so gettid == main thread of current process,
         // getppid == 1 (init), and the uid/gid family all return 0
@@ -3579,6 +3583,85 @@ without a real CSPRNG. Returns the byte count on success,
                 remp[ri] = byte(0)
                 ri += 1
         i64(0)
+
+
+SYS_WRITEV (372) / SYS_READV (274). POSIX vectored I/O over an
+`iovec[]` array. Each entry is `{iov_base: *void, iov_len: size_t}`
+= 16 bytes on LP64. We walk the iovs and call sys_write/sys_read
+per segment.
+
+Linux semantics: short write/read on the first iov returns the
+short count immediately (don't continue with later iovs). Errors
+on the first iov return -errno; later-iov errors return whatever
+was already transferred. Zero-length iovs are skipped.
+
+`SHIM_IOV_MAX = 8` cap matches sendmsg/recvmsg.
+
+    sys_writev(fd: int, iov_ptr: i64, iovcnt: int) -> i64
+        if iovcnt < 0
+            return i64(-22)
+        if iovcnt > SHIM_IOV_MAX
+            return i64(-22)
+        if iovcnt == 0
+            return i64(0)
+        if iov_ptr == i64(0)
+            return i64(-14)
+        val iov: *byte = *byte(iov_ptr)
+        var total: i64 = i64(0)
+        var ii = 0
+        while ii < iovcnt
+            val ent_off = ii * 16
+            val base = shim_read_ptr(iov, ent_off)
+            val seg_len = int(shim_read_ptr(iov, ent_off + 8))
+            if seg_len < 0
+                return i64(-22)
+            if seg_len > 0
+                if base == i64(0)
+                    return i64(-14)
+                val n = sys_write(fd, base, seg_len)
+                if n < i64(0)
+                    if total > i64(0)
+                        return total
+                    return n
+                total = total + n
+                if int(n) < seg_len
+                    return total
+            ii += 1
+        total
+
+    sys_readv(fd: int, iov_ptr: i64, iovcnt: int) -> i64
+        if iovcnt < 0
+            return i64(-22)
+        if iovcnt > SHIM_IOV_MAX
+            return i64(-22)
+        if iovcnt == 0
+            return i64(0)
+        if iov_ptr == i64(0)
+            return i64(-14)
+        val iov: *byte = *byte(iov_ptr)
+        var total: i64 = i64(0)
+        var ii = 0
+        while ii < iovcnt
+            val ent_off = ii * 16
+            val base = shim_read_ptr(iov, ent_off)
+            val seg_len = int(shim_read_ptr(iov, ent_off + 8))
+            if seg_len < 0
+                return i64(-22)
+            if seg_len > 0
+                if base == i64(0)
+                    return i64(-14)
+                val n = sys_read(fd, base, seg_len)
+                if n < i64(0)
+                    if total > i64(0)
+                        return total
+                    return n
+                if n == i64(0)
+                    return total
+                total = total + n
+                if int(n) < seg_len
+                    return total
+            ii += 1
+        total
 
 
     sys_epoll_create1(epoll_flags: int) -> i64

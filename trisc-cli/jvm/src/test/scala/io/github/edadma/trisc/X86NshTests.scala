@@ -677,6 +677,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "tcpsnd: bad"
   }
 
+  "x86 io: writev / readv vectored I/O" in {
+    // POSIX writev / readv. libc stdio buffer flushes use
+    // writev (header + body iovs); libuv uses both for TCP.
+    // Body walks iovec[] and dispatches per-segment to
+    // sys_write / sys_read.
+    val output = qemu.command("test_iov")
+    output should include("iov: ok")
+    output should not include "iov: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
