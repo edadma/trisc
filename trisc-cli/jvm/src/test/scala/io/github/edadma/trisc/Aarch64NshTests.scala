@@ -494,6 +494,24 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "dup: FAIL"
   }
 
+  "aarch64 musl: timerfd_create / settime / gettime + epoll" in {
+    // mtimerfd exercises slix-musl 356/357/358 (timerfd
+    // create/gettime/settime). One-shot at 50ms fires once and
+    // stops; periodic 30ms fires N≥1 times in ~100ms;
+    // gettime preserves the interval.
+    qemu.send("timerfd\n")
+    val output = qemu.waitFor("mtimerfd: done")
+    output should include("mtimerfd: oneshot=1 events=1")
+    output should include("mtimerfd: oneshot_read=8 exp=1")
+    output should include("mtimerfd: drained=-1 errno=11")
+    output should include("mtimerfd: gettime_int_nsec=30000000")
+    output should include("mtimerfd: done")
+    // Periodic count is non-deterministic but must be >= 1.
+    val periodicLine = output.linesIterator.find(_.contains("mtimerfd: periodic_read")).getOrElse("")
+    val expValue = "exp=(\\d+)".r.findFirstMatchIn(periodicLine).map(_.group(1).toInt).getOrElse(0)
+    expValue should be >= 1
+  }
+
   "aarch64 musl: eventfd2 + epoll integration" in {
     // meventfd binds the eventfd2 syscall (slix-musl 156). Tests
     // empty-NB read returns EAGAIN, write 7 / read 7 round-trip,

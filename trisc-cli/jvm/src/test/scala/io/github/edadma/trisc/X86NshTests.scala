@@ -295,6 +295,20 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("'ping!'")
   }
 
+  "x86 musl: timerfd_create / settime / gettime + epoll" in {
+    // Mirror of the aarch64 mtimerfd test.
+    qemu.send("timerfd\n")
+    val output = qemu.waitFor("mtimerfd: done")
+    output should include("mtimerfd: oneshot=1 events=1")
+    output should include("mtimerfd: oneshot_read=8 exp=1")
+    output should include("mtimerfd: drained=-1 errno=11")
+    output should include("mtimerfd: gettime_int_nsec=30000000")
+    output should include("mtimerfd: done")
+    val periodicLine = output.linesIterator.find(_.contains("mtimerfd: periodic_read")).getOrElse("")
+    val expValue = "exp=(\\d+)".r.findFirstMatchIn(periodicLine).map(_.group(1).toInt).getOrElse(0)
+    expValue should be >= 1
+  }
+
   "x86 musl: eventfd2 + epoll integration" in {
     // Mirror of the aarch64 meventfd test — exercises slix-musl
     // syscall 156, the new POSIX_FD_EVENTFD shim path, and the

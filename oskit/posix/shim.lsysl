@@ -88,6 +88,7 @@ posix_fd_bridge memory.
     val POSIX_FD_FILE        = 6
     val POSIX_FD_EPOLL       = 7
     val POSIX_FD_EVENTFD     = 8
+    val POSIX_FD_TIMERFD     = 9
 
     val POSIX_FDS_PER_PROC   = 64
 
@@ -137,6 +138,15 @@ posix_fd_bridge memory.
         // counter at once.
         eventfd_count: i64
         eventfd_semaphore: int
+        // POSIX_FD_TIMERFD state. `interval_ticks` is the periodic
+        // re-arm in scheduler ticks (100 Hz); 0 means one-shot.
+        // `next_tick` is the absolute uptime() tick at which the
+        // next expiration is due; 0 means disarmed. `expirations`
+        // accumulates fires that haven't been consumed via read()
+        // yet; the next read returns the count and resets it.
+        timerfd_interval_ticks: int
+        timerfd_next_tick: int
+        timerfd_expirations: i64
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -163,6 +173,9 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].keep_cnt = 0
             posix_fd_table[base + i].eventfd_count = i64(0)
             posix_fd_table[base + i].eventfd_semaphore = 0
+            posix_fd_table[base + i].timerfd_interval_ticks = 0
+            posix_fd_table[base + i].timerfd_next_tick = 0
+            posix_fd_table[base + i].timerfd_expirations = i64(0)
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -231,6 +244,9 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].keep_cnt = 0
                 posix_fd_table[base + i].eventfd_count = i64(0)
                 posix_fd_table[base + i].eventfd_semaphore = 0
+                posix_fd_table[base + i].timerfd_interval_ticks = 0
+                posix_fd_table[base + i].timerfd_next_tick = 0
+                posix_fd_table[base + i].timerfd_expirations = i64(0)
                 return i
             i += 1
         -1
@@ -589,6 +605,12 @@ to the same UDP stack that native sysl programs use via
             return sys_epoll_pwait(int(a0), a1, int(a2), int(a3))
         if num == 156
             return sys_eventfd2(int(a0), int(a1))
+        if num == 356
+            return sys_timerfd_create(int(a0), int(a1))
+        if num == 357
+            return sys_timerfd_gettime(int(a0), a1)
+        if num == 358
+            return sys_timerfd_settime(int(a0), int(a1), a2, a3)
         i64(-38)            // -ENOSYS
 
 SYS_WRITE. Looks up `fd` in the process's POSIX fd table and
@@ -747,6 +769,42 @@ handles read from the TTY driver.
             return i64(rlen)
         if k == POSIX_FD_FILE
             return shim_vfs_read(posix_fd_target(fd), buf, len)
+        if k == POSIX_FD_TIMERFD
+            if len < 8 || buf == i64(0)
+                return i64(-22)
+            val pid_t = posix_fd_current_pid()
+            val tidx = pid_t * POSIX_FDS_PER_PROC + fd
+            timerfd_advance(tidx)
+            val cnt = posix_fd_table[tidx].timerfd_expirations
+            if cnt == i64(0)
+                if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                    return i64(-11)
+                // Blocking read on timerfd needs an in-shim sleep
+                // loop until the next deadline. Simpler than the
+                // socket case since we know exactly when to wake.
+                // Loop: while expirations==0, sleep_or_notify until
+                // next_tick. notify_wait() if disarmed (would block
+                // forever).
+                while posix_fd_table[tidx].timerfd_expirations == i64(0)
+                    if posix_fd_table[tidx].timerfd_next_tick == 0
+                        // Disarmed timer in blocking mode: Linux blocks
+                        // forever waiting for someone else to settime.
+                        // Slix has no concurrent settime path yet, so
+                        // EAGAIN here matches the practical behaviour.
+                        return i64(-11)
+                    val now_b = int(uptime())
+                    val wait_ticks = posix_fd_table[tidx].timerfd_next_tick - now_b
+                    if wait_ticks > 0
+                        sleep_or_notify(wait_ticks)
+                    timerfd_advance(tidx)
+            val deliver = posix_fd_table[tidx].timerfd_expirations
+            posix_fd_table[tidx].timerfd_expirations = i64(0)
+            val ubuf: *byte = *byte(buf)
+            var bi = 0
+            while bi < 8
+                ubuf[bi] = byte(int((deliver >> i64(bi * 8))) & 0xff)
+                bi += 1
+            return i64(8)
         if k == POSIX_FD_EVENTFD
             if len < 8 || buf == i64(0)
                 return i64(-22)
@@ -2491,6 +2549,186 @@ Returns the allocated POSIX fd, or -EMFILE if no slot is free.
         i64(pfd)
 
 
+SYS_TIMERFD_CREATE / SETTIME / GETTIME (slix-musl 356/357/358).
+Periodic / one-shot kernel-managed timer fd. Read returns the
+number of expirations since the last read; epoll EPOLLIN fires
+when expirations > 0.
+
+Slix runs the scheduler at 100 Hz, so sub-10 ms precision rounds
+down to whole ticks. `CLOCK_REALTIME` and `CLOCK_MONOTONIC` are
+both backed by `uptime()` here — slix has no wall-clock-vs-
+monotonic distinction, so the two clockids resolve to the same
+tick stream.  Programs that depend on a real wall clock (e.g.
+DST handling) won't get one until a real RTC bridge lands.
+
+Time conversion: 1 tick = 10 ms = 10_000_000 ns. We round down
+on the nsec → tick conversion, which means a `tv_nsec=5_000_000`
+(5 ms) request lands at "next whole tick" and may fire up to
+10 ms late.  Programs needing finer precision lose nothing they
+weren't going to lose to scheduler quanta anyway.
+
+`flags` (TFD_NONBLOCK = 2048, TFD_CLOEXEC = 524288) — same bits
+as O_NONBLOCK / O_CLOEXEC. Non-blocking is honoured; CLOEXEC
+accept-and-ignore (matches accept4 / eventfd2).
+
+`itimerspec` is a 32-byte LP64 struct: it_interval{tv_sec(8),
+tv_nsec(8)} + it_value{tv_sec(8), tv_nsec(8)}.
+
+    val POSIX_TFD_NONBLOCK  = 2048
+    val POSIX_TFD_CLOEXEC   = 524288
+    val POSIX_TFD_TIMER_ABSTIME = 1
+    val POSIX_CLOCK_REALTIME  = 0
+    val POSIX_CLOCK_MONOTONIC = 1
+
+    shim_itimerspec_to_ticks(p: *byte, off: int) -> int
+        // Read tv_sec (low 8B) + tv_nsec (high 8B). Slix's tick
+        // resolution is 10 ms so we don't need the high half of
+        // tv_sec for any sane timer; clamp to int range.
+        var sec_lo = 0
+        var bi = 0
+        while bi < 4
+            sec_lo = sec_lo | ((int(p[off + bi]) & 0xff) << (bi * 8))
+            bi += 1
+        var nsec_lo = 0
+        bi = 0
+        while bi < 4
+            nsec_lo = nsec_lo | ((int(p[off + 8 + bi]) & 0xff) << (bi * 8))
+            bi += 1
+        if sec_lo < 0
+            sec_lo = 0
+        if nsec_lo < 0
+            nsec_lo = 0
+        sec_lo * 100 + (nsec_lo / 10000000)
+
+    shim_ticks_to_itimerspec(p: *byte, off: int, ticks: int)
+        // Write tv_sec (8B LE) + tv_nsec (8B LE). Use i64 for the
+        // shift-and-mask loop so byte-extraction past bit 31 doesn't
+        // hit the i32 shift-by-≥-width undefined-behaviour path some
+        // sysl backends fold into a no-op.
+        val sec = i64(ticks / 100)
+        val ns = i64((ticks % 100) * 10000000)
+        var bi = 0
+        while bi < 8
+            p[off + bi] = byte(int((sec >> i64(bi * 8))) & 0xff)
+            bi += 1
+        bi = 0
+        while bi < 8
+            p[off + 8 + bi] = byte(int((ns >> i64(bi * 8))) & 0xff)
+            bi += 1
+
+
+Catch up `expirations` to current uptime: every full `interval`
+between `next_tick` and now becomes one expiration. Returns
+without doing anything if the timer is disarmed or hasn't fired
+yet. Called lazily from sys_read / epoll_query_ready so the timer
+state is always coherent at the moment the user observes it.
+
+    timerfd_advance(idx: int)
+        if posix_fd_table[idx].timerfd_next_tick == 0
+            return
+        val now = int(uptime())
+        if now < posix_fd_table[idx].timerfd_next_tick
+            return
+        val interval = posix_fd_table[idx].timerfd_interval_ticks
+        if interval <= 0
+            // One-shot timer: a single expiration, then disarm.
+            val cur1 = posix_fd_table[idx].timerfd_expirations
+            posix_fd_table[idx].timerfd_expirations = cur1 + i64(1)
+            posix_fd_table[idx].timerfd_next_tick = 0
+            return
+        // Periodic: catch up by however many full intervals have
+        // elapsed past `next_tick`.  +1 covers the boundary tick
+        // itself.
+        val past = now - posix_fd_table[idx].timerfd_next_tick
+        val fired = (past / interval) + 1
+        val cur2 = posix_fd_table[idx].timerfd_expirations
+        posix_fd_table[idx].timerfd_expirations = cur2 + i64(fired)
+        val nt = posix_fd_table[idx].timerfd_next_tick
+        posix_fd_table[idx].timerfd_next_tick = nt + fired * interval
+
+
+    sys_timerfd_create(clockid: int, flags: int) -> i64
+        if clockid != POSIX_CLOCK_REALTIME
+            if clockid != POSIX_CLOCK_MONOTONIC
+                return i64(-22)
+        val pfd = posix_fd_alloc(POSIX_FD_TIMERFD, 0)
+        if pfd < 0
+            return i64(-24)
+        var fd_flags = 0
+        if (flags & POSIX_TFD_NONBLOCK) != 0
+            fd_flags = fd_flags | POSIX_O_NONBLOCK
+        posix_fd_set_flags(pfd, fd_flags)
+        i64(pfd)
+
+
+    sys_timerfd_settime(fd: int, flags: int, new_value: i64, old_value: i64) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_TIMERFD
+            return i64(-22)
+        if new_value == i64(0)
+            return i64(-14)
+        val pid_t = posix_fd_current_pid()
+        val tidx = pid_t * POSIX_FDS_PER_PROC + fd
+        // Catch up before snapshotting old_value so any
+        // unobserved expirations are accounted to the previous
+        // configuration.
+        timerfd_advance(tidx)
+        // Stash old value if requested (interval, then remaining
+        // time-to-fire).
+        if old_value != i64(0)
+            val oldp: *byte = *byte(old_value)
+            shim_ticks_to_itimerspec(oldp, 0,
+                posix_fd_table[tidx].timerfd_interval_ticks)
+            var remaining = 0
+            if posix_fd_table[tidx].timerfd_next_tick > 0
+                remaining = posix_fd_table[tidx].timerfd_next_tick - int(uptime())
+                if remaining < 0
+                    remaining = 0
+            shim_ticks_to_itimerspec(oldp, 16, remaining)
+        val newp: *byte = *byte(new_value)
+        val it_interval_ticks = shim_itimerspec_to_ticks(newp, 0)
+        val it_value_ticks = shim_itimerspec_to_ticks(newp, 16)
+        // it_value == 0 disarms the timer (Linux semantics).
+        if it_value_ticks <= 0
+            posix_fd_table[tidx].timerfd_interval_ticks = 0
+            posix_fd_table[tidx].timerfd_next_tick = 0
+            return i64(0)
+        // TFD_TIMER_ABSTIME: it_value is an absolute tick (treating
+        // tv_sec*100+tv_nsec/1e7 as ticks-since-boot).  Otherwise
+        // it_value is relative to now.  Slix collapses both clocks
+        // to uptime() so the meaning of "absolute" matches whatever
+        // the caller expects from CLOCK_MONOTONIC.
+        if (flags & POSIX_TFD_TIMER_ABSTIME) != 0
+            posix_fd_table[tidx].timerfd_next_tick = it_value_ticks
+        else
+            posix_fd_table[tidx].timerfd_next_tick = int(uptime()) + it_value_ticks
+        posix_fd_table[tidx].timerfd_interval_ticks = it_interval_ticks
+        // Reset expirations to 0 on rearm (Linux: setttime starts
+        // fresh; the read counter is wiped).
+        posix_fd_table[tidx].timerfd_expirations = i64(0)
+        i64(0)
+
+
+    sys_timerfd_gettime(fd: int, curr_value: i64) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_TIMERFD
+            return i64(-22)
+        if curr_value == i64(0)
+            return i64(-14)
+        val pid_t = posix_fd_current_pid()
+        val tidx = pid_t * POSIX_FDS_PER_PROC + fd
+        // Catch up so the snapshot reflects the live timer state.
+        timerfd_advance(tidx)
+        val cp: *byte = *byte(curr_value)
+        shim_ticks_to_itimerspec(cp, 0,
+            posix_fd_table[tidx].timerfd_interval_ticks)
+        var remaining = 0
+        if posix_fd_table[tidx].timerfd_next_tick > 0
+            remaining = posix_fd_table[tidx].timerfd_next_tick - int(uptime())
+            if remaining < 0
+                remaining = 0
+        shim_ticks_to_itimerspec(cp, 16, remaining)
+        i64(0)
+
+
     sys_epoll_create1(epoll_flags: int) -> i64
         val inst = epoll_alloc_inst()
         if inst < 0
@@ -2689,6 +2927,16 @@ multi-fd EPOLLET loops.
                 ev = ev | POSIX_EPOLLIN
             if cnt < i64(0x7fffffffffffffff)
                 ev = ev | POSIX_EPOLLOUT
+            return ev & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
+        if k == POSIX_FD_TIMERFD
+            // Catch up before reporting so a fired-but-unread
+            // timer registers as readable on the entry-pass scan.
+            val pid_t = posix_fd_current_pid()
+            val tidx = pid_t * POSIX_FDS_PER_PROC + target_fd
+            timerfd_advance(tidx)
+            var ev = 0
+            if posix_fd_table[tidx].timerfd_expirations > i64(0)
+                ev = ev | POSIX_EPOLLIN
             return ev & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         0
 
