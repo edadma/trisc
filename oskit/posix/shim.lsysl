@@ -147,6 +147,12 @@ posix_fd_bridge memory.
         timerfd_interval_ticks: int
         timerfd_next_tick: int
         timerfd_expirations: i64
+        // SO_ERROR per-fd. Holds the positive errno of the most
+        // recent socket-layer failure (ECONNREFUSED, ENETUNREACH,
+        // EADDRINUSE, ...) that the kernel/inet surfaced to this
+        // socket.  getsockopt(SOL_SOCKET, SO_ERROR) returns it and
+        // clears it back to 0 — Linux read-and-reset semantics.
+        last_error: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -176,6 +182,7 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].timerfd_interval_ticks = 0
             posix_fd_table[base + i].timerfd_next_tick = 0
             posix_fd_table[base + i].timerfd_expirations = i64(0)
+            posix_fd_table[base + i].last_error = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -247,9 +254,30 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].timerfd_interval_ticks = 0
                 posix_fd_table[base + i].timerfd_next_tick = 0
                 posix_fd_table[base + i].timerfd_expirations = i64(0)
+                posix_fd_table[base + i].last_error = 0
                 return i
             i += 1
         -1
+
+Record a positive errno on a socket fd so the next
+`getsockopt(SOL_SOCKET, SO_ERROR)` returns it (and clears it).
+Caller passes the kernel's negative errno; we store the absolute
+value to match Linux's `int *optval` convention.
+
+    posix_fd_set_error(fd: int, neg_errno: i64)
+        if fd < 0
+            return
+        if fd >= POSIX_FDS_PER_PROC
+            return
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return
+        if pid >= 16
+            return
+        var v = int(-neg_errno)
+        if v < 0
+            v = -v
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].last_error = v
 
 Iteration-based "is there another fd in this process pointing
 at the same backend?" check. Used by `sys_close` to avoid issuing
@@ -1089,8 +1117,10 @@ family(2), port(2, BE), addr(4), zero(8).
         var reply: [1]byte
         val r = ipc_send(port, msg, 9, reply, 1)
         if r < 0
+            posix_fd_set_error(fd, i64(-5))
             return i64(-5)
         if reply[0] != 0
+            posix_fd_set_error(fd, i64(-98))
             return i64(-98)     // -EADDRINUSE
         i64(0)
 
@@ -1134,8 +1164,10 @@ forwards to the inet server. `flags` is ignored for v1.
         var reply: [3]byte
         val r = ipc_send(port, msg, 11 + len, reply, 3)
         if r < 0
+            posix_fd_set_error(fd, i64(-5))
             return i64(-5)
         if reply[0] != 0
+            posix_fd_set_error(fd, i64(-101))
             return i64(-101)    // -ENETUNREACH
         i64(shim_read_u16(reply, 1))
 
@@ -1173,12 +1205,15 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
             nmsg[7] = byte(0)
             val nr = ipc_send(port, nmsg, 8, reply, 540)
             if nr < 0
+                posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
             if reply[0] == byte(1)
                 return i64(-11)         // -EAGAIN
             if reply[0] == byte(2)
+                posix_fd_set_error(fd, i64(-111))
                 return i64(-111)        // -ECONNREFUSED (ICMP error)
             if reply[0] != 0
+                posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
         else
             var msg: [4]byte
@@ -1188,10 +1223,13 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
             msg[3] = byte(cap_len & 0xff)
             val r = ipc_send(port, msg, 4, reply, 540)
             if r < 0
+                posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
             if reply[0] == byte(2)
+                posix_fd_set_error(fd, i64(-111))
                 return i64(-111)        // -ECONNREFUSED (ICMP error)
             if reply[0] != 0
+                posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
         val src_port = shim_read_u16(reply, 2)
         val payload_len = shim_read_u16(reply, 8)
@@ -1436,8 +1474,10 @@ dst_port (BE u16) at the usual offsets.
         var reply: [2]byte
         val r = ipc_send(port, msg, 11, reply, 2)
         if r < 0
+            posix_fd_set_error(fd, i64(-5))
             return i64(-5)
         if reply[0] != 0
+            posix_fd_set_error(fd, i64(-111))
             return i64(-111)            // -ECONNREFUSED
         val inet_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = inet_fd
@@ -1925,10 +1965,11 @@ For SO_SNDBUF/SO_RCVBUF the value comes from inet (or the persisted
 pending size when there's no slot yet).  For the other accept-list
 flags (SO_REUSEADDR / SO_BROADCAST / SO_KEEPALIVE / SO_REUSEPORT /
 TCP_NODELAY) we echo the actually-set value out of the shim fd
-table.  SO_ERROR — which slix doesn't track per-socket — still
-returns 0 (clean state).  `*len_ptr = 4` in every accepted case.
-`-ENOPROTOOPT` is returned for anything outside the accept-list;
-the option buffer is left untouched in that case.
+table.  SO_ERROR returns the positive errno of the most recent
+socket-layer failure (clearing it to 0) — Linux read-and-reset
+semantics.  `*len_ptr = 4` in every accepted case.  `-ENOPROTOOPT`
+is returned for anything outside the accept-list; the option buffer
+is left untouched in that case.
 
     sys_getsockopt(fd: int, level: int, optname: int, optval: i64, len_ptr: i64) -> i64
         val k = posix_fd_kind(fd)
@@ -2058,10 +2099,23 @@ the option buffer is left untouched in that case.
                 *vp = i32(kv)
                 *lp = i32(4)
                 return i64(0)
+        // SO_ERROR — Linux read-and-clear semantics.  Returns the
+        // positive errno of the most recent socket-layer failure
+        // (set by sys_connect / sys_bind / sys_sendto / sys_recvfrom
+        // when they return an error to the user) and resets to 0.
+        // A fresh socket reads back 0; a socket whose previous
+        // syscall failed reads back the errno once.
+        if level == 1
+            if optname == 4
+                val pid_e = posix_fd_current_pid()
+                val eidx = pid_e * POSIX_FDS_PER_PROC + fd
+                *vp = i32(posix_fd_table[eidx].last_error)
+                posix_fd_table[eidx].last_error = 0
+                *lp = i32(4)
+                return i64(0)
         // Echo the persisted flag value for the accept-list options
         // (SO_REUSEADDR / SO_BROADCAST / SO_KEEPALIVE / SO_REUSEPORT
-        // / TCP_NODELAY).  SO_ERROR (4) has no per-socket state in
-        // slix; it falls through with value 0 (clean state).
+        // / TCP_NODELAY).
         val pid = posix_fd_current_pid()
         val gidx = pid * POSIX_FDS_PER_PROC + fd
         var echoed = 0

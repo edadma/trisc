@@ -387,6 +387,9 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("sockopt: get TCP_KEEPIDLE = 0 val=60")
     output should include("sockopt: get TCP_KEEPINTVL = 0 val=15")
     output should include("sockopt: get TCP_KEEPCNT = 0 val=7")
+    // SO_ERROR on a fresh TCP fd is 0 (no failure recorded).  The
+    // read-and-clear semantics are exercised by test_icmperr.
+    output should include("sockopt: get SO_ERROR fresh = 0 val=0")
     output should include("sockopt: done")
     output should not include "sockopt: FAIL"
   }

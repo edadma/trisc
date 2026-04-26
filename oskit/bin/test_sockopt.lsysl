@@ -41,6 +41,7 @@ Final marker: `sockopt: done`.
 
     val SOL_SOCKET    = 1
     val SO_REUSEADDR  = 2
+    val SO_ERROR      = 4
     val SO_BROADCAST  = 6
     val SO_SNDBUF     = 7
     val SO_RCVBUF     = 8
@@ -453,6 +454,34 @@ Raw POSIX syscall wrappers.
         if r20 != 0 || kc_val != 7
             puts("sockopt: FAIL get TCP_KEEPCNT\n")
             exit_with(26)
+            return
+
+        // SO_ERROR — fresh TCP fd reads back 0 (clean state). The
+        // read-and-clear behaviour is exercised by test_icmperr (the
+        // ICMP-error pickup path sets last_error before recvfrom
+        // returns -ECONNREFUSED, so a follow-up SO_ERROR returns 111
+        // once and 0 thereafter).
+        var er_out: [4]byte
+        er_out[0] = byte(0xff)
+        er_out[1] = byte(0xff)
+        er_out[2] = byte(0xff)
+        er_out[3] = byte(0xff)
+        var er_olen: i32 = i32(4)
+        val r21 = posix_getsockopt(tfd, SOL_SOCKET, SO_ERROR,
+                                   &er_out[0], &er_olen)
+        val er_b0 = int(er_out[0]) & 0xff
+        val er_b1 = int(er_out[1]) & 0xff
+        val er_b2 = int(er_out[2]) & 0xff
+        val er_b3 = int(er_out[3]) & 0xff
+        val er_val = er_b0 | (er_b1 << 8) | (er_b2 << 16) | (er_b3 << 24)
+        puts("sockopt: get SO_ERROR fresh = ")
+        print_sdec(r21)
+        puts(" val=")
+        print_sdec(er_val)
+        puts("\n")
+        if r21 != 0 || er_val != 0
+            puts("sockopt: FAIL get SO_ERROR fresh\n")
+            exit_with(27)
             return
 
         posix_close(tfd)
