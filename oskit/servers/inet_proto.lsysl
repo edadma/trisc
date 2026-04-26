@@ -2376,14 +2376,35 @@ error but the client still reads it (stable wire shape).
         wr[1] = byte(fd & 0xff)
         ipc_reply(tid, wr, 2)
 
-Parked SEND reply (MVP currently doesn't park, keep helper for
-symmetry / phase 2).
+Parked SEND reply.  Phase 1 of the net-stack quality plan adds
+real parking: when `inet_handle_tcp_send` finds the send buffer
+full, it stashes the caller in `send_waiter` instead of replying
+with `n=0`, and the ACK-handling path here (via
+`inet_tcp_drain_send_waiter`) replies once space frees.  The
+reply is `(status=0, written=0)` — pure wake signal.  The shim
+loops and the next TCP_SEND now finds room.
 
     inet_tcp_reply_send(tid: int, status: int, written: int)
         var wr: [3]byte
         wr[0] = byte(status & 0xff)
         pkt_write_u16(wr, 1, written)
         ipc_reply(tid, wr, 3)
+
+
+Wake the parked send_waiter on send-buf drain.  Called from the
+ACK-handling path in `inet_tcp_state_step` after `send_len`
+shrinks: if a sender is parked and there is now any free space,
+reply `(0, 0)` so the shim retries the same chunk against the
+freshly-opened window.
+
+    inet_tcp_drain_send_waiter(s: int)
+        if tcp_sockets[s].send_waiter >= 0
+            val space = tcp_sockets[s].send_buf_size - tcp_sockets[s].send_len
+            if space > 0
+                val w = tcp_sockets[s].send_waiter
+                tcp_sockets[s].send_waiter = -1
+                tcp_sockets[s].send_waiter_len = 0
+                inet_tcp_reply_send(w, 0, 0)
 
 RECV drain + reply. `n == 0` signals peer-closed EOF.
 
@@ -3854,6 +3875,7 @@ the connection down.
                     // purpose; the shim filters via INET_CMD_POLL.
                     if eff > 0
                         inet_epoll_fire(2, s)
+                        inet_tcp_drain_send_waiter(s)
                     // Cumulative ACK just swept some bytes — drop any
                     // scoreboard entries now wholly covered. Keeps
                     // `tcp_sack_next_hole` pointed at the right place
@@ -4516,4 +4538,64 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
             return 32
         inet_tcp_close_slot(sb, 0)
 
+        0
+
+
+Test-only: prove the send-buf parking pipeline works end to end.
+
+Steps:
+  1. Allocate a TCP slot, force ESTABLISHED.
+  2. Pre-fill `send_buf` to capacity so `inet_tcp_do_send` returns
+     0 (the trigger condition for parking).
+  3. Verify `send_waiter` is unset (-1) initially.
+  4. Synthetically park a fake waiter (a tid past `thread_count`
+     so `ipc_reply_handler`'s validation drops the wake silently).
+  5. Drain `send_len` to mimic an incoming ACK.
+  6. Call `inet_tcp_drain_send_waiter`.  It must clear
+     `send_waiter` to -1 because space > 0 after the drain.
+  7. Run it again — the second call is a no-op (waiter already
+     cleared) and must not crash.
+
+Returns 0 on full pass; 1..6 on the failure step.
+
+    inet_tcp_send_park_selftest() -> int
+        val s = inet_tcp_alloc()
+        if s < 0
+            return 1
+        tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+        tcp_sockets[s].owner_tid = -1
+
+        if tcp_sockets[s].send_waiter != -1
+            inet_tcp_close_slot(s, 0)
+            return 2
+
+        tcp_sockets[s].send_len = tcp_sockets[s].send_buf_size
+        var d: [1]byte
+        d[0] = byte('q')
+        val ds = inet_tcp_do_send(s, &d[0], 1)
+        if ds != 0
+            inet_tcp_close_slot(s, 0)
+            return 3
+
+        // Fake tid past thread_count — ipc_reply_handler drops it.
+        tcp_sockets[s].send_waiter = 0xCAFE
+        tcp_sockets[s].send_waiter_len = 1
+
+        tcp_sockets[s].send_len = 0
+        inet_tcp_drain_send_waiter(s)
+
+        if tcp_sockets[s].send_waiter != -1
+            inet_tcp_close_slot(s, 0)
+            return 4
+        if tcp_sockets[s].send_waiter_len != 0
+            inet_tcp_close_slot(s, 0)
+            return 5
+
+        // Second call is a no-op: waiter already cleared.
+        inet_tcp_drain_send_waiter(s)
+        if tcp_sockets[s].send_waiter != -1
+            inet_tcp_close_slot(s, 0)
+            return 6
+
+        inet_tcp_close_slot(s, 0)
         0

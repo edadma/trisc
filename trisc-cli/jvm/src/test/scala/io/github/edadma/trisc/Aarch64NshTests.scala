@@ -1827,6 +1827,19 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "access: bad"
   }
 
+  "aarch64 net: TCP send-buf parking (Phase 1 quality)" in {
+    // Phase 1 of the net-stack quality plan: inet_handle_tcp_send
+    // now parks the caller in send_waiter when send_buf is full,
+    // and the ACK-handling path wakes the parked caller via
+    // inet_tcp_drain_send_waiter once any space frees.  The
+    // self-test drives the state machine synthetically (no real
+    // TCP connection): force ESTABLISHED + full send_buf, park a
+    // fake waiter, drain, verify the helper clears the slot.
+    val output = qemu.command("test_tcp_park")
+    output should include("tcp_park: ok")
+    output should not include "tcp_park: failed"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

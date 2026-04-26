@@ -864,15 +864,19 @@ vm_copy_from.
                     return i64(-32)     // -EPIPE
                 val n = shim_read_u16(reply, 1)
                 if n <= 0
-                    // Send buffer full. Non-blocking mode reports
-                    // -EAGAIN if nothing has been queued yet; other-
-                    // wise return the partial count so musl can
-                    // decide whether to retry.
-                    if sent_total == 0
-                        if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                    // Phase 1: blocking TCP_SEND now parks in inet
+                    // until send_buf has room, then replies (0,0) as
+                    // a wake — so the next loop iteration retries
+                    // the same chunk against the freshly-opened
+                    // window.  NB callers still get -EAGAIN if
+                    // nothing has been queued yet, otherwise the
+                    // partial count.
+                    if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                        if sent_total == 0
                             return i64(-11)     // -EAGAIN
-                    return i64(sent_total)
-                sent_total += n
+                        return i64(sent_total)
+                else
+                    sent_total += n
             return i64(sent_total)
         if k == POSIX_FD_FILE
             return shim_vfs_write(posix_fd_target(fd), buf, len)
@@ -1320,11 +1324,14 @@ POSIX MSG_DONTWAIT (0x40) for the EAGAIN-on-empty-send branch.
                 return i64(-32)         // -EPIPE
             val n = shim_read_u16(reply, 1)
             if n <= 0
-                if sent_total == 0
-                    if nb_eff != 0
+                // Same parked-wake semantics as sys_write — see
+                // there for the full rationale.
+                if nb_eff != 0
+                    if sent_total == 0
                         return i64(-11)
-                return i64(sent_total)
-            sent_total += n
+                    return i64(sent_total)
+            else
+                sent_total += n
         i64(sent_total)
 
 
