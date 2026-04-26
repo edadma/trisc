@@ -172,6 +172,14 @@ posix_fd_bridge memory.
         udp_peer_b: int
         udp_peer_c: int
         udp_peer_d: int
+        // SO_RCVTIMEO / SO_SNDTIMEO — millisecond timeouts.
+        // 0 = "no timeout" (blocking forever). Receive uses
+        // recv_timeout_ms via INET_CMD_RECVFROM_TIMEOUT when set.
+        // send_timeout_ms is persisted but not yet enforced (slix
+        // sendto rarely blocks; flow-control would need a separate
+        // path).
+        recv_timeout_ms: int
+        send_timeout_ms: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -209,6 +217,8 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].udp_peer_b = 0
             posix_fd_table[base + i].udp_peer_c = 0
             posix_fd_table[base + i].udp_peer_d = 0
+            posix_fd_table[base + i].recv_timeout_ms = 0
+            posix_fd_table[base + i].send_timeout_ms = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -288,6 +298,8 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].udp_peer_b = 0
                 posix_fd_table[base + i].udp_peer_c = 0
                 posix_fd_table[base + i].udp_peer_d = 0
+                posix_fd_table[base + i].recv_timeout_ms = 0
+                posix_fd_table[base + i].send_timeout_ms = 0
                 return i
             i += 1
         -1
@@ -1300,6 +1312,7 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
         if cap_len > 1472
             cap_len = 1472
         val nonblock = posix_fd_flags(fd) & POSIX_O_NONBLOCK
+        val rcvtimeo_ms = posix_fd_table[idx].recv_timeout_ms
         var reply: [1500]byte
         if nonblock != 0
             // Non-blocking: reuse RECVFROM_TIMEOUT with a zero
@@ -1320,6 +1333,31 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
                 return i64(-5)
             if reply[0] == byte(1)
                 return i64(-11)         // -EAGAIN
+            if reply[0] == byte(2)
+                posix_fd_set_error(fd, i64(-111))
+                return i64(-111)        // -ECONNREFUSED (ICMP error)
+            if reply[0] != 0
+                posix_fd_set_error(fd, i64(-5))
+                return i64(-5)
+        else if rcvtimeo_ms > 0
+            // Blocking with SO_RCVTIMEO: bounded wait. Linux returns
+            // -EAGAIN (or -EWOULDBLOCK, same value) on timeout — same
+            // shape as O_NONBLOCK on empty queue.
+            var tmsg: [8]byte
+            tmsg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
+            tmsg[1] = byte(inet_fd & 0xff)
+            tmsg[2] = byte((cap_len >> 8) & 0xff)
+            tmsg[3] = byte(cap_len & 0xff)
+            tmsg[4] = byte((rcvtimeo_ms >> 24) & 0xff)
+            tmsg[5] = byte((rcvtimeo_ms >> 16) & 0xff)
+            tmsg[6] = byte((rcvtimeo_ms >> 8) & 0xff)
+            tmsg[7] = byte(rcvtimeo_ms & 0xff)
+            val tr = ipc_send(port, tmsg, 8, reply, 1500)
+            if tr < 0
+                posix_fd_set_error(fd, i64(-5))
+                return i64(-5)
+            if reply[0] == byte(1)
+                return i64(-11)         // -EAGAIN (timed out)
             if reply[0] == byte(2)
                 posix_fd_set_error(fd, i64(-111))
                 return i64(-111)        // -ECONNREFUSED (ICMP error)
@@ -2085,6 +2123,24 @@ as -EINVAL).
                 posix_fd_table[tidx].linger_on = l_on
                 posix_fd_table[tidx].linger_secs = l_secs
                 return i64(0)
+            // SO_RCVTIMEO (20) / SO_SNDTIMEO (21).  16-byte timeval
+            // {tv_sec(8), tv_usec(8)}.  Persisted as ms on the shim
+            // fd; sys_recvfrom honors recv_timeout_ms via the
+            // RECVFROM_TIMEOUT IPC.  send_timeout is persisted but
+            // not enforced — slix's sendto rarely blocks today.
+            if optname == 20 || optname == 21
+                if optlen < 16 || optval == i64(0)
+                    return i64(-22)
+                val tv_sec_lo = shim_read_ptr(*byte(optval), 0)
+                val tv_usec_lo = shim_read_ptr(*byte(optval), 8)
+                var ms = int(tv_sec_lo) * 1000 + (int(tv_usec_lo) / 1000)
+                if ms < 0
+                    ms = 0
+                if optname == 20
+                    posix_fd_table[tidx].recv_timeout_ms = ms
+                else
+                    posix_fd_table[tidx].send_timeout_ms = ms
+                return i64(0)
             // SO_SNDBUF / SO_RCVBUF.  Persist on the shim fd so the
             // value survives until connect/listen creates an inet
             // slot, then apply via INET_CMD_TCP_SETBUF if a slot
@@ -2190,6 +2246,10 @@ is left untouched in that case.
                 accept = 1
             if optname == 15
                 accept = 1
+            if optname == 20
+                accept = 1
+            if optname == 21
+                accept = 1
             if optname == 30
                 accept = 1
             if optname == 38
@@ -2214,6 +2274,9 @@ is left untouched in that case.
         var need = 4
         if optname == 13
             need = 8
+        if level == 1
+            if optname == 20 || optname == 21
+                need = 16
         if level == 6
             if optname == 11
                 need = 1                // Linux fills as much as cap
@@ -2234,6 +2297,25 @@ is left untouched in that case.
                 *on_ptr = i32(posix_fd_table[lidx].linger_on)
                 *secs_ptr = i32(posix_fd_table[lidx].linger_secs)
                 *lp = i32(8)
+                return i64(0)
+            if optname == 20 || optname == 21
+                val tpid = posix_fd_current_pid()
+                val tidx2 = tpid * POSIX_FDS_PER_PROC + fd
+                var ms = posix_fd_table[tidx2].recv_timeout_ms
+                if optname == 21
+                    ms = posix_fd_table[tidx2].send_timeout_ms
+                val tsec = i64(ms / 1000)
+                val tusec = i64((ms % 1000) * 1000)
+                val tp: *byte = *byte(optval)
+                var ti = 0
+                while ti < 8
+                    tp[ti] = byte(int((tsec >> i64(ti * 8))) & 0xff)
+                    ti += 1
+                ti = 0
+                while ti < 8
+                    tp[8 + ti] = byte(int((tusec >> i64(ti * 8))) & 0xff)
+                    ti += 1
+                *lp = i32(16)
                 return i64(0)
         // TCP_INFO (level=IPPROTO_TCP=6, optname=11). Fetch the
         // 104-byte struct from inet via INET_CMD_TCP_GET_INFO and

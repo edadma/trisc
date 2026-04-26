@@ -1745,6 +1745,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udpdbg: bad"
   }
 
+  "aarch64 sockopt: SO_RCVTIMEO bounded blocking recv" in {
+    // setsockopt SO_RCVTIMEO = 100ms, then blocking recvfrom on
+    // an empty UDP queue must return -EAGAIN within the window
+    // (Linux semantics) instead of hanging forever.
+    val output = qemu.command("test_so_timeo")
+    output should include("sotmo: ok")
+    output should not include "sotmo: bad"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

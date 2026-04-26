@@ -1,0 +1,152 @@
+test_so_timeo — SO_RCVTIMEO enforcement
+=========================================
+
+POSIX SO_RCVTIMEO bounds the time a blocking recv waits for
+data; on timeout it returns -EAGAIN/-EWOULDBLOCK rather than
+hanging forever. Slix persists the timeout per-fd and routes
+recvfrom through the existing INET_CMD_RECVFROM_TIMEOUT IPC.
+
+Test:
+  1. Open UDP socket, bind 127.0.0.1:7793.
+  2. setsockopt(SO_RCVTIMEO, {0 sec, 100000 usec})  →  100 ms.
+  3. getsockopt(SO_RCVTIMEO)  →  must round-trip back to 100ms.
+  4. recvfrom — no data sent — must return -EAGAIN within
+     ~150 ms wall (vs the test harness's 30s hang threshold).
+
+Prints `sotmo: ok` on pass, `sotmo: bad <step>` on failure.
+
+    module oskit.bin.test_so_timeo
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE      = 147
+    val NR_BIND       = 135
+    val NR_RECVFROM   = 276
+    val NR_SOCKET     = 337
+    val NR_SETSOCKOPT = 326
+    val NR_GETSOCKOPT = 204
+
+    val AF_INET_V     = 2
+    val SOCK_DGRAM_V  = 2
+    val SOL_SOCKET    = 1
+    val SO_RCVTIMEO   = 20
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail_with(code: int)
+        puts("sotmo: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    write_i64_le(a: *byte, off: int, v: i64)
+        var i = 0
+        while i < 8
+            a[off + i] = byte(int((v >> i64(i * 8))) & 0xff)
+            i += 1
+
+
+    read_i64_le(a: *byte, off: int) -> i64
+        var v: i64 = i64(0)
+        var i = 0
+        while i < 8
+            v = v | (i64(int(a[off + i]) & 0xff) << i64(i * 8))
+            i += 1
+        v
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+                   addr: *byte, addrlen_ptr: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_ptr)))
+
+    posix_setsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, optlen: int) -> int
+        int(syscall6(NR_SETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(optlen), 0))
+
+    posix_getsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, len_ptr: *i32) -> int
+        int(syscall6(NR_GETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(len_ptr), 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        val fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if fd < 0
+            fail_with(1)
+            return
+        var addr: [16]byte
+        fill_sockaddr(&addr[0], 7793, 127, 0, 0, 1)
+        if posix_bind(fd, &addr[0], 16) < 0
+            fail_with(2)
+            return
+
+        // setsockopt SO_RCVTIMEO = {tv_sec=0, tv_usec=100000} → 100ms.
+        var tv: [16]byte
+        write_i64_le(&tv[0], 0, i64(0))
+        write_i64_le(&tv[0], 8, i64(100000))
+        if posix_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv[0], 16) != 0
+            fail_with(3)
+            return
+
+        // getsockopt round-trip — must report 100ms back.
+        var tv2: [16]byte
+        var tv2_len: i32 = i32(16)
+        if posix_getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv2[0], &tv2_len) != 0
+            fail_with(4)
+            return
+        val got_sec = read_i64_le(&tv2[0], 0)
+        val got_usec = read_i64_le(&tv2[0], 8)
+        if got_sec != i64(0)
+            fail_with(5)
+            return
+        if got_usec != i64(100000)
+            fail_with(6)
+            return
+
+        // Blocking recv with no data — must return -EAGAIN within
+        // ~the timeout.
+        var rbuf: [16]byte
+        var alen: i32 = i32(16)
+        val got = posix_recvfrom(fd, &rbuf[0], 16, 0, &addr[0], &alen)
+        if got != -11
+            fail_with(7)
+            return
+
+        posix_close(fd)
+        puts("sotmo: ok\n")
+        exit()

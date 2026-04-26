@@ -633,6 +633,15 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udpdbg: bad"
   }
 
+  "x86 sockopt: SO_RCVTIMEO bounded blocking recv" in {
+    // setsockopt SO_RCVTIMEO = 100ms, then blocking recvfrom on
+    // an empty UDP queue must return -EAGAIN within the window
+    // (Linux semantics) instead of hanging forever.
+    val output = qemu.command("test_so_timeo")
+    output should include("sotmo: ok")
+    output should not include "sotmo: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
