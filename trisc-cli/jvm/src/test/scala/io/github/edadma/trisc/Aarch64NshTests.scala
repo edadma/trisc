@@ -1585,6 +1585,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_tcp_lsv2: unexpectedly opened"
   }
 
+  "aarch64 tcp: in-guest 127.0.0.1 loopback round trip" in {
+    // test_tcp_lpbk drives the loopback fastpath added to
+    // inet_tcp_emit / inet_tcp_emit_rst: client and listener live
+    // in the same guest and exchange payloads over 127.0.0.1
+    // without any NIC/slirp involvement.
+    val output = qemu.command("test_tcp_lpbk")
+    output should include("lpbk:ok")
+    output should not include "lpbk:bad"
+  }
+
   "aarch64 tcp: out-of-order reassembly self-test" in {
     // test_tcp_ooo triggers inet's reorder-queue self-test via a
     // dedicated IPC op. The test exercises the stash → drain path

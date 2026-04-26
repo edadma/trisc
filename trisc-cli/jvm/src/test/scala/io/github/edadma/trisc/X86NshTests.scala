@@ -487,6 +487,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_tcp_lsv2: unexpectedly opened"
   }
 
+  "x86 tcp: in-guest 127.0.0.1 loopback round trip" in {
+    // test_tcp_lpbk drives the loopback fastpath added to
+    // inet_tcp_emit / inet_tcp_emit_rst: client and listener live
+    // in the same guest and exchange payloads over 127.0.0.1
+    // without any NIC/slirp involvement.
+    val output = qemu.command("test_tcp_lpbk")
+    output should include("lpbk:ok")
+    output should not include "lpbk:bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

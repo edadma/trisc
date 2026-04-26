@@ -208,10 +208,11 @@ the 11-entry aarch64 set (user + 10 servers) with growth headroom.
     var rs_boot_info: [512]byte
     var rs_boot_info_len = 0
 
-Module loading buffer (128 KB). Boot module TRB/ELF data
-is copied here via svc_phys_read before parsing.
+Module loading buffer (192 KB). Boot module TRB/ELF data
+is copied here via svc_phys_read before parsing. Sized to fit
+the largest server we currently link (x86 inet).
 
-    var rs_mod_buf: [131072]byte
+    var rs_mod_buf: [196608]byte
 
 Boot message helpers. putc goes straight to MMIO, no TTY needed.
 
@@ -470,7 +471,7 @@ Returns the PID on success, 0 on failure.
         val sz = rs_boot_module_size(mod_idx)
 
         // Copy boot module data from physical memory into our buffer
-        if sz > 131072
+        if sz > 196608
             return 0
         svc_phys_read(u64(addr), &rs_mod_buf[0], sz)
         val buf = &rs_mod_buf[0]
