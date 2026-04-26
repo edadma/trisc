@@ -1754,6 +1754,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "sotmo: bad"
   }
 
+  "aarch64 udp: MSG_DONTWAIT per-call non-blocking override" in {
+    // MSG_DONTWAIT (0x40) makes a single recvfrom non-blocking
+    // even on a blocking fd; libuv uses it to avoid the
+    // fcntl(O_NONBLOCK) race when the fd is shared.
+    val output = qemu.command("test_msg_dwait")
+    output should include("mdwait: ok")
+    output should not include "mdwait: bad"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

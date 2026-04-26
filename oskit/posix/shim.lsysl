@@ -1311,7 +1311,13 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
         var cap_len = len
         if cap_len > 1472
             cap_len = 1472
-        val nonblock = posix_fd_flags(fd) & POSIX_O_NONBLOCK
+        // MSG_DONTWAIT (0x40) overrides the fd's blocking mode for
+        // this single call — Linux semantics. libuv uses it to
+        // avoid the fcntl race when the fd's mode is shared with
+        // other pollers.
+        var nonblock = posix_fd_flags(fd) & POSIX_O_NONBLOCK
+        if (flags & 0x40) != 0
+            nonblock = POSIX_O_NONBLOCK
         val rcvtimeo_ms = posix_fd_table[idx].recv_timeout_ms
         var reply: [1500]byte
         if nonblock != 0
