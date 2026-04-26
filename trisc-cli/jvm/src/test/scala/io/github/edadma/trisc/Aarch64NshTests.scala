@@ -1680,6 +1680,20 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_tcp_ooo: failed"
   }
 
+  "aarch64 ip: fragmentation reassembly self-test" in {
+    // test_ip_reasm triggers inet's IPv4 reassembly self-test via a
+    // dedicated IPC op. Three IPv4 fragments of a 32-byte UDP
+    // datagram are injected through inet_handle_frame in
+    // out-of-order sequence (frag 2, frag 3, frag 1); the reorder
+    // bitmap must complete the assembly and route the resulting
+    // UDP datagram to a socket bound to port 9100 — this test
+    // program. recvfrom then validates the body bytes
+    // ('A'x8 + 'B'x8 + 'C'x8).
+    val output = qemu.command("test_ip_reasm")
+    output should include("test_ip_reasm: ok")
+    output should not include "test_ip_reasm: failed"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

@@ -311,6 +311,194 @@ After insertion, drain any UDP datagrams pending on this IP.
         inet_arp_drain_pending(ip)
 
 
+### IP reassembly (ingress fragments)
+
+Inbound IPv4 fragments are stashed here and reassembled into a
+synthetic full-size frame that re-enters `inet_handle_frame` for
+normal L4 dispatch. Without this, any peer-side fragmentation
+(e.g. a UDP datagram > MTU from a peer that ignored our advertised
+MSS) silently drops in L4 demux because the partial header fails
+checksum.
+
+We support fragments up to `IP_REASM_MAX_DATA` bytes of L4 payload
+total — 8 KB, enough for jumbo UDP. Four concurrent datagram
+assemblies are tracked; each times out after `IP_REASM_TIMEOUT`
+ticks (RFC 791 says 30 s; 3000 ticks @ 100 Hz). Timed-out slots
+are silently dropped — ICMP Time Exceeded emit is a follow-up.
+
+    val IP_REASM_SLOTS    = 4
+    val IP_REASM_MAX_DATA = 8192
+    val IP_REASM_TIMEOUT  = 3000
+    val IP_REASM_HDR_MAX  = 60
+
+    struct IpReasmSlot
+        in_use: int
+        src_ip: u32
+        dst_ip: u32
+        ident: int
+        proto: int
+        deadline: int
+        have_first: int
+        total_len: int
+        ihl_bytes: int
+        eth_ip: [74]byte
+        payload: [8192]byte
+        received: [8192]byte
+
+    var inet_ip_reasm_table: [4]IpReasmSlot
+    var inet_ip_reasm_staging: [8320]byte
+
+
+Find the slot matching `(src_ip, dst_ip, ident, proto)`. Returns
+slot index or -1.
+
+    inet_ip_reasm_find(src_ip: u32, dst_ip: u32, ident: int, proto: int) -> int
+        var i = 0
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].in_use != 0
+                if inet_ip_reasm_table[i].src_ip == src_ip
+                    if inet_ip_reasm_table[i].dst_ip == dst_ip
+                        if inet_ip_reasm_table[i].ident == ident
+                            if inet_ip_reasm_table[i].proto == proto
+                                return i
+            i += 1
+        -1
+
+
+Allocate a free slot, evicting the slot with the earliest
+deadline if the table is full.
+
+    inet_ip_reasm_alloc() -> int
+        var i = 0
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].in_use == 0
+                return i
+            i += 1
+        var best = 0
+        var best_dl = inet_ip_reasm_table[0].deadline
+        i = 1
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].deadline < best_dl
+                best = i
+                best_dl = inet_ip_reasm_table[i].deadline
+            i += 1
+        best
+
+
+Reset slot fields ahead of accepting a new datagram.
+
+    inet_ip_reasm_reset(s: int)
+        inet_ip_reasm_table[s].in_use = 0
+        inet_ip_reasm_table[s].have_first = 0
+        inet_ip_reasm_table[s].total_len = -1
+        inet_ip_reasm_table[s].ihl_bytes = 0
+        var i = 0
+        while i < IP_REASM_MAX_DATA
+            inet_ip_reasm_table[s].received[i] = byte(0)
+            i += 1
+
+
+Accept one fragment. Returns the assembled frame length (>0) on
+completion (written to `inet_ip_reasm_staging`), 0 when more
+fragments are needed, -1 on unrecoverable failure (oversize or
+malformed).
+
+`eth_ip` points at the start of the inbound Ethernet frame so we
+can clone the original ETH+IP header from the first fragment.
+`payload` points at the L4 payload (frame + 14 + ihl).
+
+    inet_ip_reasm_accept(eth_ip: *byte, src_ip: u32, dst_ip: u32,
+            ident: int, proto: int, mf: int, offset: int,
+            ihl_bytes: int, payload: *byte, payload_len: int) -> int
+        if offset < 0
+            return -1
+        if payload_len <= 0
+            return -1
+        if offset + payload_len > IP_REASM_MAX_DATA
+            return -1
+        if ihl_bytes > IP_REASM_HDR_MAX
+            return -1
+
+        var s = inet_ip_reasm_find(src_ip, dst_ip, ident, proto)
+        if s < 0
+            s = inet_ip_reasm_alloc()
+            inet_ip_reasm_reset(s)
+            inet_ip_reasm_table[s].in_use = 1
+            inet_ip_reasm_table[s].src_ip = src_ip
+            inet_ip_reasm_table[s].dst_ip = dst_ip
+            inet_ip_reasm_table[s].ident = ident
+            inet_ip_reasm_table[s].proto = proto
+
+        inet_ip_reasm_table[s].deadline = int(uptime()) + IP_REASM_TIMEOUT
+
+        if offset == 0
+            inet_ip_reasm_table[s].have_first = 1
+            inet_ip_reasm_table[s].ihl_bytes = ihl_bytes
+            var k = 0
+            while k < 14 + ihl_bytes
+                inet_ip_reasm_table[s].eth_ip[k] = eth_ip[k]
+                k += 1
+
+        var i = 0
+        while i < payload_len
+            inet_ip_reasm_table[s].payload[offset + i] = payload[i]
+            inet_ip_reasm_table[s].received[offset + i] = byte(1)
+            i += 1
+
+        if mf == 0
+            inet_ip_reasm_table[s].total_len = offset + payload_len
+
+        if inet_ip_reasm_table[s].have_first == 0
+            return 0
+        val tl = inet_ip_reasm_table[s].total_len
+        if tl <= 0
+            return 0
+        var j = 0
+        while j < tl
+            if inet_ip_reasm_table[s].received[j] == byte(0)
+                return 0
+            j += 1
+
+Assemble the synthetic frame: ETH + (patched IP header) +
+contiguous payload. We patch IP total_length, clear
+flags-and-fragment-offset, and recompute the IP header checksum;
+the L4 checksum is left as-is since the peer computed it over the
+full datagram before fragmenting.
+
+        val hdr = inet_ip_reasm_table[s].ihl_bytes
+        var w = 0
+        while w < 14 + hdr
+            inet_ip_reasm_staging[w] = inet_ip_reasm_table[s].eth_ip[w]
+            w += 1
+        val ip_total = hdr + tl
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 2, ip_total)
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 6, 0)
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 10, 0)
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 10,
+            net_checksum(inet_ip_reasm_staging + 14, hdr))
+        var p = 0
+        while p < tl
+            inet_ip_reasm_staging[14 + hdr + p] = inet_ip_reasm_table[s].payload[p]
+            p += 1
+        inet_ip_reasm_table[s].in_use = 0
+        return 14 + hdr + tl
+
+
+Drop slots whose deadline has passed. Called once per timer tick
+from the inet main loop alongside `inet_tcp_scan_timers`. RFC 792
+SHOULD-emit ICMP Time Exceeded (type 11, code 1) for the source —
+deferred to a follow-up.
+
+    inet_ip_reasm_scan_timeouts()
+        val now = int(uptime())
+        var i = 0
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].in_use != 0
+                if now >= inet_ip_reasm_table[i].deadline
+                    inet_ip_reasm_table[i].in_use = 0
+            i += 1
+
+
 ### Pending UDP queue
 
 Two-slot queue holding UDP datagrams whose next-hop MAC isn't

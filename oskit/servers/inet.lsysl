@@ -45,7 +45,7 @@ process B's sockets.
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet,
         ETHERTYPE_IPV4, ETHERTYPE_ARP, ARP_OP_REQUEST, ARP_OP_REPLY,
         IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
-        ICMP_DEST_UNREACH, pkt_read_u16, pkt_match_ipv4}
+        ICMP_DEST_UNREACH, pkt_read_u16, pkt_match_ipv4, net_checksum}
 
 
 Protocol command codes (byte value of buf[0]).
@@ -89,6 +89,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_GET_ERR     = 41
     val INET_CMD_TCP_INJECT_FAIL = 42
     val INET_CMD_TCP_GET_INFO    = 43
+    val INET_CMD_IP_REASM_SELFTEST = 44
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1683,6 +1684,90 @@ is 1 byte: 0 on pass, nonzero error code on failure.
         ipc_reply(sender, reply, 1)
 
 
+Test-only: synthesize three IPv4 fragments of a 32-byte UDP
+datagram bound for our IP at port 9100, inject them into
+`inet_handle_frame` in out-of-order sequence (frag 2, frag 3,
+frag 1), and reply 1 byte status (0 on success, nonzero error).
+The assembled UDP payload reaches the test program through the
+normal RX path — when it calls `recvfrom` it picks up the
+reassembled datagram from its bound socket's queue.
+
+UDP layout (post-assembly, IP payload bytes 0..32):
+  byte  0..2  src port = 9000
+  byte  2..4  dst port = 9100
+  byte  4..6  udp length = 32
+  byte  6..8  udp checksum = 0 (skip verify)
+  byte  8..16 'A' x 8
+  byte 16..24 'B' x 8
+  byte 24..32 'C' x 8
+
+Fragment plan:
+  frag 1: offset=0,  MF=1, body=ud[0..16]   (UDP header + 'A'x8)
+  frag 2: offset=16, MF=1, body=ud[16..24]  ('B' x 8)
+  frag 3: offset=24, MF=0, body=ud[24..32]  ('C' x 8)
+
+    inet_handle_ip_reasm_selftest(sender: int, buf: *byte)
+        val rc = inet_ip_reasm_selftest_run()
+        var reply: [1]byte
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+    inet_ip_reasm_selftest_run() -> int
+        var ud: [32]byte
+        inet_write_u16(ud, 0, 9000)
+        inet_write_u16(ud, 2, 9100)
+        inet_write_u16(ud, 4, 32)
+        inet_write_u16(ud, 6, 0)
+        var bi = 0
+        while bi < 8
+            ud[8 + bi] = byte('A')
+            ud[16 + bi] = byte('B')
+            ud[24 + bi] = byte('C')
+            bi += 1
+
+        if inet_ip_reasm_inject_frag(0xABCD, 16, 1, ud, 16, 8) != 0
+            return 1
+        if inet_ip_reasm_inject_frag(0xABCD, 24, 0, ud, 24, 8) != 0
+            return 2
+        if inet_ip_reasm_inject_frag(0xABCD, 0, 1, ud, 0, 16) != 0
+            return 3
+        0
+
+Build a single IPv4 fragment frame and feed it through
+`inet_handle_frame`. ETH MACs are zeroed — handle_frame doesn't
+inspect ETH dst once we're past the NIC.
+
+    inet_ip_reasm_inject_frag(ident_v: int, offset_bytes: int, mf: int,
+                              src: *byte, src_off: int, body_len: int) -> int
+        var frame: [80]byte
+        var i = 0
+        while i < 14
+            frame[i] = byte(0)
+            i += 1
+        inet_write_u16(frame, 12, ETHERTYPE_IPV4)
+
+        frame[14] = byte(0x45)
+        frame[15] = byte(0)
+        inet_write_u16(frame, 16, 20 + body_len)
+        inet_write_u16(frame, 18, ident_v)
+        val flags_v = (mf << 13) | (offset_bytes / 8)
+        inet_write_u16(frame, 20, flags_v)
+        frame[22] = byte(64)
+        frame[23] = byte(IP_PROTO_UDP)
+        inet_write_u16(frame, 24, 0)
+        inet_write_ipv4(frame, 26, ipv4(10, 0, 2, 99))
+        inet_write_ipv4(frame, 30, inet_get_our_ip())
+        inet_write_u16(frame, 24, net_checksum(frame + 14, 20))
+
+        var k = 0
+        while k < body_len
+            frame[14 + 20 + k] = src[src_off + k]
+            k += 1
+
+        inet_handle_frame(frame, 14 + 20 + body_len)
+        0
+
+
 ### UDP — inbound
 
 Dispatch an IPv4/UDP frame that already passed the destination-IP
@@ -1897,6 +1982,34 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
             if is_unicast == 0
                 if is_bcast == 0
                     return 0
+            // IP fragment? bits 12..0 of frame[14+6..14+8] are MF +
+            // fragment offset. Anything nonzero means this is part of
+            // a fragmented datagram and the L4 header isn't where the
+            // proto switch would expect it. Hand off to reassembly;
+            // when the final fragment arrives the slot synthesizes a
+            // contiguous frame and we re-enter on it.
+            val flags_frag = pkt_read_u16(frame, 14 + 6)
+            if (flags_frag & 0x3FFF) != 0
+                val ip_total_in = pkt_read_u16(frame, 14 + 2)
+                val payload_len = ip_total_in - ihl_bytes
+                if payload_len <= 0
+                    return 0
+                val ident_v = pkt_read_u16(frame, 14 + 4)
+                val mf_v = (flags_frag >> 13) & 1
+                val offset_v = (flags_frag & 0x1FFF) * 8
+                val frag_proto = int(frame[14 + 9]) & 0xff
+                val frag_src = ipv4(
+                    int(frame[14 + 12]) & 0xff, int(frame[14 + 13]) & 0xff,
+                    int(frame[14 + 14]) & 0xff, int(frame[14 + 15]) & 0xff)
+                val frag_dst = ipv4(
+                    int(frame[14 + 16]) & 0xff, int(frame[14 + 17]) & 0xff,
+                    int(frame[14 + 18]) & 0xff, int(frame[14 + 19]) & 0xff)
+                val flen = inet_ip_reasm_accept(frame, frag_src, frag_dst,
+                    ident_v, frag_proto, mf_v, offset_v, ihl_bytes,
+                    frame + 14 + ihl_bytes, payload_len)
+                if flen > 0
+                    inet_handle_frame(inet_ip_reasm_staging, flen)
+                return 1
             val proto = int(frame[14 + 9]) & 0xff
             if proto == IP_PROTO_ICMP
                 val icmp_off = 14 + ihl_bytes
@@ -2054,6 +2167,7 @@ silently skip link-layer setup and still serve UDP loopback.
             val r = ipc_recv_notify(inet_port, buf, INET_MSG_BUF)
             inet_tcp_scan_timers()
             inet_udp_scan_timeouts()
+            inet_ip_reasm_scan_timeouts()
             if r == -2
                 notify_read_self()
                 inet_drain_rx()
@@ -2100,6 +2214,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_GET_INFO -> inet_handle_tcp_get_info(sender, buf)
                     INET_CMD_TCP_DEBUG   -> inet_handle_tcp_debug(sender, buf)
                     INET_CMD_ICMP_UNREACH_INJECT -> inet_handle_icmp_unreach_inject(sender, buf)
+                    INET_CMD_IP_REASM_SELFTEST -> inet_handle_ip_reasm_selftest(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte

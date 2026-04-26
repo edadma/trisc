@@ -1,0 +1,83 @@
+test_ip_reasm — IPv4 fragmentation reassembly self-test
+========================================================
+
+Triggers inet's IP fragmentation reassembly via a test-only IPC
+that synthesizes three fragments of a 32-byte UDP datagram and
+injects them out-of-order through `inet_handle_frame`. The
+reorder bitmap must complete the assembly only when all three
+have arrived in any order; the final UDP datagram is then routed
+normally to whichever socket is bound to port 9100 — namely, us.
+
+Prints `test_ip_reasm: ok` on pass or `test_ip_reasm: failed N`
+where N is which gate tripped.
+
+    module oskit.bin.test_ip_reasm
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{socket, bind, recvfrom, close_socket, ip_reasm_selftest}
+    import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("test_ip_reasm: failed ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val fd = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd < 0
+            fail(1)
+            return
+        if bind(fd, INADDR_ANY, 9100) != 0
+            close_socket(fd)
+            fail(2)
+            return
+
+        val rc = ip_reasm_selftest()
+        if rc != 0
+            close_socket(fd)
+            fail(3 + rc)
+            return
+
+        var rbuf: [64]byte
+        var src_ip: u32 = u32(0)
+        var src_port: int = 0
+        val got = recvfrom(fd, &rbuf[0], 64, &src_ip, &src_port)
+        if got != 24
+            close_socket(fd)
+            fail(10)
+            return
+
+        var i = 0
+        while i < 8
+            if rbuf[i] != byte('A')
+                close_socket(fd)
+                fail(11)
+                return
+            i += 1
+        while i < 16
+            if rbuf[i] != byte('B')
+                close_socket(fd)
+                fail(12)
+                return
+            i += 1
+        while i < 24
+            if rbuf[i] != byte('C')
+                close_socket(fd)
+                fail(13)
+                return
+            i += 1
+
+        close_socket(fd)
+        puts("test_ip_reasm: ok\n")
+        exit()
