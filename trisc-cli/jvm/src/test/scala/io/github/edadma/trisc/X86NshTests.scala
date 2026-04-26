@@ -474,6 +474,19 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("test_tcp_srv: closed")
   }
 
+  "x86 tcp: VFS listen bridge accepts optional ',backlog' suffix" in {
+    // test_tcp_lsv2 exercises the parser-shape of
+    // connect("tcp-listen:PORT,N").  Plain form, comma+backlog,
+    // clamp-high, clamp-zero, malformed-trailer all return the
+    // expected handle status — closing the VFS-bridge backlog
+    // parameter item from the roadmap.
+    qemu.send("test_tcp_lsv2\n")
+    val output = qemu.waitFor("test_tcp_lsv2: ok")
+    output should include("test_tcp_lsv2: ok")
+    output should not include "test_tcp_lsv2: failed"
+    output should not include "test_tcp_lsv2: unexpectedly opened"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

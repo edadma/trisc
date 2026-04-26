@@ -1,0 +1,93 @@
+test_tcp_lsv2 — VFS listen bridge optional `,backlog` syntax
+==============================================================
+
+Verifies that the VFS bridge's `connect("tcp-listen:PORT,N")`
+parses an optional comma-separated backlog override (added on top
+of the original `tcp-listen:PORT` form).
+
+The chunk that landed this — `vfs_handle_connect_tcp_listen` in
+oskit/servers/vfs.lsysl — accepts:
+
+  - `tcp-listen:7895` → backlog defaults to 16 (inet's
+    TCP_LISTEN_BACKLOG cap)
+  - `tcp-listen:7895,4` → backlog=4
+  - `tcp-listen:7895,99` → backlog clamped to 16
+  - `tcp-listen:7895,0` → backlog clamped to 1 (Linux's "0 → 1")
+  - `tcp-listen:7895,abc` → parse error, returns -1
+
+We don't try to *exercise* the backlog limit (that requires
+multiple host TCP connections — the inet-side mlbacklog test
+already covers backlog enforcement). This test is a parser-shape
+regression: each form returns a valid (or rejected) handle as
+designed.
+
+    module oskit.bin.test_tcp_lsv2
+
+    import oskit.ulib.{puts, exit, exit_with, connect, close}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (n % 10))
+        puts(string(&buf[0], 1))
+
+
+    main(argv: []string)
+        // Plain form — preserved.
+        val h1 = connect("tcp-listen:7895")
+        if h1 < 0
+            puts("test_tcp_lsv2: plain failed h=")
+            print_idec(h1)
+            puts("\n")
+            exit_with(1)
+            return
+        close(h1)
+
+        // Comma form with explicit small backlog.
+        val h2 = connect("tcp-listen:7896,4")
+        if h2 < 0
+            puts("test_tcp_lsv2: backlog=4 failed h=")
+            print_idec(h2)
+            puts("\n")
+            exit_with(2)
+            return
+        close(h2)
+
+        // Backlog clamp: 99 > TCP_LISTEN_BACKLOG=16, accepted.
+        val h3 = connect("tcp-listen:7897,99")
+        if h3 < 0
+            puts("test_tcp_lsv2: backlog=99 failed h=")
+            print_idec(h3)
+            puts("\n")
+            exit_with(3)
+            return
+        close(h3)
+
+        // Backlog clamp: 0 → 1.
+        val h4 = connect("tcp-listen:7898,0")
+        if h4 < 0
+            puts("test_tcp_lsv2: backlog=0 failed h=")
+            print_idec(h4)
+            puts("\n")
+            exit_with(4)
+            return
+        close(h4)
+
+        // Malformed backlog — non-digit must be rejected.
+        val h5 = connect("tcp-listen:7899,abc")
+        if h5 >= 0
+            puts("test_tcp_lsv2: backlog=abc unexpectedly opened h=")
+            print_idec(h5)
+            puts("\n")
+            close(h5)
+            exit_with(5)
+            return
+
+        puts("test_tcp_lsv2: ok\n")
+        exit()

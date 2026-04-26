@@ -1572,6 +1572,19 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("test_tcp_lsv: closed")
   }
 
+  "aarch64 tcp: VFS listen bridge accepts optional ',backlog' suffix" in {
+    // test_tcp_lsv2 exercises the parser-shape of
+    // connect("tcp-listen:PORT,N").  Plain form, comma+backlog,
+    // clamp-high, clamp-zero, malformed-trailer all return the
+    // expected handle status — closing the VFS-bridge backlog
+    // parameter item from the roadmap.
+    qemu.send("test_tcp_lsv2\n")
+    val output = qemu.waitFor("test_tcp_lsv2: ok")
+    output should include("test_tcp_lsv2: ok")
+    output should not include "test_tcp_lsv2: failed"
+    output should not include "test_tcp_lsv2: unexpectedly opened"
+  }
+
   "aarch64 tcp: out-of-order reassembly self-test" in {
     // test_tcp_ooo triggers inet's reorder-queue self-test via a
     // dedicated IPC op. The test exercises the stash → drain path
