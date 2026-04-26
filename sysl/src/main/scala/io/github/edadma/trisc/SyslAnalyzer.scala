@@ -3808,6 +3808,39 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         if te.typ != BoolType then throw AnalysisError(s"assume expression must be bool, got ${te.typ}")
         contract("assume", te, msg.getOrElse("assume"))
 
+      case InnerFunStmtAST(decl) =>
+        // `def name(params) -> ret body` inside a function body — desugar to a named
+        // local closure with self-reference support. The name is pre-bound so calls
+        // inside the body resolve locally; the resulting TClosure carries selfName so
+        // the interpreter can wire a self-cell into the captured env after construction.
+        if decl.typeParams.nonEmpty then
+          throw AnalysisError(s"inner def '${decl.name}' cannot declare type parameters")
+        val retTypeAST = decl.returnType.getOrElse(
+          throw AnalysisError(s"inner def '${decl.name}' must declare an explicit return type")
+        )
+        val retType = resolveType(retTypeAST)
+        val paramTypes = decl.params.map(p => resolveType(p.typ))
+        val funcType: SyslType = FuncType(paramTypes, retType, escaping = true)
+        // Pre-bind the name in the enclosing scope so self-references in the body resolve.
+        if scopeStack != null then
+          currentScope(decl.name) = SymInfo(decl.name, funcType, mutable = false)
+        // Reuse the closure analyzer by synthesizing a ClosureAST and pinning its expected
+        // type. The closure analyzer pushes its own scope for params, analyzes the body,
+        // and runs capture detection — which will pick up the self-name as a capture.
+        val closureParams = decl.params.map(p => ClosureParamAST(p.name, Some(p.typ)))
+        val closureAST = ClosureAST(closureParams, decl.body)
+        val savedExp = currentExpected
+        currentExpected = Some(funcType)
+        val tClosure0 = try analyzeExpr(closureAST) finally currentExpected = savedExp
+        val tClosure = tClosure0 match
+          case c: TClosure =>
+            // Drop the self-name from captures so backends don't try to read it from
+            // the enclosing env at construction time. The interpreter wires the
+            // self-cell in itself once the ClosureVal exists (see selfName).
+            c.copy(captures = c.captures.filterNot(_._1 == decl.name), selfName = Some(decl.name))
+          case other => throw AnalysisError(s"inner def '${decl.name}': expected closure, got $other")
+        TVarStmt(decl.name, funcType, tClosure)
+
       case ExprStmtAST(expr) =>
         TExprStmt(analyzeExpr(expr))
 
@@ -4047,7 +4080,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case TStringFromPtr(ptr, len, _) => scanCaptures(ptr, locals); scanCaptures(len, locals)
           case TStringFromSlice(slc, _) => scanCaptures(slc, locals)
           case TStr(e) => scanCaptures(e, locals)
-          case TClosure(innerParams, _, innerBody, _, _, _) =>
+          case TClosure(innerParams, _, innerBody, _, _, _, _) =>
             val innerLocals = locals ++ innerParams.map(_.name).toSet
             innerBody match
               case TExprBody(e) => scanCaptures(e, innerLocals)

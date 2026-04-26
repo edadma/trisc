@@ -1235,13 +1235,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TFuncRef(name, _) => FuncVal(name)
 
-      case TClosure(params, _, body, captures, _, _) =>
-        // Capture current values by value (copy)
+      case TClosure(params, _, body, captures, _, _, selfName) =>
+        // Capture current values by value (copy). The self-name (if any) is bound to a
+        // fresh cell after the ClosureVal is built so the body can recurse via name.
         val capturedEnv = new mutable.LinkedHashMap[String, Cell]
-        for (varName, _) <- captures do
+        for (varName, _) <- captures if !selfName.contains(varName) do
           val cell = lookupCell(varName, env)
           capturedEnv(varName) = new Cell(cell.value) // copy value, not share cell
-        ClosureVal(body, params, capturedEnv)
+        val closureVal = ClosureVal(body, params, capturedEnv)
+        selfName.foreach { n => capturedEnv(n) = new Cell(closureVal) }
+        closureVal
 
       case TInterfaceBox(expr, iface) =>
         val dataVal = evalAny(expr, env)

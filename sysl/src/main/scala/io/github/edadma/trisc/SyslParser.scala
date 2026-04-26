@@ -486,7 +486,13 @@ class SyslParser extends StandardTokenParsers {
     "assume" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => AssumeStmtAST(e, msg) }
 
   lazy val stmt: Parser[StmtAST] =
-    ghostVarStmt | asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    ghostVarStmt | innerFunStmt | asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+
+  /** `def name(params) -> ret body` (or `def name -> ret body` zero-arg) at statement
+   *  position — declares a recursively-callable named local closure. The analyzer lowers
+   *  this to a `TClosure` with `selfName = Some(name)` and a `TVarStmt` binding. */
+  lazy val innerFunStmt: Parser[StmtAST] =
+    "def" ~> defDecl(false) ^^ InnerFunStmtAST.apply
 
   /** `#ghost var/val name = ...` at statement position — a ghost local declaration. Only
    *  accepts a plain var/val form (no `#address`, no `static_assert`, etc.). The resulting

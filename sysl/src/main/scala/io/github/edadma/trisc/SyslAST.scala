@@ -124,6 +124,11 @@ case class BreakStmtAST(label: Option[String] = None) extends StmtAST
 case class ContinueStmtAST(label: Option[String] = None) extends StmtAST
 case class DeferStmtAST(body: StmtAST) extends StmtAST
 case class AsmStmtAST(code: String) extends StmtAST
+// `def name(params) -> ret body` inside a function body — a named local closure with
+// self-reference (recursion) support. Reuses FunDeclAST as the carrier; the analyzer
+// lowers it to a TClosure with selfName set, then a TVarStmt binding the name to that
+// closure, so capture-detection sees a normal local binding.
+case class InnerFunStmtAST(decl: FunDeclAST) extends StmtAST
 // `invariant <bool> [, "msg"]` statement — Ada/SPARK-style loop invariant. Must appear in the
 // leading "header" of a loop body (before any non-invariant/non-variant statement). The
 // analyzer extracts these and emits the runtime check at the cut point — top of the typed body

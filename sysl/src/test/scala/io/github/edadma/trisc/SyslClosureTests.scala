@@ -133,4 +133,53 @@ class SyslClosureTests extends SyslTestHelpers {
         |    outer(2)
         |""".stripMargin) shouldBe 7
   }
+
+  // ===== Inner def declarations (recursive named local closures) =====
+
+  "inner def with self-recursion (factorial)" in {
+    eval(
+      """outer() -> int
+        |    def fact(n: int) -> int
+        |        if n == 0 then return 1
+        |        n * fact(n - 1)
+        |    fact(5)
+        |
+        |main() -> int = outer()
+        |""".stripMargin) shouldBe 120
+  }
+
+  "inner def captures outer parameter" in {
+    eval(
+      """outer(base: int) -> int
+        |    def add_base(n: int) -> int
+        |        n + base
+        |    add_base(7)
+        |
+        |main() -> int = outer(35)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "inner def with self-recursion uses captured outer local" in {
+    // Combines self-recursion with an outer-scope capture: the recursive helper
+    // sums n down to 0, adding `bonus` (captured from outer) each step.
+    eval(
+      """outer(bonus: int) -> int
+        |    def sum_with_bonus(n: int) -> int
+        |        if n == 0 then return 0
+        |        n + bonus + sum_with_bonus(n - 1)
+        |    sum_with_bonus(3)
+        |
+        |main() -> int = outer(10)
+        |""".stripMargin) shouldBe 36 // (3+10) + (2+10) + (1+10) + 0 = 36
+  }
+
+  "inner def with zero parameters" in {
+    eval(
+      """outer() -> int
+        |    def constant() -> int = 42
+        |    constant()
+        |
+        |main() -> int = outer()
+        |""".stripMargin) shouldBe 42
+  }
 }
