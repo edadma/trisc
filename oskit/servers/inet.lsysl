@@ -526,7 +526,12 @@ vs. 16K ports, so not in practice.
             inet_sockets[fd].bound_ip = INADDR_ANY
             inet_sockets[fd].bound_port = eph
         val src_port = inet_sockets[fd].bound_port
-        if dst_ip == INADDR_LOOPBACK
+        // Loopback fastpath: any address in 127/8 or our own external
+        // IP routes to a local socket via the in-memory queue, never
+        // touching the NIC. The receiver always sees src_ip = 127.0.0.1
+        // so a connect()ed local UDP fd can match its peer regardless
+        // of which loopback address the sender used.
+        if inet_is_loopback_ip(dst_ip) != 0
             val target = inet_find_bound(dst_ip, dst_port)
             if target >= 0
                 if inet_sockets[target].pending_tid >= 0

@@ -497,6 +497,27 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "lpbk:bad"
   }
 
+  "x86 udp: loopback gate covers 127/8 + own_ip" in {
+    // The pre-existing UDP loopback shortcut only matched
+    // 127.0.0.1 exactly. inet_handle_sendto now uses
+    // inet_is_loopback_ip, so 127.0.0.5 and 10.0.2.15 (our
+    // QEMU lease) also short-circuit through the in-memory
+    // queue instead of trying ARP and silently failing.
+    val output = qemu.command("test_udp_lpbk")
+    output should include("udplo: ok")
+    output should not include "udplo: bad"
+  }
+
+  "x86 icmp: ping 127.0.0.1 returns immediately" in {
+    // inet_send_icmp_echo_to short-circuits to inet_ping_deliver
+    // when the destination is loopback — `ping 127.0.0.1` sees
+    // a synthesized reply on the same tick with rtt=0 instead of
+    // the request silently dropping at inet_resolve_mac.
+    val output = qemu.command("ping -c 1 127.0.0.1")
+    output should include("reply from 127.0.0.1")
+    output should include("1 sent, 1 received")
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

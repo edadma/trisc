@@ -719,6 +719,15 @@ periodic so the caller can just re-send.
     inet_send_icmp_echo_to(dst_ip: u32, id: int, seq: int) -> int
         if inet_our_mac_known == 0
             return -1
+        // Loopback shortcut: pinging ourselves can't actually fail
+        // (no NIC, no ARP miss possible), so register the matching
+        // ECHO_REPLY directly. The reported source IP echoes whatever
+        // the caller targeted — `127.0.0.x` round-trips as
+        // `127.0.0.x`, our_ip round-trips as our_ip.
+        if inet_is_loopback_ip(dst_ip) != 0
+            inet_pings_sent += 1
+            inet_ping_deliver(dst_ip, id, seq, int(uptime()))
+            return 0
         var next_hop_mac: [6]byte
         if inet_resolve_mac(dst_ip, next_hop_mac) == 0
             return -1
