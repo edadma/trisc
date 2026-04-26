@@ -1716,6 +1716,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udpbig: bad"
   }
 
+  "aarch64 udp: connect()/send()/recv() with default peer" in {
+    // POSIX connect() on UDP saves a default peer; subsequent
+    // send() (sendto with NULL addr) targets it. Then dissolve
+    // via connect(AF_UNSPEC) and verify send returns -ENOTCONN.
+    val output = qemu.command("test_udp_conn")
+    output should include("udpcon: ok")
+    output should not include "udpcon: bad"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

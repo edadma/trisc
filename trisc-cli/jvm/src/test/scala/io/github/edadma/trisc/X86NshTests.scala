@@ -604,6 +604,15 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udpbig: bad"
   }
 
+  "x86 udp: connect()/send()/recv() with default peer" in {
+    // POSIX connect() on UDP saves a default peer; subsequent
+    // send() (sendto with NULL addr) targets it. Then dissolve
+    // via connect(AF_UNSPEC) and verify send returns -ENOTCONN.
+    val output = qemu.command("test_udp_conn")
+    output should include("udpcon: ok")
+    output should not include "udpcon: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

@@ -159,6 +159,19 @@ posix_fd_bridge memory.
         // it only on close. Children produced by accept() are fresh
         // fds with is_listen = 0.
         is_listen: int
+        // POSIX_FD_UDP_SOCKET connect() state. `udp_connected != 0`
+        // means a default peer was set via sys_connect; sendto with
+        // a null addr / zero addrlen then uses the saved peer (the
+        // libc `send()` path). Cleared by re-connecting with NULL
+        // sockaddr or sa_family == AF_UNSPEC (POSIX dissolve).
+        // Peer IP stored as 4 octets to match the inet IPC wire
+        // format (network byte order).
+        udp_connected: int
+        udp_peer_port: int
+        udp_peer_a: int
+        udp_peer_b: int
+        udp_peer_c: int
+        udp_peer_d: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -190,6 +203,12 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].timerfd_expirations = i64(0)
             posix_fd_table[base + i].last_error = 0
             posix_fd_table[base + i].is_listen = 0
+            posix_fd_table[base + i].udp_connected = 0
+            posix_fd_table[base + i].udp_peer_port = 0
+            posix_fd_table[base + i].udp_peer_a = 0
+            posix_fd_table[base + i].udp_peer_b = 0
+            posix_fd_table[base + i].udp_peer_c = 0
+            posix_fd_table[base + i].udp_peer_d = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -263,6 +282,12 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].timerfd_expirations = i64(0)
                 posix_fd_table[base + i].last_error = 0
                 posix_fd_table[base + i].is_listen = 0
+                posix_fd_table[base + i].udp_connected = 0
+                posix_fd_table[base + i].udp_peer_port = 0
+                posix_fd_table[base + i].udp_peer_a = 0
+                posix_fd_table[base + i].udp_peer_b = 0
+                posix_fd_table[base + i].udp_peer_c = 0
+                posix_fd_table[base + i].udp_peer_d = 0
                 return i
             i += 1
         -1
@@ -1193,8 +1218,6 @@ forwards to the inet server. `flags` is ignored for v1.
     sys_sendto(fd: int, buf: i64, len: int, flags: int, addr_ptr: i64, addrlen: int) -> i64
         if posix_fd_kind(fd) != POSIX_FD_UDP_SOCKET
             return i64(-9)
-        if addrlen < 16
-            return i64(-22)
         if len < 0
             return i64(-22)
         if len > 1472
@@ -1203,8 +1226,33 @@ forwards to the inet server. `flags` is ignored for v1.
         val port = inet_get_port()
         if port < 0
             return i64(-19)
-        val a: *byte = *byte(addr_ptr)
-        val dst_port = shim_read_u16(a, 2)
+        // libc `send()` lowers to sendto with addr=NULL+addrlen=0;
+        // resolve the peer from the prior sys_connect_udp. No
+        // connected peer at this point is -ENOTCONN.
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + fd
+        var dst_port: int = 0
+        var ip0: byte = byte(0)
+        var ip1: byte = byte(0)
+        var ip2: byte = byte(0)
+        var ip3: byte = byte(0)
+        if addr_ptr == i64(0)
+            if posix_fd_table[idx].udp_connected == 0
+                return i64(-107)            // -ENOTCONN
+            dst_port = posix_fd_table[idx].udp_peer_port
+            ip0 = byte(posix_fd_table[idx].udp_peer_a & 0xff)
+            ip1 = byte(posix_fd_table[idx].udp_peer_b & 0xff)
+            ip2 = byte(posix_fd_table[idx].udp_peer_c & 0xff)
+            ip3 = byte(posix_fd_table[idx].udp_peer_d & 0xff)
+        else
+            if addrlen < 16
+                return i64(-22)
+            val a: *byte = *byte(addr_ptr)
+            dst_port = shim_read_u16(a, 2)
+            ip0 = a[4]
+            ip1 = a[5]
+            ip2 = a[6]
+            ip3 = a[7]
         val ubuf: *byte = *byte(buf)
         var msg: [1483]byte
         msg[0] = byte(INET_CMD_SENDTO)
@@ -1212,10 +1260,10 @@ forwards to the inet server. `flags` is ignored for v1.
         msg[2] = byte(POSIX_AF_INET)
         msg[3] = byte(dst_port >> 8)
         msg[4] = byte(dst_port & 0xff)
-        msg[5] = a[4]
-        msg[6] = a[5]
-        msg[7] = a[6]
-        msg[8] = a[7]
+        msg[5] = ip0
+        msg[6] = ip1
+        msg[7] = ip2
+        msg[8] = ip3
         msg[9] = byte((len >> 8) & 0xff)
         msg[10] = byte(len & 0xff)
         var i = 0
@@ -1495,8 +1543,46 @@ target so subsequent read/write/close route to the right TCP
 record. The user's sockaddr_in gives dst_ip (4 bytes) and
 dst_port (BE u16) at the usual offsets.
 
+UDP variant of `connect()` — POSIX semantics: set a default peer
+that future sendto-with-NULL-addr (libc `send()`) and the recv
+filter (deferred — currently we deliver from any peer) use.
+NULL addr or sa_family == AF_UNSPEC dissolves the binding.
+Returns 0 on success, -EAFNOSUPPORT if the address family is
+something other than AF_INET / AF_UNSPEC.
+
+    sys_connect_udp(fd: int, addr_ptr: i64, addrlen: int) -> i64
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + fd
+        if addr_ptr == i64(0)
+            posix_fd_table[idx].udp_connected = 0
+            return i64(0)
+        if addrlen < 2
+            return i64(-22)
+        val a: *byte = *byte(addr_ptr)
+        val family = (int(a[0]) & 0xff) | ((int(a[1]) & 0xff) << 8)
+        if family == 0
+            // AF_UNSPEC dissolve.
+            posix_fd_table[idx].udp_connected = 0
+            return i64(0)
+        if family != POSIX_AF_INET
+            return i64(-97)         // -EAFNOSUPPORT
+        if addrlen < 16
+            return i64(-22)
+        val peer_port = ((int(a[2]) & 0xff) << 8) | (int(a[3]) & 0xff)
+        posix_fd_table[idx].udp_connected = 1
+        posix_fd_table[idx].udp_peer_port = peer_port
+        posix_fd_table[idx].udp_peer_a = int(a[4]) & 0xff
+        posix_fd_table[idx].udp_peer_b = int(a[5]) & 0xff
+        posix_fd_table[idx].udp_peer_c = int(a[6]) & 0xff
+        posix_fd_table[idx].udp_peer_d = int(a[7]) & 0xff
+        i64(0)
+
+
     sys_connect(fd: int, addr_ptr: i64, addrlen: int) -> i64
-        if posix_fd_kind(fd) != POSIX_FD_TCP_SOCKET
+        val k0 = posix_fd_kind(fd)
+        if k0 == POSIX_FD_UDP_SOCKET
+            return sys_connect_udp(fd, addr_ptr, addrlen)
+        if k0 != POSIX_FD_TCP_SOCKET
             return i64(-9)
         if addrlen < 16
             return i64(-22)
