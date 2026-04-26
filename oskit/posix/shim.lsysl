@@ -678,6 +678,27 @@ to the same UDP stack that native sysl programs use via
             return sys_gettimeofday(a0, a1)
         if num == 251
             return sys_nanosleep(a0, a1)
+        // Process / thread identity. Multi-threading isn't a thing
+        // in slix yet, so gettid == main thread of current process,
+        // getppid == 1 (init), and the uid/gid family all return 0
+        // (we boot as root). These are heavily probed by libc init
+        // and any program that logs its PID.
+        if num == 187
+            return i64(0)               // getegid
+        if num == 188
+            return i64(0)               // geteuid
+        if num == 189
+            return i64(0)               // getgid
+        if num == 194
+            return i64(posix_fd_current_pid())  // getpid
+        if num == 195
+            return i64(1)               // getppid → init
+        if num == 205
+            return i64(current_thread)  // gettid
+        if num == 207
+            return i64(0)               // getuid
+        if num == 197
+            return sys_getrandom(a0, int(a1), int(a2))
         // fsync/fdatasync/sync/syncfs: slix has no on-disk
         // persistence yet (TFS is in RAM), so there's nothing to
         // flush. Returning 0 lets programs that defensively call
@@ -3155,6 +3176,50 @@ to relative by subtracting `uptime()`.
                 remp[ri] = byte(0)
                 ri += 1
         i64(0)
+
+### getrandom
+
+Non-cryptographic xorshift64* PRNG seeded from `uptime()` plus
+a per-call counter. Real `getrandom(2)` taps the kernel CSPRNG;
+slix has no entropy source today, so this is best-effort
+"different bytes every call" useful for non-crypto consumers
+(libuv buffer cookies, malloc-debug salts, etc.). Crypto code
+should not rely on this — once a real entropy source lands,
+swap the seed/state generator.
+
+`flags` is accepted but ignored: GRND_NONBLOCK (1) is naturally
+satisfied (we never block), GRND_RANDOM (2) is irrelevant
+without a real CSPRNG. Returns the byte count on success,
+-EFAULT on bad buffer.
+
+    var rng_state: i64 = i64(0)
+
+    rng_step() -> i64
+        if rng_state == i64(0)
+            rng_state = i64(uptime()) | i64(0x9E3779B97F4A7C15)
+        var x = rng_state
+        x = x ^ (x << i64(13))
+        x = x ^ (i64(u64(x) >> u64(7)))
+        x = x ^ (x << i64(17))
+        rng_state = x
+        x
+
+    sys_getrandom(buf: i64, len: int, flags: int) -> i64
+        if buf == i64(0)
+            return i64(-14)             // -EFAULT
+        if len < 0
+            return i64(-22)
+        val p: *byte = *byte(buf)
+        var written = 0
+        while written < len
+            val r = rng_step()
+            var bi = 0
+            while bi < 8 && written + bi < len
+                p[written + bi] = byte(int((r >> i64(bi * 8))) & 0xff)
+                bi += 1
+            written += bi
+        i64(written)
+
 
     sys_clock_nanosleep(clockid: int, flags: int, req: i64, rem: i64) -> i64
         if req == i64(0)

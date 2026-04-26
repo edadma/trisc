@@ -1,0 +1,130 @@
+test_proc_id — getpid / getppid / getuid / gettid / getrandom
+==============================================================
+
+Process and thread identity syscalls plus getrandom. All trivial
+on slix (no multi-threading or non-root users yet) but heavily
+probed by libc init and any program that logs its PID.
+
+Pass criteria:
+  - getpid()    > 0
+  - getppid()   == 1   (init)
+  - getuid()    == 0
+  - geteuid()   == 0
+  - getgid()    == 0
+  - getegid()   == 0
+  - gettid()    > 0
+  - getrandom(buf, 32, 0) returns 32, fills different bytes
+    on two consecutive calls
+
+Output: `procid: ok` / `procid: bad <code>`.
+
+    module oskit.bin.test_proc_id
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_GETEGID    = 187
+    val NR_GETEUID    = 188
+    val NR_GETGID     = 189
+    val NR_GETPID     = 194
+    val NR_GETPPID    = 195
+    val NR_GETRANDOM  = 197
+    val NR_GETTID     = 205
+    val NR_GETUID     = 207
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    posix_getpid() -> int
+        int(syscall6(NR_GETPID, 0, 0, 0, 0, 0, 0))
+
+    posix_getppid() -> int
+        int(syscall6(NR_GETPPID, 0, 0, 0, 0, 0, 0))
+
+    posix_gettid() -> int
+        int(syscall6(NR_GETTID, 0, 0, 0, 0, 0, 0))
+
+    posix_getuid() -> int
+        int(syscall6(NR_GETUID, 0, 0, 0, 0, 0, 0))
+
+    posix_geteuid() -> int
+        int(syscall6(NR_GETEUID, 0, 0, 0, 0, 0, 0))
+
+    posix_getgid() -> int
+        int(syscall6(NR_GETGID, 0, 0, 0, 0, 0, 0))
+
+    posix_getegid() -> int
+        int(syscall6(NR_GETEGID, 0, 0, 0, 0, 0, 0))
+
+    posix_getrandom(buf: *byte, len: int, flags: int) -> int
+        int(syscall6(NR_GETRANDOM, i64(buf), i64(len), i64(flags), 0, 0, 0))
+
+
+    fail_with(code: int)
+        puts("procid: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val pid = posix_getpid()
+        if pid <= 0
+            fail_with(1)
+            return
+        if posix_getppid() != 1
+            fail_with(2)
+            return
+        if posix_getuid() != 0
+            fail_with(3)
+            return
+        if posix_geteuid() != 0
+            fail_with(4)
+            return
+        if posix_getgid() != 0
+            fail_with(5)
+            return
+        if posix_getegid() != 0
+            fail_with(6)
+            return
+        if posix_gettid() <= 0
+            fail_with(7)
+            return
+
+        // getrandom: 32-byte buffer, expect non-zero return and
+        // *some* variation between two calls. With xorshift64*
+        // the first 32 bytes of two consecutive calls should
+        // never be byte-identical.
+        var r1: [32]byte
+        var r2: [32]byte
+        var ii = 0
+        while ii < 32
+            r1[ii] = byte(0)
+            r2[ii] = byte(0)
+            ii += 1
+        if posix_getrandom(&r1[0], 32, 0) != 32
+            fail_with(8)
+            return
+        if posix_getrandom(&r2[0], 32, 0) != 32
+            fail_with(9)
+            return
+        var same = 1
+        var bi = 0
+        while bi < 32
+            if r1[bi] != r2[bi]
+                same = 0
+            bi += 1
+        if same != 0
+            fail_with(10)
+            return
+
+        puts("procid: ok pid=")
+        print_udec(pid)
+        puts("\n")
+        exit()

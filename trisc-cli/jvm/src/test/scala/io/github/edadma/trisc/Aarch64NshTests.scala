@@ -1627,6 +1627,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpinfo: bad"
   }
 
+  "aarch64 procid: getpid/getppid/getuid family + getrandom" in {
+    // Process / thread identity syscalls + xorshift-based getrandom.
+    // Slix has no multi-threading and boots root, so most return
+    // 0 or 1; getrandom is best-effort and just verifies two
+    // consecutive calls give different bytes.
+    val output = qemu.command("test_proc_id")
+    output should include("procid: ok")
+    output should not include "procid: bad"
+  }
+
   "aarch64 time: clock_gettime / gettimeofday / clock_getres / nanosleep" in {
     // POSIX time syscalls fed off uptime() at 100Hz. Verifies
     // clock_getres reports 10ms, clock_gettime + gettimeofday
