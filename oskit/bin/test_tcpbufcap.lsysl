@@ -1,0 +1,240 @@
+test_tcpbufcap — per-tid TCP buffer-memory cap (Phase 2 quality)
+=================================================================
+
+Phase 2 chunk 2 of the net-stack quality plan adds a per-tid
+ceiling on the sum of every owned TCP slot's `send_buf_size +
+recv_buf_size`.  `TCP_PER_TID_BUF_MAX = 65536` is set just above
+the all-default footprint of the 8-slot cap (8 × 5120 ≈ 40 KB)
+so well-behaved processes never see it; only setsockopt-heavy
+workloads or runaways hit the wall.
+
+Test plan:
+  1. Open four TCP sockets, set SO_SNDBUF = SO_RCVBUF = 8192
+     on each, bind to consecutive ports, listen(1).  All four
+     listens succeed and getsockopt returns 8192 / 8192 (no
+     clamp because 4 × 16384 = 65536 = cap exactly).
+  2. Open a fifth socket, the same setsockopt, listen() — the
+     alloc-path budget gate must reject because even the
+     default 5120 wouldn't fit.  Failure prints with a non-zero
+     return; we accept any negative listen() result.
+  3. Close one of the four originals, retry the fifth — must
+     succeed now that 16 KB of budget has been freed.
+  4. Cleanup, print `tcpbufcap: ok`.
+
+    module oskit.bin.test_tcpbufcap
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE      = 147
+    val NR_BIND       = 135
+    val NR_LISTEN     = 217
+    val NR_SOCKET     = 337
+    val NR_SETSOCKOPT = 326
+    val NR_GETSOCKOPT = 204
+
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+
+    val SOL_SOCKET    = 1
+    val SO_SNDBUF     = 7
+    val SO_RCVBUF     = 8
+
+
+    print_dec(v: int)
+        if v < 0
+            puts("-")
+            print_dec(-v)
+            return
+        if v >= 10
+            print_dec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("tcpbufcap: failed ")
+        print_dec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_setsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, vlen: int) -> int
+        int(syscall6(NR_SETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(vlen), 0))
+
+    posix_getsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, lenp: *i32) -> int
+        int(syscall6(NR_GETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(lenp), 0))
+
+
+Fill `a` with sockaddr_in(127.0.0.1, port).  16 bytes is the
+common AF_INET sockaddr length the shim accepts.
+
+    fill_sockaddr(a: *byte, port: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(127)
+        a[5] = byte(0)
+        a[6] = byte(0)
+        a[7] = byte(1)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+Set `optname` on `fd` to a 32-bit LE value of `v`.
+
+    set_int(fd: int, optname: int, v: int) -> int
+        var b: [4]byte
+        b[0] = byte(v & 0xff)
+        b[1] = byte((v >> 8) & 0xff)
+        b[2] = byte((v >> 16) & 0xff)
+        b[3] = byte((v >> 24) & 0xff)
+        posix_setsockopt(fd, SOL_SOCKET, optname, &b[0], 4)
+
+
+Read a 32-bit LE int back via getsockopt; returns -1 on error.
+
+    get_int(fd: int, optname: int) -> int
+        var b: [4]byte
+        b[0] = byte(0)
+        b[1] = byte(0)
+        b[2] = byte(0)
+        b[3] = byte(0)
+        var olen: i32 = i32(4)
+        val r = posix_getsockopt(fd, SOL_SOCKET, optname, &b[0], &olen)
+        if r < 0
+            return -1
+        val b0 = int(b[0]) & 0xff
+        val b1 = int(b[1]) & 0xff
+        val b2 = int(b[2]) & 0xff
+        val b3 = int(b[3]) & 0xff
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+
+Open one listening socket bound to 127.0.0.1:port, with the
+caller's preferred SO_SNDBUF / SO_RCVBUF stamped before listen.
+Returns the fd on success, -1 on any step's failure.
+
+    open_listener(port: int, sndbuf: int, rcvbuf: int) -> int
+        val fd = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if fd < 0
+            return -1
+        if set_int(fd, SO_SNDBUF, sndbuf) != 0
+            posix_close(fd)
+            return -1
+        if set_int(fd, SO_RCVBUF, rcvbuf) != 0
+            posix_close(fd)
+            return -1
+        var addr: [16]byte
+        fill_sockaddr(&addr[0], port)
+        if posix_bind(fd, &addr[0], 16) != 0
+            posix_close(fd)
+            return -1
+        if posix_listen(fd, 1) != 0
+            posix_close(fd)
+            return -1
+        fd
+
+
+    main(argv: []string)
+        val BUF = 8192
+        val PORT_BASE = 7900
+
+        var fds: [5]int
+        var i = 0
+        while i < 5
+            fds[i] = -1
+            i += 1
+
+        // Step 1 — four 8K+8K listeners must all succeed, with
+        // post-listen getsockopt confirming the inet-side size.
+        i = 0
+        while i < 4
+            val fd = open_listener(PORT_BASE + i, BUF, BUF)
+            if fd < 0
+                var k = 0
+                while k < i
+                    posix_close(fds[k])
+                    k += 1
+                fail(1)
+                return
+            fds[i] = fd
+            val sb = get_int(fd, SO_SNDBUF)
+            val rb = get_int(fd, SO_RCVBUF)
+            if sb != BUF || rb != BUF
+                puts("tcpbufcap: snd=")
+                print_dec(sb)
+                puts(" rcv=")
+                print_dec(rb)
+                puts("\n")
+                var k = 0
+                while k <= i
+                    posix_close(fds[k])
+                    k += 1
+                fail(2)
+                return
+            i += 1
+
+        // Step 2 — fifth listener at full size must fail (alloc-
+        // path gate refuses because 4 × 16384 = 65536 leaves no
+        // room for default-sized buffers).
+        val fifth_fail = open_listener(PORT_BASE + 4, BUF, BUF)
+        if fifth_fail >= 0
+            posix_close(fifth_fail)
+            var k = 0
+            while k < 4
+                posix_close(fds[k])
+                k += 1
+            fail(3)
+            return
+
+        // Step 3 — free one slot's 16 KB worth of buffers; the
+        // fifth listener must now succeed.
+        if posix_close(fds[0]) != 0
+            var k = 1
+            while k < 4
+                posix_close(fds[k])
+                k += 1
+            fail(4)
+            return
+        fds[0] = -1
+
+        val fifth_ok = open_listener(PORT_BASE + 5, BUF, BUF)
+        if fifth_ok < 0
+            var k = 1
+            while k < 4
+                posix_close(fds[k])
+                k += 1
+            fail(5)
+            return
+        fds[4] = fifth_ok
+
+        // Cleanup.
+        var k = 1
+        while k < 5
+            if fds[k] >= 0
+                posix_close(fds[k])
+            k += 1
+
+        puts("tcpbufcap: ok\n")
+        exit()

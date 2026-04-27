@@ -1489,6 +1489,16 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     // 16 sockets at 8 KB+8 KB worst case that's 256 KB, comfortable).
     val TCP_BUF_MIN          = 256
     val TCP_BUF_MAX          = 8192
+    // Phase 2 chunk 2 — per-tid TCP buffer memory cap. Sum of
+    // send_buf_size + recv_buf_size for every in-use TCP slot
+    // owned by a single tid is held under this ceiling. 64 KB is
+    // ~1.6 × the all-default footprint of 8 sockets (8 × 5120 =
+    // 40 KB) — comfortable for the per-tid socket cap (chunk 1)
+    // while leaving room for setsockopt(SO_SNDBUF/SO_RCVBUF)
+    // grows. Caller-visible behaviour: alloc paths refuse with
+    // -EMFILE, resize_buf silently clamps. Companion to
+    // `inet_count_tcp_owner` for the slot-count cap.
+    val TCP_PER_TID_BUF_MAX  = 65536
     // SO_KEEPALIVE timing (ticks at the inet ~10ms timer base).
     // Linux defaults are 7200/75/9 ticks (in seconds) which would
     // be 720000/7500 ticks at slix's resolution — useless for
@@ -1765,6 +1775,25 @@ calls are fine, hence the split.
             if tcp_sockets[i].in_use != 0
                 if tcp_sockets[i].owner_tid == tid
                     n += 1
+            i += 1
+        n
+
+
+Phase 2 chunk 2 — sum the heap-backed send_buf_size +
+recv_buf_size of every in-use slot that belongs to `tid`.
+Used by `inet_tcp_resize_buf` to clamp setsockopt(SO_SNDBUF/
+SO_RCVBUF), and by alloc-paths (`inet_tcp_begin_connect`,
+`inet_tcp_begin_listen`, `inet_tcp_handle_passive_syn`) to
+gate new sockets against the per-tid `TCP_PER_TID_BUF_MAX`.
+
+    inet_tcp_buf_bytes_owner(tid: int) -> int
+        var n = 0
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use != 0
+                if tcp_sockets[i].owner_tid == tid
+                    n += tcp_sockets[i].send_buf_size
+                    n += tcp_sockets[i].recv_buf_size
             i += 1
         n
 
@@ -2702,6 +2731,24 @@ out-of-range kind.
             clamped = TCP_BUF_MIN
         if clamped > TCP_BUF_MAX
             clamped = TCP_BUF_MAX
+        // Phase 2 chunk 2 — per-tid TCP buffer-memory cap.  Linux-
+        // ish silent clamp: if growing the buffer would push owner
+        // over TCP_PER_TID_BUF_MAX, shrink the request to whatever
+        // budget remains. owner_tid < 0 means alloc has run but
+        // begin_*/handle_passive_syn hasn't stamped yet — skip the
+        // check; the caller will own the budget after stamping.
+        val owner = tcp_sockets[s].owner_tid
+        if owner >= 0
+            var current = tcp_sockets[s].send_buf_size
+            if kind != 0
+                current = tcp_sockets[s].recv_buf_size
+            if clamped > current
+                val others = inet_tcp_buf_bytes_owner(owner) - current
+                val budget = TCP_PER_TID_BUF_MAX - others
+                if clamped > budget
+                    clamped = budget
+                if clamped < TCP_BUF_MIN
+                    return 0
         // Only the CLOSED state with empty buffers is a safe resize
         // window: connect/listen latch the buffer pointer into flow-
         // control state, and copying live in-flight data on a
@@ -2901,6 +2948,13 @@ the socket index on success (caller blocks until ESTABLISHED),
         // guarantees at least three concurrent processes.
         if inet_count_tcp_owner(owner_tid) >= 8
             return -1
+        // Phase 2 chunk 2: per-tid TCP buffer-memory cap. Refuse
+        // up front if the default-sized buffers wouldn't fit
+        // under TCP_PER_TID_BUF_MAX. resize_buf later clamps
+        // grow attempts but cannot reject the alloc itself.
+        val def_total = TCP_SEND_BUF_DEFAULT + TCP_RECV_BUF_DEFAULT
+        if inet_tcp_buf_bytes_owner(owner_tid) + def_total > TCP_PER_TID_BUF_MAX
+            return -1
         val s = inet_tcp_alloc()
         if s < 0
             return -1
@@ -2908,6 +2962,10 @@ the socket index on success (caller blocks until ESTABLISHED),
         if lp < 0
             tcp_sockets[s].in_use = 0
             return -1
+        // Stamp owner_tid before the pre-connect resize_buf calls
+        // so the budget clamp (Phase 2 chunk 2) sees a real owner;
+        // alloc leaves owner_tid = -1.
+        tcp_sockets[s].owner_tid = owner_tid
         // Apply any setsockopt(SO_SNDBUF / SO_RCVBUF) the caller
         // stashed pre-connect.  resize_buf no-ops below TCP_BUF_MIN
         // and clamps to TCP_BUF_MAX. Done here while state is still
@@ -2917,7 +2975,6 @@ the socket index on success (caller blocks until ESTABLISHED),
         if rcvbuf_override > 0
             inet_tcp_resize_buf(s, 1, rcvbuf_override)
         val iss = tcp_next_iss()
-        tcp_sockets[s].owner_tid = owner_tid
         tcp_sockets[s].local_port = lp
         tcp_sockets[s].remote_ip = remote_ip
         tcp_sockets[s].remote_port = remote_port
@@ -2950,9 +3007,16 @@ so a tiny but positive queue depth is always available.
         // Phase 2 quality plan: per-tid cap.  See begin_connect.
         if inet_count_tcp_owner(owner_tid) >= 8
             return -1
+        // Phase 2 chunk 2: per-tid TCP buffer-memory cap.
+        val def_total = TCP_SEND_BUF_DEFAULT + TCP_RECV_BUF_DEFAULT
+        if inet_tcp_buf_bytes_owner(owner_tid) + def_total > TCP_PER_TID_BUF_MAX
+            return -1
         val s = inet_tcp_alloc()
         if s < 0
             return -1
+        // See begin_connect — owner_tid stamped before resize so
+        // the budget clamp has a real owner to count against.
+        tcp_sockets[s].owner_tid = owner_tid
         // Pre-listen setsockopt sizing — see begin_connect.  The
         // listening socket carries its sizes through to children
         // in handle_passive_syn (Linux semantics: accepted child
@@ -2966,7 +3030,6 @@ so a tiny but positive queue depth is always available.
             b = 1
         if b > TCP_LISTEN_BACKLOG
             b = TCP_LISTEN_BACKLOG
-        tcp_sockets[s].owner_tid = owner_tid
         tcp_sockets[s].local_port = local_port
         tcp_sockets[s].remote_ip = u32(0)
         tcp_sockets[s].remote_port = 0
@@ -2991,9 +3054,24 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         // SYN retransmit will retry once a slot frees up.
         if tcp_sockets[ls].accept_count >= tcp_sockets[ls].accept_backlog
             return
+        // Phase 2 chunk 1/2 — apply per-tid slot AND buffer caps
+        // on accept paths too. A misbehaving peer otherwise drives
+        // unbounded child sockets through a single listener. Drop
+        // silently; the SYN will be retransmitted once budget
+        // frees up. Owner of the new child = listener's owner_tid.
+        val parent_tid = tcp_sockets[ls].owner_tid
+        if inet_count_tcp_owner(parent_tid) >= 8
+            return
+        val def_total = TCP_SEND_BUF_DEFAULT + TCP_RECV_BUF_DEFAULT
+        if inet_tcp_buf_bytes_owner(parent_tid) + def_total > TCP_PER_TID_BUF_MAX
+            return
         val s = inet_tcp_alloc()
         if s < 0
             return
+        // Stamp owner before inherit-resize so the budget clamp
+        // (Phase 2 chunk 2) sees the right tid; resize will
+        // silently shrink the inherit if parent's sizes don't fit.
+        tcp_sockets[s].owner_tid = parent_tid
         // Inherit the listener's per-socket buffer sizes (Linux:
         // accepted children carry the listening socket's
         // SO_SNDBUF / SO_RCVBUF). resize_buf no-ops when the size
@@ -3018,7 +3096,6 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         tcp_sockets[s].keepalive_intvl = tcp_sockets[ls].keepalive_intvl
         tcp_sockets[s].keepalive_cnt = tcp_sockets[ls].keepalive_cnt
         val iss = tcp_next_iss()
-        tcp_sockets[s].owner_tid = tcp_sockets[ls].owner_tid
         tcp_sockets[s].local_port = tcp_sockets[ls].local_port
         tcp_sockets[s].remote_ip = remote_ip
         tcp_sockets[s].remote_port = remote_port

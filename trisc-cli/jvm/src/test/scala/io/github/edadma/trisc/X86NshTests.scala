@@ -748,6 +748,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "pidcap: failed"
   }
 
+  "x86 net: per-tid TCP buffer-memory cap (Phase 2 quality)" in {
+    // Phase 2 chunk 2: TCP_PER_TID_BUF_MAX = 65536 bytes caps a
+    // single tid's combined send_buf_size + recv_buf_size across
+    // every owned TCP slot.  Four full-size (8 KB + 8 KB) listeners
+    // exhaust the budget; the fifth listen() must fail.  Closing
+    // one frees 16 KB, allowing the fifth retry to succeed.
+    val output = qemu.command("test_tcpbufcap")
+    output should include("tcpbufcap: ok")
+    output should not include "tcpbufcap: failed"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
