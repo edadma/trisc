@@ -7,7 +7,7 @@ SFS is the primary filesystem for the Slix OS. It is designed to be a modern, ro
 **Design goals:**
 - 2TB maximum capacity
 - 2TB maximum file size even under maximum fragmentation
-- Metadata journaling for crash safety
+- data=ordered journaling for crash safety (same default as ext4)
 - HTree directories for O(log n) lookup
 - CRC32 integrity on all critical structures
 - Clean on-disk layout that is easy to reason about, implement, and teach
@@ -245,7 +245,12 @@ The `HAS_INDIRECT1`, `HAS_INDIRECT2`, and `HAS_INDIRECT3` inode flags indicate w
 
 ## Journal
 
-The journal is a fixed-size circular log stored in the journal region. SFS uses **metadata-only journaling**: data blocks are written directly; only metadata changes (inode updates, bitmap updates, directory changes) are journaled. This guarantees filesystem structural consistency after a crash, though recently written file data may be lost.
+The journal is a fixed-size circular log stored in the journal region. SFS uses **data=ordered journaling** (the same default as ext4): data blocks are written to their final on-disk locations *before* the journal commit block is written. This guarantees that after a crash, inode extent pointers never point to unwritten or garbage data — worst case, you see the previous version of a file, never corrupted new content. Only metadata changes (inode updates, bitmap updates, directory changes) are journaled; data blocks are not copied into the journal.
+
+**Journaling modes for reference (all teachable):**
+- **metadata-only** — fastest; metadata consistent, but new data may be garbage after crash
+- **data=ordered** (SFS default) — data written before commit; metadata consistent, data safe
+- **data=journal** — data copied into journal first; fully safe but roughly halves write throughput
 
 ### Journal Region Layout
 
@@ -318,7 +323,7 @@ On mount, if `fs_state == dirty`:
 **Pedagogical notes:**
 - Write-ahead logging: the commit block is written last; its presence is the atomicity guarantee.
 - The sequence number teaches why monotonic counters matter for distinguishing old from new journal entries in a circular log.
-- Metadata-only vs. full-data journaling is a concrete tradeoff students can reason about.
+- The three journaling modes (metadata-only, data=ordered, data=journal) form a complete teachable spectrum of safety vs. performance tradeoffs.
 
 ---
 
@@ -430,11 +435,47 @@ These are intentional limitations worth documenting for teaching purposes.
 | Tradeoff | Decision | Real-world comparison |
 |---|---|---|
 | 1M default inodes on 2TB | ~1 inode per 2MB; inode exhaustion is a real failure mode separate from disk-full | ext4 defaults to ~1 per 16KB |
-| Metadata-only journaling | Data written after a crash may be lost | ext4 data=ordered mode |
+| data=ordered journaling | Data written before metadata commit; data written after last fsync before crash may be lost, but never corrupted | ext4 default mode |
 | No copy-on-write | Simpler, but no atomic snapshots | btrfs, ZFS |
 | No B-tree extent index | Flat indirect blocks; simpler to understand | ext4 extent tree |
 | No data block checksums | Bit-rot not detected in data | ZFS, btrfs |
 | Fixed block size | Always 4KB; no tuning | ext4 allows 1KB–4KB |
+
+---
+
+## SFS vs ext4
+
+SFS in data=ordered mode is in the same reliability tier as ext4 in its default configuration. Differences are mostly intentional omissions for simplicity, not weaknesses.
+
+| Property | SFS | ext4 |
+|---|---|---|
+| Block size | Fixed 4KB | 1KB–4KB |
+| Max volume size | 2TB | 1EB |
+| Max file size | 2TB | 16TB |
+| Journaling default | data=ordered | data=ordered |
+| Extent structure | Flat inline + indirect tiers | B-tree extent tree |
+| Directory indexing | HTree (FNV-1a) | HTree (half-MD4 or TEA hash) |
+| Inline data | Inline symlinks only | Inline symlinks + tiny file data in inode |
+| Metadata checksums | Superblock, inodes, directory blocks | Every metadata block |
+| Copy-on-write | No | No (that's btrfs) |
+| Delayed allocation | Not specified (allocator strategy, no format change needed) | Yes |
+| Preallocation | UNINITIALIZED extent flag | fallocate / unwritten extents |
+| Sparse files | SPARSE extent flag | Hole punching via fallocate |
+| Extended attributes | xattr_block pointer reserved | Full xattr support |
+| Timestamps | Nanosecond, includes crtime | Nanosecond, includes crtime |
+| fsck required | Journal replay only | Journal replay only |
+| Designed for | Teaching + real Slix use | Production Linux |
+
+**Honest gaps:**
+- Volume and file size ceilings are lower, but irrelevant for Slix
+- ext4 checksums every metadata block; SFS covers superblock, inodes, and directory blocks only
+- Delayed allocation improves extent contiguity significantly — a future allocator improvement that requires no format changes
+- xattr format not yet defined
+
+**Where SFS is cleaner than ext4:**
+- Extent format is simpler and easier to reason about than ext4's extent tree
+- On-disk layout fully described by superblock with no hidden assumptions
+- No legacy cruft accumulated over 30 years of backward compatibility
 
 ---
 
@@ -455,5 +496,5 @@ These are intentional limitations worth documenting for teaching purposes.
 | Maximum extents per file | >536M (triple-indirect; disk-bound in practice) |
 | Default journal size | 128MB |
 | Directory lookup | O(log n) via HTree / FNV-1a |
-| Journaling mode | Metadata-only |
+| Journaling mode | data=ordered (data written before commit; same default as ext4) |
 | Integrity | CRC32 on superblock, inodes, journal transactions, directory blocks |
