@@ -70,6 +70,130 @@ object ExtentAllocator:
     require(target >= 0L, s"target must be non-negative, got $target")
     truncateImpl(ino, dev, bm, target)
 
+  /** Sum of all extent counts across the inode's map. Equals the file's
+    * current logical block count (whether concrete or sparse). */
+  def totalBlockCount(ino: Inode, dev: BlockDevice): Long =
+    var total = 0L
+    forEachExtent(ino, dev) { e => total += e.count.toLong }
+    total
+
+  /** Sum of `count` across only the *concrete* and *uninitialized*
+    * extents — these are the extents that own physical data blocks
+    * (sparse extents take no space). Useful for `block_count` / st_blocks. */
+  def physicalBlockCount(ino: Inode, dev: BlockDevice): Long =
+    var total = 0L
+    forEachExtent(ino, dev) { e =>
+      if !e.sparse then total += e.count.toLong
+    }
+    total
+
+  /** Materialize every non-empty extent in walk order. Stops at the
+    * first count=0 slot in each tier per the dense-fill invariant. */
+  def listExtents(ino: Inode, dev: BlockDevice): Vector[Extent] =
+    val builder = Vector.newBuilder[Extent]
+    forEachExtent(ino, dev) { e => builder += e }
+    builder.result()
+
+  /** Replace the inode's entire extent map with `xs` (in order, no
+    * coalescing). Frees every old indirect block (ind1/ind2/ind3 and
+    * their pointer blocks) — the data blocks they used to point at
+    * are *not* freed, the caller is responsible for keeping the new
+    * `xs` consistent with the data still on disk. Allocates fresh
+    * indirect blocks as needed to hold `xs`. */
+  def replaceAllExtents(
+      ino: Inode,
+      dev: BlockDevice,
+      bm: Bitmap,
+      xs: Seq[Extent],
+  ): Inode =
+    var cur = freeAllIndirects(ino, dev, bm)
+    cur = cur.copy(body = InodeBody.EmptyExtents)
+    var i = 0
+    while i < xs.length do
+      cur = appendNewExtent(cur, dev, bm, xs(i))
+      i += 1
+    cur
+
+  /** Walk all non-empty extents in order, calling `fn` for each. */
+  private def forEachExtent(
+      ino: Inode,
+      dev: BlockDevice,
+  )(fn: Extent => Unit): Unit =
+    ino.body match
+      case InodeBody.Extents(xs) =>
+        var i = 0
+        while i < xs.length && xs(i).count > 0 do
+          fn(xs(i))
+          i += 1
+      case InodeBody.InlineSymlink(_) => return
+    if (ino.flags & InodeFlagHasIndirect1) != 0 then
+      val xs = readExtBlock(dev, ino.indirect1)
+      var i = 0
+      while i < xs.length && xs(i).count > 0 do
+        fn(xs(i))
+        i += 1
+    if (ino.flags & InodeFlagHasIndirect2) != 0 then
+      val ptrs = readPtrBlock(dev, ino.indirect2)
+      var i = 0
+      while i < ptrs.length && ptrs(i) != 0 do
+        val xs = readExtBlock(dev, ptrs(i))
+        var j = 0
+        while j < xs.length && xs(j).count > 0 do
+          fn(xs(j))
+          j += 1
+        i += 1
+    if (ino.flags & InodeFlagHasIndirect3) != 0 then
+      val ptrs3 = readPtrBlock(dev, ino.indirect3)
+      var i = 0
+      while i < ptrs3.length && ptrs3(i) != 0 do
+        val ptrs2 = readPtrBlock(dev, ptrs3(i))
+        var j = 0
+        while j < ptrs2.length && ptrs2(j) != 0 do
+          val xs = readExtBlock(dev, ptrs2(j))
+          var k = 0
+          while k < xs.length && xs(k).count > 0 do
+            fn(xs(k))
+            k += 1
+          j += 1
+        i += 1
+
+  /** Free every indirect block (ind1, ind2, ind3, and the pointer
+    * blocks under them). Does *not* free the data blocks that those
+    * extents pointed to. Returns the inode with `indirect{1,2,3}`
+    * reset to 0 and `HAS_INDIRECT*` flags cleared. The body is left
+    * unchanged. */
+  private def freeAllIndirects(
+      ino: Inode,
+      dev: BlockDevice,
+      bm: Bitmap,
+  ): Inode =
+    if (ino.flags & InodeFlagHasIndirect3) != 0 then
+      val ptrs3 = readPtrBlock(dev, ino.indirect3)
+      var i = 0
+      while i < ptrs3.length && ptrs3(i) != 0 do
+        val ptrs2 = readPtrBlock(dev, ptrs3(i))
+        var j = 0
+        while j < ptrs2.length && ptrs2(j) != 0 do
+          bm.free(ptrs2(j))
+          j += 1
+        bm.free(ptrs3(i))
+        i += 1
+      bm.free(ino.indirect3)
+    if (ino.flags & InodeFlagHasIndirect2) != 0 then
+      val ptrs = readPtrBlock(dev, ino.indirect2)
+      var i = 0
+      while i < ptrs.length && ptrs(i) != 0 do
+        bm.free(ptrs(i))
+        i += 1
+      bm.free(ino.indirect2)
+    if (ino.flags & InodeFlagHasIndirect1) != 0 then bm.free(ino.indirect1)
+    ino.copy(
+      indirect1 = 0,
+      indirect2 = 0,
+      indirect3 = 0,
+      flags = ino.flags & ~(InodeFlagHasIndirect1 | InodeFlagHasIndirect2 | InodeFlagHasIndirect3),
+    )
+
   // ---- Internal types -------------------------------------------------
 
   private sealed trait ExtentLoc
