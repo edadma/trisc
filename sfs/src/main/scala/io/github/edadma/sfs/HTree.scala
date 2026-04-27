@@ -10,15 +10,23 @@ import Constants.*
   *   - Logical blocks 1+: leaves (when `treeDepth = 0`) or interior index
   *     blocks (when `treeDepth >= 1`) followed by leaves.
   *
-  * Phase 9c only supports `treeDepth = 0` with arbitrarily many leaves
-  * referenced directly from the root's index_entries. Leaf splits are
-  * Phase 9d; tree-depth promotion is Phase 9e; index splits are Phase 9f.
+  * Phase 9c–9d support `treeDepth = 0` with arbitrarily many leaves
+  * referenced directly from the root's index_entries; insert splits a
+  * full leaf in two and adds a new index entry pointing at the new
+  * sibling. Tree-depth promotion is Phase 9e; index splits are
+  * Phase 9f.
   *
   * Every public mutation returns an updated [[Inode]] (possibly with new
   * blocks appended). Time stamps and link-count bookkeeping live one
   * layer up — Phase 10 owns those.
   */
 object HTree:
+
+  /** Ordering on hash values that treats them as unsigned 32-bit
+    * integers. Used for sorting index_entries (which the lookup walker
+    * also reads as unsigned) and for split-point selection. */
+  private given unsignedHashOrdering: Ordering[Int] =
+    (a, b) => java.lang.Integer.compareUnsigned(a, b)
 
   // ---- public API -----------------------------------------------------
 
@@ -74,8 +82,8 @@ object HTree:
     DirLeaf.findByName(leafBuf, name).map { case (_, e) => (e.inode, e.fileType) }
 
   /** Insert a name → (inode, fileType) binding. Returns the (possibly
-    * grown) inode. Throws [[SfsCorruptError]] if a leaf split is needed
-    * (deferred to chunk 9d). */
+    * grown) inode. Splits the target leaf in half if it cannot
+    * accommodate the new entry. */
   def insert(
       ino: Inode,
       dev: BlockDevice,
@@ -89,19 +97,23 @@ object HTree:
     val rootBuf = readDirBlock(ino, dev, 0L)
     val root = DirRootBlock.unpack(rootBuf, ownerInode)
     requireDepth0(root)
-    val leafBlock = leafBlockFor(root, Fnv1a.hash(name))
+    val nameHash = Fnv1a.hash(name)
+    val leafBlock = leafBlockFor(root, nameHash)
     val leafBuf = readDirBlock(ino, dev, leafBlock.toLong)
     DirTail.verify(leafBuf, ownerInode)
     if DirLeaf.findByName(leafBuf, name).isDefined then
       throw new SfsExistsError(s"""HTree.insert: name "$name" already exists""")
 
     val entry = DirEntry(childInode, fileType, name)
-    if !DirLeaf.tryInsert(leafBuf, entry, ownerInode) then
-      throw new SfsCorruptError(
-        "HTree.insert: leaf is full — leaf split is not yet implemented (Phase 9d)",
+    if DirLeaf.tryInsert(leafBuf, entry, ownerInode) then
+      writeDirBlock(ino, dev, leafBlock.toLong, leafBuf)
+      ino
+    else
+      val grown = splitLeafAndRetry(
+        ino, dev, bm, ownerInode, root, rootBuf,
+        leafBlock, leafBuf, entry, nameHash,
       )
-    writeDirBlock(ino, dev, leafBlock.toLong, leafBuf)
-    ino
+      grown
 
   /** Delete a name. Returns the (unchanged) inode. Throws
     * [[SfsNotFoundError]] if no such name exists. Refuses to delete
@@ -144,6 +156,109 @@ object HTree:
       for (_, e) <- DirLeaf.entries(leafBuf) do
         if e.inode != 0 then out += e
     out.result()
+
+  // ---- split (chunk 9d) -----------------------------------------------
+
+  /** Split a full leaf into two, register the new sibling in the root's
+    * index_entries, and re-issue the original insert. Returns the
+    * grown inode (one extra leaf block was appended). Throws
+    * [[SfsCorruptError]] if the root's index table would overflow
+    * (Phase 9e) or every entry hashes to the same value (no clean cut
+    * point exists). */
+  private def splitLeafAndRetry(
+      ino: Inode,
+      dev: BlockDevice,
+      bm: Bitmap,
+      ownerInode: Int,
+      root: DirRootBlock,
+      rootBuf: Array[Byte],
+      leafBlockNum: Int,
+      leafBuf: Array[Byte],
+      newEntry: DirEntry,
+      newEntryHash: Int,
+  ): Inode =
+    val live = DirLeaf.entries(leafBuf).map(_._2).filter(_.inode != 0).toVector
+    val withHash = live.map(e => (Fnv1a.hash(e.name), e)).sortBy(_._1)
+    val cut = findSplitIndex(withHash.map(_._1)).getOrElse(
+      throw new SfsCorruptError(
+        "HTree.insert: cannot split leaf — every entry shares the same hash",
+      ),
+    )
+    val medianHash = withHash(cut)._1
+
+    val grown = ExtentAllocator.append(ino, dev, bm, 1)
+    val newLeafLogicalBlock = (ExtentAllocator.totalBlockCount(grown, dev) - 1L).toInt
+
+    val lowHalf = withHash.take(cut).map(_._2)
+    val highHalf = withHash.drop(cut).map(_._2)
+    repackLeaf(leafBuf, lowHalf, ownerInode)
+    writeDirBlock(grown, dev, leafBlockNum.toLong, leafBuf)
+
+    val newLeafBuf = new Array[Byte](BlockSize)
+    repackLeaf(newLeafBuf, highHalf, ownerInode)
+    writeDirBlock(grown, dev, newLeafLogicalBlock.toLong, newLeafBuf)
+
+    val updatedIndex =
+      (liveIndexEntries(root) :+ ((medianHash, newLeafLogicalBlock))).sortBy(_._1)
+    if updatedIndex.length > DirRootBlock.MaxIndexEntries then
+      throw new SfsCorruptError(
+        "HTree.insert: root index_entries are full — tree-depth promotion " +
+          "(Phase 9e) is not yet implemented",
+      )
+    val newRoot = root.copy(indexEntries = updatedIndex)
+    DirRootBlock.pack(newRoot, ownerInode, rootBuf)
+    writeDirBlock(grown, dev, 0L, rootBuf)
+
+    insert(grown, dev, bm, ownerInode, newEntry.name, newEntry.inode, newEntry.fileType)
+
+  /** Pack `entries` (with their `recLen` fields normalized to the
+    * minimum) into `buf` from offset 0, donating any leftover bytes to
+    * a trailing tombstone. If `entries` is empty, the whole leaf
+    * becomes one big tombstone. Re-stamps the directory tail. */
+  private def repackLeaf(
+      buf: Array[Byte],
+      entries: Seq[DirEntry],
+      ownerInode: Int,
+  ): Unit =
+    if entries.isEmpty then
+      DirLeaf.initEmpty(buf, ownerInode)
+      return
+    val normalized = entries.map(e => DirEntry(e.inode, e.fileType, e.name))
+    val sumMin = normalized.foldLeft(0)(_ + _.recLen)
+    require(
+      sumMin <= DirLeaf.UsableSize,
+      s"repackLeaf: entries' minRecLen sum $sumMin exceeds ${DirLeaf.UsableSize}",
+    )
+    val leftover = DirLeaf.UsableSize - sumMin
+    var off = 0
+    val n = normalized.length
+    var i = 0
+    while i < n do
+      val e = normalized(i)
+      if i == n - 1 && leftover > 0 then
+        DirEntry.pack(e.copy(recLen = e.recLen + leftover), buf, off)
+        off += e.recLen + leftover
+      else
+        DirEntry.pack(e, buf, off)
+        off += e.recLen
+      i += 1
+    DirTail.pack(buf, ownerInode)
+
+  /** Choose a cut index in `[1, n]` such that
+    * `sortedHashes(j-1) != sortedHashes(j)` (strictly increasing
+    * across the boundary), biased toward `n / 2`. Returns `None` if
+    * every hash is identical (no clean partition exists). */
+  private def findSplitIndex(sortedHashes: IndexedSeq[Int]): Option[Int] =
+    val n = sortedHashes.length
+    if n < 2 then return None
+    val mid = n / 2
+    var j = math.max(mid, 1)
+    while j < n && sortedHashes(j) == sortedHashes(j - 1) do j += 1
+    if j < n then Some(j)
+    else
+      var k = mid - 1
+      while k > 0 && sortedHashes(k) == sortedHashes(k - 1) do k -= 1
+      if k > 0 then Some(k) else None
 
   // ---- internal helpers -----------------------------------------------
 

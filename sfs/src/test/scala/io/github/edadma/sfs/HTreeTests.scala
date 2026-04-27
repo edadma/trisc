@@ -170,22 +170,60 @@ class HTreeTests extends AnyFreeSpec with Matchers:
         HTree.insert(ino1, f.dev, f.bm, f.owner, "hello", 200, DirEntry.TypeRegular)
     }
 
-    "throws when the leaf fills up (split is Phase 9d)" in {
+    "splits a full leaf and keeps every name reachable" in {
       val f = fixture()
       var ino = f.ino
-      // Pack 60-byte names → recLen 72. UsableSize = 4084. We can fit
-      // (4084 - 12) / 72 = 56 entries before tryInsert fails.
-      var i = 0
-      var ok = true
-      while ok do
-        try
-          ino = HTree.insert(
-            ino, f.dev, f.bm, f.owner,
-            "x" * 60 + f"$i%04d", 100 + i, DirEntry.TypeRegular,
-          )
-          i += 1
-        catch case _: SfsCorruptError => ok = false
-      i should be > 0
+      // 60-byte names → recLen 72. ~56 entries fit before split.
+      val names = (0 until 80).map(i => "x" * 60 + f"$i%04d")
+      var inode = 100
+      for n <- names do
+        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        inode += 1
+
+      // Directory has root + at least 2 leaves after split.
+      ExtentAllocator.totalBlockCount(ino, f.dev) should be >= 3L
+
+      var n2 = 100
+      for nm <- names do
+        HTree.lookup(ino, f.dev, f.owner, nm) shouldBe Some((n2, DirEntry.TypeRegular))
+        n2 += 1
+    }
+
+    "survives many splits across diverse names" in {
+      val f = fixture()
+      var ino = f.ino
+      val names = (0 until 500).map(i => f"file_$i%04d_with_some_padding")
+      var inode = 100
+      for n <- names do
+        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        inode += 1
+
+      var n2 = 100
+      for nm <- names do
+        HTree.lookup(ino, f.dev, f.owner, nm) shouldBe Some((n2, DirEntry.TypeRegular))
+        n2 += 1
+      val listed = HTree.list(ino, f.dev, f.owner).map(_.name).toSet
+      listed shouldBe (names.toSet + "." + "..")
+    }
+
+    "split + delete + reinsert keeps everything consistent" in {
+      val f = fixture()
+      var ino = f.ino
+      val names = (0 until 100).map(i => f"file_$i%04d_padding_to_force_splits")
+      var inode = 100
+      for n <- names do
+        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        inode += 1
+      // Delete every other entry, then reinsert.
+      for i <- names.indices.filter(_ % 2 == 0) do
+        ino = HTree.delete(ino, f.dev, f.bm, f.owner, names(i))
+      for i <- names.indices.filter(_ % 2 == 0) do
+        ino = HTree.insert(ino, f.dev, f.bm, f.owner, names(i), 1000 + i, DirEntry.TypeRegular)
+
+      // Even-indexed entries now have inode 1000+i; odd-indexed have inode 100+i.
+      for i <- names.indices do
+        val expected = if i % 2 == 0 then 1000 + i else 100 + i
+        HTree.lookup(ino, f.dev, f.owner, names(i)) shouldBe Some((expected, DirEntry.TypeRegular))
     }
   }
 
