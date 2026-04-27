@@ -189,6 +189,46 @@ object Sfs:
     while b < end do
       dev.writeBlock(b, zeros)
       b += 1L
+    // The inode table needs more than zeros: every slot must have a
+    // valid (zero) CRC over its 208-byte payload, so freshly allocated
+    // inodes can be read back at generation = 0 before they're written
+    // for the first time. Build one block's worth of empty inodes once,
+    // then write it to every inode-table block.
+    writeEmptyInodeTable(dev, layout)
+
+  private def writeEmptyInodeTable(dev: BlockDevice, layout: Layout): Unit =
+    val template = new Array[Byte](BlockSize)
+    val empty = emptyInode()
+    var off = 0
+    while off < BlockSize do
+      Inode.pack(empty, template, off)
+      off += InodeSize
+    var b = layout.inodeTableStart.toLong
+    val end = b + layout.inodeTableLen.toLong
+    while b < end do
+      dev.writeBlock(b, template)
+      b += 1L
+
+  private def emptyInode(): Inode =
+    Inode(
+      mode = 0,
+      linkCount = 0,
+      uid = 0,
+      gid = 0,
+      flags = 0,
+      size = 0L,
+      blockCount = 0,
+      generation = 0,
+      atimeSec = 0, atimeNsec = 0,
+      mtimeSec = 0, mtimeNsec = 0,
+      ctimeSec = 0, ctimeNsec = 0,
+      crtimeSec = 0, crtimeNsec = 0,
+      body = InodeBody.EmptyExtents,
+      indirect1 = 0,
+      indirect2 = 0,
+      indirect3 = 0,
+      xattrBlock = 0,
+    )
 
   private def writeRootDirBlocks(dev: BlockDevice, rootAddr: Long, leafAddr: Long): Unit =
     val rootBuf = new Array[Byte](BlockSize)
