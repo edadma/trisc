@@ -2,29 +2,125 @@ package io.github.edadma.sfs
 
 import Constants.*
 
-/** Top-level filesystem operations. At Phase 4 this is just `format` —
-  * mount/unmount lands in Phase 5, file ops in later phases.
+/** A mounted SFS volume. Owns the device, the parsed superblock, the
+  * computed [[Layout]], and the loaded block + inode bitmaps for the
+  * lifetime of the mount.
+  *
+  * Single-threaded API — calls must be serialized by the caller; the
+  * filesystem itself does no locking. The mount changes the on-disk
+  * superblock's `fs_state` from `clean` to `dirty`, and [[unmount]]
+  * flips it back. A clean `unmount` is the only signal that lets the
+  * next mount skip journal recovery.
+  *
+  * Until the journal lands in Phase 13, [[writeInode]] and bitmap
+  * flushes go straight to the device. Their callers' API will not
+  * change when the journal is wired in beneath them.
+  */
+final class Sfs private[sfs] (
+    val device: BlockDevice,
+    val layout: Layout,
+    private var _sb: Superblock,
+    val blockBitmap: Bitmap,
+    val inodeBitmap: Bitmap,
+):
+  private var _mounted: Boolean = true
+
+  def superblock: Superblock = _sb
+  def isMounted: Boolean = _mounted
+
+  /** Read inode `n` out of the inode table. */
+  def readInode(n: Int): Inode =
+    requireMounted()
+    val (blk, off) = layout.inodeLocation(n)
+    val buf = new Array[Byte](BlockSize)
+    device.readBlock(blk, buf)
+    Inode.unpack(buf, off)
+
+  /** Write inode `n` into the inode table, preserving the other 15
+    * inodes in the same 4 KiB block via read-modify-write. */
+  def writeInode(n: Int, ino: Inode): Unit =
+    requireMounted()
+    val (blk, off) = layout.inodeLocation(n)
+    val buf = new Array[Byte](BlockSize)
+    device.readBlock(blk, buf)
+    Inode.pack(ino, buf, off)
+    device.writeBlock(blk, buf)
+
+  /** Flush dirty bitmap blocks, mark the volume clean in the on-disk
+    * superblock, and refuse further calls on this instance. */
+  def unmount(): Unit =
+    requireMounted()
+    blockBitmap.flush()
+    inodeBitmap.flush()
+    _sb = _sb.copy(
+      fsState = FsClean,
+      freeBlocks = blockBitmap.freeCount,
+      freeInodes = inodeBitmap.freeCount,
+      lastWriteTime = Sfs.now(),
+    )
+    Sfs.writeSuperblockTo(device, _sb)
+    device.flush()
+    _mounted = false
+
+  private def requireMounted(): Unit =
+    if !_mounted then
+      throw new IllegalStateException("filesystem is not mounted")
+
+/** Static filesystem operations. `format` lays out a fresh volume;
+  * `mount` opens an existing one for use.
   */
 object Sfs:
 
-  /** Lay out an SFS volume on the device, writing all metadata regions
-    * with the formats Phase 2 codecs produce.
+  // ---- mount -----------------------------------------------------------
+
+  /** Open a formatted volume for use. Reads the superblock (falling back
+    * to the backup at block 1 on CRC failure), validates it, sets
+    * `fs_state = dirty` on disk, and loads both bitmaps into memory.
     *
-    * Steps (matching SPEC.md):
-    *   1. Zero every metadata block (clean slate so trailing fields stay 0).
-    *   2. Set bits 0..(dataStart-1) in the block bitmap (one bit per metadata
-    *      block).
-    *   3. Set bits 0, 1, 2 in the inode bitmap (null, bad-blocks, root).
-    *   4. Allocate two consecutive data blocks for the root directory's
-    *      root block + initial leaf, then write both.
-    *   5. Write inode 1 (the bad-blocks file: regular, size 0).
-    *   6. Write inode 2 (the root directory) pointing at the allocated extent.
-    *   7. Flush the bitmaps; write the journal superblock.
-    *   8. Write the filesystem superblock at block 0 and its backup at block 1
-    *      with `fs_state = clean`.
-    *
-    * Returns the [[Layout]] so callers can immediately mount or inspect it.
-    */
+    * Until journal recovery lands in Phase 13, mounting a `dirty` volume
+    * is rejected outright (the kernel would have to replay the journal
+    * before any reads are safe). Mounting an `error` volume is also
+    * rejected — those need fsck. */
+  def mount(dev: BlockDevice): Sfs =
+    val sb0 = readSuperblock(dev)
+    sb0.fsState match
+      case FsClean => () // ok
+      case FsDirty =>
+        throw new SfsCorruptError(
+          "filesystem is dirty — journal recovery is not yet implemented (Phase 13)",
+        )
+      case FsError =>
+        throw new SfsCorruptError("filesystem is in error state — run fsck")
+      case other =>
+        throw new SfsCorruptError(s"unknown fs_state $other")
+
+    val layout = Layout.fromSuperblock(sb0)
+
+    val blockBm = new Bitmap(dev, layout.blockBitmapStart, layout.blockBitmapLen, layout.totalBlocks)
+    blockBm.load()
+    val inodeBm = new Bitmap(dev, layout.inodeBitmapStart, layout.inodeBitmapLen, layout.totalInodes)
+    inodeBm.load()
+
+    val mountedSb = sb0.copy(fsState = FsDirty, lastMountTime = now())
+    writeSuperblockTo(dev, mountedSb)
+    dev.flush()
+
+    new Sfs(dev, layout, mountedSb, blockBm, inodeBm)
+
+  /** Try block 0 first; on CRC/magic failure fall back to the backup at
+    * block 1. The backup write is part of every clean unmount, so it is
+    * always at least as fresh as the moment of the last clean shutdown. */
+  private def readSuperblock(dev: BlockDevice): Superblock =
+    val buf = new Array[Byte](BlockSize)
+    dev.readBlock(0L, buf)
+    try Superblock.unpack(buf, 0)
+    catch
+      case _: SfsCorruptError =>
+        dev.readBlock(1L, buf)
+        Superblock.unpack(buf, 0)
+
+  // ---- format ----------------------------------------------------------
+
   def format(dev: BlockDevice, opts: FormatOptions = FormatOptions()): Layout =
     val total = dev.blockCount
     require(total > 0 && total <= Int.MaxValue, s"device size $total out of range")
@@ -35,8 +131,6 @@ object Sfs:
     val blockBm = new Bitmap(dev, layout.blockBitmapStart, layout.blockBitmapLen, layout.totalBlocks)
     val inodeBm = new Bitmap(dev, layout.inodeBitmapStart, layout.inodeBitmapLen, layout.totalInodes)
 
-    // Reserve every metadata block in the block bitmap up front; the data
-    // region starts clear, ready for `allocate` calls below to carve it up.
     var i = 0
     while i < layout.dataStart do
       blockBm.set(i)
@@ -46,7 +140,6 @@ object Sfs:
     inodeBm.set(InoBadBlocks)
     inodeBm.set(InoRoot)
 
-    // Two contiguous data blocks for the root dir (root block + initial leaf).
     val rootDirStart = blockBm.allocate().getOrElse(
       throw new IllegalStateException("no data blocks available for root directory"),
     )
@@ -60,26 +153,34 @@ object Sfs:
 
     writeRootDirBlocks(dev, rootDirStart.toLong, leafBlock.toLong)
 
-    writeInode(dev, layout, InoBadBlocks, makeBadBlocksInode(opts.formatTime))
-    writeInode(dev, layout, InoRoot, makeRootDirInode(rootDirStart, opts.formatTime))
+    writeInodeRaw(dev, layout, InoBadBlocks, makeBadBlocksInode(opts.formatTime))
+    writeInodeRaw(dev, layout, InoRoot, makeRootDirInode(rootDirStart, opts.formatTime))
 
     blockBm.flush()
     inodeBm.flush()
 
     writeJournalSuperblock(dev, layout, opts.uuid)
 
-    writeSuperblock(
-      dev,
-      layout,
-      opts,
-      freeBlocks = blockBm.freeCount,
-      freeInodes = inodeBm.freeCount,
-    )
+    val sb = makeSuperblock(layout, opts, blockBm.freeCount, inodeBm.freeCount)
+    writeSuperblockTo(dev, sb)
 
     dev.flush()
     layout
 
-  // ---- metadata writers ------------------------------------------------
+  // ---- shared writers --------------------------------------------------
+
+  /** Pack a [[Superblock]] and write it to both block 0 and the backup
+    * at block 1. The atomic-ish ordering primary-then-backup is
+    * intentional: if a power loss interrupts between the two writes,
+    * the primary is the freshest version and the backup is at worst
+    * stale by one update. */
+  private[sfs] def writeSuperblockTo(dev: BlockDevice, sb: Superblock): Unit =
+    val buf = new Array[Byte](BlockSize)
+    Superblock.pack(sb, buf, 0)
+    dev.writeBlock(0L, buf)
+    dev.writeBlock(1L, buf)
+
+  // ---- format helpers --------------------------------------------------
 
   private def zeroMetadata(dev: BlockDevice, layout: Layout): Unit =
     val zeros = new Array[Byte](BlockSize)
@@ -97,8 +198,6 @@ object Sfs:
       hashVersion = HashFnv1a,
       treeDepth = 0,
       flags = 0,
-      // hash 0 covers the whole keyspace at depth 0; the leaf lives at
-      // file-logical block 1 (root is file-logical block 0).
       indexEntries = IndexedSeq((0, 1)),
     )
     DirRootBlock.pack(rootBlock, InoRoot, rootBuf)
@@ -112,7 +211,7 @@ object Sfs:
     )
     dev.writeBlock(leafAddr, leafBuf)
 
-  private def writeInode(dev: BlockDevice, layout: Layout, inodeNum: Int, ino: Inode): Unit =
+  private def writeInodeRaw(dev: BlockDevice, layout: Layout, inodeNum: Int, ino: Inode): Unit =
     val (blk, off) = layout.inodeLocation(inodeNum)
     val buf = new Array[Byte](BlockSize)
     dev.readBlock(blk, buf)
@@ -126,7 +225,6 @@ object Sfs:
   ): Unit =
     val sb = JournalSuperblock(
       version = 1,
-      // block_count is the number of journal blocks *excluding* the SB itself.
       blockCount = layout.journalLen - 1,
       head = 0,
       tail = 0,
@@ -137,14 +235,13 @@ object Sfs:
     JournalSuperblock.pack(sb, buf, 0)
     dev.writeBlock(layout.journalStart.toLong, buf)
 
-  private def writeSuperblock(
-      dev: BlockDevice,
+  private def makeSuperblock(
       layout: Layout,
       opts: FormatOptions,
       freeBlocks: Int,
       freeInodes: Int,
-  ): Unit =
-    val sb = Superblock(
+  ): Superblock =
+    Superblock(
       versionMajor = 1,
       versionMinor = 0,
       fsState = FsClean,
@@ -169,10 +266,6 @@ object Sfs:
       uuid = opts.uuid,
       volumeName = opts.volumeName,
     )
-    val buf = new Array[Byte](BlockSize)
-    Superblock.pack(sb, buf, 0)
-    dev.writeBlock(0L, buf)
-    dev.writeBlock(1L, buf) // backup at block 1
 
   // ---- inode prototypes ------------------------------------------------
 
@@ -188,7 +281,7 @@ object Sfs:
   private def makeBadBlocksInode(formatTime: Long): Inode =
     val t = formatTime.toInt
     Inode(
-      mode = 0x81a4, // regular file, 0644
+      mode = 0x81a4,
       linkCount = 1,
       uid = 0,
       gid = 0,
@@ -210,13 +303,13 @@ object Sfs:
   private def makeRootDirInode(firstBlockAddr: Int, formatTime: Long): Inode =
     val t = formatTime.toInt
     Inode(
-      mode = 0x41ed, // directory, 0755
-      linkCount = 2, // `.` and `..` both reference self
+      mode = 0x41ed,
+      linkCount = 2,
       uid = 0,
       gid = 0,
       flags = 0,
       size = 2L * BlockSize,
-      blockCount = (2 * BlockSize) / 512, // POSIX 512-byte units
+      blockCount = (2 * BlockSize) / 512,
       generation = 1,
       atimeSec = t, atimeNsec = 0,
       mtimeSec = t, mtimeNsec = 0,
@@ -228,3 +321,7 @@ object Sfs:
       indirect3 = 0,
       xattrBlock = 0,
     )
+
+  // ---- misc ------------------------------------------------------------
+
+  private[sfs] def now(): Long = System.currentTimeMillis() / 1000L

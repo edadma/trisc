@@ -67,6 +67,22 @@ object Layout:
   /** Inodes packed per inode-table block. */
   val InodesPerBlock: Int = BlockSize / InodeSize // 16
 
+  /** Reconstruct the layout from a parsed [[Superblock]]. */
+  def fromSuperblock(sb: Superblock): Layout =
+    Layout(
+      totalBlocks = sb.totalBlocks,
+      totalInodes = sb.totalInodes,
+      blockBitmapStart = sb.blockBitmapStart,
+      blockBitmapLen = sb.blockBitmapLen,
+      inodeBitmapStart = sb.inodeBitmapStart,
+      inodeBitmapLen = sb.inodeBitmapLen,
+      inodeTableStart = sb.inodeTableStart,
+      inodeTableLen = sb.inodeTableLen,
+      journalStart = sb.journalStart,
+      journalLen = sb.journalLen,
+      dataStart = sb.dataStart,
+    )
+
   /** Compute the layout for a volume with the given geometry. */
   def compute(totalBlocks: Int, totalInodes: Int, journalBlocks: Int): Layout =
     require(totalBlocks > 0, s"totalBlocks must be > 0, got $totalBlocks")
