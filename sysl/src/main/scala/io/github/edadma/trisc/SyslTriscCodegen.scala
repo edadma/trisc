@@ -162,7 +162,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
     for decl <- program.decls do
       decl match
-        case v @ TVarDecl(_, typ, init, _, _, _) =>
+        case v @ TVarDecl(_, typ, init, _, _, _, _) =>
           globals(v.name) = typ
           // Track constant values for cross-reference in other global initializers
           constEval(init).foreach(n => globalConstants(v.name) = n)
@@ -261,7 +261,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emit("segment data")
       for decl <- dataGlobals do
         decl match
-          case TVarDecl(name, typ, init, _, _, _) =>
+          case TVarDecl(name, typ, init, _, _, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -291,7 +291,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emit("segment bss")
       for decl <- bssGlobals do
         decl match
-          case TVarDecl(name, typ, _, _, _, _) =>
+          case TVarDecl(name, typ, _, _, _, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -309,7 +309,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // Scan the structured Instr array directly — no string formatting needed.
     val definedSymbols = (for decl <- program.decls yield decl match
       case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _, _, _) => Some(name)
       case _ => None).flatten.toSet
     def referencesSymbol(sym: String): Boolean =
       out.exists {
@@ -772,7 +772,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case TFunDecl(_, _, _, body, _, _, _, _, _) => body match
         case TExprBody(e) => scanE(e)
         case TBlockBody(stmts) => stmts.exists(scanS)
-      case TVarDecl(_, _, init, _, _, _) => scanE(init)
+      case TVarDecl(_, _, init, _, _, _, _) => scanE(init)
       case _ => false
     }
 

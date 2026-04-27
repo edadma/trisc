@@ -49,6 +49,67 @@ class SyslCrossUnitValTests extends SyslTestHelpers {
     ) shouldBe 0x100160
   }
 
+  // ===== cross-file `var` mutability: a sibling-imported `var` must remain
+  // writable. Pre-fix the analyzer dropped mutability when registering imports,
+  // so any cross-file write raised "cannot assign to immutable variable". =====
+
+  "module-level var is writable from main via wildcard import" in {
+    evalWithLibs(
+      Map(
+        "mymod/state" ->
+          """module mymod
+            |var counter: int = 0
+            |""".stripMargin,
+      ),
+      """import mymod.*
+        |main() -> int =
+        |    counter = 5
+        |    counter
+        |""".stripMargin
+    ) shouldBe 5
+  }
+
+  "module-level var is writable from a sibling file in the same module" in {
+    evalWithLibs(
+      Map(
+        "mymod/state" ->
+          """module mymod
+            |var counter: int = 1
+            |""".stripMargin,
+        "mymod/setter" ->
+          """module mymod
+            |bump(by: int) -> int =
+            |    counter = counter + by
+            |    counter
+            |""".stripMargin,
+      ),
+      """import mymod.*
+        |main() -> int = bump(10) + bump(7)
+        |""".stripMargin
+    ) shouldBe (11 + 18)
+  }
+
+  "module-level val stays immutable from a wildcard-importing main" in {
+    // Negative regression: don't accidentally make `val` writable too.
+    val driver = new SyslDriver
+    val sources = Map(
+      "mymod/state" ->
+        """module mymod
+          |val PINNED = 42
+          |""".stripMargin,
+      "test" ->
+        """import mymod.*
+          |main() -> int =
+          |    PINNED = 1
+          |    PINNED
+          |""".stripMargin,
+    )
+    val ex = intercept[Exception] {
+      driver.compile(sources)
+    }
+    ex.getMessage should include ("immutable")
+  }
+
   // ===== const cross-file visibility (regression: pre-fix consts were visible
   // only within the file that declared them, even though val/fn/struct/enum all
   // were module-wide visible) =====

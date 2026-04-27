@@ -479,13 +479,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if reads.isDefined || writes.isDefined then
               resolvedEffectsCache(sym.name) = (reads.getOrElse(Set.empty), writes.getOrElse(Set.empty))
             externalSymbols += localKey
-        case SymbolMeta.Kind.Data(dataType) =>
+        case SymbolMeta.Kind.Data(dataType, isMutable) =>
           if globalScope.contains(localKey) then
             val existing = globalScope(localKey)
             if !sym.isExtern && existing.name != sym.name then
               throw AnalysisError(s"imported symbol '$localKey' conflicts with existing global")
           else
-            globalScope(localKey) = SymInfo(sym.name, dataType, mutable = false)
+            globalScope(localKey) = SymInfo(sym.name, dataType, mutable = isMutable)
             externalSymbols += localKey
         case SymbolMeta.Kind.Const(constType, value) =>
           // Cross-file `const`: register in globalScope (so VarRef name resolution
@@ -1259,7 +1259,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     // via compileTimeConstants lookup during VarRef analysis. The value is also carried on
     // the typed decl so cross-file ModuleMeta serialization can publish it to sibling files.
     if isConst then TConstDecl(mangledVarName, declType, compileTimeConstants(mangledVarName))
-    else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile, isGhost = isGhost)
+    else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile, isGhost = isGhost, isMutable = isMutable)
 
   private def warnDeprecated(name: String): Unit =
     if deprecations.contains(name) && !warnedDeprecations.contains(name) then
@@ -4464,7 +4464,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val sym = meta.publicSymbols.find(s => shortName(s.name) == member)
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
-          case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
+          case SymbolMeta.Kind.Data(dataType, _) => TVarRef(sym.name, dataType)
           case SymbolMeta.Kind.Const(constType, value) => TIntLit(value, constType)
           case SymbolMeta.Kind.Func(params, retType, _, _, _, eff) => TFuncRef(sym.name, SyslType.FuncType(params, retType, effects = eff))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")

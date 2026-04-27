@@ -7,7 +7,7 @@ case class SymbolMeta(name: String, typ: SymbolMeta.Kind, isPrivate: Boolean, is
 object SymbolMeta:
   enum Kind:
     case Func(params: List[SyslType], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, effects: FuncEffects = FuncEffects.Unknown)
-    case Data(dataType: SyslType)
+    case Data(dataType: SyslType, isMutable: Boolean = false)
     case Struct(structType: SyslType.StructType)
     case Enum(enumType: SyslType.EnumType)
     case Interface(ifaceType: SyslType.InterfaceType)
@@ -53,8 +53,9 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
             else ""
           val effSuffix = if isPure || effects.isUnknown then "" else s" EFFECTS ${ModuleMeta.encodeEffects(effects)}"
           buf ++= s"${vis}$kw ${sym.name} $sig$modeSuffix$effSuffix\n"
-        case SymbolMeta.Kind.Data(dataType) =>
-          buf ++= s"${vis}DATA ${sym.name} ${dataType.toPrefix}\n"
+        case SymbolMeta.Kind.Data(dataType, isMutable) =>
+          val mutSuffix = if isMutable then " MUT" else ""
+          buf ++= s"${vis}DATA ${sym.name} ${dataType.toPrefix}$mutSuffix\n"
         case SymbolMeta.Kind.Struct(st) =>
           buf ++= s"${vis}STRUCT ${sym.name} ${st.toPrefix}\n"
         case SymbolMeta.Kind.Enum(et) =>
@@ -89,7 +90,7 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
       else sym.typ match
         case SymbolMeta.Kind.Func(params, ret, _, _, _, _) =>
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
-        case SymbolMeta.Kind.Data(dataType) =>
+        case SymbolMeta.Kind.Data(dataType, _) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
         case SymbolMeta.Kind.Struct(_) | SymbolMeta.Kind.Enum(_) | SymbolMeta.Kind.Interface(_) | SymbolMeta.Kind.Impl(_, _, _) => // type-only, no asm global
         case SymbolMeta.Kind.Const(_, _) => // const has no storage — folded at use sites
@@ -125,8 +126,10 @@ object ModuleMeta:
    *  to carry `#reads`/`#writes` signatures across modules, and the same encoding inline
    *  on each IFACE method so per-method effect sigs round-trip.
    *  v11 adds `CONST <name> <type> <value>` lines so module-level `const` declarations
-   *  are visible (with their folded value) to sibling files of the same module. */
-  val SMETA_VERSION = 11
+   *  are visible (with their folded value) to sibling files of the same module.
+   *  v12 adds an optional `MUT` trailer on DATA lines so module-level `var` (vs `val`)
+   *  is preserved across files — sibling-imported vars stay writable. */
+  val SMETA_VERSION = 12
 
   /** Encode a FuncEffects as space-separated tokens — `U` (Unknown), `P` (Pure), or
    *  `RW <nReads> <readsNames…> <nWrites> <writesNames…>`. Used both in the FUNC-line
@@ -180,8 +183,8 @@ object ModuleMeta:
         val modes = params.map(_.mode)
         val needModes = modes.exists(_ != ParamMode.In)
         SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef, isPure, if needModes then modes else Nil, effects), isPrivate, sourceFile = sourceFile)
-      case TVarDecl(name, typ, _, isPrivate, _, _) =>
-        SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate, sourceFile = sourceFile)
+      case TVarDecl(name, typ, _, isPrivate, _, _, isMutable) =>
+        SymbolMeta(name, SymbolMeta.Kind.Data(typ, isMutable), isPrivate, sourceFile = sourceFile)
       case TConstDecl(name, typ, value) =>
         SymbolMeta(name, SymbolMeta.Kind.Const(typ, value), isPrivate = false, sourceFile = sourceFile)
     }
@@ -272,7 +275,8 @@ object ModuleMeta:
                   syms += SymbolMeta(name, SymbolMeta.Kind.Func(params, ret, isDef, isPure, modes, effects), isPrivate, sourceFile = currentSource)
                 case "DATA" =>
                   val dataType = SyslType.parseType(tokens)
-                  syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType), isPrivate, sourceFile = currentSource)
+                  val isMutable = tokens.hasNext && tokens.next() == "MUT"
+                  syms += SymbolMeta(name, SymbolMeta.Kind.Data(dataType, isMutable), isPrivate, sourceFile = currentSource)
                 case "STRUCT" =>
                   val st = SyslType.parseType(tokens).asInstanceOf[SyslType.StructType]
                   syms += SymbolMeta(name, SymbolMeta.Kind.Struct(st), isPrivate, sourceFile = currentSource)

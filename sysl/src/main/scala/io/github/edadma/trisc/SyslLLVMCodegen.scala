@@ -236,7 +236,7 @@ class SyslLLVMCodegen(target: String = "host"):
           if !emittedFunctions.contains(f.name) then
             emittedFunctions += f.name
             genFunction(f)
-        case TVarDecl(name, typ, init, _, isVolatile, _) =>
+        case TVarDecl(name, typ, init, _, isVolatile, _, _) =>
           val initVal = constValue(init, typ)
           emit(s"@$name = global ${llvmType(typ)} $initVal")
           globalVarTypes(name) = typ

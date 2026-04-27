@@ -332,7 +332,7 @@ class SyslSVMCodegen:
     val bssGlobals = new mutable.ListBuffer[TDecl]
 
     for decl <- program.decls do decl match
-      case v @ TVarDecl(_, typ, init, _, _, _) =>
+      case v @ TVarDecl(_, typ, init, _, _, _, _) =>
         globals(v.name) = typ
         constEval(init).foreach(n => globalConstants(v.name) = n)
         if isZeroInit(typ, init) then bssGlobals += v
@@ -363,13 +363,13 @@ class SyslSVMCodegen:
     // For arrays of strings: per-element labels, indexed by (arrayName, i).
     val stringArrayElemLabels = new mutable.HashMap[(String, Int), String]
     for decl <- dataGlobals do decl match
-      case TVarDecl(name, SyslType.StringType, TStringLit(s, _), _, _, _) =>
+      case TVarDecl(name, SyslType.StringType, TStringLit(s, _), _, _, _, _) =>
         labelCounter += 1
         val lbl = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_${labelCounter}__g_$name"
                   else s"__str_${labelCounter}__g_$name"
         stringLiterals += ((lbl, s))
         stringGlobalLabels(name) = lbl
-      case TVarDecl(name, SyslType.ArrayType(SyslType.StringType, _), TArrayLit(elements, _), _, _, _) =>
+      case TVarDecl(name, SyslType.ArrayType(SyslType.StringType, _), TArrayLit(elements, _), _, _, _, _) =>
         for (e, idx) <- elements.zipWithIndex do e match
           case TStringLit(s, _) =>
             labelCounter += 1
@@ -409,11 +409,11 @@ class SyslSVMCodegen:
     if dataGlobals.nonEmpty then
       emit("segment data")
       for decl <- dataGlobals do decl match
-        case TVarDecl(name, typ, _, _, _, _) =>
+        case TVarDecl(name, typ, _, _, _, _, _) =>
           emit(s"global $name, data, ${typ.sizeOf.max(8)}")
         case _ =>
       for decl <- dataGlobals do decl match
-        case TVarDecl(name, typ, init, _, _, _) =>
+        case TVarDecl(name, typ, init, _, _, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           typ match
@@ -501,11 +501,11 @@ class SyslSVMCodegen:
     if bssGlobals.nonEmpty then
       emit("segment bss")
       for decl <- bssGlobals do decl match
-        case TVarDecl(name, typ, _, _, _, _) =>
+        case TVarDecl(name, typ, _, _, _, _, _) =>
           emit(s"global $name, data, ${typ.sizeOf.max(8)}")
         case _ =>
       for decl <- bssGlobals do decl match
-        case TVarDecl(name, typ, _, _, _, _) =>
+        case TVarDecl(name, typ, _, _, _, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           val size = typ.sizeOf.max(8)
@@ -516,7 +516,7 @@ class SyslSVMCodegen:
     val generated = out.toString
     val definedSymbols = program.decls.flatMap {
       case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _, _, _) => Some(name)
       case _ => None
     }.toSet
     val metaSymbols = meta.symbols.map(_.name).toSet
