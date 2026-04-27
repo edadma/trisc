@@ -187,6 +187,15 @@ lazy val sysl = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .jvmSettings(jvmNativeStubs)
   .nativeSettings(jvmNativeStubs)
 
+lazy val sfs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("sfs"))
+  .settings(commonSettings)
+  .settings(name := "trisc-sfs")
+  .jsSettings(jsSettings)
+  .jvmSettings(jvmNativeStubs)
+  .nativeSettings(jvmNativeStubs)
+
 lazy val triscCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .in(file("trisc-cli"))
   .settings(commonSettings)
@@ -244,6 +253,7 @@ lazy val root = project
     cpu.jvm, /* cpu.js, cpu.native, */
     docs.jvm, /* docs.js, docs.native, */
     sysl.jvm, /* sysl.js, sysl.native, */
+    sfs.jvm, /* sfs.js, sfs.native, */
     triscCli.jvm, /* triscCli.js, triscCli.native, */
     syslCli.jvm, /* syslCli.js, syslCli.native, */
     ttf,
@@ -259,12 +269,12 @@ lazy val root = project
 commands ++= Seq(
   Command.command("testNative") { state =>
     "utilsNative/test" :: "memNative/test" :: "tofNative/test" :: "asmNative/test" ::
-    "cpuNative/test" :: "docsNative/test" :: "syslNative/test" ::
+    "cpuNative/test" :: "docsNative/test" :: "syslNative/test" :: "sfsNative/test" ::
     "triscCliNative/test" :: "syslCliNative/test" :: state
   },
   Command.command("testJS") { state =>
     "utilsJS/test" :: "memJS/test" :: "tofJS/test" :: "asmJS/test" ::
-    "cpuJS/test" :: "docsJS/test" :: "syslJS/test" ::
+    "cpuJS/test" :: "docsJS/test" :: "syslJS/test" :: "sfsJS/test" ::
     "triscCliJS/test" :: "syslCliJS/test" :: state
   },
   // Run only tests tagged Slow (full-OS integration tests).
