@@ -49,6 +49,21 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     bm.load()
     (dev, layout, bm)
 
+  /** Even larger device: 64 MiB. Used for tests that need a directory
+    * large enough to fill an interior block at depth 1 (~1000+ data
+    * blocks for one directory). */
+  private def freshHuge(): (RamBlockDevice, Layout, Bitmap) =
+    val dev = new RamBlockDevice(16384L)
+    val layout = Sfs.format(dev, smallOpts)
+    val bm = new Bitmap(
+      dev,
+      startBlock = layout.blockBitmapStart.toLong,
+      lengthBlocks = layout.blockBitmapLen,
+      totalBits = layout.totalBlocks,
+    )
+    bm.load()
+    (dev, layout, bm)
+
   /** Read the directory's logical block 0 (root) into a fresh buffer. */
   private def readRoot(dev: BlockDevice, ino: Inode, ownerInode: Int): Array[Byte] =
     val reader = new ExtentReader(dev, ino)
@@ -301,6 +316,37 @@ class HTreeTests extends AnyFreeSpec with Matchers:
         val expected = if k % 7 == 0 then 9000000 + k else 100 + k
         HTree.lookup(ino, dev, owner, pad + f"$k%07d") shouldBe
           Some((expected, DirEntry.TypeRegular))
+    }
+
+    "splits an interior block at depth 1 (root has > 2 entries)" in {
+      val (dev, _, bm) = freshHuge()
+      val owner = 5
+      var ino = HTree.initDirectory(blankDirInode(), dev, bm, owner, 2)
+
+      // ~12k NAME_MAX-padded inserts: forces promotion (~3.5k inserts in)
+      // and then keeps loading until at least one interior block fills
+      // and splits, growing root.indexEntries past 2.
+      val pad = "x" * 248
+      val totalToInsert = 12000
+      var i = 0
+      while i < totalToInsert do
+        ino = HTree.insert(ino, dev, bm, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        i += 1
+
+      val root = DirRootBlock.unpack(readRoot(dev, ino, owner), owner)
+      root.treeDepth shouldBe 1
+      HTree.liveIndexEntries(root).length should be > 2
+
+      // Spot-check that lookup still routes correctly through the
+      // multiple-interior-block layout.
+      val samples = Vector(0, 1, 100, 1000, 4000, 8000, totalToInsert - 1)
+      for s <- samples do
+        HTree.lookup(ino, dev, owner, pad + f"$s%07d") shouldBe
+          Some((100 + s, DirEntry.TypeRegular))
+
+      // List round-trips every inserted name plus dot/dotdot.
+      HTree.list(ino, dev, owner).map(_.name).toSet shouldBe
+        ((0 until totalToInsert).map(s => pad + f"$s%07d").toSet + "." + "..")
     }
   }
 

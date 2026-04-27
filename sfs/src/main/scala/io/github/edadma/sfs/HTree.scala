@@ -10,13 +10,19 @@ import Constants.*
   *   - Logical blocks 1+: leaves (when `treeDepth = 0`) or interior
   *     index blocks alongside leaves (when `treeDepth = 1`).
   *
-  * Phase 9c–9e support `treeDepth ≤ 1`. At depth 0 the root's
-  * index_entries point directly at leaves; at depth 1 they point at
-  * interior [[DirIndexBlock]]s, each of which points at leaves. When a
-  * leaf split would push the root past its capacity, the directory is
-  * promoted from depth 0 to depth 1 by spreading the existing index
-  * entries across two fresh interior blocks. Interior-block splits at
-  * depth 1 are Phase 9f.
+  * `treeDepth ≤ 1` is the entire HTree shape SFS specifies. At depth 0
+  * the root's index_entries point directly at leaves; at depth 1 they
+  * point at interior [[DirIndexBlock]]s, each of which points at
+  * leaves. The tree grows on overflow:
+  *
+  *   - Leaf full → split the leaf and add a new pointer to its parent
+  *     (root at depth 0, the relevant interior at depth 1).
+  *   - Adding to root would exceed [[DirRootBlock.MaxIndexEntries]] at
+  *     depth 0 → promote depth 0 → 1.
+  *   - Interior full at depth 1 → split the interior and add a pointer
+  *     to root.
+  *   - Adding to root would exceed [[DirRootBlock.MaxIndexEntries]] at
+  *     depth 1 → throw; `treeDepth = 2` is outside the spec.
   *
   * Every public mutation returns an updated [[Inode]] (possibly with
   * new blocks appended). Time stamps and link-count bookkeeping live
@@ -263,8 +269,7 @@ object HTree:
       case RootParent =>
         addLeafEntryToRoot(grown, dev, bm, ownerInode, root, rootBuf, medianHash, newLeafLogicalBlock)
       case InteriorParent(interiorBlock) =>
-        addLeafEntryToInterior(grown, dev, ownerInode, interiorBlock, medianHash, newLeafLogicalBlock)
-        grown
+        addLeafEntryToInterior(grown, dev, bm, ownerInode, interiorBlock, medianHash, newLeafLogicalBlock)
 
     insert(grown2, dev, bm, ownerInode, newEntry.name, newEntry.inode, newEntry.fileType)
 
@@ -342,26 +347,73 @@ object HTree:
     grown
 
   /** Add a new (hash, leafBlock) entry into an interior block at depth
-    * 1. Throws [[SfsCorruptError]] if the interior block is already at
-    * capacity (Phase 9f territory). */
+    * 1. If the interior is already at capacity, splits it in two and
+    * registers the new sibling in the root. Throws if the root would
+    * overflow as a result (`treeDepth = 2` is not in the spec). */
   private def addLeafEntryToInterior(
       ino: Inode,
       dev: BlockDevice,
+      bm: Bitmap,
       ownerInode: Int,
       interiorBlock: Int,
       medianHash: Int,
       newLeafBlock: Int,
-  ): Unit =
+  ): Inode =
     val buf = readDirBlock(ino, dev, interiorBlock.toLong)
     val live = DirIndexBlock.unpack(buf, ownerInode).takeWhile(_._2 != 0)
     val merged = (live :+ ((medianHash, newLeafBlock))).sortBy(_._1)
-    if merged.length > DirIndexBlock.Capacity then
+    if merged.length <= DirIndexBlock.Capacity then
+      DirIndexBlock.pack(merged, ownerInode, buf)
+      writeDirBlock(ino, dev, interiorBlock.toLong, buf)
+      ino
+    else
+      splitInteriorAndAddToRoot(ino, dev, bm, ownerInode, interiorBlock, buf, merged)
+
+  /** Split a full interior block into two siblings, repack each, and
+    * splice a new (hash, sibling) entry into the root's index_entries.
+    * The new sibling is allocated as a fresh logical block. Throws if
+    * the root would overflow at depth 1 — that's `treeDepth = 2`,
+    * which is not part of the SFS spec. */
+  private def splitInteriorAndAddToRoot(
+      ino: Inode,
+      dev: BlockDevice,
+      bm: Bitmap,
+      ownerInode: Int,
+      sourceInterior: Int,
+      sourceBuf: Array[Byte],
+      merged: IndexedSeq[(Int, Int)],
+  ): Inode =
+    val cut = findSplitIndex(merged.map(_._1)).getOrElse(
       throw new SfsCorruptError(
-        "HTree.insert: interior index block is full — index split " +
-          "(Phase 9f) is not yet implemented",
+        "HTree.insert: cannot split interior — every entry shares the same hash",
+      ),
+    )
+    val left = merged.take(cut)
+    val right = merged.drop(cut)
+
+    val grown = ExtentAllocator.append(ino, dev, bm, 1)
+    val newInterior = (ExtentAllocator.totalBlockCount(grown, dev) - 1L).toInt
+
+    DirIndexBlock.pack(left, ownerInode, sourceBuf)
+    writeDirBlock(grown, dev, sourceInterior.toLong, sourceBuf)
+
+    val newBuf = new Array[Byte](BlockSize)
+    DirIndexBlock.pack(right, ownerInode, newBuf)
+    writeDirBlock(grown, dev, newInterior.toLong, newBuf)
+
+    val rootBuf = readDirBlock(grown, dev, 0L)
+    val root = DirRootBlock.unpack(rootBuf, ownerInode)
+    val rootMerged =
+      (liveIndexEntries(root) :+ ((right.head._1, newInterior))).sortBy(_._1)
+    if rootMerged.length > DirRootBlock.MaxIndexEntries then
+      throw new SfsCorruptError(
+        "HTree.insert: root index_entries are full at depth 1 — " +
+          "tree_depth = 2 is not part of the SFS spec",
       )
-    DirIndexBlock.pack(merged, ownerInode, buf)
-    writeDirBlock(ino, dev, interiorBlock.toLong, buf)
+    val newRoot = root.copy(indexEntries = rootMerged)
+    DirRootBlock.pack(newRoot, ownerInode, rootBuf)
+    writeDirBlock(grown, dev, 0L, rootBuf)
+    grown
 
   /** Pack `entries` (with their `recLen` fields normalized to the
     * minimum) into `buf` from offset 0, donating any leftover bytes to
