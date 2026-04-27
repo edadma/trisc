@@ -1751,6 +1751,24 @@ forward fn ref but not a forward var ref.
             ti += 1
 
 
+Phase 2 of the net-stack quality plan: count TCP slots whose
+`owner_tid` matches `tid`.  Companion to `inet_count_udp_owner`
+in inet.lsysl; callers add the two for the full per-tid usage.
+Lives in this file because cross-file VAR reads break the
+analyzer (see feedback_sysl_syntax_gotchas #19); cross-file FN
+calls are fine, hence the split.
+
+    inet_count_tcp_owner(tid: int) -> int
+        var n = 0
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use != 0
+                if tcp_sockets[i].owner_tid == tid
+                    n += 1
+            i += 1
+        n
+
+
     inet_tcp_init()
         var i = 0
         while i < TCP_MAX_SOCKETS
@@ -2874,6 +2892,15 @@ the socket index on success (caller blocks until ESTABLISHED),
                            sndbuf_override: int, rcvbuf_override: int) -> int
         if inet_our_mac_known == 0
             return -1
+        // Phase 2 quality plan: per-tid cap on TCP slots.  Literal
+        // 8 — duplicated in `inet_handle_socket` for UDP slots
+        // (sysl analyzer bug #19: cross-file val and cross-file fn
+        // refs break analysis).  The two pools are checked
+        // independently, so a tid can hold up to 8 UDP + 8 TCP =
+        // 16 slots; with 32 + 16 = 48 total slots that still
+        // guarantees at least three concurrent processes.
+        if inet_count_tcp_owner(owner_tid) >= 8
+            return -1
         val s = inet_tcp_alloc()
         if s < 0
             return -1
@@ -2919,6 +2946,9 @@ so a tiny but positive queue depth is always available.
                           backlog: int,
                           sndbuf_override: int, rcvbuf_override: int) -> int
         if inet_tcp_find_listen(local_port) >= 0
+            return -1
+        // Phase 2 quality plan: per-tid cap.  See begin_connect.
+        if inet_count_tcp_owner(owner_tid) >= 8
             return -1
         val s = inet_tcp_alloc()
         if s < 0

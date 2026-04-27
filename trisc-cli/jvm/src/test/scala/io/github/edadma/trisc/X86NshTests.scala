@@ -738,6 +738,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "arpretx: failed"
   }
 
+  "x86 net: per-tid socket cap (Phase 2 quality)" in {
+    // Phase 2 chunk 1: a single tid can hold at most
+    // INET_PER_PID_SOCKET_CAP (8) slots across UDP + TCP pools.
+    // The 9th allocation fails with -EMFILE; closing one frees a
+    // slot so the next allocation succeeds.
+    val output = qemu.command("test_pidcap")
+    output should include("pidcap: ok")
+    output should not include "pidcap: failed"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")

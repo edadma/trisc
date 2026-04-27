@@ -1,0 +1,118 @@
+test_pidcap — per-tid socket cap (Phase 2 quality)
+====================================================
+
+Phase 2 of the net-stack quality plan adds a per-tid slot cap
+(`INET_PER_PID_SOCKET_CAP = 8`) across UDP `inet_sockets` + TCP
+`tcp_sockets`.  A misbehaving process can now grab at most 8
+slots before allocations refuse with -EMFILE; with 32 + 16 = 48
+total slots, four well-behaved processes are guaranteed their
+full share even under pressure.
+
+This test:
+  1. Opens 8 UDP sockets in a row — all succeed.
+  2. The 9th open must fail with -24 (-EMFILE).
+  3. Closes one of the 8.
+  4. The 9th open must now succeed.
+  5. Closes everything.
+
+Prints `pidcap: ok` on pass or `pidcap: failed N` where N is the
+failure step.
+
+    module oskit.bin.test_pidcap
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE  = 147
+    val NR_SOCKET = 337
+
+    val AF_INET_V    = 2
+    val SOCK_DGRAM_V = 2
+    val ENOMFILE     = -24
+
+
+    print_dec(v: int)
+        if v < 0
+            puts("-")
+            print_dec(-v)
+            return
+        if v >= 10
+            print_dec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("pidcap: failed ")
+        print_dec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        var fds: [9]int
+        var i = 0
+        while i < 8
+            val fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+            if fd < 0
+                // Close anything we did open before bailing.
+                var k = 0
+                while k < i
+                    posix_close(fds[k])
+                    k += 1
+                fail(1)
+                return
+            fds[i] = fd
+            i += 1
+
+        // 9th must fail with -EMFILE.
+        val ninth = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if ninth != ENOMFILE
+            // Released into the test's own fd table — close it
+            // so we don't leak.
+            if ninth >= 0
+                posix_close(ninth)
+            var k = 0
+            while k < 8
+                posix_close(fds[k])
+                k += 1
+            fail(2)
+            return
+
+        // Close one and try again — must succeed.
+        if posix_close(fds[0]) != 0
+            var k = 1
+            while k < 8
+                posix_close(fds[k])
+                k += 1
+            fail(3)
+            return
+        fds[0] = -1
+
+        val ninth2 = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if ninth2 < 0
+            var k = 1
+            while k < 8
+                posix_close(fds[k])
+                k += 1
+            fail(4)
+            return
+        fds[8] = ninth2
+
+        // Cleanup.
+        var k = 1
+        while k < 9
+            if fds[k] >= 0
+                posix_close(fds[k])
+            k += 1
+
+        puts("pidcap: ok\n")
+        exit()

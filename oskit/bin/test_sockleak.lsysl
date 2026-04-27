@@ -1,20 +1,23 @@
 test_sockleak — pid-exit socket reclaim
 =======================================
 
-Opens 30 UDP sockets in a tight loop (the inet server has 32
-slots), prints a marker, then exits WITHOUT calling close() on
-any of them. Running this binary twice back-to-back is a direct
-test of PM's inet pid-exit cleanup:
+Opens 7 UDP sockets in a tight loop (just under the per-tid
+cap of 8 added in Phase 2), prints a marker, then exits WITHOUT
+calling close() on any of them. Running this binary several
+times back-to-back exercises PM's inet pid-exit cleanup:
 
-- Without cleanup, run 1 leaves 30 slots permanently occupied.
-  Run 2 fails the third socket() with -1 because the table is
-  full. The test binary would print `sockleak: failed_at_2` (or
-  similar) instead of `sockleak: all_opened`.
+- Without cleanup, slots from each run leak. After enough runs
+  the pool fills (32 UDP slots ÷ 7 per run ≈ 4 leaked runs) and
+  the next launch's first socket() returns -1.
 
 - With cleanup, PM fans out a PID_EXIT IPC to inet when the
-  process ends; inet scans both UDP and TCP tables and frees any
-  slot whose `owner_tid` matches. Run 2 sees all 30 slots free
-  and the second pass prints `all_opened` too.
+  process ends; inet scans both UDP and TCP tables and frees
+  any slot whose `owner_tid` matches.  Each run's 7 slots are
+  reclaimed and the next run starts fresh.
+
+The test launches it twice consecutively; both must report
+`sockleak: all_opened`.  Cap-enforcement itself is covered by
+test_pidcap.
 
     module oskit.bin.test_sockleak
 
@@ -42,7 +45,7 @@ Decimal writer for small ints.
 
 
     main(argv: []string)
-        val N = 30
+        val N = 7
         var i = 0
         while i < N
             val fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)

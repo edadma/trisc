@@ -158,6 +158,24 @@ traffic.
     var inet_port = -1
 
 
+Phase 2 of the net-stack quality plan: count UDP slots whose
+`owner_tid` matches `tid`.  Companion to `inet_count_tcp_owner`
+in inet_proto.lsysl; callers add the two for the full per-tid
+usage.  Lives in this file because cross-file VAR reads break
+the analyzer (see feedback_sysl_syntax_gotchas #19); cross-file
+FN calls are fine, hence the split.
+
+    inet_count_udp_owner(tid: int) -> int
+        var n = 0
+        var i = 0
+        while i < INET_MAX_SOCKETS
+            if inet_sockets[i].in_use != 0
+                if inet_sockets[i].owner_tid == tid
+                    n += 1
+            i += 1
+        n
+
+
 RFC 5227 ARP probe state. `arp_probe_target` is the IPv4
 address currently being probed (0 = no probe active).
 `arp_probe_seen` is set by the ARP RX path when any ARP
@@ -388,6 +406,19 @@ waiter. `maxlen` caps how many payload bytes we hand back.
             ipc_reply(sender, err, 2)
             return
         if stype != SOCK_DGRAM
+            var err: [2]byte
+            err[0] = byte(-1)
+            err[1] = 0
+            ipc_reply(sender, err, 2)
+            return
+        // Phase 2 net-stack quality plan: per-tid cap on UDP
+        // slots.  Literal 8 — duplicated in `begin_connect` /
+        // `begin_listen` (inet_proto.lsysl) for the TCP pool.
+        // Sysl analyzer bug #19 (cross-file val + cross-file fn
+        // refs both break analysis) is what forces the per-pool
+        // split; a true combined cap would need a fix to the
+        // analyzer.
+        if inet_count_udp_owner(sender) >= 8
             var err: [2]byte
             err[0] = byte(-1)
             err[1] = 0

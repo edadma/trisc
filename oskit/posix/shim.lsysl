@@ -1220,8 +1220,11 @@ to map a "pre-connect" state into the inet protocol.
             val r = ipc_send(port, msg, 4, reply, 2)
             if r < 0
                 return i64(-5)      // -EIO
+            // inet rejects with status != 0 either when the global
+            // pool is exhausted or when the per-tid cap is hit.
+            // Both surfaces map to -EMFILE.
             if reply[0] != 0
-                return i64(-5)
+                return i64(-24)
             val inet_fd = int(reply[1]) & 0xff
             val posix_fd = posix_fd_alloc(POSIX_FD_UDP_SOCKET, inet_fd)
             if posix_fd < 0

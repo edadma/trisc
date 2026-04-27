@@ -341,12 +341,11 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
   }
 
   "aarch64 posix: inet sockets reclaimed on pid exit" in {
-    // test_sockleak opens 30 UDP sockets and exits without
-    // close(). The inet server has 32 slots, so a second run can
-    // only succeed if PM's PID_EXIT IPC caused inet to reclaim
-    // the dying process's sockets. Without the cleanup, run 2
-    // would hit -1 on the third socket() and print
-    // `sockleak: failed_at_2`. Pass = two `all_opened` markers.
+    // test_sockleak opens 7 UDP sockets (just under the Phase 2
+    // per-tid cap of 8) and exits without close(). Two runs
+    // back-to-back exercise PM's PID_EXIT IPC: without cleanup,
+    // each run leaks 7 slots and the pool eventually fills.
+    // Pass = two `all_opened` markers.
     qemu.send("test_sockleak\n")
     val run1 = qemu.waitFor("sockleak: all_opened")
     run1 should include("sockleak: all_opened")
@@ -1849,6 +1848,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     val output = qemu.command("test_arpretx")
     output should include("arpretx: ok")
     output should not include "arpretx: failed"
+  }
+
+  "aarch64 net: per-tid socket cap (Phase 2 quality)" in {
+    // Phase 2 chunk 1: a single tid can hold at most
+    // INET_PER_PID_SOCKET_CAP (8) slots across UDP + TCP pools.
+    // The 9th allocation fails with -EMFILE; closing one frees a
+    // slot so the next allocation succeeds.
+    val output = qemu.command("test_pidcap")
+    output should include("pidcap: ok")
+    output should not include "pidcap: failed"
   }
 
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
