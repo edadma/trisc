@@ -22,6 +22,7 @@ final class Sfs private[sfs] (
     private var _sb: Superblock,
     val blockBitmap: Bitmap,
     val inodeBitmap: Bitmap,
+    val journal: Journal,
 ):
   private var _mounted: Boolean = true
 
@@ -46,12 +47,14 @@ final class Sfs private[sfs] (
     Inode.pack(ino, buf, off)
     device.writeBlock(blk, buf)
 
-  /** Flush dirty bitmap blocks, mark the volume clean in the on-disk
-    * superblock, and refuse further calls on this instance. */
+  /** Flush dirty bitmap blocks and journal state, mark the volume clean
+    * in the on-disk superblock, and refuse further calls on this
+    * instance. */
   def unmount(): Unit =
     requireMounted()
     blockBitmap.flush()
     inodeBitmap.flush()
+    journal.flush()
     _sb = _sb.copy(
       fsState = FsClean,
       freeBlocks = blockBitmap.freeCount,
@@ -101,11 +104,13 @@ object Sfs:
     val inodeBm = new Bitmap(dev, layout.inodeBitmapStart, layout.inodeBitmapLen, layout.totalInodes)
     inodeBm.load()
 
+    val journal = Journal.load(dev, layout.journalStart.toLong, sb0.uuid)
+
     val mountedSb = sb0.copy(fsState = FsDirty, lastMountTime = now())
     writeSuperblockTo(dev, mountedSb)
     dev.flush()
 
-    new Sfs(dev, layout, mountedSb, blockBm, inodeBm)
+    new Sfs(dev, layout, mountedSb, blockBm, inodeBm, journal)
 
   /** Try block 0 first; on CRC/magic failure fall back to the backup at
     * block 1. The backup write is part of every clean unmount, so it is
