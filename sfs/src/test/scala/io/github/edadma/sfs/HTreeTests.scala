@@ -34,6 +34,31 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     bm.load()
     (dev, layout, bm)
 
+  /** Format a larger 32 MiB device for tests that need a directory big
+    * enough to overflow the root index_entries (~510+ data blocks for
+    * one directory). */
+  private def freshLarge(): (RamBlockDevice, Layout, Bitmap) =
+    val dev = new RamBlockDevice(8192L)
+    val layout = Sfs.format(dev, smallOpts)
+    val bm = new Bitmap(
+      dev,
+      startBlock = layout.blockBitmapStart.toLong,
+      lengthBlocks = layout.blockBitmapLen,
+      totalBits = layout.totalBlocks,
+    )
+    bm.load()
+    (dev, layout, bm)
+
+  /** Read the directory's logical block 0 (root) into a fresh buffer. */
+  private def readRoot(dev: BlockDevice, ino: Inode, ownerInode: Int): Array[Byte] =
+    val reader = new ExtentReader(dev, ino)
+    reader.physicalBlock(0L) match
+      case BlockMapping.Concrete(p) =>
+        val buf = new Array[Byte](BlockSize)
+        dev.readBlock(p, buf)
+        buf
+      case other => fail(s"root block not concrete: $other")
+
   /** A fresh, empty directory-shaped inode with no extents. */
   private def blankDirInode(): Inode = Inode(
     mode = 0x41ed,
@@ -224,6 +249,58 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       for i <- names.indices do
         val expected = if i % 2 == 0 then 1000 + i else 100 + i
         HTree.lookup(ino, f.dev, f.owner, names(i)) shouldBe Some((expected, DirEntry.TypeRegular))
+    }
+
+    "promotes treeDepth 0 → 1 once root.indexEntries fills" in {
+      val (dev, _, bm) = freshLarge()
+      val owner = 5
+      var ino = HTree.initDirectory(blankDirInode(), dev, bm, owner, 2)
+
+      // Pad names so each leaf holds only ~15 entries (NAME_MAX-sized
+      // records). Insert until the root promotes to treeDepth = 1, plus
+      // a few extra to keep growing the tree.
+      val pad = "x" * 248
+      var i = 0
+      val totalToInsert = 6000
+      while i < totalToInsert do
+        ino = HTree.insert(ino, dev, bm, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        i += 1
+
+      val root = DirRootBlock.unpack(readRoot(dev, ino, owner), owner)
+      root.treeDepth shouldBe 1
+
+      // Spot-check a handful of names spanning the insertion range.
+      val samples = Vector(0, 1, 100, 1000, totalToInsert / 2, totalToInsert - 1)
+      for s <- samples do
+        val name = pad + f"$s%07d"
+        HTree.lookup(ino, dev, owner, name) shouldBe Some((100 + s, DirEntry.TypeRegular))
+    }
+
+    "delete + reinsert after promotion preserves all entries" in {
+      val (dev, _, bm) = freshLarge()
+      val owner = 5
+      var ino = HTree.initDirectory(blankDirInode(), dev, bm, owner, 2)
+
+      val pad = "x" * 248
+      val totalToInsert = 6000
+      var i = 0
+      while i < totalToInsert do
+        ino = HTree.insert(ino, dev, bm, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        i += 1
+
+      DirRootBlock.unpack(readRoot(dev, ino, owner), owner).treeDepth shouldBe 1
+
+      // Delete every 7th entry and reinsert with a different inode.
+      val touched = (0 until totalToInsert by 7).toVector
+      for k <- touched do
+        ino = HTree.delete(ino, dev, bm, owner, pad + f"$k%07d")
+      for k <- touched do
+        ino = HTree.insert(ino, dev, bm, owner, pad + f"$k%07d", 9000000 + k, DirEntry.TypeRegular)
+
+      for k <- 0 until totalToInsert do
+        val expected = if k % 7 == 0 then 9000000 + k else 100 + k
+        HTree.lookup(ino, dev, owner, pad + f"$k%07d") shouldBe
+          Some((expected, DirEntry.TypeRegular))
     }
   }
 
