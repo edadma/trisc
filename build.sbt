@@ -51,7 +51,7 @@ lazy val commonScalacOptions = Seq(
 lazy val commonSettings = Seq(
   scalacOptions ++= commonScalacOptions,
   libraryDependencies += "org.scalatest" %%% "scalatest" % "3.2.19" % "test",
-  Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oD", "-W", "30", "30", "-P18"),
+  Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oD"),
   // Exclude full-system integration tests tagged Slow from `sbt test` by default.
   // Run them explicitly with: sbt testSlow  (or `sbt testAll` for everything)
   Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-l", "io.github.edadma.trisc.Slow"),
@@ -71,6 +71,13 @@ lazy val jvmNativeStubs = Seq(
   libraryDependencies += "org.scala-js" %% "scalajs-stubs" % "1.1.0" % "provided",
 )
 
+// ScalaTest CLI flags the JVM runner understands but the Scala Native and
+// Scala.js runners reject (`-W` slowpoke detector, `-P18` parallelism). Keep
+// these out of `commonSettings` so cross-platform test runs work.
+lazy val jvmTestOptions = Seq(
+  Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-W", "30", "30", "-P18"),
+)
+
 // --- Sub-projects ---
 
 lazy val utils = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -82,7 +89,7 @@ lazy val utils = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     libraryDependencies += "org.scala-lang.modules" %%% "scala-parser-combinators" % "2.4.0",
   )
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val mem = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -92,7 +99,7 @@ lazy val mem = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .settings(name := "trisc-mem")
   .dependsOn(utils)
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val tof = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -105,7 +112,7 @@ lazy val tof = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   )
   .dependsOn(mem)
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val asm = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -121,7 +128,7 @@ lazy val asm = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   )
   .dependsOn(tof)
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val svm = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -137,7 +144,7 @@ lazy val svm = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   )
   .dependsOn(asm)
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -153,7 +160,7 @@ lazy val cpu = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   )
   .dependsOn(mem)
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val docs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -168,7 +175,7 @@ lazy val docs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     ),
   )
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val sysl = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -184,7 +191,7 @@ lazy val sysl = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   )
   .dependsOn(docs)
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val sfs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -193,7 +200,7 @@ lazy val sfs = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .settings(commonSettings)
   .settings(name := "trisc-sfs")
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val triscCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -209,7 +216,7 @@ lazy val triscCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   )
   .dependsOn(cpu, asm, svm, sysl)
   .jsSettings(jsSettings)
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val syslCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -224,7 +231,7 @@ lazy val syslCli = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .jsSettings(
     scalaJSUseMainModuleInitializer := true,
   )
-  .jvmSettings(jvmNativeStubs)
+  .jvmSettings(jvmNativeStubs, jvmTestOptions)
   .nativeSettings(jvmNativeStubs)
 
 lazy val ttf = project
