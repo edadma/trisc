@@ -74,6 +74,22 @@ class HTreeTests extends AnyFreeSpec with Matchers:
         buf
       case other => fail(s"root block not concrete: $other")
 
+  /** Open a freshly formatted 32 MiB device, mount it, and return both
+    * the device and the live Sfs instance. */
+  private def freshLargeMounted(): (RamBlockDevice, Sfs) =
+    val dev = new RamBlockDevice(8192L)
+    Sfs.format(dev, smallOpts)
+    val sfs = Sfs.mount(dev)
+    (dev, sfs)
+
+  /** Resolve a directory's logical block number to its physical
+    * address through the inode's extent map. */
+  private def physical(dev: BlockDevice, ino: Inode, logical: Long): Long =
+    val reader = new ExtentReader(dev, ino)
+    reader.physicalBlock(logical) match
+      case BlockMapping.Concrete(p) => p
+      case other                    => fail(s"logical $logical not concrete: $other")
+
   /** A fresh, empty directory-shaped inode with no extents. */
   private def blankDirInode(): Inode = Inode(
     mode = 0x41ed,
@@ -421,5 +437,287 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       ino = HTree.delete(ino, f.dev, f.bm, f.owner, "dead")
       val xs = HTree.list(ino, f.dev, f.owner)
       xs.map(_.name).toSet shouldBe Set(".", "..", "alive")
+    }
+
+    "exact count: dot, dotdot, and N entries — no duplicates" in {
+      val f = fixture()
+      var ino = f.ino
+      val names = (0 until 200).map(i => f"f_$i%04d_padding_to_force_splits")
+      var inode = 100
+      for n <- names do
+        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        inode += 1
+      val listed = HTree.list(ino, f.dev, f.owner)
+      // Set membership AND length: catches duplicate yields from the walker
+      // (e.g. tombstones leaking through, or a leaf being visited twice).
+      listed.length shouldBe (names.length + 2)
+      listed.map(_.name).toSet shouldBe (names.toSet + "." + "..")
+    }
+
+    "list contains correct file_type for each entry" in {
+      val f = fixture()
+      var ino = f.ino
+      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "regular_file", 100, DirEntry.TypeRegular)
+      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "subdir", 101, DirEntry.TypeDirectory)
+      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "symlink", 102, DirEntry.TypeSymlink)
+      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "device", 103, DirEntry.TypeOther)
+
+      val byName = HTree.list(ino, f.dev, f.owner).map(e => e.name -> e.fileType).toMap
+      byName("regular_file") shouldBe DirEntry.TypeRegular
+      byName("subdir") shouldBe DirEntry.TypeDirectory
+      byName("symlink") shouldBe DirEntry.TypeSymlink
+      byName("device") shouldBe DirEntry.TypeOther
+    }
+  }
+
+  // ---- persistence (Sfs.format → mount → writeInode → unmount → mount) ----
+
+  "persistence" - {
+
+    "directory state survives writeInode → unmount → mount → readInode" in {
+      val (dev, sfs) = freshLargeMounted()
+      var ino = sfs.readInode(InoRoot)
+
+      val names = (0 until 50).map(i => f"persist_$i%03d")
+      var childIno = 1000
+      for n <- names do
+        ino = HTree.insert(ino, sfs.device, sfs.blockBitmap, InoRoot, n, childIno, DirEntry.TypeRegular)
+        childIno += 1
+      sfs.writeInode(InoRoot, ino)
+      sfs.unmount()
+
+      val sfs2 = Sfs.mount(dev)
+      val recovered = sfs2.readInode(InoRoot)
+      var childIno2 = 1000
+      for n <- names do
+        HTree.lookup(recovered, sfs2.device, InoRoot, n) shouldBe
+          Some((childIno2, DirEntry.TypeRegular))
+        childIno2 += 1
+      // Plus dot/dotdot.
+      HTree.list(recovered, sfs2.device, InoRoot).length shouldBe (names.length + 2)
+      sfs2.unmount()
+    }
+
+    "post-promotion directory survives a mount cycle" in {
+      val (dev, sfs) = freshLargeMounted()
+      var ino = sfs.readInode(InoRoot)
+
+      // Force promotion to treeDepth = 1.
+      val pad = "x" * 248
+      val total = 6000
+      var i = 0
+      while i < total do
+        ino = HTree.insert(ino, sfs.device, sfs.blockBitmap, InoRoot, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        i += 1
+      sfs.writeInode(InoRoot, ino)
+      sfs.unmount()
+
+      val sfs2 = Sfs.mount(dev)
+      val recovered = sfs2.readInode(InoRoot)
+      val rootBuf = readRoot(sfs2.device, recovered, InoRoot)
+      DirRootBlock.unpack(rootBuf, InoRoot).treeDepth shouldBe 1
+      // Spot-check a handful of names.
+      for s <- Vector(0, 1, 100, total / 2, total - 1) do
+        HTree.lookup(recovered, sfs2.device, InoRoot, pad + f"$s%07d") shouldBe
+          Some((100 + s, DirEntry.TypeRegular))
+      sfs2.unmount()
+    }
+
+    "block bitmap re-load reflects directory blocks allocated mid-session" in {
+      val (dev, sfs) = freshLargeMounted()
+      var ino = sfs.readInode(InoRoot)
+      val freeBefore = sfs.blockBitmap.freeCount
+
+      val names = (0 until 200).map(i => f"alloc_$i%04d_padding_to_force_a_split")
+      var childIno = 1000
+      for n <- names do
+        ino = HTree.insert(ino, sfs.device, sfs.blockBitmap, InoRoot, n, childIno, DirEntry.TypeRegular)
+        childIno += 1
+      val freeAfter = sfs.blockBitmap.freeCount
+      val consumedThisSession = freeBefore - freeAfter
+      consumedThisSession should be > 0
+
+      sfs.writeInode(InoRoot, ino)
+      sfs.unmount()
+
+      val sfs2 = Sfs.mount(dev)
+      // Bitmap re-loaded from disk should have the same free count.
+      sfs2.blockBitmap.freeCount shouldBe freeAfter
+      sfs2.unmount()
+    }
+  }
+
+  // ---- tail-checksum protection (block-swap defense) ------------------
+
+  "directory tail integrity" - {
+
+    "lookup raises SfsCorruptError when a leaf's CRC is corrupted" in {
+      val f = fixture()
+      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, "victim", 100, DirEntry.TypeRegular)
+      // Flip a single bit in the CRC field (last 4 bytes of the leaf block).
+      val phys = physical(f.dev, ino, 1L)
+      val buf = new Array[Byte](BlockSize)
+      f.dev.readBlock(phys, buf)
+      buf(BlockSize - 1) = (buf(BlockSize - 1) ^ 0x80).toByte
+      f.dev.writeBlock(phys, buf)
+      a[SfsCorruptError] should be thrownBy HTree.lookup(ino, f.dev, f.owner, "victim")
+    }
+
+    "lookup raises SfsCorruptError when a leaf's tail magic is wrong" in {
+      val f = fixture()
+      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, "victim", 100, DirEntry.TypeRegular)
+      val phys = physical(f.dev, ino, 1L)
+      val buf = new Array[Byte](BlockSize)
+      f.dev.readBlock(phys, buf)
+      // Magic lives at BlockSize - 12 (4 bytes).
+      Le.putU32(buf, BlockSize - 12, 0xdeadbeef)
+      f.dev.writeBlock(phys, buf)
+      a[SfsCorruptError] should be thrownBy HTree.lookup(ino, f.dev, f.owner, "victim")
+    }
+
+    "lookup raises SfsCorruptError when a leaf claims the wrong owner inode (block-swap)" in {
+      val f = fixture(owner = 7, parent = 2)
+      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, "victim", 100, DirEntry.TypeRegular)
+      val phys = physical(f.dev, ino, 1L)
+      val buf = new Array[Byte](BlockSize)
+      f.dev.readBlock(phys, buf)
+      // owner_inode lives at BlockSize - 8 (4 bytes).
+      Le.putU32(buf, BlockSize - 8, 999) // some *other* inode number
+      f.dev.writeBlock(phys, buf)
+      // Note: we don't refresh the CRC, so this would also fail the CRC
+      // check; either failure is acceptable as long as we refuse the
+      // block. Test asserts SfsCorruptError specifically.
+      a[SfsCorruptError] should be thrownBy HTree.lookup(ino, f.dev, f.owner, "victim")
+    }
+
+    "lookup raises SfsCorruptError when the root's CRC is corrupted" in {
+      val f = fixture()
+      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, "victim", 100, DirEntry.TypeRegular)
+      val phys = physical(f.dev, ino, 0L)
+      val buf = new Array[Byte](BlockSize)
+      f.dev.readBlock(phys, buf)
+      buf(BlockSize - 1) = (buf(BlockSize - 1) ^ 0x80).toByte
+      f.dev.writeBlock(phys, buf)
+      a[SfsCorruptError] should be thrownBy HTree.lookup(ino, f.dev, f.owner, "victim")
+    }
+  }
+
+  // ---- name encoding edge cases ---------------------------------------
+
+  "name encoding" - {
+
+    "round-trips a name at NAME_MAX (255 bytes ASCII)" in {
+      val f = fixture()
+      val name = "n" * NameMax
+      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, name, 100, DirEntry.TypeRegular)
+      HTree.lookup(ino, f.dev, f.owner, name) shouldBe Some((100, DirEntry.TypeRegular))
+      HTree.list(ino, f.dev, f.owner).find(_.name == name) shouldBe defined
+    }
+
+    "round-trips non-ASCII UTF-8 names" in {
+      val f = fixture()
+      val names = Vector(
+        "héllo",
+        "日本語",
+        "русский",
+        "café_au_lait",
+        "naïve",
+        "🦀_crab",
+      )
+      var ino = f.ino
+      var inode = 100
+      for n <- names do
+        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        inode += 1
+
+      var inode2 = 100
+      for n <- names do
+        HTree.lookup(ino, f.dev, f.owner, n) shouldBe Some((inode2, DirEntry.TypeRegular))
+        inode2 += 1
+
+      HTree.list(ino, f.dev, f.owner).map(_.name).toSet shouldBe
+        (names.toSet + "." + "..")
+    }
+
+    "rejects a name longer than NAME_MAX at the codec layer" in {
+      // DirEntry's ctor rejects nameLen > NAME_MAX, so we don't need
+      // HTree to repeat the check — confirm the underlying invariant.
+      an[IllegalArgumentException] should be thrownBy
+        DirEntry(100, DirEntry.TypeRegular, "x" * (NameMax + 1))
+    }
+  }
+
+  // ---- emptied-directory survival -------------------------------------
+
+  "empty directories" - {
+
+    "delete every entry then list returns just dot/dotdot, lookup misses" in {
+      val f = fixture()
+      var ino = f.ino
+      val names = Vector("a", "b", "c", "d", "e")
+      var inode = 100
+      for n <- names do
+        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        inode += 1
+      for n <- names do
+        ino = HTree.delete(ino, f.dev, f.bm, f.owner, n)
+
+      HTree.list(ino, f.dev, f.owner).map(_.name) shouldBe Vector(".", "..")
+      for n <- names do
+        HTree.lookup(ino, f.dev, f.owner, n) shouldBe None
+    }
+
+    "fully drained directory accepts new entries afterwards" in {
+      val f = fixture()
+      var ino = f.ino
+      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "first", 100, DirEntry.TypeRegular)
+      ino = HTree.delete(ino, f.dev, f.bm, f.owner, "first")
+      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "second", 200, DirEntry.TypeRegular)
+      HTree.lookup(ino, f.dev, f.owner, "second") shouldBe Some((200, DirEntry.TypeRegular))
+      HTree.lookup(ino, f.dev, f.owner, "first") shouldBe None
+    }
+  }
+
+  // ---- random-churn stress on a depth-1 tree --------------------------
+
+  "depth-1 churn" - {
+
+    "many alternating insert/delete cycles preserve invariants" in {
+      val (dev, _, bm) = freshLarge()
+      val owner = 5
+      var ino = HTree.initDirectory(blankDirInode(), dev, bm, owner, 2)
+
+      // Force promotion via NAME_MAX names.
+      val pad = "x" * 248
+      val seedSize = 6000
+      var i = 0
+      while i < seedSize do
+        ino = HTree.insert(ino, dev, bm, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        i += 1
+      DirRootBlock.unpack(readRoot(dev, ino, owner), owner).treeDepth shouldBe 1
+
+      // Pseudo-random churn: delete + reinsert with new inode numbers,
+      // interleaved across the existing keyspace. Use a deterministic
+      // PRNG so failures reproduce.
+      val rng = new scala.util.Random(0x5f51L)
+      for _ <- 0 until 1000 do
+        val k = rng.nextInt(seedSize)
+        val name = pad + f"$k%07d"
+        // delete may fail (already deleted); then insert reuses the slot
+        if HTree.lookup(ino, dev, owner, name).isDefined then
+          ino = HTree.delete(ino, dev, bm, owner, name)
+        else
+          ino = HTree.insert(ino, dev, bm, owner, name, 500_000 + k, DirEntry.TypeRegular)
+
+      // Final invariant check: every name that resolves to Some has the
+      // file_type we set, and list count matches lookup count.
+      val listed = HTree.list(ino, dev, owner).filter(e => e.name != "." && e.name != "..")
+      listed.length should be > 0
+      for e <- listed do
+        e.fileType shouldBe DirEntry.TypeRegular
+      val live = (0 until seedSize).count { k =>
+        HTree.lookup(ino, dev, owner, pad + f"$k%07d").isDefined
+      }
+      live shouldBe listed.length
     }
   }
