@@ -28,3 +28,6 @@ final class SfsNotDirectoryError(message: String) extends RuntimeException(messa
 /** Raised by `rmdir` when the target directory still has entries
   * other than dot/dotdot. */
 final class SfsNotEmptyError(message: String) extends RuntimeException(message)
+
+/** Raised by `readlink` when the target inode is not a symlink. */
+final class SfsNotSymlinkError(message: String) extends RuntimeException(message)
