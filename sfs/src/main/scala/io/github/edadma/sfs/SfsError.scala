@@ -20,3 +20,11 @@ final class SfsIsDirectoryError(message: String) extends RuntimeException(messag
 /** Raised when an allocator can't satisfy a request (out of free
   * inodes or free data blocks). */
 final class SfsNoSpaceError(message: String) extends RuntimeException(message)
+
+/** Raised by directory operations that require a directory but find
+  * something else (e.g. `rmdir` on a regular file). */
+final class SfsNotDirectoryError(message: String) extends RuntimeException(message)
+
+/** Raised by `rmdir` when the target directory still has entries
+  * other than dot/dotdot. */
+final class SfsNotEmptyError(message: String) extends RuntimeException(message)
