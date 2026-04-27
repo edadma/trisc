@@ -29,6 +29,12 @@ final class Sfs private[sfs] (
   def superblock: Superblock = _sb
   def isMounted: Boolean = _mounted
 
+  /** Begin a new journal transaction. The returned [[Transaction]] is
+    * single-use — call `commit` or `abort` exactly once. */
+  def beginTxn(): Transaction =
+    requireMounted()
+    new Transaction(this)
+
   /** Read inode `n` out of the inode table. */
   def readInode(n: Int): Inode =
     requireMounted()
