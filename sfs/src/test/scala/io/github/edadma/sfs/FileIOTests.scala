@@ -21,31 +21,19 @@ class FileIOTests extends AnyFreeSpec with Matchers:
       formatTime = 0x6800_4321L,
     )
 
-  private def fresh(): (RamBlockDevice, Layout, Bitmap) =
+  private def fresh(): (RamBlockDevice, Layout, Bitmap, Sfs) =
     val dev = RamBlockDevice.default()
     val layout = Sfs.format(dev, smallOpts)
-    val bm = new Bitmap(
-      dev,
-      startBlock = layout.blockBitmapStart.toLong,
-      lengthBlocks = layout.blockBitmapLen,
-      totalBits = layout.totalBlocks,
-    )
-    bm.load()
-    (dev, layout, bm)
+    val sfs = Sfs.mount(dev)
+    (dev, layout, sfs.blockBitmap, sfs)
 
   /** A larger device for tests that need more headroom (multi-block files,
     * non-contig allocator pre-fills, indirect-1 spillover). */
-  private def freshBig(blocks: Long = 4096L): (RamBlockDevice, Layout, Bitmap) =
+  private def freshBig(blocks: Long = 4096L): (RamBlockDevice, Layout, Bitmap, Sfs) =
     val dev = new RamBlockDevice(blocks)
     val layout = Sfs.format(dev, smallOpts)
-    val bm = new Bitmap(
-      dev,
-      startBlock = layout.blockBitmapStart.toLong,
-      lengthBlocks = layout.blockBitmapLen,
-      totalBits = layout.totalBlocks,
-    )
-    bm.load()
-    (dev, layout, bm)
+    val sfs = Sfs.mount(dev)
+    (dev, layout, sfs.blockBitmap, sfs)
 
   private def blankInode(): Inode = Inode(
     mode = 0x81a4,
@@ -96,48 +84,47 @@ class FileIOTests extends AnyFreeSpec with Matchers:
   "readFile" - {
 
     "returns empty array on a zero-size inode" in {
-      val (dev, _, _) = fresh()
+      val (dev, _, _, sfs) = fresh()
       FileIO.readFile(blankInode(), dev, 0L, 100).length shouldBe 0
     }
 
     "returns empty when offset is at or past EOF" in {
-      val (dev, _, bm) = fresh()
-      val ino = FileIO.writeFile(blankInode(), dev, bm, 0L, pattern(10), FixedSec, FixedNsec)
+      val (dev, _, bm, sfs) = fresh()
+      val ino = FileIO.writeFile(blankInode(), sfs, 0L, pattern(10), FixedSec, FixedNsec)
       FileIO.readFile(ino, dev, 10L, 5).length shouldBe 0
       FileIO.readFile(ino, dev, 100L, 5).length shouldBe 0
     }
 
     "clamps a read that extends past EOF to ino.size" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val data = pattern(50)
-      val ino = FileIO.writeFile(blankInode(), dev, bm, 0L, data, FixedSec, FixedNsec)
+      val ino = FileIO.writeFile(blankInode(), sfs, 0L, data, FixedSec, FixedNsec)
       val got = FileIO.readFile(ino, dev, 40L, 100)
       got.length shouldBe 10
       got.toSeq shouldBe data.slice(40, 50).toSeq
     }
 
     "round-trips a single-block byte pattern" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val data = pattern(BlockSize)
-      val ino = FileIO.writeFile(blankInode(), dev, bm, 0L, data, FixedSec, FixedNsec)
+      val ino = FileIO.writeFile(blankInode(), sfs, 0L, data, FixedSec, FixedNsec)
       FileIO.readFile(ino, dev, 0L, BlockSize).toSeq shouldBe data.toSeq
     }
 
     "round-trips a multi-block byte pattern" in {
-      val (dev, _, bm) = freshBig()
+      val (dev, _, bm, sfs) = freshBig()
       val data = pattern(BlockSize * 3 + 17)
-      val ino = FileIO.writeFile(blankInode(), dev, bm, 0L, data, FixedSec, FixedNsec)
+      val ino = FileIO.writeFile(blankInode(), sfs, 0L, data, FixedSec, FixedNsec)
       ino.size shouldBe data.length.toLong
       FileIO.readFile(ino, dev, 0L, data.length).toSeq shouldBe data.toSeq
     }
 
     "reads sparse holes as zero" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       // Put a single byte at offset 8KiB → 2 sparse blocks then 1 concrete.
       val ino = FileIO.writeFile(
         blankInode(),
-        dev,
-        bm,
+        sfs,
         offset = (BlockSize * 2).toLong,
         bytes = Array[Byte](0x42.toByte),
         timeSec = FixedSec,
@@ -154,16 +141,16 @@ class FileIOTests extends AnyFreeSpec with Matchers:
     }
 
     "supports byte-misaligned reads inside one block" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val data = pattern(200, seed = 7)
-      val ino = FileIO.writeFile(blankInode(), dev, bm, 0L, data, FixedSec, FixedNsec)
+      val ino = FileIO.writeFile(blankInode(), sfs, 0L, data, FixedSec, FixedNsec)
       FileIO.readFile(ino, dev, 50L, 80).toSeq shouldBe data.slice(50, 130).toSeq
     }
 
     "supports byte-misaligned reads across block boundaries" in {
-      val (dev, _, bm) = freshBig()
+      val (dev, _, bm, sfs) = freshBig()
       val data = pattern(BlockSize * 2 + 100, seed = 11)
-      val ino = FileIO.writeFile(blankInode(), dev, bm, 0L, data, FixedSec, FixedNsec)
+      val ino = FileIO.writeFile(blankInode(), sfs, 0L, data, FixedSec, FixedNsec)
       val got = FileIO.readFile(ino, dev, BlockSize - 5L, 30)
       got.toSeq shouldBe data.slice(BlockSize - 5, BlockSize - 5 + 30).toSeq
     }
@@ -174,16 +161,16 @@ class FileIOTests extends AnyFreeSpec with Matchers:
   "writeFile" - {
 
     "zero-length write is a no-op (no time bumps)" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val ino = blankInode()
       val freeBefore = bm.freeCount
-      FileIO.writeFile(ino, dev, bm, 0L, new Array[Byte](0), FixedSec, FixedNsec) shouldBe ino
+      FileIO.writeFile(ino, sfs, 0L, new Array[Byte](0), FixedSec, FixedNsec) shouldBe ino
       bm.freeCount shouldBe freeBefore
     }
 
     "stamps mtime, ctime, size, and blockCount on a fresh write" in {
-      val (dev, _, bm) = fresh()
-      val ino = FileIO.writeFile(blankInode(), dev, bm, 0L, pattern(100), FixedSec, FixedNsec)
+      val (dev, _, bm, sfs) = fresh()
+      val ino = FileIO.writeFile(blankInode(), sfs, 0L, pattern(100), FixedSec, FixedNsec)
       ino.size shouldBe 100L
       ino.mtimeSec shouldBe FixedSec
       ino.mtimeNsec shouldBe FixedNsec
@@ -193,13 +180,13 @@ class FileIOTests extends AnyFreeSpec with Matchers:
     }
 
     "writing into the middle of an existing concrete file overwrites" in {
-      val (dev, _, bm) = freshBig()
+      val (dev, _, bm, sfs) = freshBig()
       val orig = pattern(BlockSize * 2, seed = 0)
-      var ino = FileIO.writeFile(blankInode(), dev, bm, 0L, orig, FixedSec, FixedNsec)
+      var ino = FileIO.writeFile(blankInode(), sfs, 0L, orig, FixedSec, FixedNsec)
       val freeBefore = bm.freeCount
       // Overwrite bytes [100, 200) with all 0xee.
       val patch = Array.fill[Byte](100)(0xee.toByte)
-      ino = FileIO.writeFile(ino, dev, bm, 100L, patch, FixedSec + 1, 0)
+      ino = FileIO.writeFile(ino, sfs, 100L, patch, FixedSec + 1, 0)
       // No new allocation — just RMW.
       bm.freeCount shouldBe freeBefore
       val got = FileIO.readFile(ino, dev, 0L, BlockSize * 2)
@@ -209,13 +196,12 @@ class FileIOTests extends AnyFreeSpec with Matchers:
     }
 
     "extends past EOF with a sparse hole when offset > size" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       // Empty file → write at byte offset 8K + 50 = 1 byte.
       val data = pattern(1, seed = 0xaa)
       val ino = FileIO.writeFile(
         blankInode(),
-        dev,
-        bm,
+        sfs,
         offset = (BlockSize * 2 + 50).toLong,
         bytes = data,
         timeSec = FixedSec,
@@ -229,11 +215,11 @@ class FileIOTests extends AnyFreeSpec with Matchers:
     }
 
     "appending at exactly EOF grows the file in place" in {
-      val (dev, _, bm) = freshBig()
+      val (dev, _, bm, sfs) = freshBig()
       val first = pattern(100, seed = 0)
       val second = pattern(50, seed = 200)
-      var ino = FileIO.writeFile(blankInode(), dev, bm, 0L, first, FixedSec, FixedNsec)
-      ino = FileIO.writeFile(ino, dev, bm, ino.size, second, FixedSec, FixedNsec)
+      var ino = FileIO.writeFile(blankInode(), sfs, 0L, first, FixedSec, FixedNsec)
+      ino = FileIO.writeFile(ino, sfs, ino.size, second, FixedSec, FixedNsec)
       ino.size shouldBe 150L
       val all = FileIO.readFile(ino, dev, 0L, 200)
       all.length shouldBe 150
@@ -242,12 +228,11 @@ class FileIOTests extends AnyFreeSpec with Matchers:
     }
 
     "writing into an existing sparse hole converts it to concrete" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       // Build a 3-block sparse file by truncate-extend.
       var ino = FileIO.truncateFile(
         blankInode(),
-        dev,
-        bm,
+        sfs,
         newSize = (BlockSize * 3).toLong,
         timeSec = FixedSec,
         timeNsec = FixedNsec,
@@ -260,8 +245,7 @@ class FileIOTests extends AnyFreeSpec with Matchers:
       val patch = pattern(10, seed = 0x55)
       ino = FileIO.writeFile(
         ino,
-        dev,
-        bm,
+        sfs,
         offset = (BlockSize + 100).toLong,
         bytes = patch,
         timeSec = FixedSec,
@@ -281,11 +265,11 @@ class FileIOTests extends AnyFreeSpec with Matchers:
     }
 
     "byte-misaligned writes inside one block preserve surrounding bytes" in {
-      val (dev, _, bm) = freshBig()
+      val (dev, _, bm, sfs) = freshBig()
       val orig = pattern(BlockSize, seed = 0x40)
-      var ino = FileIO.writeFile(blankInode(), dev, bm, 0L, orig, FixedSec, FixedNsec)
+      var ino = FileIO.writeFile(blankInode(), sfs, 0L, orig, FixedSec, FixedNsec)
       val patch = Array.fill[Byte](32)(0x77.toByte)
-      ino = FileIO.writeFile(ino, dev, bm, 1000L, patch, FixedSec, FixedNsec)
+      ino = FileIO.writeFile(ino, sfs, 1000L, patch, FixedSec, FixedNsec)
       val got = FileIO.readFile(ino, dev, 0L, BlockSize)
       got.slice(0, 1000).toSeq shouldBe orig.slice(0, 1000).toSeq
       got.slice(1000, 1032).toSeq shouldBe patch.toSeq
@@ -293,12 +277,12 @@ class FileIOTests extends AnyFreeSpec with Matchers:
     }
 
     "writes spanning a block boundary stitch correctly" in {
-      val (dev, _, bm) = freshBig()
+      val (dev, _, bm, sfs) = freshBig()
       val orig = pattern(BlockSize * 2, seed = 0x80)
-      var ino = FileIO.writeFile(blankInode(), dev, bm, 0L, orig, FixedSec, FixedNsec)
+      var ino = FileIO.writeFile(blankInode(), sfs, 0L, orig, FixedSec, FixedNsec)
       val patch = pattern(50, seed = 0x33)
       // Span byte 4090..4140 → covers tail of block 0 and head of block 1.
-      ino = FileIO.writeFile(ino, dev, bm, 4090L, patch, FixedSec, FixedNsec)
+      ino = FileIO.writeFile(ino, sfs, 4090L, patch, FixedSec, FixedNsec)
       val got = FileIO.readFile(ino, dev, 0L, BlockSize * 2)
       got.slice(0, 4090).toSeq shouldBe orig.slice(0, 4090).toSeq
       got.slice(4090, 4140).toSeq shouldBe patch.toSeq
@@ -311,44 +295,43 @@ class FileIOTests extends AnyFreeSpec with Matchers:
   "truncateFile" - {
 
     "to the same size is a no-op" in {
-      val (dev, _, bm) = fresh()
-      val ino = FileIO.writeFile(blankInode(), dev, bm, 0L, pattern(50), FixedSec, FixedNsec)
+      val (dev, _, bm, sfs) = fresh()
+      val ino = FileIO.writeFile(blankInode(), sfs, 0L, pattern(50), FixedSec, FixedNsec)
       val freeBefore = bm.freeCount
-      val same = FileIO.truncateFile(ino, dev, bm, ino.size, FixedSec + 9, 0)
+      val same = FileIO.truncateFile(ino, sfs, ino.size, FixedSec + 9, 0)
       same shouldBe ino
       bm.freeCount shouldBe freeBefore
     }
 
     "shrinking a single-block file frees the block when truncating to 0" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val freeBeforeAll = bm.freeCount
-      val ino = FileIO.writeFile(blankInode(), dev, bm, 0L, pattern(100), FixedSec, FixedNsec)
-      val after = FileIO.truncateFile(ino, dev, bm, 0L, FixedSec + 1, 0)
+      val ino = FileIO.writeFile(blankInode(), sfs, 0L, pattern(100), FixedSec, FixedNsec)
+      val after = FileIO.truncateFile(ino, sfs, 0L, FixedSec + 1, 0)
       after.size shouldBe 0L
       after.blockCount shouldBe 0
       bm.freeCount shouldBe freeBeforeAll
     }
 
     "shrinking past a partial block zeroes the trailing bytes on disk" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val data = pattern(BlockSize, seed = 0xab) // a full block of non-zero bytes
-      var ino = FileIO.writeFile(blankInode(), dev, bm, 0L, data, FixedSec, FixedNsec)
+      var ino = FileIO.writeFile(blankInode(), sfs, 0L, data, FixedSec, FixedNsec)
       // Truncate to 1000 bytes — the block stays but bytes [1000, 4096) must zero.
-      ino = FileIO.truncateFile(ino, dev, bm, 1000L, FixedSec + 1, 0)
+      ino = FileIO.truncateFile(ino, sfs, 1000L, FixedSec + 1, 0)
       ino.size shouldBe 1000L
       // Re-extend to full block to expose the underlying stale bytes (if any).
-      ino = FileIO.truncateFile(ino, dev, bm, BlockSize.toLong, FixedSec + 2, 0)
+      ino = FileIO.truncateFile(ino, sfs, BlockSize.toLong, FixedSec + 2, 0)
       val tail = FileIO.readFile(ino, dev, 1000L, BlockSize - 1000)
       tail.forall(_ == 0.toByte) shouldBe true
     }
 
     "extending with truncate adds a sparse hole, not physical blocks" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val freeBefore = bm.freeCount
       val ino = FileIO.truncateFile(
         blankInode(),
-        dev,
-        bm,
+        sfs,
         newSize = (BlockSize * 4).toLong,
         timeSec = FixedSec,
         timeNsec = FixedNsec,
@@ -360,11 +343,11 @@ class FileIOTests extends AnyFreeSpec with Matchers:
     }
 
     "shrinking a multi-block file frees the blocks past the cut point" in {
-      val (dev, _, bm) = freshBig()
+      val (dev, _, bm, sfs) = freshBig()
       val data = pattern(BlockSize * 4, seed = 0xc0)
-      var ino = FileIO.writeFile(blankInode(), dev, bm, 0L, data, FixedSec, FixedNsec)
+      var ino = FileIO.writeFile(blankInode(), sfs, 0L, data, FixedSec, FixedNsec)
       val freeAfterWrite = bm.freeCount
-      ino = FileIO.truncateFile(ino, dev, bm, BlockSize.toLong, FixedSec + 1, 0)
+      ino = FileIO.truncateFile(ino, sfs, BlockSize.toLong, FixedSec + 1, 0)
       ino.size shouldBe BlockSize.toLong
       ino.blockCount shouldBe 8
       bm.freeCount shouldBe (freeAfterWrite + 3) // 3 trailing blocks freed
@@ -374,7 +357,7 @@ class FileIOTests extends AnyFreeSpec with Matchers:
   // ---- spillover into indirect-1 -------------------------------------
 
   ">64 KiB file with non-contiguous data spills into indirect-1" in {
-    val (dev, layout, bm) = freshBig(8192L)
+    val (dev, layout, bm, sfs) = freshBig(8192L)
     // 17 logical blocks, each its own extent (forces inline → ind1 spill).
     reserveAlternating(bm, layout, 17)
     var ino = blankInode()
@@ -384,8 +367,7 @@ class FileIOTests extends AnyFreeSpec with Matchers:
       val data = pattern(sliceLen, seed = b)
       ino = FileIO.writeFile(
         ino,
-        dev,
-        bm,
+        sfs,
         offset = (b.toLong * BlockSize),
         bytes = data,
         timeSec = FixedSec,
@@ -406,15 +388,14 @@ class FileIOTests extends AnyFreeSpec with Matchers:
   // ---- > 2 GiB sparse file (built sparsely, fits in test device) -----
 
   "sparse file >2 GiB stores data only at the populated tail" in {
-    val (dev, _, bm) = fresh()
+    val (dev, _, bm, sfs) = fresh()
     // 2 GiB = 524288 blocks of 4 KiB = 0x80000000 bytes.
     val twoGiB = (1L << 31)
     val freeBefore = bm.freeCount
     val data = pattern(64, seed = 0x9c)
     val ino = FileIO.writeFile(
       blankInode(),
-      dev,
-      bm,
+      sfs,
       offset = twoGiB,
       bytes = data,
       timeSec = FixedSec,

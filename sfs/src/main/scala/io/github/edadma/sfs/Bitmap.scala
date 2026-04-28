@@ -65,6 +65,22 @@ final class Bitmap(
         dirty(i) = false
       i += 1
 
+  /** Stage every dirty bitmap block into the given [[Transaction]] and
+    * mark them clean. After this returns, a subsequent `tx.commit()`
+    * will write the bitmap blocks through the journal and to their
+    * on-disk locations.
+    *
+    * Used by [[Sfs.withTransaction]] just before commit, so bitmap
+    * mutations from any per-op work are atomically journaled with the
+    * other metadata in the same transaction. */
+  def stageInto(tx: Transaction): Unit =
+    var i = 0
+    while i < lengthBlocks do
+      if dirty(i) then
+        tx.writeMetadata(startBlock + i, blocks(i))
+        dirty(i) = false
+      i += 1
+
   def isSet(bit: Int): Boolean =
     requireRange(bit)
     val byteOff = bit >>> 3

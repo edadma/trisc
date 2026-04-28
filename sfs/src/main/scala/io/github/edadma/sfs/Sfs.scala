@@ -12,9 +12,12 @@ import Constants.*
   * flips it back. A clean `unmount` is the only signal that lets the
   * next mount skip journal recovery.
   *
-  * Until the journal lands in Phase 13, [[writeInode]] and bitmap
-  * flushes go straight to the device. Their callers' API will not
-  * change when the journal is wired in beneath them.
+  * Metadata writes flow through [[writeMetadataBlock]]. When the call
+  * happens inside a [[withTransaction]] body the block is staged in
+  * the active [[Transaction]]; outside one, it lands on the device
+  * directly. The latter path is used during format, mount/unmount, and
+  * direct test scaffolding — code under any user-visible operation
+  * always runs inside a transaction.
   */
 final class Sfs private[sfs] (
     val device: BlockDevice,
@@ -25,37 +28,132 @@ final class Sfs private[sfs] (
     val journal: Journal,
 ):
   private var _mounted: Boolean = true
+  private var _currentTxn: Transaction | Null = null
 
   def superblock: Superblock = _sb
   def isMounted: Boolean = _mounted
 
+  /** The transaction currently open on this Sfs, if any. Set by
+    * [[withTransaction]] for the duration of the body. */
+  def currentTxn: Transaction | Null = _currentTxn
+
   /** Begin a new journal transaction. The returned [[Transaction]] is
-    * single-use — call `commit` or `abort` exactly once. */
+    * single-use — call `commit` or `abort` exactly once. Most callers
+    * should use [[withTransaction]] instead. */
   def beginTxn(): Transaction =
     requireMounted()
     new Transaction(this)
 
-  /** Read inode `n` out of the inode table. */
+  /** Run `body` inside a journal transaction. On normal return, the
+    * dirty bitmap blocks are staged into the transaction and the txn
+    * is committed; on a thrown exception the txn is aborted and the
+    * exception propagates.
+    *
+    * Re-entrant: if `withTransaction` is called inside another
+    * `withTransaction`, the inner call simply runs `body` against the
+    * outer transaction without opening a nested one. This lets
+    * higher-level public ops compose lower-level public ops (e.g.
+    * `rename` calling `FileOps.unlink` to overwrite a non-directory
+    * target) without each one starting its own commit. */
+  def withTransaction[A](body: => A): A =
+    requireMounted()
+    if _currentTxn != null then body
+    else
+      val tx = new Transaction(this)
+      _currentTxn = tx
+      var committed = false
+      try
+        val r = body
+        blockBitmap.stageInto(tx)
+        inodeBitmap.stageInto(tx)
+        tx.commit()
+        committed = true
+        r
+      finally
+        if !committed && tx.isOpen then tx.abort()
+        _currentTxn = null
+
+  /** Write a 4 KiB metadata block. If a transaction is open on this
+    * Sfs (via [[withTransaction]]), the block is staged in the txn
+    * and lands on disk through the journal commit + replay. Otherwise
+    * the block is written straight to the device — used by `format`,
+    * `mount`, `unmount`, and a handful of direct paths that operate
+    * outside a transaction.
+    *
+    * Use [[BlockDevice.writeBlock]] directly only for *non-metadata*
+    * writes (file data blocks under data=ordered) and for the
+    * journal's own log + superblock writes. */
+  private[sfs] def writeMetadataBlock(blockNum: Long, buf: Array[Byte]): Unit =
+    if _currentTxn != null then _currentTxn.nn.writeMetadata(blockNum, buf)
+    else device.writeBlock(blockNum, buf)
+
+  /** Read a 4 KiB metadata block into `buf`. If a transaction is open
+    * and has a staged copy of `blockNum`, that staged copy is returned
+    * (read-your-writes within a txn). Otherwise the block is read off
+    * disk via [[BlockDevice.readBlock]].
+    *
+    * Necessary because [[writeMetadataBlock]] only stages — it does
+    * NOT touch the device until commit. Without this, code that
+    * delete-then-insert into the same dir block would see the OLD
+    * disk state on the second read, miss the just-staged change,
+    * and silently corrupt the directory. */
+  private[sfs] def readMetadataBlock(blockNum: Long, buf: Array[Byte]): Unit =
+    val txn = _currentTxn
+    if txn != null then
+      txn.nn.peek(blockNum) match
+        case Some(staged) => System.arraycopy(staged, 0, buf, 0, BlockSize)
+        case None         => device.readBlock(blockNum, buf)
+    else device.readBlock(blockNum, buf)
+
+  /** A [[BlockDevice]] view of this Sfs that routes metadata reads
+    * and writes through [[readMetadataBlock]] / [[writeMetadataBlock]].
+    *
+    * Used wherever code reads metadata that the active txn might have
+    * staged (extent indirect blocks, directory blocks, inode table
+    * blocks). Code that touches *non-metadata* (the journal log,
+    * file data blocks under data=ordered) keeps using the raw
+    * [[device]] field. */
+  val metaDevice: BlockDevice = new BlockDevice:
+    val blockCount: Long = Sfs.this.device.blockCount
+    def readBlock(blockNum: Long, buf: Array[Byte]): Unit =
+      Sfs.this.readMetadataBlock(blockNum, buf)
+    def writeBlock(blockNum: Long, buf: Array[Byte]): Unit =
+      Sfs.this.writeMetadataBlock(blockNum, buf)
+    override def flush(): Unit = Sfs.this.device.flush()
+
+  /** Read inode `n` out of the inode table. Goes through
+    * [[readMetadataBlock]] so it sees any updates the active txn has
+    * staged for that table block. */
   def readInode(n: Int): Inode =
     requireMounted()
     val (blk, off) = layout.inodeLocation(n)
     val buf = new Array[Byte](BlockSize)
-    device.readBlock(blk, buf)
+    readMetadataBlock(blk, buf)
     Inode.unpack(buf, off)
 
   /** Write inode `n` into the inode table, preserving the other 15
-    * inodes in the same 4 KiB block via read-modify-write. */
+    * inodes in the same 4 KiB block via read-modify-write. Routes
+    * through [[writeMetadataBlock]] so it is journaled when called
+    * inside [[withTransaction]]; uses [[readMetadataBlock]] for the
+    * RMW base so other inode updates already staged in this txn
+    * (which share the same 4 KiB table block) are not clobbered. */
   def writeInode(n: Int, ino: Inode): Unit =
     requireMounted()
     val (blk, off) = layout.inodeLocation(n)
     val buf = new Array[Byte](BlockSize)
-    device.readBlock(blk, buf)
+    readMetadataBlock(blk, buf)
     Inode.pack(ino, buf, off)
-    device.writeBlock(blk, buf)
+    writeMetadataBlock(blk, buf)
 
   /** Flush dirty bitmap blocks and journal state, mark the volume clean
     * in the on-disk superblock, and refuse further calls on this
-    * instance. */
+    * instance.
+    *
+    * Bitmap and journal writes here are direct (not journaled) — the
+    * superblock flip to `clean` is the outer commit, and any per-op
+    * bitmap mutations have already been journaled by `withTransaction`.
+    * The final `flush()` is a belt-and-suspenders catch for direct
+    * mutations from tests. */
   def unmount(): Unit =
     requireMounted()
     blockBitmap.flush()

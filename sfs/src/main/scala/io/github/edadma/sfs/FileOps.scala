@@ -65,7 +65,7 @@ object FileOps:
       gid: Int,
       timeSec: Int,
       timeNsec: Int,
-  ): (Inode, Int) =
+  ): (Inode, Int) = sfs.withTransaction {
     require(
       (mode & ModeTypeMask) != ModeDirectory,
       s"FileOps.create: cannot create a directory — use mkdir (Phase 11)",
@@ -78,11 +78,12 @@ object FileOps:
     sfs.writeInode(newInodeNum, fresh)
 
     val updatedParent = HTree.insert(
-      parent, sfs.device, sfs.blockBitmap, parentInodeNum,
+      parent, sfs, parentInodeNum,
       name, newInodeNum, fileTypeFromMode(mode),
     )
     val touched = bumpMtimeCtime(updatedParent, timeSec, timeNsec)
     (touched, newInodeNum)
+  }
 
   // ---- unlink ---------------------------------------------------------
 
@@ -103,7 +104,7 @@ object FileOps:
       name: String,
       timeSec: Int,
       timeNsec: Int,
-  ): Inode =
+  ): Inode = sfs.withTransaction {
     val (childNum, childType) = HTree
       .lookup(parent, sfs.device, parentInodeNum, name)
       .getOrElse(
@@ -119,7 +120,7 @@ object FileOps:
     if newLinkCount > 0 then
       sfs.writeInode(childNum, target.copy(linkCount = newLinkCount, ctimeSec = timeSec, ctimeNsec = timeNsec))
     else
-      val drained = ExtentAllocator.truncate(target, sfs.device, sfs.blockBitmap, 0L)
+      val drained = ExtentAllocator.truncate(target, sfs, 0L)
       sfs.writeInode(
         childNum,
         drained.copy(
@@ -132,8 +133,9 @@ object FileOps:
       )
       sfs.inodeBitmap.clear(childNum)
 
-    val updatedParent = HTree.delete(parent, sfs.device, sfs.blockBitmap, parentInodeNum, name)
+    val updatedParent = HTree.delete(parent, sfs, parentInodeNum, name)
     bumpMtimeCtime(updatedParent, timeSec, timeNsec)
+  }
 
   // ---- link -----------------------------------------------------------
 
@@ -153,7 +155,7 @@ object FileOps:
       name: String,
       timeSec: Int,
       timeNsec: Int,
-  ): Inode =
+  ): Inode = sfs.withTransaction {
     val target = sfs.readInode(targetInodeNum)
     if (target.mode & ModeTypeMask) == ModeDirectory then
       throw new SfsIsDirectoryError(
@@ -167,10 +169,11 @@ object FileOps:
     sfs.writeInode(targetInodeNum, bumped)
 
     val updatedParent = HTree.insert(
-      parent, sfs.device, sfs.blockBitmap, parentInodeNum,
+      parent, sfs, parentInodeNum,
       name, targetInodeNum, fileTypeFromMode(target.mode),
     )
     bumpMtimeCtime(updatedParent, timeSec, timeNsec)
+  }
 
   // ---- stat -----------------------------------------------------------
 

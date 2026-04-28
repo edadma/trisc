@@ -21,48 +21,31 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       formatTime = 0x6800_4321L,
     )
 
-  /** Format a fresh device + load its block bitmap. */
-  private def fresh(): (RamBlockDevice, Layout, Bitmap) =
+  /** Format + mount a fresh device, returning the device, layout,
+    * block bitmap, and the live Sfs all in one shot. */
+  private def fresh(): (RamBlockDevice, Layout, Bitmap, Sfs) =
     val dev = RamBlockDevice.default()
     val layout = Sfs.format(dev, smallOpts)
-    val bm = new Bitmap(
-      dev,
-      startBlock = layout.blockBitmapStart.toLong,
-      lengthBlocks = layout.blockBitmapLen,
-      totalBits = layout.totalBlocks,
-    )
-    bm.load()
-    (dev, layout, bm)
+    val sfs = Sfs.mount(dev)
+    (dev, layout, sfs.blockBitmap, sfs)
 
   /** Format a larger 32 MiB device for tests that need a directory big
     * enough to overflow the root index_entries (~510+ data blocks for
     * one directory). */
-  private def freshLarge(): (RamBlockDevice, Layout, Bitmap) =
+  private def freshLarge(): (RamBlockDevice, Layout, Bitmap, Sfs) =
     val dev = new RamBlockDevice(8192L)
     val layout = Sfs.format(dev, smallOpts)
-    val bm = new Bitmap(
-      dev,
-      startBlock = layout.blockBitmapStart.toLong,
-      lengthBlocks = layout.blockBitmapLen,
-      totalBits = layout.totalBlocks,
-    )
-    bm.load()
-    (dev, layout, bm)
+    val sfs = Sfs.mount(dev)
+    (dev, layout, sfs.blockBitmap, sfs)
 
   /** Even larger device: 64 MiB. Used for tests that need a directory
     * large enough to fill an interior block at depth 1 (~1000+ data
     * blocks for one directory). */
-  private def freshHuge(): (RamBlockDevice, Layout, Bitmap) =
+  private def freshHuge(): (RamBlockDevice, Layout, Bitmap, Sfs) =
     val dev = new RamBlockDevice(16384L)
     val layout = Sfs.format(dev, smallOpts)
-    val bm = new Bitmap(
-      dev,
-      startBlock = layout.blockBitmapStart.toLong,
-      lengthBlocks = layout.blockBitmapLen,
-      totalBits = layout.totalBlocks,
-    )
-    bm.load()
-    (dev, layout, bm)
+    val sfs = Sfs.mount(dev)
+    (dev, layout, sfs.blockBitmap, sfs)
 
   /** Read the directory's logical block 0 (root) into a fresh buffer. */
   private def readRoot(dev: BlockDevice, ino: Inode, ownerInode: Int): Array[Byte] =
@@ -116,21 +99,22 @@ class HTreeTests extends AnyFreeSpec with Matchers:
   )
 
   /** Test fixture: device, bitmap, owner inode number, parent inode
-    * number, and a freshly-initialized directory inode. */
+    * number, the live Sfs, and a freshly-initialized directory inode. */
   private case class Fixture(
       dev: RamBlockDevice,
       bm: Bitmap,
       owner: Int,
       parent: Int,
       ino: Inode,
+      sfs: Sfs,
   )
 
   /** Format + initDirectory in one shot so each test starts with a
     * working empty directory. */
   private def fixture(owner: Int = 5, parent: Int = 2): Fixture =
-    val (dev, _, bm) = fresh()
-    val ino = HTree.initDirectory(blankDirInode(), dev, bm, owner, parent)
-    Fixture(dev, bm, owner, parent, ino)
+    val (dev, _, bm, sfs) = fresh()
+    val ino = HTree.initDirectory(blankDirInode(), sfs, owner, parent)
+    Fixture(dev, bm, owner, parent, ino, sfs)
 
   // ---- initDirectory --------------------------------------------------
 
@@ -187,7 +171,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
 
     "finds a name after insert" in {
       val f = fixture()
-      val grown = HTree.insert(f.ino, f.dev, f.bm, f.owner, "hello", 100, DirEntry.TypeRegular)
+      val grown = HTree.insert(f.ino, f.sfs, f.owner, "hello", 100, DirEntry.TypeRegular)
       HTree.lookup(grown, f.dev, f.owner, "hello") shouldBe Some((100, DirEntry.TypeRegular))
     }
   }
@@ -202,7 +186,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val names = (0 until 10).map(i => f"name_$i%02d")
       var inode = 100
       for n <- names do
-        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, f.sfs, f.owner, n, inode, DirEntry.TypeRegular)
         inode += 1
 
       var n2 = 100
@@ -214,16 +198,16 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     """rejects "." and "..""" in {
       val f = fixture()
       an[IllegalArgumentException] should be thrownBy
-        HTree.insert(f.ino, f.dev, f.bm, f.owner, ".", 100, DirEntry.TypeRegular)
+        HTree.insert(f.ino, f.sfs, f.owner, ".", 100, DirEntry.TypeRegular)
       an[IllegalArgumentException] should be thrownBy
-        HTree.insert(f.ino, f.dev, f.bm, f.owner, "..", 100, DirEntry.TypeRegular)
+        HTree.insert(f.ino, f.sfs, f.owner, "..", 100, DirEntry.TypeRegular)
     }
 
     "raises SfsExistsError on duplicate name" in {
       val f = fixture()
-      val ino1 = HTree.insert(f.ino, f.dev, f.bm, f.owner, "hello", 100, DirEntry.TypeRegular)
+      val ino1 = HTree.insert(f.ino, f.sfs, f.owner, "hello", 100, DirEntry.TypeRegular)
       an[SfsExistsError] should be thrownBy
-        HTree.insert(ino1, f.dev, f.bm, f.owner, "hello", 200, DirEntry.TypeRegular)
+        HTree.insert(ino1, f.sfs, f.owner, "hello", 200, DirEntry.TypeRegular)
     }
 
     "splits a full leaf and keeps every name reachable" in {
@@ -233,7 +217,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val names = (0 until 80).map(i => "x" * 60 + f"$i%04d")
       var inode = 100
       for n <- names do
-        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, f.sfs, f.owner, n, inode, DirEntry.TypeRegular)
         inode += 1
 
       // Directory has root + at least 2 leaves after split.
@@ -251,7 +235,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val names = (0 until 500).map(i => f"file_$i%04d_with_some_padding")
       var inode = 100
       for n <- names do
-        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, f.sfs, f.owner, n, inode, DirEntry.TypeRegular)
         inode += 1
 
       var n2 = 100
@@ -268,13 +252,13 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val names = (0 until 100).map(i => f"file_$i%04d_padding_to_force_splits")
       var inode = 100
       for n <- names do
-        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, f.sfs, f.owner, n, inode, DirEntry.TypeRegular)
         inode += 1
       // Delete every other entry, then reinsert.
       for i <- names.indices.filter(_ % 2 == 0) do
-        ino = HTree.delete(ino, f.dev, f.bm, f.owner, names(i))
+        ino = HTree.delete(ino, f.sfs, f.owner, names(i))
       for i <- names.indices.filter(_ % 2 == 0) do
-        ino = HTree.insert(ino, f.dev, f.bm, f.owner, names(i), 1000 + i, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, f.sfs, f.owner, names(i), 1000 + i, DirEntry.TypeRegular)
 
       // Even-indexed entries now have inode 1000+i; odd-indexed have inode 100+i.
       for i <- names.indices do
@@ -283,9 +267,9 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     }
 
     "promotes treeDepth 0 → 1 once root.indexEntries fills" in {
-      val (dev, _, bm) = freshLarge()
+      val (dev, _, bm, sfs) = freshLarge()
       val owner = 5
-      var ino = HTree.initDirectory(blankDirInode(), dev, bm, owner, 2)
+      var ino = HTree.initDirectory(blankDirInode(), sfs, owner, 2)
 
       // Pad names so each leaf holds only ~15 entries (NAME_MAX-sized
       // records). Insert until the root promotes to treeDepth = 1, plus
@@ -294,7 +278,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       var i = 0
       val totalToInsert = 6000
       while i < totalToInsert do
-        ino = HTree.insert(ino, dev, bm, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, sfs, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
         i += 1
 
       val root = DirRootBlock.unpack(readRoot(dev, ino, owner), owner)
@@ -308,15 +292,15 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     }
 
     "delete + reinsert after promotion preserves all entries" in {
-      val (dev, _, bm) = freshLarge()
+      val (dev, _, bm, sfs) = freshLarge()
       val owner = 5
-      var ino = HTree.initDirectory(blankDirInode(), dev, bm, owner, 2)
+      var ino = HTree.initDirectory(blankDirInode(), sfs, owner, 2)
 
       val pad = "x" * 248
       val totalToInsert = 6000
       var i = 0
       while i < totalToInsert do
-        ino = HTree.insert(ino, dev, bm, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, sfs, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
         i += 1
 
       DirRootBlock.unpack(readRoot(dev, ino, owner), owner).treeDepth shouldBe 1
@@ -324,9 +308,9 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       // Delete every 7th entry and reinsert with a different inode.
       val touched = (0 until totalToInsert by 7).toVector
       for k <- touched do
-        ino = HTree.delete(ino, dev, bm, owner, pad + f"$k%07d")
+        ino = HTree.delete(ino, sfs, owner, pad + f"$k%07d")
       for k <- touched do
-        ino = HTree.insert(ino, dev, bm, owner, pad + f"$k%07d", 9000000 + k, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, sfs, owner, pad + f"$k%07d", 9000000 + k, DirEntry.TypeRegular)
 
       for k <- 0 until totalToInsert do
         val expected = if k % 7 == 0 then 9000000 + k else 100 + k
@@ -335,9 +319,9 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     }
 
     "splits an interior block at depth 1 (root has > 2 entries)" in {
-      val (dev, _, bm) = freshHuge()
+      val (dev, _, bm, sfs) = freshHuge()
       val owner = 5
-      var ino = HTree.initDirectory(blankDirInode(), dev, bm, owner, 2)
+      var ino = HTree.initDirectory(blankDirInode(), sfs, owner, 2)
 
       // ~12k NAME_MAX-padded inserts: forces promotion (~3.5k inserts in)
       // and then keeps loading until at least one interior block fills
@@ -346,7 +330,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val totalToInsert = 12000
       var i = 0
       while i < totalToInsert do
-        ino = HTree.insert(ino, dev, bm, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, sfs, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
         i += 1
 
       val root = DirRootBlock.unpack(readRoot(dev, ino, owner), owner)
@@ -372,32 +356,32 @@ class HTreeTests extends AnyFreeSpec with Matchers:
 
     "removes an inserted name" in {
       val f = fixture()
-      val ino1 = HTree.insert(f.ino, f.dev, f.bm, f.owner, "alpha", 100, DirEntry.TypeRegular)
-      val ino2 = HTree.delete(ino1, f.dev, f.bm, f.owner, "alpha")
+      val ino1 = HTree.insert(f.ino, f.sfs, f.owner, "alpha", 100, DirEntry.TypeRegular)
+      val ino2 = HTree.delete(ino1, f.sfs, f.owner, "alpha")
       HTree.lookup(ino2, f.dev, f.owner, "alpha") shouldBe None
     }
 
     """rejects "." and "..""" in {
       val f = fixture()
       an[IllegalArgumentException] should be thrownBy
-        HTree.delete(f.ino, f.dev, f.bm, f.owner, ".")
+        HTree.delete(f.ino, f.sfs, f.owner, ".")
       an[IllegalArgumentException] should be thrownBy
-        HTree.delete(f.ino, f.dev, f.bm, f.owner, "..")
+        HTree.delete(f.ino, f.sfs, f.owner, "..")
     }
 
     "raises SfsNotFoundError on missing name" in {
       val f = fixture()
       an[SfsNotFoundError] should be thrownBy
-        HTree.delete(f.ino, f.dev, f.bm, f.owner, "ghost")
+        HTree.delete(f.ino, f.sfs, f.owner, "ghost")
     }
 
     "tombstone slack is reused by a subsequent insert" in {
       val f = fixture()
       var ino = f.ino
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "first", 100, DirEntry.TypeRegular)
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "second", 101, DirEntry.TypeRegular)
-      ino = HTree.delete(ino, f.dev, f.bm, f.owner, "first")
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "third_with_a_longer_name", 102, DirEntry.TypeRegular)
+      ino = HTree.insert(ino, f.sfs, f.owner, "first", 100, DirEntry.TypeRegular)
+      ino = HTree.insert(ino, f.sfs, f.owner, "second", 101, DirEntry.TypeRegular)
+      ino = HTree.delete(ino, f.sfs, f.owner, "first")
+      ino = HTree.insert(ino, f.sfs, f.owner, "third_with_a_longer_name", 102, DirEntry.TypeRegular)
       HTree.lookup(ino, f.dev, f.owner, "second") shouldBe Some((101, DirEntry.TypeRegular))
       HTree.lookup(ino, f.dev, f.owner, "third_with_a_longer_name") shouldBe Some((102, DirEntry.TypeRegular))
       HTree.lookup(ino, f.dev, f.owner, "first") shouldBe None
@@ -422,7 +406,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val names = Vector("alpha", "beta", "gamma", "delta", "epsilon")
       var inode = 100
       for n <- names do
-        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, f.sfs, f.owner, n, inode, DirEntry.TypeRegular)
         inode += 1
 
       val xs = HTree.list(ino, f.dev, f.owner)
@@ -432,9 +416,9 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     "respects deletes (tombstones are skipped)" in {
       val f = fixture()
       var ino = f.ino
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "alive", 100, DirEntry.TypeRegular)
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "dead", 101, DirEntry.TypeRegular)
-      ino = HTree.delete(ino, f.dev, f.bm, f.owner, "dead")
+      ino = HTree.insert(ino, f.sfs, f.owner, "alive", 100, DirEntry.TypeRegular)
+      ino = HTree.insert(ino, f.sfs, f.owner, "dead", 101, DirEntry.TypeRegular)
+      ino = HTree.delete(ino, f.sfs, f.owner, "dead")
       val xs = HTree.list(ino, f.dev, f.owner)
       xs.map(_.name).toSet shouldBe Set(".", "..", "alive")
     }
@@ -445,7 +429,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val names = (0 until 200).map(i => f"f_$i%04d_padding_to_force_splits")
       var inode = 100
       for n <- names do
-        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, f.sfs, f.owner, n, inode, DirEntry.TypeRegular)
         inode += 1
       val listed = HTree.list(ino, f.dev, f.owner)
       // Set membership AND length: catches duplicate yields from the walker
@@ -457,10 +441,10 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     "list contains correct file_type for each entry" in {
       val f = fixture()
       var ino = f.ino
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "regular_file", 100, DirEntry.TypeRegular)
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "subdir", 101, DirEntry.TypeDirectory)
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "symlink", 102, DirEntry.TypeSymlink)
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "device", 103, DirEntry.TypeOther)
+      ino = HTree.insert(ino, f.sfs, f.owner, "regular_file", 100, DirEntry.TypeRegular)
+      ino = HTree.insert(ino, f.sfs, f.owner, "subdir", 101, DirEntry.TypeDirectory)
+      ino = HTree.insert(ino, f.sfs, f.owner, "symlink", 102, DirEntry.TypeSymlink)
+      ino = HTree.insert(ino, f.sfs, f.owner, "device", 103, DirEntry.TypeOther)
 
       val byName = HTree.list(ino, f.dev, f.owner).map(e => e.name -> e.fileType).toMap
       byName("regular_file") shouldBe DirEntry.TypeRegular
@@ -481,7 +465,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val names = (0 until 50).map(i => f"persist_$i%03d")
       var childIno = 1000
       for n <- names do
-        ino = HTree.insert(ino, sfs.device, sfs.blockBitmap, InoRoot, n, childIno, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, sfs, InoRoot, n, childIno, DirEntry.TypeRegular)
         childIno += 1
       sfs.writeInode(InoRoot, ino)
       sfs.unmount()
@@ -507,7 +491,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val total = 6000
       var i = 0
       while i < total do
-        ino = HTree.insert(ino, sfs.device, sfs.blockBitmap, InoRoot, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, sfs, InoRoot, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
         i += 1
       sfs.writeInode(InoRoot, ino)
       sfs.unmount()
@@ -531,7 +515,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val names = (0 until 200).map(i => f"alloc_$i%04d_padding_to_force_a_split")
       var childIno = 1000
       for n <- names do
-        ino = HTree.insert(ino, sfs.device, sfs.blockBitmap, InoRoot, n, childIno, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, sfs, InoRoot, n, childIno, DirEntry.TypeRegular)
         childIno += 1
       val freeAfter = sfs.blockBitmap.freeCount
       val consumedThisSession = freeBefore - freeAfter
@@ -553,7 +537,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
 
     "lookup raises SfsCorruptError when a leaf's CRC is corrupted" in {
       val f = fixture()
-      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, "victim", 100, DirEntry.TypeRegular)
+      val ino = HTree.insert(f.ino, f.sfs, f.owner, "victim", 100, DirEntry.TypeRegular)
       // Flip a single bit in the CRC field (last 4 bytes of the leaf block).
       val phys = physical(f.dev, ino, 1L)
       val buf = new Array[Byte](BlockSize)
@@ -565,7 +549,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
 
     "lookup raises SfsCorruptError when a leaf's tail magic is wrong" in {
       val f = fixture()
-      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, "victim", 100, DirEntry.TypeRegular)
+      val ino = HTree.insert(f.ino, f.sfs, f.owner, "victim", 100, DirEntry.TypeRegular)
       val phys = physical(f.dev, ino, 1L)
       val buf = new Array[Byte](BlockSize)
       f.dev.readBlock(phys, buf)
@@ -577,7 +561,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
 
     "lookup raises SfsCorruptError when a leaf claims the wrong owner inode (block-swap)" in {
       val f = fixture(owner = 7, parent = 2)
-      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, "victim", 100, DirEntry.TypeRegular)
+      val ino = HTree.insert(f.ino, f.sfs, f.owner, "victim", 100, DirEntry.TypeRegular)
       val phys = physical(f.dev, ino, 1L)
       val buf = new Array[Byte](BlockSize)
       f.dev.readBlock(phys, buf)
@@ -592,7 +576,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
 
     "lookup raises SfsCorruptError when the root's CRC is corrupted" in {
       val f = fixture()
-      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, "victim", 100, DirEntry.TypeRegular)
+      val ino = HTree.insert(f.ino, f.sfs, f.owner, "victim", 100, DirEntry.TypeRegular)
       val phys = physical(f.dev, ino, 0L)
       val buf = new Array[Byte](BlockSize)
       f.dev.readBlock(phys, buf)
@@ -609,7 +593,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     "round-trips a name at NAME_MAX (255 bytes ASCII)" in {
       val f = fixture()
       val name = "n" * NameMax
-      val ino = HTree.insert(f.ino, f.dev, f.bm, f.owner, name, 100, DirEntry.TypeRegular)
+      val ino = HTree.insert(f.ino, f.sfs, f.owner, name, 100, DirEntry.TypeRegular)
       HTree.lookup(ino, f.dev, f.owner, name) shouldBe Some((100, DirEntry.TypeRegular))
       HTree.list(ino, f.dev, f.owner).find(_.name == name) shouldBe defined
     }
@@ -627,7 +611,7 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       var ino = f.ino
       var inode = 100
       for n <- names do
-        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, f.sfs, f.owner, n, inode, DirEntry.TypeRegular)
         inode += 1
 
       var inode2 = 100
@@ -657,10 +641,10 @@ class HTreeTests extends AnyFreeSpec with Matchers:
       val names = Vector("a", "b", "c", "d", "e")
       var inode = 100
       for n <- names do
-        ino = HTree.insert(ino, f.dev, f.bm, f.owner, n, inode, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, f.sfs, f.owner, n, inode, DirEntry.TypeRegular)
         inode += 1
       for n <- names do
-        ino = HTree.delete(ino, f.dev, f.bm, f.owner, n)
+        ino = HTree.delete(ino, f.sfs, f.owner, n)
 
       HTree.list(ino, f.dev, f.owner).map(_.name) shouldBe Vector(".", "..")
       for n <- names do
@@ -670,9 +654,9 @@ class HTreeTests extends AnyFreeSpec with Matchers:
     "fully drained directory accepts new entries afterwards" in {
       val f = fixture()
       var ino = f.ino
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "first", 100, DirEntry.TypeRegular)
-      ino = HTree.delete(ino, f.dev, f.bm, f.owner, "first")
-      ino = HTree.insert(ino, f.dev, f.bm, f.owner, "second", 200, DirEntry.TypeRegular)
+      ino = HTree.insert(ino, f.sfs, f.owner, "first", 100, DirEntry.TypeRegular)
+      ino = HTree.delete(ino, f.sfs, f.owner, "first")
+      ino = HTree.insert(ino, f.sfs, f.owner, "second", 200, DirEntry.TypeRegular)
       HTree.lookup(ino, f.dev, f.owner, "second") shouldBe Some((200, DirEntry.TypeRegular))
       HTree.lookup(ino, f.dev, f.owner, "first") shouldBe None
     }
@@ -683,16 +667,16 @@ class HTreeTests extends AnyFreeSpec with Matchers:
   "depth-1 churn" - {
 
     "many alternating insert/delete cycles preserve invariants" in {
-      val (dev, _, bm) = freshLarge()
+      val (dev, _, bm, sfs) = freshLarge()
       val owner = 5
-      var ino = HTree.initDirectory(blankDirInode(), dev, bm, owner, 2)
+      var ino = HTree.initDirectory(blankDirInode(), sfs, owner, 2)
 
       // Force promotion via NAME_MAX names.
       val pad = "x" * 248
       val seedSize = 6000
       var i = 0
       while i < seedSize do
-        ino = HTree.insert(ino, dev, bm, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
+        ino = HTree.insert(ino, sfs, owner, pad + f"$i%07d", 100 + i, DirEntry.TypeRegular)
         i += 1
       DirRootBlock.unpack(readRoot(dev, ino, owner), owner).treeDepth shouldBe 1
 
@@ -705,9 +689,9 @@ class HTreeTests extends AnyFreeSpec with Matchers:
         val name = pad + f"$k%07d"
         // delete may fail (already deleted); then insert reuses the slot
         if HTree.lookup(ino, dev, owner, name).isDefined then
-          ino = HTree.delete(ino, dev, bm, owner, name)
+          ino = HTree.delete(ino, sfs, owner, name)
         else
-          ino = HTree.insert(ino, dev, bm, owner, name, 500_000 + k, DirEntry.TypeRegular)
+          ino = HTree.insert(ino, sfs, owner, name, 500_000 + k, DirEntry.TypeRegular)
 
       // Final invariant check: every name that resolves to Some has the
       // file_type we set, and list count matches lookup count.

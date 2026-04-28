@@ -113,10 +113,13 @@ class TransactionTests extends AnyFreeSpec with Matchers:
       val commit = CommitBlock.unpack(commitBuf, 0)
       commit.sequence shouldBe 1
 
-      // tail advanced by 3 (1 desc + 1 meta + 1 commit), seq bumped to 1
+      // tail advanced by 3 (1 desc + 1 meta + 1 commit), seq bumped to 1.
+      // After in-place writes lands, head also advances to tail —
+      // the journal record is no longer needed for recovery (the
+      // canonical state lives at the fs_block locations).
       journal.tail shouldBe 3
       journal.sequence shouldBe 1
-      journal.head shouldBe 0
+      journal.head shouldBe 3
 
       sfs.unmount()
     }

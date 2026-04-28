@@ -18,18 +18,21 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
       formatTime = 0x6800_4321L,
     )
 
-  /** Format a fresh device + load its block bitmap. */
-  private def fresh(): (RamBlockDevice, Layout, Bitmap) =
+  /** Format a fresh device + mount it. The returned `(dev, layout, bm)`
+    * triple still works for tests that only need the device and bitmap;
+    * the [[Sfs]] is constructed via `Sfs.mount` so its bitmaps share
+    * state with the returned `bm` (since `Sfs.mount` reads the same
+    * bitmap blocks off disk). */
+  private def freshSfs(): Sfs =
+    val dev = RamBlockDevice.default()
+    Sfs.format(dev, smallOpts)
+    Sfs.mount(dev)
+
+  private def fresh(): (RamBlockDevice, Layout, Bitmap, Sfs) =
     val dev = RamBlockDevice.default()
     val layout = Sfs.format(dev, smallOpts)
-    val bm = new Bitmap(
-      dev,
-      startBlock = layout.blockBitmapStart.toLong,
-      lengthBlocks = layout.blockBitmapLen,
-      totalBits = layout.totalBlocks,
-    )
-    bm.load()
-    (dev, layout, bm)
+    val sfs = Sfs.mount(dev)
+    (dev, layout, sfs.blockBitmap, sfs)
 
   /** A fresh, empty regular-file inode with no extents. */
   private def blankInode(): Inode = Inode(
@@ -129,18 +132,18 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
   "append" - {
 
     "0 leaves the inode unchanged" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val ino = blankInode()
       val before = bm.freeCount
-      val after = ExtentAllocator.append(ino, dev, bm, 0)
+      val after = ExtentAllocator.append(ino, sfs, 0)
       after shouldBe ino
       bm.freeCount shouldBe before
     }
 
     "1 places a single concrete extent in inline slot 0" in {
-      val (dev, layout, bm) = fresh()
+      val (dev, layout, bm, sfs) = fresh()
       val freeBefore = bm.freeCount
-      val ino = ExtentAllocator.append(blankInode(), dev, bm, 1)
+      val ino = ExtentAllocator.append(blankInode(), sfs, 1)
       val xs = inlineXs(ino)
       xs(0).count shouldBe 1
       xs(0).sparse shouldBe false
@@ -152,9 +155,9 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "5 contiguous blocks coalesce into a single extent (count=5)" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val freeBefore = bm.freeCount
-      val ino = ExtentAllocator.append(blankInode(), dev, bm, 5)
+      val ino = ExtentAllocator.append(blankInode(), sfs, 5)
       val xs = inlineXs(ino)
       xs(0).count shouldBe 5
       xs(0).sparse shouldBe false
@@ -163,8 +166,8 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "16 contiguous blocks still coalesce into a single inline extent" in {
-      val (dev, _, bm) = fresh()
-      val ino = ExtentAllocator.append(blankInode(), dev, bm, 16)
+      val (dev, _, bm, sfs) = fresh()
+      val ino = ExtentAllocator.append(blankInode(), sfs, 16)
       val xs = inlineXs(ino)
       xs(0).count shouldBe 16
       xs(1).count shouldBe 0
@@ -172,11 +175,11 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "non-contiguous block allocations land in separate extents" in {
-      val (dev, layout, bm) = fresh()
+      val (dev, layout, bm, sfs) = fresh()
       // Reserve 16 alternating blocks → next 16 allocations are odd-block
       // addresses, none contiguous, so 16 separate inline extents.
       reserveAlternating(bm, layout, 16)
-      val ino = ExtentAllocator.append(blankInode(), dev, bm, 16)
+      val ino = ExtentAllocator.append(blankInode(), sfs, 16)
       val xs = inlineXs(ino)
       // All 16 inline slots filled with count=1 each, distinct starts.
       xs.foreach(_.count shouldBe 1)
@@ -187,11 +190,11 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "spilling past 16 separate extents allocates an indirect-1 block" in {
-      val (dev, layout, bm) = fresh()
+      val (dev, layout, bm, sfs) = fresh()
       // Reserve enough alternating bits for 17 non-contig allocations.
       reserveAlternating(bm, layout, 17)
       val freeBefore = bm.freeCount
-      val ino = ExtentAllocator.append(blankInode(), dev, bm, 17)
+      val ino = ExtentAllocator.append(blankInode(), sfs, 17)
       val xs = inlineXs(ino)
       xs.foreach(_.count shouldBe 1)
       (ino.flags & InodeFlagHasIndirect1) shouldBe InodeFlagHasIndirect1
@@ -208,11 +211,11 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
   // ---- coalescing across calls ----------------------------------------
 
   "successive append(1) calls coalesce into one growing extent" in {
-    val (dev, _, bm) = fresh()
+    val (dev, _, bm, sfs) = fresh()
     var ino = blankInode()
-    ino = ExtentAllocator.append(ino, dev, bm, 1)
-    ino = ExtentAllocator.append(ino, dev, bm, 1)
-    ino = ExtentAllocator.append(ino, dev, bm, 1)
+    ino = ExtentAllocator.append(ino, sfs, 1)
+    ino = ExtentAllocator.append(ino, sfs, 1)
+    ino = ExtentAllocator.append(ino, sfs, 1)
     val xs = inlineXs(ino)
     xs(0).count shouldBe 3
     xs(1).count shouldBe 0
@@ -223,15 +226,15 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
   "appendSparse" - {
 
     "0 leaves the inode unchanged" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val ino = blankInode()
-      ExtentAllocator.appendSparse(ino, dev, bm, 0) shouldBe ino
+      ExtentAllocator.appendSparse(ino, sfs, 0) shouldBe ino
     }
 
     "creates a sparse extent (no physical block allocated)" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val freeBefore = bm.freeCount
-      val ino = ExtentAllocator.appendSparse(blankInode(), dev, bm, 100)
+      val ino = ExtentAllocator.appendSparse(blankInode(), sfs, 100)
       val xs = inlineXs(ino)
       xs(0).count shouldBe 100
       xs(0).sparse shouldBe true
@@ -240,10 +243,10 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "successive sparse appends coalesce into one slot" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       var ino = blankInode()
-      ino = ExtentAllocator.appendSparse(ino, dev, bm, 50)
-      ino = ExtentAllocator.appendSparse(ino, dev, bm, 70)
+      ino = ExtentAllocator.appendSparse(ino, sfs, 50)
+      ino = ExtentAllocator.appendSparse(ino, sfs, 70)
       val xs = inlineXs(ino)
       xs(0).count shouldBe 120
       xs(0).sparse shouldBe true
@@ -251,11 +254,11 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "sparse + concrete + sparse → 3 distinct extents" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       var ino = blankInode()
-      ino = ExtentAllocator.append(ino, dev, bm, 5)
-      ino = ExtentAllocator.appendSparse(ino, dev, bm, 100)
-      ino = ExtentAllocator.append(ino, dev, bm, 5)
+      ino = ExtentAllocator.append(ino, sfs, 5)
+      ino = ExtentAllocator.appendSparse(ino, sfs, 100)
+      ino = ExtentAllocator.append(ino, sfs, 5)
       val xs = inlineXs(ino)
       xs(0).count shouldBe 5
       xs(0).sparse shouldBe false
@@ -273,7 +276,7 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
   "indirect-1 → indirect-2 spill" - {
 
     "appending past a fully-packed inline+ind1 allocates ind2 + new ind1" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
 
       // Hand-craft an inode that has all 16 inline extents filled with
       // sparse(count=1) and an indirect-1 block fully filled with 512
@@ -289,7 +292,7 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
 
       val freeBefore = bm.freeCount
       // One more concrete block — must spill into the ind2 tier.
-      val ino = ExtentAllocator.append(base, dev, bm, 1)
+      val ino = ExtentAllocator.append(base, sfs, 1)
 
       (ino.flags & InodeFlagHasIndirect2) shouldBe InodeFlagHasIndirect2
       ino.indirect2 should not be 0
@@ -314,27 +317,27 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
   "truncate" - {
 
     "to 0 on a fresh inode is a no-op" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val ino = blankInode()
       val before = bm.freeCount
-      ExtentAllocator.truncate(ino, dev, bm, 0L) shouldBe ino
+      ExtentAllocator.truncate(ino, sfs, 0L) shouldBe ino
       bm.freeCount shouldBe before
     }
 
     "to current size leaves blocks intact" in {
-      val (dev, _, bm) = fresh()
-      val ino = ExtentAllocator.append(blankInode(), dev, bm, 5)
+      val (dev, _, bm, sfs) = fresh()
+      val ino = ExtentAllocator.append(blankInode(), sfs, 5)
       val before = bm.freeCount
-      val same = ExtentAllocator.truncate(ino, dev, bm, 5L)
+      val same = ExtentAllocator.truncate(ino, sfs, 5L)
       same shouldBe ino
       bm.freeCount shouldBe before
     }
 
     "shrinking a single extent trims its count and frees the suffix" in {
-      val (dev, _, bm) = fresh()
-      val ino = ExtentAllocator.append(blankInode(), dev, bm, 10)
+      val (dev, _, bm, sfs) = fresh()
+      val ino = ExtentAllocator.append(blankInode(), sfs, 10)
       val freeAfterAppend = bm.freeCount
-      val after = ExtentAllocator.truncate(ino, dev, bm, 4L)
+      val after = ExtentAllocator.truncate(ino, sfs, 4L)
       val xs = inlineXs(after)
       xs(0).count shouldBe 4
       xs(0).start shouldBe inlineXs(ino)(0).start
@@ -344,10 +347,10 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "truncating to 0 frees every concrete block (single inline extent)" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       val freshFree = bm.freeCount
-      val ino = ExtentAllocator.append(blankInode(), dev, bm, 8)
-      val after = ExtentAllocator.truncate(ino, dev, bm, 0L)
+      val ino = ExtentAllocator.append(blankInode(), sfs, 8)
+      val after = ExtentAllocator.truncate(ino, sfs, 0L)
       after.body match
         case InodeBody.Extents(xs) => xs.foreach(_.count shouldBe 0)
         case _                     => fail("expected Extents body")
@@ -355,14 +358,14 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "truncating across an extent boundary: keep first, drop second" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
       var ino = blankInode()
-      ino = ExtentAllocator.append(ino, dev, bm, 3) // extent 0: count=3
-      ino = ExtentAllocator.appendSparse(ino, dev, bm, 4) // extent 1: sparse(4)
-      ino = ExtentAllocator.append(ino, dev, bm, 2) // extent 2: count=2
+      ino = ExtentAllocator.append(ino, sfs, 3) // extent 0: count=3
+      ino = ExtentAllocator.appendSparse(ino, sfs, 4) // extent 1: sparse(4)
+      ino = ExtentAllocator.append(ino, sfs, 2) // extent 2: count=2
       val freeBefore = bm.freeCount
       // Logical layout: [0..2] concrete(3) | [3..6] sparse(4) | [7..8] concrete(2)
-      val after = ExtentAllocator.truncate(ino, dev, bm, 5L)
+      val after = ExtentAllocator.truncate(ino, sfs, 5L)
       val xs = inlineXs(after)
       xs(0).count shouldBe 3 // untouched
       xs(0).sparse shouldBe false
@@ -374,15 +377,15 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "truncating an ind1-using file back to inline reclaims the indirect block" in {
-      val (dev, layout, bm) = fresh()
+      val (dev, layout, bm, sfs) = fresh()
       // Force 17 non-contig extents to spill into ind1.
       reserveAlternating(bm, layout, 17)
-      val ino = ExtentAllocator.append(blankInode(), dev, bm, 17)
+      val ino = ExtentAllocator.append(blankInode(), sfs, 17)
       (ino.flags & InodeFlagHasIndirect1) shouldBe InodeFlagHasIndirect1
       val freeAfterFill = bm.freeCount
 
       // Truncate to 0 → all 17 file blocks + the ind1 block are freed.
-      val after = ExtentAllocator.truncate(ino, dev, bm, 0L)
+      val after = ExtentAllocator.truncate(ino, sfs, 0L)
       (after.flags & InodeFlagHasIndirect1) shouldBe 0
       after.indirect1 shouldBe 0
       after.body match
@@ -392,7 +395,7 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
     }
 
     "truncating a hand-crafted ind3 inode to 0 reclaims every metadata block" in {
-      val (dev, _, bm) = fresh()
+      val (dev, _, bm, sfs) = fresh()
 
       // A minimal "all four tiers" inode: each indirect tier holds exactly
       // one chain (single ptr / single sparse extent). This deliberately
@@ -418,7 +421,7 @@ class ExtentAllocatorTests extends AnyFreeSpec with Matchers:
         indirect3 = ind3PtrAddr,
       )
       val freeBefore = bm.freeCount
-      val after = ExtentAllocator.truncate(ino, dev, bm, 0L)
+      val after = ExtentAllocator.truncate(ino, sfs, 0L)
 
       (after.flags & InodeFlagHasIndirect1) shouldBe 0
       (after.flags & InodeFlagHasIndirect2) shouldBe 0

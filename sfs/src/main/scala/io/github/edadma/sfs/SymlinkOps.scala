@@ -49,7 +49,7 @@ object SymlinkOps:
       gid: Int,
       timeSec: Int,
       timeNsec: Int,
-  ): (Inode, Int) =
+  ): (Inode, Int) = sfs.withTransaction {
     val targetBytes = target.getBytes(UTF_8)
     require(
       targetBytes.length > 0,
@@ -105,7 +105,7 @@ object SymlinkOps:
           indirect1 = 0, indirect2 = 0, indirect3 = 0, xattrBlock = 0,
         )
         val written = FileIO.writeFile(
-          skeleton, sfs.device, sfs.blockBitmap,
+          skeleton, sfs,
           offset = 0L, bytes = targetBytes,
           timeSec = timeSec, timeNsec = timeNsec,
         )
@@ -118,7 +118,7 @@ object SymlinkOps:
     sfs.writeInode(newInodeNum, finalInode)
 
     val updatedParent = HTree.insert(
-      parent, sfs.device, sfs.blockBitmap, parentInodeNum,
+      parent, sfs, parentInodeNum,
       name, newInodeNum, DirEntry.TypeSymlink,
     )
     val touched = updatedParent.copy(
@@ -126,6 +126,7 @@ object SymlinkOps:
       ctimeSec = timeSec, ctimeNsec = timeNsec,
     )
     (touched, newInodeNum)
+  }
 
   /** Read the target string of a symlink inode. The inode's mode must
     * encode S_IFLNK; otherwise raises [[SfsNotSymlinkError]]. */

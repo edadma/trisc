@@ -188,7 +188,7 @@ class FileOpsTests extends AnyFreeSpec with Matchers:
       // Write 32 KiB to the file (8 concrete blocks via FileIO).
       val data = Array.tabulate(32 * 1024)(i => (i & 0xff).toByte)
       val withData = FileIO.writeFile(
-        sfs.readInode(ino), sfs.device, sfs.blockBitmap,
+        sfs.readInode(ino), sfs,
         offset = 0L, bytes = data, timeSec = Now, timeNsec = Nsec,
       )
       sfs.writeInode(ino, withData)
@@ -212,7 +212,7 @@ class FileOpsTests extends AnyFreeSpec with Matchers:
       // that's enough to drive the type-check.
       val rootIno = sfs.readInode(InoRoot)
       val withFakeDir = HTree.insert(
-        rootIno, sfs.device, sfs.blockBitmap, InoRoot,
+        rootIno, sfs, InoRoot,
         "fake_subdir", InoRoot, DirEntry.TypeDirectory,
       )
       an[SfsIsDirectoryError] should be thrownBy

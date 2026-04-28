@@ -18,8 +18,17 @@ import Constants.*
   * and on `truncateFile`. `atime` is left to the caller; the read path
   * doesn't mutate any state.
   *
-  * Like [[ExtentAllocator]], this module is single-threaded. Journaling
-  * happens in Phase 13 around the same primitives. */
+  * **data=ordered.** File data blocks (user-visible content) are
+  * written directly to the device, *not* through the journal. Both
+  * [[writeFile]] and [[truncateFile]] follow their data writes with a
+  * `device.flush()` so the data is durable before the surrounding
+  * `Sfs.withTransaction`'s commit lands. Metadata (extent maps,
+  * indirect blocks) flows through `sfs.writeMetadataBlock` and is
+  * journaled. A crash between data flush and metadata commit may leak
+  * orphaned data blocks (caught by Phase 16 fsck) but never produces
+  * a committed inode pointing at unwritten data.
+  *
+  * Like [[ExtentAllocator]], this module is single-threaded. */
 object FileIO:
 
   // ---- read -----------------------------------------------------------
@@ -75,8 +84,7 @@ object FileIO:
     * Existing uninitialized extents are not supported in Phase 8. */
   def writeFile(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       offset: Long,
       bytes: Array[Byte],
       timeSec: Int,
@@ -84,26 +92,35 @@ object FileIO:
   ): Inode =
     require(offset >= 0L, s"offset must be non-negative, got $offset")
     if bytes.length == 0 then return ino
+    // `dev` is the raw device for *user data* blocks (read-modify-write
+    // of partial blocks, fresh data writes); `meta` is the txn-aware
+    // wrapper used wherever we walk the extent map (which is metadata —
+    // the inline body, indirect blocks, pointer blocks).
+    val dev = sfs.device
+    val meta = sfs.metaDevice
+    val bm = sfs.blockBitmap
     val totalLen = bytes.length
     val endByte = offset + totalLen
     val firstBlock = offset / BlockSize
     val lastBlock = (endByte - 1) / BlockSize
 
     var cur = ino
-    var curBlocks = ExtentAllocator.totalBlockCount(cur, dev)
+    var curBlocks = ExtentAllocator.totalBlockCount(cur, meta)
 
     // 1) Fill any gap between current extent map and the write start
     //    with a sparse hole. After this, every block in [0, firstBlock)
     //    is at least represented in the extent map.
     if firstBlock > curBlocks then
       val gap = firstBlock - curBlocks
-      cur = ExtentAllocator.appendSparse(cur, dev, bm, toIntChecked(gap))
+      cur = ExtentAllocator.appendSparse(cur, sfs, toIntChecked(gap))
       curBlocks = firstBlock
 
     // 2) Write each affected block. Re-read-modify-write existing
     //    concrete blocks; convert sparse blocks via a split-and-replace
     //    of the surrounding extent; allocate fresh physical blocks for
-    //    blocks past the current extent map end.
+    //    blocks past the current extent map end. Data writes go
+    //    directly to dev — never through the journal — under the
+    //    data=ordered model.
     val blockBuf = new Array[Byte](BlockSize)
     var b = firstBlock
     while b <= lastBlock do
@@ -114,7 +131,7 @@ object FileIO:
       val srcOff = (math.max(blockBase, offset) - offset).toInt
 
       if b < curBlocks then
-        new ExtentReader(dev, cur).physicalBlock(b) match
+        new ExtentReader(meta, cur).physicalBlock(b) match
           case BlockMapping.Concrete(phys) =>
             dev.readBlock(phys, blockBuf)
             System.arraycopy(bytes, srcOff, blockBuf, byteStart, byteCount)
@@ -124,11 +141,11 @@ object FileIO:
               throw new SfsCorruptError("writeFile: out of free blocks")
             }
             val rebuilt = splitSparseAt(
-              ExtentAllocator.listExtents(cur, dev),
+              ExtentAllocator.listExtents(cur, meta),
               b,
               newPhys,
             )
-            cur = ExtentAllocator.replaceAllExtents(cur, dev, bm, rebuilt)
+            cur = ExtentAllocator.replaceAllExtents(cur, sfs, rebuilt)
             // New block was just allocated; its on-disk content is
             // whatever residual stale bytes were there. Zero into the
             // local buffer so the unwritten parts read as zero.
@@ -144,9 +161,9 @@ object FileIO:
               s"writeFile: extent map shorter than expected at block $b",
             )
       else
-        cur = ExtentAllocator.append(cur, dev, bm, 1)
+        cur = ExtentAllocator.append(cur, sfs, 1)
         curBlocks += 1
-        val phys = new ExtentReader(dev, cur).physicalBlock(b) match
+        val phys = new ExtentReader(meta, cur).physicalBlock(b) match
           case BlockMapping.Concrete(p) => p
           case other =>
             throw new SfsCorruptError(
@@ -157,9 +174,14 @@ object FileIO:
         dev.writeBlock(phys, blockBuf)
       b += 1
 
-    // 3) Update size, blockCount, mtime, ctime.
+    // 3) data=ordered: flush data blocks to disk before metadata
+    //    (the inode size update + extent-map writes) is committed
+    //    via the journal.
+    dev.flush()
+
+    // 4) Update size, blockCount, mtime, ctime.
     val newSize = math.max(cur.size, endByte)
-    finishWrite(cur, dev, newSize, timeSec, timeNsec)
+    finishWrite(cur, meta, newSize, timeSec, timeNsec)
 
   // ---- truncate -------------------------------------------------------
 
@@ -170,26 +192,29 @@ object FileIO:
     * Extending adds a sparse hole. Updates mtime/ctime. */
   def truncateFile(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       newSize: Long,
       timeSec: Int,
       timeNsec: Int,
   ): Inode =
     require(newSize >= 0L, s"newSize must be non-negative, got $newSize")
     if newSize == ino.size then return ino
+    val dev = sfs.device
+    val meta = sfs.metaDevice
 
     var cur = ino
     if newSize < ino.size then
       val newBlocks = ceilDiv(newSize, BlockSize.toLong)
-      cur = ExtentAllocator.truncate(cur, dev, bm, newBlocks)
+      cur = ExtentAllocator.truncate(cur, sfs, newBlocks)
       // Zero any bytes inside the last partial block beyond newSize so
       // a subsequent read of [newSize, lastBlock_end) returns zeros even
       // if the extent's physical address still has stale bytes.
+      // This is a *data* write, not metadata — it goes direct, then
+      // we flush so the zeros are durable before metadata commits.
       if newSize > 0L && (newSize % BlockSize) != 0L then
         val lastBlock = (newSize - 1) / BlockSize
         val byteStart = (newSize - lastBlock * BlockSize).toInt
-        new ExtentReader(dev, cur).physicalBlock(lastBlock) match
+        new ExtentReader(meta, cur).physicalBlock(lastBlock) match
           case BlockMapping.Concrete(phys) =>
             val buf = new Array[Byte](BlockSize)
             dev.readBlock(phys, buf)
@@ -199,14 +224,15 @@ object FileIO:
               i += 1
             dev.writeBlock(phys, buf)
           case _ => // sparse / uninit / oor: nothing to zero
+      dev.flush() // tail-zero data durable before metadata commit
     else
-      val curBlocks = ExtentAllocator.totalBlockCount(cur, dev)
+      val curBlocks = ExtentAllocator.totalBlockCount(cur, meta)
       val newBlocks = ceilDiv(newSize, BlockSize.toLong)
       if newBlocks > curBlocks then
         val gap = newBlocks - curBlocks
-        cur = ExtentAllocator.appendSparse(cur, dev, bm, toIntChecked(gap))
+        cur = ExtentAllocator.appendSparse(cur, sfs, toIntChecked(gap))
 
-    finishWrite(cur, dev, newSize, timeSec, timeNsec)
+    finishWrite(cur, meta, newSize, timeSec, timeNsec)
 
   // ---- internal helpers -----------------------------------------------
 

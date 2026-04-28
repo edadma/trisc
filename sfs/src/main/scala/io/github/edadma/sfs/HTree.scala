@@ -49,16 +49,15 @@ object HTree:
     * one empty leaf) to `ino` and write them. Returns the grown inode. */
   def initDirectory(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       ownerInode: Int,
       parentInode: Int,
   ): Inode =
     require(
-      ExtentAllocator.totalBlockCount(ino, dev) == 0L,
+      ExtentAllocator.totalBlockCount(ino, sfs.device) == 0L,
       "initDirectory: inode already has data blocks",
     )
-    val grown = ExtentAllocator.append(ino, dev, bm, 2)
+    val grown = ExtentAllocator.append(ino, sfs, 2)
 
     val rootBuf = new Array[Byte](BlockSize)
     val root = DirRootBlock(
@@ -70,11 +69,11 @@ object HTree:
       indexEntries = IndexedSeq((0, 1)),
     )
     DirRootBlock.pack(root, ownerInode, rootBuf)
-    writeDirBlock(grown, dev, 0L, rootBuf)
+    writeDirBlock(grown, sfs, 0L, rootBuf)
 
     val leafBuf = new Array[Byte](BlockSize)
     DirLeaf.initEmpty(leafBuf, ownerInode)
-    writeDirBlock(grown, dev, 1L, leafBuf)
+    writeDirBlock(grown, sfs, 1L, leafBuf)
 
     grown
 
@@ -103,14 +102,14 @@ object HTree:
     * index_entries table. */
   def insert(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       ownerInode: Int,
       name: String,
       childInode: Int,
       fileType: Int,
   ): Inode =
     require(name != "." && name != "..", s"""HTree.insert: cannot insert "$name"""")
+    val dev = sfs.metaDevice
     val rootBuf = readDirBlock(ino, dev, 0L)
     val root = DirRootBlock.unpack(rootBuf, ownerInode)
     requireSupportedDepth(root)
@@ -123,11 +122,11 @@ object HTree:
 
     val entry = DirEntry(childInode, fileType, name)
     if DirLeaf.tryInsert(leafBuf, entry, ownerInode) then
-      writeDirBlock(ino, dev, leafBlock.toLong, leafBuf)
+      writeDirBlock(ino, sfs, leafBlock.toLong, leafBuf)
       ino
     else
       splitLeafAndRetry(
-        ino, dev, bm, ownerInode, root, rootBuf,
+        ino, sfs, ownerInode, root, rootBuf,
         leafBlock, leafBuf, parent, entry,
       )
 
@@ -136,12 +135,12 @@ object HTree:
     * "." or "..". */
   def delete(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       ownerInode: Int,
       name: String,
   ): Inode =
     require(name != "." && name != "..", s"""HTree.delete: cannot delete "$name"""")
+    val dev = sfs.metaDevice
     val rootBuf = readDirBlock(ino, dev, 0L)
     val root = DirRootBlock.unpack(rootBuf, ownerInode)
     requireSupportedDepth(root)
@@ -150,7 +149,7 @@ object HTree:
     DirTail.verify(leafBuf, ownerInode)
     if !DirLeaf.delete(leafBuf, name, ownerInode) then
       throw new SfsNotFoundError(s"""HTree.delete: name "$name" not found""")
-    writeDirBlock(ino, dev, leafBlock.toLong, leafBuf)
+    writeDirBlock(ino, sfs, leafBlock.toLong, leafBuf)
     ino
 
   /** Return all live directory entries — dot, dotdot, and every live
@@ -234,8 +233,7 @@ object HTree:
     * would overflow (Phase 9f territory). */
   private def splitLeafAndRetry(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       ownerInode: Int,
       root: DirRootBlock,
       rootBuf: Array[Byte],
@@ -244,6 +242,7 @@ object HTree:
       parent: LeafParent,
       newEntry: DirEntry,
   ): Inode =
+    val dev = sfs.metaDevice
     val live = DirLeaf.entries(leafBuf).map(_._2).filter(_.inode != 0).toVector
     val withHash = live.map(e => (Fnv1a.hash(e.name), e)).sortBy(_._1)
     val cut = findSplitIndex(withHash.map(_._1)).getOrElse(
@@ -253,25 +252,25 @@ object HTree:
     )
     val medianHash = withHash(cut)._1
 
-    val grown = ExtentAllocator.append(ino, dev, bm, 1)
+    val grown = ExtentAllocator.append(ino, sfs, 1)
     val newLeafLogicalBlock = (ExtentAllocator.totalBlockCount(grown, dev) - 1L).toInt
 
     val lowHalf = withHash.take(cut).map(_._2)
     val highHalf = withHash.drop(cut).map(_._2)
     repackLeaf(leafBuf, lowHalf, ownerInode)
-    writeDirBlock(grown, dev, leafBlockNum.toLong, leafBuf)
+    writeDirBlock(grown, sfs, leafBlockNum.toLong, leafBuf)
 
     val newLeafBuf = new Array[Byte](BlockSize)
     repackLeaf(newLeafBuf, highHalf, ownerInode)
-    writeDirBlock(grown, dev, newLeafLogicalBlock.toLong, newLeafBuf)
+    writeDirBlock(grown, sfs, newLeafLogicalBlock.toLong, newLeafBuf)
 
     val grown2 = parent match
       case RootParent =>
-        addLeafEntryToRoot(grown, dev, bm, ownerInode, root, rootBuf, medianHash, newLeafLogicalBlock)
+        addLeafEntryToRoot(grown, sfs, ownerInode, root, rootBuf, medianHash, newLeafLogicalBlock)
       case InteriorParent(interiorBlock) =>
-        addLeafEntryToInterior(grown, dev, bm, ownerInode, interiorBlock, medianHash, newLeafLogicalBlock)
+        addLeafEntryToInterior(grown, sfs, ownerInode, interiorBlock, medianHash, newLeafLogicalBlock)
 
-    insert(grown2, dev, bm, ownerInode, newEntry.name, newEntry.inode, newEntry.fileType)
+    insert(grown2, sfs, ownerInode, newEntry.name, newEntry.inode, newEntry.fileType)
 
   /** Either splice the new (hash, block) into root.indexEntries (if it
     * still fits), or promote the directory to depth 1 and place it in
@@ -279,8 +278,7 @@ object HTree:
     * grown) inode. */
   private def addLeafEntryToRoot(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       ownerInode: Int,
       root: DirRootBlock,
       rootBuf: Array[Byte],
@@ -292,10 +290,10 @@ object HTree:
     if merged.length <= DirRootBlock.MaxIndexEntries then
       val newRoot = root.copy(indexEntries = merged)
       DirRootBlock.pack(newRoot, ownerInode, rootBuf)
-      writeDirBlock(ino, dev, 0L, rootBuf)
+      writeDirBlock(ino, sfs, 0L, rootBuf)
       ino
     else
-      promoteToDepth1(ino, dev, bm, ownerInode, root, rootBuf, merged)
+      promoteToDepth1(ino, sfs, ownerInode, root, rootBuf, merged)
 
   /** Promote a depth-0 directory to depth 1: spread the merged
     * index_entries (which would have overflowed the root) across two
@@ -303,13 +301,13 @@ object HTree:
     * (one per interior). */
   private def promoteToDepth1(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       ownerInode: Int,
       root: DirRootBlock,
       rootBuf: Array[Byte],
       merged: IndexedSeq[(Int, Int)],
   ): Inode =
+    val dev = sfs.metaDevice
     val cut = findSplitIndex(merged.map(_._1)).getOrElse(
       throw new SfsCorruptError(
         "HTree.promoteToDepth1: cannot partition root index — every entry shares the same hash",
@@ -322,18 +320,18 @@ object HTree:
       s"promoteToDepth1: halves $left/$right exceed interior capacity ${DirIndexBlock.Capacity}",
     )
 
-    val grown = ExtentAllocator.append(ino, dev, bm, 2)
+    val grown = ExtentAllocator.append(ino, sfs, 2)
     val total = ExtentAllocator.totalBlockCount(grown, dev).toInt
     val interiorA = total - 2
     val interiorB = total - 1
 
     val interiorABuf = new Array[Byte](BlockSize)
     DirIndexBlock.pack(left, ownerInode, interiorABuf)
-    writeDirBlock(grown, dev, interiorA.toLong, interiorABuf)
+    writeDirBlock(grown, sfs, interiorA.toLong, interiorABuf)
 
     val interiorBBuf = new Array[Byte](BlockSize)
     DirIndexBlock.pack(right, ownerInode, interiorBBuf)
-    writeDirBlock(grown, dev, interiorB.toLong, interiorBBuf)
+    writeDirBlock(grown, sfs, interiorB.toLong, interiorBBuf)
 
     val newRoot = root.copy(
       treeDepth = 1,
@@ -343,7 +341,7 @@ object HTree:
       ),
     )
     DirRootBlock.pack(newRoot, ownerInode, rootBuf)
-    writeDirBlock(grown, dev, 0L, rootBuf)
+    writeDirBlock(grown, sfs, 0L, rootBuf)
     grown
 
   /** Add a new (hash, leafBlock) entry into an interior block at depth
@@ -352,22 +350,21 @@ object HTree:
     * overflow as a result (`treeDepth = 2` is not in the spec). */
   private def addLeafEntryToInterior(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       ownerInode: Int,
       interiorBlock: Int,
       medianHash: Int,
       newLeafBlock: Int,
   ): Inode =
-    val buf = readDirBlock(ino, dev, interiorBlock.toLong)
+    val buf = readDirBlock(ino, sfs.metaDevice, interiorBlock.toLong)
     val live = DirIndexBlock.unpack(buf, ownerInode).takeWhile(_._2 != 0)
     val merged = (live :+ ((medianHash, newLeafBlock))).sortBy(_._1)
     if merged.length <= DirIndexBlock.Capacity then
       DirIndexBlock.pack(merged, ownerInode, buf)
-      writeDirBlock(ino, dev, interiorBlock.toLong, buf)
+      writeDirBlock(ino, sfs, interiorBlock.toLong, buf)
       ino
     else
-      splitInteriorAndAddToRoot(ino, dev, bm, ownerInode, interiorBlock, buf, merged)
+      splitInteriorAndAddToRoot(ino, sfs, ownerInode, interiorBlock, buf, merged)
 
   /** Split a full interior block into two siblings, repack each, and
     * splice a new (hash, sibling) entry into the root's index_entries.
@@ -376,13 +373,13 @@ object HTree:
     * which is not part of the SFS spec. */
   private def splitInteriorAndAddToRoot(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       ownerInode: Int,
       sourceInterior: Int,
       sourceBuf: Array[Byte],
       merged: IndexedSeq[(Int, Int)],
   ): Inode =
+    val dev = sfs.metaDevice
     val cut = findSplitIndex(merged.map(_._1)).getOrElse(
       throw new SfsCorruptError(
         "HTree.insert: cannot split interior — every entry shares the same hash",
@@ -391,15 +388,15 @@ object HTree:
     val left = merged.take(cut)
     val right = merged.drop(cut)
 
-    val grown = ExtentAllocator.append(ino, dev, bm, 1)
+    val grown = ExtentAllocator.append(ino, sfs, 1)
     val newInterior = (ExtentAllocator.totalBlockCount(grown, dev) - 1L).toInt
 
     DirIndexBlock.pack(left, ownerInode, sourceBuf)
-    writeDirBlock(grown, dev, sourceInterior.toLong, sourceBuf)
+    writeDirBlock(grown, sfs, sourceInterior.toLong, sourceBuf)
 
     val newBuf = new Array[Byte](BlockSize)
     DirIndexBlock.pack(right, ownerInode, newBuf)
-    writeDirBlock(grown, dev, newInterior.toLong, newBuf)
+    writeDirBlock(grown, sfs, newInterior.toLong, newBuf)
 
     val rootBuf = readDirBlock(grown, dev, 0L)
     val root = DirRootBlock.unpack(rootBuf, ownerInode)
@@ -412,7 +409,7 @@ object HTree:
       )
     val newRoot = root.copy(indexEntries = rootMerged)
     DirRootBlock.pack(newRoot, ownerInode, rootBuf)
-    writeDirBlock(grown, dev, 0L, rootBuf)
+    writeDirBlock(grown, sfs, 0L, rootBuf)
     grown
 
   /** Pack `entries` (with their `recLen` fields normalized to the
@@ -497,14 +494,17 @@ object HTree:
 
   private def writeDirBlock(
       ino: Inode,
-      dev: BlockDevice,
+      sfs: Sfs,
       logical: Long,
       buf: Array[Byte],
   ): Unit =
-    val reader = new ExtentReader(dev, ino)
+    // Use metaDevice so the ExtentReader sees any staged extent-map
+    // changes made earlier in the same txn (e.g. by ExtentAllocator
+    // when a directory has just grown into the indirect tier).
+    val reader = new ExtentReader(sfs.metaDevice, ino)
     reader.physicalBlock(logical) match
       case BlockMapping.Concrete(p) =>
-        dev.writeBlock(p, buf)
+        sfs.writeMetadataBlock(p, buf)
       case other =>
         throw new SfsCorruptError(
           s"HTree.writeDirBlock: directory block $logical not concrete: $other",

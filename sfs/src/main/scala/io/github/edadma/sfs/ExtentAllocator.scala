@@ -7,9 +7,13 @@ import Constants.*
   * Object-style API: each call returns a new (immutable) [[Inode]].
   * Mutates the inode's extent map (inline body and indirect block contents),
   * the `indirect1/2/3` pointers, the `HAS_INDIRECT*` flags, and the
-  * [[Bitmap]] state. Does *not* update `size` / `block_count` / `mtime`
-  * / `ctime` — that's Phase 8 (file I/O). Does not journal — Phase 13
-  * wraps these calls.
+  * block-bitmap state. Does *not* update `size` / `block_count` / `mtime`
+  * / `ctime` — that's [[FileIO]]'s job.
+  *
+  * Write paths take an [[Sfs]] so indirect-block writes route through
+  * `sfs.writeMetadataBlock` (and therefore the journal when called
+  * inside `Sfs.withTransaction`). Read-only methods stay on a plain
+  * [[BlockDevice]] — they never need a journal.
   *
   * All operations are single-threaded; concurrent writers are not supported.
   *
@@ -36,39 +40,40 @@ object ExtentAllocator:
   // ---- Public API -----------------------------------------------------
 
   /** Append `n` concrete data blocks to the file by allocating fresh
-    * physical blocks one-at-a-time from `bm`. Returns the updated inode. */
-  def append(ino: Inode, dev: BlockDevice, bm: Bitmap, n: Int): Inode =
+    * physical blocks one-at-a-time from the block bitmap. Returns the
+    * updated inode. */
+  def append(ino: Inode, sfs: Sfs, n: Int): Inode =
     require(n >= 0, s"n must be non-negative, got $n")
     var cur = ino
     var i = 0
     while i < n do
-      val phys = bm.allocate().getOrElse {
+      val phys = sfs.blockBitmap.allocate().getOrElse {
         throw new SfsCorruptError("append: out of free blocks")
       }
-      cur = appendOneConcrete(cur, dev, bm, phys)
+      cur = appendOneConcrete(cur, sfs, phys)
       i += 1
     cur
 
   /** Append `n` sparse logical blocks (a hole). No physical blocks are
     * allocated; the extent records the hole's logical length. Returns
     * the updated inode. */
-  def appendSparse(ino: Inode, dev: BlockDevice, bm: Bitmap, n: Int): Inode =
+  def appendSparse(ino: Inode, sfs: Sfs, n: Int): Inode =
     require(n >= 0, s"n must be non-negative, got $n")
     if n == 0 then return ino
-    findLastExtent(ino, dev) match
+    findLastExtent(ino, sfs.metaDevice) match
       case Some((loc, e)) if e.sparse && canBumpCount(e.count, n) =>
-        writeExtentAt(ino, dev, loc, e.copy(count = e.count + n))
+        writeExtentAt(ino, sfs, loc, e.copy(count = e.count + n))
       case _ =>
-        appendNewExtent(ino, dev, bm, Extent(start = 0, count = n, sparse = true))
+        appendNewExtent(ino, sfs, Extent(start = 0, count = n, sparse = true))
 
   /** Truncate the file to `target` logical blocks. Frees any physical
     * blocks past the cut point and reclaims indirect blocks whose
     * extents/pointers all become empty. If `target` already equals or
     * exceeds the file's logical block count, the inode is returned
     * unchanged (extending is the caller's job — see [[appendSparse]]). */
-  def truncate(ino: Inode, dev: BlockDevice, bm: Bitmap, target: Long): Inode =
+  def truncate(ino: Inode, sfs: Sfs, target: Long): Inode =
     require(target >= 0L, s"target must be non-negative, got $target")
-    truncateImpl(ino, dev, bm, target)
+    truncateImpl(ino, sfs, target)
 
   /** Sum of all extent counts across the inode's map. Equals the file's
     * current logical block count (whether concrete or sparse). */
@@ -102,15 +107,14 @@ object ExtentAllocator:
     * indirect blocks as needed to hold `xs`. */
   def replaceAllExtents(
       ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
+      sfs: Sfs,
       xs: Seq[Extent],
   ): Inode =
-    var cur = freeAllIndirects(ino, dev, bm)
+    var cur = freeAllIndirects(ino, sfs)
     cur = cur.copy(body = InodeBody.EmptyExtents)
     var i = 0
     while i < xs.length do
-      cur = appendNewExtent(cur, dev, bm, xs(i))
+      cur = appendNewExtent(cur, sfs, xs(i))
       i += 1
     cur
 
@@ -162,11 +166,9 @@ object ExtentAllocator:
     * extents pointed to. Returns the inode with `indirect{1,2,3}`
     * reset to 0 and `HAS_INDIRECT*` flags cleared. The body is left
     * unchanged. */
-  private def freeAllIndirects(
-      ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
-  ): Inode =
+  private def freeAllIndirects(ino: Inode, sfs: Sfs): Inode =
+    val dev = sfs.metaDevice
+    val bm = sfs.blockBitmap
     if (ino.flags & InodeFlagHasIndirect3) != 0 then
       val ptrs3 = readPtrBlock(dev, ino.indirect3)
       var i = 0
@@ -205,20 +207,15 @@ object ExtentAllocator:
 
   // ---- Append helpers -------------------------------------------------
 
-  private def appendOneConcrete(
-      ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
-      phys: Int,
-  ): Inode =
-    findLastExtent(ino, dev) match
+  private def appendOneConcrete(ino: Inode, sfs: Sfs, phys: Int): Inode =
+    findLastExtent(ino, sfs.metaDevice) match
       case Some((loc, e))
           if !e.sparse && !e.uninitialized
             && phys == e.start + e.count
             && canBumpCount(e.count, 1) =>
-        writeExtentAt(ino, dev, loc, e.copy(count = e.count + 1))
+        writeExtentAt(ino, sfs, loc, e.copy(count = e.count + 1))
       case _ =>
-        appendNewExtent(ino, dev, bm, Extent(start = phys, count = 1))
+        appendNewExtent(ino, sfs, Extent(start = phys, count = 1))
 
   /** Bumping `cur` by `delta` would not overflow the 32-bit count. */
   private def canBumpCount(cur: Int, delta: Int): Boolean =
@@ -226,12 +223,10 @@ object ExtentAllocator:
 
   /** Place a fresh extent at the next free slot, allocating indirect
     * blocks as required by the lazy tier-promotion rule. */
-  private def appendNewExtent(
-      ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
-      e: Extent,
-  ): Inode =
+  private def appendNewExtent(ino: Inode, sfs: Sfs, e: Extent): Inode =
+    val dev = sfs.metaDevice
+    val bm = sfs.blockBitmap
+
     // Inline tier --------------------------------------------------
     val inlineXs = ino.body match
       case InodeBody.Extents(xs) => xs
@@ -241,19 +236,19 @@ object ExtentAllocator:
         )
     val inlineFree = firstEmptySlot(inlineXs)
     if inlineFree >= 0 then
-      return writeExtentAt(ino, dev, InlineLoc(inlineFree), e)
+      return writeExtentAt(ino, sfs, InlineLoc(inlineFree), e)
 
     // Indirect-1 tier ----------------------------------------------
-    val (ino1, ind1Addr) = ensureInd1(ino, dev, bm)
+    val (ino1, ind1Addr) = ensureInd1(ino, sfs)
     val xs1 = readExtBlock(dev, ind1Addr)
     val slot1 = firstEmptySlotArr(xs1)
     if slot1 >= 0 then
       xs1(slot1) = e
-      writeExtBlock(dev, ind1Addr, xs1)
+      writeExtBlock(sfs, ind1Addr, xs1)
       return ino1
 
     // Indirect-2 tier ----------------------------------------------
-    val (ino2, ind2Addr) = ensureInd2(ino1, dev, bm)
+    val (ino2, ind2Addr) = ensureInd2(ino1, sfs)
     val ptrs2 = readPtrBlock(dev, ind2Addr)
     val tailPtr2 = lastNonZeroPtr(ptrs2)
     if tailPtr2 >= 0 then
@@ -262,23 +257,23 @@ object ExtentAllocator:
       val slot = firstEmptySlotArr(xs)
       if slot >= 0 then
         xs(slot) = e
-        writeExtBlock(dev, tailInd1, xs)
+        writeExtBlock(sfs, tailInd1, xs)
         return ino2
     val nextPtr2 = tailPtr2 + 1
     if nextPtr2 < IndirectPointerBlock.Capacity then
       val newInd1 = bm.allocate().getOrElse {
         throw new SfsCorruptError("appendNewExtent: out of space (ind1 under ind2)")
       }
-      initEmptyExtBlock(dev, newInd1)
+      initEmptyExtBlock(sfs, newInd1)
       ptrs2(nextPtr2) = newInd1
-      writePtrBlock(dev, ind2Addr, ptrs2)
+      writePtrBlock(sfs, ind2Addr, ptrs2)
       val xs = readExtBlock(dev, newInd1)
       xs(0) = e
-      writeExtBlock(dev, newInd1, xs)
+      writeExtBlock(sfs, newInd1, xs)
       return ino2
 
     // Indirect-3 tier ----------------------------------------------
-    val (ino3, ind3Addr) = ensureInd3(ino2, dev, bm)
+    val (ino3, ind3Addr) = ensureInd3(ino2, sfs)
     val ptrs3 = readPtrBlock(dev, ind3Addr)
     val tailPtr3 = lastNonZeroPtr(ptrs3)
     if tailPtr3 >= 0 then
@@ -291,7 +286,7 @@ object ExtentAllocator:
         val slot = firstEmptySlotArr(xs)
         if slot >= 0 then
           xs(slot) = e
-          writeExtBlock(dev, tailInd1, xs)
+          writeExtBlock(sfs, tailInd1, xs)
           return ino3
       val nextPtr2InTail = tailPtr2InTail + 1
       if nextPtr2InTail < IndirectPointerBlock.Capacity then
@@ -300,12 +295,12 @@ object ExtentAllocator:
             "appendNewExtent: out of space (ind1 under ind3-leaf-ptrs)",
           )
         }
-        initEmptyExtBlock(dev, newInd1)
+        initEmptyExtBlock(sfs, newInd1)
         tailPtrs2(nextPtr2InTail) = newInd1
-        writePtrBlock(dev, tailPtrs2Addr, tailPtrs2)
+        writePtrBlock(sfs, tailPtrs2Addr, tailPtrs2)
         val xs = readExtBlock(dev, newInd1)
         xs(0) = e
-        writeExtBlock(dev, newInd1, xs)
+        writeExtBlock(sfs, newInd1, xs)
         return ino3
     val nextPtr3 = tailPtr3 + 1
     if nextPtr3 >= IndirectPointerBlock.Capacity then
@@ -315,56 +310,56 @@ object ExtentAllocator:
     val newPtrs2Addr = bm.allocate().getOrElse {
       throw new SfsCorruptError("appendNewExtent: out of space (ind3-leaf-ptrs)")
     }
-    initEmptyPtrBlock(dev, newPtrs2Addr)
+    initEmptyPtrBlock(sfs, newPtrs2Addr)
     val newInd1Addr = bm.allocate().getOrElse {
       throw new SfsCorruptError("appendNewExtent: out of space (ind1 under fresh ind3-leaf-ptrs)")
     }
-    initEmptyExtBlock(dev, newInd1Addr)
+    initEmptyExtBlock(sfs, newInd1Addr)
     val freshPtrs2 = new Array[Int](IndirectPointerBlock.Capacity)
     freshPtrs2(0) = newInd1Addr
-    writePtrBlock(dev, newPtrs2Addr, freshPtrs2)
+    writePtrBlock(sfs, newPtrs2Addr, freshPtrs2)
     ptrs3(nextPtr3) = newPtrs2Addr
-    writePtrBlock(dev, ind3Addr, ptrs3)
+    writePtrBlock(sfs, ind3Addr, ptrs3)
     val xs = readExtBlock(dev, newInd1Addr)
     xs(0) = e
-    writeExtBlock(dev, newInd1Addr, xs)
+    writeExtBlock(sfs, newInd1Addr, xs)
     ino3
 
   /** Allocate `indirect1` if not yet present. Returns updated inode and
     * the ind1 block address. */
-  private def ensureInd1(ino: Inode, dev: BlockDevice, bm: Bitmap): (Inode, Int) =
+  private def ensureInd1(ino: Inode, sfs: Sfs): (Inode, Int) =
     if (ino.flags & InodeFlagHasIndirect1) != 0 then (ino, ino.indirect1)
     else
-      val addr = bm.allocate().getOrElse {
+      val addr = sfs.blockBitmap.allocate().getOrElse {
         throw new SfsCorruptError("ensureInd1: out of free blocks")
       }
-      initEmptyExtBlock(dev, addr)
+      initEmptyExtBlock(sfs, addr)
       val updated = ino.copy(
         indirect1 = addr,
         flags = ino.flags | InodeFlagHasIndirect1,
       )
       (updated, addr)
 
-  private def ensureInd2(ino: Inode, dev: BlockDevice, bm: Bitmap): (Inode, Int) =
+  private def ensureInd2(ino: Inode, sfs: Sfs): (Inode, Int) =
     if (ino.flags & InodeFlagHasIndirect2) != 0 then (ino, ino.indirect2)
     else
-      val addr = bm.allocate().getOrElse {
+      val addr = sfs.blockBitmap.allocate().getOrElse {
         throw new SfsCorruptError("ensureInd2: out of free blocks")
       }
-      initEmptyPtrBlock(dev, addr)
+      initEmptyPtrBlock(sfs, addr)
       val updated = ino.copy(
         indirect2 = addr,
         flags = ino.flags | InodeFlagHasIndirect2,
       )
       (updated, addr)
 
-  private def ensureInd3(ino: Inode, dev: BlockDevice, bm: Bitmap): (Inode, Int) =
+  private def ensureInd3(ino: Inode, sfs: Sfs): (Inode, Int) =
     if (ino.flags & InodeFlagHasIndirect3) != 0 then (ino, ino.indirect3)
     else
-      val addr = bm.allocate().getOrElse {
+      val addr = sfs.blockBitmap.allocate().getOrElse {
         throw new SfsCorruptError("ensureInd3: out of free blocks")
       }
-      initEmptyPtrBlock(dev, addr)
+      initEmptyPtrBlock(sfs, addr)
       val updated = ino.copy(
         indirect3 = addr,
         flags = ino.flags | InodeFlagHasIndirect3,
@@ -428,10 +423,11 @@ object ExtentAllocator:
 
   private def writeExtentAt(
       ino: Inode,
-      dev: BlockDevice,
+      sfs: Sfs,
       loc: ExtentLoc,
       e: Extent,
   ): Inode =
+    val dev = sfs.metaDevice
     loc match
       case InlineLoc(slot) =>
         ino.body match
@@ -444,14 +440,14 @@ object ExtentAllocator:
       case Ind1Loc(slot) =>
         val xs = readExtBlock(dev, ino.indirect1)
         xs(slot) = e
-        writeExtBlock(dev, ino.indirect1, xs)
+        writeExtBlock(sfs, ino.indirect1, xs)
         ino
       case Ind2Loc(ptrSlot, slot) =>
         val ptrs = readPtrBlock(dev, ino.indirect2)
         val ind1Addr = ptrs(ptrSlot)
         val xs = readExtBlock(dev, ind1Addr)
         xs(slot) = e
-        writeExtBlock(dev, ind1Addr, xs)
+        writeExtBlock(sfs, ind1Addr, xs)
         ino
       case Ind3Loc(ptr3Slot, ptr2Slot, slot) =>
         val ptrs3 = readPtrBlock(dev, ino.indirect3)
@@ -459,24 +455,22 @@ object ExtentAllocator:
         val ind1Addr = ptrs2(ptr2Slot)
         val xs = readExtBlock(dev, ind1Addr)
         xs(slot) = e
-        writeExtBlock(dev, ind1Addr, xs)
+        writeExtBlock(sfs, ind1Addr, xs)
         ino
 
   // ---- Truncate -------------------------------------------------------
 
-  private def truncateImpl(
-      ino: Inode,
-      dev: BlockDevice,
-      bm: Bitmap,
-      target: Long,
-  ): Inode =
+  private def truncateImpl(ino: Inode, sfs: Sfs, target: Long): Inode =
+    val dev = sfs.metaDevice
+    val bm = sfs.blockBitmap
+
     // Inline tier -------------------------------------------------
     var cur = ino
     var rem = target
     val inlineXs = cur.body match
       case InodeBody.Extents(xs)        => xs.toArray
       case InodeBody.InlineSymlink(_)   => return cur
-    val (remAfterInline, inlineMod) = trimExtents(inlineXs, rem, dev, bm)
+    val (remAfterInline, inlineMod) = trimExtents(inlineXs, rem, bm)
     if inlineMod then
       cur = cur.copy(body = InodeBody.Extents(inlineXs.toIndexedSeq))
     rem = remAfterInline
@@ -485,7 +479,7 @@ object ExtentAllocator:
     if (cur.flags & InodeFlagHasIndirect1) != 0 then
       val ind1Addr = cur.indirect1
       val xs = readExtBlock(dev, ind1Addr)
-      val (newRem, mod) = trimExtents(xs, rem, dev, bm)
+      val (newRem, mod) = trimExtents(xs, rem, bm)
       rem = newRem
       val emptyAfter = isEmptyExtArr(xs)
       if emptyAfter then
@@ -494,7 +488,7 @@ object ExtentAllocator:
           indirect1 = 0,
           flags = cur.flags & ~InodeFlagHasIndirect1,
         )
-      else if mod then writeExtBlock(dev, ind1Addr, xs)
+      else if mod then writeExtBlock(sfs, ind1Addr, xs)
 
     // Indirect-2 tier ---------------------------------------------
     if (cur.flags & InodeFlagHasIndirect2) != 0 then
@@ -505,13 +499,13 @@ object ExtentAllocator:
       while i < ptrs.length && ptrs(i) != 0 do
         val ind1Addr = ptrs(i)
         val xs = readExtBlock(dev, ind1Addr)
-        val (newRem, mod) = trimExtents(xs, rem, dev, bm)
+        val (newRem, mod) = trimExtents(xs, rem, bm)
         rem = newRem
         if isEmptyExtArr(xs) then
           bm.free(ind1Addr)
           ptrs(i) = 0
           ptrsMod = true
-        else if mod then writeExtBlock(dev, ind1Addr, xs)
+        else if mod then writeExtBlock(sfs, ind1Addr, xs)
         i += 1
       val emptyAfter = isEmptyPtrArr(ptrs)
       if emptyAfter then
@@ -520,7 +514,7 @@ object ExtentAllocator:
           indirect2 = 0,
           flags = cur.flags & ~InodeFlagHasIndirect2,
         )
-      else if ptrsMod then writePtrBlock(dev, ind2Addr, ptrs)
+      else if ptrsMod then writePtrBlock(sfs, ind2Addr, ptrs)
 
     // Indirect-3 tier ---------------------------------------------
     if (cur.flags & InodeFlagHasIndirect3) != 0 then
@@ -536,19 +530,19 @@ object ExtentAllocator:
         while j < ptrs2.length && ptrs2(j) != 0 do
           val ind1Addr = ptrs2(j)
           val xs = readExtBlock(dev, ind1Addr)
-          val (newRem, mod) = trimExtents(xs, rem, dev, bm)
+          val (newRem, mod) = trimExtents(xs, rem, bm)
           rem = newRem
           if isEmptyExtArr(xs) then
             bm.free(ind1Addr)
             ptrs2(j) = 0
             ptrs2Mod = true
-          else if mod then writeExtBlock(dev, ind1Addr, xs)
+          else if mod then writeExtBlock(sfs, ind1Addr, xs)
           j += 1
         if isEmptyPtrArr(ptrs2) then
           bm.free(ptrs2Addr)
           ptrs3(i) = 0
           ptrs3Mod = true
-        else if ptrs2Mod then writePtrBlock(dev, ptrs2Addr, ptrs2)
+        else if ptrs2Mod then writePtrBlock(sfs, ptrs2Addr, ptrs2)
         i += 1
       val emptyAfter = isEmptyPtrArr(ptrs3)
       if emptyAfter then
@@ -557,7 +551,7 @@ object ExtentAllocator:
           indirect3 = 0,
           flags = cur.flags & ~InodeFlagHasIndirect3,
         )
-      else if ptrs3Mod then writePtrBlock(dev, ind3Addr, ptrs3)
+      else if ptrs3Mod then writePtrBlock(sfs, ind3Addr, ptrs3)
 
     cur
 
@@ -565,11 +559,12 @@ object ExtentAllocator:
     * Frees physical blocks of fully-discarded concrete extents and
     * the freed suffix of a straddling concrete extent. Returns the
     * leftover `rem` (logical blocks still owed past these extents)
-    * and whether any slot was mutated. */
+    * and whether any slot was mutated. The bitmap mutations alone
+    * do not write through the device — `Bitmap.stageInto` flushes
+    * dirty blocks at txn-commit time. */
   private def trimExtents(
       xs: Array[Extent],
       rem0: Long,
-      dev: BlockDevice,
       bm: Bitmap,
   ): (Long, Boolean) =
     var rem = rem0
@@ -654,13 +649,13 @@ object ExtentAllocator:
     IndirectExtentBlock.unpack(buf, 0).toArray
 
   private def writeExtBlock(
-      dev: BlockDevice,
+      sfs: Sfs,
       blockAddr: Int,
       xs: Array[Extent],
   ): Unit =
     val buf = new Array[Byte](BlockSize)
     IndirectExtentBlock.pack(xs.toIndexedSeq, buf, 0)
-    dev.writeBlock(blockAddr.toLong, buf)
+    sfs.writeMetadataBlock(blockAddr.toLong, buf)
 
   private def readPtrBlock(dev: BlockDevice, blockAddr: Int): Array[Int] =
     val buf = new Array[Byte](BlockSize)
@@ -668,18 +663,18 @@ object ExtentAllocator:
     IndirectPointerBlock.unpack(buf, 0).toArray
 
   private def writePtrBlock(
-      dev: BlockDevice,
+      sfs: Sfs,
       blockAddr: Int,
       ptrs: Array[Int],
   ): Unit =
     val buf = new Array[Byte](BlockSize)
     IndirectPointerBlock.pack(ptrs.toIndexedSeq, buf, 0)
-    dev.writeBlock(blockAddr.toLong, buf)
+    sfs.writeMetadataBlock(blockAddr.toLong, buf)
 
-  private def initEmptyExtBlock(dev: BlockDevice, blockAddr: Int): Unit =
+  private def initEmptyExtBlock(sfs: Sfs, blockAddr: Int): Unit =
     val buf = new Array[Byte](BlockSize)
-    dev.writeBlock(blockAddr.toLong, buf)
+    sfs.writeMetadataBlock(blockAddr.toLong, buf)
 
-  private def initEmptyPtrBlock(dev: BlockDevice, blockAddr: Int): Unit =
+  private def initEmptyPtrBlock(sfs: Sfs, blockAddr: Int): Unit =
     val buf = new Array[Byte](BlockSize)
-    dev.writeBlock(blockAddr.toLong, buf)
+    sfs.writeMetadataBlock(blockAddr.toLong, buf)

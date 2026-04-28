@@ -50,6 +50,13 @@ final class Transaction private[sfs] (sfs: Sfs):
   /** Number of distinct metadata blocks staged so far. */
   def size: Int = staged.size
 
+  /** Look up a previously-staged write for `blockNum`. Returns the
+    * staged buffer (a defensive copy is NOT taken — caller must not
+    * mutate it; instead, copy into their own buffer). Returns `None`
+    * if no staged write exists for this block. */
+  private[sfs] def peek(blockNum: Long): Option[Array[Byte]] =
+    staged.get(blockNum)
+
   /** Stage a 4 KiB metadata block to be written at `blockNum` after
     * the journal commit lands. Replaces any previously-staged buffer
     * for the same `blockNum`. */
@@ -210,8 +217,18 @@ final class Transaction private[sfs] (sfs: Sfs):
       w += 1
 
     // ---- Persist new tail/sequence ---------------------------------
+    // In-place writes have already landed; the journal record is now
+    // redundant for crash recovery (the on-disk metadata IS the
+    // canonical state). Advance head along with tail so the log
+    // effectively returns to empty. If we crash between this point
+    // and `journal.flush()` below, the on-disk JournalSuperblock
+    // still holds the OLD head/tail/sequence — recovery walks from
+    // there, finds this committed txn, and replays it. Replay is
+    // idempotent: the same metadata blocks are rewritten to the same
+    // disk locations.
     val newTail = (startTail + totalLogBlocks) % bc
     journal.advance(newTail, newSeq)
+    journal.replayHead(newTail)
     journal.flush()
 
 object Transaction:

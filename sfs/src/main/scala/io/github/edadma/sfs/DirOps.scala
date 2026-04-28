@@ -33,7 +33,7 @@ object DirOps:
       gid: Int,
       timeSec: Int,
       timeNsec: Int,
-  ): (Inode, Int) =
+  ): (Inode, Int) = sfs.withTransaction {
     require(
       (mode & FileOps.ModeTypeMask) == 0 ||
         (mode & FileOps.ModeTypeMask) == FileOps.ModeDirectory,
@@ -66,7 +66,7 @@ object DirOps:
       indirect1 = 0, indirect2 = 0, indirect3 = 0, xattrBlock = 0,
     )
     val laidOut = HTree.initDirectory(
-      skeleton, sfs.device, sfs.blockBitmap,
+      skeleton, sfs,
       ownerInode = newInodeNum, parentInode = parentInodeNum,
     )
     val sized = laidOut.copy(
@@ -76,7 +76,7 @@ object DirOps:
     sfs.writeInode(newInodeNum, sized)
 
     val parentWithEntry = HTree.insert(
-      parent, sfs.device, sfs.blockBitmap, parentInodeNum,
+      parent, sfs, parentInodeNum,
       name, newInodeNum, DirEntry.TypeDirectory,
     )
     val parentTouched = parentWithEntry.copy(
@@ -85,6 +85,7 @@ object DirOps:
       ctimeSec = timeSec, ctimeNsec = timeNsec,
     )
     (parentTouched, newInodeNum)
+  }
 
   // ---- rmdir ----------------------------------------------------------
 
@@ -99,7 +100,7 @@ object DirOps:
       name: String,
       timeSec: Int,
       timeNsec: Int,
-  ): Inode =
+  ): Inode = sfs.withTransaction {
     val (childNum, childType) = HTree
       .lookup(parent, sfs.device, parentInodeNum, name)
       .getOrElse(
@@ -121,7 +122,7 @@ object DirOps:
         s"""DirOps.rmdir: "$name" is not empty ($nonSpecial entries)""",
       )
 
-    val drained = ExtentAllocator.truncate(child, sfs.device, sfs.blockBitmap, 0L)
+    val drained = ExtentAllocator.truncate(child, sfs, 0L)
     sfs.writeInode(
       childNum,
       drained.copy(
@@ -133,14 +134,13 @@ object DirOps:
     )
     sfs.inodeBitmap.clear(childNum)
 
-    val parentRemoved = HTree.delete(
-      parent, sfs.device, sfs.blockBitmap, parentInodeNum, name,
-    )
+    val parentRemoved = HTree.delete(parent, sfs, parentInodeNum, name)
     parentRemoved.copy(
       linkCount = parentRemoved.linkCount - 1,
       mtimeSec = timeSec, mtimeNsec = timeNsec,
       ctimeSec = timeSec, ctimeNsec = timeNsec,
     )
+  }
 
   // ---- readdir --------------------------------------------------------
 
@@ -189,7 +189,7 @@ object DirOps:
       newName: String,
       timeSec: Int,
       timeNsec: Int,
-  ): (Inode, Inode) =
+  ): (Inode, Inode) = sfs.withTransaction {
     val sameParent = oldParentInodeNum == newParentInodeNum
 
     val (oldChildNum, oldChildType) = HTree
@@ -206,76 +206,75 @@ object DirOps:
         mtimeSec = timeSec, mtimeNsec = timeNsec,
         ctimeSec = timeSec, ctimeNsec = timeNsec,
       )
-      return (touched, touched)
+      (touched, touched)
+    else
+      val newParentMaybeUnlinked =
+        HTree.lookup(newParent, sfs.device, newParentInodeNum, newName) match
+          case None => newParent
+          case Some((existingNum, existingType)) =>
+            if existingNum == oldChildNum then
+              // Renaming over the same inode — drop the source name only.
+              // Our delete-then-insert below will handle the rest.
+              newParent
+            else if existingType == DirEntry.TypeDirectory then
+              throw new SfsIsDirectoryError(
+                s"""DirOps.rename: target "$newName" is a directory""" +
+                  " — call rmdir first",
+              )
+            else if oldChildType == DirEntry.TypeDirectory then
+              throw new SfsNotDirectoryError(
+                s"""DirOps.rename: cannot rename directory "$oldName"""" +
+                  s""" over non-directory "$newName"""",
+              )
+            else
+              // Overwrite: unlink the existing target. unlink takes care
+              // of inode/block freeing and dir-entry removal. Re-entrant
+              // withTransaction means it joins our open txn.
+              FileOps.unlink(newParent, newParentInodeNum, sfs, newName, timeSec, timeNsec)
 
-    val newParentMaybeUnlinked =
-      HTree.lookup(newParent, sfs.device, newParentInodeNum, newName) match
-        case None => newParent
-        case Some((existingNum, existingType)) =>
-          if existingNum == oldChildNum then
-            // Renaming over the same inode — drop the source name only.
-            // Our delete-then-insert below will handle the rest.
-            newParent
-          else if existingType == DirEntry.TypeDirectory then
-            throw new SfsIsDirectoryError(
-              s"""DirOps.rename: target "$newName" is a directory""" +
-                " — call rmdir first",
-            )
-          else if oldChildType == DirEntry.TypeDirectory then
-            throw new SfsNotDirectoryError(
-              s"""DirOps.rename: cannot rename directory "$oldName"""" +
-                s""" over non-directory "$newName"""",
-            )
-          else
-            // Overwrite: unlink the existing target. unlink takes care
-            // of inode/block freeing and dir-entry removal.
-            FileOps.unlink(newParent, newParentInodeNum, sfs, newName, timeSec, timeNsec)
+      // Splice the new entry into newParent (or whichever parent that is).
+      val newParentWithEntry = HTree.insert(
+        newParentMaybeUnlinked, sfs, newParentInodeNum,
+        newName, oldChildNum, oldChildType,
+      )
 
-    // Splice the new entry into newParent (or whichever parent that is).
-    val newParentWithEntry = HTree.insert(
-      newParentMaybeUnlinked, sfs.device, sfs.blockBitmap, newParentInodeNum,
-      newName, oldChildNum, oldChildType,
-    )
+      // Now drop the old entry from oldParent (which may be the same
+      // physical inode as newParentWithEntry if sameParent).
+      val oldParentBase = if sameParent then newParentWithEntry else oldParent
+      val oldParentRemoved = HTree.delete(oldParentBase, sfs, oldParentInodeNum, oldName)
 
-    // Now drop the old entry from oldParent (which may be the same
-    // physical inode as newParentWithEntry if sameParent).
-    val oldParentBase = if sameParent then newParentWithEntry else oldParent
-    val oldParentRemoved = HTree.delete(
-      oldParentBase, sfs.device, sfs.blockBitmap, oldParentInodeNum, oldName,
-    )
+      // Cross-parent move of a directory: fix the child's '..' and adjust
+      // both parents' linkCounts. Same-parent moves leave both alone.
+      val (finalOldParent, finalNewParent) =
+        if !sameParent && oldChildType == DirEntry.TypeDirectory then
+          repointChildDotDot(sfs, oldChildNum, newParentInodeNum, timeSec, timeNsec)
+          val oldAdjusted = oldParentRemoved.copy(
+            linkCount = oldParentRemoved.linkCount - 1,
+          )
+          val newAdjusted = newParentWithEntry.copy(
+            linkCount = newParentWithEntry.linkCount + 1,
+          )
+          (oldAdjusted, newAdjusted)
+        else if sameParent then
+          // Single physical parent inode; the cumulative state lives in
+          // oldParentRemoved (which was layered on top of
+          // newParentWithEntry).
+          (oldParentRemoved, oldParentRemoved)
+        else
+          (oldParentRemoved, newParentWithEntry)
 
-    // Cross-parent move of a directory: fix the child's '..' and adjust
-    // both parents' linkCounts. Same-parent moves leave both alone.
-    val (finalOldParent, finalNewParent) =
-      if !sameParent && oldChildType == DirEntry.TypeDirectory then
-        repointChildDotDot(sfs, oldChildNum, newParentInodeNum, timeSec, timeNsec)
-        val oldAdjusted = oldParentRemoved.copy(
-          linkCount = oldParentRemoved.linkCount - 1,
-        )
-        val newAdjusted = newParentWithEntry.copy(
-          linkCount = newParentWithEntry.linkCount + 1,
-        )
-        (oldAdjusted, newAdjusted)
-      else if sameParent then
-        // Single physical parent inode; the cumulative state lives in
-        // oldParentRemoved (which was layered on top of
-        // newParentWithEntry).
-        (oldParentRemoved, oldParentRemoved)
-      else
-        (oldParentRemoved, newParentWithEntry)
-
-    // Bump mtime/ctime on whichever parents were affected.
-    val timestamped = (
-      finalOldParent.copy(
-        mtimeSec = timeSec, mtimeNsec = timeNsec,
-        ctimeSec = timeSec, ctimeNsec = timeNsec,
-      ),
-      finalNewParent.copy(
-        mtimeSec = timeSec, mtimeNsec = timeNsec,
-        ctimeSec = timeSec, ctimeNsec = timeNsec,
-      ),
-    )
-    timestamped
+      // Bump mtime/ctime on whichever parents were affected.
+      (
+        finalOldParent.copy(
+          mtimeSec = timeSec, mtimeNsec = timeNsec,
+          ctimeSec = timeSec, ctimeNsec = timeNsec,
+        ),
+        finalNewParent.copy(
+          mtimeSec = timeSec, mtimeNsec = timeNsec,
+          ctimeSec = timeSec, ctimeNsec = timeNsec,
+        ),
+      )
+  }
 
   /** Update a directory's `..` entry to point at a new parent.
     * Re-reads the child inode, rewrites the `..` entry's leaf in
@@ -289,18 +288,18 @@ object DirOps:
       timeNsec: Int,
   ): Unit =
     val child = sfs.readInode(childInodeNum)
-    val rootPhys = new ExtentReader(sfs.device, child).physicalBlock(0L) match
+    val rootPhys = new ExtentReader(sfs.metaDevice, child).physicalBlock(0L) match
       case BlockMapping.Concrete(p) => p
       case other =>
         throw new SfsCorruptError(
           s"DirOps.rename: directory inode $childInodeNum has no concrete root block: $other",
         )
     val buf = new Array[Byte](BlockSize)
-    sfs.device.readBlock(rootPhys, buf)
+    sfs.readMetadataBlock(rootPhys, buf)
     val root = DirRootBlock.unpack(buf, childInodeNum)
     val newDotDot = DirEntry(newParentInodeNum, DirEntry.TypeDirectory, "..")
     DirRootBlock.pack(root.copy(dotdot = newDotDot), childInodeNum, buf)
-    sfs.device.writeBlock(rootPhys, buf)
+    sfs.writeMetadataBlock(rootPhys, buf)
     sfs.writeInode(
       childInodeNum,
       child.copy(ctimeSec = timeSec, ctimeNsec = timeNsec),
