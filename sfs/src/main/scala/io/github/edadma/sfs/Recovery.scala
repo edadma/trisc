@@ -24,9 +24,23 @@ import Constants.*
   */
 object Recovery:
 
-  /** Replay every committed transaction in the journal log. Returns
-    * the new head position (= old tail, since the log is now empty
-    * post-replay).
+  /** Replay every committed transaction reachable by walking forward
+    * from `journal.head`. Returns the new head position (= the first
+    * log slot past the last successfully-replayed txn).
+    *
+    * **Does not trust the on-disk journal-SB tail.** A crash can hit
+    * between the commit block landing and `journal.flush()`'s tail
+    * update — in that case the on-disk tail still reads zero (or the
+    * pre-crash value), even though the committed txn is fully durable
+    * in the log. We therefore scan opportunistically: try to parse a
+    * txn at every position, and stop at the first one whose
+    * descriptor / commit / sequence / CRC doesn't validate. The
+    * sequence-number check (each new txn must have `prev + 1`)
+    * prevents us from walking into stale committed-but-overwritten
+    * txns from earlier in the log's history.
+    *
+    * Bounded by [[Journal.blockCount]] iterations to handle the
+    * pathological case of a journal full of valid-looking ghosts.
     *
     * Must be called only on a `dirty` filesystem with an
     * already-loaded [[Journal]] — the caller (Sfs.mount) handles the
@@ -34,29 +48,27 @@ object Recovery:
   def replay(dev: BlockDevice, journal: Journal): Int =
     val bc = journal.blockCount
     val startHead = journal.head
-    val tail = journal.tail
     var pos = startHead
-    var lastReplayedSeq = journal.sequence // sequence of last-known-replayed txn
+    var expectedSeq = journal.sequence + 1
+    var iter = 0
 
-    // Walk forward until we hit the journal tail (= no more txns to
-    // try) or we encounter an invalid txn (CRC or magic failure).
-    while pos != tail do
-      parseAndReplayOne(dev, journal, pos) match
-        case Some((nextPos, seq)) =>
+    while iter < bc do
+      parseAndReplayOne(dev, journal, pos, expectedSeq) match
+        case Some(nextPos) =>
           pos = nextPos
-          lastReplayedSeq = seq
+          expectedSeq += 1
+          iter += 1
         case None =>
-          // Stop at first invalid txn — leave head where it is and
-          // bail out. Anything between this point and tail is treated
-          // as never-committed.
+          // First invalid txn — anything past here is treated as
+          // never-committed.
           return pos
 
-    pos // == tail; log is now fully replayed
+    pos
 
   /** Try to parse one transaction starting at log position `pos`.
-    * Returns `Some((newPos, sequence))` if the txn is valid and was
-    * replayed; `None` if the descriptor / commit could not be parsed
-    * or its CRC failed.
+    * Returns `Some(newPos)` if the txn is valid (sequence matches
+    * `expectedSeq`, descriptors parse, commit-block CRC matches) and
+    * was replayed; `None` if anything fails to validate.
     *
     * The on-disk layout is:
     * `descriptor[s] || metadata[blockCount] || commit`
@@ -68,15 +80,17 @@ object Recovery:
       dev: BlockDevice,
       journal: Journal,
       pos: Int,
-  ): Option[(Int, Int)] =
+      expectedSeq: Int,
+  ): Option[Int] =
     val bc = journal.blockCount
-    val tail = journal.tail
     val firstDescBuf = new Array[Byte](BlockSize)
     dev.readBlock(journal.logPositionToDisk(pos), firstDescBuf)
     val firstMagic = Le.u32(firstDescBuf, 0)
     if firstMagic != MagicTxnDescriptor then return None
 
     val sequence = Le.u32(firstDescBuf, 4)
+    if sequence != expectedSeq then return None
+
     val totalBlocks = Le.u32(firstDescBuf, 8)
     if totalBlocks < 0 || totalBlocks > MaxBlocksPerTransaction then return None
 
@@ -85,9 +99,6 @@ object Recovery:
         TxnDescriptor.MaxEntriesPerBlock
     val totalLogBlocks = numDescriptors + totalBlocks + 1
     if totalLogBlocks > bc then return None
-
-    // Verify we have enough log blocks before tail to cover this txn.
-    if !logRangeReachable(pos, totalLogBlocks, tail, bc) then return None
 
     // ---- Read all descriptor blocks --------------------------------
     val entries = new Array[TxnEntry](totalBlocks)
@@ -181,12 +192,4 @@ object Recovery:
     dev.flush()
 
     val newPos = (pos + totalLogBlocks) % bc
-    Some((newPos, sequence))
-
-  /** True if a contiguous run of `n` log blocks starting at `pos`
-    * fits before `tail` in a circular log of `bc` blocks. */
-  private def logRangeReachable(pos: Int, n: Int, tail: Int, bc: Int): Boolean =
-    val available =
-      if pos <= tail then tail - pos
-      else bc - pos + tail
-    n <= available
+    Some(newPos)
