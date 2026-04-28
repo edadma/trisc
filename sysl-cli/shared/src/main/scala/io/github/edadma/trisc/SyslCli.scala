@@ -568,9 +568,163 @@ object SyslCli:
           case _ => Pass
       case e: Throwable => Fail(s"unexpected error: ${e.getClass.getSimpleName}: ${e.getMessage}", captured)
 
+  /** Compile + run a single test on the TRISC emulator.
+    *
+    * Strategy: codegen the test's scoped program to TRISC asm, append a boot
+    * wrapper with a vector table that calls the target test function and
+    * halts. The wrapper's trap and fault ISRs each record a distinct sentinel
+    * byte at a known memory location before halting, because TRISC `trap N`
+    * doesn't halt the CPU — it transfers control to the matching vector slot,
+    * which would otherwise look identical to a clean return.
+    *
+    * Memory layout:
+    *   0x00000..0x0009F  vector table (20 slots × 8 bytes)
+    *   0x000A0..0x1FEF7  code + data + stack (grows down from 0x1FEF8)
+    *   0x1FF00           panic flag byte (0=clean, sysl-code=panic, 222=fault)
+    *   0x20000           STDOUT MMIO (1 byte)
+    *
+    * Outcome is read from `cpu.state` and the panic flag byte:
+    *   - state == Halt, flag == 0     → clean return → Pass (or Fail if shouldPanic)
+    *   - state == Halt, flag in 1..5  → sysl panic → Pass if shouldPanic, else Fail
+    *   - state == Halt, flag == 222   → CPU fault routed through fault ISR → Fail
+    *   - state == Run                 → cycle-limit reached → Fail (timeout)
+    *   - any other state              → CPU fault before fault ISR ran → Fail
+    *
+    * Limitations: TRISC `assert`/`panic` lower to inline `trap 1` with no
+    * message printing, so the `should_panic = "msg"` substring match cannot
+    * be verified — any trap satisfies a shouldPanic test. Tests that exercise
+    * heap allocation (`new`, dynamic strings, `s"..."` interpolation) require
+    * malloc/free externs which this minimal runtime does not yet provide;
+    * those tests will fail at link time. Both gaps are tracked as follow-ups.
+    *
+    * `TRISC_DUMP_ASM=1` writes the generated asm to /tmp for inspection.
+    * `TRISC_TRACE=1` prints a one-line per-test summary and lets the CPU emit
+    * its diagnostic stderr (otherwise quiet).
+    */
+  private def runOneTRISC(program: TProgram, t: DiscoveredTest): TestOutcome =
+    val outputBuf = new StringBuilder
+    val asm =
+      try (new SyslTriscCodegen).generate(program)
+      catch case e: Throwable =>
+        if System.getenv("TRISC_TRACE") != null then e.printStackTrace()
+        return Fail(s"TRISC codegen failed: ${e.getClass.getSimpleName}: ${e.getMessage}")
+    if System.getenv("TRISC_DUMP_ASM") != null then
+      java.nio.file.Files.writeString(
+        java.nio.file.Paths.get(s"/tmp/trisc_${t.unitName.replace("/", "_")}.s"), asm)
+    val stdoutAddr = 0x20000L
+    val panicFlagAddr = 0x1FF00L
+    val initialSP = 0x1FEF8L
+    val faultIsrSlots = (1 to 7).map(_ => "  dl fault_isr").mkString("\n")
+    val trapIsrSlots = (1 to 8).map(_ => "  dl panic_isr").mkString("\n")
+    val tailFaultSlots = (1 to 3).map(_ => "  dl fault_isr").mkString("\n")
+    val wrapperAsm =
+      s"""|STDOUT = $stdoutAddr
+          |
+          |segment vectors
+          |  dl $initialSP
+          |  dl boot
+          |$faultIsrSlots
+          |$trapIsrSlots
+          |$tailFaultSlots
+          |
+          |segment code
+          |
+          |extern ${t.fn.name}
+          |
+          |global boot, func
+          |entry boot
+          |
+          |boot
+          |  movi r4, ${t.fn.name}
+          |  jalr r6, r4
+          |  halt
+          |
+          |global putchar, func
+          |putchar
+          |  movi r2, STDOUT
+          |  stb r1, r2, r0
+          |  jalr r0, r6
+          |
+          |; panic_isr: invoked by trap N (sysl panics). r1 holds the sysl
+          |; error code (1=oob, 2=null, 3=abort, 4=assert/panic, 5=div0).
+          |; Record it to the panic flag location, then halt.
+          |global panic_isr, func
+          |panic_isr
+          |  movi r2, $panicFlagAddr
+          |  stb r1, r2, r0
+          |  halt
+          |
+          |; fault_isr: invoked by hardware faults (instruction-access, etc.).
+          |; Record a distinct sentinel so the runner can distinguish a CPU
+          |; fault from a sysl panic.
+          |global fault_isr, func
+          |fault_isr
+          |  movi r1, 222
+          |  movi r2, $panicFlagAddr
+          |  stb r1, r2, r0
+          |  halt
+          |""".stripMargin
+    val programTof =
+      try assemble(asm, relocatable = true)
+      catch case e: Throwable => return Fail(s"TRISC assembly failed: ${e.getMessage}", outputBuf.toString)
+    val wrapperTof =
+      try assemble(wrapperAsm, relocatable = true)
+      catch case e: Throwable => return Fail(s"TRISC wrapper assembly failed: ${e.getMessage}", outputBuf.toString)
+    // Two-pass link: first link the user program TOF (relocatable), then merge
+    // with the wrapper at base 0. This mirrors OSKitTestHelpers.runWithBoot and
+    // ensures the wrapper's `vectors` segment lands at address 0 even if the
+    // user program also declares vectors-shaped data.
+    val linkedProgram =
+      try Linker.link(Seq(programTof), relocatable = true)
+      catch case e: Throwable => return Fail(s"TRISC user-link failed: ${e.getMessage}", outputBuf.toString)
+    val linked =
+      try Linker.link(Seq(wrapperTof, linkedProgram))
+      catch case e: Throwable => return Fail(s"TRISC link failed: ${e.getMessage}", outputBuf.toString)
+    val stdout = new Device with WriteOnlyAddressable {
+      val name = "stdout"
+      val base: Long = stdoutAddr
+      val size: Long = 1
+      def writeByte(addr: Long, data: Long): Unit = outputBuf += data.toChar
+      override def loadByte(addr: Long, data: Long): Unit = ()
+    }
+    val mem = new Memory("Memory", new RAM(0, stdoutAddr), stdout)
+    try linked.load(mem)
+    catch case e: Throwable => return Fail(s"TRISC load failed: ${e.getMessage}", outputBuf.toString)
+    val cpu = new CPU(mem) { limit = 50_000_000; quiet = System.getenv("TRISC_TRACE") == null }
+    try
+      cpu.reset()
+      cpu.run()
+    catch case e: Throwable =>
+      return Fail(s"TRISC runtime error: ${e.getClass.getSimpleName}: ${e.getMessage} at PC=0x${cpu.pc.toHexString}", outputBuf.toString)
+    val captured = outputBuf.toString
+    val flag = mem.readByte(panicFlagAddr) & 0xFF
+    if System.getenv("TRISC_TRACE") != null then
+      System.err.println(s"TRISC_TRACE: ${t.fn.name} state=${cpu.state} pc=0x${cpu.pc.toHexString} r1=${cpu.r(1).read} flag=$flag")
+    cpu.state match
+      case State.Halt =>
+        flag match
+          case 0 =>
+            if t.shouldPanic then Fail("expected panic, got normal return", captured) else Pass
+          case 222 =>
+            Fail(s"CPU fault routed through fault ISR at PC=0x${cpu.pc.toHexString}", captured)
+          case code =>
+            val codeName = code match
+              case 1 => "out-of-bounds"
+              case 2 => "null-deref"
+              case 3 => "abort"
+              case 4 => "assert/panic"
+              case 5 => "divide-by-zero"
+              case _ => s"trap (code=$code)"
+            if t.shouldPanic then Pass
+            else Fail(s"panic ($codeName)", captured)
+      case State.Run =>
+        Fail(s"TRISC test timed out (cycle limit reached) at PC=0x${cpu.pc.toHexString}", captured)
+      case other =>
+        Fail(s"unexpected CPU state: $other at PC=0x${cpu.pc.toHexString}", captured)
+
   private def executeTest(cmd: TestCommand): Unit =
-    if cmd.backend == "trisc" || cmd.backend == "all" then
-      System.err.println(s"error: backend '${cmd.backend}' not yet implemented (use 'interpreter', 'llvm-host', or 'svm-host')")
+    if cmd.backend == "all" then
+      System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', or 'trisc')")
       throw CliError("unsupported backend")
 
     // Always use project root as base so module paths resolve correctly.
@@ -660,6 +814,7 @@ object SyslCli:
       val outcome = cmd.backend match
         case "llvm-host" => runOneLLVM(programFor(t.unitName), t, llvmBinCache)
         case "svm-host"  => runOneSVM(programFor(t.unitName), t)
+        case "trisc"     => runOneTRISC(programFor(t.unitName), t)
         case _           => runOneInterpreter(programFor(t.unitName), stdlibImports, t)
       val elapsedMs = (System.nanoTime() - start) / 1e6
       outcome match

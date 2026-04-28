@@ -1,0 +1,46 @@
+Panic and assert semantics
+==========================
+
+A small corpus that exercises the runtime semantics of `panic`, `assert`,
+and clean-return paths. Useful as a backend smoke test — runs on all four
+backends (`interpreter`, `llvm-host`, `svm-host`, `trisc`).
+
+    module sysl.tests.panic_test
+
+
+### clean return is a pass
+
+`unit`-returning functions that complete normally must be reported as
+passing tests across every backend.
+
+    #test
+    test_returns_cleanly() -> unit
+        return
+
+
+### panic is detected
+
+A direct `panic("...")` call halts the program with an error condition
+and must be classified as a panic across every backend.
+
+    #test(should_panic: "boom")
+    test_panic_is_caught() -> unit
+        panic("boom")
+
+
+### assert(false) is a panic
+
+`assert(cond, "msg")` panics with the given message when `cond` is false.
+
+    #test(should_panic: "fails")
+    test_failing_assert() -> unit
+        assert(false, "fails")
+
+
+### assert(true) is a no-op
+
+When `cond` is true the message is unused and execution continues.
+
+    #test
+    test_passing_assert() -> unit
+        assert(true, "never panics")
