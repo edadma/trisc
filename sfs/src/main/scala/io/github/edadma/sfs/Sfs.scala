@@ -181,21 +181,22 @@ object Sfs:
   // ---- mount -----------------------------------------------------------
 
   /** Open a formatted volume for use. Reads the superblock (falling back
-    * to the backup at block 1 on CRC failure), validates it, sets
-    * `fs_state = dirty` on disk, and loads both bitmaps into memory.
+    * to the backup at block 1 on CRC failure), validates it, runs
+    * journal recovery if the volume is dirty, sets `fs_state = dirty`
+    * on disk for the duration of the mount, and loads both bitmaps
+    * into memory.
     *
-    * Until journal recovery lands in Phase 13, mounting a `dirty` volume
-    * is rejected outright (the kernel would have to replay the journal
-    * before any reads are safe). Mounting an `error` volume is also
-    * rejected — those need fsck. */
+    * A `dirty` volume gets [[Recovery.replay]] run against it — every
+    * committed-but-not-yet-checkpointed transaction is re-applied to
+    * its in-place fs_block locations. Replay is idempotent so it's
+    * safe whether or not the in-place writes already happened.
+    *
+    * `error`-state volumes are rejected — those need fsck (Phase 16). */
   def mount(dev: BlockDevice): Sfs =
     val sb0 = readSuperblock(dev)
     sb0.fsState match
       case FsClean => () // ok
-      case FsDirty =>
-        throw new SfsCorruptError(
-          "filesystem is dirty — journal recovery is not yet implemented (Phase 13)",
-        )
+      case FsDirty => () // recover below
       case FsError =>
         throw new SfsCorruptError("filesystem is in error state — run fsck")
       case other =>
@@ -203,12 +204,22 @@ object Sfs:
 
     val layout = Layout.fromSuperblock(sb0)
 
+    val journal = Journal.load(dev, layout.journalStart.toLong, sb0.uuid)
+
+    // Recovery runs *before* loading the bitmaps so any bitmap blocks
+    // staged in committed-but-not-checkpointed transactions are
+    // applied to disk first. The bitmap load below then sees the
+    // canonical post-replay state.
+    if sb0.fsState == FsDirty then
+      val newHead = Recovery.replay(dev, journal)
+      journal.replayHead(newHead)
+      journal.flush()
+      dev.flush()
+
     val blockBm = new Bitmap(dev, layout.blockBitmapStart, layout.blockBitmapLen, layout.totalBlocks)
     blockBm.load()
     val inodeBm = new Bitmap(dev, layout.inodeBitmapStart, layout.inodeBitmapLen, layout.totalInodes)
     inodeBm.load()
-
-    val journal = Journal.load(dev, layout.journalStart.toLong, sb0.uuid)
 
     val mountedSb = sb0.copy(fsState = FsDirty, lastMountTime = now())
     writeSuperblockTo(dev, mountedSb)

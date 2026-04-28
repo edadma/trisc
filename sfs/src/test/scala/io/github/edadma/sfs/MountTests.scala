@@ -63,14 +63,19 @@ class MountTests extends AnyFreeSpec with Matchers:
       fs2.unmount()
     }
 
-    "rejects a dirty volume (until journal recovery)" in {
+    "recovers a dirty volume on remount (Phase 13d)" in {
       val (dev, _) = fresh()
       val fs = Sfs.mount(dev)
       // skip unmount → leave fsState=dirty on disk
       val sbBuf = new Array[Byte](BlockSize)
       dev.readBlock(0, sbBuf)
       Superblock.unpack(sbBuf, 0).fsState shouldBe FsDirty
-      a[SfsCorruptError] should be thrownBy Sfs.mount(dev)
+      // Recovery on next mount: walks the journal, replays nothing
+      // (no committed txns since the prior mount didn't do anything),
+      // and re-marks the SB dirty for our new mount session.
+      val fs2 = Sfs.mount(dev)
+      fs2.isMounted shouldBe true
+      fs2.unmount()
     }
 
     "rejects an error-state volume" in {
