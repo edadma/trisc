@@ -225,7 +225,9 @@ object Sfs:
     writeSuperblockTo(dev, mountedSb)
     dev.flush()
 
-    new Sfs(dev, layout, mountedSb, blockBm, inodeBm, journal)
+    val sfs = new Sfs(dev, layout, mountedSb, blockBm, inodeBm, journal)
+    BadBlockOps.loadAtMount(sfs)
+    sfs
 
   /** Try block 0 first; on CRC/magic failure fall back to the backup at
     * block 1. The backup write is part of every clean unmount, so it is
