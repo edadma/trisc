@@ -15,8 +15,8 @@ For back-pointers and non-owning references (e.g. parent pointers in trees). ARC
 
 `SyslLLVMCodegen.scala` was originally landed as a stub but is now substantial (~75% feature coverage, 21 dedicated test files). Confirmed correctness gaps from the 2026-04-28 audit (see `project_sysl_audit_bugs.md` in auto-memory):
 
-- **Unsigned widening uses `sext` instead of `zext`** (`SyslLLVMCodegen.scala:1550-1551`). `u32 → i64` widening turns high-bit-set values negative. Critical for systems code.
-- **Unsigned comparisons emit signed predicates** (`:1594, 1599, 1604, 1609`). Same impact.
+- ~~**Unsigned widening uses `sext` instead of `zext`**~~ — verified already fixed (audit tests pass; `emitSextIfNeeded` honours signedness).
+- ~~**Unsigned comparisons emit signed predicates**~~ — verified already fixed (predicates branch on `isUnsigned`).
 - `TPreInc` / `TPreDec` not lowered.
 - `TSizeof` missing for some cases.
 - `?` operator (Try) end-to-end coverage unverified — parser/analyzer desugar, but no LLVM gap-test.
@@ -32,8 +32,7 @@ For back-pointers and non-owning references (e.g. parent pointers in trees). ARC
 
 ## SVM Backend
 
-- `genExpr` default case emits placeholder `push_0` for unhandled `TExpr` types (`SyslSVMCodegen.scala:2406`). Silent miscompile — should be a hard error.
-- `genStmt` default case is a TODO (`:1226`).
+- ~~`genExpr` / `genStmt` default cases were silent placeholders~~ — fixed at sysl@3ada8ece (2026-04-28); both now `sys.error(...)` on unhandled nodes.
 - Type-attribute helpers (`T::Valid`, `T::Image`, `T::Pos`, etc.) not synthesized.
 - Param modes (`in`/`out`/`inout`) ignored — all params treated as `in`.
 - `require`/`ensure` discard the message string (bare `halt` instead of message-bearing trap).
