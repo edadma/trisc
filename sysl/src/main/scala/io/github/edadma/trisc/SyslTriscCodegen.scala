@@ -2886,33 +2886,46 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           case "saturating_add" | "saturating_sub" | "saturating_mul" =>
             if width >= 64 then
               throw new RuntimeException(s"$name on 64-bit types is not yet supported in the TRISC backend")
+            // Special case: saturating_mul on u32 — the full u64 product can exceed
+            // signed i64 range (e.g. 0xFFFFFFFF * 0xFFFFFFFF = 0xFFFFFFFE_00000001),
+            // so the generic signed-clamp path below would misinterpret it as
+            // negative and saturate to 0. Use unsigned compare against u32 max
+            // instead; no LOW clamp is needed because `mulu` on unsigned operands
+            // never produces a value below 0 in unsigned interpretation.
             if name == "saturating_mul" && unsigned && width == 32 then
-              throw new RuntimeException("saturating_mul on u32 is not yet supported in the TRISC backend (would overflow signed i64)")
-            // Compute in 64-bit; for narrow widths the intermediate fits in signed i64.
-            // Then signed-clamp to [minV, maxV]. For unsigned types maxV is set to the
-            // unsigned max, but we still use signed slt because the intermediate is in signed range.
-            name match
-              case "saturating_add" => emit("  add r1, r1, r2")
-              case "saturating_sub" => emit("  sub r1, r1, r2")
-              case "saturating_mul" => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
-              case _ =>
-            val (minV, maxV) =
-              if unsigned then (0L, (1L << width) - 1)
-              else (-(1L << (width - 1)), (1L << (width - 1)) - 1)
-            // Clamp HIGH: if r1 > maxV then r1 = maxV  (signed compare)
-            loadImm(3, maxV)
-            emit("  slt r4, r3, r1")       // r4 = (max < r1)
-            val noHi = newLabel("nohi")
-            emit(s"  beq r4, r0, $noHi")
-            emit("  mov r1, r3")
-            emit(s"$noHi")
-            // Clamp LOW: if r1 < minV then r1 = minV  (signed compare)
-            loadImm(3, minV)
-            emit("  slt r4, r1, r3")       // r4 = (r1 < min)
-            val noLo = newLabel("nolo")
-            emit(s"  beq r4, r0, $noLo")
-            emit("  mov r1, r3")
-            emit(s"$noLo")
+              emit("  mulu r1, r1, r2")    // r1 = u64 product (high 64 in r2 is always 0 for u32*u32)
+              loadImm(3, (1L << 32) - 1)   // r3 = u32 max = 0xFFFFFFFF
+              emit("  sltu r4, r3, r1")    // r4 = 1 if u32max < r1 unsigned
+              val noHi = newLabel("sat_nohi")
+              emit(s"  beq r4, r0, $noHi")
+              emit("  mov r1, r3")
+              emit(s"$noHi")
+            else
+              // Compute in 64-bit; for narrow widths the intermediate fits in signed i64.
+              // Then signed-clamp to [minV, maxV]. For unsigned types maxV is set to the
+              // unsigned max, but we still use signed slt because the intermediate is in signed range.
+              name match
+                case "saturating_add" => emit("  add r1, r1, r2")
+                case "saturating_sub" => emit("  sub r1, r1, r2")
+                case "saturating_mul" => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+                case _ =>
+              val (minV, maxV) =
+                if unsigned then (0L, (1L << width) - 1)
+                else (-(1L << (width - 1)), (1L << (width - 1)) - 1)
+              // Clamp HIGH: if r1 > maxV then r1 = maxV  (signed compare)
+              loadImm(3, maxV)
+              emit("  slt r4, r3, r1")       // r4 = (max < r1)
+              val noHi = newLabel("nohi")
+              emit(s"  beq r4, r0, $noHi")
+              emit("  mov r1, r3")
+              emit(s"$noHi")
+              // Clamp LOW: if r1 < minV then r1 = minV  (signed compare)
+              loadImm(3, minV)
+              emit("  slt r4, r1, r3")       // r4 = (r1 < min)
+              val noLo = newLabel("nolo")
+              emit(s"  beq r4, r0, $noLo")
+              emit("  mov r1, r3")
+              emit(s"$noLo")
           case other => throw new RuntimeException(s"unknown intrinsic: $other")
 
       case TBinary(left, op, right, resultType) =>
