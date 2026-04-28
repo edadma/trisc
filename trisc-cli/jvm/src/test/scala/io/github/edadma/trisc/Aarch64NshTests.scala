@@ -56,6 +56,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("Hello")
   }
 
+  "C program: test_c receives argc and argv" in {
+    // test_c is written in C and linked with crt0.c (the POSIX->Sysl
+    // crt0 bridge). It prints argc and joined argv[1..], returning argc
+    // as exit code — exercises the C side of the POSIX argv contract.
+    val output = qemu.command("test_c hello world")
+    output should include("argc=3")
+    output should include("hello world")
+  }
+
   "musl: write(1, ...) + read(0, ...) + exit" in {
     // mhello is a C program cross-compiled against slix's musl fork
     // (slix/test/hello.c, built by slix/test/build-hello.sh). It
