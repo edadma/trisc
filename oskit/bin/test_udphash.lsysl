@@ -1,0 +1,207 @@
+test_udphash — UDP socket lookup hash (Phase 3 chunk 2)
+========================================================
+
+Phase 3 chunk 2 of the net-stack quality plan replaces
+`inet_find_bound` and `inet_find_bound_port`'s linear-scan over all
+32 UDP socket slots with a 16-bucket hash chained on
+`bound_port & 0xf`. This test stresses both axes the bucket layout
+cares about: spread (sockets across many buckets) and chain depth
+(many sockets all colliding into one bucket).
+
+Test plan:
+
+  Phase A — spread.
+    Open 8 UDP sockets, bind to ports 8000..8007. The bucket index
+    is the low 4 bits of the port, so each socket lands in its own
+    bucket (0..7). Sendto/recvfrom loopback for each: every send
+    must reach the right socket, proving inet_find_bound walks the
+    correct bucket. Then close all 8.
+
+  Phase B — collision.
+    Open 8 UDP sockets, bind to ports that all share bucket 0 —
+    `port & 0xf == 0`. Picked: 8000, 8016, 8032, 8048, 8064, 8080,
+    8096, 8112. inet_udp_port_hash[0] is now an 8-entry chain.
+    Sendto/recvfrom to each: every walk must traverse to the
+    correct entry without confusing siblings. Close all 8.
+
+  Phase C — re-bind.
+    Re-open one socket and re-bind to a port already used and
+    closed in Phase A. Confirms close()'s hash-remove unlinked
+    correctly (otherwise the bucket carries a stale entry whose
+    bound_port matches and the new bind sees a phantom in-use).
+
+8 sockets is the per-tid UDP cap, so we go in 8-at-a-time waves
+rather than opening all 16+ at once.
+
+    module oskit.bin.test_udphash
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE      = 147
+    val NR_BIND       = 135
+    val NR_SOCKET     = 337
+    val NR_SENDTO     = 307
+    val NR_RECVFROM   = 276
+
+    val AF_INET_V     = 2
+    val SOCK_DGRAM_V  = 2
+
+
+    print_dec(v: int)
+        if v < 0
+            puts("-")
+            print_dec(-v)
+            return
+        if v >= 10
+            print_dec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("udphash: failed ")
+        print_dec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int, addr: *byte, alen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen), i64(flags), i64(addr), i64(alen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int, addr: *byte, alen: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen), i64(flags), i64(addr), i64(alen)))
+
+
+Fill `a` with sockaddr_in(127.0.0.1, port).
+
+    fill_sockaddr(a: *byte, port: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(127)
+        a[5] = byte(0)
+        a[6] = byte(0)
+        a[7] = byte(1)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+Wave: open 8 sockets, bind to ports[0..7], sendto/recvfrom each,
+return -1 on first failure (indexed by i). On success return 0
+and leave fds[0..7] open for the caller to close.
+
+    run_wave(ports: *int, fds: *int) -> int
+        var addr: [16]byte
+        var i = 0
+        while i < 8
+            val fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+            if fd < 0
+                fds[i] = -1
+                return i + 100
+            fds[i] = fd
+            fill_sockaddr(&addr[0], ports[i])
+            if posix_bind(fd, &addr[0], 16) != 0
+                return i + 200
+            i += 1
+
+Sendto/recvfrom: send the port low byte as the payload so we can
+identify which socket should have received which byte. Then recv
+on the destination fd and check the byte matches the bound port's
+low byte.
+
+        var j = 0
+        while j < 8
+            var payload: [1]byte
+            payload[0] = byte(ports[j] & 0xff)
+            fill_sockaddr(&addr[0], ports[j])
+            if posix_sendto(fds[j], &payload[0], 1, 0, &addr[0], 16) != 1
+                return j + 300
+            var rxbuf: [1]byte
+            var raddr: [16]byte
+            var rlen: i32 = i32(16)
+            if posix_recvfrom(fds[j], &rxbuf[0], 1, 0, &raddr[0], &rlen) != 1
+                return j + 400
+            if int(rxbuf[0]) & 0xff != ports[j] & 0xff
+                return j + 500
+            j += 1
+        0
+
+
+    main(argv: []string)
+        var fds: [8]int
+        var ports: [8]int
+        // Phase A — spread across all 8 distinct buckets.
+        ports[0] = 8000
+        ports[1] = 8001
+        ports[2] = 8002
+        ports[3] = 8003
+        ports[4] = 8004
+        ports[5] = 8005
+        ports[6] = 8006
+        ports[7] = 8007
+        val rA = run_wave(&ports[0], &fds[0])
+        if rA != 0
+            fail(rA)
+            return
+        var k = 0
+        while k < 8
+            if fds[k] >= 0
+                posix_close(fds[k])
+            k += 1
+
+        // Phase B — all colliding into bucket 0.
+        ports[0] = 8000
+        ports[1] = 8016
+        ports[2] = 8032
+        ports[3] = 8048
+        ports[4] = 8064
+        ports[5] = 8080
+        ports[6] = 8096
+        ports[7] = 8112
+        val rB = run_wave(&ports[0], &fds[0])
+        if rB != 0
+            fail(rB + 1000)
+            return
+        k = 0
+        while k < 8
+            if fds[k] >= 0
+                posix_close(fds[k])
+            k += 1
+
+        // Phase C — re-bind to a Phase A port. If close didn't
+        // unlink from the hash bucket, this would either fail to
+        // bind (phantom in-use) or fail to deliver.
+        ports[0] = 8003
+        ports[1] = 8004
+        ports[2] = 8005
+        ports[3] = 8006
+        ports[4] = 8007
+        ports[5] = 8008
+        ports[6] = 8009
+        ports[7] = 8010
+        val rC = run_wave(&ports[0], &fds[0])
+        if rC != 0
+            fail(rC + 2000)
+            return
+        k = 0
+        while k < 8
+            if fds[k] >= 0
+                posix_close(fds[k])
+            k += 1
+
+        puts("udphash: ok\n")
+        exit()

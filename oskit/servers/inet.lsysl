@@ -165,9 +165,85 @@ traffic.
         pending_maxlen: int
         recv_deadline: int
         pending_error: int
+        // Phase 3 chunk 2: forward link in the UDP-port hash bucket
+        // for `bound_port`. -1 = not in any bucket. Maintained by
+        // `inet_udp_hash_insert` / `inet_udp_hash_remove` whenever a
+        // socket transitions in/out of the bound state.
+        next_in_udp_bucket: int
 
     var inet_sockets: [32]InetSocket
     var inet_port = -1
+
+
+### UDP port hash (Phase 3 chunk 2)
+
+`inet_find_bound` and `inet_find_bound_port` are the two hot lookups
+on the inbound UDP path: every received datagram pays one of them to
+find the destination socket. A linear scan over the 32-slot table is
+fine for current loads, but the plan calls for hashing now while the
+caps are small so growth doesn't surface a perf wall.
+
+The hash is a chained table keyed on `bound_port & (N - 1)`. N is a
+power of two so the mask is a single `&`. Each socket holds a
+`next_in_udp_bucket` link forming a singly-linked list per bucket;
+`inet_udp_port_hash[h]` is the head index, or -1 for empty. With
+N=16 and 32 sockets we average 2 entries per bucket — already a 16x
+constant-factor win over the linear scan, and it scales linearly
+with N if MAX_SOCKETS grows.
+
+Maintenance points: `inet_handle_bind` and the auto-bind in
+`inet_handle_sendto` insert; `inet_handle_close` and
+`inet_handle_pid_exit` remove. Tests catch missed maintenance via
+the duplicate-bind detection in `inet_handle_bind` (collisions or
+stale entries surface as either a refused legitimate bind or an
+allowed dup bind).
+
+    val INET_UDP_HASH_N = 16
+
+    var inet_udp_port_hash: [16]int
+
+Hash a port to a bucket. Limited to the low 16 bits per the IPv4
+TCP/UDP port-number space.
+
+    inet_udp_bucket(port: int) -> int
+        (port & 0xffff) & (INET_UDP_HASH_N - 1)
+
+Initialize the bucket array. Called once from `inet_init_sockets`.
+
+    inet_udp_hash_init()
+        var i = 0
+        while i < INET_UDP_HASH_N
+            inet_udp_port_hash[i] = -1
+            i += 1
+
+Insert socket `idx` at the head of its `bound_port` bucket. Caller
+guarantees `bound_port` is set and the socket isn't already in any
+bucket (i.e. only call after a fresh bind).
+
+    inet_udp_hash_insert(idx: int)
+        val h = inet_udp_bucket(inet_sockets[idx].bound_port)
+        inet_sockets[idx].next_in_udp_bucket = inet_udp_port_hash[h]
+        inet_udp_port_hash[h] = idx
+
+Remove socket `idx` from its bucket. Walks the chain to find the
+predecessor, splices the link past `idx`, and clears `next`. No-op
+if `idx` isn't actually in the bucket — happens when `pid_exit`
+sweeps a socket that close() already cleaned up.
+
+    inet_udp_hash_remove(idx: int)
+        val h = inet_udp_bucket(inet_sockets[idx].bound_port)
+        var cur = inet_udp_port_hash[h]
+        if cur == idx
+            inet_udp_port_hash[h] = inet_sockets[idx].next_in_udp_bucket
+            inet_sockets[idx].next_in_udp_bucket = -1
+            return
+        while cur >= 0
+            val nx = inet_sockets[cur].next_in_udp_bucket
+            if nx == idx
+                inet_sockets[cur].next_in_udp_bucket = inet_sockets[idx].next_in_udp_bucket
+                inet_sockets[idx].next_in_udp_bucket = -1
+                return
+            cur = nx
 
 
 Phase 2 of the net-stack quality plan: count UDP slots whose
@@ -263,7 +339,9 @@ client can reach us.
             inet_sockets[i].pending_tid = -1
             inet_sockets[i].recv_deadline = 0
             inet_sockets[i].pending_error = 0
+            inet_sockets[i].next_in_udp_bucket = -1
             i += 1
+        inet_udp_hash_init()
         // Note: `inet_udp_fire_seq` (in inet_proto.lsysl) is left at
         // its default-zeroed state. The shim re-syncs `last_seen_seq`
         // on every EPOLL_CTL_ADD anyway, so a recycled slot's stale
@@ -273,12 +351,15 @@ client can reach us.
 
 ### Locate a bound socket
 
-Linear scan — fine at 32 sockets; a hash on (ip, port) would be
-the obvious upgrade once the stack grows.
+Hash-bucket walk on `port`. Phase 3 chunk 2 — replaces the prior
+linear scan over all 32 slots. Average bucket length is ~2 at
+INET_MAX_SOCKETS=32 / INET_UDP_HASH_N=16; worst case (all 32 sockets
+collide to one bucket) is still O(N) but only ever realized by
+bind-by-port-mod-16 patterns the tests don't exercise.
 
     inet_find_bound(ip: u32, port: int) -> int
-        var i = 0
-        while i < INET_MAX_SOCKETS
+        var i = inet_udp_port_hash[inet_udp_bucket(port)]
+        while i >= 0
             if inet_sockets[i].in_use != 0
                 if inet_sockets[i].bound != 0
                     if inet_sockets[i].bound_port == port
@@ -287,7 +368,7 @@ the obvious upgrade once the stack grows.
                             return i
                         if bi == ip
                             return i
-            i += 1
+            i = inet_sockets[i].next_in_udp_bucket
         -1
 
 
@@ -316,13 +397,13 @@ to our MAC). Returning the first port match keeps the RX path simple
 and matches how typical single-homed stacks behave.
 
     inet_find_bound_port(port: int) -> int
-        var i = 0
-        while i < INET_MAX_SOCKETS
+        var i = inet_udp_port_hash[inet_udp_bucket(port)]
+        while i >= 0
             if inet_sockets[i].in_use != 0
                 if inet_sockets[i].bound != 0
                     if inet_sockets[i].bound_port == port
                         return i
-            i += 1
+            i = inet_sockets[i].next_in_udp_bucket
         -1
 
 
@@ -463,6 +544,7 @@ waiter. `maxlen` caps how many payload bytes we hand back.
         inet_sockets[idx].pending_tid = -1
         inet_sockets[idx].recv_deadline = 0
         inet_sockets[idx].pending_error = 0
+        inet_sockets[idx].next_in_udp_bucket = -1
         // No need to reset inet_udp_fire_seq[idx] — see
         // `inet_init_sockets` for why a stale counter is harmless.
         var reply: [2]byte
@@ -527,6 +609,7 @@ pass the IPC `sender` argument.
         inet_sockets[fd].bound = 1
         inet_sockets[fd].bound_ip = ip
         inet_sockets[fd].bound_port = port
+        inet_udp_hash_insert(fd)
         var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, reply, 1)
@@ -582,6 +665,7 @@ vs. 16K ports, so not in practice.
             inet_sockets[fd].bound = 1
             inet_sockets[fd].bound_ip = INADDR_ANY
             inet_sockets[fd].bound_port = eph
+            inet_udp_hash_insert(fd)
         val src_port = inet_sockets[fd].bound_port
         // Loopback fastpath: any address in 127/8 or our own external
         // IP routes to a local socket via the in-memory queue, never
@@ -933,6 +1017,8 @@ the caller doesn't block forever.
             var wr: [10]byte
             wr[0] = byte(-1)
             ipc_reply(waiter, wr, 10)
+        if inet_sockets[fd].bound != 0
+            inet_udp_hash_remove(fd)
         inet_sockets[fd].in_use = 0
         inet_sockets[fd].bound = 0
         inet_sockets[fd].q_count = 0
@@ -1610,6 +1696,8 @@ future RST).
         while i < INET_MAX_SOCKETS
             if inet_sockets[i].in_use != 0
                 if inet_sockets[i].owner_tid == tid
+                    if inet_sockets[i].bound != 0
+                        inet_udp_hash_remove(i)
                     inet_sockets[i].in_use = 0
                     inet_sockets[i].bound = 0
                     inet_sockets[i].q_count = 0

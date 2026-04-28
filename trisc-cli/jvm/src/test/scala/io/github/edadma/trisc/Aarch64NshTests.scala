@@ -2028,6 +2028,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "framepool: failed"
   }
 
+  "net: UDP socket lookup hash (Phase 3 chunk 2)" in {
+    // Phase 3 chunk 2: replace inet_find_bound + inet_find_bound_port
+    // linear scans with a 16-bucket hash chained on (port & 0xf).
+    // Test stresses both the spread case (8 sockets in 8 distinct
+    // buckets) and the collision case (8 sockets all in bucket 0),
+    // then verifies that close() correctly unlinks so a re-bind
+    // succeeds without phantom "port in use" rejections.
+    val output = qemu.command("test_udphash")
+    output should include("udphash: ok")
+    output should not include "udphash: failed"
+  }
+
   "dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and
