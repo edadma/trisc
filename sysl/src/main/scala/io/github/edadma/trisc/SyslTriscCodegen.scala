@@ -2884,8 +2884,6 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
             emitNarrow(1, typ)
           case "saturating_add" | "saturating_sub" | "saturating_mul" =>
-            if width >= 64 then
-              throw new RuntimeException(s"$name on 64-bit types is not yet supported in the TRISC backend")
             // Special case: saturating_mul on u32 — the full u64 product can exceed
             // signed i64 range (e.g. 0xFFFFFFFF * 0xFFFFFFFF = 0xFFFFFFFE_00000001),
             // so the generic signed-clamp path below would misinterpret it as
@@ -2900,6 +2898,113 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
               emit(s"  beq r4, r0, $noHi")
               emit("  mov r1, r3")
               emit(s"$noHi")
+            else if width >= 64 then
+              // 64-bit saturating arithmetic. The narrow signed-clamp path below
+              // doesn't work — operands already span the full i64 range, so the
+              // intermediate computation cannot be widened. Use overflow detection
+              // on the wrapped result and clamp to type-specific bounds.
+              (name, unsigned) match
+                case ("saturating_add", true) =>
+                  // u64 add: overflow iff (a + b) < a unsigned.
+                  emit("  pshd r1")             // save a
+                  stackOffset -= 8
+                  emit("  add r1, r1, r2")      // r1 = a + b (wrapped)
+                  emit("  popd r3")             // r3 = a
+                  stackOffset += 8
+                  emit("  sltu r4, r1, r3")     // r4 = 1 iff sum < a
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r4, r0, $noOf")
+                  loadImm(1, -1L)               // MAX_U64 = 0xFFFF_FFFF_FFFF_FFFF
+                  emit(s"$noOf")
+                case ("saturating_sub", true) =>
+                  // u64 sub: would-underflow iff a < b unsigned.
+                  emit("  sltu r4, r1, r2")     // r4 = 1 iff a < b
+                  emit("  sub r1, r1, r2")      // r1 = a - b (wrapped)
+                  val noUn = newLabel("sat_noun")
+                  emit(s"  beq r4, r0, $noUn")
+                  emit("  ldi r1, 0")
+                  emit(s"$noUn")
+                case ("saturating_mul", true) =>
+                  // u64 mul: mulu writes high to r((d+1)&7) = r2 (clobber).
+                  // Overflow iff high half is non-zero.
+                  emit("  mulu r1, r1, r2")     // r1 = low, r2 = high
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r2, r0, $noOf")
+                  loadImm(1, -1L)               // MAX_U64
+                  emit(s"$noOf")
+                case ("saturating_add", false) =>
+                  // i64 add: signed overflow iff sign(a)==sign(b) && sign(result)!=sign(a).
+                  // XOR trick: ((a ^ result) & (b ^ result)) is negative ⇔ overflow.
+                  emit("  pshd r1")             // save a
+                  stackOffset -= 8
+                  emit("  pshd r2")             // save b
+                  stackOffset -= 8
+                  emit("  add r1, r1, r2")      // r1 = result (wrapped)
+                  emit("  popd r2")             // r2 = b
+                  stackOffset += 8
+                  emit("  popd r3")             // r3 = a
+                  stackOffset += 8
+                  emit("  xor r4, r3, r1")      // a ^ result
+                  emit("  xor r5, r2, r1")      // b ^ result
+                  emit("  and r4, r4, r5")
+                  emit("  slt r4, r4, r0")      // r4 = 1 iff combined indicator < 0
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r4, r0, $noOf")
+                  // Overflow direction: same sign as a (== sign of b).
+                  emit("  slt r4, r3, r0")      // r4 = 1 iff a < 0
+                  val neg = newLabel("sat_neg")
+                  emit(s"  bne r4, r0, $neg")
+                  loadImm(1, Long.MaxValue)
+                  emit(s"  bra $noOf")
+                  emit(s"$neg")
+                  loadImm(1, Long.MinValue)
+                  emit(s"$noOf")
+                case ("saturating_sub", false) =>
+                  // i64 sub: overflow iff sign(a)!=sign(b) && sign(result)!=sign(a).
+                  // XOR trick: ((a ^ b) & (a ^ result)) is negative ⇔ overflow.
+                  emit("  pshd r1")             // save a
+                  stackOffset -= 8
+                  emit("  pshd r2")             // save b
+                  stackOffset -= 8
+                  emit("  sub r1, r1, r2")      // r1 = result (wrapped)
+                  emit("  popd r2")             // r2 = b
+                  stackOffset += 8
+                  emit("  popd r3")             // r3 = a
+                  stackOffset += 8
+                  emit("  xor r4, r3, r2")      // a ^ b
+                  emit("  xor r5, r3, r1")      // a ^ result
+                  emit("  and r4, r4, r5")
+                  emit("  slt r4, r4, r0")      // r4 = 1 iff combined indicator < 0
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r4, r0, $noOf")
+                  // Overflow direction: same sign as a.
+                  emit("  slt r4, r3, r0")      // r4 = 1 iff a < 0
+                  val neg = newLabel("sat_neg")
+                  emit(s"  bne r4, r0, $neg")
+                  loadImm(1, Long.MaxValue)
+                  emit(s"  bra $noOf")
+                  emit(s"$neg")
+                  loadImm(1, Long.MinValue)
+                  emit(s"$noOf")
+                case ("saturating_mul", false) =>
+                  // i64 mul: mul writes high to r2 (clobber).
+                  // Overflow iff high != asr(low, 63), i.e. high doesn't equal the
+                  // sign-extension of the low half.
+                  emit("  mul r1, r1, r2")      // r1 = low, r2 = high
+                  emit("  ldi r3, 63")
+                  emit("  asr r4, r1, r3")      // r4 = sign-extended low (expected high)
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r4, r2, $noOf")
+                  // Overflow direction: sign of actual high tells us positive vs negative.
+                  emit("  slt r4, r2, r0")      // r4 = 1 iff high < 0
+                  val neg = newLabel("sat_neg")
+                  emit(s"  bne r4, r0, $neg")
+                  loadImm(1, Long.MaxValue)
+                  emit(s"  bra $noOf")
+                  emit(s"$neg")
+                  loadImm(1, Long.MinValue)
+                  emit(s"$noOf")
+                case _ =>
             else
               // Compute in 64-bit; for narrow widths the intermediate fits in signed i64.
               // Then signed-clamp to [minV, maxV]. For unsigned types maxV is set to the
