@@ -3,7 +3,7 @@ package io.github.edadma.trisc
 import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Regression coverage for TRISC aggregate-copy alignment.
+/** Regression coverage for TRISC aggregate-copy alignment (audit item #32).
   *
   * Bug surfaced by the audit item #19 TRISC test runner: copying a struct
   * or enum whose natural alignment is < 8 (e.g. an enum carrying only `int`

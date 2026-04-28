@@ -561,7 +561,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         // Same alignment story as struct — enums whose payloads are only
         // 4-aligned (e.g. an enum carrying `int`-only variants embedded in
         // another enum) sit at 4-aligned offsets and must not be copied
-        // with `std`. See audit item #20 (TRISC enum-match misalignment).
+        // with `std`. See audit item #32 (TRISC enum-match misalignment,
+        // surfaced by item #19's runner).
         emitAggregateCopy(srcReg, addrReg, stackSize(et), stackAlign(et))
       case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.FloatType(64) |
            _: SyslType.PtrType | _: SyslType.RefType =>
@@ -1791,7 +1792,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     emit("  ldd r2, r2, r0")               // r2 = _ret_ptr (destination)
     emit("  popd r3")                       // r3 = source
     // Copy size bytes from r3 to r2 using width-appropriate ops. See
-    // `emitAggregateCopy` for the alignment story (audit item #20).
+    // `emitAggregateCopy` for the alignment story (audit item #32).
     if align >= 8 then
       for i <- 0 until size by 8 do
         emitAddImm(4, 3, i)
