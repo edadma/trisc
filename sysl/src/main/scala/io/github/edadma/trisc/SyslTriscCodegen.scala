@@ -1736,14 +1736,24 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emitRefCleanup()
       emitEpilogue()
 
+  // Emit a divide-by-zero check on `divisorReg`. If the divisor is zero,
+  // trap with error code 5 before the div/divu issues — TRISC `div` on
+  // zero is hardware-undefined, so we must fault deterministically.
+  private def emitDivByZeroCheck(divisorReg: String): Unit =
+    val ok = newLabel("div_ok")
+    emit(s"  bne $divisorReg, r0, $ok")
+    emit("  ldi r1, 5")           // error code: 5 = divide-by-zero
+    emit("  trap 1")
+    emit(s"$ok")
+
   // Emit binary operation: r1 = r1 op r3
   private def emitBinOp(op: String): Unit =
     op match
       case "+"  => emit("  add r1, r1, r3")
       case "-"  => emit("  sub r1, r1, r3")
       case "*"  => emit("  mul r1, r1, r3")
-      case "/"  => emit("  div r1, r1, r3")
-      case "%"  => emit("  div r1, r1, r3"); emit("  mov r1, r2") // remainder in r2
+      case "/"  => emitDivByZeroCheck("r3"); emit("  div r1, r1, r3")
+      case "%"  => emitDivByZeroCheck("r3"); emit("  div r1, r1, r3"); emit("  mov r1, r2") // remainder in r2
       case "&"  => emit("  and r1, r1, r3")
       case "|"  => emit("  or r1, r1, r3")
       case "^"  => emit("  xor r1, r1, r3")
@@ -2586,8 +2596,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           case "+"  => emit("  add r2, r2, r1")
           case "-"  => emit("  sub r2, r2, r1")
           case "*"  => emit("  mul r2, r2, r1")
-          case "/"  => emit("  div r2, r2, r1")
-          case "%"  => emit("  div r2, r2, r1"); emit("  mov r2, r3") // remainder in r3
+          case "/"  => emitDivByZeroCheck("r1"); emit("  div r2, r2, r1")
+          case "%"  => emitDivByZeroCheck("r1"); emit("  div r2, r2, r1"); emit("  mov r2, r3") // remainder in r3
           case "&"  => emit("  and r2, r2, r1")
           case "|"  => emit("  or r2, r2, r1")
           case "^"  => emit("  xor r2, r2, r1")
@@ -2945,8 +2955,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             case "+"  => emit("  add r1, r1, r2")
             case "-"  => emit("  sub r1, r1, r2")
             case "*"  => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
-            case "/"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
-            case "%"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2"); emit("  mov r1, r2") // remainder in r2
+            case "/"  => emitDivByZeroCheck("r2"); emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
+            case "%"  => emitDivByZeroCheck("r2"); emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2"); emit("  mov r1, r2") // remainder in r2
             case "&"  => emit("  and r1, r1, r2")
             case "|"  => emit("  or r1, r1, r2")
             case "^"  => emit("  xor r1, r1, r2")
