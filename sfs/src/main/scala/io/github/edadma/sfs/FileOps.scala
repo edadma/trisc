@@ -121,9 +121,10 @@ object FileOps:
       sfs.writeInode(childNum, target.copy(linkCount = newLinkCount, ctimeSec = timeSec, ctimeNsec = timeNsec))
     else
       val drained = ExtentAllocator.truncate(target, sfs, 0L)
+      val cleared = freeXattrBlock(sfs, drained)
       sfs.writeInode(
         childNum,
-        drained.copy(
+        cleared.copy(
           linkCount = 0,
           size = 0L,
           blockCount = 0,
@@ -241,3 +242,16 @@ object FileOps:
       mtimeSec = timeSec, mtimeNsec = timeNsec,
       ctimeSec = timeSec, ctimeNsec = timeNsec,
     )
+
+  /** If `ino` carries an xattr block, free it in the block bitmap and
+    * return a copy with the flag and pointer cleared. Otherwise the
+    * input is returned unchanged. Called when the inode is about to be
+    * freed (link_count reaches zero). */
+  private[sfs] def freeXattrBlock(sfs: Sfs, ino: Inode): Inode =
+    if (ino.flags & InodeFlagHasXattr) == 0 then ino
+    else
+      sfs.blockBitmap.clear(ino.xattrBlock)
+      ino.copy(
+        flags = ino.flags & ~InodeFlagHasXattr,
+        xattrBlock = 0,
+      )

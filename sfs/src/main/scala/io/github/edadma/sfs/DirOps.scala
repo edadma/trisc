@@ -123,9 +123,10 @@ object DirOps:
       )
 
     val drained = ExtentAllocator.truncate(child, sfs, 0L)
+    val cleared = FileOps.freeXattrBlock(sfs, drained)
     sfs.writeInode(
       childNum,
-      drained.copy(
+      cleared.copy(
         linkCount = 0,
         size = 0L,
         blockCount = 0,
