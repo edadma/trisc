@@ -29,7 +29,7 @@ For back-pointers and non-owning references (e.g. parent pointers in trees). ARC
 - ~~`saturating_*` on 64-bit types throw "not supported"~~ — fixed at sysl@271e7696 (six implementations using overflow detection on the wrapped result).
 - ~~No explicit divide-by-zero check inserted before `div`/`divu`~~ — fixed at sysl@5cfe61c6.
 - `f"..."` format strings not implemented (interpreter and LLVM have them).
-- TRISC backend is not wired into the `sysl test --backend` runner (`SyslCli.scala:572-574` errors with "not yet implemented"). Infrastructure gap for per-feature TRISC testing.
+- ~~TRISC backend is not wired into the `sysl test --backend` runner~~ — fixed at sysl@c2f59c2c. `runOneTRISC` mirrors `runOneSVM`. Limitations: should_panic message-substring not honoured (asserts/panics drop the message); tests needing malloc/free fail at link. Cross-backend smoke at `sysl/tests/panic_test/`.
 
 ## SVM Backend
 
