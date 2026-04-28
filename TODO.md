@@ -25,8 +25,9 @@ For back-pointers and non-owning references (e.g. parent pointers in trees). ARC
 
 ## TRISC Backend
 
-- `saturating_mul` on `u32` and `saturating_*` on 64-bit types throw "not supported" at codegen time (`SyslTriscCodegen.scala:2878, 2880`). Needs 128-bit detection or runtime helpers.
-- No explicit divide-by-zero check inserted before `div`/`divu`.
+- ~~`saturating_mul` on `u32`~~ — fixed at sysl@f918d56b (`mulu` + unsigned compare against u32 max).
+- ~~`saturating_*` on 64-bit types throw "not supported"~~ — fixed at sysl@271e7696 (six implementations using overflow detection on the wrapped result).
+- ~~No explicit divide-by-zero check inserted before `div`/`divu`~~ — fixed at sysl@5cfe61c6.
 - `f"..."` format strings not implemented (interpreter and LLVM have them).
 - TRISC backend is not wired into the `sysl test --backend` runner (`SyslCli.scala:572-574` errors with "not yet implemented"). Infrastructure gap for per-feature TRISC testing.
 
