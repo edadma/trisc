@@ -1223,7 +1223,7 @@ class SyslSVMCodegen:
           emit(s"  local_set ${target.index}")
       emit("  drop")
 
-    case _ => // TODO: remaining stmt types
+    case _ => sys.error(s"unhandled TStmt in SVM codegen: ${stmt.getClass.getSimpleName}")
 
   // ========================================================================
   // genExpr — leaves exactly one value on the data stack
@@ -2403,8 +2403,7 @@ class SyslSVMCodegen:
       emitStore(fieldType)
 
     case _ =>
-      // TODO: remaining expr types
-      emitPushInt(0) // placeholder
+      sys.error(s"unhandled TExpr in SVM codegen: ${expr.getClass.getSimpleName}")
 
   // ========================================================================
   // Helpers
