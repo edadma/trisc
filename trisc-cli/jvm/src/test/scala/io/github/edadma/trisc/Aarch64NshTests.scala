@@ -36,22 +36,27 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
   override def afterEach(): Unit =
     if qemu != null then qemu.close()
 
-  "aarch64 login: echo command" in {
+  "login: echo command" in {
     val output = qemu.command("echo hello aarch64")
     output should include("hello aarch64")
   }
 
-  "aarch64 login: help command" in {
+  "login: help command" in {
     val output = qemu.command("help")
     output should include("builtins:")
   }
 
-  "aarch64 login: hello program" in {
+  "login: pwd shows home" in {
+    val output = qemu.command("pwd")
+    output should include("/root")
+  }
+
+  "login: hello program" in {
     val output = qemu.command("hello")
     output should include("Hello")
   }
 
-  "aarch64 musl: write(1, ...) + read(0, ...) + exit" in {
+  "musl: write(1, ...) + read(0, ...) + exit" in {
     // mhello is a C program cross-compiled against slix's musl fork
     // (slix/test/hello.c, built by slix/test/build-hello.sh). It
     // exercises SYS_WRITE=128, SYS_READ=130 and SYS_EXIT_GROUP=129
@@ -75,52 +80,149 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("read=1")
   }
 
-  "aarch64 login: uptime command" in {
+  "login: uptime command" in {
     val output = qemu.command("uptime")
     output.trim should not be empty
   }
 
-  "aarch64 login: ls root" in {
+  "login: ls root" in {
     val output = qemu.command("ls")
     output should include("etc")
     output should include("bin")
   }
 
-  "aarch64 login: cat /etc/ttytab" in {
+  "login: cat /etc/ttytab" in {
     val output = qemu.command("cat /etc/ttytab")
     output should include("tty0 login")
   }
 
-  "aarch64 login: whoami" in {
+  "login: whoami" in {
     val output = qemu.command("whoami")
     output should include("0")
   }
 
-  "aarch64 login: ps lists threads" in {
+  "login: ps lists threads" in {
     val output = qemu.command("ps")
     output should include("rs")
   }
 
-  "aarch64 login: multiple commands" in {
+  "login: multiple commands" in {
     qemu.command("echo first")
     val output = qemu.command("echo second")
     output should include("second")
   }
 
+  "kill: background process" in {
+    // Start count in background — nsh prints "[1] PID"
+    qemu.send("count &\n")
+    val bgOutput = qemu.waitFor("> ")
+    Thread.sleep(2000)
+
+    // Extract PID from nsh's "[N] PID" output
+    val pidPattern = """\[\d+\]\s+(\d+)""".r
+    val countPid = pidPattern.findFirstMatchIn(bgOutput).map(_.group(1))
+    countPid shouldBe defined
+
+    // Kill it
+    qemu.command(s"kill ${countPid.get}")
+    Thread.sleep(1000)
+
+    // Verify count is gone
+    val psAfter = qemu.command("ps")
+    psAfter should not include ("count")
+  }
+
+  "signal: ctrl-c kills foreground process" in {
+    // Byte 0x03 passes through directly to the serial port,
+    // since Java's process pipe bypasses the host terminal.
+    qemu.send("count\n")
+    Thread.sleep(2000)
+    qemu.send("")
+    qemu.waitFor(rootPrompt)
+    val ps = qemu.command("ps")
+    ps should not include "count"
+  }
+
+  "ds: publish, retrieve, delete int and string" in {
+    // Int round-trip
+    qemu.command("ds set answer 42")
+    val getAnswer = qemu.command("ds get answer")
+    getAnswer should include("42")
+
+    // String round-trip
+    qemu.command("ds set greeting hello")
+    val getGreeting = qemu.command("ds get greeting")
+    getGreeting should include("hello")
+
+    // Delete + retrieve should miss
+    qemu.command("ds del answer")
+    val afterDel = qemu.command("ds get answer")
+    afterDel should include("not found")
+  }
+
   private val rootPrompt = "/root> "
 
-  "aarch64 pipe: echo hello | cat" in {
+  "pipe: echo hello | cat" in {
     val output = qemu.command("echo hello | cat")
     output should include("hello")
   }
 
-  "aarch64 redirect: echo hello > /tmp/out" in {
+  "pipe: echo hello | cat | cat" in {
+    val output = qemu.command("echo hello | cat | cat")
+    output should include("hello")
+  }
+
+  "pipe: echo piped to tail" in {
+    val output = qemu.command("echo asdf | tail -1")
+    output should include("asdf")
+  }
+
+  "pipe: test_pipe 1 write" in {
+    val output = qemu.command("echo x | test_pipe 1")
+    output should include("A")
+  }
+
+  "pipe: test_pipe 2 writes" in {
+    val output = qemu.command("echo x | test_pipe 2")
+    output should include("B")
+  }
+
+  "pipe: test_pipe 3 writes" in {
+    val output = qemu.command("echo x | test_pipe 3")
+    output should include("C")
+  }
+
+  "pipe: test_pipe 4 writes" in {
+    val output = qemu.command("echo x | test_pipe 4")
+    output should include("D")
+  }
+
+  "wc: echo piped to wc" in {
+    val output = qemu.command("echo asdf | wc")
+    output should include("1")
+  }
+
+  "tail: pipe from cat" in {
+    qemu.command("echo first > /tmp/tp", rootPrompt)
+    qemu.command("echo second >> /tmp/tp", rootPrompt)
+    qemu.command("echo third >> /tmp/tp", rootPrompt)
+    val output = qemu.command("cat /tmp/tp | tail -1")
+    output should not include "first"
+    output should include("third")
+  }
+
+  "head: first 3 lines from pipe" in {
+    val output = qemu.command("echo aaa | head -3")
+    output should include("aaa")
+  }
+
+  "redirect: echo hello > /tmp/out" in {
     qemu.command("echo hello > /tmp/out", rootPrompt)
     val output = qemu.command("cat /tmp/out")
     output should include("hello")
   }
 
-  "aarch64 redirect: echo append >>" in {
+  "redirect: echo append >>" in {
     qemu.command("echo line1 > /tmp/app", rootPrompt)
     qemu.command("echo line2 >> /tmp/app", rootPrompt)
     val output = qemu.command("cat /tmp/app")
@@ -128,24 +230,31 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("line2")
   }
 
-  "aarch64 redirect: cat < /tmp/in" in {
+  "redirect: cat < /tmp/in" in {
     qemu.command("echo inputdata > /tmp/in", rootPrompt)
     val output = qemu.command("cat < /tmp/in")
     output should include("inputdata")
   }
 
-  "aarch64 redirect: no space after >" in {
+  "redirect: pipe with output redirect" in {
+    qemu.command("echo piped > /tmp/p1", rootPrompt)
+    qemu.command("cat /tmp/p1 | cat > /tmp/p2", rootPrompt)
+    val output = qemu.command("cat /tmp/p2")
+    output should include("piped")
+  }
+
+  "redirect: no space after >" in {
     qemu.command("echo spaceless >/tmp/ns", rootPrompt)
     val output = qemu.command("cat /tmp/ns")
     output should include("spaceless")
   }
 
-  "aarch64 pipe: no spaces around |" in {
+  "pipe: no spaces around |" in {
     val output = qemu.command("echo piped|cat")
     output should include("piped")
   }
 
-  "aarch64 head: first 2 lines of file" in {
+  "head: first 2 lines of file" in {
     qemu.command("echo line1 > /tmp/hf", rootPrompt)
     qemu.command("echo line2 >> /tmp/hf", rootPrompt)
     qemu.command("echo line3 >> /tmp/hf", rootPrompt)
@@ -155,7 +264,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "line3"
   }
 
-  "aarch64 tail: last 2 lines of file" in {
+  "tail: last 2 lines of file" in {
     qemu.command("echo aaa > /tmp/tf", rootPrompt)
     qemu.command("echo bbb >> /tmp/tf", rootPrompt)
     qemu.command("echo ccc >> /tmp/tf", rootPrompt)
@@ -165,22 +274,27 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("ccc")
   }
 
-  "aarch64 wc: count from file" in {
+  "wc: count from file" in {
     qemu.command("echo hello > /tmp/wcf", rootPrompt)
     val output = qemu.command("wc /tmp/wcf")
     output should include("1")
   }
 
-  "aarch64 virtio: probe finds the attached virtio-net device" in {
-    // The boot log (captured before the login prompt) should have
-    // the virtio probe line confirming QEMU's virtio-net-device is
-    // reachable over virtio-mmio.
+  "virtio: probe finds the attached virtio-net device" in {
+    // The boot log (captured before the login prompt) should
+    // confirm a working virtio-net probe. The banner format is
+    // arch-specific — aarch64 uses virtio-mmio and prints
+    // `virtio: slot N ... (net)`; x86 uses PCI and prints
+    // `virtio-net: probe ok ...`. The test accepts either, so the
+    // same description holds across arches.
     val banner = qemu.allOutput
-    banner should include("virtio: slot")
-    banner should include("(net)")
+    val hasMmio = banner.contains("virtio: slot") && banner.contains("(net)")
+    val hasPci  = banner.contains("virtio-net: probe ok")
+    (hasMmio || hasPci) shouldBe true
+    banner should not include "virtio: probe failed"
   }
 
-  "aarch64 inet: UDP loopback via test_net" in {
+  "inet: UDP loopback via test_net" in {
     // test_net opens a UDP socket on 127.0.0.1:5000, sends "hello"
     // to itself, and prints what recvfrom returned. Phase 2 on
     // aarch64 exercises real-wire sendto without an explicit bind
@@ -191,7 +305,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("wire sent=5")
   }
 
-  "aarch64 nic: GET_MAC + subscribe + drain via test_nic" in {
+  "nic: GET_MAC + subscribe + drain via test_nic" in {
     // test_nic exercises the full nic IPC ABI: GET_MAC,
     // SUBSCRIBE_RX, and RECV_PACKET drain loop. QEMU boots
     // virtio-net-device with a fixed MAC. The RX queue gets
@@ -204,7 +318,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("rx=")
   }
 
-  "aarch64 async RX: unsolicited UDP reaches recvfrom via virtio IRQ" in {
+  "async RX: unsolicited UDP reaches recvfrom via virtio IRQ" in {
     // test_udp_echo binds :7777, blocks in recvfrom. The harness's
     // netdev forwards host localhost:17777 → guest:7777. Sending a
     // datagram from Scala arrives at the guest unsolicited, travels
@@ -227,7 +341,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("'ping!'")
   }
 
-  "aarch64 boot: init auto-runs dhclient before opening logins" in {
+  "boot: init auto-runs dhclient before opening logins" in {
     // D.3 init integration: init spawns /bin/dhclient, pm_waitpids
     // it, and prints the summary line before reading /etc/ttytab.
     // beforeEach already drove the boot past the "> " prompt, so
@@ -239,7 +353,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     qemu.allOutput should not include "network: dhcp spawn failed"
   }
 
-  "aarch64 ifconfig: reports the lease installed at boot" in {
+  "ifconfig: reports the lease installed at boot" in {
     // init's start_dhcp has already leased 10.0.2.15 from slirp by
     // the time the shell is up, so ifconfig should read it back
     // through inet_get_ip_config.
@@ -249,7 +363,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("gateway: 10.0.2.2")
   }
 
-  "aarch64 udp: recvfrom_timeout fires after ~1s with no sender" in {
+  "udp: recvfrom_timeout fires after ~1s with no sender" in {
     // test_udp_tmo binds 0.0.0.0:7788 and calls
     // recvfrom_timeout(..., 1000 ms) with nothing sending to it.
     // Verifies that:
@@ -273,7 +387,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_udp_tmo: unexpected data"
   }
 
-  "aarch64 posix: socket/bind/sendto/recvfrom round-trip via shim" in {
+  "posix: socket/bind/sendto/recvfrom round-trip via shim" in {
     // test_posix_udp drives the POSIX socket syscalls added in the
     // per-process fd-table migration: 337=socket, 135=bind,
     // 307=sendto, 276=recvfrom, 147=close. The shim in
@@ -293,7 +407,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_posix_udp: recvfrom failed"
   }
 
-  "aarch64 posix: TCP connect/write/read/close via shim" in {
+  "posix: TCP connect/write/read/close via shim" in {
     // test_posix_tcp drives the POSIX TCP syscalls added in phase
     // 2: 337=socket(SOCK_STREAM), 148=connect, 128=write,
     // 130=read, 147=close. Uses the same slirp-forwarded
@@ -340,7 +454,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       echoThread.join(2000)
   }
 
-  "aarch64 posix: inet sockets reclaimed on pid exit" in {
+  "posix: inet sockets reclaimed on pid exit" in {
     // test_sockleak opens 7 UDP sockets (just under the Phase 2
     // per-tid cap of 8) and exits without close(). Two runs
     // back-to-back exercise PM's PID_EXIT IPC: without cleanup,
@@ -357,7 +471,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     run2 should not include "sockleak: failed_at_"
   }
 
-  "aarch64 posix: setsockopt / getsockopt accept+ignore + bufsize" in {
+  "posix: setsockopt / getsockopt accept+ignore + bufsize" in {
     // test_sockopt drives the POSIX shim's setsockopt / getsockopt
     // paths.  UDP fd: accept-and-ignore for SO_REUSEADDR /
     // SO_BROADCAST / TCP_NODELAY (always 0); unknown pair returns
@@ -393,7 +507,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "sockopt: FAIL"
   }
 
-  "aarch64 posix: getsockname / getpeername" in {
+  "posix: getsockname / getpeername" in {
     // test_getname drives syscall 203 (getsockname) and 192
     // (getpeername) via the POSIX shim. UDP: bound getsockname
     // round-trips 127.0.0.1:7788, getpeername reports -ENOTCONN.
@@ -409,7 +523,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "getname: FAIL"
   }
 
-  "aarch64 posix: fcntl + O_NONBLOCK + accept4 SOCK_NONBLOCK" in {
+  "posix: fcntl + O_NONBLOCK + accept4 SOCK_NONBLOCK" in {
     // test_nonblock drives syscall 171 (fcntl) and 132 (accept4).
     // Verifies recvfrom on an empty UDP queue returns -EAGAIN
     // when O_NONBLOCK is set; F_GETFL/F_SETFL round-trip;
@@ -432,7 +546,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "nonblock: FAIL"
   }
 
-  "aarch64 posix: shutdown(SHUT_WR) half-close" in {
+  "posix: shutdown(SHUT_WR) half-close" in {
     // test_shutdown connects to a host peer that reads all bytes
     // until EOF then replies with the consumed byte count. The
     // shim's shutdown(fd, SHUT_WR) must emit FIN (not RST, not
@@ -481,7 +595,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       peerThread.join(2000)
   }
 
-  "aarch64 posix: dup / dup3 fd aliasing" in {
+  "posix: dup / dup3 fd aliasing" in {
     // test_dup exercises dup (151) + dup3 (152). Three checks:
     //   (a) dup(STDOUT) returns a fresh fd >= 3
     //   (b) dup3(udp, 5, 0): closing fd 5 must NOT tear down
@@ -499,7 +613,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "dup: FAIL"
   }
 
-  "aarch64 musl: O_NONBLOCK on stdin returns EAGAIN before key" in {
+  "musl: O_NONBLOCK on stdin returns EAGAIN before key" in {
     // Pre-check via TTY_CMD_POLL: with O_NONBLOCK set, sys_read on
     // fd 0 must return -EAGAIN when the tty input ring is empty;
     // after a key arrives, the same read returns 1.
@@ -513,7 +627,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mnbstdin: done")
   }
 
-  "aarch64 musl: epoll on stdin (TTY input subscriber)" in {
+  "musl: epoll on stdin (TTY input subscriber)" in {
     // estdin adds fd 0 to an epoll instance and waits. Pre-injection
     // poll reports 0 events. After the harness sends a keystroke the
     // tty server bumps the per-console fire_seq and notifies the
@@ -529,7 +643,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mepoll_stdin: done")
   }
 
-  "aarch64 musl: timerfd_create / settime / gettime + epoll" in {
+  "musl: timerfd_create / settime / gettime + epoll" in {
     // mtimerfd exercises slix-musl 356/357/358 (timerfd
     // create/gettime/settime). One-shot at 50ms fires once and
     // stops; periodic 30ms fires N≥1 times in ~100ms;
@@ -547,7 +661,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     expValue should be >= 1
   }
 
-  "aarch64 musl: eventfd2 + epoll integration" in {
+  "musl: eventfd2 + epoll integration" in {
     // meventfd binds the eventfd2 syscall (slix-musl 156). Tests
     // empty-NB read returns EAGAIN, write 7 / read 7 round-trip,
     // epoll EPOLLIN fires when count > 0 and quiesces after drain,
@@ -565,7 +679,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("meventfd: done")
   }
 
-  "aarch64 net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
+  "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose
     // inner UDP src port is 7801, then non-blocking recvfrom: must
@@ -578,7 +692,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_icmperr: failed"
   }
 
-  "aarch64 net: NB-connect failure surfaces as SO_ERROR=ECONNREFUSED" in {
+  "net: NB-connect failure surfaces as SO_ERROR=ECONNREFUSED" in {
     // test_nbconfail issues a non-blocking connect (returns
     // -EINPROGRESS), then synthesises a SYN_SENT failure on the inet
     // slot via INET_CMD_TCP_INJECT_FAIL. The slot's pending_error
@@ -592,7 +706,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "nbconfail: failed"
   }
 
-  "aarch64 musl: socket/connect/shutdown/read via libc wrappers" in {
+  "musl: socket/connect/shutdown/read via libc wrappers" in {
     // msocket is a C program linked against slix's musl fork; uses
     // socket(), connect(), write(), shutdown(), read(), close(),
     // getsockname() through real libc wrappers. Validates that the
@@ -647,7 +761,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       peerThread.join(2000)
   }
 
-  "aarch64 musl: open/read/lseek/close on /etc/passwd" in {
+  "musl: open/read/lseek/close on /etc/passwd" in {
     // mfile (slix/test/file.c) opens /etc/passwd through musl's
     // open(2), reads ~256 bytes, lseeks back to 0, reads 16 more.
     // Validates that the shim's POSIX_FD_FILE kind, sys_openat,
@@ -666,7 +780,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mfile: done")
   }
 
-  "aarch64 musl: epoll_create1/ctl/wait on a UDP socket" in {
+  "musl: epoll_create1/ctl/wait on a UDP socket" in {
     // mepoll (slix/test/epoll.c) walks the level-triggered epoll
     // path: empty wait times out, sendto-self makes the fd
     // readable, drain returns to idle. Validates the shim's
@@ -686,7 +800,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mepoll: done")
   }
 
-  "aarch64 musl: epoll EPOLLET + EPOLLONESHOT (Phase A2)" in {
+  "musl: epoll EPOLLET + EPOLLONESHOT (Phase A2)" in {
     // mepoll2 (slix/test/epoll2.c) validates the Phase A2
     // edge-trigger and one-shot semantics layered on the
     // inet→shim notify path. ET fires on rising edges only;
@@ -704,7 +818,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mepoll2: done")
   }
 
-  "aarch64 musl: epoll on a pipe (Phase A2 closeout)" in {
+  "musl: epoll on a pipe (Phase A2 closeout)" in {
     // epoll_pipe (slix/test/epoll_pipe.c): exercise VFS_CMD_POLL
     // + the VFS epoll subscriber list landed in this chunk. Empty
     // pipe → 0 events; write end fires EPOLLIN via vfs_epoll_fire
@@ -721,7 +835,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mepoll_pipe: done")
   }
 
-  "aarch64 musl: non-blocking accept (Phase B)" in {
+  "musl: non-blocking accept (Phase B)" in {
     // mnbacc (slix/test/nbacc.c): non-blocking listen fd that
     // first accepts on an empty queue (-EAGAIN), then waits via
     // epoll_wait for EPOLLIN, then accepts the queued child.
@@ -743,7 +857,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     finally client.close()
   }
 
-  "aarch64 musl: non-blocking connect (Phase B)" in {
+  "musl: non-blocking connect (Phase B)" in {
     // mnbcon (slix/test/nbcon.c): O_NONBLOCK connect to
     // 10.0.2.2:18080 (slirp routes to host 127.0.0.1:18080)
     // surfaces -EINPROGRESS, EPOLLOUT fires once SYN-ACK lands,
@@ -782,7 +896,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       echoThread.join(2000)
   }
 
-  "aarch64 musl: pipe2 + write + read + EOF" in {
+  "musl: pipe2 + write + read + EOF" in {
     // mpipe (slix/test/pipe.c) creates a pipe, writes a string,
     // reads it back, closes the write end, then reads again
     // expecting EOF. Exercises sys_pipe2 → VFS_CMD_PIPE → two
@@ -796,7 +910,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mpipe: done")
   }
 
-  "aarch64 musl: sendmsg/recvmsg via libc wrappers" in {
+  "musl: sendmsg/recvmsg via libc wrappers" in {
     // mmsg validates the shim's msghdr offset parsing by going
     // through musl's real sendmsg(3) / recvmsg(3) — those build
     // the struct with the layout from
@@ -813,7 +927,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mmsg: done")
   }
 
-  "aarch64 timer: subscribe fires expected count in N ticks" in {
+  "timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications via notify_wait/notify_read_self. Proves the
     // kernel's svc_timer_subscribe path is load-bearing-reliable
@@ -828,7 +942,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_timer: FAIL"
   }
 
-  "aarch64 tcp: connect, send, receive echo, close" in {
+  "tcp: connect, send, receive echo, close" in {
     // Start a tiny host-side TCP echo server on 127.0.0.1:18080.
     // QEMU user-mode networking translates guest dials of
     // 10.0.2.2:18080 into host connections on the matching port,
@@ -872,7 +986,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       echoThread.join(2000)
   }
 
-  "aarch64 tcp: cwnd grows on ACK (slow start)" in {
+  "tcp: cwnd grows on ACK (slow start)" in {
     // Phase 1 of TCP congestion control. Exposes snd_cwnd /
     // snd_ssthresh via INET_CMD_TCP_DEBUG, drives a 900-byte
     // pipelined send, and asserts cwnd is observably bigger
@@ -929,7 +1043,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       bulkEcho.join(2000)
   }
 
-  "aarch64 tcp: fast retransmit + recovery round-trip" in {
+  "tcp: fast retransmit + recovery round-trip" in {
     // Phase 2 + Phase 3 of TCP congestion control. The nic's
     // loss-injection knob drops the first TCP data segment
     // post-connect; the host receives segments 2, 3, 4 out of
@@ -1002,7 +1116,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
   // validation needs tap networking or a guest-side pcap. The
   // positive path is exercised by the passive-open test below.
 
-  "aarch64 tcp: passive open, accept, echo, close" in {
+  "tcp: passive open, accept, echo, close" in {
     // test_tcp_srv listens on :7890. QEMU's hostfwd=tcp::28080-:7890
     // forwards host dials of 127.0.0.1:28080 into the guest. We
     // send "ping\n", expect the same bytes back, close cleanly.
@@ -1030,7 +1144,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("test_tcp_srv: closed")
   }
 
-  "aarch64 tcp: multi-client passive open stress" in {
+  "tcp: multi-client passive open stress" in {
     // test_tcp_mcl listens on :7890 and accepts N clients in sequence.
     // We fire N host-side dials concurrently (all arriving while the
     // server is still processing the first), which forces children
@@ -1088,7 +1202,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       got.exists(_.startsWith(s"ping$i#")) shouldBe true
   }
 
-  "aarch64 tcp: minimal HTTP/1.0 interop (httpd)" in {
+  "tcp: minimal HTTP/1.0 interop (httpd)" in {
     // httpd listens on :8080. QEMU's hostfwd=tcp::28083-:8080
     // forwards host dials of 127.0.0.1:28083 into the guest. This
     // is the Phase-5-ish interop milestone — end-to-end proof that
@@ -1127,7 +1241,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("httpd: done")
   }
 
-  "aarch64 dns: resolve against a mock DNS server" in {
+  "dns: resolve against a mock DNS server" in {
     // Spin up a tiny mock DNS responder on 127.0.0.1:<ephemeral>.
     // The guest sends its query to 10.0.2.2:<that port> — slirp
     // forwards outbound UDP to the host's loopback, so the guest
@@ -1192,7 +1306,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       dns.close()
   }
 
-  "aarch64 wget: resolve + fetch via mock DNS and mock HTTP" in {
+  "wget: resolve + fetch via mock DNS and mock HTTP" in {
     // End-to-end "real internet" proof: guest parses URL, resolves
     // name via our mock DNS (which answers any query with an A
     // record = 10.0.2.2), opens TCP to 10.0.2.2:<httpPort> which
@@ -1288,7 +1402,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       http.close()
   }
 
-  "aarch64 tcp: multi-request httpd accept loop" in {
+  "tcp: multi-request httpd accept loop" in {
     // Three back-to-back dials to a single httpd process. The
     // server serves 3 requests in a sequential accept loop and
     // exits. Proves the accept loop terminates, closes each child
@@ -1328,7 +1442,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("httpd: done")
   }
 
-  "aarch64 tcp: 900-byte multi-segment transfer" in {
+  "tcp: 900-byte multi-segment transfer" in {
     // test_tcp_big listens on :7892. Host writes exactly 900 bytes
     // of a known pattern (byte i -> i & 0xff), reads a 6-byte
     // summary (count u16 BE + checksum u32 BE), asserts both match.
@@ -1375,7 +1489,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("test_tcp_big: ok")
   }
 
-  "aarch64 tcp: active-open drain-recv 900 bytes" in {
+  "tcp: active-open drain-recv 900 bytes" in {
     // test_tcp_rx dials 10.0.2.2:18081 (slirp routes to host's
     // 18081 via user-mode networking — no hostfwd needed for
     // outbound). We stand up a Scala ServerSocket on 127.0.0.1:18081
@@ -1439,7 +1553,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       srvThread.join(2000)
   }
 
-  "aarch64 tcp: VFS bridge (connect/read/write/close)" in {
+  "tcp: VFS bridge (connect/read/write/close)" in {
     // Same shape as the test_tcp_rx test, but the guest program
     // (test_tcp_vfs) calls only connect("tcp:...") + read/write/close —
     // no tcp_* wrappers. Proves VFS routes FS_CMD_READ/WRITE/CLOSE on a
@@ -1501,7 +1615,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
       srvThread.join(2000)
   }
 
-  "aarch64 tcp: accept + send on CLOSE_WAIT child (peer already FIN'd)" in {
+  "tcp: accept + send on CLOSE_WAIT child (peer already FIN'd)" in {
     // test_tcp_fcw listens, sleeps 100 ticks, then accepts. While the
     // guest is sleeping the host connects, writes "ping\n", and
     // shutdown(SHUT_WR)s — FIN arrives while the child sits on the
@@ -1541,7 +1655,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("test_tcp_fcw: ok")
   }
 
-  "aarch64 tcp: VFS listen bridge (connect/accept/read/write/close)" in {
+  "tcp: VFS listen bridge (connect/accept/read/write/close)" in {
     // test_tcp_lsv listens via connect("tcp-listen:7890") + accept()
     // + read/write/close — no tcp_listen/tcp_accept wrappers. Proves
     // that OFT_TYPE_TCP_LISTEN + FS_CMD_ACCEPT let a passive TCP
@@ -1571,7 +1685,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("test_tcp_lsv: closed")
   }
 
-  "aarch64 tcp: VFS listen bridge accepts optional ',backlog' suffix" in {
+  "tcp: VFS listen bridge accepts optional ',backlog' suffix" in {
     // test_tcp_lsv2 exercises the parser-shape of
     // connect("tcp-listen:PORT,N").  Plain form, comma+backlog,
     // clamp-high, clamp-zero, malformed-trailer all return the
@@ -1584,7 +1698,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_tcp_lsv2: unexpectedly opened"
   }
 
-  "aarch64 tcp: in-guest 127.0.0.1 loopback round trip" in {
+  "tcp: in-guest 127.0.0.1 loopback round trip" in {
     // test_tcp_lpbk drives the loopback fastpath added to
     // inet_tcp_emit / inet_tcp_emit_rst: client and listener live
     // in the same guest and exchange payloads over 127.0.0.1
@@ -1594,7 +1708,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "lpbk:bad"
   }
 
-  "aarch64 udp: loopback gate covers 127/8 + own_ip" in {
+  "udp: loopback gate covers 127/8 + own_ip" in {
     // The pre-existing UDP loopback shortcut only matched
     // 127.0.0.1 exactly. inet_handle_sendto now uses
     // inet_is_loopback_ip, so 127.0.0.5 and 10.0.2.15 (our
@@ -1605,7 +1719,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udplo: bad"
   }
 
-  "aarch64 icmp: ping 127.0.0.1 returns immediately" in {
+  "icmp: ping 127.0.0.1 returns immediately" in {
     // inet_send_icmp_echo_to short-circuits to inet_ping_deliver
     // when the destination is loopback — `ping 127.0.0.1` sees
     // a synthesized reply on the same tick with rtt=0 instead of
@@ -1615,7 +1729,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("1 sent, 1 received")
   }
 
-  "aarch64 tcp: getsockopt(TCP_INFO) on ESTABLISHED loopback fd" in {
+  "tcp: getsockopt(TCP_INFO) on ESTABLISHED loopback fd" in {
     // test_tcp_info opens an in-guest 127.0.0.1 connection and
     // probes getsockopt(IPPROTO_TCP, TCP_INFO). Verifies the
     // 104-byte struct is fully written, tcpi_state maps to 1
@@ -1626,7 +1740,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpinfo: bad"
   }
 
-  "aarch64 procid: getpid/getppid/getuid family + getrandom" in {
+  "procid: getpid/getppid/getuid family + getrandom" in {
     // Process / thread identity syscalls + xorshift-based getrandom.
     // Slix has no multi-threading and boots root, so most return
     // 0 or 1; getrandom is best-effort and just verifies two
@@ -1636,7 +1750,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "procid: bad"
   }
 
-  "aarch64 time: clock_gettime / gettimeofday / clock_getres / nanosleep" in {
+  "time: clock_gettime / gettimeofday / clock_getres / nanosleep" in {
     // POSIX time syscalls fed off uptime() at 100Hz. Verifies
     // clock_getres reports 10ms, clock_gettime + gettimeofday
     // agree within 20ms, and nanosleep(50ms) advances the
@@ -1646,7 +1760,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "clock: bad"
   }
 
-  "aarch64 fs: fsync / fdatasync / sync / syncfs no-op stubs" in {
+  "fs: fsync / fdatasync / sync / syncfs no-op stubs" in {
     // No on-disk persistence yet; these return 0 (or -EBADF for
     // bad fds) so defensive sqlite/log-writer patterns don't
     // crash on -ENOSYS.
@@ -1655,7 +1769,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "fsync: bad"
   }
 
-  "aarch64 sockopt: SO_TYPE/DOMAIN/PROTOCOL/ACCEPTCONN" in {
+  "sockopt: SO_TYPE/DOMAIN/PROTOCOL/ACCEPTCONN" in {
     // test_sockinfo verifies the four read-only introspection
     // getsockopts the shim now reports off the fd kind +
     // is_listen flag. Three fds: UDP, TCP pre-listen, TCP
@@ -1665,7 +1779,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "sockinfo: bad"
   }
 
-  "aarch64 tcp: out-of-order reassembly self-test" in {
+  "tcp: out-of-order reassembly self-test" in {
     // test_tcp_ooo triggers inet's reorder-queue self-test via a
     // dedicated IPC op. The test exercises the stash → drain path
     // without depending on slirp to actually reorder packets, which
@@ -1679,7 +1793,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_tcp_ooo: failed"
   }
 
-  "aarch64 ip: fragmentation reassembly self-test" in {
+  "ip: fragmentation reassembly self-test" in {
     // test_ip_reasm triggers inet's IPv4 reassembly self-test via a
     // dedicated IPC op. Three IPv4 fragments of a 32-byte UDP
     // datagram are injected through inet_handle_frame in
@@ -1693,7 +1807,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_ip_reasm: failed"
   }
 
-  "aarch64 ip: fragmentation RFC corners (overlap + timeout)" in {
+  "ip: fragmentation RFC corners (overlap + timeout)" in {
     // test_ip_reasm2 covers two RFC corners of the reassembly path:
     //   1. RFC 5722 overlap-fragment drop — a fragment overlapping
     //      a previously received range must poison the slot.
@@ -1705,7 +1819,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "test_ip_reasm2: failed"
   }
 
-  "aarch64 udp: 1024-byte datagram via 127.0.0.1 loopback" in {
+  "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates
     // the full body comes through. Catches truncation at the old
@@ -1715,7 +1829,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udpbig: bad"
   }
 
-  "aarch64 udp: connect()/send()/recv() with default peer" in {
+  "udp: connect()/send()/recv() with default peer" in {
     // POSIX connect() on UDP saves a default peer; subsequent
     // send() (sendto with NULL addr) targets it. Then dissolve
     // via connect(AF_UNSPEC) and verify send returns -ENOTCONN.
@@ -1724,7 +1838,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udpcon: bad"
   }
 
-  "aarch64 udp: connected fd drops non-peer datagrams (recv filter)" in {
+  "udp: connected fd drops non-peer datagrams (recv filter)" in {
     // POSIX/Linux: a UDP fd with a saved peer (via connect())
     // drops datagrams whose source != peer. Slix enforces this
     // at recv time — sys_recvfrom loops past non-peer datagrams
@@ -1734,7 +1848,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udpfilt: bad"
   }
 
-  "aarch64 udp: NB recv on empty queue returns EAGAIN" in {
+  "udp: NB recv on empty queue returns EAGAIN" in {
     // Minimal regression check: socket → bind → fcntl(NONBLOCK)
     // → recvfrom → must return -EAGAIN. Catches future
     // sys_recvfrom regressions in the empty-queue path
@@ -1744,7 +1858,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udpdbg: bad"
   }
 
-  "aarch64 sockopt: SO_RCVTIMEO bounded blocking recv" in {
+  "sockopt: SO_RCVTIMEO bounded blocking recv" in {
     // setsockopt SO_RCVTIMEO = 100ms, then blocking recvfrom on
     // an empty UDP queue must return -EAGAIN within the window
     // (Linux semantics) instead of hanging forever.
@@ -1753,7 +1867,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "sotmo: bad"
   }
 
-  "aarch64 udp: MSG_DONTWAIT per-call non-blocking override" in {
+  "udp: MSG_DONTWAIT per-call non-blocking override" in {
     // MSG_DONTWAIT (0x40) makes a single recvfrom non-blocking
     // even on a blocking fd; libuv uses it to avoid the
     // fcntl(O_NONBLOCK) race when the fd is shared.
@@ -1762,7 +1876,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "mdwait: bad"
   }
 
-  "aarch64 udp: getpeername after connect + shutdown no-op" in {
+  "udp: getpeername after connect + shutdown no-op" in {
     // POSIX: getpeername on a connected UDP fd returns the saved
     // peer; pre-connect returns -ENOTCONN. shutdown on UDP is
     // accepted as a no-op (Linux compat). Both behaviors changed
@@ -1772,7 +1886,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udppeer: bad"
   }
 
-  "aarch64 tcp: recvfrom with MSG_DONTWAIT" in {
+  "tcp: recvfrom with MSG_DONTWAIT" in {
     // sys_recvfrom now accepts TCP fds (previously -EBADF) and
     // honors MSG_DONTWAIT for per-call NB. The pre-data recv
     // returns -EAGAIN; after write, recv returns the bytes.
@@ -1781,7 +1895,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpdw: bad"
   }
 
-  "aarch64 tcp: sendto / send() round-trip" in {
+  "tcp: sendto / send() round-trip" in {
     // sys_sendto now accepts TCP fds — libc lowers send() to
     // sendto(NULL, 0). Previously rejected with -EBADF.
     val output = qemu.command("test_tcp_send")
@@ -1789,7 +1903,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpsnd: bad"
   }
 
-  "aarch64 io: writev / readv vectored I/O" in {
+  "io: writev / readv vectored I/O" in {
     // POSIX writev / readv. libc stdio buffer flushes use
     // writev (header + body iovs); libuv uses both for TCP.
     // Body walks iovec[] and dispatches per-segment to
@@ -1799,7 +1913,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "iov: bad"
   }
 
-  "aarch64 io: pread64 preserves file position" in {
+  "io: pread64 preserves file position" in {
     // POSIX pread reads at offset without disturbing the fd's
     // current pos. Slix synthesizes via save/seek/read/restore
     // of VFS file pos.
@@ -1808,7 +1922,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "pread: bad"
   }
 
-  "aarch64 misc: madvise / sched_yield / prctl / getrusage stubs" in {
+  "misc: madvise / sched_yield / prctl / getrusage stubs" in {
     // Defensive syscall stubs. libc startup, jemalloc, glibc
     // compat layers all probe these routinely; -ENOSYS would
     // crash or push them onto slow fallback paths.
@@ -1817,7 +1931,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "stubs: bad"
   }
 
-  "aarch64 fs: faccessat path-exists probe" in {
+  "fs: faccessat path-exists probe" in {
     // POSIX faccessat. Slix has no real permission model so
     // F_OK / R_OK / W_OK / X_OK collapse into "VFS opens it".
     // -ENOENT for missing paths.
@@ -1826,7 +1940,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "access: bad"
   }
 
-  "aarch64 net: TCP send-buf parking (Phase 1 quality)" in {
+  "net: TCP send-buf parking (Phase 1 quality)" in {
     // Phase 1 of the net-stack quality plan: inet_handle_tcp_send
     // now parks the caller in send_waiter when send_buf is full,
     // and the ACK-handling path wakes the parked caller via
@@ -1839,7 +1953,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcp_park: failed"
   }
 
-  "aarch64 net: ARP-driven TCP retransmit (Phase 1 quality)" in {
+  "net: ARP-driven TCP retransmit (Phase 1 quality)" in {
     // Phase 1 chunk 2: inet_tcp_emit now records arp_pending=1
     // when the next-hop MAC isn't cached, and inet_arp_drain_pending
     // walks TCP on a fresh ARP entry, clearing the flag and
@@ -1850,7 +1964,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "arpretx: failed"
   }
 
-  "aarch64 net: per-tid socket cap (Phase 2 quality)" in {
+  "net: per-tid socket cap (Phase 2 quality)" in {
     // Phase 2 chunk 1: a single tid can hold at most
     // INET_PER_PID_SOCKET_CAP (8) slots across UDP + TCP pools.
     // The 9th allocation fails with -EMFILE; closing one frees a
@@ -1860,7 +1974,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "pidcap: failed"
   }
 
-  "aarch64 net: per-tid TCP buffer-memory cap (Phase 2 quality)" in {
+  "net: per-tid TCP buffer-memory cap (Phase 2 quality)" in {
     // Phase 2 chunk 2: TCP_PER_TID_BUF_MAX = 65536 bytes caps a
     // single tid's combined send_buf_size + recv_buf_size across
     // every owned TCP slot.  Four full-size (8 KB + 8 KB) listeners
@@ -1871,7 +1985,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpbufcap: failed"
   }
 
-  "aarch64 net: PID_EXIT cleanup audit (Phase 2 quality)" in {
+  "net: PID_EXIT cleanup audit (Phase 2 quality)" in {
     // Phase 2 chunk 3: PID_EXIT now also reclaims the auxiliary
     // tables that hold owner_tid — the 4-slot ICMP ping pending
     // table and the 2-slot ARP-pending UDP queue.  The self-test
@@ -1882,7 +1996,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "pidxclean: failed"
   }
 
-  "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
+  "dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and
     // a malformed magic-cookie negative case). No live DHCP server
@@ -1895,7 +2009,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "dhclient: selftest failed"
   }
 
-  "aarch64 dhcp: live bind via slirp's DHCP server" in {
+  "dhcp: live bind via slirp's DHCP server" in {
     // Exercises the full wire path end-to-end: DISCOVER out via the
     // broadcast UDP TX special-case in inet_send_udp, slirp's
     // built-in DHCP server replies OFFER (also broadcast), dhclient
@@ -1913,7 +2027,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("dhclient: probing 10.0.2.15")
   }
 
-  "aarch64 crash recovery: kill tfs and restart" in {
+  "crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))
     tfsLine shouldBe defined
@@ -1933,7 +2047,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     after should include("tty0 login")
   }
 
-  "aarch64 musl: per-fd EPOLLET edge isolation" in {
+  "musl: per-fd EPOLLET edge isolation" in {
     // mepoll_multi (slix/test/epoll_multi.c): two UDP sockets share
     // an epoll instance, both EPOLLIN | EPOLLET. Firing one must
     // not re-deliver the other. Before the per-fd fire counter
@@ -1948,7 +2062,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mepoll_multi: done")
   }
 
-  "aarch64 musl: listen backlog enforcement (Phase F)" in {
+  "musl: listen backlog enforcement (Phase F)" in {
     // mlbacklog (slix/test/lbacklog.c): listen() with backlog=2,
     // four parallel host connects. Two of the four SYNs land in
     // the queue immediately; the other two are dropped at SYN

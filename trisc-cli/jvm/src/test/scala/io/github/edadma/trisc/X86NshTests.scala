@@ -39,61 +39,61 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
   override def afterEach(): Unit =
     if qemu != null then qemu.close()
 
-  "x86 login: echo command" in {
+  "login: echo command" in {
     val output = qemu.command("echo hello x86")
     output should include("hello x86")
   }
 
-  "x86 login: pwd shows home" in {
+  "login: pwd shows home" in {
     val output = qemu.command("pwd")
     output should include("/root")
   }
 
-  "x86 login: help command" in {
+  "login: help command" in {
     val output = qemu.command("help")
     output should include("builtins:")
   }
 
-  "x86 login: hello program" in {
+  "login: hello program" in {
     val output = qemu.command("hello")
     output should include("Hello")
   }
 
-  "x86 login: uptime command" in {
+  "login: uptime command" in {
     val output = qemu.command("uptime")
     // uptime prints a number
     output.trim should not be empty
   }
 
-  "x86 login: ls root" in {
+  "login: ls root" in {
     val output = qemu.command("ls")
     output should include("etc")
     output should include("bin")
   }
 
-  "x86 login: cat /etc/ttytab" in {
+  "login: cat /etc/ttytab" in {
     val output = qemu.command("cat /etc/ttytab")
     output should include("tty0 login")
   }
 
-  "x86 login: whoami" in {
+  "login: whoami" in {
     val output = qemu.command("whoami")
     output should include("0")
   }
 
-  "x86 login: ps lists threads" in {
+  "login: ps lists threads" in {
     val output = qemu.command("ps")
     // Should show at least RS, disk, tfs, tty, pm, vfs
     output should include("rs")
   }
 
-  "x86 login: multiple commands" in {
+  "login: multiple commands" in {
     qemu.command("echo first")
     val output = qemu.command("echo second")
     output should include("second")
   }
 
-  "x86 kill: background process" in {
+  "kill: background process" in {
     // Start count in background — nsh prints "[1] PID"
     qemu.send("count &\n")
     val bgOutput = qemu.waitFor("> ")
@@ -113,12 +113,12 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     psAfter should not include ("count")
   }
 
-  "x86 pipe: echo hello | cat" in {
+  "pipe: echo hello | cat" in {
     val output = qemu.command("echo hello | cat")
     output should include("hello")
   }
 
-  "x86 pipe: echo hello | cat | cat" in {
+  "pipe: echo hello | cat | cat" in {
     val output = qemu.command("echo hello | cat | cat")
     output should include("hello")
   }
@@ -126,13 +126,13 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
   // Redirect tests use "/root> " as prompt to avoid matching ">" in commands
   private val rootPrompt = "/root> "
 
-  "x86 redirect: echo hello > /tmp/out" in {
+  "redirect: echo hello > /tmp/out" in {
     qemu.command("echo hello > /tmp/out", rootPrompt)
     val output = qemu.command("cat /tmp/out")
     output should include("hello")
   }
 
-  "x86 redirect: echo append >>" in {
+  "redirect: echo append >>" in {
     qemu.command("echo line1 > /tmp/app", rootPrompt)
     qemu.command("echo line2 >> /tmp/app", rootPrompt)
     val output = qemu.command("cat /tmp/app")
@@ -140,25 +140,36 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("line2")
   }
 
-  "x86 redirect: cat < /tmp/in" in {
+  "redirect: cat < /tmp/in" in {
     qemu.command("echo inputdata > /tmp/in", rootPrompt)
     val output = qemu.command("cat < /tmp/in")
     output should include("inputdata")
   }
 
-  "x86 redirect: pipe with output redirect" in {
+  "redirect: pipe with output redirect" in {
     qemu.command("echo piped > /tmp/p1", rootPrompt)
     qemu.command("cat /tmp/p1 | cat > /tmp/p2", rootPrompt)
     val output = qemu.command("cat /tmp/p2")
     output should include("piped")
   }
 
-  "x86 head: first 3 lines from pipe" in {
+  "redirect: no space after >" in {
+    qemu.command("echo spaceless >/tmp/ns", rootPrompt)
+    val output = qemu.command("cat /tmp/ns")
+    output should include("spaceless")
+  }
+
+  "pipe: no spaces around |" in {
+    val output = qemu.command("echo piped|cat")
+    output should include("piped")
+  }
+
+  "head: first 3 lines from pipe" in {
     val output = qemu.command("echo aaa | head -3")
     output should include("aaa")
   }
 
-  "x86 head: first 2 lines of file" in {
+  "head: first 2 lines of file" in {
     qemu.command("echo line1 > /tmp/hf", rootPrompt)
     qemu.command("echo line2 >> /tmp/hf", rootPrompt)
     qemu.command("echo line3 >> /tmp/hf", rootPrompt)
@@ -168,7 +179,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "line3"
   }
 
-  "x86 tail: last 2 lines of file" in {
+  "tail: last 2 lines of file" in {
     qemu.command("echo aaa > /tmp/tf", rootPrompt)
     qemu.command("echo bbb >> /tmp/tf", rootPrompt)
     qemu.command("echo ccc >> /tmp/tf", rootPrompt)
@@ -178,7 +189,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("ccc")
   }
 
-  "x86 tail: pipe from cat" in {
+  "tail: pipe from cat" in {
     qemu.command("echo first > /tmp/tp", rootPrompt)
     qemu.command("echo second >> /tmp/tp", rootPrompt)
     qemu.command("echo third >> /tmp/tp", rootPrompt)
@@ -187,43 +198,43 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("third")
   }
 
-  "x86 wc: count from file" in {
+  "wc: count from file" in {
     qemu.command("echo hello > /tmp/wcf", rootPrompt)
     val output = qemu.command("wc /tmp/wcf")
     output should include("1")
   }
 
-  "x86 pipe: test_pipe 1 write" in {
+  "pipe: test_pipe 1 write" in {
     val output = qemu.command("echo x | test_pipe 1")
     output should include("A")
   }
 
-  "x86 pipe: test_pipe 2 writes" in {
+  "pipe: test_pipe 2 writes" in {
     val output = qemu.command("echo x | test_pipe 2")
     output should include("B")
   }
 
-  "x86 pipe: test_pipe 3 writes" in {
+  "pipe: test_pipe 3 writes" in {
     val output = qemu.command("echo x | test_pipe 3")
     output should include("C")
   }
 
-  "x86 pipe: test_pipe 4 writes" in {
+  "pipe: test_pipe 4 writes" in {
     val output = qemu.command("echo x | test_pipe 4")
     output should include("D")
   }
 
-  "x86 wc: echo piped to wc" in {
+  "wc: echo piped to wc" in {
     val output = qemu.command("echo asdf | wc")
     output should include("1")
   }
 
-  "x86 pipe: echo piped to tail" in {
+  "pipe: echo piped to tail" in {
     val output = qemu.command("echo asdf | tail -1")
     output should include("asdf")
   }
 
-  "x86 signal: ctrl-c kills foreground process" in {
+  "signal: ctrl-c kills foreground process" in {
     // Byte 0x03 passes through -chardev stdio,signal=off directly to COM1,
     // since Java's process pipe bypasses the host terminal.
     qemu.send("count\n")
@@ -234,7 +245,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     ps should not include "count"
   }
 
-  "x86 ds: publish, retrieve, delete int and string" in {
+  "ds: publish, retrieve, delete int and string" in {
     // Int round-trip
     qemu.command("ds set answer 42")
     val getAnswer = qemu.command("ds get answer")
@@ -251,7 +262,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     afterDel should include("not found")
   }
 
-  "x86 C program: test_c receives argc and argv" in {
+  "C program: test_c receives argc and argv" in {
     // test_c is written in C and linked with c_crt0.c (the POSIX->Sysl
     // crt0 bridge). It prints argc and joined argv[1..], returning argc
     // as exit code — exercises the C side of the POSIX argv contract.
@@ -260,7 +271,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("hello world")
   }
 
-  "x86 inet: UDP loopback via test_net" in {
+  "inet: UDP loopback via test_net" in {
     // test_net opens a UDP socket on 127.0.0.1:5000, sends "hello"
     // to itself, and prints what recvfrom returned. Phase 2 also
     // exercises real-wire sendto without an explicit bind so the
@@ -272,7 +283,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("wire sent=5")
   }
 
-  "x86 async RX: unsolicited UDP reaches recvfrom via virtio IRQ" in {
+  "async RX: unsolicited UDP reaches recvfrom via virtio IRQ" in {
     // test_udp_echo binds :7777, blocks in recvfrom. The harness's
     // netdev forwards host localhost:17777 → guest:7777. Sending a
     // datagram from Scala arrives at the guest unsolicited, travels
@@ -295,7 +306,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("'ping!'")
   }
 
-  "x86 musl: O_NONBLOCK on stdin returns EAGAIN before key" in {
+  "musl: O_NONBLOCK on stdin returns EAGAIN before key" in {
     // Mirror of the aarch64 mnbstdin test.
     qemu.send("nbstdin\n")
     val pre = qemu.waitFor("mnbstdin: ready_for_input")
@@ -307,7 +318,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mnbstdin: done")
   }
 
-  "x86 musl: epoll on stdin (TTY input subscriber)" in {
+  "musl: epoll on stdin (TTY input subscriber)" in {
     // Mirror of the aarch64 estdin test.
     qemu.send("estdin\n")
     val pre = qemu.waitFor("mepoll_stdin: ready_for_input")
@@ -319,7 +330,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mepoll_stdin: done")
   }
 
-  "x86 musl: timerfd_create / settime / gettime + epoll" in {
+  "musl: timerfd_create / settime / gettime + epoll" in {
     // Mirror of the aarch64 mtimerfd test.
     qemu.send("timerfd\n")
     val output = qemu.waitFor("mtimerfd: done")
@@ -333,7 +344,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     expValue should be >= 1
   }
 
-  "x86 musl: eventfd2 + epoll integration" in {
+  "musl: eventfd2 + epoll integration" in {
     // Mirror of the aarch64 meventfd test — exercises slix-musl
     // syscall 156, the new POSIX_FD_EVENTFD shim path, and the
     // EFD_SEMAPHORE counter-decrement mode.
@@ -350,7 +361,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("meventfd: done")
   }
 
-  "x86 net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
+  "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose
     // inner UDP src port is 7801, then non-blocking recvfrom: must
@@ -363,7 +374,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_icmperr: failed"
   }
 
-  "x86 net: NB-connect failure surfaces as SO_ERROR=ECONNREFUSED" in {
+  "net: NB-connect failure surfaces as SO_ERROR=ECONNREFUSED" in {
     // test_nbconfail issues a non-blocking connect (returns
     // -EINPROGRESS), then synthesises a SYN_SENT failure on the inet
     // slot via INET_CMD_TCP_INJECT_FAIL. The slot's pending_error
@@ -377,7 +388,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "nbconfail: failed"
   }
 
-  "x86 musl: epoll on a pipe (Phase A2 closeout)" in {
+  "musl: epoll on a pipe (Phase A2 closeout)" in {
     qemu.send("epoll_pipe\n")
     val output = qemu.waitFor("mepoll_pipe: done")
     output should include("mepoll_pipe: empty=0")
@@ -386,7 +397,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mepoll_pipe: done")
   }
 
-  "x86 timer: subscribe fires expected count in N ticks" in {
+  "timer: subscribe fires expected count in N ticks" in {
     // test_timer subscribes to a period=5 timer and waits for 10
     // notifications. Proves svc_timer_subscribe fires reliably
     // during a quiet channel — required before phase-2 can trust
@@ -399,7 +410,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_timer: FAIL"
   }
 
-  "x86 tcp: connect, send, receive echo, close" in {
+  "tcp: connect, send, receive echo, close" in {
     // Host-side TCP echo server on 127.0.0.1:18080. QEMU's
     // user-mode networking routes guest dials of 10.0.2.2:18080
     // to the host's matching port, so no hostfwd is needed for
@@ -446,7 +457,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
   // mirrored note in Aarch64NshTests). Needs tap networking or a
   // guest-side pcap to assert the outbound RST frame.
 
-  "x86 tcp: passive open, accept, echo, close" in {
+  "tcp: passive open, accept, echo, close" in {
     // test_tcp_srv listens on :7890. QEMU's hostfwd=tcp::28080-:7890
     // routes host dials of 127.0.0.1:28080 into the guest. Send
     // "ping\n", receive echo, close cleanly.
@@ -474,7 +485,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("test_tcp_srv: closed")
   }
 
-  "x86 tcp: VFS listen bridge accepts optional ',backlog' suffix" in {
+  "tcp: VFS listen bridge accepts optional ',backlog' suffix" in {
     // test_tcp_lsv2 exercises the parser-shape of
     // connect("tcp-listen:PORT,N").  Plain form, comma+backlog,
     // clamp-high, clamp-zero, malformed-trailer all return the
@@ -487,7 +498,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_tcp_lsv2: unexpectedly opened"
   }
 
-  "x86 tcp: in-guest 127.0.0.1 loopback round trip" in {
+  "tcp: in-guest 127.0.0.1 loopback round trip" in {
     // test_tcp_lpbk drives the loopback fastpath added to
     // inet_tcp_emit / inet_tcp_emit_rst: client and listener live
     // in the same guest and exchange payloads over 127.0.0.1
@@ -497,7 +508,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "lpbk:bad"
   }
 
-  "x86 udp: loopback gate covers 127/8 + own_ip" in {
+  "udp: loopback gate covers 127/8 + own_ip" in {
     // The pre-existing UDP loopback shortcut only matched
     // 127.0.0.1 exactly. inet_handle_sendto now uses
     // inet_is_loopback_ip, so 127.0.0.5 and 10.0.2.15 (our
@@ -508,7 +519,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udplo: bad"
   }
 
-  "x86 icmp: ping 127.0.0.1 returns immediately" in {
+  "icmp: ping 127.0.0.1 returns immediately" in {
     // inet_send_icmp_echo_to short-circuits to inet_ping_deliver
     // when the destination is loopback — `ping 127.0.0.1` sees
     // a synthesized reply on the same tick with rtt=0 instead of
@@ -518,7 +529,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("1 sent, 1 received")
   }
 
-  "x86 tcp: getsockopt(TCP_INFO) on ESTABLISHED loopback fd" in {
+  "tcp: getsockopt(TCP_INFO) on ESTABLISHED loopback fd" in {
     // test_tcp_info opens an in-guest 127.0.0.1 connection and
     // probes getsockopt(IPPROTO_TCP, TCP_INFO). Verifies the
     // 104-byte struct is fully written, tcpi_state maps to 1
@@ -529,7 +540,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "tcpinfo: bad"
   }
 
-  "x86 procid: getpid/getppid/getuid family + getrandom" in {
+  "procid: getpid/getppid/getuid family + getrandom" in {
     // Process / thread identity syscalls + xorshift-based getrandom.
     // Slix has no multi-threading and boots root, so most return
     // 0 or 1; getrandom is best-effort and just verifies two
@@ -539,7 +550,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "procid: bad"
   }
 
-  "x86 time: clock_gettime / gettimeofday / clock_getres / nanosleep" in {
+  "time: clock_gettime / gettimeofday / clock_getres / nanosleep" in {
     // POSIX time syscalls fed off uptime() at 100Hz. Verifies
     // clock_getres reports 10ms, clock_gettime + gettimeofday
     // agree within 20ms, and nanosleep(50ms) advances the
@@ -549,7 +560,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "clock: bad"
   }
 
-  "x86 fs: fsync / fdatasync / sync / syncfs no-op stubs" in {
+  "fs: fsync / fdatasync / sync / syncfs no-op stubs" in {
     // No on-disk persistence yet; these return 0 (or -EBADF for
     // bad fds) so defensive sqlite/log-writer patterns don't
     // crash on -ENOSYS.
@@ -558,7 +569,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "fsync: bad"
   }
 
-  "x86 sockopt: SO_TYPE/DOMAIN/PROTOCOL/ACCEPTCONN" in {
+  "sockopt: SO_TYPE/DOMAIN/PROTOCOL/ACCEPTCONN" in {
     // test_sockinfo verifies the four read-only introspection
     // getsockopts the shim now reports off the fd kind +
     // is_listen flag. Three fds: UDP, TCP pre-listen, TCP
@@ -568,7 +579,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "sockinfo: bad"
   }
 
-  "x86 ip: fragmentation reassembly self-test" in {
+  "ip: fragmentation reassembly self-test" in {
     // test_ip_reasm triggers inet's IPv4 reassembly self-test via a
     // dedicated IPC op. Three IPv4 fragments of a 32-byte UDP
     // datagram are injected through inet_handle_frame in
@@ -582,7 +593,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_ip_reasm: failed"
   }
 
-  "x86 ip: fragmentation RFC corners (overlap + timeout)" in {
+  "ip: fragmentation RFC corners (overlap + timeout)" in {
     // test_ip_reasm2 covers two RFC corners of the reassembly path:
     //   1. RFC 5722 overlap-fragment drop — a fragment overlapping
     //      a previously received range must poison the slot.
@@ -594,7 +605,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_ip_reasm2: failed"
   }
 
-  "x86 udp: 1024-byte datagram via 127.0.0.1 loopback" in {
+  "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates
     // the full body comes through. Catches truncation at the old
@@ -604,7 +615,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udpbig: bad"
   }
 
-  "x86 udp: connect()/send()/recv() with default peer" in {
+  "udp: connect()/send()/recv() with default peer" in {
     // POSIX connect() on UDP saves a default peer; subsequent
     // send() (sendto with NULL addr) targets it. Then dissolve
     // via connect(AF_UNSPEC) and verify send returns -ENOTCONN.
@@ -613,7 +624,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udpcon: bad"
   }
 
-  "x86 udp: connected fd drops non-peer datagrams (recv filter)" in {
+  "udp: connected fd drops non-peer datagrams (recv filter)" in {
     // POSIX/Linux: a UDP fd with a saved peer (via connect())
     // drops datagrams whose source != peer. Slix enforces this
     // at recv time — sys_recvfrom recurses past non-peer
@@ -623,7 +634,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udpfilt: bad"
   }
 
-  "x86 udp: NB recv on empty queue returns EAGAIN" in {
+  "udp: NB recv on empty queue returns EAGAIN" in {
     // Minimal regression check: socket → bind → fcntl(NONBLOCK)
     // → recvfrom → must return -EAGAIN. Catches future
     // sys_recvfrom regressions in the empty-queue path
@@ -633,7 +644,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udpdbg: bad"
   }
 
-  "x86 sockopt: SO_RCVTIMEO bounded blocking recv" in {
+  "sockopt: SO_RCVTIMEO bounded blocking recv" in {
     // setsockopt SO_RCVTIMEO = 100ms, then blocking recvfrom on
     // an empty UDP queue must return -EAGAIN within the window
     // (Linux semantics) instead of hanging forever.
@@ -642,7 +653,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "sotmo: bad"
   }
 
-  "x86 udp: MSG_DONTWAIT per-call non-blocking override" in {
+  "udp: MSG_DONTWAIT per-call non-blocking override" in {
     // MSG_DONTWAIT (0x40) makes a single recvfrom non-blocking
     // even on a blocking fd; libuv uses it to avoid the
     // fcntl(O_NONBLOCK) race when the fd is shared.
@@ -651,7 +662,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "mdwait: bad"
   }
 
-  "x86 udp: getpeername after connect + shutdown no-op" in {
+  "udp: getpeername after connect + shutdown no-op" in {
     // POSIX: getpeername on a connected UDP fd returns the saved
     // peer; pre-connect returns -ENOTCONN. shutdown on UDP is
     // accepted as a no-op (Linux compat).
@@ -660,7 +671,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udppeer: bad"
   }
 
-  "x86 tcp: recvfrom with MSG_DONTWAIT" in {
+  "tcp: recvfrom with MSG_DONTWAIT" in {
     // sys_recvfrom now accepts TCP fds (previously -EBADF) and
     // honors MSG_DONTWAIT for per-call NB. The pre-data recv
     // returns -EAGAIN; after write, recv returns the bytes.
@@ -669,7 +680,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "tcpdw: bad"
   }
 
-  "x86 tcp: sendto / send() round-trip" in {
+  "tcp: sendto / send() round-trip" in {
     // sys_sendto now accepts TCP fds — libc lowers send() to
     // sendto(NULL, 0). Previously rejected with -EBADF.
     val output = qemu.command("test_tcp_send")
@@ -677,7 +688,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "tcpsnd: bad"
   }
 
-  "x86 io: writev / readv vectored I/O" in {
+  "io: writev / readv vectored I/O" in {
     // POSIX writev / readv. libc stdio buffer flushes use
     // writev (header + body iovs); libuv uses both for TCP.
     // Body walks iovec[] and dispatches per-segment to
@@ -687,7 +698,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "iov: bad"
   }
 
-  "x86 io: pread64 preserves file position" in {
+  "io: pread64 preserves file position" in {
     // POSIX pread reads at offset without disturbing the fd's
     // current pos. Slix synthesizes via save/seek/read/restore
     // of VFS file pos.
@@ -696,7 +707,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "pread: bad"
   }
 
-  "x86 misc: madvise / sched_yield / prctl / getrusage stubs" in {
+  "misc: madvise / sched_yield / prctl / getrusage stubs" in {
     // Defensive syscall stubs. libc startup, jemalloc, glibc
     // compat layers all probe these routinely; -ENOSYS would
     // crash or push them onto slow fallback paths.
@@ -705,7 +716,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "stubs: bad"
   }
 
-  "x86 fs: faccessat path-exists probe" in {
+  "fs: faccessat path-exists probe" in {
     // POSIX faccessat. Slix has no real permission model so
     // F_OK / R_OK / W_OK / X_OK collapse into "VFS opens it".
     // -ENOENT for missing paths.
@@ -714,7 +725,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "access: bad"
   }
 
-  "x86 net: TCP send-buf parking (Phase 1 quality)" in {
+  "net: TCP send-buf parking (Phase 1 quality)" in {
     // Phase 1 of the net-stack quality plan: inet_handle_tcp_send
     // now parks the caller in send_waiter when send_buf is full,
     // and the ACK-handling path wakes the parked caller via
@@ -727,7 +738,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "tcp_park: failed"
   }
 
-  "x86 net: ARP-driven TCP retransmit (Phase 1 quality)" in {
+  "net: ARP-driven TCP retransmit (Phase 1 quality)" in {
     // Phase 1 chunk 2: inet_tcp_emit now records arp_pending=1
     // when the next-hop MAC isn't cached, and inet_arp_drain_pending
     // walks TCP on a fresh ARP entry, clearing the flag and
@@ -738,7 +749,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "arpretx: failed"
   }
 
-  "x86 net: per-tid socket cap (Phase 2 quality)" in {
+  "net: per-tid socket cap (Phase 2 quality)" in {
     // Phase 2 chunk 1: a single tid can hold at most
     // INET_PER_PID_SOCKET_CAP (8) slots across UDP + TCP pools.
     // The 9th allocation fails with -EMFILE; closing one frees a
@@ -748,7 +759,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "pidcap: failed"
   }
 
-  "x86 net: per-tid TCP buffer-memory cap (Phase 2 quality)" in {
+  "net: per-tid TCP buffer-memory cap (Phase 2 quality)" in {
     // Phase 2 chunk 2: TCP_PER_TID_BUF_MAX = 65536 bytes caps a
     // single tid's combined send_buf_size + recv_buf_size across
     // every owned TCP slot.  Four full-size (8 KB + 8 KB) listeners
@@ -759,7 +770,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "tcpbufcap: failed"
   }
 
-  "x86 net: PID_EXIT cleanup audit (Phase 2 quality)" in {
+  "net: PID_EXIT cleanup audit (Phase 2 quality)" in {
     // Phase 2 chunk 3: PID_EXIT now also reclaims the auxiliary
     // tables that hold owner_tid — the 4-slot ICMP ping pending
     // table and the 2-slot ARP-pending UDP queue.  The self-test
@@ -770,7 +781,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "pidxclean: failed"
   }
 
-  "x86 crash recovery: kill tfs and restart" in {
+  "crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))
@@ -794,7 +805,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     after should include("tty0 login")
   }
 
-  "x86 musl: write(1, ...) + read(0, ...) + exit" in {
+  "musl: write(1, ...) + read(0, ...) + exit" in {
     // Mirror of the aarch64 mhello test. The C source is shared
     // (slix/test/hello.c) — only the build target differs. Validates
     // the x86 POSIX shim's SYS_WRITE/SYS_READ/SYS_EXIT_GROUP path and
@@ -806,7 +817,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("read=1")
   }
 
-  "x86 musl: socket/connect/shutdown/read via libc wrappers" in {
+  "musl: socket/connect/shutdown/read via libc wrappers" in {
     // Mirror of the aarch64 msocket test. Host peer on
     // 127.0.0.1:18083 reads until EOF and replies with the byte
     // count; guest dials it via slirp's outbound NAT.
@@ -853,7 +864,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
       peerThread.join(2000)
   }
 
-  "x86 musl: open/read/lseek/close on /etc/passwd" in {
+  "musl: open/read/lseek/close on /etc/passwd" in {
     qemu.send("mfile\n")
     val output = qemu.waitFor("mfile: done")
     output should include("mfile: open=3")
@@ -865,7 +876,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mfile: done")
   }
 
-  "x86 musl: epoll_create1/ctl/wait on a UDP socket" in {
+  "musl: epoll_create1/ctl/wait on a UDP socket" in {
     qemu.send("mepoll\n")
     val output = qemu.waitFor("mepoll: done")
     output should include("mepoll: create=3")
@@ -880,7 +891,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mepoll: done")
   }
 
-  "x86 musl: epoll EPOLLET + EPOLLONESHOT (Phase A2)" in {
+  "musl: epoll EPOLLET + EPOLLONESHOT (Phase A2)" in {
     qemu.send("mepoll2\n")
     val output = qemu.waitFor("mepoll2: done")
     output should include("mepoll2: et_first=1")
@@ -892,7 +903,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mepoll2: done")
   }
 
-  "x86 musl: non-blocking accept (Phase B)" in {
+  "musl: non-blocking accept (Phase B)" in {
     qemu.send("mnbacc\n")
     val pre = qemu.waitFor("mnbacc: ready")
     val client = new java.net.Socket()
@@ -909,7 +920,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     finally client.close()
   }
 
-  "x86 musl: non-blocking connect (Phase B)" in {
+  "musl: non-blocking connect (Phase B)" in {
     val server = new java.net.ServerSocket()
     server.setReuseAddress(true)
     server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
@@ -944,7 +955,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
       echoThread.join(2000)
   }
 
-  "x86 musl: pipe2 + write + read + EOF" in {
+  "musl: pipe2 + write + read + EOF" in {
     qemu.send("mpipe\n")
     val output = qemu.waitFor("mpipe: done")
     output should include("mpipe: pipe2=0")
@@ -954,7 +965,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mpipe: done")
   }
 
-  "x86 musl: sendmsg/recvmsg via libc wrappers" in {
+  "musl: sendmsg/recvmsg via libc wrappers" in {
     qemu.send("mmsg\n")
     val output = qemu.waitFor("mmsg: done")
     output should include("mmsg: socket=3")
@@ -965,11 +976,11 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mmsg: done")
   }
 
-  "x86 musl: listen backlog enforcement (Phase F)" in {
+  "musl: listen backlog enforcement (Phase F)" in {
     runBacklogTest("x86")
   }
 
-  "x86 musl: per-fd EPOLLET edge isolation" in {
+  "musl: per-fd EPOLLET edge isolation" in {
     // mepoll_multi (slix/test/epoll_multi.c): two UDP sockets share
     // an epoll instance, both EPOLLIN | EPOLLET. Firing one must
     // not re-deliver the other. Before the per-fd fire counter
@@ -985,6 +996,1044 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "mepoll_multi: after_b=2"
     output should include("mepoll_multi: done")
   }
+
+
+  // === ported from Aarch64NshTests for arch parity ===
+
+  "boot: init auto-runs dhclient before opening logins" in {
+    // D.3 init integration: init spawns /bin/dhclient, pm_waitpids
+    // it, and prints the summary line before reading /etc/ttytab.
+    // beforeEach already drove the boot past the "> " prompt, so
+    // the full boot trace is in allOutput and we can assert the
+    // marker line appears.
+    qemu.allOutput should include("network: dhcp ok")
+    qemu.allOutput should include("bound 10.0.2.15")
+    qemu.allOutput should not include "network: dhcp failed"
+    qemu.allOutput should not include "network: dhcp spawn failed"
+  }
+
+
+  "dhcp: dhclient --test parses canned OFFER/ACK" in {
+    // dhclient --test runs the in-process parser selftest against
+    // canned DHCP packets (known-good OFFER, same-layout ACK, and
+    // a malformed magic-cookie negative case). No live DHCP server
+    // is involved — this catches byte-layout regressions without
+    // needing slirp to run a DHCP server (slirp does, but coupling
+    // correctness to a separate service is brittle).
+    qemu.send("dhclient --test\n")
+    val output = qemu.waitFor("dhclient: selftest ok")
+    output should include("dhclient: selftest ok")
+    output should not include "dhclient: selftest failed"
+  }
+
+
+  "dhcp: live bind via slirp's DHCP server" in {
+    // Exercises the full wire path end-to-end: DISCOVER out via the
+    // broadcast UDP TX special-case in inet_send_udp, slirp's
+    // built-in DHCP server replies OFFER (also broadcast), dhclient
+    // REQUESTs, slirp ACKs, dhclient runs the RFC 5227 probe cycle
+    // (clean on slirp), announces, then calls inet_set_ip_config.
+    // The expected bound address under slirp's default lease table
+    // is 10.0.2.15 mask 255.255.255.0 gw 10.0.2.2.
+    qemu.send("dhclient\n")
+    val output = qemu.waitFor("lease=")
+    output should include("dhclient: bound 10.0.2.15")
+    output should include("mask=255.255.255.0")
+    output should include("gw=10.0.2.2")
+    // Probe line proves the RFC 5227 path executed. Slirp is silent
+    // on ARP probes so the window completes cleanly.
+    output should include("dhclient: probing 10.0.2.15")
+  }
+
+
+  "dns: resolve against a mock DNS server" in {
+    // Spin up a tiny mock DNS responder on 127.0.0.1:<ephemeral>.
+    // The guest sends its query to 10.0.2.2:<that port> — slirp
+    // forwards outbound UDP to the host's loopback, so the guest
+    // and the mock never need a real network in between. Offline-
+    // friendly and deterministic.
+    //
+    // The mock echoes the query back with QR=1 and one appended
+    // A-record pointing at 1.2.3.4 via a compressed name pointer
+    // to offset 12 (start of the question's QNAME). That's the
+    // minimum a recursive resolver actually emits — recursive
+    // resolvers almost always flatten CNAMEs into the same
+    // response so a client that only looks at answer records can
+    // walk it in one pass.
+    val dns = new java.net.DatagramSocket(
+      new java.net.InetSocketAddress("127.0.0.1", 0))
+    val mockPort = dns.getLocalPort
+    val answered = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val mockThread = new Thread(() => {
+      try
+        val qbuf = new Array[Byte](512)
+        val inPkt = new java.net.DatagramPacket(qbuf, qbuf.length)
+        dns.setSoTimeout(10000)
+        dns.receive(inPkt)
+        val qlen = inPkt.getLength
+        // Build the response in-place: flip QR bit, set ANCOUNT=1,
+        // then append the 16-byte answer record.
+        val resp = new Array[Byte](qlen + 16)
+        System.arraycopy(qbuf, 0, resp, 0, qlen)
+        resp(2) = (resp(2) | 0x80.toByte).toByte   // QR=1
+        resp(6) = 0                                // ANCOUNT hi
+        resp(7) = 1                                // ANCOUNT lo
+        var off = qlen
+        resp(off)     = 0xc0.toByte                // compressed name
+        resp(off + 1) = 0x0c.toByte                // -> offset 12
+        resp(off + 2) = 0; resp(off + 3) = 1       // TYPE=A
+        resp(off + 4) = 0; resp(off + 5) = 1       // CLASS=IN
+        resp(off + 6) = 0; resp(off + 7) = 0
+        resp(off + 8) = 0; resp(off + 9) = 60.toByte  // TTL=60
+        resp(off + 10) = 0; resp(off + 11) = 4     // RDLENGTH=4
+        resp(off + 12) = 1; resp(off + 13) = 2     // RDATA
+        resp(off + 14) = 3; resp(off + 15) = 4
+        val outPkt = new java.net.DatagramPacket(
+          resp, resp.length, inPkt.getAddress, inPkt.getPort)
+        dns.send(outPkt)
+        answered.set(true)
+      catch case _: Throwable => ()
+    }, "mock-dns")
+    mockThread.setDaemon(true)
+    mockThread.start()
+
+    try
+      qemu.send(s"test_dns example.com 10.0.2.2 $mockPort\n")
+      // Wait for the IP itself so `waitFor` returns with the full
+      // "resolved host -> A.B.C.D" line in its output. Matching just
+      // the "resolved " prefix would race — waitFor is cumulative up
+      // to the matched point, so we'd lose the tail in the assert.
+      val output = qemu.waitFor("1.2.3.4")
+      output should include("test_dns: resolved example.com -> 1.2.3.4")
+      mockThread.join(5000)
+      answered.get() shouldBe true
+    finally
+      dns.close()
+  }
+
+
+  "ifconfig: reports the lease installed at boot" in {
+    // init's start_dhcp has already leased 10.0.2.15 from slirp by
+    // the time the shell is up, so ifconfig should read it back
+    // through inet_get_ip_config.
+    val output = qemu.command("ifconfig")
+    output should include("ip:      10.0.2.15")
+    output should include("mask:    255.255.255.0")
+    output should include("gateway: 10.0.2.2")
+  }
+
+
+  "nic: GET_MAC + subscribe + drain via test_nic" in {
+    // test_nic exercises the full nic IPC ABI: GET_MAC,
+    // SUBSCRIBE_RX, and RECV_PACKET drain loop. QEMU boots
+    // virtio-net-device with a fixed MAC. The RX queue gets
+    // the ARP/ICMP boot frames enqueued by nic_poller, so
+    // the drain count is non-zero by the time test_nic runs
+    // under login.
+    val output = qemu.command("test_nic")
+    output should include("mac=52:54:00:12:34:56")
+    output should include("sub=ok")
+    output should include("rx=")
+  }
+
+
+  "posix: dup / dup3 fd aliasing" in {
+    // test_dup exercises dup (151) + dup3 (152). Three checks:
+    //   (a) dup(STDOUT) returns a fresh fd >= 3
+    //   (b) dup3(udp, 5, 0): closing fd 5 must NOT tear down
+    //       the inet UDP record — sendto via the original
+    //       still works. Validates the iteration-based refcount
+    //       in posix_fd_other_dup_exists.
+    //   (c) dup3(fd, fd, 0) reports -EINVAL per Linux.
+    qemu.send("test_dup\n")
+    val output = qemu.waitFor("dup: done")
+    output should include("dup: stdout dup = ")
+    output should include("dup: dup3(udp, 5, 0) = 5")
+    output should include("dup: sendto via udp = 3")
+    output should include("dup: dup3(udp,udp,0) = -22")
+    output should include("dup: done")
+    output should not include "dup: FAIL"
+  }
+
+
+  "posix: fcntl + O_NONBLOCK + accept4 SOCK_NONBLOCK" in {
+    // test_nonblock drives syscall 171 (fcntl) and 132 (accept4).
+    // Verifies recvfrom on an empty UDP queue returns -EAGAIN
+    // when O_NONBLOCK is set; F_GETFL/F_SETFL round-trip;
+    // F_GETFD/F_SETFD accept+ignore; F_DUPFD -EINVAL stub.  Then
+    // creates a TCP listener, sets it non-blocking, and asserts
+    // accept4(SOCK_NONBLOCK) returns -EAGAIN on an empty queue
+    // and accept4 with an unknown flag bit returns -EINVAL.
+    qemu.send("test_nonblock\n")
+    val output = qemu.waitFor("nonblock: done")
+    output should include("nonblock: F_GETFL pre = 0")
+    output should include("nonblock: F_SETFL(O_NONBLOCK) = 0")
+    output should include("nonblock: F_GETFL post = 2048")
+    output should include("nonblock: recvfrom (empty) = -11")
+    output should include("nonblock: F_GETFD = 0")
+    output should include("nonblock: F_SETFD(FD_CLOEXEC) = 0")
+    output should include("nonblock: F_DUPFD = -22")
+    output should include("nonblock: accept4 NB empty = -11")
+    output should include("nonblock: accept4 bad flag = -22")
+    output should include("nonblock: done")
+    output should not include "nonblock: FAIL"
+  }
+
+
+  "posix: getsockname / getpeername" in {
+    // test_getname drives syscall 203 (getsockname) and 192
+    // (getpeername) via the POSIX shim. UDP: bound getsockname
+    // round-trips 127.0.0.1:7788, getpeername reports -ENOTCONN.
+    // TCP on a fresh socket (no connect/listen yet) reports
+    // 0.0.0.0:0 for getsockname and -ENOTCONN for getpeername.
+    qemu.send("test_getname\n")
+    val output = qemu.waitFor("getname: done")
+    output should include("getname: udp-local fam=2 port=7788 ip=127.0.0.1")
+    output should include("getname: getpeername UDP = -107")
+    output should include("getname: tcp-local-fresh fam=2 port=0 ip=0.0.0.0")
+    output should include("getname: getpeername TCP-fresh = -107")
+    output should include("getname: done")
+    output should not include "getname: FAIL"
+  }
+
+
+  "posix: inet sockets reclaimed on pid exit" in {
+    // test_sockleak opens 7 UDP sockets (just under the Phase 2
+    // per-tid cap of 8) and exits without close(). Two runs
+    // back-to-back exercise PM's PID_EXIT IPC: without cleanup,
+    // each run leaks 7 slots and the pool eventually fills.
+    // Pass = two `all_opened` markers.
+    qemu.send("test_sockleak\n")
+    val run1 = qemu.waitFor("sockleak: all_opened")
+    run1 should include("sockleak: all_opened")
+    run1 should not include "sockleak: failed_at_"
+
+    qemu.send("test_sockleak\n")
+    val run2 = qemu.waitFor("sockleak: all_opened")
+    run2 should include("sockleak: all_opened")
+    run2 should not include "sockleak: failed_at_"
+  }
+
+
+  "posix: setsockopt / getsockopt accept+ignore + bufsize" in {
+    // test_sockopt drives the POSIX shim's setsockopt / getsockopt
+    // paths.  UDP fd: accept-and-ignore for SO_REUSEADDR /
+    // SO_BROADCAST / TCP_NODELAY (always 0); unknown pair returns
+    // -ENOPROTOOPT.  TCP fd: SO_SNDBUF / SO_RCVBUF round-trip —
+    // setsockopt persists, getsockopt echoes the requested size.
+    qemu.send("test_sockopt\n")
+    val output = qemu.waitFor("sockopt: done")
+    output should include("sockopt: set SO_REUSEADDR = 0")
+    output should include("sockopt: set SO_BROADCAST = 0")
+    output should include("sockopt: set TCP_NODELAY = 0")
+    output should include("sockopt: set unknown = -92")
+    // SO_REUSEADDR was set to 1 in the test program; persistence
+    // pass echoes the actually-set value.
+    output should include("sockopt: get SO_REUSEADDR = 0 olen=4 val=1")
+    output should include("sockopt: get unknown = -92")
+    output should include("sockopt: set SO_SNDBUF = 0")
+    output should include("sockopt: set SO_RCVBUF = 0")
+    output should include("sockopt: get SO_SNDBUF = 0 val=2048")
+    output should include("sockopt: get SO_RCVBUF = 0 val=4096")
+    output should include("sockopt: get TCP_NODELAY = 0 val=1")
+    output should include("sockopt: set SO_LINGER = 0")
+    output should include("sockopt: get SO_LINGER = 0 olen=8 on=1 secs=0")
+    // TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT round-trip the
+    // requested seconds / count via the persisted shim values; a
+    // pre-connect TCP fd carries the user value verbatim.
+    output should include("sockopt: get TCP_KEEPIDLE = 0 val=60")
+    output should include("sockopt: get TCP_KEEPINTVL = 0 val=15")
+    output should include("sockopt: get TCP_KEEPCNT = 0 val=7")
+    // SO_ERROR on a fresh TCP fd is 0 (no failure recorded).  The
+    // read-and-clear semantics are exercised by test_icmperr.
+    output should include("sockopt: get SO_ERROR fresh = 0 val=0")
+    output should include("sockopt: done")
+    output should not include "sockopt: FAIL"
+  }
+
+
+  "posix: shutdown(SHUT_WR) half-close" in {
+    // test_shutdown connects to a host peer that reads all bytes
+    // until EOF then replies with the consumed byte count. The
+    // shim's shutdown(fd, SHUT_WR) must emit FIN (not RST, not
+    // nothing) so the peer's read loop terminates and the reply
+    // comes back. Without real half-close this test times out.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18082))
+    server.setSoTimeout(15000)
+
+    val peerThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](128)
+          var total = 0
+          var n = in.read(buf, total, buf.length - total)
+          while n > 0 do
+            total += n
+            n = in.read(buf, total, buf.length - total)
+          // n == -1 → peer (guest) sent FIN. Reply with count.
+          val reply = s"got $total".getBytes
+          out.write(reply)
+          out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-shutdown-peer")
+    peerThread.setDaemon(true)
+    peerThread.start()
+
+    try
+      qemu.send("test_shutdown\n")
+      val output = qemu.waitFor("shutdown: done")
+      output should include("shutdown: connected")
+      output should include("shutdown: wrote 11")
+      output should include("shutdown: shutdown SHUT_WR = 0")
+      output should include("shutdown: read got 'got 11")
+      output should include("shutdown: done")
+      output should not include "shutdown: FAIL"
+    finally
+      server.close()
+      peerThread.join(2000)
+  }
+
+
+  "posix: socket/bind/sendto/recvfrom round-trip via shim" in {
+    // test_posix_udp drives the POSIX socket syscalls added in the
+    // per-process fd-table migration: 337=socket, 135=bind,
+    // 307=sendto, 276=recvfrom, 147=close. The shim in
+    // hello.lsysl translates sockaddr_in to the inet server's IPC
+    // format and returns a POSIX fd backed by an inet socket id.
+    // Pass = loopback datagram makes the round trip with the
+    // payload and src port intact.
+    qemu.send("test_posix_udp\n")
+    val output = qemu.waitFor("test_posix_udp: done")
+    output should include("test_posix_udp: got 5 from 127.0.0.1:")
+    output should include("'posix'")
+    output should include("test_posix_udp: done")
+    output should not include "test_posix_udp: socket rx failed"
+    output should not include "test_posix_udp: socket tx failed"
+    output should not include "test_posix_udp: bind failed"
+    output should not include "test_posix_udp: sendto"
+    output should not include "test_posix_udp: recvfrom failed"
+  }
+
+
+  "posix: TCP connect/write/read/close via shim" in {
+    // test_posix_tcp drives the POSIX TCP syscalls added in phase
+    // 2: 337=socket(SOCK_STREAM), 148=connect, 128=write,
+    // 130=read, 147=close. Uses the same slirp-forwarded
+    // host echo pattern as test_tcp (10.0.2.2:18080 → host
+    // 127.0.0.1:18080). Pass = full "ping\n" round-trip plus the
+    // "closed" line.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+
+    val echoThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](64)
+          val n = in.read(buf)
+          if n > 0 then
+            out.write(buf, 0, n)
+            out.flush()
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-echo-server-posix")
+    echoThread.setDaemon(true)
+    echoThread.start()
+
+    try
+      qemu.send("test_posix_tcp\n")
+      val output = qemu.waitFor("test_posix_tcp: closed")
+      output should include("test_posix_tcp: connected")
+      output should include("test_posix_tcp: sent=5")
+      output should include("test_posix_tcp: got 5 'ping")
+      output should include("test_posix_tcp: closed")
+      output should not include "test_posix_tcp: socket failed"
+      output should not include "test_posix_tcp: connect failed"
+      output should not include "test_posix_tcp: write unexpected"
+      output should not include "test_posix_tcp: read failed"
+    finally
+      server.close()
+      echoThread.join(2000)
+  }
+
+
+  "tcp: 900-byte multi-segment transfer" in {
+    // test_tcp_big listens on :7892. Host writes exactly 900 bytes
+    // of a known pattern (byte i -> i & 0xff), reads a 6-byte
+    // summary (count u16 BE + checksum u32 BE), asserts both match.
+    // Exercises the guest's drain-recv loop, multi-segment
+    // reassembly at the byte level, and a short reply from the
+    // server while the peer is still in ESTABLISHED.
+    qemu.send("test_tcp_big\n")
+    qemu.waitFor("test_tcp_big: listening fd=")
+
+    val n = 900
+    var expectedSum = 0L
+    val payload = new Array[Byte](n)
+    for i <- 0 until n do
+      val b = (i & 0xff).toByte
+      payload(i) = b
+      expectedSum += (b & 0xff).toLong
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(15000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28082), 5000)
+    try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write(payload)
+      out.flush()
+      val reply = new Array[Byte](6)
+      var read = 0
+      while read < 6 do
+        val r = in.read(reply, read, 6 - read)
+        if r <= 0 then throw new RuntimeException(s"short read: got $read")
+        read += r
+      val gotCount = ((reply(0) & 0xff) << 8) | (reply(1) & 0xff)
+      val gotSum =
+        ((reply(2) & 0xffL) << 24) |
+        ((reply(3) & 0xffL) << 16) |
+        ((reply(4) & 0xffL) << 8)  |
+        (reply(5) & 0xffL)
+      gotCount shouldBe n
+      gotSum shouldBe expectedSum
+    finally sock.close()
+
+    val output = qemu.waitFor("test_tcp_big: ok")
+    output should include("test_tcp_big: drained count=900")
+    output should include("test_tcp_big: ok")
+  }
+
+
+  "tcp: accept + send on CLOSE_WAIT child (peer already FIN'd)" in {
+    // test_tcp_fcw listens, sleeps 100 ticks, then accepts. While the
+    // guest is sleeping the host connects, writes "ping\n", and
+    // shutdown(SHUT_WR)s — FIN arrives while the child sits on the
+    // accept queue, flipping it ESTABLISHED → CLOSE_WAIT. Exercises
+    // three CLOSE_WAIT-path fixes:
+    //   - do_accept returns the CLOSE_WAIT child (not dropped)
+    //   - do_send accepts a send in CLOSE_WAIT (our write side is
+    //     still open — only the peer half-closed)
+    //   - retransmit still fires for CLOSE_WAIT if needed (covered
+    //     incidentally if the pong reply gets reordered).
+    qemu.send("test_tcp_fcw\n")
+    qemu.waitFor("test_tcp_fcw: listening h=")
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(10000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    val replyBytes = new Array[Byte](5)
+    try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write("ping\n".getBytes("UTF-8"))
+      out.flush()
+      sock.shutdownOutput()  // FIN now, don't wait for guest to accept
+      var read = 0
+      while read < 5 do
+        val r = in.read(replyBytes, read, 5 - read)
+        if r <= 0 then throw new RuntimeException(s"short read: got $read")
+        read += r
+    finally sock.close()
+
+    new String(replyBytes, "UTF-8") shouldBe "pong\n"
+
+    val output = qemu.waitFor("test_tcp_fcw: ok")
+    output should include("test_tcp_fcw: accepted ch=")
+    output should include("test_tcp_fcw: got 5")
+    output should include("test_tcp_fcw: sent=5")
+    output should include("test_tcp_fcw: ok")
+  }
+
+
+  "tcp: active-open drain-recv 900 bytes" in {
+    // test_tcp_rx dials 10.0.2.2:18081 (slirp routes to host's
+    // 18081 via user-mode networking — no hostfwd needed for
+    // outbound). We stand up a Scala ServerSocket on 127.0.0.1:18081
+    // that writes 900 bytes of pattern (byte i = i & 0xff), reads
+    // the guest's 6-byte summary, verifies count + checksum.
+    // Mirror of test_tcp_big but from the active-open side.
+    val n = 900
+    var expectedSum = 0L
+    val payload = new Array[Byte](n)
+    for i <- 0 until n do
+      val b = (i & 0xff).toByte
+      payload(i) = b
+      expectedSum += (b & 0xff).toLong
+
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18081))
+    server.setSoTimeout(15000)
+
+    val resultBox = new java.util.concurrent.atomic.AtomicReference[String]("")
+    val srvThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try {
+          val out = client.getOutputStream
+          val in  = client.getInputStream
+          out.write(payload)
+          out.flush()
+          val reply = new Array[Byte](6)
+          var read = 0
+          while read < 6 do
+            val r = in.read(reply, read, 6 - read)
+            if r <= 0 then throw new RuntimeException(s"short read: got $read")
+            read += r
+          val gotCount = ((reply(0) & 0xff) << 8) | (reply(1) & 0xff)
+          val gotSum =
+            ((reply(2) & 0xffL) << 24) |
+            ((reply(3) & 0xffL) << 16) |
+            ((reply(4) & 0xffL) << 8)  |
+            (reply(5) & 0xffL)
+          resultBox.set(s"count=$gotCount sum=$gotSum")
+        } finally client.close()
+      catch
+        case e: Throwable => resultBox.set(s"ERR: ${e.getMessage}")
+    }, "tcp-pattern-server")
+    srvThread.setDaemon(true)
+    srvThread.start()
+
+    try
+      qemu.send("test_tcp_rx\n")
+      val output = qemu.waitFor("test_tcp_rx: ok")
+      output should include("test_tcp_rx: connected fd=")
+      output should include("test_tcp_rx: drained count=900")
+      output should include("test_tcp_rx: sent=6")
+      output should include("test_tcp_rx: ok")
+
+      srvThread.join(5000)
+      resultBox.get() shouldBe s"count=$n sum=$expectedSum"
+    finally
+      server.close()
+      srvThread.join(2000)
+  }
+
+
+  "tcp: cwnd grows on ACK (slow start)" in {
+    // Phase 1 of TCP congestion control. Exposes snd_cwnd /
+    // snd_ssthresh via INET_CMD_TCP_DEBUG, drives a 900-byte
+    // pipelined send, and asserts cwnd is observably bigger
+    // afterward. The actual growth amount depends on how many
+    // cumulative ACKs Linux sends back (typically 1-2 for a
+    // small payload), but any growth at all proves the ACK
+    // path is feeding into inet_tcp_cwnd_on_ack.
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+    val bulkEcho = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](1024)
+          var remaining = 900
+          while remaining > 0 do
+            val n = in.read(buf, 0, math.min(buf.length, remaining))
+            if n <= 0 then remaining = 0
+            else
+              out.write(buf, 0, n)
+              out.flush()
+              remaining -= n
+          Thread.sleep(100)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-cwnd-echo")
+    bulkEcho.setDaemon(true)
+    bulkEcho.start()
+
+    try
+      qemu.send("test_tcp_cwnd\n")
+      val output = qemu.waitFor("test_tcp_cwnd: ok")
+      output should include("test_tcp_cwnd: initial")
+      output should include("test_tcp_cwnd: after")
+      output should include("test_tcp_cwnd: ok")
+      // Pull the two cwnd values out of the output.
+      val initRe  = """cwnd=(\d+)\s+ssthresh=(\d+)""".r
+      val matches = initRe.findAllMatchIn(output).toList
+      matches.length shouldBe 2
+      val initialCwnd = matches(0).group(1).toInt
+      val initialSs   = matches(0).group(2).toInt
+      val afterCwnd   = matches(1).group(1).toInt
+      initialCwnd shouldBe 4800
+      initialSs   shouldBe 65535
+      assert(afterCwnd > initialCwnd,
+        s"expected cwnd growth, got initial=$initialCwnd after=$afterCwnd")
+    finally
+      server.close()
+      bulkEcho.join(2000)
+  }
+
+
+  "tcp: fast retransmit + recovery round-trip" in {
+    // Phase 2 + Phase 3 of TCP congestion control. The nic's
+    // loss-injection knob drops the first TCP data segment
+    // post-connect; the host receives segments 2, 3, 4 out of
+    // order and emits three duplicate ACKs. Slix fires fast
+    // retransmit (Phase 2), enters fast recovery with cwnd
+    // inflated (Phase 3 §3.2 ¶5), the retransmit delivers the
+    // missing segment, the host ACKs everything cumulatively,
+    // slix deflates cwnd back to ssthresh and exits recovery.
+    //
+    // Asserts:
+    //   - ssthresh halved from 65535 (fast retransmit fired)
+    //   - fast_recovery == 0 at end (recovery exited cleanly)
+    //   - no stuck data (snd_una == snd_nxt at end)
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18080))
+    server.setSoTimeout(15000)
+    val bulkEcho = new Thread(() => {
+      try
+        val client = server.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val buf = new Array[Byte](2048)
+          var remaining = 1920
+          while remaining > 0 do
+            val n = in.read(buf, 0, math.min(buf.length, remaining))
+            if n <= 0 then remaining = 0
+            else
+              out.write(buf, 0, n)
+              out.flush()
+              remaining -= n
+          Thread.sleep(200)
+        finally client.close()
+      catch
+        case _: Throwable => ()
+    }, "tcp-fr-echo")
+    bulkEcho.setDaemon(true)
+    bulkEcho.start()
+
+    try
+      qemu.send("test_tcp_fr\n")
+      val output = qemu.waitFor("test_tcp_fr: ok")
+      output should include("test_tcp_fr: arm drop_next=1")
+      output should include("test_tcp_fr: sent=1920")
+      val ssRe = """ssthresh=(\d+)\s+cwnd=(\d+)""".r
+      val matches = ssRe.findAllMatchIn(output).toList
+      matches.length shouldBe 2
+      val initialSs = matches(0).group(1).toInt
+      val afterSs   = matches(1).group(1).toInt
+      initialSs shouldBe 65535
+      assert(afterSs < 65535,
+        s"expected ssthresh halving from fast retransmit, " +
+        s"got initial=$initialSs after=$afterSs " +
+        s"(still at initial means fast retransmit didn't fire)")
+      // Phase 3 assertions: recovery exits cleanly.
+      output should include("test_tcp_fr: fr=0")
+      output should include("test_tcp_fr: una==nxt")
+    finally
+      server.close()
+      bulkEcho.join(2000)
+  }
+
+
+  "tcp: minimal HTTP/1.0 interop (httpd)" in {
+    // httpd listens on :8080. QEMU's hostfwd=tcp::28083-:8080
+    // forwards host dials of 127.0.0.1:28083 into the guest. This
+    // is the Phase-5-ish interop milestone — end-to-end proof that
+    // the slix TCP stack coexists with real-world HTTP clients,
+    // not just our own echo tests.
+    qemu.send("httpd\n")
+    qemu.waitFor("httpd: listening on :8080 fd=")
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(10000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28083), 5000)
+    val body = try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write("GET / HTTP/1.0\r\nHost: slix\r\n\r\n".getBytes("UTF-8"))
+      out.flush()
+      val buf = new Array[Byte](256)
+      var total = 0
+      var done  = false
+      while !done && total < buf.length do
+        val r = in.read(buf, total, buf.length - total)
+        if r <= 0 then done = true
+        else total += r
+      new String(buf, 0, total, "UTF-8")
+    finally sock.close()
+
+    body should startWith("HTTP/1.0 200 OK")
+    body should include("Content-Type: text/plain")
+    body should include("Content-Length: 6")
+    body should endWith("hello\n")
+
+    val output = qemu.waitFor("httpd: done")
+    output should include("httpd: accept[0] cfd=")
+    output should include("httpd: i=0 hdr_end=")
+    output should include("httpd: sent=")
+    output should include("httpd: done")
+  }
+
+
+  "tcp: multi-client passive open stress" in {
+    // test_tcp_mcl listens on :7890 and accepts N clients in sequence.
+    // We fire N host-side dials concurrently (all arriving while the
+    // server is still processing the first), which forces children
+    // into the accept queue. Each reply carries a "#i" tag so we can
+    // verify each payload landed. Regression-catching target:
+    // accept-queue enqueue/dequeue, SYN_RCVD concurrency, per-child
+    // retx arming/disarming across overlapping lifetimes.
+    // N must match the test_tcp_mcl binary.
+    val n = 3
+    qemu.send("test_tcp_mcl\n")
+    qemu.waitFor("test_tcp_mcl: listening fd=")
+
+    val replies = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val threads = new Array[Thread](n)
+    for i <- 0 until n do
+      val runnable: Runnable = () => {
+        val sock = new java.net.Socket()
+        sock.setSoTimeout(10000)
+        try {
+          sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+          val out = sock.getOutputStream
+          val in  = sock.getInputStream
+          out.write(s"ping$i\n".getBytes("UTF-8"))
+          out.flush()
+          val buf = new Array[Byte](32)
+          val got = in.read(buf)
+          if got > 0 then
+            replies.add(new String(buf, 0, got, "UTF-8"))
+          else
+            replies.add(s"EOF-$i")
+        } catch {
+          case e: Throwable => replies.add(s"ERR-$i: ${e.getMessage}")
+        } finally {
+          sock.close()
+        }
+      }
+      threads(i) = new Thread(runnable, s"tcp-stress-$i")
+    for t <- threads do t.start()
+    for t <- threads do t.join(20000)
+
+    val output = qemu.waitFor("test_tcp_mcl: ok")
+    for i <- 0 until n do
+      output should include(s"test_tcp_mcl: accept[$i] cfd=")
+    output should include("test_tcp_mcl: ok")
+
+    import scala.jdk.CollectionConverters.*
+    val got = replies.asScala.toSet
+    got.size shouldBe n
+    // Each reply carries its own payload plus a "#i" tag. Because the
+    // parent port is re-used and slot-allocation order isn't
+    // guaranteed across parallel SYNs, we don't assert which payload
+    // matched which accept slot — just that each payload made it
+    // back with SOME tag in the 0..n-1 range.
+    for i <- 0 until n do
+      got.exists(_.startsWith(s"ping$i#")) shouldBe true
+  }
+
+
+  "tcp: multi-request httpd accept loop" in {
+    // Three back-to-back dials to a single httpd process. The
+    // server serves 3 requests in a sequential accept loop and
+    // exits. Proves the accept loop terminates, closes each child
+    // cleanly without affecting the listen socket, and doesn't
+    // leak slots across iterations. Companion to test_tcp_mcl —
+    // that one proves the queue depth under parallel SYN, this
+    // one proves the full request/response cycle works repeatedly.
+    val n = 3
+    qemu.send(s"httpd $n\n")
+    qemu.waitFor("httpd: listening on :8080 fd=")
+
+    for i <- 0 until n do
+      val sock = new java.net.Socket()
+      sock.setSoTimeout(10000)
+      sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28083), 5000)
+      val body = try
+        val out = sock.getOutputStream
+        val in  = sock.getInputStream
+        out.write(s"GET /iter/$i HTTP/1.0\r\n\r\n".getBytes("UTF-8"))
+        out.flush()
+        val buf = new Array[Byte](256)
+        var total = 0
+        var done  = false
+        while !done && total < buf.length do
+          val r = in.read(buf, total, buf.length - total)
+          if r <= 0 then done = true
+          else total += r
+        new String(buf, 0, total, "UTF-8")
+      finally sock.close()
+      body should startWith("HTTP/1.0 200 OK")
+      body should endWith("hello\n")
+
+    val output = qemu.waitFor("httpd: done")
+    for i <- 0 until n do
+      output should include(s"httpd: accept[$i] cfd=")
+      output should include(s"httpd: i=$i hdr_end=")
+    output should include("httpd: done")
+  }
+
+
+  "tcp: out-of-order reassembly self-test" in {
+    // test_tcp_ooo triggers inet's reorder-queue self-test via a
+    // dedicated IPC op. The test exercises the stash → drain path
+    // without depending on slirp to actually reorder packets, which
+    // it doesn't. See inet_tcp_ooo_selftest for the exact sequence:
+    // two out-of-order segs at seq 200 and 250 get stashed, then an
+    // in-order seg at seq 100 fills the gap and drains both stashed
+    // segs in order.
+    qemu.send("test_tcp_ooo\n")
+    val output = qemu.waitFor("test_tcp_ooo: ok")
+    output should include("test_tcp_ooo: ok")
+    output should not include "test_tcp_ooo: failed"
+  }
+
+
+  "tcp: VFS bridge (connect/read/write/close)" in {
+    // Same shape as the test_tcp_rx test, but the guest program
+    // (test_tcp_vfs) calls only connect("tcp:...") + read/write/close —
+    // no tcp_* wrappers. Proves VFS routes FS_CMD_READ/WRITE/CLOSE on a
+    // tcp-typed handle through INET_CMD_TCP_RECV/SEND/CLOSE.
+    val n = 900
+    var expectedSum = 0L
+    val payload = new Array[Byte](n)
+    for i <- 0 until n do
+      val b = (i & 0xff).toByte
+      payload(i) = b
+      expectedSum += (b & 0xff).toLong
+
+    val server = new java.net.ServerSocket()
+    server.setReuseAddress(true)
+    server.bind(new java.net.InetSocketAddress("127.0.0.1", 18081))
+    server.setSoTimeout(15000)
+
+    val resultBox = new java.util.concurrent.atomic.AtomicReference[String]("")
+    val srvThread = new Thread(() => {
+      try
+        val client = server.accept()
+        try {
+          val out = client.getOutputStream
+          val in  = client.getInputStream
+          out.write(payload)
+          out.flush()
+          val reply = new Array[Byte](6)
+          var read = 0
+          while read < 6 do
+            val r = in.read(reply, read, 6 - read)
+            if r <= 0 then throw new RuntimeException(s"short read: got $read")
+            read += r
+          val gotCount = ((reply(0) & 0xff) << 8) | (reply(1) & 0xff)
+          val gotSum =
+            ((reply(2) & 0xffL) << 24) |
+            ((reply(3) & 0xffL) << 16) |
+            ((reply(4) & 0xffL) << 8)  |
+            (reply(5) & 0xffL)
+          resultBox.set(s"count=$gotCount sum=$gotSum")
+        } finally client.close()
+      catch
+        case e: Throwable => resultBox.set(s"ERR: ${e.getMessage}")
+    }, "tcp-pattern-server-vfs")
+    srvThread.setDaemon(true)
+    srvThread.start()
+
+    try
+      qemu.send("test_tcp_vfs\n")
+      val output = qemu.waitFor("test_tcp_vfs: ok")
+      output should include("test_tcp_vfs: connected h=")
+      output should include("test_tcp_vfs: drained count=900")
+      output should include("test_tcp_vfs: sent=6")
+      output should include("test_tcp_vfs: ok")
+
+      srvThread.join(5000)
+      resultBox.get() shouldBe s"count=$n sum=$expectedSum"
+    finally
+      server.close()
+      srvThread.join(2000)
+  }
+
+
+  "tcp: VFS listen bridge (connect/accept/read/write/close)" in {
+    // test_tcp_lsv listens via connect("tcp-listen:7890") + accept()
+    // + read/write/close — no tcp_listen/tcp_accept wrappers. Proves
+    // that OFT_TYPE_TCP_LISTEN + FS_CMD_ACCEPT let a passive TCP
+    // server run entirely through VFS. QEMU's hostfwd=tcp::28080-:7890
+    // forwards host dials of 127.0.0.1:28080 into the guest.
+    qemu.send("test_tcp_lsv\n")
+    qemu.waitFor("test_tcp_lsv: listening h=")
+
+    val sock = new java.net.Socket()
+    sock.setSoTimeout(10000)
+    sock.connect(new java.net.InetSocketAddress("127.0.0.1", 28080), 5000)
+    try
+      val out = sock.getOutputStream
+      val in  = sock.getInputStream
+      out.write("ping\n".getBytes("UTF-8"))
+      out.flush()
+      val buf = new Array[Byte](32)
+      val n = in.read(buf)
+      n should be > 0
+      new String(buf, 0, n, "UTF-8") should include("ping")
+    finally sock.close()
+
+    val output = qemu.waitFor("test_tcp_lsv: closed")
+    output should include("test_tcp_lsv: accepted ch=")
+    output should include("test_tcp_lsv: got ")
+    output should include("test_tcp_lsv: sent=")
+    output should include("test_tcp_lsv: closed")
+  }
+
+
+  "udp: recvfrom_timeout fires after ~1s with no sender" in {
+    // test_udp_tmo binds 0.0.0.0:7788 and calls
+    // recvfrom_timeout(..., 1000 ms) with nothing sending to it.
+    // Verifies that:
+    //   (a) the call returns 0 (timed out, not blocked, not errored),
+    //   (b) the elapsed uptime is in the expected range,
+    //   (c) the server main loop's inet_udp_scan_timeouts
+    //       delivered the deferred reply.
+    // Without the scan, the thread would park in
+    // inet_handle_recvfrom_timeout forever and the harness
+    // would time out rather than the program.
+    // (Binary name shortened from test_udp_timeout to fit TFS's
+    //  DIR_NAME_LEN=14 limit — "test_udp_timeout" was silently
+    //  truncated to "test_udp_timeo" in an earlier iteration.)
+    qemu.send("test_udp_tmo\n")
+    val output = qemu.waitFor("test_udp_tmo: ok")
+    output should include("test_udp_tmo: timeout elapsed=")
+    output should include("test_udp_tmo: ok")
+    output should not include "test_udp_tmo: recvfrom_timeout error"
+    output should not include "test_udp_tmo: too early"
+    output should not include "test_udp_tmo: too late"
+    output should not include "test_udp_tmo: unexpected data"
+  }
+
+
+  "virtio: probe finds the attached virtio-net device" in {
+    // The boot log (captured before the login prompt) should
+    // confirm a working virtio-net probe. The banner format is
+    // arch-specific — aarch64 uses virtio-mmio and prints
+    // `virtio: slot N ... (net)`; x86 uses PCI and prints
+    // `virtio-net: probe ok ...`. The test accepts either, so the
+    // same description holds across arches.
+    val banner = qemu.allOutput
+    val hasMmio = banner.contains("virtio: slot") && banner.contains("(net)")
+    val hasPci  = banner.contains("virtio-net: probe ok")
+    (hasMmio || hasPci) shouldBe true
+    banner should not include "virtio: probe failed"
+  }
+
+
+  "wget: resolve + fetch via mock DNS and mock HTTP" in {
+    // End-to-end "real internet" proof: guest parses URL, resolves
+    // name via our mock DNS (which answers any query with an A
+    // record = 10.0.2.2), opens TCP to 10.0.2.2:<httpPort> which
+    // slirp forwards to the host's mock HTTP server on
+    // 127.0.0.1:<httpPort>. Mock HTTP replies with "hello wget\n"
+    // and closes. Guest reads until EOF, prints body to stdout,
+    // emits `wget: done`.
+    val http = new java.net.ServerSocket()
+    http.setReuseAddress(true)
+    http.bind(new java.net.InetSocketAddress("127.0.0.1", 0))
+    http.setSoTimeout(10000)
+    val httpPort = http.getLocalPort
+
+    val dns = new java.net.DatagramSocket(
+      new java.net.InetSocketAddress("127.0.0.1", 0))
+    val dnsPort = dns.getLocalPort
+
+    val httpAnswered = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val dnsAnswered  = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+    val dnsThread = new Thread(() => {
+      try
+        val qbuf = new Array[Byte](512)
+        val inPkt = new java.net.DatagramPacket(qbuf, qbuf.length)
+        dns.setSoTimeout(10000)
+        dns.receive(inPkt)
+        val qlen = inPkt.getLength
+        val resp = new Array[Byte](qlen + 16)
+        System.arraycopy(qbuf, 0, resp, 0, qlen)
+        resp(2) = (resp(2) | 0x80.toByte).toByte
+        resp(6) = 0
+        resp(7) = 1
+        var off = qlen
+        resp(off)      = 0xc0.toByte
+        resp(off + 1)  = 0x0c.toByte
+        resp(off + 2)  = 0; resp(off + 3)  = 1
+        resp(off + 4)  = 0; resp(off + 5)  = 1
+        resp(off + 6)  = 0; resp(off + 7)  = 0
+        resp(off + 8)  = 0; resp(off + 9)  = 60.toByte
+        resp(off + 10) = 0; resp(off + 11) = 4
+        resp(off + 12) = 10
+        resp(off + 13) = 0
+        resp(off + 14) = 2
+        resp(off + 15) = 2
+        dns.send(new java.net.DatagramPacket(
+          resp, resp.length, inPkt.getAddress, inPkt.getPort))
+        dnsAnswered.set(true)
+      catch case _: Throwable => ()
+    }, "mock-dns-wget")
+    dnsThread.setDaemon(true)
+    dnsThread.start()
+
+    val httpThread = new Thread(() => {
+      try
+        val client = http.accept()
+        try
+          val in  = client.getInputStream
+          val out = client.getOutputStream
+          val rbuf = new Array[Byte](2048)
+          var total = 0
+          var done  = false
+          while !done && total < rbuf.length do
+            val r = in.read(rbuf, total, rbuf.length - total)
+            if r <= 0 then done = true
+            else
+              total += r
+              val s = new String(rbuf, 0, total, "UTF-8")
+              if s.contains("\r\n\r\n") then done = true
+          val body = "hello wget\n"
+          val respStr = s"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body"
+          out.write(respStr.getBytes("UTF-8"))
+          out.flush()
+          httpAnswered.set(true)
+        finally client.close()
+      catch case _: Throwable => ()
+    }, "mock-http-wget")
+    httpThread.setDaemon(true)
+    httpThread.start()
+
+    try
+      qemu.send(s"wget http://example.local:$httpPort/hello 10.0.2.2 $dnsPort\n")
+      val output = qemu.waitFor("wget: done")
+      output should include("wget: resolved example.local -> 10.0.2.2")
+      output should include("wget: status=200")
+      output should include("hello wget")
+      output should include("wget: done")
+      dnsThread.join(5000)
+      httpThread.join(5000)
+      dnsAnswered.get()  shouldBe true
+      httpAnswered.get() shouldBe true
+    finally
+      dns.close()
+      http.close()
+  }
+
+
 
   /** Shared body for the Phase F listen-backlog test (also used by
     * Aarch64NshTests). Listens with backlog=2; fires four parallel
