@@ -509,6 +509,24 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         throw new RuntimeException(s"emitLoad: unexpected type $other")
 
   // Emit store from rSrc to [rBase + 0], using width-appropriate instruction
+  /** Copy `size` bytes from [srcReg] to [addrReg], using either 8-byte or
+    *  4-byte memory ops based on `align`. Required because TRISC `std`/`ldd`
+    *  fault on misaligned addresses, and an aggregate's natural alignment
+    *  determines the worst-case alignment of its in-memory address. */
+  private def emitAggregateCopy(srcReg: Int, addrReg: Int, size: Int, align: Int): Unit =
+    if align >= 8 then
+      for i <- 0 until size by 8 do
+        emitAddImm(4, srcReg, i)
+        emit("  ldd r4, r4, r0")
+        emitAddImm(3, addrReg, i)
+        emit("  std r4, r3, r0")
+    else
+      for i <- 0 until size by 4 do
+        emitAddImm(4, srcReg, i)
+        emit("  ldw r4, r4, r0")
+        emitAddImm(3, addrReg, i)
+        emit("  stw r4, r3, r0")
+
   private def emitStore(srcReg: Int, addrReg: Int, typ: SyslType): Unit =
     typ.underlying match
       case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType =>
@@ -533,21 +551,18 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emitAddImm(3, addrReg, i)
           emit("  std r4, r3, r0")
       case st: SyslType.StructType =>
-        // Struct copy: srcReg = source address, addrReg = dest address
-        val size = stackSize(st)
-        for i <- 0 until size by 8 do
-          emitAddImm(4, srcReg, i)
-          emit("  ldd r4, r4, r0")
-          emitAddImm(3, addrReg, i)
-          emit("  std r4, r3, r0")
+        // Struct copy: srcReg = source address, addrReg = dest address.
+        // If the struct's natural alignment is < 8, the destination is only
+        // 4-aligned (e.g. a struct field at a non-8-aligned offset), so we
+        // must use 4-byte loads/stores. Otherwise 8-byte ops are fine.
+        emitAggregateCopy(srcReg, addrReg, stackSize(st), stackAlign(st))
       case et: SyslType.EnumType =>
-        // Enum copy: srcReg = source address, addrReg = dest address
-        val size = stackSize(et)
-        for i <- 0 until size by 8 do
-          emitAddImm(4, srcReg, i)
-          emit("  ldd r4, r4, r0")
-          emitAddImm(3, addrReg, i)
-          emit("  std r4, r3, r0")
+        // Enum copy: srcReg = source address, addrReg = dest address.
+        // Same alignment story as struct — enums whose payloads are only
+        // 4-aligned (e.g. an enum carrying `int`-only variants embedded in
+        // another enum) sit at 4-aligned offsets and must not be copied
+        // with `std`. See audit item #20 (TRISC enum-match misalignment).
+        emitAggregateCopy(srcReg, addrReg, stackSize(et), stackAlign(et))
       case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.FloatType(64) |
            _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  std r$srcReg, r$addrReg, r0")
@@ -1763,24 +1778,32 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   // Copy multi-word value from src address (r1) to _ret_ptr, then set r1 = _ret_ptr
   // Works for both StructType and StringType (16 bytes)
   private def emitStructReturn(): Unit =
-    val size = currentFunction.returnType match
-      case st: SyslType.StructType => stackSize(st)
-      case et: SyslType.EnumType => stackSize(et)
-      case SyslType.StringType | _: SyslType.FuncType | _: SyslType.InterfaceType => 16
-      case _: SyslType.SliceType => 24
-      case _ => 8
+    val (size, align) = currentFunction.returnType match
+      case st: SyslType.StructType => (stackSize(st), stackAlign(st))
+      case et: SyslType.EnumType => (stackSize(et), stackAlign(et))
+      case SyslType.StringType | _: SyslType.FuncType | _: SyslType.InterfaceType => (16, 8)
+      case _: SyslType.SliceType => (24, 8)
+      case _ => (8, 8)
     val retLocal = locals("_ret_ptr")
     // r1 = source address; load _ret_ptr into r2
     emit("  pshd r1")                       // save source
     emitAddImm(2, 5, retLocal.offset)
     emit("  ldd r2, r2, r0")               // r2 = _ret_ptr (destination)
     emit("  popd r3")                       // r3 = source
-    // Copy size bytes from r3 to r2
-    for i <- 0 until size by 8 do
-      emitAddImm(4, 3, i)
-      emit("  ldd r4, r4, r0")
-      emitAddImm(1, 2, i)
-      emit("  std r4, r1, r0")
+    // Copy size bytes from r3 to r2 using width-appropriate ops. See
+    // `emitAggregateCopy` for the alignment story (audit item #20).
+    if align >= 8 then
+      for i <- 0 until size by 8 do
+        emitAddImm(4, 3, i)
+        emit("  ldd r4, r4, r0")
+        emitAddImm(1, 2, i)
+        emit("  std r4, r1, r0")
+    else
+      for i <- 0 until size by 4 do
+        emitAddImm(4, 3, i)
+        emit("  ldw r4, r4, r0")
+        emitAddImm(1, 2, i)
+        emit("  stw r4, r1, r0")
     // r1 = _ret_ptr (for the caller)
     emit("  mov r1, r2")
     // Increment string fields in the destination so the source local can be
@@ -3425,11 +3448,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                          _: SyslType.FuncType | _: SyslType.InterfaceType |
                          SyslType.StringType =>
                       emitAddImm(3, 5, local.offset)
-                      for i <- 0 until size by 8 do
-                        emitAddImm(4, 3, i)
-                        emit("  ldd r4, r4, r0")
-                        emitAddImm(1, 2, i)
-                        emit("  std r4, r1, r0")
+                      emitAggregateCopy(3, 2, size, stackAlign(typ))
                     case _ =>
                       // Use local.typ for the load — params are stored in 8-byte
                       // I64 slots (big-endian; ldw at the slot base reads the
@@ -3445,11 +3464,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                          _: SyslType.SliceType | _: SyslType.EnumType |
                          _: SyslType.FuncType | _: SyslType.InterfaceType |
                          SyslType.StringType =>
-                      for i <- 0 until size by 8 do
-                        emitAddImm(4, 3, i)
-                        emit("  ldd r4, r4, r0")
-                        emitAddImm(1, 2, i)
-                        emit("  std r4, r1, r0")
+                      emitAggregateCopy(3, 2, size, stackAlign(typ))
                     case _ =>
                       emitLoad(3, 3, typ)
                       emitStore(3, 2, typ)
@@ -3530,11 +3545,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                     case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType |
                          _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
                       emitAddImm(3, 5, local.offset)
-                      for i <- 0 until size by 8 do
-                        emitAddImm(4, 3, i)
-                        emit("  ldd r4, r4, r0")
-                        emitAddImm(1, 2, i)
-                        emit("  std r4, r1, r0")
+                      emitAggregateCopy(3, 2, size, stackAlign(typ))
                     case _ =>
                       // Use local.typ for the load — params are stored in 8-byte
                       // I64 slots (big-endian; ldw at the slot base reads the
@@ -3548,11 +3559,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                   typ match
                     case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType |
                          _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
-                      for i <- 0 until size by 8 do
-                        emitAddImm(4, 3, i)
-                        emit("  ldd r4, r4, r0")
-                        emitAddImm(1, 2, i)
-                        emit("  std r4, r1, r0")
+                      emitAggregateCopy(3, 2, size, stackAlign(typ))
                     case _ =>
                       emitLoad(3, 3, typ)
                       emitStore(3, 2, typ)
