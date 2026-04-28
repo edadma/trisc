@@ -95,6 +95,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_SEND_PARK_TEST = 47
     val INET_CMD_TCP_ARP_REPLAY_TEST = 48
     val INET_CMD_PID_EXIT_SELFTEST   = 49
+    val INET_CMD_GET_STATS           = 50
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -1795,6 +1796,66 @@ freed.  Reply byte breaks down as:
         ipc_reply(sender, reply, 1)
 
 
+### inet_handle_get_stats
+
+Phase 2 chunk 4 — caller-side introspection of net-stack
+resource use. Lets a process answer "how many sockets and how
+much TCP buffer memory am I currently holding?" without parsing
+`/proc/net/*` style files. Closes Phase 2 of the netstack-quality
+plan.
+
+Wire:
+
+  request:  cmd(1) + tid_be32(4) = 5 bytes.  tid==0 means
+            "use the sender's tid"; nonzero is an explicit query
+            that lets a parent inspect a child or a test inspect
+            a synthetic owner.
+
+  reply:    status(1) + tcp_count_be32(4) + udp_count_be32(4)
+            + tcp_buf_bytes_be32(4) + reserved_be32(4) = 17 bytes.
+            status==0 on success, 0xff on error (currently the
+            handler can't fail — slot scans never error — but we
+            keep the byte for symmetry with the rest of the IPC
+            ABI and to leave room for ACL gating later).
+
+The three counts are computed by the existing per-owner helpers
+(`inet_count_tcp_owner`, `inet_count_udp_owner`,
+`inet_tcp_buf_bytes_owner`), so this handler is essentially three
+calls plus packing.
+
+    inet_handle_get_stats(sender: int, buf: *byte)
+        val t0 = (int(buf[1]) & 0xff) << 24
+        val t1 = (int(buf[2]) & 0xff) << 16
+        val t2 = (int(buf[3]) & 0xff) <<  8
+        val t3 =  int(buf[4]) & 0xff
+        val tid_arg = t0 | t1 | t2 | t3
+        var whose = tid_arg
+        if tid_arg == 0
+            whose = sender
+        val tcp_n = inet_count_tcp_owner(whose)
+        val udp_n = inet_count_udp_owner(whose)
+        val buf_b = inet_tcp_buf_bytes_owner(whose)
+        var reply: [17]byte
+        reply[0] = byte(0)
+        reply[1] = byte((tcp_n >> 24) & 0xff)
+        reply[2] = byte((tcp_n >> 16) & 0xff)
+        reply[3] = byte((tcp_n >>  8) & 0xff)
+        reply[4] = byte( tcp_n        & 0xff)
+        reply[5] = byte((udp_n >> 24) & 0xff)
+        reply[6] = byte((udp_n >> 16) & 0xff)
+        reply[7] = byte((udp_n >>  8) & 0xff)
+        reply[8] = byte( udp_n        & 0xff)
+        reply[ 9] = byte((buf_b >> 24) & 0xff)
+        reply[10] = byte((buf_b >> 16) & 0xff)
+        reply[11] = byte((buf_b >>  8) & 0xff)
+        reply[12] = byte( buf_b        & 0xff)
+        reply[13] = byte(0)
+        reply[14] = byte(0)
+        reply[15] = byte(0)
+        reply[16] = byte(0)
+        ipc_reply(sender, reply, 17)
+
+
 Test-only: synthesize three IPv4 fragments of a 32-byte UDP
 datagram bound for our IP at port 9100, inject them into
 `inet_handle_frame` in out-of-order sequence (frag 2, frag 3,
@@ -2405,6 +2466,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_SEND_PARK_TEST -> inet_handle_tcp_send_park_test(sender, buf)
                     INET_CMD_TCP_ARP_REPLAY_TEST -> inet_handle_tcp_arp_replay_test(sender, buf)
                     INET_CMD_PID_EXIT_SELFTEST -> inet_handle_pid_exit_selftest(sender, buf)
+                    INET_CMD_GET_STATS         -> inet_handle_get_stats(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte

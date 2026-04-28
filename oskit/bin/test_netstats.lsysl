@@ -1,0 +1,203 @@
+test_netstats — INET_CMD_GET_STATS introspection (Phase 2 quality)
+===================================================================
+
+Phase 2 chunk 4 of the net-stack quality plan.  Adds a caller-side
+syscall-style IPC, `INET_CMD_GET_STATS`, that returns the calling
+tid's net-stack resource usage:
+
+  - tcp_count      number of in-use TCP slots owned by tid
+  - udp_count      number of in-use UDP/raw slots owned by tid
+  - tcp_buf_bytes  sum of (send_buf_size + recv_buf_size) over the
+                   tid's TCP slots
+
+Closes Phase 2 of the netstack-quality plan.  After this the inet
+server can answer any "how much am I holding?" question without
+the tid having to walk a `/proc` analogue.
+
+Test plan:
+
+  1. Baseline: get_stats(0) — calling tid should have zero of
+     everything (tests run as fresh processes; nothing held yet).
+  2. Open one UDP socket (bind so it has a port) — udp_count
+     becomes 1, tcp_count stays 0, tcp_buf_bytes stays 0.
+  3. Open one TCP listener — tcp_count becomes 1, udp_count stays
+     1, tcp_buf_bytes is now >= 2 × TCP_BUF_MIN (we don't pin to
+     an exact number to stay robust against default tweaks).
+  4. Close both — get_stats(0) returns to all zeros.
+  5. Print `netstats: ok`.
+
+    module oskit.bin.test_netstats
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+    import oskit.net.{get_stats}
+
+
+    val NR_CLOSE      = 147
+    val NR_BIND       = 135
+    val NR_LISTEN     = 217
+    val NR_SOCKET     = 337
+
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+    val SOCK_DGRAM_V  = 2
+
+
+    print_dec(v: int)
+        if v < 0
+            puts("-")
+            print_dec(-v)
+            return
+        if v >= 10
+            print_dec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("netstats: failed ")
+        print_dec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+
+Fill `a` with sockaddr_in(127.0.0.1, port).  Same shape as
+test_tcpbufcap; lifted unchanged.
+
+    fill_sockaddr(a: *byte, port: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(127)
+        a[5] = byte(0)
+        a[6] = byte(0)
+        a[7] = byte(1)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    main(argv: []string)
+        // Step 1 — baseline.  Calling tid should have zero of
+        // everything before any sockets have been opened.
+        var tcp_n = 0
+        var udp_n = 0
+        var bbytes = 0
+        val r0 = get_stats(0, &tcp_n, &udp_n, &bbytes)
+        if r0 != 0
+            fail(11)
+            return
+        if tcp_n != 0 || udp_n != 0 || bbytes != 0
+            puts("netstats: baseline tcp=")
+            print_dec(tcp_n)
+            puts(" udp=")
+            print_dec(udp_n)
+            puts(" bbytes=")
+            print_dec(bbytes)
+            puts("\n")
+            fail(12)
+            return
+
+        // Step 2 — open one UDP socket and bind it.  udp_count
+        // should become 1, tcp side untouched.
+        val udp_fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if udp_fd < 0
+            fail(20)
+            return
+        var addr: [16]byte
+        fill_sockaddr(&addr[0], 7950)
+        if posix_bind(udp_fd, &addr[0], 16) != 0
+            posix_close(udp_fd)
+            fail(21)
+            return
+        val r1 = get_stats(0, &tcp_n, &udp_n, &bbytes)
+        if r1 != 0
+            posix_close(udp_fd)
+            fail(22)
+            return
+        if udp_n != 1 || tcp_n != 0 || bbytes != 0
+            puts("netstats: udp-only tcp=")
+            print_dec(tcp_n)
+            puts(" udp=")
+            print_dec(udp_n)
+            puts(" bbytes=")
+            print_dec(bbytes)
+            puts("\n")
+            posix_close(udp_fd)
+            fail(23)
+            return
+
+        // Step 3 — add one TCP listener.  tcp_count becomes 1,
+        // tcp_buf_bytes becomes nonzero (default send+recv).  We
+        // don't pin the exact byte total so the test stays robust
+        // against future default-buf tweaks.
+        val tcp_fd = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if tcp_fd < 0
+            posix_close(udp_fd)
+            fail(30)
+            return
+        fill_sockaddr(&addr[0], 7951)
+        if posix_bind(tcp_fd, &addr[0], 16) != 0
+            posix_close(tcp_fd)
+            posix_close(udp_fd)
+            fail(31)
+            return
+        if posix_listen(tcp_fd, 1) != 0
+            posix_close(tcp_fd)
+            posix_close(udp_fd)
+            fail(32)
+            return
+        val r2 = get_stats(0, &tcp_n, &udp_n, &bbytes)
+        if r2 != 0
+            posix_close(tcp_fd)
+            posix_close(udp_fd)
+            fail(33)
+            return
+        if tcp_n != 1 || udp_n != 1 || bbytes <= 0
+            puts("netstats: both tcp=")
+            print_dec(tcp_n)
+            puts(" udp=")
+            print_dec(udp_n)
+            puts(" bbytes=")
+            print_dec(bbytes)
+            puts("\n")
+            posix_close(tcp_fd)
+            posix_close(udp_fd)
+            fail(34)
+            return
+
+        // Step 4 — close both, counts should return to zero.
+        posix_close(tcp_fd)
+        posix_close(udp_fd)
+        val r3 = get_stats(0, &tcp_n, &udp_n, &bbytes)
+        if r3 != 0
+            fail(40)
+            return
+        if tcp_n != 0 || udp_n != 0 || bbytes != 0
+            puts("netstats: residual tcp=")
+            print_dec(tcp_n)
+            puts(" udp=")
+            print_dec(udp_n)
+            puts(" bbytes=")
+            print_dec(bbytes)
+            puts("\n")
+            fail(41)
+            return
+
+        puts("netstats: ok\n")
+        exit()

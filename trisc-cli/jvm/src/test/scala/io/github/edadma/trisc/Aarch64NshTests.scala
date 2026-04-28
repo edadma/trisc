@@ -2005,6 +2005,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "pidxclean: failed"
   }
 
+  "net: GET_STATS introspection (Phase 2 quality)" in {
+    // Phase 2 chunk 4: INET_CMD_GET_STATS returns the calling tid's
+    // tcp_count / udp_count / tcp_buf_bytes.  The test starts at
+    // zero, opens one UDP and one TCP listener, observes the
+    // counters move, then closes both and confirms the counters
+    // return to zero.  Closes Phase 2 of the netstack-quality plan.
+    val output = qemu.command("test_netstats")
+    output should include("netstats: ok")
+    output should not include "netstats: failed"
+  }
+
   "dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and
