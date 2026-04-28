@@ -1871,6 +1871,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpbufcap: failed"
   }
 
+  "aarch64 net: PID_EXIT cleanup audit (Phase 2 quality)" in {
+    // Phase 2 chunk 3: PID_EXIT now also reclaims the auxiliary
+    // tables that hold owner_tid — the 4-slot ICMP ping pending
+    // table and the 2-slot ARP-pending UDP queue.  The self-test
+    // parks one of each under a synthetic owner_tid and verifies
+    // the cleanup helpers free them.
+    val output = qemu.command("test_pidxclean")
+    output should include("pidxclean: ok")
+    output should not include "pidxclean: failed"
+  }
+
   "aarch64 dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

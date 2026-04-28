@@ -53,6 +53,7 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_IP_REASM_TIMEOUT_TEST = 46
     val INET_CMD_TCP_SEND_PARK_TEST = 47
     val INET_CMD_TCP_ARP_REPLAY_TEST = 48
+    val INET_CMD_PID_EXIT_SELFTEST   = 49
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val ARP_PROBE_OP_START    = 0
@@ -774,6 +775,26 @@ flag.  Returns 0 on pass, 1..3 on the failure step.
             return -1
         var msg: [1]byte
         msg[0] = byte(INET_CMD_TCP_ARP_REPLAY_TEST)
+        var reply: [1]byte
+        ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### pid_exit_cleanup_test (test-only)
+
+Triggers the inet server's PID_EXIT auxiliary-table cleanup
+self-test (Phase 2 chunk 3).  Parks one ICMP ping and one
+pending-UDP slot under a synthetic owner_tid, runs the cleanup
+helpers, and verifies both slots freed.  Returns 0 on pass,
+0x10..0x1f if the ping path failed at step 1..f, 0x20..0x2f if
+the pending-UDP path failed.
+
+    pid_exit_cleanup_test() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_PID_EXIT_SELFTEST)
         var reply: [1]byte
         ipc_send(port, msg, 1, reply, 1)
         int(reply[0]) & 0xff

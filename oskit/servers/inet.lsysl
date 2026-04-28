@@ -94,6 +94,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_IP_REASM_TIMEOUT_TEST = 46
     val INET_CMD_TCP_SEND_PARK_TEST = 47
     val INET_CMD_TCP_ARP_REPLAY_TEST = 48
+    val INET_CMD_PID_EXIT_SELFTEST   = 49
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -586,7 +587,7 @@ vs. 16K ports, so not in practice.
             inet_write_u16(reply, 1, dlen)
             ipc_reply(sender, reply, 3)
             return
-        val r = inet_send_udp(dst_ip, dst_port, src_port, data, dlen)
+        val r = inet_send_udp(sender, dst_ip, dst_port, src_port, data, dlen)
         if r < 0
             var err: [3]byte
             err[0] = byte(-1)
@@ -829,7 +830,7 @@ CHECK reply:   status(1) + src_ip(4) + rtt(4)        = 9 bytes
         val seq = (int(buf[7]) & 0xff) << 8 | (int(buf[8]) & 0xff)
         var reply: [1]byte
         reply[0] = 0
-        if inet_ping_register(id, seq, int(uptime())) < 0
+        if inet_ping_register(sender, id, seq, int(uptime())) < 0
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 1)
             return
@@ -1602,6 +1603,15 @@ future RST).
             i += 1
         inet_tcp_cleanup_owner(tid)
         inet_epoll_drop_owner(tid)
+        // Phase 2 chunk 3 — auxiliary tables that hold owner_tid:
+        // ICMP ping pending replies (4 slots, easy to fill) and
+        // ARP-pending UDP datagrams (2 slots, ditto).  Without this
+        // a process that pings an unresponsive peer or sends to an
+        // unresolved next-hop and then dies leaks the slot until
+        // an unrelated id+seq collision or ARP cache eviction frees
+        // it.
+        inet_ping_cleanup_owner(tid)
+        inet_pending_udp_cleanup_owner(tid)
         var reply: [1]byte
         reply[0] = byte(0)
         ipc_reply(sender, reply, 1)
@@ -1756,6 +1766,32 @@ hit a MAC-miss in `inet_tcp_emit`.
         val rc = inet_tcp_arp_replay_selftest()
         var reply: [1]byte
         reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+
+Test-only: drive the Phase 2 chunk 3 PID_EXIT cleanup audit.
+Synthesizes a fake owner_tid (-7777, well outside the real tid
+space), parks one ICMP ping slot and one pending-UDP slot under
+that tid, runs the cleanup helpers, and verifies both slots
+freed.  Reply byte breaks down as:
+  0          all clear
+  0x10..0x1f ping selftest failed (low 4 bits = step)
+  0x20..0x2f pending-UDP selftest failed (low 4 bits = step)
+
+    inet_handle_pid_exit_selftest(sender: int, buf: *byte)
+        val fake_tid = -7777
+        val pr = inet_ping_cleanup_selftest(fake_tid)
+        var reply: [1]byte
+        if pr != 0
+            reply[0] = byte(0x10 | (pr & 0x0f))
+            ipc_reply(sender, reply, 1)
+            return
+        val ur = inet_pending_udp_cleanup_selftest(fake_tid)
+        if ur != 0
+            reply[0] = byte(0x20 | (ur & 0x0f))
+            ipc_reply(sender, reply, 1)
+            return
+        reply[0] = byte(0)
         ipc_reply(sender, reply, 1)
 
 
@@ -2368,6 +2404,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_IP_REASM_TIMEOUT_TEST -> inet_handle_ip_reasm_timeout_test(sender, buf)
                     INET_CMD_TCP_SEND_PARK_TEST -> inet_handle_tcp_send_park_test(sender, buf)
                     INET_CMD_TCP_ARP_REPLAY_TEST -> inet_handle_tcp_arp_replay_test(sender, buf)
+                    INET_CMD_PID_EXIT_SELFTEST -> inet_handle_pid_exit_selftest(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte

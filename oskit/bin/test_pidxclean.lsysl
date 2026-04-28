@@ -1,0 +1,61 @@
+test_pidxclean — PID_EXIT auxiliary-table cleanup self-test
+============================================================
+
+Phase 2 chunk 3 of the net-stack quality plan: when PM notifies
+inet that a process has exited, inet must reclaim every slot the
+process owned — not only its UDP/TCP sockets, but also the
+auxiliary tables that hold an owner_tid:
+
+- ICMP ping pending-reply table (`inet_ping_table`, 4 slots).
+  `ping foo` registers a slot; if the peer never replies and the
+  process exits without polling, the slot was leaking.
+- ARP-pending UDP queue (`inet_pending_udp`, 2 slots).  A
+  datagram parked while we wait for an ARP reply was being
+  retransmitted on behalf of the dead process when the reply
+  landed.
+
+This test drives the inet self-test that exercises both paths
+synthetically — no real socket, no real network. The inet side
+parks one ping slot and one pending-UDP slot under a synthetic
+owner_tid, runs the cleanup helpers, and verifies both slots
+freed.
+
+Prints `pidxclean: ok` on pass or `pidxclean: failed N` where
+N is the failure-step code returned by the inet self-test
+(0x10..0x1f = ping path, 0x20..0x2f = pending-UDP path).
+
+    module oskit.bin.test_pidxclean
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{pid_exit_cleanup_test}
+
+
+    print_uhex(v: int)
+        val hi = (v >> 4) & 0xf
+        val lo = v & 0xf
+        var b: [2]byte
+        if hi < 10
+            b[0] = byte('0' + hi)
+        else
+            b[0] = byte('a' + (hi - 10))
+        if lo < 10
+            b[1] = byte('0' + lo)
+        else
+            b[1] = byte('a' + (lo - 10))
+        puts(string(&b[0], 2))
+
+
+    fail(code: int)
+        puts("pidxclean: failed 0x")
+        print_uhex(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val rc = pid_exit_cleanup_test()
+        if rc != 0
+            fail(rc)
+            return
+        puts("pidxclean: ok\n")
+        exit()
