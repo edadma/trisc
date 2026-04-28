@@ -2016,6 +2016,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "netstats: failed"
   }
 
+  "net: frame buffer pool (Phase 3 chunk 1)" in {
+    // Phase 3 chunk 1: replace per-handler `var frame: [1514]byte`
+    // with a small reusable pool. INET_CMD_FRAME_POOL_STATS reports
+    // (used, high, cap, fails). Test verifies a UDP loopback round-
+    // trip pushes high-water above the baseline (proves multiple
+    // pool slots got used) and that `used` returns to baseline
+    // afterward (no leaks). `fails` must stay zero.
+    val output = qemu.command("test_framepool")
+    output should include("framepool: ok")
+    output should not include "framepool: failed"
+  }
+
   "dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

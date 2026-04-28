@@ -55,6 +55,7 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_TCP_ARP_REPLAY_TEST = 48
     val INET_CMD_PID_EXIT_SELFTEST   = 49
     val INET_CMD_GET_STATS           = 50
+    val INET_CMD_FRAME_POOL_STATS    = 51
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val ARP_PROBE_OP_START    = 0
@@ -829,6 +830,36 @@ recv_buf_size` over every in-use TCP slot owned by `tid`.
         *out_tcp_count = ((int(reply[1]) & 0xff) << 24) | ((int(reply[2]) & 0xff) << 16) | ((int(reply[3]) & 0xff) << 8) | (int(reply[4]) & 0xff)
         *out_udp_count = ((int(reply[5]) & 0xff) << 24) | ((int(reply[6]) & 0xff) << 16) | ((int(reply[7]) & 0xff) << 8) | (int(reply[8]) & 0xff)
         *out_tcp_buf_bytes = ((int(reply[9]) & 0xff) << 24) | ((int(reply[10]) & 0xff) << 16) | ((int(reply[11]) & 0xff) << 8) | (int(reply[12]) & 0xff)
+        0
+
+
+### frame_pool_stats
+
+Phase 3 chunk 1 — introspect the inet server's frame buffer pool.
+Used by `test_framepool` to verify no handler is leaking pool slots
+and that the pool's high-water mark stays well below capacity.
+
+  - out_used     count of slots currently allocated. Steady-state is
+                 ≥ 1 because the server's main IPC loop holds one slot.
+  - out_high     running max of `used` across server lifetime.
+  - out_cap      pool capacity (`INET_FRAME_POOL_N`).
+  - out_fails    requests that hit pool exhaustion (pool size is
+                 chosen so this stays 0 on the happy path).
+
+    frame_pool_stats(out_used: *int, out_high: *int, out_cap: *int, out_fails: *int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_FRAME_POOL_STATS)
+        var reply: [17]byte
+        ipc_send(port, msg, 1, reply, 17)
+        if reply[0] != 0
+            return -1
+        *out_used  = ((int(reply[1]) & 0xff) << 24) | ((int(reply[2]) & 0xff) << 16) | ((int(reply[3]) & 0xff) << 8) | (int(reply[4]) & 0xff)
+        *out_high  = ((int(reply[5]) & 0xff) << 24) | ((int(reply[6]) & 0xff) << 16) | ((int(reply[7]) & 0xff) << 8) | (int(reply[8]) & 0xff)
+        *out_cap   = ((int(reply[9]) & 0xff) << 24) | ((int(reply[10]) & 0xff) << 16) | ((int(reply[11]) & 0xff) << 8) | (int(reply[12]) & 0xff)
+        *out_fails = ((int(reply[13]) & 0xff) << 24) | ((int(reply[14]) & 0xff) << 16) | ((int(reply[15]) & 0xff) << 8) | (int(reply[16]) & 0xff)
         0
 
 

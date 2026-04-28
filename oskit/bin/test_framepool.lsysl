@@ -1,0 +1,188 @@
+test_framepool — INET frame buffer pool introspection (Phase 3 chunk 1)
+========================================================================
+
+Phase 3 chunk 1 of the net-stack quality plan replaces a half-dozen
+`var frame: [1514]byte` / `var reply: [1500]byte` stack-allocations in
+the inet server with a small reusable pool: `inet_frame_pool[8]` of
+1514 bytes each, doled out by `inet_frame_alloc` and returned by
+`inet_frame_release`. The change saves ~1.5 KB of stack per call and
+collapses the eventual jumbo-frame bump to a single literal.
+
+This test verifies the pool actually behaves like a pool: there is a
+steady-state baseline (the main-loop IPC buffer holds slot 0); a
+handler-side burst pushes the high-water mark above the baseline; and
+after the burst the pool drains back to the baseline (no leaks).
+`fails` must stay zero — eight slots is plenty for inet's call depth.
+
+Test plan:
+
+  1. Baseline: `frame_pool_stats` — `used >= 1`, `high >= 1`, `cap == 8`,
+     `fails == 0`.
+  2. Trigger handler-side traffic: open a UDP socket, sendto/recvfrom
+     loopback, close. The recv path allocates a reply slot in addition
+     to the main-loop slot, so `high` should advance to ≥ 2.
+  3. Re-read stats: `used` should fall back to the baseline (≤ pre-step
+     value) — proves no leaks across alloc/release pairs.
+  4. `fails` must still be 0.
+
+    module oskit.bin.test_framepool
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+    import oskit.net.{frame_pool_stats}
+
+
+    val NR_CLOSE      = 147
+    val NR_BIND       = 135
+    val NR_SOCKET     = 337
+    val NR_SENDTO     = 307
+    val NR_RECVFROM   = 276
+
+    val AF_INET_V     = 2
+    val SOCK_DGRAM_V  = 2
+
+
+    print_dec(v: int)
+        if v < 0
+            puts("-")
+            print_dec(-v)
+            return
+        if v >= 10
+            print_dec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("framepool: failed ")
+        print_dec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int, addr: *byte, alen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen), i64(flags), i64(addr), i64(alen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int, addr: *byte, alen: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen), i64(flags), i64(addr), i64(alen)))
+
+
+Fill `a` with sockaddr_in(127.0.0.1, port). Same shape as
+`test_netstats::fill_sockaddr`.
+
+    fill_sockaddr(a: *byte, port: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(127)
+        a[5] = byte(0)
+        a[6] = byte(0)
+        a[7] = byte(1)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    main(argv: []string)
+        // Step 1 — baseline.
+        var used = 0
+        var high = 0
+        var cap = 0
+        var fails = 0
+        if frame_pool_stats(&used, &high, &cap, &fails) != 0
+            fail(11)
+            return
+        if used < 1
+            puts("framepool: baseline used=")
+            print_dec(used)
+            puts("\n")
+            fail(12)
+            return
+        if cap != 8
+            puts("framepool: baseline cap=")
+            print_dec(cap)
+            puts("\n")
+            fail(13)
+            return
+        if fails != 0
+            puts("framepool: baseline fails=")
+            print_dec(fails)
+            puts("\n")
+            fail(14)
+            return
+
+        val baseline_used = used
+        val baseline_high = high
+
+        // Step 2 — drive a UDP loopback round-trip so the recv path
+        // allocates a reply slot in addition to the main-loop slot.
+        val fd = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if fd < 0
+            fail(20)
+            return
+        var addr: [16]byte
+        fill_sockaddr(&addr[0], 7960)
+        if posix_bind(fd, &addr[0], 16) != 0
+            posix_close(fd)
+            fail(21)
+            return
+        var payload: [4]byte
+        payload[0] = byte('p')
+        payload[1] = byte('o')
+        payload[2] = byte('o')
+        payload[3] = byte('l')
+        if posix_sendto(fd, &payload[0], 4, 0, &addr[0], 16) != 4
+            posix_close(fd)
+            fail(22)
+            return
+        var rxbuf: [16]byte
+        var raddr: [16]byte
+        var rlen: i32 = i32(16)
+        if posix_recvfrom(fd, &rxbuf[0], 16, 0, &raddr[0], &rlen) != 4
+            posix_close(fd)
+            fail(23)
+            return
+        posix_close(fd)
+
+        // Step 3 — high water should have advanced to >= 2.
+        if frame_pool_stats(&used, &high, &cap, &fails) != 0
+            fail(30)
+            return
+        if high < 2
+            puts("framepool: post-traffic high=")
+            print_dec(high)
+            puts(" (expected >= 2)\n")
+            fail(31)
+            return
+        if used > baseline_used
+            puts("framepool: leak! pre=")
+            print_dec(baseline_used)
+            puts(" post=")
+            print_dec(used)
+            puts("\n")
+            fail(32)
+            return
+        if fails != 0
+            puts("framepool: fails=")
+            print_dec(fails)
+            puts(" (pool exhausted)\n")
+            fail(33)
+            return
+
+        puts("framepool: ok (high=")
+        print_dec(high)
+        puts(" cap=")
+        print_dec(cap)
+        puts(")\n")
+        exit()

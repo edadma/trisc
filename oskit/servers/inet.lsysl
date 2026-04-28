@@ -96,6 +96,7 @@ Protocol command codes (byte value of buf[0]).
     val INET_CMD_TCP_ARP_REPLAY_TEST = 48
     val INET_CMD_PID_EXIT_SELFTEST   = 49
     val INET_CMD_GET_STATS           = 50
+    val INET_CMD_FRAME_POOL_STATS    = 51
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -120,6 +121,15 @@ Capacity limits.
     val INET_MAX_QUEUE   = 2
     val INET_MAX_DATA    = 1472
     val INET_MSG_BUF     = 1500  // cmd(1)+fd(1)+hdr(9)+maxlen(2)+data(1472)+slop
+
+
+Frame buffer pool (Phase 3 chunk 1) — storage + helpers live in
+`inet_proto.lsysl` (cross-file VAR access fails the sysl analyzer
+per `feedback_sysl_cross_unit.md`, so the pool follows the same
+"every helper sits with the var it touches" rule used by
+`inet_count_*_owner`). Forward calls from this file into
+`inet_frame_alloc` / `inet_frame_release` / `inet_frame_buf`
+work fine — sysl resolves them on the second pass.
 
 
 A queued datagram awaiting recvfrom. Source address is stored
@@ -353,7 +363,8 @@ replies via IPC.
         val mlen = inet_sockets[fd].pending_maxlen
         inet_sockets[fd].pending_tid = -1
         inet_sockets[fd].recv_deadline = 0
-        var wr: [1500]byte
+        val widx = inet_frame_alloc()
+        val wr = inet_frame_buf(widx)
         var deliver_len = dlen
         if deliver_len > mlen
             deliver_len = mlen
@@ -367,6 +378,7 @@ replies via IPC.
             wr[10 + i] = data[i]
             i += 1
         ipc_reply(waiter, wr, 10 + deliver_len)
+        inet_frame_release(widx)
 
 
 ### Deliver one queued datagram to a pending recvfrom
@@ -634,9 +646,11 @@ programs; multi-waiter support is on the list.
             ipc_reply(sender, er, 10)
             return
         if inet_sockets[fd].q_count > 0
-            var reply: [1500]byte
+            val ridx = inet_frame_alloc()
+            val reply = inet_frame_buf(ridx)
             val n = inet_deliver_head(fd, maxlen, reply)
             ipc_reply(sender, reply, n)
+            inet_frame_release(ridx)
             return
         if inet_sockets[fd].pending_tid >= 0
             var err: [10]byte
@@ -686,9 +700,11 @@ possibly firing immediately.
             ipc_reply(sender, er, 10)
             return
         if inet_sockets[fd].q_count > 0
-            var reply: [1500]byte
+            val ridx = inet_frame_alloc()
+            val reply = inet_frame_buf(ridx)
             val n = inet_deliver_head(fd, maxlen, reply)
             ipc_reply(sender, reply, n)
+            inet_frame_release(ridx)
             return
         if inet_sockets[fd].pending_tid >= 0
             var err: [10]byte
@@ -1856,6 +1872,11 @@ calls plus packing.
         ipc_reply(sender, reply, 17)
 
 
+`inet_handle_frame_pool_stats` lives in `inet_proto.lsysl` next to
+the pool storage. Dispatch wires it from this file via a forward
+call.
+
+
 Test-only: synthesize three IPv4 fragments of a 32-byte UDP
 datagram bound for our IP at port 9100, inject them into
 `inet_handle_frame` in out-of-order sequence (frag 2, frag 3,
@@ -2297,12 +2318,14 @@ Called on every `ipc_recv_notify` wake where the result was -2
 each frame into `inet_handle_frame`.
 
     inet_drain_rx()
-        var frame: [1514]byte
+        val idx = inet_frame_alloc()
+        val frame = inet_frame_buf(idx)
         while true
             val n = inet_nic_recv_packet(frame, 1514)
             if n <= 0
                 break
             inet_handle_frame(frame, n)
+        inet_frame_release(idx)
 
 
 ### Link-layer init
@@ -2408,7 +2431,11 @@ silently skip link-layer setup and still serve UDP loopback.
         // 5 ticks ≈ 50 ms on a 100 Hz scheduler timer.
         svc_timer_subscribe(5)
 
-        var buf: [1500]byte
+        // Borrow a pool slot for the IPC receive buffer; held for
+        // the server's entire lifetime so subsequent allocs see
+        // baseline `used == 1`.
+        val main_idx = inet_frame_alloc()
+        val buf = inet_frame_buf(main_idx)
         while 1 == 1
             val r = ipc_recv_notify(inet_port, buf, INET_MSG_BUF)
             inet_tcp_scan_timers()
@@ -2467,6 +2494,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_ARP_REPLAY_TEST -> inet_handle_tcp_arp_replay_test(sender, buf)
                     INET_CMD_PID_EXIT_SELFTEST -> inet_handle_pid_exit_selftest(sender, buf)
                     INET_CMD_GET_STATS         -> inet_handle_get_stats(sender, buf)
+                    INET_CMD_FRAME_POOL_STATS  -> inet_handle_frame_pool_stats(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte
