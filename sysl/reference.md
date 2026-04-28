@@ -523,6 +523,28 @@ Note: `val` is also folded when the initializer happens to be constant, but unli
 it additionally allocates storage (and accepts non-const initializers). Prefer `const` when
 you want the guarantee and zero-storage behaviour.
 
+### `static_assert(cond [, "message"])`
+
+Module-scope compile-time check. The condition is evaluated by the same constant
+folder as `const` initializers (supports `sizeof`, comparisons, bitwise, shifts,
+arithmetic, and references to other `const` names) and must produce a `bool`. A
+true result emits no code; a false result is a compile error citing the optional
+message.
+
+```sysl
+struct EthHeader
+    dst: [6]byte
+    src: [6]byte
+    ethertype: u16
+
+static_assert(sizeof(EthHeader) == 14, "EthHeader must be 14 bytes")
+static_assert(MAX_FRAME >= 64 && MAX_FRAME <= 1518)
+```
+
+The canonical use is locking down on-the-wire and on-disk struct layouts so an
+accidental field reorder or padding shift fails the build instead of corrupting
+packets at runtime.
+
 ---
 
 ## Functions
@@ -1366,6 +1388,36 @@ Non-escaping closures are more efficient (no heap allocation) but the compiler t
 - **Escaping, OR any rc-bearing capture** (string, ref, struct-with-string, enum-with-string, …): the environment is heap-allocated with a `[rc:i64 @ -16 | deinit_ptr:i8* @ -8 | data]` header. Closure descriptor scope-exit decrements the env's refcount; at zero, a per-closure-id deinit walks the captures (decr'ing rc-bearing entries) and `free` reclaims the env block.
 
 The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention (LLVM passes it as the first hidden parameter `i8* %env`).
+
+### Inner `def` — Recursive Named Local Closures
+
+Inside a function body, `def name(params) -> ret body` declares a **recursively
+callable named local closure** with full capture support. The recursive call
+resolves to the local binding (not a global), and outer-scope variables are
+captured through the same pipeline as anonymous closures.
+
+```sysl
+outer(bonus: int) -> int
+    def sum_with_bonus(n: int) -> int
+        if n == 0 then return 0
+        n + bonus + sum_with_bonus(n - 1)
+    sum_with_bonus(3)
+```
+
+The body sees `bonus` (captured from `outer`) and `sum_with_bonus` itself
+(self-referential). Non-recursive inner defs (no self-call in the body) cost the
+same as an anonymous lambda; the self-cell is only allocated when needed.
+
+**Required signature.** Inner defs must declare the return type — self-references
+need the binding's type to resolve, and inference would require a two-pass
+analysis. Top-level functions still allow inferred return types.
+
+**Restrictions:** no type parameters, no return-type inference, no mutual
+recursion (`def f` then `def g` calling each other would need both names
+pre-bound before either body is analyzed). Contracts (`require`/`ensure`) parse
+but are currently ignored on inner defs.
+
+Implemented across all four backends (interpreter, LLVM, SVM, TRISC).
 
 ### Extern Declarations
 

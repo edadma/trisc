@@ -10,7 +10,7 @@ import SyslType.*
 //      level, so this produced misleading error messages like
 //      "cannot compare signed and unsigned: byte == u8" where both sides
 //      looked unsigned to the user.
-//   2. String indexing returned I8 (signed) — but sysl-reference documents
+//   2. String indexing returned I8 (signed) — but the sysl reference documents
 //      string as {ptr: *u8, len: i64}, so s[i] should be U8.
 //   3. fromPrefix("byte") returned I8 for symmetry with (1), but the
 //      source-level analyzer maps "byte" -> U8, so the two round-trip
