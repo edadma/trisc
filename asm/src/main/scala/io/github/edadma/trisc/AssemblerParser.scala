@@ -66,7 +66,16 @@ object AssemblerParser extends RegexParsers:
     | hexLit ^^ (s => LongExprAST(java.lang.Long.parseLong(s.drop(2), 16)))
     | floatLit ^^ (s => DoubleExprAST(s.toDouble))
     | charLit ^^ (n => LongExprAST(n))
-    | intLit ^^ (s => LongExprAST(s.toLong))
+    | intLit ^^ { s =>
+      // Parse as BigInt so the magnitude `9223372036854775808` can flow through
+      // (it appears under unary minus as `-9223372036854775808` = Long.MinValue;
+      // BigInt.toLong does the two's-complement wrap, so the value lands as
+      // Long.MinValue, and the surrounding unary `-` is a no-op on it).
+      val big = BigInt(s)
+      if big > BigInt(Long.MaxValue) + 1 then
+        sys.error(s"integer literal too large for i64: $s")
+      LongExprAST(big.toLong)
+    }
     | stringLit ^^ StringExprAST.apply
     | "." ~> ident ^^ (l => LocalExprAST(l, null))
     | ident ^^ ReferenceExprAST.apply
