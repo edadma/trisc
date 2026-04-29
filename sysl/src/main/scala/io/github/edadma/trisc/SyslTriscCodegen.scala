@@ -578,17 +578,29 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     *  fault on misaligned addresses, and an aggregate's natural alignment
     *  determines the worst-case alignment of its in-memory address. */
   private def emitAggregateCopy(srcReg: Int, addrReg: Int, size: Int, align: Int): Unit =
+    // The loop uses r3 and r4 as scratch (r4 = loaded value, r3 = dest addr).
+    // If srcReg is 3 or 4, the inner loop would clobber the source-base
+    // pointer between iterations (e.g. `addi r4, r4, i; ldw r4, r4, r0`
+    // computes from the previously-loaded VALUE instead of the source ADDR).
+    // Same for addrReg in {3, 4}. Copy any conflicting reg to r2 / r1 first.
+    val srcBase = if srcReg == 3 || srcReg == 4 then 2 else srcReg
+    if srcBase != srcReg then emit(s"  mov r$srcBase, r$srcReg")
+    val destBase =
+      if addrReg == 3 || addrReg == 4 then
+        if srcBase == 1 then 2 else 1
+      else addrReg
+    if destBase != addrReg then emit(s"  mov r$destBase, r$addrReg")
     if align >= 8 then
       for i <- 0 until size by 8 do
-        emitAddImm(4, srcReg, i)
+        emitAddImm(4, srcBase, i)
         emit("  ldd r4, r4, r0")
-        emitAddImm(3, addrReg, i)
+        emitAddImm(3, destBase, i)
         emit("  std r4, r3, r0")
     else
       for i <- 0 until size by 4 do
-        emitAddImm(4, srcReg, i)
+        emitAddImm(4, srcBase, i)
         emit("  ldw r4, r4, r0")
-        emitAddImm(3, addrReg, i)
+        emitAddImm(3, destBase, i)
         emit("  stw r4, r3, r0")
 
   private def emitStore(srcReg: Int, addrReg: Int, typ: SyslType): Unit =
