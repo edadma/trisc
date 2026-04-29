@@ -5049,10 +5049,26 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         val elemSize = stackSize(elemType)
         needsAllocExtern = true
 
-        // Pre-allocate 24-byte result slot
-        emitAddImm(7, 7, -24)
-        stackOffset -= 24
+        // Aggregate elem types (struct, array, string, slice, enum, func, iface)
+        // need extra care: their `genExpr` typically allocates a stack temp and
+        // returns r1 = address of that temp. The subsequent `popd r1; popd r2;
+        // popd r3; popd r4` would read INTO that temp instead of the slice
+        // components above it. Worse, the no-grow path then `pshd`'s into the
+        // temp's space. To make the rest of the codegen address-stable, we
+        // copy aggregate elem bytes into a dedicated frame scratch slot and
+        // reclaim the stack temp before the popd shuffle.
+        val isAggregateElem = elemType.underlying match
+          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType
+             | _: SyslType.SliceType | _: SyslType.EnumType
+             | _: SyslType.FuncType | _: SyslType.InterfaceType => true
+          case _ => false
+        val elemScratchSize = if isAggregateElem then (elemSize + 7) & ~7 else 0
+
+        // Pre-allocate 24-byte result slot + optional elem scratch.
+        emitAddImm(7, 7, -(24 + elemScratchSize))
+        stackOffset -= (24 + elemScratchSize)
         val resultOffset = stackOffset
+        val elemScratchOffset = resultOffset + 24
 
         // Evaluate slice → push ptr, len, cap, backref onto stack
         genExpr(sliceExpr)
@@ -5070,9 +5086,20 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  pshd r2")              // [ptr] [len] [cap] [backref]
         stackOffset -= 24
 
-        // Evaluate elem, push
+        // Evaluate elem. For aggregate types this may push a stack temp; we
+        // copy the bytes into the frame scratch slot and reclaim the temp
+        // so the subsequent popd's see an undisturbed [ptr][len][cap] stack.
+        val preElem = stackOffset
         genExpr(elemExpr)
-        emit("  pshd r1")              // [elem] [ptr] [len] [cap]
+        val elemTempBytes = preElem - stackOffset
+        if isAggregateElem then
+          emit("  mov r2, r1")                 // r2 = source addr (stack temp or stable)
+          emitAddImm(1, 5, elemScratchOffset)  // r1 = frame scratch addr
+          emitAggregateCopy(2, 1, elemSize, stackAlign(elemType))
+          if elemTempBytes > 0 then
+            emitAddImm(7, 7, elemTempBytes)
+            stackOffset += elemTempBytes
+        emit("  pshd r1")              // [elem] [ptr] [len] [cap] [backref]
         stackOffset -= 8
 
         // Load all into regs: r1=elem, r2=ptr, r3=len, r4=cap
@@ -5102,7 +5129,12 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emit("  ldd r2, r2, r0")     // r2 = ptr (reloaded)
         emit("  add r1, r2, r1")       // r1 = dest addr
         emit("  popd r2")              // r2 = elem
+        // For aggregate elem types, emitStore → emitAggregateCopy clobbers r3
+        // and r4. Save/restore r3 (len) so the new_len computation below sees
+        // the right value. (cap is reloaded fresh from the stack, so r4 is OK.)
+        if isAggregateElem then emit("  pshd r3")
         emitStore(2, 1, elemType)      // store elem at dest
+        if isAggregateElem then emit("  popd r3")
         emit("  popd r2")              // r2 = ptr
         emit("  popd r4")              // r4 = cap
         emit("  addi r3, r3, 1")       // new_len = len + 1
