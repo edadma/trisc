@@ -836,19 +836,19 @@ object SyslCli:
     val ram: Addressable =
       if watchRanges.nonEmpty then
         new RAM(0, ramSize) {
-          private def maybeReport(addr: Long, width: String): Unit =
+          private def maybeReport(addr: Long, data: Long, width: String): Unit =
             if watchRanges.exists((lo, hi) => addr >= lo && addr < hi) then
               watchCpu.foreach { c =>
-                System.err.println(f"[WATCH] $width to 0x$addr%x at PC=0x${c.pc.toHexString}")
+                System.err.println(f"[WATCH] $width 0x$data%x to 0x$addr%x at PC=0x${c.pc.toHexString}")
               }
           override def writeByte(addr: Long, data: Long): Unit =
-            maybeReport(addr, "stb"); super.writeByte(addr, data)
+            maybeReport(addr, data, "stb"); super.writeByte(addr, data)
           override def writeShort(addr: Long, data: Long): Unit =
-            maybeReport(addr, "sts"); super.writeShort(addr, data)
+            maybeReport(addr, data, "sts"); super.writeShort(addr, data)
           override def writeInt(addr: Long, data: Long): Unit =
-            maybeReport(addr, "stw"); super.writeInt(addr, data)
+            maybeReport(addr, data, "stw"); super.writeInt(addr, data)
           override def writeLong(addr: Long, data: Long): Unit =
-            maybeReport(addr, "std"); super.writeLong(addr, data)
+            maybeReport(addr, data, "std"); super.writeLong(addr, data)
         }
       else new RAM(0, ramSize)
     val mem = new Memory("Memory", ram, stdout)

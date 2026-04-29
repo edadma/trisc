@@ -347,6 +347,13 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
       catch
         case _: RuntimeException =>
           log.warn(f"InstructionAccess fault at pc=$pc%04x", category = "CPU")
+          if !quiet then
+            System.err.println(f"[TRISC] InstructionAccess fault at pc=$pc%08x (bad fetch)")
+            System.err.println(f"  r1=${r(1).read}%x r2=${r(2).read}%x r3=${r(3).read}%x r4=${r(4).read}%x r5=${r(5).read}%x r6=${r(6).read}%x r7=${r(7).read}%x")
+            System.err.println("  last PCs:")
+            for i <- 0 until _pcRing.length do
+              val idx = (_pcPos - _pcRing.length + i + _pcRing.length * 2) % _pcRing.length
+              System.err.println(f"    ${_pcRing(idx)}%08x")
           state = State.InstructionAccess
           return
 
