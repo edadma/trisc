@@ -1,0 +1,157 @@
+test_tcp_info — getsockopt(IPPROTO_TCP, TCP_INFO)
+==================================================
+
+Verifies the new TCP_INFO getsockopt returns a Linux-shaped
+struct tcp_info (104 bytes, host-endian) populated from the
+inet TCP slot fields. Uses the in-guest loopback fastpath to
+get a real ESTABLISHED connection without depending on the
+host: listen on 9102, connect to 127.0.0.1:9102, then probe
+TCP_INFO on the client fd.
+
+Pass criteria:
+  - call returns 0 with len reported as 104
+  - tcpi_state @ 0  == 1   (TCP_ESTABLISHED, mapped from local
+    TCP_STATE_ESTABLISHED = 2)
+  - tcpi_snd_mss @ 16 reads as a small-but-nonzero number
+    (default 536 today, written little-endian)
+
+Output: `tcpinfo: ok` / `tcpinfo: bad <code>`.
+
+    module oskit.bin.test_tcp_info
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_GETSOCKOPT = 204
+    val NR_BIND       = 135
+    val NR_LISTEN     = 217
+    val NR_ACCEPT     = 131
+    val NR_CONNECT    = 148
+    val NR_CLOSE      = 147
+    val NR_SOCKET     = 337
+
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, addrlen: *int) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_getsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, lenp: *i32) -> int
+        int(syscall6(NR_GETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(lenp), 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    fail_with(code: int)
+        puts("tcpinfo: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        // Set up a loopback listener.
+        val ls = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if ls < 0
+            fail_with(1)
+            return
+        var bind_addr: [16]byte
+        fill_sockaddr(&bind_addr[0], 9102, 0, 0, 0, 0)
+        if posix_bind(ls, &bind_addr[0], 16) != 0
+            fail_with(2)
+            return
+        if posix_listen(ls, 4) != 0
+            fail_with(3)
+            return
+
+        val cl = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if cl < 0
+            fail_with(4)
+            return
+        var conn_addr: [16]byte
+        fill_sockaddr(&conn_addr[0], 9102, 127, 0, 0, 1)
+        if posix_connect(cl, &conn_addr[0], 16) != 0
+            fail_with(5)
+            return
+        var peer: [16]byte
+        var peer_len = 16
+        val ch = posix_accept(ls, &peer[0], &peer_len)
+        if ch < 0
+            fail_with(6)
+            return
+
+        // Probe TCP_INFO on the client side. cap = 104 = full
+        // struct so the call should report len == 104 too.
+        var info: [104]byte
+        var i = 0
+        while i < 104
+            info[i] = byte(0xff)
+            i += 1
+        var ilen: i32 = i32(104)
+        val rc = posix_getsockopt(cl, 6, 11, &info[0], &ilen)
+        if rc != 0
+            fail_with(7)
+            return
+        if int(ilen) != 104
+            fail_with(8)
+            return
+        // tcpi_state at offset 0 — TCP_ESTABLISHED (Linux value 1).
+        if (int(info[0]) & 0xff) != 1
+            fail_with(9)
+            return
+        // tcpi_snd_mss at offset 16 (4-byte LE u32) must be nonzero.
+        val mss = ((int(info[16]) & 0xff) | ((int(info[17]) & 0xff) << 8) | ((int(info[18]) & 0xff) << 16) | ((int(info[19]) & 0xff) << 24))
+        if mss <= 0
+            fail_with(10)
+            return
+        // Sanity-cap to avoid catching a wild value on regression.
+        if mss > 9000
+            fail_with(11)
+            return
+
+        posix_close(ch)
+        posix_close(cl)
+        posix_close(ls)
+        puts("tcpinfo: ok mss=")
+        print_udec(mss)
+        puts("\n")
+        exit()

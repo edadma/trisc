@@ -81,64 +81,6 @@ class NewFloatTests extends TestHelpers {
     cpu.r(3).read shouldBe 0
   }
 
-  // ===== FPOW (float power, destructive: ra = pow(ra, rb)) =====
-
-  "fpow square 2.0 ^ 2.0 = 4.0" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + loadDouble("r2", "b") + "fpow r1, r2\n",
-      "a dd 2.0\nb dd 2.0\n"))
-    cpu.r(1).readf shouldBe 4.0
-  }
-
-  "fpow cube 3.0 ^ 3.0 = 27.0" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + loadDouble("r2", "b") + "fpow r1, r2\n",
-      "a dd 3.0\nb dd 3.0\n"))
-    cpu.r(1).readf shouldBe 27.0
-  }
-
-  "fpow to the 0 yields 1.0" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + "fpow r1, r0\n",
-      "a dd 99.0\n"))
-    cpu.r(1).readf shouldBe 1.0
-  }
-
-  "fpow to the 1 yields identity" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + loadDouble("r2", "b") + "fpow r1, r2\n",
-      "a dd 7.5\nb dd 1.0\n"))
-    cpu.r(1).readf shouldBe 7.5
-  }
-
-  "fpow fractional exponent 4.0 ^ 0.5 = 2.0" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + loadDouble("r2", "b") + "fpow r1, r2\n",
-      "a dd 4.0\nb dd 0.5\n"))
-    cpu.r(1).readf shouldBe 2.0
-  }
-
-  "fpow 8.0 ^ (1/3) = 2.0" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + loadDouble("r2", "b") + "fpow r1, r2\n",
-      "a dd 8.0\nb dd 0.3333333333333333\n"))
-    cpu.r(1).readf shouldBe (2.0 +- 1e-10)
-  }
-
-  "fpow negative base with integer exponent (-2.0) ^ 3.0 = -8.0" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + loadDouble("r2", "b") + "fpow r1, r2\n",
-      "a dd -2.0\nb dd 3.0\n"))
-    cpu.r(1).readf shouldBe -8.0
-  }
-
-  "fpow negative base with even exponent (-3.0) ^ 2.0 = 9.0" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + loadDouble("r2", "b") + "fpow r1, r2\n",
-      "a dd -3.0\nb dd 2.0\n"))
-    cpu.r(1).readf shouldBe 9.0
-  }
-
   // ===== CVT (int to float) =====
 
   "cvt 0 to 0.0" in {
@@ -347,13 +289,6 @@ class NewFloatTests extends TestHelpers {
       "ldi r1, 3\ncvt r1, r1\n" + loadDouble("r2", "a") + "fadd r3, r1, r2\n",
       "a dd 1.5\n"))
     cpu.r(3).readf shouldBe 4.5
-  }
-
-  "fsqrt then fpow: sqrt(16) ^ 3 = 64" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + "fsqrt r2, r1\n" + loadDouble("r3", "b") + "fpow r2, r3\n",
-      "a dd 16.0\nb dd 3.0\n"))
-    cpu.r(2).readf shouldBe 64.0
   }
 
   "fabs then fint: abs(-7.9) truncated = 7" in {

@@ -1,0 +1,177 @@
+test_tcp_lpbk — in-guest 127.0.0.1 client + listener round trip
+====================================================================
+
+Drives the loopback fastpath added to `inet_tcp_emit` /
+`inet_tcp_emit_rst`. Both endpoints live in this single guest:
+
+  1. listen socket on 127.0.0.1:9100 (INADDR_ANY actually — matches
+     anything, including 127.0.0.1).
+  2. client socket connect()s to 127.0.0.1:9100. With the loopback
+     fastpath, the SYN re-enters `inet_tcp_handle_segment`
+     synchronously, drives the entire 3-way handshake during the
+     connect IPC, and returns 0 to the caller.
+  3. accept() on the listen socket finds the already-enqueued child
+     and returns immediately.
+  4. write "loop" from client, read 4 bytes on child, write "back"
+     from child, read 4 bytes on client.
+  5. close everything.
+
+If anything goes wrong, prints `lpbk:bad <code>` and exits
+non-zero. Success prints `lpbk:ok`.
+
+    module oskit.bin.test_tcp_lpbk
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_WRITE   = 128
+    val NR_READ    = 130
+    val NR_ACCEPT  = 131
+    val NR_BIND    = 135
+    val NR_CLOSE   = 147
+    val NR_CONNECT = 148
+    val NR_LISTEN  = 217
+    val NR_SOCKET  = 337
+
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var buf: [1]byte
+        buf[0] = byte('0' + (v % 10))
+        puts(string(&buf[0], 1))
+
+
+Populate a 16-byte sockaddr_in. Port is host-order; we write it
+big-endian into the buffer.
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, addrlen: *int) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_read(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    fail_with(code: int)
+        puts("lpbk:bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val ls = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if ls < 0
+            fail_with(1)
+            return
+
+        var bind_addr: [16]byte
+        fill_sockaddr(&bind_addr[0], 9100, 0, 0, 0, 0)
+        if posix_bind(ls, &bind_addr[0], 16) != 0
+            fail_with(2)
+            return
+        if posix_listen(ls, 4) != 0
+            fail_with(3)
+            return
+
+        val cl = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if cl < 0
+            fail_with(4)
+            return
+
+        var conn_addr: [16]byte
+        fill_sockaddr(&conn_addr[0], 9100, 127, 0, 0, 1)
+        if posix_connect(cl, &conn_addr[0], 16) != 0
+            fail_with(5)
+            return
+
+        var peer: [16]byte
+        var peer_len = 16
+        val ch = posix_accept(ls, &peer[0], &peer_len)
+        if ch < 0
+            fail_with(6)
+            return
+
+        var msg1: [4]byte
+        msg1[0] = byte('l')
+        msg1[1] = byte('o')
+        msg1[2] = byte('o')
+        msg1[3] = byte('p')
+        if posix_write(cl, &msg1[0], 4) != 4
+            fail_with(7)
+            return
+
+        var rbuf1: [4]byte
+        var got1 = 0
+        while got1 < 4
+            val r = posix_read(ch, &rbuf1[got1], 4 - got1)
+            if r <= 0
+                fail_with(8)
+                return
+            got1 += r
+        if rbuf1[0] != byte('l') || rbuf1[3] != byte('p')
+            fail_with(9)
+            return
+
+        var msg2: [4]byte
+        msg2[0] = byte('b')
+        msg2[1] = byte('a')
+        msg2[2] = byte('c')
+        msg2[3] = byte('k')
+        if posix_write(ch, &msg2[0], 4) != 4
+            fail_with(10)
+            return
+
+        var rbuf2: [4]byte
+        var got2 = 0
+        while got2 < 4
+            val r = posix_read(cl, &rbuf2[got2], 4 - got2)
+            if r <= 0
+                fail_with(11)
+                return
+            got2 += r
+        if rbuf2[0] != byte('b') || rbuf2[3] != byte('k')
+            fail_with(12)
+            return
+
+        posix_close(ch)
+        posix_close(cl)
+        posix_close(ls)
+        puts("lpbk:ok\n")
+        exit()

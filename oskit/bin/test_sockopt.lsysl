@@ -41,12 +41,16 @@ Final marker: `sockopt: done`.
 
     val SOL_SOCKET    = 1
     val SO_REUSEADDR  = 2
+    val SO_ERROR      = 4
     val SO_BROADCAST  = 6
     val SO_SNDBUF     = 7
     val SO_RCVBUF     = 8
     val SO_LINGER     = 13
     val IPPROTO_TCP   = 6
     val TCP_NODELAY   = 1
+    val TCP_KEEPIDLE  = 4
+    val TCP_KEEPINTVL = 5
+    val TCP_KEEPCNT   = 6
 
 
 Decimal printer for small signed ints (handles the negative
@@ -344,6 +348,140 @@ Raw POSIX syscall wrappers.
         if on_lo != 1 || secs_lo != 0
             puts("sockopt: FAIL SO_LINGER round-trip values\n")
             exit_with(20)
+            return
+
+        // TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT round-trip.
+        // Pre-connect TCP fd: persists on the shim only; getsockopt
+        // reads back the exact seconds the user set.
+        var ki: [4]byte
+        ki[0] = byte(60)       // 60 seconds LE
+        ki[1] = byte(0)
+        ki[2] = byte(0)
+        ki[3] = byte(0)
+        val r15 = posix_setsockopt(tfd, IPPROTO_TCP, TCP_KEEPIDLE, &ki[0], 4)
+        puts("sockopt: set TCP_KEEPIDLE = ")
+        print_sdec(r15)
+        puts("\n")
+        if r15 != 0
+            puts("sockopt: FAIL set TCP_KEEPIDLE\n")
+            exit_with(21)
+            return
+
+        var ki_out: [4]byte
+        ki_out[0] = byte(0xff)
+        ki_out[1] = byte(0xff)
+        ki_out[2] = byte(0xff)
+        ki_out[3] = byte(0xff)
+        var ki_olen: i32 = i32(4)
+        val r16 = posix_getsockopt(tfd, IPPROTO_TCP, TCP_KEEPIDLE,
+                                   &ki_out[0], &ki_olen)
+        val ki_b0 = int(ki_out[0]) & 0xff
+        val ki_b1 = int(ki_out[1]) & 0xff
+        val ki_val = ki_b0 | (ki_b1 << 8)
+        puts("sockopt: get TCP_KEEPIDLE = ")
+        print_sdec(r16)
+        puts(" val=")
+        print_sdec(ki_val)
+        puts("\n")
+        if r16 != 0 || ki_val != 60
+            puts("sockopt: FAIL get TCP_KEEPIDLE\n")
+            exit_with(22)
+            return
+
+        var kv: [4]byte
+        kv[0] = byte(15)
+        kv[1] = byte(0)
+        kv[2] = byte(0)
+        kv[3] = byte(0)
+        val r17 = posix_setsockopt(tfd, IPPROTO_TCP, TCP_KEEPINTVL, &kv[0], 4)
+        puts("sockopt: set TCP_KEEPINTVL = ")
+        print_sdec(r17)
+        puts("\n")
+        if r17 != 0
+            puts("sockopt: FAIL set TCP_KEEPINTVL\n")
+            exit_with(23)
+            return
+
+        var kv_out: [4]byte
+        kv_out[0] = byte(0xff)
+        kv_out[1] = byte(0xff)
+        kv_out[2] = byte(0xff)
+        kv_out[3] = byte(0xff)
+        var kv_olen: i32 = i32(4)
+        val r18 = posix_getsockopt(tfd, IPPROTO_TCP, TCP_KEEPINTVL,
+                                   &kv_out[0], &kv_olen)
+        val kv_b0 = int(kv_out[0]) & 0xff
+        val kv_b1 = int(kv_out[1]) & 0xff
+        val kv_val = kv_b0 | (kv_b1 << 8)
+        puts("sockopt: get TCP_KEEPINTVL = ")
+        print_sdec(r18)
+        puts(" val=")
+        print_sdec(kv_val)
+        puts("\n")
+        if r18 != 0 || kv_val != 15
+            puts("sockopt: FAIL get TCP_KEEPINTVL\n")
+            exit_with(24)
+            return
+
+        var kc: [4]byte
+        kc[0] = byte(7)
+        kc[1] = byte(0)
+        kc[2] = byte(0)
+        kc[3] = byte(0)
+        val r19 = posix_setsockopt(tfd, IPPROTO_TCP, TCP_KEEPCNT, &kc[0], 4)
+        puts("sockopt: set TCP_KEEPCNT = ")
+        print_sdec(r19)
+        puts("\n")
+        if r19 != 0
+            puts("sockopt: FAIL set TCP_KEEPCNT\n")
+            exit_with(25)
+            return
+
+        var kc_out: [4]byte
+        kc_out[0] = byte(0xff)
+        kc_out[1] = byte(0xff)
+        kc_out[2] = byte(0xff)
+        kc_out[3] = byte(0xff)
+        var kc_olen: i32 = i32(4)
+        val r20 = posix_getsockopt(tfd, IPPROTO_TCP, TCP_KEEPCNT,
+                                   &kc_out[0], &kc_olen)
+        val kc_val = int(kc_out[0]) & 0xff
+        puts("sockopt: get TCP_KEEPCNT = ")
+        print_sdec(r20)
+        puts(" val=")
+        print_sdec(kc_val)
+        puts("\n")
+        if r20 != 0 || kc_val != 7
+            puts("sockopt: FAIL get TCP_KEEPCNT\n")
+            exit_with(26)
+            return
+
+        // SO_ERROR — fresh TCP fd reads back 0 (clean state). The
+        // read-and-clear behaviour is exercised by test_icmperr (the
+        // ICMP-error pickup path sets last_error before recvfrom
+        // returns -ECONNREFUSED, so a follow-up SO_ERROR returns 111
+        // once and 0 thereafter).
+        var er_out: [4]byte
+        er_out[0] = byte(0xff)
+        er_out[1] = byte(0xff)
+        er_out[2] = byte(0xff)
+        er_out[3] = byte(0xff)
+        var er_olen: i32 = i32(4)
+        val r21 = posix_getsockopt(tfd, SOL_SOCKET, SO_ERROR,
+                                   &er_out[0], &er_olen)
+        val er_b0 = int(er_out[0]) & 0xff
+        val er_b1 = int(er_out[1]) & 0xff
+        val er_b2 = int(er_out[2]) & 0xff
+        val er_b3 = int(er_out[3]) & 0xff
+        val er_val = er_b0 | (er_b1 << 8) | (er_b2 << 16) | (er_b3 << 24)
+        puts("sockopt: get SO_ERROR fresh = ")
+        print_sdec(r21)
+        puts(" val=")
+        print_sdec(er_val)
+        puts("\n")
+        if r21 != 0 || er_val != 0
+            puts("sockopt: FAIL get SO_ERROR fresh\n")
+            exit_with(27)
             return
 
         posix_close(tfd)

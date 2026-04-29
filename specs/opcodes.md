@@ -16,8 +16,8 @@ Complete opcode listing for all native instructions. Pseudo-instructions are doc
 | 0111 | std | mem[rb + rc] = ra (double) |
 | 1000 | add | rd = ra + rb (sets carry) |
 | 1001 | sub | rd = ra - rb (sets carry/borrow) |
-| 1010 | mul | rd = ra * rb (low), rd+1 = high |
-| 1011 | div | rd = ra / rb (signed), rd+1 = ra % rb |
+| 1010 | mul | rd = ra * rb (low 64 bits; signed/unsigned identical) |
+| 1011 | div | rd = ra / rb (signed) |
 | 1100 | cas | compare-and-swap: old = mem[ra]; if old == rd then mem[ra] = rb; rd = old |
 | 1101 | and | rd = ra & rb |
 | 1110 | or | rd = ra \| rb |
@@ -34,9 +34,9 @@ Complete opcode listing for all native instructions. Pseudo-instructions are doc
 | 0100 | sltu | rd = (ra < rb) ? 1 : 0 (unsigned) |
 | 0101 | adc | rd = ra + rb + carry (sets carry) |
 | 0110 | sbc | rd = ra - rb - borrow (sets carry) |
-| 0111 | mulu | rd = ra * rb (unsigned, low), rd+1 = high |
-| 1000 | divu | rd = ra / rb (unsigned), rd+1 = ra % rb |
-| 1001 | — | (reserved) |
+| 0111 | _reserved_ | |
+| 1000 | divu | rd = ra / rb (unsigned) |
+| 1001 | _reserved_ | |
 | 1010 | fslt | rd = (fa < fb) ? 1 : 0 (float compare) |
 | 1011 | fadd | fd = fa + fb |
 | 1100 | fsub | fd = fa - fb |
@@ -69,7 +69,7 @@ Complete opcode listing for all native instructions. Pseudo-instructions are doc
 | 01000 | not | ra = ~rb |
 | 01001 | cvt | ra = int_to_float(rb) or float_to_int(rb) |
 | 01010 | fneg | fa = -fb |
-| 01011 | finv | fa = 1.0 / fb |
+| 01011 | _reserved_ | |
 | 01100 | fint | fa = trunc(fb) |
 | 01101 | fsqrt | fa = sqrt(fb) |
 | 01110 | fabs | fa = abs(fb) |
@@ -95,16 +95,16 @@ Complete opcode listing for all native instructions. Pseudo-instructions are doc
 
 | Opcode | Mnemonic | Operation |
 |--------|----------|-----------|
-| 00000 | fpow | ra = pow(ra, rb) (destructive) |
-| 01001 | fsin | fa = sin(fb) |
-| 01010 | fcos | fa = cos(fb) |
-| 01011 | ftan | fa = tan(fb) |
-| 01100 | fasin | fa = asin(fb) |
-| 01101 | facos | fa = acos(fb) |
-| 01110 | fatan | fa = atan(fb) |
-| 01111 | fatan2 | fa = atan2(fa, fb) (destructive) |
-| 10000 | fexp | fa = exp(fb) |
-| 10001 | flog | fa = ln(fb) |
+| 00000 | mulh | ra = high64(ra * rb) (signed × signed; destructive) |
+| 01001 | mulhu | ra = high64(ra * rb) (unsigned × unsigned; destructive) |
+| 01010 | mulhsu | ra = high64(ra_signed * rb_unsigned) (destructive) |
+| 01011 | rem | ra = ra %s rb (signed remainder; destructive) |
+| 01100 | remu | ra = ra %u rb (unsigned remainder; destructive) |
+| 01101 | _reserved_ | |
+| 01110 | _reserved_ | |
+| 01111 | _reserved_ | |
+| 10000 | _reserved_ | |
+| 10001 | _reserved_ | |
 | 00001 | tlbi | invalidate TLB entry for virtual address rb (supervisor) |
 | 00010 | tlbia | invalidate all TLB entries (supervisor) |
 | 00011 | sptbr | set page table base register to rb (supervisor) |

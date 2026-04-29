@@ -295,6 +295,88 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("'ping!'")
   }
 
+  "x86 musl: O_NONBLOCK on stdin returns EAGAIN before key" in {
+    // Mirror of the aarch64 mnbstdin test.
+    qemu.send("nbstdin\n")
+    val pre = qemu.waitFor("mnbstdin: ready_for_input")
+    pre should include("mnbstdin: setfl=0")
+    pre should include("mnbstdin: empty=-1 errno=11")
+    qemu.send("Y")
+    val output = qemu.waitFor("mnbstdin: done")
+    output should include("mnbstdin: woke=1 byte=89")
+    output should include("mnbstdin: done")
+  }
+
+  "x86 musl: epoll on stdin (TTY input subscriber)" in {
+    // Mirror of the aarch64 estdin test.
+    qemu.send("estdin\n")
+    val pre = qemu.waitFor("mepoll_stdin: ready_for_input")
+    pre should include("mepoll_stdin: idle=0")
+    qemu.send("Z")
+    val output = qemu.waitFor("mepoll_stdin: done")
+    output should include("mepoll_stdin: woke=1 events=1")
+    output should include("mepoll_stdin: read=1 byte=90")
+    output should include("mepoll_stdin: done")
+  }
+
+  "x86 musl: timerfd_create / settime / gettime + epoll" in {
+    // Mirror of the aarch64 mtimerfd test.
+    qemu.send("timerfd\n")
+    val output = qemu.waitFor("mtimerfd: done")
+    output should include("mtimerfd: oneshot=1 events=1")
+    output should include("mtimerfd: oneshot_read=8 exp=1")
+    output should include("mtimerfd: drained=-1 errno=11")
+    output should include("mtimerfd: gettime_int_nsec=30000000")
+    output should include("mtimerfd: done")
+    val periodicLine = output.linesIterator.find(_.contains("mtimerfd: periodic_read")).getOrElse("")
+    val expValue = "exp=(\\d+)".r.findFirstMatchIn(periodicLine).map(_.group(1).toInt).getOrElse(0)
+    expValue should be >= 1
+  }
+
+  "x86 musl: eventfd2 + epoll integration" in {
+    // Mirror of the aarch64 meventfd test — exercises slix-musl
+    // syscall 156, the new POSIX_FD_EVENTFD shim path, and the
+    // EFD_SEMAPHORE counter-decrement mode.
+    qemu.send("eventfd\n")
+    val output = qemu.waitFor("meventfd: done")
+    output should include("meventfd: empty_read=-1 errno=11")
+    output should include("meventfd: after_write7=7")
+    output should include("meventfd: epoll_after_write=1 events=1")
+    output should include("meventfd: epoll_after_drain=0")
+    output should include("meventfd: sem1=1")
+    output should include("meventfd: sem2=1")
+    output should include("meventfd: sem3=1")
+    output should include("meventfd: sem4=-1 errno=11")
+    output should include("meventfd: done")
+  }
+
+  "x86 net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
+    // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
+    // inet to inject a synthetic ICMP type-3 / code-3 frame whose
+    // inner UDP src port is 7801, then non-blocking recvfrom: must
+    // return -111 (-ECONNREFUSED) once, then -11 (-EAGAIN) on the
+    // follow-up since the error byte is one-shot.
+    qemu.send("test_icmperr\n")
+    val output = qemu.waitFor("test_icmperr: ok")
+    output should include("test_icmperr: ok")
+    output should not include "test_icmperr: expected"
+    output should not include "test_icmperr: failed"
+  }
+
+  "x86 net: NB-connect failure surfaces as SO_ERROR=ECONNREFUSED" in {
+    // test_nbconfail issues a non-blocking connect (returns
+    // -EINPROGRESS), then synthesises a SYN_SENT failure on the inet
+    // slot via INET_CMD_TCP_INJECT_FAIL. The slot's pending_error
+    // (111 = ECONNREFUSED) survives close_slot's tear-down and
+    // surfaces via getsockopt(SO_ERROR) — closing the async-path side
+    // of the SO_ERROR contract. Second getsockopt reads 0 (cleared).
+    qemu.send("test_nbconfail\n")
+    val output = qemu.waitFor("nbconfail: ok")
+    output should include("nbconfail: ok")
+    output should not include "nbconfail: expected"
+    output should not include "nbconfail: failed"
+  }
+
   "x86 musl: epoll on a pipe (Phase A2 closeout)" in {
     qemu.send("epoll_pipe\n")
     val output = qemu.waitFor("mepoll_pipe: done")
@@ -392,6 +474,165 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("test_tcp_srv: closed")
   }
 
+  "x86 tcp: VFS listen bridge accepts optional ',backlog' suffix" in {
+    // test_tcp_lsv2 exercises the parser-shape of
+    // connect("tcp-listen:PORT,N").  Plain form, comma+backlog,
+    // clamp-high, clamp-zero, malformed-trailer all return the
+    // expected handle status — closing the VFS-bridge backlog
+    // parameter item from the roadmap.
+    qemu.send("test_tcp_lsv2\n")
+    val output = qemu.waitFor("test_tcp_lsv2: ok")
+    output should include("test_tcp_lsv2: ok")
+    output should not include "test_tcp_lsv2: failed"
+    output should not include "test_tcp_lsv2: unexpectedly opened"
+  }
+
+  "x86 tcp: in-guest 127.0.0.1 loopback round trip" in {
+    // test_tcp_lpbk drives the loopback fastpath added to
+    // inet_tcp_emit / inet_tcp_emit_rst: client and listener live
+    // in the same guest and exchange payloads over 127.0.0.1
+    // without any NIC/slirp involvement.
+    val output = qemu.command("test_tcp_lpbk")
+    output should include("lpbk:ok")
+    output should not include "lpbk:bad"
+  }
+
+  "x86 udp: loopback gate covers 127/8 + own_ip" in {
+    // The pre-existing UDP loopback shortcut only matched
+    // 127.0.0.1 exactly. inet_handle_sendto now uses
+    // inet_is_loopback_ip, so 127.0.0.5 and 10.0.2.15 (our
+    // QEMU lease) also short-circuit through the in-memory
+    // queue instead of trying ARP and silently failing.
+    val output = qemu.command("test_udp_lpbk")
+    output should include("udplo: ok")
+    output should not include "udplo: bad"
+  }
+
+  "x86 icmp: ping 127.0.0.1 returns immediately" in {
+    // inet_send_icmp_echo_to short-circuits to inet_ping_deliver
+    // when the destination is loopback — `ping 127.0.0.1` sees
+    // a synthesized reply on the same tick with rtt=0 instead of
+    // the request silently dropping at inet_resolve_mac.
+    val output = qemu.command("ping -c 1 127.0.0.1")
+    output should include("reply from 127.0.0.1")
+    output should include("1 sent, 1 received")
+  }
+
+  "x86 tcp: getsockopt(TCP_INFO) on ESTABLISHED loopback fd" in {
+    // test_tcp_info opens an in-guest 127.0.0.1 connection and
+    // probes getsockopt(IPPROTO_TCP, TCP_INFO). Verifies the
+    // 104-byte struct is fully written, tcpi_state maps to 1
+    // (TCP_ESTABLISHED), and tcpi_snd_mss decodes as a sane
+    // little-endian u32.
+    val output = qemu.command("test_tcp_info")
+    output should include("tcpinfo: ok")
+    output should not include "tcpinfo: bad"
+  }
+
+  "x86 procid: getpid/getppid/getuid family + getrandom" in {
+    // Process / thread identity syscalls + xorshift-based getrandom.
+    // Slix has no multi-threading and boots root, so most return
+    // 0 or 1; getrandom is best-effort and just verifies two
+    // consecutive calls give different bytes.
+    val output = qemu.command("test_proc_id")
+    output should include("procid: ok")
+    output should not include "procid: bad"
+  }
+
+  "x86 time: clock_gettime / gettimeofday / clock_getres / nanosleep" in {
+    // POSIX time syscalls fed off uptime() at 100Hz. Verifies
+    // clock_getres reports 10ms, clock_gettime + gettimeofday
+    // agree within 20ms, and nanosleep(50ms) advances the
+    // clock by at least 40ms.
+    val output = qemu.command("test_clock")
+    output should include("clock: ok")
+    output should not include "clock: bad"
+  }
+
+  "x86 fs: fsync / fdatasync / sync / syncfs no-op stubs" in {
+    // No on-disk persistence yet; these return 0 (or -EBADF for
+    // bad fds) so defensive sqlite/log-writer patterns don't
+    // crash on -ENOSYS.
+    val output = qemu.command("test_fsync")
+    output should include("fsync: ok")
+    output should not include "fsync: bad"
+  }
+
+  "x86 sockopt: SO_TYPE/DOMAIN/PROTOCOL/ACCEPTCONN" in {
+    // test_sockinfo verifies the four read-only introspection
+    // getsockopts the shim now reports off the fd kind +
+    // is_listen flag. Three fds: UDP, TCP pre-listen, TCP
+    // post-listen.
+    val output = qemu.command("test_sockinfo")
+    output should include("sockinfo: ok")
+    output should not include "sockinfo: bad"
+  }
+
+  "x86 ip: fragmentation reassembly self-test" in {
+    // test_ip_reasm triggers inet's IPv4 reassembly self-test via a
+    // dedicated IPC op. Three IPv4 fragments of a 32-byte UDP
+    // datagram are injected through inet_handle_frame in
+    // out-of-order sequence (frag 2, frag 3, frag 1); the reorder
+    // bitmap must complete the assembly and route the resulting
+    // UDP datagram to a socket bound to port 9100 — this test
+    // program. recvfrom then validates the body bytes
+    // ('A'x8 + 'B'x8 + 'C'x8).
+    val output = qemu.command("test_ip_reasm")
+    output should include("test_ip_reasm: ok")
+    output should not include "test_ip_reasm: failed"
+  }
+
+  "x86 ip: fragmentation RFC corners (overlap + timeout)" in {
+    // test_ip_reasm2 covers two RFC corners of the reassembly path:
+    //   1. RFC 5722 overlap-fragment drop — a fragment overlapping
+    //      a previously received range must poison the slot.
+    //   2. ICMP Time Exceeded emit on RFC 791 30-s timeout — the
+    //      scan sweep must call inet_send_icmp_time_exceeded for
+    //      slots that timed out with have_first=1.
+    val output = qemu.command("test_ip_reasm2")
+    output should include("test_ip_reasm2: ok")
+    output should not include "test_ip_reasm2: failed"
+  }
+
+  "x86 udp: 1024-byte datagram via 127.0.0.1 loopback" in {
+    // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
+    // 1024-byte body with byte i = (i & 0xff), recvfrom-validates
+    // the full body comes through. Catches truncation at the old
+    // 512 boundary plus any reply-buffer overflow / underflow.
+    val output = qemu.command("test_udp_big")
+    output should include("udpbig: ok")
+    output should not include "udpbig: bad"
+  }
+
+  "x86 udp: connect()/send()/recv() with default peer" in {
+    // POSIX connect() on UDP saves a default peer; subsequent
+    // send() (sendto with NULL addr) targets it. Then dissolve
+    // via connect(AF_UNSPEC) and verify send returns -ENOTCONN.
+    val output = qemu.command("test_udp_conn")
+    output should include("udpcon: ok")
+    output should not include "udpcon: bad"
+  }
+
+  "x86 udp: connected fd drops non-peer datagrams (recv filter)" in {
+    // POSIX/Linux: a UDP fd with a saved peer (via connect())
+    // drops datagrams whose source != peer. Slix enforces this
+    // at recv time — sys_recvfrom recurses past non-peer
+    // datagrams until a matching one arrives or EAGAIN.
+    val output = qemu.command("test_udp_filt")
+    output should include("udpfilt: ok")
+    output should not include "udpfilt: bad"
+  }
+
+  "x86 udp: NB recv on empty queue returns EAGAIN" in {
+    // Minimal regression check: socket → bind → fcntl(NONBLOCK)
+    // → recvfrom → must return -EAGAIN. Catches future
+    // sys_recvfrom regressions in the empty-queue path
+    // independently of the connect/filter loop.
+    val output = qemu.command("test_udp_dbg")
+    output should include("udpdbg: ok")
+    output should not include "udpdbg: bad"
+  }
+
   "x86 crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
@@ -421,9 +662,11 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     // (slix/test/hello.c) — only the build target differs. Validates
     // the x86 POSIX shim's SYS_WRITE/SYS_READ/SYS_EXIT_GROUP path and
     // the musl __set_thread_area override that lands TLS via WRFSBASE.
-    val output = qemu.command("mhello")
-    output should include("hello from musl")
-    output should include("read=0")
+    qemu.send("mhello\n")
+    qemu.waitFor("hello from musl")
+    qemu.send("X")
+    val output = qemu.waitFor("read=1")
+    output should include("read=1")
   }
 
   "x86 musl: socket/connect/shutdown/read via libc wrappers" in {

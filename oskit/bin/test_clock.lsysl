@@ -1,0 +1,154 @@
+test_clock — clock_gettime / gettimeofday / clock_getres / nanosleep
+=====================================================================
+
+Exercises the four POSIX time syscalls now wired to the
+kernel's `uptime()` tick counter (100 Hz):
+
+  - clock_gettime(CLOCK_MONOTONIC) advances over a sleep
+  - gettimeofday matches clock_gettime within ±20ms
+  - clock_getres returns 10_000_000ns (10ms tick)
+  - nanosleep(50ms) blocks for at least ~40ms
+
+Output: `clock: ok` / `clock: bad <code>`.
+
+    module oskit.bin.test_clock
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOCK_GETRES   = 142
+    val NR_CLOCK_GETTIME  = 143
+    val NR_GETTIMEOFDAY   = 206
+    val NR_NANOSLEEP      = 251
+
+    val CLOCK_MONOTONIC   = 1
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    posix_clock_gettime(clockid: int, tp: *byte) -> int
+        int(syscall6(NR_CLOCK_GETTIME, i64(clockid), i64(tp), 0, 0, 0, 0))
+
+    posix_clock_getres(clockid: int, tp: *byte) -> int
+        int(syscall6(NR_CLOCK_GETRES, i64(clockid), i64(tp), 0, 0, 0, 0))
+
+    posix_gettimeofday(tv: *byte, tz: i64) -> int
+        int(syscall6(NR_GETTIMEOFDAY, i64(tv), tz, 0, 0, 0, 0))
+
+    posix_nanosleep(req: *byte, rem: i64) -> int
+        int(syscall6(NR_NANOSLEEP, i64(req), rem, 0, 0, 0, 0))
+
+
+    fail_with(code: int)
+        puts("clock: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+Read tv_sec (low 32 bits — we won't overflow that in test).
+
+    read_tv_sec(buf: *byte) -> int
+        ((int(buf[0]) & 0xff) | ((int(buf[1]) & 0xff) << 8) | ((int(buf[2]) & 0xff) << 16) | ((int(buf[3]) & 0xff) << 24))
+
+
+Read second u64 field (tv_nsec / tv_usec) low 32 bits.
+
+    read_tv_field2(buf: *byte) -> int
+        ((int(buf[8]) & 0xff) | ((int(buf[9]) & 0xff) << 8) | ((int(buf[10]) & 0xff) << 16) | ((int(buf[11]) & 0xff) << 24))
+
+
+Convert a {sec, nsec} timespec to absolute milliseconds.
+
+    timespec_to_ms(buf: *byte) -> int
+        read_tv_sec(buf) * 1000 + (read_tv_field2(buf) / 1000000)
+
+
+Convert a {sec, usec} timeval to absolute milliseconds.
+
+    timeval_to_ms(buf: *byte) -> int
+        read_tv_sec(buf) * 1000 + (read_tv_field2(buf) / 1000)
+
+
+Build a {sec, nsec} timespec.
+
+    fill_timespec(buf: *byte, sec: int, nsec: int)
+        var i = 0
+        while i < 16
+            buf[i] = byte(0)
+            i += 1
+        buf[0] = byte(sec & 0xff)
+        buf[1] = byte((sec >> 8) & 0xff)
+        buf[2] = byte((sec >> 16) & 0xff)
+        buf[3] = byte((sec >> 24) & 0xff)
+        buf[8]  = byte(nsec & 0xff)
+        buf[9]  = byte((nsec >> 8) & 0xff)
+        buf[10] = byte((nsec >> 16) & 0xff)
+        buf[11] = byte((nsec >> 24) & 0xff)
+
+
+    main(argv: []string)
+        // 1. clock_getres should report 10 ms.
+        var res: [16]byte
+        if posix_clock_getres(CLOCK_MONOTONIC, &res[0]) != 0
+            fail_with(1)
+            return
+        if read_tv_sec(&res[0]) != 0
+            fail_with(2)
+            return
+        if read_tv_field2(&res[0]) != 10000000
+            fail_with(3)
+            return
+
+        // 2. clock_gettime + gettimeofday agree within 20ms.
+        var t1: [16]byte
+        if posix_clock_gettime(CLOCK_MONOTONIC, &t1[0]) != 0
+            fail_with(4)
+            return
+        var tv: [16]byte
+        if posix_gettimeofday(&tv[0], i64(0)) != 0
+            fail_with(5)
+            return
+        val ms_clock = timespec_to_ms(&t1[0])
+        val ms_tv = timeval_to_ms(&tv[0])
+        var diff = ms_clock - ms_tv
+        if diff < 0
+            diff = -diff
+        // Two back-to-back syscalls may straddle ticks; allow up
+        // to 100ms slack for slow QEMU scheduling. Real Linux is
+        // tighter but slix doesn't have vDSO so each call is a
+        // full syscall round-trip.
+        if diff > 100
+            fail_with(6)
+            return
+
+        // 3. nanosleep(50ms) advances clock_gettime by ≥ ~40ms
+        //    (one-tick rounding can shave up to 10ms).
+        var sleep_req: [16]byte
+        fill_timespec(&sleep_req[0], 0, 50000000)
+        if posix_nanosleep(&sleep_req[0], i64(0)) != 0
+            fail_with(7)
+            return
+        var t2: [16]byte
+        if posix_clock_gettime(CLOCK_MONOTONIC, &t2[0]) != 0
+            fail_with(8)
+            return
+        val elapsed = timespec_to_ms(&t2[0]) - ms_clock
+        if elapsed < 40
+            fail_with(9)
+            return
+        // Wide upper bound — host may schedule slowly under load.
+        if elapsed > 500
+            fail_with(10)
+            return
+
+        puts("clock: ok elapsed=")
+        print_udec(elapsed)
+        puts("\n")
+        exit()

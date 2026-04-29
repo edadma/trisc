@@ -1849,7 +1849,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case "-"  => emit("  sub r1, r1, r3")
       case "*"  => emit("  mul r1, r1, r3")
       case "/"  => emitDivByZeroCheck("r3"); emit("  div r1, r1, r3")
-      case "%"  => emitDivByZeroCheck("r3"); emit("  div r1, r1, r3"); emit("  mov r1, r2") // remainder in r2
+      case "%"  => emitDivByZeroCheck("r3"); emit("  rem r1, r3")
       case "&"  => emit("  and r1, r1, r3")
       case "|"  => emit("  or r1, r1, r3")
       case "^"  => emit("  xor r1, r1, r3")
@@ -2695,7 +2695,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         val st = obj.typ.asInstanceOf[SyslType.StructType]
         val off = fieldOffset(st, fieldIndex)
         val fieldType = st.fields(fieldIndex)._2
-        // Step 1: compute field address and push it (safe from mul d+1 clobber)
+        // Step 1: compute field address and push it
         emitStructAddr(obj)        // r1 = struct address
         if off != 0 then emitAddImm(1, 1, off)
         emit("  pshd r1")        // save field address on stack
@@ -2711,7 +2711,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           case "-"  => emit("  sub r2, r2, r1")
           case "*"  => emit("  mul r2, r2, r1")
           case "/"  => emitDivByZeroCheck("r1"); emit("  div r2, r2, r1")
-          case "%"  => emitDivByZeroCheck("r1"); emit("  div r2, r2, r1"); emit("  mov r2, r3") // remainder in r3
+          case "%"  => emitDivByZeroCheck("r1"); emit("  rem r2, r1")
           case "&"  => emit("  and r2, r2, r1")
           case "|"  => emit("  or r2, r2, r1")
           case "^"  => emit("  xor r2, r2, r1")
@@ -2995,17 +2995,18 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           case "wrapping_sub" =>
             emit("  sub r1, r1, r2"); emitNarrow(1, typ)
           case "wrapping_mul" =>
-            emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+            emit("  mul r1, r1, r2")
             emitNarrow(1, typ)
           case "saturating_add" | "saturating_sub" | "saturating_mul" =>
             // Special case: saturating_mul on u32 — the full u64 product can exceed
             // signed i64 range (e.g. 0xFFFFFFFF * 0xFFFFFFFF = 0xFFFFFFFE_00000001),
             // so the generic signed-clamp path below would misinterpret it as
             // negative and saturate to 0. Use unsigned compare against u32 max
-            // instead; no LOW clamp is needed because `mulu` on unsigned operands
+            // instead; no LOW clamp is needed because `mul` on unsigned operands
             // never produces a value below 0 in unsigned interpretation.
             if name == "saturating_mul" && unsigned && width == 32 then
-              emit("  mulu r1, r1, r2")    // r1 = u64 product (high 64 in r2 is always 0 for u32*u32)
+              // u32 × u32 product fits in u64; `mul` (low 64 bits) is the full result.
+              emit("  mul r1, r1, r2")     // r1 = full u64 product
               loadImm(3, (1L << 32) - 1)   // r3 = u32 max = 0xFFFFFFFF
               emit("  sltu r4, r3, r1")    // r4 = 1 if u32max < r1 unsigned
               val noHi = newLabel("sat_nohi")
@@ -3039,11 +3040,14 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                   emit("  ldi r1, 0")
                   emit(s"$noUn")
                 case ("saturating_mul", true) =>
-                  // u64 mul: mulu writes high to r((d+1)&7) = r2 (clobber).
+                  // u64 mul: compute high (mulhu) and low (mul) separately —
+                  // mulhu is destructive on rd, so save a in r3 first.
                   // Overflow iff high half is non-zero.
-                  emit("  mulu r1, r1, r2")     // r1 = low, r2 = high
+                  emit("  mov r3, r1")          // r3 = a (preserve for mulhu)
+                  emit("  mulhu r3, r2")        // r3 = high(a *u b)
+                  emit("  mul r1, r1, r2")      // r1 = low(a * b)
                   val noOf = newLabel("sat_noof")
-                  emit(s"  beq r2, r0, $noOf")
+                  emit(s"  beq r3, r0, $noOf")
                   loadImm(1, -1L)               // MAX_U64
                   emit(s"$noOf")
                 case ("saturating_add", false) =>
@@ -3101,16 +3105,18 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                   loadImm(1, Long.MinValue)
                   emit(s"$noOf")
                 case ("saturating_mul", false) =>
-                  // i64 mul: mul writes high to r2 (clobber).
+                  // i64 mul: compute high (mulh, destructive) and low (mul) separately.
                   // Overflow iff high != asr(low, 63), i.e. high doesn't equal the
                   // sign-extension of the low half.
-                  emit("  mul r1, r1, r2")      // r1 = low, r2 = high
-                  emit("  ldi r3, 63")
-                  emit("  asr r4, r1, r3")      // r4 = sign-extended low (expected high)
+                  emit("  mov r3, r1")          // r3 = a (preserve for mulh)
+                  emit("  mulh r3, r2")         // r3 = high(a *s b)
+                  emit("  mul r1, r1, r2")      // r1 = low(a * b)
+                  emit("  ldi r4, 63")
+                  emit("  asr r4, r1, r4")      // r4 = sign-extended low (expected high)
                   val noOf = newLabel("sat_noof")
-                  emit(s"  beq r4, r2, $noOf")
+                  emit(s"  beq r4, r3, $noOf")
                   // Overflow direction: sign of actual high tells us positive vs negative.
-                  emit("  slt r4, r2, r0")      // r4 = 1 iff high < 0
+                  emit("  slt r4, r3, r0")      // r4 = 1 iff high < 0
                   val neg = newLabel("sat_neg")
                   emit(s"  bne r4, r0, $neg")
                   loadImm(1, Long.MaxValue)
@@ -3123,10 +3129,11 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
               // Compute in 64-bit; for narrow widths the intermediate fits in signed i64.
               // Then signed-clamp to [minV, maxV]. For unsigned types maxV is set to the
               // unsigned max, but we still use signed slt because the intermediate is in signed range.
+              // mul-low is identical signed/unsigned per the post-Stage-2 ISA.
               name match
                 case "saturating_add" => emit("  add r1, r1, r2")
                 case "saturating_sub" => emit("  sub r1, r1, r2")
-                case "saturating_mul" => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+                case "saturating_mul" => emit("  mul r1, r1, r2")
                 case _ =>
               val (minV, maxV) =
                 if unsigned then (0L, (1L << width) - 1)
@@ -3186,9 +3193,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           op match
             case "+"  => emit("  add r1, r1, r2")
             case "-"  => emit("  sub r1, r1, r2")
-            case "*"  => emit(if unsigned then "  mulu r1, r1, r2" else "  mul r1, r1, r2")
+            case "*"  => emit("  mul r1, r1, r2")  // mul-low is identical signed/unsigned post-Stage-2
             case "/"  => emitDivByZeroCheck("r2"); emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
-            case "%"  => emitDivByZeroCheck("r2"); emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2"); emit("  mov r1, r2") // remainder in r2
+            case "%"  => emitDivByZeroCheck("r2"); emit(if unsigned then "  remu r1, r2" else "  rem r1, r2")
             case "&"  => emit("  and r1, r1, r2")
             case "|"  => emit("  or r1, r1, r2")
             case "^"  => emit("  xor r1, r1, r2")
@@ -5033,11 +5040,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         if elemSize == 1 then
           emit("  add r3, r3, r2")
         else
-          emit("  pshd r1")            // save new_len
-          emit("  pshd r3")            // save ptr (mul clobbers r(d+1)=r3)
+          emit("  pshd r1")            // save new_len (emitLoadImm overwrites r1)
           emitLoadImm(1, elemSize)
-          emit("  mul r2, r2, r1")     // r2 = lo * elemSize (clobbers r3)
-          emit("  popd r3")            // restore ptr
+          emit("  mul r2, r2, r1")     // r2 = lo * elemSize
           emit("  popd r1")            // restore new_len
           emit("  add r3, r3, r2")     // r3 = new_ptr
 
@@ -5135,10 +5140,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  mov r1, r3")           // r1 = len
         if elemSize != 1 then
           emitLoadImm(4, elemSize)
-          emit("  mul r1, r1, r4")     // r1 = len * elemSize (clobbers r2!)
-          // reload ptr from stack (at sp+8)
-          emitAddImm(2, 7, 8)
-          emit("  ldd r2, r2, r0")     // r2 = ptr (reloaded)
+          emit("  mul r1, r1, r4")     // r1 = len * elemSize
         emit("  add r1, r2, r1")       // r1 = dest addr
         emit("  popd r2")              // r2 = elem
         // For aggregate elem types, emitStore → emitAggregateCopy clobbers r3
@@ -5203,13 +5205,10 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emitAddImm(4, 7, 16)
         emit("  ldd r4, r4, r0")       // r4 = len
         if elemSize != 1 then
-          // mul r4 would clobber r5 (frame pointer!), so compute in r1 instead
-          emit("  pshd r2")            // save new_ptr (mul r1 clobbers r2)
           emit("  mov r1, r4")         // r1 = len
           emitLoadImm(4, elemSize)
-          emit("  mul r1, r1, r4")     // r1 = len * elemSize (clobbers r2)
+          emit("  mul r1, r1, r4")     // r1 = len * elemSize
           emit("  mov r4, r1")         // r4 = bytes to copy
-          emit("  popd r2")            // restore new_ptr
         val copyLoop = newLabel("acopy")
         val copyDone = newLabel("acopy_d")
         emit(s"$copyLoop")
@@ -5229,9 +5228,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  mov r1, r3")           // r1 = len
         if elemSize != 1 then
           emitLoadImm(4, elemSize)
-          emit("  mul r1, r1, r4")     // r1 = len * elemSize (clobbers r2!)
-          // reload new_ptr from stack (at sp+0)
-          emit("  ldd r2, r7, r0")     // r2 = new_ptr (reloaded)
+          emit("  mul r1, r1, r4")     // r1 = len * elemSize
         emit("  add r1, r2, r1")       // r1 = dest addr
         emitAddImm(4, 7, 32)
         emit("  ldd r4, r4, r0")       // r4 = elem
@@ -5446,9 +5443,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         val doneLabel = newLabel("zero_done")
         emitAddImm(3, 1, 16)         // r3 = data start
         emitLoadImm(4, elemSize)
-        emit("  pshd r3")            // save data start (mul r2 clobbers r3)
-        emit("  mul r2, r2, r4")     // r2 = n * elemSize (clobbers r3)
-        emit("  popd r3")            // restore data start
+        emit("  mul r2, r2, r4")     // r2 = n * elemSize
         // Round up to 8-byte boundary
         emit("  addi r2, r2, 7")
         emit("  movi r4, 3")
@@ -5892,11 +5887,13 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // Division loop: extract digits
     emit(s"$loopLabel")
     emit(s"  beq r1, r0, $doneLabel")
-    // Save digit_count to [fp-16] (div will clobber r2)
+    // Save digit_count to [fp-16]
     emitAddImm(4, 5, -16)
     emit("  std r3, r4, r0")
     emit("  ldi r3, 10")
-    emit("  div r1, r1, r3")       // r1 = quotient, r2 = remainder
+    emit("  mov r2, r1")           // r2 = remaining
+    emit("  rem r2, r3")           // r2 = remaining % 10 (digit)
+    emit("  div r1, r1, r3")       // r1 = remaining / 10
     emit("  addi r2, r2, 48")      // r2 = ASCII digit
     // Restore digit_count
     emitAddImm(4, 5, -16)
@@ -6079,12 +6076,14 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // Division loop: extract int digits
     emit(s"$intLoopLabel")
     emit(s"  beq r1, r0, $intDoneLabel")
-    // Save digit_count (div clobbers r2)
+    // Save digit_count
     emitAddImm(4, 5, -32)
     emit("  std r3, r4, r0")
     emit("  ldi r3, 10")
-    emit("  div r1, r1, r3")       // r1 = quot, r2 = rem
-    emit("  addi r2, r2, 48")
+    emit("  mov r2, r1")           // r2 = remaining
+    emit("  rem r2, r3")           // r2 = remaining % 10 (digit)
+    emit("  div r1, r1, r3")       // r1 = remaining / 10
+    emit("  addi r2, r2, 48")      // r2 = ASCII digit
     // Restore digit_count
     emitAddImm(4, 5, -32)
     emit("  ldd r3, r4, r0")
@@ -6168,7 +6167,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // For each divisor 100000, 10000, 1000, 100, 10, 1:
     for divisor <- List(100000, 10000, 1000, 100, 10, 1) do
       emitLoadImm(3, divisor)
-      emit("  div r3, r2, r3")     // r3 = scaled_frac / divisor, r4 = remainder
+      emit("  mov r4, r2")         // r4 = scaled_frac (preserve for rem)
+      emit("  rem r4, r3")         // r4 = scaled_frac % divisor (new remainder)
+      emit("  div r3, r2, r3")     // r3 = scaled_frac / divisor (digit)
       emit("  mov r2, r4")         // r2 = new remainder
       emit("  addi r3, r3, 48")    // r3 = ASCII digit
       emit("  stb r3, r1, r0")

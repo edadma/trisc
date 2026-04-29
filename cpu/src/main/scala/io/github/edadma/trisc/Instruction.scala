@@ -142,22 +142,14 @@ class SUB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 class MUL(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "mul"
 
-  def apply(cpu: CPU): Unit =
-    val va = cpu.r(a).read
-    val vb = cpu.r(b).read
-    cpu.r(d).write(va * vb)
-    cpu.r((d + 1) & 7).write(java.lang.Math.multiplyHigh(va, vb))
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read * cpu.r(b).read)
 
 class DIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "div"
 
   def apply(cpu: CPU): Unit =
     if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else
-      val va = cpu.r(a).read
-      val vb = cpu.r(b).read
-      cpu.r(d).write(va / vb)
-      cpu.r((d + 1) & 7).write(va % vb)
+    else cpu.r(d).write(cpu.r(a).read / cpu.r(b).read)
 
 class CAS(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "cas"
@@ -232,27 +224,12 @@ class SBC(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
 // Unsigned arithmetic (RRR 001 block)
 
-class MULU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "mulu"
-
-  def apply(cpu: CPU): Unit =
-    val va = cpu.r(a).read
-    val vb = cpu.r(b).read
-    cpu.r(d).write(va * vb)
-    // Unsigned multiply high: multiplyHigh gives signed high, correct for unsigned
-    val hi = java.lang.Math.multiplyHigh(va, vb) + (if va < 0 then vb else 0L) + (if vb < 0 then va else 0L)
-    cpu.r((d + 1) & 7).write(hi)
-
 class DIVU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "divu"
 
   def apply(cpu: CPU): Unit =
     if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else
-      val va = cpu.r(a).read
-      val vb = cpu.r(b).read
-      cpu.r(d).write(java.lang.Long.divideUnsigned(va, vb))
-      cpu.r((d + 1) & 7).write(java.lang.Long.remainderUnsigned(va, vb))
+    else cpu.r(d).write(java.lang.Long.divideUnsigned(cpu.r(a).read, cpu.r(b).read))
 
 // Float comparison (RRR 001 block)
 
@@ -422,11 +399,6 @@ class FNEG(a: Int, b: Int) extends RRInstruction(a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(-cpu.r(b).readf)
 
-class FINV(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "finv"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(1.0 / cpu.r(b).readf)
-
 class CVT(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "cvt"
 
@@ -447,57 +419,58 @@ class FABS(a: Int, b: Int) extends RRInstruction(a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(math.abs(cpu.r(b).readf))
 
-// Floating point RR 01 (110 block, sub-format 01)
+// Multi-limb multiply / remainder (RR 01 sub-format, destructive: rd = rd op rb)
+//
+// mul/divu in RRR write only the low half / quotient. The high-half multiplies
+// (mulh/mulhu/mulhsu) and remainder (rem/remu) are destructive RR-01 ops; that
+// fits TRISC's tight RRR opcode space and matches the bignum usage pattern:
+//
+//     mul  lo, a, b      ; low 64 bits of a*b
+//     mov  hi, a
+//     mulhu hi, b        ; high 64 bits of a*b unsigned
+//
+// The high-half operand semantics match RV: mulh is signed×signed, mulhu is
+// unsigned×unsigned, mulhsu is signed(rd)×unsigned(rb).
 
-class FPOW(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fpow"
+class MULH(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "mulh"
 
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.pow(cpu.r(a).readf, cpu.r(b).readf))
+  def apply(cpu: CPU): Unit =
+    cpu.r(a).write(java.lang.Math.multiplyHigh(cpu.r(a).read, cpu.r(b).read))
 
-class FSIN(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fsin"
+class MULHU(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "mulhu"
 
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.sin(cpu.r(b).readf))
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    val hi = java.lang.Math.multiplyHigh(va, vb) +
+      (if va < 0 then vb else 0L) +
+      (if vb < 0 then va else 0L)
+    cpu.r(a).write(hi)
 
-class FCOS(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fcos"
+class MULHSU(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "mulhsu"
 
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.cos(cpu.r(b).readf))
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    val hi = java.lang.Math.multiplyHigh(va, vb) + (if vb < 0 then va else 0L)
+    cpu.r(a).write(hi)
 
-class FTAN(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "ftan"
+class REM(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "rem"
 
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.tan(cpu.r(b).readf))
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
+    else cpu.r(a).write(cpu.r(a).read % cpu.r(b).read)
 
-class FASIN(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fasin"
+class REMU(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "remu"
 
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.asin(cpu.r(b).readf))
-
-class FACOS(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "facos"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.acos(cpu.r(b).readf))
-
-class FATAN(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fatan"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.atan(cpu.r(b).readf))
-
-class FATAN2(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fatan2"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.atan2(cpu.r(a).readf, cpu.r(b).readf))
-
-class FEXP(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fexp"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.exp(cpu.r(b).readf))
-
-class FLOG(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "flog"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.log(cpu.r(b).readf))
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
+    else cpu.r(a).write(java.lang.Long.remainderUnsigned(cpu.r(a).read, cpu.r(b).read))
 
 // Single/double precision float conversion.
 // Single-precision floats live in the low 32 bits of a register,

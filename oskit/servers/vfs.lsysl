@@ -1217,9 +1217,11 @@ Wire for INET_CMD_TCP_LISTEN (oskit/servers/inet.lsysl):
   request:  [cmd(1), port(2), backlog(2)]
   reply:    [status(1), fd(1)]
 
-The VFS bridge has no API for callers to specify a backlog
-(connect("tcp-listen:7890") is the only entry), so we pass the
-default 16 — same as `tcp_listen` in oskit/net/client.lsysl.
+Caller syntax `connect("tcp-listen:7890")` accepts an optional
+backlog after a comma — `connect("tcp-listen:7890,4")` requests
+backlog=4. Without the trailer, the default 16 (matches
+`tcp_listen` in oskit/net/client.lsysl and inet's
+TCP_LISTEN_BACKLOG cap) is used.
 
     vfs_handle_connect_tcp_listen(sender: int, name: *byte, colon: int, name_len: int)
         val pid = svc_get_thread_pid(sender)
@@ -1230,7 +1232,8 @@ default 16 — same as `tcp_listen` in oskit/net/client.lsysl.
             ipc_reply(sender, err, 1)
             return
 
-        // Parse decimal port after the colon.
+        // Parse decimal port after the colon. Stops at the optional
+        // ",backlog" separator so the same loop handles both forms.
         var i = colon + 1
         var port = 0
         var ok = 1
@@ -1238,6 +1241,8 @@ default 16 — same as `tcp_listen` in oskit/net/client.lsysl.
             ok = 0
         while i < name_len
             val c = int(name[i]) & 0xFF
+            if c == 44   // ','
+                break
             if c < 48 || c > 57
                 ok = 0
                 break
@@ -1245,6 +1250,31 @@ default 16 — same as `tcp_listen` in oskit/net/client.lsysl.
             i += 1
         if port <= 0 || port > 65535
             ok = 0
+        // Optional ",<backlog>" trailer. Caps mirror inet's listen
+        // path: 0 → 1 (Linux's "non-positive → 1" rule), >16 → 16
+        // (TCP_LISTEN_BACKLOG slot-array cap).
+        var backlog = 16
+        if ok != 0 && i < name_len
+            if int(name[i]) & 0xFF == 44
+                i += 1
+                var b = 0
+                var saw_digit = 0
+                while i < name_len
+                    val c2 = int(name[i]) & 0xFF
+                    if c2 < 48 || c2 > 57
+                        ok = 0
+                        break
+                    b = b * 10 + (c2 - 48)
+                    saw_digit = 1
+                    i += 1
+                if saw_digit == 0
+                    ok = 0
+                if ok != 0
+                    if b < 1
+                        b = 1
+                    if b > 16
+                        b = 16
+                    backlog = b
         if ok == 0
             var err: [1]byte
             err[0] = byte(-1)
@@ -1257,8 +1287,8 @@ default 16 — same as `tcp_listen` in oskit/net/client.lsysl.
         msg[0] = 14  // INET_CMD_TCP_LISTEN
         msg[1] = byte((port >> 8) & 0xFF)
         msg[2] = byte(port & 0xFF)
-        msg[3] = 0   // backlog hi
-        msg[4] = 16  // backlog lo — matches TCP_LISTEN_BACKLOG default
+        msg[3] = byte((backlog >> 8) & 0xFF)
+        msg[4] = byte(backlog & 0xFF)
         msg[5] = 0
         msg[6] = 0
         msg[7] = 0

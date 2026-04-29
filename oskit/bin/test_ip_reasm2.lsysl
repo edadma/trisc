@@ -1,0 +1,51 @@
+test_ip_reasm2 — IPv4 reassembly RFC corners
+=============================================
+
+Two test-only IPC drivers in inet validate the new RFC corners
+on top of the basic reassembly path:
+
+- **RFC 5722 overlap drop.** Inject a first-fragment ('X'x16)
+  followed by a fragment that overlaps it ('Y'x8 at offset=8).
+  The slot must be poisoned and never assemble.
+- **ICMP Time Exceeded on timeout.** Inject one first-fragment,
+  force-expire its deadline, run the scan sweep. The server
+  bumps `inet_ip_reasm_timeouts_sent` whether or not the wire
+  send actually succeeds, so the test verifies the emit attempt.
+
+Prints `test_ip_reasm2: ok` on pass or `test_ip_reasm2: failed N`
+where N is the failing sub-test number.
+
+    module oskit.bin.test_ip_reasm2
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{ip_reasm_overlap_test, ip_reasm_timeout_test}
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("test_ip_reasm2: failed ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val r1 = ip_reasm_overlap_test()
+        if r1 != 0
+            fail(10 + r1)
+            return
+
+        val r2 = ip_reasm_timeout_test()
+        if r2 != 0
+            fail(20 + r2)
+            return
+
+        puts("test_ip_reasm2: ok\n")
+        exit()

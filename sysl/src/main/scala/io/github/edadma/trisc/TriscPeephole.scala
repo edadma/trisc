@@ -167,9 +167,11 @@ object TriscPeephole:
 
   /** Mnemonics that write their first register operand (and only that). */
   private val writesFirstOpReg: Set[String] = Set(
-    "mov", "addi", "add", "sub", "div", "and", "or", "xor", "not", "lsl", "lsr", "asr",
+    "mov", "addi", "add", "sub", "mul", "div", "divu", "and", "or", "xor", "not", "lsl", "lsr", "asr",
     "ldi", "movi", "ldb", "lds", "ldw", "ldd",
     "zeb", "zes", "zew", "seb", "ses", "sew",
+    // RR-01 destructive ops (rd = rd op rb) — also write only rd
+    "mulh", "mulhu", "mulhsu", "rem", "remu",
     "f32tof64", "i2f", "f2i", "fadd", "fsub", "fmul", "fdiv",
   )
 
@@ -178,8 +180,6 @@ object TriscPeephole:
     case _ if target == 0 => false
     // Common form: rD is the first operand and is the destination.
     case Instr(m, Reg(d) :: _) if writesFirstOpReg.contains(m) => d == target
-    // mul clobbers both rD and r((d+1) & 7) — see CLAUDE.md TRISC notes.
-    case Instr("mul", Reg(d) :: _) => d == target || ((d + 1) & 7) == target
     // pshd modifies SP (r7) but no other register.
     case Instr("pshd", _) => target == 7
     // popd writes both the named destination AND modifies r7.

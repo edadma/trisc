@@ -603,10 +603,10 @@ Design notes
 
 **Software implementations.** All transcendental functions use
 pure Sysl — Taylor series, Newton's method, and range
-reduction. When TRISC hardware float builtins or compiler
-intrinsics become available, these can be replaced with
-single-instruction versions (`fsin`, `fcos`, `fsqrt`, `fexp`,
-`flog`, etc.) without changing the API.
+reduction. The TRISC ISA provides hardware `fsqrt` (used by
+`sqrt`), but transcendentals like sin/cos/exp/log are software
+only — matching real RISC ISAs (RV F/D, ARM, x86) which delegate
+those to libm.
 
 **Naming convention.** Functions that shadow an integer
 counterpart use the `_f64` suffix: `abs_f64`, `min_f64`,

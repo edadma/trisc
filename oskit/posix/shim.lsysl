@@ -87,6 +87,8 @@ posix_fd_bridge memory.
     val POSIX_FD_TCP_SOCKET  = 5
     val POSIX_FD_FILE        = 6
     val POSIX_FD_EPOLL       = 7
+    val POSIX_FD_EVENTFD     = 8
+    val POSIX_FD_TIMERFD     = 9
 
     val POSIX_FDS_PER_PROC   = 64
 
@@ -119,6 +121,57 @@ posix_fd_bridge memory.
         // flush-or-timeout semantics aren't enforced yet.
         linger_on: int
         linger_secs: int
+        // setsockopt(IPPROTO_TCP, TCP_KEEPIDLE/INTVL/CNT) — caller-
+        // requested per-socket keepalive overrides. 0 = "no override,
+        // use the inet-side default".  Idle/intvl persisted as the
+        // user's seconds value (the conversion to ticks happens at
+        // the IPC boundary so getsockopt round-trips the seconds
+        // unchanged); cnt is a raw probe count.
+        keep_idle_secs: int
+        keep_intvl_secs: int
+        keep_cnt: int
+        // POSIX_FD_EVENTFD state. `eventfd_count` is the running
+        // counter; read returns the count and resets it (or
+        // decrements to 0 in semaphore mode), write adds to it.
+        // `eventfd_semaphore` records EFD_SEMAPHORE so successive
+        // reads decrement by 1 instead of returning the full
+        // counter at once.
+        eventfd_count: i64
+        eventfd_semaphore: int
+        // POSIX_FD_TIMERFD state. `interval_ticks` is the periodic
+        // re-arm in scheduler ticks (100 Hz); 0 means one-shot.
+        // `next_tick` is the absolute uptime() tick at which the
+        // next expiration is due; 0 means disarmed. `expirations`
+        // accumulates fires that haven't been consumed via read()
+        // yet; the next read returns the count and resets it.
+        timerfd_interval_ticks: int
+        timerfd_next_tick: int
+        timerfd_expirations: i64
+        // SO_ERROR per-fd. Holds the positive errno of the most
+        // recent socket-layer failure (ECONNREFUSED, ENETUNREACH,
+        // EADDRINUSE, ...) that the kernel/inet surfaced to this
+        // socket.  getsockopt(SOL_SOCKET, SO_ERROR) returns it and
+        // clears it back to 0 — Linux read-and-reset semantics.
+        last_error: int
+        // SO_ACCEPTCONN read-side flag. Set when sys_listen succeeds
+        // on this TCP fd; getsockopt(SO_ACCEPTCONN) returns it.
+        // Stays 1 across the listen socket's lifetime — Linux clears
+        // it only on close. Children produced by accept() are fresh
+        // fds with is_listen = 0.
+        is_listen: int
+        // POSIX_FD_UDP_SOCKET connect() state. `udp_connected != 0`
+        // means a default peer was set via sys_connect; sendto with
+        // a null addr / zero addrlen then uses the saved peer (the
+        // libc `send()` path). Cleared by re-connecting with NULL
+        // sockaddr or sa_family == AF_UNSPEC (POSIX dissolve).
+        // Peer IP stored as 4 octets to match the inet IPC wire
+        // format (network byte order).
+        udp_connected: int
+        udp_peer_port: int
+        udp_peer_a: int
+        udp_peer_b: int
+        udp_peer_c: int
+        udp_peer_d: int
 
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
@@ -140,6 +193,22 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].flag_nodelay = 0
             posix_fd_table[base + i].linger_on = 0
             posix_fd_table[base + i].linger_secs = 0
+            posix_fd_table[base + i].keep_idle_secs = 0
+            posix_fd_table[base + i].keep_intvl_secs = 0
+            posix_fd_table[base + i].keep_cnt = 0
+            posix_fd_table[base + i].eventfd_count = i64(0)
+            posix_fd_table[base + i].eventfd_semaphore = 0
+            posix_fd_table[base + i].timerfd_interval_ticks = 0
+            posix_fd_table[base + i].timerfd_next_tick = 0
+            posix_fd_table[base + i].timerfd_expirations = i64(0)
+            posix_fd_table[base + i].last_error = 0
+            posix_fd_table[base + i].is_listen = 0
+            posix_fd_table[base + i].udp_connected = 0
+            posix_fd_table[base + i].udp_peer_port = 0
+            posix_fd_table[base + i].udp_peer_a = 0
+            posix_fd_table[base + i].udp_peer_b = 0
+            posix_fd_table[base + i].udp_peer_c = 0
+            posix_fd_table[base + i].udp_peer_d = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -203,9 +272,45 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].flag_nodelay = 0
                 posix_fd_table[base + i].linger_on = 0
                 posix_fd_table[base + i].linger_secs = 0
+                posix_fd_table[base + i].keep_idle_secs = 0
+                posix_fd_table[base + i].keep_intvl_secs = 0
+                posix_fd_table[base + i].keep_cnt = 0
+                posix_fd_table[base + i].eventfd_count = i64(0)
+                posix_fd_table[base + i].eventfd_semaphore = 0
+                posix_fd_table[base + i].timerfd_interval_ticks = 0
+                posix_fd_table[base + i].timerfd_next_tick = 0
+                posix_fd_table[base + i].timerfd_expirations = i64(0)
+                posix_fd_table[base + i].last_error = 0
+                posix_fd_table[base + i].is_listen = 0
+                posix_fd_table[base + i].udp_connected = 0
+                posix_fd_table[base + i].udp_peer_port = 0
+                posix_fd_table[base + i].udp_peer_a = 0
+                posix_fd_table[base + i].udp_peer_b = 0
+                posix_fd_table[base + i].udp_peer_c = 0
+                posix_fd_table[base + i].udp_peer_d = 0
                 return i
             i += 1
         -1
+
+Record a positive errno on a socket fd so the next
+`getsockopt(SOL_SOCKET, SO_ERROR)` returns it (and clears it).
+Caller passes the kernel's negative errno; we store the absolute
+value to match Linux's `int *optval` convention.
+
+    posix_fd_set_error(fd: int, neg_errno: i64)
+        if fd < 0
+            return
+        if fd >= POSIX_FDS_PER_PROC
+            return
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return
+        if pid >= 16
+            return
+        var v = int(-neg_errno)
+        if v < 0
+            v = -v
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].last_error = v
 
 Iteration-based "is there another fd in this process pointing
 at the same backend?" check. Used by `sys_close` to avoid issuing
@@ -282,6 +387,10 @@ keep the kernel link free of the full socket-API module.
     val INET_CMD_TCP_GETBUF  = 35
     val INET_CMD_TCP_ABORT_CLOSE = 36
     val INET_CMD_TCP_SET_KEEPALIVE = 37
+    val INET_CMD_TCP_SET_KEEPOPT = 39
+    val INET_CMD_TCP_GET_KEEPOPT = 40
+    val INET_CMD_TCP_GET_ERR     = 41
+    val INET_CMD_TCP_GET_INFO    = 43
 
     val INET_MAX_TCP_SEG     = 480
 
@@ -357,6 +466,25 @@ private grant table (1 = read by mapper, 2 = write by mapper).
         if vfs_port_cached < 0
             vfs_port_cached = port_lookup("fs")
         vfs_port_cached
+
+
+    var tty_port_cached = -1
+
+    tty_get_port() -> int
+        if tty_port_cached < 0
+            tty_port_cached = port_lookup("tty")
+        tty_port_cached
+
+
+TTY IPC commands (must track oskit/drivers/tty/tty.lsysl).
+The shim only uses READ + POLL + EPOLL_SUB/UNSUB/INST_CLOSE;
+the WRITE/PUTS/SWITCH commands are driven from the legacy ulib.
+
+    val TTY_CMD_READ_C            = 2
+    val TTY_CMD_POLL_C            = 5
+    val TTY_CMD_EPOLL_SUB_C       = 6
+    val TTY_CMD_EPOLL_UNSUB_C     = 7
+    val TTY_CMD_EPOLL_INST_CLOSE_C = 8
 
 Big-endian 32-bit helpers for the VFS wire format.
 
@@ -557,6 +685,65 @@ to the same UDP stack that native sysl programs use via
             return sys_epoll_ctl(int(a0), int(a1), int(a2), a3)
         if num == 155
             return sys_epoll_pwait(int(a0), a1, int(a2), int(a3))
+        if num == 156
+            return sys_eventfd2(int(a0), int(a1))
+        if num == 356
+            return sys_timerfd_create(int(a0), int(a1))
+        if num == 357
+            return sys_timerfd_gettime(int(a0), a1)
+        if num == 358
+            return sys_timerfd_settime(int(a0), int(a1), a2, a3)
+        if num == 142
+            return sys_clock_getres(int(a0), a1)
+        if num == 143
+            return sys_clock_gettime(int(a0), a1)
+        if num == 144
+            return sys_clock_nanosleep(int(a0), int(a1), a2, a3)
+        if num == 206
+            return sys_gettimeofday(a0, a1)
+        if num == 251
+            return sys_nanosleep(a0, a1)
+        // Process / thread identity. Multi-threading isn't a thing
+        // in slix yet, so gettid == main thread of current process,
+        // getppid == 1 (init), and the uid/gid family all return 0
+        // (we boot as root). These are heavily probed by libc init
+        // and any program that logs its PID.
+        if num == 187
+            return i64(0)               // getegid
+        if num == 188
+            return i64(0)               // geteuid
+        if num == 189
+            return i64(0)               // getgid
+        if num == 194
+            return i64(posix_fd_current_pid())  // getpid
+        if num == 195
+            return i64(1)               // getppid → init
+        if num == 205
+            return i64(current_thread)  // gettid
+        if num == 207
+            return i64(0)               // getuid
+        if num == 197
+            return sys_getrandom(a0, int(a1), int(a2))
+        // fsync/fdatasync/sync/syncfs: slix has no on-disk
+        // persistence yet (TFS is in RAM), so there's nothing to
+        // flush. Returning 0 lets programs that defensively call
+        // these after writes (sqlite, log writers, ...) keep
+        // moving instead of crashing on -ENOSYS. fsync/fdatasync/
+        // syncfs validate fd; sync takes no args.
+        if num == 172
+            if posix_fd_kind(int(a0)) == POSIX_FD_FREE
+                return i64(-9)              // -EBADF
+            return i64(0)
+        if num == 180
+            if posix_fd_kind(int(a0)) == POSIX_FD_FREE
+                return i64(-9)
+            return i64(0)
+        if num == 345
+            return i64(0)
+        if num == 347
+            if posix_fd_kind(int(a0)) == POSIX_FD_FREE
+                return i64(-9)
+            return i64(0)
         i64(-38)            // -ENOSYS
 
 SYS_WRITE. Looks up `fd` in the process's POSIX fd table and
@@ -622,6 +809,44 @@ vm_copy_from.
             return i64(sent_total)
         if k == POSIX_FD_FILE
             return shim_vfs_write(posix_fd_target(fd), buf, len)
+        if k == POSIX_FD_EVENTFD
+            // Linux requires len >= 8.
+            if len < 8 || buf == i64(0)
+                return i64(-22)             // -EINVAL
+            val ubuf: *byte = *byte(buf)
+            var add = i64(0)
+            var bi = 0
+            while bi < 8
+                add = add | (i64(int(ubuf[bi]) & 0xff) << (bi * 8))
+                bi += 1
+            // Linux rejects the value u64::MAX (-1 as i64) — that
+            // bit pattern is reserved as "invalid".
+            if add == i64(-1)
+                return i64(-22)
+            val pid_w = posix_fd_current_pid()
+            val widx = pid_w * POSIX_FDS_PER_PROC + fd
+            // Counter is unsigned u64-1 max; we treat i64 sign as
+            // "high bit set" → near-overflow.  Accept the add if
+            // current + add < 2^64 - 1.  Practically: detect
+            // overflow on signed addition by checking whether the
+            // sum wraps below either operand (works because we
+            // never exceed i64::MAX before this point).
+            val cur = posix_fd_table[widx].eventfd_count
+            val sum = cur + add
+            // Overflow detection — same operands both unsigned-wise.
+            if u64(sum) < u64(cur)
+                if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                    return i64(-11)         // -EAGAIN
+                // Blocking mode: slix has no inter-thread notify
+                // path that wakes a write blocked on counter
+                // headroom yet, so return -EAGAIN even in blocking
+                // mode (matches musl when no waiter exists). Real
+                // behaviour for the threaded "writer waits for
+                // reader" case lands with the inter-thread notify
+                // chunk.
+                return i64(-11)
+            posix_fd_table[widx].eventfd_count = sum
+            return i64(8)
         i64(-9)             // -EBADF
 
 SYS_READ. STDIN returns 0 (EOF) — no kernel-side keyboard path
@@ -635,7 +860,48 @@ handles read from the TTY driver.
     sys_read(fd: int, buf: i64, len: int) -> i64
         val k = posix_fd_kind(fd)
         if k == POSIX_FD_STDIN
-            return i64(0)
+            // Route through the TTY server. Currently every slix
+            // process is bound to console 0 — multi-tty isn't a
+            // thing yet. Returns 1 byte per call (TTY_CMD_READ
+            // hands back one char); musl's read loops as needed.
+            // O_NONBLOCK pre-checks via TTY_CMD_POLL and returns
+            // -EAGAIN if no byte is queued, so a non-blocking
+            // stdin read never sits inside TTY_CMD_READ's blocking
+            // path. Blocking mode falls through to TTY_CMD_READ
+            // which parks the caller on the tty server's
+            // pending_reader slot until input arrives.
+            if len <= 0
+                return i64(0)
+            if buf == i64(0)
+                return i64(-14)
+            val port = tty_get_port()
+            if port < 0
+                return i64(-19)
+            if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                var pmsg: [2]byte
+                pmsg[0] = byte(TTY_CMD_POLL_C)
+                pmsg[1] = byte(0)
+                var preply: [7]byte
+                val pr = ipc_send(port, pmsg, 2, preply, 7)
+                if pr < 0
+                    return i64(-5)
+                if preply[0] != 0
+                    return i64(-5)
+                val pbits = (int(preply[1]) & 0xff) | ((int(preply[2]) & 0xff) << 8)
+                if (pbits & POSIX_EPOLLIN) == 0
+                    return i64(-11)         // -EAGAIN
+            var msg: [2]byte
+            msg[0] = byte(TTY_CMD_READ_C)
+            msg[1] = byte(0)
+            var reply: [2]byte
+            val r = ipc_send(port, msg, 2, reply, 2)
+            if r < 0
+                return i64(-5)
+            if reply[0] != 0
+                return i64(-5)
+            val ubuf: *byte = *byte(buf)
+            ubuf[0] = reply[1]
+            return i64(1)
         if k == POSIX_FD_TCP_SOCKET
             val inet_fd = posix_fd_target(fd)
             if inet_fd < 0
@@ -677,6 +943,71 @@ handles read from the TTY driver.
             return i64(rlen)
         if k == POSIX_FD_FILE
             return shim_vfs_read(posix_fd_target(fd), buf, len)
+        if k == POSIX_FD_TIMERFD
+            if len < 8 || buf == i64(0)
+                return i64(-22)
+            val pid_t = posix_fd_current_pid()
+            val tidx = pid_t * POSIX_FDS_PER_PROC + fd
+            timerfd_advance(tidx)
+            val cnt = posix_fd_table[tidx].timerfd_expirations
+            if cnt == i64(0)
+                if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                    return i64(-11)
+                // Blocking read on timerfd needs an in-shim sleep
+                // loop until the next deadline. Simpler than the
+                // socket case since we know exactly when to wake.
+                // Loop: while expirations==0, sleep_or_notify until
+                // next_tick. notify_wait() if disarmed (would block
+                // forever).
+                while posix_fd_table[tidx].timerfd_expirations == i64(0)
+                    if posix_fd_table[tidx].timerfd_next_tick == 0
+                        // Disarmed timer in blocking mode: Linux blocks
+                        // forever waiting for someone else to settime.
+                        // Slix has no concurrent settime path yet, so
+                        // EAGAIN here matches the practical behaviour.
+                        return i64(-11)
+                    val now_b = int(uptime())
+                    val wait_ticks = posix_fd_table[tidx].timerfd_next_tick - now_b
+                    if wait_ticks > 0
+                        sleep_or_notify(wait_ticks)
+                    timerfd_advance(tidx)
+            val deliver = posix_fd_table[tidx].timerfd_expirations
+            posix_fd_table[tidx].timerfd_expirations = i64(0)
+            val ubuf: *byte = *byte(buf)
+            var bi = 0
+            while bi < 8
+                ubuf[bi] = byte(int((deliver >> i64(bi * 8))) & 0xff)
+                bi += 1
+            return i64(8)
+        if k == POSIX_FD_EVENTFD
+            if len < 8 || buf == i64(0)
+                return i64(-22)
+            val pid_r = posix_fd_current_pid()
+            val ridx = pid_r * POSIX_FDS_PER_PROC + fd
+            val cur = posix_fd_table[ridx].eventfd_count
+            if cur == i64(0)
+                if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                    return i64(-11)         // -EAGAIN
+                // Blocking semantics: see write-side note above —
+                // slix doesn't yet have an inter-thread notify
+                // for eventfd, so return -EAGAIN in blocking mode
+                // too. Single-threaded user code that writes
+                // before reading hits the cur != 0 path naturally.
+                return i64(-11)
+            // Semaphore mode hands back 1 per read; default mode
+            // returns the full counter and resets to 0.
+            var deliver = cur
+            var remain = i64(0)
+            if posix_fd_table[ridx].eventfd_semaphore != 0
+                deliver = i64(1)
+                remain = cur - i64(1)
+            posix_fd_table[ridx].eventfd_count = remain
+            val ubuf: *byte = *byte(buf)
+            var bi = 0
+            while bi < 8
+                ubuf[bi] = byte(int((deliver >> i64(bi * 8))) & 0xff)
+                bi += 1
+            return i64(8)
         i64(-9)             // -EBADF
 
 VFS read/write helpers. Both create a grant against the user's
@@ -872,8 +1203,10 @@ family(2), port(2, BE), addr(4), zero(8).
         var reply: [1]byte
         val r = ipc_send(port, msg, 9, reply, 1)
         if r < 0
+            posix_fd_set_error(fd, i64(-5))
             return i64(-5)
         if reply[0] != 0
+            posix_fd_set_error(fd, i64(-98))
             return i64(-98)     // -EADDRINUSE
         i64(0)
 
@@ -885,29 +1218,52 @@ forwards to the inet server. `flags` is ignored for v1.
     sys_sendto(fd: int, buf: i64, len: int, flags: int, addr_ptr: i64, addrlen: int) -> i64
         if posix_fd_kind(fd) != POSIX_FD_UDP_SOCKET
             return i64(-9)
-        if addrlen < 16
-            return i64(-22)
         if len < 0
             return i64(-22)
-        if len > 512
+        if len > 1472
             return i64(-90)     // -EMSGSIZE
         val inet_fd = posix_fd_target(fd)
         val port = inet_get_port()
         if port < 0
             return i64(-19)
-        val a: *byte = *byte(addr_ptr)
-        val dst_port = shim_read_u16(a, 2)
+        // libc `send()` lowers to sendto with addr=NULL+addrlen=0;
+        // resolve the peer from the prior sys_connect_udp. No
+        // connected peer at this point is -ENOTCONN.
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + fd
+        var dst_port: int = 0
+        var ip0: byte = byte(0)
+        var ip1: byte = byte(0)
+        var ip2: byte = byte(0)
+        var ip3: byte = byte(0)
+        if addr_ptr == i64(0)
+            if posix_fd_table[idx].udp_connected == 0
+                return i64(-107)            // -ENOTCONN
+            dst_port = posix_fd_table[idx].udp_peer_port
+            ip0 = byte(posix_fd_table[idx].udp_peer_a & 0xff)
+            ip1 = byte(posix_fd_table[idx].udp_peer_b & 0xff)
+            ip2 = byte(posix_fd_table[idx].udp_peer_c & 0xff)
+            ip3 = byte(posix_fd_table[idx].udp_peer_d & 0xff)
+        else
+            if addrlen < 16
+                return i64(-22)
+            val a: *byte = *byte(addr_ptr)
+            dst_port = shim_read_u16(a, 2)
+            ip0 = a[4]
+            ip1 = a[5]
+            ip2 = a[6]
+            ip3 = a[7]
         val ubuf: *byte = *byte(buf)
-        var msg: [523]byte
+        var msg: [1483]byte
         msg[0] = byte(INET_CMD_SENDTO)
         msg[1] = byte(inet_fd & 0xff)
         msg[2] = byte(POSIX_AF_INET)
         msg[3] = byte(dst_port >> 8)
         msg[4] = byte(dst_port & 0xff)
-        msg[5] = a[4]
-        msg[6] = a[5]
-        msg[7] = a[6]
-        msg[8] = a[7]
+        msg[5] = ip0
+        msg[6] = ip1
+        msg[7] = ip2
+        msg[8] = ip3
         msg[9] = byte((len >> 8) & 0xff)
         msg[10] = byte(len & 0xff)
         var i = 0
@@ -917,8 +1273,10 @@ forwards to the inet server. `flags` is ignored for v1.
         var reply: [3]byte
         val r = ipc_send(port, msg, 11 + len, reply, 3)
         if r < 0
+            posix_fd_set_error(fd, i64(-5))
             return i64(-5)
         if reply[0] != 0
+            posix_fd_set_error(fd, i64(-101))
             return i64(-101)    // -ENETUNREACH
         i64(shim_read_u16(reply, 1))
 
@@ -936,11 +1294,13 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
         val port = inet_get_port()
         if port < 0
             return i64(-19)
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + fd
         var cap_len = len
-        if cap_len > 512
-            cap_len = 512
+        if cap_len > 1472
+            cap_len = 1472
         val nonblock = posix_fd_flags(fd) & POSIX_O_NONBLOCK
-        var reply: [540]byte
+        var reply: [1500]byte
         if nonblock != 0
             // Non-blocking: reuse RECVFROM_TIMEOUT with a zero
             // timeout — the inet handler will reply with status=1
@@ -954,12 +1314,17 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
             nmsg[5] = byte(0)
             nmsg[6] = byte(0)
             nmsg[7] = byte(0)
-            val nr = ipc_send(port, nmsg, 8, reply, 540)
+            val nr = ipc_send(port, nmsg, 8, reply, 1500)
             if nr < 0
+                posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
             if reply[0] == byte(1)
                 return i64(-11)         // -EAGAIN
+            if reply[0] == byte(2)
+                posix_fd_set_error(fd, i64(-111))
+                return i64(-111)        // -ECONNREFUSED (ICMP error)
             if reply[0] != 0
+                posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
         else
             var msg: [4]byte
@@ -967,11 +1332,36 @@ updates `*addrlen_ptr` to 16, and copies the payload into `buf`.
             msg[1] = byte(inet_fd & 0xff)
             msg[2] = byte((cap_len >> 8) & 0xff)
             msg[3] = byte(cap_len & 0xff)
-            val r = ipc_send(port, msg, 4, reply, 540)
+            val r = ipc_send(port, msg, 4, reply, 1500)
             if r < 0
+                posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
+            if reply[0] == byte(2)
+                posix_fd_set_error(fd, i64(-111))
+                return i64(-111)        // -ECONNREFUSED (ICMP error)
             if reply[0] != 0
+                posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
+        // Connected-UDP filter (Linux semantics): if a peer was
+        // saved via sys_connect_udp and the source doesn't match,
+        // recurse to drop the datagram and try again. Each non-
+        // matching datagram is already dequeued from inet, so it's
+        // effectively dropped on the floor.
+        if posix_fd_table[idx].udp_connected != 0
+            val r_port = shim_read_u16(reply, 2)
+            var matches = 1
+            if r_port != posix_fd_table[idx].udp_peer_port
+                matches = 0
+            if (int(reply[4]) & 0xff) != posix_fd_table[idx].udp_peer_a
+                matches = 0
+            if (int(reply[5]) & 0xff) != posix_fd_table[idx].udp_peer_b
+                matches = 0
+            if (int(reply[6]) & 0xff) != posix_fd_table[idx].udp_peer_c
+                matches = 0
+            if (int(reply[7]) & 0xff) != posix_fd_table[idx].udp_peer_d
+                matches = 0
+            if matches == 0
+                return sys_recvfrom(fd, buf, len, flags, addr_ptr, addrlen_ptr)
         val src_port = shim_read_u16(reply, 2)
         val payload_len = shim_read_u16(reply, 8)
         if addr_ptr != i64(0)
@@ -1024,12 +1414,12 @@ struct iovec { void *iov_base; size_t iov_len; }; // 16 bytes
 ```
 
 To keep the gather/scatter buffer bounded, we cap `iovlen` at
-`SHIM_IOV_MAX = 8` and total bytes at `SHIM_MSG_MAX = 512` —
-matches the inet UDP datagram cap and is plenty for the TCP
-chunk-at-a-time path.
+`SHIM_IOV_MAX = 8` and total bytes at `SHIM_MSG_MAX = 1472` —
+matches the inet UDP datagram cap (full Ethernet MTU) and is
+plenty for the TCP chunk-at-a-time path.
 
     val SHIM_IOV_MAX        = 8
-    val SHIM_MSG_MAX        = 512
+    val SHIM_MSG_MAX        = 1472
 
     shim_read_ptr(p: *byte, off: int) -> i64
         var v: i64 = 0
@@ -1067,7 +1457,7 @@ chunk-at-a-time path.
         if iov_len > 0
             if iov_ptr == i64(0)
                 return i64(-14)
-        var gather: [512]byte
+        var gather: [1472]byte
         var total = 0
         val iov_base: *byte = *byte(iov_ptr)
         var ii = 0
@@ -1124,7 +1514,7 @@ chunk-at-a-time path.
             ii += 1
         if cap > SHIM_MSG_MAX
             cap = SHIM_MSG_MAX
-        var scratch: [512]byte
+        var scratch: [1472]byte
         // Stage the receive into the scratch buffer; sys_recvfrom
         // / sys_read writes there, then we scatter into the iovs.
         var got: i64 = i64(0)
@@ -1175,8 +1565,46 @@ target so subsequent read/write/close route to the right TCP
 record. The user's sockaddr_in gives dst_ip (4 bytes) and
 dst_port (BE u16) at the usual offsets.
 
+UDP variant of `connect()` — POSIX semantics: set a default peer
+that future sendto-with-NULL-addr (libc `send()`) and the recv
+filter (deferred — currently we deliver from any peer) use.
+NULL addr or sa_family == AF_UNSPEC dissolves the binding.
+Returns 0 on success, -EAFNOSUPPORT if the address family is
+something other than AF_INET / AF_UNSPEC.
+
+    sys_connect_udp(fd: int, addr_ptr: i64, addrlen: int) -> i64
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + fd
+        if addr_ptr == i64(0)
+            posix_fd_table[idx].udp_connected = 0
+            return i64(0)
+        if addrlen < 2
+            return i64(-22)
+        val a: *byte = *byte(addr_ptr)
+        val family = (int(a[0]) & 0xff) | ((int(a[1]) & 0xff) << 8)
+        if family == 0
+            // AF_UNSPEC dissolve.
+            posix_fd_table[idx].udp_connected = 0
+            return i64(0)
+        if family != POSIX_AF_INET
+            return i64(-97)         // -EAFNOSUPPORT
+        if addrlen < 16
+            return i64(-22)
+        val peer_port = ((int(a[2]) & 0xff) << 8) | (int(a[3]) & 0xff)
+        posix_fd_table[idx].udp_connected = 1
+        posix_fd_table[idx].udp_peer_port = peer_port
+        posix_fd_table[idx].udp_peer_a = int(a[4]) & 0xff
+        posix_fd_table[idx].udp_peer_b = int(a[5]) & 0xff
+        posix_fd_table[idx].udp_peer_c = int(a[6]) & 0xff
+        posix_fd_table[idx].udp_peer_d = int(a[7]) & 0xff
+        i64(0)
+
+
     sys_connect(fd: int, addr_ptr: i64, addrlen: int) -> i64
-        if posix_fd_kind(fd) != POSIX_FD_TCP_SOCKET
+        val k0 = posix_fd_kind(fd)
+        if k0 == POSIX_FD_UDP_SOCKET
+            return sys_connect_udp(fd, addr_ptr, addrlen)
+        if k0 != POSIX_FD_TCP_SOCKET
             return i64(-9)
         if addrlen < 16
             return i64(-22)
@@ -1215,8 +1643,10 @@ dst_port (BE u16) at the usual offsets.
         var reply: [2]byte
         val r = ipc_send(port, msg, 11, reply, 2)
         if r < 0
+            posix_fd_set_error(fd, i64(-5))
             return i64(-5)
         if reply[0] != 0
+            posix_fd_set_error(fd, i64(-111))
             return i64(-111)            // -ECONNREFUSED
         val inet_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = inet_fd
@@ -1226,6 +1656,19 @@ dst_port (BE u16) at the usual offsets.
         // post-handshake property (only fires in ESTABLISHED).
         if posix_fd_table[idx].flag_keepalive != 0
             shim_inet_set_keepalive(inet_fd, 1)
+        // Apply persisted TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT.
+        // Same shape as keepalive: pre-slot setsockopt landed only
+        // on the shim, so the slot starts with defaults until we
+        // replay the per-option IPC here.
+        if posix_fd_table[idx].keep_idle_secs > 0
+            shim_inet_set_keepopt(inet_fd, 0,
+                posix_fd_table[idx].keep_idle_secs * 100)
+        if posix_fd_table[idx].keep_intvl_secs > 0
+            shim_inet_set_keepopt(inet_fd, 1,
+                posix_fd_table[idx].keep_intvl_secs * 100)
+        if posix_fd_table[idx].keep_cnt > 0
+            shim_inet_set_keepopt(inet_fd, 2,
+                posix_fd_table[idx].keep_cnt)
         // Non-blocking connect: surface -EINPROGRESS so the user
         // can poll EPOLLOUT for completion. The slot is already
         // SYN_SENT; once it reaches ESTABLISHED the existing
@@ -1281,10 +1724,23 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
             return i64(-98)             // -EADDRINUSE
         val listen_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = listen_fd
+        posix_fd_table[idx].is_listen = 1
         // Apply pending SO_KEEPALIVE — accepted children inherit
         // the listener's flag via inet's handle_passive_syn.
         if posix_fd_table[idx].flag_keepalive != 0
             shim_inet_set_keepalive(listen_fd, 1)
+        // Apply pending TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT —
+        // accepted children also inherit these via
+        // inet_tcp_handle_passive_syn.
+        if posix_fd_table[idx].keep_idle_secs > 0
+            shim_inet_set_keepopt(listen_fd, 0,
+                posix_fd_table[idx].keep_idle_secs * 100)
+        if posix_fd_table[idx].keep_intvl_secs > 0
+            shim_inet_set_keepopt(listen_fd, 1,
+                posix_fd_table[idx].keep_intvl_secs * 100)
+        if posix_fd_table[idx].keep_cnt > 0
+            shim_inet_set_keepopt(listen_fd, 2,
+                posix_fd_table[idx].keep_cnt)
         i64(0)
 
 SYS_ACCEPT. Blocks until a child connection arrives unless the
@@ -1461,6 +1917,84 @@ Returns 0 on success, negative errno on failure.
             return -22
         0
 
+Send INET_CMD_TCP_SET_KEEPOPT.  `kind` selects IDLE (0), INTVL
+(1), or CNT (2).  `value` is in *ticks* for IDLE/INTVL — this
+helper does NOT do unit conversion; the caller has already
+converted seconds→ticks. Returns 0 on success, negative errno on
+failure.
+
+    shim_inet_set_keepopt(inet_fd: int, kind: int, value: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [8]byte
+        msg[0] = byte(INET_CMD_TCP_SET_KEEPOPT)
+        shim_write_u16(msg, 1, inet_fd)
+        msg[3] = byte(kind & 0xff)
+        msg[4] = byte((value >> 24) & 0xff)
+        msg[5] = byte((value >> 16) & 0xff)
+        msg[6] = byte((value >>  8) & 0xff)
+        msg[7] = byte( value        & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 8, reply, 1)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            return -22
+        0
+
+
+Send INET_CMD_TCP_GET_KEEPOPT.  Returns the per-socket value in
+*ticks* (or count for CNT) on success via the `out v` parameter,
+or a negative errno via the function return.  Caller-side does
+the ticks→seconds conversion before handing back to userspace.
+
+    shim_inet_get_keepopt(inet_fd: int, kind: int, out v: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [4]byte
+        msg[0] = byte(INET_CMD_TCP_GET_KEEPOPT)
+        shim_write_u16(msg, 1, inet_fd)
+        msg[3] = byte(kind & 0xff)
+        var reply: [5]byte
+        val r = ipc_send(port, msg, 4, reply, 5)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            return -22
+        val b1 = (int(reply[1]) & 0xff) << 24
+        val b2 = (int(reply[2]) & 0xff) << 16
+        val b3 = (int(reply[3]) & 0xff) <<  8
+        val b4 =  int(reply[4]) & 0xff
+        v = b1 | b2 | b3 | b4
+        0
+
+
+Send `INET_CMD_TCP_GET_ERR`.  Returns 0 on success with the
+positive errno written into `out err` (0 = no pending error), or
+a negative errno on IPC failure.  inet clears its side as part
+of the read so the SO_ERROR read-and-clear contract holds even
+across the slot teardown.
+
+    shim_inet_get_tcp_err(inet_fd: int, out err: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_TCP_GET_ERR)
+        shim_write_u16(msg, 1, inet_fd)
+        var reply: [2]byte
+        val r = ipc_send(port, msg, 3, reply, 2)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            err = 0
+            return 0
+        err = int(reply[1]) & 0xff
+        0
+
+
 SYS_SETSOCKOPT / SYS_GETSOCKOPT. The inet server tracks
 `SO_SNDBUF` / `SO_RCVBUF` (since Phase E bufsize chunk).  The
 remaining accept-list options (SO_REUSEADDR, SO_BROADCAST,
@@ -1583,6 +2117,40 @@ as -EINVAL).
                     return i64(-22)
                 posix_fd_table[tidx].flag_nodelay = v
                 return i64(0)
+            // TCP_KEEPIDLE (4) / TCP_KEEPINTVL (5) — seconds.
+            // TCP_KEEPCNT (6) — count.
+            if optname == 4 || optname == 5 || optname == 6
+                if k != POSIX_FD_TCP_SOCKET
+                    return i64(-92)
+                var v = 0
+                if shim_sockopt_read_int(optval, optlen, v) != 0
+                    return i64(-22)
+                if v < 0
+                    v = 0
+                if optname == 4
+                    posix_fd_table[tidx].keep_idle_secs = v
+                else if optname == 5
+                    posix_fd_table[tidx].keep_intvl_secs = v
+                else
+                    posix_fd_table[tidx].keep_cnt = v
+                // Push to inet immediately if a slot exists; pre-slot
+                // calls just persist on the shim fd. Slot creation
+                // (sys_connect / sys_listen) replays them via the
+                // same path.
+                val ko_inet_fd = posix_fd_target(fd)
+                if ko_inet_fd >= 0
+                    var kind = 0
+                    if optname == 5
+                        kind = 1
+                    else if optname == 6
+                        kind = 2
+                    var ticks = v
+                    if optname != 6
+                        ticks = v * 100        // sec → tick @ 100 Hz
+                    val rc = shim_inet_set_keepopt(ko_inet_fd, kind, ticks)
+                    if rc != 0
+                        return i64(rc)
+                return i64(0)
         i64(-92)                        // -ENOPROTOOPT
 
 `val` is a pointer to the option buffer; `len_ptr` points at an
@@ -1591,10 +2159,11 @@ For SO_SNDBUF/SO_RCVBUF the value comes from inet (or the persisted
 pending size when there's no slot yet).  For the other accept-list
 flags (SO_REUSEADDR / SO_BROADCAST / SO_KEEPALIVE / SO_REUSEPORT /
 TCP_NODELAY) we echo the actually-set value out of the shim fd
-table.  SO_ERROR — which slix doesn't track per-socket — still
-returns 0 (clean state).  `*len_ptr = 4` in every accepted case.
-`-ENOPROTOOPT` is returned for anything outside the accept-list;
-the option buffer is left untouched in that case.
+table.  SO_ERROR returns the positive errno of the most recent
+socket-layer failure (clearing it to 0) — Linux read-and-reset
+semantics.  `*len_ptr = 4` in every accepted case.  `-ENOPROTOOPT`
+is returned for anything outside the accept-list; the option buffer
+is left untouched in that case.
 
     sys_getsockopt(fd: int, level: int, optname: int, optval: i64, len_ptr: i64) -> i64
         val k = posix_fd_kind(fd)
@@ -1604,6 +2173,8 @@ the option buffer is left untouched in that case.
         var accept = 0
         if level == 1
             if optname == 2
+                accept = 1
+            if optname == 3
                 accept = 1
             if optname == 4
                 accept = 1
@@ -1619,8 +2190,18 @@ the option buffer is left untouched in that case.
                 accept = 1
             if optname == 15
                 accept = 1
+            if optname == 30
+                accept = 1
+            if optname == 38
+                accept = 1
+            if optname == 39
+                accept = 1
         if level == 6
             if optname == 1
+                accept = 1
+            if optname == 4 || optname == 5 || optname == 6
+                accept = 1
+            if optname == 11
                 accept = 1
         if accept == 0
             return i64(-92)             // -ENOPROTOOPT
@@ -1628,9 +2209,14 @@ the option buffer is left untouched in that case.
             return i64(-14)             // -EFAULT
         val lp: *i32 = *i32(len_ptr)
         val cap = int(*lp)
-        // SO_LINGER returns a struct linger (8 bytes); everything
-        // else is an int (4 bytes).
-        val need = if optname == 13 then 8 else 4
+        // SO_LINGER returns 8 bytes, TCP_INFO can fill up to 104
+        // (we truncate to caller's cap), everything else is an int.
+        var need = 4
+        if optname == 13
+            need = 8
+        if level == 6
+            if optname == 11
+                need = 1                // Linux fills as much as cap
         if cap < need
             return i64(-22)             // -EINVAL
         if optval == i64(0)
@@ -1649,7 +2235,75 @@ the option buffer is left untouched in that case.
                 *secs_ptr = i32(posix_fd_table[lidx].linger_secs)
                 *lp = i32(8)
                 return i64(0)
+        // TCP_INFO (level=IPPROTO_TCP=6, optname=11). Fetch the
+        // 104-byte struct from inet via INET_CMD_TCP_GET_INFO and
+        // copy as much as the caller's buffer holds — Linux
+        // truncates silently rather than rejecting smaller bufs.
+        if level == 6
+            if optname == 11
+                if k != POSIX_FD_TCP_SOCKET
+                    return i64(-92)         // -ENOPROTOOPT
+                val info_inet_fd = posix_fd_target(fd)
+                if info_inet_fd < 0
+                    return i64(-22)         // pre-connect TCP fd
+                val iport = inet_get_port()
+                if iport < 0
+                    return i64(-5)
+                var imsg: [3]byte
+                imsg[0] = byte(INET_CMD_TCP_GET_INFO)
+                shim_write_u16(imsg, 1, info_inet_fd)
+                var ireply: [105]byte
+                val ir = ipc_send(iport, imsg, 3, ireply, 105)
+                if ir < 0
+                    return i64(-5)
+                if ireply[0] != 0
+                    return i64(-22)
+                val ubuf: *byte = *byte(optval)
+                var cw = cap
+                if cw > 104
+                    cw = 104
+                var ci = 0
+                while ci < cw
+                    ubuf[ci] = ireply[1 + ci]
+                    ci += 1
+                *lp = i32(cw)
+                return i64(0)
         val vp: *i32 = *i32(optval)
+        // Read-only introspection getsockopts. SO_TYPE / SO_PROTOCOL
+        // are derived from the fd kind; SO_DOMAIN is always AF_INET
+        // (slix has no AF_UNIX or AF_INET6); SO_ACCEPTCONN reflects
+        // the per-fd is_listen flag set in sys_listen. Real Linux
+        // also reports these and several libraries probe via them
+        // (e.g. libuv's socket-type detection on accept'd fds).
+        if level == 1
+            if optname == 3
+                // SO_TYPE: SOCK_STREAM = 1, SOCK_DGRAM = 2
+                if k == POSIX_FD_TCP_SOCKET
+                    *vp = i32(1)
+                else
+                    *vp = i32(2)
+                *lp = i32(4)
+                return i64(0)
+            if optname == 30
+                // SO_ACCEPTCONN: 1 iff post-listen, else 0
+                val pid_ac = posix_fd_current_pid()
+                val acidx = pid_ac * POSIX_FDS_PER_PROC + fd
+                *vp = i32(posix_fd_table[acidx].is_listen)
+                *lp = i32(4)
+                return i64(0)
+            if optname == 38
+                // SO_PROTOCOL: IPPROTO_TCP = 6, IPPROTO_UDP = 17
+                if k == POSIX_FD_TCP_SOCKET
+                    *vp = i32(6)
+                else
+                    *vp = i32(17)
+                *lp = i32(4)
+                return i64(0)
+            if optname == 39
+                // SO_DOMAIN: always AF_INET (2)
+                *vp = i32(2)
+                *lp = i32(4)
+                return i64(0)
         // SO_SNDBUF / SO_RCVBUF: ask the inet server for the actual
         // per-socket size.  Pre-connect TCP fds (no inet slot yet)
         // report the pending value the caller stashed via setsockopt
@@ -1697,10 +2351,68 @@ the option buffer is left untouched in that case.
                 *vp = i32(shim_read_u16(reply, 1))
                 *lp = i32(4)
                 return i64(0)
+        // TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT.  Always answer
+        // from the shim's persisted value — that's the source of
+        // truth for what the user set, and round-tripping through
+        // the inet ticks representation would lose the original
+        // seconds (60 sec → 6000 ticks → 60 sec is fine, but small
+        // values can drift if the user passes 0 / 1 in seconds and
+        // we'd return the default rather than the persisted 0).
+        if level == 6
+            if optname == 4 || optname == 5 || optname == 6
+                if k != POSIX_FD_TCP_SOCKET
+                    *vp = i32(0)
+                    *lp = i32(4)
+                    return i64(0)
+                val pid_k = posix_fd_current_pid()
+                val kidx = pid_k * POSIX_FDS_PER_PROC + fd
+                var kv = 0
+                if optname == 4
+                    kv = posix_fd_table[kidx].keep_idle_secs
+                else if optname == 5
+                    kv = posix_fd_table[kidx].keep_intvl_secs
+                else
+                    kv = posix_fd_table[kidx].keep_cnt
+                *vp = i32(kv)
+                *lp = i32(4)
+                return i64(0)
+        // SO_ERROR — Linux read-and-clear semantics.  Returns the
+        // positive errno of the most recent socket-layer failure
+        // (set by sys_connect / sys_bind / sys_sendto / sys_recvfrom
+        // when they return an error to the user) and resets to 0.
+        // A fresh socket reads back 0; a socket whose previous
+        // syscall failed reads back the errno once.
+        //
+        // For TCP sockets we also consult inet's `pending_error`
+        // channel via `INET_CMD_TCP_GET_ERR`. That covers the
+        // asynchronous-failure path where a connection error (RST in
+        // SYN_SENT, post-handshake RST, retransmit/keepalive timeout)
+        // happens *after* the user has stopped issuing syscalls and
+        // is sitting in epoll — the shim's local `last_error` won't
+        // catch those because no syscall returned the errno. Only
+        // query when local is 0 so the local "most recent syscall
+        // failure" has priority (and one read still clears both
+        // sources atomically — inet clears as part of the read).
+        if level == 1
+            if optname == 4
+                val pid_e = posix_fd_current_pid()
+                val eidx = pid_e * POSIX_FDS_PER_PROC + fd
+                var e_val = posix_fd_table[eidx].last_error
+                posix_fd_table[eidx].last_error = 0
+                if e_val == 0
+                    if k == POSIX_FD_TCP_SOCKET
+                        val inet_fd = posix_fd_target(fd)
+                        if inet_fd >= 0
+                            var ie = 0
+                            val rr = shim_inet_get_tcp_err(inet_fd, ie)
+                            if rr == 0
+                                e_val = ie
+                *vp = i32(e_val)
+                *lp = i32(4)
+                return i64(0)
         // Echo the persisted flag value for the accept-list options
         // (SO_REUSEADDR / SO_BROADCAST / SO_KEEPALIVE / SO_REUSEPORT
-        // / TCP_NODELAY).  SO_ERROR (4) has no per-socket state in
-        // slix; it falls through with value 0 (clean state).
+        // / TCP_NODELAY).
         val pid = posix_fd_current_pid()
         val gidx = pid * POSIX_FDS_PER_PROC + fd
         var echoed = 0
@@ -2187,6 +2899,48 @@ to stay consistent with the rest of the VFS protocol.
         ipc_send(port, msg, 2, reply, 1)
 
 
+`epoll_tty_subscribe` covers POSIX_FD_STDIN. The TTY server
+keys subscriptions on (console, sender_tid, inst); we hardcode
+console=0 since slix's per-process tty assignment is single-
+console today.
+
+    epoll_tty_subscribe(target_fd: int, inst: int)
+        if posix_fd_kind(target_fd) != POSIX_FD_STDIN
+            return
+        val port = tty_get_port()
+        if port < 0
+            return
+        var msg: [3]byte
+        msg[0] = byte(TTY_CMD_EPOLL_SUB_C)
+        msg[1] = byte(0)        // console
+        msg[2] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
+
+    epoll_tty_unsubscribe(target_fd: int, inst: int)
+        if posix_fd_kind(target_fd) != POSIX_FD_STDIN
+            return
+        val port = tty_get_port()
+        if port < 0
+            return
+        var msg: [3]byte
+        msg[0] = byte(TTY_CMD_EPOLL_UNSUB_C)
+        msg[1] = byte(0)
+        msg[2] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
+
+    epoll_inst_close_tty(inst: int)
+        val port = tty_get_port()
+        if port < 0
+            return
+        var msg: [2]byte
+        msg[0] = byte(TTY_CMD_EPOLL_INST_CLOSE_C)
+        msg[1] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 2, reply, 1)
+
+
 Combined sub/unsub helpers — single call site for the
 `epoll_ctl` path, no need to teach it about the kind/owner
 split. Each underlying helper short-circuits if the fd doesn't
@@ -2195,14 +2949,17 @@ belong to it, so calling both is safe and idempotent.
     epoll_subscribe(target_fd: int, inst: int)
         epoll_inet_subscribe(target_fd, inst)
         epoll_vfs_subscribe(target_fd, inst)
+        epoll_tty_subscribe(target_fd, inst)
 
     epoll_unsubscribe(target_fd: int, inst: int)
         epoll_inet_unsubscribe(target_fd, inst)
         epoll_vfs_unsubscribe(target_fd, inst)
+        epoll_tty_unsubscribe(target_fd, inst)
 
     epoll_inst_close_all(inst: int)
         epoll_inst_close_inet(inst)
         epoll_inst_close_vfs(inst)
+        epoll_inst_close_tty(inst)
 
 
 SYS_EPOLL_CREATE1. Allocates a fresh epoll instance and parks
@@ -2210,6 +2967,390 @@ it in a `POSIX_FD_EPOLL` slot. `flags` would carry
 `EPOLL_CLOEXEC` / `EPOLL_NONBLOCK`; we honour O_NONBLOCK in
 the slot but exec/CLOEXEC isn't tracked yet — see the
 posix_fd_bridge memory.
+
+SYS_EVENTFD2 (slix-musl syscall 156, sits next to the
+epoll triplet at 153/154/155). Allocates an
+eventfd backing slot with `initval` as the starting counter.
+`flags` honors:
+
+- `EFD_NONBLOCK` (0x800 = 2048) — same bit as `O_NONBLOCK`,
+  recorded on the slot's flags so read/write pick the
+  EAGAIN path on starvation.
+- `EFD_CLOEXEC`  (0x80000 = 524288) — slix doesn't track CLOEXEC
+  yet; accepted and ignored (matches the existing accept4 stance).
+- `EFD_SEMAPHORE` (1) — read decrements the counter by 1 instead
+  of returning the full count and zeroing it.
+
+Returns the allocated POSIX fd, or -EMFILE if no slot is free.
+
+    val POSIX_EFD_SEMAPHORE = 1
+    val POSIX_EFD_CLOEXEC   = 524288
+    val POSIX_EFD_NONBLOCK  = 2048
+
+    sys_eventfd2(initval: int, flags: int) -> i64
+        val pfd = posix_fd_alloc(POSIX_FD_EVENTFD, 0)
+        if pfd < 0
+            return i64(-24)
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + pfd
+        posix_fd_table[idx].eventfd_count = i64(initval)
+        var sem = 0
+        if (flags & POSIX_EFD_SEMAPHORE) != 0
+            sem = 1
+        posix_fd_table[idx].eventfd_semaphore = sem
+        var fd_flags = 0
+        if (flags & POSIX_EFD_NONBLOCK) != 0
+            fd_flags = fd_flags | POSIX_O_NONBLOCK
+        posix_fd_set_flags(pfd, fd_flags)
+        i64(pfd)
+
+
+SYS_TIMERFD_CREATE / SETTIME / GETTIME (slix-musl 356/357/358).
+Periodic / one-shot kernel-managed timer fd. Read returns the
+number of expirations since the last read; epoll EPOLLIN fires
+when expirations > 0.
+
+Slix runs the scheduler at 100 Hz, so sub-10 ms precision rounds
+down to whole ticks. `CLOCK_REALTIME` and `CLOCK_MONOTONIC` are
+both backed by `uptime()` here — slix has no wall-clock-vs-
+monotonic distinction, so the two clockids resolve to the same
+tick stream.  Programs that depend on a real wall clock (e.g.
+DST handling) won't get one until a real RTC bridge lands.
+
+Time conversion: 1 tick = 10 ms = 10_000_000 ns. We round down
+on the nsec → tick conversion, which means a `tv_nsec=5_000_000`
+(5 ms) request lands at "next whole tick" and may fire up to
+10 ms late.  Programs needing finer precision lose nothing they
+weren't going to lose to scheduler quanta anyway.
+
+`flags` (TFD_NONBLOCK = 2048, TFD_CLOEXEC = 524288) — same bits
+as O_NONBLOCK / O_CLOEXEC. Non-blocking is honoured; CLOEXEC
+accept-and-ignore (matches accept4 / eventfd2).
+
+`itimerspec` is a 32-byte LP64 struct: it_interval{tv_sec(8),
+tv_nsec(8)} + it_value{tv_sec(8), tv_nsec(8)}.
+
+    val POSIX_TFD_NONBLOCK  = 2048
+    val POSIX_TFD_CLOEXEC   = 524288
+    val POSIX_TFD_TIMER_ABSTIME = 1
+    val POSIX_CLOCK_REALTIME  = 0
+    val POSIX_CLOCK_MONOTONIC = 1
+
+    shim_itimerspec_to_ticks(p: *byte, off: int) -> int
+        // Read tv_sec (low 8B) + tv_nsec (high 8B). Slix's tick
+        // resolution is 10 ms so we don't need the high half of
+        // tv_sec for any sane timer; clamp to int range.
+        var sec_lo = 0
+        var bi = 0
+        while bi < 4
+            sec_lo = sec_lo | ((int(p[off + bi]) & 0xff) << (bi * 8))
+            bi += 1
+        var nsec_lo = 0
+        bi = 0
+        while bi < 4
+            nsec_lo = nsec_lo | ((int(p[off + 8 + bi]) & 0xff) << (bi * 8))
+            bi += 1
+        if sec_lo < 0
+            sec_lo = 0
+        if nsec_lo < 0
+            nsec_lo = 0
+        sec_lo * 100 + (nsec_lo / 10000000)
+
+    shim_ticks_to_itimerspec(p: *byte, off: int, ticks: int)
+        // Write tv_sec (8B LE) + tv_nsec (8B LE). Use i64 for the
+        // shift-and-mask loop so byte-extraction past bit 31 doesn't
+        // hit the i32 shift-by-≥-width undefined-behaviour path some
+        // sysl backends fold into a no-op.
+        val sec = i64(ticks / 100)
+        val ns = i64((ticks % 100) * 10000000)
+        var bi = 0
+        while bi < 8
+            p[off + bi] = byte(int((sec >> i64(bi * 8))) & 0xff)
+            bi += 1
+        bi = 0
+        while bi < 8
+            p[off + 8 + bi] = byte(int((ns >> i64(bi * 8))) & 0xff)
+            bi += 1
+
+
+Catch up `expirations` to current uptime: every full `interval`
+between `next_tick` and now becomes one expiration. Returns
+without doing anything if the timer is disarmed or hasn't fired
+yet. Called lazily from sys_read / epoll_query_ready so the timer
+state is always coherent at the moment the user observes it.
+
+    timerfd_advance(idx: int)
+        if posix_fd_table[idx].timerfd_next_tick == 0
+            return
+        val now = int(uptime())
+        if now < posix_fd_table[idx].timerfd_next_tick
+            return
+        val interval = posix_fd_table[idx].timerfd_interval_ticks
+        if interval <= 0
+            // One-shot timer: a single expiration, then disarm.
+            val cur1 = posix_fd_table[idx].timerfd_expirations
+            posix_fd_table[idx].timerfd_expirations = cur1 + i64(1)
+            posix_fd_table[idx].timerfd_next_tick = 0
+            return
+        // Periodic: catch up by however many full intervals have
+        // elapsed past `next_tick`.  +1 covers the boundary tick
+        // itself.
+        val past = now - posix_fd_table[idx].timerfd_next_tick
+        val fired = (past / interval) + 1
+        val cur2 = posix_fd_table[idx].timerfd_expirations
+        posix_fd_table[idx].timerfd_expirations = cur2 + i64(fired)
+        val nt = posix_fd_table[idx].timerfd_next_tick
+        posix_fd_table[idx].timerfd_next_tick = nt + fired * interval
+
+
+    sys_timerfd_create(clockid: int, flags: int) -> i64
+        if clockid != POSIX_CLOCK_REALTIME
+            if clockid != POSIX_CLOCK_MONOTONIC
+                return i64(-22)
+        val pfd = posix_fd_alloc(POSIX_FD_TIMERFD, 0)
+        if pfd < 0
+            return i64(-24)
+        var fd_flags = 0
+        if (flags & POSIX_TFD_NONBLOCK) != 0
+            fd_flags = fd_flags | POSIX_O_NONBLOCK
+        posix_fd_set_flags(pfd, fd_flags)
+        i64(pfd)
+
+
+    sys_timerfd_settime(fd: int, flags: int, new_value: i64, old_value: i64) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_TIMERFD
+            return i64(-22)
+        if new_value == i64(0)
+            return i64(-14)
+        val pid_t = posix_fd_current_pid()
+        val tidx = pid_t * POSIX_FDS_PER_PROC + fd
+        // Catch up before snapshotting old_value so any
+        // unobserved expirations are accounted to the previous
+        // configuration.
+        timerfd_advance(tidx)
+        // Stash old value if requested (interval, then remaining
+        // time-to-fire).
+        if old_value != i64(0)
+            val oldp: *byte = *byte(old_value)
+            shim_ticks_to_itimerspec(oldp, 0,
+                posix_fd_table[tidx].timerfd_interval_ticks)
+            var remaining = 0
+            if posix_fd_table[tidx].timerfd_next_tick > 0
+                remaining = posix_fd_table[tidx].timerfd_next_tick - int(uptime())
+                if remaining < 0
+                    remaining = 0
+            shim_ticks_to_itimerspec(oldp, 16, remaining)
+        val newp: *byte = *byte(new_value)
+        val it_interval_ticks = shim_itimerspec_to_ticks(newp, 0)
+        val it_value_ticks = shim_itimerspec_to_ticks(newp, 16)
+        // it_value == 0 disarms the timer (Linux semantics).
+        if it_value_ticks <= 0
+            posix_fd_table[tidx].timerfd_interval_ticks = 0
+            posix_fd_table[tidx].timerfd_next_tick = 0
+            return i64(0)
+        // TFD_TIMER_ABSTIME: it_value is an absolute tick (treating
+        // tv_sec*100+tv_nsec/1e7 as ticks-since-boot).  Otherwise
+        // it_value is relative to now.  Slix collapses both clocks
+        // to uptime() so the meaning of "absolute" matches whatever
+        // the caller expects from CLOCK_MONOTONIC.
+        if (flags & POSIX_TFD_TIMER_ABSTIME) != 0
+            posix_fd_table[tidx].timerfd_next_tick = it_value_ticks
+        else
+            posix_fd_table[tidx].timerfd_next_tick = int(uptime()) + it_value_ticks
+        posix_fd_table[tidx].timerfd_interval_ticks = it_interval_ticks
+        // Reset expirations to 0 on rearm (Linux: setttime starts
+        // fresh; the read counter is wiped).
+        posix_fd_table[tidx].timerfd_expirations = i64(0)
+        i64(0)
+
+
+    sys_timerfd_gettime(fd: int, curr_value: i64) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_TIMERFD
+            return i64(-22)
+        if curr_value == i64(0)
+            return i64(-14)
+        val pid_t = posix_fd_current_pid()
+        val tidx = pid_t * POSIX_FDS_PER_PROC + fd
+        // Catch up so the snapshot reflects the live timer state.
+        timerfd_advance(tidx)
+        val cp: *byte = *byte(curr_value)
+        shim_ticks_to_itimerspec(cp, 0,
+            posix_fd_table[tidx].timerfd_interval_ticks)
+        var remaining = 0
+        if posix_fd_table[tidx].timerfd_next_tick > 0
+            remaining = posix_fd_table[tidx].timerfd_next_tick - int(uptime())
+            if remaining < 0
+                remaining = 0
+        shim_ticks_to_itimerspec(cp, 16, remaining)
+        i64(0)
+
+
+### POSIX time syscalls
+
+`clock_gettime` / `gettimeofday` / `clock_getres` / `nanosleep` /
+`clock_nanosleep`. All clocks (REALTIME, MONOTONIC, BOOTTIME,
+PROCESS_CPUTIME, THREAD_CPUTIME, *_RAW, *_COARSE) collapse to
+the kernel's `uptime()` tick counter at 100 Hz — slix has no
+wallclock or per-thread CPU accounting yet, but apps that
+just need a monotonic timestamp (the overwhelming majority)
+keep working. timerfd already takes the same shortcut.
+
+    sys_clock_gettime(clockid: int, tp: i64) -> i64
+        if tp == i64(0)
+            return i64(-14)             // -EFAULT
+        val p: *byte = *byte(tp)
+        shim_ticks_to_itimerspec(p, 0, int(uptime()))
+        i64(0)
+
+    sys_clock_getres(clockid: int, tp: i64) -> i64
+        if tp == i64(0)
+            return i64(0)               // Linux: NULL is allowed for clock_getres
+        val p: *byte = *byte(tp)
+        // Resolution = 10ms = 10_000_000 ns. Reuse the helper
+        // by passing 1 tick.
+        shim_ticks_to_itimerspec(p, 0, 1)
+        i64(0)
+
+`gettimeofday` predates `clock_gettime`. Layout differs by one
+field: `tv_usec` (microseconds) instead of `tv_nsec`. The
+`tz` arg has been deprecated since the 1990s — Linux ignores
+it but accepts the pointer. We do the same.
+
+    sys_gettimeofday(tv: i64, tz: i64) -> i64
+        if tv == i64(0)
+            return i64(-14)
+        val p: *byte = *byte(tv)
+        val ticks = int(uptime())
+        val sec = i64(ticks / 100)
+        val usec = i64((ticks % 100) * 10000)
+        var bi = 0
+        while bi < 8
+            p[bi] = byte(int((sec >> i64(bi * 8))) & 0xff)
+            bi += 1
+        bi = 0
+        while bi < 8
+            p[8 + bi] = byte(int((usec >> i64(bi * 8))) & 0xff)
+            bi += 1
+        // tz: write {0, 0} if non-null. Most callers pass NULL
+        // these days but glibc still accepts it.
+        if tz != i64(0)
+            val tzp: *byte = *byte(tz)
+            var ti = 0
+            while ti < 8
+                tzp[ti] = byte(0)
+                ti += 1
+        i64(0)
+
+`nanosleep` and `clock_nanosleep` block for the requested
+duration, rounded up to the next 10ms tick. We don't have
+signals so the call always completes — `rem` (if non-null) is
+zeroed to indicate "no time left". TIMER_ABSTIME (clock_nanosleep
+flag = 1) means the request is an absolute deadline — convert
+to relative by subtracting `uptime()`.
+
+    shim_timespec_to_ticks(p: *byte) -> int
+        // Read tv_sec (i64) + tv_nsec (i64), convert to a
+        // tick count rounded up so a 1ns sleep yields 1 tick
+        // (10 ms) instead of 0.
+        var sec = i64(0)
+        var i = 7
+        while i >= 0
+            sec = (sec << i64(8)) | i64(int(p[i]) & 0xff)
+            i -= 1
+        var nsec = i64(0)
+        i = 7
+        while i >= 0
+            nsec = (nsec << i64(8)) | i64(int(p[8 + i]) & 0xff)
+            i -= 1
+        // ticks = sec*100 + ceil(nsec / 10_000_000)
+        val tick_from_sec = int(sec) * 100
+        val tick_from_ns = int((nsec + i64(9999999)) / i64(10000000))
+        var t = tick_from_sec + tick_from_ns
+        if t < 0
+            t = 0
+        t
+
+    sys_nanosleep(req: i64, rem: i64) -> i64
+        if req == i64(0)
+            return i64(-14)
+        val rp: *byte = *byte(req)
+        val ticks = shim_timespec_to_ticks(rp)
+        if ticks > 0
+            sleep(ticks)
+        if rem != i64(0)
+            val remp: *byte = *byte(rem)
+            var ri = 0
+            while ri < 16
+                remp[ri] = byte(0)
+                ri += 1
+        i64(0)
+
+### getrandom
+
+Non-cryptographic xorshift64* PRNG seeded from `uptime()` plus
+a per-call counter. Real `getrandom(2)` taps the kernel CSPRNG;
+slix has no entropy source today, so this is best-effort
+"different bytes every call" useful for non-crypto consumers
+(libuv buffer cookies, malloc-debug salts, etc.). Crypto code
+should not rely on this — once a real entropy source lands,
+swap the seed/state generator.
+
+`flags` is accepted but ignored: GRND_NONBLOCK (1) is naturally
+satisfied (we never block), GRND_RANDOM (2) is irrelevant
+without a real CSPRNG. Returns the byte count on success,
+-EFAULT on bad buffer.
+
+    var rng_state: i64 = i64(0)
+
+    rng_step() -> i64
+        if rng_state == i64(0)
+            rng_state = i64(uptime()) | i64(0x9E3779B97F4A7C15)
+        var x = rng_state
+        x = x ^ (x << i64(13))
+        x = x ^ (i64(u64(x) >> u64(7)))
+        x = x ^ (x << i64(17))
+        rng_state = x
+        x
+
+    sys_getrandom(buf: i64, len: int, flags: int) -> i64
+        if buf == i64(0)
+            return i64(-14)             // -EFAULT
+        if len < 0
+            return i64(-22)
+        val p: *byte = *byte(buf)
+        var written = 0
+        while written < len
+            val r = rng_step()
+            var bi = 0
+            while bi < 8 && written + bi < len
+                p[written + bi] = byte(int((r >> i64(bi * 8))) & 0xff)
+                bi += 1
+            written += bi
+        i64(written)
+
+
+    sys_clock_nanosleep(clockid: int, flags: int, req: i64, rem: i64) -> i64
+        if req == i64(0)
+            return i64(-14)
+        val rp: *byte = *byte(req)
+        var ticks = shim_timespec_to_ticks(rp)
+        // TIMER_ABSTIME = 1: req is an absolute time. Convert to
+        // relative by subtracting current uptime.
+        if (flags & 1) != 0
+            val now_t = int(uptime())
+            ticks = ticks - now_t
+            if ticks < 0
+                ticks = 0
+        if ticks > 0
+            sleep(ticks)
+        if rem != i64(0)
+            val remp: *byte = *byte(rem)
+            var ri = 0
+            while ri < 16
+                remp[ri] = byte(0)
+                ri += 1
+        i64(0)
+
 
     sys_epoll_create1(epoll_flags: int) -> i64
         val inst = epoll_alloc_inst()
@@ -2392,9 +3533,51 @@ multi-fd EPOLLET loops.
             *seq_out = (int(reply[3]) & 0xff) | ((int(reply[4]) & 0xff) << 8) | ((int(reply[5]) & 0xff) << 16) | ((int(reply[6]) & 0xff) << 24)
             return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         if k == POSIX_FD_STDIN
-            return 0
+            // Ask the tty server for readiness on console 0 plus
+            // its per-console fire_seq. Reply mirrors VFS_CMD_POLL
+            // so the existing 7-byte parse layout is reused.
+            val port_t = tty_get_port()
+            if port_t < 0
+                return 0
+            var msg: [2]byte
+            msg[0] = byte(TTY_CMD_POLL_C)
+            msg[1] = byte(0)
+            var reply: [7]byte
+            val r = ipc_send(port_t, msg, 2, reply, 7)
+            if r < 0
+                return 0
+            if reply[0] != 0
+                return 0
+            val raw = (int(reply[1]) & 0xff) | ((int(reply[2]) & 0xff) << 8)
+            *seq_out = (int(reply[3]) & 0xff) | ((int(reply[4]) & 0xff) << 8) | ((int(reply[5]) & 0xff) << 16) | ((int(reply[6]) & 0xff) << 24)
+            return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         if k == POSIX_FD_STDOUT || k == POSIX_FD_STDERR
             return want & POSIX_EPOLLOUT
+        if k == POSIX_FD_EVENTFD
+            // Readable when count > 0; writable when count <
+            // u64-1 (i.e. add of 1 wouldn't overflow). Counter is
+            // i64 internally with i64::MAX representing "near max"
+            // — a tighter bound than Linux's u64::MAX-1, but the
+            // gap is irrelevant for any practical use.
+            val pid_e = posix_fd_current_pid()
+            val eidx = pid_e * POSIX_FDS_PER_PROC + target_fd
+            val cnt = posix_fd_table[eidx].eventfd_count
+            var ev = 0
+            if cnt > i64(0)
+                ev = ev | POSIX_EPOLLIN
+            if cnt < i64(0x7fffffffffffffff)
+                ev = ev | POSIX_EPOLLOUT
+            return ev & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
+        if k == POSIX_FD_TIMERFD
+            // Catch up before reporting so a fired-but-unread
+            // timer registers as readable on the entry-pass scan.
+            val pid_t = posix_fd_current_pid()
+            val tidx = pid_t * POSIX_FDS_PER_PROC + target_fd
+            timerfd_advance(tidx)
+            var ev = 0
+            if posix_fd_table[tidx].timerfd_expirations > i64(0)
+                ev = ev | POSIX_EPOLLIN
+            return ev & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         0
 
 `epoll_scan_once` walks the instance's entries, queries inet

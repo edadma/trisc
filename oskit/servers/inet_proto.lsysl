@@ -311,6 +311,296 @@ After insertion, drain any UDP datagrams pending on this IP.
         inet_arp_drain_pending(ip)
 
 
+### IP reassembly (ingress fragments)
+
+Inbound IPv4 fragments are stashed here and reassembled into a
+synthetic full-size frame that re-enters `inet_handle_frame` for
+normal L4 dispatch. Without this, any peer-side fragmentation
+(e.g. a UDP datagram > MTU from a peer that ignored our advertised
+MSS) silently drops in L4 demux because the partial header fails
+checksum.
+
+We support fragments up to `IP_REASM_MAX_DATA` bytes of L4 payload
+total — 8 KB, enough for jumbo UDP. Four concurrent datagram
+assemblies are tracked; each times out after `IP_REASM_TIMEOUT`
+ticks (RFC 791 says 30 s; 3000 ticks @ 100 Hz). Timed-out slots
+are silently dropped — ICMP Time Exceeded emit is a follow-up.
+
+    val IP_REASM_SLOTS    = 4
+    val IP_REASM_MAX_DATA = 8192
+    val IP_REASM_TIMEOUT  = 3000
+    val IP_REASM_HDR_MAX  = 60
+
+    struct IpReasmSlot
+        in_use: int
+        poisoned: int
+        src_ip: u32
+        dst_ip: u32
+        ident: int
+        proto: int
+        deadline: int
+        have_first: int
+        total_len: int
+        ihl_bytes: int
+        eth_ip: [74]byte
+        payload: [8192]byte
+        received: [8192]byte
+
+    var inet_ip_reasm_table: [4]IpReasmSlot
+    var inet_ip_reasm_staging: [8320]byte
+    var inet_ip_reasm_timeouts_sent: int = 0
+
+
+Find the slot matching `(src_ip, dst_ip, ident, proto)`. Returns
+slot index or -1.
+
+    inet_ip_reasm_find(src_ip: u32, dst_ip: u32, ident: int, proto: int) -> int
+        var i = 0
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].in_use != 0
+                if inet_ip_reasm_table[i].src_ip == src_ip
+                    if inet_ip_reasm_table[i].dst_ip == dst_ip
+                        if inet_ip_reasm_table[i].ident == ident
+                            if inet_ip_reasm_table[i].proto == proto
+                                return i
+            i += 1
+        -1
+
+
+Allocate a free slot, evicting the slot with the earliest
+deadline if the table is full.
+
+    inet_ip_reasm_alloc() -> int
+        var i = 0
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].in_use == 0
+                return i
+            i += 1
+        var best = 0
+        var best_dl = inet_ip_reasm_table[0].deadline
+        i = 1
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].deadline < best_dl
+                best = i
+                best_dl = inet_ip_reasm_table[i].deadline
+            i += 1
+        best
+
+
+Reset slot fields ahead of accepting a new datagram.
+
+    inet_ip_reasm_reset(s: int)
+        inet_ip_reasm_table[s].in_use = 0
+        inet_ip_reasm_table[s].poisoned = 0
+        inet_ip_reasm_table[s].have_first = 0
+        inet_ip_reasm_table[s].total_len = -1
+        inet_ip_reasm_table[s].ihl_bytes = 0
+        var i = 0
+        while i < IP_REASM_MAX_DATA
+            inet_ip_reasm_table[s].received[i] = byte(0)
+            i += 1
+
+
+Accept one fragment. Returns the assembled frame length (>0) on
+completion (written to `inet_ip_reasm_staging`), 0 when more
+fragments are needed, -1 on unrecoverable failure (oversize or
+malformed).
+
+`eth_ip` points at the start of the inbound Ethernet frame so we
+can clone the original ETH+IP header from the first fragment.
+`payload` points at the L4 payload (frame + 14 + ihl).
+
+    inet_ip_reasm_accept(eth_ip: *byte, src_ip: u32, dst_ip: u32,
+            ident: int, proto: int, mf: int, offset: int,
+            ihl_bytes: int, payload: *byte, payload_len: int) -> int
+        if offset < 0
+            return -1
+        if payload_len <= 0
+            return -1
+        if offset + payload_len > IP_REASM_MAX_DATA
+            return -1
+        if ihl_bytes > IP_REASM_HDR_MAX
+            return -1
+
+        var s = inet_ip_reasm_find(src_ip, dst_ip, ident, proto)
+        if s < 0
+            s = inet_ip_reasm_alloc()
+            inet_ip_reasm_reset(s)
+            inet_ip_reasm_table[s].in_use = 1
+            inet_ip_reasm_table[s].src_ip = src_ip
+            inet_ip_reasm_table[s].dst_ip = dst_ip
+            inet_ip_reasm_table[s].ident = ident
+            inet_ip_reasm_table[s].proto = proto
+
+        inet_ip_reasm_table[s].deadline = int(uptime()) + IP_REASM_TIMEOUT
+
+RFC 5722 §4: a fragment that overlaps any previously received
+range MUST cause the entire datagram to be dropped. We mark the
+slot poisoned and silently drop every subsequent fragment for
+the same (src, dst, id, proto) tuple. The slot stays in_use
+until its deadline so the attacker can't immediately recycle it
+with a fresh-allocation request.
+
+        if inet_ip_reasm_table[s].poisoned != 0
+            return 0
+        var ov = 0
+        while ov < payload_len
+            if inet_ip_reasm_table[s].received[offset + ov] != byte(0)
+                inet_ip_reasm_table[s].poisoned = 1
+                return 0
+            ov += 1
+
+        if offset == 0
+            inet_ip_reasm_table[s].have_first = 1
+            inet_ip_reasm_table[s].ihl_bytes = ihl_bytes
+            var k = 0
+            while k < 14 + ihl_bytes
+                inet_ip_reasm_table[s].eth_ip[k] = eth_ip[k]
+                k += 1
+
+        var i = 0
+        while i < payload_len
+            inet_ip_reasm_table[s].payload[offset + i] = payload[i]
+            inet_ip_reasm_table[s].received[offset + i] = byte(1)
+            i += 1
+
+        if mf == 0
+            inet_ip_reasm_table[s].total_len = offset + payload_len
+
+        if inet_ip_reasm_table[s].have_first == 0
+            return 0
+        val tl = inet_ip_reasm_table[s].total_len
+        if tl <= 0
+            return 0
+        var j = 0
+        while j < tl
+            if inet_ip_reasm_table[s].received[j] == byte(0)
+                return 0
+            j += 1
+
+Assemble the synthetic frame: ETH + (patched IP header) +
+contiguous payload. We patch IP total_length, clear
+flags-and-fragment-offset, and recompute the IP header checksum;
+the L4 checksum is left as-is since the peer computed it over the
+full datagram before fragmenting.
+
+        val hdr = inet_ip_reasm_table[s].ihl_bytes
+        var w = 0
+        while w < 14 + hdr
+            inet_ip_reasm_staging[w] = inet_ip_reasm_table[s].eth_ip[w]
+            w += 1
+        val ip_total = hdr + tl
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 2, ip_total)
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 6, 0)
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 10, 0)
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 10,
+            net_checksum(inet_ip_reasm_staging + 14, hdr))
+        var p = 0
+        while p < tl
+            inet_ip_reasm_staging[14 + hdr + p] = inet_ip_reasm_table[s].payload[p]
+            p += 1
+        inet_ip_reasm_table[s].in_use = 0
+        return 14 + hdr + tl
+
+
+Send ICMP Type 11 Code 1 (Time Exceeded / Fragment reassembly time
+exceeded) per RFC 792 §3.5 toward the original sender of `eth_ip`.
+The ICMP body carries the original IP header (`ihl_bytes`) plus
+the first 8 bytes of L4 payload — for fragmented datagrams the
+caller must supply this from the slot's first-fragment payload,
+since later fragments don't include those bytes.
+
+Bumps `inet_ip_reasm_timeouts_sent` on every call (whether the
+NIC send actually succeeds or not) so test infrastructure can
+verify the emit attempt without depending on slirp / ARP state.
+
+Returns 0 on emit, -1 if MAC unknown or peer ARP cache miss.
+
+    inet_send_icmp_time_exceeded(eth_ip: *byte, ihl_bytes: int,
+                                  payload8: *byte) -> int
+        inet_ip_reasm_timeouts_sent += 1
+        if inet_our_mac_known == 0
+            return -1
+        val peer_ip = ipv4(int(eth_ip[14 + 12]) & 0xff, int(eth_ip[14 + 13]) & 0xff,
+                           int(eth_ip[14 + 14]) & 0xff, int(eth_ip[14 + 15]) & 0xff)
+        var next_hop_mac: [6]byte
+        if inet_resolve_mac(peer_ip, next_hop_mac) == 0
+            return -1
+        var frame: [1514]byte
+        val icmp_body = ihl_bytes + 8
+        val icmp_len = 8 + icmp_body
+        val ip_total = 20 + icmp_len
+        val total = 14 + ip_total
+        pkt_write_mac(frame, 0, next_hop_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+        frame[14] = byte(0x45)
+        frame[15] = byte(0)
+        pkt_write_u16(frame, 16, ip_total)
+        pkt_write_u16(frame, 18, 0)
+        pkt_write_u16(frame, 20, 0x4000)
+        frame[22] = byte(64)
+        frame[23] = byte(IP_PROTO_ICMP)
+        pkt_write_u16(frame, 24, 0)
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30,
+            ipv4_octet(peer_ip, 0), ipv4_octet(peer_ip, 1),
+            ipv4_octet(peer_ip, 2), ipv4_octet(peer_ip, 3))
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+        val icmp_off = 14 + 20
+        frame[icmp_off + 0] = byte(11)         // ICMP_TIME_EXCEEDED
+        frame[icmp_off + 1] = byte(1)          // code 1: frag reassembly
+        pkt_write_u16(frame, icmp_off + 2, 0)
+        pkt_write_u16(frame, icmp_off + 4, 0)
+        pkt_write_u16(frame, icmp_off + 6, 0)
+        // Body: original IP header + 8 bytes of original L4 payload.
+        var i = 0
+        while i < ihl_bytes
+            frame[icmp_off + 8 + i] = eth_ip[14 + i]
+            i += 1
+        var j = 0
+        while j < 8
+            frame[icmp_off + 8 + ihl_bytes + j] = payload8[j]
+            j += 1
+        pkt_write_u16(frame, icmp_off + 2,
+            net_checksum(frame + icmp_off, icmp_len))
+        inet_nic_send_packet(frame, total)
+        0
+
+
+Force-expire a reassembly slot's deadline so the next scan sweep
+clears it. Used by test infrastructure (inet.lsysl can't write
+sibling-file vars directly per `feedback_sysl_module_split.md`).
+
+    inet_ip_reasm_force_expire(s: int)
+        if s >= 0
+            if s < IP_REASM_SLOTS
+                inet_ip_reasm_table[s].deadline = 0
+
+
+Drop slots whose deadline has passed. Called once per timer tick
+from the inet main loop alongside `inet_tcp_scan_timers`. Emits
+ICMP Time Exceeded (RFC 792 §3.5) toward the source if we ever
+saw the first fragment — without it we don't have an IP header
+to embed and skipping the emit is mandatory.
+
+    inet_ip_reasm_scan_timeouts()
+        val now = int(uptime())
+        var i = 0
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].in_use != 0
+                if now >= inet_ip_reasm_table[i].deadline
+                    if inet_ip_reasm_table[i].have_first != 0
+                        if inet_ip_reasm_table[i].poisoned == 0
+                            inet_send_icmp_time_exceeded(
+                                inet_ip_reasm_table[i].eth_ip,
+                                inet_ip_reasm_table[i].ihl_bytes,
+                                inet_ip_reasm_table[i].payload)
+                    inet_ip_reasm_table[i].in_use = 0
+            i += 1
+
+
 ### Pending UDP queue
 
 Two-slot queue holding UDP datagrams whose next-hop MAC isn't
@@ -402,6 +692,20 @@ than /24 work once DHCP installs them.
         val mask = inet_get_mask()
         val ours = inet_get_our_ip()
         if (ip & mask) == (ours & mask)
+            return 1
+        0
+
+
+Loopback gate. We treat all of `127.0.0.0/8` plus `our_ip` itself
+as loopback for the in-guest fastpath: TCP emit short-circuits to
+the inbound dispatcher instead of going to the NIC. This is the
+only way `127.0.0.1` traffic ever moves — there is no ARP entry
+for the loopback range and the gateway will not forward it.
+
+    inet_is_loopback_ip(ip: u32) -> int
+        if ipv4_octet(ip, 0) == 127
+            return 1
+        if ip == inet_get_our_ip()
             return 1
         0
 
@@ -705,6 +1009,15 @@ periodic so the caller can just re-send.
     inet_send_icmp_echo_to(dst_ip: u32, id: int, seq: int) -> int
         if inet_our_mac_known == 0
             return -1
+        // Loopback shortcut: pinging ourselves can't actually fail
+        // (no NIC, no ARP miss possible), so register the matching
+        // ECHO_REPLY directly. The reported source IP echoes whatever
+        // the caller targeted — `127.0.0.x` round-trips as
+        // `127.0.0.x`, our_ip round-trips as our_ip.
+        if inet_is_loopback_ip(dst_ip) != 0
+            inet_pings_sent += 1
+            inet_ping_deliver(dst_ip, id, seq, int(uptime()))
+            return 0
         var next_hop_mac: [6]byte
         if inet_resolve_mac(dst_ip, next_hop_mac) == 0
             return -1
@@ -1367,6 +1680,24 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         last_recv_tick: int
         keepalive_probes: int
         keepalive_next_probe: int
+        // Per-socket keepalive overrides (TCP_KEEPIDLE / TCP_KEEPINTVL
+        // / TCP_KEEPCNT). 0 = use the global TCP_KEEPALIVE_* default.
+        // Idle/intvl are stored as ticks (already converted from
+        // seconds at the shim boundary); cnt is the probe-giveup
+        // threshold.
+        keepalive_idle: int
+        keepalive_intvl: int
+        keepalive_cnt: int
+        // Asynchronous-error channel for SO_ERROR.  Holds the positive
+        // errno of a connection-level failure (RST in SYN_SENT/SYN_RCVD,
+        // post-handshake RST, retransmit/keepalive timeout) so that
+        // `getsockopt(SO_ERROR)` can surface it after `close_slot` has
+        // already torn the slot down — the slot's `in_use` is cleared
+        // *before* the EPOLL fire so the shim's wake-poll sees mask=0,
+        // and a separate field (read-and-cleared via the
+        // `INET_CMD_TCP_GET_ERR` IPC) is the only way to recover the
+        // reason. Survives `close_slot`; reset by `inet_tcp_alloc`.
+        pending_error: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -1717,9 +2048,20 @@ TCP options attached:
                   payload_seq: u32, payload_len: int) -> int
         if inet_our_mac_known == 0
             return -1
+        val is_loopback = inet_is_loopback_ip(tcp_sockets[s].remote_ip)
         var next_hop_mac: [6]byte
-        if inet_resolve_mac(tcp_sockets[s].remote_ip, next_hop_mac) == 0
-            return -1
+        if is_loopback != 0
+            // Loopback never goes to the NIC; the eth header is
+            // ignored on the inbound dispatch path so any MAC is
+            // fine. Re-using `inet_our_mac` keeps construction
+            // uniform with the wire path below.
+            var mi = 0
+            while mi < 6
+                next_hop_mac[mi] = inet_our_mac[mi]
+                mi += 1
+        else
+            if inet_resolve_mac(tcp_sockets[s].remote_ip, next_hop_mac) == 0
+                return -1
         val is_syn = (flags & TCP_F_SYN) != 0
         // Count SACK blocks we'd emit on this segment. SACK is
         // only ever attached to non-SYN ACKs once both sides
@@ -1909,6 +2251,31 @@ TCP options attached:
         pkt_write_u16(frame, tcp_off + 16,
             (~inet_l4_partial_sum(our_ip, tcp_sockets[s].remote_ip,
                 IP_PROTO_TCP, frame, tcp_off, seg_len)) & 0xffff)
+        if is_loopback != 0
+            // Swap IP src/dst so the inbound dispatcher sees a
+            // peer-shaped frame, then recompute IP and TCP
+            // checksums against the new pseudo-header. The TCP
+            // pseudo-header was originally `(our_ip, remote_ip)`;
+            // on inbound it will be evaluated as `(src_from_frame,
+            // our_ip)`, so swapping puts both into agreement.
+            var sw = 0
+            while sw < 4
+                val tmp = frame[26 + sw]
+                frame[26 + sw] = frame[30 + sw]
+                frame[30 + sw] = tmp
+                sw += 1
+            pkt_write_u16(frame, 24, 0)
+            pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+            val src_in = ipv4(int(frame[26]) & 0xff, int(frame[27]) & 0xff,
+                int(frame[28]) & 0xff, int(frame[29]) & 0xff)
+            val dst_in = ipv4(int(frame[30]) & 0xff, int(frame[31]) & 0xff,
+                int(frame[32]) & 0xff, int(frame[33]) & 0xff)
+            pkt_write_u16(frame, tcp_off + 16, 0)
+            pkt_write_u16(frame, tcp_off + 16,
+                (~inet_l4_partial_sum(src_in, dst_in,
+                    IP_PROTO_TCP, frame, tcp_off, seg_len)) & 0xffff)
+            inet_tcp_handle_segment(frame, total_len, 20)
+            return 0
         inet_nic_send_packet(frame, total_len)
         0
 
@@ -2107,6 +2474,9 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].last_recv_tick = 0
         tcp_sockets[s].keepalive_probes = 0
         tcp_sockets[s].keepalive_next_probe = 0
+        tcp_sockets[s].keepalive_idle = 0
+        tcp_sockets[s].keepalive_intvl = 0
+        tcp_sockets[s].keepalive_cnt = 0
         // Release the heap-backed buffers. `free(null)` is a no-op
         // (std.alloc), so close paths hit on slots that never
         // allocated (e.g. listen sockets in early-reject paths) are
@@ -2200,6 +2570,10 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].last_recv_tick = int(uptime())
                 tcp_sockets[i].keepalive_probes = 0
                 tcp_sockets[i].keepalive_next_probe = 0
+                tcp_sockets[i].keepalive_idle = 0
+                tcp_sockets[i].keepalive_intvl = 0
+                tcp_sockets[i].keepalive_cnt = 0
+                tcp_sockets[i].pending_error = 0
                 // Heap-backed buffers are allocated lazily on alloc.
                 // close_slot frees + nulls the pointers, so re-using a
                 // slot doesn't double-allocate.  std.alloc returns 0 on
@@ -2297,6 +2671,78 @@ Idempotent (no-op for same-state calls).  Returns 0 on success,
             tcp_sockets[s].keepalive_probes = 0
             tcp_sockets[s].keepalive_next_probe = 0
         0
+
+
+setsockopt(TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT) — write a
+per-socket override that scan_timers consults instead of the
+global default. `kind` selects which option (0 = idle, 1 = intvl,
+2 = cnt). Idle/intvl arrive in *ticks* (the shim has already
+converted from seconds at 100 Hz); cnt is a raw probe count.
+Clamp to a non-zero positive — 0 is reserved internally to mean
+"use default", so a caller passing 0 still routes to the global
+constant. Resets the probe schedule so the new cadence takes
+effect on the next scan, regardless of any in-flight probe.
+
+Returns 0 on success, -1 on bad fd / unknown kind.
+
+    inet_tcp_set_keepopt(s: int, kind: int, value: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        var v = value
+        if v < 0
+            v = 0
+        if kind == 0
+            tcp_sockets[s].keepalive_idle = v
+        else if kind == 1
+            tcp_sockets[s].keepalive_intvl = v
+        else if kind == 2
+            tcp_sockets[s].keepalive_cnt = v
+        else
+            return -1
+        // Force a reschedule on the next scan: any cached probe
+        // deadline was derived from the old cadence and would
+        // misbehave (probe too soon / too late) under the new
+        // values.
+        tcp_sockets[s].keepalive_next_probe = 0
+        0
+
+
+getsockopt(TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT) — read the
+persisted per-socket override. Returns the *ticks* / count. The
+caller (typically the shim) is responsible for converting back
+to seconds. Returns -1 on bad fd / unknown kind. A 0 reply means
+"using the global default" — distinct from a real 0, which is
+forbidden by the setter clamp.
+
+    inet_tcp_get_keepopt(s: int, kind: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if kind == 0
+            return tcp_sockets[s].keepalive_idle
+        if kind == 1
+            return tcp_sockets[s].keepalive_intvl
+        if kind == 2
+            return tcp_sockets[s].keepalive_cnt
+        -1
+
+
+Resolve the effective keepalive timing for socket `s`. Returns
+the values scan_timers should use, falling back to the global
+default whenever a per-socket override is 0. Centralized so the
+fallback rule stays in one place rather than duplicated three
+times in scan_timers.
+
+    inet_tcp_eff_keepalive(s: int, out idle: int, out intvl: int, out cnt: int)
+        val raw_idle = tcp_sockets[s].keepalive_idle
+        val raw_intvl = tcp_sockets[s].keepalive_intvl
+        val raw_cnt = tcp_sockets[s].keepalive_cnt
+        idle = if raw_idle != 0 then raw_idle else TCP_KEEPALIVE_IDLE
+        intvl = if raw_intvl != 0 then raw_intvl else TCP_KEEPALIVE_INTVL
+        cnt = if raw_cnt != 0 then raw_cnt else TCP_KEEPALIVE_MAX_PROBES
 
 
     inet_tcp_get_bufsize(s: int, kind: int) -> int
@@ -2472,6 +2918,13 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         // already points at "now" via alloc).
         if tcp_sockets[ls].keepalive_on != 0
             inet_tcp_set_keepalive(s, 1)
+        // Per-socket TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT
+        // overrides also inherit. 0 on either side just means
+        // "use the global default", so copying through is a no-op
+        // for a listener that never tuned these.
+        tcp_sockets[s].keepalive_idle = tcp_sockets[ls].keepalive_idle
+        tcp_sockets[s].keepalive_intvl = tcp_sockets[ls].keepalive_intvl
+        tcp_sockets[s].keepalive_cnt = tcp_sockets[ls].keepalive_cnt
         val iss = tcp_next_iss()
         tcp_sockets[s].owner_tid = tcp_sockets[ls].owner_tid
         tcp_sockets[s].local_port = tcp_sockets[ls].local_port
@@ -2598,9 +3051,16 @@ and the ACK flag is set. seg_len counts SYN and FIN as one octet.
                       seg_seq: u32, seg_ack: u32, seg_payload_len: int)
         if inet_our_mac_known == 0
             return
+        val is_loopback = inet_is_loopback_ip(remote_ip)
         var next_hop_mac: [6]byte
-        if inet_resolve_mac(remote_ip, next_hop_mac) == 0
-            return
+        if is_loopback != 0
+            var mi = 0
+            while mi < 6
+                next_hop_mac[mi] = inet_our_mac[mi]
+                mi += 1
+        else
+            if inet_resolve_mac(remote_ip, next_hop_mac) == 0
+                return
         var rst_seq: u32 = u32(0)
         var rst_ack: u32 = u32(0)
         var rst_flags = TCP_F_RST
@@ -2650,6 +3110,27 @@ and the ACK flag is set. seg_len counts SYN and FIN as one octet.
         pkt_write_u16(frame, tcp_off + 16,
             (~inet_l4_partial_sum(our_ip, remote_ip,
                 IP_PROTO_TCP, frame, tcp_off, seg_total)) & 0xffff)
+        if is_loopback != 0
+            // Same swap-and-recompute pattern as inet_tcp_emit.
+            // RST is terminal, so no further recursion downstream.
+            var sw = 0
+            while sw < 4
+                val tmp = frame[26 + sw]
+                frame[26 + sw] = frame[30 + sw]
+                frame[30 + sw] = tmp
+                sw += 1
+            pkt_write_u16(frame, 24, 0)
+            pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+            val src_in = ipv4(int(frame[26]) & 0xff, int(frame[27]) & 0xff,
+                int(frame[28]) & 0xff, int(frame[29]) & 0xff)
+            val dst_in = ipv4(int(frame[30]) & 0xff, int(frame[31]) & 0xff,
+                int(frame[32]) & 0xff, int(frame[33]) & 0xff)
+            pkt_write_u16(frame, tcp_off + 16, 0)
+            pkt_write_u16(frame, tcp_off + 16,
+                (~inet_l4_partial_sum(src_in, dst_in,
+                    IP_PROTO_TCP, frame, tcp_off, seg_total)) & 0xffff)
+            inet_tcp_handle_segment(frame, total_len, 20)
+            return
         inet_nic_send_packet(frame, total_len)
 
 
@@ -3226,6 +3707,11 @@ Per-socket state transition for one validated segment.
         val st = tcp_sockets[s].state
         if st == TCP_STATE_SYN_SENT
             if (flags & TCP_F_RST) != 0
+                // RFC 793: RST in response to a SYN means the peer is
+                // not listening (or refused). NB-connect surfaces this
+                // as ECONNREFUSED via SO_ERROR after close_slot tears
+                // down the slot.
+                tcp_sockets[s].pending_error = 111
                 inet_tcp_close_slot(s, -1)
                 return
             if (flags & TCP_F_SYN) == 0
@@ -3271,6 +3757,7 @@ Per-socket state transition for one validated segment.
             return
         if st == TCP_STATE_SYN_RCVD
             if (flags & TCP_F_RST) != 0
+                tcp_sockets[s].pending_error = 104  // ECONNRESET
                 inet_tcp_close_slot(s, -1)
                 return
             if (flags & TCP_F_ACK) == 0
@@ -3329,6 +3816,7 @@ peer aggressively reorders.
 Past handshake: process ACK, data, FIN in that order.
 
         if (flags & TCP_F_RST) != 0
+            tcp_sockets[s].pending_error = 104  // ECONNRESET
             inet_tcp_close_slot(s, -1)
             return
 
@@ -3552,6 +4040,7 @@ socket for retransmit and TIME_WAIT deadlines.
                 if rtx != 0
                     if now >= rtx
                         if tcp_sockets[i].retries >= TCP_MAX_RETRIES
+                            tcp_sockets[i].pending_error = 110  // ETIMEDOUT
                             inet_tcp_close_slot(i, -1)
                         else
                             tcp_sockets[i].retries += 1
@@ -3571,14 +4060,19 @@ socket for retransmit and TIME_WAIT deadlines.
                     if tcp_sockets[i].keepalive_on != 0
                         val kst = tcp_sockets[i].state
                         if kst == TCP_STATE_ESTABLISHED || kst == TCP_STATE_CLOSE_WAIT
+                            var idle_eff = 0
+                            var intvl_eff = 0
+                            var cnt_eff = 0
+                            inet_tcp_eff_keepalive(i, idle_eff, intvl_eff, cnt_eff)
                             if tcp_sockets[i].keepalive_next_probe == 0
                                 // Idle timer just (re)started — schedule
-                                // first probe `IDLE` ticks after last recv.
-                                val first_probe = tcp_sockets[i].last_recv_tick + TCP_KEEPALIVE_IDLE
+                                // first probe `idle_eff` ticks after last recv.
+                                val first_probe = tcp_sockets[i].last_recv_tick + idle_eff
                                 tcp_sockets[i].keepalive_next_probe = first_probe
                             if now >= tcp_sockets[i].keepalive_next_probe
-                                if tcp_sockets[i].keepalive_probes >= TCP_KEEPALIVE_MAX_PROBES
+                                if tcp_sockets[i].keepalive_probes >= cnt_eff
                                     // Peer is dead. Close as -ETIMEDOUT.
+                                    tcp_sockets[i].pending_error = 110  // ETIMEDOUT
                                     inet_tcp_close_slot(i, -1)
                                 else
                                     // Probe: empty ACK at snd_una - 1
@@ -3590,7 +4084,7 @@ socket for retransmit and TIME_WAIT deadlines.
                                     val probe_seq = tcp_sockets[i].snd_una - u32(1)
                                     inet_tcp_emit(i, TCP_F_ACK, probe_seq, u32(0), 0)
                                     tcp_sockets[i].keepalive_probes += 1
-                                    tcp_sockets[i].keepalive_next_probe = now + TCP_KEEPALIVE_INTVL
+                                    tcp_sockets[i].keepalive_next_probe = now + intvl_eff
             i += 1
 
     inet_tcp_retransmit(s: int)

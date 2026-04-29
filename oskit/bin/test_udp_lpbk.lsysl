@@ -1,0 +1,138 @@
+test_udp_lpbk — UDP loopback fastpath generalization
+=====================================================
+
+The pre-existing 127.0.0.1 fastpath was a strict equality check.
+After generalizing to `inet_is_loopback_ip`, sends to any
+`127.0.0.x` and to our own external IP should also short-circuit
+through the in-memory queue.
+
+Sends two datagrams to a single INADDR_ANY-bound listener:
+
+  1. dst=127.0.0.5  — exercises the 127/8 generalization
+  2. dst=10.0.2.15  — exercises the own-IP generalization
+     (matches QEMU user-mode networking's hardcoded lease)
+
+Both should be picked up via recvfrom.  The reported src_ip in
+the recvfrom reply is always `127.0.0.1` — that's intentional;
+loopback senders don't expose which loopback address they used,
+matching how Linux's `lo` interface synthesizes a uniform
+`127.0.0.1` peer for any in-host UDP traffic.
+
+Output: `udplo: ok` on success, `udplo: bad <step>` on failure.
+
+    module oskit.bin.test_udp_lpbk
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE      = 147
+    val NR_BIND       = 135
+    val NR_RECVFROM   = 276
+    val NR_SENDTO     = 307
+    val NR_SOCKET     = 337
+
+    val AF_INET_V     = 2
+    val SOCK_DGRAM_V  = 2
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int,
+                 addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+                   addr: *byte, addrlen_ptr: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_ptr)))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    fail_with(code: int)
+        puts("udplo: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+Send one datagram and read it back. Returns the byte count or a
+negative error.
+
+    one_round(tx: int, rx: int, port: int, b0: int, b1: int, b2: int, b3: int,
+              tag: byte) -> int
+        var dst: [16]byte
+        fill_sockaddr(&dst[0], port, b0, b1, b2, b3)
+        var msg: [1]byte
+        msg[0] = tag
+        val sent = posix_sendto(tx, &msg[0], 1, 0, &dst[0], 16)
+        if sent != 1
+            return -1
+        var rbuf: [4]byte
+        var src: [16]byte
+        var src_len: i32 = i32(16)
+        val got = posix_recvfrom(rx, &rbuf[0], 4, 0, &src[0], &src_len)
+        if got != 1
+            return -2
+        if rbuf[0] != tag
+            return -3
+        0
+
+
+    main(argv: []string)
+        val rx = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if rx < 0
+            fail_with(1)
+            return
+        var rx_addr: [16]byte
+        fill_sockaddr(&rx_addr[0], 7798, 0, 0, 0, 0)
+        if posix_bind(rx, &rx_addr[0], 16) < 0
+            fail_with(2)
+            return
+        val tx = posix_socket(AF_INET_V, SOCK_DGRAM_V, 0)
+        if tx < 0
+            fail_with(3)
+            return
+
+        // 127/8 path — non-127.0.0.1 loopback address.
+        if one_round(tx, rx, 7798, 127, 0, 0, 5, byte('A')) != 0
+            fail_with(4)
+            return
+        // Own-IP path — QEMU user-mode lease.
+        if one_round(tx, rx, 7798, 10, 0, 2, 15, byte('B')) != 0
+            fail_with(5)
+            return
+
+        posix_close(tx)
+        posix_close(rx)
+        puts("udplo: ok\n")
+        exit()

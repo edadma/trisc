@@ -46,6 +46,11 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_ICMP_SEND    = 21
     val INET_CMD_ICMP_CHECK   = 22
     val INET_CMD_TCP_DEBUG    = 20
+    val INET_CMD_ICMP_UNREACH_INJECT = 38
+    val INET_CMD_TCP_INJECT_FAIL = 42
+    val INET_CMD_IP_REASM_SELFTEST = 44
+    val INET_CMD_IP_REASM_OVERLAP_TEST = 45
+    val INET_CMD_IP_REASM_TIMEOUT_TEST = 46
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val ARP_PROBE_OP_START    = 0
@@ -53,7 +58,7 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val ARP_PROBE_OP_CHECK    = 2
     val ARP_PROBE_OP_ANNOUNCE = 3
 
-    val INET_MAX_DATA     = 512
+    val INET_MAX_DATA     = 1472
     val INET_MAX_TCP_SEG  = 480
 
 
@@ -140,7 +145,7 @@ bytes accepted, or -1 on error.
             return -1
         if dlen > INET_MAX_DATA
             return -1
-        var msg: [523]byte
+        var msg: [1483]byte
         msg[0] = byte(INET_CMD_SENDTO)
         msg[1] = byte(fd & 0xff)
         msg[2] = byte(AF_INET & 0xff)
@@ -178,8 +183,8 @@ payload length on success, -1 on error.
         msg[0] = byte(INET_CMD_RECVFROM)
         msg[1] = byte(fd & 0xff)
         net_write_u16(msg, 2, cap_len)
-        var reply: [540]byte
-        ipc_send(port, msg, 4, reply, 540)
+        var reply: [1500]byte
+        ipc_send(port, msg, 4, reply, 1500)
         if reply[0] != 0
             return -1
         val r_port = net_read_u16(reply, 2)
@@ -233,8 +238,8 @@ reply matches `recvfrom`. Status byte: `0` = data, `1` = timeout,
         net_write_u16(msg, 2, cap_len)
         net_write_u16(msg, 4, (timeout_ms >> 16) & 0xffff)
         net_write_u16(msg, 6, timeout_ms & 0xffff)
-        var reply: [540]byte
-        ipc_send(port, msg, 8, reply, 540)
+        var reply: [1500]byte
+        ipc_send(port, msg, 8, reply, 1500)
         val status = int(reply[0]) & 0xff
         if status == 0xff
             return -1
@@ -675,4 +680,107 @@ Returns 0 on pass, a nonzero error code on failure.
         msg[0] = byte(INET_CMD_TCP_OOO_SELFTEST)
         var reply: [1]byte
         ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### ip_reasm_selftest (test-only)
+
+Triggers the inet server's IPv4 fragmentation reassembly self-test.
+Three IPv4 fragments of a 32-byte UDP datagram are injected
+out-of-order; the assembled UDP arrives at port 9100 of whichever
+socket is bound there. Returns 0 on inject success, nonzero on
+inject failure.
+
+    ip_reasm_selftest() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_IP_REASM_SELFTEST)
+        var reply: [1]byte
+        ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### ip_reasm_overlap_test (test-only)
+
+Triggers the inet server's RFC 5722 overlap-fragment test. Two
+fragments are injected for the same `(src, dst, id, proto)` tuple
+where the second overlaps the first; the slot must be poisoned in
+response. Returns 0 on pass, nonzero on failure.
+
+    ip_reasm_overlap_test() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_IP_REASM_OVERLAP_TEST)
+        var reply: [1]byte
+        ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### ip_reasm_timeout_test (test-only)
+
+Triggers the inet server's reassembly-timeout self-test. Injects
+one first-fragment, force-expires its deadline, runs the scan
+sweep, and verifies `inet_ip_reasm_timeouts_sent` advanced by one
+(i.e. ICMP Time Exceeded emit was attempted). Returns 0 on pass,
+nonzero on failure.
+
+    ip_reasm_timeout_test() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_IP_REASM_TIMEOUT_TEST)
+        var reply: [1]byte
+        ipc_send(port, msg, 1, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### icmp_unreach_inject (test-only)
+
+Synthesizes an inbound ICMP type-3 / code-3 frame whose inner
+UDP header carries `local_port` as its source port, and feeds it
+through the inet server's RX dispatch. After this call, a UDP
+socket bound to `local_port` will see ECONNREFUSED on its next
+recvfrom (or have any parked recvfrom woken with the same).
+
+Pairs with the egress emit landed in chunk 7 to close the
+both-sides UDP error story.
+
+    icmp_unreach_inject(local_port: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_ICMP_UNREACH_INJECT)
+        msg[1] = byte((local_port >> 8) & 0xff)
+        msg[2] = byte(local_port & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### tcp_inject_fail (test-only)
+
+Finds an `in_use` TCP slot in `SYN_SENT` whose `remote_port`
+matches `rport`, sets its `pending_error = 111` (ECONNREFUSED),
+and runs `close_slot` — mirroring what an inbound RST in
+SYN_SENT would do without depending on slirp's RST timing
+(which is unreliable enough that the Java SO_LINGER path is
+worse than this synthetic injector for SO_ERROR async
+testing).
+
+    tcp_inject_fail(rport: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(INET_CMD_TCP_INJECT_FAIL)
+        msg[1] = byte((rport >> 8) & 0xff)
+        msg[2] = byte(rport & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
         int(reply[0]) & 0xff
