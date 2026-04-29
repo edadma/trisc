@@ -1,0 +1,24 @@
+Tuple destructuring with slice element
+======================================
+
+Repro for the `emitLoad: unexpected type []T` cluster on `--backend trisc`.
+
+    module sysl.tests.tuple_slice
+
+    struct Node
+        kind: int
+        value: int
+
+    build_nodes() -> ([]Node, int)
+        val nodes = new [4]Node
+        nodes[0] = Node(1, 42)
+        return (nodes[:1], 7)
+
+### destructure tuple containing a slice
+
+    #test
+    test_destructure() -> unit
+        n, x = build_nodes()
+        assert(x == 7, "second")
+        assert(len(n) == 1, "len")
+        assert(n[0].value == 42, "value")

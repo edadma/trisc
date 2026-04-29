@@ -2046,7 +2046,13 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emitAddImm(1, 5, tmpLocal.offset)
           emit("  ldd r1, r1, r0")  // r1 = tuple address
           if off != 0 then emitAddImm(1, 1, off)
-          emitLoad(1, 1, fieldType)  // r1 = field value
+          // Aggregates use address-as-value; emitStore→emitAggregateCopy will
+          // do the byte-copy. Scalars need an actual load before the store.
+          fieldType.underlying match
+            case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType
+              | _: SyslType.SliceType | _: SyslType.EnumType
+              | _: SyslType.FuncType | _: SyslType.InterfaceType => ()
+            case _ => emitLoad(1, 1, fieldType)
           val local = allocLocal(name, fieldType)
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, fieldType)
@@ -2065,7 +2071,11 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emitAddImm(1, 5, tmpLocal.offset)
           emit("  ldd r1, r1, r0")  // r1 = tuple address
           if off != 0 then emitAddImm(1, 1, off)
-          emitLoad(1, 1, fieldType)  // r1 = field value
+          fieldType.underlying match
+            case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType
+              | _: SyslType.SliceType | _: SyslType.EnumType
+              | _: SyslType.FuncType | _: SyslType.InterfaceType => ()
+            case _ => emitLoad(1, 1, fieldType)
           if locals != null && locals.contains(name) then
             val local = locals(name)
             emitAddImm(2, 5, local.offset)
@@ -4600,7 +4610,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                     emit("  ldd r1, r1, r0")  // r1 = scrutinee address
                     if off != 0 then emitAddImm(1, 1, off)
                     fieldType match
-                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType =>
+                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType
+                        | _: SyslType.SliceType | _: SyslType.ArrayType
+                        | _: SyslType.FuncType | _: SyslType.InterfaceType =>
                         // Aggregate: r1 = field address (src), copy bytes to local.
                         emitAddImm(2, 5, local.offset)
                         emitStore(1, 2, fieldType)
@@ -4638,7 +4650,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                     emit("  ldd r1, r1, r0")  // r1 = enum address
                     if dataOff + fieldOff != 0 then emitAddImm(1, 1, dataOff + fieldOff)
                     fieldType match
-                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType =>
+                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType
+                        | _: SyslType.SliceType | _: SyslType.ArrayType
+                        | _: SyslType.FuncType | _: SyslType.InterfaceType =>
                         // Aggregate: r1 = field address (src), copy bytes to local.
                         emitAddImm(2, 5, local.offset)
                         emitStore(1, 2, fieldType)
