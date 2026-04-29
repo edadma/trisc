@@ -62,11 +62,15 @@ class SyslTriscSaturating64Tests extends AnyFreeSpec with Matchers {
     out should include("ldi r1, 0")
   }
 
-  "u64 saturating_mul emits mulu and tests high-half non-zero" in {
+  "u64 saturating_mul emits mulhu/mul and tests high-half non-zero" in {
     val out = asm("f(a: u64, b: u64) -> u64 = saturating_mul(a, b)\n")
-    out should include("mulu r1, r1, r2")
-    // mulu writes high to r2; overflow iff r2 != 0
-    out should (include regex "beq r2, r0, \\.sat_noof_")
+    // Post-Stage-2 ISA: mulu removed; compute high (mulhu, destructive)
+    // and low (mul) separately. r3 is the high-half temp.
+    out should include("mov r3, r1")
+    out should include("mulhu r3, r2")
+    out should include("mul r1, r1, r2")
+    // overflow iff r3 != 0
+    out should (include regex "beq r3, r0, \\.sat_noof_")
     out should include("ldc r1, -1")
   }
 
@@ -96,16 +100,19 @@ class SyslTriscSaturating64Tests extends AnyFreeSpec with Matchers {
     out should include regex "ldc r1, -9223372036854775808"
   }
 
-  "i64 saturating_mul emits mul + sign-extension high-half compare" in {
+  "i64 saturating_mul emits mulh/mul + sign-extension high-half compare" in {
     val out = asm("f(a: i64, b: i64) -> i64 = saturating_mul(a, b)\n")
+    // Post-Stage-2 ISA: compute high (mulh, destructive) and low (mul) separately.
+    out should include("mov r3, r1")
+    out should include("mulh r3, r2")
     out should include("mul r1, r1, r2")
-    // expected high = asr(low, 63)
-    out should include("ldi r3, 63")
-    out should include("asr r4, r1, r3")
-    // compare actual high (r2) against expected high (r4)
-    out should (include regex "beq r4, r2, \\.sat_noof_")
-    // signed direction probe
-    out should include("slt r4, r2, r0")
+    // expected high = asr(low, 63), into r4 (using r4 as temp for the literal)
+    out should include("ldi r4, 63")
+    out should include("asr r4, r1, r4")
+    // compare actual high (r3) against expected high (r4)
+    out should (include regex "beq r4, r3, \\.sat_noof_")
+    // signed direction probe on the actual high
+    out should include("slt r4, r3, r0")
     out should include regex "ldc r1, 9223372036854775807"
     out should include regex "ldc r1, -9223372036854775808"
   }
@@ -114,7 +121,7 @@ class SyslTriscSaturating64Tests extends AnyFreeSpec with Matchers {
     // Carve out just the i64-mul saturating section so we don't pick up sltu
     // from elsewhere in the program.
     val out = asm("f(a: i64, b: i64) -> i64 = saturating_mul(a, b)\n")
-    val sat = out.linesIterator.dropWhile(!_.contains("mul r1, r1, r2"))
+    val sat = out.linesIterator.dropWhile(!_.contains("mulh r3, r2"))
       .takeWhile(!_.contains("jalr r0, r6"))
       .mkString("\n")
     sat should not include "sltu"
