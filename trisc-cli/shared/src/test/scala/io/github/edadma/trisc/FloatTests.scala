@@ -208,49 +208,6 @@ class FloatTests extends TestHelpers {
     cpu.r(2).readf shouldBe -1.23456789
   }
 
-  // ===== FINV =====
-
-  "finv basic" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + "finv r2, r1\n",
-      "a dd 4.0\n"))
-    cpu.r(2).readf shouldBe 0.25
-  }
-
-  "finv of one" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + "finv r2, r1\n",
-      "a dd 1.0\n"))
-    cpu.r(2).readf shouldBe 1.0
-  }
-
-  "finv of negative" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + "finv r2, r1\n",
-      "a dd -2.0\n"))
-    cpu.r(2).readf shouldBe -0.5
-  }
-
-  "finv of zero produces infinity" in {
-    val cpu = runCPU(floatProg(
-      "finv r1, r0\n", ""))
-    cpu.r(1).readf.isInfinite shouldBe true
-  }
-
-  "finv double inversion" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + "finv r2, r1\nfinv r3, r2\n",
-      "a dd 5.0\n"))
-    cpu.r(3).readf shouldBe 5.0
-  }
-
-  "finv of 0.5" in {
-    val cpu = runCPU(floatProg(
-      loadDouble("r1", "a") + "finv r2, r1\n",
-      "a dd 0.5\n"))
-    cpu.r(2).readf shouldBe 2.0
-  }
-
   // ===== Float integration =====
 
   "fadd then fmul compound expression" in {

@@ -495,7 +495,6 @@ object Decode:
         "110 aaa bbb 00 00111" -> ((args: Map[Char, Int]) => new NEG(args('a'), args('b'))),
         "110 aaa bbb 00 01000" -> ((args: Map[Char, Int]) => new NOT(args('a'), args('b'))),
         "110 aaa bbb 00 01010" -> ((args: Map[Char, Int]) => new FNEG(args('a'), args('b'))),
-        "110 aaa bbb 00 01011" -> ((args: Map[Char, Int]) => new FINV(args('a'), args('b'))),
         "110 aaa bbb 00 01001" -> ((args: Map[Char, Int]) => new CVT(args('a'), args('b'))),
         "110 aaa bbb 00 01100" -> ((args: Map[Char, Int]) => new FINT(args('a'), args('b'))),
         "110 aaa bbb 00 01101" -> ((args: Map[Char, Int]) => new FSQRT(args('a'), args('b'))),
@@ -517,18 +516,13 @@ object Decode:
         "110 aaa bbb 00 11101" -> ((args: Map[Char, Int]) => new MIN(args('a'), args('b'))),
         "110 aaa bbb 00 11110" -> ((args: Map[Char, Int]) => new MAX(args('a'), args('b'))),
         "110 aaa bbb 00 11111" -> ((args: Map[Char, Int]) => new EXG(args('a'), args('b'))),
-        // RR 01 sub-format: two-register destructive operations
-        "110 aaa bbb 01 00000" -> ((args: Map[Char, Int]) => new FPOW(args('a'), args('b'))),
-        // Trig instructions
-        "110 aaa bbb 01 01001" -> ((args: Map[Char, Int]) => new FSIN(args('a'), args('b'))),
-        "110 aaa bbb 01 01010" -> ((args: Map[Char, Int]) => new FCOS(args('a'), args('b'))),
-        "110 aaa bbb 01 01011" -> ((args: Map[Char, Int]) => new FTAN(args('a'), args('b'))),
-        "110 aaa bbb 01 01100" -> ((args: Map[Char, Int]) => new FASIN(args('a'), args('b'))),
-        "110 aaa bbb 01 01101" -> ((args: Map[Char, Int]) => new FACOS(args('a'), args('b'))),
-        "110 aaa bbb 01 01110" -> ((args: Map[Char, Int]) => new FATAN(args('a'), args('b'))),
-        "110 aaa bbb 01 01111" -> ((args: Map[Char, Int]) => new FATAN2(args('a'), args('b'))),
-        "110 aaa bbb 01 10000" -> ((args: Map[Char, Int]) => new FEXP(args('a'), args('b'))),
-        "110 aaa bbb 01 10001" -> ((args: Map[Char, Int]) => new FLOG(args('a'), args('b'))),
+        // RR 01 sub-format: two-register destructive operations (rd = rd op rb)
+        // Multi-limb multiply high + integer remainder
+        "110 aaa bbb 01 00000" -> ((args: Map[Char, Int]) => new MULH(args('a'), args('b'))),
+        "110 aaa bbb 01 01001" -> ((args: Map[Char, Int]) => new MULHU(args('a'), args('b'))),
+        "110 aaa bbb 01 01010" -> ((args: Map[Char, Int]) => new MULHSU(args('a'), args('b'))),
+        "110 aaa bbb 01 01011" -> ((args: Map[Char, Int]) => new REM(args('a'), args('b'))),
+        "110 aaa bbb 01 01100" -> ((args: Map[Char, Int]) => new REMU(args('a'), args('b'))),
         // Single/double precision float conversion
         "110 aaa bbb 01 10010" -> ((args: Map[Char, Int]) => new F32TOF64(args('a'), args('b'))),
         "110 aaa bbb 01 10011" -> ((args: Map[Char, Int]) => new F64TOF32(args('a'), args('b'))),
@@ -577,9 +571,9 @@ object Decode:
         "001 ddd aaa bbb 0100" -> ((args: Map[Char, Int]) => new SLTU(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 0101" -> ((args: Map[Char, Int]) => new ADC(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 0110" -> ((args: Map[Char, Int]) => new SBC(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 0111" -> ((args: Map[Char, Int]) => new MULU(args('d'), args('a'), args('b'))),
+        // 001 ... 0111 — reserved
         "001 ddd aaa bbb 1000" -> ((args: Map[Char, Int]) => new DIVU(args('d'), args('a'), args('b'))),
-        // 001 ... 1001 — freed from REMU (remainder now in DIV/DIVU register pair)
+        // 001 ... 1001 — reserved
         "001 ddd aaa bbb 1010" -> ((args: Map[Char, Int]) => new FSLT(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1011" -> ((args: Map[Char, Int]) => new FADD(args('d'), args('a'), args('b'))),
         "001 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new FSUB(args('d'), args('a'), args('b'))),

@@ -42,7 +42,7 @@ The 7-bit immediate is sign-extended. Branch offsets are in halfwords.
       3     3     3    2      5     = 16 bits
 
 - `110 aaa bbb 00 ooooo` — 32 unary/binary register ops (jalr, extensions, bit ops, etc.)
-- `110 aaa bbb 01 ooooo` — Extended ops (fpow, MMU instructions)
+- `110 aaa bbb 01 ooooo` — Extended ops (MMU instructions, f32/f64 conversion)
 - `110 aaa bbb 10 iiiii` — ld (load with 5-bit offset)
 - `110 aaa bbb 11 iiiii` — st (store with 5-bit offset)
 

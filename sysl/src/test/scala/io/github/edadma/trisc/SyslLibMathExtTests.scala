@@ -2,14 +2,33 @@ package io.github.edadma.trisc
 
 class SyslLibMathExtTests extends SyslTestHelpers {
 
+  private val testFileOps: FileOps = new FileOps:
+    def readFile(path: String): String = scala.io.Source.fromFile(path).mkString
+    def writeFile(path: String, content: String): Unit = java.nio.file.Files.writeString(java.nio.file.Paths.get(path), content)
+    def exists(path: String): Boolean = java.io.File(path).exists()
+    def isDirectory(path: String): Boolean = java.io.File(path).isDirectory
+    def listFiles(path: String): Seq[String] = java.io.File(path).listFiles().map(_.getPath).toSeq
+    def fileName(path: String): String = java.io.File(path).getName
+    def mkdirs(path: String): Unit = java.io.File(path).mkdirs()
+    def joinPath(dir: String, name: String): String = java.nio.file.Paths.get(dir, name).toString
+
+  private val simpleTangler: String => String = raw =>
+    raw.linesIterator
+      .filter(_.startsWith("    "))
+      .map(_.drop(4))
+      .mkString("\n")
+
   val libs: Map[String, String] = Map(
     "posix/math/math" -> readSysl("posix/math/math.sysl"),
   )
 
-  private def evalWith(main: String): Long = evalWithLibs(libs,
-    s"""import posix.math.*
-       |$main
-       |""".stripMargin)
+  private def evalWith(main: String): Long =
+    val sources = libs + ("test" -> s"import posix.math.*\n$main\n")
+    val driver = new SyslDriver(Some(testFileOps), List("."), tangler = Some(simpleTangler))
+    val result = driver.compile(sources)
+    val merged = TProgram(result.units.flatMap(_.typed.decls))
+    val interp = new SyslInterpreter()
+    interp.run(merged)
 
   // ===== isnan =====
 
