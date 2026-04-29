@@ -1,0 +1,137 @@
+test_tcphash — TCP 4-tuple hash routing (Phase 3 chunk 3)
+=========================================================
+
+Phase 3 chunk 3 of the net-stack quality plan replaces
+`inet_tcp_find`'s linear scan over `tcp_sockets[16]` with a hash
+keyed on `(local_port ^ remote_port ^ low16(remote_ip)) & 0xf`.
+This test stresses the routing in the realistic shape — multiple
+connections open simultaneously, sharing one of the 4-tuple
+components.
+
+In a single process via loopback (`127.0.0.1`):
+
+  1. listen on port 9100.
+  2. connect 3 times. Each connect picks a fresh ephemeral
+     local_port, so the connect-side ends up with 3 sockets that
+     share `remote_ip` (127.0.0.1) and `remote_port` (9100) but
+     differ on `local_port`. The listener's accept queue
+     accumulates 3 child slots that share `local_port` (9100) but
+     differ on `remote_port` (the connect side's ephemerals).
+  3. accept 3 times. Now we hold 7 active TCP slots:
+     1 listener + 3 connect-side + 3 accepted children.
+  4. For each i in 0..2:
+       - send a unique tag byte ('0' + i) from the connect-side;
+       - read it on the child;
+       - echo it back from the child (+1 to make 'A' + i);
+       - read it on the connect-side;
+       - assert it round-tripped to the right socket.
+     If hash routing were broken, packets would land in the wrong
+     slot and the tag mismatch would surface.
+  5. close all 7 fds.
+
+7 slots fits inside the per-tid TCP cap (8). The test passes when
+all three round-trips report the correct echo byte.
+
+    module oskit.bin.test_tcphash
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{tcp_listen, tcp_accept, tcp_connect, tcp_send, tcp_recv, tcp_close}
+    import std.net.{ipv4}
+
+
+    print_dec(v: int)
+        if v < 0
+            puts("-")
+            print_dec(-v)
+            return
+        if v >= 10
+            print_dec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("tcphash: failed ")
+        print_dec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val LP = 9100
+        val LO = ipv4(127, 0, 0, 1)
+
+        val lfd = tcp_listen(LP)
+        if lfd < 0
+            fail(1)
+            return
+
+        var cfds: [3]int
+        var i = 0
+        while i < 3
+            cfds[i] = tcp_connect(LO, LP)
+            if cfds[i] < 0
+                fail(10 + i)
+                return
+            i += 1
+
+        var sfds: [3]int
+        var peer_ip: [4]byte
+        var peer_port: [2]byte
+        i = 0
+        while i < 3
+            sfds[i] = tcp_accept(lfd, &peer_ip[0], &peer_port[0])
+            if sfds[i] < 0
+                fail(20 + i)
+                return
+            i += 1
+
+        // Per-connection round-trip with a unique tag. If hashing
+        // routes a packet to the wrong slot, the tag mismatch
+        // surfaces here.
+        i = 0
+        while i < 3
+            var tx: [1]byte
+            tx[0] = byte('0' + i)
+            if tcp_send(cfds[i], &tx[0], 1) != 1
+                fail(30 + i)
+                return
+
+            var rx: [1]byte
+            if tcp_recv(sfds[i], &rx[0], 1) != 1
+                fail(40 + i)
+                return
+            if int(rx[0]) & 0xff != int('0' + i)
+                fail(50 + i)
+                return
+
+            // Echo back with a +1 transform so client-side rx is
+            // distinguishable from a stale tx echo. Server-side
+            // children land in different hash buckets than the
+            // connect-side, so this exercises both directions.
+            var tx2: [1]byte
+            tx2[0] = byte(int(rx[0]) + 1)
+            if tcp_send(sfds[i], &tx2[0], 1) != 1
+                fail(60 + i)
+                return
+
+            var rx2: [1]byte
+            if tcp_recv(cfds[i], &rx2[0], 1) != 1
+                fail(70 + i)
+                return
+            if int(rx2[0]) & 0xff != int('0' + i) + 1
+                fail(80 + i)
+                return
+            i += 1
+
+        // Tear down.
+        i = 0
+        while i < 3
+            tcp_close(cfds[i])
+            tcp_close(sfds[i])
+            i += 1
+        tcp_close(lfd)
+
+        puts("tcphash: ok\n")
+        exit()

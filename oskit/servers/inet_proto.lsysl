@@ -1941,9 +1941,74 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         // lands.  Without this we waste an RTO on the first SYN to
         // any off-cache peer; the retx-on-drain path saves that RTT.
         arp_pending: int
+        // Phase 3 chunk 3: forward link in the TCP-connected 4-tuple
+        // hash bucket. -1 = not in any bucket. Maintained by
+        // `inet_tcp_conn_hash_insert` / `inet_tcp_conn_hash_remove`
+        // whenever a slot transitions in/out of having a full
+        // (local_port, remote_port, remote_ip) tuple.
+        next_in_tcp_conn_bucket: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
+
+
+### TCP connected-socket hash (Phase 3 chunk 3)
+
+`inet_tcp_find` is called once per inbound TCP segment to map an
+ingress 4-tuple to a slot index. The pre-existing implementation
+linearly scanned all 16 slots even when 15 of them were unrelated
+sockets in different states. The hash chains by
+`(local_port ^ remote_port ^ low16(remote_ip)) & 0xf`, so the per-
+packet cost is amortised constant regardless of how many sockets
+are open.
+
+LISTEN sockets stay out of this hash — they have no remote tuple.
+Phase 3 chunk 4 introduces a separate listen hash keyed on
+`local_port` alone.
+
+Maintenance: insert when a slot transitions to having the full
+4-tuple set (active connect path in `inet_tcp_begin_connect`,
+passive accept path in `inet_tcp_accept_child`); remove in
+`inet_tcp_close_slot`. The remove is a safe no-op for slots never
+inserted (listen sockets, fresh-alloc-then-immediately-close-slot
+paths), so the close handler can call it unconditionally.
+
+    val INET_TCP_HASH_N = 16
+
+    var inet_tcp_conn_hash: [16]int
+
+    inet_tcp_conn_bucket(local_port: int, remote_port: int, remote_ip: u32) -> int
+        ((local_port ^ remote_port ^ int(remote_ip & u32(0xffff))) & (INET_TCP_HASH_N - 1))
+
+    inet_tcp_conn_hash_init()
+        var i = 0
+        while i < INET_TCP_HASH_N
+            inet_tcp_conn_hash[i] = -1
+            i += 1
+
+    inet_tcp_conn_hash_insert(s: int)
+        val h = inet_tcp_conn_bucket(tcp_sockets[s].local_port,
+                                      tcp_sockets[s].remote_port,
+                                      tcp_sockets[s].remote_ip)
+        tcp_sockets[s].next_in_tcp_conn_bucket = inet_tcp_conn_hash[h]
+        inet_tcp_conn_hash[h] = s
+
+    inet_tcp_conn_hash_remove(s: int)
+        val h = inet_tcp_conn_bucket(tcp_sockets[s].local_port,
+                                      tcp_sockets[s].remote_port,
+                                      tcp_sockets[s].remote_ip)
+        var cur = inet_tcp_conn_hash[h]
+        if cur == s
+            inet_tcp_conn_hash[h] = tcp_sockets[s].next_in_tcp_conn_bucket
+            tcp_sockets[s].next_in_tcp_conn_bucket = -1
+            return
+        while cur >= 0
+            val nx = tcp_sockets[cur].next_in_tcp_conn_bucket
+            if nx == s
+                tcp_sockets[cur].next_in_tcp_conn_bucket = tcp_sockets[s].next_in_tcp_conn_bucket
+                tcp_sockets[s].next_in_tcp_conn_bucket = -1
+                return
+            cur = nx
 
     // Bump the per-TCP-fd fire counter. Defined here, after the
     // TcpSocket declaration, so `inet_epoll_fire` (further up in
@@ -2020,10 +2085,12 @@ gate new sockets against the per-tid `TCP_PER_TID_BUF_MAX`.
 
 
     inet_tcp_init()
+        inet_tcp_conn_hash_init()
         var i = 0
         while i < TCP_MAX_SOCKETS
             tcp_sockets[i].in_use = 0
             tcp_sockets[i].state = TCP_STATE_CLOSED
+            tcp_sockets[i].next_in_tcp_conn_bucket = -1
             tcp_sockets[i].connect_waiter = -1
             tcp_sockets[i].send_waiter = -1
             tcp_sockets[i].recv_waiter = -1
@@ -2763,6 +2830,11 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         // reports nothing — preferring the wasted wake over an extra
         // pre-tear-down readiness state.
         inet_epoll_fire(2, s)
+        // Phase 3 chunk 3: drop from the connected-socket hash. No-op
+        // for slots that never carried a 4-tuple (LISTEN slots, fresh
+        // alloc that was immediately close_slot'd) — the bucket walk
+        // simply finds nothing and returns.
+        inet_tcp_conn_hash_remove(s)
         if tcp_sockets[s].connect_waiter >= 0
             inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, status, 0)
             tcp_sockets[s].connect_waiter = -1
@@ -2907,6 +2979,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].keepalive_cnt = 0
                 tcp_sockets[i].pending_error = 0
                 tcp_sockets[i].arp_pending = 0
+                tcp_sockets[i].next_in_tcp_conn_bucket = -1
                 // Heap-backed buffers are allocated lazily on alloc.
                 // close_slot frees + nulls the pointers, so re-using a
                 // slot doesn't double-allocate.  std.alloc returns 0 on
@@ -3108,14 +3181,14 @@ times in scan_timers.
         -1
 
     inet_tcp_find(local_port: int, remote_ip: u32, remote_port: int) -> int
-        var i = 0
-        while i < TCP_MAX_SOCKETS
+        var i = inet_tcp_conn_hash[inet_tcp_conn_bucket(local_port, remote_port, remote_ip)]
+        while i >= 0
             if (tcp_sockets[i].in_use != 0 && tcp_sockets[i].is_listen == 0 &&
                     tcp_sockets[i].local_port == local_port &&
                     tcp_sockets[i].remote_port == remote_port &&
                     tcp_sockets[i].remote_ip == remote_ip)
                 return i
-            i += 1
+            i = tcp_sockets[i].next_in_tcp_conn_bucket
         -1
 
 
@@ -3202,6 +3275,7 @@ the socket index on success (caller blocks until ESTABLISHED),
         tcp_sockets[s].local_port = lp
         tcp_sockets[s].remote_ip = remote_ip
         tcp_sockets[s].remote_port = remote_port
+        inet_tcp_conn_hash_insert(s)
         tcp_sockets[s].iss = iss
         tcp_sockets[s].snd_una = iss
         tcp_sockets[s].snd_nxt = iss + u32(1)
@@ -3323,6 +3397,7 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         tcp_sockets[s].local_port = tcp_sockets[ls].local_port
         tcp_sockets[s].remote_ip = remote_ip
         tcp_sockets[s].remote_port = remote_port
+        inet_tcp_conn_hash_insert(s)
         tcp_sockets[s].iss = iss
         tcp_sockets[s].snd_una = iss
         tcp_sockets[s].snd_nxt = iss + u32(1)

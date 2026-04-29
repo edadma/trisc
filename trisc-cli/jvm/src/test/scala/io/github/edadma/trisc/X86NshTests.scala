@@ -816,6 +816,18 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udphash: failed"
   }
 
+  "net: TCP 4-tuple hash routing (Phase 3 chunk 3)" in {
+    // Phase 3 chunk 3: replace inet_tcp_find's linear scan with a
+    // hash chained on (local_port ^ remote_port ^ low16(remote_ip)).
+    // Test opens a listener and 3 simultaneous loopback connections,
+    // then runs a per-connection round-trip with a unique tag byte.
+    // If hash routing were broken (wrong slot, missing remove on
+    // close), tag mismatch would surface here.
+    val output = qemu.command("test_tcphash")
+    output should include("tcphash: ok")
+    output should not include "tcphash: failed"
+  }
+
   "crash recovery: kill tfs and restart" in {
     // Find tfs PID from ps output
     val psOut = qemu.command("ps")
