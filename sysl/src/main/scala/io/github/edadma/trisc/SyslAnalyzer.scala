@@ -3680,8 +3680,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tValue = analyzeExpr(value)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          // Use latestStruct on the deref'd type — for self-referential generic
+          // structs the field's StructType may still be the placeholder created
+          // during monomorphization (with empty .fields). Codegen reads obj.typ
+          // directly, so a stale annotation here propagates a 0-field StructType
+          // that crashes index lookups.
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -3695,8 +3700,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tValue = analyzeExpr(value)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4217,8 +4222,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4229,8 +4234,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4241,8 +4246,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4253,8 +4258,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4402,7 +4407,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot take address of field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4489,8 +4494,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // Auto-dereference pointers to structs (p.x works like (*p).x)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
