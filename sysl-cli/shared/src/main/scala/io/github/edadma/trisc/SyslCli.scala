@@ -816,19 +816,30 @@ object SyslCli:
       def writeByte(addr: Long, data: Long): Unit = outputBuf += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
     }
-    // Optional write-watchpoint on BRK_PTR (8 bytes). When TRISC_WATCH_BRK=1
-    // is set, every write that touches the BRK_PTR slot from user code prints
-    // the CPU's current PC to stderr — useful for tracking who's corrupting
-    // the brk pointer outside the malloc shim. Wraps RAM with an override.
-    var watchCpu: Option[CPU] = None  // populated after CPU is constructed
+    // Optional write-watchpoints (set TRISC_WATCH=<hex_addr>:<width>,...).
+    // Common targets: TRISC_WATCH=0xFFF08:8 watches BRK_PTR. The watchpoint
+    // skips writes during initial load (before CPU exists) and prints the
+    // CPU's current PC to stderr on every match. Several ranges may be set
+    // by separating with commas. Wraps RAM with an override only when set.
+    var watchCpu: Option[CPU] = None
+    val watchRanges: List[(Long, Long)] =
+      Option(System.getenv("TRISC_WATCH")).map { spec =>
+        spec.split(",").toList.flatMap { r =>
+          r.split(":") match
+            case Array(addrStr, widthStr) =>
+              val addr = java.lang.Long.parseLong(addrStr.stripPrefix("0x"), 16)
+              val width = widthStr.toLong
+              Some((addr, addr + width))
+            case _ => None
+        }
+      }.getOrElse(Nil)
     val ram: Addressable =
-      if System.getenv("TRISC_WATCH_BRK") != null then
+      if watchRanges.nonEmpty then
         new RAM(0, ramSize) {
           private def maybeReport(addr: Long, width: String): Unit =
-            if addr >= brkPtrAddr && addr < brkPtrAddr + 8 then
-              // Skip writes during initial load (CPU not yet constructed).
+            if watchRanges.exists((lo, hi) => addr >= lo && addr < hi) then
               watchCpu.foreach { c =>
-                System.err.println(f"[BRK_WATCH] $width to 0x$addr%x at PC=0x${c.pc.toHexString}")
+                System.err.println(f"[WATCH] $width to 0x$addr%x at PC=0x${c.pc.toHexString}")
               }
           override def writeByte(addr: Long, data: Long): Unit =
             maybeReport(addr, "stb"); super.writeByte(addr, data)
