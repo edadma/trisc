@@ -116,7 +116,27 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   private val itables = new mutable.LinkedHashMap[String, List[String]] // itable label → list of function names
   private var declaredFunctions = Set.empty[String] // all function names in this compilation unit
 
-  def generate(program: TProgram): String =
+  def generate(program0: TProgram): String =
+    // Dedupe decls by name across compilation units. The test runner merges
+    // multiple units into one TProgram via `flatMap(_.typed.decls)`; if two
+    // units both instantiated the same generic (e.g. `is_err[i64, Error]`)
+    // we'd emit two `global is_err_i64_Error, ...` lines and two
+    // `is_err_i64_Error:` labels, and the asm assembler rejects the duplicate
+    // symbol. Keep the first occurrence per name; subsequent duplicates are
+    // identical re-instantiations of the same template and can be skipped.
+    val program: TProgram =
+      val seen = mutable.Set.empty[String]
+      def keep(name: String): Boolean =
+        if seen.contains(name) then false else { seen += name; true }
+      val deduped = program0.decls.filter {
+        case TFunDecl(name, _, _, _, _, _, _, _, _) => keep(name)
+        case TVarDecl(name, _, _, _, _, _, _) => keep(name)
+        case TExternFuncDecl(name, _, _) => keep(name)
+        case TExternVarDecl(name, _) => keep(name)
+        case _ => true
+      }
+      TProgram(deduped)
+
     out.clear()
     labelCounter = 0
     stringLiterals.clear()
