@@ -129,25 +129,16 @@ void __dump_heap(int x)
 }
 #endif
 
-/* This function returns true if the interval [old,new]
- * intersects the 'len'-sized interval below &libc.auxv
- * (interpreted as the main-thread stack) or below &b
- * (the current stack). It is used to defend against
- * buggy brk implementations that can cross the stack. */
-
+/* slix-musl: sys_brk caps growth at POSIX_BRK_LIMIT (0x60080000)
+ * and the user stack lives at 0x60080000+, so brk physically can
+ * never cross into the stack region — see oskit/posix/shim.lsysl
+ * sys_brk and slix/test/slix-prog.ld. The upstream check defends
+ * against systems where brk grows unbounded; on slix it's
+ * redundant and trips on every allocation because heap and stack
+ * are adjacent in the 576 KB user carve-out. */
 static int traverses_stack_p(uintptr_t old, uintptr_t new)
 {
-	const uintptr_t len = 8<<20;
-	uintptr_t a, b;
-
-	b = (uintptr_t)libc.auxv;
-	a = b > len ? b-len : 0;
-	if (new>a && old<b) return 1;
-
-	b = (uintptr_t)&b;
-	a = b > len ? b-len : 0;
-	if (new>a && old<b) return 1;
-
+	(void)old; (void)new;
 	return 0;
 }
 

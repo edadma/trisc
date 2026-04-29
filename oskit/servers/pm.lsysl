@@ -521,10 +521,15 @@ in `cap` or the blob is malformed.
                 k += 1
 
         // Frame size: argc(8) + argv+NULL((argc+1)*8) + envp NULL(8)
-        //             + auxv AT_NULL pair(16) + string bytes.
+        //             + auxv (AT_PAGESZ + AT_NULL = 2 pairs * 16 bytes)
+        //             + string bytes.
+        // AT_PAGESZ=4096 is required by musl's __init_libc (libc.page_size
+        // is read from auxv); without it, malloc's page-alignment math
+        // computes `n & (PAGE_SIZE-1)` as `n & -1` and zeroes everything,
+        // making malloc fall through to the unimplemented mmap path.
         val s_argv = (argc + 1) * 8
         val s_envp = 1 * 8
-        val s_auxv = 2 * 8
+        val s_auxv = 4 * 8     // AT_PAGESZ pair + AT_NULL pair
         var frame_size = 8 + s_argv + s_envp + s_auxv + s_total
 
         // 16-byte align (SysV ABI / AArch64 SP alignment requirement).
@@ -581,8 +586,18 @@ in `cap` or the blob is malformed.
             ai += 1
 
         // argv NULL (at pbase = 8 + argc*8), envp NULL (at 8 + s_argv),
-        // AT_NULL pair (at 8 + s_argv + s_envp), and alignment padding
+        // AT_NULL pair (at 8 + s_argv + s_envp + 16), and alignment padding
         // are all already zero from the clear above.
+
+        // Write the AT_PAGESZ auxv entry: type=6 at offset 0, value=4096
+        // at offset 8 of the auxv region. The AT_NULL terminator pair
+        // (16 zero bytes after that) was already cleared.
+        val auxv_off = 8 + s_argv + s_envp
+        out[auxv_off]      = byte(6)        // AT_PAGESZ = 6
+        // bytes auxv_off+1..7 are zero (high bytes of i64 type)
+        out[auxv_off + 8]  = byte(0)        // 4096 little-endian:
+        out[auxv_off + 9]  = byte(0x10)     //   0x00 0x10 0x00 0x00...
+        // bytes auxv_off+10..15 are zero (high bytes of i64 value)
 
         frame_size
 

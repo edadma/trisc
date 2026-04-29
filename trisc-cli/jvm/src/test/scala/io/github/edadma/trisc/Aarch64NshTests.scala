@@ -2076,18 +2076,13 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("::1 localhost")
   }
 
-  "musl: getaddrinfo via /etc/hosts (Phase 4 chunk 1a)" ignore {
-    // TODO: un-ignore when slix-musl malloc/mmap support lands
-    // (project_slix_musl_heap_gap.md). Currently fails with
-    // EAI_MEMORY (-10) — mallocng's alloc_group calls mmap, which
-    // is a no-op stub in shim.lsysl.
-    //
+  "musl: getaddrinfo via /etc/hosts (Phase 4 chunk 1a)" in {
     // mgetaddr (slix/test/getaddr.c): musl's getaddrinfo("localhost",
     // ...) walks name_from_null → name_from_numeric → name_from_hosts.
     // /etc/hosts has "127.0.0.1 localhost" so name_from_hosts returns
     // 127.0.0.1 without DNS. Validates the VFS read path through
-    // musl's stdio (fopen/fgets/fclose) on /etc/hosts AND the calloc
-    // path inside getaddrinfo for the result struct.
+    // musl's stdio on /etc/hosts AND the calloc path inside
+    // getaddrinfo (which exercises oldmalloc + brk + AT_PAGESZ auxv).
     qemu.send("mgetaddr\n")
     val output = qemu.waitFor("mgetaddr: ok")
     output should include("mgetaddr: localhost -> 127.0.0.1")

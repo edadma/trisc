@@ -94,10 +94,15 @@ echo "=== Compile $SRC ($ARCH) ==="
     "$SRC"
 
 echo "=== Link ==="
+# -u __bin_chunk forces lld to pull in oldmalloc/malloc.lo so its
+# strong __libc_malloc_impl wins over lite_malloc's weak alias.
+# Without this, archive-order resolution sticks with lite_malloc and
+# any malloc that needs to grow falls through to mmap (unimplemented).
 "$LD" \
     -T "$TEST_DIR/slix-prog.ld" \
     -z max-page-size=0x1000 \
     -static \
+    -u __bin_chunk \
     -o "$BIN_OUT/$OUT_NAME" \
     "$MUSL_LIB/crt1.o" \
     "$MUSL_LIB/crti.o" \

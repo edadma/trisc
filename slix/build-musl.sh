@@ -41,7 +41,8 @@ if [ ! -f config.mak ]; then
         --target=aarch64-slix-linux-musl \
         --prefix="$REPO_ROOT/slix/sysroot" \
         --disable-shared \
-        --enable-static
+        --enable-static \
+        --with-malloc=oldmalloc
 fi
 
 echo "=== Building musl libc.a ==="

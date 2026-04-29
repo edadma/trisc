@@ -851,10 +851,9 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("::1 localhost")
   }
 
-  "musl: getaddrinfo via /etc/hosts (Phase 4 chunk 1a)" ignore {
-    // TODO: un-ignore when slix-musl malloc/mmap support lands
-    // (project_slix_musl_heap_gap.md). Currently fails with
-    // EAI_MEMORY (-10).
+  "musl: getaddrinfo via /etc/hosts (Phase 4 chunk 1a)" in {
+    // Mirror of the aarch64 mgetaddr test. Same path through musl's
+    // name_from_hosts and oldmalloc/brk-only allocator.
     qemu.send("mgetaddr\n")
     val output = qemu.waitFor("mgetaddr: ok")
     output should include("mgetaddr: localhost -> 127.0.0.1")
