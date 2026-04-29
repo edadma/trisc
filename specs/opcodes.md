@@ -132,6 +132,11 @@ Complete opcode listing for all native instructions. Pseudo-instructions are doc
 
 ## R — `111 000 rrr ooooooo`
 
+The `rrr` field names a single register operand (r1..r7). Most opcodes
+in this group are nullary and ignore it (pshb/popb/spsr/rte/…); only
+pshr/popr give it semantic weight, where it encodes the *upper bound*
+of a contiguous register range starting at r1.
+
 | Opcode | Mnemonic | Operation | Notes |
 |--------|----------|-----------|-------|
 | 0000000 | pshb | push byte | |
@@ -150,8 +155,8 @@ Complete opcode listing for all native instructions. Pseudo-instructions are doc
 | 0001101 | gusp | get user stack pointer | supervisor |
 | 0001110 | susp | set user stack pointer | supervisor |
 | 0001111 | trapv | trap if overflow | |
-| 0010000 | pshr | push r1-rN | |
-| 0010001 | popr | pop rN-r1 | |
+| 0010000 | pshr rN | push r1..rN (8 bytes each, r1 deepest, rN on top); N = `rrr`, range 1..6 | |
+| 0010001 | popr rN | pop rN..r1 (rN first, r1 last); N = `rrr`, range 1..6 | |
 | 0010010 | cli | disable interrupts | supervisor |
 | 0010011 | sti | enable interrupts | supervisor |
 | 0010100 | swsp | swap r7 and USP | supervisor |
