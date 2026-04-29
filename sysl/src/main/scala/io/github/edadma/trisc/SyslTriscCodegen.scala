@@ -230,6 +230,29 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // Emit __str_float helper if needed (float to string conversion)
     if needsStrFloat then emitStrFloatHelper()
 
+    // Pre-walk dataGlobals to intern any string-literal initializers (scalar or
+    // array elements). This must run before rodata emission so the bodies land
+    // in rodata; the data segment loop below then re-uses the precomputed
+    // (label, len) pairs without re-interning.
+    val dataGlobalStringLabels = new mutable.HashMap[Int, List[(String, Int)]]
+    for (decl, idx) <- dataGlobals.toList.zipWithIndex do
+      decl match
+        case TVarDecl(_, typ, init, _, _, _, _) =>
+          init match
+            case TArrayLit(elements, _) =>
+              val isStringArray = typ match
+                case SyslType.ArrayType(e, _) => e.underlying == SyslType.StringType
+                case _ => false
+              if isStringArray then
+                dataGlobalStringLabels(idx) = elements.map {
+                  case TStringLit(value, _) => internStringLiteral(value)
+                  case _ => ("0", 0)
+                }.toList
+            case TStringLit(value, _) =>
+              dataGlobalStringLabels(idx) = List(internStringLiteral(value))
+            case _ =>
+        case _ =>
+
     // Emit rodata segment — string literals and interface tables
     if stringLiterals.nonEmpty || itables.nonEmpty then
       emit("segment rodata")
@@ -259,7 +282,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // Emit data segment — initialized globals
     if dataGlobals.nonEmpty then
       emit("segment data")
-      for decl <- dataGlobals do
+      for (decl, idx) <- dataGlobals.toList.zipWithIndex do
         decl match
           case TVarDecl(name, typ, init, _, _, _, _) =>
             val align = stackAlign(typ)
@@ -271,11 +294,30 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                 val declElemType = typ match
                   case SyslType.ArrayType(e, _) => e
                   case other => throw new RuntimeException(s"global array literal: expected ArrayType, got $other")
-                val elemDir = emitDataDirective(declElemType)
-                for elem <- elements do
-                  constEval(elem) match
-                    case Some(n) => emit(s"  $elemDir $n")
-                    case None => emit(s"  $elemDir 0")
+                declElemType.underlying match
+                  case SyslType.StringType =>
+                    // Each element is a 16-byte {ptr, len} descriptor pointing at
+                    // an interned string blob in rodata (interned in the pre-walk).
+                    val labels = dataGlobalStringLabels(idx)
+                    for (label, lenBytes) <- labels do
+                      if label == "0" then
+                        emit("  dl 0")
+                        emit("  dl 0")
+                      else
+                        emit(s"  dl $label")
+                        emit(s"  dl $lenBytes")
+                  case _ =>
+                    val elemDir = emitDataDirective(declElemType)
+                    for elem <- elements do
+                      constEval(elem) match
+                        case Some(n) => emit(s"  $elemDir $n")
+                        case None => emit(s"  $elemDir 0")
+              case TStringLit(_, _) =>
+                // Module-level scalar string init: emit a 16-byte {ptr, len} descriptor
+                // pointing at the interned blob.
+                val (label, lenBytes) = dataGlobalStringLabels(idx).head
+                emit(s"  dl $label")
+                emit(s"  dl $lenBytes")
               case _ =>
                 val directive = emitDataDirective(typ)
                 floatConstEval(init) match
@@ -405,6 +447,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   private def isZeroInit(typ: SyslType, init: TExpr): Boolean =
     init match
       case TArrayLit(_, _) => false // array literal has explicit values → data
+      case TStringLit("", _) => true  // empty string descriptor is {ptr=0, len=0} → bss
+      case TStringLit(_, _) => false  // non-empty string literal needs interned data → data
       case _ =>
         floatConstEval(init) match
           case Some(0.0) => true  // explicit zero float → bss
@@ -5709,6 +5753,15 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emitStructAddr(innerObj)  // r1 = parent struct address
         if off != 0 then emitAddImm(1, 1, off)
       case _ => genExpr(obj) // struct value (local/global) — genExpr produces address for struct types
+
+  // Allocate a unique label for a string-literal blob and queue it for rodata
+  // emission. Returns (label, byte-length). The blob in rodata is 8 bytes of
+  // immortal-refcount header followed by the UTF-8 bytes plus a NUL terminator.
+  private def internStringLiteral(value: String): (String, Int) =
+    labelCounter += 1
+    val label = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
+    stringLiterals += ((label, value))
+    (label, value.getBytes("UTF-8").length)
 
   // Data directive for a type: db (1 byte), ds (2), dw (4), dl (8)
   private def emitDataDirective(typ: SyslType): String = typ match
