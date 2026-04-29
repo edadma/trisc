@@ -1253,6 +1253,17 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       stackOffset -= 16
     else if arg.typ.isInstanceOf[SyslType.EnumType] || arg.typ.isInstanceOf[SyslType.StructType] then
       val aligned = (stackSize(arg.typ) + 7) & ~7
+      // Compensate for any extra stack used by genExpr (e.g., a struct
+      // constructor that materialised the value into a temporary). Without
+      // this, subsequent args end up at the wrong offsets and the callee
+      // reads garbage. Same pattern slice/string/scalar branches use.
+      // r1 still points to the source bytes — they live in the just-popped
+      // region until our copy reads them, and nothing in this loop writes
+      // there before we ldd from it.
+      val extra = preOffset - stackOffset
+      if extra > 0 then
+        emitAddImm(7, 7, extra)
+        stackOffset = preOffset
       emitAddImm(7, 7, -aligned)
       stackOffset -= aligned
       for off <- 0 until aligned by 8 do

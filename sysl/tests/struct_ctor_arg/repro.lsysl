@@ -1,0 +1,39 @@
+Struct-ctor argument corrupts next slice argument (TRISC codegen)
+===================================================================
+
+Pinned 2026-04-29. The TRISC `evalAndPushArg` struct/enum branch was
+forgetting to pop any "extra" stack used during `genExpr(arg)` before
+allocating its own copy slot. When a struct **constructor expression**
+appeared as a non-final positional argument, the constructor's
+materialisation temporary shifted every subsequent argument's stack
+offset, and the callee read garbage where it expected its later args
+(slice `len`, `int`, etc.).
+
+Real-world bite: in `std/regex/vm.lsysl`, `exec()` calls
+`vm.add_thread(current, Thread(0, init_saves), visited, sp, input_len)`.
+The `Thread(...)` constructor was the second arg; `visited` was the
+third. Inside `add_thread` the `len(visited)` field read as 0, so
+`visited[t.pc]` immediately bounds-trapped — that was the entire 96-OOB
+`std/regex/vm` cluster on the `--backend trisc` test runner.
+
+Fix in `SyslTriscCodegen.scala` mirrors the slice/string/scalar branches
+of the same function: pop the genExpr "extra" before allocating the
+struct's copy slot. r1 still points to the source bytes — they live in
+the just-popped stack region until our copy reads them, and the only
+thing emitted between the pop and the read is register arithmetic.
+
+    module sysl.tests.struct_ctor_arg
+
+    struct ST
+        a: int
+        b: int
+
+    callee(_pad: []int, t: ST, vis: []bool) -> int
+        return len(vis)
+
+    #test
+    test_ctor_arg_before_slice() -> unit
+        val _l = new [1]int
+        val _v = new [3]bool
+        val r = callee(_l[:1], ST(0, 0), _v[:3])
+        assert(r == 3, "len lost across struct-ctor arg")
