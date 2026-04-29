@@ -72,6 +72,32 @@ object FileIO:
       b += 1
     out
 
+  /** Read variant that applies the relatime rule to `atime` and
+    * persists the inode if it changed. Returns the bytes read; the
+    * (possibly updated) inode lands on disk through
+    * [[Sfs.writeInode]] inside an `Sfs.withTransaction` so the
+    * atime bump is journaled.
+    *
+    * Use this from public read entry points; the `(ino, dev, ...)`
+    * primitive above is for internal callers that must not touch
+    * metadata (e.g. fsck, recovery, tests). */
+  def readFile(
+      ino: Inode,
+      inoNum: Int,
+      sfs: Sfs,
+      offset: Long,
+      len: Int,
+      nowSec: Int,
+      nowNsec: Int,
+  ): Array[Byte] =
+    val bytes = readFile(ino, sfs.device, offset, len)
+    val updated = Atime.relatimeUpdate(ino, nowSec, nowNsec)
+    if updated ne ino then
+      sfs.withTransaction {
+        sfs.writeInode(inoNum, updated)
+      }
+    bytes
+
   // ---- write ----------------------------------------------------------
 
   /** Write `bytes` into the file at byte `offset`. Returns the updated
