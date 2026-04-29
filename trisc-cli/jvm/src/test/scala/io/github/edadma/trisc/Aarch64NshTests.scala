@@ -2121,6 +2121,25 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("dhclient: probing 10.0.2.15")
   }
 
+  "dhcp: dhclient writes /etc/resolv.conf (Phase 4 chunk 1b)" in {
+    // After a successful bind, dhclient persists DHCP option 6
+    // (DNS server list) into /etc/resolv.conf as canonical
+    // "nameserver A.B.C.D" lines. Slirp's user-mode DHCP server
+    // hands out 10.0.2.3 — its built-in DNS forwarder — so a
+    // single nameserver line at that address is the expected
+    // result. The file is created fresh via VFS_CMD_CREATE +
+    // VFS_CMD_WRITE; this test also validates that runtime file
+    // creation under /etc works at all.
+    qemu.send("dhclient\n")
+    qemu.waitFor("lease=")
+    // Drain dhclient's tail output and post-exit prompt before sending
+    // the next command — otherwise qemu.command's waitFor("> ") matches
+    // dhclient's exit prompt rather than cat's.
+    qemu.waitFor("> ")
+    val output = qemu.command("cat /etc/resolv.conf")
+    output should include("nameserver 10.0.2.3")
+  }
+
   "crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))

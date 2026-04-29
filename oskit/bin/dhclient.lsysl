@@ -36,7 +36,8 @@ skip.
 
     module oskit.bin.dhclient
 
-    import oskit.ulib.{puts, exit, exit_with, uptime}
+    import oskit.ulib.{puts, exit, exit_with, uptime,
+        create, open, close, unlink, write_handle}
     import oskit.net.{socket, bind, sendto, recvfrom, recvfrom_timeout,
         close_socket, inet_set_ip_config, nic_get_mac,
         arp_probe_start, arp_probe_send, arp_probe_check, arp_probe_announce}
@@ -244,17 +245,21 @@ Message-Type (53) — always the first option per convention.
         buf[off + 2] = byte(msg_type)
         off += 3
 
-Parameter-Request-List (55) — five options we want the server
-to include in its reply: subnet mask, router, lease time, T1, T2.
+Parameter-Request-List (55) — six options we want the server
+to include in its reply: subnet mask, router, lease time, T1, T2,
+and DNS server list. Per RFC 2131 §3.5 the server only emits the
+options the client actually asks for, so option 6 (DNS) must be
+listed here to make slirp populate it on the OFFER/ACK.
 
         buf[off] = byte(DHCP_OPT_PARAM_REQ_LIST)
-        buf[off + 1] = byte(5)
+        buf[off + 1] = byte(6)
         buf[off + 2] = byte(DHCP_OPT_SUBNET_MASK)
         buf[off + 3] = byte(DHCP_OPT_ROUTER)
         buf[off + 4] = byte(DHCP_OPT_LEASE_TIME)
         buf[off + 5] = byte(DHCP_OPT_T1)
         buf[off + 6] = byte(DHCP_OPT_T2)
-        off += 7
+        buf[off + 7] = byte(DHCP_OPT_DNS)
+        off += 8
 
 Hostname (12) = "slix". Cosmetic but helps router admin UIs
 label our box something useful.
@@ -527,6 +532,59 @@ failure returns -1 but commit still proceeds.
         0
 
 
+### dhclient_write_resolv_conf
+
+Persist DHCP option 6 (DNS server list) to `/etc/resolv.conf` so
+musl's `__get_resolv_conf` can resolve names against the addresses
+the lease handed us. The file is rewritten on every BOUND so a
+later renew with a different option-6 set replaces the previous
+contents cleanly — `unlink` first, then `create` + `open` + write
+each populated entry as `nameserver A.B.C.D\n`.
+
+`unlink` is best-effort: on the first lease the file doesn't exist
+yet and `unlink` returns -1, which we ignore. Failures past that
+point are logged but non-fatal — DHCP itself bound, only name
+resolution is impaired.
+
+    dhclient_write_resolv_conf(ack: *DhcpMessage)
+        unlink("/etc/resolv.conf")
+        if create("/etc/resolv.conf", 1, 0x1FF) < 0
+            puts("dhclient: resolv.conf create failed\n")
+            return
+        val fid = open("/etc/resolv.conf")
+        if fid < 0
+            puts("dhclient: resolv.conf open failed\n")
+            return
+        for var i = 0; i < 2; i++
+            val ip = ack.dns_servers[i]
+            if ip == u32(0)
+                continue
+            var buf: [40]byte
+            var n = 0
+            val prefix = "nameserver "
+            val pp = *byte(prefix)
+            for var j = 0; j < 11; j++
+                buf[n] = pp[j]
+                n += 1
+            for var oct = 0; oct < 4; oct++
+                val v = ipv4_octet(ip, oct)
+                if v >= 100
+                    buf[n] = byte('0' + (v / 100))
+                    n += 1
+                if v >= 10
+                    buf[n] = byte('0' + ((v / 10) % 10))
+                    n += 1
+                buf[n] = byte('0' + (v % 10))
+                n += 1
+                if oct < 3
+                    buf[n] = byte('.')
+                    n += 1
+            buf[n] = byte('\n')
+            n += 1
+            write_handle(fid, &buf[0], n)
+        close(fid)
+
+
 ### dhclient_wait_match
 
 Drain incoming datagrams until one matches our xid and the
@@ -723,6 +781,9 @@ consumer routers.
         // Announce claim per RFC 5227 §2.3 so any host with a
         // stale ARP cache for yiaddr updates. Best-effort.
         dhclient_announce(fd, out_ack.yiaddr)
+        // Persist option 6 (DNS server list) so musl's name lookups
+        // pick up the lease's resolvers. Errors are logged inside.
+        dhclient_write_resolv_conf(out_ack)
         puts("dhclient: bound ")
         print_ipv4(out_ack.yiaddr)
         puts(" mask=")
