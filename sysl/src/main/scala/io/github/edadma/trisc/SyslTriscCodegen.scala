@@ -556,6 +556,10 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         // 4-aligned (e.g. a struct field at a non-8-aligned offset), so we
         // must use 4-byte loads/stores. Otherwise 8-byte ops are fine.
         emitAggregateCopy(srcReg, addrReg, stackSize(st), stackAlign(st))
+      case at: SyslType.ArrayType =>
+        // Fixed-size array copy: srcReg = source address, addrReg = dest address.
+        // Used when an array is a struct field (e.g. `buf: [1024]u8` in std/bufio).
+        emitAggregateCopy(srcReg, addrReg, stackSize(at), stackAlign(at))
       case et: SyslType.EnumType =>
         // Enum copy: srcReg = source address, addrReg = dest address.
         // Same alignment story as struct — enums whose payloads are only
