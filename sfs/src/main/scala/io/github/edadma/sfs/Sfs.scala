@@ -157,8 +157,10 @@ final class Sfs private[sfs] (
     * through a journal transaction so a crash mid-relabel is replayed
     * atomically on next mount. The new label must fit in the
     * [[Superblock.VolumeNameMax]]-byte usable region. */
-  def relabel(newName: String): Unit =
+  def relabel(newName: String, caller: Caller = Caller.Root): Unit =
     requireMounted()
+    if !caller.isRoot then
+      throw new SfsPermissionError(s"Sfs.relabel: requires root (caller uid=${caller.uid})")
     require(
       newName.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= Superblock.VolumeNameMax,
       s"newName too long for ${Superblock.VolumeNameMax}-byte usable region",

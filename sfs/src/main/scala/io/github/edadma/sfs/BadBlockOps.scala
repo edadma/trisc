@@ -32,7 +32,9 @@ object BadBlockOps:
     * address. Empty result for a freshly formatted volume. Reads
     * through `sfs.metaDevice` so an active txn's staged writes are
     * visible. */
-  def list(sfs: Sfs): IndexedSeq[Int] =
+  def list(sfs: Sfs, caller: Caller = Caller.Root): IndexedSeq[Int] =
+    if !caller.isRoot then
+      throw new SfsPermissionError(s"BadBlockOps.list: requires root (caller uid=${caller.uid})")
     val ino = sfs.readInode(InoBadBlocks)
     if ino.size == 0L then IndexedSeq.empty
     else
@@ -67,7 +69,10 @@ object BadBlockOps:
       blockAddr: Int,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): Inode = sfs.withTransaction {
+    if !caller.isRoot then
+      throw new SfsPermissionError(s"BadBlockOps.mark: requires root (caller uid=${caller.uid})")
     val layout = sfs.layout
     require(
       blockAddr >= layout.dataStart && blockAddr < layout.totalBlocks,

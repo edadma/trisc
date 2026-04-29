@@ -29,9 +29,10 @@ object XattrOps:
 
   /** Look up `name` on `inodeNum`. Returns `None` when the inode has
     * no xattr block, or when the block has no entry with that name. */
-  def get(sfs: Sfs, inodeNum: Int, name: String): Option[Array[Byte]] =
+  def get(sfs: Sfs, inodeNum: Int, name: String, caller: Caller = Caller.Root): Option[Array[Byte]] =
     require(name.nonEmpty, "xattr name must not be empty")
     val ino = sfs.readInode(inodeNum)
+    Perms.requireAccess(caller, ino, FileOps.AccessRead, "XattrOps.get", s"inode #$inodeNum")
     if (ino.flags & InodeFlagHasXattr) == 0 then None
     else
       val entries = readXattrBlock(sfs, ino.xattrBlock, inodeNum)
@@ -40,8 +41,9 @@ object XattrOps:
   /** Return every attribute name on `inodeNum`, in stored order.
     * Returns an empty sequence when there are none (or no xattr block
     * is allocated). */
-  def list(sfs: Sfs, inodeNum: Int): IndexedSeq[String] =
+  def list(sfs: Sfs, inodeNum: Int, caller: Caller = Caller.Root): IndexedSeq[String] =
     val ino = sfs.readInode(inodeNum)
+    Perms.requireAccess(caller, ino, FileOps.AccessRead, "XattrOps.list", s"inode #$inodeNum")
     if (ino.flags & InodeFlagHasXattr) == 0 then IndexedSeq.empty
     else readXattrBlock(sfs, ino.xattrBlock, inodeNum).map(_.name)
 
@@ -60,9 +62,11 @@ object XattrOps:
       timeSec: Int,
       timeNsec: Int,
       mode: SetMode = SetMode.CreateOrReplace,
+      caller: Caller = Caller.Root,
   ): Inode = sfs.withTransaction {
     require(name.nonEmpty, "xattr name must not be empty")
     val ino = sfs.readInode(inodeNum)
+    Perms.requireAccess(caller, ino, FileOps.AccessWrite, "XattrOps.set", s"inode #$inodeNum")
     val current =
       if (ino.flags & InodeFlagHasXattr) == 0 then IndexedSeq.empty[XattrEntry]
       else readXattrBlock(sfs, ino.xattrBlock, inodeNum)
@@ -115,9 +119,11 @@ object XattrOps:
       name: String,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): Inode = sfs.withTransaction {
     require(name.nonEmpty, "xattr name must not be empty")
     val ino = sfs.readInode(inodeNum)
+    Perms.requireAccess(caller, ino, FileOps.AccessWrite, "XattrOps.remove", s"inode #$inodeNum")
     if (ino.flags & InodeFlagHasXattr) == 0 then
       throw new SfsNotFoundError(s"""xattr "$name" does not exist (no xattr block)""")
     val current = readXattrBlock(sfs, ino.xattrBlock, inodeNum)
