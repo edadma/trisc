@@ -588,19 +588,27 @@ pass the IPC `sender` argument.
             err[0] = byte(-1)
             ipc_reply(sender, err, 1)
             return
-        val port = inet_read_u16(buf, 3)
+        val req_port = inet_read_u16(buf, 3)
         val ip = inet_read_ipv4(buf, 5)
-        if port <= 0
-            var err: [1]byte
-            err[0] = byte(-1)
-            ipc_reply(sender, err, 1)
-            return
         if ip != INADDR_ANY
             if ip != INADDR_LOOPBACK
                 var err: [1]byte
                 err[0] = byte(-1)
                 ipc_reply(sender, err, 1)
                 return
+        // Port 0 → "any free port". POSIX bind(2) gives the kernel
+        // an ephemeral port from the local range; required by musl's
+        // DNS resolver, which always passes sin_port = 0 on its
+        // outbound UDP socket.
+        var port = req_port
+        if port == 0
+            val eph = inet_alloc_ephemeral_port()
+            if eph < 0
+                var err: [1]byte
+                err[0] = byte(-1)
+                ipc_reply(sender, err, 1)
+                return
+            port = eph
         if inet_find_bound(ip, port) >= 0
             var err: [1]byte
             err[0] = byte(-1)

@@ -2140,6 +2140,29 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("nameserver 10.0.2.3")
   }
 
+  // TODO: un-ignore when the slirp DNS round-trip lands. The
+  // syscall-side prep is in place (socket flags, port-0 bind,
+  // ppoll) — verified by `mdns` reaching `poll(1, 1, 2000)` with
+  // a sent UDP query — but the response from 10.0.2.3:53 (slirp's
+  // stub DNS) doesn't make it back to the bound socket on this
+  // build, leaving getaddrinfo to time out (-3 EAI_AGAIN). Next
+  // chunk: identify whether the packet leaves the guest, whether
+  // slirp answers, and whether inet's RX path delivers the reply
+  // to a non-loopback bound port. Switching to 8.8.8.8 doesn't
+  // help — same no-answer mode — so the gap is below the resolver
+  // (TX or RX), not in the DNS forwarder. See
+  // project_slix_phase4_chunk1c_handoff.md for entry points.
+  "musl: getaddrinfo over slirp DNS (Phase 4 chunk 1c)" ignore {
+    qemu.send("dhclient\n")
+    qemu.waitFor("lease=")
+    qemu.waitFor("> ")
+    qemu.send("mdns\n")
+    val output = qemu.waitFor("mdns: ok")
+    output should include("mdns: example.com -> ")
+    output should not include "mdns: getaddrinfo rc="
+    output should not include "mdns: failed"
+  }
+
   "crash recovery: kill tfs and restart" in {
     val psOut = qemu.command("ps")
     val tfsLine = psOut.split('\n').find(_.contains("tfs"))

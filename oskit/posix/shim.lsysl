@@ -410,6 +410,15 @@ keep the kernel link free of the full socket-API module.
     val POSIX_SOCK_DGRAM     = 2
     val POSIX_SOCK_STREAM    = 1
 
+socket(2) / accept4(2) flag bits OR'd into `stype` / `flags`.
+SOCK_NONBLOCK is honoured (mirrored into the slot's flags field
+as `POSIX_O_NONBLOCK`); SOCK_CLOEXEC is accepted and ignored
+(no fork/exec yet). Used by both `sys_socket` and `sys_accept4`,
+so they live up here near `POSIX_SOCK_DGRAM`.
+
+    val POSIX_SOCK_NONBLOCK  = 2048
+    val POSIX_SOCK_CLOEXEC   = 524288
+
 POSIX `O_NONBLOCK` is Linux octal 04000 = 2048. We only honour this
 flag today; other open(2) flags (O_APPEND etc.) would need the
 shim to actually track them, so we mask them off on `F_SETFL`.
@@ -697,6 +706,8 @@ to the same UDP stack that native sysl programs use via
             return sys_epoll_ctl(int(a0), int(a1), int(a2), a3)
         if num == 155
             return sys_epoll_pwait(int(a0), a1, int(a2), int(a3))
+        if num == 258
+            return sys_ppoll(a0, int(a1), a2)
         if num == 156
             return sys_eventfd2(int(a0), int(a1))
         if num == 356
@@ -1206,17 +1217,28 @@ unconnected POSIX fd (target = -1); the inet-side socket is
 allocated lazily by `sys_connect` or `sys_listen` so we don't have
 to map a "pre-connect" state into the inet protocol.
 
+`stype` may be OR'd with `SOCK_CLOEXEC` and/or `SOCK_NONBLOCK` —
+musl's resolver creates its DNS socket as
+`SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK`, mirroring the same
+atomic creation pattern as `accept4`. We mask the flag bits off
+before the `stype` discriminator and re-apply `SOCK_NONBLOCK` to
+the new fd's flags. `SOCK_CLOEXEC` is accepted-and-ignored (no
+exec yet).
+
     sys_socket(family: int, stype: int, proto: int) -> i64
         if family != POSIX_AF_INET
             return i64(-97)     // -EAFNOSUPPORT
-        if stype == POSIX_SOCK_DGRAM
+        val sock_flag_mask = POSIX_SOCK_NONBLOCK | POSIX_SOCK_CLOEXEC
+        val sock_flags = stype & sock_flag_mask
+        val base_type = stype & ~sock_flag_mask
+        if base_type == POSIX_SOCK_DGRAM
             val port = inet_get_port()
             if port < 0
                 return i64(-19)     // -ENODEV
             var msg: [4]byte
             msg[0] = byte(INET_CMD_SOCKET)
             msg[1] = byte(family & 0xff)
-            msg[2] = byte(stype & 0xff)
+            msg[2] = byte(base_type & 0xff)
             msg[3] = byte(proto & 0xff)
             var reply: [2]byte
             val r = ipc_send(port, msg, 4, reply, 2)
@@ -1236,11 +1258,17 @@ to map a "pre-connect" state into the inet protocol.
                 var close_rep: [1]byte
                 ipc_send(port, close_msg, 2, close_rep, 1)
                 return i64(-24)     // -EMFILE
+            if (sock_flags & POSIX_SOCK_NONBLOCK) != 0
+                val cur = posix_fd_flags(posix_fd)
+                posix_fd_set_flags(posix_fd, cur | POSIX_O_NONBLOCK)
             return i64(posix_fd)
-        if stype == POSIX_SOCK_STREAM
+        if base_type == POSIX_SOCK_STREAM
             val posix_fd = posix_fd_alloc(POSIX_FD_TCP_SOCKET, -1)
             if posix_fd < 0
                 return i64(-24)
+            if (sock_flags & POSIX_SOCK_NONBLOCK) != 0
+                val cur = posix_fd_flags(posix_fd)
+                posix_fd_set_flags(posix_fd, cur | POSIX_O_NONBLOCK)
             return i64(posix_fd)
         i64(-93)                    // -EPROTONOSUPPORT
 
@@ -2053,9 +2081,6 @@ already routes through the non-blocking inet path.
 `SOCK_CLOEXEC` is accept-and-ignore for now (no fork/exec
 story yet — see `feedback_no_workarounds_build_it.md` for the
 follow-up arc).  Unknown flag bits return -EINVAL.
-
-    val POSIX_SOCK_NONBLOCK = 2048
-    val POSIX_SOCK_CLOEXEC  = 524288
 
     sys_accept4(fd: int, addr_ptr: i64, addrlen_ptr: i64, flags: int) -> i64
         val known = POSIX_SOCK_NONBLOCK | POSIX_SOCK_CLOEXEC
@@ -4206,6 +4231,89 @@ and `notify_wait()` can block again on the next iteration.
                 sleep_or_notify(ticks_left)
                 val after = uptime()
                 val elapsed = after - before
+                if elapsed >= ticks_left
+                    ticks_left = 0
+                else
+                    ticks_left -= elapsed
+        i64(0)
+
+SYS_PPOLL. Linux ppoll(2): wait for any of `nfds` file descriptors
+to become ready for the requested events, or until `tmo_p`
+elapses. Musl's `poll(2)` wrapper routes here when `SYS_poll`
+isn't defined (slix-musl's case for both arches).
+
+Layout of `struct pollfd` (LP64, packed): fd(i32 LE @0),
+events(i16 LE @4), revents(i16 LE @6) — 8 bytes per entry. The
+event bits (POLLIN/OUT/ERR/HUP) match `POSIX_EPOLL*` 1:1, so the
+existing `epoll_query_ready` helper drops in directly.
+
+Strategy: short-interval poll. Each iteration calls
+`epoll_query_ready` for each fd, fills revents, and counts
+fds with non-zero revents. If any fired or `timeout_ms == 0`, we
+return. Otherwise sleep one tick and loop. We don't pre-subscribe
+each fd via `INET_CMD_EPOLL_SUB` — that would tighten latency but
+adds bookkeeping (transient inst, unsub on exit) that's not
+worth it for the resolver's 5-second timeouts. 10 ms latency is
+well below DNS round-trip.
+
+`tmo_p` is a `struct timespec { i64 tv_sec; i64 tv_nsec; }`. NULL
+means wait forever. `sigmask` and `sigsetsize` (a3, a4) are
+ignored — slix has no signals.
+
+    sys_ppoll(fds_ptr: i64, nfds: int, ts_ptr: i64) -> i64
+        if nfds < 0 || nfds > 32
+            return i64(-22)         // -EINVAL
+        if nfds > 0 && fds_ptr == i64(0)
+            return i64(-14)         // -EFAULT
+        var timeout_ms = -1
+        if ts_ptr != i64(0)
+            val ts: *byte = *byte(ts_ptr)
+            val tv_sec = shim_read_le_i64(ts, 0)
+            val tv_nsec = shim_read_le_i64(ts, 8)
+            if tv_sec < i64(0) || tv_nsec < i64(0) || tv_nsec >= i64(1000000000)
+                return i64(-22)
+            timeout_ms = int(tv_sec * i64(1000) + tv_nsec / i64(1000000))
+        val fds: *byte = *byte(fds_ptr)
+        var ticks_left = -1
+        if timeout_ms >= 0
+            ticks_left = (timeout_ms + 9) / 10
+        var iter = 0
+        while iter < 100000
+            iter += 1
+            val _ = notify_read_self()
+            var ready_count = 0
+            var i = 0
+            while i < nfds
+                val off = i * 8
+                val fd = shim_read_le_u32(fds, off)
+                val events = (int(fds[off + 4]) & 0xff) | ((int(fds[off + 5]) & 0xff) << 8)
+                var revents = 0
+                // fd < 0 (sentinel "skip this slot") or out-of-range
+                // (no such slot in this process) → revents = 0. Sysl's
+                // int width can be 32 or 64 in context, so combine
+                // both bounds rather than relying on sign.
+                if fd >= 0 && fd < POSIX_FDS_PER_PROC
+                    var seq = 0
+                    revents = epoll_query_ready(fd, events, &seq)
+                fds[off + 6] = byte(revents & 0xff)
+                fds[off + 7] = byte((revents >> 8) & 0xff)
+                if revents != 0
+                    ready_count += 1
+                i += 1
+            if ready_count > 0
+                return i64(ready_count)
+            if timeout_ms == 0
+                return i64(0)
+            if ticks_left == 0
+                return i64(0)
+            // Re-poll every tick (10 ms). For waits ≥ ~50 ms this is
+            // imperceptible; the resolver case typically lands within
+            // 1–5 ticks of the response arriving.
+            val before = uptime()
+            sleep_or_notify(1)
+            val after = uptime()
+            val elapsed = after - before
+            if timeout_ms >= 0
                 if elapsed >= ticks_left
                     ticks_left = 0
                 else

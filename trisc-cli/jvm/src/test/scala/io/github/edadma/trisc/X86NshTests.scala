@@ -1146,6 +1146,20 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
   }
 
 
+  // TODO: un-ignore when the slirp DNS round-trip lands; see the
+  // matching aarch64 test for context.
+  "musl: getaddrinfo over slirp DNS (Phase 4 chunk 1c)" ignore {
+    qemu.send("dhclient\n")
+    qemu.waitFor("lease=")
+    qemu.waitFor("> ")
+    qemu.send("mdns\n")
+    val output = qemu.waitFor("mdns: ok")
+    output should include("mdns: example.com -> ")
+    output should not include "mdns: getaddrinfo rc="
+    output should not include "mdns: failed"
+  }
+
+
   "dns: resolve against a mock DNS server" in {
     // Spin up a tiny mock DNS responder on 127.0.0.1:<ephemeral>.
     // The guest sends its query to 10.0.2.2:<that port> — slirp
