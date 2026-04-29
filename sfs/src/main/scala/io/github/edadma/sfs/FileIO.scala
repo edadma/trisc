@@ -89,7 +89,9 @@ object FileIO:
       len: Int,
       nowSec: Int,
       nowNsec: Int,
+      caller: Caller = Caller.Root,
   ): Array[Byte] =
+    Perms.requireAccess(caller, ino, FileOps.AccessRead, "FileIO.readFile", s"inode #$inoNum")
     val bytes = readFile(ino, sfs.device, offset, len)
     val updated = Atime.relatimeUpdate(ino, nowSec, nowNsec)
     if updated ne ino then
@@ -115,8 +117,10 @@ object FileIO:
       bytes: Array[Byte],
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): Inode =
     require(offset >= 0L, s"offset must be non-negative, got $offset")
+    Perms.requireAccess(caller, ino, FileOps.AccessWrite, "FileIO.writeFile", "target inode")
     if bytes.length == 0 then return ino
     // `dev` is the raw device for *user data* blocks (read-modify-write
     // of partial blocks, fresh data writes); `meta` is the txn-aware
@@ -222,8 +226,10 @@ object FileIO:
       newSize: Long,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): Inode =
     require(newSize >= 0L, s"newSize must be non-negative, got $newSize")
+    Perms.requireAccess(caller, ino, FileOps.AccessWrite, "FileIO.truncateFile", "target inode")
     if newSize == ino.size then return ino
     val dev = sfs.device
     val meta = sfs.metaDevice

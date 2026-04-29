@@ -163,7 +163,9 @@ object HTree:
       sfs: Sfs,
       nowSec: Int,
       nowNsec: Int,
+      caller: Caller = Caller.Root,
   ): Vector[DirEntry] =
+    Perms.requireAccess(caller, ino, FileOps.AccessRead, "HTree.list", s"directory inode #$inoNum")
     val out = list(ino, sfs.device, inoNum)
     val updated = Atime.relatimeUpdate(ino, nowSec, nowNsec)
     if updated ne ino then
