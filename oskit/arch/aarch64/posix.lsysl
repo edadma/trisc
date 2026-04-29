@@ -1,0 +1,98 @@
+OSKit Arch — aarch64 POSIX layout helpers
+==========================================
+
+The POSIX shim writes Linux-shaped structs (`struct kstat`,
+`struct timespec`, etc.) into user buffers. Most of those have
+identical wire layouts across the arches we care about, so they
+live in `oskit.posix` directly. A handful — `struct kstat`
+chief among them — are arch-specific because slix-musl's per-
+arch kstat header reorders fields to match the arch's Linux
+ABI. Those packers live here, exported through `module oskit.arch`
+so the shim can `import oskit.arch.{pack_kstat}` without caring
+which arch it's compiled against.
+
+aarch64-slix `struct kstat` mirrors the arm64 Linux kernel
+layout. Crucially, slix-musl's `arch/aarch64-slix/bits/alltypes.h.in`
+overrides the generic `nlink_t = unsigned _Reg` and
+`blksize_t = long` to plain 4-byte `unsigned int` / `int` — so
+the struct ends up at exactly 128 bytes, not 144 like x86_64.
+This was caught the hard way: a 144-byte writer overwrote
+`__fstatat`'s saved LR at sp+160 and the program crashed
+returning to PC=0. Don't change KSTAT_SIZE without a matching
+disassembly check.
+
+Field offsets (verified by hand against `arch/aarch64-slix/`
+overrides + the generic kstat header — keep in sync if the
+musl header ever moves):
+
+```
+  0  st_dev          (u64)
+  8  st_ino          (u64)
+ 16  st_mode         (u32)
+ 20  st_nlink        (u32)
+ 24  st_uid          (u32)
+ 28  st_gid          (u32)
+ 32  st_rdev         (u64)
+ 40  __pad           (u64)
+ 48  st_size         (i64)
+ 56  st_blksize      (i32)
+ 60  __pad2          (i32)
+ 64  st_blocks       (i64)
+ 72  st_atime        (i64)
+ 80  st_atime_nsec   (i64)
+ 88  st_mtime        (i64)
+ 96  st_mtime_nsec   (i64)
+104  st_ctime        (i64)
+112  st_ctime_nsec   (i64)
+120  __unused[2]     (u32×2 → 8 B)
+```
+
+All values are little-endian (aarch64 user processes run LE).
+
+    module oskit.arch
+
+    val KSTAT_SIZE = 128
+
+A small write-LE helper lives here rather than borrowing the
+shim's because importing oskit.posix from oskit.arch would
+introduce a module cycle. The cost is ~10 lines duplicated.
+
+    posix_write_le_i64(p: *byte, off: int, v: i64)
+        var i = 0
+        while i < 8
+            p[off + i] = byte(int((v >> i64(8 * i))) & 0xff)
+            i += 1
+
+    posix_write_le_u32(p: *byte, off: int, v: int)
+        p[off]     = byte(v & 0xff)
+        p[off + 1] = byte((v >> 8) & 0xff)
+        p[off + 2] = byte((v >> 16) & 0xff)
+        p[off + 3] = byte((v >> 24) & 0xff)
+
+Pack the universal stat fields into the 128-byte aarch64-slix
+kstat. `mode` is already in Linux musl form (S_IFREG=0o100000
+etc., NOT TFS-encoded). `size` / `ino` are i64-wide so a
+4 GB+ file or a >32-bit inode space remains representable; TFS
+itself caps both at i32 today, but the packer stays future-
+proof.
+
+    pack_kstat(buf: *byte, mode: int, nlinks: int, uid: int, gid: int,
+               size: i64, ino: i64)
+        var i = 0
+        while i < KSTAT_SIZE
+            buf[i] = byte(0)
+            i += 1
+        posix_write_le_i64(buf, 0, i64(0))         // st_dev
+        posix_write_le_i64(buf, 8, ino)            // st_ino
+        posix_write_le_u32(buf, 16, mode)          // st_mode
+        posix_write_le_u32(buf, 20, nlinks)        // st_nlink
+        posix_write_le_u32(buf, 24, uid)           // st_uid
+        posix_write_le_u32(buf, 28, gid)           // st_gid
+        posix_write_le_i64(buf, 32, i64(0))        // st_rdev
+        posix_write_le_i64(buf, 48, size)          // st_size
+        posix_write_le_u32(buf, 56, 4096)          // st_blksize
+        // st_blocks is a count of 512-byte units; round up.
+        val blocks = (size + i64(511)) >> i64(9)
+        posix_write_le_i64(buf, 64, blocks)
+        // atime/mtime/ctime + nsec all stay zero — slix has no
+        // wall clock for files yet.

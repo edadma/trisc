@@ -34,6 +34,7 @@ SYSL_FILES=(
     oskit/arch/x86_64/prog_config.sysl
     oskit/arch/x86_64/vm.lsysl
     oskit/arch/x86_64/runtime.lsysl
+    oskit/arch/x86_64/posix.lsysl
     oskit/config/config.sysl
     oskit/hal/mem_cpu.lsysl
     oskit/ipc/ipc.lsysl

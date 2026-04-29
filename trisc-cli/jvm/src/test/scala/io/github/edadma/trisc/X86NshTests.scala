@@ -956,6 +956,23 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mfile: done")
   }
 
+  "musl: stat / lstat / fstat (Phase 4 chunk 2)" in {
+    // mstat (slix/test/stat.c) exercises SYS_fstat (178) and
+    // SYS_newfstatat (252) through musl's stat/lstat/fstat
+    // wrappers. Validates the per-arch kstat layout (x86_64 here)
+    // and the shim's TFS-mode → Linux S_IF* translation.
+    qemu.send("mstat\n")
+    val output = qemu.waitFor("mstat: ok")
+    output should include("mstat: stat /etc/passwd size=")
+    output should include("reg=1 dir=0")
+    output should not include "size=0 reg=1"
+    output should include("mstat: lstat /etc/passwd")
+    output should include("mstat: stat /etc size=")
+    output should include("reg=0 dir=1")
+    output should include("mstat: fstat fd=")
+    output should include("mstat: stat /no/such missing=1")
+  }
+
   "musl: epoll_create1/ctl/wait on a UDP socket" in {
     qemu.send("mepoll\n")
     val output = qemu.waitFor("mepoll: done")

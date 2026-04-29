@@ -789,6 +789,26 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mfile: done")
   }
 
+  "musl: stat / lstat / fstat (Phase 4 chunk 2)" in {
+    // mstat (slix/test/stat.c) exercises the new SYS_fstat (178)
+    // and SYS_newfstatat (252) paths against /etc/passwd (a regular
+    // file with non-zero size in the prefilled ramdisk) and /etc
+    // (a directory). Validates the shim's TFS-mode → musl-mode
+    // translation table, the per-arch kstat layout packer, and
+    // VFS_CMD_FSTAT for fd-based stat. Final case stats /no/such
+    // to confirm -ENOENT propagates.
+    qemu.send("mstat\n")
+    val output = qemu.waitFor("mstat: ok")
+    output should include("mstat: stat /etc/passwd size=")
+    output should include("reg=1 dir=0")
+    output should not include "size=0 reg=1"
+    output should include("mstat: lstat /etc/passwd")
+    output should include("mstat: stat /etc size=")
+    output should include("reg=0 dir=1")
+    output should include("mstat: fstat fd=")
+    output should include("mstat: stat /no/such missing=1")
+  }
+
   "musl: epoll_create1/ctl/wait on a UDP socket" in {
     // mepoll (slix/test/epoll.c) walks the level-triggered epoll
     // path: empty wait times out, sendto-self makes the fd

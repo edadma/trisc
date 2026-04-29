@@ -758,6 +758,8 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_EPOLL_SUB         = 21
     val VFS_CMD_EPOLL_UNSUB       = 22
     val VFS_CMD_EPOLL_INST_CLOSE  = 23
+    // Phase 4 chunk 2 — fstat by handle. Same reply shape as STAT.
+    val VFS_CMD_FSTAT   = 24
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
@@ -771,6 +773,8 @@ reply is always 1 byte. On success, length depends on command.
         if cmd == VFS_CMD_CREATE
             return 5
         if cmd == VFS_CMD_STAT
+            return 29
+        if cmd == VFS_CMD_FSTAT
             return 29
         if cmd == VFS_CMD_MKDIR
             return 5
@@ -1792,6 +1796,64 @@ Reply: [status(1), mode(4), nlinks(4), uid(4), gid(4), size(4), mtime(4), ctime(
         ipc_send(backend, tfs_msg, 5, reply, 29)
         ipc_reply(sender, reply, 29)
 
+Handle-based FSTAT: [cmd(1), handle(4)]
+Reply: [status(1), mode(4), nlinks(4), uid(4), gid(4), size(4), mtime(4), ctime(4)]
+
+For OFT_TYPE_FILE the inode is forwarded to TFS just like the
+path-based STAT path. TTY/PIPE/TCP synthesise plausible
+metadata locally — those object types have no on-disk inode,
+but musl's `fstat()` is a routine probe libc uses on every
+open fd (e.g. when deciding whether stdin is a tty), so a
+"-1" reply would break common code paths. The synthesised
+mode uses TFS's encoded ftype constant so the shim's
+translation table keeps working uniformly.
+
+    vfs_handle_fstat(sender: int, buf: *byte, backend: int)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val pid = svc_get_thread_pid(sender)
+        val fid = vfs_handle_lookup(pid, handle)
+        if fid < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        if oft_type[fid] == OFT_TYPE_FILE
+            val ino = oft_ino[fid]
+            var tfs_msg: [5]byte
+            tfs_msg[0] = 6  // TFS_CMD_STAT
+            vfs_msg_write_i32(tfs_msg, 1, ino)
+            var reply: [29]byte
+            ipc_send(backend, tfs_msg, 5, reply, 29)
+            ipc_reply(sender, reply, 29)
+            return
+        // Non-file handles: synthesise enough metadata that
+        // S_ISCHR / S_ISFIFO / S_ISSOCK probes work and size
+        // queries don't return garbage. Permissions: 0o666 for
+        // streams, matching Linux.
+        var reply: [29]byte
+        var i = 0
+        while i < 29
+            reply[i] = byte(0)
+            i += 1
+        var ftype = 0
+        if oft_type[fid] == OFT_TYPE_TTY
+            ftype = 3                     // TFS S_IFCHR
+        else if oft_type[fid] == OFT_TYPE_PIPE
+            ftype = 5                     // shim translates to S_IFIFO
+        else if oft_type[fid] == OFT_TYPE_TCP
+            ftype = 6                     // shim translates to S_IFSOCK
+        else if oft_type[fid] == OFT_TYPE_TCP_LISTEN
+            ftype = 6
+        else
+            // Unknown — fall back to "regular file" so musl's
+            // S_ISREG check passes.
+            ftype = 1
+        val mode = (ftype << 12) | 0x1B6  // 0o666 perms
+        vfs_msg_write_i32(reply, 1, mode)
+        vfs_msg_write_i32(reply, 5, 1)    // nlinks
+        // uid/gid/size/mtime/ctime stay zero.
+        ipc_reply(sender, reply, 29)
+
 Path-based MKDIR: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
 Reply: [status(1), ino(4)]
 
@@ -2047,6 +2109,8 @@ the appropriate backend.
                     vfs_path_unlink(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_STAT
                     vfs_path_stat(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_FSTAT
+                    vfs_handle_fstat(sender, buf, backend)
                 else if cmd == VFS_CMD_MKDIR
                     vfs_path_mkdir(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_RMDIR

@@ -40,6 +40,7 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
     import oskit.kernel.{current_thread, terminate_current,
         kernel_grant_create_inline, kernel_grant_revoke_inline,
         kernel_get_thread_pid, kernel_get_process_main_tid}
+    import oskit.arch.{pack_kstat, KSTAT_SIZE}
 
     extern shim_uart_putc(c: int)
 
@@ -465,6 +466,7 @@ the way out so it doesn't leak.
     val VFS_CMD_OPEN_C    = 1
     val VFS_CMD_READ_C    = 2
     val VFS_CMD_WRITE_C   = 3
+    val VFS_CMD_STAT_C    = 6
     val VFS_CMD_CLOSE_C   = 13
     val VFS_CMD_SEEK_C    = 14
     val VFS_CMD_CONNECT_C = 15
@@ -474,6 +476,8 @@ the way out so it doesn't leak.
     val VFS_CMD_EPOLL_SUB_C         = 21
     val VFS_CMD_EPOLL_UNSUB_C       = 22
     val VFS_CMD_EPOLL_INST_CLOSE_C  = 23
+    // Phase 4 chunk 2 — fstat by handle.
+    val VFS_CMD_FSTAT_C   = 24
 
 `GRANT_READ` / `GRANT_WRITE` mirror the values in `oskit.kernel`'s
 private grant table (1 = read by mapper, 2 = write by mapper).
@@ -696,6 +700,10 @@ to the same UDP stack that native sysl programs use via
             return sys_socket(int(a0), int(a1), int(a2))
         if num == 254
             return sys_openat(int(a0), a1, int(a2), int(a3))
+        if num == 178
+            return sys_fstat(int(a0), a1)
+        if num == 252
+            return sys_newfstatat(int(a0), a1, a2, int(a3))
         if num == 221
             return sys_lseek(int(a0), a1, int(a2))
         if num == 256
@@ -3138,6 +3146,167 @@ exec lands.
         fdp[0] = rfd
         fdp[1] = wfd
         i64(0)
+
+### Stat family
+
+`stat` / `lstat` / `fstat` all funnel through musl's
+`fstatat_kstat` path on slix. With the kstat header carrying
+64-bit time fields, musl skips the `statx` first-attempt branch
+and goes straight to the dedicated syscalls. We handle two:
+
+- `SYS_fstat (178)` — fd-based; routes to `VFS_CMD_FSTAT`.
+- `SYS_newfstatat (252)` — path-based with optional dirfd +
+  flags. `AT_EMPTY_PATH` (0x1000) with `fd >= 0` and an empty
+  path means "stat this fd"; we redirect to the fstat path.
+  Otherwise we ignore `dirfd` (musl always passes `AT_FDCWD`
+  before the cwd arc lands) and route to `VFS_CMD_STAT`.
+
+`AT_SYMLINK_NOFOLLOW` (0x100) is accepted-and-ignored — TFS
+has no symlink concept yet, so the with-follow and no-follow
+paths are identical.
+
+VFS replies in TFS's encoded form: `mode = (ftype << 12) | perm`
+where `ftype ∈ {1=REG, 2=DIR, 3=CHR, 5=FIFO, 6=SOCK}`. musl
+uses Linux's encoded form (`S_IFREG = 0o100000`, etc.), so we
+remap before packing the kstat. Anything outside the known
+TFS table falls through to S_IFREG so a probe-only caller
+(e.g. `fstat` on a freshly-opened pipe via `OFT_TYPE_PIPE`)
+gets a sensible mode.
+
+`AT_FDCWD` is musl's "interpret path as cwd-relative" sentinel,
+defined as `-100`. We don't actually have a cwd yet; absolute
+paths work, relative paths don't. The dirfd argument is
+ignored either way.
+
+    val POSIX_AT_FDCWD       = -100
+    val POSIX_AT_EMPTY_PATH  = 0x1000
+
+    val POSIX_S_IFREG = 0x8000
+    val POSIX_S_IFDIR = 0x4000
+    val POSIX_S_IFCHR = 0x2000
+    val POSIX_S_IFIFO = 0x1000
+    val POSIX_S_IFBLK = 0x6000
+    val POSIX_S_IFSOCK = 0xC000
+
+    shim_translate_tfs_mode(tfs_mode: int) -> int
+        val ftype = (tfs_mode >> 12) & 0xF
+        val perm  = tfs_mode & 0xFFF
+        var ifmt = POSIX_S_IFREG
+        if ftype == 1
+            ifmt = POSIX_S_IFREG
+        else if ftype == 2
+            ifmt = POSIX_S_IFDIR
+        else if ftype == 3
+            ifmt = POSIX_S_IFCHR
+        else if ftype == 5
+            ifmt = POSIX_S_IFIFO
+        else if ftype == 6
+            ifmt = POSIX_S_IFSOCK
+        ifmt | perm
+
+Take a 29-byte VFS stat reply and a user buffer; translate the
+mode and pack the per-arch kstat. Returns 0 on success, -ENOENT
+if VFS reported an error.
+
+    shim_pack_stat_reply(reply: *byte, st_ptr: i64) -> i64
+        if reply[0] != 0
+            return i64(-2)              // -ENOENT
+        if st_ptr == i64(0)
+            return i64(-14)             // -EFAULT
+        val tfs_mode = shim_read_be_i32(reply, 1)
+        val nlinks   = shim_read_be_i32(reply, 5)
+        val uid      = shim_read_be_i32(reply, 9)
+        val gid      = shim_read_be_i32(reply, 13)
+        val size     = shim_read_be_i32(reply, 17)
+        val mode     = shim_translate_tfs_mode(tfs_mode)
+        val out: *byte = *byte(st_ptr)
+        // The arch-specific packer rewrites the whole struct,
+        // including its trailing pad. Inode comes from VFS's
+        // OPEN reply; STAT itself doesn't carry one yet. Fill
+        // 0 for now — `S_ISREG` and `st_size` are what real
+        // callers need first.
+        pack_kstat(out, mode, nlinks, uid, gid, i64(size), i64(0))
+        i64(0)
+
+    sys_fstat(fd: int, st_ptr: i64) -> i64
+        if posix_fd_kind(fd) == POSIX_FD_FREE
+            return i64(-9)              // -EBADF
+        if posix_fd_kind(fd) != POSIX_FD_FILE
+            // Sockets / epoll / eventfd / timerfd: musl probes
+            // these with fstat to populate libc's `_isatty` and
+            // friends. Synthesise S_IFSOCK or S_IFREG with 0
+            // size so the probe succeeds. Sticking with S_IFREG
+            // is safest — Linux returns the same for sockets'
+            // `fstat` on the `socket()` fd (the kernel reports
+            // a synthetic socketfs inode).
+            if st_ptr == i64(0)
+                return i64(-14)
+            val out: *byte = *byte(st_ptr)
+            var mode = POSIX_S_IFREG | 0x1B6
+            val k = posix_fd_kind(fd)
+            if k == POSIX_FD_UDP_SOCKET
+                mode = POSIX_S_IFSOCK | 0x1B6
+            else if k == POSIX_FD_TCP_SOCKET
+                mode = POSIX_S_IFSOCK | 0x1B6
+            else if k == POSIX_FD_STDIN
+                mode = POSIX_S_IFCHR | 0x1B6
+            else if k == POSIX_FD_STDOUT
+                mode = POSIX_S_IFCHR | 0x1B6
+            else if k == POSIX_FD_STDERR
+                mode = POSIX_S_IFCHR | 0x1B6
+            pack_kstat(out, mode, 1, 0, 0, i64(0), i64(0))
+            return i64(0)
+        val handle = posix_fd_target(fd)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)
+        var msg: [5]byte
+        msg[0] = byte(VFS_CMD_FSTAT_C)
+        shim_write_be_i32(msg, 1, handle)
+        var reply: [29]byte
+        val r = ipc_send(port, msg, 5, reply, 29)
+        if r < 0
+            return i64(-5)
+        shim_pack_stat_reply(reply, st_ptr)
+
+    sys_newfstatat(dirfd: int, path_ptr: i64, st_ptr: i64, flag: int) -> i64
+        // `AT_EMPTY_PATH` + valid fd + empty path = stat the fd.
+        // musl's `fstat()` arrives via this path on arches that
+        // lack a dedicated SYS_fstat — slix-musl does have one,
+        // so this branch is mostly a defence-in-depth.
+        if (flag & POSIX_AT_EMPTY_PATH) != 0
+            if dirfd >= 0
+                if path_ptr != i64(0)
+                    val pp: *byte = *byte(path_ptr)
+                    if pp[0] == byte(0)
+                        return sys_fstat(dirfd, st_ptr)
+                else
+                    return sys_fstat(dirfd, st_ptr)
+        if path_ptr == i64(0)
+            return i64(-14)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)
+        var path: [128]byte
+        val up: *byte = *byte(path_ptr)
+        var n = 0
+        while n < 127
+            val c = up[n]
+            if c == byte(0)
+                break
+            path[n] = c
+            n += 1
+        var msg: [129]byte
+        msg[0] = byte(VFS_CMD_STAT_C)
+        var i = 0
+        while i < n
+            msg[1 + i] = path[i]
+            i += 1
+        var reply: [29]byte
+        val r = ipc_send(port, msg, 1 + n, reply, 29)
+        if r < 0
+            return i64(-5)
+        shim_pack_stat_reply(reply, st_ptr)
 
 ### Epoll → inet subscription helpers
 

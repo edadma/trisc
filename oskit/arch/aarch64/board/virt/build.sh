@@ -34,6 +34,7 @@ SYSL_FILES=(
     oskit/arch/aarch64/cpu.lsysl
     oskit/arch/aarch64/vm.lsysl
     oskit/arch/aarch64/exc.lsysl
+    oskit/arch/aarch64/posix.lsysl
     oskit/hal/mem_cpu.lsysl
     oskit/kernel/kernel.lsysl
     oskit/kernel/spinlock.lsysl

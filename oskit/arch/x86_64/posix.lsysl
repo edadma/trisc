@@ -1,0 +1,71 @@
+OSKit Arch — x86_64 POSIX layout helpers
+=========================================
+
+The POSIX shim writes Linux-shaped structs into user buffers.
+For most structs the layout is arch-agnostic, but `struct kstat`
+differs: x86_64 puts `nlink` before `mode`, packs `blksize` /
+`blocks` contiguously, and uses `__unused[3]` (24 B) as the
+trailing pad — 144 bytes total, same total size as the aarch64
+variant but different field offsets. Mirrors
+`slix/musl/arch/x86_64-slix/kstat.h`.
+
+Field offsets (matches Linux x86_64 `struct stat`):
+
+```
+  0  st_dev          (u64)
+  8  st_ino          (u64)
+ 16  st_nlink        (u64)
+ 24  st_mode         (u32)
+ 28  st_uid          (u32)
+ 32  st_gid          (u32)
+ 36  __pad0          (u32)
+ 40  st_rdev         (u64)
+ 48  st_size         (i64)
+ 56  st_blksize      (i64)
+ 64  st_blocks       (i64)
+ 72  st_atime        (i64)
+ 80  st_atime_nsec   (i64)
+ 88  st_mtime        (i64)
+ 96  st_mtime_nsec   (i64)
+104  st_ctime        (i64)
+112  st_ctime_nsec   (i64)
+120  __unused[3]     (i64×3 → 24 B)
+```
+
+    module oskit.arch
+
+    val KSTAT_SIZE = 144
+
+    posix_write_le_i64(p: *byte, off: int, v: i64)
+        var i = 0
+        while i < 8
+            p[off + i] = byte(int((v >> i64(8 * i))) & 0xff)
+            i += 1
+
+    posix_write_le_u32(p: *byte, off: int, v: int)
+        p[off]     = byte(v & 0xff)
+        p[off + 1] = byte((v >> 8) & 0xff)
+        p[off + 2] = byte((v >> 16) & 0xff)
+        p[off + 3] = byte((v >> 24) & 0xff)
+
+Pack universal stat fields into the 144-byte x86_64-slix kstat.
+`mode` arrives already-translated to musl S_IF* values.
+
+    pack_kstat(buf: *byte, mode: int, nlinks: int, uid: int, gid: int,
+               size: i64, ino: i64)
+        var i = 0
+        while i < KSTAT_SIZE
+            buf[i] = byte(0)
+            i += 1
+        posix_write_le_i64(buf, 0, i64(0))         // st_dev
+        posix_write_le_i64(buf, 8, ino)            // st_ino
+        posix_write_le_i64(buf, 16, i64(nlinks))   // st_nlink
+        posix_write_le_u32(buf, 24, mode)          // st_mode
+        posix_write_le_u32(buf, 28, uid)           // st_uid
+        posix_write_le_u32(buf, 32, gid)           // st_gid
+        posix_write_le_i64(buf, 40, i64(0))        // st_rdev
+        posix_write_le_i64(buf, 48, size)          // st_size
+        posix_write_le_i64(buf, 56, i64(4096))     // st_blksize
+        val blocks = (size + i64(511)) >> i64(9)
+        posix_write_le_i64(buf, 64, blocks)
+        // atime/mtime/ctime + nsec stay zero.
