@@ -619,12 +619,18 @@ object SyslCli:
     //   0x01FF00            panic flag (1 byte)
     //   0x01FF08            heap brk pointer (8 bytes; init to 0 by RAM zero,
     //                       lazily set to HEAP_START on first malloc)
+    //   0x01FF10            saved-PC slot (8 bytes, written by fault_isr; the
+    //                       supervisor exception frame puts saved PC at [r7])
+    //   0x01FF20..0x01FF3F  saved r1..r4 (4 × 8 bytes, written by fault_isr
+    //                       before its body clobbers them)
     //   0x020000..0x0FFF00  bump-allocator heap (~896 KB)
     //   0x100000            STDOUT (1 byte, write-only device)
     val stdoutAddr = 0x100000L
     val ramSize = 0x100000L
     val panicFlagAddr = 0x1FF00L
     val brkPtrAddr = 0x1FF08L
+    val faultPcAddr = 0x1FF10L
+    val faultRegsAddr = 0x1FF20L  // r1, r2, r3, r4 each 8 bytes
     val heapStart = 0x20000L
     val heapEnd = 0xFFF00L
     val initialSP = 0x1FEF8L
@@ -636,6 +642,8 @@ object SyslCli:
           |BRK_PTR = $brkPtrAddr
           |HEAP_START = $heapStart
           |HEAP_END = $heapEnd
+          |FAULT_PC = $faultPcAddr
+          |FAULT_REGS = $faultRegsAddr
           |
           |segment vectors
           |  dl $initialSP
@@ -672,10 +680,32 @@ object SyslCli:
           |  halt
           |
           |; fault_isr: invoked by hardware faults (instruction-access, etc.).
-          |; Record a distinct sentinel so the runner can distinguish a CPU
-          |; fault from a sysl panic.
+          |; Records a distinct sentinel + the saved PC so the runner can
+          |; distinguish a CPU fault from a sysl panic AND report the actual
+          |; faulting instruction. On exception entry the CPU pushes PSR then
+          |; PC onto the supervisor stack (see CPU.enterException), so when
+          |; fault_isr starts r7 points at the saved PC.
           |global fault_isr, func
           |fault_isr
+          |  ; Save r1..r4 first — the body below clobbers them. r6 is the
+          |  ; only general-purpose register we can use as scratch without
+          |  ; losing diagnostic state (r5 holds the original SSP/USP swap
+          |  ; result, r7 the new SSP). After this we never return.
+          |  movi r6, FAULT_REGS
+          |  std r1, r6, r0
+          |  addi r6, r6, 8
+          |  std r2, r6, r0
+          |  addi r6, r6, 8
+          |  std r3, r6, r0
+          |  addi r6, r6, 8
+          |  std r4, r6, r0
+          |  ; Save the faulting PC. On exception entry the CPU pushes
+          |  ; PSR then PC onto the supervisor stack, and the new r7 points
+          |  ; at the saved PC (see CPU.enterException).
+          |  ldd r3, r7, r0
+          |  movi r2, FAULT_PC
+          |  std r3, r2, r0
+          |  ; Sentinel.
           |  movi r1, 222
           |  movi r2, $panicFlagAddr
           |  stb r1, r2, r0
@@ -757,7 +787,33 @@ object SyslCli:
           case 0 =>
             if t.shouldPanic then Fail("expected panic, got normal return", captured) else Pass
           case 222 =>
-            Fail(s"CPU fault routed through fault ISR at PC=0x${cpu.pc.toHexString}", captured)
+            val savedPc = mem.readLong(faultPcAddr)
+            // CPU advances pc *before* executing the instruction, so the saved
+            // PC on the exception frame is one past the faulting instruction.
+            val faultPc = savedPc - 2
+            val regs =
+              try
+                val r1v = mem.readLong(faultRegsAddr)
+                val r2v = mem.readLong(faultRegsAddr + 8)
+                val r3v = mem.readLong(faultRegsAddr + 16)
+                val r4v = mem.readLong(faultRegsAddr + 24)
+                f"\n      regs: r1=0x$r1v%x r2=0x$r2v%x r3=0x$r3v%x r4=0x$r4v%x"
+              catch case _: Throwable => ""
+            val ctx =
+              if faultPc >= 0 && faultPc + 4 < ramSize then
+                val window = (-4 to 4 by 2).flatMap { d =>
+                  val p = faultPc + d
+                  if p < 0 || p + 1 >= ramSize then None
+                  else
+                    try
+                      val w = mem.readShortUnsigned(p)
+                      val mark = if d == 0 then " <-- FAULT" else ""
+                      Some(f"      0x$p%04x: ${Decode(w).disassemble(cpu)}$mark")
+                    catch case _: Throwable => None
+                }
+                "\n" + window.mkString("\n")
+              else ""
+            Fail(s"CPU fault at PC=0x${faultPc.toHexString} (saved PC=0x${savedPc.toHexString})$regs$ctx", captured)
           case code =>
             val codeName = code match
               case 1 => "out-of-bounds"
