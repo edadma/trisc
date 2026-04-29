@@ -612,13 +612,30 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case SyslType.IntType(32) | SyslType.UIntType(32) =>
         emit(s"  stw r$srcReg, r$addrReg, r0")
       case SyslType.StringType | (_: SyslType.FuncType) | _: SyslType.InterfaceType =>
-        // 16-byte copy: srcReg = source address, addrReg = dest address
-        emit(s"  ldd r4, r$srcReg, r0")
-        emit(s"  std r4, r$addrReg, r0")
-        emitAddImm(4, srcReg, 8)
-        emit("  ldd r4, r4, r0")
+        // 16-byte copy. srcReg may be one of our scratches (r3 or r4); pick
+        // a load order that doesn't clobber srcReg before its second use.
+        // Bug history: the previous order loaded src[0] into r4 first, then
+        // re-derived src+8 from srcReg — which produced garbage when
+        // srcReg == r4 (e.g. the append-grow path for `[]string`,
+        // where the elem was loaded into r4). Now: read both source words
+        // *before* any store, into r3 (lo) and r4 (hi), with the pair
+        // ordered so the load that clobbers srcReg comes last.
+        if srcReg == 3 then
+          // srcReg already in r3; compute src+8 (clobbers r4 only) and load
+          // src[8] first, then load src[0] last (clobbering r3 = srcReg).
+          emitAddImm(4, srcReg, 8)
+          emit("  ldd r4, r4, r0")            // r4 = src[8]
+          emit(s"  ldd r3, r$srcReg, r0")     // r3 = src[0]  (srcReg dies here)
+        else
+          // srcReg is r1/r2/r4 — load src[0] into r3 (no srcReg clobber unless
+          // srcReg=3, handled above), then derive src+8 into r4 (clobbers
+          // srcReg if srcReg=4, fine because src[0] is already saved).
+          emit(s"  ldd r3, r$srcReg, r0")     // r3 = src[0]
+          emitAddImm(4, srcReg, 8)
+          emit("  ldd r4, r4, r0")            // r4 = src[8]
+        emit(s"  std r3, r$addrReg, r0")      // dst[0] = src[0]
         emitAddImm(3, addrReg, 8)
-        emit("  std r4, r3, r0")
+        emit("  std r4, r3, r0")              // dst[8] = src[8]
       case SyslType.SliceType(_) =>
         // 24-byte copy: {ptr(8), len+cap(8), backref(8)}
         for i <- 0 until 24 by 8 do
