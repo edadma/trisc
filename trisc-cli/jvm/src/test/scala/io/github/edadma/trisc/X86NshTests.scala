@@ -1146,9 +1146,12 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
   }
 
 
-  // TODO: un-ignore when the slirp DNS round-trip lands; see the
-  // matching aarch64 test for context.
-  "musl: getaddrinfo over slirp DNS (Phase 4 chunk 1c)" ignore {
+  "musl: getaddrinfo over slirp DNS (Phase 4 chunk 1c)" in {
+    // dhclient writes /etc/resolv.conf with `options timeout:15
+    // attempts:1` so musl's resolver waits up to 15 s for a reply —
+    // slirp's stub DNS forwards to the host's resolver, which on a
+    // cold cache or slow upstream can take several seconds. The test
+    // assumes the host has working DNS (i.e. NOT offline).
     qemu.send("dhclient\n")
     qemu.waitFor("lease=")
     qemu.waitFor("> ")

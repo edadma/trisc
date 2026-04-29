@@ -4274,11 +4274,17 @@ ignored — slix has no signals.
                 return i64(-22)
             timeout_ms = int(tv_sec * i64(1000) + tv_nsec / i64(1000000))
         val fds: *byte = *byte(fds_ptr)
-        var ticks_left = -1
-        if timeout_ms >= 0
-            ticks_left = (timeout_ms + 9) / 10
+        // Wall-clock deadline (in 10 ms ticks). Using a deadline rather
+        // than decrementing per-iteration avoids early termination when
+        // sleep_or_notify wakes after >1 tick due to scheduling latency
+        // (which would happen with the old `ticks_left -= (after - before)`
+        // pattern under contention — eg. 126 iters could exhaust a 250-tick
+        // budget while only 1.26 s of wall time had passed).
+        var deadline_tick = i64(0)
+        if timeout_ms > 0
+            deadline_tick = i64(uptime()) + i64((timeout_ms + 9) / 10)
         var iter = 0
-        while iter < 100000
+        while iter < 1000000
             iter += 1
             val _ = notify_read_self()
             var ready_count = 0
@@ -4304,18 +4310,11 @@ ignored — slix has no signals.
                 return i64(ready_count)
             if timeout_ms == 0
                 return i64(0)
-            if ticks_left == 0
-                return i64(0)
+            if timeout_ms > 0
+                if i64(uptime()) >= deadline_tick
+                    return i64(0)
             // Re-poll every tick (10 ms). For waits ≥ ~50 ms this is
             // imperceptible; the resolver case typically lands within
             // 1–5 ticks of the response arriving.
-            val before = uptime()
             sleep_or_notify(1)
-            val after = uptime()
-            val elapsed = after - before
-            if timeout_ms >= 0
-                if elapsed >= ticks_left
-                    ticks_left = 0
-                else
-                    ticks_left -= elapsed
         i64(0)

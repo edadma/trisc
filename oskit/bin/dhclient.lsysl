@@ -555,6 +555,14 @@ resolution is impaired.
         if fid < 0
             puts("dhclient: resolv.conf open failed\n")
             return
+        // Lift musl's resolver budget above the default 5 s. slirp's
+        // stub DNS at 10.0.2.3 forwards to the host's resolver, which
+        // can take several seconds on a cold cache or off-LAN target.
+        // attempts:1 keeps the test deterministic — one query, no
+        // mid-flight retransmits muddling the trace.
+        val opts = "options timeout:15 attempts:1\n"
+        val op = *byte(opts)
+        write_handle(fid, op, len(opts))
         for var i = 0; i < 2; i++
             val ip = ack.dns_servers[i]
             if ip == u32(0)
