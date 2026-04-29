@@ -33,12 +33,14 @@ object DirOps:
       gid: Int,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): (Inode, Int) = sfs.withTransaction {
     require(
       (mode & FileOps.ModeTypeMask) == 0 ||
         (mode & FileOps.ModeTypeMask) == FileOps.ModeDirectory,
       "DirOps.mkdir: mode must encode S_IFDIR (or no type bits, in which case S_IFDIR is added)",
     )
+    Perms.requireAccess(caller, parent, FileOps.AccessWrite | FileOps.AccessExec, "DirOps.mkdir", s"parent inode #$parentInodeNum")
     val effectiveMode =
       if (mode & FileOps.ModeTypeMask) == 0 then mode | FileOps.ModeDirectory
       else mode
@@ -100,7 +102,9 @@ object DirOps:
       name: String,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): Inode = sfs.withTransaction {
+    Perms.requireAccess(caller, parent, FileOps.AccessWrite | FileOps.AccessExec, "DirOps.rmdir", s"parent inode #$parentInodeNum")
     val (childNum, childType) = HTree
       .lookup(parent, sfs.device, parentInodeNum, name)
       .getOrElse(
@@ -115,6 +119,7 @@ object DirOps:
         s"""DirOps.rmdir: refusing to remove "$name" (would unlink ourselves)""",
       )
     val child = sfs.readInode(childNum)
+    Perms.requireStickyOk(caller, parent, child, "DirOps.rmdir", s""""$name"""")
     val nonSpecial = HTree.list(child, sfs.device, childNum)
       .count(e => e.name != "." && e.name != "..")
     if nonSpecial > 0 then
@@ -190,8 +195,13 @@ object DirOps:
       newName: String,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): (Inode, Inode) = sfs.withTransaction {
     val sameParent = oldParentInodeNum == newParentInodeNum
+
+    Perms.requireAccess(caller, oldParent, FileOps.AccessWrite | FileOps.AccessExec, "DirOps.rename", s"source parent inode #$oldParentInodeNum")
+    if !sameParent then
+      Perms.requireAccess(caller, newParent, FileOps.AccessWrite | FileOps.AccessExec, "DirOps.rename", s"destination parent inode #$newParentInodeNum")
 
     val (oldChildNum, oldChildType) = HTree
       .lookup(oldParent, sfs.device, oldParentInodeNum, oldName)
@@ -200,6 +210,9 @@ object DirOps:
           s"""DirOps.rename: source name "$oldName" not found""",
         ),
       )
+
+    val oldChild = sfs.readInode(oldChildNum)
+    Perms.requireStickyOk(caller, oldParent, oldChild, "DirOps.rename", s"""source "$oldName"""")
 
     // No-op? Same inode same name same parent → just bump mtime.
     if sameParent && oldName == newName then
@@ -231,7 +244,7 @@ object DirOps:
               // Overwrite: unlink the existing target. unlink takes care
               // of inode/block freeing and dir-entry removal. Re-entrant
               // withTransaction means it joins our open txn.
-              FileOps.unlink(newParent, newParentInodeNum, sfs, newName, timeSec, timeNsec)
+              FileOps.unlink(newParent, newParentInodeNum, sfs, newName, timeSec, timeNsec, caller)
 
       // Splice the new entry into newParent (or whichever parent that is).
       val newParentWithEntry = HTree.insert(

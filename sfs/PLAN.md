@@ -308,11 +308,20 @@ Tests: deliberate corruption; verify diagnostics.
 
 ## Phase 17 — Polish
 
-- atime updating with `relatime`-style semantics.
-- Permissions enforcement on every op.
-- Statfs (`free_blocks`, `free_inodes`).
-- Volume label / UUID utilities.
-- Non-empty fs growth (resize) — possibly deferred again.
+- 17a — Statfs (`free_blocks`, `free_inodes`). **DONE** at sfs@8c736973.
+- 17b — Volume label / UUID utilities + atomic relabel. **DONE** at
+  sfs@e63d0962.
+- 17c — atime updating with `relatime`-style semantics. **DONE** at
+  sfs@21ae2f62.
+- 17d — Permissions enforcement on every public op via
+  `Caller(uid, gid)` + `Perms.requireAccess` + sticky-bit. **DONE** at
+  sfs@87568487.
+- 17e — Non-empty fs growth (resize). **Intentionally out of scope.**
+  Online resize requires extending the bitmaps, journal, and inode
+  table in place, with every metadata pointer updated atomically;
+  it interacts with every part of the filesystem and is firmly a
+  "second-version" feature, not part of this initial spec. Phase 17
+  closes here.
 
 ---
 

@@ -49,7 +49,9 @@ object SymlinkOps:
       gid: Int,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): (Inode, Int) = sfs.withTransaction {
+    Perms.requireAccess(caller, parent, FileOps.AccessWrite | FileOps.AccessExec, "SymlinkOps.symlink", s"parent inode #$parentInodeNum")
     val targetBytes = target.getBytes(UTF_8)
     require(
       targetBytes.length > 0,

@@ -65,11 +65,13 @@ object FileOps:
       gid: Int,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): (Inode, Int) = sfs.withTransaction {
     require(
       (mode & ModeTypeMask) != ModeDirectory,
       s"FileOps.create: cannot create a directory — use mkdir (Phase 11)",
     )
+    Perms.requireAccess(caller, parent, AccessWrite | AccessExec, "FileOps.create", s"parent inode #$parentInodeNum")
     val newInodeNum = sfs.inodeBitmap.allocate().getOrElse(
       throw new SfsNoSpaceError("FileOps.create: out of free inodes"),
     )
@@ -104,7 +106,9 @@ object FileOps:
       name: String,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): Inode = sfs.withTransaction {
+    Perms.requireAccess(caller, parent, AccessWrite | AccessExec, "FileOps.unlink", s"parent inode #$parentInodeNum")
     val (childNum, childType) = HTree
       .lookup(parent, sfs.device, parentInodeNum, name)
       .getOrElse(
@@ -116,6 +120,7 @@ object FileOps:
       )
 
     val target = sfs.readInode(childNum)
+    Perms.requireStickyOk(caller, parent, target, "FileOps.unlink", s""""$name"""")
     val newLinkCount = target.linkCount - 1
     if newLinkCount > 0 then
       sfs.writeInode(childNum, target.copy(linkCount = newLinkCount, ctimeSec = timeSec, ctimeNsec = timeNsec))
@@ -156,7 +161,9 @@ object FileOps:
       name: String,
       timeSec: Int,
       timeNsec: Int,
+      caller: Caller = Caller.Root,
   ): Inode = sfs.withTransaction {
+    Perms.requireAccess(caller, parent, AccessWrite | AccessExec, "FileOps.link", s"parent inode #$parentInodeNum")
     val target = sfs.readInode(targetInodeNum)
     if (target.mode & ModeTypeMask) == ModeDirectory then
       throw new SfsIsDirectoryError(

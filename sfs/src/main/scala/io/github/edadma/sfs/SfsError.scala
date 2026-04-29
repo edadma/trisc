@@ -31,3 +31,9 @@ final class SfsNotEmptyError(message: String) extends RuntimeException(message)
 
 /** Raised by `readlink` when the target inode is not a symlink. */
 final class SfsNotSymlinkError(message: String) extends RuntimeException(message)
+
+/** Raised by Phase 17d's permission enforcement when a [[Caller]] lacks
+  * the requested access bits on the inode being operated on (and is not
+  * root). Sticky-bit denials on `unlink` / `rmdir` / `rename` raise this
+  * too. */
+final class SfsPermissionError(message: String) extends RuntimeException(message)

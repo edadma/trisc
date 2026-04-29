@@ -152,6 +152,28 @@ object HTree:
     writeDirBlock(ino, sfs, leafBlock.toLong, leafBuf)
     ino
 
+  /** Variant that applies the relatime rule to the directory inode's
+    * `atime` and persists it through `Sfs.withTransaction` if it
+    * changed. Use from public list entry points; the `(ino, dev,
+    * ownerInode)` primitive below is for fsck / DirOps internal walks
+    * that must not touch metadata. */
+  def list(
+      ino: Inode,
+      inoNum: Int,
+      sfs: Sfs,
+      nowSec: Int,
+      nowNsec: Int,
+      caller: Caller = Caller.Root,
+  ): Vector[DirEntry] =
+    Perms.requireAccess(caller, ino, FileOps.AccessRead, "HTree.list", s"directory inode #$inoNum")
+    val out = list(ino, sfs.device, inoNum)
+    val updated = Atime.relatimeUpdate(ino, nowSec, nowNsec)
+    if updated ne ino then
+      sfs.withTransaction {
+        sfs.writeInode(inoNum, updated)
+      }
+    out
+
   /** Return all live directory entries — dot, dotdot, and every live
     * entry in every leaf — in implementation-defined order. */
   def list(

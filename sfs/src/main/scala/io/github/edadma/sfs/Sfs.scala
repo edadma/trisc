@@ -145,6 +145,49 @@ final class Sfs private[sfs] (
     Inode.pack(ino, buf, off)
     writeMetadataBlock(blk, buf)
 
+  /** The current volume label. Convenience getter — same value as
+    * `superblock.volumeName`. */
+  def volumeName: String = _sb.volumeName
+
+  /** The 16-byte volume UUID set at format time. Convenience getter —
+    * same value as `superblock.uuid`. */
+  def uuid: IndexedSeq[Byte] = _sb.uuid
+
+  /** Rewrite the on-disk superblock with a new volume label. Goes
+    * through a journal transaction so a crash mid-relabel is replayed
+    * atomically on next mount. The new label must fit in the
+    * [[Superblock.VolumeNameMax]]-byte usable region. */
+  def relabel(newName: String, caller: Caller = Caller.Root): Unit =
+    requireMounted()
+    if !caller.isRoot then
+      throw new SfsPermissionError(s"Sfs.relabel: requires root (caller uid=${caller.uid})")
+    require(
+      newName.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= Superblock.VolumeNameMax,
+      s"newName too long for ${Superblock.VolumeNameMax}-byte usable region",
+    )
+    withTransaction {
+      val updated = _sb.copy(volumeName = newName, lastWriteTime = Sfs.now())
+      val buf = new Array[Byte](BlockSize)
+      Superblock.pack(updated, buf, 0)
+      writeMetadataBlock(0L, buf)
+      writeMetadataBlock(1L, buf)
+      _sb = updated
+    }
+
+  /** A read-only snapshot of filesystem capacity. `freeBlocks` and
+    * `freeInodes` come from the live bitmaps, so they reflect any
+    * allocations made since mount, not the stale on-disk SB values
+    * that are only refreshed at unmount. */
+  def statfs: StatfsInfo =
+    requireMounted()
+    StatfsInfo(
+      blockSize = BlockSize,
+      totalBlocks = layout.totalBlocks,
+      freeBlocks = blockBitmap.freeCount,
+      totalInodes = layout.totalInodes,
+      freeInodes = inodeBitmap.freeCount,
+    )
+
   /** Flush dirty bitmap blocks and journal state, mark the volume clean
     * in the on-disk superblock, and refuse further calls on this
     * instance.
