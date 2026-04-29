@@ -5112,7 +5112,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val branchLastTypes = (tThen.lastOption :: tElse.toList.flatMap(_.lastOption.map(Some(_)))).collect {
           case Some(TExprStmt(e)) => e.typ
         }
-        val resultType = branchLastTypes.find(_ != VoidType).orElse(branchLastTypes.headOption).getOrElse(VoidType)
+        // When both non-void branches are integral, widen to the larger type so the
+        // result slot fits the value of either branch (e.g. `if c then byte else -1`
+        // must store ch as int, not byte — otherwise -1 truncates to 255).
+        val nonVoid = branchLastTypes.filter(_ != VoidType)
+        val resultType = nonVoid match
+          case List(a, b) if a.isIntegral && b.isIntegral =>
+            (a, b) match
+              case (FloatType(x), FloatType(y)) => FloatType(x max y)
+              case (_: FloatType, _) => a
+              case (_, _: FloatType) => b
+              case (IntType(x), IntType(y))   => IntType(x max y)
+              case (UIntType(x), UIntType(y)) => UIntType(x max y)
+              case (UIntType(x), IntType(y)) if x < y => IntType(y)
+              case (IntType(x), UIntType(y)) if y < x => IntType(x)
+              case _ => a
+          case _ => nonVoid.headOption.orElse(branchLastTypes.headOption).getOrElse(VoidType)
         TIfExpr(tCond, tThen, tElse, resultType)
 
       case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>

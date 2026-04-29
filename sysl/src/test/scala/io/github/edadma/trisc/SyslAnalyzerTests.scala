@@ -386,4 +386,36 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
         |    p.magnitude()
         |""".stripMargin)
   }
+
+  // ===== if-expression branch type unification =====
+
+  "if-expr widens byte/int branches to int" in {
+    // val ch = if cond then byte else -1  must yield int, not byte —
+    // otherwise -1 truncates to 255 when stored in a byte-sized slot.
+    analyzeExprType(
+      """main() -> int
+        |    val s = "x"
+        |    val ch = if true then s[0] else -1
+        |    ch
+        |""".stripMargin) shouldBe I32
+  }
+
+  "if-expr widens int/i64 branches to i64" in {
+    analyzeExprType(
+      """main() -> i64
+        |    val n: i64 = 9999999999i64
+        |    val r = if true then 1 else n
+        |    r
+        |""".stripMargin) shouldBe I64
+  }
+
+  "if-expr widens u32/i64 branches to i64 (unsigned fits in signed)" in {
+    analyzeExprType(
+      """main() -> i64
+        |    val u: u32 = 7u32
+        |    val n: i64 = 9999999999i64
+        |    val r = if true then u else n
+        |    r
+        |""".stripMargin) shouldBe I64
+  }
 }
