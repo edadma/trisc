@@ -145,6 +145,20 @@ final class Sfs private[sfs] (
     Inode.pack(ino, buf, off)
     writeMetadataBlock(blk, buf)
 
+  /** A read-only snapshot of filesystem capacity. `freeBlocks` and
+    * `freeInodes` come from the live bitmaps, so they reflect any
+    * allocations made since mount, not the stale on-disk SB values
+    * that are only refreshed at unmount. */
+  def statfs: StatfsInfo =
+    requireMounted()
+    StatfsInfo(
+      blockSize = BlockSize,
+      totalBlocks = layout.totalBlocks,
+      freeBlocks = blockBitmap.freeCount,
+      totalInodes = layout.totalInodes,
+      freeInodes = inodeBitmap.freeCount,
+    )
+
   /** Flush dirty bitmap blocks and journal state, mark the volume clean
     * in the on-disk superblock, and refuse further calls on this
     * instance.
