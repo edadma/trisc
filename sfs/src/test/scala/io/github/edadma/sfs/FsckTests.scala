@@ -643,6 +643,202 @@ class FsckTests extends AnyFreeSpec with Matchers:
     }
   }
 
+  // ---- repair (16d) ---------------------------------------------------
+
+  "repair: leaked block" - {
+
+    "is cleared from the bitmap" in {
+      val (dev, sfs) = mounted()
+      sfs.unmount()
+      val target = sfs.layout.dataStart + 200
+      val sfs1 = Sfs.mount(dev)
+      sfs1.unmount()
+      flipBlockBitmapBit(dev, sfs1, target) // set the bit (no inode owns it)
+      val sfs2 = Sfs.mount(dev)
+      val before = Fsck.check(sfs2)
+      before.issues.exists {
+        case FsckIssue.BlockBitmapLeakedBlock(b) => b == target
+        case _                                   => false
+      } shouldBe true
+
+      val rep = Fsck.repair(sfs2, Now, Nsec)
+      rep.leakedBlocksCleared shouldBe 1
+
+      // After repair, fsck reports clean.
+      Fsck.check(sfs2).clean shouldBe true
+      sfs2.unmount()
+    }
+  }
+
+  "repair: linkCount mismatch" - {
+
+    "is restored from the walked count" in {
+      val (dev, sfs) = mounted()
+      val ino = createFile(sfs, "f")
+      sfs.unmount()
+      // Inflate stored linkCount on disk.
+      val (blk, off) = sfs.layout.inodeLocation(ino)
+      val buf = new Array[Byte](BlockSize)
+      dev.readBlock(blk, buf)
+      val parsedIno = Inode.unpack(buf, off)
+      Inode.pack(parsedIno.copy(linkCount = 7), buf, off)
+      dev.writeBlock(blk, buf)
+      dev.flush()
+
+      val sfs2 = Sfs.mount(dev)
+      val before = Fsck.check(sfs2)
+      before.issues.exists {
+        case FsckIssue.LinkCountMismatch(n, 7, 1) => n == ino
+        case _                                    => false
+      } shouldBe true
+
+      val rep = Fsck.repair(sfs2, Now, Nsec)
+      rep.linkCountsRestored shouldBe 1
+
+      sfs2.readInode(ino).linkCount shouldBe 1
+      Fsck.check(sfs2).clean shouldBe true
+      sfs2.unmount()
+    }
+  }
+
+  "repair: orphan rescue" - {
+
+    "creates lost+found and links the orphan with linkCount=1" in {
+      val (dev, sfs) = mounted()
+      // Hand-allocate an orphan: alloc a slot, write a regular-file
+      // inode with linkCount=1, no dir entry.
+      val orphan = sfs.inodeBitmap.allocate().getOrElse(fail("out of inodes"))
+      val orphanIno = Inode(
+        mode = FileOps.ModeRegular | 0x1a4,
+        linkCount = 5, // pretend a multi-linked file lost its parents
+        uid = 0, gid = 0, flags = 0,
+        size = 0L, blockCount = 0, generation = 1,
+        atimeSec = Now, atimeNsec = 0,
+        mtimeSec = Now, mtimeNsec = 0,
+        ctimeSec = Now, ctimeNsec = 0,
+        crtimeSec = Now, crtimeNsec = 0,
+        body = InodeBody.EmptyExtents,
+        indirect1 = 0, indirect2 = 0, indirect3 = 0, xattrBlock = 0,
+      )
+      sfs.withTransaction { sfs.writeInode(orphan, orphanIno) }
+      sfs.unmount()
+
+      val sfs2 = Sfs.mount(dev)
+      val rep = Fsck.repair(sfs2, Now, Nsec)
+      rep.orphansLinked shouldBe 1
+      rep.lostAndFoundCreated shouldBe true
+
+      // lost+found exists and the orphan has linkCount=1, named "#N".
+      val (lfIno, lfType) = HTree.lookup(
+        sfs2.readInode(InoRoot), sfs2.metaDevice, InoRoot, "lost+found",
+      ).getOrElse(fail("lost+found not created"))
+      lfType shouldBe DirEntry.TypeDirectory
+      val (foundIno, _) = HTree.lookup(
+        sfs2.readInode(lfIno), sfs2.metaDevice, lfIno, s"#$orphan",
+      ).getOrElse(fail("orphan not linked under lost+found"))
+      foundIno shouldBe orphan
+      sfs2.readInode(orphan).linkCount shouldBe 1
+
+      Fsck.check(sfs2).clean shouldBe true
+      sfs2.unmount()
+    }
+
+    "second orphan reuses the existing lost+found" in {
+      val (dev, sfs) = mounted()
+
+      def addOrphan(): Int =
+        val n = sfs.inodeBitmap.allocate().getOrElse(fail("out of inodes"))
+        val ino = Inode(
+          mode = FileOps.ModeRegular | 0x1a4,
+          linkCount = 1,
+          uid = 0, gid = 0, flags = 0,
+          size = 0L, blockCount = 0, generation = 1,
+          atimeSec = Now, atimeNsec = 0,
+          mtimeSec = Now, mtimeNsec = 0,
+          ctimeSec = Now, ctimeNsec = 0,
+          crtimeSec = Now, crtimeNsec = 0,
+          body = InodeBody.EmptyExtents,
+          indirect1 = 0, indirect2 = 0, indirect3 = 0, xattrBlock = 0,
+        )
+        sfs.withTransaction { sfs.writeInode(n, ino) }
+        n
+
+      val a = addOrphan()
+      sfs.unmount()
+      val sfs2 = Sfs.mount(dev)
+      val rep1 = Fsck.repair(sfs2, Now, Nsec)
+      rep1.orphansLinked shouldBe 1
+      rep1.lostAndFoundCreated shouldBe true
+      sfs2.unmount()
+
+      // Add another orphan + repair on top of the existing lost+found.
+      val sfs3 = Sfs.mount(dev)
+      val b = sfs3.inodeBitmap.allocate().getOrElse(fail("out of inodes"))
+      val ino = Inode(
+        mode = FileOps.ModeRegular | 0x1a4,
+        linkCount = 1,
+        uid = 0, gid = 0, flags = 0,
+        size = 0L, blockCount = 0, generation = 1,
+        atimeSec = Now, atimeNsec = 0,
+        mtimeSec = Now, mtimeNsec = 0,
+        ctimeSec = Now, ctimeNsec = 0,
+        crtimeSec = Now, crtimeNsec = 0,
+        body = InodeBody.EmptyExtents,
+        indirect1 = 0, indirect2 = 0, indirect3 = 0, xattrBlock = 0,
+      )
+      sfs3.withTransaction { sfs3.writeInode(b, ino) }
+      val rep2 = Fsck.repair(sfs3, Now, Nsec)
+      rep2.orphansLinked shouldBe 1
+      rep2.lostAndFoundCreated shouldBe false
+      Fsck.check(sfs3).clean shouldBe true
+      sfs3.unmount()
+    }
+  }
+
+  "repair: skipped issues" - {
+
+    "CRC corruptions are NOT auto-repaired" in {
+      val (dev, sfs) = mounted()
+      val ino = createFile(sfs, "f")
+      sfs.unmount()
+      val (blk, off) = sfs.layout.inodeLocation(ino)
+      tamperByte(dev, blk, off + 0)
+      val sfs2 = Sfs.mount(dev)
+      val rep = Fsck.repair(sfs2, Now, Nsec)
+      rep.skipped.exists {
+        case FsckIssue.InodeCorrupt(n, _) => n == ino
+        case _                            => false
+      } shouldBe true
+      // Re-running check still shows the corruption.
+      Fsck.check(sfs2).issues.exists {
+        case FsckIssue.InodeCorrupt(n, _) => n == ino
+        case _                            => false
+      } shouldBe true
+      sfs2.unmount()
+    }
+
+    "options can disable individual fixes" in {
+      val (dev, sfs) = mounted()
+      sfs.unmount()
+      val target = sfs.layout.dataStart + 250
+      val sfs1 = Sfs.mount(dev)
+      sfs1.unmount()
+      flipBlockBitmapBit(dev, sfs1, target)
+      val sfs2 = Sfs.mount(dev)
+
+      val rep = Fsck.repair(
+        sfs2, Now, Nsec,
+        FsckRepairOptions(fixLeakedBlocks = false),
+      )
+      rep.leakedBlocksCleared shouldBe 0
+      rep.skipped.exists {
+        case FsckIssue.BlockBitmapLeakedBlock(b) => b == target
+        case _                                   => false
+      } shouldBe true
+      sfs2.unmount()
+    }
+  }
+
   // ---- multiple issues ------------------------------------------------
 
   "multiple issues are reported in one pass" in {

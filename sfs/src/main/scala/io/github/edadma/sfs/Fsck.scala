@@ -103,6 +103,27 @@ object FsckStats:
 final case class FsckReport(issues: Vector[FsckIssue], stats: FsckStats):
   def clean: Boolean = issues.isEmpty
 
+/** Knobs for [[Fsck.repair]]. All on by default — toggle individual
+  * fields to suppress a given fix. CRC corruptions (data loss) are
+  * never auto-repaired. */
+final case class FsckRepairOptions(
+    fixLeakedBlocks: Boolean = true,
+    fixLinkCounts: Boolean = true,
+    rescueOrphans: Boolean = true,
+    lostAndFoundName: String = "lost+found",
+)
+
+/** Summary of what [[Fsck.repair]] actually changed. `skipped` lists
+  * the issues fsck did NOT fix (CRC corruptions, directory-walk
+  * failures, etc.) — those need user attention. */
+final case class FsckRepairReport(
+    leakedBlocksCleared: Int,
+    linkCountsRestored: Int,
+    orphansLinked: Int,
+    lostAndFoundCreated: Boolean,
+    skipped: Vector[FsckIssue],
+)
+
 /** Filesystem consistency checker.
   *
   * `check(sfs)` is read-only — it walks every reachable on-disk
@@ -489,3 +510,147 @@ object Fsck:
 
       n += 1
     out.result()
+
+  // ---- repair (16d, optional) ----------------------------------------
+
+  /** Apply a curated set of safe automated fixes to `sfs`.
+    *
+    * What gets repaired:
+    *
+    *  - [[FsckIssue.BlockBitmapLeakedBlock]] — clear the bit in the
+    *    block bitmap so the allocator can reuse it.
+    *  - [[FsckIssue.LinkCountMismatch]] — overwrite the inode's stored
+    *    link_count with the value fsck computed from directory
+    *    references.
+    *  - [[FsckIssue.OrphanedInode]] — for non-directory orphans only,
+    *    create a `lost+found` directory under root if needed and
+    *    insert a "#N" entry pointing at the orphan, with link_count
+    *    set to 1. Directory orphans are left in place (re-linking
+    *    them safely needs a tree-cycle audit beyond 16d's scope).
+    *
+    * What does NOT get repaired:
+    *
+    *  - All `*Corrupt` variants (CRC / magic / owner mismatches) —
+    *    those represent data loss; the user decides what to do.
+    *  - `BlockBitmapMissingBit` / `InodeBitmapMissingBit` — silently
+    *    setting these can mask deeper damage; report only.
+    *  - `InodeBitmapLeakedBit` — same caveat (deferred to a future
+    *    pass that can verify the slot is genuinely empty).
+    *  - `DirectoryWalkFailed` — a partial walk leaves the orphan
+    *    enumeration unsafe; reported, not repaired.
+    *
+    * All fixes land in a single [[Sfs.withTransaction]] so the volume
+    * is atomically consistent across a crash mid-repair. */
+  def repair(
+      sfs: Sfs,
+      timeSec: Int,
+      timeNsec: Int,
+      options: FsckRepairOptions = FsckRepairOptions(),
+  ): FsckRepairReport =
+    val report0 = check(sfs)
+
+    var leakedBlocks = 0
+    var linkCountFixes = 0
+    var orphansLinked = 0
+    var lostAndFoundCreated = false
+    val skipped = Vector.newBuilder[FsckIssue]
+
+    sfs.withTransaction {
+      var i = 0
+      while i < report0.issues.length do
+        report0.issues(i) match
+          case FsckIssue.BlockBitmapLeakedBlock(b) if options.fixLeakedBlocks =>
+            sfs.blockBitmap.clear(b)
+            leakedBlocks += 1
+
+          case FsckIssue.LinkCountMismatch(n, _, computed) if options.fixLinkCounts =>
+            val ino = sfs.readInode(n)
+            sfs.writeInode(n, ino.copy(linkCount = computed, ctimeSec = timeSec, ctimeNsec = timeNsec))
+            linkCountFixes += 1
+
+          case other =>
+            skipped += other
+        i += 1
+
+      // Orphan rescue runs after the simple per-issue fixes so that
+      // any dir entries we add to lost+found don't perturb earlier
+      // counts. We re-walk references because rescuing a non-dir
+      // orphan adds one ref to it.
+      if options.rescueOrphans then
+        val orphans = report0.issues.collect {
+          case FsckIssue.OrphanedInode(n, lc) => (n, lc)
+        }
+        if orphans.nonEmpty then
+          val lf = ensureLostAndFound(sfs, options.lostAndFoundName, timeSec, timeNsec)
+          lostAndFoundCreated = lf.created
+          var j = 0
+          while j < orphans.length do
+            val (n, _) = orphans(j)
+            val ino = sfs.readInode(n)
+            if (ino.mode & 0xf000) == 0x4000 then
+              // Directory orphan — out of scope for 16d.
+              skipped += FsckIssue.OrphanedInode(n, ino.linkCount)
+            else
+              val lfIno = sfs.readInode(lf.inodeNum)
+              val name = s"#$n"
+              val updatedLfIno = HTree.insert(
+                lfIno, sfs, lf.inodeNum,
+                name, n, fileTypeFromMode(ino.mode),
+              )
+              sfs.writeInode(lf.inodeNum, updatedLfIno)
+              // Set linkCount = 1 (this single lost+found entry).
+              sfs.writeInode(n, ino.copy(
+                linkCount = 1,
+                ctimeSec = timeSec,
+                ctimeNsec = timeNsec,
+              ))
+              orphansLinked += 1
+            j += 1
+    }
+
+    FsckRepairReport(
+      leakedBlocksCleared = leakedBlocks,
+      linkCountsRestored = linkCountFixes,
+      orphansLinked = orphansLinked,
+      lostAndFoundCreated = lostAndFoundCreated,
+      skipped = skipped.result(),
+    )
+
+  /** Look up `lostAndFoundName` under root. If it exists and is a
+    * directory, return its inode number; otherwise create it via
+    * `DirOps.mkdir` and return the new number. */
+  private final case class LostFoundResult(inodeNum: Int, created: Boolean)
+
+  private def ensureLostAndFound(
+      sfs: Sfs,
+      name: String,
+      timeSec: Int,
+      timeNsec: Int,
+  ): LostFoundResult =
+    val rootIno = sfs.readInode(InoRoot)
+    HTree.lookup(rootIno, sfs.metaDevice, InoRoot, name) match
+      case Some((existing, fileType)) =>
+        if fileType != DirEntry.TypeDirectory then
+          throw new SfsCorruptError(
+            s"Fsck.repair: $name exists at root but is not a directory",
+          )
+        LostFoundResult(existing, created = false)
+      case None =>
+        val (newRoot, newIno) = DirOps.mkdir(
+          rootIno, InoRoot, sfs, name,
+          FileOps.ModeDirectory | 0x1c0, // owner-only rwx
+          uid = 0, gid = 0,
+          timeSec = timeSec, timeNsec = timeNsec,
+        )
+        sfs.writeInode(InoRoot, newRoot)
+        LostFoundResult(newIno, created = true)
+
+  /** Map a mode bits to the [[DirEntry]] file_type tag. Mirror of
+    * [[FileOps.fileTypeFromMode]] which is private; small enough to
+    * duplicate here rather than widen its visibility just for fsck. */
+  private def fileTypeFromMode(mode: Int): Int =
+    (mode & 0xf000) match
+      case 0x8000 => DirEntry.TypeRegular
+      case 0x4000 => DirEntry.TypeDirectory
+      case 0xa000 => DirEntry.TypeSymlink
+      case _      => DirEntry.TypeOther
