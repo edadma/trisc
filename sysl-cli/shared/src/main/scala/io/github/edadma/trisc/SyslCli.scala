@@ -621,8 +621,9 @@ object SyslCli:
     //                       lazily set to HEAP_START on first malloc)
     //   0x01FF10            saved-PC slot (8 bytes, written by fault_isr; the
     //                       supervisor exception frame puts saved PC at [r7])
-    //   0x01FF20..0x01FF3F  saved r1..r4 (4 × 8 bytes, written by fault_isr
-    //                       before its body clobbers them)
+    //   0x01FF20..0x01FF4F  saved r1..r6 (6 × 8 bytes, written by fault_isr
+    //                       before its body clobbers them; r6=LR is most
+    //                       useful for "jalr to garbage" CPU faults)
     //   0x020000..0x0FFF00  bump-allocator heap (~896 KB)
     //   0x100000            STDOUT (1 byte, write-only device)
     val stdoutAddr = 0x100000L
@@ -704,10 +705,11 @@ object SyslCli:
           |; fault_isr starts r7 points at the saved PC.
           |global fault_isr, func
           |fault_isr
-          |  ; Save r1..r4 first — the body below clobbers them. r6 is the
-          |  ; only general-purpose register we can use as scratch without
-          |  ; losing diagnostic state (r5 holds the original SSP/USP swap
-          |  ; result, r7 the new SSP). After this we never return.
+          |  ; Save all caller registers r1..r6 to FAULT_REGS for diagnostics.
+          |  ; r6 is the link register — for "we jalr'd to garbage" CPU faults
+          |  ; it's the most useful clue, so we preserve its original value by
+          |  ; pushing it on the supervisor stack BEFORE using r6 as scratch.
+          |  pshd r6
           |  movi r6, FAULT_REGS
           |  std r1, r6, r0
           |  addi r6, r6, 8
@@ -716,6 +718,14 @@ object SyslCli:
           |  std r3, r6, r0
           |  addi r6, r6, 8
           |  std r4, r6, r0
+          |  addi r6, r6, 8
+          |  std r5, r6, r0
+          |  ; r6 slot: read original r6 back from the supervisor stack (we
+          |  ; pushed it first, so it sits at [r7+0]) and store to FAULT_REGS+40.
+          |  addi r6, r6, 8
+          |  ldd r4, r7, r0
+          |  std r4, r6, r0
+          |  addi r7, r7, 8       ; pop the saved-r6 slot
           |  ; Save the faulting PC. On exception entry the CPU pushes
           |  ; PSR then PC onto the supervisor stack, and the new r7 points
           |  ; at the saved PC (see CPU.enterException).
@@ -841,7 +851,9 @@ object SyslCli:
         val r2v = mem.readLong(faultRegsAddr + 8)
         val r3v = mem.readLong(faultRegsAddr + 16)
         val r4v = mem.readLong(faultRegsAddr + 24)
-        f"\n      regs: r1=0x$r1v%x r2=0x$r2v%x r3=0x$r3v%x r4=0x$r4v%x"
+        val r5v = mem.readLong(faultRegsAddr + 32)
+        val r6v = mem.readLong(faultRegsAddr + 40)
+        f"\n      regs: r1=0x$r1v%x r2=0x$r2v%x r3=0x$r3v%x r4=0x$r4v%x r5=0x$r5v%x r6=0x$r6v%x"
       catch case _: Throwable => ""
     def disasmWindow(faultPc: Long): String =
       if faultPc < 0 || faultPc + 4 >= ramSize then ""
