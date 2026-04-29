@@ -37,6 +37,25 @@ enum FsckIssue:
     * mismatch, or out-of-bounds entry header. */
   case XattrBlockCorrupt(ownerInode: Int, physicalBlock: Long, message: String)
 
+  /** A block is reachable from a live inode (or is in the metadata
+    * region or the bad-blocks list) but the on-disk block bitmap has
+    * its bit clear. The filesystem may hand the same block out to
+    * another file. */
+  case BlockBitmapMissingBit(blockNum: Int)
+
+  /** A block has its on-disk block bitmap bit set but no live inode,
+    * metadata region, or bad-blocks entry references it. The block is
+    * "leaked" — permanently lost from the free pool. */
+  case BlockBitmapLeakedBlock(blockNum: Int)
+
+  /** Walking a directory's entries threw an [[SfsCorruptError]] —
+    * usually because the directory's HTree structure (root, index, or
+    * leaf) is corrupt past what `DirBlockCorrupt` already reports.
+    * Without a successful walk, fsck cannot enumerate the directory's
+    * children, which means orphans / link-count comparisons will be
+    * incomplete for those subtrees. */
+  case DirectoryWalkFailed(inodeNum: Int, message: String)
+
 /** Counters collected while walking the filesystem. Useful both for
   * sanity checks (compare against the superblock's free counts) and as
   * a smoke-test signal that fsck actually exercised the structures it
@@ -46,10 +65,11 @@ final case class FsckStats(
     dirBlocksChecked: Int,
     xattrBlocksChecked: Int,
     extentsWalked: Int,
+    claimedBlocks: Int,
 )
 
 object FsckStats:
-  val empty: FsckStats = FsckStats(0, 0, 0, 0)
+  val empty: FsckStats = FsckStats(0, 0, 0, 0, 0)
 
 /** Result of [[Fsck.check]]: every inconsistency found, plus walk
   * statistics. Ordering of `issues` is not stable across versions —
@@ -81,6 +101,9 @@ object Fsck:
     issues ++= inoIssues
     val perInode = walkPerInode(sfs, parsed)
     issues ++= perInode.issues
+    val reach = walkReachability(sfs, parsed)
+    issues ++= reach.walkIssues
+    issues ++= reconcileBlockBitmap(sfs, reach.claimedBlocks)
     FsckReport(
       issues = issues.result(),
       stats = FsckStats(
@@ -88,6 +111,7 @@ object Fsck:
         dirBlocksChecked = perInode.dirBlocks,
         xattrBlocksChecked = perInode.xattrBlocks,
         extentsWalked = perInode.extents,
+        claimedBlocks = reach.claimedBlocks.size,
       ),
     )
 
@@ -228,3 +252,164 @@ object Fsck:
       None
     catch case e: SfsCorruptError =>
       Some(FsckIssue.XattrBlockCorrupt(inodeNum, ino.xattrBlock.toLong, e.getMessage))
+
+  // ---- reachability walk (16b foundation, 16c also feeds off this) ---
+
+  /** Aggregate of the reachability walk:
+    *
+    *  - `claimedBlocks` — every physical block that fsck believes is in
+    *    legitimate use: the metadata region, every block any parsed
+    *    inode owns (extents, indirects, xattr), and every entry in the
+    *    bad-blocks list.
+    *  - `inodeReferences` — count of directory entries pointing at each
+    *    inode. Used by chunk 16c (`link_count` reconciliation).
+    *  - `walkIssues` — diagnostics for directories whose `HTree.list`
+    *    couldn't complete; their referenced inodes won't appear in
+    *    `inodeReferences`. */
+  private final case class ReachabilityResult(
+      claimedBlocks: Set[Int],
+      inodeReferences: Map[Int, Int],
+      walkIssues: Vector[FsckIssue],
+  )
+
+  private def walkReachability(
+      sfs: Sfs,
+      parsed: Map[Int, Inode],
+  ): ReachabilityResult =
+    val claimed = scala.collection.mutable.Set.empty[Int]
+    val refs = scala.collection.mutable.Map.empty[Int, Int]
+    val walkIssues = Vector.newBuilder[FsckIssue]
+
+    // Metadata region — always claimed by the filesystem itself.
+    var b = 0
+    while b < sfs.layout.dataStart do
+      claimed += b
+      b += 1
+
+    // Bad-blocks list — referenced by inode 1, but we want them to
+    // appear as legitimately claimed even though no other inode owns
+    // them.
+    try
+      val bads = BadBlockOps.list(sfs)
+      var i = 0
+      while i < bads.length do
+        claimed += bads(i)
+        i += 1
+    catch case e: SfsCorruptError =>
+      walkIssues += FsckIssue.InodeCorrupt(InoBadBlocks, s"bad-blocks list walk failed: ${e.getMessage}")
+
+    // Per-inode block enumeration + per-directory entry walk.
+    val ordered = parsed.toIndexedSeq.sortBy(_._1)
+    var k = 0
+    while k < ordered.length do
+      val (n, ino) = ordered(k)
+      try
+        val blocks = enumerateInodeBlocks(ino, sfs.device)
+        var j = 0
+        while j < blocks.length do
+          claimed += blocks(j)
+          j += 1
+      catch case e: SfsCorruptError =>
+        walkIssues += FsckIssue.InodeCorrupt(n, s"block enumeration failed: ${e.getMessage}")
+
+      if isDirectoryMode(ino.mode) then
+        try
+          val entries = HTree.list(ino, sfs.device, n)
+          var j = 0
+          while j < entries.length do
+            val e = entries(j)
+            // Skip "." and ".." — those don't count as real references
+            // from a link-count perspective; they're how directories
+            // self-link.
+            if e.name != "." && e.name != ".." then
+              refs.updateWith(e.inode) { case Some(c) => Some(c + 1); case None => Some(1) }
+            j += 1
+        catch case e: SfsCorruptError =>
+          walkIssues += FsckIssue.DirectoryWalkFailed(n, e.getMessage)
+
+      k += 1
+
+    ReachabilityResult(claimed.toSet, refs.toMap, walkIssues.result())
+
+  /** Enumerate every physical block this inode lays claim to:
+    *
+    *  - Concrete and uninitialized extent blocks (sparse extents own
+    *    no physical blocks).
+    *  - The indirect tier blocks themselves (`indirect1`, `indirect2`
+    *    plus its pointer block contents, `indirect3` plus its two
+    *    levels of pointer blocks).
+    *  - The xattr block, if `HAS_XATTR` is set.
+    *
+    * Reads through `dev` directly — never through any cache, so we
+    * see actual on-disk state. */
+  private def enumerateInodeBlocks(ino: Inode, dev: BlockDevice): Vector[Int] =
+    val out = Vector.newBuilder[Int]
+
+    // Extents (concrete and uninitialized — both own physical blocks).
+    val xs = ExtentAllocator.listExtents(ino, dev)
+    var i = 0
+    while i < xs.length do
+      val e = xs(i)
+      if !e.sparse then
+        var c = 0
+        while c < e.count do
+          out += e.start + c
+          c += 1
+      i += 1
+
+    // Indirect tier blocks. ExtentAllocator.listExtents already walked
+    // through the tier blocks, but those reads don't surface the tier
+    // block addresses themselves — that's what we collect here.
+    if (ino.flags & InodeFlagHasIndirect1) != 0 then out += ino.indirect1
+
+    if (ino.flags & InodeFlagHasIndirect2) != 0 then
+      out += ino.indirect2
+      val ptrs = readPointerBlock(dev, ino.indirect2)
+      var p = 0
+      while p < ptrs.length && ptrs(p) != 0 do
+        out += ptrs(p)
+        p += 1
+
+    if (ino.flags & InodeFlagHasIndirect3) != 0 then
+      out += ino.indirect3
+      val ptrs3 = readPointerBlock(dev, ino.indirect3)
+      var p3 = 0
+      while p3 < ptrs3.length && ptrs3(p3) != 0 do
+        out += ptrs3(p3)
+        val ptrs2 = readPointerBlock(dev, ptrs3(p3))
+        var p2 = 0
+        while p2 < ptrs2.length && ptrs2(p2) != 0 do
+          out += ptrs2(p2)
+          p2 += 1
+        p3 += 1
+
+    if (ino.flags & InodeFlagHasXattr) != 0 && ino.xattrBlock != 0 then
+      out += ino.xattrBlock
+
+    out.result()
+
+  private def readPointerBlock(dev: BlockDevice, blockAddr: Int): IndexedSeq[Int] =
+    val buf = new Array[Byte](BlockSize)
+    dev.readBlock(blockAddr.toLong, buf)
+    IndirectPointerBlock.unpack(buf, 0)
+
+  // ---- block-bitmap reconciliation -----------------------------------
+
+  /** For every block in `[0, totalBlocks)`, compare "is it in the
+    * fsck-derived claimed set" against the on-disk block bitmap.
+    * Reports a `BlockBitmapMissingBit` for claimed-but-clear and
+    * `BlockBitmapLeakedBlock` for unclaimed-but-set. */
+  private def reconcileBlockBitmap(
+      sfs: Sfs,
+      claimed: Set[Int],
+  ): Vector[FsckIssue] =
+    val out = Vector.newBuilder[FsckIssue]
+    val total = sfs.layout.totalBlocks
+    var b = 0
+    while b < total do
+      val isClaimed = claimed.contains(b)
+      val isSet = sfs.blockBitmap.isSet(b)
+      if isClaimed && !isSet then out += FsckIssue.BlockBitmapMissingBit(b)
+      else if !isClaimed && isSet then out += FsckIssue.BlockBitmapLeakedBlock(b)
+      b += 1
+    out.result()

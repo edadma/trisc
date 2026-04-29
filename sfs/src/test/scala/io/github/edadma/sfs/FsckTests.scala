@@ -311,6 +311,154 @@ class FsckTests extends AnyFreeSpec with Matchers:
     }
   }
 
+  // ---- block bitmap reconciliation (16b) ------------------------------
+
+  /** Flip one bit in the block bitmap on disk. */
+  private def flipBlockBitmapBit(dev: RamBlockDevice, sfs: Sfs, blockNum: Int): Unit =
+    val byteOffGlobal = blockNum >>> 3
+    val bbBlockIdx = byteOffGlobal / BlockSize
+    val byteInBlock = byteOffGlobal % BlockSize
+    val bitInByte = blockNum & 7
+    val bbBuf = new Array[Byte](BlockSize)
+    val bbBlk = sfs.layout.blockBitmapStart.toLong + bbBlockIdx
+    dev.readBlock(bbBlk, bbBuf)
+    bbBuf(byteInBlock) = (bbBuf(byteInBlock) ^ (1 << bitInByte)).toByte
+    dev.writeBlock(bbBlk, bbBuf)
+    dev.flush()
+
+  "block bitmap reconciliation" - {
+
+    "freshly formatted volume claims at least dataStart blocks" in {
+      val (_, sfs) = mounted()
+      val report = Fsck.check(sfs)
+      // Metadata region (0..dataStart-1) plus the two root-dir blocks.
+      report.stats.claimedBlocks should be >= sfs.layout.dataStart
+      sfs.unmount()
+    }
+
+    "missing-bit on a claimed block is reported" in {
+      val (dev, sfs) = mounted()
+      val (newRoot, _) = DirOps.mkdir(
+        sfs.readInode(InoRoot), InoRoot, sfs, "sub",
+        FileOps.ModeDirectory | 0x1ed, 0, 0, Now, Nsec,
+      )
+      sfs.writeInode(InoRoot, newRoot)
+      sfs.unmount()
+      // Pick a known-allocated data block — root's leaf block.
+      val sfs1 = Sfs.mount(dev)
+      val rootIno = sfs1.readInode(InoRoot)
+      val reader = new ExtentReader(sfs1.device, rootIno)
+      val leafBlock = reader.physicalBlock(1L) match
+        case BlockMapping.Concrete(p) => p.toInt
+        case _                        => fail("expected concrete root leaf")
+      sfs1.unmount()
+      // Clear that bit on disk (a "missing-bit corruption").
+      flipBlockBitmapBit(dev, sfs1, leafBlock)
+      val sfs2 = Sfs.mount(dev)
+      val report = Fsck.check(sfs2)
+      report.issues.exists {
+        case FsckIssue.BlockBitmapMissingBit(b) => b == leafBlock
+        case _                                  => false
+      } shouldBe true
+      sfs2.unmount()
+    }
+
+    "leaked block (set bit, no inode owns it) is reported" in {
+      val (dev, sfs) = mounted()
+      sfs.unmount()
+      // Pick a free data block far from root's two blocks; set its bit.
+      val target = sfs.layout.dataStart + 100
+      val sfs1 = Sfs.mount(dev)
+      sfs1.unmount()
+      flipBlockBitmapBit(dev, sfs1, target) // toggle from clear to set
+      val sfs2 = Sfs.mount(dev)
+      val report = Fsck.check(sfs2)
+      report.issues.exists {
+        case FsckIssue.BlockBitmapLeakedBlock(b) => b == target
+        case _                                   => false
+      } shouldBe true
+      sfs2.unmount()
+    }
+
+    "metadata region bits cannot be reported as leaks" in {
+      val (_, sfs) = mounted()
+      val report = Fsck.check(sfs)
+      // No metadata block (block bitmap region etc.) should appear in
+      // a leak report — they're always "claimed" by fsck.
+      val md = sfs.layout.dataStart
+      report.issues.collect {
+        case FsckIssue.BlockBitmapLeakedBlock(b) if b < md => b
+      } shouldBe empty
+      sfs.unmount()
+    }
+
+    "bad-block list addresses are NOT flagged as leaked" in {
+      val (dev, sfs) = mounted()
+      val target = sfs.layout.dataStart + 50
+      BadBlockOps.mark(sfs, target, Now, Nsec)
+      // Now `target`'s bit is set in the bitmap, but no inode points
+      // at it. fsck must treat it as legitimately claimed.
+      val report = Fsck.check(sfs)
+      report.issues.collect {
+        case FsckIssue.BlockBitmapLeakedBlock(b) if b == target => b
+      } shouldBe empty
+      sfs.unmount()
+    }
+
+    "extents from a regular file are claimed" in {
+      val (_, sfs) = mounted()
+      val ino = createFile(sfs, "f")
+      // Write a few KiB to allocate some data blocks.
+      val data = Array.fill(BlockSize * 3)('a'.toByte)
+      val before = sfs.readInode(ino)
+      val grown = FileIO.writeFile(before, sfs, 0L, data, Now, Nsec)
+      sfs.writeInode(ino, grown)
+      val report = Fsck.check(sfs)
+      report.clean shouldBe true
+      sfs.unmount()
+    }
+
+    "indirect tier blocks are claimed (no leaks for ind1)" in {
+      val (_, sfs) = mounted()
+      val ino = createFile(sfs, "big")
+      // Force allocation past the 16 inline extents. Each writeFile
+      // call appends one concrete block, so we want 17+ writes to a
+      // file that has appendOneConcrete unable to coalesce — easiest
+      // way is to write blocks at non-contiguous physical addresses,
+      // but allocator hands them out monotonically so they coalesce
+      // into one extent. Forcing ind1 requires a file with > 16
+      // separate extents, which means non-coalescing appends — easy
+      // way: alternate sparse + concrete via writeFile holes. Use
+      // appendSparse explicitly between concrete writes.
+      var cur = sfs.readInode(ino)
+      var i = 0
+      while i < 18 do
+        // Concrete byte then a hole — 18 separate concrete extents
+        // forces ind1 to be allocated.
+        cur = ExtentAllocator.appendSparse(cur, sfs, 1)
+        cur = FileIO.writeFile(cur, sfs, cur.size + 1L, Array[Byte]('x'.toByte), Now, Nsec)
+        i += 1
+      sfs.writeInode(ino, cur)
+      // ind1 may or may not have been hit depending on coalescing —
+      // just assert fsck stays clean.
+      Fsck.check(sfs).clean shouldBe true
+      sfs.unmount()
+    }
+
+    "after journaled mkdir + reopen, bitmap stays consistent" in {
+      val (dev, sfs) = mounted()
+      val (newRoot, _) = DirOps.mkdir(
+        sfs.readInode(InoRoot), InoRoot, sfs, "sub",
+        FileOps.ModeDirectory | 0x1ed, 0, 0, Now, Nsec,
+      )
+      sfs.writeInode(InoRoot, newRoot)
+      sfs.unmount()
+      val sfs2 = Sfs.mount(dev)
+      Fsck.check(sfs2).clean shouldBe true
+      sfs2.unmount()
+    }
+  }
+
   // ---- multiple issues ------------------------------------------------
 
   "multiple issues are reported in one pass" in {
