@@ -4247,8 +4247,16 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         val elemSize = stackSize(elemType)
         genExpr(index)           // r1 = index
         emit("  pshd r1")
-        genExpr(array)           // r1 = array base address
+        genExpr(array)           // r1 = array/slice base; for SliceType this is the descriptor's address
         emit("  popd r2")        // r2 = index
+        // For slices the descriptor's `ptr` field (offset 0) is the data start;
+        // genExpr returns the descriptor address, so we must deref to get the
+        // data pointer. Arrays/pointers/RefType(SliceType) already give the
+        // data pointer directly. Without this, &slot[i] resolves to the
+        // address of the descriptor itself rather than the heap data, so any
+        // write through the resulting pointer corrupts the caller's frame.
+        if array.typ.isInstanceOf[SyslType.SliceType] then
+          emit("  ldd r1, r1, r0") // r1 = slice.ptr
         emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset

@@ -1,0 +1,37 @@
+`&slice[i]` must yield the data pointer, not the descriptor address (TRISC codegen)
+=====================================================================================
+
+Pinned 2026-04-29. The TRISC `TAddrOfIndex` codegen for a `SliceType`
+operand was computing `&slot + i*sizeof(T)` instead of
+`slot.ptr + i*sizeof(T)`. The slice descriptor's `ptr` field at offset
+0 needs to be loaded; arrays and raw pointers don't (the value already
+*is* the data start).
+
+Real-world bite: every helper in `std/container/list` and
+`std/container/ring` materialises a single-element heap slice with
+`(new [1]T)[:]` and then takes `&slot[0]` to return a `*T`. With the
+buggy codegen, the returned pointer aimed at the slice descriptor on
+the *caller's stack* rather than the heap allocation. Once the call
+returned, any write through that pointer corrupted whatever stack
+frame happened to occupy that address — most visibly the saved-LR
+slot of the parent call, producing CPU faults at PCs of the form
+`0x1_0000_0xxx` (an `stw` writing 1 to the high half of an 8-byte
+return address).
+
+The fix is local to `TAddrOfIndex(_, _, PtrType(_))`: when
+`array.typ` is `SliceType`, emit `ldd r1, r1, r0` after evaluating
+the array expression to read the descriptor's `ptr` field before
+applying the index offset.
+
+    module sysl.tests.slice_addrof_index
+
+    callee(p: *int) -> int
+        *p = 42
+        0
+
+    #test
+    test_slice_addrof_index_writes_to_heap_data() -> unit
+        val s = (new [1]int)[:]
+        val p = &s[0]
+        callee(p)
+        assert(s[0] == 42, "&slot[0] must point at slice data, not the descriptor")
