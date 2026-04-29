@@ -611,14 +611,31 @@ object SyslCli:
     if System.getenv("TRISC_DUMP_ASM") != null then
       java.nio.file.Files.writeString(
         java.nio.file.Paths.get(s"/tmp/trisc_${t.unitName.replace("/", "_")}.s"), asm)
-    val stdoutAddr = 0x20000L
+    // Memory layout (1MB RAM):
+    //   0x000000..0x00009F  vector table (20 × 8 bytes)
+    //   0x0000A0..          wrapper code, then user program code, then stack
+    //                       grows down toward the program from initialSP
+    //   0x01FEF8            initial SP
+    //   0x01FF00            panic flag (1 byte)
+    //   0x01FF08            heap brk pointer (8 bytes; init to 0 by RAM zero,
+    //                       lazily set to HEAP_START on first malloc)
+    //   0x020000..0x0FFF00  bump-allocator heap (~896 KB)
+    //   0x100000            STDOUT (1 byte, write-only device)
+    val stdoutAddr = 0x100000L
+    val ramSize = 0x100000L
     val panicFlagAddr = 0x1FF00L
+    val brkPtrAddr = 0x1FF08L
+    val heapStart = 0x20000L
+    val heapEnd = 0xFFF00L
     val initialSP = 0x1FEF8L
     val faultIsrSlots = (1 to 7).map(_ => "  dl fault_isr").mkString("\n")
     val trapIsrSlots = (1 to 8).map(_ => "  dl panic_isr").mkString("\n")
     val tailFaultSlots = (1 to 3).map(_ => "  dl fault_isr").mkString("\n")
     val wrapperAsm =
       s"""|STDOUT = $stdoutAddr
+          |BRK_PTR = $brkPtrAddr
+          |HEAP_START = $heapStart
+          |HEAP_END = $heapEnd
           |
           |segment vectors
           |  dl $initialSP
@@ -663,6 +680,40 @@ object SyslCli:
           |  movi r2, $panicFlagAddr
           |  stb r1, r2, r0
           |  halt
+          |
+          |; malloc(size: i64) -> *byte
+          |; Bump allocator. Aligns size up to 8, advances brk, returns the
+          |; old brk. Returns 0 on heap exhaustion. Never reclaims (free is
+          |; a no-op) — fine for a one-shot test runner: each test gets a
+          |; fresh CPU+memory.
+          |;
+          |; ABI: only clobbers r1..r4 — r5 is the caller's frame pointer,
+          |; r6 the link register, r7 the stack pointer. Touching r5 used
+          |; to corrupt the caller's stack-relative addressing.
+          |global malloc, func
+          |malloc
+          |  addi r1, r1, 7         ; size += 7
+          |  addi r2, r0, -8        ; r2 = -8 = ~7  (movi rejects negative)
+          |  and r1, r1, r2         ; r1 = aligned size
+          |  movi r2, BRK_PTR
+          |  ldd r3, r2, r0         ; r3 = current brk
+          |  bne r3, r0, .have
+          |  movi r3, HEAP_START    ; first call: lazy init
+          |.have
+          |  add r1, r3, r1         ; r1 = new brk (consumes the size in r1)
+          |  movi r4, HEAP_END
+          |  bgu r1, r4, .oom       ; if new brk > HEAP_END, OOM
+          |  std r1, r2, r0         ; brk = new brk
+          |  mov r1, r3             ; return old brk
+          |  jalr r0, r6
+          |.oom
+          |  movi r1, 0
+          |  jalr r0, r6
+          |
+          |; free(p: *byte) — no-op (bump allocator)
+          |global free, func
+          |free
+          |  jalr r0, r6
           |""".stripMargin
     val programTof =
       try assemble(asm, relocatable = true)
@@ -687,7 +738,7 @@ object SyslCli:
       def writeByte(addr: Long, data: Long): Unit = outputBuf += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
     }
-    val mem = new Memory("Memory", new RAM(0, stdoutAddr), stdout)
+    val mem = new Memory("Memory", new RAM(0, ramSize), stdout)
     try linked.load(mem)
     catch case e: Throwable => return Fail(s"TRISC load failed: ${e.getMessage}", outputBuf.toString)
     val cpu = new CPU(mem) { limit = 50_000_000; quiet = System.getenv("TRISC_TRACE") == null }

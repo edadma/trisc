@@ -1,0 +1,76 @@
+Heap allocation across backends
+================================
+
+A small corpus that exercises malloc/free paths across every backend
+(`interpreter`, `llvm-host`, `svm-host`, `trisc`). Pins audit item #34:
+the TRISC runner now ships a built-in bump-allocator shim, so any test
+that triggers `new T(...)`, dynamic slice growth, or string interpolation
+links and runs end-to-end on `--backend trisc`.
+
+    module sysl.tests.heap_alloc
+
+
+### `new T(...)` ref-counted box
+
+A heap-allocated struct is the most basic malloc/free trigger. The ref
+goes out of scope at the end of the test, decrementing to zero and
+calling `free`.
+
+    struct Box
+        value: int
+
+    #test
+    test_new_box_round_trips() -> unit
+        val b = new Box(42)
+        assert(b.value == 42, "round-trip")
+
+
+### `new [n]T` dynamic array
+
+Heap-allocated slices use a separate malloc path (size derived from cap).
+The slice's refcount drops to zero at scope end.
+
+    #test
+    test_new_dynamic_array() -> unit
+        val arr = new [16]int
+        var i = 0
+        while i < 16
+            arr[i] = i * i
+            i = i + 1
+        assert(arr[0] == 0, "first")
+        assert(arr[7] == 49, "middle")
+        assert(arr[15] == 225, "last")
+
+
+### `append` past initial capacity reallocates
+
+`append` grows the underlying buffer by allocating a larger one and
+copying. Pushing 64 elements into a 4-cap slice forces several growth
+rounds.
+
+    #test
+    test_append_grows_slice() -> unit
+        val seed = new [4]int
+        var s = seed[:0]
+        var i = 0
+        while i < 64
+            s = append(s, i)
+            i = i + 1
+        assert(len(s) == 64, "len after grows")
+        assert(s[0] == 0, "first preserved across grows")
+        assert(s[63] == 63, "last value")
+
+
+### Many small allocations exercise the bump pointer
+
+Allocating 200 small refcount-headed boxes in a loop sanity-checks that
+the bump allocator advances correctly and free is a true no-op (no
+heap corruption from double-frees, no premature OOM).
+
+    #test
+    test_many_small_allocs() -> unit
+        var i = 0
+        while i < 200
+            val b = new Box(i)
+            assert(b.value == i, "each box round-trips")
+            i = i + 1

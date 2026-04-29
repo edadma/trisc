@@ -29,7 +29,8 @@ For back-pointers and non-owning references (e.g. parent pointers in trees). ARC
 - ~~`saturating_*` on 64-bit types throw "not supported"~~ — fixed at sysl@271e7696 (six implementations using overflow detection on the wrapped result).
 - ~~No explicit divide-by-zero check inserted before `div`/`divu`~~ — fixed at sysl@5cfe61c6.
 - `f"..."` format strings not implemented (interpreter and LLVM have them).
-- ~~TRISC backend is not wired into the `sysl test --backend` runner~~ — fixed at sysl@c2f59c2c. `runOneTRISC` mirrors `runOneSVM`. Limitations: should_panic message-substring not honoured (asserts/panics drop the message); tests needing malloc/free fail at link. Cross-backend smoke at `sysl/tests/panic_test/`.
+- ~~TRISC backend is not wired into the `sysl test --backend` runner~~ — fixed at sysl@c2f59c2c. `runOneTRISC` mirrors `runOneSVM`. Limitation remaining: should_panic message-substring not honoured (asserts/panics drop the message). Cross-backend smoke at `sysl/tests/panic_test/`.
+- ~~Tests needing malloc/free fail at link~~ — fixed 2026-04-28. Bump-allocator + no-op `free` shim wired into `runOneTRISC` wrapper asm. STDOUT moved to 0x100000, RAM bumped to 1MB, 896KB heap at 0x20000–0xFFF00. Pinned by `sysl/tests/heap_alloc/`. std/ on `--backend trisc` 322→578 passing (+256).
 
 ## SVM Backend
 
