@@ -973,6 +973,22 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mstat: stat /no/such missing=1")
   }
 
+  "musl: tar extract end-to-end (Phase 4 chunk 5)" in {
+    // muntar (slix/test/untar.c) — same script as the aarch64
+    // entry. Bit-identical /test.tar bytes (TestTar.bytes is
+    // arch-neutral); the OS-side path here is x86_64's full musl
+    // → shim → VFS → TFS chain for mkdir + open(O_CREAT) + write.
+    qemu.send("muntar\n")
+    val output = qemu.waitFor("muntar: ok")
+    output should include("muntar: open /test.tar rc=")
+    output should include("muntar: dir /tmp/tx rc=0")
+    output should include("muntar: file /tmp/tx/a.txt rc=0 size=6")
+    output should include("muntar: file /tmp/tx/b.txt rc=0 size=7")
+    output should include("muntar: stat /tmp/tx dir=1")
+    output should include("muntar: stat /tmp/tx/a.txt size=6 reg=1 match=1")
+    output should include("muntar: stat /tmp/tx/b.txt size=7 reg=1 match=1")
+  }
+
   "musl: open(O_CREAT) + write + readback (Phase 4 chunk 4)" in {
     // mfcreat (slix/test/fcreat.c) — same script as the aarch64
     // entry. The shim's sys_openat is arch-neutral, so this is

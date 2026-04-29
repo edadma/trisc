@@ -809,6 +809,25 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mstat: stat /no/such missing=1")
   }
 
+  "musl: tar extract end-to-end (Phase 4 chunk 5)" in {
+    // muntar (slix/test/untar.c) opens a synthesized USTAR archive
+    // pre-baked into the ramdisk at /test.tar (bytes from
+    // trisc-cli/.../TestTar.scala) and extracts it under /tmp/
+    // using only the new chunk-3+4 syscalls — mkdir, open(O_CREAT),
+    // write, plus stat to verify. This is the closing integration
+    // test for Phase 4: every musl→VFS path the package-manager
+    // surface needs is exercised end-to-end against real bytes.
+    qemu.send("muntar\n")
+    val output = qemu.waitFor("muntar: ok")
+    output should include("muntar: open /test.tar rc=")
+    output should include("muntar: dir /tmp/tx rc=0")
+    output should include("muntar: file /tmp/tx/a.txt rc=0 size=6")
+    output should include("muntar: file /tmp/tx/b.txt rc=0 size=7")
+    output should include("muntar: stat /tmp/tx dir=1")
+    output should include("muntar: stat /tmp/tx/a.txt size=6 reg=1 match=1")
+    output should include("muntar: stat /tmp/tx/b.txt size=7 reg=1 match=1")
+  }
+
   "musl: open(O_CREAT) + write + readback (Phase 4 chunk 4)" in {
     // mfcreat (slix/test/fcreat.c) extends sys_openat with the
     // create-then-retry path: VFS_CMD_OPEN_C miss + O_CREAT set

@@ -18,7 +18,7 @@ object MakeX86RamdiskMain:
     val binDir = outDir.resolve("bin")
 
     // Collect pre-built ELF binaries (no extension)
-    val files: Map[String, Array[Byte]] =
+    val binFiles: Map[String, Array[Byte]] =
       if Files.isDirectory(binDir) then
         import scala.jdk.CollectionConverters.*
         Files.list(binDir).iterator().asScala
@@ -31,6 +31,15 @@ object MakeX86RamdiskMain:
           }
           .toMap
       else Map.empty
+
+    // Phase 4 chunk 5 fixture: a tiny synthesized tar at /test.tar
+    // exercised by slix/test/untar.c. Bytes come from the shared
+    // TestTar object so x86 and aarch64 ramdisks contain bit-identical
+    // archives.
+    val tarBytes = TestTar.bytes
+    System.err.println(s"  including /test.tar (${tarBytes.length} bytes, synthesized)")
+    val files: Map[String, Array[Byte]] =
+      binFiles + ("/test.tar" -> tarBytes)
 
     val basePrefill =
       """/dev dir
