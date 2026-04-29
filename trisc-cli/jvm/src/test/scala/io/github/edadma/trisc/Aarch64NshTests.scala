@@ -2052,6 +2052,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcphash: failed"
   }
 
+  "net: TCP listen hash routing (Phase 3 chunk 4)" in {
+    // Phase 3 chunk 4: hash inet_tcp_find_listen on local_port.
+    // Test opens 3 listeners at colliding bucket-8 ports
+    // (9000/9016/9032), then loops sequential connect-accept-tag
+    // round-trips through each. A buggy chain walk that returns
+    // first-match-regardless-of-port would route all SYNs to the
+    // first listener, hanging the second/third tcp_accept.
+    val output = qemu.command("test_tlhash")
+    output should include("tlhash: ok")
+    output should not include "tlhash: failed"
+  }
+
   "dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and

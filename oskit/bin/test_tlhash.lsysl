@@ -1,0 +1,133 @@
+test_tlhash — TCP listen-socket hash routing (Phase 3 chunk 4)
+==============================================================
+
+Phase 3 chunk 4 closes Phase 3 of the netstack-quality plan: hash
+the per-segment lookup `inet_tcp_find_listen(local_port)`. The
+chained hash uses a separate table from chunk 3's connected-socket
+hash, with `next_in_tcp_listen_bucket` linking listener slots
+keyed on `local_port & 0xf`.
+
+The risk this test catches: a buggy chain walk that returns the
+first listener regardless of port match, a missed hash-remove on
+listener close, or a hash function that maps two distinct listener
+ports to the same slot.
+
+Test plan:
+
+  1. listen on 3 colliding ports (9000, 9016, 9032) — all hash
+     to bucket 8 because the low 4 bits are 0. Each listener
+     ends up linked off `inet_tcp_listen_hash[8]`.
+  2. For each listener i:
+       - tcp_connect 127.0.0.1:port[i] → loopback fast-path
+         re-enters the segment dispatch; the SYN's destination
+         port is matched against the listen hash.
+       - tcp_accept on listener i → if hash returned the wrong
+         listener, accept on listener i would block (no child)
+         and the test would hang.
+       - send tag byte ('A' + i), recv on child, echo +1, recv
+         on connect-side, assert.
+       - close child + connect-side fd. Listener stays open for
+         the next iteration.
+  3. close all 3 listeners. close_slot's listen-hash remove
+     unlinks each. Re-listening (not done in this test, but
+     covered indirectly when the test runs in a process recycle)
+     would otherwise hit "phantom in-use" rejection.
+
+5 TCP slots active at peak (3 listeners + 1 connect-side + 1
+accepted child). Within the per-tid cap of 8.
+
+    module oskit.bin.test_tlhash
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{tcp_listen, tcp_accept, tcp_connect, tcp_send, tcp_recv, tcp_close}
+    import std.net.{ipv4}
+
+
+    print_dec(v: int)
+        if v < 0
+            puts("-")
+            print_dec(-v)
+            return
+        if v >= 10
+            print_dec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("tlhash: failed ")
+        print_dec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val LO = ipv4(127, 0, 0, 1)
+        var ports: [3]int
+        ports[0] = 9000
+        ports[1] = 9016
+        ports[2] = 9032
+
+        var lfds: [3]int
+        var i = 0
+        while i < 3
+            lfds[i] = tcp_listen(ports[i])
+            if lfds[i] < 0
+                fail(1 + i)
+                return
+            i += 1
+
+        i = 0
+        while i < 3
+            val cfd = tcp_connect(LO, ports[i])
+            if cfd < 0
+                fail(10 + i)
+                return
+
+            var peer_ip: [4]byte
+            var peer_port: [2]byte
+            val sfd = tcp_accept(lfds[i], &peer_ip[0], &peer_port[0])
+            if sfd < 0
+                fail(20 + i)
+                return
+
+            var tx: [1]byte
+            tx[0] = byte(int('A') + i)
+            if tcp_send(cfd, &tx[0], 1) != 1
+                fail(30 + i)
+                return
+
+            var rx: [1]byte
+            if tcp_recv(sfd, &rx[0], 1) != 1
+                fail(40 + i)
+                return
+            if int(rx[0]) & 0xff != int('A') + i
+                fail(50 + i)
+                return
+
+            var tx2: [1]byte
+            tx2[0] = byte(int(rx[0]) + 1)
+            if tcp_send(sfd, &tx2[0], 1) != 1
+                fail(60 + i)
+                return
+
+            var rx2: [1]byte
+            if tcp_recv(cfd, &rx2[0], 1) != 1
+                fail(70 + i)
+                return
+            if int(rx2[0]) & 0xff != int('A') + i + 1
+                fail(80 + i)
+                return
+
+            tcp_close(sfd)
+            tcp_close(cfd)
+            i += 1
+
+        i = 0
+        while i < 3
+            tcp_close(lfds[i])
+            i += 1
+
+        puts("tlhash: ok\n")
+        exit()

@@ -1947,6 +1947,11 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         // whenever a slot transitions in/out of having a full
         // (local_port, remote_port, remote_ip) tuple.
         next_in_tcp_conn_bucket: int
+        // Phase 3 chunk 4: forward link in the listen-port hash
+        // bucket. -1 = not in any bucket. Disjoint from the conn
+        // bucket: a slot is in at most one of the two hashes
+        // depending on `is_listen`.
+        next_in_tcp_listen_bucket: int
 
     var tcp_sockets: [16]TcpSocket
     var tcp_iss_counter: u32 = u32(1000)
@@ -2007,6 +2012,56 @@ paths), so the close handler can call it unconditionally.
             if nx == s
                 tcp_sockets[cur].next_in_tcp_conn_bucket = tcp_sockets[s].next_in_tcp_conn_bucket
                 tcp_sockets[s].next_in_tcp_conn_bucket = -1
+                return
+            cur = nx
+
+
+### TCP listen-socket hash (Phase 3 chunk 4)
+
+`inet_tcp_find_listen` is called once per inbound TCP segment that
+fails the connected-socket lookup (typically: a SYN to a listening
+port). The pre-existing implementation scanned every slot looking
+for `is_listen != 0 && local_port == p`. With this hash a SYN is
+mapped to its listener via a single masked index instead.
+
+Same chained-list shape as the connected-socket hash (chunk 3) but
+disjoint storage and a different key (just `local_port`, since a
+listener has no remote tuple). A slot is in at most one of the two
+hashes — a listener is never in the conn hash, and a connected slot
+is never in the listen hash.
+
+Maintenance: insert in `inet_tcp_begin_listen` after `is_listen = 1`;
+remove in `inet_tcp_close_slot` (gated on `is_listen != 0`). The
+listen-vs-conn discriminator at close time avoids unnecessary walks.
+
+    var inet_tcp_listen_hash: [16]int
+
+    inet_tcp_listen_bucket(local_port: int) -> int
+        (local_port & 0xffff) & (INET_TCP_HASH_N - 1)
+
+    inet_tcp_listen_hash_init()
+        var i = 0
+        while i < INET_TCP_HASH_N
+            inet_tcp_listen_hash[i] = -1
+            i += 1
+
+    inet_tcp_listen_hash_insert(s: int)
+        val h = inet_tcp_listen_bucket(tcp_sockets[s].local_port)
+        tcp_sockets[s].next_in_tcp_listen_bucket = inet_tcp_listen_hash[h]
+        inet_tcp_listen_hash[h] = s
+
+    inet_tcp_listen_hash_remove(s: int)
+        val h = inet_tcp_listen_bucket(tcp_sockets[s].local_port)
+        var cur = inet_tcp_listen_hash[h]
+        if cur == s
+            inet_tcp_listen_hash[h] = tcp_sockets[s].next_in_tcp_listen_bucket
+            tcp_sockets[s].next_in_tcp_listen_bucket = -1
+            return
+        while cur >= 0
+            val nx = tcp_sockets[cur].next_in_tcp_listen_bucket
+            if nx == s
+                tcp_sockets[cur].next_in_tcp_listen_bucket = tcp_sockets[s].next_in_tcp_listen_bucket
+                tcp_sockets[s].next_in_tcp_listen_bucket = -1
                 return
             cur = nx
 
@@ -2086,11 +2141,13 @@ gate new sockets against the per-tid `TCP_PER_TID_BUF_MAX`.
 
     inet_tcp_init()
         inet_tcp_conn_hash_init()
+        inet_tcp_listen_hash_init()
         var i = 0
         while i < TCP_MAX_SOCKETS
             tcp_sockets[i].in_use = 0
             tcp_sockets[i].state = TCP_STATE_CLOSED
             tcp_sockets[i].next_in_tcp_conn_bucket = -1
+            tcp_sockets[i].next_in_tcp_listen_bucket = -1
             tcp_sockets[i].connect_waiter = -1
             tcp_sockets[i].send_waiter = -1
             tcp_sockets[i].recv_waiter = -1
@@ -2835,6 +2892,11 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         // alloc that was immediately close_slot'd) — the bucket walk
         // simply finds nothing and returns.
         inet_tcp_conn_hash_remove(s)
+        // Phase 3 chunk 4: drop from the listen hash if this was a
+        // listener. Gated on `is_listen` because non-listener slots
+        // were never inserted; the gate avoids the bucket walk.
+        if tcp_sockets[s].is_listen != 0
+            inet_tcp_listen_hash_remove(s)
         if tcp_sockets[s].connect_waiter >= 0
             inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, status, 0)
             tcp_sockets[s].connect_waiter = -1
@@ -2980,6 +3042,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].pending_error = 0
                 tcp_sockets[i].arp_pending = 0
                 tcp_sockets[i].next_in_tcp_conn_bucket = -1
+                tcp_sockets[i].next_in_tcp_listen_bucket = -1
                 // Heap-backed buffers are allocated lazily on alloc.
                 // close_slot frees + nulls the pointers, so re-using a
                 // slot doesn't double-allocate.  std.alloc returns 0 on
@@ -3195,12 +3258,12 @@ times in scan_timers.
 Find a listen socket bound to `local_port`. Returns slot index or -1.
 
     inet_tcp_find_listen(local_port: int) -> int
-        var i = 0
-        while i < TCP_MAX_SOCKETS
+        var i = inet_tcp_listen_hash[inet_tcp_listen_bucket(local_port)]
+        while i >= 0
             if (tcp_sockets[i].in_use != 0 && tcp_sockets[i].is_listen != 0 &&
                     tcp_sockets[i].local_port == local_port)
                 return i
-            i += 1
+            i = tcp_sockets[i].next_in_tcp_listen_bucket
         -1
 
 
@@ -3334,6 +3397,7 @@ so a tiny but positive queue depth is always available.
         tcp_sockets[s].state = TCP_STATE_LISTEN
         tcp_sockets[s].is_listen = 1
         tcp_sockets[s].accept_backlog = b
+        inet_tcp_listen_hash_insert(s)
         s
 
 
