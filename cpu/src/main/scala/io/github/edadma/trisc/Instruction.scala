@@ -422,11 +422,6 @@ class FNEG(a: Int, b: Int) extends RRInstruction(a, b):
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(-cpu.r(b).readf)
 
-class FINV(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "finv"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(1.0 / cpu.r(b).readf)
-
 class CVT(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "cvt"
 
@@ -446,58 +441,6 @@ class FABS(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "fabs"
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(math.abs(cpu.r(b).readf))
-
-// Floating point RR 01 (110 block, sub-format 01)
-
-class FPOW(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fpow"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.pow(cpu.r(a).readf, cpu.r(b).readf))
-
-class FSIN(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fsin"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.sin(cpu.r(b).readf))
-
-class FCOS(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fcos"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.cos(cpu.r(b).readf))
-
-class FTAN(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "ftan"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.tan(cpu.r(b).readf))
-
-class FASIN(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fasin"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.asin(cpu.r(b).readf))
-
-class FACOS(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "facos"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.acos(cpu.r(b).readf))
-
-class FATAN(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fatan"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.atan(cpu.r(b).readf))
-
-class FATAN2(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fatan2"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.atan2(cpu.r(a).readf, cpu.r(b).readf))
-
-class FEXP(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "fexp"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.exp(cpu.r(b).readf))
-
-class FLOG(a: Int, b: Int) extends RRInstruction(a, b):
-  val mnemonic = "flog"
-
-  def apply(cpu: CPU): Unit = cpu.r(a).write(math.log(cpu.r(b).readf))
 
 // Single/double precision float conversion.
 // Single-precision floats live in the low 32 bits of a register,

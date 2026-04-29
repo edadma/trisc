@@ -727,7 +727,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o, "expected register as first operand")
 
       addInstruction(3 -> 7, 3 -> 0, 3 -> reg, 7 -> opcode)
-    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "cvt" | "fneg" | "finv" | "fint" | "fsqrt" | "fabs" | "ll" | "sc" | "clz" | "ctz" | "chk" | "btst" | "bset" | "bclr" | "rol" | "ror" | "cnt" | "rev" | "sext" | "mov" | "min" | "max" | "exg"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("zeb" | "zes" | "zew" | "seb" | "ses" | "sew" | "neg" | "not" | "cvt" | "fneg" | "fint" | "fsqrt" | "fabs" | "ll" | "sc" | "clz" | "ctz" | "chk" | "btst" | "bset" | "bclr" | "rol" | "ror" | "cnt" | "rev" | "sext" | "mov" | "min" | "max" | "exg"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
           case "zeb"   => 1
@@ -740,7 +740,6 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "not"   => 8
           case "cvt"   => 9
           case "fneg"  => 10
-          case "finv"  => 11
           case "fint"  => 12
           case "fsqrt" => 13
           case "fabs"  => 14
@@ -771,19 +770,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
-    case InstructionLineAST(mnemonic @ ("fpow" | "fsin" | "fcos" | "ftan" | "fasin" | "facos" | "fatan" | "fatan2" | "fexp" | "flog" | "f32tof64" | "f64tof32" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("f32tof64" | "f64tof32" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
-          case "fpow"     => 0
-          case "fsin"     => 9
-          case "fcos"     => 10
-          case "ftan"     => 11
-          case "fasin"    => 12
-          case "facos"    => 13
-          case "fatan"    => 14
-          case "fatan2"   => 15
-          case "fexp"     => 16
-          case "flog"     => 17
           case "f32tof64" => 18
           case "f64tof32" => 19
           case "tlbi"     => 1

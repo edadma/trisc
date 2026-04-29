@@ -69,7 +69,7 @@ Complete opcode listing for all native instructions. Pseudo-instructions are doc
 | 01000 | not | ra = ~rb |
 | 01001 | cvt | ra = int_to_float(rb) or float_to_int(rb) |
 | 01010 | fneg | fa = -fb |
-| 01011 | finv | fa = 1.0 / fb |
+| 01011 | _reserved_ | (was finv; removed — use fdiv 1.0, x) |
 | 01100 | fint | fa = trunc(fb) |
 | 01101 | fsqrt | fa = sqrt(fb) |
 | 01110 | fabs | fa = abs(fb) |
@@ -95,16 +95,16 @@ Complete opcode listing for all native instructions. Pseudo-instructions are doc
 
 | Opcode | Mnemonic | Operation |
 |--------|----------|-----------|
-| 00000 | fpow | ra = pow(ra, rb) (destructive) |
-| 01001 | fsin | fa = sin(fb) |
-| 01010 | fcos | fa = cos(fb) |
-| 01011 | ftan | fa = tan(fb) |
-| 01100 | fasin | fa = asin(fb) |
-| 01101 | facos | fa = acos(fb) |
-| 01110 | fatan | fa = atan(fb) |
-| 01111 | fatan2 | fa = atan2(fa, fb) (destructive) |
-| 10000 | fexp | fa = exp(fb) |
-| 10001 | flog | fa = ln(fb) |
+| 00000 | _reserved_ | (was fpow; transcendentals removed — see std.math.float) |
+| 01001 | _reserved_ | (was fsin) |
+| 01010 | _reserved_ | (was fcos) |
+| 01011 | _reserved_ | (was ftan) |
+| 01100 | _reserved_ | (was fasin) |
+| 01101 | _reserved_ | (was facos) |
+| 01110 | _reserved_ | (was fatan) |
+| 01111 | _reserved_ | (was fatan2) |
+| 10000 | _reserved_ | (was fexp) |
+| 10001 | _reserved_ | (was flog) |
 | 00001 | tlbi | invalidate TLB entry for virtual address rb (supervisor) |
 | 00010 | tlbia | invalidate all TLB entries (supervisor) |
 | 00011 | sptbr | set page table base register to rb (supervisor) |
