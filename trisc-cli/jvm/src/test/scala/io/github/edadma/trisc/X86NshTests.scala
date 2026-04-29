@@ -973,6 +973,20 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mstat: stat /no/such missing=1")
   }
 
+  "musl: open(O_CREAT) + write + readback (Phase 4 chunk 4)" in {
+    // mfcreat (slix/test/fcreat.c) — same script as the aarch64
+    // entry. The shim's sys_openat is arch-neutral, so this is
+    // mostly a parallel-coverage check, but x86's TFS write
+    // path independently exercises tfs_write block alloc.
+    qemu.send("mfcreat\n")
+    val output = qemu.waitFor("mfcreat: ok")
+    output should include("mfcreat: write rc=12")
+    output should include("mfcreat: stat after create size=12 reg=1")
+    output should include("mfcreat: read back rc=12 match=1")
+    output should include("mfcreat: O_EXCL on existing rc=-1 errno=17")
+    output should include("mfcreat: unlink rc=0 missing=1")
+  }
+
   "musl: mkdir / unlink / rename / chmod (Phase 4 chunk 3)" in {
     // mfsmod (slix/test/fsmod.c) exercises the four chunk-3
     // syscalls — mkdirat (227), fchmodat (167), renameat (281),

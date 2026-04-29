@@ -420,11 +420,22 @@ so they live up here near `POSIX_SOCK_DGRAM`.
     val POSIX_SOCK_NONBLOCK  = 2048
     val POSIX_SOCK_CLOEXEC   = 524288
 
-POSIX `O_NONBLOCK` is Linux octal 04000 = 2048. We only honour this
+POSIX `O_NONBLOCK` is Linux octal 04000 = 2048. We only track this
 flag today; other open(2) flags (O_APPEND etc.) would need the
-shim to actually track them, so we mask them off on `F_SETFL`.
+shim to honour them, so we mask them off on `F_SETFL`.
+
+`O_CREAT` (0o100) and `O_EXCL` (0o200) are inspected once during
+`sys_openat` to drive the create-then-retry path; we don't store
+them on the fd so they won't surface from `F_GETFL`. `O_TRUNC`
+(0o1000) is parsed but left as a deferred — TFS has no truncate
+operation today, so an `open(O_WRONLY|O_TRUNC)` against an
+existing file just rewrites starting at offset 0 (the caller is
+expected to know whether the residual tail matters).
 
     val POSIX_O_NONBLOCK     = 2048
+    val POSIX_O_CREAT        = 64
+    val POSIX_O_EXCL         = 128
+    val POSIX_O_TRUNC        = 512
 
 fcntl command codes (`<fcntl.h>` in musl arch).
 
@@ -466,6 +477,7 @@ the way out so it doesn't leak.
     val VFS_CMD_OPEN_C    = 1
     val VFS_CMD_READ_C    = 2
     val VFS_CMD_WRITE_C   = 3
+    val VFS_CMD_CREATE_C  = 4
     val VFS_CMD_UNLINK_C  = 5
     val VFS_CMD_STAT_C    = 6
     val VFS_CMD_MKDIR_C   = 7
@@ -3064,8 +3076,57 @@ Returns 0 on success, -ENOENT on miss.
         val r = ipc_send(port, msg, 1 + n, reply, 9)
         if r < 0
             return i64(-5)
+        val want_create = (oflags & POSIX_O_CREAT) != 0
+        val want_excl   = (oflags & POSIX_O_EXCL)  != 0
         if reply[0] != 0
-            return i64(-2)              // -ENOENT
+            if !want_create
+                return i64(-2)          // -ENOENT
+            // File doesn't exist and O_CREAT is set — ask VFS to
+            // create it (TFS_CMD_CREATE goes via vfs_path_create
+            // server-side, splitting the path into parent_ino +
+            // name_in_parent), then retry the open. Mode bits get
+            // the regular-file ftype (1) ORed in by TFS itself.
+            val perm = mode & 0xFFF
+            var cm: [131]byte
+            cm[0] = byte(VFS_CMD_CREATE_C)
+            cm[1] = byte(1)             // TFS ftype = REG
+            cm[2] = byte((perm >> 8) & 0xFF)
+            cm[3] = byte(perm & 0xFF)
+            var k = 0
+            while k < n
+                cm[4 + k] = path[k]
+                k += 1
+            var crep: [5]byte
+            val cr = ipc_send(port, cm, 4 + n, crep, 5)
+            if cr < 0
+                return i64(-5)
+            if crep[0] != 0
+                return i64(-2)          // -ENOENT (parent missing)
+            // Now reopen — if THIS fails the FS is corrupt, but
+            // -ENOENT is still the best Linux can return.
+            var msg2: [129]byte
+            msg2[0] = byte(VFS_CMD_OPEN_C)
+            var j = 0
+            while j < n
+                msg2[1 + j] = path[j]
+                j += 1
+            val r2 = ipc_send(port, msg2, 1 + n, reply, 9)
+            if r2 < 0
+                return i64(-5)
+            if reply[0] != 0
+                return i64(-2)
+        else if want_create && want_excl
+            // File already exists and the caller asked for
+            // exclusive creation — release the just-acquired VFS
+            // handle before reporting -EEXIST so the slot doesn't
+            // leak.
+            val h = shim_read_be_i32(reply, 1)
+            var cmsg: [5]byte
+            cmsg[0] = byte(VFS_CMD_CLOSE_C)
+            shim_write_be_i32(cmsg, 1, h)
+            var crep: [1]byte
+            ipc_send(port, cmsg, 5, crep, 1)
+            return i64(-17)             // -EEXIST
         val handle = shim_read_be_i32(reply, 1)
         val pfd = posix_fd_alloc(POSIX_FD_FILE, handle)
         if pfd < 0
