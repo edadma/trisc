@@ -459,6 +459,190 @@ class FsckTests extends AnyFreeSpec with Matchers:
     }
   }
 
+  // ---- inode reconciliation + link counts (16c) ----------------------
+
+  /** Flip one bit in the inode bitmap on disk. */
+  private def flipInodeBitmapBit(dev: RamBlockDevice, sfs: Sfs, inodeNum: Int): Unit =
+    val byteOffGlobal = inodeNum >>> 3
+    val ibBlockIdx = byteOffGlobal / BlockSize
+    val byteInBlock = byteOffGlobal % BlockSize
+    val bitInByte = inodeNum & 7
+    val ibBuf = new Array[Byte](BlockSize)
+    val ibBlk = sfs.layout.inodeBitmapStart.toLong + ibBlockIdx
+    dev.readBlock(ibBlk, ibBuf)
+    ibBuf(byteInBlock) = (ibBuf(byteInBlock) ^ (1 << bitInByte)).toByte
+    dev.writeBlock(ibBlk, ibBuf)
+    dev.flush()
+
+  "link-count comparison" - {
+
+    "freshly formatted root has linkCount = 2 and refs = 2 (clean)" in {
+      val (_, sfs) = mounted()
+      val report = Fsck.check(sfs)
+      report.issues.collect {
+        case i: FsckIssue.LinkCountMismatch => i
+      } shouldBe empty
+      sfs.unmount()
+    }
+
+    "creating a file makes refs match the file's linkCount = 1" in {
+      val (_, sfs) = mounted()
+      createFile(sfs, "f")
+      Fsck.check(sfs).clean shouldBe true
+      sfs.unmount()
+    }
+
+    "creating a subdirectory bumps root.linkCount by 1" in {
+      val (_, sfs) = mounted()
+      val (newRoot, _) = DirOps.mkdir(
+        sfs.readInode(InoRoot), InoRoot, sfs, "sub",
+        FileOps.ModeDirectory | 0x1ed, 0, 0, Now, Nsec,
+      )
+      sfs.writeInode(InoRoot, newRoot)
+      val r = sfs.readInode(InoRoot)
+      r.linkCount shouldBe 3 // 2 + 1 subdir
+      Fsck.check(sfs).clean shouldBe true
+      sfs.unmount()
+    }
+
+    "many subdirs: root.linkCount = 2 + N and fsck stays clean" in {
+      val (_, sfs) = mounted()
+      val n = 7
+      var i = 0
+      while i < n do
+        val (newRoot, _) = DirOps.mkdir(
+          sfs.readInode(InoRoot), InoRoot, sfs, s"d$i",
+          FileOps.ModeDirectory | 0x1ed, 0, 0, Now, Nsec,
+        )
+        sfs.writeInode(InoRoot, newRoot)
+        i += 1
+      sfs.readInode(InoRoot).linkCount shouldBe (2 + n)
+      Fsck.check(sfs).clean shouldBe true
+      sfs.unmount()
+    }
+
+    "mismatch is reported when linkCount is inflated on disk" in {
+      val (dev, sfs) = mounted()
+      val ino = createFile(sfs, "f")
+      sfs.unmount()
+      // Re-pack the inode with a wrong linkCount.
+      val (blk, off) = sfs.layout.inodeLocation(ino)
+      val buf = new Array[Byte](BlockSize)
+      dev.readBlock(blk, buf)
+      val parsed = Inode.unpack(buf, off)
+      Inode.pack(parsed.copy(linkCount = 9), buf, off)
+      dev.writeBlock(blk, buf)
+      dev.flush()
+      val sfs2 = Sfs.mount(dev)
+      val report = Fsck.check(sfs2)
+      report.issues.exists {
+        case FsckIssue.LinkCountMismatch(n, stored, computed) =>
+          n == ino && stored == 9 && computed == 1
+        case _ => false
+      } shouldBe true
+      sfs2.unmount()
+    }
+  }
+
+  "orphan detection" - {
+
+    "an inode allocated but with no dir entry is flagged as orphan" in {
+      val (dev, sfs) = mounted()
+      val ino = createFile(sfs, "f")
+      // Allocate a fresh inode by hand and write a regular-file inode
+      // record into it, but never create a dir entry pointing at it.
+      // Easiest path: allocate via the bitmap directly + writeInode.
+      val orphan = sfs.inodeBitmap.allocate().getOrElse(fail("out of inodes"))
+      val now = Now
+      val orphanIno = Inode(
+        mode = FileOps.ModeRegular | 0x1a4,
+        linkCount = 1,
+        uid = 0, gid = 0, flags = 0,
+        size = 0L, blockCount = 0, generation = 1,
+        atimeSec = now, atimeNsec = 0,
+        mtimeSec = now, mtimeNsec = 0,
+        ctimeSec = now, ctimeNsec = 0,
+        crtimeSec = now, crtimeNsec = 0,
+        body = InodeBody.EmptyExtents,
+        indirect1 = 0, indirect2 = 0, indirect3 = 0, xattrBlock = 0,
+      )
+      // writeInode goes through the txn machinery, which is fine.
+      sfs.withTransaction { sfs.writeInode(orphan, orphanIno) }
+      sfs.unmount()
+      val sfs2 = Sfs.mount(dev)
+      val report = Fsck.check(sfs2)
+      report.issues.exists {
+        case FsckIssue.OrphanedInode(n, lc) => n == orphan && lc == 1
+        case _                              => false
+      } shouldBe true
+      // The deliberately-created file is still fine.
+      report.issues.collect {
+        case FsckIssue.OrphanedInode(n, _) if n == ino => n
+      } shouldBe empty
+      sfs2.unmount()
+    }
+
+    "reserved inodes (0, 1) are NOT flagged as orphans" in {
+      val (_, sfs) = mounted()
+      val report = Fsck.check(sfs)
+      report.issues.collect {
+        case FsckIssue.OrphanedInode(n, _) if n == InoNull || n == InoBadBlocks => n
+      } shouldBe empty
+      // Same for InodeBitmapLeakedBit.
+      report.issues.collect {
+        case FsckIssue.InodeBitmapLeakedBit(n) if n == InoNull || n == InoBadBlocks => n
+      } shouldBe empty
+      sfs.unmount()
+    }
+  }
+
+  "inode bitmap reconciliation" - {
+
+    "missing-bit: a dir entry pointing at an unallocated inode is reported" in {
+      val (dev, sfs) = mounted()
+      val ino = createFile(sfs, "f")
+      sfs.unmount()
+      // Clear the inode's bit on disk while leaving the dir entry
+      // pointing at it.
+      flipInodeBitmapBit(dev, sfs, ino)
+      val sfs2 = Sfs.mount(dev)
+      val report = Fsck.check(sfs2)
+      report.issues.exists {
+        case FsckIssue.InodeBitmapMissingBit(n) => n == ino
+        case _                                  => false
+      } shouldBe true
+      sfs2.unmount()
+    }
+
+    "leaked: an allocated inode with linkCount=0 is reported" in {
+      val (dev, sfs) = mounted()
+      // Allocate a slot and leave its bit set, but write a linkCount=0
+      // inode to it. (Simulates a half-applied unlink that cleared
+      // linkCount but didn't clear the bitmap bit.)
+      val n = sfs.inodeBitmap.allocate().getOrElse(fail("out of inodes"))
+      val ino = Inode(
+        mode = 0, linkCount = 0,
+        uid = 0, gid = 0, flags = 0,
+        size = 0L, blockCount = 0, generation = 1,
+        atimeSec = 0, atimeNsec = 0,
+        mtimeSec = 0, mtimeNsec = 0,
+        ctimeSec = 0, ctimeNsec = 0,
+        crtimeSec = 0, crtimeNsec = 0,
+        body = InodeBody.EmptyExtents,
+        indirect1 = 0, indirect2 = 0, indirect3 = 0, xattrBlock = 0,
+      )
+      sfs.withTransaction { sfs.writeInode(n, ino) }
+      sfs.unmount()
+      val sfs2 = Sfs.mount(dev)
+      val report = Fsck.check(sfs2)
+      report.issues.exists {
+        case FsckIssue.InodeBitmapLeakedBit(m) => m == n
+        case _                                 => false
+      } shouldBe true
+      sfs2.unmount()
+    }
+  }
+
   // ---- multiple issues ------------------------------------------------
 
   "multiple issues are reported in one pass" in {

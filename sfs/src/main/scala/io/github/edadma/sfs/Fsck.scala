@@ -56,6 +56,32 @@ enum FsckIssue:
     * incomplete for those subtrees. */
   case DirectoryWalkFailed(inodeNum: Int, message: String)
 
+  /** A directory entry points at an inode whose bitmap bit is clear.
+    * The reference is dangling — opening it would either find a stale
+    * empty inode or be reused by a freshly-allocated unrelated file. */
+  case InodeBitmapMissingBit(inodeNum: Int)
+
+  /** An inode bit is set but the inode has `link_count == 0` and is
+    * not referenced by any directory entry. The slot is wastefully
+    * marked allocated. (Distinct from `OrphanedInode`, where the
+    * inode IS in use according to its `link_count` but no dir entry
+    * points at it.) */
+  case InodeBitmapLeakedBit(inodeNum: Int)
+
+  /** An inode's stored `link_count` doesn't match the number of
+    * directory entries pointing at it. Includes `.`/`..` entries the
+    * way POSIX does — for a directory with `n` subdirectories the
+    * computed count is `2 + n`. Only emitted when `computed > 0`;
+    * `computed == 0` with `stored > 0` is reported as
+    * [[OrphanedInode]] instead. */
+  case LinkCountMismatch(inodeNum: Int, stored: Int, computed: Int)
+
+  /** An inode's bitmap bit is set and its `link_count > 0`, but no
+    * directory entry references it. The inode's data is intact but
+    * unreachable through the directory tree. Repair mode (chunk 16d)
+    * can link these under `lost+found/`. */
+  case OrphanedInode(inodeNum: Int, linkCount: Int)
+
 /** Counters collected while walking the filesystem. Useful both for
   * sanity checks (compare against the superblock's free counts) and as
   * a smoke-test signal that fsck actually exercised the structures it
@@ -104,6 +130,7 @@ object Fsck:
     val reach = walkReachability(sfs, parsed)
     issues ++= reach.walkIssues
     issues ++= reconcileBlockBitmap(sfs, reach.claimedBlocks)
+    issues ++= reconcileInodes(sfs, parsed, reach.inodeReferences)
     FsckReport(
       issues = issues.result(),
       stats = FsckStats(
@@ -318,11 +345,12 @@ object Fsck:
           var j = 0
           while j < entries.length do
             val e = entries(j)
-            // Skip "." and ".." — those don't count as real references
-            // from a link-count perspective; they're how directories
-            // self-link.
-            if e.name != "." && e.name != ".." then
-              refs.updateWith(e.inode) { case Some(c) => Some(c + 1); case None => Some(1) }
+            // POSIX link-count semantics: every dir entry contributes,
+            // including "." (self-link) and ".." (back-link). For a
+            // directory N with k subdirectories, this gives expected
+            // link_count = 2 + k (the "." in N, the entry in N's
+            // parent, and one ".." per subdir).
+            refs.updateWith(e.inode) { case Some(c) => Some(c + 1); case None => Some(1) }
             j += 1
         catch case e: SfsCorruptError =>
           walkIssues += FsckIssue.DirectoryWalkFailed(n, e.getMessage)
@@ -412,4 +440,52 @@ object Fsck:
       if isClaimed && !isSet then out += FsckIssue.BlockBitmapMissingBit(b)
       else if !isClaimed && isSet then out += FsckIssue.BlockBitmapLeakedBlock(b)
       b += 1
+    out.result()
+
+  // ---- inode reconciliation (16c) ------------------------------------
+
+  /** Compare each inode's stored `link_count` against the count of
+    * directory entries fsck found pointing at it (including `.` and
+    * `..`), plus reconcile the inode bitmap with reachability.
+    *
+    * Reserved inodes [[InoNull]] and [[InoBadBlocks]] are skipped —
+    * they are deliberately allocated without dir-tree references.
+    * [[InoRoot]] is *not* skipped: its self-references through "."
+    * and ".." (plus any subdirectory's "..") are counted by the
+    * walker so the comparison is meaningful. */
+  private def reconcileInodes(
+      sfs: Sfs,
+      parsed: Map[Int, Inode],
+      refs: Map[Int, Int],
+  ): Vector[FsckIssue] =
+    val out = Vector.newBuilder[FsckIssue]
+    val total = sfs.layout.totalInodes
+    var n = 0
+    while n < total do
+      val isReserved = n == InoNull || n == InoBadBlocks
+      val bit = sfs.inodeBitmap.isSet(n)
+      val computed = refs.getOrElse(n, 0)
+      val parsedIno = parsed.get(n)
+
+      if !bit && computed > 0 then
+        // A directory entry points at an inode the bitmap says is
+        // free. The inode contents (if any) are stale.
+        out += FsckIssue.InodeBitmapMissingBit(n)
+
+      else if bit && !isReserved && parsedIno.isDefined then
+        val ino = parsedIno.get
+        val stored = ino.linkCount
+        if stored == 0 && computed == 0 then
+          // Allocated slot whose payload is empty and which nothing
+          // points at — bitmap leak.
+          out += FsckIssue.InodeBitmapLeakedBit(n)
+        else if stored > 0 && computed == 0 then
+          // The inode is in use according to its own link_count but
+          // no dir entry points at it. Lost — repair mode would
+          // re-link under lost+found.
+          out += FsckIssue.OrphanedInode(n, stored)
+        else if stored != computed then
+          out += FsckIssue.LinkCountMismatch(n, stored = stored, computed = computed)
+
+      n += 1
     out.result()
