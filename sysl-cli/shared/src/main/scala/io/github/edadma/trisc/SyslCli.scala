@@ -671,10 +671,27 @@ object SyslCli:
           |  jalr r0, r6
           |
           |; panic_isr: invoked by trap N (sysl panics). r1 holds the sysl
-          |; error code (1=oob, 2=null, 3=abort, 4=assert/panic, 5=div0).
-          |; Record it to the panic flag location, then halt.
+          |; error code (1=oob, 2=null, 3=abort, 4=assert/panic, 5=div0,
+          |; 99=brk-corruption sentinel).
+          |; Records r1 to the panic flag AND saves the faulting PC and r1..r4
+          |; into the same FAULT_REGS slots used by fault_isr, so the runner
+          |; can dump them on demand for trap-99 (brk-corrupt) diagnostics.
           |global panic_isr, func
           |panic_isr
+          |  ; Save r1..r4 — clobbered below.
+          |  movi r6, FAULT_REGS
+          |  std r1, r6, r0
+          |  addi r6, r6, 8
+          |  std r2, r6, r0
+          |  addi r6, r6, 8
+          |  std r3, r6, r0
+          |  addi r6, r6, 8
+          |  std r4, r6, r0
+          |  ; Save the faulting PC (same exception frame layout as fault_isr).
+          |  ldd r3, r7, r0
+          |  movi r2, FAULT_PC
+          |  std r3, r2, r0
+          |  ; Record the panic code.
           |  movi r2, $panicFlagAddr
           |  stb r1, r2, r0
           |  halt
@@ -727,8 +744,16 @@ object SyslCli:
           |  and r1, r1, r2         ; r1 = aligned size
           |  movi r2, BRK_PTR
           |  ldd r3, r2, r0         ; r3 = current brk
-          |  bne r3, r0, .have
-          |  movi r3, HEAP_START    ; first call: lazy init
+          |  beq r3, r0, .first     ; first call: lazy init below
+          |  ; Validate brk in [HEAP_START, HEAP_END]. Unsigned compare catches
+          |  ; both negative (= huge unsigned) and positive-but-bogus values.
+          |  movi r4, HEAP_START
+          |  bgu r4, r3, .corrupt   ; HEAP_START > brk → bogus
+          |  movi r4, HEAP_END
+          |  bgu r3, r4, .corrupt   ; brk > HEAP_END → bogus (incl. negatives)
+          |  bra .have
+          |.first
+          |  movi r3, HEAP_START
           |.have
           |  add r1, r3, r1         ; r1 = new brk (consumes the size in r1)
           |  movi r4, HEAP_END
@@ -739,6 +764,11 @@ object SyslCli:
           |.oom
           |  movi r1, 0
           |  jalr r0, r6
+          |.corrupt
+          |  ; BRK_PTR was clobbered by a previous call. Trap with sentinel 99
+          |  ; so the runner reports `trap (code=99)` instead of the usual OOB.
+          |  movi r1, 99
+          |  trap 1
           |
           |; free(p: *byte) — no-op (bump allocator)
           |global free, func
@@ -771,6 +801,30 @@ object SyslCli:
     val mem = new Memory("Memory", new RAM(0, ramSize), stdout)
     try linked.load(mem)
     catch case e: Throwable => return Fail(s"TRISC load failed: ${e.getMessage}", outputBuf.toString)
+    if System.getenv("TRISC_DUMP_DISASM") != null then
+      // Build PC -> symbol map from the linked TOF.
+      val syms: Map[Long, String] =
+        (for seg <- linked.segments; sym <- seg.symbols
+         yield (seg.org + sym.offset) -> sym.name).toMap
+      val buf = new StringBuilder
+      val tmpCpu = new CPU(mem)
+      for seg <- linked.segments if seg.name == "code" do
+        val end = seg.org + seg.chunks.map {
+          case TOF.DataChunk(d)  => d.length.toLong
+          case TOF.ResChunk(s)   => s
+          case TOF.CommentChunk(_) => 0L
+        }.sum
+        buf ++= s"# segment ${seg.name} org=0x${seg.org.toHexString} end=0x${end.toHexString}\n"
+        var addr = seg.org
+        while addr < end do
+          syms.get(addr).foreach(n => buf ++= s"$n:\n")
+          val w = mem.readShortUnsigned(addr)
+          tmpCpu.pc = addr + 2
+          val text = Decode(w).disassemble(tmpCpu)
+          buf ++= f"  0x$addr%04x  $text%n"
+          addr += 2
+      java.nio.file.Files.writeString(
+        java.nio.file.Paths.get(s"/tmp/trisc_${t.unitName.replace("/", "_")}.dis"), buf.toString)
     val cpu = new CPU(mem) { limit = 50_000_000; quiet = System.getenv("TRISC_TRACE") == null }
     try
       cpu.reset()
@@ -781,6 +835,29 @@ object SyslCli:
     val flag = mem.readByte(panicFlagAddr) & 0xFF
     if System.getenv("TRISC_TRACE") != null then
       System.err.println(s"TRISC_TRACE: ${t.fn.name} state=${cpu.state} pc=0x${cpu.pc.toHexString} r1=${cpu.r(1).read} flag=$flag")
+    def readFaultRegs(): String =
+      try
+        val r1v = mem.readLong(faultRegsAddr)
+        val r2v = mem.readLong(faultRegsAddr + 8)
+        val r3v = mem.readLong(faultRegsAddr + 16)
+        val r4v = mem.readLong(faultRegsAddr + 24)
+        f"\n      regs: r1=0x$r1v%x r2=0x$r2v%x r3=0x$r3v%x r4=0x$r4v%x"
+      catch case _: Throwable => ""
+    def disasmWindow(faultPc: Long): String =
+      if faultPc < 0 || faultPc + 4 >= ramSize then ""
+      else
+        val rng = if System.getenv("TRISC_TRACE") != null then -32 to 8 by 2 else -4 to 4 by 2
+        val window = rng.flatMap { d =>
+          val p = faultPc + d
+          if p < 0 || p + 1 >= ramSize then None
+          else
+            try
+              val w = mem.readShortUnsigned(p)
+              val mark = if d == 0 then " <-- FAULT" else ""
+              Some(f"      0x$p%04x: ${Decode(w).disassemble(cpu)}$mark")
+            catch case _: Throwable => None
+        }
+        if window.isEmpty then "" else "\n" + window.mkString("\n")
     cpu.state match
       case State.Halt =>
         flag match
@@ -791,28 +868,8 @@ object SyslCli:
             // CPU advances pc *before* executing the instruction, so the saved
             // PC on the exception frame is one past the faulting instruction.
             val faultPc = savedPc - 2
-            val regs =
-              try
-                val r1v = mem.readLong(faultRegsAddr)
-                val r2v = mem.readLong(faultRegsAddr + 8)
-                val r3v = mem.readLong(faultRegsAddr + 16)
-                val r4v = mem.readLong(faultRegsAddr + 24)
-                f"\n      regs: r1=0x$r1v%x r2=0x$r2v%x r3=0x$r3v%x r4=0x$r4v%x"
-              catch case _: Throwable => ""
-            val ctx =
-              if faultPc >= 0 && faultPc + 4 < ramSize then
-                val window = (-4 to 4 by 2).flatMap { d =>
-                  val p = faultPc + d
-                  if p < 0 || p + 1 >= ramSize then None
-                  else
-                    try
-                      val w = mem.readShortUnsigned(p)
-                      val mark = if d == 0 then " <-- FAULT" else ""
-                      Some(f"      0x$p%04x: ${Decode(w).disassemble(cpu)}$mark")
-                    catch case _: Throwable => None
-                }
-                "\n" + window.mkString("\n")
-              else ""
+            val regs = readFaultRegs()
+            val ctx = disasmWindow(faultPc)
             Fail(s"CPU fault at PC=0x${faultPc.toHexString} (saved PC=0x${savedPc.toHexString})$regs$ctx", captured)
           case code =>
             val codeName = code match
@@ -821,9 +878,21 @@ object SyslCli:
               case 3 => "abort"
               case 4 => "assert/panic"
               case 5 => "divide-by-zero"
+              case 99 => "brk-corrupt (test-runner sentinel)"
               case _ => s"trap (code=$code)"
+            // For trap-99 (brk-corruption diagnostics) and TRISC_TRACE always
+            // append the saved-PC + reg dump so we can see *which* trap fired
+            // in the user code (panic_isr now saves the same exception frame
+            // info that fault_isr does).
+            val showDiag = code == 99 || System.getenv("TRISC_TRACE") != null
+            val diag =
+              if !showDiag then ""
+              else
+                val savedPc = try mem.readLong(faultPcAddr) catch case _: Throwable => 0L
+                val faultPc = savedPc - 2
+                s"\n      at PC=0x${faultPc.toHexString} (saved=0x${savedPc.toHexString})${readFaultRegs()}${disasmWindow(faultPc)}"
             if t.shouldPanic then Pass
-            else Fail(s"panic ($codeName)", captured)
+            else Fail(s"panic ($codeName)$diag", captured)
       case State.Run =>
         Fail(s"TRISC test timed out (cycle limit reached) at PC=0x${cpu.pc.toHexString}", captured)
       case other =>
