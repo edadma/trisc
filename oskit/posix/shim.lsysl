@@ -770,6 +770,8 @@ to the same UDP stack that native sysl programs use via
             return sys_readv(int(a0), a1, int(a2))
         if num == 372
             return sys_writev(int(a0), a1, int(a2))
+        if num == 136
+            return sys_brk(a0)
         // Process / thread identity. Multi-threading isn't a thing
         // in slix yet, so gettid == main thread of current process,
         // getppid == 1 (init), and the uid/gid family all return 0
@@ -3819,6 +3821,49 @@ was already transferred. Zero-length iovs are skipped.
                     return total
             ii += 1
         total
+
+
+`brk(addr)` — manage the process program break. The slix-musl
+linker script (slix/test/slix-prog.ld) places `_heap_start` at a
+fixed virtual address `POSIX_BRK_BASE` and `_heap_end` at
+`POSIX_BRK_LIMIT`; both correspond to physical pages already
+mapped by `vm_create_process_pt`, so brk never has to allocate
+pages — it just bookkeeps the current break per pid.
+
+Linux semantics: `brk(0)` returns the current break. `brk(new)`
+attempts to set the break to `new`; on success it returns `new`,
+on failure (out of range) it returns the OLD break unchanged.
+Musl's lite_malloc relies on the equality check
+`__syscall(SYS_brk, brk+req) == brk+req` to detect success.
+
+    val POSIX_BRK_BASE: i64  = i64(0x60040000)
+    val POSIX_BRK_LIMIT: i64 = i64(0x60080000)
+
+    var posix_break_addr: [16]i64
+    var posix_break_last_gen: [16]int
+
+    posix_brk_ensure_init(pid: int)
+        val gen = kernel_get_process_main_tid(pid)
+        if posix_break_last_gen[pid] != gen
+            posix_break_addr[pid] = POSIX_BRK_BASE
+            posix_break_last_gen[pid] = gen
+
+    sys_brk(new_brk: i64) -> i64
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return i64(0)
+        if pid >= 16
+            return i64(0)
+        posix_brk_ensure_init(pid)
+        val cur = posix_break_addr[pid]
+        if new_brk == i64(0)
+            return cur
+        if new_brk < POSIX_BRK_BASE
+            return cur
+        if new_brk > POSIX_BRK_LIMIT
+            return cur
+        posix_break_addr[pid] = new_brk
+        new_brk
 
 
     sys_epoll_create1(epoll_flags: int) -> i64

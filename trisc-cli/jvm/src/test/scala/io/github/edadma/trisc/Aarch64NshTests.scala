@@ -2064,6 +2064,37 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tlhash: failed"
   }
 
+  "fs: /etc/hosts is pre-populated (Phase 4 chunk 1a)" in {
+    // The ramdisk maker now pre-populates /etc/hosts with
+    // "127.0.0.1 localhost\n::1 localhost\n" so musl's
+    // name_from_hosts() can find localhost without DNS. This test
+    // verifies the file is in place and readable; the actual
+    // musl getaddrinfo round-trip is gated on slix-musl malloc
+    // support — see "musl: getaddrinfo via /etc/hosts" (ignored).
+    val output = qemu.command("cat /etc/hosts")
+    output should include("127.0.0.1 localhost")
+    output should include("::1 localhost")
+  }
+
+  "musl: getaddrinfo via /etc/hosts (Phase 4 chunk 1a)" ignore {
+    // TODO: un-ignore when slix-musl malloc/mmap support lands
+    // (project_slix_musl_heap_gap.md). Currently fails with
+    // EAI_MEMORY (-10) — mallocng's alloc_group calls mmap, which
+    // is a no-op stub in shim.lsysl.
+    //
+    // mgetaddr (slix/test/getaddr.c): musl's getaddrinfo("localhost",
+    // ...) walks name_from_null → name_from_numeric → name_from_hosts.
+    // /etc/hosts has "127.0.0.1 localhost" so name_from_hosts returns
+    // 127.0.0.1 without DNS. Validates the VFS read path through
+    // musl's stdio (fopen/fgets/fclose) on /etc/hosts AND the calloc
+    // path inside getaddrinfo for the result struct.
+    qemu.send("mgetaddr\n")
+    val output = qemu.waitFor("mgetaddr: ok")
+    output should include("mgetaddr: localhost -> 127.0.0.1")
+    output should include("mgetaddr: ok")
+    output should not include "mgetaddr: failed"
+  }
+
   "dhcp: dhclient --test parses canned OFFER/ACK" in {
     // dhclient --test runs the in-process parser selftest against
     // canned DHCP packets (known-good OFFER, same-layout ACK, and
