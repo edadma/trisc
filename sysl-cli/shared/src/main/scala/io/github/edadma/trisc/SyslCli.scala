@@ -613,28 +613,36 @@ object SyslCli:
         java.nio.file.Paths.get(s"/tmp/trisc_${t.unitName.replace("/", "_")}.s"), asm)
     // Memory layout (1MB RAM):
     //   0x000000..0x00009F  vector table (20 × 8 bytes)
-    //   0x0000A0..          wrapper code, then user program code, then stack
-    //                       grows down toward the program from initialSP
-    //   0x01FEF8            initial SP
-    //   0x01FF00            panic flag (1 byte)
-    //   0x01FF08            heap brk pointer (8 bytes; init to 0 by RAM zero,
+    //   0x0000A0..          wrapper code, then user program code + rodata +
+    //                       data + const segments, all packed sequentially
+    //                       by the linker. Allowed to grow up to HEAP_START.
+    //   0x080000..0x0FFE00  bump-allocator heap (~512 KB)
+    //   0x0FFEF8            initial SP (stack grows down into 0x0FFE00..0x0FFEF8)
+    //   0x0FFF00            panic flag (1 byte)
+    //   0x0FFF08            heap brk pointer (8 bytes; init to 0 by RAM zero,
     //                       lazily set to HEAP_START on first malloc)
-    //   0x01FF10            saved-PC slot (8 bytes, written by fault_isr; the
+    //   0x0FFF10            saved-PC slot (8 bytes, written by fault_isr; the
     //                       supervisor exception frame puts saved PC at [r7])
-    //   0x01FF20..0x01FF4F  saved r1..r6 (6 × 8 bytes, written by fault_isr
+    //   0x0FFF20..0x0FFF4F  saved r1..r6 (6 × 8 bytes, written by fault_isr
     //                       before its body clobbers them; r6=LR is most
     //                       useful for "jalr to garbage" CPU faults)
-    //   0x020000..0x0FFF00  bump-allocator heap (~896 KB)
     //   0x100000            STDOUT (1 byte, write-only device)
+    //
+    // Earlier layout pinned SP and the metadata slots at ~0x1FF00, with the
+    // heap above. That broke for any program whose code+rodata exceeded
+    // ~128 KB (e.g. std/strings) — the linker placed rodata over the
+    // metadata region, silently corrupting BRK_PTR. Pushing the metadata
+    // up to high RAM (just below STDOUT) and HEAP_START to 0x80000 gives
+    // ~512 KB of program space and ~512 KB of heap.
     val stdoutAddr = 0x100000L
     val ramSize = 0x100000L
-    val panicFlagAddr = 0x1FF00L
-    val brkPtrAddr = 0x1FF08L
-    val faultPcAddr = 0x1FF10L
-    val faultRegsAddr = 0x1FF20L  // r1, r2, r3, r4 each 8 bytes
-    val heapStart = 0x20000L
-    val heapEnd = 0xFFF00L
-    val initialSP = 0x1FEF8L
+    val panicFlagAddr = 0xFFF00L
+    val brkPtrAddr = 0xFFF08L
+    val faultPcAddr = 0xFFF10L
+    val faultRegsAddr = 0xFFF20L  // r1..r6, 8 bytes each
+    val heapStart = 0x80000L
+    val heapEnd = 0xFFE00L
+    val initialSP = 0xFFEF8L
     val faultIsrSlots = (1 to 7).map(_ => "  dl fault_isr").mkString("\n")
     val trapIsrSlots = (1 to 8).map(_ => "  dl panic_isr").mkString("\n")
     val tailFaultSlots = (1 to 3).map(_ => "  dl fault_isr").mkString("\n")
@@ -808,7 +816,31 @@ object SyslCli:
       def writeByte(addr: Long, data: Long): Unit = outputBuf += data.toChar
       override def loadByte(addr: Long, data: Long): Unit = ()
     }
-    val mem = new Memory("Memory", new RAM(0, ramSize), stdout)
+    // Optional write-watchpoint on BRK_PTR (8 bytes). When TRISC_WATCH_BRK=1
+    // is set, every write that touches the BRK_PTR slot from user code prints
+    // the CPU's current PC to stderr — useful for tracking who's corrupting
+    // the brk pointer outside the malloc shim. Wraps RAM with an override.
+    var watchCpu: Option[CPU] = None  // populated after CPU is constructed
+    val ram: Addressable =
+      if System.getenv("TRISC_WATCH_BRK") != null then
+        new RAM(0, ramSize) {
+          private def maybeReport(addr: Long, width: String): Unit =
+            if addr >= brkPtrAddr && addr < brkPtrAddr + 8 then
+              // Skip writes during initial load (CPU not yet constructed).
+              watchCpu.foreach { c =>
+                System.err.println(f"[BRK_WATCH] $width to 0x$addr%x at PC=0x${c.pc.toHexString}")
+              }
+          override def writeByte(addr: Long, data: Long): Unit =
+            maybeReport(addr, "stb"); super.writeByte(addr, data)
+          override def writeShort(addr: Long, data: Long): Unit =
+            maybeReport(addr, "sts"); super.writeShort(addr, data)
+          override def writeInt(addr: Long, data: Long): Unit =
+            maybeReport(addr, "stw"); super.writeInt(addr, data)
+          override def writeLong(addr: Long, data: Long): Unit =
+            maybeReport(addr, "std"); super.writeLong(addr, data)
+        }
+      else new RAM(0, ramSize)
+    val mem = new Memory("Memory", ram, stdout)
     try linked.load(mem)
     catch case e: Throwable => return Fail(s"TRISC load failed: ${e.getMessage}", outputBuf.toString)
     if System.getenv("TRISC_DUMP_DISASM") != null then
@@ -818,7 +850,7 @@ object SyslCli:
          yield (seg.org + sym.offset) -> sym.name).toMap
       val buf = new StringBuilder
       val tmpCpu = new CPU(mem)
-      for seg <- linked.segments if seg.name == "code" do
+      for seg <- linked.segments do
         val end = seg.org + seg.chunks.map {
           case TOF.DataChunk(d)  => d.length.toLong
           case TOF.ResChunk(s)   => s
@@ -836,6 +868,7 @@ object SyslCli:
       java.nio.file.Files.writeString(
         java.nio.file.Paths.get(s"/tmp/trisc_${t.unitName.replace("/", "_")}.dis"), buf.toString)
     val cpu = new CPU(mem) { limit = 50_000_000; quiet = System.getenv("TRISC_TRACE") == null }
+    watchCpu = Some(cpu)
     try
       cpu.reset()
       cpu.run()
