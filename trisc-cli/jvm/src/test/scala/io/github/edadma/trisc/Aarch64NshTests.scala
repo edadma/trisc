@@ -809,6 +809,26 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mstat: stat /no/such missing=1")
   }
 
+  "musl: mkdir / unlink / rename / chmod (Phase 4 chunk 3)" in {
+    // mfsmod (slix/test/fsmod.c) exercises the four chunk-3
+    // syscalls — mkdirat (227), fchmodat (167), renameat (281),
+    // unlinkat (365) — by creating /tmp/ck, chmod'ing it,
+    // renaming /etc/hosts in place and back, then rmdir'ing
+    // /tmp/ck. Each step is followed by a stat() to confirm
+    // the change actually landed in TFS, plus an absence check
+    // to confirm renames remove the source path. The shim
+    // wrappers are thin VFS forwarders, so this simultaneously
+    // covers vfs_path_mkdir / unlink / rmdir / chmod / rename.
+    qemu.send("mfsmod\n")
+    val output = qemu.waitFor("mfsmod: ok")
+    output should include("mfsmod: mkdir /tmp/ck rc=0 dir=1")
+    output should include("mfsmod: chmod /tmp/ck 0700 mode=0700")
+    output should include("rc=0 reg=1 size>0=1")
+    output should include("mfsmod: stat /etc/hosts after rename missing=1")
+    output should include("mfsmod: rename back rc=0")
+    output should include("mfsmod: rmdir /tmp/ck rc=0 missing=1")
+  }
+
   "musl: epoll_create1/ctl/wait on a UDP socket" in {
     // mepoll (slix/test/epoll.c) walks the level-triggered epoll
     // path: empty wait times out, sendto-self makes the fd

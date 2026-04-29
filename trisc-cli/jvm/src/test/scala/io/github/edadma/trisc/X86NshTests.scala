@@ -973,6 +973,24 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mstat: stat /no/such missing=1")
   }
 
+  "musl: mkdir / unlink / rename / chmod (Phase 4 chunk 3)" in {
+    // mfsmod (slix/test/fsmod.c) exercises the four chunk-3
+    // syscalls — mkdirat (227), fchmodat (167), renameat (281),
+    // unlinkat (365) — through musl's libc wrappers. Same script
+    // as the aarch64 NshTest entry; the shim is arch-neutral so
+    // both arches walk identical code, but x86_64 stresses its
+    // own struct stat layout (144 B kstat) on the verification
+    // stat()s.
+    qemu.send("mfsmod\n")
+    val output = qemu.waitFor("mfsmod: ok")
+    output should include("mfsmod: mkdir /tmp/ck rc=0 dir=1")
+    output should include("mfsmod: chmod /tmp/ck 0700 mode=0700")
+    output should include("rc=0 reg=1 size>0=1")
+    output should include("mfsmod: stat /etc/hosts after rename missing=1")
+    output should include("mfsmod: rename back rc=0")
+    output should include("mfsmod: rmdir /tmp/ck rc=0 missing=1")
+  }
+
   "musl: epoll_create1/ctl/wait on a UDP socket" in {
     qemu.send("mepoll\n")
     val output = qemu.waitFor("mepoll: done")

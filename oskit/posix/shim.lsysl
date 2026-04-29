@@ -466,7 +466,12 @@ the way out so it doesn't leak.
     val VFS_CMD_OPEN_C    = 1
     val VFS_CMD_READ_C    = 2
     val VFS_CMD_WRITE_C   = 3
+    val VFS_CMD_UNLINK_C  = 5
     val VFS_CMD_STAT_C    = 6
+    val VFS_CMD_MKDIR_C   = 7
+    val VFS_CMD_RMDIR_C   = 8
+    val VFS_CMD_CHMOD_C   = 11
+    val VFS_CMD_RENAME_C  = 12
     val VFS_CMD_CLOSE_C   = 13
     val VFS_CMD_SEEK_C    = 14
     val VFS_CMD_CONNECT_C = 15
@@ -704,6 +709,18 @@ to the same UDP stack that native sysl programs use via
             return sys_fstat(int(a0), a1)
         if num == 252
             return sys_newfstatat(int(a0), a1, a2, int(a3))
+        if num == 167
+            return sys_fchmodat(int(a0), a1, int(a2), int(a3))
+        if num == 227
+            return sys_mkdirat(int(a0), a1, int(a2))
+        if num == 281
+            return sys_renameat(int(a0), a1, int(a2), a3)
+        if num == 282
+            // renameat2 — flags arg in a4 is ignored (RENAME_EXCHANGE /
+            // RENAME_NOREPLACE not supported yet).
+            return sys_renameat(int(a0), a1, int(a2), a3)
+        if num == 365
+            return sys_unlinkat(int(a0), a1, int(a2))
         if num == 221
             return sys_lseek(int(a0), a1, int(a2))
         if num == 256
@@ -3180,6 +3197,7 @@ ignored either way.
 
     val POSIX_AT_FDCWD       = -100
     val POSIX_AT_EMPTY_PATH  = 0x1000
+    val POSIX_AT_REMOVEDIR   = 0x200
 
     val POSIX_S_IFREG = 0x8000
     val POSIX_S_IFDIR = 0x4000
@@ -3307,6 +3325,182 @@ if VFS reported an error.
         if r < 0
             return i64(-5)
         shim_pack_stat_reply(reply, st_ptr)
+
+Phase 4 chunk 3 — `mkdir` / `unlink` / `rename` / `chmod`. musl
+on slix routes the legacy syscalls through the `at`-suffixed
+ones (`mkdir(p, m)` → `mkdirat(AT_FDCWD, p, m)`,
+`rmdir(p)` → `unlinkat(AT_FDCWD, p, AT_REMOVEDIR)`, etc.), so
+these four entry points are sufficient.
+
+The shim copies the path into a stack buffer, builds the
+matching VFS wire format, sends to the `fs` port, and returns
+0/-ENOENT/-EFAULT/-ENODEV. `dirfd` is currently ignored — the
+shim has no per-process cwd, so paths must be absolute.
+
+`shim_copy_path_terminated(up, dst, max)` returns the byte
+count copied (excluding the NUL); -1 on overflow. Single
+helper so each wrapper below can stay short. The 128-byte
+local stack buffer is reused everywhere — keeps the wrappers
+parallel and matches `sys_openat` / `sys_newfstatat`.
+
+    shim_copy_path_terminated(up: *byte, dst: *byte, max: int) -> int
+        var n = 0
+        while n < max - 1
+            val c = up[n]
+            if c == byte(0)
+                return n
+            dst[n] = c
+            n += 1
+        -1                      // overflow
+
+`SYS_MKDIRAT` (227). Mode is the lower 12 bits — we forward it
+verbatim to TFS (which stores the perm half of `tfs_mode` and
+ORs with `ftype = 2 = DIR` server-side). VFS reply is
+`[status(1), ino(4)]`; we ignore the ino and just return 0 on
+success.
+
+    sys_mkdirat(dirfd: int, path_ptr: i64, mode: int) -> i64
+        if path_ptr == i64(0)
+            return i64(-14)             // -EFAULT
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)             // -ENODEV
+        var path: [128]byte
+        val up: *byte = *byte(path_ptr)
+        val n = shim_copy_path_terminated(up, path, 128)
+        if n < 0
+            return i64(-36)             // -ENAMETOOLONG
+        val perm = mode & 0xFFF
+        var msg: [131]byte
+        msg[0] = byte(VFS_CMD_MKDIR_C)
+        msg[1] = byte((perm >> 8) & 0xFF)
+        msg[2] = byte(perm & 0xFF)
+        var i = 0
+        while i < n
+            msg[3 + i] = path[i]
+            i += 1
+        var reply: [5]byte
+        val r = ipc_send(port, msg, 3 + n, reply, 5)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-2)              // -ENOENT (parent missing or name in use)
+        i64(0)
+
+`SYS_UNLINKAT` (365). `flags=AT_REMOVEDIR` (0x200) routes to
+the directory remover; otherwise unlink the regular file at
+`path`. Both VFS commands accept `[cmd(1), path(N)]` and reply
+`[status(1)]`.
+
+    sys_unlinkat(dirfd: int, path_ptr: i64, flags: int) -> i64
+        if path_ptr == i64(0)
+            return i64(-14)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)
+        var path: [128]byte
+        val up: *byte = *byte(path_ptr)
+        val n = shim_copy_path_terminated(up, path, 128)
+        if n < 0
+            return i64(-36)
+        var msg: [129]byte
+        if (flags & POSIX_AT_REMOVEDIR) != 0
+            msg[0] = byte(VFS_CMD_RMDIR_C)
+        else
+            msg[0] = byte(VFS_CMD_UNLINK_C)
+        var i = 0
+        while i < n
+            msg[1 + i] = path[i]
+            i += 1
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 1 + n, reply, 1)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-2)              // -ENOENT
+        i64(0)
+
+`SYS_RENAMEAT` (281) and `SYS_RENAMEAT2` (282). The wire
+format wedges both names into a single message:
+`[cmd(1), old_len(1), old(N), new(M)]`. We bound each path at
+120 bytes so the joint buffer stays under 256 (caller cap is
+~512 in practice, but VFS itself reads into a 128-byte recv
+buf so two 120s + header just fits the round trip).
+`renameat2` ignores its `flags` arg — `RENAME_EXCHANGE` /
+`RENAME_NOREPLACE` aren't supported by TFS yet.
+
+    sys_renameat(olddirfd: int, oldpath_ptr: i64,
+                 newdirfd: int, newpath_ptr: i64) -> i64
+        if oldpath_ptr == i64(0)
+            return i64(-14)
+        if newpath_ptr == i64(0)
+            return i64(-14)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)
+        var old: [120]byte
+        var nw: [120]byte
+        val oldp: *byte = *byte(oldpath_ptr)
+        val newp: *byte = *byte(newpath_ptr)
+        val ol = shim_copy_path_terminated(oldp, old, 120)
+        if ol < 0
+            return i64(-36)
+        val nl = shim_copy_path_terminated(newp, nw, 120)
+        if nl < 0
+            return i64(-36)
+        if ol > 255
+            return i64(-36)
+        var msg: [248]byte
+        msg[0] = byte(VFS_CMD_RENAME_C)
+        msg[1] = byte(ol)
+        var i = 0
+        while i < ol
+            msg[2 + i] = old[i]
+            i += 1
+        var j = 0
+        while j < nl
+            msg[2 + ol + j] = nw[j]
+            j += 1
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 2 + ol + nl, reply, 1)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-2)
+        i64(0)
+
+`SYS_FCHMODAT` (167). `flags=AT_SYMLINK_NOFOLLOW` (0x100) is
+ignored — TFS doesn't have symlinks. The wire format is the
+same shape as `MKDIR_C`: `[cmd(1), perm_hi(1), perm_lo(1),
+path(N)]`.
+
+    sys_fchmodat(dirfd: int, path_ptr: i64, mode: int, flags: int) -> i64
+        if path_ptr == i64(0)
+            return i64(-14)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-19)
+        var path: [128]byte
+        val up: *byte = *byte(path_ptr)
+        val n = shim_copy_path_terminated(up, path, 128)
+        if n < 0
+            return i64(-36)
+        val perm = mode & 0xFFF
+        var msg: [131]byte
+        msg[0] = byte(VFS_CMD_CHMOD_C)
+        msg[1] = byte((perm >> 8) & 0xFF)
+        msg[2] = byte(perm & 0xFF)
+        var i = 0
+        while i < n
+            msg[3 + i] = path[i]
+            i += 1
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 3 + n, reply, 1)
+        if r < 0
+            return i64(-5)
+        if reply[0] != 0
+            return i64(-2)
+        i64(0)
 
 ### Epoll → inet subscription helpers
 
