@@ -615,7 +615,7 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
         addInstruction(3 -> opcode, 3 -> reg1, 3 -> reg2, 7 -> imm / 2)
     case InstructionLineAST(
           mnemonic @ ("ldb" | "stb" | "lds" | "sts" | "ldw" | "stw" | "ldd" | "std" | "add" | "sub" | "mul" | "div" |
-          "cas" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "adc" | "sbc" | "mulu" | "divu" |
+          "cas" | "and" | "or" | "xor" | "asr" | "lsr" | "lsl" | "slt" | "sltu" | "adc" | "sbc" | "divu" |
           "fslt" | "fadd" | "fsub" | "fmul" | "fdiv" | "fseq"),
           Seq(o1, o2, o3),
         ) =>
@@ -644,9 +644,9 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case "sltu" => (1, 4)
           case "adc"  => (1, 5)
           case "sbc"  => (1, 6)
-          case "mulu" => (1, 7)
+          // (1, 7) reserved
           case "divu" => (1, 8)
-          // remu slot (1, 9) freed — remainder now in DIVU register pair
+          // (1, 9) reserved
           case "fslt" => (1, 10)
           case "fadd" => (1, 11)
           case "fsub" => (1, 12)
@@ -770,9 +770,14 @@ def assemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = Map
           case _                    => problem(o2, "expected register as second operand")
 
       addInstruction(3 -> 6, 3 -> reg1, 3 -> reg2, 2 -> 0, 5 -> opcode)
-    case InstructionLineAST(mnemonic @ ("f32tof64" | "f64tof32" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
+    case InstructionLineAST(mnemonic @ ("mulh" | "mulhu" | "mulhsu" | "rem" | "remu" | "f32tof64" | "f64tof32" | "tlbi" | "tlbia" | "sptbr" | "gptbr" | "gfault" | "sasid" | "gasid" | "gfcause"), Seq(o1, o2)) =>
       val opcode =
         mnemonic match
+          case "mulh"     => 0
+          case "mulhu"    => 9
+          case "mulhsu"   => 10
+          case "rem"      => 11
+          case "remu"     => 12
           case "f32tof64" => 18
           case "f64tof32" => 19
           case "tlbi"     => 1

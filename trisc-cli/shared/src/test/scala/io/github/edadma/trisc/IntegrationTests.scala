@@ -68,6 +68,8 @@ class IntegrationTests extends TestHelpers {
         |.digit
         |  addi r4, r4, -1
         |  div r5, r2, r3
+        |  mov r6, r2
+        |  rem r6, r3
         |  ; r5 = quotient, r6 = remainder
         |  addi r6, r6, '0'
         |  stb r6, r4, r0

@@ -142,22 +142,14 @@ class SUB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 class MUL(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "mul"
 
-  def apply(cpu: CPU): Unit =
-    val va = cpu.r(a).read
-    val vb = cpu.r(b).read
-    cpu.r(d).write(va * vb)
-    cpu.r((d + 1) & 7).write(java.lang.Math.multiplyHigh(va, vb))
+  def apply(cpu: CPU): Unit = cpu.r(d).write(cpu.r(a).read * cpu.r(b).read)
 
 class DIV(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "div"
 
   def apply(cpu: CPU): Unit =
     if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else
-      val va = cpu.r(a).read
-      val vb = cpu.r(b).read
-      cpu.r(d).write(va / vb)
-      cpu.r((d + 1) & 7).write(va % vb)
+    else cpu.r(d).write(cpu.r(a).read / cpu.r(b).read)
 
 class CAS(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "cas"
@@ -232,27 +224,12 @@ class SBC(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
 
 // Unsigned arithmetic (RRR 001 block)
 
-class MULU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
-  val mnemonic = "mulu"
-
-  def apply(cpu: CPU): Unit =
-    val va = cpu.r(a).read
-    val vb = cpu.r(b).read
-    cpu.r(d).write(va * vb)
-    // Unsigned multiply high: multiplyHigh gives signed high, correct for unsigned
-    val hi = java.lang.Math.multiplyHigh(va, vb) + (if va < 0 then vb else 0L) + (if vb < 0 then va else 0L)
-    cpu.r((d + 1) & 7).write(hi)
-
 class DIVU(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "divu"
 
   def apply(cpu: CPU): Unit =
     if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
-    else
-      val va = cpu.r(a).read
-      val vb = cpu.r(b).read
-      cpu.r(d).write(java.lang.Long.divideUnsigned(va, vb))
-      cpu.r((d + 1) & 7).write(java.lang.Long.remainderUnsigned(va, vb))
+    else cpu.r(d).write(java.lang.Long.divideUnsigned(cpu.r(a).read, cpu.r(b).read))
 
 // Float comparison (RRR 001 block)
 
@@ -441,6 +418,59 @@ class FABS(a: Int, b: Int) extends RRInstruction(a, b):
   val mnemonic = "fabs"
 
   def apply(cpu: CPU): Unit = cpu.r(a).write(math.abs(cpu.r(b).readf))
+
+// Multi-limb multiply / remainder (RR 01 sub-format, destructive: rd = rd op rb)
+//
+// mul/divu in RRR write only the low half / quotient. The high-half multiplies
+// (mulh/mulhu/mulhsu) and remainder (rem/remu) are destructive RR-01 ops; that
+// fits TRISC's tight RRR opcode space and matches the bignum usage pattern:
+//
+//     mul  lo, a, b      ; low 64 bits of a*b
+//     mov  hi, a
+//     mulhu hi, b        ; high 64 bits of a*b unsigned
+//
+// The high-half operand semantics match RV: mulh is signed×signed, mulhu is
+// unsigned×unsigned, mulhsu is signed(rd)×unsigned(rb).
+
+class MULH(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "mulh"
+
+  def apply(cpu: CPU): Unit =
+    cpu.r(a).write(java.lang.Math.multiplyHigh(cpu.r(a).read, cpu.r(b).read))
+
+class MULHU(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "mulhu"
+
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    val hi = java.lang.Math.multiplyHigh(va, vb) +
+      (if va < 0 then vb else 0L) +
+      (if vb < 0 then va else 0L)
+    cpu.r(a).write(hi)
+
+class MULHSU(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "mulhsu"
+
+  def apply(cpu: CPU): Unit =
+    val va = cpu.r(a).read
+    val vb = cpu.r(b).read
+    val hi = java.lang.Math.multiplyHigh(va, vb) + (if vb < 0 then va else 0L)
+    cpu.r(a).write(hi)
+
+class REM(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "rem"
+
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
+    else cpu.r(a).write(cpu.r(a).read % cpu.r(b).read)
+
+class REMU(a: Int, b: Int) extends RRInstruction(a, b):
+  val mnemonic = "remu"
+
+  def apply(cpu: CPU): Unit =
+    if cpu.r(b).read == 0 then cpu.state = State.IllegalDivide
+    else cpu.r(a).write(java.lang.Long.remainderUnsigned(cpu.r(a).read, cpu.r(b).read))
 
 // Single/double precision float conversion.
 // Single-precision floats live in the low 32 bits of a register,
