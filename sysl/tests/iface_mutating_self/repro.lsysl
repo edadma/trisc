@@ -1,0 +1,60 @@
+Mutating-self method dispatched through an interface (TRISC codegen)
+======================================================================
+
+Pinned 2026-04-29. The TRISC `TInterfaceBox` codegen for a struct
+operand `heap-allocated a copy` of the struct and stored the copy's
+address as the interface's `data_ptr`. Inside the dispatched method
+`self` pointed at that throwaway heap copy, so any mutation (e.g.
+`self.buf = append(self.buf, x)`) silently affected only the copy
+and was discarded when the call returned. Direct dispatch (the
+language convention for value-type methods) passes `&w` as `self`
+and therefore mutates the original — the interface path needs to
+match.
+
+Real-world bite: every test in `std/io` that built up a
+`ByteWriter` through the `Writer` interface
+(`test_writer_interface`, `test_copy`) returned the right `n` from
+`w.write(...)` but then asserted `w.to_string() == "hello world"`
+on a `w` that was still empty. Both backends (interpreter and
+TRISC) had failed previously, but the interpreter was fixed by
+wrapping struct receivers in a Cell at dispatch time; TRISC kept
+the heap-copy and silently dropped the mutation.
+
+Fix: in `TInterfaceBox` for `StructType`, drop the malloc + copy
+and just take the original struct's address. The lifetime risk
+(a returned interface of a stack local now dangles) matches
+direct dispatch (`*T` of a stack local) and the historical
+`PtrType`/`RefType` branch already worked this way.
+
+    module sysl.tests.iface_mutating_self
+
+    interface Sink
+        push(v: int) -> int
+
+    struct Bag
+        items: []int
+
+    new_bag() -> Bag = Bag((new [0]int)[:0])
+
+    Bag.push(v: int) -> int
+        self.items = append(self.items, v)
+        return len(self.items)
+
+    Bag.size() -> int = len(self.items)
+
+    feed(s: Sink, vs: []int) -> int
+        var total = 0
+        for i in 0..<len(vs)
+            total = s.push(vs[i])
+        return total
+
+    #test
+    test_iface_mutating_self_persists() -> unit
+        var bag = new_bag()
+        val data: [3]int = [10, 20, 30]
+        val final_count = feed(bag, data[:])
+        assert(final_count == 3, s"final count via iface push: ${final_count}")
+        assert(bag.size() == 3, s"after feed, bag.size() should be 3, got ${bag.size()}")
+        assert(bag.items[0] == 10, "items[0]")
+        assert(bag.items[1] == 20, "items[1]")
+        assert(bag.items[2] == 30, "items[2]")

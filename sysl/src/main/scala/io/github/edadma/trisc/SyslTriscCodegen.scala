@@ -3731,45 +3731,32 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
         expr.typ match
           case st: SyslType.StructType =>
-            // Value type: heap-allocate a copy, data_ptr = heap address
-            val dataSize = stackSize(st)
-            needsAllocExtern = true
-            // Evaluate struct expression first — r1 = address of struct data
-            genExpr(expr)
-            emit("  pshd r1")               // save struct address
-            stackOffset -= 8
-            // Allocate heap space
-            emitLoadImm(1, dataSize.toInt)
-            emit("  movi r4, malloc")
-            emit("  jalr r6, r4")
-            // r1 = heap data_ptr, check for null
-            val allocOk = newLabel("ibox_alloc_ok")
-            emit(s"  bne r1, r0, $allocOk")
-            emit("  ldi r1, 2")             // error code: null pointer
-            emit("  trap 1")
-            emit(s"$allocOk:")
+            // Box by reference: data_ptr = original struct's address. No copy,
+            // no malloc. Mutations through the boxed interface propagate back
+            // to the source, matching direct-call semantics (`w.method()`
+            // passes &w as self) and the interpreter's behavior (which wraps
+            // the value in a Cell that the method writes through).
+            //
+            // The historical implementation heap-allocated a copy here, which
+            // made interface dispatch silently lose any mutating-method side
+            // effect — `w.write(buf)` through a `Writer` iface filled a heap
+            // copy that was discarded on return, so `w` in the caller stayed
+            // empty (entire `std/io` test_writer_interface + test_copy
+            // cluster). The lifetime risk (returning a Writer of a stack
+            // local now dangles) is the same risk the language already has
+            // for `*T` of a stack local; it's the user's responsibility,
+            // and direct dispatch already had the same shape.
+            genExpr(expr)                    // r1 = address of struct data (the original)
             emit("  pshd r1")               // save data_ptr
             stackOffset -= 8
-            // Copy struct data: src on stack below, dst = data_ptr in r1
-            emit("  mov r2, r1")            // r2 = dst (heap)
-            emitAddImm(3, 7, 8)             // r3 = src (original struct addr, pushed earlier)
-            emit("  ldd r3, r3, r0")        // r3 = actual src address
-            for i <- 0 until dataSize.toInt by 8 do
-              emitAddImm(4, 3, i)
-              emit("  ldd r4, r4, r0")
-              emitAddImm(1, 2, i)
-              emit("  std r4, r1, r0")
-            // Build {itable_ptr, data_ptr} pair on stack (16 bytes)
-            emit("  popd r2")               // r2 = data_ptr
-            stackOffset += 8
-            emit("  popd r3")               // discard saved struct addr
-            stackOffset += 8
             emitAddImm(7, 7, -16)
             stackOffset -= 16
             emit(s"  movi r1, $itableLabel")
             emit("  std r1, r7, r0")         // itable_ptr at [sp+0]
-            emitAddImm(3, 7, 8)
-            emit("  std r2, r3, r0")         // data_ptr at [sp+8]
+            emitAddImm(2, 7, 8)
+            emit("  popd r3")               // r3 = data_ptr (the saved original)
+            stackOffset += 8
+            emit("  std r3, r2, r0")         // data_ptr at [sp+8]
             emit("  mov r1, r7")             // r1 = address of the pair
 
           case _: SyslType.PtrType | _: SyslType.RefType =>
