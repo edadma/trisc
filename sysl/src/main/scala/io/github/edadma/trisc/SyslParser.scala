@@ -885,14 +885,33 @@ class SyslParser extends StandardTokenParsers {
     expr ^^ ExprBodyAST.apply
 
   lazy val matchExpr: Parser[MatchExprAST] =
-    logicalOr ~ ("match" ~> Newline ~> Indent ~> rep1(matchArm) ~ opt(matchElse) <~ Dedent) <~ opt(endMarker("match")) ^^ {
+    logicalOr ~ ("match" ~> (matchArmsIndented | matchArmsInline)) <~ opt(endMarker("match")) ^^ {
       case scrutinee ~ (arms ~ default) => MatchExprAST(scrutinee, arms, default)
     }
+
+  // Indented form (top-level / outside parens). Newline/Indent/Dedent emitted by the lexer.
+  private lazy val matchArmsIndented: Parser[List[MatchArmAST] ~ Option[List[StmtAST]]] =
+    Newline ~> Indent ~> rep1(matchArm) ~ opt(matchElse) <~ Dedent
+
+  // Inline form for paren / line-joining contexts (call arg, cast arg, tuple lit) where
+  // the lexer suppresses Newline/Indent/Dedent. Arms are detected greedily by their
+  // pattern; rep1 stops at the first token that doesn't begin a pattern (e.g. `,` or
+  // `)` of the enclosing call). Bodies are single expressions, not blocks.
+  private lazy val matchArmsInline: Parser[List[MatchArmAST] ~ Option[List[StmtAST]]] =
+    rep1(matchArmInline) ~ opt(matchElseInline)
 
   lazy val matchArm: Parser[MatchArmAST] =
     rep1sep(matchPattern, ",") ~ opt("if" ~> logicalOr) ~ ("->" ~> (block | inlineStmt ^^ (s => List(s)))) <~ opt(Newline) ^^ {
       case patterns ~ guard ~ body => MatchArmAST(patterns, guard, body)
     }
+
+  lazy val matchArmInline: Parser[MatchArmAST] =
+    rep1sep(matchPattern, ",") ~ opt("if" ~> logicalOr) ~ ("->" ~> expr) ^^ {
+      case patterns ~ guard ~ body => MatchArmAST(patterns, guard, List(ExprStmtAST(body)))
+    }
+
+  lazy val matchElseInline: Parser[List[StmtAST]] =
+    "else" ~> "->" ~> expr ^^ (e => List(ExprStmtAST(e)))
 
   lazy val matchPattern: Parser[MatchPatternAST] =
     "_" ^^^ WildcardPatternAST |

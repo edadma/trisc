@@ -1657,6 +1657,24 @@ the parser — indentation is purely visual. A statement-block body
 top-level lambda position where Newline/Indent/Dedent tokens are
 emitted.
 
+`match` works in this position too: it carries an inline-arms form that
+detects each arm by the start of its pattern, so the indented arm list
+parses without Newline/Indent/Dedent tokens being available:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+map[A, B](p: Parser[A], f: (A) -> B) -> Parser[B] =
+    Parser[B]((inp: Input) ->
+        p(inp) match
+            Success(v, n) -> Success(f(v), n)
+            Failure(m, n) -> Failure(m, n))
+```
+
+The arm list terminates at the first token that doesn't begin a pattern
+— typically the closing `)` of the enclosing call or a `,` that
+introduces another argument.
+
 **Capture semantics:** Closures capture variables **by value** (copy at creation time). Mutations to the original variable after the closure is created do not affect the captured value:
 
 ```sysl
