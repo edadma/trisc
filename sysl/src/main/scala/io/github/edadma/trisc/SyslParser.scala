@@ -1214,8 +1214,13 @@ class SyslParser extends StandardTokenParsers {
       ident ~ ("::" ~> ident) ~ opt("(" ~> expr <~ ")") ^^ {
         case typeName ~ attr ~ argOpt => TypeAttrAST(typeName, attr, argOpt)
       } |
-      // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42)
-      ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "unit") ^^ VarRefAST.apply |
+      // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42).
+      // `string` belongs here for the same reason as the others — `Parser[string](...)` should
+      // parse uniformly. The `string ~> "("` string-builder rule earlier in `primary` still
+      // wins for the legitimate call form `string(arg, ...)` because it's tried first and
+      // succeeds when the `(` is actually present; this fallback only fires when there's no
+      // following `(` (i.e., the bare keyword inside a type-arg bracket).
+      ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "unit" | "string") ^^ VarRefAST.apply |
       "_" ^^^ UnderscorePlaceholderAST() |
       ident ^^ VarRefAST.apply |
       "(" ~ ")" ^^^ UnitLitAST() |  // `()` — unit value literal
