@@ -4399,7 +4399,63 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         else variantToEnum.get(name)
       case _ => variantToEnum.get(name)
 
-  private def analyzePattern(pat: MatchPatternAST, scrutineeType: SyslType): TMatchPattern =
+  // Counter for synthesizing unique outer-bindings for nested tuple patterns.
+  private var tuplePatternCounter: Int = 0
+  private def freshTupleBindName(): String =
+    tuplePatternCounter += 1
+    s"_match_tup_$tuplePatternCounter"
+
+  private def isTupleStructType(t: SyslType): Boolean = t.underlying match
+    case st: SyslType.StructType => st.name.startsWith("_Tuple")
+    case _ => false
+
+  /** Analyze a field pattern inside a destructure (variant or struct). For most shapes
+   *  this returns the user-visible binding name (or None for wildcard / literal). For a
+   *  nested tuple pattern `(a, b)` the helper introduces a fresh synthetic outer name
+   *  bound to the field, then appends `val a = sym._0; val b = sym._1` to `prelude` —
+   *  these are prepended to the arm body before it's analyzed. */
+  private def analyzeFieldPattern(
+      fieldPat: MatchPatternAST,
+      fieldType: SyslType,
+      prelude: scala.collection.mutable.ListBuffer[StmtAST],
+  ): Option[String] = fieldPat match
+    case WildcardPatternAST => None
+    case ValuePatternAST(VarRefAST(bindName)) =>
+      if scopeStack != null then
+        currentScope(bindName) = SymInfo(bindName, fieldType, false)
+      Some(bindName)
+    case ValuePatternAST(TupleLitAST(elems)) =>
+      fieldType.underlying match
+        case st: SyslType.StructType if st.name.startsWith("_Tuple") =>
+          if elems.length != st.fields.length then
+            throw AnalysisError(
+              s"tuple pattern has ${elems.length} elements but field type has ${st.fields.length}"
+            )
+          val syn = freshTupleBindName()
+          if scopeStack != null then
+            currentScope(syn) = SymInfo(syn, fieldType, false)
+          elems.zip(st.fields).foreach { case (elemExpr, (fname, _)) =>
+            elemExpr match
+              case VarRefAST("_") => ()
+              case VarRefAST(bindName) =>
+                prelude += VarStmtAST(
+                  bindName, None,
+                  FieldAccessAST(VarRefAST(syn), fname),
+                  isMutable = false,
+                )
+              case _ => ()
+          }
+          Some(syn)
+        case other =>
+          throw AnalysisError(s"tuple pattern requires tuple type, got $other")
+    case ValuePatternAST(_) => None
+    case _ => throw AnalysisError(s"unsupported pattern in destructure")
+
+  private def analyzePattern(
+      pat: MatchPatternAST,
+      scrutineeType: SyslType,
+      prelude: scala.collection.mutable.ListBuffer[StmtAST],
+  ): TMatchPattern =
     pat match
       case WildcardPatternAST => TWildcard
       case ValuePatternAST(VarRefAST(name)) if resolveVariant(name, scrutineeType).isDefined =>
@@ -4408,6 +4464,23 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val (_, variantFields) = et.variants(variantIdx)
         if variantFields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${variantFields.length} argument(s) in pattern")
         TVariantPattern(et, variantIdx, Nil, Nil)
+      // Top-level tuple pattern on a tuple-typed scrutinee — destructure directly.
+      case ValuePatternAST(TupleLitAST(elems)) if isTupleStructType(scrutineeType) =>
+        val st = scrutineeType.underlying.asInstanceOf[SyslType.StructType]
+        if elems.length != st.fields.length then
+          throw AnalysisError(
+            s"tuple pattern has ${elems.length} elements but scrutinee type has ${st.fields.length}"
+          )
+        val bindings = elems.zip(st.fields).map { case (elemExpr, (_, fty)) =>
+          elemExpr match
+            case VarRefAST("_") => None
+            case VarRefAST(bindName) =>
+              if scopeStack != null then
+                currentScope(bindName) = SymInfo(bindName, fty, false)
+              Some(bindName)
+            case _ => None
+        }
+        TDestructurePattern(st, bindings, st.fields.map(_._2))
       case ValuePatternAST(expr) =>
         val tv = analyzeExpr(expr)
         val coerced = coerceLiteral(tv, scrutineeType)
@@ -4425,33 +4498,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           val (_, variantFields) = et.variants(variantIdx)
           if fields.length != variantFields.length then
             throw AnalysisError(s"variant '$name' has ${variantFields.length} fields, pattern has ${fields.length}")
-          val bindings = fields.zip(variantFields).map { case (fieldPat, (fieldName, fieldType)) =>
-            fieldPat match
-              case WildcardPatternAST => None
-              case ValuePatternAST(VarRefAST(bindName)) =>
-                if scopeStack != null then
-                  currentScope(bindName) = SymInfo(bindName, fieldType, false)
-                Some(bindName)
-              case ValuePatternAST(expr) => None
-              case _ => throw AnalysisError(s"unsupported pattern in variant destructure")
+          val bindings = fields.zip(variantFields).map { case (fieldPat, (_, fieldType)) =>
+            analyzeFieldPattern(fieldPat, fieldType, prelude)
           }
           TVariantPattern(et, variantIdx, bindings, variantFields.map(_._2))
         else
           val st = structTypes.getOrElse(name, throw AnalysisError(s"unknown struct or variant '$name' in match pattern"))
           if fields.length != st.fields.length then
             throw AnalysisError(s"struct '$name' has ${st.fields.length} fields, pattern has ${fields.length}")
-          val bindings = fields.zip(st.fields).map { case (fieldPat, (fieldName, fieldType)) =>
-            fieldPat match
-              case WildcardPatternAST => None
-              case ValuePatternAST(VarRefAST(bindName)) =>
-                // In destructure context, bare names are bindings
-                if scopeStack != null then
-                  currentScope(bindName) = SymInfo(bindName, fieldType, false) // val binding
-                Some(bindName)
-              case ValuePatternAST(expr) =>
-                // Literal value — not a binding
-                None
-              case _ => throw AnalysisError(s"unsupported pattern in struct destructure")
+          val bindings = fields.zip(st.fields).map { case (fieldPat, (_, fieldType)) =>
+            analyzeFieldPattern(fieldPat, fieldType, prelude)
           }
           TDestructurePattern(st, bindings, st.fields.map(_._2))
 
@@ -5733,7 +5789,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val matchExpectedOpt = currentExpected
         val tArms = arms.map { arm =>
           pushScope()
-          val tPatterns = arm.patterns.map(p => analyzePattern(p, tScrutinee.typ))
+          val prelude = scala.collection.mutable.ListBuffer.empty[StmtAST]
+          val tPatterns = arm.patterns.map(p => analyzePattern(p, tScrutinee.typ, prelude))
           val tGuard = arm.guard.map { g =>
             val tg = analyzeExpr(g)
             if tg.typ != BoolType then throw AnalysisError(s"match guard must be bool, got ${tg.typ}")
@@ -5741,7 +5798,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           }
           val savedExp = currentExpected
           currentExpected = matchExpectedOpt
-          val tBody = try analyzeBlock(arm.body) finally currentExpected = savedExp
+          // Synthetic prelude statements (e.g. `val a = sym._0` for nested tuple
+          // patterns) are introduced before the user's arm body.
+          val bodyWithPrelude = prelude.toList ++ arm.body
+          val tBody = try analyzeBlock(bodyWithPrelude) finally currentExpected = savedExp
           popScope()
           TMatchArm(tPatterns, tGuard, tBody)
         }

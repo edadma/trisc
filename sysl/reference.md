@@ -2070,6 +2070,16 @@ s match
     Empty -> 0                 // no-data variant
     Circle(r) if r > 5 -> 1   // guard with variant binding
 
+// tuple pattern — destructure a tuple-typed scrutinee
+t match                       // t: (int, int)
+    (a, b) -> a + b
+    (a, _) -> a               // wildcard at any position
+
+// nested tuple pattern inside a variant or struct
+r match                       // r: Result with Ok(p: (int, int))
+    Ok((a, b)) -> a + b       // tuple field destructured in place
+    Err(_) -> 0
+
 // match with block bodies
 x match
     1 ->
