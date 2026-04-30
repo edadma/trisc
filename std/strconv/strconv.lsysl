@@ -32,7 +32,7 @@ conceptually part of the layering).
 
     import std.debug.{assert}
     import std.errors.{Error, new_error}
-    import std.result.{Result, Ok, Err, is_ok, is_err, unwrap}
+    import std.result.{Result, Ok, Err, is_ok, is_err, unwrap, unwrap_err}
 
 
 Parsers

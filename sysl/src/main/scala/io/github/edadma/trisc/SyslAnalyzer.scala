@@ -657,9 +657,17 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 definingModule = "",   // imported impls — orphan check skipped on import
               )
 
-    // Register generic templates from imported module (needed for cross-module generic instantiation)
+    // Register generic templates from imported module (needed for cross-module generic instantiation).
+    // Selective imports (`import std.option.{Option, Some, None}`) must filter generic templates
+    // by selector — otherwise generic functions like `std.option.expect[T]` leak into scope and
+    // shadow the testing-builtin `expect` (or whatever else the user wants to use). Wildcard
+    // imports register everything as before.
+    val genericTemplateFilter: Option[Set[String]] = selectors match
+      case List(WildcardImport) => None
+      case named =>
+        Some(named.collect { case NamedImport(n, _) => n }.toSet)
     if meta.genericTemplates.nonEmpty then
-      registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates))
+      registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates), genericTemplateFilter)
 
     // Register generic enum instance mappings for cross-module type inference
     for inst <- meta.genericEnumInstances do
@@ -728,11 +736,27 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         }
 
   /** Generic templates are omitted from `ModuleMeta` / typed `TProgram`; same-package siblings need the raw AST templates to resolve calls like `alt(...)`. */
-  def registerGenericTemplatesFrom(program: ProgramAST): Unit =
+  /** Register generic templates (functions, structs, data enums) for the current
+   *  unit or for a cross-module import. When `filter` is `None` (wildcard / own
+   *  module), every template is registered.
+   *
+   *  When `filter` is `Some(set)`, only **functions** whose name is in the set are
+   *  registered — this is what makes selective imports actually selective for
+   *  generic functions, which is where shadowing bugs surface (the canonical
+   *  case: `import std.option.{Option, Some, None}` should NOT pull in the
+   *  generic `expect[T]`). Generic structs / data enums are still registered
+   *  unconditionally because their names appear in user-written types and the
+   *  analyzer needs them resolvable; the symbol-table import path already
+   *  filters them through publicSymbols. */
+  def registerGenericTemplatesFrom(
+      program: ProgramAST,
+      filter: Option[Set[String]] = None,
+  ): Unit =
+    def funcSelected(name: String): Boolean = filter.forall(_.contains(name))
     for decl <- program.decls do
       decl match
         case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _) if tps.nonEmpty =>
-          if !genericTemplates.contains(name) && !functions.contains(name) then
+          if funcSelected(name) && !genericTemplates.contains(name) && !functions.contains(name) then
             genericTemplates(name) = fd
         case sd @ StructDeclAST(name, _, tps, _, _) if tps.nonEmpty =>
           if !genericStructs.contains(name) then
@@ -5543,7 +5567,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               else Nil
             resolveNamedArgsTyped(name, paramNames, expectedFor(paramTypes, modesForNamed), args)
           else
-            // Determine expected types for args if callee has known concrete signature
+            // Determine expected types for args if callee has known concrete signature.
+            // Variant constructors are critical here: a no-arg variant (e.g. `None`) inside
+            // another variant's args would otherwise inherit the OUTER expected type and
+            // misresolve. By passing each field's type as expected, the inner variant can
+            // disambiguate to the right enum instantiation.
             val argExpected: List[Option[SyslType]] =
               if traitCallRewrite.contains(name) then
                 val mangled = traitCallRewrite(name)
@@ -5554,6 +5582,28 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
               else if structTypes.contains(name) then
                 structTypes(name).fields.map(f => Some(f._2))
+              else if variantToEnum.contains(name) then
+                val (et, variantIdx) = variantToEnum(name)
+                et.variants(variantIdx)._2.map(f => Some(f._2))
+              else if genericVariantToEnum.contains(name) then
+                val (enumName, variantIdx) = genericVariantToEnum(name)
+                val template = genericEnums(enumName)
+                val variant = template.variants(variantIdx)
+                // Use currentExpected (the enum's instantiation) to recover type args,
+                // then resolve each field's TypeAST under that substitution.
+                val typeArgs: Option[List[SyslType]] = currentExpected match
+                  case Some(et: SyslType.EnumType) =>
+                    genericEnumInstantiations.collectFirst {
+                      case ((n, args), inst) if n == enumName && inst.name == et.name => args
+                    }
+                  case _ => None
+                typeArgs match
+                  case Some(tArgs) =>
+                    val savedEnv = typeEnv
+                    typeEnv = typeEnv ++ template.typeParams.zip(tArgs).toMap
+                    try variant.fields.map(f => Some(resolveType(f._2)))
+                    finally typeEnv = savedEnv
+                  case None => List.fill(args.length)(None)
               else
                 List.fill(args.length)(None)
             args.zip(argExpected.padTo(args.length, None)).map { case (a, exp) =>
