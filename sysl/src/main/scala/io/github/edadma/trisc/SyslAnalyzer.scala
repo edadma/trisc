@@ -3108,6 +3108,72 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case InterfaceType(n, _)        => NamedTypeAST(n, Nil)
     case NamedType(n, _, _, _, _)   => NamedTypeAST(n, Nil)
 
+  /** Least upper bound of two effect signatures under the effect lattice
+   *  (`Pure ≤ RW(R, W) ≤ Unknown`, with `RW` ordered by subset on its sets).
+   *  Returns `None` when the two are incomparable — i.e., both are `RW` but
+   *  neither's read/write sets are a subset of the other's. The LUB is the
+   *  *less-specific* (larger, higher) of the two when comparable, so the
+   *  merged binding is wide enough that **both** original observations flow
+   *  into it as actuals via `effectsSatisfy`. (Picking the smaller — the GLB —
+   *  would let the merge succeed but make the larger observation fail
+   *  `checkArgs` immediately afterwards.)
+   */
+  private def lubEffect(e1: FuncEffects, e2: FuncEffects): Option[FuncEffects] =
+    if e1 == e2 then Some(e1)
+    else if e1.isUnknown || e2.isUnknown then Some(FuncEffects.Unknown)
+    else if e1.isPure then Some(e2)
+    else if e2.isPure then Some(e1)
+    else
+      val r1 = e1.reads.getOrElse(Set.empty)
+      val w1 = e1.writes.getOrElse(Set.empty)
+      val r2 = e2.reads.getOrElse(Set.empty)
+      val w2 = e2.writes.getOrElse(Set.empty)
+      if r1.subsetOf(r2) && w1.subsetOf(w2) then Some(e2)
+      else if r2.subsetOf(r1) && w2.subsetOf(w1) then Some(e1)
+      else None
+
+  /** Merge two concrete-type observations of the same generic type variable,
+   *  taking the lattice LUB on `FuncType` effects rather than demanding
+   *  structural equality. Recurses through container types (slice / array /
+   *  ptr / ref / struct / named) so an embedded `FuncType` anywhere in the
+   *  shape uses the lattice. Returns `None` when the two types are
+   *  structurally incompatible or carry incomparable effect annotations.
+   *
+   *  This is the inference-engine analogue of `latticeEqual`: that one decides
+   *  *whether* a single observation flows into a slot; this one decides *what*
+   *  binding to pick when several observations of the same type variable
+   *  appear at different use sites. The merged binding is wide enough that
+   *  every original observation still satisfies it as a slot.
+   */
+  private def mergeBindings(t1: SyslType, t2: SyslType): Option[SyslType] =
+    if t1 == t2 then Some(t1)
+    else
+      (t1, t2) match
+        case (FuncType(p1, r1, esc1, eff1), FuncType(p2, r2, _, eff2)) if p1.length == p2.length =>
+          val mergedParams = p1.zip(p2).map((a, b) => mergeBindings(a, b))
+          if mergedParams.exists(_.isEmpty) then None
+          else
+            mergeBindings(r1, r2).flatMap { mr =>
+              lubEffect(eff1, eff2).map { eff =>
+                FuncType(mergedParams.map(_.get), mr, esc1, eff)
+              }
+            }
+        case (SliceType(a), SliceType(b)) => mergeBindings(a, b).map(SliceType.apply)
+        case (ArrayType(a, n1), ArrayType(b, n2)) if n1 == n2 =>
+          mergeBindings(a, b).map(ArrayType(_, n1))
+        case (PtrType(a), PtrType(b)) => mergeBindings(a, b).map(PtrType.apply)
+        case (RefType(a), RefType(b)) => mergeBindings(a, b).map(RefType.apply)
+        case (StructType(n1, f1, v1), StructType(n2, f2, v2))
+            if n1 == n2 && v1 == v2 && f1.length == f2.length &&
+              f1.zip(f2).forall { case ((fn1, _), (fn2, _)) => fn1 == fn2 } =>
+          val merged = f1.zip(f2).map { case ((fn, ft1), (_, ft2)) => mergeBindings(ft1, ft2).map((fn, _)) }
+          if merged.exists(_.isEmpty) then None
+          else Some(StructType(n1, merged.map(_.get), v1))
+        case (NamedType(n1, u1, nom1, ro1, pr1), NamedType(n2, u2, nom2, ro2, pr2))
+            if n1 == n2 && nom1 == nom2 && ro1 == ro2 && pr1 == pr2 =>
+          mergeBindings(u1, u2).map(NamedType(n1, _, nom1, ro1, pr1))
+        case _ => None
+
   // Unify a parameter TypeAST (which may contain type variables) against a concrete SyslType,
   // recording type variable bindings. Returns true if unification succeeded structurally.
   private def unifyTypes(param: TypeAST, arg: SyslType, typeParams: Set[String], env: mutable.Map[String, SyslType]): Unit =
@@ -3116,7 +3182,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         env.get(name) match
           case Some(existing) if existing == arg => ()
           case Some(existing) =>
-            throw AnalysisError(s"cannot infer type parameter '$name': seen both $existing and $arg")
+            // Lattice merge: two concrete observations of the same type variable
+            // are compatible iff one is ≤ the other under the effect/structure
+            // lattice. The merged binding is the GLB (more-specific). Without
+            // this, any combinator-library call where the user supplies a
+            // literal closure (auto-`#pure`) and the same type variable is also
+            // constrained by an unannotated context is rejected.
+            mergeBindings(existing, arg) match
+              case Some(merged) => env(name) = merged
+              case None =>
+                throw AnalysisError(s"cannot infer type parameter '$name': seen both $existing and $arg")
           case None => env(name) = arg
       case PtrTypeAST(inner) => arg match
         case PtrType(a) => unifyTypes(inner, a, typeParams, env)

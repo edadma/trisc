@@ -3108,6 +3108,20 @@ success[int](21) ^^ ((x: int) -> x * 2)
 
 The direction is one-way: an unannotated callable can't flow into a `#pure` slot (the compiler can't prove the absence of effects), but a `#pure` callable flows into anything. The unifier mirrors the indirect-call rules above so that a value's effect signature stays compatible across every site where its type is checked, not just at the point of the call itself.
 
+**Lattice rule at generic-parameter inference sites.** The same lattice also applies when the inference engine merges multiple concrete observations of the same generic type variable. If an explicit type argument or one call-site argument observes `(A) -> B` (unannotated) and another argument observes `(A) -> B #pure`, the type variable is bound to the **lattice LUB** — `(A) -> B` (the wider one) — rather than rejected as "seen both X and X #pure". The merged binding is wide enough that every original observation still flows in as an actual via `effectsSatisfy`. For the read/write axis, two `#reads` (or `#writes`) annotations whose sets are subset-related merge to the wider set; sets that are *not* subset-related (e.g. `#reads(x)` and `#writes(y)` with no overlap in either axis) remain a hard error so the user can disambiguate. Combinator libraries written against unannotated function types (`success[A](v: A) -> Parser[A]`, then `success[(int, int) -> int]((a, b) -> a - b)`) infer through this rule:
+
+```sysl
+type Parser[A] = new (int) -> int
+success[A](v: A) -> Parser[A] = Parser[A]((x: int) -> x)
+
+val sub: Parser[(int, int) -> int] =
+    success[(int, int) -> int]((a: int, b: int) -> a - b)
+//                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+// Closure infers `(int, int) -> int #pure`. Explicit type arg
+// pre-seeds A as `(int, int) -> int` (unannotated). Lattice LUB
+// keeps A unannotated; the closure flows in as `#pure ≤ unannotated`.
+```
+
 ### `#ghost` — verification-only declarations
 
 A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost. Three places `#ghost` may appear:
