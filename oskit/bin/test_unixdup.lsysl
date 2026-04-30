@@ -1,0 +1,344 @@
+test_unixdup — duplicate-fd SCM_RIGHTS semantics
+==================================================
+
+Verifies that AF_UNIX SCM_RIGHTS correctly handles duplicate
+fds in the cmsg ancillary block (Linux: receiver gets N
+distinct fds aliasing the same underlying file description).
+
+The slix path:
+- `unix_handle_recvmsg` returns N copies of the same slot
+  index in the cmsg slot list.
+- `sys_recvmsg_unix` allocates N distinct posix_fd entries
+  via `posix_fd_alloc(POSIX_FD_UNIX_SOCKET, sidx)`.
+- `unix_slot_add_owner` is idempotent — the receiver tid
+  appears in the owners ring exactly once.
+- `sys_close` checks `posix_fd_other_dup_exists` before
+  sending `UNIX_CMD_CLOSE`; only the last close of an
+  aliased target hits the server.
+
+Test plan
+---------
+
+  1. alpha→"DA", beta→"DB", gamma→"DG" — three bound DGRAM
+     sockets in one process.
+  2. `sendmsg(alpha → "DB", cmsg=[gamma, gamma])` — pass
+     gamma TWICE.
+  3. `recvmsg(beta)` — should report ctrl_used = 16 + 4*2 = 24
+     and yield two distinct posix_fds, both pointing to
+     gamma's underlying slot.
+  4. `close(gamma)` — drops original handle (sender side).
+  5. Send a probe: `sendto(alpha → "DG", probe)` reaches
+     gamma's slot via path lookup.
+  6. `recvfrom(fd1)` drains the probe — proves fd1 is a
+     valid alias to gamma's slot.
+  7. `close(fd1)` — dup_exists=true (fd2 still alive), so no
+     IPC. Local clear only.
+  8. Another probe: `sendto(alpha → "DG", probe2)`.
+  9. `recvfrom(fd2)` drains probe2 — proves fd2 is still valid
+     after fd1 was closed.
+ 10. `close(fd2)` — dup_exists=false, sends UNIX_CMD_CLOSE.
+     With sender already closed in step 4, owners=0 → slot
+     freed, "DG" cleared.
+ 11. Re-bind "DG" on a fresh socket — succeeds iff cleanup ran.
+
+Pass criterion: prints `unixdup: ok`.
+
+    module oskit.bin.test_unixdup
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_RECVFROM   = 276
+    val NR_RECVMSG    = 278
+    val NR_SENDMSG    = 306
+    val NR_SENDTO     = 307
+    val NR_SOCKET     = 337
+
+    val AF_UNIX_V     = 1
+    val SOCK_DGRAM_V  = 2
+
+    val SOL_SOCKET_V  = 1
+    val SCM_RIGHTS_V  = 1
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixdup: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, path_len: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < path_len
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + path_len] = byte(0)
+        2 + path_len + 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_sendmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_SENDMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+    posix_recvmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_RECVMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen_p: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_p)))
+
+
+    write_i64(p: *byte, off: int, v: i64)
+        var i = 0
+        while i < 8
+            p[off + i] = byte((v >> (i * 8)) & i64(0xff))
+            i += 1
+
+
+    write_i32(p: *byte, off: int, v: int)
+        p[off]     = byte(v & 0xff)
+        p[off + 1] = byte((v >> 8) & 0xff)
+        p[off + 2] = byte((v >> 16) & 0xff)
+        p[off + 3] = byte((v >> 24) & 0xff)
+
+
+    read_i32(p: *byte, off: int) -> int
+        (int(p[off]) & 0xff) | ((int(p[off + 1]) & 0xff) << 8) | ((int(p[off + 2]) & 0xff) << 16) | ((int(p[off + 3]) & 0xff) << 24)
+
+
+    main(argv: []string)
+
+Step 1: bind alpha, beta, gamma.
+
+        val alpha = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if alpha < 0
+            fail(1)
+            return
+        val beta = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if beta < 0
+            fail(2)
+            return
+        val gamma = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if gamma < 0
+            fail(3)
+            return
+
+        var path_a: [2]byte
+        path_a[0] = 'D'; path_a[1] = 'A'
+        var path_b: [2]byte
+        path_b[0] = 'D'; path_b[1] = 'B'
+        var path_g: [2]byte
+        path_g[0] = 'D'; path_g[1] = 'G'
+
+        var sa_a: [128]byte
+        val al_a = fill_sockaddr_un(&sa_a[0], &path_a[0], 2)
+        if posix_bind(alpha, &sa_a[0], al_a) != 0
+            fail(4)
+            return
+        var sa_b: [128]byte
+        val al_b = fill_sockaddr_un(&sa_b[0], &path_b[0], 2)
+        if posix_bind(beta, &sa_b[0], al_b) != 0
+            fail(5)
+            return
+        var sa_g: [128]byte
+        val al_g = fill_sockaddr_un(&sa_g[0], &path_g[0], 2)
+        if posix_bind(gamma, &sa_g[0], al_g) != 0
+            fail(6)
+            return
+
+Step 2: sendmsg with cmsg=[gamma, gamma]. cmsg_len = 16 + 4*2
+= 24 bytes.
+
+        var ctrl_send: [32]byte
+        write_i64(&ctrl_send[0], 0, i64(24))
+        write_i32(&ctrl_send[0], 8, SOL_SOCKET_V)
+        write_i32(&ctrl_send[0], 12, SCM_RIGHTS_V)
+        write_i32(&ctrl_send[0], 16, gamma)
+        write_i32(&ctrl_send[0], 20, gamma)
+
+        var payload: [4]byte
+        payload[0] = 'd'; payload[1] = 'u'
+        payload[2] = 'p'; payload[3] = '!'
+
+        var iov: [16]byte
+        write_i64(&iov[0], 0, i64(&payload[0]))
+        write_i64(&iov[0], 8, i64(4))
+
+        var mh: [56]byte
+        write_i64(&mh[0], 0, i64(&sa_b[0]))
+        write_i32(&mh[0], 8, al_b)
+        write_i32(&mh[0], 12, 0)
+        write_i64(&mh[0], 16, i64(&iov[0]))
+        write_i32(&mh[0], 24, 1)
+        write_i32(&mh[0], 28, 0)
+        write_i64(&mh[0], 32, i64(&ctrl_send[0]))
+        write_i32(&mh[0], 40, 24)
+        write_i32(&mh[0], 44, 0)
+        write_i32(&mh[0], 48, 0)
+
+        val ns = posix_sendmsg(alpha, &mh[0], 0)
+        if ns != 4
+            puts("unixdup: sendmsg=")
+            print_idec(ns)
+            puts("\n")
+            fail(7)
+            return
+
+Step 3: recvmsg(beta). Expect ctrl_used=24, two distinct fds.
+
+        var rbuf: [16]byte
+        var src_addr: [128]byte
+        var iov_r: [16]byte
+        write_i64(&iov_r[0], 0, i64(&rbuf[0]))
+        write_i64(&iov_r[0], 8, i64(16))
+
+        var ctrl_r: [40]byte
+        var mh_r: [56]byte
+        write_i64(&mh_r[0], 0, i64(&src_addr[0]))
+        write_i32(&mh_r[0], 8, 128)
+        write_i32(&mh_r[0], 12, 0)
+        write_i64(&mh_r[0], 16, i64(&iov_r[0]))
+        write_i32(&mh_r[0], 24, 1)
+        write_i32(&mh_r[0], 28, 0)
+        write_i64(&mh_r[0], 32, i64(&ctrl_r[0]))
+        write_i32(&mh_r[0], 40, 40)
+        write_i32(&mh_r[0], 44, 0)
+        write_i32(&mh_r[0], 48, 0)
+
+        val nr = posix_recvmsg(beta, &mh_r[0], 0)
+        if nr != 4
+            puts("unixdup: recvmsg=")
+            print_idec(nr)
+            puts("\n")
+            fail(8)
+            return
+
+        val ctrl_used = read_i32(&mh_r[0], 40)
+        if ctrl_used != 24
+            puts("unixdup: ctrl_used=")
+            print_idec(ctrl_used)
+            puts("\n")
+            fail(9)
+            return
+        val fd1 = read_i32(&ctrl_r[0], 16)
+        val fd2 = read_i32(&ctrl_r[0], 20)
+        if fd1 < 0 || fd2 < 0
+            fail(10)
+            return
+        if fd1 == fd2
+            fail(11)
+            return
+
+Step 4: close gamma — sender's original handle goes away.
+
+        posix_close(gamma)
+
+Step 5+6: sendto "DG" routes via path lookup. recvfrom(fd1)
+should drain it, proving fd1 aliases gamma's slot correctly.
+
+        var probe1: [4]byte
+        probe1[0] = 'p'; probe1[1] = '1'
+        probe1[2] = byte(0); probe1[3] = byte(0)
+        if posix_sendto(alpha, &probe1[0], 4, 0, &sa_g[0], al_g) != 4
+            fail(12)
+            return
+
+        var rb1: [8]byte
+        var src1: [128]byte
+        var sl1: i32 = 128
+        val r6 = posix_recvfrom(fd1, &rb1[0], 8, 0,
+            &src1[0], &sl1)
+        if r6 != 4
+            puts("unixdup: r6=")
+            print_idec(r6)
+            puts("\n")
+            fail(13)
+            return
+        if rb1[0] != 'p' || rb1[1] != '1'
+            fail(14)
+            return
+
+Step 7: close fd1. dup_exists=true → no IPC; fd2 still works.
+
+        posix_close(fd1)
+
+Step 8+9: another probe; recvfrom(fd2) drains.
+
+        var probe2: [4]byte
+        probe2[0] = 'p'; probe2[1] = '2'
+        probe2[2] = byte(0); probe2[3] = byte(0)
+        if posix_sendto(alpha, &probe2[0], 4, 0, &sa_g[0], al_g) != 4
+            fail(15)
+            return
+
+        var rb2: [8]byte
+        var src2: [128]byte
+        var sl2: i32 = 128
+        val r9 = posix_recvfrom(fd2, &rb2[0], 8, 0,
+            &src2[0], &sl2)
+        if r9 != 4
+            puts("unixdup: r9=")
+            print_idec(r9)
+            puts("\n")
+            fail(16)
+            return
+        if rb2[0] != 'p' || rb2[1] != '2'
+            fail(17)
+            return
+
+Step 10: close fd2. dup_exists=false → shim_unix_close.
+With sender already closed, owners=0 → slot freed.
+
+        posix_close(fd2)
+
+Step 11: re-bind "DG" on a fresh socket. Succeeds iff slot
+was fully released.
+
+        val probe = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if probe < 0
+            fail(18)
+            return
+        val br = posix_bind(probe, &sa_g[0], al_g)
+        if br != 0
+            puts("unixdup: rebind=")
+            print_idec(br)
+            puts("\n")
+            fail(19)
+            return
+
+        posix_close(probe)
+        posix_close(alpha)
+        posix_close(beta)
+        puts("unixdup: ok\n")
+        exit()

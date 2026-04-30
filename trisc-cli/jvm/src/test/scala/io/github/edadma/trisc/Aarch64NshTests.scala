@@ -2107,6 +2107,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixsmrf: bad"
   }
 
+  "unix: SCM_RIGHTS duplicate-fd in cmsg yields N aliased posix_fds" in {
+    // sendmsg with cmsg=[gamma, gamma]; recvmsg gives the receiver
+    // 2 distinct posix_fds, both pointing to gamma's slot. close on
+    // one keeps the other valid (sys_close's posix_fd_other_dup_exists
+    // suppresses the IPC); close on the last triggers slot cleanup.
+    // Regression test for the existing dup-detection mechanism.
+    val output = qemu.command("test_unixdup")
+    output should include("unixdup: ok")
+    output should not include "unixdup: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates
