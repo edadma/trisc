@@ -109,7 +109,7 @@ for app in "${APPS[@]}"; do
 done
 
 echo "=== Build servers ==="
-for srv in rs disk tfs tty pm vfs ds nic inet init; do
+for srv in rs disk tfs tty pm vfs ds nic inet unix init; do
     bash "$ARCH_DIR/build_servers.sh" "$srv" > "$OUT/build-$srv.log" 2>&1
     if [ ! -f "$OUT/servers/$srv.bin" ]; then
         echo "  $srv server build failed:" >&2
@@ -132,7 +132,7 @@ echo "=== Pack boot info (user=$USER_PROG.bin, rs, disk, tfs) ==="
 # resolves consistently regardless of which test program was selected.
 cp "$OUT/bin/$USER_PROG.bin" "$OUT/bin/user.bin"
 cd "$REPO_ROOT"
-sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeAarch64BootInfoMain user rs disk tfs tty pm vfs ds nic inet init" > "$OUT/sbt-bootinfo.log" 2>&1
+sbt "triscCliJVM/runMain io.github.edadma.trisc.MakeAarch64BootInfoMain user rs disk tfs tty pm vfs ds nic inet unix init" > "$OUT/sbt-bootinfo.log" 2>&1
 if [ ! -f "$OUT/bootinfo.img" ]; then
     echo "  bootinfo.img build failed:" >&2
     tail -20 "$OUT/sbt-bootinfo.log" >&2

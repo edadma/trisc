@@ -1,0 +1,162 @@
+test_unixdg — AF_UNIX SOCK_DGRAM ping/pong
+==========================================
+
+First half of Option C Session 1: validates the unix server's
+DGRAM path. Two sockets bind on different paths, one sendto
+the other, the other recvfroms, asserts the bytes round-trip
+and the source path comes back in the recvfrom reply.
+
+Pass criterion: prints `unixdg: ok`.
+
+    module oskit.bin.test_unixdg
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{unix_socket, unix_bind, unix_sendto,
+        unix_recvfrom, unix_close,
+        UNIX_SOCK_DGRAM}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixdg: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+
+Open two DGRAM sockets and bind each to a distinct abstract
+path. The path bytes are arbitrary — we only need them to be
+distinct keys inside the unix server.
+
+        val a = unix_socket(UNIX_SOCK_DGRAM)
+        if a < 0
+            fail(1)
+            return
+        val b = unix_socket(UNIX_SOCK_DGRAM)
+        if b < 0
+            fail(2)
+            return
+
+        var path_a: [4]byte
+        path_a[0] = 'A'; path_a[1] = '0'; path_a[2] = '0'; path_a[3] = '1'
+        var path_b: [4]byte
+        path_b[0] = 'B'; path_b[1] = '0'; path_b[2] = '0'; path_b[3] = '1'
+
+        if unix_bind(a, &path_a[0], 4) != 0
+            fail(3)
+            return
+        if unix_bind(b, &path_b[0], 4) != 0
+            fail(4)
+            return
+
+Re-binding to the same path on a fresh socket must fail with
+-EADDRINUSE so the registry's collision check is exercised.
+
+        val c = unix_socket(UNIX_SOCK_DGRAM)
+        if c < 0
+            fail(5)
+            return
+        if unix_bind(c, &path_a[0], 4) >= 0
+            fail(6)
+            return
+        unix_close(c)
+
+Build a 32-byte deterministic payload and sendto from `a` to
+path_b. nsent should equal the input length.
+
+        var send_buf: [32]byte
+        var i = 0
+        while i < 32
+            send_buf[i] = byte((i * 7) & 0xff)
+            i += 1
+
+        val nsent = unix_sendto(a, &path_b[0], 4, &send_buf[0], 32)
+        if nsent != 32
+            puts("unixdg: sendto returned ")
+            print_idec(nsent)
+            puts("\n")
+            fail(7)
+            return
+
+recvfrom on `b` should drain the datagram, return the same 32
+bytes, and tell us the source path was 4 bytes long
+("A001"). The server short-circuits the parked-recv path when
+the queue is empty at sendto time, but here recvfrom comes
+*after* sendto so the datagram is already queued.
+
+        var recv_buf: [32]byte
+        var src_path: [16]byte
+        var src_plen = 0
+        val n = unix_recvfrom(b, &recv_buf[0], 32, &src_path[0], 16, &src_plen)
+        if n != 32
+            puts("unixdg: recvfrom returned ")
+            print_idec(n)
+            puts("\n")
+            fail(8)
+            return
+
+Verify every byte matches the deterministic pattern. A clamp
+or off-by-one in the queue copy would corrupt one of these.
+
+        i = 0
+        while i < 32
+            if recv_buf[i] != byte((i * 7) & 0xff)
+                puts("unixdg: byte ")
+                print_idec(i)
+                puts(" mismatch\n")
+                fail(9)
+                return
+            i += 1
+
+The sender's bound path was 4 bytes ("A001"), and the
+recvfrom reply must echo that.
+
+        if src_plen != 4
+            puts("unixdg: src_plen=")
+            print_idec(src_plen)
+            puts("\n")
+            fail(10)
+            return
+        if src_path[0] != 'A'
+            fail(11)
+            return
+        if src_path[1] != '0'
+            fail(12)
+            return
+        if src_path[2] != '0'
+            fail(13)
+            return
+        if src_path[3] != '1'
+            fail(14)
+            return
+
+Send to a non-existent path — should fail with -ECONNREFUSED
+(reported as the negative status byte).
+
+        var bogus: [4]byte
+        bogus[0] = 'Z'; bogus[1] = 'Z'; bogus[2] = 'Z'; bogus[3] = 'Z'
+        val r2 = unix_sendto(a, &bogus[0], 4, &send_buf[0], 8)
+        if r2 >= 0
+            puts("unixdg: bogus sendto returned ")
+            print_idec(r2)
+            puts("\n")
+            fail(15)
+            return
+
+        unix_close(a)
+        unix_close(b)
+        puts("unixdg: ok\n")
+        exit()

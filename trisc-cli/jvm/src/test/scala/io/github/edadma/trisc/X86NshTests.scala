@@ -648,6 +648,30 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "pmtutcp: bad"
   }
 
+  "unix: SOCK_DGRAM bind/sendto/recvfrom round-trip" in {
+    // Option C Session 1 (AF_UNIX basics): two DGRAM sockets bind
+    // to distinct path keys in the unix server's registry; one
+    // sendtos a 32-byte deterministic payload, the other recvfroms
+    // it. Validates path collision detection (-EADDRINUSE on dup
+    // bind), source-path round-trip in recvfrom, and -ECONNREFUSED
+    // on sendto to an unbound key.
+    val output = qemu.command("test_unixdg")
+    output should include("unixdg: ok")
+    output should not include "unixdg: bad"
+  }
+
+  "unix: SOCK_STREAM listen/accept/send/recv + EOF on close" in {
+    // Option C Session 1 (AF_UNIX basics): listener binds + listens
+    // on a path; client connects (which queues a server-end slot in
+    // the listener's backlog and returns immediately); accept drains
+    // the queue. Bidirectional 16/12-byte exchange validates the
+    // paired rx_buf rings. Final close on the connector triggers a
+    // 0-byte recv on the server-end (clean EOF).
+    val output = qemu.command("test_unixstr")
+    output should include("unixstr: ok")
+    output should not include "unixstr: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

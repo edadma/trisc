@@ -1,0 +1,172 @@
+test_unixstr — AF_UNIX SOCK_STREAM listen/accept/send/recv
+============================================================
+
+Second half of Option C Session 1: validates the unix server's
+STREAM path. listen + connect + accept + bidirectional
+send/recv on the same thread — the server's design allows
+connect to succeed before accept drains, so the sequence runs
+without needing a second thread.
+
+Pass criterion: prints `unixstr: ok`.
+
+    module oskit.bin.test_unixstr
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{unix_socket, unix_bind, unix_listen,
+        unix_accept, unix_connect, unix_send, unix_recv,
+        unix_close,
+        UNIX_SOCK_STREAM}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixstr: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+
+Set up listener at path "STR1" — bind + listen.
+
+        val ls = unix_socket(UNIX_SOCK_STREAM)
+        if ls < 0
+            fail(1)
+            return
+        var path: [4]byte
+        path[0] = 'S'; path[1] = 'T'; path[2] = 'R'; path[3] = '1'
+        if unix_bind(ls, &path[0], 4) != 0
+            fail(2)
+            return
+        if unix_listen(ls, 4) != 0
+            fail(3)
+            return
+
+Connect from a separate socket. Connect succeeds even before
+accept because the server queues the new server-end slot in
+the listener's backlog and replies immediately.
+
+        val cl = unix_socket(UNIX_SOCK_STREAM)
+        if cl < 0
+            fail(4)
+            return
+        if unix_connect(cl, &path[0], 4) != 0
+            fail(5)
+            return
+
+Connect to a path that doesn't exist must fail
+(-ECONNREFUSED). Connect to a path that's bound but not
+listening must also fail.
+
+        val cl2 = unix_socket(UNIX_SOCK_STREAM)
+        if cl2 < 0
+            fail(6)
+            return
+        var bogus: [4]byte
+        bogus[0] = 'X'; bogus[1] = 'X'; bogus[2] = 'X'; bogus[3] = 'X'
+        if unix_connect(cl2, &bogus[0], 4) >= 0
+            fail(7)
+            return
+        unix_close(cl2)
+
+Accept drains the backlog and returns the server-end fd
+owned by the same thread.
+
+        val sv = unix_accept(ls)
+        if sv < 0
+            puts("unixstr: accept got ")
+            print_idec(sv)
+            puts("\n")
+            fail(8)
+            return
+
+Client→server message. send returns bytes appended to the
+peer's rx ring; recv on the peer drains them.
+
+        var msg1: [16]byte
+        var i = 0
+        while i < 16
+            msg1[i] = byte((i + 1) & 0xff)
+            i += 1
+        val ns1 = unix_send(cl, &msg1[0], 16)
+        if ns1 != 16
+            puts("unixstr: send1 ")
+            print_idec(ns1)
+            puts("\n")
+            fail(9)
+            return
+
+        var rb1: [16]byte
+        val nr1 = unix_recv(sv, &rb1[0], 16)
+        if nr1 != 16
+            puts("unixstr: recv1 ")
+            print_idec(nr1)
+            puts("\n")
+            fail(10)
+            return
+        i = 0
+        while i < 16
+            if rb1[i] != byte((i + 1) & 0xff)
+                fail(11)
+                return
+            i += 1
+
+Server→client reply. Same path the other direction.
+
+        var msg2: [12]byte
+        i = 0
+        while i < 12
+            msg2[i] = byte((100 - i) & 0xff)
+            i += 1
+        val ns2 = unix_send(sv, &msg2[0], 12)
+        if ns2 != 12
+            puts("unixstr: send2 ")
+            print_idec(ns2)
+            puts("\n")
+            fail(12)
+            return
+
+        var rb2: [12]byte
+        val nr2 = unix_recv(cl, &rb2[0], 12)
+        if nr2 != 12
+            puts("unixstr: recv2 ")
+            print_idec(nr2)
+            puts("\n")
+            fail(13)
+            return
+        i = 0
+        while i < 12
+            if rb2[i] != byte((100 - i) & 0xff)
+                fail(14)
+                return
+            i += 1
+
+Half-close test: close the connector. Recv on the server
+side should return 0 bytes (clean EOF).
+
+        unix_close(cl)
+        var rb3: [4]byte
+        val nr3 = unix_recv(sv, &rb3[0], 4)
+        if nr3 != 0
+            puts("unixstr: eof recv got ")
+            print_idec(nr3)
+            puts("\n")
+            fail(15)
+            return
+
+        unix_close(sv)
+        unix_close(ls)
+        puts("unixstr: ok\n")
+        exit()

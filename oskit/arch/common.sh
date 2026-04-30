@@ -100,6 +100,7 @@ build_program() {
         oskit/ulib/srt0.lsysl
         oskit/ds/client.lsysl
         oskit/net/client.lsysl
+        oskit/net/unix_client.lsysl
         oskit/net/nic_client.lsysl
         oskit/net/dns.lsysl
         std/alloc/alloc.lsysl
@@ -296,6 +297,12 @@ build_inet() {
         std/net/packet.lsysl
 }
 
+build_unix() {
+    build_server unix unix_server \
+        "import oskit.servers.{unix_server}" \
+        oskit/servers/unix.lsysl
+}
+
 build_nic() {
     build_server nic nic_server \
         "import oskit.servers.{nic_server}" \
@@ -336,11 +343,12 @@ dispatch_servers_arg() {
             ds)   build_ds ;;
             nic)  build_nic ;;
             inet) build_inet ;;
+            unix) build_unix ;;
             init) build_init ;;
-            all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_nic; build_inet; build_init ;;
+            all)  build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_nic; build_inet; build_unix; build_init ;;
             *)    echo "Unknown server: $1" >&2; exit 1 ;;
         esac
     else
-        build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_nic; build_inet; build_init
+        build_rs; build_disk; build_tfs; build_tty; build_pm; build_vfs; build_ds; build_nic; build_inet; build_unix; build_init
     fi
 }

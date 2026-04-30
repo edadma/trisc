@@ -47,6 +47,7 @@ object OskitDemoBuilder:
   private lazy val dsSrvSysl: String     = readLsysl("oskit/servers/ds.lsysl")
   private lazy val inetSrvSysl: String   = readLsysl("oskit/servers/inet.lsysl")
   private lazy val inetProtoSysl: String = readLsysl("oskit/servers/inet_proto.lsysl")
+  private lazy val unixSrvSysl: String   = readLsysl("oskit/servers/unix.lsysl")
   private lazy val stdNetPacketSysl: String = readLsysl("std/net/packet.lsysl")
   private lazy val stdNetSysl: String    = readLsysl("std/net/net.lsysl")
   private lazy val halMemSysl: String   = readLsysl("oskit/hal/mem_dma.lsysl")
@@ -376,6 +377,7 @@ import oskit.hal.memset
           "std/net/packet"           -> stdNetPacketSysl,
           "std/debug/debug"          -> debugSysl,
         )),
+      "unix" -> compileServerTrb("oskit/servers/unix", "oskit.servers", unixSrvSysl, "unix_server"),
       "init"  -> compileServerTrb("oskit/apps/init/init", "oskit.apps.init", initSysl, "init",
         extraSources = Map(
           "oskit/fs/client"      -> fsClientSysl,

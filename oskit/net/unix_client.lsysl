@@ -1,0 +1,336 @@
+OSKit UNIX Client — AF_UNIX Socket Wrappers
+=============================================
+
+Companion to `oskit/net/client.lsysl`. Wraps the
+`oskit.servers.unix` IPC protocol so user programs and the
+POSIX shim can issue AF_UNIX socket calls without re-deriving
+wire layouts. Shape mirrors POSIX `socket(2)` for a future
+`posix.sys.socket` layer.
+
+Session 1 of AF_UNIX: SOCK_STREAM (listen/accept/connect/
+send/recv) and SOCK_DGRAM (sendto/recvfrom). SCM_RIGHTS and
+recvfrom MSG_PEEK are deferred.
+
+    module oskit.net
+
+    import oskit.ulib.{ipc_send, port_lookup}
+
+
+Cached unix server port. Resolved lazily so the lookup
+doesn't run until a program actually opens an AF_UNIX socket.
+
+    var unix_srv_port = -1
+
+    unix_get_port() -> int
+        if unix_srv_port < 0
+            unix_srv_port = port_lookup("unix")
+        unix_srv_port
+
+
+Command codes — must track `oskit/servers/unix.lsysl`.
+
+    val UNIX_CMD_SOCKET    = 1
+    val UNIX_CMD_BIND      = 2
+    val UNIX_CMD_CONNECT   = 3
+    val UNIX_CMD_LISTEN    = 4
+    val UNIX_CMD_ACCEPT    = 5
+    val UNIX_CMD_SENDTO    = 6
+    val UNIX_CMD_RECVFROM  = 7
+    val UNIX_CMD_SEND      = 8
+    val UNIX_CMD_RECV      = 9
+    val UNIX_CMD_CLOSE     = 10
+    val UNIX_CMD_PID_EXIT  = 11
+
+    val UNIX_SOCK_STREAM = 1
+    val UNIX_SOCK_DGRAM  = 2
+
+    val UNIX_PATH_MAX_C    = 108
+    val UNIX_DG_DATA_MAX_C = 256
+
+
+Big-endian helpers, local copies so callers don't have to
+import them from the inet client.
+
+    unix_write_u16(p: *byte, off: int, v: int)
+        p[off]     = byte((v >> 8) & 0xff)
+        p[off + 1] = byte(v & 0xff)
+
+    unix_read_u16(p: *byte, off: int) -> int
+        ((int(p[off]) & 0xff) << 8) | (int(p[off + 1]) & 0xff)
+
+
+Sign-extend the wire status byte. The server emits negative
+errnos via `byte(-EADDRINUSE)` which round-trip back as
+unsigned 0..255; this restores the negative value so callers
+can compare against 0.
+
+    unix_status(b: byte) -> int
+        val v = int(b) & 0xff
+        if v >= 128
+            return v - 256
+        v
+
+
+socket(AF_UNIX, stype, 0). Returns the unix server's slot
+index (0..15) or a negative errno.
+
+    unix_socket(stype: int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        var msg: [2]byte
+        msg[0] = byte(UNIX_CMD_SOCKET)
+        msg[1] = byte(stype & 0xff)
+        var reply: [2]byte
+        val r = ipc_send(port, msg, 2, reply, 2)
+        if r < 0
+            return -1
+        if reply[0] != 0
+            return unix_status(reply[0])
+        int(reply[1]) & 0xff
+
+
+bind(fd, path) — binds the socket to the given path key in
+the server's registry. `path` is a *byte; `plen` is the
+number of bytes (no implicit terminator). 0 on success,
+negative errno otherwise.
+
+    unix_bind(fd: int, path: *byte, plen: int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        if plen <= 0
+            return -1
+        if plen > UNIX_PATH_MAX_C
+            return -1
+        var msg: [128]byte
+        msg[0] = byte(UNIX_CMD_BIND)
+        msg[1] = byte(fd & 0xff)
+        msg[2] = byte(plen & 0xff)
+        var i = 0
+        while i < plen
+            msg[3 + i] = path[i]
+            i += 1
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 3 + plen, reply, 1)
+        if r < 0
+            return -1
+        unix_status(reply[0])
+
+
+connect(fd, path) — STREAM only. 0 on success.
+
+    unix_connect(fd: int, path: *byte, plen: int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        if plen <= 0
+            return -1
+        if plen > UNIX_PATH_MAX_C
+            return -1
+        var msg: [128]byte
+        msg[0] = byte(UNIX_CMD_CONNECT)
+        msg[1] = byte(fd & 0xff)
+        msg[2] = byte(plen & 0xff)
+        var i = 0
+        while i < plen
+            msg[3 + i] = path[i]
+            i += 1
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 3 + plen, reply, 1)
+        if r < 0
+            return -1
+        unix_status(reply[0])
+
+
+listen(fd, backlog) — STREAM only. backlog is advisory; the
+server clamps to UNIX_BACKLOG_MAX. 0 on success.
+
+    unix_listen(fd: int, backlog: int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        var msg: [3]byte
+        msg[0] = byte(UNIX_CMD_LISTEN)
+        msg[1] = byte(fd & 0xff)
+        msg[2] = byte(backlog & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 3, reply, 1)
+        if r < 0
+            return -1
+        unix_status(reply[0])
+
+
+accept(fd) — blocks until a CONNECT pairs with this listener.
+Returns the server-end slot index (0..15) on success.
+
+    unix_accept(fd: int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        var msg: [2]byte
+        msg[0] = byte(UNIX_CMD_ACCEPT)
+        msg[1] = byte(fd & 0xff)
+        var reply: [2]byte
+        val r = ipc_send(port, msg, 2, reply, 2)
+        if r < 0
+            return -1
+        if reply[0] != 0
+            return unix_status(reply[0])
+        int(reply[1]) & 0xff
+
+
+sendto(fd, dst_path, data) — DGRAM only. Returns bytes
+queued (may truncate down to UNIX_DG_DATA_MAX) or negative
+errno.
+
+    unix_sendto(fd: int, dst_path: *byte, plen: int,
+            data: *byte, dlen: int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        if plen < 0
+            return -1
+        if plen > UNIX_PATH_MAX_C
+            return -1
+        if dlen < 0
+            return -1
+        if dlen > UNIX_DG_DATA_MAX_C
+            return -1
+        var msg: [512]byte
+        msg[0] = byte(UNIX_CMD_SENDTO)
+        msg[1] = byte(fd & 0xff)
+        msg[2] = byte(plen & 0xff)
+        var i = 0
+        while i < plen
+            msg[3 + i] = dst_path[i]
+            i += 1
+        unix_write_u16(&msg[0], 3 + plen, dlen)
+        i = 0
+        while i < dlen
+            msg[3 + plen + 2 + i] = data[i]
+            i += 1
+        var reply: [3]byte
+        val r = ipc_send(port, msg, 3 + plen + 2 + dlen, reply, 3)
+        if r < 0
+            return -1
+        if reply[0] != 0
+            return unix_status(reply[0])
+        unix_read_u16(&reply[0], 1)
+
+
+recvfrom(fd, buf, maxlen, src_path_out, src_plen_out_p) —
+DGRAM only. `src_plen_out_p` may be null; otherwise
+receives the source path length, and up to that many bytes
+are written into `src_path_out`. Returns dlen on success or
+negative errno.
+
+    unix_recvfrom(fd: int, buf: *byte, maxlen: int,
+            src_path_out: *byte, src_path_cap: int,
+            src_plen_out_p: *int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        var msg: [4]byte
+        msg[0] = byte(UNIX_CMD_RECVFROM)
+        msg[1] = byte(fd & 0xff)
+        unix_write_u16(&msg[0], 2, maxlen)
+        var reply: [512]byte
+        val r = ipc_send(port, msg, 4, reply, 512)
+        if r < 0
+            return -1
+        if reply[0] != 0
+            return unix_status(reply[0])
+        val plen = int(reply[1]) & 0xff
+        var pcopy = plen
+        if pcopy > src_path_cap
+            pcopy = src_path_cap
+        var i = 0
+        while i < pcopy
+            src_path_out[i] = reply[2 + i]
+            i += 1
+        if int(src_plen_out_p) != 0
+            *src_plen_out_p = plen
+        val dlen = unix_read_u16(&reply[0], 2 + plen)
+        var dcopy = dlen
+        if dcopy > maxlen
+            dcopy = maxlen
+        i = 0
+        while i < dcopy
+            buf[i] = reply[2 + plen + 2 + i]
+            i += 1
+        dlen
+
+
+send(fd, data) — STREAM only. Returns bytes appended to the
+peer's rx ring. Caller chunks long writes via a loop.
+
+    unix_send(fd: int, data: *byte, dlen: int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        if dlen < 0
+            return -1
+        var msg: [2050]byte
+        msg[0] = byte(UNIX_CMD_SEND)
+        msg[1] = byte(fd & 0xff)
+        unix_write_u16(&msg[0], 2, dlen)
+        var i = 0
+        while i < dlen
+            msg[4 + i] = data[i]
+            i += 1
+        var reply: [3]byte
+        val r = ipc_send(port, msg, 4 + dlen, reply, 3)
+        if r < 0
+            return -1
+        if reply[0] != 0
+            return unix_status(reply[0])
+        unix_read_u16(&reply[0], 1)
+
+
+recv(fd, buf, maxlen) — STREAM only. Returns bytes drained
+or 0 for EOF (peer closed and no buffered data).
+
+    unix_recv(fd: int, buf: *byte, maxlen: int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        if maxlen < 0
+            return -1
+        var msg: [4]byte
+        msg[0] = byte(UNIX_CMD_RECV)
+        msg[1] = byte(fd & 0xff)
+        unix_write_u16(&msg[0], 2, maxlen)
+        var reply: [2050]byte
+        val r = ipc_send(port, msg, 4, reply, 2050)
+        if r < 0
+            return -1
+        if reply[0] != 0
+            return unix_status(reply[0])
+        val dlen = unix_read_u16(&reply[0], 1)
+        var dcopy = dlen
+        if dcopy > maxlen
+            dcopy = maxlen
+        var i = 0
+        while i < dcopy
+            buf[i] = reply[3 + i]
+            i += 1
+        dlen
+
+
+close(fd). 0 on success.
+
+    unix_close(fd: int) -> int
+        val port = unix_get_port()
+        if port < 0
+            return -1
+        var msg: [2]byte
+        msg[0] = byte(UNIX_CMD_CLOSE)
+        msg[1] = byte(fd & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 2, reply, 1)
+        if r < 0
+            return -1
+        unix_status(reply[0])
