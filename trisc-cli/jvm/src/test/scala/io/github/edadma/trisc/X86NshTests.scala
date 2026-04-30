@@ -620,6 +620,34 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_frag: expected"
   }
 
+  "ip: ICMP-driven PMTU cache update (RFC 1191)" in {
+    // Second half of Option B Session 2: handle_icmp_dest_unreach
+    // recognizes ICMP type 3 code 4 ("Fragmentation Needed") and
+    // pulls the Next-Hop MTU out of the ICMP body to populate the
+    // per-destination PMTU cache. test_pmtuicmp drives the parser
+    // via INET_CMD_PMTU_DISCOVER_INJECT (synthesizes a real ICMP
+    // type-3 code-4 frame, feeds through the dest-unreach
+    // consumer), then reads back inet_pmtu_get to assert the
+    // cache learned the value.
+    val output = qemu.command("test_pmtuicmp")
+    output should include("pmtuicmp: ok")
+    output should not include "pmtuicmp: bad"
+  }
+
+  "ip: TCP MSS clamps to PMTU cache (RFC 1191 §5)" in {
+    // Closing the loop: TCP's drain emits segments sized against
+    // inet_pmtu_get(remote_ip), so a Frag-Needed ICMP that says
+    // "the path to that peer holds 350 bytes" forces the next
+    // segments to MSS = 350 - 20(IP) - 40(TCP worst-case) = 290
+    // bytes. test_pmtutcp opens a 127.0.0.1 loopback TCP, injects
+    // ICMP code-4 with MTU=350, sends 900 bytes, and asserts the
+    // data-segment emit count rose by ≥3 — without the clamp the
+    // existing TCP_MAX_SEG=480 ceiling would yield only 2.
+    val output = qemu.command("test_pmtutcp")
+    output should include("pmtutcp: ok")
+    output should not include "pmtutcp: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

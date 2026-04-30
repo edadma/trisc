@@ -45,7 +45,8 @@ process B's sockets.
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet,
         ETHERTYPE_IPV4, ETHERTYPE_ARP, ARP_OP_REQUEST, ARP_OP_REPLY,
         IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
-        ICMP_DEST_UNREACH, pkt_read_u16, pkt_match_ipv4, net_checksum}
+        ICMP_DEST_UNREACH, ICMP_CODE_FRAG_NEEDED,
+        pkt_read_u16, pkt_match_ipv4, net_checksum}
 
 
 Protocol command codes (byte value of buf[0]).
@@ -101,6 +102,8 @@ Protocol command codes (byte value of buf[0]).
     const INET_CMD_TCP_BLACKHOLE_ACKS_TEST = 53
     const INET_CMD_PMTU_INJECT_TEST    = 54
     const INET_CMD_FRAG_EGRESS_COUNT   = 55
+    const INET_CMD_PMTU_DISCOVER_INJECT = 56
+    const INET_CMD_TCP_DATA_SEG_COUNT  = 57
     const INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -2270,7 +2273,7 @@ Dropping on no-match matches standard UDP semantics.
             inet_enqueue(target, src_ip, src_port, data, payload_len)
 
 
-### Inbound ICMP Destination Unreachable → connected UDP socket
+### Inbound ICMP Destination Unreachable → connected UDP socket / PMTU update
 
 Pairs with `inet_send_icmp_port_unreach`: when a peer reports our
 UDP datagram couldn't be delivered, surface the error on the
@@ -2279,9 +2282,16 @@ frame's IP header + first 8 bytes of L4 in the ICMP body, so we
 parse the inner UDP header to find our local source port and look
 the socket up by it.
 
-We only handle UDP for now — the inner-protocol check skips TCP
-and others. TCP error consumption (RST-on-ICMP) is its own piece
-of work; the UDP path is what unblocks the typical
+Code 4 (RFC 1191 "Fragmentation Needed and DF Set") is handled
+separately ahead of the proto-specific path: the ICMP body's
+Next-Hop MTU goes into the per-destination PMTU cache so the
+next emit to the inner-IP destination shrinks accordingly. This
+applies whether the offending datagram was UDP, TCP, or ICMP —
+PMTU is a routing fact, not a protocol fact.
+
+We only handle UDP for the ECONNREFUSED path — the inner-protocol
+check skips TCP and others. TCP error consumption (RST-on-ICMP)
+is its own piece of work; the UDP path is what unblocks the typical
 `connect()` / `sendto()` / `recvfrom()` loop returning
 `-ECONNREFUSED` instead of timing out.
 
@@ -2299,6 +2309,24 @@ port may flag the wrong one, but that's bounded scope.
             return
         val inner_ihl = (int(frame[body_off]) & 0x0f) * 4
         if inner_ihl < 20
+            return
+        val icmp_code = int(frame[icmp_off + 1]) & 0xff
+        if icmp_code == ICMP_CODE_FRAG_NEEDED
+            // RFC 1191 §3 wire format: Next-Hop MTU lives in the
+            // last 2 bytes of the ICMP header (icmp_off+6..7).
+            // Older RFC 792 routers leave it 0; in that case we
+            // skip the cache update — RFC 1191 §5 says the host
+            // should fall back to a guessed plateau (576 etc.)
+            // but slix doesn't, since the only entry point to
+            // populate the cache today is this path.
+            val mtu = pkt_read_u16(frame, icmp_off + 6)
+            if mtu > 0
+                val inner_dst = ipv4(
+                    int(frame[body_off + 16]) & 0xff,
+                    int(frame[body_off + 17]) & 0xff,
+                    int(frame[body_off + 18]) & 0xff,
+                    int(frame[body_off + 19]) & 0xff)
+                inet_pmtu_set(inner_dst, mtu)
             return
         val inner_proto = int(frame[body_off + 9]) & 0xff
         if inner_proto != IP_PROTO_UDP
@@ -2406,6 +2434,96 @@ Wire layouts:
 
     inet_handle_frag_egress_count(sender: int, _buf: *byte)
         val v = inet_frag_egress_count
+        var reply: [5]byte
+        reply[0] = 0
+        reply[1] = byte((v >> 24) & 0xff)
+        reply[2] = byte((v >> 16) & 0xff)
+        reply[3] = byte((v >>  8) & 0xff)
+        reply[4] = byte( v        & 0xff)
+        ipc_reply(sender, reply, 5)
+
+
+### Test-only: drive ICMP-Frag-Needed through the real parser
+
+`INET_CMD_PMTU_INJECT_TEST` writes the cache directly; this
+companion command instead exercises the *real* RFC 1191 path.
+It synthesizes an outer ICMP type-3 code-4 frame whose body
+carries an inner IPv4 header with `dst = (a, b, c, d)`, then
+hands the frame to `inet_handle_icmp_dest_unreach`. After the
+parser runs the reply also reports the post-update cache value
+so the test can assert the real path populated the cache.
+
+The synthesized inner IP destination is what we want to match
+against — that's the address WE sent to (so for our cache
+that's the *destination* of our sends). The inner-IP source
+field is left zero; the parser doesn't consult it for this
+code path.
+
+Wire layout:
+- request: cmd(1) + dst_a(1) + dst_b(1) + dst_c(1) + dst_d(1)
+           + mtu_be(2) = 7 bytes.
+- reply:   status(1) + cached_mtu_be(2) = 3 bytes.
+           status==0 always; cached_mtu reflects the cache
+           after the synthesized parse runs.
+
+    inet_handle_pmtu_discover_inject(sender: int, buf: *byte)
+        val a = int(buf[1]) & 0xff
+        val b = int(buf[2]) & 0xff
+        val c = int(buf[3]) & 0xff
+        val d = int(buf[4]) & 0xff
+        val mtu = pkt_read_u16(buf, 5)
+        // Layout (offset / size):
+        //   0  / 14  ETH placeholder
+        //  14 / 20  IPv4 outer (only IHL nibble matters)
+        //  34 / 8   ICMP outer (type/code/checksum/unused/MTU)
+        //  42 / 20  inner IPv4 (proto + dst at +16..+19)
+        //  62 / 8   inner UDP   (so the rfc-792 §3.4 length is met)
+        // = 70 bytes total.
+        var frame: [70]byte
+        var k = 0
+        while k < 70
+            frame[k] = byte(0)
+            k += 1
+        frame[14] = byte(0x45)               // ver=4, IHL=5
+        frame[34] = byte(ICMP_DEST_UNREACH)
+        frame[35] = byte(ICMP_CODE_FRAG_NEEDED)
+        // ICMP body: bytes 4-5 unused (0), 6-7 = Next-Hop MTU.
+        frame[34 + 6] = byte((mtu >> 8) & 0xff)
+        frame[34 + 7] = byte(mtu & 0xff)
+        frame[42] = byte(0x45)               // inner ver=4, IHL=5
+        frame[42 + 9] = byte(IP_PROTO_UDP)   // inner protocol
+        // Inner IP destination = the address we want the cache
+        // entry against (RFC 792 §3.4: the body holds the IP
+        // header of the offending datagram, whose dst is what
+        // we sent to).
+        frame[42 + 16] = byte(a)
+        frame[42 + 17] = byte(b)
+        frame[42 + 18] = byte(c)
+        frame[42 + 19] = byte(d)
+        inet_handle_icmp_dest_unreach(frame, 70, 34)
+        val cached = inet_pmtu_get(ipv4(a, b, c, d))
+        var reply: [3]byte
+        reply[0] = 0
+        reply[1] = byte((cached >> 8) & 0xff)
+        reply[2] = byte(cached & 0xff)
+        ipc_reply(sender, reply, 3)
+
+
+### Test-only: read TCP data-segment emit counter
+
+Returns the running count of segments that `inet_tcp_emit`
+sent with non-zero `payload_len`. A test takes the delta
+across a `send()` and divides the byte count by the delta to
+sanity-check the effective MSS, or asserts the count meets a
+lower bound (`bytes / pmtu_cap`) to confirm the PMTU clamp
+forced a finer-grained drain.
+
+Wire layout:
+- request: cmd(1) = 1 byte
+- reply:   status(1) + count_be32(4) = 5 bytes
+
+    inet_handle_tcp_data_seg_count(sender: int, _buf: *byte)
+        val v = inet_tcp_data_seg_emit_count
         var reply: [5]byte
         reply[0] = 0
         reply[1] = byte((v >> 24) & 0xff)
@@ -2731,6 +2849,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_TCP_BLACKHOLE_ACKS_TEST -> inet_handle_tcp_blackhole_acks_test(sender, buf)
                     INET_CMD_PMTU_INJECT_TEST -> inet_handle_pmtu_inject_test(sender, buf)
                     INET_CMD_FRAG_EGRESS_COUNT -> inet_handle_frag_egress_count(sender, buf)
+                    INET_CMD_PMTU_DISCOVER_INJECT -> inet_handle_pmtu_discover_inject(sender, buf)
+                    INET_CMD_TCP_DATA_SEG_COUNT -> inet_handle_tcp_data_seg_count(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte

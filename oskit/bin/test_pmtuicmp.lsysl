@@ -1,0 +1,122 @@
+test_pmtuicmp — RFC 1191 ICMP-driven PMTU cache update
+=========================================================
+
+Second half of Option B's discovery half. Drives a real
+ICMP type 3 code 4 ("Fragmentation Needed") frame through
+`inet_handle_icmp_dest_unreach` via the test injector, then
+reads the post-update PMTU cache to assert the parser pulled
+the Next-Hop MTU out of the ICMP body and called
+`inet_pmtu_set` for the inner-IP destination.
+
+This pairs with `test_frag` (Session 1): the cache is now
+populatable from the wire, not just from the test-only
+`pmtu_inject_test` setter.
+
+Pass criterion: prints `pmtuicmp: ok`.
+
+    module oskit.bin.test_pmtuicmp
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{pmtu_discover_inject}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int, got: int)
+        puts("pmtuicmp: bad ")
+        print_idec(code)
+        puts(" got=")
+        print_idec(got)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+
+Inject a synthesized ICMP type-3 code-4 telling us the path
+to 10.0.2.99 has an MTU of 600. The cache should latch that
+exact value (above INET_PMTU_MIN=296, below INET_LINK_MTU=1500
+so no clamp).
+
+        val cached1 = pmtu_discover_inject(10, 0, 2, 99, 600)
+        if cached1 < 0
+            fail(1, cached1)
+            return
+        if cached1 != 600
+            fail(2, cached1)
+            return
+
+A second smaller value should overwrite the entry (RFC 1191
+§3 — PMTUD lowers monotonically per black-hole-avoidance, but
+slix's cache is a plain key-value map; that's fine here since
+in real life a router only sends a smaller value than a prior
+fragment-needed reply, never a larger one. The test asserts
+overwrite either direction.)
+
+        val cached2 = pmtu_discover_inject(10, 0, 2, 99, 400)
+        if cached2 < 0
+            fail(3, cached2)
+            return
+        if cached2 != 400
+            fail(4, cached2)
+            return
+
+A different destination gets its own slot. This catches a
+bug where the lookup ignores dst_ip and clobbers a single
+shared entry.
+
+        val cached3 = pmtu_discover_inject(192, 168, 99, 1, 800)
+        if cached3 < 0
+            fail(5, cached3)
+            return
+        if cached3 != 800
+            fail(6, cached3)
+            return
+
+The first destination's entry must still hold its 400-byte
+value — proves the cache is keyed by IP, not first-write-wins.
+
+        val cached4 = pmtu_discover_inject(10, 0, 2, 99, 0)
+        if cached4 < 0
+            fail(7, cached4)
+            return
+        // mtu=0 in the inject means "wire format with zero MTU"
+        // — the parser bails before calling inet_pmtu_set per the
+        // RFC 792 fallback path, so the prior 400-byte entry
+        // survives.
+        if cached4 != 400
+            fail(8, cached4)
+            return
+
+A value below INET_PMTU_MIN clamps to the floor.
+
+        val cached5 = pmtu_discover_inject(10, 0, 2, 99, 100)
+        if cached5 < 0
+            fail(9, cached5)
+            return
+        if cached5 != 296
+            fail(10, cached5)
+            return
+
+A value above INET_LINK_MTU clamps down.
+
+        val cached6 = pmtu_discover_inject(10, 0, 2, 99, 9000)
+        if cached6 < 0
+            fail(11, cached6)
+            return
+        if cached6 != 1500
+            fail(12, cached6)
+            return
+
+        puts("pmtuicmp: ok\n")
+        exit()

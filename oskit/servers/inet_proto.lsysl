@@ -2695,6 +2695,42 @@ blocks — so at most `TCP_SACK_BOARD + 1` passes.
         c
 
 
+PMTU-driven effective MSS (RFC 1191 §5). The send-side payload
+cap is `pmtu - IP(20) - TCP(<=40 with options)`. Slix's drain
+path picks the segment size before knowing the exact option
+shape — Timestamps + SACK can grow the header to 36 or 40
+bytes — so we conservatively reserve 40 bytes for the TCP
+header. Over-conservative just means slightly smaller
+segments on the wire, never a frame-too-big rejection inside
+`inet_tcp_emit`. Loopback destinations hit the same lookup;
+the default-MTU miss returns 1500 so the existing TCP_MAX_SEG
+ceiling continues to dominate when the cache hasn't learned
+anything.
+
+A floor of 1 byte prevents a degenerate cap from stalling the
+connection — if a peer reports an MTU below the architectural
+minimum the cache clamps it to `INET_PMTU_MIN=296` anyway, so
+this floor is belt-and-suspenders.
+
+    inet_tcp_eff_mss(s: int) -> int
+        val pmtu = inet_pmtu_get(tcp_sockets[s].remote_ip)
+        var cap = pmtu - 20 - 40
+        if cap < 1
+            cap = 1
+        cap
+
+`inet_tcp_data_seg_emit_count` ticks whenever `inet_tcp_emit`
+sends a segment carrying user payload (any non-zero
+`payload_len`). Pure ACKs, retransmits with payload, SYN/FIN
+without data, and the loopback fastpath all pass through —
+the counter records data delivery as observed at the emit
+seam, not the wire. Test scaffolding reads this counter
+across a `send()` to assert the segment count matches what a
+PMTU-clamped path would produce.
+
+    var inet_tcp_data_seg_emit_count: int = 0
+
+
 Build a single Ethernet + IPv4 + TCP frame for socket `s`. Payload
 is `payload_len` bytes of send_buf starting at `payload_seq`
 (relative to snd_una).
@@ -2801,6 +2837,8 @@ TCP options attached:
         var seg_len = hdr_bytes + payload_len
         if seg_len > 1460
             return -1
+        if payload_len > 0
+            inet_tcp_data_seg_emit_count += 1
         val fidx = inet_frame_alloc()
         val frame = inet_frame_buf(fidx)
         val total_len = 14 + 20 + seg_len
@@ -4087,6 +4125,9 @@ stay in-flight and drain handles window accounting correctly.
             var retx_len = avail
             if retx_len > TCP_MAX_SEG
                 retx_len = TCP_MAX_SEG
+            val pmtu_cap = inet_tcp_eff_mss(s)
+            if retx_len > pmtu_cap
+                retx_len = pmtu_cap
             if retx_len > 0
                 inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
                     retx_seq, retx_seq, retx_len)
@@ -4117,6 +4158,9 @@ plugged promptly instead of waiting for RTO.
         var retx_len = avail
         if retx_len > TCP_MAX_SEG
             retx_len = TCP_MAX_SEG
+        val pmtu_cap = inet_tcp_eff_mss(s)
+        if retx_len > pmtu_cap
+            retx_len = pmtu_cap
         if retx_len <= 0
             return
         inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
@@ -4164,6 +4208,9 @@ enough for coarse RTT tracking.
             var seg_size = unsent
             if seg_size > TCP_MAX_SEG
                 seg_size = TCP_MAX_SEG
+            val pmtu_cap = inet_tcp_eff_mss(s)
+            if seg_size > pmtu_cap
+                seg_size = pmtu_cap
             if seg_size > room
                 seg_size = room
             val seq = tcp_sockets[s].snd_nxt
@@ -4996,6 +5043,9 @@ socket for retransmit and TIME_WAIT deadlines.
                 var retx_len = tcp_sockets[s].send_len
                 if retx_len > TCP_MAX_SEG
                     retx_len = TCP_MAX_SEG
+                val pmtu_cap = inet_tcp_eff_mss(s)
+                if retx_len > pmtu_cap
+                    retx_len = pmtu_cap
                 inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
                     tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
                     retx_len)

@@ -58,6 +58,8 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_FRAME_POOL_STATS    = 51
     val INET_CMD_PMTU_INJECT_TEST    = 54
     val INET_CMD_FRAG_EGRESS_COUNT   = 55
+    val INET_CMD_PMTU_DISCOVER_INJECT = 56
+    val INET_CMD_TCP_DATA_SEG_COUNT  = 57
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val ARP_PROBE_OP_START    = 0
@@ -936,6 +938,61 @@ non-negative int.
             return -1
         var msg: [1]byte
         msg[0] = byte(INET_CMD_FRAG_EGRESS_COUNT)
+        var reply: [5]byte
+        if ipc_send(port, msg, 1, reply, 5) < 0
+            return -1
+        if reply[0] != 0
+            return -1
+        val v0 = (int(reply[1]) & 0xff) << 24
+        val v1 = (int(reply[2]) & 0xff) << 16
+        val v2 = (int(reply[3]) & 0xff) <<  8
+        val v3 =  int(reply[4]) & 0xff
+        v0 | v1 | v2 | v3
+
+
+### pmtu_discover_inject (test-only)
+
+Drives `inet_handle_icmp_dest_unreach` with a synthesized ICMP
+type-3 code-4 frame so the *real* RFC 1191 parser gets to do
+the cache update. Returns the post-update cached MTU for the
+target destination (so the test can assert the parser ran),
+or -1 on IPC error.
+
+    pmtu_discover_inject(a: int, b: int, c: int, d: int, mtu: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [7]byte
+        msg[0] = byte(INET_CMD_PMTU_DISCOVER_INJECT)
+        msg[1] = byte(a & 0xff)
+        msg[2] = byte(b & 0xff)
+        msg[3] = byte(c & 0xff)
+        msg[4] = byte(d & 0xff)
+        msg[5] = byte((mtu >> 8) & 0xff)
+        msg[6] = byte(mtu & 0xff)
+        var reply: [3]byte
+        if ipc_send(port, msg, 7, reply, 3) < 0
+            return -1
+        if reply[0] != 0
+            return -1
+        ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
+
+
+### tcp_data_seg_emit_count (test-only)
+
+Returns the running count of TCP segments emitted with non-zero
+payload (`inet_tcp_emit` increments on every data-bearing
+segment). A test snapshots before / after a `send()` to verify
+the PMTU clamp made the drain finer-grained.
+
+Returns -1 on IPC error.
+
+    tcp_data_seg_emit_count() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_TCP_DATA_SEG_COUNT)
         var reply: [5]byte
         if ipc_send(port, msg, 1, reply, 5) < 0
             return -1
