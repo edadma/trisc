@@ -2234,11 +2234,12 @@ nfds(1) + slots(F) + dlen_be(2) + data(D).
 
 Allocate posix_fds for each transferred slot. Linux's
 SCM_RIGHTS leaves the receiver responsible for closing
-each new fd. If posix_fd_alloc fails (EMFILE), close the
-unix-server slot directly via UNIX_CMD_CLOSE so we don't
-leak — but Session 2 doesn't bother with the close-on-EMFILE
-edge: the slot stays alive (we own it) and the new fd is
-omitted from the cmsg. Future cleanup via process exit.
+each new fd. If `posix_fd_alloc` fails (EMFILE) for a
+particular slot, immediately issue `UNIX_CMD_CLOSE` for
+that slot so the receiver's owners-ring co-ownership
+(added by the server during RECVMSG) is released. If the
+sender had already closed their handle, this frees the
+slot — no leak across PID exit.
 
         var new_fds: [4]int
         var n_new = 0
@@ -2251,6 +2252,8 @@ omitted from the cmsg. Future cleanup via process exit.
                 posix_fd_table[pid2 * POSIX_FDS_PER_PROC + pfd].pos = i64(POSIX_SOCK_DGRAM)
                 new_fds[n_new] = pfd
                 n_new += 1
+            else
+                shim_unix_close(sidx)
             nf += 1
 
 Scatter data into the iovec.

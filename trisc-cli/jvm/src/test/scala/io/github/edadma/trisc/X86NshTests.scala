@@ -720,6 +720,18 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "unixapth: bad"
   }
 
+  "unix: SCM_RIGHTS recvmsg cleans up unix-server slot on EMFILE" in {
+    // Fills posix_fd_table via eventfd2 so the cmsg-transferred slot
+    // can't get a new posix_fd. The shim now issues UNIX_CMD_CLOSE
+    // for the slot — combined with the original sender's close, the
+    // unix-server slot is fully released and its bound_path cleared.
+    // Verified by re-binding the same path on a fresh socket: would
+    // fail with EADDRINUSE if the leak fix were missing.
+    val output = qemu.command("test_unixemf")
+    output should include("unixemf: ok")
+    output should not include "unixemf: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates
