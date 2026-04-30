@@ -204,6 +204,10 @@ case class NewArrayAST(size: ExpressionAST, elemType: TypeAST) extends Expressio
 case class StringLitExprAST(value: String) extends ExpressionAST
 case class ClosureParamAST(name: String, typ: Option[TypeAST])
 case class ClosureAST(params: List[ClosureParamAST], body: FunBodyAST) extends ExpressionAST
+// `_` placeholder in expression position — desugars at parse time to a fresh
+// parameter of an enclosing anonymous function. See `expandPlaceholders` in
+// the parser for the boundary rules. This node never reaches the analyzer.
+case class UnderscorePlaceholderAST() extends ExpressionAST
 // Type attribute: `T::First`, `T::Last`, `T::Range`, `T::Image(x)`, `T::Pos(x)`, `T::Val(n)`.
 // `arg` is set only for attributes that take one (Image, Pos, Val). `Range` is only valid
 // syntactically inside `for i in T::Range` and is desugared at parse time; it is never analyzed.

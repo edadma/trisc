@@ -1613,6 +1613,69 @@ Non-escaping closures are more efficient (no heap allocation) but the compiler t
 
 The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention (LLVM passes it as the first hidden parameter `i8* %env`).
 
+### Underscore Placeholder Syntax
+
+`_` in expression position is a **placeholder** that desugars to a fresh
+parameter of an enclosing anonymous function. Each occurrence introduces one
+parameter, in lexical (left-to-right) order:
+
+```sysl
+xs.map(_ + 1)            // xs.map(x -> x + 1)
+xs.filter(_ > 0)         // xs.filter(x -> x > 0)
+xs.sortBy(_.timestamp)   // xs.sortBy(x -> x.timestamp)
+items.fold(_ + _)        // items.fold((a, b) -> a + b)
+```
+
+The lambda body is the **smallest enclosing expression** that contains the
+placeholder(s). Parens and call-arg boundaries delimit the body; binary/unary
+operators, field access, indexing, and method-receiver positions do not — so
+`_` "bubbles up" through them until it hits a boundary. Boundaries:
+
+- **Parens** explicitly delimit: `(_ + 1) * 2` is `(x -> x + 1) * 2`, not
+  `x -> (x + 1) * 2`.
+- **Function-call arguments**: an arg expression that *contains* `_` (but is
+  not bare `_`) wraps at the arg position — `xs.map(_ + 1)` is
+  `xs.map(x -> x + 1)`.
+- **Statement-level expressions** (var/val init, return value, expression
+  statements): `var f: (int) -> int = _ + 1` binds `f` to `x -> x + 1`.
+
+**Partial application — bare `_` at an argument position.** When a `_` is
+*directly* a call argument (with no surrounding operators), it is absorbed by
+the **enclosing call**, making the whole call the lambda body:
+
+```sysl
+xs.map(f(_, 0))          // xs.map(x -> f(x, 0))
+xs.map(f(0, _))          // xs.map(x -> f(0, x))
+xs.map(f(_, _))          // xs.map((x, y) -> f(x, y))
+```
+
+This is the canonical "wildcard-arg" partial-application form.
+
+**Type inference.** A placeholder lambda is type-checked the same as any other
+closure — its parameters infer from the expected type of the surrounding
+context (e.g., the function-typed parameter that consumes it). A
+placeholder-lambda *without* an expected type (`var f = _ + 1` without an
+ascription) cannot infer the parameter's type and must be annotated:
+
+```sysl
+var f: (int) -> int = _ + 1   // OK — expected type drives inference
+var f = _ + 1                 // error: cannot infer placeholder's type
+```
+
+**Disambiguation with existing `_` uses.** The placeholder meaning is *purely
+expression-positional*. The other three positions where `_` appears keep their
+existing meaning:
+
+| Position                         | Meaning              |
+|----------------------------------|----------------------|
+| LHS of `var _ = ...` / `val _`   | discard binding      |
+| Destructuring binder `(_, b) =`  | discard              |
+| `match` arm pattern `_ ->`       | wildcard pattern     |
+| Expression position (`_ + 1`)    | placeholder (lambda) |
+
+The four positions are syntactically disjoint, so there is no parser
+ambiguity.
+
 ### Inner `def` — Recursive Named Local Closures
 
 Inside a function body, `def name(params) -> ret body` declares a **recursively

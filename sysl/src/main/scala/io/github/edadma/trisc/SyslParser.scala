@@ -398,9 +398,13 @@ class SyslParser extends StandardTokenParsers {
 
   // Function call argument: `name = expr` (named) or `expr` (positional).
   // The `ident ~ "="` lookahead must succeed only when both tokens are present.
+  // Bare `_` is left as a placeholder so the enclosing call can absorb it
+  // (partial application: `f(_, 0)` → `x -> f(x, 0)`); other exprs containing
+  // `_` are wrapped here so the arg itself becomes the lambda body
+  // (`f(_+1, 0)` → `f(x -> x+1, 0)`).
   lazy val callArg: Parser[ExpressionAST] =
-    ident ~ ("=" ~> expr) ^^ { case name ~ value => NamedArgAST(name, value) } |
-      expr
+    ident ~ ("=" ~> expr) ^^ { case name ~ value => NamedArgAST(name, wrapPlaceholders(value)) } |
+      expr ^^ wrapPlaceholders
 
   // Optional type argument list for generic type references: [T], [T, U], or absent
   lazy val typeArgList: Parser[List[TypeAST]] =
@@ -487,7 +491,7 @@ class SyslParser extends StandardTokenParsers {
     "assume" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => AssumeStmtAST(e, msg) }
 
   lazy val stmt: Parser[StmtAST] =
-    ghostVarStmt | innerFunStmt | asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    ghostVarStmt | innerFunStmt | asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ (e => ExprStmtAST(wrapPlaceholders(e)))
 
   /** `def name(params) -> ret body` (or `def name -> ret body` zero-arg) at statement
    *  position — declares a recursively-callable named local closure. The analyzer lowers
@@ -749,8 +753,82 @@ class SyslParser extends StandardTokenParsers {
   // Comma-separated expressions form a tuple at statement level (like Go/Python)
   // Inside f(args) and [elems], plain expr is used so commas stay as separators
   lazy val tupleExpr: Parser[ExpressionAST] =
-    expr ~ rep1("," ~> expr) ^^ { case first ~ rest => TupleLitAST(first :: rest) } |
-      expr
+    expr ~ rep1("," ~> expr) ^^ { case first ~ rest => TupleLitAST((first :: rest).map(wrapPlaceholders)) } |
+      expr ^^ wrapPlaceholders
+
+  // ----- Underscore placeholder expansion (Scala-style anonymous functions) -----
+  //
+  // `_` in expression position is parsed as `UnderscorePlaceholderAST` and then
+  // desugared into a `ClosureAST` at the smallest enclosing "boundary" — see
+  // `wrapPlaceholders` below. The boundary is the smallest enclosing expression
+  // that does NOT propagate `_` further upward; specifically:
+  //
+  //   - parenthesized expression (`(_ + 1)` is `x -> x + 1`)
+  //   - call / method-call / new-call argument that is not bare `_` (`f(_+1)`
+  //     wraps the arg as `f(x -> x+1)`; `f(_)` instead absorbs the bare `_`
+  //     into the call → `x -> f(x)` for partial application)
+  //   - statement-level expression (`var f = _ + 1` is `var f = x -> x + 1`)
+  //   - return value, array literal element, tuple literal element
+  //
+  // Within a single boundary, `_` "bubbles up" through binary/unary operators,
+  // field/index access, and the receiver of a method/indirect call — these
+  // refuse to absorb. Bare `_` at a call-arg position is handled separately
+  // via `absorbBarePlaceholdersInCall` (the call itself becomes the lambda).
+
+  /** Walk `e`, replacing each direct `UnderscorePlaceholderAST` with a fresh
+   *  `VarRefAST`. Recurses through "non-absorbing" expression shapes; stops at
+   *  closures, call-arg lists (already processed), and statement-shaped exprs.
+   *  Returns the substituted expression and the list of fresh names in
+   *  left-to-right order. */
+  private def substitutePlaceholders(e: ExpressionAST): (ExpressionAST, List[String]) =
+    val names = scala.collection.mutable.ListBuffer.empty[String]
+    def fresh(): String =
+      val n = s"_ph${names.size}"
+      names += n
+      n
+    def go(x: ExpressionAST): ExpressionAST = x match
+      case _: UnderscorePlaceholderAST => VarRefAST(fresh())
+      case BinaryAST(l, op, r)         => BinaryAST(go(l), op, go(r))
+      case UnaryAST(op, x2)            => UnaryAST(op, go(x2))
+      case CallAST(name, args)         => CallAST(name, args)
+      case MethodCallAST(obj, m, args) => MethodCallAST(go(obj), m, args)
+      case IndirectCallAST(c, args)    => IndirectCallAST(go(c), args)
+      case FieldAccessAST(obj, f)      => FieldAccessAST(go(obj), f)
+      case IndexAST(o, i)              => IndexAST(go(o), go(i))
+      case AddrOfFieldAST(obj, f)      => AddrOfFieldAST(go(obj), f)
+      case AddrOfIndexAST(o, i)        => AddrOfIndexAST(go(o), go(i))
+      case DerefAST(e2)                => DerefAST(go(e2))
+      case CastAST(t, e2)              => CastAST(t, go(e2))
+      case SliceExprAST(a, lo, hi)     => SliceExprAST(go(a), lo.map(go), hi.map(go))
+      case TryAST(e2)                  => TryAST(go(e2))
+      case other                       => other
+    val transformed = go(e)
+    (transformed, names.toList)
+
+  /** Wrap `e` in a `ClosureAST` if it contains `_` placeholders to be bound
+   *  here; otherwise return `e` unchanged. Bare `_` is left alone — that's
+   *  reserved for outer call-argument absorption (partial application). */
+  private def wrapPlaceholders(e: ExpressionAST): ExpressionAST = e match
+    case _: UnderscorePlaceholderAST => e
+    case _ =>
+      val (sub, names) = substitutePlaceholders(e)
+      if names.isEmpty then e
+      else ClosureAST(names.map(n => ClosureParamAST(n, None)), ExprBodyAST(sub))
+
+  /** If `args` contains any bare `_` placeholders, wrap the whole call in a
+   *  ClosureAST (partial application). `rebuild` reconstructs the call AST
+   *  from the substituted arg list. Otherwise the call is returned as-is. */
+  private def absorbBarePlaceholdersInCall(args: List[ExpressionAST], rebuild: List[ExpressionAST] => ExpressionAST): ExpressionAST =
+    val names = scala.collection.mutable.ListBuffer.empty[String]
+    val newArgs = args.map {
+      case _: UnderscorePlaceholderAST =>
+        val n = s"_ph${names.size}"
+        names += n
+        VarRefAST(n)
+      case other => other
+    }
+    if names.isEmpty then rebuild(args)
+    else ClosureAST(names.toList.map(n => ClosureParamAST(n, None)), ExprBodyAST(rebuild(newArgs)))
 
   // --- Expressions ---
 
@@ -851,12 +929,12 @@ class SyslParser extends StandardTokenParsers {
   lazy val inlineStmt: Parser[StmtAST] =
     breakStmt | continueStmt | returnStmt | derefAssignStmt |
       ident ~ lvalueChain ~ compoundOp ~ expr ^^ { case name ~ chain ~ op ~ value =>
-        buildCompoundAssign(name, chain, op.init, value)
+        buildCompoundAssign(name, chain, op.init, wrapPlaceholders(value))
       } |
       ident ~ lvalueChain ~ ("=" ~> expr) ^^ { case name ~ chain ~ value =>
-        buildAssign(name, chain, value)
+        buildAssign(name, chain, wrapPlaceholders(value))
       } |
-      expr ^^ ExprStmtAST.apply
+      expr ^^ (e => ExprStmtAST(wrapPlaceholders(e)))
 
   // --- Precedence climbing ---
   //
@@ -1016,12 +1094,12 @@ class SyslParser extends StandardTokenParsers {
         case base ~ ops => ops.foldLeft(base) {
           case (e, (0, idx, _, _)) => IndexAST(e, idx)
           case (e, (1, _, field, _)) => FieldAccessAST(e, field)
-          case (e, (2, _, method, args)) => MethodCallAST(e, method, args)
+          case (e, (2, _, method, args)) => absorbBarePlaceholdersInCall(args, a => MethodCallAST(e, method, a))
           case (e, (3, _, _, args)) =>
             // Indirect call: expr(args) — e is a function pointer
             e match
-              case VarRefAST(name) => CallAST(name, args)
-              case _ => IndirectCallAST(e, args)
+              case VarRefAST(name) => absorbBarePlaceholdersInCall(args, a => CallAST(name, a))
+              case _               => absorbBarePlaceholdersInCall(args, a => IndirectCallAST(e, a))
           case (e, (4, _, _, args)) =>
             SliceExprAST(e, Option(args(0)), Option(args(1)))
           case (e, (5, _, _, _)) => TryAST(e)
@@ -1064,14 +1142,20 @@ class SyslParser extends StandardTokenParsers {
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
-      "[" ~> repsep(expr, ",") <~ "]" ^^ ArrayLitAST.apply |
+      "[" ~> repsep(expr, ",") <~ "]" ^^ (es => ArrayLitAST(es.map(wrapPlaceholders))) |
       "asm" ~> "(" ~> stringLit <~ ")" ^^ AsmExprAST.apply |
       "sizeof" ~> "(" ~> sizeofArg <~ ")" |
-      "new" ~> "[" ~> expr ~ ("]" ~> typeRef) ^^ { case size ~ elemType => NewArrayAST(size, elemType) } |
-      "new" ~> ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => NewExprAST(name, args) } |
-      "string" ~> "(" ~> rep1sep(expr, ",") <~ ")" ^^ { args => CallAST("string", args) } |
+      "new" ~> "[" ~> expr ~ ("]" ~> typeRef) ^^ { case size ~ elemType => NewArrayAST(wrapPlaceholders(size), elemType) } |
+      "new" ~> ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args =>
+        absorbBarePlaceholdersInCall(args, a => NewExprAST(name, a))
+      } |
+      "string" ~> "(" ~> rep1sep(callArg, ",") <~ ")" ^^ { args =>
+        absorbBarePlaceholdersInCall(args, a => CallAST("string", a))
+      } |
       cast |
-      ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
+      ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args =>
+        absorbBarePlaceholdersInCall(args, a => CallAST(name, a))
+      } |
       // Type attribute: Type::Attr or Type::Attr(arg). Must come before the bare
       // VarRefAST rule so the `::`-suffix is recognized.
       ident ~ ("::" ~> ident) ~ opt("(" ~> expr <~ ")") ^^ {
@@ -1079,9 +1163,10 @@ class SyslParser extends StandardTokenParsers {
       } |
       // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42)
       ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool") ^^ VarRefAST.apply |
+      "_" ^^^ UnderscorePlaceholderAST() |
       ident ^^ VarRefAST.apply |
       "(" ~> expr ~ rep("," ~> expr) <~ ")" ^^ {
-        case first ~ Nil => first  // (expr) — parenthesized expression
-        case first ~ rest => TupleLitAST(first :: rest)  // (expr, expr, ...) — tuple
+        case first ~ Nil  => wrapPlaceholders(first)  // (expr) — parens form a placeholder boundary
+        case first ~ rest => TupleLitAST((first :: rest).map(wrapPlaceholders))
       }
 }
