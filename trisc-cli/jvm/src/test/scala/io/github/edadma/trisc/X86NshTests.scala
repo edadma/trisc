@@ -732,6 +732,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "unixemf: bad"
   }
 
+  "unix: recvfrom drain releases SCM_RIGHTS queue-refs" in {
+    // sendmsg with cmsg fds enqueues; recvfrom drains the entry
+    // (silently dropping ancillary). unix_dg_dequeue_reply now
+    // releases each fd's queue-ref so the underlying slot can be
+    // orphan-freed when its last owner closes. Verified by
+    // re-binding the same path on a fresh socket post-close.
+    val output = qemu.command("test_unixsmrf")
+    output should include("unixsmrf: ok")
+    output should not include "unixsmrf: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

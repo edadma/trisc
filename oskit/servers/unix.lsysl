@@ -572,7 +572,27 @@ data(M). Returns total reply length.
         while i < dl
             out_reply[2 + sp + 2 + i] = unix_sockets[idx].dg_queue[slot].data[i]
             i += 1
+
+If this is a real drain (not a peek), release any cmsg fd
+queue-refs the entry was carrying and orphan-free their
+slots if they fall to zero owners + zero queue refs.
+recvfrom doesn't carry ancillary, so the fds are silently
+dropped — but their nrefs_in_queues counter MUST be
+decremented or the slots will leak. The recvmsg path does
+this in its own dispatch.
+
         if peek == 0
+            val nfds_drop = unix_sockets[idx].dg_queue[slot].nfds
+            var k = 0
+            while k < nfds_drop
+                val sidx = unix_sockets[idx].dg_queue[slot].fds[k]
+                unix_sockets[sidx].nrefs_in_queues -= 1
+                if unix_sockets[sidx].owners_count == 0
+                    if unix_sockets[sidx].nrefs_in_queues == 0
+                        if unix_sockets[sidx].in_use != 0
+                            unix_full_close(sidx)
+                k += 1
+            unix_sockets[idx].dg_queue[slot].nfds = 0
             unix_sockets[idx].dg_queue[slot].in_use = 0
             unix_sockets[idx].dg_head = (slot + 1) % UNIX_DG_QUEUE
             unix_sockets[idx].dg_count -= 1
@@ -1115,9 +1135,12 @@ slotted between the path and the payload:
 
 Limitations: DGRAM only (STREAM SCM_RIGHTS deferred);
 fd-passing is restricted to AF_UNIX socket fds (transferring
-TCP/UDP/file fds is a separate Session-3 concern); never
-short-circuits into a parked recvfrom — see the design note
-above SENDMSG in the wire-protocol header.
+TCP/UDP/file fds is a separate Session-3 concern). After
+the enqueue, if a thread is parked on `recvfrom` for the
+same target, this handler drains the head of queue and
+wakes it — the cmsg fds in that drained entry are silently
+dropped because recvfrom doesn't carry ancillary, but their
+queue-refs are released by `unix_dg_dequeue_reply`.
 
     unix_handle_sendmsg(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
@@ -1226,6 +1249,21 @@ its current owners close before the receiver drains.
         sreply[0] = 0
         unix_write_u16(&sreply[0], 1, nsent)
         ipc_reply(sender, sreply, 3)
+
+If a thread is parked on recvfrom for `target`, drain the
+head of queue (the entry we just enqueued) and reply to it.
+recvfrom doesn't carry ancillary, so any cmsg fds get
+dropped — but `unix_dg_dequeue_reply` releases their
+queue-refs so the slots aren't leaked. Without this wake,
+a parked recvfrom thread sleeps until the next sendto.
+
+        val parked = unix_sockets[target].pending_recv_tid
+        if parked >= 0
+            unix_sockets[target].pending_recv_tid = -1
+            val pmaxlen = unix_sockets[target].pending_recv_maxlen
+            var pr: [512]byte
+            val n = unix_dg_dequeue_reply(target, pmaxlen, 0, &pr[0])
+            ipc_reply(parked, &pr[0], n)
 
 
 ### RECVMSG handler (DGRAM, SCM_RIGHTS)
