@@ -160,6 +160,10 @@ case class CharLitAST(value: Char) extends ExpressionAST
 case class StringLitAST(value: String) extends ExpressionAST
 case class BoolLitAST(value: Boolean) extends ExpressionAST
 case class UnitLitAST() extends ExpressionAST  // `()` — sole inhabitant of `unit`
+// Wraps a parsed TypeAST so it can appear in expression position — used for
+// generic type-argument shapes that don't have an expression-syntax form
+// (e.g. `Parser[[]A]`, `Parser[[5]A]`). The analyzer unwraps via exprToTypeAST.
+case class TypeRefExprAST(typ: TypeAST) extends ExpressionAST
 case class VarRefAST(name: String) extends ExpressionAST
 case class BinaryAST(left: ExpressionAST, op: String, right: ExpressionAST) extends ExpressionAST
 case class UnaryAST(op: String, operand: ExpressionAST) extends ExpressionAST

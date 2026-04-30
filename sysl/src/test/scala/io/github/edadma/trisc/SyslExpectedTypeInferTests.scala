@@ -109,4 +109,55 @@ class SyslExpectedTypeInferTests extends SyslTestHelpers {
         |main() -> int = int(make())
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Bracket-shaped type args: []T, [N]T =====
+  //
+  // Inside a generic instantiation (e.g. `Parser[[]A]`) the bracket contents are
+  // parsed as an expression. Slice types and array types don't have an
+  // expression-syntax form, so the parser emits a TypeRefExprAST wrapper that
+  // exprToTypeAST unwraps. Without this, the parser fails at `]A]` because `[]`
+  // alone parses as an empty array literal, leaving `A` orphan.
+
+  "slice type as type-arg in generic-alias cast" in {
+    eval(
+      """type Box[T] = new int
+        |
+        |make() -> Box[[]int] = Box[[]int](42)
+        |
+        |main() -> int = int(make())
+        |""".stripMargin) shouldBe 42
+  }
+
+  "array type as type-arg in generic-alias cast" in {
+    eval(
+      """type Box[T] = new int
+        |
+        |make() -> Box[[5]int] = Box[[5]int](42)
+        |
+        |main() -> int = int(make())
+        |""".stripMargin) shouldBe 42
+  }
+
+  "slice type-arg inside parsyl-style Parser combinator" in {
+    eval(
+      """type Parser[A] = new (int) -> int
+        |
+        |rep_zero() -> Parser[[]int] = Parser[[]int]((x: int) -> x + 1)
+        |
+        |main() -> int
+        |    val p = rep_zero()
+        |    p(41)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "array literal still parses inside generic-call brackets when the typeRef alts don't apply" in {
+    // Sanity regression: `[1, 2, 3]` (a value, not a type) still works as the
+    // single index inside a regular indexing. The slice/array TYPE alternatives
+    // only fire when followed by a typeRef, so `[1, 2, 3]` doesn't trip them.
+    eval(
+      """main() -> int
+        |    var arr: [3]int = [10, 20, 30]
+        |    arr[1] + arr[2]
+        |""".stripMargin) shouldBe 50
+  }
 }

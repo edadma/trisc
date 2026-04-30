@@ -2754,9 +2754,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
   /** Convert an expression AST to a type AST (for explicit type args parsed as index expressions).
    *  The expression-position grammar parses generic type args as expressions, so this maps
-   *  the relevant shapes back to types: `A` (VarRef), `Parser[A]` (Index of VarRef), and
-   *  `(A, B)` (TupleLit) are the cases that arise in practice. */
+   *  the relevant shapes back to types: `A` (VarRef), `Parser[A]` (Index of VarRef),
+   *  `(A, B)` (TupleLit), and `[]A` / `[5]A` (TypeRefExprAST wrappers emitted by the parser
+   *  for slice / array type literals appearing in expression position). */
   private def exprToTypeAST(expr: ExpressionAST): TypeAST = expr match
+    case TypeRefExprAST(t) => t
     case VarRefAST(name) => NamedTypeAST(name)
     case TupleLitAST(elems) => TupleTypeAST(elems.map(exprToTypeAST))
     case IndexAST(VarRefAST(name), arg) => NamedTypeAST(name, List(exprToTypeAST(arg)))

@@ -1166,6 +1166,14 @@ class SyslParser extends StandardTokenParsers {
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
+      // Slice / array types as expressions — used inside [] for generic type args:
+      //   Parser[[]A](closure)  or  Parser[[5]int](closure)
+      // These must be tried BEFORE the array-literal rule so that `[]A` isn't read as
+      // the empty-array literal followed by a stray `A`.
+      "[" ~> "]" ~> typeRef ^^ (t => TypeRefExprAST(SliceTypeAST(t))) |
+      "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t =>
+        TypeRefExprAST(ArrayTypeAST(n.toInt, t))
+      } |
       "[" ~> repsep(expr, ",") <~ "]" ^^ (es => ArrayLitAST(es.map(wrapPlaceholders))) |
       "asm" ~> "(" ~> stringLit <~ ")" ^^ AsmExprAST.apply |
       "sizeof" ~> "(" ~> sizeofArg <~ ")" |
