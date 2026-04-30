@@ -1108,6 +1108,12 @@ class SyslParser extends StandardTokenParsers {
       primary ~ rep(
         ("[" ~> (
           ":" ~> opt(expr) ^^ (hi => (4, null, "", List(null, hi.orNull): List[ExpressionAST])) |
+          // Function type as a generic type-arg, only inside `[ ]` (so it doesn't
+          // collide with closures / match patterns / paren expressions elsewhere):
+          //   Parser[(int, int) -> int]   chainl1[A](op: Parser[(A, A) -> A])
+          // Tried BEFORE the expr alternative below — funcTypeRef requires `(... ) -> typeRef`
+          // and backtracks cleanly when the bracket holds an indexing expression instead.
+          funcTypeRef ^^ (t => (0, TypeRefExprAST(t), "", Nil: List[ExpressionAST])) |
           expr ~ opt(":" ~> opt(expr)) ^^ {
             case e ~ None => (0, e, "", Nil: List[ExpressionAST])
             case lo ~ Some(hi) => (4, null, "", List(lo, hi.orNull): List[ExpressionAST])

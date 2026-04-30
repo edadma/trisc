@@ -1136,6 +1136,35 @@ route through the bounded trait's methods.
 - Operations on a type parameter that are invalid for the concrete type produce
   an error at the call site where the instantiation happens.
 
+**Type-argument shapes.** Generic type arguments accept the full type grammar
+— named types, tuples, slices, fixed-size arrays, nested generics, and
+**function types**. Function-typed type arguments are essential for
+combinator-shaped libraries:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+// Parse an operand, then a binary operator that combines two operands
+chainl1[A](operand: Parser[A], op: Parser[(A, A) -> A]) -> Parser[A]
+chainr1[A](operand: Parser[A], op: Parser[(A, A) -> A]) -> Parser[A]
+
+// Container holding a callback
+struct Cell[T] { value: T }
+val c: Cell[(int) -> int] = Cell((x: int) -> x + 1)
+
+// Option / Result wrapping a function
+var maybe_handler: Option[(Event) -> unit] = None
+fn lookup(name: string) -> Result[(int) -> int, string]
+
+// Zero-arg fn type
+val thunk: Parser[() -> int] = ...
+```
+
+Multi-parameter function types must use the parens form: `(int, int) -> int`
+(not `int, int -> int` — the latter is a multi-arg generic of `int, int`
+followed by a stray `->`). Bare `T -> R` (no parens) is not currently
+accepted as a type-argument shape; use `(T) -> R`.
+
 ### Generic Structs
 
 Structs may declare type parameters in square brackets after the name. Each

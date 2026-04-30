@@ -2768,6 +2768,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case VarRefAST(name) => NamedTypeAST(name)
     case TupleLitAST(elems) => TupleTypeAST(elems.map(exprToTypeAST))
     case IndexAST(VarRefAST(name), arg) => NamedTypeAST(name, List(exprToTypeAST(arg)))
+    // Zero-param fn type: `() -> R` is greedy-parsed by closureExpr's
+    // `"(" ~ ")" ~ "->" ~> closureBody` form, so it arrives as a ClosureAST(Nil, body).
+    // Lift it back into a FuncTypeAST when the body is a type-shaped expression.
+    // Multi-param fn types (`(P, ...) -> R`) come through funcTypeRef as TypeRefExprAST.
+    case ClosureAST(Nil, ExprBodyAST(retExpr)) =>
+      FuncTypeAST(Nil, exprToTypeAST(retExpr))
     case _ => throw AnalysisError(s"expected type argument, got expression")
 
   /** Look up a method function by struct name and method name, trying both unmangled and mangled forms. */
