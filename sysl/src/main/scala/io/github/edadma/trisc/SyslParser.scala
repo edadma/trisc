@@ -155,9 +155,9 @@ class SyslParser extends StandardTokenParsers {
     "where" ~> logicalOr
 
   lazy val traitDecl: Parser[TraitDeclAST] =
-    "trait" ~> ident ~ ("[" ~> ident <~ "]") ~
+    "trait" ~> ident ~ ("[" ~> rep1sep(ident, ",") <~ "]") ~
       (Newline ~> Indent ~> rep1sep(traitMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("trait")) ^^ {
-        case name ~ tparam ~ methods => TraitDeclAST(name, tparam, methods)
+        case name ~ tparams ~ methods => TraitDeclAST(name, tparams, methods)
       }
 
   lazy val traitMethod: Parser[TraitMethodAST] =

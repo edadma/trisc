@@ -57,7 +57,7 @@ case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[Stri
 
 // Range for `within lo..hi` / `within lo..<hi` type constraints
 case class RangeAST(lo: ExpressionAST, hi: ExpressionAST, exclusiveHi: Boolean) extends Positional
-case class TraitDeclAST(name: String, typeParam: String, methods: List[TraitMethodAST], attributes: List[Attribute] = Nil) extends DeclAST
+case class TraitDeclAST(name: String, typeParams: List[String], methods: List[TraitMethodAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class TraitMethodAST(
     name: String,
     params: List[ParamAST],

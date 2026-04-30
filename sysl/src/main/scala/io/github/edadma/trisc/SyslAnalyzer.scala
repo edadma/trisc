@@ -349,7 +349,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         throw AnalysisError(s"#${attr.name} requires a non-empty string literal, e.g. #operator(\"~\")", at)
 
   // Trait / impl support
-  private case class TraitInfo(name: String, typeParam: String, methods: List[TraitMethodAST])
+  private case class TraitInfo(name: String, typeParams: List[String], methods: List[TraitMethodAST])
   private case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
   private val traits = new mutable.LinkedHashMap[String, TraitInfo]
   // (traitName, targetType) -> (methodName -> mangledFunName)
@@ -368,7 +368,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
   /** Get trait declaration AST nodes for serialization in TEMPLATES section. */
   def getTraitDecls: List[TraitDeclAST] =
-    traits.values.map(t => TraitDeclAST(t.name, t.typeParam, t.methods)).toList
+    traits.values.map(t => TraitDeclAST(t.name, t.typeParams, t.methods)).toList
 
   /** Get generic enum instance mappings for cross-module type inference. */
   def getGenericEnumInstances: List[GenericEnumInstanceMeta] =
@@ -543,9 +543,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     // Register trait declarations from imported templates
     for template <- meta.genericTemplates do
       template match
-        case TraitDeclAST(name, tparam, methods, _) =>
+        case TraitDeclAST(name, tparams, methods, _) =>
           if !traits.contains(name) then
-            traits(name) = TraitInfo(name, tparam, methods)
+            traits(name) = TraitInfo(name, tparams, methods)
             registerTraitOperatorEntries(name, methods, template)
         case _ =>
 
@@ -857,13 +857,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             genericTypeAliases(name) = (tparams, target)
           else
             typeAliases(name) = (target, isNew, range, predicate)
-        case TraitDeclAST(name, tparam, methods, _) =>
+        case TraitDeclAST(name, tparams, methods, _) =>
           if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
           // Check no duplicate method names within the trait
           val methodNames = methods.map(_.name)
           if methodNames.distinct.length != methodNames.length then
             throw AnalysisError(s"duplicate method names in trait '$name'")
-          traits(name) = TraitInfo(name, tparam, methods)
+          if tparams.distinct.length != tparams.length then
+            throw AnalysisError(s"duplicate type parameter names in trait '$name'")
+          traits(name) = TraitInfo(name, tparams, methods)
           registerTraitOperatorEntries(name, methods, decl)
         case InterfaceDeclAST(name, methodASTs, embeddedNames, _) =>
           if interfaceTypes.contains(name) then throw AnalysisError(s"duplicate interface: '$name'", decl)
@@ -960,7 +962,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           val infos = mutable.ListBuffer.empty[ImplMethodInfo]
           val typeMangled = typeToMangled(resolvedTarget)
           val savedEnv = typeEnv
-          typeEnv = Map(trait_.typeParam -> resolvedTarget)
+          if trait_.typeParams.length != 1 then
+            throw AnalysisError(s"impl of multi-parameter trait '$traitName' is not yet supported (Stage F); trait has ${trait_.typeParams.length} type parameters", decl)
+          typeEnv = Map(trait_.typeParams.head -> resolvedTarget)
           try
             for traitMethod <- trait_.methods do
               val rawMangled = s"${traitName}_${traitMethod.name}_${typeMangled}"
@@ -2992,7 +2996,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       // unqualified calls to sibling trait methods route to the impl's mangled functions.
       infos.map { info =>
         if info.isSynthesized then
-          typeEnv = Map(trait_.typeParam -> resolvedTarget)
+          typeEnv = Map(trait_.typeParams.head -> resolvedTarget)
           traitCallRewrite = methodMap.toMap
         else
           typeEnv = savedEnv
@@ -3020,10 +3024,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     if method.params.length != tArgs.length then
       throw AnalysisError(s"trait method '$traitName.$methodName' expects ${method.params.length} argument(s), got ${tArgs.length}")
     // Infer the target type by unifying each param type against the arg type, using typeParam as the variable
+    if trait_.typeParams.length != 1 then
+      throw AnalysisError(s"calling method on multi-parameter trait '$traitName' is not yet supported (Stage F); trait has ${trait_.typeParams.length} type parameters")
+    val typeParam = trait_.typeParams.head
     val env = mutable.Map.empty[String, SyslType]
     for (p, a) <- method.params.zip(tArgs) do
-      unifyTypes(p.typ, a.typ, Set(trait_.typeParam), env)
-    val targetType = env.get(trait_.typeParam).getOrElse(
+      unifyTypes(p.typ, a.typ, Set(typeParam), env)
+    val targetType = env.get(typeParam).getOrElse(
       throw AnalysisError(s"cannot infer target type for trait method '$traitName.$methodName'"))
     val methodMap = impls.getOrElse((traitName, targetType),
       throw AnalysisError(s"no impl of trait '$traitName' for type $targetType"))

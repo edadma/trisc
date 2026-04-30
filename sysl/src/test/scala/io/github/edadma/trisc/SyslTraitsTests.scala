@@ -286,6 +286,53 @@ class SyslTraitsTests extends SyslTestHelpers {
     ) shouldBe 1
   }
 
+  // ===== Multi-param trait declarations (Stage E — declaration only) =====
+  // A multi-parameter trait can be DECLARED post-Stage E. Implementing it
+  // requires the unifier (Stage F), so any `impl` of one currently raises a
+  // clean diagnostic — the gating ensures the half-built path can't silently
+  // misdispatch.
+
+  "multi-param trait declaration parses and analyzes" in {
+    // Pure declaration — no impl, no use site, just check it round-trips
+    // through parser+analyzer. (No `eval` because there's nothing to dispatch.)
+    val src =
+      """trait Concat[A, B, R]
+        |    concat(a: A, b: B) -> R
+        |
+        |main() -> int = 0
+        |""".stripMargin
+    eval(src) shouldBe 0
+  }
+
+  "implementing a multi-param trait is a clean error pre-Stage F" in {
+    val ex = intercept[Exception] {
+      eval(
+        """trait Concat[A, B, R]
+          |    concat(a: A, b: B) -> R
+          |
+          |impl Concat[int]
+          |    concat(a: int, b: int) -> int = a + b
+          |
+          |main() -> int = 0
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage
+    assert(msg.contains("multi-parameter trait"), s"error should explain multi-param-trait gap, got: $msg")
+  }
+
+  "duplicate trait type-param name is a parse-time analyzer error" in {
+    val ex = intercept[Exception] {
+      eval(
+        """trait Bad[T, T]
+          |    f(a: T, b: T) -> T
+          |
+          |main() -> int = 0
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage
+    assert(msg.contains("duplicate type parameter"), s"error should mention duplicate type param, got: $msg")
+  }
+
   "import trait with defaults across modules" in {
     evalWithLibs(
       Map(
