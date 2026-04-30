@@ -4594,7 +4594,24 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if tLeft.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tLeft.typ}")
             if tRight.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tRight.typ}")
             BoolType
-          case _ => throw AnalysisError(s"unknown operator: $op")
+          case _ =>
+            // Unknown operator. Distinguish three cases for the user:
+            //   (a) the operator IS bound to a trait, but neither operand is a user
+            //       type that impls that trait → suggest casting / type-wrapping
+            //   (b) the operator looks user-defined (composed of op chars) but is
+            //       not bound anywhere → tell them how to bind it via #operator
+            //   (c) the operator is genuinely garbage (shouldn't happen post-parse)
+            lookupBinaryOperatorTrait(op) match
+              case Some((traitName, _)) =>
+                throw AnalysisError(
+                  s"operator '$op' is bound to trait '$traitName', but neither operand is a struct/enum that impls it (got ${tLeft.typ} $op ${tRight.typ})",
+                )
+              case None if op.forall(c => "+-*/%<>=!&|^~".contains(c)) =>
+                throw AnalysisError(
+                  s"operator '$op' is not bound; declare it via `#operator(\"$op\")` on a trait method",
+                )
+              case None =>
+                throw AnalysisError(s"unknown operator: $op")
         // Insert implicit int→float promotion / float-width casts for mixed operands
         val promotedLeft  = if resultType.isFloat && tLeft.typ  != resultType then TCast(tLeft,  resultType) else tLeft
         val promotedRight = if resultType.isFloat && tRight.typ != resultType then TCast(tRight, resultType) else tRight
