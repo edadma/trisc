@@ -268,7 +268,7 @@ main() -> int
 automatically freed when the refcount reaches zero, just like `&Struct`.
 
 **Recursive types:** Structs and enums may reference themselves (or each other)
-through pointers (`*T`) or refs (`&T`):
+through pointers (`*T`), refs (`&T`), or slices (`[]T`):
 
 ```sysl
 struct Node
@@ -277,8 +277,13 @@ struct Node
 
 enum Tree
     Leaf(value: int)
-    Branch(left: &Tree, right: &Tree)   // recursive via ref
+    Branch(left: &Tree, right: &Tree)   // binary tree via ref
+    Node(children: []Tree)              // n-ary tree via slice-of-self
 ```
+
+A `[]Self` field stores a fixed-size slice descriptor, so the variant size is
+bounded — no infinite type. Build it with `(new [n]Tree)[:0]` and `append`,
+walk it by pattern-matching the variant and indexing the slice.
 
 **Memory layout:** `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
 
