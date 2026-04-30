@@ -3189,6 +3189,42 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case TupleTypeAST(elems) => TupleTypeAST(elems.map(substituteTypeAST(_, subst)))
     case RefTypeAST(inner) => RefTypeAST(substituteTypeAST(inner, subst))
 
+  /** Strict structural equality with effect-lattice tolerance for FuncType.
+   *  Used for impl-dispatch post-validation. `slot` is the impl pattern resolved
+   *  with the unifier-bound env; `actual` is the call-site type. They must be
+   *  structurally identical *except* that nested FuncType effects compare by
+   *  `effectsSatisfy(actualEff, slotEff)` rather than `==`. This lets a `#pure`
+   *  closure (auto-inferred for any side-effect-free body) flow into an
+   *  unannotated higher-order parameter — the common shape for combinator
+   *  libraries that haven't yet opted into the effect discipline.
+   *
+   *  Containers (slice/array/ref/ptr/tuple/struct/enum) recurse component-wise
+   *  so the lattice rule fires on FuncType anywhere in the tree.
+   */
+  private def latticeEqual(slot: SyslType, actual: SyslType): Boolean =
+    (slot, actual) match
+      case (FuncType(p1, r1, _, eff1), FuncType(p2, r2, _, eff2)) =>
+        // Parameters and return types match by lattice (recursive). Effects
+        // checked one-way: actual must satisfy slot. Escape flag ignored — it's
+        // an optimization hint, not a type distinction (mirrors `compatible`).
+        p1.length == p2.length &&
+          p1.zip(p2).forall((a, b) => latticeEqual(a, b)) &&
+          latticeEqual(r1, r2) &&
+          effectsSatisfy(eff2, eff1)
+      case (SliceType(a), SliceType(b)) => latticeEqual(a, b)
+      case (ArrayType(a, n1), ArrayType(b, n2)) => n1 == n2 && latticeEqual(a, b)
+      case (PtrType(a), PtrType(b)) => latticeEqual(a, b)
+      case (RefType(a), RefType(b)) => latticeEqual(a, b)
+      case (StructType(n1, f1, v1), StructType(n2, f2, v2)) if n1 == n2 && v1 == v2 && f1.length == f2.length =>
+        // Same nominal struct — recurse on fields so an embedded FuncType still uses
+        // the lattice (anonymous tuple structs land here too — they share generated names).
+        f1.zip(f2).forall { case ((fn1, ft1), (fn2, ft2)) => fn1 == fn2 && latticeEqual(ft1, ft2) }
+      case (NamedType(n1, u1, nom1, r1, p1), NamedType(n2, u2, nom2, r2, p2)) =>
+        n1 == n2 && nom1 == nom2 && r1 == r2 && p1 == p2 && latticeEqual(u1, u2)
+      // Default: strict equality. Covers primitives (int, float, bool, string, unit),
+      // enums, interfaces — anywhere effects don't appear in the shape.
+      case (s, a) => s == a
+
   /** Stage F.3 entry point — try to unify a list of TypeAST patterns against a list of
    *  concrete SyslType actuals, returning the inferred binding map on success or None on
    *  any failure. Failure modes captured: arity mismatch, type-var conflict (caught as
@@ -3196,9 +3232,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  structural mismatch that the recursive walker silently no-ops past.
    *
    *  The post-validation step substitutes the inferred env into each pattern, re-resolves
-   *  it via `resolveType`, and demands `==` against the actual. Without this, a pattern
-   *  like `NamedTypeAST("Foo_int")` against `StructType("Foo_int", ...)` would silently
-   *  bind nothing and pass — wrong for dispatch.
+   *  it via `resolveType`, and demands `latticeEqual` against the actual. The lattice
+   *  rule lets a candidate FuncType with stricter effects (e.g. `#pure`) flow into an
+   *  unannotated slot — the common shape for combinator-library impls. Without this, a
+   *  literal closure (always inferred `#pure` for side-effect-free bodies) would never
+   *  match an `(A) -> B` impl pattern.
    */
   private def tryUnifyAll(
       patterns: List[TypeAST],
@@ -3224,7 +3262,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               val resolved =
                 try Some(resolveType(p))
                 catch case _: Throwable => None
-              resolved.contains(a)
+              resolved.exists(r => latticeEqual(r, a))
             }
           finally typeEnv = savedEnv
         if !structuralOk then None

@@ -3088,6 +3088,26 @@ Reads of captured outer locals don't contribute to the inferred sets — capture
 
 When a closure is passed to a callback slot, the slot's declared effects are checked against the inferred ones via the same subset rule used everywhere else: closure effects must be a subset of the slot's `#reads ∪ #writes` for reads, and a subset of the slot's `#writes` for writes.
 
+**Lattice rule at type-equality / unifier sites.** The same lattice (`#pure ≤ #reads(R)/#writes(W) ≤ unannotated`, modulo subset on the read/write sets) is what generic-impl dispatch uses when matching a function-typed actual against an impl-pattern function-type slot. A `#pure` closure is always accepted by an unannotated `(A) -> B` impl pattern — the common shape for combinator libraries that accept any callback the user supplies:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+trait Map[A, F, R]
+    #operator("^^")
+    pmap(a: A, f: F) -> R
+
+impl[A, B] Map[Parser[A], (A) -> B, Parser[B]]
+    pmap(a: Parser[A], f: (A) -> B) -> Parser[B] = map(a, f)
+
+success[int](21) ^^ ((x: int) -> x * 2)
+//                  ^^^^^^^^^^^^^^^^^^^^^^
+// Closure infers `#pure`. Impl pattern's `(A) -> B` is unannotated.
+// Lattice: `#pure ≤ unannotated` → dispatch fires. B binds to `int`.
+```
+
+The direction is one-way: an unannotated callable can't flow into a `#pure` slot (the compiler can't prove the absence of effects), but a `#pure` callable flows into anything. The unifier mirrors the indirect-call rules above so that a value's effect signature stays compatible across every site where its type is checked, not just at the point of the call itself.
+
 ### `#ghost` — verification-only declarations
 
 A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost. Three places `#ghost` may appear:
