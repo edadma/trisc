@@ -95,26 +95,38 @@ posix_fd_bridge memory.
 
 
 Subset of POSIX/Linux errno values used by the shim.  Returned to
-userspace as the *negative* of these — `i64(-EINVAL)`, etc.  Most
-of the existing `// -EBADF` literal-comment sites predate these
-constants; new code should prefer the named form, and a sweep can
-follow.  Magic numbers without an `E*` constant in this block are
-all from `linux/include/uapi/asm-generic/errno-base.h` plus
-`asm-generic/errno.h`.
+userspace as the *negative* of these — `i64(-EINVAL)`, etc.  Values
+are sourced from `linux/include/uapi/asm-generic/errno-base.h` plus
+`asm-generic/errno.h`; only those actually returned by some shim
+codepath are listed here.  Keep numerically sorted so a future
+reader can scan by errno number.
 
-    const EBADF        = 9
-    const EAGAIN       = 11
-    const EFAULT       = 14
-    const ENODEV       = 19
-    const EINVAL       = 22
-    const EMFILE       = 24
-    const EIO          = 5
-    const ENOPROTOOPT  = 92
-    const ENOTCONN     = 107
-    const ETIMEDOUT    = 110
-    const ECONNREFUSED = 111
-    const EINPROGRESS  = 115
-    const EADDRINUSE   = 98
+    const ENOENT           = 2
+    const EIO              = 5
+    const EBADF            = 9
+    const EAGAIN           = 11
+    const ENOMEM           = 12
+    const EFAULT           = 14
+    const EEXIST           = 17
+    const ENODEV           = 19
+    const EINVAL           = 22
+    const EMFILE           = 24
+    const ENOSPC           = 28
+    const ESPIPE           = 29
+    const EPIPE            = 32
+    const ENAMETOOLONG     = 36
+    const ENOSYS           = 38
+    const EISCONN          = 56
+    const EMSGSIZE         = 90
+    const ENOPROTOOPT      = 92
+    const EPROTONOSUPPORT  = 93
+    const EAFNOSUPPORT     = 97
+    const EADDRINUSE       = 98
+    const ENETUNREACH      = 101
+    const ENOTCONN         = 107
+    const ETIMEDOUT        = 110
+    const ECONNREFUSED     = 111
+    const EINPROGRESS      = 115
 
 
     struct PosixFd
@@ -848,14 +860,14 @@ to the same UDP stack that native sysl programs use via
                 return i64(0)
             if int(a0) == 16
                 return i64(0)
-            return i64(-22)
+            return i64(-EINVAL)
         if num == 201
             // getrusage(who, *rusage) — zero-fill the 144-byte
             // struct so RUSAGE_SELF / RUSAGE_CHILDREN both report
             // "no resources used yet". Real per-process accounting
             // is its own follow-up.
             if a1 == i64(0)
-                return i64(-14)
+                return i64(-EFAULT)
             val rp: *byte = *byte(a1)
             var ri = 0
             while ri < 144
@@ -897,19 +909,19 @@ to the same UDP stack that native sysl programs use via
         // syncfs validate fd; sync takes no args.
         if num == 172
             if posix_fd_kind(int(a0)) == POSIX_FD_FREE
-                return i64(-9)              // -EBADF
+                return i64(-EBADF)
             return i64(0)
         if num == 180
             if posix_fd_kind(int(a0)) == POSIX_FD_FREE
-                return i64(-9)
+                return i64(-EBADF)
             return i64(0)
         if num == 345
             return i64(0)
         if num == 347
             if posix_fd_kind(int(a0)) == POSIX_FD_FREE
-                return i64(-9)
+                return i64(-EBADF)
             return i64(0)
-        i64(-38)            // -ENOSYS
+        i64(-ENOSYS)
 
 SYS_WRITE. Looks up `fd` in the process's POSIX fd table and
 dispatches by kind. STDOUT/STDERR take the direct UART fast-path
@@ -932,10 +944,10 @@ vm_copy_from.
         if k == POSIX_FD_TCP_SOCKET
             val inet_fd = posix_fd_target(fd)
             if inet_fd < 0
-                return i64(-107)    // -ENOTCONN
+                return i64(-ENOTCONN)
             val port = inet_get_port()
             if port < 0
-                return i64(-19)
+                return i64(-ENODEV)
             val pid_w = posix_fd_current_pid()
             val tidx_w = pid_w * POSIX_FDS_PER_PROC + fd
             // SO_SNDTIMEO clamp: u16 wire field maxes at 65535 ms.
@@ -966,7 +978,7 @@ vm_copy_from.
                 if r < 0
                     if sent_total > 0
                         return i64(sent_total)
-                    return i64(-5)
+                    return i64(-EIO)
                 if reply[0] == 2
                     // SO_SNDTIMEO expired while parked.  Linux returns
                     // EAGAIN (not ETIMEDOUT) for SO_SNDTIMEO on TCP
@@ -989,7 +1001,7 @@ vm_copy_from.
                     if ger == 0
                         if perr != 0
                             return i64(-perr)
-                    return i64(-32)     // -EPIPE
+                    return i64(-EPIPE)
                 val n = shim_read_u16(reply, 1)
                 if n <= 0
                     // Phase 1: blocking TCP_SEND now parks in inet
@@ -1001,7 +1013,7 @@ vm_copy_from.
                     // partial count.
                     if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
                         if sent_total == 0
-                            return i64(-11)     // -EAGAIN
+                            return i64(-EAGAIN)
                         return i64(sent_total)
                 else
                     sent_total += n
@@ -1011,7 +1023,7 @@ vm_copy_from.
         if k == POSIX_FD_EVENTFD
             // Linux requires len >= 8.
             if len < 8 || buf == i64(0)
-                return i64(-22)             // -EINVAL
+                return i64(-EINVAL)
             val ubuf: *byte = *byte(buf)
             var add = i64(0)
             var bi = 0
@@ -1021,7 +1033,7 @@ vm_copy_from.
             // Linux rejects the value u64::MAX (-1 as i64) — that
             // bit pattern is reserved as "invalid".
             if add == i64(-1)
-                return i64(-22)
+                return i64(-EINVAL)
             val pid_w = posix_fd_current_pid()
             val widx = pid_w * POSIX_FDS_PER_PROC + fd
             // Counter is unsigned u64-1 max; we treat i64 sign as
@@ -1035,7 +1047,7 @@ vm_copy_from.
             // Overflow detection — same operands both unsigned-wise.
             if u64(sum) < u64(cur)
                 if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
-                    return i64(-11)         // -EAGAIN
+                    return i64(-EAGAIN)
                 // Blocking mode: slix has no inter-thread notify
                 // path that wakes a write blocked on counter
                 // headroom yet, so return -EAGAIN even in blocking
@@ -1043,10 +1055,10 @@ vm_copy_from.
                 // behaviour for the threaded "writer waits for
                 // reader" case lands with the inter-thread notify
                 // chunk.
-                return i64(-11)
+                return i64(-EAGAIN)
             posix_fd_table[widx].eventfd_count = sum
             return i64(8)
-        i64(-9)             // -EBADF
+        i64(-EBADF)
 
 SYS_READ. STDIN returns 0 (EOF) — no kernel-side keyboard path
 yet; TTY routing is on the bridge memory's todo list. TCP sockets
@@ -1072,10 +1084,10 @@ handles read from the TTY driver.
             if len <= 0
                 return i64(0)
             if buf == i64(0)
-                return i64(-14)
+                return i64(-EFAULT)
             val port = tty_get_port()
             if port < 0
-                return i64(-19)
+                return i64(-ENODEV)
             if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
                 var pmsg: [2]byte
                 pmsg[0] = byte(TTY_CMD_POLL_C)
@@ -1083,33 +1095,33 @@ handles read from the TTY driver.
                 var preply: [7]byte
                 val pr = ipc_send(port, pmsg, 2, preply, 7)
                 if pr < 0
-                    return i64(-5)
+                    return i64(-EIO)
                 if preply[0] != 0
-                    return i64(-5)
+                    return i64(-EIO)
                 val pbits = (int(preply[1]) & 0xff) | ((int(preply[2]) & 0xff) << 8)
                 if (pbits & POSIX_EPOLLIN) == 0
-                    return i64(-11)         // -EAGAIN
+                    return i64(-EAGAIN)
             var msg: [2]byte
             msg[0] = byte(TTY_CMD_READ_C)
             msg[1] = byte(0)
             var reply: [2]byte
             val r = ipc_send(port, msg, 2, reply, 2)
             if r < 0
-                return i64(-5)
+                return i64(-EIO)
             if reply[0] != 0
-                return i64(-5)
+                return i64(-EIO)
             val ubuf: *byte = *byte(buf)
             ubuf[0] = reply[1]
             return i64(1)
         if k == POSIX_FD_TCP_SOCKET
             val inet_fd = posix_fd_target(fd)
             if inet_fd < 0
-                return i64(-107)
+                return i64(-ENOTCONN)
             if len <= 0
                 return i64(0)
             val port = inet_get_port()
             if port < 0
-                return i64(-19)
+                return i64(-ENODEV)
             var cap_len = len
             if cap_len > INET_MAX_TCP_SEG
                 cap_len = INET_MAX_TCP_SEG
@@ -1124,7 +1136,7 @@ handles read from the TTY driver.
             var reply: [540]byte
             val r = ipc_send(port, msg, 5, reply, 540)
             if r < 0
-                return i64(-5)
+                return i64(-EIO)
             if nb != 0
                 val raw = int(reply[0]) & 0xff
                 if raw != 0
@@ -1132,7 +1144,7 @@ handles read from the TTY driver.
                         return i64(raw - 256)
                     return i64(raw)
             if reply[0] != 0
-                return i64(-5)
+                return i64(-EIO)
             val rlen = shim_read_u16(reply, 1)
             val ubuf: *byte = *byte(buf)
             var i = 0
@@ -1144,14 +1156,14 @@ handles read from the TTY driver.
             return shim_vfs_read(posix_fd_target(fd), buf, len)
         if k == POSIX_FD_TIMERFD
             if len < 8 || buf == i64(0)
-                return i64(-22)
+                return i64(-EINVAL)
             val pid_t = posix_fd_current_pid()
             val tidx = pid_t * POSIX_FDS_PER_PROC + fd
             timerfd_advance(tidx)
             val cnt = posix_fd_table[tidx].timerfd_expirations
             if cnt == i64(0)
                 if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
-                    return i64(-11)
+                    return i64(-EAGAIN)
                 // Blocking read on timerfd needs an in-shim sleep
                 // loop until the next deadline. Simpler than the
                 // socket case since we know exactly when to wake.
@@ -1164,7 +1176,7 @@ handles read from the TTY driver.
                         // forever waiting for someone else to settime.
                         // Slix has no concurrent settime path yet, so
                         // EAGAIN here matches the practical behaviour.
-                        return i64(-11)
+                        return i64(-EAGAIN)
                     val now_b = int(uptime())
                     val wait_ticks = posix_fd_table[tidx].timerfd_next_tick - now_b
                     if wait_ticks > 0
@@ -1180,19 +1192,19 @@ handles read from the TTY driver.
             return i64(8)
         if k == POSIX_FD_EVENTFD
             if len < 8 || buf == i64(0)
-                return i64(-22)
+                return i64(-EINVAL)
             val pid_r = posix_fd_current_pid()
             val ridx = pid_r * POSIX_FDS_PER_PROC + fd
             val cur = posix_fd_table[ridx].eventfd_count
             if cur == i64(0)
                 if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
-                    return i64(-11)         // -EAGAIN
+                    return i64(-EAGAIN)
                 // Blocking semantics: see write-side note above —
                 // slix doesn't yet have an inter-thread notify
                 // for eventfd, so return -EAGAIN in blocking mode
                 // too. Single-threaded user code that writes
                 // before reading hits the cur != 0 path naturally.
-                return i64(-11)
+                return i64(-EAGAIN)
             // Semaphore mode hands back 1 per read; default mode
             // returns the full counter and resets to 0.
             var deliver = cur
@@ -1207,7 +1219,7 @@ handles read from the TTY driver.
                 ubuf[bi] = byte(int((deliver >> i64(bi * 8))) & 0xff)
                 bi += 1
             return i64(8)
-        i64(-9)             // -EBADF
+        i64(-EBADF)
 
 VFS read/write helpers. Both create a grant against the user's
 buffer (granter_pid = current pid), send the appropriate VFS
@@ -1221,14 +1233,14 @@ the actual count.
         if len <= 0
             return i64(0)
         if handle < 0
-            return i64(-9)      // -EBADF
+            return i64(-EBADF)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)     // -ENODEV
+            return i64(-ENODEV)
         val pid = posix_fd_current_pid()
         val gid = kernel_grant_create_inline(pid, u64(buf), len, SHIM_GRANT_WRITE)
         if gid < 0
-            return i64(-12)     // -ENOMEM
+            return i64(-ENOMEM)
         var msg: [13]byte
         msg[0] = byte(VFS_CMD_READ_C)
         shim_write_be_i32(msg, 1, handle)
@@ -1238,23 +1250,23 @@ the actual count.
         val r = ipc_send(port, msg, 13, reply, 5)
         kernel_grant_revoke_inline(pid, gid)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-5)
+            return i64(-EIO)
         i64(shim_read_be_i32(reply, 1))
 
     shim_vfs_write(handle: int, buf: i64, len: int) -> i64
         if len <= 0
             return i64(0)
         if handle < 0
-            return i64(-9)
+            return i64(-EBADF)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         val pid = posix_fd_current_pid()
         val gid = kernel_grant_create_inline(pid, u64(buf), len, SHIM_GRANT_READ)
         if gid < 0
-            return i64(-12)
+            return i64(-ENOMEM)
         var msg: [13]byte
         msg[0] = byte(VFS_CMD_WRITE_C)
         shim_write_be_i32(msg, 1, handle)
@@ -1264,9 +1276,9 @@ the actual count.
         val r = ipc_send(port, msg, 13, reply, 5)
         kernel_grant_revoke_inline(pid, gid)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-5)
+            return i64(-EIO)
         i64(shim_read_be_i32(reply, 1))
 
 SYS_CLOSE. For socket kinds, tell the inet server to drop the
@@ -1277,7 +1289,7 @@ still -1) skip the inet call — no backend was ever allocated.
     sys_close(fd: int) -> i64
         val k = posix_fd_kind(fd)
         if k == POSIX_FD_FREE
-            return i64(-9)  // -EBADF
+            return i64(-EBADF)
         val target = posix_fd_target(fd)
         // If this fd was duped, another slot still owns the inet
         // record — clear our slot but leave the backend alone.
@@ -1342,14 +1354,14 @@ exec yet).
 
     sys_socket(family: int, stype: int, proto: int) -> i64
         if family != POSIX_AF_INET
-            return i64(-97)     // -EAFNOSUPPORT
+            return i64(-EAFNOSUPPORT)
         val sock_flag_mask = POSIX_SOCK_NONBLOCK | POSIX_SOCK_CLOEXEC
         val sock_flags = stype & sock_flag_mask
         val base_type = stype & ~sock_flag_mask
         if base_type == POSIX_SOCK_DGRAM
             val port = inet_get_port()
             if port < 0
-                return i64(-19)     // -ENODEV
+                return i64(-ENODEV)
             var msg: [4]byte
             msg[0] = byte(INET_CMD_SOCKET)
             msg[1] = byte(family & 0xff)
@@ -1358,12 +1370,12 @@ exec yet).
             var reply: [2]byte
             val r = ipc_send(port, msg, 4, reply, 2)
             if r < 0
-                return i64(-5)      // -EIO
+                return i64(-EIO)
             // inet rejects with status != 0 either when the global
             // pool is exhausted or when the per-tid cap is hit.
             // Both surfaces map to -EMFILE.
             if reply[0] != 0
-                return i64(-24)
+                return i64(-EMFILE)
             val inet_fd = int(reply[1]) & 0xff
             val posix_fd = posix_fd_alloc(POSIX_FD_UDP_SOCKET, inet_fd)
             if posix_fd < 0
@@ -1372,7 +1384,7 @@ exec yet).
                 close_msg[1] = byte(inet_fd & 0xff)
                 var close_rep: [1]byte
                 ipc_send(port, close_msg, 2, close_rep, 1)
-                return i64(-24)     // -EMFILE
+                return i64(-EMFILE)
             if (sock_flags & POSIX_SOCK_NONBLOCK) != 0
                 val cur = posix_fd_flags(posix_fd)
                 posix_fd_set_flags(posix_fd, cur | POSIX_O_NONBLOCK)
@@ -1380,12 +1392,12 @@ exec yet).
         if base_type == POSIX_SOCK_STREAM
             val posix_fd = posix_fd_alloc(POSIX_FD_TCP_SOCKET, -1)
             if posix_fd < 0
-                return i64(-24)
+                return i64(-EMFILE)
             if (sock_flags & POSIX_SOCK_NONBLOCK) != 0
                 val cur = posix_fd_flags(posix_fd)
                 posix_fd_set_flags(posix_fd, cur | POSIX_O_NONBLOCK)
             return i64(posix_fd)
-        i64(-93)                    // -EPROTONOSUPPORT
+        i64(-EPROTONOSUPPORT)
 
 SYS_BIND. For UDP sockets, forward to inet's BIND. For TCP
 sockets, stash the bound port in `slot.pos` so a subsequent
@@ -1396,7 +1408,7 @@ family(2), port(2, BE), addr(4), zero(8).
     sys_bind(fd: int, addr_ptr: i64, addrlen: int) -> i64
         val k = posix_fd_kind(fd)
         if addrlen < 16
-            return i64(-22)
+            return i64(-EINVAL)
         val a: *byte = *byte(addr_ptr)
         val sin_port = shim_read_u16(a, 2)
         if k == POSIX_FD_TCP_SOCKET
@@ -1404,11 +1416,11 @@ family(2), port(2, BE), addr(4), zero(8).
             posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].pos = i64(sin_port)
             return i64(0)
         if k != POSIX_FD_UDP_SOCKET
-            return i64(-9)
+            return i64(-EBADF)
         val inet_fd = posix_fd_target(fd)
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var msg: [9]byte
         msg[0] = byte(INET_CMD_BIND)
         msg[1] = byte(inet_fd & 0xff)
@@ -1422,11 +1434,11 @@ family(2), port(2, BE), addr(4), zero(8).
         var reply: [1]byte
         val r = ipc_send(port, msg, 9, reply, 1)
         if r < 0
-            posix_fd_set_error(fd, i64(-5))
-            return i64(-5)
+            posix_fd_set_error(fd, i64(-EIO))
+            return i64(-EIO)
         if reply[0] != 0
-            posix_fd_set_error(fd, i64(-98))
-            return i64(-98)     // -EADDRINUSE
+            posix_fd_set_error(fd, i64(-EADDRINUSE))
+            return i64(-EADDRINUSE)
         i64(0)
 
 TCP variant of `sendto`.  `addr_ptr` is ignored — TCP is
@@ -1437,14 +1449,14 @@ POSIX MSG_DONTWAIT (0x40) for the EAGAIN-on-empty-send branch.
     sys_sendto_tcp(fd: int, buf: i64, len: int, flags: int) -> i64
         val inet_fd = posix_fd_target(fd)
         if inet_fd < 0
-            return i64(-107)            // -ENOTCONN
+            return i64(-ENOTCONN)
         if len < 0
-            return i64(-22)
+            return i64(-EINVAL)
         if len == 0
             return i64(0)
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         val nb_eff = (posix_fd_flags(fd) & POSIX_O_NONBLOCK) | (flags & 0x40)
         val pid_t = posix_fd_current_pid()
         val tidx_t = pid_t * POSIX_FDS_PER_PROC + fd
@@ -1471,7 +1483,7 @@ POSIX MSG_DONTWAIT (0x40) for the EAGAIN-on-empty-send branch.
             if r < 0
                 if sent_total > 0
                     return i64(sent_total)
-                return i64(-5)
+                return i64(-EIO)
             if reply[0] == 2
                 // SO_SNDTIMEO expired while parked — see sys_write.
                 if sent_total > 0
@@ -1489,14 +1501,14 @@ POSIX MSG_DONTWAIT (0x40) for the EAGAIN-on-empty-send branch.
                 if ger == 0
                     if perr != 0
                         return i64(-perr)
-                return i64(-32)         // -EPIPE
+                return i64(-EPIPE)
             val n = shim_read_u16(reply, 1)
             if n <= 0
                 // Same parked-wake semantics as sys_write — see
                 // there for the full rationale.
                 if nb_eff != 0
                     if sent_total == 0
-                        return i64(-11)
+                        return i64(-EAGAIN)
                     return i64(sent_total)
             else
                 sent_total += n
@@ -1514,15 +1526,15 @@ MSG_DONTWAIT (0x40) is honored for TCP via sys_sendto_tcp.
         if k0 == POSIX_FD_TCP_SOCKET
             return sys_sendto_tcp(fd, buf, len, flags)
         if k0 != POSIX_FD_UDP_SOCKET
-            return i64(-9)
+            return i64(-EBADF)
         if len < 0
-            return i64(-22)
+            return i64(-EINVAL)
         if len > 1472
-            return i64(-90)     // -EMSGSIZE
+            return i64(-EMSGSIZE)
         val inet_fd = posix_fd_target(fd)
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         // libc `send()` lowers to sendto with addr=NULL+addrlen=0;
         // resolve the peer from the prior sys_connect_udp. No
         // connected peer at this point is -ENOTCONN.
@@ -1535,7 +1547,7 @@ MSG_DONTWAIT (0x40) is honored for TCP via sys_sendto_tcp.
         var ip3: byte = byte(0)
         if addr_ptr == i64(0)
             if posix_fd_table[idx].udp_connected == 0
-                return i64(-107)            // -ENOTCONN
+                return i64(-ENOTCONN)
             dst_port = posix_fd_table[idx].udp_peer_port
             ip0 = byte(posix_fd_table[idx].udp_peer_a & 0xff)
             ip1 = byte(posix_fd_table[idx].udp_peer_b & 0xff)
@@ -1543,7 +1555,7 @@ MSG_DONTWAIT (0x40) is honored for TCP via sys_sendto_tcp.
             ip3 = byte(posix_fd_table[idx].udp_peer_d & 0xff)
         else
             if addrlen < 16
-                return i64(-22)
+                return i64(-EINVAL)
             val a: *byte = *byte(addr_ptr)
             dst_port = shim_read_u16(a, 2)
             ip0 = a[4]
@@ -1570,11 +1582,11 @@ MSG_DONTWAIT (0x40) is honored for TCP via sys_sendto_tcp.
         var reply: [3]byte
         val r = ipc_send(port, msg, 11 + len, reply, 3)
         if r < 0
-            posix_fd_set_error(fd, i64(-5))
-            return i64(-5)
+            posix_fd_set_error(fd, i64(-EIO))
+            return i64(-EIO)
         if reply[0] != 0
-            posix_fd_set_error(fd, i64(-101))
-            return i64(-101)    // -ENETUNREACH
+            posix_fd_set_error(fd, i64(-ENETUNREACH))
+            return i64(-ENETUNREACH)
         i64(shim_read_u16(reply, 1))
 
 SYS_RECVFROM. Args: (fd, buf, len, flags, src_addr, addrlen_ptr).
@@ -1594,12 +1606,12 @@ peer call `getpeername`.
                      addr_ptr: i64, addrlen_ptr: i64) -> i64
         val inet_fd = posix_fd_target(fd)
         if inet_fd < 0
-            return i64(-107)            // -ENOTCONN
+            return i64(-ENOTCONN)
         if len <= 0
             return i64(0)
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var cap_len = len
         if cap_len > INET_MAX_TCP_SEG
             cap_len = INET_MAX_TCP_SEG
@@ -1616,7 +1628,7 @@ peer call `getpeername`.
         var reply: [540]byte
         val r = ipc_send(port, msg, 5, reply, 540)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if nb != 0
             val raw = int(reply[0]) & 0xff
             if raw != 0
@@ -1624,7 +1636,7 @@ peer call `getpeername`.
                     return i64(raw - 256)
                 return i64(raw)
         if reply[0] != 0
-            return i64(-5)
+            return i64(-EIO)
         val rlen = shim_read_u16(reply, 1)
         val ubuf: *byte = *byte(buf)
         var i = 0
@@ -1650,13 +1662,13 @@ peer call `getpeername`.
         if k0 == POSIX_FD_TCP_SOCKET
             return sys_recvfrom_tcp(fd, buf, len, flags, addr_ptr, addrlen_ptr)
         if k0 != POSIX_FD_UDP_SOCKET
-            return i64(-9)
+            return i64(-EBADF)
         if len < 0
-            return i64(-22)
+            return i64(-EINVAL)
         val inet_fd = posix_fd_target(fd)
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         val pid = posix_fd_current_pid()
         val idx = pid * POSIX_FDS_PER_PROC + fd
         var cap_len = len
@@ -1695,16 +1707,16 @@ peer call `getpeername`.
             nmsg[8] = peek_byte
             val nr = ipc_send(port, nmsg, 9, reply, 1500)
             if nr < 0
-                posix_fd_set_error(fd, i64(-5))
-                return i64(-5)
+                posix_fd_set_error(fd, i64(-EIO))
+                return i64(-EIO)
             if reply[0] == byte(1)
-                return i64(-11)         // -EAGAIN
+                return i64(-EAGAIN)
             if reply[0] == byte(2)
-                posix_fd_set_error(fd, i64(-111))
-                return i64(-111)        // -ECONNREFUSED (ICMP error)
+                posix_fd_set_error(fd, i64(-ECONNREFUSED))
+                return i64(-ECONNREFUSED)        // ICMP error
             if reply[0] != 0
-                posix_fd_set_error(fd, i64(-5))
-                return i64(-5)
+                posix_fd_set_error(fd, i64(-EIO))
+                return i64(-EIO)
         else if rcvtimeo_ms > 0
             // Blocking with SO_RCVTIMEO: bounded wait. Linux returns
             // -EAGAIN (or -EWOULDBLOCK, same value) on timeout — same
@@ -1721,16 +1733,16 @@ peer call `getpeername`.
             tmsg[8] = peek_byte
             val tr = ipc_send(port, tmsg, 9, reply, 1500)
             if tr < 0
-                posix_fd_set_error(fd, i64(-5))
-                return i64(-5)
+                posix_fd_set_error(fd, i64(-EIO))
+                return i64(-EIO)
             if reply[0] == byte(1)
-                return i64(-11)         // -EAGAIN (timed out)
+                return i64(-EAGAIN)         // timed out
             if reply[0] == byte(2)
-                posix_fd_set_error(fd, i64(-111))
-                return i64(-111)        // -ECONNREFUSED (ICMP error)
+                posix_fd_set_error(fd, i64(-ECONNREFUSED))
+                return i64(-ECONNREFUSED)        // ICMP error
             if reply[0] != 0
-                posix_fd_set_error(fd, i64(-5))
-                return i64(-5)
+                posix_fd_set_error(fd, i64(-EIO))
+                return i64(-EIO)
         else
             var msg: [5]byte
             msg[0] = byte(INET_CMD_RECVFROM)
@@ -1740,14 +1752,14 @@ peer call `getpeername`.
             msg[4] = peek_byte
             val r = ipc_send(port, msg, 5, reply, 1500)
             if r < 0
-                posix_fd_set_error(fd, i64(-5))
-                return i64(-5)
+                posix_fd_set_error(fd, i64(-EIO))
+                return i64(-EIO)
             if reply[0] == byte(2)
-                posix_fd_set_error(fd, i64(-111))
-                return i64(-111)        // -ECONNREFUSED (ICMP error)
+                posix_fd_set_error(fd, i64(-ECONNREFUSED))
+                return i64(-ECONNREFUSED)        // ICMP error
             if reply[0] != 0
-                posix_fd_set_error(fd, i64(-5))
-                return i64(-5)
+                posix_fd_set_error(fd, i64(-EIO))
+                return i64(-EIO)
         // Connected-UDP filter (Linux semantics): if a peer was
         // saved via sys_connect_udp and the source doesn't match,
         // recurse to drop the datagram and try again. Each non-
@@ -1868,21 +1880,21 @@ plenty for the TCP chunk-at-a-time path.
         val k = posix_fd_kind(fd)
         if k != POSIX_FD_UDP_SOCKET
             if k != POSIX_FD_TCP_SOCKET
-                return i64(-9)
+                return i64(-EBADF)
         if msghdr_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val mh: *byte = *byte(msghdr_ptr)
         val name_ptr  = shim_read_ptr(mh, 0)
         val name_len  = shim_read_i32(mh, 8)
         val iov_ptr   = shim_read_ptr(mh, 16)
         val iov_len   = shim_read_i32(mh, 24)
         if iov_len < 0
-            return i64(-22)
+            return i64(-EINVAL)
         if iov_len > SHIM_IOV_MAX
-            return i64(-22)
+            return i64(-EINVAL)
         if iov_len > 0
             if iov_ptr == i64(0)
-                return i64(-14)
+                return i64(-EFAULT)
         var gather: [1472]byte
         var total = 0
         val iov_base: *byte = *byte(iov_ptr)
@@ -1893,7 +1905,7 @@ plenty for the TCP chunk-at-a-time path.
             val seg_len = int(shim_read_ptr(iov_base, ent_off + 8))
             if seg_len > 0
                 if base == i64(0)
-                    return i64(-14)
+                    return i64(-EFAULT)
                 val src: *byte = *byte(base)
                 var jj = 0
                 while jj < seg_len
@@ -1904,9 +1916,9 @@ plenty for the TCP chunk-at-a-time path.
             ii += 1
         if k == POSIX_FD_UDP_SOCKET
             if name_ptr == i64(0)
-                return i64(-22)
+                return i64(-EINVAL)
             if name_len < 16
-                return i64(-22)
+                return i64(-EINVAL)
             return sys_sendto(fd, i64(&gather[0]), total, flags, name_ptr, 16)
         sys_write(fd, i64(&gather[0]), total)
 
@@ -1914,20 +1926,20 @@ plenty for the TCP chunk-at-a-time path.
         val k = posix_fd_kind(fd)
         if k != POSIX_FD_UDP_SOCKET
             if k != POSIX_FD_TCP_SOCKET
-                return i64(-9)
+                return i64(-EBADF)
         if msghdr_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val mh: *byte = *byte(msghdr_ptr)
         val name_ptr  = shim_read_ptr(mh, 0)
         val iov_ptr   = shim_read_ptr(mh, 16)
         val iov_len   = shim_read_i32(mh, 24)
         if iov_len < 0
-            return i64(-22)
+            return i64(-EINVAL)
         if iov_len > SHIM_IOV_MAX
-            return i64(-22)
+            return i64(-EINVAL)
         if iov_len > 0
             if iov_ptr == i64(0)
-                return i64(-14)
+                return i64(-EFAULT)
         // Compute total scatter capacity across iovs.
         var cap = 0
         val iov_base: *byte = *byte(iov_ptr)
@@ -2005,7 +2017,7 @@ something other than AF_INET / AF_UNSPEC.
             posix_fd_table[idx].udp_connected = 0
             return i64(0)
         if addrlen < 2
-            return i64(-22)
+            return i64(-EINVAL)
         val a: *byte = *byte(addr_ptr)
         val family = (int(a[0]) & 0xff) | ((int(a[1]) & 0xff) << 8)
         if family == 0
@@ -2013,9 +2025,9 @@ something other than AF_INET / AF_UNSPEC.
             posix_fd_table[idx].udp_connected = 0
             return i64(0)
         if family != POSIX_AF_INET
-            return i64(-97)         // -EAFNOSUPPORT
+            return i64(-EAFNOSUPPORT)
         if addrlen < 16
-            return i64(-22)
+            return i64(-EINVAL)
         val peer_port = ((int(a[2]) & 0xff) << 8) | (int(a[3]) & 0xff)
         posix_fd_table[idx].udp_connected = 1
         posix_fd_table[idx].udp_peer_port = peer_port
@@ -2031,14 +2043,14 @@ something other than AF_INET / AF_UNSPEC.
         if k0 == POSIX_FD_UDP_SOCKET
             return sys_connect_udp(fd, addr_ptr, addrlen)
         if k0 != POSIX_FD_TCP_SOCKET
-            return i64(-9)
+            return i64(-EBADF)
         if addrlen < 16
-            return i64(-22)
+            return i64(-EINVAL)
         if posix_fd_target(fd) >= 0
-            return i64(-56)             // -EISCONN
+            return i64(-EISCONN)
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         val a: *byte = *byte(addr_ptr)
         val nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
         val pid = posix_fd_current_pid()
@@ -2069,11 +2081,11 @@ something other than AF_INET / AF_UNSPEC.
         var reply: [2]byte
         val r = ipc_send(port, msg, 11, reply, 2)
         if r < 0
-            posix_fd_set_error(fd, i64(-5))
-            return i64(-5)
+            posix_fd_set_error(fd, i64(-EIO))
+            return i64(-EIO)
         if reply[0] != 0
-            posix_fd_set_error(fd, i64(-111))
-            return i64(-111)            // -ECONNREFUSED
+            posix_fd_set_error(fd, i64(-ECONNREFUSED))
+            return i64(-ECONNREFUSED)
         val inet_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = inet_fd
         // Apply pending SO_KEEPALIVE now that the slot exists.
@@ -2106,7 +2118,7 @@ something other than AF_INET / AF_UNSPEC.
         // SYN_SENT; once it reaches ESTABLISHED the existing
         // inet_epoll_fire path delivers the readiness wake.
         if nb != 0
-            return i64(-115)            // -EINPROGRESS
+            return i64(-EINPROGRESS)
         i64(0)
 
 SYS_LISTEN. Requires a prior bind() to have set the local port in
@@ -2116,17 +2128,17 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
 
     sys_listen(fd: int, backlog: int) -> i64
         if posix_fd_kind(fd) != POSIX_FD_TCP_SOCKET
-            return i64(-9)
+            return i64(-EBADF)
         if posix_fd_target(fd) >= 0
-            return i64(-22)             // already listening or connected
+            return i64(-EINVAL)             // already listening or connected
         val pid = posix_fd_current_pid()
         val idx = pid * POSIX_FDS_PER_PROC + fd
         val local_port = int(posix_fd_table[idx].pos)
         if local_port <= 0
-            return i64(-22)             // -EINVAL — must bind first
+            return i64(-EINVAL)             // must bind first
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var msg: [9]byte
         msg[0] = byte(INET_CMD_TCP_LISTEN)
         shim_write_u16(msg, 1, local_port)
@@ -2151,9 +2163,9 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         var reply: [2]byte
         val r = ipc_send(port, msg, 9, reply, 2)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-98)             // -EADDRINUSE
+            return i64(-EADDRINUSE)
         val listen_fd = int(reply[1]) & 0xff
         posix_fd_table[idx].target = listen_fd
         posix_fd_table[idx].is_listen = 1
@@ -2193,13 +2205,13 @@ CLOSE_WAIT on arrival — read/close paths handle that already.
 
     sys_accept(fd: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
         if posix_fd_kind(fd) != POSIX_FD_TCP_SOCKET
-            return i64(-9)
+            return i64(-EBADF)
         val listen_fd = posix_fd_target(fd)
         if listen_fd < 0
-            return i64(-22)
+            return i64(-EINVAL)
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         val nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
         var msg: [3]byte
         if nb != 0
@@ -2210,12 +2222,12 @@ CLOSE_WAIT on arrival — read/close paths handle that already.
         var reply: [8]byte
         val r = ipc_send(port, msg, 3, reply, 8)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] == byte(-11)
             // NB variant returns -EAGAIN when queue is empty.
-            return i64(-11)
+            return i64(-EAGAIN)
         if reply[0] != 0
-            return i64(-5)
+            return i64(-EIO)
         val child_inet_fd = int(reply[1]) & 0xff
         val peer_port = shim_read_u16(reply, 6)
         if addr_ptr != i64(0)
@@ -2242,7 +2254,7 @@ CLOSE_WAIT on arrival — read/close paths handle that already.
             shim_write_u16(close_msg, 1, child_inet_fd)
             var close_rep: [1]byte
             ipc_send(port, close_msg, 3, close_rep, 1)
-            return i64(-24)             // -EMFILE
+            return i64(-EMFILE)
         i64(new_fd)
 
 SYS_ACCEPT4.  Linux's accept(2) variant that takes a `flags`
@@ -2264,7 +2276,7 @@ follow-up arc).  Unknown flag bits return -EINVAL.
     sys_accept4(fd: int, addr_ptr: i64, addrlen_ptr: i64, flags: int) -> i64
         val known = POSIX_SOCK_NONBLOCK | POSIX_SOCK_CLOEXEC
         if (flags & ~known) != 0
-            return i64(-22)             // -EINVAL
+            return i64(-EINVAL)
         val r = sys_accept(fd, addr_ptr, addrlen_ptr)
         if r < i64(0)
             return r
@@ -2291,13 +2303,13 @@ recv data). Not valid on non-TCP fds.
             // best-effort flush hint.
             return i64(0)
         if k != POSIX_FD_TCP_SOCKET
-            return i64(-9)
+            return i64(-EBADF)
         val inet_fd = posix_fd_target(fd)
         if inet_fd < 0
-            return i64(-107)            // -ENOTCONN
+            return i64(-ENOTCONN)
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var msg: [4]byte
         msg[0] = byte(INET_CMD_TCP_SHUTDOWN)
         shim_write_u16(msg, 1, inet_fd)
@@ -2305,9 +2317,9 @@ recv data). Not valid on non-TCP fds.
         var reply: [1]byte
         val r = ipc_send(port, msg, 4, reply, 1)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-5)
+            return i64(-EIO)
         i64(0)
 
 Send INET_CMD_TCP_SET_KEEPALIVE.  Returns 0 / negative errno.
@@ -2522,7 +2534,7 @@ as -EINVAL).
         val k = posix_fd_kind(fd)
         if k != POSIX_FD_UDP_SOCKET
             if k != POSIX_FD_TCP_SOCKET
-                return i64(-9)          // -EBADF
+                return i64(-EBADF)
         val pid = posix_fd_current_pid()
         val tidx = pid * POSIX_FDS_PER_PROC + fd
 
@@ -2557,19 +2569,19 @@ no resurrection on this test surface.
             if optname == 2
                 var v = 0
                 if shim_sockopt_read_int(optval, optlen, v) != 0
-                    return i64(-22)
+                    return i64(-EINVAL)
                 posix_fd_table[tidx].flag_reuseaddr = v
                 return i64(0)
             if optname == 6
                 var v = 0
                 if shim_sockopt_read_int(optval, optlen, v) != 0
-                    return i64(-22)
+                    return i64(-EINVAL)
                 posix_fd_table[tidx].flag_broadcast = v
                 return i64(0)
             if optname == 9
                 var v = 0
                 if shim_sockopt_read_int(optval, optlen, v) != 0
-                    return i64(-22)
+                    return i64(-EINVAL)
                 posix_fd_table[tidx].flag_keepalive = v
                 // Push to inet immediately when a slot exists so
                 // the probe/giveup cycle either starts (v != 0) or
@@ -2583,7 +2595,7 @@ no resurrection on this test surface.
             if optname == 15
                 var v = 0
                 if shim_sockopt_read_int(optval, optlen, v) != 0
-                    return i64(-22)
+                    return i64(-EINVAL)
                 posix_fd_table[tidx].flag_reuseport = v
                 return i64(0)
             // SO_LINGER. Wire is `struct linger { i32 l_onoff;
@@ -2593,7 +2605,7 @@ no resurrection on this test surface.
             // (matches Linux glibc behaviour).
             if optname == 13
                 if optlen < 8 || optval == i64(0)
-                    return i64(-22)
+                    return i64(-EINVAL)
                 val lp_on: *i32 = *i32(optval)
                 val lp_secs: *i32 = *i32(optval + i64(4))
                 var l_on = int(*lp_on)
@@ -2612,7 +2624,7 @@ no resurrection on this test surface.
             // expiry.  UDP sendto remains unenforced (rarely blocks).
             if optname == 20 || optname == 21
                 if optlen < 16 || optval == i64(0)
-                    return i64(-22)
+                    return i64(-EINVAL)
                 val tv_sec_lo = shim_read_ptr(*byte(optval), 0)
                 val tv_usec_lo = shim_read_ptr(*byte(optval), 8)
                 var ms = int(tv_sec_lo) * 1000 + (int(tv_usec_lo) / 1000)
@@ -2634,7 +2646,7 @@ no resurrection on this test surface.
                     return i64(0)
                 var requested = 0
                 if shim_sockopt_read_int(optval, optlen, requested) != 0
-                    return i64(-22)
+                    return i64(-EINVAL)
                 if requested < 0
                     requested = 0
                 if optname == 7
@@ -2652,17 +2664,17 @@ no resurrection on this test surface.
             if optname == 1
                 var v = 0
                 if shim_sockopt_read_int(optval, optlen, v) != 0
-                    return i64(-22)
+                    return i64(-EINVAL)
                 posix_fd_table[tidx].flag_nodelay = v
                 return i64(0)
             // TCP_KEEPIDLE (4) / TCP_KEEPINTVL (5) — seconds.
             // TCP_KEEPCNT (6) — count.
             if optname == 4 || optname == 5 || optname == 6
                 if k != POSIX_FD_TCP_SOCKET
-                    return i64(-92)
+                    return i64(-ENOPROTOOPT)
                 var v = 0
                 if shim_sockopt_read_int(optval, optlen, v) != 0
-                    return i64(-22)
+                    return i64(-EINVAL)
                 if v < 0
                     v = 0
                 if optname == 4
@@ -2728,7 +2740,7 @@ is left untouched in that case.
         val k = posix_fd_kind(fd)
         if k != POSIX_FD_UDP_SOCKET
             if k != POSIX_FD_TCP_SOCKET
-                return i64(-9)          // -EBADF
+                return i64(-EBADF)
         var accept = 0
         if level == 1
             if optname == 2
@@ -2769,9 +2781,9 @@ is left untouched in that case.
             if optname == 18
                 accept = 1
         if accept == 0
-            return i64(-92)             // -ENOPROTOOPT
+            return i64(-ENOPROTOOPT)
         if len_ptr == i64(0)
-            return i64(-14)             // -EFAULT
+            return i64(-EFAULT)
         val lp: *i32 = *i32(len_ptr)
         val cap = int(*lp)
         // SO_LINGER returns 8 bytes, TCP_INFO can fill up to 104
@@ -2786,9 +2798,9 @@ is left untouched in that case.
             if optname == 11
                 need = 1                // Linux fills as much as cap
         if cap < need
-            return i64(-22)             // -EINVAL
+            return i64(-EINVAL)
         if optval == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         // SO_LINGER: write back the persisted struct.  Pre-connect
         // / post-close fds carry the user's most recent set call
         // (or zero-init).  No inet round-trip needed since the
@@ -2829,22 +2841,22 @@ is left untouched in that case.
         if level == 6
             if optname == 11
                 if k != POSIX_FD_TCP_SOCKET
-                    return i64(-92)         // -ENOPROTOOPT
+                    return i64(-ENOPROTOOPT)
                 val info_inet_fd = posix_fd_target(fd)
                 if info_inet_fd < 0
-                    return i64(-22)         // pre-connect TCP fd
+                    return i64(-EINVAL)         // pre-connect TCP fd
                 val iport = inet_get_port()
                 if iport < 0
-                    return i64(-5)
+                    return i64(-EIO)
                 var imsg: [3]byte
                 imsg[0] = byte(INET_CMD_TCP_GET_INFO)
                 shim_write_u16(imsg, 1, info_inet_fd)
                 var ireply: [105]byte
                 val ir = ipc_send(iport, imsg, 3, ireply, 105)
                 if ir < 0
-                    return i64(-5)
+                    return i64(-EIO)
                 if ireply[0] != 0
-                    return i64(-22)
+                    return i64(-EINVAL)
                 val ubuf: *byte = *byte(optval)
                 var cw = cap
                 if cw > 104
@@ -2922,7 +2934,7 @@ is left untouched in that case.
                     return i64(0)
                 val port = inet_get_port()
                 if port < 0
-                    return i64(-5)
+                    return i64(-EIO)
                 var msg: [4]byte
                 msg[0] = byte(INET_CMD_TCP_GETBUF)
                 shim_write_u16(msg, 1, inet_fd)
@@ -2932,9 +2944,9 @@ is left untouched in that case.
                 var reply: [3]byte
                 val r = ipc_send(port, msg, 4, reply, 3)
                 if r < 0
-                    return i64(-5)
+                    return i64(-EIO)
                 if reply[0] != 0
-                    return i64(-22)
+                    return i64(-EINVAL)
                 *vp = i32(shim_read_u16(reply, 1))
                 *lp = i32(4)
                 return i64(0)
@@ -3072,19 +3084,19 @@ peer short-circuit.
         if k == POSIX_FD_UDP_SOCKET
             val inet_fd = posix_fd_target(fd)
             if inet_fd < 0
-                return i64(-9)
+                return i64(-EBADF)
             val port = inet_get_port()
             if port < 0
-                return i64(-19)
+                return i64(-ENODEV)
             var msg: [2]byte
             msg[0] = byte(INET_CMD_UDP_GETNAME)
             msg[1] = byte(inet_fd & 0xff)
             var reply: [7]byte
             val r = ipc_send(port, msg, 2, reply, 7)
             if r < 0
-                return i64(-5)
+                return i64(-EIO)
             if reply[0] != 0
-                return i64(-5)
+                return i64(-EIO)
             val p = ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
             shim_write_sockaddr(addr_ptr, p, &reply[3])
             shim_write_addrlen(addrlen_ptr, 16)
@@ -3103,7 +3115,7 @@ peer short-circuit.
                 return i64(0)
             val port = inet_get_port()
             if port < 0
-                return i64(-19)
+                return i64(-ENODEV)
             var msg: [4]byte
             msg[0] = byte(INET_CMD_TCP_GETNAME)
             shim_write_u16(msg, 1, tcp_fd)
@@ -3111,7 +3123,7 @@ peer short-circuit.
             var reply: [7]byte
             val r = ipc_send(port, msg, 4, reply, 7)
             if r < 0
-                return i64(-5)
+                return i64(-EIO)
             val raw = int(reply[0]) & 0xff
             if raw != 0
                 if raw >= 128
@@ -3121,7 +3133,7 @@ peer short-circuit.
             shim_write_sockaddr(addr_ptr, p, &reply[3])
             shim_write_addrlen(addrlen_ptr, 16)
             return i64(0)
-        i64(-9)                             // -EBADF
+        i64(-EBADF)
 
     sys_getpeername(fd: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
         val k = posix_fd_kind(fd)
@@ -3133,7 +3145,7 @@ peer short-circuit.
             val pid = posix_fd_current_pid()
             val idx = pid * POSIX_FDS_PER_PROC + fd
             if posix_fd_table[idx].udp_connected == 0
-                return i64(-107)
+                return i64(-ENOTCONN)
             var oct: [4]byte
             oct[0] = byte(posix_fd_table[idx].udp_peer_a & 0xff)
             oct[1] = byte(posix_fd_table[idx].udp_peer_b & 0xff)
@@ -3143,13 +3155,13 @@ peer short-circuit.
             shim_write_addrlen(addrlen_ptr, 16)
             return i64(0)
         if k != POSIX_FD_TCP_SOCKET
-            return i64(-9)
+            return i64(-EBADF)
         val tcp_fd = posix_fd_target(fd)
         if tcp_fd < 0
-            return i64(-107)
+            return i64(-ENOTCONN)
         val port = inet_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var msg: [4]byte
         msg[0] = byte(INET_CMD_TCP_GETNAME)
         shim_write_u16(msg, 1, tcp_fd)
@@ -3157,7 +3169,7 @@ peer short-circuit.
         var reply: [7]byte
         val r = ipc_send(port, msg, 4, reply, 7)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         val status = i8(reply[0])
         if int(status) != 0
             return i64(int(status))
@@ -3182,25 +3194,25 @@ newfd` reports -EINVAL per Linux.
     sys_dup(oldfd: int) -> i64
         val k = posix_fd_kind(oldfd)
         if k == POSIX_FD_FREE
-            return i64(-9)              // -EBADF
+            return i64(-EBADF)
         val target = posix_fd_target(oldfd)
         val flags = posix_fd_flags(oldfd)
         val newfd = posix_fd_alloc(k, target)
         if newfd < 0
-            return i64(-24)             // -EMFILE
+            return i64(-EMFILE)
         posix_fd_set_flags(newfd, flags)
         i64(newfd)
 
     sys_dup3(oldfd: int, newfd: int, dup_flags: int) -> i64
         if oldfd == newfd
-            return i64(-22)             // -EINVAL
+            return i64(-EINVAL)
         val k = posix_fd_kind(oldfd)
         if k == POSIX_FD_FREE
-            return i64(-9)
+            return i64(-EBADF)
         if newfd < 0
-            return i64(-9)
+            return i64(-EBADF)
         if newfd >= POSIX_FDS_PER_PROC
-            return i64(-9)
+            return i64(-EBADF)
         if posix_fd_kind(newfd) != POSIX_FD_FREE
             val _ = sys_close(newfd)
         val target = posix_fd_target(oldfd)
@@ -3234,7 +3246,7 @@ Unknown command → -EINVAL so real misuse surfaces.
     sys_fcntl(fd: int, cmd: int, arg: int) -> i64
         val k = posix_fd_kind(fd)
         if k == POSIX_FD_FREE
-            return i64(-9)              // -EBADF
+            return i64(-EBADF)
         if cmd == POSIX_F_GETFL
             return i64(posix_fd_flags(fd))
         if cmd == POSIX_F_SETFL
@@ -3245,8 +3257,8 @@ Unknown command → -EINVAL so real misuse surfaces.
         if cmd == POSIX_F_SETFD
             return i64(0)
         if cmd == POSIX_F_DUPFD
-            return i64(-22)             // -EINVAL (no dup yet)
-        i64(-22)
+            return i64(-EINVAL)             // no dup yet
+        i64(-EINVAL)
 
 SYS_OPENAT. The user passes `(dirfd, pathname, flags, mode)`. We
 ignore `dirfd` (musl always sends `AT_FDCWD = -100` once the cwd
@@ -3269,10 +3281,10 @@ Returns 0 on success, -ENOENT on miss.
 
     sys_faccessat(dirfd: int, path_ptr: i64, mode: int, flags: int) -> i64
         if path_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var path: [128]byte
         val up: *byte = *byte(path_ptr)
         var n = 0
@@ -3291,9 +3303,9 @@ Returns 0 on success, -ENOENT on miss.
         var reply: [9]byte
         val r = ipc_send(port, msg, 1 + n, reply, 9)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-2)              // -ENOENT
+            return i64(-ENOENT)
         // Open succeeded — close the handle immediately, we just
         // wanted the existence check.
         val handle = shim_read_be_i32(reply, 1)
@@ -3307,10 +3319,10 @@ Returns 0 on success, -ENOENT on miss.
 
     sys_openat(dirfd: int, path_ptr: i64, oflags: int, mode: int) -> i64
         if path_ptr == i64(0)
-            return i64(-14)             // -EFAULT
+            return i64(-EFAULT)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)             // -ENODEV
+            return i64(-ENODEV)
         var path: [128]byte
         val up: *byte = *byte(path_ptr)
         var n = 0
@@ -3329,12 +3341,12 @@ Returns 0 on success, -ENOENT on miss.
         var reply: [9]byte
         val r = ipc_send(port, msg, 1 + n, reply, 9)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         val want_create = (oflags & POSIX_O_CREAT) != 0
         val want_excl   = (oflags & POSIX_O_EXCL)  != 0
         if reply[0] != 0
             if !want_create
-                return i64(-2)          // -ENOENT
+                return i64(-ENOENT)
             // File doesn't exist and O_CREAT is set — ask VFS to
             // create it (TFS_CMD_CREATE goes via vfs_path_create
             // server-side, splitting the path into parent_ino +
@@ -3353,9 +3365,9 @@ Returns 0 on success, -ENOENT on miss.
             var crep: [5]byte
             val cr = ipc_send(port, cm, 4 + n, crep, 5)
             if cr < 0
-                return i64(-5)
+                return i64(-EIO)
             if crep[0] != 0
-                return i64(-2)          // -ENOENT (parent missing)
+                return i64(-ENOENT)          // parent missing
             // Now reopen — if THIS fails the FS is corrupt, but
             // -ENOENT is still the best Linux can return.
             var msg2: [129]byte
@@ -3366,9 +3378,9 @@ Returns 0 on success, -ENOENT on miss.
                 j += 1
             val r2 = ipc_send(port, msg2, 1 + n, reply, 9)
             if r2 < 0
-                return i64(-5)
+                return i64(-EIO)
             if reply[0] != 0
-                return i64(-2)
+                return i64(-ENOENT)
         else if want_create && want_excl
             // File already exists and the caller asked for
             // exclusive creation — release the just-acquired VFS
@@ -3380,7 +3392,7 @@ Returns 0 on success, -ENOENT on miss.
             shim_write_be_i32(cmsg, 1, h)
             var crep: [1]byte
             ipc_send(port, cmsg, 5, crep, 1)
-            return i64(-17)             // -EEXIST
+            return i64(-EEXIST)
         val handle = shim_read_be_i32(reply, 1)
         val pfd = posix_fd_alloc(POSIX_FD_FILE, handle)
         if pfd < 0
@@ -3391,7 +3403,7 @@ Returns 0 on success, -ENOENT on miss.
             shim_write_be_i32(cmsg, 1, handle)
             var crep: [1]byte
             ipc_send(port, cmsg, 5, crep, 1)
-            return i64(-24)             // -EMFILE
+            return i64(-EMFILE)
         posix_fd_set_flags(pfd, oflags & POSIX_O_NONBLOCK)
         i64(pfd)
 
@@ -3404,13 +3416,13 @@ the way Linux does for unseekable fds.
     sys_lseek(fd: int, offset: i64, whence: int) -> i64
         val k = posix_fd_kind(fd)
         if k == POSIX_FD_FREE
-            return i64(-9)              // -EBADF
+            return i64(-EBADF)
         if k != POSIX_FD_FILE
-            return i64(-29)             // -ESPIPE
+            return i64(-ESPIPE)
         val handle = posix_fd_target(fd)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var msg: [10]byte
         msg[0] = byte(VFS_CMD_SEEK_C)
         shim_write_be_i32(msg, 1, handle)
@@ -3419,9 +3431,9 @@ the way Linux does for unseekable fds.
         var reply: [5]byte
         val r = ipc_send(port, msg, 10, reply, 5)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-22)             // -EINVAL
+            return i64(-EINVAL)
         i64(shim_read_be_i32(reply, 1))
 
 SYS_PIPE2. Asks VFS to allocate a pipe and hand back two
@@ -3433,18 +3445,18 @@ exec lands.
 
     sys_pipe2(pipefd_array: i64, pipe_flags: int) -> i64
         if pipefd_array == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var msg: [1]byte
         msg[0] = byte(VFS_CMD_PIPE_C)
         var reply: [9]byte
         val r = ipc_send(port, msg, 1, reply, 9)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-24)             // -EMFILE
+            return i64(-EMFILE)
         val rh = shim_read_be_i32(reply, 1)
         val wh = shim_read_be_i32(reply, 5)
         val rfd = posix_fd_alloc(POSIX_FD_FILE, rh)
@@ -3461,7 +3473,7 @@ exec lands.
             ipc_send(port, c1, 5, crep, 1)
             if wfd >= 0
                 posix_fd_clear(wfd)
-            return i64(-24)
+            return i64(-EMFILE)
         if wfd < 0
             sys_close(rfd)
             var c1: [5]byte
@@ -3469,7 +3481,7 @@ exec lands.
             shim_write_be_i32(c1, 1, wh)
             var crep: [1]byte
             ipc_send(port, c1, 5, crep, 1)
-            return i64(-24)
+            return i64(-EMFILE)
         val nb = pipe_flags & POSIX_O_NONBLOCK
         if nb != 0
             posix_fd_set_flags(rfd, nb)
@@ -3543,9 +3555,9 @@ if VFS reported an error.
 
     shim_pack_stat_reply(reply: *byte, st_ptr: i64) -> i64
         if reply[0] != 0
-            return i64(-2)              // -ENOENT
+            return i64(-ENOENT)
         if st_ptr == i64(0)
-            return i64(-14)             // -EFAULT
+            return i64(-EFAULT)
         val tfs_mode = shim_read_be_i32(reply, 1)
         val nlinks   = shim_read_be_i32(reply, 5)
         val uid      = shim_read_be_i32(reply, 9)
@@ -3563,7 +3575,7 @@ if VFS reported an error.
 
     sys_fstat(fd: int, st_ptr: i64) -> i64
         if posix_fd_kind(fd) == POSIX_FD_FREE
-            return i64(-9)              // -EBADF
+            return i64(-EBADF)
         if posix_fd_kind(fd) != POSIX_FD_FILE
             // Sockets / epoll / eventfd / timerfd: musl probes
             // these with fstat to populate libc's `_isatty` and
@@ -3573,7 +3585,7 @@ if VFS reported an error.
             // `fstat` on the `socket()` fd (the kernel reports
             // a synthetic socketfs inode).
             if st_ptr == i64(0)
-                return i64(-14)
+                return i64(-EFAULT)
             val out: *byte = *byte(st_ptr)
             var mode = POSIX_S_IFREG | 0x1B6
             val k = posix_fd_kind(fd)
@@ -3592,14 +3604,14 @@ if VFS reported an error.
         val handle = posix_fd_target(fd)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var msg: [5]byte
         msg[0] = byte(VFS_CMD_FSTAT_C)
         shim_write_be_i32(msg, 1, handle)
         var reply: [29]byte
         val r = ipc_send(port, msg, 5, reply, 29)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         shim_pack_stat_reply(reply, st_ptr)
 
     sys_newfstatat(dirfd: int, path_ptr: i64, st_ptr: i64, flag: int) -> i64
@@ -3616,10 +3628,10 @@ if VFS reported an error.
                 else
                     return sys_fstat(dirfd, st_ptr)
         if path_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var path: [128]byte
         val up: *byte = *byte(path_ptr)
         var n = 0
@@ -3638,7 +3650,7 @@ if VFS reported an error.
         var reply: [29]byte
         val r = ipc_send(port, msg, 1 + n, reply, 29)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         shim_pack_stat_reply(reply, st_ptr)
 
 Phase 4 chunk 3 — `mkdir` / `unlink` / `rename` / `chmod`. musl
@@ -3676,15 +3688,15 @@ success.
 
     sys_mkdirat(dirfd: int, path_ptr: i64, mode: int) -> i64
         if path_ptr == i64(0)
-            return i64(-14)             // -EFAULT
+            return i64(-EFAULT)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)             // -ENODEV
+            return i64(-ENODEV)
         var path: [128]byte
         val up: *byte = *byte(path_ptr)
         val n = shim_copy_path_terminated(up, path, 128)
         if n < 0
-            return i64(-36)             // -ENAMETOOLONG
+            return i64(-ENAMETOOLONG)
         val perm = mode & 0xFFF
         var msg: [131]byte
         msg[0] = byte(VFS_CMD_MKDIR_C)
@@ -3697,9 +3709,9 @@ success.
         var reply: [5]byte
         val r = ipc_send(port, msg, 3 + n, reply, 5)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-2)              // -ENOENT (parent missing or name in use)
+            return i64(-ENOENT)              // parent missing or name in use
         i64(0)
 
 `SYS_UNLINKAT` (365). `flags=AT_REMOVEDIR` (0x200) routes to
@@ -3709,15 +3721,15 @@ the directory remover; otherwise unlink the regular file at
 
     sys_unlinkat(dirfd: int, path_ptr: i64, flags: int) -> i64
         if path_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var path: [128]byte
         val up: *byte = *byte(path_ptr)
         val n = shim_copy_path_terminated(up, path, 128)
         if n < 0
-            return i64(-36)
+            return i64(-ENAMETOOLONG)
         var msg: [129]byte
         if (flags & POSIX_AT_REMOVEDIR) != 0
             msg[0] = byte(VFS_CMD_RMDIR_C)
@@ -3730,9 +3742,9 @@ the directory remover; otherwise unlink the regular file at
         var reply: [1]byte
         val r = ipc_send(port, msg, 1 + n, reply, 1)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-2)              // -ENOENT
+            return i64(-ENOENT)
         i64(0)
 
 `SYS_RENAMEAT` (281) and `SYS_RENAMEAT2` (282). The wire
@@ -3747,24 +3759,24 @@ buf so two 120s + header just fits the round trip).
     sys_renameat(olddirfd: int, oldpath_ptr: i64,
                  newdirfd: int, newpath_ptr: i64) -> i64
         if oldpath_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         if newpath_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var old: [120]byte
         var nw: [120]byte
         val oldp: *byte = *byte(oldpath_ptr)
         val newp: *byte = *byte(newpath_ptr)
         val ol = shim_copy_path_terminated(oldp, old, 120)
         if ol < 0
-            return i64(-36)
+            return i64(-ENAMETOOLONG)
         val nl = shim_copy_path_terminated(newp, nw, 120)
         if nl < 0
-            return i64(-36)
+            return i64(-ENAMETOOLONG)
         if ol > 255
-            return i64(-36)
+            return i64(-ENAMETOOLONG)
         var msg: [248]byte
         msg[0] = byte(VFS_CMD_RENAME_C)
         msg[1] = byte(ol)
@@ -3779,9 +3791,9 @@ buf so two 120s + header just fits the round trip).
         var reply: [1]byte
         val r = ipc_send(port, msg, 2 + ol + nl, reply, 1)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-2)
+            return i64(-ENOENT)
         i64(0)
 
 `SYS_FCHMODAT` (167). `flags=AT_SYMLINK_NOFOLLOW` (0x100) is
@@ -3791,15 +3803,15 @@ path(N)]`.
 
     sys_fchmodat(dirfd: int, path_ptr: i64, mode: int, flags: int) -> i64
         if path_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val port = vfs_get_port()
         if port < 0
-            return i64(-19)
+            return i64(-ENODEV)
         var path: [128]byte
         val up: *byte = *byte(path_ptr)
         val n = shim_copy_path_terminated(up, path, 128)
         if n < 0
-            return i64(-36)
+            return i64(-ENAMETOOLONG)
         val perm = mode & 0xFFF
         var msg: [131]byte
         msg[0] = byte(VFS_CMD_CHMOD_C)
@@ -3812,9 +3824,9 @@ path(N)]`.
         var reply: [1]byte
         val r = ipc_send(port, msg, 3 + n, reply, 1)
         if r < 0
-            return i64(-5)
+            return i64(-EIO)
         if reply[0] != 0
-            return i64(-2)
+            return i64(-ENOENT)
         i64(0)
 
 ### Epoll → inet subscription helpers
@@ -4034,7 +4046,7 @@ Returns the allocated POSIX fd, or -EMFILE if no slot is free.
     sys_eventfd2(initval: int, flags: int) -> i64
         val pfd = posix_fd_alloc(POSIX_FD_EVENTFD, 0)
         if pfd < 0
-            return i64(-24)
+            return i64(-EMFILE)
         val pid = posix_fd_current_pid()
         val idx = pid * POSIX_FDS_PER_PROC + pfd
         posix_fd_table[idx].eventfd_count = i64(initval)
@@ -4150,10 +4162,10 @@ state is always coherent at the moment the user observes it.
     sys_timerfd_create(clockid: int, flags: int) -> i64
         if clockid != POSIX_CLOCK_REALTIME
             if clockid != POSIX_CLOCK_MONOTONIC
-                return i64(-22)
+                return i64(-EINVAL)
         val pfd = posix_fd_alloc(POSIX_FD_TIMERFD, 0)
         if pfd < 0
-            return i64(-24)
+            return i64(-EMFILE)
         var fd_flags = 0
         if (flags & POSIX_TFD_NONBLOCK) != 0
             fd_flags = fd_flags | POSIX_O_NONBLOCK
@@ -4163,9 +4175,9 @@ state is always coherent at the moment the user observes it.
 
     sys_timerfd_settime(fd: int, flags: int, new_value: i64, old_value: i64) -> i64
         if posix_fd_kind(fd) != POSIX_FD_TIMERFD
-            return i64(-22)
+            return i64(-EINVAL)
         if new_value == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val pid_t = posix_fd_current_pid()
         val tidx = pid_t * POSIX_FDS_PER_PROC + fd
         // Catch up before snapshotting old_value so any
@@ -4210,9 +4222,9 @@ state is always coherent at the moment the user observes it.
 
     sys_timerfd_gettime(fd: int, curr_value: i64) -> i64
         if posix_fd_kind(fd) != POSIX_FD_TIMERFD
-            return i64(-22)
+            return i64(-EINVAL)
         if curr_value == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val pid_t = posix_fd_current_pid()
         val tidx = pid_t * POSIX_FDS_PER_PROC + fd
         // Catch up so the snapshot reflects the live timer state.
@@ -4241,7 +4253,7 @@ keep working. timerfd already takes the same shortcut.
 
     sys_clock_gettime(clockid: int, tp: i64) -> i64
         if tp == i64(0)
-            return i64(-14)             // -EFAULT
+            return i64(-EFAULT)
         val p: *byte = *byte(tp)
         shim_ticks_to_itimerspec(p, 0, int(uptime()))
         i64(0)
@@ -4262,7 +4274,7 @@ it but accepts the pointer. We do the same.
 
     sys_gettimeofday(tv: i64, tz: i64) -> i64
         if tv == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val p: *byte = *byte(tv)
         val ticks = int(uptime())
         val sec = i64(ticks / 100)
@@ -4316,7 +4328,7 @@ to relative by subtracting `uptime()`.
 
     sys_nanosleep(req: i64, rem: i64) -> i64
         if req == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val rp: *byte = *byte(req)
         val ticks = shim_timespec_to_ticks(rp)
         if ticks > 0
@@ -4358,9 +4370,9 @@ without a real CSPRNG. Returns the byte count on success,
 
     sys_getrandom(buf: i64, len: int, flags: int) -> i64
         if buf == i64(0)
-            return i64(-14)             // -EFAULT
+            return i64(-EFAULT)
         if len < 0
-            return i64(-22)
+            return i64(-EINVAL)
         val p: *byte = *byte(buf)
         var written = 0
         while written < len
@@ -4375,7 +4387,7 @@ without a real CSPRNG. Returns the byte count on success,
 
     sys_clock_nanosleep(clockid: int, flags: int, req: i64, rem: i64) -> i64
         if req == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val rp: *byte = *byte(req)
         var ticks = shim_timespec_to_ticks(rp)
         // TIMER_ABSTIME = 1: req is an absolute time. Convert to
@@ -4413,9 +4425,9 @@ Only POSIX_FD_FILE is supported; sockets / fifos return
 
     sys_pread64(fd: int, buf: i64, len: int, offset: i64) -> i64
         if posix_fd_kind(fd) != POSIX_FD_FILE
-            return i64(-29)             // -ESPIPE
+            return i64(-ESPIPE)
         if offset < i64(0)
-            return i64(-22)
+            return i64(-EINVAL)
         // Save current pos; SEEK_CUR=1 with offset=0 just reads it.
         val saved = sys_lseek(fd, i64(0), 1)
         if saved < i64(0)
@@ -4433,9 +4445,9 @@ Only POSIX_FD_FILE is supported; sockets / fifos return
 
     sys_pwrite64(fd: int, buf: i64, len: int, offset: i64) -> i64
         if posix_fd_kind(fd) != POSIX_FD_FILE
-            return i64(-29)
+            return i64(-ESPIPE)
         if offset < i64(0)
-            return i64(-22)
+            return i64(-EINVAL)
         val saved = sys_lseek(fd, i64(0), 1)
         if saved < i64(0)
             return saved
@@ -4461,13 +4473,13 @@ was already transferred. Zero-length iovs are skipped.
 
     sys_writev(fd: int, iov_ptr: i64, iovcnt: int) -> i64
         if iovcnt < 0
-            return i64(-22)
+            return i64(-EINVAL)
         if iovcnt > SHIM_IOV_MAX
-            return i64(-22)
+            return i64(-EINVAL)
         if iovcnt == 0
             return i64(0)
         if iov_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val iov: *byte = *byte(iov_ptr)
         var total: i64 = i64(0)
         var ii = 0
@@ -4476,10 +4488,10 @@ was already transferred. Zero-length iovs are skipped.
             val base = shim_read_ptr(iov, ent_off)
             val seg_len = int(shim_read_ptr(iov, ent_off + 8))
             if seg_len < 0
-                return i64(-22)
+                return i64(-EINVAL)
             if seg_len > 0
                 if base == i64(0)
-                    return i64(-14)
+                    return i64(-EFAULT)
                 val n = sys_write(fd, base, seg_len)
                 if n < i64(0)
                     if total > i64(0)
@@ -4493,13 +4505,13 @@ was already transferred. Zero-length iovs are skipped.
 
     sys_readv(fd: int, iov_ptr: i64, iovcnt: int) -> i64
         if iovcnt < 0
-            return i64(-22)
+            return i64(-EINVAL)
         if iovcnt > SHIM_IOV_MAX
-            return i64(-22)
+            return i64(-EINVAL)
         if iovcnt == 0
             return i64(0)
         if iov_ptr == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val iov: *byte = *byte(iov_ptr)
         var total: i64 = i64(0)
         var ii = 0
@@ -4508,10 +4520,10 @@ was already transferred. Zero-length iovs are skipped.
             val base = shim_read_ptr(iov, ent_off)
             val seg_len = int(shim_read_ptr(iov, ent_off + 8))
             if seg_len < 0
-                return i64(-22)
+                return i64(-EINVAL)
             if seg_len > 0
                 if base == i64(0)
-                    return i64(-14)
+                    return i64(-EFAULT)
                 val n = sys_read(fd, base, seg_len)
                 if n < i64(0)
                     if total > i64(0)
@@ -4572,11 +4584,11 @@ Musl's lite_malloc relies on the equality check
     sys_epoll_create1(epoll_flags: int) -> i64
         val inst = epoll_alloc_inst()
         if inst < 0
-            return i64(-24)             // -EMFILE
+            return i64(-EMFILE)
         val pfd = posix_fd_alloc(POSIX_FD_EPOLL, inst)
         if pfd < 0
             epoll_inst_release(inst)
-            return i64(-24)
+            return i64(-EMFILE)
         posix_fd_set_flags(pfd, epoll_flags & POSIX_O_NONBLOCK)
         i64(pfd)
 
@@ -4618,15 +4630,15 @@ without poll support.
 
     sys_epoll_ctl(epfd: int, op: int, target_fd: int, ev_ptr: i64) -> i64
         if posix_fd_kind(epfd) != POSIX_FD_EPOLL
-            return i64(-22)             // -EINVAL
+            return i64(-EINVAL)
         val inst = posix_fd_target(epfd)
         if inst < 0
-            return i64(-22)
+            return i64(-EINVAL)
         var events_in = 0
         var data_in = i64(0)
         if op != POSIX_EPOLL_CTL_DEL
             if ev_ptr == i64(0)
-                return i64(-14)         // -EFAULT
+                return i64(-EFAULT)
             val up: *byte = *byte(ev_ptr)
             events_in = shim_read_le_u32(up, 0)
             data_in = shim_read_le_i64(up, 8)
@@ -4636,7 +4648,7 @@ without poll support.
             while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
                 if epoll_table[inst].entries[i].in_use != 0
                     if epoll_table[inst].entries[i].watched_fd == target_fd
-                        return i64(-17)     // -EEXIST
+                        return i64(-EEXIST)
                 i += 1
             i = 0
             while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
@@ -4656,7 +4668,7 @@ without poll support.
                     epoll_subscribe(target_fd, inst)
                     return i64(0)
                 i += 1
-            return i64(-28)             // -ENOSPC
+            return i64(-ENOSPC)
         if op == POSIX_EPOLL_CTL_MOD
             var i = 0
             while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
@@ -4675,7 +4687,7 @@ without poll support.
                         epoll_table[inst].entries[i].last_seen_seq = 0
                         return i64(0)
                 i += 1
-            return i64(-2)              // -ENOENT
+            return i64(-ENOENT)
         if op == POSIX_EPOLL_CTL_DEL
             var i = 0
             while i < POSIX_EPOLL_ENTRIES_PER_INSTANCE
@@ -4685,8 +4697,8 @@ without poll support.
                         epoll_table[inst].entries[i].in_use = 0
                         return i64(0)
                 i += 1
-            return i64(-2)
-        i64(-22)
+            return i64(-ENOENT)
+        i64(-EINVAL)
 
 Query a single watched fd's readiness. Returns the bits the
 shim should report, masked against the user's requested events
@@ -4868,14 +4880,14 @@ and `notify_wait()` can block again on the next iteration.
 
     sys_epoll_pwait(epfd: int, events_array: i64, max_events: int, timeout_ms: int) -> i64
         if posix_fd_kind(epfd) != POSIX_FD_EPOLL
-            return i64(-22)
+            return i64(-EINVAL)
         val inst = posix_fd_target(epfd)
         if inst < 0
-            return i64(-22)
+            return i64(-EINVAL)
         if max_events <= 0
-            return i64(-22)
+            return i64(-EINVAL)
         if events_array == i64(0)
-            return i64(-14)
+            return i64(-EFAULT)
         val out: *byte = *byte(events_array)
         var ticks_left = -1
         if timeout_ms >= 0
@@ -4940,16 +4952,16 @@ ignored — slix has no signals.
 
     sys_ppoll(fds_ptr: i64, nfds: int, ts_ptr: i64) -> i64
         if nfds < 0 || nfds > 32
-            return i64(-22)         // -EINVAL
+            return i64(-EINVAL)
         if nfds > 0 && fds_ptr == i64(0)
-            return i64(-14)         // -EFAULT
+            return i64(-EFAULT)
         var timeout_ms = -1
         if ts_ptr != i64(0)
             val ts: *byte = *byte(ts_ptr)
             val tv_sec = shim_read_le_i64(ts, 0)
             val tv_nsec = shim_read_le_i64(ts, 8)
             if tv_sec < i64(0) || tv_nsec < i64(0) || tv_nsec >= i64(1000000000)
-                return i64(-22)
+                return i64(-EINVAL)
             timeout_ms = int(tv_sec * i64(1000) + tv_nsec / i64(1000000))
         val fds: *byte = *byte(fds_ptr)
         // Wall-clock deadline (in 10 ms ticks). Using a deadline rather
