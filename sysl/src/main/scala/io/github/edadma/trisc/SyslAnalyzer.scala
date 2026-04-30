@@ -2728,9 +2728,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   private def latestStruct(st: SyslType.StructType): SyslType.StructType =
     structTypes.getOrElse(st.name, st)
 
-  /** Convert an expression AST to a type AST (for explicit type args parsed as index expressions). */
+  /** Convert an expression AST to a type AST (for explicit type args parsed as index expressions).
+   *  The expression-position grammar parses generic type args as expressions, so this maps
+   *  the relevant shapes back to types: `A` (VarRef), `Parser[A]` (Index of VarRef), and
+   *  `(A, B)` (TupleLit) are the cases that arise in practice. */
   private def exprToTypeAST(expr: ExpressionAST): TypeAST = expr match
     case VarRefAST(name) => NamedTypeAST(name)
+    case TupleLitAST(elems) => TupleTypeAST(elems.map(exprToTypeAST))
+    case IndexAST(VarRefAST(name), arg) => NamedTypeAST(name, List(exprToTypeAST(arg)))
     case _ => throw AnalysisError(s"expected type argument, got expression")
 
   /** Look up a method function by struct name and method name, trying both unmangled and mangled forms. */
@@ -5279,7 +5284,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case IndirectCallAST(IndexAST(VarRefAST(name), typeExpr), args)
         if genericStructs.contains(name) || genericTemplates.contains(name) || genericTypeAliases.contains(name) =>
         val typeArg = resolveType(exprToTypeAST(typeExpr))
-        val tArgs = args.map(analyzeExpr)
+        // For a generic-alias cast `Parser[i32](closure)`, propagate the alias's underlying
+        // type as the expected type for the (single) cast argument so that closure-shaped
+        // args get parameter inference, return-type context, and downstream type-arg
+        // inference for variant constructors that don't pin all type params from arg types.
+        val tArgs =
+          if genericTypeAliases.contains(name) && args.length == 1 then
+            val target = resolveType(NamedTypeAST(name, List(exprToTypeAST(typeExpr))))
+            val savedExp = currentExpected
+            currentExpected = Some(target.underlying)
+            try args.map(analyzeExpr) finally currentExpected = savedExp
+          else
+            args.map(analyzeExpr)
         if genericStructs.contains(name) then
           val st = instantiateGenericStruct(name, List(typeArg))
           if tArgs.length != st.fields.length then
@@ -5710,6 +5726,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case MatchExprAST(scrutinee, arms, default) =>
         val tScrutinee = analyzeExpr(scrutinee)
+        // The match expression's own expected type (if any) propagates into each arm's
+        // body and into the optional `else` body. This is what lets variant constructors
+        // with phantom type parameters (e.g. `Failure(m, n)` for `ParseResult[A]` where
+        // `A` doesn't appear in `Failure`'s fields) infer their type args from context.
+        val matchExpectedOpt = currentExpected
         val tArms = arms.map { arm =>
           pushScope()
           val tPatterns = arm.patterns.map(p => analyzePattern(p, tScrutinee.typ))
@@ -5718,11 +5739,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if tg.typ != BoolType then throw AnalysisError(s"match guard must be bool, got ${tg.typ}")
             tg
           }
-          val tBody = analyzeBlock(arm.body)
+          val savedExp = currentExpected
+          currentExpected = matchExpectedOpt
+          val tBody = try analyzeBlock(arm.body) finally currentExpected = savedExp
           popScope()
           TMatchArm(tPatterns, tGuard, tBody)
         }
-        val tDefault = default.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
+        val tDefault = default.map { stmts =>
+          pushScope()
+          val savedExp = currentExpected
+          currentExpected = matchExpectedOpt
+          val r = try analyzeBlock(stmts) finally currentExpected = savedExp
+          popScope()
+          r
+        }
         // Exhaustiveness check for matches on enum types. A guarded arm does not cover
         // its variant (the guard could be false). Wildcard or default provides full coverage.
         tScrutinee.typ.underlying match
