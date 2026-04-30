@@ -553,6 +553,24 @@ volatile var status: u32 = 0
 volatile var flag: int
 ```
 
+**Multi-line initializer.** When the right-hand side is long (a deeply
+parenthesized constructor, a verbose generic call, etc.), break after `=`
+and indent the value on the next line. This works for `val`, `var`, and
+plain assignment, with or without a type annotation:
+
+```sysl
+val sub: Parser[(int, int) -> int] =
+    success[(int, int) -> int]((a: int, b: int) -> a - b)
+
+var n: int =
+    100 + 23
+
+x =
+    f(some_long_argument)
+```
+
+The form mirrors function bodies' `=` ⏎ Indent stmts Dedent layout.
+
 ### Volatile
 
 The `volatile` qualifier prevents the compiler from optimizing away, reordering, or coalescing loads and stores. Use it for memory-mapped I/O registers and shared-memory variables.

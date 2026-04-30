@@ -580,8 +580,19 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val bindName: Parser[String] = ident | "_"
 
+  /** Right-hand side of a `val`/`var` initializer or an assignment. Accepts
+   *  either an inline expression (`val x = expr`) or an indented expression
+   *  on the next line (`val x =` ⏎ Indent expr Dedent), mirroring the way
+   *  function bodies take both `= expr` and `= ⏎ Indent stmts Dedent`. The
+   *  multi-line form is common when the RHS is a long generic call or a
+   *  deeply parenthesized constructor and the user wants to break after `=`.
+   */
+  lazy val valRhs: Parser[ExpressionAST] =
+    (Newline ~> Indent ~> tupleExpr <~ opt(Newline) <~ Dedent) |
+      tupleExpr
+
   lazy val identStmt: Parser[StmtAST] =
-    opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
+    opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeExpr) ~ ("=" ~> valRhs) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
       opt("volatile") ~ mutability ~ ident ~ (":" ~> typeExpr) ^^ { case vol ~ mut ~ name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
         VarStmtAST(name, Some(t), ArrayDeclAST(size, t), mut.isMutable, vol.isDefined, mut.isConst)
@@ -589,9 +600,9 @@ class SyslParser extends StandardTokenParsers {
       opt("volatile") ~ mutability ~ ident ~ (":" ~> typeRef) ~ not("=") ^^ { case vol ~ mut ~ name ~ t ~ _ =>
         VarStmtAST(name, Some(t), UninitDeclAST(t), mut.isMutable, vol.isDefined, mut.isConst)
       } |
-      opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
-      opt("volatile") ~ mutability ~ bindName ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ e => VarStmtAST(name, None, e, mut.isMutable, vol.isDefined, mut.isConst) } |
-      ident ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
+      opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeRef) ~ ("=" ~> valRhs) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
+      opt("volatile") ~ mutability ~ bindName ~ ("=" ~> valRhs) ^^ { case vol ~ mut ~ name ~ e => VarStmtAST(name, None, e, mut.isMutable, vol.isDefined, mut.isConst) } |
+      ident ~ (":" ~> typeExpr) ~ ("=" ~> valRhs) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ (":" ~> typeExpr) ^^ { case name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
         VarStmtAST(name, Some(t), ArrayDeclAST(size, t))
@@ -599,11 +610,11 @@ class SyslParser extends StandardTokenParsers {
       ident ~ (":" ~> typeRef) ~ not("=") ^^ { case name ~ t ~ _ =>
         VarStmtAST(name, Some(t), UninitDeclAST(t))
       } |
-      ident ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
+      ident ~ (":" ~> typeRef) ~ ("=" ~> valRhs) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ lvalueChain ~ compoundOp ~ expr ^^ { case name ~ chain ~ op ~ value =>
         buildCompoundAssign(name, chain, op.init, value)
       } |
-      ident ~ lvalueChain ~ ("=" ~> tupleExpr) ^^ { case name ~ chain ~ value =>
+      ident ~ lvalueChain ~ ("=" ~> valRhs) ^^ { case name ~ chain ~ value =>
         buildAssign(name, chain, value)
       }
 
