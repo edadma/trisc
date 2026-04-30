@@ -4600,11 +4600,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case ArrayLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
         if tElems.isEmpty then
-          // Empty array literal — element type comes from target context (e.g. [0]string = [])
-          val elemType = currentExpected.flatMap {
-            case SyslType.ArrayType(et, _) => Some(et)
-            case _ => None
-          }.getOrElse(throw AnalysisError("cannot infer element type for empty array literal []"))
+          // Empty array literal — element type comes from `currentExpected`. The
+          // canonical use case is the empty-accumulator idiom: `var xs: []int = []`,
+          // `f() -> []int = []`, `Bag([])`, `match { ... -> [] }`. This mirrors the
+          // expected-type-from-context rule that variant constructors with phantom
+          // type parameters already use for `None`-style zero-data variants.
+          //
+          // Slice expected → produce a [0]T literal; the existing array→slice
+          // coercion path handles the conversion. Fixed-array [0]T expected → match
+          // directly. Other expected types fall through to the unambiguous error.
+          val elemType: SyslType = currentExpected.map(_.underlying) match
+            case Some(SyslType.SliceType(et))      => et
+            case Some(SyslType.ArrayType(et, 0))   => et
+            case Some(SyslType.ArrayType(_, n))    =>
+              throw AnalysisError(s"empty literal `[]` cannot satisfy fixed-array type with $n element(s)")
+            case _ =>
+              throw AnalysisError("cannot infer element type for empty array literal []")
           TArrayLit(Nil, SyslType.ArrayType(elemType, 0))
         else
           val elemType = tElems.head.typ

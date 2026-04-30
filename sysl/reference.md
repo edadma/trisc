@@ -154,6 +154,25 @@ same `where`-predicate mechanism used for user-defined predicates (a synthesized
 function per inner type). `*T not null` is pointer-compatible with `*T`, so it can be passed
 anywhere a `*T` is expected.
 
+**Empty array / slice literals (`[]`).** An empty literal infers its element
+type from the expected type at the use site — the same expected-type-from-
+context rule that no-data variant constructors (`None`, etc.) use. This is
+the canonical "empty accumulator" idiom:
+
+```sysl
+var xs: []int = []                  // expected []int → element T = int
+val ys: []string = []               // works for any element type
+f() -> []int = []                   // expected return type
+g(items: []int) -> int = ...
+g([])                               // expected from parameter type
+struct Bag { items: []int; n: int }
+Bag([], 0)                          // expected from struct field type
+```
+
+`val xs = []` (no expected type) still errors with "cannot infer element
+type". A non-zero fixed-array type rejects `[]` (you can't give zero
+elements to a `[3]int`). Only `[0]T` accepts the empty fixed-array form.
+
 ### Struct Types
 
 ```sysl
