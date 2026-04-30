@@ -61,23 +61,28 @@ class SyslLexical extends IndentationLexical(
   // Decide whether the muncher should stop *before* appending `c` to `buf`.
   // This is the only place where `*` and `&` get context-sensitive — both
   // act as prefix unary operators (deref / addr-of) and as type sigils, so
-  // they MUST lex as single-char tokens unless paired with `=` (or, for
-  // `&`, with another `&`). Without this rule, `**T`, `*&a`, `*++p`,
-  // `*=*p`, etc. would all be miscategorized.
+  // they MUST lex as single-char tokens when followed by other prefix
+  // operators or by `*`/`&` themselves. Without this rule, `**T`, `*&a`,
+  // `*++p`, `*=*p`, etc. would all be miscategorized.
   //
-  //   - `*` mid-token: always stop (preserves `**T`, `*=*p`, etc.).
-  //   - `&` mid-token: stop unless prev char is `&` (allows `&&`).
-  //   - After a `*`: only `=` may follow (allows `*=`).
-  //   - After a `&`: only `&` (for `&&`) or `=` (for `&=`).
+  // Rules (applied in order):
+  //   1. Buf already contains `*` AND next is `*`: stop. (Preserves `**T`
+  //      type syntax and `*=*p` chains.)
+  //   2. Buf is exactly `*` AND next is one of `+ - &`: stop. (Preserves
+  //      `*++p`, `*--p`, `*&a` — these mean `*<unary-op> operand`.)
+  //   3. Buf is exactly `&` AND next is one of `* + - ~ !`: stop.
+  //      (Preserves `&&` (allowed) and `&=` (allowed) but blocks `&*`,
+  //      `&-`, etc. as adjacent prefix-unary patterns.)
   //
-  // No other rules — `+ - / % < > = ! | ^ ~` chain freely so `<<=`, `>>=`,
-  // `==`, `!=`, `++`, `--`, `||`, `->`, `=>`, `..` etc. munch as today.
+  // Otherwise, allow munching. So `<*>`, `*>`, `<*`, `*<`, `<+>` and
+  // similar user-definable operator names lex as single tokens, while
+  // `<<=`, `>>=`, `==`, `!=`, `++`, `--`, `||`, `&&`, `->`, `=>`, `..`
+  // continue to munch as built-ins.
   private def shouldStop(buf: StringBuilder, c: Char): Boolean =
     if buf.isEmpty then false
-    else if c == '*' then true
-    else if c == '&' then buf.last != '&'
-    else if buf.last == '*' then c != '='
-    else if buf.last == '&' then c != '=' && c != '&'
+    else if c == '*' && buf.toString.contains('*') then true
+    else if buf.length == 1 && buf.charAt(0) == '*' && (c == '+' || c == '-' || c == '&') then true
+    else if buf.length == 1 && buf.charAt(0) == '&' && (c == '*' || c == '+' || c == '-' || c == '~' || c == '!') then true
     else false
 
   private def operatorMuncher: Parser[Token] =

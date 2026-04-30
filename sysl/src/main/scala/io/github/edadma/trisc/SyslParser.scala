@@ -952,10 +952,10 @@ class SyslParser extends StandardTokenParsers {
     "..", "..<",
   )
 
-  // Comparison level (level 4) is special: shifts (`<<` `>>`) and shift-
-  // assigns (`<<=` `>>=`) also start with `<`/`>`, but live at a different
-  // level, so user comparison ops must exclude any string that *starts* with
-  // `<<` or `>>`. (E.g. `<<*` is a shift-level user op, not comparison.)
+  // Comparison level (level 4) — first chars of comparison user ops.
+  // Built-in shifts (`<<` `>>`) and shift-assigns (`<<=` `>>=`) are excluded
+  // via `reservedOps`; user ops like `<<<` / `>>>` slot here (Scala-style:
+  // first char rules).
   private val comparisonFirstChars: Set[Char] = Set('<', '>', '=', '!')
 
   // Match any Keyword whose chars start with one of `firstChars`, and
@@ -966,8 +966,7 @@ class SyslParser extends StandardTokenParsers {
       case k: lexical.Keyword
           if k.chars.nonEmpty
             && firstChars.contains(k.chars.head)
-            && !reservedOps.contains(k.chars)
-            && !(firstChars == comparisonFirstChars && (k.chars.startsWith("<<") || k.chars.startsWith(">>"))) =>
+            && !reservedOps.contains(k.chars) =>
         k.chars
     })
 
