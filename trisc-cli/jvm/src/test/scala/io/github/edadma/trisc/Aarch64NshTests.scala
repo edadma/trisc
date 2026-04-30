@@ -846,6 +846,34 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("msndto: pass=1")
   }
 
+  "musl: TCP_USER_TIMEOUT enforcement (RFC 5482)" in {
+    // musrto (slix/test/musrto.c) sets TCP_USER_TIMEOUT=200 ms on the
+    // client fd, accept()s a child, then arms a slix-only ACK
+    // blackhole on the *child* slot via setsockopt(SOL_SLIX_TEST=
+    // 0x534c, optname=1, &on).  The blackhole drops pure-ACK segments
+    // emitted from the child while letting SYN/FIN/RST through, so
+    // the loopback fastpath delivers the data segment normally but
+    // the server's ACK is silently lost.  earliest_unack_tick stays
+    // anchored on the client; after ~250 ms inet_tcp_scan_timers
+    // sees (now - earliest_unack_tick) >= user_timeout_ticks and
+    // aborts the slot with pending_error=ETIMEDOUT (110).  The
+    // shim's send path consults INET_CMD_TCP_GET_ERR on the
+    // post-abort slot and surfaces -ETIMEDOUT to userspace.
+    //
+    // Pinned: new IPC commands INET_CMD_TCP_SET_USERTO (52) and
+    // INET_CMD_TCP_BLACKHOLE_ACKS_TEST (53); per-socket fields
+    // user_timeout_ticks, earliest_unack_tick, ack_blackholed.
+    qemu.send("musrto\n")
+    val output = qemu.waitFor("musrto: done")
+    output should include("musrto: bind=0")
+    output should include("musrto: listen=0")
+    output should include("musrto: setsockopt_userto=0")
+    output should include("musrto: getsockopt_userto=0 val=200")
+    output should include("musrto: connect=0")
+    output should include("musrto: blackhole=0")
+    output should include("musrto: pass=1")
+  }
+
   "musl: tar extract end-to-end (Phase 4 chunk 5)" in {
     // muntar (slix/test/untar.c) opens a synthesized USTAR archive
     // pre-baked into the ramdisk at /test.tar (bytes from

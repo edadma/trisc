@@ -93,6 +93,30 @@ posix_fd_bridge memory.
 
     val POSIX_FDS_PER_PROC   = 64
 
+
+Subset of POSIX/Linux errno values used by the shim.  Returned to
+userspace as the *negative* of these — `i64(-EINVAL)`, etc.  Most
+of the existing `// -EBADF` literal-comment sites predate these
+constants; new code should prefer the named form, and a sweep can
+follow.  Magic numbers without an `E*` constant in this block are
+all from `linux/include/uapi/asm-generic/errno-base.h` plus
+`asm-generic/errno.h`.
+
+    const EBADF        = 9
+    const EAGAIN       = 11
+    const EFAULT       = 14
+    const ENODEV       = 19
+    const EINVAL       = 22
+    const EMFILE       = 24
+    const EIO          = 5
+    const ENOPROTOOPT  = 92
+    const ENOTCONN     = 107
+    const ETIMEDOUT    = 110
+    const ECONNREFUSED = 111
+    const EINPROGRESS  = 115
+    const EADDRINUSE   = 98
+
+
     struct PosixFd
         kind: int
         target: int
@@ -181,6 +205,19 @@ posix_fd_bridge memory.
         recv_timeout_ms: int
         send_timeout_ms: int
 
+`tcp_user_timeout_ms` is the caller-requested per-connection
+RFC 5482 timeout, in milliseconds (the unit RFC 5482 §3 specifies
+— the man page is misleading about seconds).  0 means "use the
+system default" — slix has no sysctl, so 0 means no cap.
+
+Persisted on the shim fd so `getsockopt` round-trips the user's
+exact ms value; pushed to inet via `INET_CMD_TCP_SET_USERTO` when
+a slot exists, and replayed on accept-children so listener
+settings propagate to passive opens (matches Linux behaviour for
+the keepalive options).
+
+        tcp_user_timeout_ms: int
+
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
 
@@ -219,6 +256,7 @@ posix_fd_bridge memory.
             posix_fd_table[base + i].udp_peer_d = 0
             posix_fd_table[base + i].recv_timeout_ms = 0
             posix_fd_table[base + i].send_timeout_ms = 0
+            posix_fd_table[base + i].tcp_user_timeout_ms = 0
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -300,6 +338,7 @@ posix_fd_bridge memory.
                 posix_fd_table[base + i].udp_peer_d = 0
                 posix_fd_table[base + i].recv_timeout_ms = 0
                 posix_fd_table[base + i].send_timeout_ms = 0
+                posix_fd_table[base + i].tcp_user_timeout_ms = 0
                 return i
             i += 1
         -1
@@ -373,38 +412,40 @@ IPC protocol that `oskit/net/client.lsysl` uses from user space;
 we replicate the writers here instead of importing `oskit.net` to
 keep the kernel link free of the full socket-API module.
 
-    val INET_CMD_SOCKET      = 1
-    val INET_CMD_BIND        = 2
-    val INET_CMD_SENDTO      = 3
-    val INET_CMD_RECVFROM    = 4
-    val INET_CMD_CLOSE       = 5
-    val INET_CMD_TCP_CONNECT = 10
-    val INET_CMD_TCP_SEND    = 11
-    val INET_CMD_TCP_RECV    = 12
-    val INET_CMD_TCP_CLOSE   = 13
-    val INET_CMD_TCP_LISTEN  = 14
-    val INET_CMD_TCP_ACCEPT  = 15
-    val INET_CMD_UDP_GETNAME = 24
-    val INET_CMD_TCP_GETNAME = 25
-    val INET_CMD_RECVFROM_TIMEOUT = 18
-    val INET_CMD_TCP_RECV_NB = 26
-    val INET_CMD_TCP_SHUTDOWN = 27
-    val INET_CMD_POLL        = 28
-    val INET_CMD_EPOLL_SUB   = 29
-    val INET_CMD_EPOLL_UNSUB = 30
-    val INET_CMD_EPOLL_INST_CLOSE = 31
-    val INET_CMD_TCP_ACCEPT_NB = 32
-    val INET_CMD_TCP_CONNECT_NB = 33
-    val INET_CMD_TCP_SETBUF  = 34
-    val INET_CMD_TCP_GETBUF  = 35
-    val INET_CMD_TCP_ABORT_CLOSE = 36
-    val INET_CMD_TCP_SET_KEEPALIVE = 37
-    val INET_CMD_TCP_SET_KEEPOPT = 39
-    val INET_CMD_TCP_GET_KEEPOPT = 40
-    val INET_CMD_TCP_GET_ERR     = 41
-    val INET_CMD_TCP_GET_INFO    = 43
+    const INET_CMD_SOCKET      = 1
+    const INET_CMD_BIND        = 2
+    const INET_CMD_SENDTO      = 3
+    const INET_CMD_RECVFROM    = 4
+    const INET_CMD_CLOSE       = 5
+    const INET_CMD_TCP_CONNECT = 10
+    const INET_CMD_TCP_SEND    = 11
+    const INET_CMD_TCP_RECV    = 12
+    const INET_CMD_TCP_CLOSE   = 13
+    const INET_CMD_TCP_LISTEN  = 14
+    const INET_CMD_TCP_ACCEPT  = 15
+    const INET_CMD_UDP_GETNAME = 24
+    const INET_CMD_TCP_GETNAME = 25
+    const INET_CMD_RECVFROM_TIMEOUT = 18
+    const INET_CMD_TCP_RECV_NB = 26
+    const INET_CMD_TCP_SHUTDOWN = 27
+    const INET_CMD_POLL        = 28
+    const INET_CMD_EPOLL_SUB   = 29
+    const INET_CMD_EPOLL_UNSUB = 30
+    const INET_CMD_EPOLL_INST_CLOSE = 31
+    const INET_CMD_TCP_ACCEPT_NB = 32
+    const INET_CMD_TCP_CONNECT_NB = 33
+    const INET_CMD_TCP_SETBUF  = 34
+    const INET_CMD_TCP_GETBUF  = 35
+    const INET_CMD_TCP_ABORT_CLOSE = 36
+    const INET_CMD_TCP_SET_KEEPALIVE = 37
+    const INET_CMD_TCP_SET_KEEPOPT = 39
+    const INET_CMD_TCP_GET_KEEPOPT = 40
+    const INET_CMD_TCP_GET_ERR     = 41
+    const INET_CMD_TCP_GET_INFO    = 43
+    const INET_CMD_TCP_SET_USERTO  = 52
+    const INET_CMD_TCP_BLACKHOLE_ACKS_TEST = 53
 
-    val INET_MAX_TCP_SEG     = 480
+    const INET_MAX_TCP_SEG     = 480
 
     val POSIX_AF_INET        = 2
     val POSIX_SOCK_DGRAM     = 2
@@ -932,10 +973,22 @@ vm_copy_from.
                     // writes; honour partial progress when present.
                     if sent_total > 0
                         return i64(sent_total)
-                    return i64(-11)     // -EAGAIN
+                    return i64(-EAGAIN)
                 if reply[0] != 0
                     if sent_total > 0
                         return i64(sent_total)
+                    // Connection torn down — consult pending_error so
+                    // TCP_USER_TIMEOUT / keepalive-giveup / RST surface
+                    // as the right errno (ETIMEDOUT / ECONNRESET / …)
+                    // instead of a generic EPIPE.  Linux delivers the
+                    // recorded sk_err on the next syscall and clears
+                    // it; matching that here keeps Node-style "see
+                    // ETIMEDOUT once on the next send" behaviour.
+                    var perr = 0
+                    val ger = shim_inet_get_tcp_err(inet_fd, perr)
+                    if ger == 0
+                        if perr != 0
+                            return i64(-perr)
                     return i64(-32)     // -EPIPE
                 val n = shim_read_u16(reply, 1)
                 if n <= 0
@@ -1423,10 +1476,19 @@ POSIX MSG_DONTWAIT (0x40) for the EAGAIN-on-empty-send branch.
                 // SO_SNDTIMEO expired while parked — see sys_write.
                 if sent_total > 0
                     return i64(sent_total)
-                return i64(-11)         // -EAGAIN
+                return i64(-EAGAIN)
             if reply[0] != 0
                 if sent_total > 0
                     return i64(sent_total)
+                // See sys_write for the pending_error rationale —
+                // surface ETIMEDOUT / ECONNRESET / etc. instead of
+                // a generic EPIPE when the connection was torn
+                // down by an asynchronous error.
+                var perr = 0
+                val ger = shim_inet_get_tcp_err(inet_fd, perr)
+                if ger == 0
+                    if perr != 0
+                        return i64(-perr)
                 return i64(-32)         // -EPIPE
             val n = shim_read_u16(reply, 1)
             if n <= 0
@@ -2033,6 +2095,12 @@ something other than AF_INET / AF_UNSPEC.
         if posix_fd_table[idx].keep_cnt > 0
             shim_inet_set_keepopt(inet_fd, 2,
                 posix_fd_table[idx].keep_cnt)
+        // Apply pending TCP_USER_TIMEOUT — same shape as keepalive,
+        // just one IPC.  No-op when the user never set it (zero
+        // skipped on the inet side).
+        if posix_fd_table[idx].tcp_user_timeout_ms > 0
+            shim_inet_set_userto(inet_fd,
+                posix_fd_table[idx].tcp_user_timeout_ms)
         // Non-blocking connect: surface -EINPROGRESS so the user
         // can poll EPOLLOUT for completion. The slot is already
         // SYN_SENT; once it reaches ESTABLISHED the existing
@@ -2105,6 +2173,13 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         if posix_fd_table[idx].keep_cnt > 0
             shim_inet_set_keepopt(listen_fd, 2,
                 posix_fd_table[idx].keep_cnt)
+        // Apply pending TCP_USER_TIMEOUT.  The listener slot itself
+        // never enters ESTABLISHED so the timer never fires on it,
+        // but accepted children inherit `user_timeout_ticks` from
+        // the listener via `inet_tcp_handle_passive_syn`.
+        if posix_fd_table[idx].tcp_user_timeout_ms > 0
+            shim_inet_set_userto(listen_fd,
+                posix_fd_table[idx].tcp_user_timeout_ms)
         i64(0)
 
 SYS_ACCEPT. Blocks until a child connection arrives unless the
@@ -2310,6 +2385,55 @@ failure.
         0
 
 
+Send INET_CMD_TCP_SET_USERTO with `timeout_ms` packed as a u32 big-
+endian.  Inet rounds milliseconds up to 10-ms ticks.  Returns 0 on
+success, negative errno on failure.
+
+    shim_inet_set_userto(inet_fd: int, timeout_ms: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var ms = timeout_ms
+        if ms < 0
+            ms = 0
+        var msg: [7]byte
+        msg[0] = byte(INET_CMD_TCP_SET_USERTO)
+        shim_write_u16(msg, 1, inet_fd)
+        msg[3] = byte((ms >> 24) & 0xff)
+        msg[4] = byte((ms >> 16) & 0xff)
+        msg[5] = byte((ms >>  8) & 0xff)
+        msg[6] = byte( ms        & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 7, reply, 1)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            return -22
+        0
+
+
+Send INET_CMD_TCP_BLACKHOLE_ACKS_TEST — slix-only test injector
+that arms (`on=1`) or disarms (`on=0`) the ACK blackhole on
+`inet_fd`.  Used by `slix/test/musrto.c`; not part of the POSIX
+surface.
+
+    shim_inet_set_blackhole_acks(inet_fd: int, on: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -5
+        var msg: [4]byte
+        msg[0] = byte(INET_CMD_TCP_BLACKHOLE_ACKS_TEST)
+        shim_write_u16(msg, 1, inet_fd)
+        msg[3] = byte(on & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 4, reply, 1)
+        if r < 0
+            return -5
+        if reply[0] != 0
+            return -22
+        0
+
+
 Send INET_CMD_TCP_GET_KEEPOPT.  Returns the per-socket value in
 *ticks* (or count for CNT) on success via the `out v` parameter,
 or a negative errno via the function return.  Caller-side does
@@ -2401,6 +2525,34 @@ as -EINVAL).
                 return i64(-9)          // -EBADF
         val pid = posix_fd_current_pid()
         val tidx = pid * POSIX_FDS_PER_PROC + fd
+
+`level == 0x534c` is the slix-only test channel ("SL").  Used by
+`slix/test/musrto.c` to arm the per-slot ACK blackhole so the
+TCP_USER_TIMEOUT smoke test can simulate a peer that's stopped
+ACKing on slix's synchronous loopback fastpath.  Not part of any
+POSIX protocol; the hardcoded literal sits well outside the
+assigned `SOL_*` / `IPPROTO_*` ranges (max ~300).
+
+`optname == 1` is "set ACK blackhole on this slot's child", with
+`*(int*)optval` as the on/off value.  Returns -ENOPROTOOPT for
+non-TCP fds and -ENOTCONN for fds without an inet slot — there's
+no resurrection on this test surface.
+
+        if level == 0x534c
+            if optname == 1
+                if k != POSIX_FD_TCP_SOCKET
+                    return i64(-ENOPROTOOPT)
+                var v = 0
+                if shim_sockopt_read_int(optval, optlen, v) != 0
+                    return i64(-EINVAL)
+                val bh_inet_fd = posix_fd_target(fd)
+                if bh_inet_fd < 0
+                    return i64(-ENOTCONN)
+                val rc = shim_inet_set_blackhole_acks(bh_inet_fd, v)
+                if rc != 0
+                    return i64(rc)
+                return i64(0)
+            return i64(-ENOPROTOOPT)
         if level == 1
             if optname == 2
                 var v = 0
@@ -2537,7 +2689,28 @@ as -EINVAL).
                     if rc != 0
                         return i64(rc)
                 return i64(0)
-        i64(-92)                        // -ENOPROTOOPT
+            // TCP_USER_TIMEOUT (Linux level=6, optname=18) —
+            // milliseconds (RFC 5482 §3 "ms" — the man page is
+            // misleading on the unit).  Persist on the shim fd as
+            // ms so getsockopt round-trips the user's value;
+            // push to inet when a slot exists, replay on slot
+            // creation otherwise.
+            if optname == 18
+                if k != POSIX_FD_TCP_SOCKET
+                    return i64(-ENOPROTOOPT)
+                var v = 0
+                if shim_sockopt_read_int(optval, optlen, v) != 0
+                    return i64(-EINVAL)
+                if v < 0
+                    v = 0
+                posix_fd_table[tidx].tcp_user_timeout_ms = v
+                val ut_inet_fd = posix_fd_target(fd)
+                if ut_inet_fd >= 0
+                    val rc = shim_inet_set_userto(ut_inet_fd, v)
+                    if rc != 0
+                        return i64(rc)
+                return i64(0)
+        i64(-ENOPROTOOPT)
 
 `val` is a pointer to the option buffer; `len_ptr` points at an
 i32 that the caller seeded with the buffer capacity. We write 0
@@ -2592,6 +2765,8 @@ is left untouched in that case.
             if optname == 4 || optname == 5 || optname == 6
                 accept = 1
             if optname == 11
+                accept = 1
+            if optname == 18
                 accept = 1
         if accept == 0
             return i64(-92)             // -ENOPROTOOPT
@@ -2786,6 +2961,16 @@ is left untouched in that case.
                 else
                     kv = posix_fd_table[kidx].keep_cnt
                 *vp = i32(kv)
+                *lp = i32(4)
+                return i64(0)
+            if optname == 18
+                if k != POSIX_FD_TCP_SOCKET
+                    *vp = i32(0)
+                    *lp = i32(4)
+                    return i64(0)
+                val pid_u = posix_fd_current_pid()
+                val uidx = pid_u * POSIX_FDS_PER_PROC + fd
+                *vp = i32(posix_fd_table[uidx].tcp_user_timeout_ms)
                 *lp = i32(4)
                 return i64(0)
         // SO_ERROR — Linux read-and-clear semantics.  Returns the

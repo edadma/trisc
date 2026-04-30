@@ -50,54 +50,56 @@ process B's sockets.
 
 Protocol command codes (byte value of buf[0]).
 
-    val INET_CMD_SOCKET       = 1
-    val INET_CMD_BIND         = 2
-    val INET_CMD_SENDTO       = 3
-    val INET_CMD_RECVFROM     = 4
-    val INET_CMD_CLOSE        = 5
-    val INET_CMD_TCP_CONNECT  = 10
-    val INET_CMD_TCP_SEND     = 11
-    val INET_CMD_TCP_RECV     = 12
-    val INET_CMD_TCP_CLOSE    = 13
-    val INET_CMD_TCP_LISTEN   = 14
-    val INET_CMD_TCP_ACCEPT   = 15
-    val INET_CMD_SET_IP_CONFIG = 16
-    val INET_CMD_GET_IP_CONFIG = 17
-    val INET_CMD_RECVFROM_TIMEOUT = 18
-    val INET_CMD_ARP_PROBE    = 19
-    val INET_CMD_TCP_DEBUG    = 20
-    val INET_CMD_ICMP_SEND    = 21
-    val INET_CMD_ICMP_CHECK   = 22
-    val INET_CMD_PID_EXIT     = 23
-    val INET_CMD_UDP_GETNAME  = 24
-    val INET_CMD_TCP_GETNAME  = 25
-    val INET_CMD_TCP_RECV_NB  = 26
-    val INET_CMD_TCP_SHUTDOWN = 27
-    val INET_CMD_POLL         = 28
-    val INET_CMD_EPOLL_SUB    = 29
-    val INET_CMD_EPOLL_UNSUB  = 30
-    val INET_CMD_EPOLL_INST_CLOSE = 31
-    val INET_CMD_TCP_ACCEPT_NB = 32
-    val INET_CMD_TCP_CONNECT_NB = 33
-    val INET_CMD_TCP_SETBUF   = 34
-    val INET_CMD_TCP_GETBUF   = 35
-    val INET_CMD_TCP_ABORT_CLOSE = 36
-    val INET_CMD_TCP_SET_KEEPALIVE = 37
-    val INET_CMD_ICMP_UNREACH_INJECT = 38
-    val INET_CMD_TCP_SET_KEEPOPT = 39
-    val INET_CMD_TCP_GET_KEEPOPT = 40
-    val INET_CMD_TCP_GET_ERR     = 41
-    val INET_CMD_TCP_INJECT_FAIL = 42
-    val INET_CMD_TCP_GET_INFO    = 43
-    val INET_CMD_IP_REASM_SELFTEST = 44
-    val INET_CMD_IP_REASM_OVERLAP_TEST = 45
-    val INET_CMD_IP_REASM_TIMEOUT_TEST = 46
-    val INET_CMD_TCP_SEND_PARK_TEST = 47
-    val INET_CMD_TCP_ARP_REPLAY_TEST = 48
-    val INET_CMD_PID_EXIT_SELFTEST   = 49
-    val INET_CMD_GET_STATS           = 50
-    val INET_CMD_FRAME_POOL_STATS    = 51
-    val INET_CMD_TCP_OOO_SELFTEST = 99
+    const INET_CMD_SOCKET       = 1
+    const INET_CMD_BIND         = 2
+    const INET_CMD_SENDTO       = 3
+    const INET_CMD_RECVFROM     = 4
+    const INET_CMD_CLOSE        = 5
+    const INET_CMD_TCP_CONNECT  = 10
+    const INET_CMD_TCP_SEND     = 11
+    const INET_CMD_TCP_RECV     = 12
+    const INET_CMD_TCP_CLOSE    = 13
+    const INET_CMD_TCP_LISTEN   = 14
+    const INET_CMD_TCP_ACCEPT   = 15
+    const INET_CMD_SET_IP_CONFIG = 16
+    const INET_CMD_GET_IP_CONFIG = 17
+    const INET_CMD_RECVFROM_TIMEOUT = 18
+    const INET_CMD_ARP_PROBE    = 19
+    const INET_CMD_TCP_DEBUG    = 20
+    const INET_CMD_ICMP_SEND    = 21
+    const INET_CMD_ICMP_CHECK   = 22
+    const INET_CMD_PID_EXIT     = 23
+    const INET_CMD_UDP_GETNAME  = 24
+    const INET_CMD_TCP_GETNAME  = 25
+    const INET_CMD_TCP_RECV_NB  = 26
+    const INET_CMD_TCP_SHUTDOWN = 27
+    const INET_CMD_POLL         = 28
+    const INET_CMD_EPOLL_SUB    = 29
+    const INET_CMD_EPOLL_UNSUB  = 30
+    const INET_CMD_EPOLL_INST_CLOSE = 31
+    const INET_CMD_TCP_ACCEPT_NB = 32
+    const INET_CMD_TCP_CONNECT_NB = 33
+    const INET_CMD_TCP_SETBUF   = 34
+    const INET_CMD_TCP_GETBUF   = 35
+    const INET_CMD_TCP_ABORT_CLOSE = 36
+    const INET_CMD_TCP_SET_KEEPALIVE = 37
+    const INET_CMD_ICMP_UNREACH_INJECT = 38
+    const INET_CMD_TCP_SET_KEEPOPT = 39
+    const INET_CMD_TCP_GET_KEEPOPT = 40
+    const INET_CMD_TCP_GET_ERR     = 41
+    const INET_CMD_TCP_INJECT_FAIL = 42
+    const INET_CMD_TCP_GET_INFO    = 43
+    const INET_CMD_IP_REASM_SELFTEST = 44
+    const INET_CMD_IP_REASM_OVERLAP_TEST = 45
+    const INET_CMD_IP_REASM_TIMEOUT_TEST = 46
+    const INET_CMD_TCP_SEND_PARK_TEST = 47
+    const INET_CMD_TCP_ARP_REPLAY_TEST = 48
+    const INET_CMD_PID_EXIT_SELFTEST   = 49
+    const INET_CMD_GET_STATS           = 50
+    const INET_CMD_FRAME_POOL_STATS    = 51
+    const INET_CMD_TCP_SET_USERTO      = 52
+    const INET_CMD_TCP_BLACKHOLE_ACKS_TEST = 53
+    const INET_CMD_TCP_OOO_SELFTEST = 99
 
 
 Sub-ops for INET_CMD_ARP_PROBE. A single command code fans out
@@ -1627,6 +1629,55 @@ struct = 105 bytes. Status -1 if fd out of range or not owned.
         ipc_reply(sender, reply, 1)
 
 
+setsockopt(IPPROTO_TCP, TCP_USER_TIMEOUT) — write the per-socket
+cap.  Wire: `cmd(1) + fd(u16 BE) + timeout_ms(u32 BE) = 7` bytes
+in; reply: 1-byte status.  Inet rounds milliseconds up to the
+nearest 10-ms tick (matching the SO_SNDTIMEO convention) before
+storing — a 0 timeout means "disable" and is preserved as 0.
+
+    inet_handle_tcp_set_userto(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val ms_hi = inet_read_u16(buf, 3)
+        val ms_lo = inet_read_u16(buf, 5)
+        val timeout_ms = (ms_hi << 16) | ms_lo
+        var reply: [1]byte
+        if inet_tcp_slot_owned(fd, sender) == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        var ticks = 0
+        if timeout_ms > 0
+            ticks = (timeout_ms + 9) / 10
+        val rc = inet_tcp_set_userto(fd, ticks)
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+
+Test-only: arm/disarm the per-slot ACK blackhole used by the
+TCP_USER_TIMEOUT smoke test.  Wire: `cmd(1) + fd(u16 BE) + on(1)
+= 4` bytes in; reply: 1-byte status.  Bypasses the usual owner
+check so a single-process test can flip the flag on a child slot
+created by `accept()` (children inherit the parent's owner_tid,
+so the check would pass anyway, but skipping it keeps the
+injector independent of slot-ownership invariants).
+
+    inet_handle_tcp_blackhole_acks_test(sender: int, buf: *byte)
+        val fd = inet_read_u16(buf, 1) & 0xffff
+        val on = int(buf[3]) & 0xff
+        var reply: [1]byte
+        if fd < 0 || fd >= TCP_MAX_SOCKETS
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        if tcp_sockets[fd].in_use == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val rc = inet_tcp_set_ack_blackhole(fd, on)
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
+
+
 SO_LINGER `l_linger = 0` close path.  Shim sends this when the
 caller has set linger-on with a zero timeout: emit RST, free
 slot, no FIN, no TIME_WAIT.  Reply is immediate (1-byte status)
@@ -2630,6 +2681,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_PID_EXIT_SELFTEST -> inet_handle_pid_exit_selftest(sender, buf)
                     INET_CMD_GET_STATS         -> inet_handle_get_stats(sender, buf)
                     INET_CMD_FRAME_POOL_STATS  -> inet_handle_frame_pool_stats(sender, buf)
+                    INET_CMD_TCP_SET_USERTO    -> inet_handle_tcp_set_userto(sender, buf)
+                    INET_CMD_TCP_BLACKHOLE_ACKS_TEST -> inet_handle_tcp_blackhole_acks_test(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte

@@ -1847,11 +1847,43 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         connect_waiter: int
         send_waiter: int
         send_waiter_len: int
-        // SO_SNDTIMEO deadline in `uptime()` ticks. 0 means
-        // "park forever" (Linux default). Set when a TCP_SEND
-        // arrives carrying a non-zero timeout_ms and parks; the
-        // timer scan replies (status=2, n=0) when `now >= deadline`.
         send_deadline: int
+
+`send_deadline` is the SO_SNDTIMEO deadline in `uptime()` ticks. 0
+means "park forever" (Linux default). Set when a TCP_SEND arrives
+carrying a non-zero `timeout_ms` and parks; the timer scan replies
+`(status=2, n=0)` when `now >= deadline`.
+
+`user_timeout_ticks` and `earliest_unack_tick` together drive
+RFC 5482 TCP_USER_TIMEOUT — a per-connection cap on how long the
+socket may remain unable to drain its unacked window. Distinct from
+SO_SNDTIMEO: USER_TIMEOUT survives an unblocked send and governs
+the connection itself; SNDTIMEO governs only the current send
+call's blocking window.
+
+  - `user_timeout_ticks` is the configured cap (in 10-ms ticks).
+    0 disables — slix has no sysctl for the system default, so 0
+    means "no cap".
+  - `earliest_unack_tick` is the absolute tick at which the
+    *current* unacked run started.  Set in `inet_tcp_do_send` when
+    `send_len` transitions 0 → >0; reset to 0 in the ACK path when
+    `snd_una` reaches `snd_nxt` (everything drained); restarted on
+    partial cumulative ACKs so the countdown is anchored on the
+    most recent cumulative-ACK boundary (RFC 5482 §3, "any progress
+    restarts the timer").
+
+        user_timeout_ticks: int
+        earliest_unack_tick: int
+
+`ack_blackholed` is a test-only override: when nonzero,
+`inet_tcp_emit` suppresses pure-ACK segments (ACK-only, no payload,
+no SYN/FIN/RST) so the peer sees no acknowledgements while
+SYN/FIN/RST handshake bytes still flow. Lets a single-process
+loopback test simulate "peer went dark mid-conversation" for
+TCP_USER_TIMEOUT verification. Set via `INET_CMD_TCP_BLACKHOLE_ACKS_TEST`
+(53); cleared on `close_slot`.
+
+        ack_blackholed: int
         recv_waiter: int
         recv_maxlen: int
         close_waiter: int
@@ -2156,6 +2188,9 @@ gate new sockets against the per-tid `TCP_PER_TID_BUF_MAX`.
             tcp_sockets[i].connect_waiter = -1
             tcp_sockets[i].send_waiter = -1
             tcp_sockets[i].send_deadline = 0
+            tcp_sockets[i].user_timeout_ticks = 0
+            tcp_sockets[i].earliest_unack_tick = 0
+            tcp_sockets[i].ack_blackholed = 0
             tcp_sockets[i].recv_waiter = -1
             tcp_sockets[i].close_waiter = -1
             tcp_sockets[i].is_listen = 0
@@ -2480,6 +2515,20 @@ TCP options attached:
 
     inet_tcp_emit(s: int, flags: int, seq: u32,
                   payload_seq: u32, payload_len: int) -> int
+        // Test-only ACK blackhole. When `ack_blackholed != 0`, drop
+        // pure-ACK segments (ACK set, no payload, no SYN/FIN/RST).
+        // SYN/FIN/RST still fly so the test can establish + tear
+        // down the connection; only acknowledgements are silently
+        // discarded, which on slix's synchronous loopback fastpath
+        // is the only way to simulate "peer went dark" without
+        // breaking handshake.
+        if tcp_sockets[s].ack_blackholed != 0
+            val pure_ack_mask = TCP_F_ACK
+            val deny_mask = TCP_F_SYN | TCP_F_FIN | TCP_F_RST
+            if (flags & deny_mask) == 0
+                if (flags & pure_ack_mask) != 0
+                    if payload_len == 0
+                        return 0
         if inet_our_mac_known == 0
             return -1
         val is_loopback = inet_is_loopback_ip(tcp_sockets[s].remote_ip)
@@ -2913,6 +2962,9 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
             inet_tcp_reply_send(tcp_sockets[s].send_waiter, status, 0)
             tcp_sockets[s].send_waiter = -1
             tcp_sockets[s].send_deadline = 0
+        tcp_sockets[s].user_timeout_ticks = 0
+        tcp_sockets[s].earliest_unack_tick = 0
+        tcp_sockets[s].ack_blackholed = 0
         if tcp_sockets[s].close_waiter >= 0
             inet_tcp_reply_status(tcp_sockets[s].close_waiter, 0)
             tcp_sockets[s].close_waiter = -1
@@ -3008,6 +3060,9 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].connect_waiter = -1
                 tcp_sockets[i].send_waiter = -1
                 tcp_sockets[i].send_deadline = 0
+                tcp_sockets[i].user_timeout_ticks = 0
+                tcp_sockets[i].earliest_unack_tick = 0
+                tcp_sockets[i].ack_blackholed = 0
                 tcp_sockets[i].recv_waiter = -1
                 tcp_sockets[i].close_waiter = -1
                 tcp_sockets[i].mss = TCP_MSS_ADV
@@ -3166,6 +3221,47 @@ Idempotent (no-op for same-state calls).  Returns 0 on success,
             tcp_sockets[s].keepalive_on = 0
             tcp_sockets[s].keepalive_probes = 0
             tcp_sockets[s].keepalive_next_probe = 0
+        0
+
+
+setsockopt(TCP_USER_TIMEOUT) — write the per-socket cap in ticks
+(shim has already converted from milliseconds at the boundary,
+rounding up at the same 10-ms granularity as SO_SNDTIMEO).  0
+disables (Linux's "system default" semantics — slix has no
+sysctl for this, so 0 means "no cap").
+
+Returns 0 on success, -1 on bad fd.
+
+    inet_tcp_set_userto(s: int, ticks: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        var t = ticks
+        if t < 0
+            t = 0
+        tcp_sockets[s].user_timeout_ticks = t
+        0
+
+
+Test-only: arm or disarm the ACK blackhole on a slot.  When set,
+`inet_tcp_emit` drops pure-ACK segments from this slot, so the
+peer never sees acknowledgements while SYN/FIN/RST handshake
+flow continues.  Used by `slix/test/musrto.c` to drive a
+TCP_USER_TIMEOUT abort over the loopback fastpath, which would
+otherwise ACK every segment synchronously.
+
+Returns 0 on success, -1 on bad fd.
+
+    inet_tcp_set_ack_blackhole(s: int, on: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if on != 0
+            tcp_sockets[s].ack_blackholed = 1
+        else
+            tcp_sockets[s].ack_blackholed = 0
         0
 
 
@@ -3466,6 +3562,11 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         tcp_sockets[s].keepalive_idle = tcp_sockets[ls].keepalive_idle
         tcp_sockets[s].keepalive_intvl = tcp_sockets[ls].keepalive_intvl
         tcp_sockets[s].keepalive_cnt = tcp_sockets[ls].keepalive_cnt
+        // Inherit TCP_USER_TIMEOUT (RFC 5482).  Linux propagates the
+        // listener's timeout to passive opens just like the keepalive
+        // options; copying 0 through is a no-op (the listener never
+        // tuned it, so the child stays uncapped).
+        tcp_sockets[s].user_timeout_ticks = tcp_sockets[ls].user_timeout_ticks
         val iss = tcp_next_iss()
         tcp_sockets[s].local_port = tcp_sockets[ls].local_port
         tcp_sockets[s].remote_ip = remote_ip
@@ -3901,6 +4002,13 @@ ACK and retry.
         while i < n
             tcp_sockets[s].send_buf_ptr[start_off + i] = data[i]
             i += 1
+        // Anchor the TCP_USER_TIMEOUT clock on the 0→>0 transition.
+        // RFC 5482 §3: the user-timeout countdown begins when the
+        // connection first has unacked data; subsequent appends within
+        // an already-unacked run inherit the original anchor so a
+        // steady stream of small writes can't reset the timer.
+        if start_off == 0
+            tcp_sockets[s].earliest_unack_tick = int(uptime())
         tcp_sockets[s].send_len += n
         inet_tcp_drain_send(s)
         n
@@ -4388,6 +4496,16 @@ the connection down.
                         k += 1
                     tcp_sockets[s].send_len -= eff
                     tcp_sockets[s].snd_una = ack
+                    // TCP_USER_TIMEOUT bookkeeping (RFC 5482 §3):
+                    // any cumulative ACK is "progress" — restart the
+                    // unack clock from this moment.  Once the unacked
+                    // window fully drains (snd_una == snd_nxt) clear
+                    // it so the timer doesn't fire on an idle
+                    // connection waiting for the next write.
+                    if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                        tcp_sockets[s].earliest_unack_tick = 0
+                    else
+                        tcp_sockets[s].earliest_unack_tick = int(uptime())
                     // RFC 7323 §2.3: shift the raw header field by
                     // the negotiated peer scale.  Defaults to 0
                     // (no-op) when WS wasn't agreed on.
@@ -4607,6 +4725,23 @@ socket for retransmit and TIME_WAIT deadlines.
                             tcp_sockets[i].send_waiter_len = 0
                             tcp_sockets[i].send_deadline = 0
                             inet_tcp_reply_send(w, 2, 0)
+                // TCP_USER_TIMEOUT (RFC 5482) — abort the connection
+                // when no progress has been made on unacked data for
+                // `user_timeout_ticks`.  Distinct from SO_SNDTIMEO:
+                // SNDTIMEO returns EAGAIN to the caller and leaves
+                // the connection alive; USER_TIMEOUT records a
+                // pending ETIMEDOUT and tears the slot down so the
+                // *next* read/write/getsockopt(SO_ERROR) surfaces 110
+                // (Linux semantics).  The earliest_unack_tick gate
+                // ensures we don't fire on idle connections that have
+                // simply gone quiet.
+                if tcp_sockets[i].in_use != 0
+                    val ut = tcp_sockets[i].user_timeout_ticks
+                    val eu = tcp_sockets[i].earliest_unack_tick
+                    if ut > 0 && eu > 0
+                        if (now - eu) >= ut
+                            tcp_sockets[i].pending_error = 110  // ETIMEDOUT
+                            inet_tcp_close_slot(i, -1)
                 val tw = tcp_sockets[i].tw_deadline
                 if tw != 0
                     if now >= tw

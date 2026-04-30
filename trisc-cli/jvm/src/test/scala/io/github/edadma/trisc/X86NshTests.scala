@@ -1003,6 +1003,22 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("msndto: pass=1")
   }
 
+  "musl: TCP_USER_TIMEOUT enforcement (RFC 5482)" in {
+    // musrto (slix/test/musrto.c) — see Aarch64NshTests for full
+    // notes.  Single-process loopback with TCP_USER_TIMEOUT=200ms,
+    // ACK-blackholed accepted child to make the loopback fastpath
+    // simulate a peer gone dark, asserts ETIMEDOUT on the next send.
+    qemu.send("musrto\n")
+    val output = qemu.waitFor("musrto: done")
+    output should include("musrto: bind=0")
+    output should include("musrto: listen=0")
+    output should include("musrto: setsockopt_userto=0")
+    output should include("musrto: getsockopt_userto=0 val=200")
+    output should include("musrto: connect=0")
+    output should include("musrto: blackhole=0")
+    output should include("musrto: pass=1")
+  }
+
   "musl: tar extract end-to-end (Phase 4 chunk 5)" in {
     // muntar (slix/test/untar.c) — same script as the aarch64
     // entry. Bit-identical /test.tar bytes (TestTar.bytes is
