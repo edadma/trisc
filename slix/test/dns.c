@@ -17,11 +17,18 @@
  * and that getaddrinfo did not fail — we don't pin a specific
  * IP that could rotate.
  *
+ * Internally retries up to 3 times with 2 s backoff on
+ * EAI_AGAIN-style transients: macOS mDNSResponder occasionally
+ * returns SERVFAIL on cold lookups, surfacing as rc=-3 to musl.
+ * The retry suppresses intermediate "rc="/"failed" output so the
+ * Scala test's success-path assertions still hold across hiccups.
+ * On exhaustion the final attempt's rc is reported.
+ *
  * Output (success):
  *   mdns: example.com -> A.B.C.D
  *   mdns: ok
  *
- * Output (failure):
+ * Output (final failure):
  *   mdns: getaddrinfo rc=<errno>
  *   mdns: failed
  */
@@ -29,6 +36,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <time.h>
 #include <unistd.h>
 #include <string.h>
 
@@ -66,7 +74,16 @@ int main(void) {
     hint.ai_family = AF_INET;
     hint.ai_socktype = SOCK_STREAM;
 
-    int rc = getaddrinfo("example.com", "443", &hint, &res);
+    int rc = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            struct timespec ts = { .tv_sec = 2, .tv_nsec = 0 };
+            nanosleep(&ts, 0);
+        }
+        rc = getaddrinfo("example.com", "443", &hint, &res);
+        if (rc == 0 && res) break;
+        if (res) { freeaddrinfo(res); res = 0; }
+    }
     if (rc != 0 || !res) {
         wstr("mdns: getaddrinfo rc=");
         wint(rc);
