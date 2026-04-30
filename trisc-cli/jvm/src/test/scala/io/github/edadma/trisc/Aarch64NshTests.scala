@@ -2073,6 +2073,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixnb: bad"
   }
 
+  "unix: accept() returns connector's bound path in peer sockaddr_un" in {
+    // Connector's bound_path is now propagated through CONNECT to the
+    // server-end slot; ACCEPT reply carries plen + path. Bound
+    // connector ("APC1") round-trips with addrlen=7 (family + 4 path
+    // bytes + NUL). Unbound connector reports empty path with
+    // addrlen=2 — matches Linux's "anonymous client" convention.
+    val output = qemu.command("test_unixapth")
+    output should include("unixapth: ok")
+    output should not include "unixapth: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

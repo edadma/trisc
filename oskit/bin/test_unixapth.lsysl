@@ -1,0 +1,195 @@
+test_unixapth — accept() returns connector's bound path
+========================================================
+
+Validates that AF_UNIX `accept(2)` fills the peer sockaddr_un
+with the connector's bound path (the standard Linux behaviour).
+Two sub-cases:
+
+  1. Bound connector — bind the connector to "APC1", connect
+     to listener "APS1", accept on listener: peer_addr should
+     report family=AF_UNIX, path="APC1", addrlen=2+4+1=7
+     (family + path + NUL).
+  2. Unbound connector — fresh socket, no bind, connect to
+     "APS2", accept: peer_addr.path is empty, addrlen=2.
+
+Pass criterion: prints `unixapth: ok`.
+
+    module oskit.bin.test_unixapth
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_ACCEPT     = 131
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_CONNECT    = 148
+    val NR_LISTEN     = 217
+    val NR_SOCKET     = 337
+
+    val AF_UNIX_V     = 1
+    val SOCK_STREAM_V = 1
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixapth: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, path_len: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < path_len
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + path_len] = byte(0)
+        2 + path_len + 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, addrlen_p: *i32) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(addrlen_p), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+
+Sub-case 1: bound connector. The peer-sockaddr round-trip
+should hand back "APC1".
+
+        val ls1 = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if ls1 < 0
+            fail(1)
+            return
+        var path_s1: [4]byte
+        path_s1[0] = 'A'; path_s1[1] = 'P'; path_s1[2] = 'S'; path_s1[3] = '1'
+        var sa_s1: [128]byte
+        val al_s1 = fill_sockaddr_un(&sa_s1[0], &path_s1[0], 4)
+        if posix_bind(ls1, &sa_s1[0], al_s1) != 0
+            fail(2)
+            return
+        if posix_listen(ls1, 4) != 0
+            fail(3)
+            return
+
+        val cl1 = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if cl1 < 0
+            fail(4)
+            return
+        var path_c1: [4]byte
+        path_c1[0] = 'A'; path_c1[1] = 'P'; path_c1[2] = 'C'; path_c1[3] = '1'
+        var sa_c1: [128]byte
+        val al_c1 = fill_sockaddr_un(&sa_c1[0], &path_c1[0], 4)
+        if posix_bind(cl1, &sa_c1[0], al_c1) != 0
+            fail(5)
+            return
+        if posix_connect(cl1, &sa_s1[0], al_s1) != 0
+            fail(6)
+            return
+
+        var peer_addr1: [128]byte
+        var peer_alen1: i32 = 128
+        val sv1 = posix_accept(ls1, &peer_addr1[0], &peer_alen1)
+        if sv1 < 0
+            puts("unixapth: accept1=")
+            print_idec(sv1)
+            puts("\n")
+            fail(7)
+            return
+        if peer_addr1[0] != byte(AF_UNIX_V)
+            fail(8)
+            return
+        if peer_addr1[2] != 'A' || peer_addr1[3] != 'P'
+            fail(9)
+            return
+        if peer_addr1[4] != 'C' || peer_addr1[5] != '1'
+            fail(10)
+            return
+        if peer_addr1[6] != byte(0)
+            fail(11)
+            return
+        if peer_alen1 != i32(7)
+            puts("unixapth: alen1=")
+            print_idec(int(peer_alen1))
+            puts("\n")
+            fail(12)
+            return
+
+        posix_close(sv1)
+        posix_close(cl1)
+        posix_close(ls1)
+
+Sub-case 2: unbound connector. Linux returns family + empty
+path, addrlen=2.
+
+        val ls2 = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if ls2 < 0
+            fail(13)
+            return
+        var path_s2: [4]byte
+        path_s2[0] = 'A'; path_s2[1] = 'P'; path_s2[2] = 'S'; path_s2[3] = '2'
+        var sa_s2: [128]byte
+        val al_s2 = fill_sockaddr_un(&sa_s2[0], &path_s2[0], 4)
+        if posix_bind(ls2, &sa_s2[0], al_s2) != 0
+            fail(14)
+            return
+        if posix_listen(ls2, 4) != 0
+            fail(15)
+            return
+
+        val cl2 = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if cl2 < 0
+            fail(16)
+            return
+        if posix_connect(cl2, &sa_s2[0], al_s2) != 0
+            fail(17)
+            return
+
+        var peer_addr2: [128]byte
+        var peer_alen2: i32 = 128
+        val sv2 = posix_accept(ls2, &peer_addr2[0], &peer_alen2)
+        if sv2 < 0
+            fail(18)
+            return
+        if peer_addr2[0] != byte(AF_UNIX_V)
+            fail(19)
+            return
+        if peer_alen2 != i32(2)
+            puts("unixapth: alen2=")
+            print_idec(int(peer_alen2))
+            puts("\n")
+            fail(20)
+            return
+
+        posix_close(sv2)
+        posix_close(cl2)
+        posix_close(ls2)
+        puts("unixapth: ok\n")
+        exit()

@@ -1653,31 +1653,47 @@ empty backlog returns -EAGAIN instead of parking.
         else
             msg[0] = byte(UNIX_CMD_ACCEPT)
         msg[1] = byte(target & 0xff)
-        var reply: [2]byte
-        val r = ipc_send(port, msg, 2, reply, 2)
+        var reply: [128]byte
+        val r = ipc_send(port, msg, 2, reply, 128)
         if r < 0
             return i64(-EIO)
         if reply[0] != 0
             return i64(unix_status(reply[0]))
         val server_end = int(reply[1]) & 0xff
+        val plen = int(reply[2]) & 0xff
         val new_posix_fd = posix_fd_alloc(POSIX_FD_UNIX_SOCKET, server_end)
         if new_posix_fd < 0
             shim_unix_close(server_end)
             return i64(-EMFILE)
         val pid = posix_fd_current_pid()
         posix_fd_table[pid * POSIX_FDS_PER_PROC + new_posix_fd].pos = i64(POSIX_SOCK_STREAM)
-        // sockaddr_out for AF_UNIX accept: family + (typically empty)
-        // peer path. We don't track which client connected so the path
-        // is just empty — Linux fills it from the connector's bound
-        // path, which we don't currently propagate through CONNECT.
+
+The reply carries `plen + path[]` from the connector's bound
+path (or `plen=0` if the connector was unbound). Fill the
+caller's sockaddr_un with `family(2) + path[plen] + NUL` —
+matching Linux's "len includes the NUL when the path is
+non-empty" convention, and leave `addrlen = 2` for an
+unbound connector so callers can distinguish.
+
         if addr_ptr != i64(0)
             val a: *byte = *byte(addr_ptr)
             a[0] = byte(POSIX_AF_UNIX & 0xff)
             a[1] = byte(0)
-            // Leave path bytes zero.
+            var pcopy = plen
+            if pcopy > UNIX_PATH_MAX
+                pcopy = UNIX_PATH_MAX
+            var i = 0
+            while i < pcopy
+                a[2 + i] = reply[3 + i]
+                i += 1
+            if 2 + pcopy < 110
+                a[2 + pcopy] = byte(0)
         if addrlen_ptr != i64(0)
             val alp: *i32 = *i32(addrlen_ptr)
-            *alp = i32(2)
+            if plen == 0
+                *alp = i32(2)
+            else
+                *alp = i32(2 + plen + 1)
         i64(new_posix_fd)
 
 

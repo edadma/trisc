@@ -47,7 +47,9 @@ UNIX_PATH_MAX. Multi-byte integers are big-endian.
 - LISTEN (4)    req: cmd(1) + fd(1) + backlog(1)
                 rep: status(1)
 - ACCEPT (5)    req: cmd(1) + fd(1)
-                rep: status(1) + new_fd(1)
+                rep: status(1) + new_fd(1) + plen(1) + path(N)
+                where path is the connector's bound_path
+                (empty if connector wasn't bind()ed first)
 - SENDTO (6)    req: cmd(1) + fd(1) + plen(1) + path(N) + dlen_be(2) + data(M)
                 rep: status(1) + nsent_be(2)
 - RECVFROM (7)  req: cmd(1) + fd(1) + maxlen_be(2)
@@ -213,6 +215,8 @@ matching send/sendto wakes the slot.
         pending_recv_maxlen: int
         pending_recv_peek: int
         pending_accept_tid: int
+        connector_path: [108]byte
+        connector_path_len: int
 
     var unix_sockets: [16]UnixSocket
     var unix_port = -1
@@ -257,6 +261,7 @@ loop before `port_register`.
             unix_sockets[i].pending_recv_tid = -1
             unix_sockets[i].pending_recv_peek = 0
             unix_sockets[i].pending_accept_tid = -1
+            unix_sockets[i].connector_path_len = 0
             var j = 0
             while j < UNIX_MAX_OWNERS
                 unix_sockets[i].owners[j] = -1
@@ -382,6 +387,7 @@ or -1 if the table is full.
                 unix_sockets[i].pending_recv_peek = 0
                 unix_sockets[i].pending_accept_tid = -1
                 unix_sockets[i].nrefs_in_queues = 0
+                unix_sockets[i].connector_path_len = 0
                 var j = 0
                 while j < UNIX_MAX_OWNERS
                     unix_sockets[i].owners[j] = -1
@@ -454,10 +460,11 @@ single-owner close used to do, then frees the slot.
         if unix_sockets[idx].pending_accept_tid >= 0
             val waiter = unix_sockets[idx].pending_accept_tid
             unix_sockets[idx].pending_accept_tid = -1
-            var ar: [2]byte
+            var ar: [3]byte
             ar[0] = byte(-UNIX_EBADF)
             ar[1] = 0
-            ipc_reply(waiter, ar, 2)
+            ar[2] = 0
+            ipc_reply(waiter, ar, 3)
 
         unix_free_slot(idx)
 
@@ -723,6 +730,12 @@ owner so accept() on that thread can claim it and ops on it
 pass `unix_fd_valid`. peer_idx links the two halves so
 subsequent send/recv route through each other's `rx_buf`.
 
+If the connector itself was bound to a path (typical Linux
+servers don't bind clients, but some apps do for naming /
+auth), copy it onto the server-end as `connector_path` so the
+accept reply can hand it back. Unbound connectors leave
+`connector_path_len = 0` and accept reports an empty path.
+
         val server_end = unix_alloc_slot(unix_sockets[target].owners[0],
             UNIX_SOCK_STREAM)
         if server_end < 0
@@ -732,12 +745,22 @@ subsequent send/recv route through each other's `rx_buf`.
             return
         unix_sockets[fd].peer_idx = server_end
         unix_sockets[server_end].peer_idx = fd
+        if unix_sockets[fd].bound != 0
+            val cplen = unix_sockets[fd].path_len
+            var ci = 0
+            while ci < cplen
+                unix_sockets[server_end].connector_path[ci] = unix_sockets[fd].bound_path[ci]
+                ci += 1
+            unix_sockets[server_end].connector_path_len = cplen
+        else
+            unix_sockets[server_end].connector_path_len = 0
 
 Reply to the connector first so the connect() unblocks
 without depending on listener-side state. If a thread was
 already parked on accept(), unblock it now with the new fd —
 otherwise enqueue the server_end on the backlog for a
-future accept().
+future accept(). The accept reply is variable-length:
+`status(1) + new_fd(1) + plen(1) + path(P)`.
 
         var creply: [1]byte
         creply[0] = 0
@@ -746,10 +769,16 @@ future accept().
         if unix_sockets[target].pending_accept_tid >= 0
             val waiter = unix_sockets[target].pending_accept_tid
             unix_sockets[target].pending_accept_tid = -1
-            var ar: [2]byte
+            var ar: [128]byte
             ar[0] = 0
             ar[1] = byte(server_end & 0xff)
-            ipc_reply(waiter, ar, 2)
+            val plen = unix_sockets[server_end].connector_path_len
+            ar[2] = byte(plen & 0xff)
+            var pi = 0
+            while pi < plen
+                ar[3 + pi] = unix_sockets[server_end].connector_path[pi]
+                pi += 1
+            ipc_reply(waiter, &ar[0], 3 + plen)
         else
             val tail = unix_sockets[target].pending_tail
             unix_sockets[target].pending_q[tail] = server_end
@@ -765,35 +794,48 @@ matching CONNECT will unblock it. The `_NB` cmd byte
 (UNIX_CMD_ACCEPT_NB) sets `no_park=1`, which makes an empty
 queue reply with -EAGAIN immediately instead of parking.
 
+Reply wire shape: `status(1) + new_fd(1) + plen(1) + path(P)`.
+Errors emit `(-errno, 0, 0)` — 3 bytes; the shim peeks status
+first, so the trailing zero plen is harmless.
+
     unix_handle_accept(sender: int, buf: *byte, no_park: int)
         val fd = int(buf[1]) & 0xff
         if unix_fd_valid(fd, sender) == 0
-            var err: [2]byte
+            var err: [3]byte
             err[0] = byte(-UNIX_EBADF)
             err[1] = 0
-            ipc_reply(sender, err, 2)
+            err[2] = 0
+            ipc_reply(sender, err, 3)
             return
         if unix_sockets[fd].listening == 0
-            var err: [2]byte
+            var err: [3]byte
             err[0] = byte(-UNIX_EINVAL)
             err[1] = 0
-            ipc_reply(sender, err, 2)
+            err[2] = 0
+            ipc_reply(sender, err, 3)
             return
         if unix_sockets[fd].pending_count > 0
             val head = unix_sockets[fd].pending_head
             val server_end = unix_sockets[fd].pending_q[head]
             unix_sockets[fd].pending_head = (head + 1) % UNIX_BACKLOG_MAX
             unix_sockets[fd].pending_count -= 1
-            var reply: [2]byte
+            var reply: [128]byte
             reply[0] = 0
             reply[1] = byte(server_end & 0xff)
-            ipc_reply(sender, reply, 2)
+            val plen = unix_sockets[server_end].connector_path_len
+            reply[2] = byte(plen & 0xff)
+            var pi = 0
+            while pi < plen
+                reply[3 + pi] = unix_sockets[server_end].connector_path[pi]
+                pi += 1
+            ipc_reply(sender, &reply[0], 3 + plen)
             return
         if no_park != 0
-            var err: [2]byte
+            var err: [3]byte
             err[0] = byte(-UNIX_EAGAIN)
             err[1] = 0
-            ipc_reply(sender, err, 2)
+            err[2] = 0
+            ipc_reply(sender, err, 3)
             return
         unix_sockets[fd].pending_accept_tid = sender
 
