@@ -1177,10 +1177,11 @@ separate statements also work (e.g. `x = a?` followed by `y = b?`).
 
 ### Traits and `impl` blocks
 
-Traits describe a set of methods a type may implement. Each trait is parameterized
-by a subject type `T` (the type that will conform). Methods may have default
-bodies; implementers override or inherit them. No orphan rule — any `impl` may
-be written anywhere.
+Traits describe a set of methods a type may implement. A trait is parameterized
+by one or more type parameters. The simplest case — and the most common — is a
+single subject type `T` (the type that will conform). Methods may have default
+bodies; implementers override or inherit them. Cross-module impls are governed
+by an orphan rule (see *Coherence* below).
 
 ```sysl
 trait Ord[T]
@@ -1320,6 +1321,99 @@ Context-sensitive prefix operators (`*` deref, `&` addr-of) are preserved:
 so user-defined operators may not start with `*` followed by `+`/`-`/`&`,
 or with `&` followed by `*`/`+`/`-`/`~`/`!`. Operators like `*>`, `*<`,
 `<*`, `<*>`, `&|>` are allowed.
+
+#### Multi-Parameter Traits
+
+A trait may declare more than one type parameter. Each `impl` then provides
+one target type per trait parameter:
+
+```sysl
+trait Concat[A, B, R]
+    concat(a: A, b: B) -> R
+
+impl Concat[int, int, int]
+    concat(a: int, b: int) -> int = a * 10 + b
+
+main() -> int = Concat.concat(3, 7)   // 37
+```
+
+`Concat.concat(3, 7)` finds the impl whose first two trait targets unify
+with the operand types `(int, int)`; the third target (`R`) is determined
+by which impl matches. This is the **functional-dependency convention**:
+the first two trait positions are operands, the rest are derived. It is
+not currently expressible in syntax — it is just how the dispatcher
+matches candidates.
+
+#### Generic `impl` Blocks
+
+`impl[X, Y, ...]` introduces type variables that may appear in the impl's
+target patterns and in its method signatures. The dispatcher unifies the
+impl's method-parameter patterns against actual argument types at each
+call site to produce a substitution, then specializes the method body
+into a fresh top-level function (with caching, so repeated dispatches at
+the same operand types reuse one mangled function).
+
+```sysl
+struct Box[T]
+    v: T
+
+trait Show[T]
+    showInt(x: T) -> int
+
+impl[X] Show[Box[X]]
+    showInt(x: Box[X]) -> int = 7
+
+main() -> int
+    var b = Box[int](5)
+    Show.showInt(b)         // dispatches to Show_showInt_Box_i32, returns 7
+```
+
+Combined with multi-param traits, generic impls express dependency-style
+relations:
+
+```sysl
+struct Wrap[T]
+    v: T
+
+trait Combine[X, Y, R]
+    combine(x: X, y: Y) -> R
+
+impl[U] Combine[Wrap[U], int, int]
+    combine(x: Wrap[U], y: int) -> int = y * 2
+
+main() -> int
+    var w = Wrap[bool](true)
+    Combine.combine(w, 21)   // 42
+```
+
+**Rules for impl declarations:**
+- Every declared impl tvar (`[X, Y, ...]`) must appear in at least one
+  target pattern. An unused tvar can never be bound at dispatch time and
+  is rejected at registration.
+- The number of target types must match the trait's type-parameter count.
+
+#### Coherence: Orphan Rule and At-Most-One
+
+To keep dispatch unambiguous, two rules apply at impl registration:
+
+- **Orphan rule.** A module may declare `impl T[Args...]` only if it
+  defined trait `T` itself, or it defined at least one named type that
+  appears anywhere in the impl's target patterns. This prevents two
+  unrelated modules from each registering an impl of someone else's
+  trait for someone else's type and producing a conflict on import.
+  The "root" module (no `module` declaration) is exempt — it has
+  nothing to conflict with.
+
+- **At-most-one (coherence).** No two impl templates of the same trait
+  may have overlapping operand patterns (positions 0–1 by the FD
+  convention; the result position is excluded). Two `impl[T]
+  Show[Box[T]]` blocks overlap, as do `impl[T] Show[Box[T]]` and
+  `impl Show[Box[int]]`. Both are rejected at registration.
+
+When dispatch finds zero matching impls, the analyzer emits "no impl of
+trait 'X.method' matches arg type(s) ..."; when more than one matches,
+"ambiguous: N impls of 'X' match ...". Coherence ensures the second
+case can only happen across modules that violate the orphan rule.
 
 ### Methods
 

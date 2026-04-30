@@ -286,11 +286,10 @@ class SyslTraitsTests extends SyslTestHelpers {
     ) shouldBe 1
   }
 
-  // ===== Multi-param trait declarations (Stage E — declaration only) =====
-  // A multi-parameter trait can be DECLARED post-Stage E. Implementing it
-  // requires the unifier (Stage F), so any `impl` of one currently raises a
-  // clean diagnostic — the gating ensures the half-built path can't silently
-  // misdispatch.
+  // ===== Multi-param trait declarations (Stage E + F) =====
+  // Multi-param traits can be DECLARED (Stage E) and now also IMPLEMENTED
+  // (Stage F). The arity check in the registration pass ensures the impl's
+  // target list matches the trait's type-parameter count.
 
   "multi-param trait declaration parses and analyzes" in {
     // Pure declaration — no impl, no use site, just check it round-trips
@@ -304,7 +303,7 @@ class SyslTraitsTests extends SyslTestHelpers {
     eval(src) shouldBe 0
   }
 
-  "implementing a multi-param trait is a clean error pre-Stage F" in {
+  "implementing a multi-param trait with wrong arity is an error" in {
     val ex = intercept[Exception] {
       eval(
         """trait Concat[A, B, R]
@@ -317,7 +316,7 @@ class SyslTraitsTests extends SyslTestHelpers {
           |""".stripMargin)
     }
     val msg = ex.getMessage
-    assert(msg.contains("multi-parameter trait"), s"error should explain multi-param-trait gap, got: $msg")
+    assert(msg.contains("3 type parameter"), s"error should report arity mismatch, got: $msg")
   }
 
   "duplicate trait type-param name is a parse-time analyzer error" in {
