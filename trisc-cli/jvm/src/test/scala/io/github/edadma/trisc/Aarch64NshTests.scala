@@ -2141,6 +2141,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixwk: bad"
   }
 
+  "unix: non-blocking recvmsg via O_NONBLOCK + UNIX_CMD_RECVMSG_NB" in {
+    // recvmsg used to return -EAGAIN unconditionally on empty queue
+    // (no parking). Now it parks by default; the shim selects
+    // UNIX_CMD_RECVMSG_NB when the fd is O_NONBLOCK or the call
+    // passes MSG_DONTWAIT. After data + cmsg arrive via sendmsg,
+    // recvmsg drains correctly with cmsg fds intact.
+    val output = qemu.command("test_unixrmnb")
+    output should include("unixrmnb: ok")
+    output should not include "unixrmnb: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

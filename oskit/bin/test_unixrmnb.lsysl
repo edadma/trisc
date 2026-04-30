@@ -1,0 +1,257 @@
+test_unixrmnb — non-blocking recvmsg on AF_UNIX
+=================================================
+
+Validates the new UNIX_CMD_RECVMSG_NB path. recvmsg used to
+always return -EAGAIN on an empty queue (no parking); now
+the default is to park, and the NB variant is selected by
+the shim when O_NONBLOCK is set on the fd or MSG_DONTWAIT
+is in the call's flags.
+
+  1. Bind alpha→"RA", beta→"RB", gamma→"RG".
+  2. fcntl(F_SETFL, O_NONBLOCK) on beta.
+  3. recvmsg(beta) on empty queue → -EAGAIN (NB path).
+  4. sendmsg(alpha → "RB", payload + cmsg=[gamma]).
+  5. recvmsg(beta) drains; payload + cmsg with one transferred
+     fd. Verify the new fd is functional by closing it.
+
+Pass criterion: prints `unixrmnb: ok`.
+
+    module oskit.bin.test_unixrmnb
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_FCNTL      = 171
+    val NR_RECVMSG    = 278
+    val NR_SENDMSG    = 306
+    val NR_SOCKET     = 337
+
+    val AF_UNIX_V     = 1
+    val SOCK_DGRAM_V  = 2
+
+    val F_GETFL       = 3
+    val F_SETFL       = 4
+    val O_NONBLOCK    = 2048
+
+    val SOL_SOCKET_V  = 1
+    val SCM_RIGHTS_V  = 1
+
+    val EAGAIN_NEG    = -11
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixrmnb: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, path_len: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < path_len
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + path_len] = byte(0)
+        2 + path_len + 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_sendmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_SENDMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+    posix_recvmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_RECVMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+    posix_fcntl(fd: int, cmd: int, arg: i64) -> int
+        int(syscall6(NR_FCNTL, i64(fd), i64(cmd), arg, 0, 0, 0))
+
+
+    write_i64(p: *byte, off: int, v: i64)
+        var i = 0
+        while i < 8
+            p[off + i] = byte((v >> (i * 8)) & i64(0xff))
+            i += 1
+
+
+    write_i32(p: *byte, off: int, v: int)
+        p[off]     = byte(v & 0xff)
+        p[off + 1] = byte((v >> 8) & 0xff)
+        p[off + 2] = byte((v >> 16) & 0xff)
+        p[off + 3] = byte((v >> 24) & 0xff)
+
+
+    read_i32(p: *byte, off: int) -> int
+        (int(p[off]) & 0xff) | ((int(p[off + 1]) & 0xff) << 8) | ((int(p[off + 2]) & 0xff) << 16) | ((int(p[off + 3]) & 0xff) << 24)
+
+
+    main(argv: []string)
+
+Step 1: bind alpha, beta, gamma.
+
+        val alpha = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if alpha < 0
+            fail(1)
+            return
+        val beta = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if beta < 0
+            fail(2)
+            return
+        val gamma = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if gamma < 0
+            fail(3)
+            return
+
+        var path_a: [2]byte
+        path_a[0] = 'R'; path_a[1] = 'A'
+        var path_b: [2]byte
+        path_b[0] = 'R'; path_b[1] = 'B'
+        var path_g: [2]byte
+        path_g[0] = 'R'; path_g[1] = 'G'
+
+        var sa_a: [128]byte
+        val al_a = fill_sockaddr_un(&sa_a[0], &path_a[0], 2)
+        if posix_bind(alpha, &sa_a[0], al_a) != 0
+            fail(4)
+            return
+        var sa_b: [128]byte
+        val al_b = fill_sockaddr_un(&sa_b[0], &path_b[0], 2)
+        if posix_bind(beta, &sa_b[0], al_b) != 0
+            fail(5)
+            return
+        var sa_g: [128]byte
+        val al_g = fill_sockaddr_un(&sa_g[0], &path_g[0], 2)
+        if posix_bind(gamma, &sa_g[0], al_g) != 0
+            fail(6)
+            return
+
+Step 2: set O_NONBLOCK on beta.
+
+        if posix_fcntl(beta, F_SETFL, i64(O_NONBLOCK)) != 0
+            fail(7)
+            return
+
+Step 3: recvmsg on empty queue → -EAGAIN.
+
+        var rb: [16]byte
+        var src: [128]byte
+
+        var iov_r: [16]byte
+        write_i64(&iov_r[0], 0, i64(&rb[0]))
+        write_i64(&iov_r[0], 8, i64(16))
+
+        var ctrl_r: [40]byte
+        var mh_r: [56]byte
+        write_i64(&mh_r[0], 0, i64(&src[0]))
+        write_i32(&mh_r[0], 8, 128)
+        write_i32(&mh_r[0], 12, 0)
+        write_i64(&mh_r[0], 16, i64(&iov_r[0]))
+        write_i32(&mh_r[0], 24, 1)
+        write_i32(&mh_r[0], 28, 0)
+        write_i64(&mh_r[0], 32, i64(&ctrl_r[0]))
+        write_i32(&mh_r[0], 40, 40)
+        write_i32(&mh_r[0], 44, 0)
+        write_i32(&mh_r[0], 48, 0)
+
+        val r1 = posix_recvmsg(beta, &mh_r[0], 0)
+        if r1 != EAGAIN_NEG
+            puts("unixrmnb: r1=")
+            print_idec(r1)
+            puts("\n")
+            fail(8)
+            return
+
+Step 4: sendmsg with cmsg=[gamma].
+
+        var ctrl_send: [32]byte
+        write_i64(&ctrl_send[0], 0, i64(20))
+        write_i32(&ctrl_send[0], 8, SOL_SOCKET_V)
+        write_i32(&ctrl_send[0], 12, SCM_RIGHTS_V)
+        write_i32(&ctrl_send[0], 16, gamma)
+
+        var send_payload: [4]byte
+        send_payload[0] = 'h'; send_payload[1] = 'i'
+        send_payload[2] = '!'; send_payload[3] = byte(0)
+
+        var send_iov: [16]byte
+        write_i64(&send_iov[0], 0, i64(&send_payload[0]))
+        write_i64(&send_iov[0], 8, i64(4))
+
+        var send_mh: [56]byte
+        write_i64(&send_mh[0], 0, i64(&sa_b[0]))
+        write_i32(&send_mh[0], 8, al_b)
+        write_i32(&send_mh[0], 12, 0)
+        write_i64(&send_mh[0], 16, i64(&send_iov[0]))
+        write_i32(&send_mh[0], 24, 1)
+        write_i32(&send_mh[0], 28, 0)
+        write_i64(&send_mh[0], 32, i64(&ctrl_send[0]))
+        write_i32(&send_mh[0], 40, 20)
+        write_i32(&send_mh[0], 44, 0)
+        write_i32(&send_mh[0], 48, 0)
+
+        if posix_sendmsg(alpha, &send_mh[0], 0) != 4
+            fail(9)
+            return
+
+Step 5: recvmsg drains. Should succeed (queue non-empty, NB
+or not doesn't matter).
+
+        write_i32(&mh_r[0], 8, 128)
+        write_i32(&mh_r[0], 40, 40)
+        val r2 = posix_recvmsg(beta, &mh_r[0], 0)
+        if r2 != 4
+            puts("unixrmnb: r2=")
+            print_idec(r2)
+            puts("\n")
+            fail(10)
+            return
+        if rb[0] != 'h' || rb[1] != 'i' || rb[2] != '!'
+            fail(11)
+            return
+
+The cmsg should hold one transferred fd.
+
+        val ctrl_used = read_i32(&mh_r[0], 40)
+        if ctrl_used != 20
+            puts("unixrmnb: ctrl_used=")
+            print_idec(ctrl_used)
+            puts("\n")
+            fail(12)
+            return
+        val gamma2 = read_i32(&ctrl_r[0], 16)
+        if gamma2 < 0
+            fail(13)
+            return
+
+Close all fds. Includes the transferred gamma2 (which is
+distinct from gamma but aliases the same server slot).
+
+        posix_close(gamma2)
+        posix_close(gamma)
+        posix_close(beta)
+        posix_close(alpha)
+        puts("unixrmnb: ok\n")
+        exit()

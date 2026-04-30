@@ -93,6 +93,10 @@ UNIX_PATH_MAX. Multi-byte integers are big-endian.
                    Drops every sub belonging to (sender_tid,
                    epoll_inst) — bulk cleanup when an epoll
                    fd closes.
+- RECVMSG_NB (21)  same wire as RECVMSG — returns -EAGAIN on
+                   empty queue (never parks). RECVMSG itself
+                   parks by default (POSIX-conformant
+                   blocking recvmsg).
 
 The `_NB` variants are used by the shim when the fd is in
 `O_NONBLOCK` mode (or when `MSG_DONTWAIT` is passed in the
@@ -135,6 +139,7 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_EPOLL_SUB        = 18
     const UNIX_CMD_EPOLL_UNSUB      = 19
     const UNIX_CMD_EPOLL_INST_CLOSE = 20
+    const UNIX_CMD_RECVMSG_NB       = 21
 
 EPOLL/POLL bit values match `POSIX_EPOLL*` 1:1 (POLLIN=0x001,
 POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010). The shim's
@@ -246,6 +251,8 @@ matching send/sendto wakes the slot.
         pending_recv_tid: int
         pending_recv_maxlen: int
         pending_recv_peek: int
+        pending_recv_is_msg: int
+        pending_recv_max_nfds: int
         pending_accept_tid: int
         connector_path: [108]byte
         connector_path_len: int
@@ -363,6 +370,8 @@ loop before `port_register`.
             unix_sockets[i].pending_count = 0
             unix_sockets[i].pending_recv_tid = -1
             unix_sockets[i].pending_recv_peek = 0
+            unix_sockets[i].pending_recv_is_msg = 0
+            unix_sockets[i].pending_recv_max_nfds = 0
             unix_sockets[i].pending_accept_tid = -1
             unix_sockets[i].connector_path_len = 0
             unix_sockets[i].fire_seq = 0
@@ -512,6 +521,8 @@ or -1 if the table is full.
                 unix_sockets[i].pending_count = 0
                 unix_sockets[i].pending_recv_tid = -1
                 unix_sockets[i].pending_recv_peek = 0
+                unix_sockets[i].pending_recv_is_msg = 0
+                unix_sockets[i].pending_recv_max_nfds = 0
                 unix_sockets[i].pending_accept_tid = -1
                 unix_sockets[i].nrefs_in_queues = 0
                 unix_sockets[i].connector_path_len = 0
@@ -1043,16 +1054,20 @@ the just-enqueued datagram and reply directly.
             ipc_reply(sender, err, 3)
             return
 
-If the receiver is parked on recvfrom and its queue is empty,
+If the receiver is parked and its queue is empty,
 short-circuit straight into the parked reply — saves a queue
 hop and means the wake-up happens before the sender's reply,
 so a tight ping-pong sees the pong already on the wire when
-ping() returns.
+ping() returns. The reply shape depends on whether the parker
+is recvfrom (recvfrom-shape) or recvmsg (recvmsg-shape with
+nfds=0 — sendto carries no ancillary).
 
         val parked = unix_sockets[target].pending_recv_tid
         if parked >= 0
             if unix_sockets[target].dg_count == 0
+                val is_msg = unix_sockets[target].pending_recv_is_msg
                 unix_sockets[target].pending_recv_tid = -1
+                unix_sockets[target].pending_recv_is_msg = 0
                 val maxlen = unix_sockets[target].pending_recv_maxlen
                 var dl = dlen
                 if dl > UNIX_DG_DATA_MAX
@@ -1061,19 +1076,35 @@ ping() returns.
                 var dlcap = dl
                 if dlcap > maxlen
                     dlcap = maxlen
-                var pr: [512]byte
-                pr[0] = 0
-                pr[1] = byte(spl & 0xff)
-                var i = 0
-                while i < spl
-                    pr[2 + i] = unix_sockets[fd].bound_path[i]
-                    i += 1
-                unix_write_u16(&pr[0], 2 + spl, dlcap)
-                i = 0
-                while i < dlcap
-                    pr[2 + spl + 2 + i] = data[i]
-                    i += 1
-                ipc_reply(parked, &pr[0], 2 + spl + 2 + dlcap)
+                if is_msg != 0
+                    var pr: [600]byte
+                    pr[0] = 0
+                    pr[1] = byte(spl & 0xff)
+                    var i = 0
+                    while i < spl
+                        pr[2 + i] = unix_sockets[fd].bound_path[i]
+                        i += 1
+                    pr[2 + spl] = byte(0)
+                    unix_write_u16(&pr[0], 2 + spl + 1, dlcap)
+                    i = 0
+                    while i < dlcap
+                        pr[2 + spl + 1 + 2 + i] = data[i]
+                        i += 1
+                    ipc_reply(parked, &pr[0], 2 + spl + 1 + 2 + dlcap)
+                else
+                    var pr: [512]byte
+                    pr[0] = 0
+                    pr[1] = byte(spl & 0xff)
+                    var i = 0
+                    while i < spl
+                        pr[2 + i] = unix_sockets[fd].bound_path[i]
+                        i += 1
+                    unix_write_u16(&pr[0], 2 + spl, dlcap)
+                    i = 0
+                    while i < dlcap
+                        pr[2 + spl + 2 + i] = data[i]
+                        i += 1
+                    ipc_reply(parked, &pr[0], 2 + spl + 2 + dlcap)
                 var sr: [3]byte
                 sr[0] = 0
                 unix_write_u16(&sr[0], 1, dl)
@@ -1138,6 +1169,7 @@ queue reply with -EAGAIN immediately.
         unix_sockets[fd].pending_recv_tid = sender
         unix_sockets[fd].pending_recv_maxlen = maxlen
         unix_sockets[fd].pending_recv_peek = 0
+        unix_sockets[fd].pending_recv_is_msg = 0
 
 
 ### SEND handler (STREAM)
@@ -1253,6 +1285,7 @@ how POSIX distinguishes "would block" from "stream closed".
         unix_sockets[fd].pending_recv_tid = sender
         unix_sockets[fd].pending_recv_maxlen = maxlen
         unix_sockets[fd].pending_recv_peek = 0
+        unix_sockets[fd].pending_recv_is_msg = 0
 
 
 ### SENDMSG handler (DGRAM, SCM_RIGHTS)
@@ -1386,20 +1419,26 @@ its current owners close before the receiver drains.
         unix_write_u16(&sreply[0], 1, nsent)
         ipc_reply(sender, sreply, 3)
 
-If a thread is parked on recvfrom for `target`, drain the
-head of queue (the entry we just enqueued) and reply to it.
-recvfrom doesn't carry ancillary, so any cmsg fds get
-dropped — but `unix_dg_dequeue_reply` releases their
-queue-refs so the slots aren't leaked. Without this wake,
-a parked recvfrom thread sleeps until the next sendto.
+If a thread is parked on recvfrom or recvmsg for `target`,
+drain the head of queue (the entry we just enqueued) and
+reply to it. The reply shape depends on the parker:
+recvfrom drops the cmsg fds (queue-refs released by
+`unix_dg_dequeue_reply`); recvmsg goes through the
+recvmsg-drain helper which transfers fd ownership.
 
         val parked = unix_sockets[target].pending_recv_tid
         if parked >= 0
-            unix_sockets[target].pending_recv_tid = -1
             val pmaxlen = unix_sockets[target].pending_recv_maxlen
-            var pr: [512]byte
-            val n = unix_dg_dequeue_reply(target, pmaxlen, 0, &pr[0])
-            ipc_reply(parked, &pr[0], n)
+            val pmsg = unix_sockets[target].pending_recv_is_msg
+            val pmaxn = unix_sockets[target].pending_recv_max_nfds
+            unix_sockets[target].pending_recv_tid = -1
+            unix_sockets[target].pending_recv_is_msg = 0
+            if pmsg != 0
+                unix_dg_drain_for_msg(target, parked, pmaxn, pmaxlen)
+            else
+                var pr: [512]byte
+                val n = unix_dg_dequeue_reply(target, pmaxlen, 0, &pr[0])
+                ipc_reply(parked, &pr[0], n)
 
 
 ### RECVMSG handler (DGRAM, SCM_RIGHTS)
@@ -1418,7 +1457,61 @@ Recvmsg parking is deferred to a later session.
 Wire reply: `status(1) + src_plen(1) + src_path(P) +
 nfds(1) + slots(F) + dlen_be(2) + data(D)`.
 
-    unix_handle_recvmsg(sender: int, buf: *byte)
+Drain helper for the recvmsg-shaped reply. Used both by
+`unix_handle_recvmsg`'s direct dequeue and by sendto /
+sendmsg wakes when the parker is a recvmsg (not recvfrom).
+Builds the reply, transfers fd ownership for `min(queued,
+max_nfds)` slots, releases queue-refs for *all* slots, and
+advances the head pointer.
+
+    unix_dg_drain_for_msg(idx: int, receiver: int, max_nfds: int,
+            maxlen: int)
+        val slot = unix_sockets[idx].dg_head
+        val sp = unix_sockets[idx].dg_queue[slot].src_path_len
+        val queued_nfds = unix_sockets[idx].dg_queue[slot].nfds
+        var grant = queued_nfds
+        if grant > max_nfds
+            grant = max_nfds
+        var pr: [600]byte
+        pr[0] = 0
+        pr[1] = byte(sp & 0xff)
+        var i = 0
+        while i < sp
+            pr[2 + i] = unix_sockets[idx].dg_queue[slot].src_path[i]
+            i += 1
+        pr[2 + sp] = byte(grant & 0xff)
+        i = 0
+        while i < grant
+            val sidx = unix_sockets[idx].dg_queue[slot].fds[i]
+            pr[2 + sp + 1 + i] = byte(sidx & 0xff)
+            i += 1
+        var dl = unix_sockets[idx].dg_queue[slot].data_len
+        if dl > maxlen
+            dl = maxlen
+        unix_write_u16(&pr[0], 2 + sp + 1 + grant, dl)
+        i = 0
+        while i < dl
+            pr[2 + sp + 1 + grant + 2 + i] = unix_sockets[idx].dg_queue[slot].data[i]
+            i += 1
+        i = 0
+        while i < queued_nfds
+            val sidx = unix_sockets[idx].dg_queue[slot].fds[i]
+            unix_sockets[sidx].nrefs_in_queues -= 1
+            if i < grant
+                unix_slot_add_owner(sidx, receiver)
+            if unix_sockets[sidx].owners_count == 0
+                if unix_sockets[sidx].nrefs_in_queues == 0
+                    if unix_sockets[sidx].in_use != 0
+                        unix_full_close(sidx)
+            i += 1
+        unix_sockets[idx].dg_queue[slot].in_use = 0
+        unix_sockets[idx].dg_head = (slot + 1) % UNIX_DG_QUEUE
+        unix_sockets[idx].dg_count -= 1
+        unix_bump_fire_seq(idx)
+        ipc_reply(receiver, &pr[0], 2 + sp + 1 + grant + 2 + dl)
+
+
+    unix_handle_recvmsg(sender: int, buf: *byte, no_park: int)
         val fd = int(buf[1]) & 0xff
         if unix_fd_valid(fd, sender) == 0
             var err: [4]byte
@@ -1441,7 +1534,10 @@ nfds(1) + slots(F) + dlen_be(2) + data(D)`.
         if max_nfds > UNIX_SCM_MAX_FDS
             max_nfds = UNIX_SCM_MAX_FDS
         val maxlen = unix_read_u16(buf, 3)
-        if unix_sockets[fd].dg_count == 0
+        if unix_sockets[fd].dg_count > 0
+            unix_dg_drain_for_msg(fd, sender, max_nfds, maxlen)
+            return
+        if no_park != 0
             var err: [4]byte
             err[0] = byte(-UNIX_EAGAIN)
             err[1] = 0
@@ -1449,61 +1545,11 @@ nfds(1) + slots(F) + dlen_be(2) + data(D)`.
             err[3] = 0
             ipc_reply(sender, err, 4)
             return
-
-Drain the head dgram. Build the recvmsg-shaped reply by
-hand (different layout than dg_dequeue_reply): we need a
-slot list slotted between path and dlen.
-
-        val slot = unix_sockets[fd].dg_head
-        val sp = unix_sockets[fd].dg_queue[slot].src_path_len
-        val queued_nfds = unix_sockets[fd].dg_queue[slot].nfds
-        var grant = queued_nfds
-        if grant > max_nfds
-            grant = max_nfds
-        var pr: [600]byte
-        pr[0] = 0
-        pr[1] = byte(sp & 0xff)
-        var i = 0
-        while i < sp
-            pr[2 + i] = unix_sockets[fd].dg_queue[slot].src_path[i]
-            i += 1
-        pr[2 + sp] = byte(grant & 0xff)
-        i = 0
-        while i < grant
-            val sidx = unix_sockets[fd].dg_queue[slot].fds[i]
-            pr[2 + sp + 1 + i] = byte(sidx & 0xff)
-            i += 1
-        var dl = unix_sockets[fd].dg_queue[slot].data_len
-        if dl > maxlen
-            dl = maxlen
-        unix_write_u16(&pr[0], 2 + sp + 1 + grant, dl)
-        i = 0
-        while i < dl
-            pr[2 + sp + 1 + grant + 2 + i] = unix_sockets[fd].dg_queue[slot].data[i]
-            i += 1
-
-Release each queued fd. The first `grant` get co-owner
-status; the rest are dropped. In both cases the slot's
-`nrefs_in_queues` is decremented; if that drops the slot
-to 0 owners + 0 queue refs, run the orphan cleanup.
-
-        i = 0
-        while i < queued_nfds
-            val sidx = unix_sockets[fd].dg_queue[slot].fds[i]
-            unix_sockets[sidx].nrefs_in_queues -= 1
-            if i < grant
-                unix_slot_add_owner(sidx, sender)
-            if unix_sockets[sidx].owners_count == 0
-                if unix_sockets[sidx].nrefs_in_queues == 0
-                    if unix_sockets[sidx].in_use != 0
-                        unix_full_close(sidx)
-            i += 1
-
-        unix_sockets[fd].dg_queue[slot].in_use = 0
-        unix_sockets[fd].dg_head = (slot + 1) % UNIX_DG_QUEUE
-        unix_sockets[fd].dg_count -= 1
-        unix_bump_fire_seq(fd)
-        ipc_reply(sender, &pr[0], 2 + sp + 1 + grant + 2 + dl)
+        unix_sockets[fd].pending_recv_tid = sender
+        unix_sockets[fd].pending_recv_maxlen = maxlen
+        unix_sockets[fd].pending_recv_peek = 0
+        unix_sockets[fd].pending_recv_is_msg = 1
+        unix_sockets[fd].pending_recv_max_nfds = max_nfds
 
 
 ### POLL handler
@@ -1669,6 +1715,11 @@ sweep is a no-op against everything else.
         var i = 0
         while i < UNIX_MAX_SOCKETS
             if unix_sockets[i].in_use != 0
+                if unix_sockets[i].pending_recv_tid == tid
+                    unix_sockets[i].pending_recv_tid = -1
+                    unix_sockets[i].pending_recv_is_msg = 0
+                if unix_sockets[i].pending_accept_tid == tid
+                    unix_sockets[i].pending_accept_tid = -1
                 if unix_slot_has_owner(i, tid) != 0
                     unix_slot_remove_owner(i, tid)
                     if unix_sockets[i].owners_count == 0
@@ -1722,7 +1773,9 @@ Synchronous request-reply, no notification path required
                 else if cmd == UNIX_CMD_SENDMSG
                     unix_handle_sendmsg(sender, buf)
                 else if cmd == UNIX_CMD_RECVMSG
-                    unix_handle_recvmsg(sender, buf)
+                    unix_handle_recvmsg(sender, buf, 0)
+                else if cmd == UNIX_CMD_RECVMSG_NB
+                    unix_handle_recvmsg(sender, buf, 1)
                 else if cmd == UNIX_CMD_ACCEPT_NB
                     unix_handle_accept(sender, buf, 1)
                 else if cmd == UNIX_CMD_RECVFROM_NB

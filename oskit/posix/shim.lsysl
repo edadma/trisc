@@ -491,6 +491,7 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_EPOLL_SUB        = 18
     const UNIX_CMD_EPOLL_UNSUB      = 19
     const UNIX_CMD_EPOLL_INST_CLOSE = 20
+    const UNIX_CMD_RECVMSG_NB       = 21
 
     const UNIX_PATH_MAX      = 108
     const UNIX_SCM_MAX_FDS   = 4
@@ -2211,8 +2212,14 @@ RECVMSG cmd, parse the reply.
         val port = unix_get_port()
         if port < 0
             return i64(-ENODEV)
+        var nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
+        if (flags & POSIX_MSG_DONTWAIT) != 0
+            nb = POSIX_O_NONBLOCK
         var msg: [5]byte
-        msg[0] = byte(UNIX_CMD_RECVMSG)
+        if nb != 0
+            msg[0] = byte(UNIX_CMD_RECVMSG_NB)
+        else
+            msg[0] = byte(UNIX_CMD_RECVMSG)
         msg[1] = byte(target & 0xff)
         msg[2] = byte(max_nfds & 0xff)
         msg[3] = byte((cap >> 8) & 0xff)
