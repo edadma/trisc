@@ -337,6 +337,36 @@ type IntPtr = *int
 type Callback = (int) -> int
 ```
 
+#### Generic Type Aliases
+
+A type alias may take type parameters in `[...]` after the name. The
+parameters bind in the right-hand side and are substituted at each use
+site. Generic aliases are pure type-level abbreviations — no codegen is
+emitted for the alias itself.
+
+```sysl
+type Transform[T]   = (T) -> T                  // generic function alias
+type Pair[A, B]     = (A) -> B                  // multiple parameters
+type Predicate[T]   = (T) -> bool               // common combinator shape
+type ParseResult[T] = Result[T, string]         // re-parameterize a generic enum
+```
+
+Aliases compose with generic functions and methods naturally:
+
+```sysl
+apply(f: Transform[int], x: int) -> int = f(x)
+
+unwrap_or[T, E](r: Result[T, E], default: T) -> T
+    r match
+        Ok(v)  -> v
+        Err(_) -> default
+```
+
+**Restrictions.** Generic aliases must be transparent — they cannot
+combine with `new`, `within`, or `where`. Use a plain (non-generic)
+type declaration when you want a nominally distinct or constrained
+type.
+
 ### Type Attributes (`T::Attr`)
 
 Range-constrained types and simple enums expose their metadata through `::`-suffixed
