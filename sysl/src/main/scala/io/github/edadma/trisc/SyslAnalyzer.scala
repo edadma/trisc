@@ -56,7 +56,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   private val moduleNamespaces = new mutable.LinkedHashMap[String, ModuleMeta]  // short name → module meta (for qualified imports)
   // alias name → (target type AST, isNew flag, optional within-range, optional where-predicate AST)
   private val typeAliases = new mutable.LinkedHashMap[String, (TypeAST, Boolean, Option[RangeAST], Option[ExpressionAST])]
-  private val genericTypeAliases = new mutable.LinkedHashMap[String, (List[String], TypeAST)]  // name → (type params, target)
+  // name → (type params, target, isNew). `isNew=true` means each instantiation is a
+  // distinct nominal type (`type Parser[A] = new (Input) -> ParseResult[A]`); `false` is
+  // the historical transparent expansion. `within`/`where` remain rejected for generic
+  // aliases (no scalar ordering / no operations on a bare T without trait bounds).
+  private val genericTypeAliases = new mutable.LinkedHashMap[String, (List[String], TypeAST, Boolean)]
+  // Cached SyslType for each instantiation of a `new` generic alias. Keyed by (template
+  // name, type args). Mirrors `genericStructInstantiations` so repeated mentions of
+  // `Parser[i32]` return the same NamedType instance (object-equality dispatch).
+  private val genericAliasInstantiations = new mutable.LinkedHashMap[(String, List[SyslType]), SyslType]
+  // Reverse map: mangled instantiation name → (template name, concrete args). Used by
+  // the unifier to bind type vars when matching `Parser[A]` against `NamedType("Parser_i32", ...)`.
+  private val genericAliasToTemplate = new mutable.LinkedHashMap[String, (String, List[SyslType])]
   // Memoized resolved form of a named/derived/constrained alias. Plain transparent aliases
   // do not appear here — they resolve directly to their base.
   private val resolvedNamedTypes = new mutable.LinkedHashMap[String, SyslType]
@@ -990,9 +1001,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           if typeAliases.contains(name) || genericTypeAliases.contains(name) then
             throw AnalysisError(s"duplicate type alias: '$name'", decl)
           if tparams.nonEmpty then
-            if isNew || range.nonEmpty || predicate.nonEmpty then
-              throw AnalysisError(s"generic type aliases cannot use 'new', 'within', or 'where': '$name'", decl)
-            genericTypeAliases(name) = (tparams, target)
+            // `within` and `where` need scalar ordering / operations on T; both are
+            // unavailable on a bare type parameter without trait bounds. `new` does NOT
+            // need either — it's just nominal identity per instantiation, fully supported
+            // by the existing monomorphization machinery.
+            if range.nonEmpty || predicate.nonEmpty then
+              throw AnalysisError(s"generic type aliases cannot use 'within' or 'where': '$name'", decl)
+            genericTypeAliases(name) = (tparams, target, isNew)
           else
             typeAliases(name) = (target, isNew, range, predicate)
         case TraitDeclAST(name, tparams, methods, _) =>
@@ -2255,14 +2270,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case NamedTypeAST(name, typeArgs) if typeArgs.nonEmpty =>
       val resolved = typeArgs.map(resolveType)
       if genericTypeAliases.contains(name) then
-        val (tparams, target) = genericTypeAliases(name)
+        val (tparams, target, isNew) = genericTypeAliases(name)
         if resolved.length != tparams.length then
           throw AnalysisError(s"type alias '$name' expects ${tparams.length} type argument(s), got ${resolved.length}")
-        val savedEnv = typeEnv
-        typeEnv = typeEnv ++ tparams.zip(resolved).toMap
-        val result = resolveType(target)
-        typeEnv = savedEnv
-        result
+        if isNew then instantiateGenericNominalAlias(name, tparams, target, resolved)
+        else
+          val savedEnv = typeEnv
+          typeEnv = typeEnv ++ tparams.zip(resolved).toMap
+          val result = resolveType(target)
+          typeEnv = savedEnv
+          result
       else if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
       else if genericEnums.contains(name) then instantiateGenericEnum(name, resolved)
       else throw AnalysisError(s"'$name' is not a generic type")
@@ -3083,15 +3100,26 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case NamedTypeAST(name, tArgs) if tArgs.nonEmpty =>
         // If this is a generic type alias, expand it and unify the expanded type
         if genericTypeAliases.contains(name) then
-          val (tparams, target) = genericTypeAliases(name)
+          val (tparams, target, isNew) = genericTypeAliases(name)
           if tArgs.length == tparams.length then
-            // Substitute alias type params with the call's type args in the target TypeAST,
-            // then unify the expanded structure against the argument type.
-            // e.g., type Parser[T] = (string, int) -> Result[T, string]
-            //   Parser[A] → substitute T→A in target → (string, int) -> Result[A, string]
-            val subst = tparams.zip(tArgs).toMap
-            val expanded = substituteTypeAST(target, subst)
-            unifyTypes(expanded, arg, typeParams, env)
+            if isNew then
+              // Nominal generic alias: the actual must be a NamedType whose mangled name
+              // resolves back through `genericAliasToTemplate` to this template.
+              arg match
+                case SyslType.NamedType(argName, _, true, _, _) =>
+                  genericAliasToTemplate.get(argName) match
+                    case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+                      for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+                    case _ => () // structural mismatch — caught by post-validation
+                case _ => ()
+            else
+              // Transparent: substitute alias type params with the call's type args in
+              // the target TypeAST, then unify the expanded structure against the actual.
+              // e.g., type Parser[T] = (string, int) -> Result[T, string]
+              //   Parser[A] → substitute T→A in target → (string, int) -> Result[A, string]
+              val subst = tparams.zip(tArgs).toMap
+              val expanded = substituteTypeAST(target, subst)
+              unifyTypes(expanded, arg, typeParams, env)
         else arg match
           case SyslType.StructType(argName, _, _) =>
             structToTemplate.get(argName) match
@@ -3276,6 +3304,35 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     }.toList
 
   // Instantiate a generic struct with concrete type arguments, returning its StructType
+  /** Instantiate a `new` generic alias (`type Parser[A] = new (Input) -> ParseResult[A]`)
+   *  for a specific list of type args. Each instantiation gets a unique mangled name
+   *  (e.g. `Parser_i32`) and is wrapped as a nominal `NamedType` so it is distinct from
+   *  both its underlying base and from other instantiations.
+   *
+   *  Cached so that two mentions of `Parser[i32]` produce object-equal `SyslType` values —
+   *  this is what makes trait/impl dispatch see them as the same type.
+   */
+  private def instantiateGenericNominalAlias(
+      name: String,
+      tparams: List[String],
+      target: TypeAST,
+      typeArgs: List[SyslType],
+  ): SyslType =
+    val cacheKey = (name, typeArgs)
+    genericAliasInstantiations.get(cacheKey) match
+      case Some(t) => t
+      case None =>
+        val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ tparams.zip(typeArgs).toMap
+        val base =
+          try resolveType(target)
+          finally typeEnv = savedEnv
+        val nt = SyslType.NamedType(mangled, base, nominal = true, range = None, predicateFunc = None)
+        genericAliasInstantiations(cacheKey) = nt
+        genericAliasToTemplate(mangled) = (name, typeArgs)
+        nt
+
   private def instantiateGenericStruct(name: String, typeArgs: List[SyslType]): SyslType.StructType =
     val cacheKey = (name, typeArgs)
     genericStructInstantiations.get(cacheKey) match
@@ -5219,7 +5276,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       // Generic struct/function constructor with explicit type args: Name[T](args)
       // The parser sees this as IndirectCallAST(IndexAST(VarRefAST(name), typeExpr), args)
       case IndirectCallAST(IndexAST(VarRefAST(name), typeExpr), args)
-        if genericStructs.contains(name) || genericTemplates.contains(name) =>
+        if genericStructs.contains(name) || genericTemplates.contains(name) || genericTypeAliases.contains(name) =>
         val typeArg = resolveType(exprToTypeAST(typeExpr))
         val tArgs = args.map(analyzeExpr)
         if genericStructs.contains(name) then
@@ -5233,6 +5290,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             coerced
           }
           TStructConstruct(st, checkedArgs)
+        else if genericTypeAliases.contains(name) then
+          // Generic-alias cast: `Parser[i32](closure)`. For nominal aliases this wraps
+          // the value in a TCast to the NamedType (the explicit-cast requirement is what
+          // makes the type nominal in the first place). For transparent aliases the cast
+          // is a no-op — use the resolved underlying type directly.
+          if tArgs.length != 1 then
+            throw AnalysisError(s"generic alias '$name[...]' cast expects exactly 1 argument, got ${tArgs.length}")
+          val target = resolveType(NamedTypeAST(name, List(exprToTypeAST(typeExpr))))
+          val arg = tArgs.head
+          target match
+            case nt @ SyslType.NamedType(_, base, true, _, _) =>
+              val coreCast =
+                if arg.typ.underlying == base.underlying then arg
+                else if compatible(arg.typ, base) then arg
+                else throw AnalysisError(s"cannot cast ${arg.typ} to '$name[...]' (underlying $base)")
+              TCast(coreCast, nt)
+            case other =>
+              if compatible(arg.typ, other) then arg
+              else throw AnalysisError(s"cannot cast ${arg.typ} to transparent alias '$name[...]' (= $other)")
         else
           val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ), List(typeArg))
           val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)

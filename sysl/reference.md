@@ -367,10 +367,35 @@ unwrap_or[T, E](r: Result[T, E], default: T) -> T
         Err(_) -> default
 ```
 
-**Restrictions.** Generic aliases must be transparent — they cannot
-combine with `new`, `within`, or `where`. Use a plain (non-generic)
-type declaration when you want a nominally distinct or constrained
-type.
+**Nominal generic aliases (`new`).** Adding `new` makes each
+instantiation a distinct nominal type — the same Ada-derived semantics
+as `type X = new B`, just generalized to one nominal identity per
+substitution:
+
+```sysl
+type Parser[A] = new (int) -> ParseResult[A]
+
+id_i32(x: int) -> int = x
+
+main() -> int
+    var p: Parser[int] = Parser[int](id_i32)   // wrap with explicit cast
+    7
+```
+
+Each instantiation (`Parser[int]`, `Parser[string]`, …) is its own
+type. Trait/impl dispatch and operator overloading bind on the
+instantiation, not the underlying base, which makes patterns like
+`impl[A, B] Concat[Parser[A], Parser[B], Parser[(A, B)]]` express
+heterogeneous combinator operators directly. Wrapping uses the
+explicit cast `Parser[A](value)`; unwrapping uses an explicit cast to
+the underlying. There is no implicit conversion in either direction.
+
+**Restrictions.** `within` and `where` are still rejected on generic
+aliases — both need scalar ordering or operations on `T`, neither of
+which is available without trait bounds. They are rejected even when
+combined with `new` (the `within`/`where` clause is what's
+unsupported). Use a plain (non-generic) type declaration when you
+want a constrained type.
 
 ### Type Attributes (`T::Attr`)
 
