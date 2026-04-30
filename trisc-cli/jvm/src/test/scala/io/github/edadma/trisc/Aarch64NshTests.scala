@@ -826,6 +826,26 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mpeek: drained=EAGAIN errno=11")
   }
 
+  "musl: SO_SNDTIMEO enforcement on TCP" in {
+    // msndto (slix/test/msndto.c) opens a same-process TCP loopback
+    // pair on 127.0.0.1:7796, accepts but never reads, and writes a
+    // 16 KB payload from the client with SO_SNDTIMEO=200 ms.  The
+    // first send returns a positive partial count (the bytes that
+    // fit in send_buf 4096 + recv_buf 1024 before the window
+    // closes); the second send finds both buffers full, parks in
+    // inet, and is woken by inet_tcp_scan_timers with status=2 once
+    // the deadline elapses → shim returns -1 with errno=EAGAIN.
+    // Pinned wire format: INET_CMD_TCP_SEND grew a u16 timeout_ms
+    // at offset 5 (data shifted to offset 7).
+    qemu.send("msndto\n")
+    val output = qemu.waitFor("msndto: done")
+    output should include("msndto: bind=0")
+    output should include("msndto: listen=0")
+    output should include("msndto: setsockopt_sndtimeo=0")
+    output should include("msndto: connect=0")
+    output should include("msndto: pass=1")
+  }
+
   "musl: tar extract end-to-end (Phase 4 chunk 5)" in {
     // muntar (slix/test/untar.c) opens a synthesized USTAR archive
     // pre-baked into the ramdisk at /test.tar (bytes from

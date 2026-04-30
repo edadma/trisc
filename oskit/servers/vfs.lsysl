@@ -1154,18 +1154,21 @@ Wire: request [cmd(1), fd(2), len(2), data], reply [status(1), nsent(2)].
         if wlen < 0
             wlen = 0
         val tcp_fd = oft_tcp_fd[fid]
-        var msg: [485]byte
+        var msg: [487]byte
         msg[0] = 11  // INET_CMD_TCP_SEND
         msg[1] = byte((tcp_fd >> 8) & 0xFF)
         msg[2] = byte(tcp_fd & 0xFF)
         msg[3] = byte((wlen >> 8) & 0xFF)
         msg[4] = byte(wlen & 0xFF)
+        // No SO_SNDTIMEO for vfs forwarder (FS_CMD_WRITE on TCP).
+        msg[5] = byte(0)
+        msg[6] = byte(0)
         if wlen > 0
             if grant_id == -1
                 // Inline payload at vfs_buf+13
                 var k = 0
                 while k < wlen
-                    msg[5 + k] = vfs_buf[13 + k]
+                    msg[7 + k] = vfs_buf[13 + k]
                     k += 1
             else
                 val mapped = svc_grant_map(grant_id, 0, wlen)
@@ -1177,11 +1180,11 @@ Wire: request [cmd(1), fd(2), len(2), data], reply [status(1), nsent(2)].
                 var src: *byte = *byte(mapped)
                 var k = 0
                 while k < wlen
-                    msg[5 + k] = src[k]
+                    msg[7 + k] = src[k]
                     k += 1
                 svc_grant_unmap(grant_id)
         var icreply: [3]byte
-        ipc_send(inet, msg, 5 + wlen, icreply, 3)
+        ipc_send(inet, msg, 7 + wlen, icreply, 3)
         if icreply[0] != 0
             var err: [1]byte
             err[0] = byte(-1)

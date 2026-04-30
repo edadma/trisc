@@ -174,11 +174,10 @@ posix_fd_bridge memory.
         udp_peer_c: int
         udp_peer_d: int
         // SO_RCVTIMEO / SO_SNDTIMEO — millisecond timeouts.
-        // 0 = "no timeout" (blocking forever). Receive uses
-        // recv_timeout_ms via INET_CMD_RECVFROM_TIMEOUT when set.
-        // send_timeout_ms is persisted but not yet enforced (slix
-        // sendto rarely blocks; flow-control would need a separate
-        // path).
+        // 0 = "no timeout" (blocking forever).  Receive rides
+        // recv_timeout_ms into INET_CMD_RECVFROM_TIMEOUT.  Send
+        // rides send_timeout_ms into INET_CMD_TCP_SEND (TCP only;
+        // wire field is u16 so values are clamped to 65535 ms).
         recv_timeout_ms: int
         send_timeout_ms: int
 
@@ -896,26 +895,44 @@ vm_copy_from.
             val port = inet_get_port()
             if port < 0
                 return i64(-19)
+            val pid_w = posix_fd_current_pid()
+            val tidx_w = pid_w * POSIX_FDS_PER_PROC + fd
+            // SO_SNDTIMEO clamp: u16 wire field maxes at 65535 ms.
+            // Larger values fall back to "no timeout" (treated as 0
+            // on the inet side) — Linux semantics for blocking writes
+            // beyond a minute are functionally indistinguishable from
+            // forever, so this loses no visible precision.
+            var tmo_w = posix_fd_table[tidx_w].send_timeout_ms
+            if tmo_w < 0 || tmo_w > 65535
+                tmo_w = 0
             val ubuf: *byte = *byte(buf)
             var sent_total = 0
             while sent_total < len
                 var chunk = len - sent_total
                 if chunk > INET_MAX_TCP_SEG
                     chunk = INET_MAX_TCP_SEG
-                var msg: [485]byte
+                var msg: [487]byte
                 msg[0] = byte(INET_CMD_TCP_SEND)
                 shim_write_u16(msg, 1, inet_fd)
                 shim_write_u16(msg, 3, chunk)
+                shim_write_u16(msg, 5, tmo_w)
                 var i = 0
                 while i < chunk
-                    msg[5 + i] = ubuf[sent_total + i]
+                    msg[7 + i] = ubuf[sent_total + i]
                     i += 1
                 var reply: [3]byte
-                val r = ipc_send(port, msg, 5 + chunk, reply, 3)
+                val r = ipc_send(port, msg, 7 + chunk, reply, 3)
                 if r < 0
                     if sent_total > 0
                         return i64(sent_total)
                     return i64(-5)
+                if reply[0] == 2
+                    // SO_SNDTIMEO expired while parked.  Linux returns
+                    // EAGAIN (not ETIMEDOUT) for SO_SNDTIMEO on TCP
+                    // writes; honour partial progress when present.
+                    if sent_total > 0
+                        return i64(sent_total)
+                    return i64(-11)     // -EAGAIN
                 if reply[0] != 0
                     if sent_total > 0
                         return i64(sent_total)
@@ -1376,26 +1393,37 @@ POSIX MSG_DONTWAIT (0x40) for the EAGAIN-on-empty-send branch.
         if port < 0
             return i64(-19)
         val nb_eff = (posix_fd_flags(fd) & POSIX_O_NONBLOCK) | (flags & 0x40)
+        val pid_t = posix_fd_current_pid()
+        val tidx_t = pid_t * POSIX_FDS_PER_PROC + fd
+        var tmo_t = posix_fd_table[tidx_t].send_timeout_ms
+        if tmo_t < 0 || tmo_t > 65535
+            tmo_t = 0
         val ubuf: *byte = *byte(buf)
         var sent_total = 0
         while sent_total < len
             var chunk = len - sent_total
             if chunk > INET_MAX_TCP_SEG
                 chunk = INET_MAX_TCP_SEG
-            var msg: [485]byte
+            var msg: [487]byte
             msg[0] = byte(INET_CMD_TCP_SEND)
             shim_write_u16(msg, 1, inet_fd)
             shim_write_u16(msg, 3, chunk)
+            shim_write_u16(msg, 5, tmo_t)
             var i = 0
             while i < chunk
-                msg[5 + i] = ubuf[sent_total + i]
+                msg[7 + i] = ubuf[sent_total + i]
                 i += 1
             var reply: [3]byte
-            val r = ipc_send(port, msg, 5 + chunk, reply, 3)
+            val r = ipc_send(port, msg, 7 + chunk, reply, 3)
             if r < 0
                 if sent_total > 0
                     return i64(sent_total)
                 return i64(-5)
+            if reply[0] == 2
+                // SO_SNDTIMEO expired while parked — see sys_write.
+                if sent_total > 0
+                    return i64(sent_total)
+                return i64(-11)         // -EAGAIN
             if reply[0] != 0
                 if sent_total > 0
                     return i64(sent_total)
@@ -2426,8 +2454,10 @@ as -EINVAL).
             // SO_RCVTIMEO (20) / SO_SNDTIMEO (21).  16-byte timeval
             // {tv_sec(8), tv_usec(8)}.  Persisted as ms on the shim
             // fd; sys_recvfrom honors recv_timeout_ms via the
-            // RECVFROM_TIMEOUT IPC.  send_timeout is persisted but
-            // not enforced — slix's sendto rarely blocks today.
+            // RECVFROM_TIMEOUT IPC, and sys_write / sys_sendto_tcp
+            // ride send_timeout_ms into INET_CMD_TCP_SEND so inet's
+            // park-with-deadline replies status=2 → -EAGAIN on
+            // expiry.  UDP sendto remains unenforced (rarely blocks).
             if optname == 20 || optname == 21
                 if optlen < 16 || optval == i64(0)
                     return i64(-22)

@@ -348,16 +348,18 @@ from a prior call — retry after a short delay.
         var n = len
         if n > INET_MAX_TCP_SEG
             n = INET_MAX_TCP_SEG
-        var msg: [485]byte
+        var msg: [487]byte
         msg[0] = byte(INET_CMD_TCP_SEND)
         net_write_u16(msg, 1, fd)
         net_write_u16(msg, 3, n)
+        // No SO_SNDTIMEO for kernel-side senders.
+        net_write_u16(msg, 5, 0)
         var i = 0
         while i < n
-            msg[5 + i] = data[i]
+            msg[7 + i] = data[i]
             i += 1
         var reply: [3]byte
-        ipc_send(port, msg, 5 + n, reply, 3)
+        ipc_send(port, msg, 7 + n, reply, 3)
         if reply[0] != 0
             return -1
         net_read_u16(reply, 1)

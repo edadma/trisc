@@ -1847,6 +1847,11 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         connect_waiter: int
         send_waiter: int
         send_waiter_len: int
+        // SO_SNDTIMEO deadline in `uptime()` ticks. 0 means
+        // "park forever" (Linux default). Set when a TCP_SEND
+        // arrives carrying a non-zero timeout_ms and parks; the
+        // timer scan replies (status=2, n=0) when `now >= deadline`.
+        send_deadline: int
         recv_waiter: int
         recv_maxlen: int
         close_waiter: int
@@ -2150,6 +2155,7 @@ gate new sockets against the per-tid `TCP_PER_TID_BUF_MAX`.
             tcp_sockets[i].next_in_tcp_listen_bucket = -1
             tcp_sockets[i].connect_waiter = -1
             tcp_sockets[i].send_waiter = -1
+            tcp_sockets[i].send_deadline = 0
             tcp_sockets[i].recv_waiter = -1
             tcp_sockets[i].close_waiter = -1
             tcp_sockets[i].is_listen = 0
@@ -2839,6 +2845,7 @@ freshly-opened window.
                 val w = tcp_sockets[s].send_waiter
                 tcp_sockets[s].send_waiter = -1
                 tcp_sockets[s].send_waiter_len = 0
+                tcp_sockets[s].send_deadline = 0
                 inet_tcp_reply_send(w, 0, 0)
 
 RECV drain + reply. `n == 0` signals peer-closed EOF.
@@ -2905,6 +2912,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         if tcp_sockets[s].send_waiter >= 0
             inet_tcp_reply_send(tcp_sockets[s].send_waiter, status, 0)
             tcp_sockets[s].send_waiter = -1
+            tcp_sockets[s].send_deadline = 0
         if tcp_sockets[s].close_waiter >= 0
             inet_tcp_reply_status(tcp_sockets[s].close_waiter, 0)
             tcp_sockets[s].close_waiter = -1
@@ -2999,6 +3007,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].our_fin_sent = 0
                 tcp_sockets[i].connect_waiter = -1
                 tcp_sockets[i].send_waiter = -1
+                tcp_sockets[i].send_deadline = 0
                 tcp_sockets[i].recv_waiter = -1
                 tcp_sockets[i].close_waiter = -1
                 tcp_sockets[i].mss = TCP_MSS_ADV
@@ -4584,6 +4593,20 @@ socket for retransmit and TIME_WAIT deadlines.
                             inet_tcp_retransmit(i)
                             inet_tcp_rto_backoff(i)
                             inet_tcp_arm_rtx(i)
+                // SO_SNDTIMEO: parked sender wakes with status=2 once
+                // its deadline elapses.  Caller (shim sys_write /
+                // sys_sendto_tcp) maps that to -EAGAIN, or returns
+                // accumulated `sent_total` if any chunk got through
+                // before the deadline.
+                if tcp_sockets[i].in_use != 0
+                    val sd = tcp_sockets[i].send_deadline
+                    if sd != 0 && tcp_sockets[i].send_waiter >= 0
+                        if now >= sd
+                            val w = tcp_sockets[i].send_waiter
+                            tcp_sockets[i].send_waiter = -1
+                            tcp_sockets[i].send_waiter_len = 0
+                            tcp_sockets[i].send_deadline = 0
+                            inet_tcp_reply_send(w, 2, 0)
                 val tw = tcp_sockets[i].tw_deadline
                 if tw != 0
                     if now >= tw

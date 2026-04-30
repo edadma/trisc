@@ -990,6 +990,19 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mpeek: drained=EAGAIN errno=11")
   }
 
+  "musl: SO_SNDTIMEO enforcement on TCP" in {
+    // msndto (slix/test/msndto.c) — see Aarch64NshTests for full
+    // notes.  Same-process TCP loopback pair, 16 KB payload with
+    // 200 ms SO_SNDTIMEO, asserts partial-then-EAGAIN.
+    qemu.send("msndto\n")
+    val output = qemu.waitFor("msndto: done")
+    output should include("msndto: bind=0")
+    output should include("msndto: listen=0")
+    output should include("msndto: setsockopt_sndtimeo=0")
+    output should include("msndto: connect=0")
+    output should include("msndto: pass=1")
+  }
+
   "musl: tar extract end-to-end (Phase 4 chunk 5)" in {
     // muntar (slix/test/untar.c) — same script as the aarch64
     // entry. Bit-identical /test.tar bytes (TestTar.bytes is

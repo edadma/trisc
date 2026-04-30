@@ -1129,7 +1129,10 @@ existing `inet_epoll_fire(2, s)` at SYN_SENT → ESTABLISHED.
     inet_handle_tcp_send(sender: int, buf: *byte)
         val fd = inet_read_u16(buf, 1) & 0xffff
         val dlen = inet_read_u16(buf, 3)
-        val data: *byte = buf + 5
+        // SO_SNDTIMEO arms the parked-waiter deadline; 0 means
+        // "no timeout" (Linux default — park indefinitely).
+        val timeout_ms = inet_read_u16(buf, 5) & 0xffff
+        val data: *byte = buf + 7
         if inet_tcp_slot_owned(fd, sender) == 0
             var err: [3]byte
             err[0] = byte(-1)
@@ -1154,6 +1157,12 @@ existing `inet_epoll_fire(2, s)` at SYN_SENT → ESTABLISHED.
         if n == 0 && dlen > 0 && tcp_sockets[fd].send_waiter < 0
             tcp_sockets[fd].send_waiter = sender
             tcp_sockets[fd].send_waiter_len = dlen
+            // 10 ms tick rounding-up — same convention as
+            // INET_CMD_RECVFROM_TIMEOUT.  0 disables the deadline.
+            if timeout_ms > 0
+                tcp_sockets[fd].send_deadline = int(uptime()) + ((timeout_ms + 9) / 10)
+            else
+                tcp_sockets[fd].send_deadline = 0
             return
         var reply: [3]byte
         reply[0] = 0
