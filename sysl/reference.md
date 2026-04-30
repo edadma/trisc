@@ -1251,6 +1251,76 @@ Operator sugar composes with generic functions. Inside `max[T](a: T, b: T)`,
 writing `a > b` works for any `T` that has an `Ord` impl, checked at
 instantiation time.
 
+#### User-Defined Operator Symbols
+
+Beyond the fixed built-in operators in the table above, users can introduce
+new binary operator symbols by attaching `#operator("sym")` to a trait
+method. The lexer is greedy over the operator characters
+
+```
++  -  *  /  %  <  >  =  !  &  |  ^  ~
+```
+
+so any sequence of these characters lexes as one operator token, including
+new symbols like `<>`, `>>>`, `|>`, `<*>`, or `~~`. The parser slots each
+user operator into the precedence ladder by its **first character**
+(Scala-style):
+
+| First char | Level | Examples |
+|---|---|---|
+| `*` `/` `%` | multiplicative | `<*` `*>` `/?` |
+| `+` `-` | additive | `+++` `<+>` |
+| `<` `>` `=` `!` | comparison | `<>` `<=>` `>>>` `===` `!==` |
+| `&` | bitwise-and | `&&&` (user) |
+| `^` `~` | bitwise-xor | `~~` `^^` |
+| `\|` | bitwise-or | `\|>` `<\|` |
+
+Reserved sigils (not redefinable): `( ) [ ] { } , ; : :: . .. ..< -> => ? #
+//` `/*` `*/` plus assignment / compound-assignment (`=`, `+=`, `-=`, ...,
+`<<=`, `>>=`), the built-in arithmetic / comparison / shift operators
+listed in the table above, the logical `&&` `||`, and `++` `--`.
+
+Declare a new operator on a trait method:
+
+```sysl
+struct Set
+    bits: int
+
+trait Union[T]
+    #operator("<>")
+    union(a: T, b: T) -> T
+
+impl Union[Set]
+    union(a: Set, b: Set) -> Set = Set(a.bits | b.bits)
+
+main() -> int
+    a = Set(3)
+    b = Set(12)
+    c = a <> b               // desugars to Union.union(a, b)
+    c.bits                   // 15
+```
+
+The dispatch rules are the same as for built-in operators: an operator
+binds only when the left operand is a struct or enum that has an `impl` of
+the trait carrying the `#operator` annotation. Built-in scalar types are
+not overloadable through this mechanism.
+
+Two failure modes get specific diagnostics:
+
+- **Unbound operator.** `a <~> b` where `<~>` isn't bound anywhere produces
+  `operator '<~>' is not bound; declare it via #operator("<~>") on a trait
+  method`.
+- **Bound but not impl'd.** `1 |> 2` when `|>` is bound to `Pipe[T]` but
+  neither operand is a struct/enum that impls `Pipe` produces
+  `operator '|>' is bound to trait 'Pipe', but neither operand is a
+  struct/enum that impls it`.
+
+Context-sensitive prefix operators (`*` deref, `&` addr-of) are preserved:
+`*++p`, `*&a`, `**T`, `*=*p` all lex as today (they split the muncher),
+so user-defined operators may not start with `*` followed by `+`/`-`/`&`,
+or with `&` followed by `*`/`+`/`-`/`~`/`!`. Operators like `*>`, `*<`,
+`<*`, `<*>`, `&|>` are allowed.
+
 ### Methods
 
 Methods are declared with the `StructName.methodName(...)` syntax. The parser

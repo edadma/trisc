@@ -206,4 +206,132 @@ class SyslOperatorSugarTests extends SyslTestHelpers {
         |    m.cents
         |""".stripMargin) shouldBe 300
   }
+
+  // ===== Multi-char user operators (greedy lexer + first-char ladder) =====
+  // Cover the new pipeline: lexer munches `<>`, `>>>`, `|>` as single
+  // tokens; parser slots them at the precedence level matching their
+  // first char; analyzer dispatches to the trait method bound via
+  // `#operator(...)`.
+
+  "binary <> via #operator on trait method" in {
+    eval(
+      """struct Set
+        |    bits: int
+        |
+        |trait Union[T]
+        |    #operator("<>")
+        |    union(a: T, b: T) -> T
+        |
+        |impl Union[Set]
+        |    union(a: Set, b: Set) -> Set = Set(a.bits | b.bits)
+        |
+        |main() -> int
+        |    a = Set(3)
+        |    b = Set(12)
+        |    c = a <> b
+        |    c.bits
+        |""".stripMargin) shouldBe 15
+  }
+
+  "binary >>> via #operator on trait method" in {
+    eval(
+      """struct Bits
+        |    v: int
+        |
+        |trait Shr[T]
+        |    #operator(">>>")
+        |    shr(a: T, b: T) -> T
+        |
+        |impl Shr[Bits]
+        |    shr(a: Bits, b: Bits) -> Bits = Bits(a.v >> b.v)
+        |
+        |main() -> int
+        |    a = Bits(64)
+        |    b = Bits(2)
+        |    c = a >>> b
+        |    c.v
+        |""".stripMargin) shouldBe 16
+  }
+
+  "binary |> pipe operator" in {
+    eval(
+      """struct Box
+        |    n: int
+        |
+        |trait Pipe[T]
+        |    #operator("|>")
+        |    pipe(a: T, b: T) -> T
+        |
+        |impl Pipe[Box]
+        |    pipe(a: Box, b: Box) -> Box = Box(a.n + b.n * 10)
+        |
+        |main() -> int
+        |    a = Box(3)
+        |    b = Box(4)
+        |    r = a |> b
+        |    r.n
+        |""".stripMargin) shouldBe 43
+  }
+
+  // User op `*>` (starts with `*`) slots at multiplicative precedence.
+  // Verifies (a) the muncher doesn't split `*>` into `*` `>` post-fix,
+  // and (b) the parser routes it through the multiplicative ladder so
+  // the trait's `times` method is dispatched.
+  "user op *> at multiplicative precedence" in {
+    eval(
+      """struct N
+        |    v: int
+        |
+        |trait Times[T]
+        |    #operator("*>")
+        |    times(a: T, b: T) -> T
+        |
+        |impl Times[N]
+        |    times(a: N, b: N) -> N = N(a.v * b.v)
+        |
+        |main() -> int
+        |    a = N(2)
+        |    b = N(3)
+        |    c = N(10)
+        |    r = a *> b *> c
+        |    r.v
+        |""".stripMargin) shouldBe 60
+  }
+
+  // Diagnostic: unbound user operator gives the user a hint about
+  // `#operator(...)` rather than a generic "unknown operator".
+  "unbound user operator yields actionable error" in {
+    val ex = intercept[Exception] {
+      eval(
+        """main() -> int
+          |    var a = 1
+          |    var b = 2
+          |    a <~> b
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage
+    assert(msg.contains("<~>"), s"error should mention the operator, got: $msg")
+    assert(msg.contains("#operator"), s"error should suggest #operator, got: $msg")
+  }
+
+  // Diagnostic: user-op IS bound, but operands are built-in scalars (not
+  // a struct/enum that impls the trait) — name the trait so the user
+  // knows what to wrap their operands in.
+  "user op on wrong-type operands names the trait" in {
+    val ex = intercept[Exception] {
+      eval(
+        """trait Pipe[T]
+          |    #operator("|>")
+          |    pipe(a: T, b: T) -> T
+          |
+          |main() -> int
+          |    var a = 1
+          |    var b = 2
+          |    a |> b
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage
+    assert(msg.contains("|>"), s"error should mention the operator, got: $msg")
+    assert(msg.contains("Pipe"), s"error should name the bound trait, got: $msg")
+  }
 }
