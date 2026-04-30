@@ -1,0 +1,319 @@
+test_unixedf — EMFILE-mid-loop edge case for duplicate-fd recvmsg
+===================================================================
+
+Validates the two-pass orphan-close fix in `sys_recvmsg_unix`.
+Previously the EMFILE handler called `UNIX_CMD_CLOSE` per
+failed `posix_fd_alloc` — with duplicate cmsg fds where
+some allocs succeed and others fail, the failed-alloc
+close would strip the receiver from owners, leaving the
+earlier successful posix_fd dangling on a freed slot.
+
+Test plan
+---------
+
+  1. Bind alpha→"EA", beta→"EB", gamma→"EG".
+  2. Fill posix_fd_table via eventfd2 until -EMFILE,
+     keeping exactly the dummies needed for ~1 free slot.
+     (We close 1 dummy so cmsg=[gamma, gamma] succeeds for
+     the first dup but fails for the second.)
+  3. sendmsg(alpha → "EB", payload + cmsg=[gamma, gamma]).
+  4. recvmsg(beta) — first dup succeeds, second fails. Without
+     the fix, the failed close would have stripped receiver
+     from gamma's owners ring and freed it once gamma's
+     original sender closed.
+  5. close(gamma) — sender drops original. With the fix, the
+     surviving posix_fd is still a valid co-owner; the slot
+     stays alive.
+  6. close enough dummies to free posix_fd entries. Then
+     sendto(alpha → "EG") + recvfrom(gamma2). Without the
+     fix, the failed-alloc close would have stripped
+     receiver from gamma's owners and (after step 5)
+     freed the slot — then sendto would return
+     -ECONNREFUSED. With the fix, the round-trip works.
+
+Pass criterion: prints `unixedf: ok`.
+
+    module oskit.bin.test_unixedf
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_EVENTFD2   = 156
+    val NR_RECVFROM   = 276
+    val NR_RECVMSG    = 278
+    val NR_SENDMSG    = 306
+    val NR_SENDTO     = 307
+    val NR_SOCKET     = 337
+
+    val AF_UNIX_V     = 1
+    val SOCK_DGRAM_V  = 2
+
+    val SOL_SOCKET_V  = 1
+    val SCM_RIGHTS_V  = 1
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixedf: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, path_len: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < path_len
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + path_len] = byte(0)
+        2 + path_len + 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_sendmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_SENDMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+    posix_recvmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_RECVMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+    posix_eventfd2(initval: int, flags: int) -> int
+        int(syscall6(NR_EVENTFD2, i64(initval), i64(flags), 0, 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen_p: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_p)))
+
+
+    write_i64(p: *byte, off: int, v: i64)
+        var i = 0
+        while i < 8
+            p[off + i] = byte((v >> (i * 8)) & i64(0xff))
+            i += 1
+
+
+    write_i32(p: *byte, off: int, v: int)
+        p[off]     = byte(v & 0xff)
+        p[off + 1] = byte((v >> 8) & 0xff)
+        p[off + 2] = byte((v >> 16) & 0xff)
+        p[off + 3] = byte((v >> 24) & 0xff)
+
+
+    read_i32(p: *byte, off: int) -> int
+        (int(p[off]) & 0xff) | ((int(p[off + 1]) & 0xff) << 8) | ((int(p[off + 2]) & 0xff) << 16) | ((int(p[off + 3]) & 0xff) << 24)
+
+
+    main(argv: []string)
+
+Step 1: bind alpha, beta, gamma.
+
+        val alpha = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if alpha < 0
+            fail(1)
+            return
+        val beta = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if beta < 0
+            fail(2)
+            return
+        val gamma = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if gamma < 0
+            fail(3)
+            return
+
+        var path_a: [2]byte
+        path_a[0] = 'E'; path_a[1] = 'A'
+        var path_b: [2]byte
+        path_b[0] = 'E'; path_b[1] = 'B'
+        var path_g: [2]byte
+        path_g[0] = 'E'; path_g[1] = 'G'
+
+        var sa_a: [128]byte
+        val al_a = fill_sockaddr_un(&sa_a[0], &path_a[0], 2)
+        if posix_bind(alpha, &sa_a[0], al_a) != 0
+            fail(4)
+            return
+        var sa_b: [128]byte
+        val al_b = fill_sockaddr_un(&sa_b[0], &path_b[0], 2)
+        if posix_bind(beta, &sa_b[0], al_b) != 0
+            fail(5)
+            return
+        var sa_g: [128]byte
+        val al_g = fill_sockaddr_un(&sa_g[0], &path_g[0], 2)
+        if posix_bind(gamma, &sa_g[0], al_g) != 0
+            fail(6)
+            return
+
+Step 2: fill the posix_fd_table; then close exactly one
+dummy so there's room for one more posix_fd alloc.
+
+        var dummies: [80]int
+        var n_dummies = 0
+        while n_dummies < 80
+            val d = posix_eventfd2(0, 0)
+            if d < 0
+                break
+            dummies[n_dummies] = d
+            n_dummies += 1
+        if n_dummies < 30
+            fail(7)
+            return
+        // Close one dummy → exactly one free posix_fd slot.
+        posix_close(dummies[0])
+
+Step 3: sendmsg with cmsg=[gamma, gamma]. cmsg_len = 16 + 8.
+
+        var ctrl_send: [32]byte
+        write_i64(&ctrl_send[0], 0, i64(24))
+        write_i32(&ctrl_send[0], 8, SOL_SOCKET_V)
+        write_i32(&ctrl_send[0], 12, SCM_RIGHTS_V)
+        write_i32(&ctrl_send[0], 16, gamma)
+        write_i32(&ctrl_send[0], 20, gamma)
+
+        var send_payload: [4]byte
+        send_payload[0] = 'd'; send_payload[1] = 'u'
+        send_payload[2] = 'p'; send_payload[3] = byte(0)
+
+        var send_iov: [16]byte
+        write_i64(&send_iov[0], 0, i64(&send_payload[0]))
+        write_i64(&send_iov[0], 8, i64(4))
+
+        var send_mh: [56]byte
+        write_i64(&send_mh[0], 0, i64(&sa_b[0]))
+        write_i32(&send_mh[0], 8, al_b)
+        write_i32(&send_mh[0], 12, 0)
+        write_i64(&send_mh[0], 16, i64(&send_iov[0]))
+        write_i32(&send_mh[0], 24, 1)
+        write_i32(&send_mh[0], 28, 0)
+        write_i64(&send_mh[0], 32, i64(&ctrl_send[0]))
+        write_i32(&send_mh[0], 40, 24)
+        write_i32(&send_mh[0], 44, 0)
+        write_i32(&send_mh[0], 48, 0)
+
+        if posix_sendmsg(alpha, &send_mh[0], 0) != 4
+            fail(8)
+            return
+
+Step 4: recvmsg. Expect 4 bytes payload + cmsg with one fd
+(first dup succeeds, second fails — but the fix means the
+fail doesn't strip the success).
+
+        var rb: [16]byte
+        var src: [128]byte
+        var iov_r: [16]byte
+        write_i64(&iov_r[0], 0, i64(&rb[0]))
+        write_i64(&iov_r[0], 8, i64(16))
+
+        var ctrl_r: [40]byte
+        var mh_r: [56]byte
+        write_i64(&mh_r[0], 0, i64(&src[0]))
+        write_i32(&mh_r[0], 8, 128)
+        write_i32(&mh_r[0], 12, 0)
+        write_i64(&mh_r[0], 16, i64(&iov_r[0]))
+        write_i32(&mh_r[0], 24, 1)
+        write_i32(&mh_r[0], 28, 0)
+        write_i64(&mh_r[0], 32, i64(&ctrl_r[0]))
+        write_i32(&mh_r[0], 40, 40)
+        write_i32(&mh_r[0], 44, 0)
+        write_i32(&mh_r[0], 48, 0)
+
+        val nr = posix_recvmsg(beta, &mh_r[0], 0)
+        if nr != 4
+            puts("unixedf: recvmsg=")
+            print_idec(nr)
+            puts("\n")
+            fail(9)
+            return
+
+The cmsg should hold exactly one fd (16 + 4 = 20 bytes).
+
+        val ctrl_used = read_i32(&mh_r[0], 40)
+        if ctrl_used != 20
+            puts("unixedf: ctrl_used=")
+            print_idec(ctrl_used)
+            puts("\n")
+            fail(10)
+            return
+        val gamma2 = read_i32(&ctrl_r[0], 16)
+        if gamma2 < 0
+            fail(11)
+            return
+
+Step 5: close gamma — sender's original handle goes away.
+With the fix, gamma2 is still a valid co-owner.
+
+        posix_close(gamma)
+
+Step 6: free posix_fd entries; then verify gamma2 is still a
+valid handle on gamma's slot via a sendto/recvfrom round-trip.
+Without the fix, the failed-second-alloc's UNIX_CMD_CLOSE
+would have stripped receiver from owners; combined with
+step 5's close (stripping the original sender), the slot's
+bound_path "EG" would have been freed, and sendto to "EG"
+would return -ECONNREFUSED.
+
+        var c = 1   // dummies[0] already closed
+        while c < 6 && c < n_dummies
+            posix_close(dummies[c])
+            c += 1
+
+        var probe: [4]byte
+        probe[0] = 'p'; probe[1] = 'r'
+        probe[2] = 'b'; probe[3] = byte(0)
+        if posix_sendto(alpha, &probe[0], 4, 0, &sa_g[0], al_g) != 4
+            puts("unixedf: sendto=")
+            print_idec(posix_sendto(alpha, &probe[0], 4, 0, &sa_g[0], al_g))
+            puts("\n")
+            fail(12)
+            return
+
+        var rb2: [8]byte
+        var src2: [128]byte
+        var sl2: i32 = 128
+        val r6 = posix_recvfrom(gamma2, &rb2[0], 8, 0, &src2[0], &sl2)
+        if r6 != 4
+            puts("unixedf: recvfrom=")
+            print_idec(r6)
+            puts("\n")
+            fail(13)
+            return
+        if rb2[0] != 'p' || rb2[1] != 'r' || rb2[2] != 'b'
+            fail(14)
+            return
+
+        posix_close(gamma2)
+        posix_close(beta)
+        posix_close(alpha)
+        var di = c
+        while di < n_dummies
+            posix_close(dummies[di])
+            di += 1
+        puts("unixedf: ok\n")
+        exit()

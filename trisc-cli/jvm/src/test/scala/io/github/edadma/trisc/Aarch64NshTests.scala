@@ -2152,6 +2152,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixrmnb: bad"
   }
 
+  "unix: SCM_RIGHTS recvmsg EMFILE-mid-loop with duplicate sidx" in {
+    // Edge case: cmsg=[gamma, gamma] with posix_fd_table almost
+    // full. First alloc succeeds, second fails. The previous
+    // implementation called UNIX_CMD_CLOSE on the failed alloc,
+    // which stripped the receiver from gamma's owners and
+    // dangled the first successful posix_fd. Two-pass fix only
+    // closes orphan sidx (no successful alloc in this batch).
+    val output = qemu.command("test_unixedf")
+    output should include("unixedf: ok")
+    output should not include "unixedf: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

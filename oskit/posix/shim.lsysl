@@ -2246,11 +2246,18 @@ nfds(1) + slots(F) + dlen_be(2) + data(D).
 Allocate posix_fds for each transferred slot. Linux's
 SCM_RIGHTS leaves the receiver responsible for closing
 each new fd. If `posix_fd_alloc` fails (EMFILE) for a
-particular slot, immediately issue `UNIX_CMD_CLOSE` for
-that slot so the receiver's owners-ring co-ownership
-(added by the server during RECVMSG) is released. If the
-sender had already closed their handle, this frees the
-slot — no leak across PID exit.
+particular slot, the receiver's owners-ring co-ownership
+(added by the server during RECVMSG) needs to be
+released — but only if NO other allocation in this batch
+succeeded for the same sidx. With duplicate cmsg fds, an
+early success + later fail must not call `UNIX_CMD_CLOSE`
+or it would strip the receiver from owners and dangle the
+earlier successful posix_fd.
+
+Two-pass: first try every alloc; then walk the cmsg again
+and call CLOSE only for sidx values that ended up with
+zero successful allocs (de-duped so same sidx isn't closed
+twice).
 
         var new_fds: [4]int
         var n_new = 0
@@ -2263,8 +2270,32 @@ slot — no leak across PID exit.
                 posix_fd_table[pid2 * POSIX_FDS_PER_PROC + pfd].pos = i64(POSIX_SOCK_DGRAM)
                 new_fds[n_new] = pfd
                 n_new += 1
-            else
-                shim_unix_close(sidx)
+            nf += 1
+
+        var sidx_closed: [4]int
+        var n_closed = 0
+        nf = 0
+        while nf < nfds_in_reply
+            val sidx = int(reply[slots_off + nf]) & 0xff
+            var has_alloc = 0
+            var i = 0
+            while i < n_new
+                if posix_fd_target(new_fds[i]) == sidx
+                    has_alloc = 1
+                    break
+                i += 1
+            if has_alloc == 0
+                var dup = 0
+                i = 0
+                while i < n_closed
+                    if sidx_closed[i] == sidx
+                        dup = 1
+                        break
+                    i += 1
+                if dup == 0
+                    shim_unix_close(sidx)
+                    sidx_closed[n_closed] = sidx
+                    n_closed += 1
             nf += 1
 
 Scatter data into the iovec.
