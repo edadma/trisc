@@ -192,7 +192,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val interfaceMember: Parser[Either[String, InterfaceMethodAST]] =
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ opt("->" ~> typeRef) ~ funcTypeEffects ^^ {
-      case name ~ params ~ rt ~ eff => Right(InterfaceMethodAST(name, params, rt.getOrElse(NamedTypeAST("void")), eff))
+      case name ~ params ~ rt ~ eff => Right(InterfaceMethodAST(name, params, rt.getOrElse(NamedTypeAST("unit")), eff))
     } |
     ident ^^ (name => Left(name))
 
@@ -412,7 +412,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val typeName: Parser[TypeAST] =
     ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "string") ^^ (n => NamedTypeAST(n)) |
-      "unit" ^^^ NamedTypeAST("void") |
+      "unit" ^^^ NamedTypeAST("unit") |
       ident ~ typeArgList ^^ { case name ~ args => NamedTypeAST(name, args) }
 
   // Full type reference: *int, **int, &Node, [5]int, []int (slice), (int)->int, @escaping (int)->int, string, int, etc.
@@ -1118,7 +1118,7 @@ class SyslParser extends StandardTokenParsers {
       funcTypeRef ^^ SizeofTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ (t => SizeofTypeAST(SliceTypeAST(t))) |
       ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "string") ^^ (n => SizeofTypeAST(NamedTypeAST(n))) |
-      "unit" ^^ (_ => SizeofTypeAST(NamedTypeAST("void"))) |
+      "unit" ^^ (_ => SizeofTypeAST(NamedTypeAST("unit"))) |
       expr ^^ SizeofExprAST.apply
 
   lazy val scalarCastType: Parser[String] =
@@ -1162,9 +1162,10 @@ class SyslParser extends StandardTokenParsers {
         case typeName ~ attr ~ argOpt => TypeAttrAST(typeName, attr, argOpt)
       } |
       // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42)
-      ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool") ^^ VarRefAST.apply |
+      ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "unit") ^^ VarRefAST.apply |
       "_" ^^^ UnderscorePlaceholderAST() |
       ident ^^ VarRefAST.apply |
+      "(" ~ ")" ^^^ UnitLitAST() |  // `()` — unit value literal
       "(" ~> expr ~ rep("," ~> expr) <~ ")" ^^ {
         case first ~ Nil  => wrapPlaceholders(first)  // (expr) — parens form a placeholder boundary
         case first ~ rest => TupleLitAST((first :: rest).map(wrapPlaceholders))

@@ -227,7 +227,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case other => List(other)
     }
     (pre.toList, newBody)
-  private var currentReturnType: SyslType = VoidType
+  private var currentReturnType: SyslType = UnitType
 
   // Module-path name mangling: set from ModuleDeclAST during analyze()
   private var currentModule: Option[String] = None // e.g. "std_strings"
@@ -512,19 +512,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
   private val builtinFunctions = Map(
     "putchar" -> FunInfo("putchar", List("c" -> U32), U32),
-    "print" -> FunInfo("print", List("n" -> I32), VoidType),
-    "println" -> FunInfo("println", List("n" -> I32), VoidType),
-    "puts" -> FunInfo("puts", List("s" -> StringType), VoidType),
-    "puti" -> FunInfo("puti", List("n" -> I32), VoidType),
+    "print" -> FunInfo("print", List("n" -> I32), UnitType),
+    "println" -> FunInfo("println", List("n" -> I32), UnitType),
+    "puts" -> FunInfo("puts", List("s" -> StringType), UnitType),
+    "puti" -> FunInfo("puti", List("n" -> I32), UnitType),
     "malloc" -> FunInfo("malloc", List("size" -> I64), PtrType(I8)),
-    "free" -> FunInfo("free", List("ptr" -> PtrType(I8)), VoidType),
+    "free" -> FunInfo("free", List("ptr" -> PtrType(I8)), UnitType),
     "calloc" -> FunInfo("calloc", List("count" -> I64, "size" -> I64), PtrType(I8)),
     "realloc" -> FunInfo("realloc", List("ptr" -> PtrType(I8), "size" -> I64), PtrType(I8)),
     "sbrk" -> FunInfo("sbrk", List("increment" -> I32), PtrType(I8)),
-    "abort" -> FunInfo("abort", Nil, VoidType),
-    "panic" -> FunInfo("panic", List("msg" -> StringType), VoidType),
-    "assert" -> FunInfo("assert", List("cond" -> BoolType, "msg" -> StringType), VoidType),
-    "expect" -> FunInfo("expect", List("actual" -> I64, "expected" -> I64, "msg" -> StringType), VoidType),
+    "abort" -> FunInfo("abort", Nil, UnitType),
+    "panic" -> FunInfo("panic", List("msg" -> StringType), UnitType),
+    "assert" -> FunInfo("assert", List("cond" -> BoolType, "msg" -> StringType), UnitType),
+    "expect" -> FunInfo("expect", List("actual" -> I64, "expected" -> I64, "msg" -> StringType), UnitType),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport), modulePath: String = ""): Unit =
@@ -711,7 +711,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case "u64" => Some(SyslType.U64)
         case "bool" => Some(SyslType.BoolType)
         case "string" => Some(SyslType.StringType)
-        case "void" => Some(SyslType.VoidType)
+        case "unit" => Some(SyslType.UnitType)
         case "f32" | "float" => Some(SyslType.F32)
         case "f64" | "double" => Some(SyslType.F64)
         case _ => None
@@ -842,7 +842,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case ExternFuncDeclAST(name, params, returnType, _) =>
           if !functions.contains(name) && !builtinFunctions.contains(name) then
             val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
-            val retType = returnType.map(resolveType).getOrElse(VoidType)
+            val retType = returnType.map(resolveType).getOrElse(UnitType)
             functions(name) = FunInfo(name, paramTypes, retType)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
@@ -908,7 +908,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               (p.name, sigType)
             }
             val paramModes = params.map(_.mode)
-            val retType = returnType.map(resolveType).getOrElse(VoidType)
+            val retType = returnType.map(resolveType).getOrElse(UnitType)
             if functions.contains(name) || genericTemplates.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
@@ -1060,7 +1060,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           // and `isConst`) are set correctly from the AST here.
           val mangled = if shouldMangle(name) then mangleName(name) else name
           val isGhost = attrs.exists(_.name == "ghost")
-          globalScope(name) = SymInfo(mangled, SyslType.VoidType, isMutable, isConst = isConst, isGhost = isGhost)
+          globalScope(name) = SymInfo(mangled, SyslType.UnitType, isMutable, isConst = isConst, isGhost = isGhost)
         case _: StaticAssertDeclAST => // evaluated in pass 2
         case _ => // other decls (e.g. CondDeclAST) handled elsewhere
 
@@ -1156,7 +1156,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 val (paramTypes, retType, body, synthesized) = providedOpt match
                   case Some(implMethod) =>
                     val pTypes = implMethod.params.map(p => (p.name, resolveType(p.typ)))
-                    val r = implMethod.returnType.map(resolveType).getOrElse(VoidType)
+                    val r = implMethod.returnType.map(resolveType).getOrElse(UnitType)
                     if pTypes.map(_._2) != expectedParams.map(_._2) then
                       throw AnalysisError(s"impl method '${implMethod.name}' parameter types don't match trait: expected ${expectedParams.map(_._2).mkString("(", ", ", ")")}, got ${pTypes.map(_._2).mkString("(", ", ", ")")}", decl)
                     if r != expectedRet then
@@ -1290,7 +1290,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case ExternFuncDeclAST(name, params, returnType, _) =>
         val paramTypes = params.map(p => resolveType(p.typ))
-        val retType = returnType.map(resolveType).getOrElse(VoidType)
+        val retType = returnType.map(resolveType).getOrElse(UnitType)
         TExternFuncDecl(name, paramTypes, retType)
 
       case ExternVarDeclAST(name, typ, _) =>
@@ -1308,7 +1308,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         TDataEnumDecl(name, dataEnumTypes(name))
 
       case TypeAliasDeclAST(name, _, tparams, _, _, _, _) =>
-        if tparams.nonEmpty then TTypeAliasDecl(name, VoidType) // generic alias: type-only, no codegen
+        if tparams.nonEmpty then TTypeAliasDecl(name, UnitType) // generic alias: type-only, no codegen
         else TTypeAliasDecl(name, resolveType(NamedTypeAST(name))) // force resolution (and range validation)
 
       case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs, _) =>
@@ -1352,21 +1352,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           if paramName == "__self__" then
             currentScope("self") = SymInfo(paramName, bodyType, true, autoIndirect = autoInd)
         val savedExp = currentExpected
-        currentExpected = if funInfo.returnType == VoidType then None else Some(funInfo.returnType)
+        currentExpected = if funInfo.returnType == UnitType then None else Some(funInfo.returnType)
         val tBody = try body match
           case ExprBodyAST(expr) =>
             val tExpr = analyzeExpr(expr)
             // Apply return-type range check for expression-body functions.
-            val checked = if funInfo.returnType != VoidType then applyTargetType(tExpr, funInfo.returnType) else tExpr
+            val checked = if funInfo.returnType != UnitType then applyTargetType(tExpr, funInfo.returnType) else tExpr
             TExprBody(checked)
           case BlockBodyAST(stmts, contracts) =>
             analyzeBlockWithContracts(stmts, contracts, funInfo.returnType, funInfo.name, funInfo.params.map(_._1))
         finally currentExpected = savedExp
         // For def functions with no explicit return type, infer from body
-        val retType = if funInfo.isDef && funInfo.returnType == VoidType then
+        val retType = if funInfo.isDef && funInfo.returnType == UnitType then
           val inferred = tBody match
             case TExprBody(expr) => expr.typ
-            case _ => VoidType
+            case _ => UnitType
           // Update FunInfo so other references see the correct type
           functions(name) = funInfo.copy(returnType = inferred)
           inferred
@@ -1493,7 +1493,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case None    => false // unknown: conservative reject
 
     def checkExpr(e: TExpr): Unit = e match
-      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TUnitLit => ()
       case _: TVarRef | _: TAddrOf | _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl => ()
       case TArrayLit(els, _)               => els.foreach(checkExpr)
       case TAddrOfIndex(a, i, _)           => checkExpr(a); checkExpr(i)
@@ -1713,7 +1713,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           reject(s"writes to global '$name' not declared in #writes")
 
     def checkExpr(e: TExpr): Unit = e match
-      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TUnitLit => ()
       case TVarRef(name, _)                => checkRead(name)
       case TAddrOf(name, _)                => checkRead(name)
       case _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl => ()
@@ -1918,7 +1918,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     def checkExpr(e: TExpr): Unit =
       if bailed then return
       e match
-        case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+        case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TUnitLit => ()
         case _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl | _: TStructLit | _: TEnumConstruct => ()
         case TVarRef(n, _) => mutableGlobal(n).foreach(reads += _)
         case TAddrOf(n, _) => mutableGlobal(n).foreach(reads += _)
@@ -2118,7 +2118,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       globalScope.values.exists(s => s.name == name && !s.isGhost && s.mutable && !s.isConst)
 
     def checkExpr(e: TExpr, ghostCtx: Boolean): Unit = e match
-      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TArrayDecl => ()
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TUnitLit | _: TStringLit | _: TArrayDecl => ()
       case _: TAddrLit | _: TFuncRef | _: TSizeof | _: TStructLit | _: TEnumConstruct => ()
       case _: TPreInc | _: TPreDec | _: TPostInc | _: TPostDec => ()
       case TVarRef(name, _) =>
@@ -2257,7 +2257,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case Some(attr) =>
         if fd.params.nonEmpty then
           throw AnalysisError(s"#test function '${fd.name}' must take zero parameters", fd)
-        if info.returnType != VoidType then
+        if info.returnType != UnitType then
           throw AnalysisError(s"#test function '${fd.name}' must return unit", fd)
         if fd.typeParams.nonEmpty then
           throw AnalysisError(s"#test function '${fd.name}' cannot be generic", fd)
@@ -2297,7 +2297,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case "short" | "i16"  => I16
       case "ushort" | "u16"  => U16
       case "bool" => BoolType
-      case "void" => VoidType
+      case "unit" => UnitType
       case "string" => StringType
       case name if typeAliases.contains(name) =>
         resolvedNamedTypes.getOrElseUpdate(name, {
@@ -3014,7 +3014,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case BoolType        => "bool"
     case FloatType(w)    => s"f$w"
     case StringType      => "string"
-    case VoidType        => "void"
+    case UnitType        => "unit"
     case PtrType(i)      => "ptr" + typeToMangled(i)
     case RefType(i)      => "ref" + typeToMangled(i)
     case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
@@ -3053,7 +3053,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case IntType(w)        => NamedTypeAST(s"i$w", Nil)
     case UIntType(w)       => NamedTypeAST(s"u$w", Nil)
     case StringType        => NamedTypeAST("string", Nil)
-    case VoidType          => NamedTypeAST("void", Nil)
+    case UnitType          => NamedTypeAST("unit", Nil)
     case PtrType(i)        => PtrTypeAST(syslTypeToAST(i))
     case RefType(i)        => RefTypeAST(syslTypeToAST(i))
     case ArrayType(e, n)   => ArrayTypeAST(n, syslTypeToAST(e))
@@ -3485,7 +3485,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           val (paramTypes, retType, body, isSynthesized) =
             try
               val pTypes = implMethod.params.map(p => (p.name, resolveType(p.typ)))
-              val r = implMethod.returnType.map(resolveType).getOrElse(VoidType)
+              val r = implMethod.returnType.map(resolveType).getOrElse(UnitType)
               val provided = template.methodASTs.exists(_.name == methodName)
               (pTypes, r, implMethod.body, !provided)
             finally typeEnv = savedEnv
@@ -3600,7 +3600,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         try
           // Resolve param/return types in the new env
           val paramTypes = template.params.map(p => (p.name, resolveType(p.typ)))
-          val retType = template.returnType.map(resolveType).getOrElse(VoidType)
+          val retType = template.returnType.map(resolveType).getOrElse(UnitType)
           val funInfo = FunInfo(mangled, paramTypes, retType)
           // Register before analyzing body to support recursion
           functions(mangled) = funInfo
@@ -3782,7 +3782,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       throw AnalysisError(s"function may declare at most one `variant` clause, got ${variantClauses.length}")
     // Pre-declare __result__ in the function scope so that `result` aliased to it resolves
     // during ensure analysis, and later references inside the injected rewrite work.
-    val hasResult = returnType != VoidType
+    val hasResult = returnType != UnitType
     if hasResult then
       currentScope("__result__") = SymInfo("__result__", returnType, mutable = true)
       currentScope("result") = SymInfo("__result__", returnType, mutable = false)
@@ -3837,7 +3837,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     stmts.map(s => rewriteStmtForEnsure(s, returnType, ensureChecks))
 
   private def rewriteStmtForEnsure(stmt: TStmt, returnType: SyslType, ensureChecks: List[TStmt]): TStmt = stmt match
-    case TReturnStmt(Some(v)) if returnType != VoidType =>
+    case TReturnStmt(Some(v)) if returnType != UnitType =>
       TMultiStmt(List(TAssignStmt("__result__", v)) ++ ensureChecks ++
         List(TReturnStmt(Some(TVarRef("__result__", returnType)))))
     case TReturnStmt(None) =>
@@ -3864,7 +3864,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   /** If the rewritten body lacks a trailing explicit return, append one so ensure runs
    * at the implicit fall-through point. The last TExprStmt (if any) becomes the return value. */
   private def finalizeFallThroughReturn(stmts: List[TStmt], returnType: SyslType, ensureChecks: List[TStmt]): List[TStmt] =
-    if returnType == VoidType then
+    if returnType == UnitType then
       // Append bare ensure + return at the end unless the last stmt is already a return
       if stmts.lastOption.exists(isTerminalReturn) then stmts
       else stmts ++ ensureChecks :+ TReturnStmt(None)
@@ -4462,6 +4462,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case FloatLitAST(d) => TFloatLit(d, F64)
       case CharLitAST(c) => TIntLit(c.toLong, U32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
+      case UnitLitAST()  => TUnitLit(UnitType)
       case StringLitAST(s) => TStringLit(s, StringType)
       case StringLitExprAST(s) =>
         if s.startsWith("s:") then analyzeInterpolatedString(s.substring(2))
@@ -4541,8 +4542,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         }
         val expectedRet = expectedFunc.map(_.returnType).getOrElse(
           currentExpected match
-            case Some(t) if t != VoidType => t
-            case _ => VoidType
+            case Some(t) if t != UnitType => t
+            case _ => UnitType
         )
         // Push scope with closure params
         pushScope()
@@ -4550,7 +4551,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           currentScope(p.name) = SymInfo(p.name, p.typ, mutable = false)
         // Analyze body
         val savedExp = currentExpected
-        currentExpected = if expectedRet == VoidType then None else Some(expectedRet)
+        currentExpected = if expectedRet == UnitType then None else Some(expectedRet)
         val tBody = try body match
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
           case BlockBodyAST(stmts, _) => TBlockBody(analyzeBlock(stmts))
@@ -4702,7 +4703,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case TBlockBody(stmts) =>
             stmts.lastOption match
               case Some(TExprStmt(e)) => e.typ
-              case _ => VoidType
+              case _ => UnitType
         // Determine if this closure escapes — it does if the expected type is @escaping,
         // or if there is no expected type (e.g. assigned to a local with no annotation).
         val escapesFlag = expectedFunc match
@@ -5669,14 +5670,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tElse = elseBody.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
         // Pick a non-void branch type if one exists (e.g., `if cond then panic("...") else x`
         // — first branch is void but overall expression is x's type). Fall back to the then
-        // branch's type, or VoidType if the then branch has no trailing expression.
+        // branch's type, or UnitType if the then branch has no trailing expression.
         val branchLastTypes = (tThen.lastOption :: tElse.toList.flatMap(_.lastOption.map(Some(_)))).collect {
           case Some(TExprStmt(e)) => e.typ
         }
         // When both non-void branches are integral, widen to the larger type so the
         // result slot fits the value of either branch (e.g. `if c then byte else -1`
         // must store ch as int, not byte — otherwise -1 truncates to 255).
-        val nonVoid = branchLastTypes.filter(_ != VoidType)
+        val nonVoid = branchLastTypes.filter(_ != UnitType)
         val resultType = nonVoid match
           case List(a, b) if a.isIntegral && b.isIntegral =>
             (a, b) match
@@ -5688,7 +5689,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               case (UIntType(x), IntType(y)) if x < y => IntType(y)
               case (IntType(x), UIntType(y)) if y < x => IntType(x)
               case _ => a
-          case _ => nonVoid.headOption.orElse(branchLastTypes.headOption).getOrElse(VoidType)
+          case _ => nonVoid.headOption.orElse(branchLastTypes.headOption).getOrElse(UnitType)
         TIfExpr(tCond, tThen, tElse, resultType)
 
       case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>
@@ -5743,10 +5744,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 )
           case _ => // non-enum or has default — skip
         // Pick a non-void arm type if one exists (e.g., one arm panics, another returns a value).
-        // Fall back to the first arm's last-expression type, or VoidType if no arm ends with an expression.
+        // Fall back to the first arm's last-expression type, or UnitType if no arm ends with an expression.
         val armLastTypes = tArms.flatMap(_.body.lastOption).collect { case TExprStmt(e) => e.typ } ++
           tDefault.toList.flatMap(_.lastOption).collect { case TExprStmt(e) => e.typ }
-        val resultType = armLastTypes.find(_ != VoidType).orElse(armLastTypes.headOption).getOrElse(VoidType)
+        val resultType = armLastTypes.find(_ != UnitType).orElse(armLastTypes.headOption).getOrElse(UnitType)
         TMatchExpr(tScrutinee, tArms, tDefault, resultType)
 
   private def analyzeInterpolatedString(s: String): TExpr =

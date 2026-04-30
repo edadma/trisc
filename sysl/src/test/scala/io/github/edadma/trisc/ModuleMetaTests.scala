@@ -101,10 +101,10 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = 0
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("FUNC swap 2 ptr i32 ptr i32 void")
+    text should include("FUNC swap 2 ptr i32 ptr i32 unit")
     val meta2 = ModuleMeta.fromSmeta(text).get
     val swap = meta2.symbols.find(_.name == "swap").get
-    swap.typ shouldBe SymbolMeta.Kind.Func(List(PtrType(I32), PtrType(I32)), VoidType)
+    swap.typ shouldBe SymbolMeta.Kind.Func(List(PtrType(I32), PtrType(I32)), UnitType)
   }
 
   "round-trips array types" in {
@@ -125,9 +125,9 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = 0
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("FUNC doNothing 0 void")
+    text should include("FUNC doNothing 0 unit")
     val meta2 = ModuleMeta.fromSmeta(text).get
-    meta2.symbols.find(_.name == "doNothing").get.typ shouldBe SymbolMeta.Kind.Func(Nil, VoidType)
+    meta2.symbols.find(_.name == "doNothing").get.typ shouldBe SymbolMeta.Kind.Func(Nil, UnitType)
   }
 
   // ===== toAsmGlobals =====

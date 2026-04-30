@@ -64,8 +64,36 @@ Source code always uses the short name — the compiler resolves it to the mangl
 | `f32` | `float` | 4 bytes | IEEE-754 single-precision floating point |
 | `f64` | `double` | 8 bytes | IEEE-754 double-precision floating point |
 | `bool` | | 1 byte | `true` or `false` |
-| `unit` | | 0 bytes | no value |
+| `unit` | | 0 bytes | sole value `()` |
 | `string` | | 16 bytes | fat pointer: `{ptr: *u8, len: i64}` |
+
+### The `unit` Type
+
+`unit` is a first-class scalar type with a single value, written `()`.
+It is the canonical translation of Scala's `Unit`, Rust's `()`, Haskell's
+`()`, and the C concept "function that returns nothing." It works
+everywhere any other scalar type works:
+
+- Variable type: `val x: unit = ()`, `var y: unit = ()`
+- Parameter type: `f(x: unit) -> int = ...`
+- Return type: `g() -> unit = ()`
+- Generic type argument: `Option[unit]`, `Parser[unit]`, `Result[unit, string]`
+- Struct field: `struct S { f: unit; n: int }`
+- Enum-variant payload: `Some(())`, custom variants like `Done(x: unit)`
+
+`unit` does not implicitly convert to or from `int`, `bool`, or any other
+type — it is a distinct nominal scalar.
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+eof() -> Parser[unit] = Parser[unit]((inp: Input) -> Success((), inp))
+```
+
+The size is 0 bytes; `sizeof(unit) == 0`. A struct field of type `unit`
+contributes nothing to the parent struct's size or alignment beyond the
+existing layout. At runtime, codegen treats `()` as a discardable
+zero-byte placeholder.
 
 ### Integer Overflow
 

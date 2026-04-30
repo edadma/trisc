@@ -467,7 +467,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case SyslType.StringType => StringVal(Array.empty)
     case _: SyslType.IntType | _: SyslType.UIntType => IntVal(0)
     case _: SyslType.FloatType => FloatVal(0.0)
-    case SyslType.VoidType | (_: SyslType.FuncType) | SyslType.InterfaceType(_, _) => IntVal(0)
+    case SyslType.UnitType | (_: SyslType.FuncType) | SyslType.InterfaceType(_, _) => IntVal(0)
     case SyslType.EnumType(_, _) => EnumVal(0, Array.empty)
     case SyslType.RefType(inner) =>
       // Uninitialized ref cell — represented as null-ish placeholder
@@ -681,6 +681,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TIntLit(n, _) => IntVal(n)
       case TFloatLit(d, _) => FloatVal(d)
       case TBoolLit(b, _) => IntVal(if b then 1L else 0L)
+      case TUnitLit(_)    => IntVal(0L)  // 0-byte type — represented as 0 at runtime
 
       case TStringLit(s, _) => StringVal(s.getBytes("UTF-8"))
 

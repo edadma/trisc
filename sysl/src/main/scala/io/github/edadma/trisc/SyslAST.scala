@@ -159,6 +159,7 @@ case class FloatLitAST(value: Double) extends ExpressionAST
 case class CharLitAST(value: Char) extends ExpressionAST
 case class StringLitAST(value: String) extends ExpressionAST
 case class BoolLitAST(value: Boolean) extends ExpressionAST
+case class UnitLitAST() extends ExpressionAST  // `()` — sole inhabitant of `unit`
 case class VarRefAST(name: String) extends ExpressionAST
 case class BinaryAST(left: ExpressionAST, op: String, right: ExpressionAST) extends ExpressionAST
 case class UnaryAST(op: String, operand: ExpressionAST) extends ExpressionAST

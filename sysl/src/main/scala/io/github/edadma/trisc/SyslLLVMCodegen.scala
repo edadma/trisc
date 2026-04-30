@@ -1376,6 +1376,7 @@ class SyslLLVMCodegen(target: String = "host"):
         s"0x${bits.toHexString.toUpperCase}"
       case TBoolLit(true, _) => "1"
       case TBoolLit(false, _) => "0"
+      case TUnitLit(_) => "0"  // 0-byte type — placeholder constant; consumers treat it as discardable
       case TSizeof(size, _) => size.toString
 
       case TStringLit(s, _) =>
@@ -2782,8 +2783,8 @@ class SyslLLVMCodegen(target: String = "host"):
         val scrut = genExpr(scrutinee)
         val endLabel = newLabel("match_end")
         val resultAlloca = newReg()
-        // Match type may be VoidType when one arm diverges (panic). Use function return type as fallback.
-        val effectiveType = if typ == SyslType.VoidType && currentFunction != null && currentFunction.returnType != SyslType.VoidType then
+        // Match type may be UnitType when one arm diverges (panic). Use function return type as fallback.
+        val effectiveType = if typ == SyslType.UnitType && currentFunction != null && currentFunction.returnType != SyslType.UnitType then
           currentFunction.returnType
         else typ
         val resultLt = llvmType(effectiveType)
@@ -3853,7 +3854,7 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.FloatType(32) => "float"
     case SyslType.FloatType(64) => "double"
     case SyslType.FloatType(w) => throw new RuntimeException(s"unsupported float width: $w")
-    case SyslType.VoidType => "void"
+    case SyslType.UnitType => "void"
     case SyslType.StringType => "%struct.string"
     case _: SyslType.InterfaceType => "%struct.iface"
     case SyslType.StructType(name, fields, _) =>
@@ -4553,7 +4554,7 @@ class SyslLLVMCodegen(target: String = "host"):
   /** Emit backref decrement for a slice: load backref field, if non-null decrement refcount,
     * call elem deinit (if any), free at zero. `sliceType` is the slice's value type
     * (`SyslType.SliceType(elem)`); needed to dispatch the per-elem-type deinit. */
-  private def emitSliceBackrefDecr(slicePtr: String, sliceType: SyslType = SyslType.VoidType): Unit =
+  private def emitSliceBackrefDecr(slicePtr: String, sliceType: SyslType = SyslType.UnitType): Unit =
     val deinit = sliceType match
       case SyslType.SliceType(elem) => sliceDeinitFor(elem)
       case _ => None
@@ -4688,6 +4689,7 @@ class SyslLLVMCodegen(target: String = "host"):
       val bits = java.lang.Double.doubleToRawLongBits(v)
       s"0x${bits.toHexString.toUpperCase}"
     case TBoolLit(v, _) => if v then "1" else "0"
+    case TUnitLit(_) => "0"
     case TStringLit(s, _) =>
       val (label, byteLen) = internString(s)
       val strLen = byteLen - 1

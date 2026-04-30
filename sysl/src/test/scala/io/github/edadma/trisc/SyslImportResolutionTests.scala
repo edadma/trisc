@@ -16,7 +16,7 @@ class SyslImportResolutionTests extends AnyFreeSpec with Matchers {
 
   private val ioSmeta =
     s"""SMETA v${ModuleMeta.SMETA_VERSION}
-      |FUNC write 1 int void
+      |FUNC write 1 int unit
       |""".stripMargin
 
   private def analyzeWithImport(source: String, imports: Map[String, String]): (TProgram, SyslAnalyzer) =

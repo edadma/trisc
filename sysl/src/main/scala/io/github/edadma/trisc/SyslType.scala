@@ -26,7 +26,7 @@ enum SyslType:
   case IntType(width: Int)   // i8, i16, i32, i64
   case UIntType(width: Int)  // u8, u16, u32, u64
   case BoolType
-  case VoidType
+  case UnitType
   case PtrType(pointee: SyslType)
   case ArrayType(elem: SyslType, size: Int)
   case FuncType(params: List[SyslType], returnType: SyslType, escaping: Boolean = false, effects: FuncEffects = FuncEffects.Unknown)
@@ -92,7 +92,7 @@ enum SyslType:
     case IntType(w) => w / 8
     case UIntType(w) => w / 8
     case BoolType => 1
-    case VoidType => 0
+    case UnitType => 0
     case PtrType(_) => 8
     case _: FuncType => 16           // {func_ptr(8), env_ptr(8)} — closure-ready fat pointer
     case InterfaceType(_, _) => 16   // {itable_ptr(8), data_ptr(8)} — Go-style interface
@@ -130,7 +130,7 @@ enum SyslType:
     case IntType(w) => (w / 8).toLong.min(8)
     case UIntType(w) => (w / 8).toLong.min(8)
     case BoolType => 1
-    case VoidType => 1
+    case UnitType => 1
     case PtrType(_) => 8
     case _: FuncType => 8
     case InterfaceType(_, _) => 8
@@ -168,7 +168,7 @@ enum SyslType:
     case UIntType(w) => s"u$w"
     case FloatType(w) => s"f$w"
     case BoolType => "bool"
-    case VoidType => "unit"
+    case UnitType => "unit"
     case PtrType(t) => s"*$t"
     case ArrayType(t, n) => s"[$n]$t"
     case FuncType(params, ret, esc, eff) =>
@@ -193,7 +193,7 @@ enum SyslType:
     case UIntType(w) => s"u$w"
     case FloatType(w) => s"f$w"
     case BoolType => "bool"
-    case VoidType => "void"
+    case UnitType => "unit"
     case PtrType(t) => s"ptr ${t.toPrefix}"
     case ArrayType(t, n) => s"arr $n ${t.toPrefix}"
     case FuncType(params, ret, _, _) => s"func ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}"
@@ -243,7 +243,7 @@ object SyslType:
     case UIntType(w) => s"u$w"
     case FloatType(w) => s"f$w"
     case BoolType => "bool"
-    case VoidType => "void"
+    case UnitType => "unit"
     case StringType => "string"
     case PtrType(inner) => s"p${mangleType(inner)}"
     case RefType(inner) => s"r${mangleType(inner)}"
@@ -289,7 +289,7 @@ object SyslType:
   def parseType(tokens: Iterator[String]): SyslType =
     tokens.next() match
       case "bool" => BoolType
-      case "void" => VoidType
+      case "unit" => UnitType
       case s if s.startsWith("u") && s.drop(1).forall(_.isDigit) =>
         UIntType(s.drop(1).toInt)
       case s if s.startsWith("i") && s.drop(1).forall(_.isDigit) =>

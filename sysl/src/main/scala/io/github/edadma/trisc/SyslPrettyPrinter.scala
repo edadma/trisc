@@ -27,7 +27,6 @@ object SyslPrettyPrinter:
   // --- Types ---
 
   def typeToSource(t: TypeAST): String = t match
-    case NamedTypeAST("void", _)    => "unit"
     case NamedTypeAST(name, Nil)    => name
     case NamedTypeAST(name, args)   => s"$name[${args.map(typeToSource).mkString(", ")}]"
     case PtrTypeAST(inner)          => s"*${typeToSource(inner)}"

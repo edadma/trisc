@@ -525,6 +525,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   private def constEval(expr: TExpr): Option[Long] = expr match
     case TIntLit(n, _) => Some(n)
     case TBoolLit(b, _) => Some(if b then 1 else 0)
+    case TUnitLit(_) => Some(0)
     case TVarRef(name, _) => globalConstants.get(name)
     case TUnary("-", operand, _) => constEval(operand).map(-_)
     case TUnary("~", operand, _) => constEval(operand).map(~_)
@@ -2768,6 +2769,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
       case TBoolLit(true, _) => emit("  ldi r1, 1")
       case TBoolLit(false, _) => emit("  ldi r1, 0")
+
+      case TUnitLit(_) => emit("  ldi r1, 0")  // unit is 0-byte; placeholder constant
 
       case TVarRef(name, typ) =>
         if locals != null && locals.contains(name) then

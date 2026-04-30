@@ -16,7 +16,7 @@ class SyslAnalyzerTests extends AnyFreeSpec with Matchers {
       case TExprBody(expr) => expr.typ
       case TBlockBody(stmts) => stmts.last match
         case TExprStmt(expr) => expr.typ
-        case _ => VoidType
+        case _ => UnitType
 
   def shouldFail(source: String): Unit =
     val Right(ast) = (new SyslParser).parseProgram(source): @unchecked

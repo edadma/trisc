@@ -61,6 +61,7 @@ trait TExpr:
 case class TIntLit(value: Long, typ: SyslType) extends TExpr
 case class TFloatLit(value: Double, typ: SyslType) extends TExpr
 case class TBoolLit(value: Boolean, typ: SyslType) extends TExpr
+case class TUnitLit(typ: SyslType) extends TExpr  // `()` — zero-byte value of `unit`
 case class TStringLit(value: String, typ: SyslType) extends TExpr
 case class TArrayDecl(size: Int, typ: SyslType) extends TExpr
 case class TArrayLit(elements: List[TExpr], typ: SyslType) extends TExpr
@@ -80,7 +81,7 @@ case class TStructLit(typ: SyslType) extends TExpr
 case class TStructConstruct(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = structType }
 case class TSizeof(size: Long, typ: SyslType.IntType) extends TExpr
 // Internal: address relative to frame pointer (for hidden return slot args)
-case class TAddrLit(fpOffset: Int) extends TExpr { def typ: SyslType = SyslType.PtrType(SyslType.VoidType) }
+case class TAddrLit(fpOffset: Int) extends TExpr { def typ: SyslType = SyslType.PtrType(SyslType.UnitType) }
 case class TPreInc(name: String, typ: SyslType) extends TExpr
 case class TPreDec(name: String, typ: SyslType) extends TExpr
 case class TPostInc(name: String, typ: SyslType) extends TExpr
