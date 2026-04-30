@@ -170,9 +170,10 @@ class SyslParser extends StandardTokenParsers {
       funBlockBody
 
   lazy val implDecl: Parser[ImplDeclAST] =
-    "impl" ~> ident ~ ("[" ~> typeRef <~ "]") ~
+    "impl" ~> opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ident ~ ("[" ~> rep1sep(typeRef, ",") <~ "]") ~
       (Newline ~> Indent ~> rep1sep(implMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("impl")) ^^ {
-        case name ~ typ ~ methods => ImplDeclAST(name, typ, methods)
+        case tparams ~ name ~ targets ~ methods =>
+          ImplDeclAST(name, tparams.getOrElse(Nil), targets, methods)
       }
 
   lazy val implMethod: Parser[FunDeclAST] =

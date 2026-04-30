@@ -351,18 +351,46 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   // Trait / impl support
   private case class TraitInfo(name: String, typeParams: List[String], methods: List[TraitMethodAST])
   private case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
+  /** A registered impl block — concrete or generic. For Stage F.2 (no generics yet) every
+   *  template has `typeParams = Nil` and `targetPatterns = List(concreteType)`. Stage F.3
+   *  will allow `typeParams.nonEmpty` and pattern-matching dispatch via the unifier. */
+  private case class ImplTemplate(
+      typeParams: List[String],
+      targetPatterns: List[SyslType],
+      methods: mutable.LinkedHashMap[String, String], // methodName -> mangledFunName
+      methodInfos: List[ImplMethodInfo],
+      definingModule: String = "",                    // F.5 will populate
+  )
   private val traits = new mutable.LinkedHashMap[String, TraitInfo]
-  // (traitName, targetType) -> (methodName -> mangledFunName)
-  private val impls = new mutable.LinkedHashMap[(String, SyslType), mutable.LinkedHashMap[String, String]]
-  // Methods to analyze (provided + synthesized defaults) keyed by (traitName, targetType)
-  private val implMethodInfos = new mutable.LinkedHashMap[(String, SyslType), List[ImplMethodInfo]]
+  // traitName -> list of registered impls (templates). Order is registration order.
+  private val implTemplates = new mutable.LinkedHashMap[String, mutable.ListBuffer[ImplTemplate]]
+
+  /** Concrete-impl lookup: find a registered impl whose first target pattern is exactly
+   *  `operandType` and which has no type params. This covers all Stage F.2 dispatch sites
+   *  (built-in trait method calls, concrete operator dispatch, generic-bound checks). */
+  private def findConcreteImpl(traitName: String, operandType: SyslType): Option[ImplTemplate] =
+    implTemplates.get(traitName).flatMap { ts =>
+      ts.find(t => t.typeParams.isEmpty && t.targetPatterns.headOption.contains(operandType))
+    }
+
+  /** Iterate over all registered concrete impls (legacy shape) for cross-unit serialization
+   *  and similar bookkeeping that hasn't been generalized yet. */
+  private def concreteImpls: Iterator[(String, SyslType, mutable.LinkedHashMap[String, String])] =
+    implTemplates.iterator.flatMap { case (traitName, ts) =>
+      ts.iterator.collect {
+        case t if t.typeParams.isEmpty && t.targetPatterns.length == 1 =>
+          (traitName, t.targetPatterns.head, t.methods)
+      }
+    }
   // When analyzing a synthesized default method body, rewrite unqualified calls
   // to sibling trait methods to their impl's mangled names
   private var traitCallRewrite: Map[String, String] = Map.empty
 
-  /** Get trait impl metadata for cross-unit serialization. */
+  /** Get trait impl metadata for cross-unit serialization. Currently only concrete
+   *  (non-generic, single-target) impls round-trip across units; generic impls (Stage F.5+)
+   *  will need an extended IMPL line format. */
   def getTraitImplMetas: List[TraitImplMeta] =
-    impls.map { case ((traitName, targetType), methodMap) =>
+    concreteImpls.map { case (traitName, targetType, methodMap) =>
       TraitImplMeta(traitName, targetType, methodMap.toMap)
     }.toList
 
@@ -527,9 +555,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               for ((vname, _), idx) <- et.variants.zipWithIndex do
                 variantToEnum(vname) = (et, idx)
         case SymbolMeta.Kind.Impl(traitName, targetType, methods) =>
-          val key = (traitName, targetType)
-          if !impls.contains(key) then
-            impls(key) = mutable.LinkedHashMap.from(methods)
+          if findConcreteImpl(traitName, targetType).isEmpty then
+            val mm = mutable.LinkedHashMap.from(methods)
+            implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) +=
+              ImplTemplate(Nil, List(targetType), mm, Nil)
 
     // Register generic templates from imported module (needed for cross-module generic instantiation)
     if meta.genericTemplates.nonEmpty then
@@ -551,9 +580,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
     // Register trait impl mappings from imported module
     for impl <- meta.traitImpls do
-      val key = (impl.traitName, impl.targetType)
-      if !impls.contains(key) then
-        impls(key) = mutable.LinkedHashMap.from(impl.methods)
+      if findConcreteImpl(impl.traitName, impl.targetType).isEmpty then
+        val mm = mutable.LinkedHashMap.from(impl.methods)
+        implTemplates.getOrElseUpdate(impl.traitName, mutable.ListBuffer.empty) +=
+          ImplTemplate(Nil, List(impl.targetType), mm, Nil)
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
@@ -894,7 +924,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           if names.distinct.length != names.length then
             throw AnalysisError(s"duplicate method names in interface '$name'")
           interfaceTypes(name) = SyslType.InterfaceType(name, allMethods)
-        case ImplDeclAST(_, _, _, _) =>
+        case _: ImplDeclAST =>
           // Deferred to registerImpls after all traits are known
           ()
         case VarDeclAST(name, _, _, _, isMutable, attrs, _, isConst) =>
@@ -942,11 +972,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do
       decl match
-        case ImplDeclAST(traitName, targetType, methods, _) =>
+        case ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _) =>
           val trait_ = traits.getOrElse(traitName,
             throw AnalysisError(s"impl references unknown trait '$traitName'", decl))
-          val resolvedTarget = resolveType(targetType)
-          if impls.contains((traitName, resolvedTarget)) then
+          if implTypeParams.nonEmpty then
+            throw AnalysisError(s"generic impl blocks (impl[X, ...]) are not yet supported (Stage F.3+); impl of '$traitName' has ${implTypeParams.length} type parameter(s)", decl)
+          if targetTypes.length != 1 then
+            throw AnalysisError(s"impl of multi-parameter trait '$traitName' is not yet supported (Stage F); got ${targetTypes.length} target type(s)", decl)
+          val resolvedTarget = resolveType(targetTypes.head)
+          if findConcreteImpl(traitName, resolvedTarget).isDefined then
             throw AnalysisError(s"duplicate impl: trait '$traitName' already implemented for ${resolvedTarget}")
           // Check required methods are all provided
           val providedNames = methods.map(_.name).toSet
@@ -991,8 +1025,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               methodMap(traitMethod.name) = mangled
               infos += ImplMethodInfo(mangled, paramTypes, retType, body, isSynthesized = synthesized)
           finally typeEnv = savedEnv
-          impls((traitName, resolvedTarget)) = methodMap
-          implMethodInfos((traitName, resolvedTarget)) = infos.toList
+          implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) +=
+            ImplTemplate(Nil, List(resolvedTarget), methodMap, infos.toList)
         case _ =>
 
     // Second pass: produce typed AST (skip generic templates; they're instantiated on demand)
@@ -2921,9 +2955,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case _: SyslType.StructType | _: SyslType.EnumType =>
             if !traits.contains(traitName) then
               throw AnalysisError(s"operator '$op' on $operandType requires trait '$traitName' but it is not defined")
-            impls.get((traitName, operandType)) match
-              case Some(methodMap) =>
-                val mangled = methodMap(methodName)
+            findConcreteImpl(traitName, operandType) match
+              case Some(template) =>
+                val mangled = template.methods(methodName)
                 val funInfo = functions(mangled)
                 val checkedArgs = checkArgs(mangled, funInfo.params, List(tLeft, tRight))
                 Some(TCall(mangled, checkedArgs, funInfo.returnType))
@@ -2985,9 +3019,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
   // Analyze each impl method (including synthesized defaults) as a mangled top-level function
   private def analyzeImplMethods(impl: ImplDeclAST): List[TDecl] =
-    val resolvedTarget = resolveType(impl.targetType)
-    val methodMap = impls((impl.traitName, resolvedTarget))
-    val infos = implMethodInfos((impl.traitName, resolvedTarget))
+    // Stage F.2 invariant: every registered impl is concrete (typeParams=Nil, single
+    // target). The registration pass already gated multi-param/generic shapes.
+    val resolvedTarget = resolveType(impl.targetTypes.head)
+    val template = findConcreteImpl(impl.traitName, resolvedTarget).getOrElse(
+      throw AnalysisError(s"internal: impl of '${impl.traitName}' for $resolvedTarget not registered"))
+    val methodMap = template.methods
+    val infos = template.methodInfos
     val trait_ = traits(impl.traitName)
     val savedEnv = typeEnv
     val savedRewrite = traitCallRewrite
@@ -3032,9 +3070,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       unifyTypes(p.typ, a.typ, Set(typeParam), env)
     val targetType = env.get(typeParam).getOrElse(
       throw AnalysisError(s"cannot infer target type for trait method '$traitName.$methodName'"))
-    val methodMap = impls.getOrElse((traitName, targetType),
+    val template = findConcreteImpl(traitName, targetType).getOrElse(
       throw AnalysisError(s"no impl of trait '$traitName' for type $targetType"))
-    val mangled = methodMap(methodName)
+    val mangled = template.methods(methodName)
     // Look up by full mangled name first, then by short name (for cross-module imports)
     val funInfo = functions.getOrElse(mangled,
       functions.getOrElse(shortName(mangled),
@@ -3071,7 +3109,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       for traitName <- bounds do
         if !traits.contains(traitName) then
           throw AnalysisError(s"bound '$traitName' on type parameter '$tp' of '$name' refers to unknown trait")
-        if !impls.contains((traitName, concreteType)) then
+        if findConcreteImpl(traitName, concreteType).isEmpty then
           throw AnalysisError(s"type $concreteType does not satisfy bound '$traitName' for type parameter '$tp' in call to '$name'")
     val cacheKey = (name, inferredArgs)
     instantiations.get(cacheKey) match

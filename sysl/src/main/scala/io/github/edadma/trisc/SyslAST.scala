@@ -65,7 +65,7 @@ case class TraitMethodAST(
     body: Option[FunBodyAST],
     attributes: List[Attribute] = Nil,
 ) extends Positional
-case class ImplDeclAST(traitName: String, targetType: TypeAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
+case class ImplDeclAST(traitName: String, typeParams: List[String], targetTypes: List[TypeAST], methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, effects: FuncEffects = FuncEffects.Unknown) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
