@@ -800,6 +800,18 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "unixedf: bad"
   }
 
+  "unix: getsockname/getpeername round-trip" in {
+    // STREAM bind+getsockname; STREAM connect+accept where
+    // getsockname(server_end) returns the listener's path and
+    // getpeername(server_end) returns the connector's bound
+    // path; getpeername on the client returns the listener's
+    // path. DGRAM unconnected → -ENOTCONN. Unbound socket →
+    // empty path with addrlen=2.
+    val output = qemu.command("test_unixname")
+    output should include("unixname: ok")
+    output should not include "unixname: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

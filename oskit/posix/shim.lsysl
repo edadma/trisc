@@ -492,6 +492,8 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_EPOLL_UNSUB      = 19
     const UNIX_CMD_EPOLL_INST_CLOSE = 20
     const UNIX_CMD_RECVMSG_NB       = 21
+    const UNIX_CMD_GETSOCKNAME      = 22
+    const UNIX_CMD_GETPEERNAME      = 23
 
     const UNIX_PATH_MAX      = 108
     const UNIX_SCM_MAX_FDS   = 4
@@ -4069,6 +4071,33 @@ peer short-circuit.
         val alp: *i32 = *i32(addrlen_ptr)
         *alp = i32(n)
 
+Write a `sockaddr_un` into the caller's buffer and return the
+addrlen value Linux would set:
+  - empty path → addrlen = 2 (just the family field)
+  - non-empty path → addrlen = 2 + plen + 1 (family + path + NUL)
+The path is bounded to UNIX_PATH_MAX bytes; the trailing NUL is
+written when there's room (the receive buffer is sockaddr_un
+which is 110 bytes, so 2 + UNIX_PATH_MAX still fits).
+
+    shim_write_sockaddr_un(addr_ptr: i64, path: *byte, plen: int) -> int
+        if addr_ptr != i64(0)
+            val a: *byte = *byte(addr_ptr)
+            a[0] = byte(POSIX_AF_UNIX & 0xff)
+            a[1] = byte(0)
+            var pcopy = plen
+            if pcopy > UNIX_PATH_MAX
+                pcopy = UNIX_PATH_MAX
+            var i = 0
+            while i < pcopy
+                a[2 + i] = path[i]
+                i += 1
+            if 2 + pcopy < 110
+                a[2 + pcopy] = byte(0)
+        if plen == 0
+            return 2
+        2 + plen + 1
+
+
     sys_getsockname(fd: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
         val k = posix_fd_kind(fd)
         if k == POSIX_FD_UDP_SOCKET
@@ -4123,6 +4152,27 @@ peer short-circuit.
             shim_write_sockaddr(addr_ptr, p, &reply[3])
             shim_write_addrlen(addrlen_ptr, 16)
             return i64(0)
+        if k == POSIX_FD_UNIX_SOCKET
+            val unix_fd = posix_fd_target(fd)
+            if unix_fd < 0
+                return i64(-EBADF)
+            val port = unix_get_port()
+            if port < 0
+                return i64(-ENODEV)
+            var msg: [2]byte
+            msg[0] = byte(UNIX_CMD_GETSOCKNAME)
+            msg[1] = byte(unix_fd & 0xff)
+            var reply: [128]byte
+            val r = ipc_send(port, msg, 2, reply, 128)
+            if r < 0
+                return i64(-EIO)
+            val status = i8(reply[0])
+            if int(status) != 0
+                return i64(int(status))
+            val plen = int(reply[1]) & 0xff
+            val al = shim_write_sockaddr_un(addr_ptr, &reply[2], plen)
+            shim_write_addrlen(addrlen_ptr, al)
+            return i64(0)
         i64(-EBADF)
 
     sys_getpeername(fd: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
@@ -4143,6 +4193,27 @@ peer short-circuit.
             oct[3] = byte(posix_fd_table[idx].udp_peer_d & 0xff)
             shim_write_sockaddr(addr_ptr, posix_fd_table[idx].udp_peer_port, &oct[0])
             shim_write_addrlen(addrlen_ptr, 16)
+            return i64(0)
+        if k == POSIX_FD_UNIX_SOCKET
+            val unix_fd = posix_fd_target(fd)
+            if unix_fd < 0
+                return i64(-EBADF)
+            val port = unix_get_port()
+            if port < 0
+                return i64(-ENODEV)
+            var msg: [2]byte
+            msg[0] = byte(UNIX_CMD_GETPEERNAME)
+            msg[1] = byte(unix_fd & 0xff)
+            var reply: [128]byte
+            val r = ipc_send(port, msg, 2, reply, 128)
+            if r < 0
+                return i64(-EIO)
+            val status = i8(reply[0])
+            if int(status) != 0
+                return i64(int(status))
+            val plen = int(reply[1]) & 0xff
+            val al = shim_write_sockaddr_un(addr_ptr, &reply[2], plen)
+            shim_write_addrlen(addrlen_ptr, al)
             return i64(0)
         if k != POSIX_FD_TCP_SOCKET
             return i64(-EBADF)

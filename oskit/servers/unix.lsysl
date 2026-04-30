@@ -140,6 +140,8 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_EPOLL_UNSUB      = 19
     const UNIX_CMD_EPOLL_INST_CLOSE = 20
     const UNIX_CMD_RECVMSG_NB       = 21
+    const UNIX_CMD_GETSOCKNAME      = 22
+    const UNIX_CMD_GETPEERNAME      = 23
 
 EPOLL/POLL bit values match `POSIX_EPOLL*` 1:1 (POLLIN=0x001,
 POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010). The shim's
@@ -919,6 +921,18 @@ accept reply can hand it back. Unbound connectors leave
             unix_sockets[server_end].connector_path_len = cplen
         else
             unix_sockets[server_end].connector_path_len = 0
+
+Linux's `getsockname` on the accepted server end returns the
+listening socket's path. Copy the listener's bound_path into
+the server_end without setting `bound=1` — `unix_find_bound`
+filters by `bound`, so this won't create a lookup alias.
+
+        val lplen = unix_sockets[target].path_len
+        var li = 0
+        while li < lplen
+            unix_sockets[server_end].bound_path[li] = unix_sockets[target].bound_path[li]
+            li += 1
+        unix_sockets[server_end].path_len = lplen
 
 Reply to the connector first so the connect() unblocks
 without depending on listener-side state. If a thread was
@@ -1701,6 +1715,102 @@ listener-flush / parked-accept-EBADF cleanup, then free.
         ipc_reply(sender, reply, 1)
 
 
+### GETSOCKNAME handler
+
+Returns the slot's `bound_path` and `path_len`. Unbound slots
+report `plen=0`. The shim translates that into Linux's
+`addrlen=2` convention (just the family field) on the user
+side. Accept-allocated server ends carry the listener's
+bound_path (copied at accept time) so this returns the
+listening socket's path, matching Linux semantics.
+
+Wire format:
+  Request:  cmd(1) + fd(1) = 2 bytes
+  Reply:    status(1) + plen(1) + path[plen] = 2 + plen bytes
+            (or status(1) alone on validation failure)
+
+    unix_handle_getsockname(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, err, 1)
+            return
+        val plen = unix_sockets[fd].path_len
+        var reply: [128]byte
+        reply[0] = 0
+        reply[1] = byte(plen & 0xff)
+        var i = 0
+        while i < plen
+            reply[2 + i] = unix_sockets[fd].bound_path[i]
+            i += 1
+        ipc_reply(sender, &reply[0], 2 + plen)
+
+
+### GETPEERNAME handler
+
+For STREAM with `peer_idx >= 0`: returns the peer's
+`bound_path`. The accept-allocated server end's peer is the
+connector, whose bound_path is empty unless the client
+explicitly bound itself — fall back to the cached
+`connector_path` so apps that bound the client see its name
+and apps that didn't see plen=0.
+
+For STREAM with `peer_idx < 0` (never connected, or peer
+already gone): -ENOTCONN. We don't try to detect "peer was
+connected then died" precisely — once peer_idx is cleared by
+peer's full_close, the connection is gone and -ENOTCONN is
+the right Linux answer.
+
+DGRAM: -ENOTCONN unconditionally. SLIX AF_UNIX has no DGRAM
+`connect()` to remember a peer.
+
+Wire format:
+  Request:  cmd(1) + fd(1) = 2 bytes
+  Reply:    status(1) + plen(1) + path[plen] = 2 + plen bytes
+            (or status(1) alone on validation failure)
+
+    unix_handle_getpeername(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_STREAM
+            var err: [1]byte
+            err[0] = byte(-UNIX_ENOTCONN)
+            ipc_reply(sender, err, 1)
+            return
+        val peer = unix_sockets[fd].peer_idx
+        if peer < 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_ENOTCONN)
+            ipc_reply(sender, err, 1)
+            return
+        var plen = unix_sockets[peer].path_len
+        var src: [108]byte
+        var i = 0
+        while i < plen
+            src[i] = unix_sockets[peer].bound_path[i]
+            i += 1
+        if plen == 0
+            val cplen = unix_sockets[fd].connector_path_len
+            i = 0
+            while i < cplen
+                src[i] = unix_sockets[fd].connector_path[i]
+                i += 1
+            plen = cplen
+        var reply: [128]byte
+        reply[0] = 0
+        reply[1] = byte(plen & 0xff)
+        i = 0
+        while i < plen
+            reply[2 + i] = src[i]
+            i += 1
+        ipc_reply(sender, &reply[0], 2 + plen)
+
+
 ### PID_EXIT handler
 
 PM calls this when a process exits, with the dead thread's
@@ -1790,6 +1900,10 @@ Synchronous request-reply, no notification path required
                     unix_handle_epoll_unsub(sender, buf)
                 else if cmd == UNIX_CMD_EPOLL_INST_CLOSE
                     unix_handle_epoll_inst_close(sender, buf)
+                else if cmd == UNIX_CMD_GETSOCKNAME
+                    unix_handle_getsockname(sender, buf)
+                else if cmd == UNIX_CMD_GETPEERNAME
+                    unix_handle_getpeername(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)
