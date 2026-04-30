@@ -2061,6 +2061,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "punixscm: bad"
   }
 
+  "unix: non-blocking accept/recvfrom/recv via O_NONBLOCK + MSG_DONTWAIT" in {
+    // AF_UNIX non-blocking variants (UNIX_CMD_ACCEPT_NB / RECVFROM_NB /
+    // RECV_NB). Validates that empty queues return -EAGAIN instead of
+    // parking. Covers SOCK_NONBLOCK at socket-create, fcntl-driven
+    // O_NONBLOCK toggle, and per-call MSG_DONTWAIT override on a
+    // blocking fd. After data arrives, the same NB fd drains it
+    // normally — no spurious EAGAIN once the queue is non-empty.
+    val output = qemu.command("test_unixnb")
+    output should include("unixnb: ok")
+    output should not include "unixnb: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

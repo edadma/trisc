@@ -1,0 +1,310 @@
+test_unixnb — AF_UNIX non-blocking variants
+=============================================
+
+Validates the non-blocking accept/recvfrom/recv path for
+AF_UNIX sockets:
+
+  1. DGRAM `recvfrom` on an empty queue with the fd in
+     `O_NONBLOCK` mode returns -EAGAIN.
+  2. DGRAM `recvfrom` with `MSG_DONTWAIT` and the fd in
+     blocking mode also returns -EAGAIN.
+  3. After a `sendto` puts data on the queue, the same
+     non-blocking `recvfrom` drains it cleanly.
+  4. STREAM `recv` on an empty rx_buf with peer still alive
+     and `O_NONBLOCK` returns -EAGAIN.
+  5. STREAM `accept` on a listener with no pending
+     connections and `O_NONBLOCK` returns -EAGAIN.
+  6. After `connect` lands a child, the non-blocking
+     `accept` returns the child fd; after the connector
+     sends data, the non-blocking `recv` drains it.
+
+Pass criterion: prints `unixnb: ok`.
+
+    module oskit.bin.test_unixnb
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_WRITE      = 128
+    val NR_READ       = 130
+    val NR_ACCEPT     = 131
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_CONNECT    = 148
+    val NR_FCNTL      = 171
+    val NR_LISTEN     = 217
+    val NR_RECVFROM   = 276
+    val NR_SENDTO     = 307
+    val NR_SOCKET     = 337
+
+    val AF_UNIX_V     = 1
+    val SOCK_STREAM_V = 1
+    val SOCK_DGRAM_V  = 2
+    val SOCK_NONBLOCK_V = 2048
+
+    val F_GETFL       = 3
+    val F_SETFL       = 4
+    val O_NONBLOCK    = 2048
+
+    val MSG_DONTWAIT  = 64
+
+    val EAGAIN_NEG    = -11
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixnb: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, path_len: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < path_len
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + path_len] = byte(0)
+        2 + path_len + 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, addrlen_p: *i32) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(addrlen_p), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen_p: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_p)))
+
+    posix_write(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_read(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_fcntl(fd: int, cmd: int, arg: i64) -> int
+        int(syscall6(NR_FCNTL, i64(fd), i64(cmd), arg, 0, 0, 0))
+
+
+    main(argv: []string)
+
+DGRAM sub-case. Two sockets: `a` is bound to "UN-A" and used
+to send; `b` is bound to "UN-B" and used to receive. We make
+`b` non-blocking via `SOCK_NONBLOCK` at creation.
+
+        val a = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if a < 0
+            fail(1)
+            return
+        val b = posix_socket(AF_UNIX_V, SOCK_DGRAM_V | SOCK_NONBLOCK_V, 0)
+        if b < 0
+            fail(2)
+            return
+
+        var path_a: [4]byte
+        path_a[0] = 'U'; path_a[1] = 'N'; path_a[2] = '-'; path_a[3] = 'A'
+        var path_b: [4]byte
+        path_b[0] = 'U'; path_b[1] = 'N'; path_b[2] = '-'; path_b[3] = 'B'
+
+        var sa_a: [128]byte
+        val al_a = fill_sockaddr_un(&sa_a[0], &path_a[0], 4)
+        if posix_bind(a, &sa_a[0], al_a) != 0
+            fail(3)
+            return
+
+        var sa_b: [128]byte
+        val al_b = fill_sockaddr_un(&sa_b[0], &path_b[0], 4)
+        if posix_bind(b, &sa_b[0], al_b) != 0
+            fail(4)
+            return
+
+(1) NB recvfrom on empty queue → -EAGAIN.
+
+        var rb: [16]byte
+        var src_addr: [128]byte
+        var src_alen: i32 = 128
+        val r1 = posix_recvfrom(b, &rb[0], 16, 0, &src_addr[0], &src_alen)
+        if r1 != EAGAIN_NEG
+            puts("unixnb: r1=")
+            print_idec(r1)
+            puts("\n")
+            fail(5)
+            return
+
+(2) Drop NB on `b` and use MSG_DONTWAIT instead.
+
+        val cur_b = posix_fcntl(b, F_GETFL, i64(0))
+        if cur_b < 0
+            fail(6)
+            return
+        val cleared = cur_b & ~O_NONBLOCK
+        if posix_fcntl(b, F_SETFL, i64(cleared)) != 0
+            fail(7)
+            return
+        src_alen = 128
+        val r2 = posix_recvfrom(b, &rb[0], 16, MSG_DONTWAIT, &src_addr[0], &src_alen)
+        if r2 != EAGAIN_NEG
+            puts("unixnb: r2=")
+            print_idec(r2)
+            puts("\n")
+            fail(8)
+            return
+
+(3) Send a datagram from `a` to `b`. NB recvfrom should now
+drain it.
+
+        var send_buf: [8]byte
+        var i = 0
+        while i < 8
+            send_buf[i] = byte((i + 11) & 0xff)
+            i += 1
+        if posix_sendto(a, &send_buf[0], 8, 0, &sa_b[0], al_b) != 8
+            fail(9)
+            return
+        src_alen = 128
+        val r3 = posix_recvfrom(b, &rb[0], 16, MSG_DONTWAIT, &src_addr[0], &src_alen)
+        if r3 != 8
+            puts("unixnb: r3=")
+            print_idec(r3)
+            puts("\n")
+            fail(10)
+            return
+        i = 0
+        while i < 8
+            if rb[i] != byte((i + 11) & 0xff)
+                fail(11)
+                return
+            i += 1
+
+        posix_close(a)
+        posix_close(b)
+
+STREAM sub-case. Listener `ls` with `O_NONBLOCK`, no pending
+connection yet — `accept` should return -EAGAIN.
+
+        val ls = posix_socket(AF_UNIX_V, SOCK_STREAM_V | SOCK_NONBLOCK_V, 0)
+        if ls < 0
+            fail(12)
+            return
+        var path_s: [4]byte
+        path_s[0] = 'U'; path_s[1] = 'N'; path_s[2] = 'B'; path_s[3] = '1'
+        var sa_s: [128]byte
+        val al_s = fill_sockaddr_un(&sa_s[0], &path_s[0], 4)
+        if posix_bind(ls, &sa_s[0], al_s) != 0
+            fail(13)
+            return
+        if posix_listen(ls, 4) != 0
+            fail(14)
+            return
+
+(4) NB accept with no pending → -EAGAIN.
+
+        var peer_addr: [128]byte
+        var peer_alen: i32 = 128
+        val r4 = posix_accept(ls, &peer_addr[0], &peer_alen)
+        if r4 != EAGAIN_NEG
+            puts("unixnb: r4=")
+            print_idec(r4)
+            puts("\n")
+            fail(15)
+            return
+
+(5) After connect, NB accept returns the child fd. Mark the
+child as non-blocking via fcntl so the next recv check is
+non-blocking too.
+
+        val cl = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if cl < 0
+            fail(16)
+            return
+        if posix_connect(cl, &sa_s[0], al_s) != 0
+            fail(17)
+            return
+        val sv = posix_accept(ls, &peer_addr[0], &peer_alen)
+        if sv < 0
+            puts("unixnb: accept=")
+            print_idec(sv)
+            puts("\n")
+            fail(18)
+            return
+        val sv_fl = posix_fcntl(sv, F_GETFL, i64(0))
+        if sv_fl < 0
+            fail(19)
+            return
+        if posix_fcntl(sv, F_SETFL, i64(sv_fl | O_NONBLOCK)) != 0
+            fail(20)
+            return
+
+(6) Server-end NB recv with no data yet → -EAGAIN.
+
+        var rs: [16]byte
+        val r6 = posix_read(sv, &rs[0], 16)
+        if r6 != EAGAIN_NEG
+            puts("unixnb: r6=")
+            print_idec(r6)
+            puts("\n")
+            fail(21)
+            return
+
+(7) Connector writes; NB recv drains.
+
+        var wb: [12]byte
+        i = 0
+        while i < 12
+            wb[i] = byte((i + 21) & 0xff)
+            i += 1
+        if posix_write(cl, &wb[0], 12) != 12
+            fail(22)
+            return
+        val r7 = posix_read(sv, &rs[0], 16)
+        if r7 != 12
+            puts("unixnb: r7=")
+            print_idec(r7)
+            puts("\n")
+            fail(23)
+            return
+        i = 0
+        while i < 12
+            if rs[i] != byte((i + 21) & 0xff)
+                fail(24)
+                return
+            i += 1
+
+        posix_close(cl)
+        posix_close(sv)
+        posix_close(ls)
+        puts("unixnb: ok\n")
+        exit()

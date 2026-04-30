@@ -484,6 +484,9 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_PID_EXIT  = 11
     const UNIX_CMD_SENDMSG   = 12
     const UNIX_CMD_RECVMSG   = 13
+    const UNIX_CMD_ACCEPT_NB    = 14
+    const UNIX_CMD_RECVFROM_NB  = 15
+    const UNIX_CMD_RECV_NB      = 16
 
     const UNIX_PATH_MAX      = 108
     const UNIX_SCM_MAX_FDS   = 4
@@ -1174,7 +1177,7 @@ handles read from the TTY driver.
             ubuf[0] = reply[1]
             return i64(1)
         if k == POSIX_FD_UNIX_SOCKET
-            return sys_recv_unix_stream(fd, buf, len)
+            return sys_recv_unix_stream(fd, buf, len, 0)
         if k == POSIX_FD_TCP_SOCKET
             val inet_fd = posix_fd_target(fd)
             if inet_fd < 0
@@ -1632,7 +1635,9 @@ sys_listen for AF_UNIX. STREAM only.
 
 
 sys_accept for AF_UNIX. STREAM only. Allocates a fresh
-posix fd backed by the new server-end slot.
+posix fd backed by the new server-end slot. If the listener fd
+has `O_NONBLOCK` set, switches to `UNIX_CMD_ACCEPT_NB` so an
+empty backlog returns -EAGAIN instead of parking.
 
     sys_accept_unix(fd: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
         val target = posix_fd_target(fd)
@@ -1641,8 +1646,12 @@ posix fd backed by the new server-end slot.
         val port = unix_get_port()
         if port < 0
             return i64(-ENODEV)
+        val nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
         var msg: [2]byte
-        msg[0] = byte(UNIX_CMD_ACCEPT)
+        if nb != 0
+            msg[0] = byte(UNIX_CMD_ACCEPT_NB)
+        else
+            msg[0] = byte(UNIX_CMD_ACCEPT)
         msg[1] = byte(target & 0xff)
         var reply: [2]byte
         val r = ipc_send(port, msg, 2, reply, 2)
@@ -1789,9 +1798,11 @@ addr) and `write` on a STREAM unix fd.
         i64(nsent)
 
 
-DGRAM recvfrom for AF_UNIX.
+DGRAM recvfrom for AF_UNIX. If the fd is `O_NONBLOCK` (or
+`MSG_DONTWAIT` is in flags) and the queue is empty, returns
+-EAGAIN via `UNIX_CMD_RECVFROM_NB`.
 
-    sys_recvfrom_unix_dgram(fd: int, buf: i64, len: int,
+    sys_recvfrom_unix_dgram(fd: int, buf: i64, len: int, flags: int,
             addr_ptr: i64, addrlen_ptr: i64) -> i64
         val target = posix_fd_target(fd)
         if target < 0
@@ -1804,8 +1815,14 @@ DGRAM recvfrom for AF_UNIX.
         val port = unix_get_port()
         if port < 0
             return i64(-ENODEV)
+        var nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
+        if (flags & POSIX_MSG_DONTWAIT) != 0
+            nb = POSIX_O_NONBLOCK
         var msg: [4]byte
-        msg[0] = byte(UNIX_CMD_RECVFROM)
+        if nb != 0
+            msg[0] = byte(UNIX_CMD_RECVFROM_NB)
+        else
+            msg[0] = byte(UNIX_CMD_RECVFROM)
         msg[1] = byte(target & 0xff)
         msg[2] = byte((maxlen >> 8) & 0xff)
         msg[3] = byte(maxlen & 0xff)
@@ -1847,10 +1864,14 @@ DGRAM recvfrom for AF_UNIX.
         i64(dcopy)
 
 
-STREAM recv for AF_UNIX. Used by both `recvfrom` and
-`read` on a STREAM unix fd.
+STREAM recv for AF_UNIX. Used by `read` (flags=0) and
+`recvfrom`/`recvmsg` (flags forwarded). If the fd is
+`O_NONBLOCK` (or `MSG_DONTWAIT` is in flags) and rx_buf is
+empty *and* the peer is still alive, switches to
+`UNIX_CMD_RECV_NB` so the server returns -EAGAIN instead of
+parking. EOF (peer closed, no data) still returns 0.
 
-    sys_recv_unix_stream(fd: int, buf: i64, len: int) -> i64
+    sys_recv_unix_stream(fd: int, buf: i64, len: int, flags: int) -> i64
         val target = posix_fd_target(fd)
         if target < 0
             return i64(-EBADF)
@@ -1862,8 +1883,14 @@ STREAM recv for AF_UNIX. Used by both `recvfrom` and
         val port = unix_get_port()
         if port < 0
             return i64(-ENODEV)
+        var nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
+        if (flags & POSIX_MSG_DONTWAIT) != 0
+            nb = POSIX_O_NONBLOCK
         var msg: [4]byte
-        msg[0] = byte(UNIX_CMD_RECV)
+        if nb != 0
+            msg[0] = byte(UNIX_CMD_RECV_NB)
+        else
+            msg[0] = byte(UNIX_CMD_RECV)
         msg[1] = byte(target & 0xff)
         msg[2] = byte((maxlen >> 8) & 0xff)
         msg[3] = byte(maxlen & 0xff)
@@ -2108,7 +2135,7 @@ delegate to sys_read.
             if cap > 2046
                 cap = 2046
             var scratch_s: [2048]byte
-            val got_s = sys_recv_unix_stream(fd, i64(&scratch_s[0]), cap)
+            val got_s = sys_recv_unix_stream(fd, i64(&scratch_s[0]), cap, flags)
             if got_s < i64(0)
                 return got_s
             val nbytes_s = int(got_s)
@@ -2548,8 +2575,8 @@ peer call `getpeername`.
             val pid = posix_fd_current_pid()
             val stype = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].pos)
             if stype == POSIX_SOCK_STREAM
-                return sys_recv_unix_stream(fd, buf, len)
-            return sys_recvfrom_unix_dgram(fd, buf, len, addr_ptr, addrlen_ptr)
+                return sys_recv_unix_stream(fd, buf, len, flags)
+            return sys_recvfrom_unix_dgram(fd, buf, len, flags, addr_ptr, addrlen_ptr)
         if k0 == POSIX_FD_TCP_SOCKET
             return sys_recvfrom_tcp(fd, buf, len, flags, addr_ptr, addrlen_ptr)
         if k0 != POSIX_FD_UDP_SOCKET
