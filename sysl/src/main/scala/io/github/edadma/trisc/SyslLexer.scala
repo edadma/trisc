@@ -11,6 +11,11 @@ class SyslLexical extends IndentationLexical(
   lineComment = "//",
   blockCommentStart = "/*",
   blockCommentEnd = "*/",
+  // Re-enable Newline/Indent/Dedent emission for closure bodies whose `->` is
+  // followed by a newline + indented block, even when the closure itself sits
+  // inside a paren / cast-arg context. Without this, multi-statement closure
+  // bodies inside parens can't parse.
+  blockTriggerToken = Some("->"),
 ) {
   reserved ++= List(
     "if", "then", "elif", "else", "while", "do", "for", "loop", "in", "downTo", "step", "break", "continue", "return", "defer", "match", "is", "_",

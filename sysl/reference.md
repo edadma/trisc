@@ -1650,12 +1650,29 @@ eof[A](v: A) -> Parser[A] =
         else Failure("expected end of input", inp))
 ```
 
-Inside parens (call arguments, casts, tuple literals) the lexer joins
-lines, so what looks like a multi-line body is one large expression to
-the parser — indentation is purely visual. A statement-block body
-(multiple statements separated by newlines) is only available at
-top-level lambda position where Newline/Indent/Dedent tokens are
-emitted.
+Statement-block bodies (multiple statements separated by newlines, e.g.
+a `var` accumulator + a `for` loop + a result expression) work in any
+position — including inside call arguments, cast arguments, tuple
+literals — even though the lexer normally suppresses Newline/Indent/
+Dedent inside parens. The lexer recognizes `->` followed by an indented
+block as a body trigger and re-enables indent processing for the body's
+extent. The body terminates at the first dedent below the `->` line's
+indent or at the matching close-delimiter / `,` — whichever comes first.
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+rep[A](p: Parser[A]) -> Parser[[]A] =
+    Parser[[]A]((inp: Input) ->
+        var result: []A = []
+        var current = inp
+        while ...
+        Success(result, current))
+```
+
+A single-expression body inside parens still works as before — the
+trigger only re-enables indent processing when the body actually starts
+on a new indented line.
 
 `match` works in this position too: it carries an inline-arms form that
 detects each arm by the start of its pattern, so the indented arm list

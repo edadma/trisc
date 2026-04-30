@@ -153,4 +153,83 @@ class SyslLambdaBodyTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 41
   }
 
+  // ===== Statement-block body inside parens =====
+  //
+  // The previous fixes handled expression bodies in paren contexts. The
+  // remaining gap is a multi-statement block body: `var`, loops, etc. ending
+  // in a result expression. The lexer's block-trigger feature suspends line
+  // joining for the body so Newline/Indent/Dedent are emitted, then drains
+  // dedents when the matching close-delim or `,` appears at the body's
+  // outer level.
+
+  "block body in single-arg call: var + for loop + return expr" in {
+    eval(
+      """apply(f: (int) -> int) -> int = f(7)
+        |
+        |main() -> int = apply((x: int) ->
+        |    var acc = 0
+        |    for i in 0..<x do acc = acc + i
+        |    acc)
+        |""".stripMargin) shouldBe 21  // 0+1+2+3+4+5+6
+  }
+
+  "block body in cast arg (parsyl-style nominal-alias)" in {
+    eval(
+      """type Parser[A] = new (int) -> int
+        |
+        |fold() -> Parser[int] =
+        |    Parser[int]((x: int) ->
+        |        var acc = 0
+        |        for i in 0..<x do acc = acc + i
+        |        acc)
+        |
+        |main() -> int
+        |    val p = fold()
+        |    p(7)
+        |""".stripMargin) shouldBe 21
+  }
+
+  "block body terminated by `,` in multi-arg call" in {
+    eval(
+      """combine(f: (int) -> int, n: int) -> int = f(n)
+        |
+        |main() -> int = combine((x: int) ->
+        |    var acc = x
+        |    for i in 1..3 do acc = acc + i
+        |    acc, 10)
+        |""".stripMargin) shouldBe 16  // 10+1+2+3
+  }
+
+  "mixed: inline-expr lambda + block-body lambda in one call" in {
+    eval(
+      """combine(f: (int) -> int, g: (int) -> int, x: int) -> int = f(x) + g(x)
+        |
+        |main() -> int = combine(
+        |    (a: int) -> a * 2,
+        |    (b: int) ->
+        |        var acc = 0
+        |        for i in 1..b do acc = acc + i
+        |        acc,
+        |    5)
+        |""".stripMargin) shouldBe 25  // (5*2) + (1+2+3+4+5)
+  }
+
+  "regression: nested call inside body still parses (line-joining still works in body)" in {
+    eval(
+      """add1(x: int) -> int = x + 1
+        |apply(f: (int) -> int) -> int = f(7)
+        |
+        |main() -> int = apply((x: int) ->
+        |    var t = add1(x)
+        |    t * 2)
+        |""".stripMargin) shouldBe 16  // (7+1) * 2
+  }
+
+  "regression: paren-grouped expression that isn't a closure still parses" in {
+    eval(
+      """f(x: int) -> int = x + 1
+        |
+        |main() -> int = f((1 + 2))
+        |""".stripMargin) shouldBe 4
+  }
 }
