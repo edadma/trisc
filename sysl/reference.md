@@ -1427,11 +1427,26 @@ Two failure modes get specific diagnostics:
   `operator '<~>' is not bound; declare it via #operator("<~>") on a trait
   method`.
 - **Bound but no impl matches.** `1 |> 2` when `|>` is bound to `Pipe[T]`
-  but neither operand is user-defined produces
-  `operator '|>' is bound to trait 'Pipe', but neither operand is a
-  struct/enum that impls it`. When one operand is user-defined but no
-  matching impl exists (e.g. `1 ~ Box(2)` with only `impl Concat[Box, Box, _]`
-  defined), you get `no impl of 'Concat' for operator '~' on int, Box`.
+  but neither operand is user-defined produces `operator '|>' is bound to
+  trait 'Pipe', but no impl matches operand types (int, int) — operands must
+  be a struct, enum, or nominal alias (`type T = new ...`) that impls 'Pipe'`.
+  When one operand is user-defined but no matching impl exists (e.g.
+  `1 ~ Box(2)` with only `impl Concat[Box, Box, _]` defined), you get
+  `no impl of 'Concat' for operator '~' on int, Box`.
+
+Nominal aliases preserve their outer type through operator dispatch — the
+unifier matches an operand whose static type is `Parser[i32]` against a
+generic impl `impl[X, Y] Concat[Parser[X], Parser[Y], R]`, even though
+`Parser[A]` desugars to `new (Input) -> ParseResult[A]`. The nominal name
+gates the dispatch; the underlying function type is only consulted when
+the alias is *called*. Combined with the "either operand is user-defined"
+rule, `success(1) ~ success(2)` (both nominal) and `"x" ~ ident` (mixed
+primitive + nominal) both work.
+
+Nominal aliases of numeric types stay arithmetically usable too: `Meters
++ Meters` (where `type Meters = new int`) does plain int arithmetic and
+re-wraps the result, even with no `impl Add[Meters]`. If you *do* register
+an impl, dispatch fires through it instead.
 
 Context-sensitive prefix operators (`*` deref, `&` addr-of) are preserved:
 `*++p`, `*&a`, `**T`, `*=*p` all lex as today (they split the muncher),

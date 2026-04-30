@@ -3261,7 +3261,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   // and FunInfo of the instantiated function. Reuses cached instantiations.
   // If an operator has a user-defined struct/enum operand, desugar to the corresponding trait call.
   // Returns None if no desugaring applies (use built-in dispatch).
-  private def tryOperatorDispatch(op: String, tLeft: TExpr, tRight: TExpr): Option[TExpr] =
+  //
+  // `strict` controls behaviour when no impl matches:
+  //   - strict=true: throw "no impl of trait for operator on operands" — used when an
+  //     operand is non-arithmetic (struct/enum/nominal alias of non-numeric) and built-in
+  //     fallback can't possibly succeed; the better diagnostic names trait + operands.
+  //   - strict=false: return None silently — used when both operands are numeric (or
+  //     nominal aliases of numerics) and the built-in arithmetic path is a valid fallback,
+  //     so `Meters + Meters` with no `impl Add[Meters]` still does plain int arithmetic.
+  private def tryOperatorDispatch(op: String, tLeft: TExpr, tRight: TExpr, strict: Boolean): Option[TExpr] =
     lookupBinaryOperatorTrait(op) match
       case None => None
       case Some((traitName, methodName)) =>
@@ -3275,11 +3283,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         }
         if !hasUserType then return None
         if !traits.contains(traitName) then
-          throw AnalysisError(s"operator '$op' on ${operands.mkString(", ")} requires trait '$traitName' but it is not defined")
+          if strict then
+            throw AnalysisError(s"operator '$op' on ${operands.mkString(", ")} requires trait '$traitName' but it is not defined")
+          else return None
         val candidates = enumerateImplCandidates(traitName, methodName, operands)
         candidates match
           case Nil =>
-            throw AnalysisError(s"no impl of '$traitName' for operator '$op' on ${operands.mkString(", ")}")
+            if strict then
+              throw AnalysisError(s"no impl of '$traitName' for operator '$op' on ${operands.mkString(", ")}")
+            else None
           case (template, subst) :: Nil =>
             val (mangled, funInfo) = instantiateImpl(template, traitName, methodName, subst)
             val checkedArgs = checkArgs(mangled, funInfo.params, List(tLeft, tRight))
@@ -5138,6 +5150,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case BinaryAST(left, op, right) =>
         val tLeft00 = analyzeExpr(left)
         val tRight00 = analyzeExpr(right)
+        // Operator overloading on nominal aliases (`type Parser[A] = new ...`,
+        // `type Meters = new f64`, etc.) needs the dispatcher to see the outer
+        // NamedType — not the underlying — or `impl Concat[Parser[X], ...]`
+        // never matches an operand whose static type is `Parser[i32]`.
+        // Try dispatch first, before any nominal-unwrap or signedness coercion.
+        // Strict mode: at least one operand can't fall back to built-in arithmetic
+        // (struct, enum, or nominal alias of a non-numeric). Lenient otherwise so
+        // `Meters + Meters` without an impl still does plain int arithmetic.
+        def couldFallToArith(t: SyslType): Boolean =
+          t.underlying.isNumeric || t.underlying == StringType || t.underlying == BoolType
+        val strict = !couldFallToArith(tLeft00.typ) || !couldFallToArith(tRight00.typ)
+        val dispatchedOpt = tryOperatorDispatch(op, tLeft00, tRight00, strict)
+        if dispatchedOpt.isDefined then return dispatchedOpt.get
         // Handle NamedType operands:
         //   nominal + nominal (same name)  → result keeps that nominal type
         //   nominal + anything else         → error (explicit cast required)
@@ -5158,9 +5183,6 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // Coerce integer literal signedness to match the other operand (preserve width)
         val tLeft = if tRight0.typ.isIntegral then coerceSignedness(tLeft0, tRight0.typ) else tLeft0
         val tRight = if tLeft.typ.isIntegral then coerceSignedness(tRight0, tLeft.typ) else tRight0
-        // Try to desugar operator to a trait call when operands are user-defined types
-        val dispatchedOpt = tryOperatorDispatch(op, tLeft, tRight)
-        if dispatchedOpt.isDefined then return dispatchedOpt.get
         val resultType = op match
           case "+" if tLeft.typ == StringType && tRight.typ == StringType => StringType // string concatenation
           case "+" | "-" if tLeft.typ == StringType && tRight.typ.isNumeric =>
@@ -5220,7 +5242,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             lookupBinaryOperatorTrait(op) match
               case Some((traitName, _)) =>
                 throw AnalysisError(
-                  s"operator '$op' is bound to trait '$traitName', but neither operand is a struct/enum that impls it (got ${tLeft.typ} $op ${tRight.typ})",
+                  s"operator '$op' is bound to trait '$traitName', but no impl matches operand types (${tLeft.typ}, ${tRight.typ}) — operands must be a struct, enum, or nominal alias (`type T = new ...`) that impls '$traitName'",
                 )
               case None if op.forall(c => "+-*/%<>=!&|^~".contains(c)) =>
                 throw AnalysisError(
