@@ -5793,8 +5793,23 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     if offset >= -64 && offset <= 63 then
       emit(s"  addi r$destReg, r$baseReg, $offset")
     else
-      // Use a temp register to avoid clobbering baseReg when destReg == baseReg
-      val tmp = if destReg == 3 then 2 else 3
+      // Use destReg itself as the offset scratch when destReg != baseReg —
+      // `movi destReg, X; add destReg, baseReg, destReg` reads baseReg before
+      // writing destReg, so baseReg is preserved and no third register is
+      // clobbered. When destReg == baseReg, fall back to a separate temp
+      // (r2 if destReg=3 else r3).
+      //
+      // Earlier bug: tmp was picked as r3 with only destReg avoided, so
+      // emitAddImm(4, 3, ≥64) emitted `movi r3, X; add r4, r3, r3` and
+      // clobbered the source pointer (sysl/tests/aggregate_copy_offset_64).
+      // A first attempt routed the temp away from r3 by picking r2 — that
+      // unblocked tabwriter but broke emitStructReturn, which holds r2 and
+      // r3 live as destBase/srcBase across the copy loop. Self-tmp avoids
+      // both pitfalls.
+      val tmp =
+        if destReg != baseReg then destReg
+        else if destReg == 3 then 2
+        else 3
       if offset >= 0 then
         emit(s"  movi r$tmp, $offset")
         emit(s"  add r$destReg, r$baseReg, r$tmp")
