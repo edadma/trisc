@@ -1837,15 +1837,33 @@ var f = _ + 1                 // error: cannot infer placeholder's type
 expression-positional*. The other three positions where `_` appears keep their
 existing meaning:
 
-| Position                         | Meaning              |
-|----------------------------------|----------------------|
-| LHS of `var _ = ...` / `val _`   | discard binding      |
-| Destructuring binder `(_, b) =`  | discard              |
-| `match` arm pattern `_ ->`       | wildcard pattern     |
-| Expression position (`_ + 1`)    | placeholder (lambda) |
+| Position                                | Meaning              |
+|-----------------------------------------|----------------------|
+| LHS of `var _ = ...` / `val _`          | discard binding      |
+| Destructuring binder `(_, b) =`         | discard              |
+| `match` arm pattern `_ ->`              | wildcard pattern     |
+| Lambda parameter list `(_: T) -> body`  | discard parameter    |
+| Expression position (`_ + 1`)           | placeholder (lambda) |
 
-The four positions are syntactically disjoint, so there is no parser
+The five positions are syntactically disjoint, so there is no parser
 ambiguity.
+
+**Discard parameter.** In a lambda parameter list, `_` introduces a
+parameter slot that is unreferenceable from the body. Type annotation is
+optional (inferred from context, like any closure parameter). Multiple `_`
+parameters in the same list are independent — they don't collide:
+
+```sysl
+apply((_: int) -> 42, 7)               // ignore the int, return 42
+apply2((_: int, _: int) -> 99, 1, 2)   // both slots discarded
+apply2((x: int, _: string) -> x, ...)  // mix named + discard
+```
+
+The single-param shorthand `name -> body` does **not** treat `_` as a
+discard binder — `_ -> body` parses `_` as the expression-position
+placeholder (yielding a `(_x) -> _x`-shaped lambda). Use the parens form
+`(_) -> body` for a discard parameter without an annotation. `out _: T`
+and `inout _: T` are not valid (modes require an lvalue caller-side).
 
 ### Inner `def` — Recursive Named Local Closures
 

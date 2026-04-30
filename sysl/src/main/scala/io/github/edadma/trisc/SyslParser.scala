@@ -872,8 +872,12 @@ class SyslParser extends StandardTokenParsers {
       ClosureAST(List(ClosureParamAST(name, None)), body)
     }
 
+  // `_` is accepted as a discard binder — the param has a fresh slot in the
+  // closure but is unreferenceable in the body. The analyzer rewrites `_` to
+  // a unique synthetic name so multiple `_` params don't collide and so any
+  // `_` in the body falls through to the placeholder rule, not a var lookup.
   lazy val closureParam: Parser[ClosureParamAST] =
-    ident ~ opt(":" ~> typeRef) ^^ { case name ~ typ => ClosureParamAST(name, typ) }
+    (ident | "_") ~ opt(":" ~> typeRef) ^^ { case name ~ typ => ClosureParamAST(name, typ) }
 
   lazy val closureBody: Parser[FunBodyAST] =
     // `block` runs at top-level lambdas where the body is on its own indented

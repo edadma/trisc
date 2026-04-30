@@ -309,6 +309,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  the names are stable per function. */
   private var variantCallCounter: Int = 0
 
+  /** Counter for closure params bound by `_` (discard). Each `_` slot gets a unique
+   *  synthetic name so multiple discards in the same param list don't collide and the
+   *  body's `_` falls through to the placeholder rule, not a var lookup.
+   */
+  private var discardParamCounter: Int = 0
+
   // Built-in binary operator → (trait name, method name). Extensible via #operator("sym") on trait methods.
   private val builtinBinaryOperatorTraits: Map[String, (String, String)] = Map(
     "<"  -> ("Ord", "lt"),  "<=" -> ("Ord", "le"),
@@ -4648,17 +4654,29 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 case Some(ft) if ft.params.length == params.length && i < ft.params.length =>
                   ft.params(i)
                 case _ => throw AnalysisError(s"cannot infer type for closure parameter '${p.name}' — add a type annotation")
-          TParam(p.name, paramType)
+          // `_` discard binders get a unique synthetic name. Multiple `_` slots
+          // are distinct (no name collision in the TParam list / codegen frame)
+          // and `_` in the body still falls through to the placeholder rule.
+          val finalName =
+            if p.name == "_" then
+              val n = s"__discard_$discardParamCounter"
+              discardParamCounter += 1
+              n
+            else p.name
+          TParam(finalName, paramType)
         }
         val expectedRet = expectedFunc.map(_.returnType).getOrElse(
           currentExpected match
             case Some(t) if t != UnitType => t
             case _ => UnitType
         )
-        // Push scope with closure params
+        // Push scope with closure params (discard params are NOT bound — `__discard_<n>`
+        // is unspellable in source and the placeholder rule for `_` in expression position
+        // is preserved).
         pushScope()
-        for p <- typedParams do
-          currentScope(p.name) = SymInfo(p.name, p.typ, mutable = false)
+        for (p, src) <- typedParams.zip(params) do
+          if src.name != "_" then
+            currentScope(p.name) = SymInfo(p.name, p.typ, mutable = false)
         // Analyze body
         val savedExp = currentExpected
         currentExpected = if expectedRet == UnitType then None else Some(expectedRet)
