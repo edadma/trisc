@@ -334,4 +334,121 @@ class SyslOperatorSugarTests extends SyslTestHelpers {
     assert(msg.contains("|>"), s"error should mention the operator, got: $msg")
     assert(msg.contains("Pipe"), s"error should name the bound trait, got: $msg")
   }
+
+  // ===== Either-operand dispatch: at least one operand may be user-defined =====
+  //
+  // The dispatch rule is "at least one operand is a user-defined named type",
+  // not LHS-only. This unblocks parser-combinator-style sugar like
+  // `"foo" ~ ident` and scalar-times-vector math like `2 * v`.
+
+  "primitive on LHS + user on RHS dispatches via #operator" in {
+    eval(
+      """struct Box
+        |    n: int
+        |
+        |trait Pipe[A, B, R]
+        |    #operator("~")
+        |    pipe(a: A, b: B) -> R
+        |
+        |impl Pipe[int, Box, int]
+        |    pipe(a: int, b: Box) -> int = a + b.n
+        |
+        |main() -> int = 100 ~ Box(42)
+        |""".stripMargin) shouldBe 142
+  }
+
+  "user on LHS + primitive on RHS dispatches via #operator" in {
+    eval(
+      """struct Box
+        |    n: int
+        |
+        |trait Pipe[A, B, R]
+        |    #operator("~")
+        |    pipe(a: A, b: B) -> R
+        |
+        |impl Pipe[Box, int, int]
+        |    pipe(a: Box, b: int) -> int = a.n + b
+        |
+        |main() -> int = Box(42) ~ 100
+        |""".stripMargin) shouldBe 142
+  }
+
+  "scalar * Vec3 dispatches via Mul with mixed-operand impl" in {
+    eval(
+      """struct Vec3
+        |    x: int
+        |    y: int
+        |    z: int
+        |
+        |trait Mul[A, B, R]
+        |    mul(a: A, b: B) -> R
+        |
+        |impl Mul[int, Vec3, Vec3]
+        |    mul(s: int, v: Vec3) -> Vec3 = Vec3(s * v.x, s * v.y, s * v.z)
+        |
+        |main() -> int
+        |    var v = 3 * Vec3(1, 2, 4)
+        |    v.x + v.y + v.z
+        |""".stripMargin) shouldBe 21
+  }
+
+  "both primitives — no user dispatch, falls back to built-in int + int" in {
+    eval(
+      """main() -> int = 3 + 4
+        |""".stripMargin) shouldBe 7
+  }
+
+  "both primitives + custom op (no impl, no built-in) — clean error mentioning trait" in {
+    val ex = intercept[Exception] {
+      eval(
+        """trait Pipe[A, B, R]
+          |    #operator("~")
+          |    pipe(a: A, b: B) -> R
+          |
+          |main() -> int = "foo" ~ "bar"
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage
+    assert(msg.contains("~"), s"error should mention the operator, got: $msg")
+    assert(msg.contains("Pipe"), s"error should name the bound trait, got: $msg")
+  }
+
+  "user on one side + primitive on other, no matching impl — 'no impl' error" in {
+    val ex = intercept[Exception] {
+      eval(
+        """struct Box
+          |    n: int
+          |
+          |trait Pipe[A, B, R]
+          |    #operator("~")
+          |    pipe(a: A, b: B) -> R
+          |
+          |impl Pipe[Box, Box, int]
+          |    pipe(a: Box, b: Box) -> int = a.n + b.n
+          |
+          |main() -> int = 1 ~ Box(2)
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage
+    assert(msg.contains("~"), s"error should mention the operator, got: $msg")
+    assert(msg.contains("no impl"), s"error should say 'no impl', got: $msg")
+  }
+
+  "homogeneous Vec2 + Vec2 still dispatches (regression)" in {
+    eval(
+      """struct Vec2
+        |    x: int
+        |    y: int
+        |
+        |trait Add[T]
+        |    add(a: T, b: T) -> T
+        |
+        |impl Add[Vec2]
+        |    add(a: Vec2, b: Vec2) -> Vec2 = Vec2(a.x + b.x, a.y + b.y)
+        |
+        |main() -> int
+        |    var v = Vec2(1, 2) + Vec2(10, 20)
+        |    v.x + v.y
+        |""".stripMargin) shouldBe 33
+  }
 }

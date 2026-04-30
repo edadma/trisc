@@ -1270,8 +1270,30 @@ main() -> int
 ```
 
 Built-in numeric operators are unaffected — `3 + 4` on `int` still uses the
-native instruction. Dispatch through a trait only applies when the left operand
-is a struct or enum type.
+native instruction. Dispatch through a trait applies whenever **at least one**
+operand is a user-defined named type (struct, enum, or nominal type alias) and
+a matching `impl` exists. When neither operand is user-defined, the operator
+falls through to the built-in operator table; built-in scalar types are not
+overloadable through this mechanism.
+
+Mixed-operand impls let primitives appear on either side. For example, with
+
+```sysl
+struct Vec3
+    x: int
+    y: int
+    z: int
+
+trait Mul[A, B, R]
+    mul(a: A, b: B) -> R
+
+impl Mul[int, Vec3, Vec3]
+    mul(s: int, v: Vec3) -> Vec3 = Vec3(s * v.x, s * v.y, s * v.z)
+```
+
+`3 * Vec3(1, 2, 4)` dispatches via `Mul[int, Vec3, Vec3]`. The reverse
+(`Vec3(...) * 3`) needs its own `impl Mul[Vec3, int, Vec3]` — there is no
+implicit symmetry. Dispatch is by operand types, not LHS-only.
 
 Operator sugar composes with generic functions. Inside `max[T](a: T, b: T)`,
 writing `a > b` works for any `T` that has an `Ord` impl, checked at
@@ -1327,19 +1349,42 @@ main() -> int
 ```
 
 The dispatch rules are the same as for built-in operators: an operator
-binds only when the left operand is a struct or enum that has an `impl` of
-the trait carrying the `#operator` annotation. Built-in scalar types are
-not overloadable through this mechanism.
+binds when at least one operand is a user-defined named type and an `impl`
+of the trait carrying the `#operator` annotation matches. When neither
+operand is user-defined, the operator falls through to the built-in
+operator table (or fails to type-check). Built-in scalar types are not
+overloadable through this mechanism.
+
+This makes parser-combinator-style sugar work directly:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+trait Concat[A, B, R]
+    #operator("~")
+    concat(a: A, b: B) -> R
+
+impl[A, B] Concat[Parser[A], Parser[B], Parser[(A, B)]]
+    concat(a: Parser[A], b: Parser[B]) -> Parser[(A, B)] = seq(a, b)
+
+impl[A] Concat[string, Parser[A], Parser[(string, A)]]
+    concat(a: string, b: Parser[A]) -> Parser[(string, A)] = seq(literal(a), b)
+```
+
+`"foo" ~ ident` dispatches via the second impl even though the LHS is a
+primitive `string`.
 
 Two failure modes get specific diagnostics:
 
 - **Unbound operator.** `a <~> b` where `<~>` isn't bound anywhere produces
   `operator '<~>' is not bound; declare it via #operator("<~>") on a trait
   method`.
-- **Bound but not impl'd.** `1 |> 2` when `|>` is bound to `Pipe[T]` but
-  neither operand is a struct/enum that impls `Pipe` produces
+- **Bound but no impl matches.** `1 |> 2` when `|>` is bound to `Pipe[T]`
+  but neither operand is user-defined produces
   `operator '|>' is bound to trait 'Pipe', but neither operand is a
-  struct/enum that impls it`.
+  struct/enum that impls it`. When one operand is user-defined but no
+  matching impl exists (e.g. `1 ~ Box(2)` with only `impl Concat[Box, Box, _]`
+  defined), you get `no impl of 'Concat' for operator '~' on int, Box`.
 
 Context-sensitive prefix operators (`*` deref, `&` addr-of) are preserved:
 `*++p`, `*&a`, `**T`, `*=*p` all lex as today (they split the muncher),
