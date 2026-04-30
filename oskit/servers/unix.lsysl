@@ -8,9 +8,15 @@ path-keyed slots that pair up via send/recv queues.
 
 Session 1 of the AF_UNIX arc: SOCK_DGRAM (sendto/recvfrom over
 a path) and SOCK_STREAM (listen/accept/connect/send/recv).
-**SCM_RIGHTS fd-passing is not supported in this session** —
-that's a separate Session 2 chunk that needs cross-process
-fd-grant plumbing.
+
+Session 2 adds SCM_RIGHTS fd-passing for DGRAM sockets via the
+new SENDMSG/RECVMSG commands. The owner check for every command
+is now multi-tid — each slot keeps an `owners[UNIX_MAX_OWNERS]`
+ring plus `nrefs_in_queues` so a slot stays alive across
+sendmsg-then-recvmsg even if all original owners close in
+between. STREAM SCM_RIGHTS is deferred (no per-byte ancillary
+plumbing yet); transferring non-AF_UNIX fds is also deferred
+(the wire format only carries unix-server slot indices).
 
 Path namespace
 --------------
@@ -54,9 +60,19 @@ UNIX_PATH_MAX. Multi-byte integers are big-endian.
                 rep: status(1)
 - PID_EXIT (11) req: cmd(1) + tid_be(4)
                 rep: status(1)
+- SENDMSG (12)  req: cmd(1) + fd(1) + plen(1) + path(N) +
+                     nfds(1) + slots(F) + dlen_be(2) + data(M)
+                rep: status(1) + nsent_be(2)
+- RECVMSG (13)  req: cmd(1) + fd(1) + max_nfds(1) + maxlen_be(2)
+                rep: status(1) + plen(1) + path(N) +
+                     nfds(1) + slots(F) + dlen_be(2) + data(M)
 
-All handlers enforce per-fd ownership: `owner_tid == sender` is
-required so process A can't issue ops on process B's sockets.
+All handlers enforce per-fd ownership: the caller's tid must
+appear in the slot's `owners[]` ring. The ring supports up
+to `UNIX_MAX_OWNERS` simultaneous owners so SCM_RIGHTS
+fd-passing (Session 2) can grant a co-owner without losing
+the original. `nrefs_in_queues` counts pending fd-grant
+queue entries that hold the slot alive while in transit.
 
     module oskit.servers
 
@@ -77,6 +93,8 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_RECV      = 9
     const UNIX_CMD_CLOSE     = 10
     const UNIX_CMD_PID_EXIT  = 11
+    const UNIX_CMD_SENDMSG   = 12
+    const UNIX_CMD_RECVMSG   = 13
 
 Socket types — match Linux `SOCK_STREAM=1`, `SOCK_DGRAM=2`.
 
@@ -106,6 +124,8 @@ matches the POSIX `sockaddr_un.sun_path[108]`.
     const UNIX_DG_DATA_MAX = 256
     const UNIX_RX_BUF      = 2048
     const UNIX_BACKLOG_MAX = 8
+    const UNIX_MAX_OWNERS  = 4
+    const UNIX_SCM_MAX_FDS = 4
 
 Server-side IPC buffer. Max wire request is SENDTO with full
 DGRAM payload: cmd(1) + fd(1) + plen(1) + path(108) + dlen(2) +
@@ -124,6 +144,8 @@ return it to the caller via the standard sockaddr_un round-trip.
         src_path_len: int
         data: [256]byte
         data_len: int
+        nfds: int
+        fds: [4]int
 
 
 Per-slot state. The same struct serves DGRAM and STREAM
@@ -149,7 +171,9 @@ matching send/sendto wakes the slot.
 
     struct UnixSocket
         in_use: int
-        owner_tid: int
+        owners: [4]int
+        owners_count: int
+        nrefs_in_queues: int
         stype: int
         bound: int
         bound_path: [108]byte
@@ -198,6 +222,8 @@ loop before `port_register`.
         var i = 0
         while i < UNIX_MAX_SOCKETS
             unix_sockets[i].in_use = 0
+            unix_sockets[i].owners_count = 0
+            unix_sockets[i].nrefs_in_queues = 0
             unix_sockets[i].bound = 0
             unix_sockets[i].listening = 0
             unix_sockets[i].peer_idx = -1
@@ -216,15 +242,60 @@ loop before `port_register`.
             unix_sockets[i].pending_recv_peek = 0
             unix_sockets[i].pending_accept_tid = -1
             var j = 0
+            while j < UNIX_MAX_OWNERS
+                unix_sockets[i].owners[j] = -1
+                j += 1
+            j = 0
             while j < UNIX_DG_QUEUE
                 unix_sockets[i].dg_queue[j].in_use = 0
                 j += 1
             i += 1
 
 
+Owners-ring helpers. The ring is a flat array of up to
+`UNIX_MAX_OWNERS` tids; the live entries occupy the prefix
+`[0..owners_count)` and -1 elsewhere. Lookup / add / remove
+are O(UNIX_MAX_OWNERS), which is fine at n=4.
+
+    unix_slot_has_owner(idx: int, tid: int) -> int
+        var i = 0
+        while i < unix_sockets[idx].owners_count
+            if unix_sockets[idx].owners[i] == tid
+                return 1
+            i += 1
+        0
+
+    unix_slot_add_owner(idx: int, tid: int) -> int
+        if unix_slot_has_owner(idx, tid) != 0
+            return 1
+        if unix_sockets[idx].owners_count >= UNIX_MAX_OWNERS
+            return 0
+        unix_sockets[idx].owners[unix_sockets[idx].owners_count] = tid
+        unix_sockets[idx].owners_count += 1
+        1
+
+Remove `tid` from the owners ring; compact the prefix so
+`owners[0..owners_count)` stays contiguous. No-op if the tid
+isn't present.
+
+    unix_slot_remove_owner(idx: int, tid: int)
+        var i = 0
+        while i < unix_sockets[idx].owners_count
+            if unix_sockets[idx].owners[i] == tid
+                var j = i
+                while j < unix_sockets[idx].owners_count - 1
+                    unix_sockets[idx].owners[j] = unix_sockets[idx].owners[j + 1]
+                    j += 1
+                unix_sockets[idx].owners_count -= 1
+                unix_sockets[idx].owners[unix_sockets[idx].owners_count] = -1
+                return
+            i += 1
+
+
 Validate `fd` belongs to `sender`. Same shape as
 `inet_fd_valid`: rejects out-of-range, free, or
-foreign-owner slots.
+foreign-owner slots. Multi-owner-aware — accepts any tid in
+the slot's owners ring.
 
     unix_fd_valid(fd: int, sender: int) -> int
         if fd < 0
@@ -233,7 +304,7 @@ foreign-owner slots.
             return 0
         if unix_sockets[fd].in_use == 0
             return 0
-        if unix_sockets[fd].owner_tid != sender
+        if unix_slot_has_owner(fd, sender) == 0
             return 0
         1
 
@@ -276,7 +347,6 @@ or -1 if the table is full.
         while i < UNIX_MAX_SOCKETS
             if unix_sockets[i].in_use == 0
                 unix_sockets[i].in_use = 1
-                unix_sockets[i].owner_tid = owner_tid
                 unix_sockets[i].stype = stype
                 unix_sockets[i].bound = 0
                 unix_sockets[i].listening = 0
@@ -295,7 +365,14 @@ or -1 if the table is full.
                 unix_sockets[i].pending_recv_tid = -1
                 unix_sockets[i].pending_recv_peek = 0
                 unix_sockets[i].pending_accept_tid = -1
+                unix_sockets[i].nrefs_in_queues = 0
                 var j = 0
+                while j < UNIX_MAX_OWNERS
+                    unix_sockets[i].owners[j] = -1
+                    j += 1
+                unix_sockets[i].owners[0] = owner_tid
+                unix_sockets[i].owners_count = 1
+                j = 0
                 while j < UNIX_DG_QUEUE
                     unix_sockets[i].dg_queue[j].in_use = 0
                     j += 1
@@ -310,10 +387,63 @@ succeeds; the rest of the state is reset on re-allocation.
 
     unix_free_slot(idx: int)
         unix_sockets[idx].in_use = 0
+        unix_sockets[idx].owners_count = 0
+        unix_sockets[idx].nrefs_in_queues = 0
         unix_sockets[idx].bound = 0
         unix_sockets[idx].listening = 0
         unix_sockets[idx].peer_idx = -1
         unix_sockets[idx].peer_closed = 0
+        var i = 0
+        while i < UNIX_MAX_OWNERS
+            unix_sockets[idx].owners[i] = -1
+            i += 1
+
+
+Last-owner cleanup. Called from `unix_handle_close` and
+`unix_handle_pid_exit` when removing the last owner of a
+slot drops `owners_count` to 0 and there are no in-flight
+queue references (`nrefs_in_queues == 0`). Walks the same
+peer-EOF / backlog-flush / parked-accept-EBADF dance the
+single-owner close used to do, then frees the slot.
+
+    unix_full_close(idx: int)
+        val peer = unix_sockets[idx].peer_idx
+        if peer >= 0
+            if unix_sockets[peer].in_use != 0
+                unix_sockets[peer].peer_closed = 1
+                unix_sockets[peer].peer_idx = -1
+                val parked = unix_sockets[peer].pending_recv_tid
+                if parked >= 0
+                    unix_sockets[peer].pending_recv_tid = -1
+                    var pr: [3]byte
+                    pr[0] = 0
+                    pr[1] = 0
+                    pr[2] = 0
+                    ipc_reply(parked, pr, 3)
+
+        if unix_sockets[idx].listening != 0
+            while unix_sockets[idx].pending_count > 0
+                val head = unix_sockets[idx].pending_head
+                val pending = unix_sockets[idx].pending_q[head]
+                unix_sockets[idx].pending_head = (head + 1) % UNIX_BACKLOG_MAX
+                unix_sockets[idx].pending_count -= 1
+                if unix_sockets[pending].in_use != 0
+                    val ppeer = unix_sockets[pending].peer_idx
+                    if ppeer >= 0
+                        if unix_sockets[ppeer].in_use != 0
+                            unix_sockets[ppeer].peer_closed = 1
+                            unix_sockets[ppeer].peer_idx = -1
+                    unix_free_slot(pending)
+
+        if unix_sockets[idx].pending_accept_tid >= 0
+            val waiter = unix_sockets[idx].pending_accept_tid
+            unix_sockets[idx].pending_accept_tid = -1
+            var ar: [2]byte
+            ar[0] = byte(-UNIX_EBADF)
+            ar[1] = 0
+            ipc_reply(waiter, ar, 2)
+
+        unix_free_slot(idx)
 
 
 Append `n` bytes from `src` to slot `idx`'s rx ring. Returns
@@ -370,6 +500,11 @@ the caller sees a smaller `nsent`.
     unix_dg_enqueue(dst_idx: int, src_idx: int, data: *byte, dlen: int) -> int
         val slot = unix_sockets[dst_idx].dg_tail
         unix_sockets[dst_idx].dg_queue[slot].in_use = 1
+        // Default to no ancillary fds; SENDMSG overrides after this
+        // call. Without this clear, a queue slot reused after a
+        // previous SCM_RIGHTS send would carry stale fds into a plain
+        // sendto's payload.
+        unix_sockets[dst_idx].dg_queue[slot].nfds = 0
         var sp = unix_sockets[src_idx].path_len
         if sp > UNIX_PATH_MAX
             sp = UNIX_PATH_MAX
@@ -572,7 +707,7 @@ owner so accept() on that thread can claim it and ops on it
 pass `unix_fd_valid`. peer_idx links the two halves so
 subsequent send/recv route through each other's `rx_buf`.
 
-        val server_end = unix_alloc_slot(unix_sockets[target].owner_tid,
+        val server_end = unix_alloc_slot(unix_sockets[target].owners[0],
             UNIX_SOCK_STREAM)
         if server_end < 0
             var err: [1]byte
@@ -882,6 +1017,238 @@ parks the caller.
         unix_sockets[fd].pending_recv_peek = 0
 
 
+### SENDMSG handler (DGRAM, SCM_RIGHTS)
+
+Bundles an in-band datagram with up to `UNIX_SCM_MAX_FDS`
+ancillary unix-socket fds. The caller passes a list of
+slot indices it owns; the server validates ownership,
+increments each slot's `nrefs_in_queues`, and enqueues the
+datagram + fd payload onto the destination's `dg_queue`.
+The receiver claims co-ownership in `unix_handle_recvmsg`.
+
+Wire format mirrors SENDTO with a single ancillary block
+slotted between the path and the payload:
+`cmd(1) + fd(1) + plen(1) + path(P) + nfds(1) + slots(F)
++ dlen_be(2) + data(D)`.
+
+Limitations: DGRAM only (STREAM SCM_RIGHTS deferred);
+fd-passing is restricted to AF_UNIX socket fds (transferring
+TCP/UDP/file fds is a separate Session-3 concern); never
+short-circuits into a parked recvfrom — see the design note
+above SENDMSG in the wire-protocol header.
+
+    unix_handle_sendmsg(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EBADF)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_DGRAM
+            var err: [3]byte
+            err[0] = byte(-UNIX_EINVAL)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val plen = int(buf[2]) & 0xff
+        val nfds = int(buf[3 + plen]) & 0xff
+        if nfds > UNIX_SCM_MAX_FDS
+            var err: [3]byte
+            err[0] = byte(-UNIX_EINVAL)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val slots_off = 3 + plen + 1
+        val dlen = unix_read_u16(buf, slots_off + nfds)
+        val data: *byte = buf + slots_off + nfds + 2
+        val target = unix_find_bound(buf + 3, plen)
+        if target < 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_ECONNREFUSED)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[target].stype != UNIX_SOCK_DGRAM
+            var err: [3]byte
+            err[0] = byte(-UNIX_ECONNREFUSED)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+
+Validate every fd up front — if any is bogus, reject the
+whole sendmsg without partial transfer. Each slot must be
+in range, in_use, and in the sender's owners ring.
+
+        var k = 0
+        while k < nfds
+            val sidx = int(buf[slots_off + k]) & 0xff
+            if sidx < 0
+                var err: [3]byte
+                err[0] = byte(-UNIX_EINVAL)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            if sidx >= UNIX_MAX_SOCKETS
+                var err: [3]byte
+                err[0] = byte(-UNIX_EINVAL)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            if unix_sockets[sidx].in_use == 0
+                var err: [3]byte
+                err[0] = byte(-UNIX_EBADF)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            if unix_slot_has_owner(sidx, sender) == 0
+                var err: [3]byte
+                err[0] = byte(-UNIX_EBADF)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            k += 1
+
+        if unix_sockets[target].dg_count >= UNIX_DG_QUEUE
+            var err: [3]byte
+            err[0] = byte(-UNIX_EAGAIN)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+
+Enqueue the datagram, copy the fd slot indices into the
+ancillary slot, and bump each transferred slot's queue-ref
+counter so the underlying socket stays alive even if all
+its current owners close before the receiver drains.
+
+        val nsent = unix_dg_enqueue(target, fd, data, dlen)
+        val q = (unix_sockets[target].dg_tail + UNIX_DG_QUEUE - 1) % UNIX_DG_QUEUE
+        unix_sockets[target].dg_queue[q].nfds = nfds
+        k = 0
+        while k < nfds
+            val sidx = int(buf[slots_off + k]) & 0xff
+            unix_sockets[target].dg_queue[q].fds[k] = sidx
+            unix_sockets[sidx].nrefs_in_queues += 1
+            k += 1
+        var sreply: [3]byte
+        sreply[0] = 0
+        unix_write_u16(&sreply[0], 1, nsent)
+        ipc_reply(sender, sreply, 3)
+
+
+### RECVMSG handler (DGRAM, SCM_RIGHTS)
+
+Drains one queued datagram. For each ancillary fd in the
+entry, releases its queue-ref and grants co-ownership to
+the recvmsg caller. If the receiver's `max_nfds` budget is
+smaller than the queued count, excess fds are dropped (the
+queue-ref is released, but no co-ownership granted — those
+slots become orphaned candidates for free).
+
+If the queue is empty, returns -EAGAIN. No parking — a
+caller wanting blocking semantics should use `recvfrom`.
+Recvmsg parking is deferred to a later session.
+
+Wire reply: `status(1) + src_plen(1) + src_path(P) +
+nfds(1) + slots(F) + dlen_be(2) + data(D)`.
+
+    unix_handle_recvmsg(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [4]byte
+            err[0] = byte(-UNIX_EBADF)
+            err[1] = 0
+            err[2] = 0
+            err[3] = 0
+            ipc_reply(sender, err, 4)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_DGRAM
+            var err: [4]byte
+            err[0] = byte(-UNIX_EINVAL)
+            err[1] = 0
+            err[2] = 0
+            err[3] = 0
+            ipc_reply(sender, err, 4)
+            return
+        val max_nfds_raw = int(buf[2]) & 0xff
+        var max_nfds = max_nfds_raw
+        if max_nfds > UNIX_SCM_MAX_FDS
+            max_nfds = UNIX_SCM_MAX_FDS
+        val maxlen = unix_read_u16(buf, 3)
+        if unix_sockets[fd].dg_count == 0
+            var err: [4]byte
+            err[0] = byte(-UNIX_EAGAIN)
+            err[1] = 0
+            err[2] = 0
+            err[3] = 0
+            ipc_reply(sender, err, 4)
+            return
+
+Drain the head dgram. Build the recvmsg-shaped reply by
+hand (different layout than dg_dequeue_reply): we need a
+slot list slotted between path and dlen.
+
+        val slot = unix_sockets[fd].dg_head
+        val sp = unix_sockets[fd].dg_queue[slot].src_path_len
+        val queued_nfds = unix_sockets[fd].dg_queue[slot].nfds
+        var grant = queued_nfds
+        if grant > max_nfds
+            grant = max_nfds
+        var pr: [600]byte
+        pr[0] = 0
+        pr[1] = byte(sp & 0xff)
+        var i = 0
+        while i < sp
+            pr[2 + i] = unix_sockets[fd].dg_queue[slot].src_path[i]
+            i += 1
+        pr[2 + sp] = byte(grant & 0xff)
+        i = 0
+        while i < grant
+            val sidx = unix_sockets[fd].dg_queue[slot].fds[i]
+            pr[2 + sp + 1 + i] = byte(sidx & 0xff)
+            i += 1
+        var dl = unix_sockets[fd].dg_queue[slot].data_len
+        if dl > maxlen
+            dl = maxlen
+        unix_write_u16(&pr[0], 2 + sp + 1 + grant, dl)
+        i = 0
+        while i < dl
+            pr[2 + sp + 1 + grant + 2 + i] = unix_sockets[fd].dg_queue[slot].data[i]
+            i += 1
+
+Release each queued fd. The first `grant` get co-owner
+status; the rest are dropped. In both cases the slot's
+`nrefs_in_queues` is decremented; if that drops the slot
+to 0 owners + 0 queue refs, run the orphan cleanup.
+
+        i = 0
+        while i < queued_nfds
+            val sidx = unix_sockets[fd].dg_queue[slot].fds[i]
+            unix_sockets[sidx].nrefs_in_queues -= 1
+            if i < grant
+                unix_slot_add_owner(sidx, sender)
+            if unix_sockets[sidx].owners_count == 0
+                if unix_sockets[sidx].nrefs_in_queues == 0
+                    if unix_sockets[sidx].in_use != 0
+                        unix_full_close(sidx)
+            i += 1
+
+        unix_sockets[fd].dg_queue[slot].in_use = 0
+        unix_sockets[fd].dg_head = (slot + 1) % UNIX_DG_QUEUE
+        unix_sockets[fd].dg_count -= 1
+        ipc_reply(sender, &pr[0], 2 + sp + 1 + grant + 2 + dl)
+
+
 ### CLOSE handler
 
 Frees the slot. If the slot has a STREAM peer, marks the
@@ -897,55 +1264,27 @@ the backlog and forcibly closes pending server-end slots.
             ipc_reply(sender, reply, 1)
             return
 
-If we were the connected end of a stream pair, notify the
-peer it lost us. Don't free the peer here — the peer's
-owner closes it via its own CLOSE.
+Drop the caller from the owners ring. If other owners or
+in-flight queue references remain, the slot stays alive —
+just reply success without touching peers/backlog/parked
+state.
 
-        val peer = unix_sockets[fd].peer_idx
-        if peer >= 0
-            if unix_sockets[peer].in_use != 0
-                unix_sockets[peer].peer_closed = 1
-                unix_sockets[peer].peer_idx = -1
-                val parked = unix_sockets[peer].pending_recv_tid
-                if parked >= 0
-                    unix_sockets[peer].pending_recv_tid = -1
-                    var pr: [3]byte
-                    pr[0] = 0
-                    pr[1] = 0
-                    pr[2] = 0
-                    ipc_reply(parked, pr, 3)
+        unix_slot_remove_owner(fd, sender)
+        if unix_sockets[fd].owners_count > 0
+            var reply: [1]byte
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
+        if unix_sockets[fd].nrefs_in_queues > 0
+            var reply: [1]byte
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
 
-If we were a listener, forcibly close any backlog entries
-that haven't been accepted. Their owner is `sender` (the
-listener's owner); they hold no resources beyond the slot.
+Last owner gone and no queue refs — run the full peer-EOF /
+listener-flush / parked-accept-EBADF cleanup, then free.
 
-        if unix_sockets[fd].listening != 0
-            while unix_sockets[fd].pending_count > 0
-                val head = unix_sockets[fd].pending_head
-                val pending = unix_sockets[fd].pending_q[head]
-                unix_sockets[fd].pending_head = (head + 1) % UNIX_BACKLOG_MAX
-                unix_sockets[fd].pending_count -= 1
-                if unix_sockets[pending].in_use != 0
-                    val ppeer = unix_sockets[pending].peer_idx
-                    if ppeer >= 0
-                        if unix_sockets[ppeer].in_use != 0
-                            unix_sockets[ppeer].peer_closed = 1
-                            unix_sockets[ppeer].peer_idx = -1
-                    unix_free_slot(pending)
-
-Wake any thread that was blocked on accept() — they'll see
-status=0 + a "fake" fd of 0xff which the shim recognizes as
-"-EBADF, listener closed". Prefer EBADF over a hung accept.
-
-        if unix_sockets[fd].pending_accept_tid >= 0
-            val waiter = unix_sockets[fd].pending_accept_tid
-            unix_sockets[fd].pending_accept_tid = -1
-            var ar: [2]byte
-            ar[0] = byte(-UNIX_EBADF)
-            ar[1] = 0
-            ipc_reply(waiter, ar, 2)
-
-        unix_free_slot(fd)
+        unix_full_close(fd)
         var reply: [1]byte
         reply[0] = 0
         ipc_reply(sender, reply, 1)
@@ -964,21 +1303,11 @@ sweep is a no-op against everything else.
         var i = 0
         while i < UNIX_MAX_SOCKETS
             if unix_sockets[i].in_use != 0
-                if unix_sockets[i].owner_tid == tid
-                    val peer = unix_sockets[i].peer_idx
-                    if peer >= 0
-                        if unix_sockets[peer].in_use != 0
-                            unix_sockets[peer].peer_closed = 1
-                            unix_sockets[peer].peer_idx = -1
-                            val parked = unix_sockets[peer].pending_recv_tid
-                            if parked >= 0
-                                unix_sockets[peer].pending_recv_tid = -1
-                                var pr: [3]byte
-                                pr[0] = 0
-                                pr[1] = 0
-                                pr[2] = 0
-                                ipc_reply(parked, pr, 3)
-                    unix_free_slot(i)
+                if unix_slot_has_owner(i, tid) != 0
+                    unix_slot_remove_owner(i, tid)
+                    if unix_sockets[i].owners_count == 0
+                        if unix_sockets[i].nrefs_in_queues == 0
+                            unix_full_close(i)
             i += 1
         var reply: [1]byte
         reply[0] = 0
@@ -1023,6 +1352,10 @@ Synchronous request-reply, no notification path required
                     unix_handle_close(sender, buf)
                 else if cmd == UNIX_CMD_PID_EXIT
                     unix_handle_pid_exit(sender, buf)
+                else if cmd == UNIX_CMD_SENDMSG
+                    unix_handle_sendmsg(sender, buf)
+                else if cmd == UNIX_CMD_RECVMSG
+                    unix_handle_recvmsg(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)

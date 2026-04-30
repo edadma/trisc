@@ -121,6 +121,7 @@ reader can scan by errno number.
     const EMSGSIZE         = 90
     const ENOPROTOOPT      = 92
     const EPROTONOSUPPORT  = 93
+    const EOPNOTSUPP       = 95
     const EAFNOSUPPORT     = 97
     const EADDRINUSE       = 98
     const ENETUNREACH      = 101
@@ -481,8 +482,26 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_RECV      = 9
     const UNIX_CMD_CLOSE     = 10
     const UNIX_CMD_PID_EXIT  = 11
+    const UNIX_CMD_SENDMSG   = 12
+    const UNIX_CMD_RECVMSG   = 13
 
     const UNIX_PATH_MAX      = 108
+    const UNIX_SCM_MAX_FDS   = 4
+
+SCM_RIGHTS cmsg constants. SOL_SOCKET / SCM_RIGHTS match
+Linux UAPI; the cmsghdr is 16 bytes on LP64
+(`size_t cmsg_len + int cmsg_level + int cmsg_type`).
+
+    val SHIM_SOL_SOCKET      = 1
+    val SHIM_SCM_RIGHTS      = 1
+    val SHIM_CMSG_HDR_LEN    = 16
+
+sendmsg/recvmsg gather/scatter caps. `SHIM_IOV_MAX` bounds
+the iovec array we'll walk; `SHIM_MSG_MAX` bounds the
+total payload bytes (Ethernet MTU for UDP, plenty for TCP).
+
+    val SHIM_IOV_MAX         = 8
+    val SHIM_MSG_MAX         = 1472
 
 socket(2) / accept4(2) flag bits OR'd into `stype` / `flags`.
 SOCK_NONBLOCK is honoured (mirrored into the slot's flags field
@@ -1868,6 +1887,395 @@ STREAM recv for AF_UNIX. Used by both `recvfrom` and
         i64(dcopy)
 
 
+SCM_RIGHTS sendmsg path. Walks the user's `msg_control`
+buffer for a single SOL_SOCKET/SCM_RIGHTS cmsg and resolves
+each fd into a unix-server slot index. Other cmsg types
+are silently skipped (matches Linux: unknown cmsgs aren't
+an error). Returns the number of slots written into
+`slots[]` on success, -1 on parse error or if any fd isn't
+a unix socket.
+
+    shim_unix_extract_scm_rights(ctrl_ptr: i64, ctrl_len: int,
+            slots: *byte) -> int
+        if ctrl_ptr == i64(0)
+            return 0
+        if ctrl_len < SHIM_CMSG_HDR_LEN
+            return 0
+        val cm: *byte = *byte(ctrl_ptr)
+        var off = 0
+        var nfds = 0
+        while off + SHIM_CMSG_HDR_LEN <= ctrl_len
+            val cmsg_len = int(shim_read_ptr(cm, off))
+            if cmsg_len < SHIM_CMSG_HDR_LEN
+                return -1
+            if off + cmsg_len > ctrl_len
+                return -1
+            val cmsg_level = shim_read_i32(cm, off + 8)
+            val cmsg_type  = shim_read_i32(cm, off + 12)
+            if cmsg_level == SHIM_SOL_SOCKET
+                if cmsg_type == SHIM_SCM_RIGHTS
+                    val fd_count = (cmsg_len - SHIM_CMSG_HDR_LEN) / 4
+                    var i = 0
+                    while i < fd_count
+                        if nfds >= UNIX_SCM_MAX_FDS
+                            return -1
+                        val user_fd = shim_read_i32(cm,
+                            off + SHIM_CMSG_HDR_LEN + i * 4)
+                        val k = posix_fd_kind(user_fd)
+                        if k != POSIX_FD_UNIX_SOCKET
+                            return -1
+                        val slot_idx = posix_fd_target(user_fd)
+                        slots[nfds] = byte(slot_idx & 0xff)
+                        nfds += 1
+                        i += 1
+            // Advance to next cmsg, aligned to 8 bytes (sizeof size_t).
+            var advance = cmsg_len
+            advance = (advance + 7) & (~7)
+            off += advance
+        nfds
+
+
+sys_sendmsg helper for AF_UNIX. Gathers the iovec into a
+single buffer, parses any SCM_RIGHTS cmsg for fd-passing,
+and dispatches:
+- DGRAM: UNIX_CMD_SENDMSG with path + nfds + slots + payload.
+- STREAM with no fds: falls through to sys_write (existing
+  UNIX_CMD_SEND path).
+- STREAM with fds: returns -EOPNOTSUPP — Session 2 wires
+  SCM_RIGHTS through DGRAM only.
+
+    sys_sendmsg_unix(fd: int, msghdr_ptr: i64, flags: int) -> i64
+        if msghdr_ptr == i64(0)
+            return i64(-EFAULT)
+        val mh: *byte = *byte(msghdr_ptr)
+        val name_ptr = shim_read_ptr(mh, 0)
+        val name_len = shim_read_i32(mh, 8)
+        val iov_ptr  = shim_read_ptr(mh, 16)
+        val iov_len  = shim_read_i32(mh, 24)
+        val ctrl_ptr = shim_read_ptr(mh, 32)
+        val ctrl_len = shim_read_i32(mh, 40)
+        if iov_len < 0
+            return i64(-EINVAL)
+        if iov_len > SHIM_IOV_MAX
+            return i64(-EINVAL)
+        if iov_len > 0
+            if iov_ptr == i64(0)
+                return i64(-EFAULT)
+        var slots: [4]byte
+        val nfds = shim_unix_extract_scm_rights(ctrl_ptr, ctrl_len,
+            &slots[0])
+        if nfds < 0
+            return i64(-EINVAL)
+        val pid = posix_fd_current_pid()
+        val stype = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].pos)
+        if stype == POSIX_SOCK_STREAM
+            if nfds > 0
+                return i64(-EOPNOTSUPP)
+            // No cmsg → fall back to plain stream write.
+            var gather: [2048]byte
+            var gtotal = 0
+            val iov_base_s: *byte = *byte(iov_ptr)
+            var ii_s = 0
+            while ii_s < iov_len
+                val ent_off_s = ii_s * 16
+                val base_s    = shim_read_ptr(iov_base_s, ent_off_s)
+                val seg_len_s = int(shim_read_ptr(iov_base_s, ent_off_s + 8))
+                if seg_len_s > 0
+                    if base_s == i64(0)
+                        return i64(-EFAULT)
+                    val src_s: *byte = *byte(base_s)
+                    var jj_s = 0
+                    while jj_s < seg_len_s
+                        if gtotal < 2046
+                            gather[gtotal] = src_s[jj_s]
+                            gtotal += 1
+                        jj_s += 1
+                ii_s += 1
+            return sys_send_unix_stream(fd, i64(&gather[0]), gtotal)
+
+DGRAM path: name is required, gather iovec, build the
+SENDMSG wire message.
+
+        if name_ptr == i64(0)
+            return i64(-EINVAL)
+        var path: [108]byte
+        val plen = shim_unix_read_path(name_ptr, name_len, &path[0], 108)
+        if plen <= 0
+            return i64(-EINVAL)
+        var gather: [256]byte
+        var total = 0
+        val iov_base: *byte = *byte(iov_ptr)
+        var ii = 0
+        while ii < iov_len
+            val ent_off = ii * 16
+            val base    = shim_read_ptr(iov_base, ent_off)
+            val seg_len = int(shim_read_ptr(iov_base, ent_off + 8))
+            if seg_len > 0
+                if base == i64(0)
+                    return i64(-EFAULT)
+                val src: *byte = *byte(base)
+                var jj = 0
+                while jj < seg_len
+                    if total < 256
+                        gather[total] = src[jj]
+                        total += 1
+                    jj += 1
+            ii += 1
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+
+Wire layout: cmd(1) + fd(1) + plen(1) + path(P) + nfds(1)
++ slots(F) + dlen_be(2) + data(D). For our caps (path 108
++ 4 fds + 256 data) the worst case is 374 bytes — round to
+512 for headroom, matching the server's UNIX_MSG_BUF.
+
+        var msg: [512]byte
+        msg[0] = byte(UNIX_CMD_SENDMSG)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte(plen & 0xff)
+        var i = 0
+        while i < plen
+            msg[3 + i] = path[i]
+            i += 1
+        msg[3 + plen] = byte(nfds & 0xff)
+        i = 0
+        while i < nfds
+            msg[3 + plen + 1 + i] = slots[i]
+            i += 1
+        val slots_off = 3 + plen + 1 + nfds
+        msg[slots_off]     = byte((total >> 8) & 0xff)
+        msg[slots_off + 1] = byte(total & 0xff)
+        i = 0
+        while i < total
+            msg[slots_off + 2 + i] = gather[i]
+            i += 1
+        var reply: [3]byte
+        val r = ipc_send(port, msg, slots_off + 2 + total, reply, 3)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            val status = unix_status(reply[0])
+            posix_fd_set_error(fd, i64(status))
+            return i64(status)
+        val nsent = ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
+        i64(nsent)
+
+
+sys_recvmsg helper for AF_UNIX. Issues UNIX_CMD_RECVMSG,
+unpacks the reply (src_path + ancillary fds + data),
+allocates a fresh posix_fd entry per transferred slot,
+scatters data into the iovec, and writes a single
+SOL_SOCKET/SCM_RIGHTS cmsg into the user's `msg_control`
+buffer. Returns the number of payload bytes received.
+
+For STREAM, no SCM_RIGHTS path exists in this session —
+delegate to sys_read.
+
+    sys_recvmsg_unix(fd: int, msghdr_ptr: i64, flags: int) -> i64
+        if msghdr_ptr == i64(0)
+            return i64(-EFAULT)
+        val mh: *byte = *byte(msghdr_ptr)
+        val name_ptr = shim_read_ptr(mh, 0)
+        val iov_ptr  = shim_read_ptr(mh, 16)
+        val iov_len  = shim_read_i32(mh, 24)
+        val ctrl_ptr = shim_read_ptr(mh, 32)
+        val ctrl_len = shim_read_i32(mh, 40)
+        if iov_len < 0
+            return i64(-EINVAL)
+        if iov_len > SHIM_IOV_MAX
+            return i64(-EINVAL)
+        if iov_len > 0
+            if iov_ptr == i64(0)
+                return i64(-EFAULT)
+        val pid = posix_fd_current_pid()
+        val stype = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].pos)
+        if stype == POSIX_SOCK_STREAM
+            // STREAM: no SCM_RIGHTS in Session 2 — read into the
+            // gather/scatter scratch then signal "no ancillary".
+            var cap = 0
+            val iov_base_s: *byte = *byte(iov_ptr)
+            var ii_s = 0
+            while ii_s < iov_len
+                val ent_off_s = ii_s * 16
+                val seg_len_s = int(shim_read_ptr(iov_base_s, ent_off_s + 8))
+                if seg_len_s > 0
+                    cap += seg_len_s
+                ii_s += 1
+            if cap > 2046
+                cap = 2046
+            var scratch_s: [2048]byte
+            val got_s = sys_recv_unix_stream(fd, i64(&scratch_s[0]), cap)
+            if got_s < i64(0)
+                return got_s
+            val nbytes_s = int(got_s)
+            var written_s = 0
+            ii_s = 0
+            while ii_s < iov_len
+                val ent_off_s = ii_s * 16
+                val base_s    = shim_read_ptr(iov_base_s, ent_off_s)
+                val seg_len_s = int(shim_read_ptr(iov_base_s, ent_off_s + 8))
+                if seg_len_s > 0
+                    if base_s != i64(0)
+                        val dst_s: *byte = *byte(base_s)
+                        var take_s = nbytes_s - written_s
+                        if take_s > seg_len_s
+                            take_s = seg_len_s
+                        var jj_s = 0
+                        while jj_s < take_s
+                            dst_s[jj_s] = scratch_s[written_s + jj_s]
+                            jj_s += 1
+                        written_s += take_s
+                ii_s += 1
+            shim_write_i32(mh, 40, 0)
+            shim_write_i32(mh, 48, 0)
+            return i64(nbytes_s)
+
+DGRAM path: budget the cmsg buffer for max_nfds, send the
+RECVMSG cmd, parse the reply.
+
+        var max_nfds = 0
+        if ctrl_ptr != i64(0)
+            if ctrl_len >= SHIM_CMSG_HDR_LEN
+                max_nfds = (ctrl_len - SHIM_CMSG_HDR_LEN) / 4
+                if max_nfds > UNIX_SCM_MAX_FDS
+                    max_nfds = UNIX_SCM_MAX_FDS
+                if max_nfds < 0
+                    max_nfds = 0
+        var cap = 0
+        val iov_base: *byte = *byte(iov_ptr)
+        var ii = 0
+        while ii < iov_len
+            val ent_off = ii * 16
+            val seg_len = int(shim_read_ptr(iov_base, ent_off + 8))
+            if seg_len > 0
+                cap += seg_len
+            ii += 1
+        if cap > 256
+            cap = 256
+        if cap < 0
+            cap = 0
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [5]byte
+        msg[0] = byte(UNIX_CMD_RECVMSG)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte(max_nfds & 0xff)
+        msg[3] = byte((cap >> 8) & 0xff)
+        msg[4] = byte(cap & 0xff)
+        var reply: [600]byte
+        val r = ipc_send(port, msg, 5, reply, 600)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            val status = unix_status(reply[0])
+            posix_fd_set_error(fd, i64(status))
+            return i64(status)
+
+Reply layout: status(1) + src_plen(1) + src_path(P) +
+nfds(1) + slots(F) + dlen_be(2) + data(D).
+
+        val src_plen = int(reply[1]) & 0xff
+        val nfds_in_reply = int(reply[2 + src_plen]) & 0xff
+        val slots_off = 2 + src_plen + 1
+        val dlen_off = slots_off + nfds_in_reply
+        val dlen = ((int(reply[dlen_off]) & 0xff) << 8) | (int(reply[dlen_off + 1]) & 0xff)
+        val data_off = dlen_off + 2
+
+Allocate posix_fds for each transferred slot. Linux's
+SCM_RIGHTS leaves the receiver responsible for closing
+each new fd. If posix_fd_alloc fails (EMFILE), close the
+unix-server slot directly via UNIX_CMD_CLOSE so we don't
+leak — but Session 2 doesn't bother with the close-on-EMFILE
+edge: the slot stays alive (we own it) and the new fd is
+omitted from the cmsg. Future cleanup via process exit.
+
+        var new_fds: [4]int
+        var n_new = 0
+        var nf = 0
+        while nf < nfds_in_reply
+            val sidx = int(reply[slots_off + nf]) & 0xff
+            val pfd = posix_fd_alloc(POSIX_FD_UNIX_SOCKET, sidx)
+            if pfd >= 0
+                val pid2 = posix_fd_current_pid()
+                posix_fd_table[pid2 * POSIX_FDS_PER_PROC + pfd].pos = i64(POSIX_SOCK_DGRAM)
+                new_fds[n_new] = pfd
+                n_new += 1
+            nf += 1
+
+Scatter data into the iovec.
+
+        var written = 0
+        ii = 0
+        while ii < iov_len
+            val ent_off = ii * 16
+            val base    = shim_read_ptr(iov_base, ent_off)
+            val seg_len = int(shim_read_ptr(iov_base, ent_off + 8))
+            if seg_len > 0
+                if base != i64(0)
+                    val dst: *byte = *byte(base)
+                    var take = dlen - written
+                    if take > seg_len
+                        take = seg_len
+                    if take < 0
+                        take = 0
+                    var jj = 0
+                    while jj < take
+                        dst[jj] = reply[data_off + written + jj]
+                        jj += 1
+                    written += take
+            ii += 1
+
+Write src_path into msg_name as a sockaddr_un (family +
+NUL-terminated path). Update msg_namelen.
+
+        if name_ptr != i64(0)
+            val a: *byte = *byte(name_ptr)
+            a[0] = byte(POSIX_AF_UNIX & 0xff)
+            a[1] = byte(0)
+            var pcopy = src_plen
+            if pcopy > UNIX_PATH_MAX
+                pcopy = UNIX_PATH_MAX
+            var i = 0
+            while i < pcopy
+                a[2 + i] = reply[2 + i]
+                i += 1
+            if 2 + pcopy < 110
+                a[2 + pcopy] = byte(0)
+            shim_write_i32(mh, 8, 2 + src_plen)
+
+Build SCM_RIGHTS cmsg in the user's control buffer if
+fds were granted and the buffer is non-null.
+
+        var ctrl_used = 0
+        if n_new > 0
+            if ctrl_ptr != i64(0)
+                val cb: *byte = *byte(ctrl_ptr)
+                val cmsg_len_v = SHIM_CMSG_HDR_LEN + n_new * 4
+                if cmsg_len_v <= ctrl_len
+                    var i = 0
+                    while i < 8
+                        cb[i] = byte((cmsg_len_v >> (i * 8)) & 0xff)
+                        i += 1
+                    shim_write_i32(cb, 8, SHIM_SOL_SOCKET)
+                    shim_write_i32(cb, 12, SHIM_SCM_RIGHTS)
+                    var fi = 0
+                    while fi < n_new
+                        shim_write_i32(cb, SHIM_CMSG_HDR_LEN + fi * 4, new_fds[fi])
+                        fi += 1
+                    ctrl_used = cmsg_len_v
+        shim_write_i32(mh, 40, ctrl_used)
+        shim_write_i32(mh, 48, 0)
+        i64(written)
+
+
 SYS_BIND. For UDP sockets, forward to inet's BIND. For TCP
 sockets, stash the bound port in `slot.pos` so a subsequent
 `listen()` can use it — inet allocates the actual listen slot
@@ -2337,10 +2745,9 @@ struct iovec { void *iov_base; size_t iov_len; }; // 16 bytes
 To keep the gather/scatter buffer bounded, we cap `iovlen` at
 `SHIM_IOV_MAX = 8` and total bytes at `SHIM_MSG_MAX = 1472` —
 matches the inet UDP datagram cap (full Ethernet MTU) and is
-plenty for the TCP chunk-at-a-time path.
-
-    val SHIM_IOV_MAX        = 8
-    val SHIM_MSG_MAX        = 1472
+plenty for the TCP chunk-at-a-time path. The constants
+themselves live up next to the other shim-wide caps so AF_UNIX
+helpers can use them without a forward reference.
 
     shim_read_ptr(p: *byte, off: int) -> i64
         var v: i64 = 0
@@ -2361,6 +2768,8 @@ plenty for the TCP chunk-at-a-time path.
 
     sys_sendmsg(fd: int, msghdr_ptr: i64, flags: int) -> i64
         val k = posix_fd_kind(fd)
+        if k == POSIX_FD_UNIX_SOCKET
+            return sys_sendmsg_unix(fd, msghdr_ptr, flags)
         if k != POSIX_FD_UDP_SOCKET
             if k != POSIX_FD_TCP_SOCKET
                 return i64(-EBADF)
@@ -2407,6 +2816,8 @@ plenty for the TCP chunk-at-a-time path.
 
     sys_recvmsg(fd: int, msghdr_ptr: i64, flags: int) -> i64
         val k = posix_fd_kind(fd)
+        if k == POSIX_FD_UNIX_SOCKET
+            return sys_recvmsg_unix(fd, msghdr_ptr, flags)
         if k != POSIX_FD_UDP_SOCKET
             if k != POSIX_FD_TCP_SOCKET
                 return i64(-EBADF)

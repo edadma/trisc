@@ -1,0 +1,346 @@
+test_punixscm — AF_UNIX SCM_RIGHTS fd-passing
+==============================================
+
+Validates Session 2 of Option C: SCM_RIGHTS through the
+POSIX `sendmsg(2)` / `recvmsg(2)` surface. DGRAM only; STREAM
+SCM_RIGHTS is deferred.
+
+Test plan
+---------
+
+Three sockets in a single process:
+
+- `alpha` — DGRAM, bound to "PSCA"
+- `beta`  — DGRAM, bound to "PSCB"
+- `gamma` — DGRAM, **unbound** (the fd we pass)
+
+1. `sendmsg(alpha → "PSCB", payload + cmsg=[gamma])` — passes
+   `gamma`'s fd to `beta` via SCM_RIGHTS.
+2. `recvmsg(beta)` — receives the payload, the source path
+   "PSCA", and a fresh fd `gamma2` that aliases the same
+   underlying unix-server slot as `gamma`.
+3. `close(gamma)` — drops the original handle. The slot
+   stays alive because `gamma2` still owns it.
+4. `bind(gamma2, "PSCG")` — proves `gamma2` is a fully
+   functional unix-socket fd.
+5. `sendto(beta → "PSCG", probe)` and `recvfrom(gamma2)` —
+   probe round-trip confirms the slot is reachable through
+   the transferred fd.
+
+Pass criterion: prints `punixscm: ok`.
+
+    module oskit.bin.test_punixscm
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE      = 147
+    val NR_BIND       = 135
+    val NR_RECVFROM   = 276
+    val NR_RECVMSG    = 278
+    val NR_SENDMSG    = 306
+    val NR_SENDTO     = 307
+    val NR_SOCKET     = 337
+
+    val AF_UNIX_V     = 1
+    val SOCK_DGRAM_V  = 2
+
+    val SOL_SOCKET_V  = 1
+    val SCM_RIGHTS_V  = 1
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("punixscm: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+Build a sockaddr_un at `out` with sun_family=AF_UNIX and the
+given NUL-terminated path bytes. Returns total addrlen
+(2 + path_len + 1 for the terminator).
+
+    fill_sockaddr_un(out: *byte, path: *byte, path_len: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < path_len
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + path_len] = byte(0)
+        2 + path_len + 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen_p: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_p)))
+
+    posix_sendmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_SENDMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+    posix_recvmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_RECVMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+
+Write a 64-bit little-endian value at offset `off` in `p`.
+
+    write_i64(p: *byte, off: int, v: i64)
+        var i = 0
+        while i < 8
+            p[off + i] = byte((v >> (i * 8)) & i64(0xff))
+            i += 1
+
+
+Write a 32-bit little-endian value at offset `off` in `p`.
+
+    write_i32(p: *byte, off: int, v: int)
+        p[off]     = byte(v & 0xff)
+        p[off + 1] = byte((v >> 8) & 0xff)
+        p[off + 2] = byte((v >> 16) & 0xff)
+        p[off + 3] = byte((v >> 24) & 0xff)
+
+
+    read_i32(p: *byte, off: int) -> int
+        (int(p[off]) & 0xff) | ((int(p[off + 1]) & 0xff) << 8) | ((int(p[off + 2]) & 0xff) << 16) | ((int(p[off + 3]) & 0xff) << 24)
+
+
+    main(argv: []string)
+
+Allocate the three sockets. `gamma` is left unbound — we
+pass it via SCM_RIGHTS, then bind it on the receiver side.
+
+        val alpha = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if alpha < 0
+            fail(1)
+            return
+        val beta = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if beta < 0
+            fail(2)
+            return
+        val gamma = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if gamma < 0
+            fail(3)
+            return
+
+        var path_a: [4]byte
+        path_a[0] = 'P'; path_a[1] = 'S'; path_a[2] = 'C'; path_a[3] = 'A'
+        var path_b: [4]byte
+        path_b[0] = 'P'; path_b[1] = 'S'; path_b[2] = 'C'; path_b[3] = 'B'
+        var path_g: [4]byte
+        path_g[0] = 'P'; path_g[1] = 'S'; path_g[2] = 'C'; path_g[3] = 'G'
+
+        var sa_a: [128]byte
+        val al_a = fill_sockaddr_un(&sa_a[0], &path_a[0], 4)
+        if posix_bind(alpha, &sa_a[0], al_a) != 0
+            fail(4)
+            return
+        var sa_b: [128]byte
+        val al_b = fill_sockaddr_un(&sa_b[0], &path_b[0], 4)
+        if posix_bind(beta, &sa_b[0], al_b) != 0
+            fail(5)
+            return
+
+Build the SCM_RIGHTS sendmsg control buffer carrying
+`gamma`'s fd.  Layout (LP64):
+
+```
+struct cmsghdr {
+    size_t cmsg_len;     // off  0, 8 bytes
+    int    cmsg_level;   // off  8, 4 bytes
+    int    cmsg_type;    // off 12, 4 bytes
+    // followed by cmsg_data (4 bytes per fd, padded to 8)
+};
+```
+
+For one fd, cmsg_len = 16 + 4 = 20.
+
+        var ctrl_send: [32]byte
+        write_i64(&ctrl_send[0], 0, i64(20))
+        write_i32(&ctrl_send[0], 8, SOL_SOCKET_V)
+        write_i32(&ctrl_send[0], 12, SCM_RIGHTS_V)
+        write_i32(&ctrl_send[0], 16, gamma)
+
+        var send_payload: [8]byte
+        var ii = 0
+        while ii < 8
+            send_payload[ii] = byte((ii + 0x40) & 0xff)
+            ii += 1
+
+        var send_iov: [16]byte
+        write_i64(&send_iov[0], 0, i64(&send_payload[0]))
+        write_i64(&send_iov[0], 8, i64(8))
+
+        var send_mh: [56]byte
+        write_i64(&send_mh[0], 0, i64(&sa_b[0]))
+        write_i32(&send_mh[0], 8, al_b)
+        write_i32(&send_mh[0], 12, 0)
+        write_i64(&send_mh[0], 16, i64(&send_iov[0]))
+        write_i32(&send_mh[0], 24, 1)
+        write_i32(&send_mh[0], 28, 0)
+        write_i64(&send_mh[0], 32, i64(&ctrl_send[0]))
+        write_i32(&send_mh[0], 40, 20)
+        write_i32(&send_mh[0], 44, 0)
+        write_i32(&send_mh[0], 48, 0)
+
+        val ns = posix_sendmsg(alpha, &send_mh[0], 0)
+        if ns != 8
+            puts("punixscm: sendmsg ")
+            print_idec(ns)
+            puts("\n")
+            fail(6)
+            return
+
+Receive on `beta`. Provide enough space in msg_control for
+one fd's cmsg (16 + 4 = 20 bytes; round to 32).
+
+        var recv_payload: [16]byte
+        var src_addr: [128]byte
+
+        var recv_iov: [16]byte
+        write_i64(&recv_iov[0], 0, i64(&recv_payload[0]))
+        write_i64(&recv_iov[0], 8, i64(16))
+
+        var ctrl_recv: [32]byte
+        var recv_mh: [56]byte
+        write_i64(&recv_mh[0], 0, i64(&src_addr[0]))
+        write_i32(&recv_mh[0], 8, 128)
+        write_i32(&recv_mh[0], 12, 0)
+        write_i64(&recv_mh[0], 16, i64(&recv_iov[0]))
+        write_i32(&recv_mh[0], 24, 1)
+        write_i32(&recv_mh[0], 28, 0)
+        write_i64(&recv_mh[0], 32, i64(&ctrl_recv[0]))
+        write_i32(&recv_mh[0], 40, 32)
+        write_i32(&recv_mh[0], 44, 0)
+        write_i32(&recv_mh[0], 48, 0)
+
+        val nr = posix_recvmsg(beta, &recv_mh[0], 0)
+        if nr != 8
+            puts("punixscm: recvmsg ")
+            print_idec(nr)
+            puts("\n")
+            fail(7)
+            return
+        ii = 0
+        while ii < 8
+            if recv_payload[ii] != byte((ii + 0x40) & 0xff)
+                fail(8)
+                return
+            ii += 1
+
+Verify the source path round-trips as "PSCA".
+
+        if src_addr[0] != byte(AF_UNIX_V)
+            fail(9)
+            return
+        if src_addr[2] != 'P' || src_addr[3] != 'S'
+            fail(10)
+            return
+        if src_addr[4] != 'C' || src_addr[5] != 'A'
+            fail(11)
+            return
+
+Check that the cmsg returned is a valid SCM_RIGHTS with one
+fd.
+
+        val ctrl_used = read_i32(&recv_mh[0], 40)
+        if ctrl_used != 20
+            puts("punixscm: ctrl_used ")
+            print_idec(ctrl_used)
+            puts("\n")
+            fail(12)
+            return
+        val cmsg_level = read_i32(&ctrl_recv[0], 8)
+        val cmsg_type  = read_i32(&ctrl_recv[0], 12)
+        if cmsg_level != SOL_SOCKET_V
+            fail(13)
+            return
+        if cmsg_type != SCM_RIGHTS_V
+            fail(14)
+            return
+        val gamma2 = read_i32(&ctrl_recv[0], 16)
+        if gamma2 < 0
+            fail(15)
+            return
+
+Drop the original `gamma` handle. The slot must stay alive
+because `gamma2` still owns it — verified by the bind below.
+
+        if posix_close(gamma) != 0
+            fail(16)
+            return
+
+Bind `gamma2` to "PSCG". This would fail with -EBADF if the
+slot had been freed when we closed `gamma`.
+
+        var sa_g: [128]byte
+        val al_g = fill_sockaddr_un(&sa_g[0], &path_g[0], 4)
+        if posix_bind(gamma2, &sa_g[0], al_g) != 0
+            fail(17)
+            return
+
+Probe round-trip: send 4 bytes from `beta` → "PSCG" and
+read them back from `gamma2`.
+
+        var probe_send: [4]byte
+        probe_send[0] = byte(0xAA)
+        probe_send[1] = byte(0xBB)
+        probe_send[2] = byte(0xCC)
+        probe_send[3] = byte(0xDD)
+        val nps = posix_sendto(beta, &probe_send[0], 4, 0, &sa_g[0], al_g)
+        if nps != 4
+            fail(18)
+            return
+
+        var probe_recv: [4]byte
+        var probe_src: [128]byte
+        var probe_alen: i32 = 128
+        val npr = posix_recvfrom(gamma2, &probe_recv[0], 4, 0,
+            &probe_src[0], &probe_alen)
+        if npr != 4
+            fail(19)
+            return
+        if probe_recv[0] != byte(0xAA)
+            fail(20)
+            return
+        if probe_recv[1] != byte(0xBB)
+            fail(21)
+            return
+        if probe_recv[2] != byte(0xCC)
+            fail(22)
+            return
+        if probe_recv[3] != byte(0xDD)
+            fail(23)
+            return
+
+        posix_close(alpha)
+        posix_close(beta)
+        posix_close(gamma2)
+        puts("punixscm: ok\n")
+        exit()

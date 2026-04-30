@@ -684,6 +684,19 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "posixunix: bad"
   }
 
+  "unix: SCM_RIGHTS fd-passing via sendmsg/recvmsg" in {
+    // Option C Session 2: AF_UNIX SCM_RIGHTS fd-passing for DGRAM
+    // sockets. sendmsg(... cmsg=SCM_RIGHTS([gamma])) routes through
+    // the shim's sys_sendmsg_unix → UNIX_CMD_SENDMSG; recvmsg builds
+    // a fresh posix_fd entry per transferred slot and writes a
+    // SOL_SOCKET/SCM_RIGHTS cmsg into msg_control. Verifies the
+    // received fd is functional by binding it to a fresh path and
+    // round-tripping a probe datagram through it.
+    val output = qemu.command("test_punixscm")
+    output should include("punixscm: ok")
+    output should not include "punixscm: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates
