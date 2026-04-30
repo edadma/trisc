@@ -42,6 +42,78 @@ class SyslNominalAliasTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 7
   }
 
+  // ===== Call-through: nominal-alias values whose underlying is a function =====
+  //
+  // The value's type is the nominal alias (so trait/operator dispatch still
+  // sees it as Parser[int], not (int) -> int), but invocation is transparent
+  // to the underlying function — the user writes `p(args)` directly with no
+  // explicit unwrap.
+
+  "call a Parser[A]-typed local directly" in {
+    eval(
+      """type Parser[A] = new (int) -> A
+        |
+        |id_i32(x: int) -> int = x
+        |
+        |main() -> int
+        |    var p: Parser[int] = Parser[int](id_i32)
+        |    p(42)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "call a Parser[A]-typed parameter (indirect call through alias)" in {
+    eval(
+      """type Parser[A] = new (int) -> A
+        |
+        |id_i32(x: int) -> int = x
+        |
+        |run_p(p: Parser[int], x: int) -> int = p(x)
+        |
+        |main() -> int = run_p(Parser[int](id_i32), 100)
+        |""".stripMargin) shouldBe 100
+  }
+
+  "call a Parser[A] returned by a generic constructor function" in {
+    eval(
+      """type Parser[A] = new (int) -> A
+        |
+        |success[A](v: A) -> Parser[A] = Parser[A]((_x: int) -> v)
+        |
+        |main() -> int
+        |    val p = success[int](42)
+        |    p(99)
+        |""".stripMargin) shouldBe 42
+  }
+
+  "Parser[A] preserves nominal identity during dispatch but is still callable" in {
+    // Vec2 + Vec2-style: prove the alias keeps its nominal identity
+    // (would be a different type than the bare function) AND can be called.
+    eval(
+      """type Wrap = new (int) -> int
+        |
+        |add1(x: int) -> int = x + 1
+        |
+        |main() -> int
+        |    var w: Wrap = Wrap(add1)
+        |    w(7) + w(10)
+        |""".stripMargin) shouldBe 19
+  }
+
+  "non-callable nominal alias still rejects call" in {
+    val ex = intercept[Exception] {
+      eval(
+        """type Box[T] = new int
+          |
+          |main() -> int
+          |    var b = Box[int](5)
+          |    b(7)
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage
+    assert(msg.toLowerCase.contains("not a function") || msg.toLowerCase.contains("cannot call"),
+      s"non-callable alias should reject call, got: $msg")
+  }
+
   // ===== Nominal distinctness =====
 
   "different instantiations are distinct types" in {

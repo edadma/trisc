@@ -5317,13 +5317,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case IndirectCallAST(callee, args) =>
         val tCallee = analyzeExpr(callee)
         val tArgs = args.map(analyzeExpr)
-        tCallee.typ match
+        tCallee.typ.underlying match
           case FuncType(paramTypes, returnType, _, _) =>
             val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
             val checkedArgs = checkArgs("<indirect>", params, tArgs)
             TIndirectCall(tCallee, checkedArgs, returnType)
           case other =>
-            throw AnalysisError(s"cannot call expression of type $other as a function")
+            throw AnalysisError(s"cannot call expression of type ${tCallee.typ} as a function")
 
       case MethodCallAST(VarRefAST(nsName), method, args) if moduleNamespaces.contains(nsName) =>
         // Qualified import call: strings.has_prefix(s, prefix)
@@ -5421,7 +5421,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // `f(int) -> int`, causing a misleading argument-type error.
         lookupLocal(name) match
           case Some(sym) =>
-            sym.typ match
+            // Match through nominal aliases: a local `p: Parser[int]` whose
+            // underlying type is a FuncType is callable, and must shadow any
+            // like-named global.
+            sym.typ.underlying match
               case ft: FuncType =>
                 val expectedTypes = ft.params.map(t => Some(t): Option[SyslType])
                 val tArgs = args.zip(expectedTypes.padTo(args.length, None)).map { case (a, exp) =>
@@ -5600,15 +5603,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           }
           TEnumConstruct(et, variantIdx, checkedArgs)
         else
-          // Try as a variable of FuncType
+          // Try as a variable of FuncType (including a nominal alias whose underlying is a FuncType)
           val sym = lookup(name)
-          sym.typ match
+          sym.typ.underlying match
             case FuncType(paramTypes, returnType, _, _) =>
               val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
               val checkedArgs = checkArgs(name, params, tArgs)
               TIndirectCall(TVarRef(name, sym.typ), checkedArgs, returnType)
-            case other =>
-              throw AnalysisError(s"'$name' is not a function (type: $other)")
+            case _ =>
+              throw AnalysisError(s"'$name' is not a function (type: ${sym.typ})")
 
       case TryAST(inner) =>
         val tInner = analyzeExpr(inner)
