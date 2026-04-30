@@ -437,6 +437,14 @@ expected to know whether the residual tail matters).
     val POSIX_O_EXCL         = 128
     val POSIX_O_TRUNC        = 512
 
+POSIX recv()/send() flags. Currently only DONTWAIT (per-call NB
+override) and PEEK (read without dequeuing) are honored — the
+others are accepted-and-ignored by the recv path, never inspected
+by send.
+
+    val POSIX_MSG_PEEK       = 2
+    val POSIX_MSG_DONTWAIT   = 64
+
 fcntl command codes (`<fcntl.h>` in musl arch).
 
     val POSIX_F_DUPFD        = 0
@@ -1569,15 +1577,23 @@ peer call `getpeername`.
         // avoid the fcntl race when the fd's mode is shared with
         // other pollers.
         var nonblock = posix_fd_flags(fd) & POSIX_O_NONBLOCK
-        if (flags & 0x40) != 0
+        if (flags & POSIX_MSG_DONTWAIT) != 0
             nonblock = POSIX_O_NONBLOCK
+        // MSG_PEEK (0x02): read the head of the inet queue but leave
+        // it queued so a follow-up recv (without PEEK) returns the
+        // same bytes. Forwarded to the inet server as a per-call byte
+        // appended to the existing RECVFROM / RECVFROM_TIMEOUT wire
+        // formats.
+        var peek_byte = byte(0)
+        if (flags & POSIX_MSG_PEEK) != 0
+            peek_byte = byte(1)
         val rcvtimeo_ms = posix_fd_table[idx].recv_timeout_ms
         var reply: [1500]byte
         if nonblock != 0
             // Non-blocking: reuse RECVFROM_TIMEOUT with a zero
             // timeout — the inet handler will reply with status=1
             // (no data) immediately if the queue is empty.
-            var nmsg: [8]byte
+            var nmsg: [9]byte
             nmsg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
             nmsg[1] = byte(inet_fd & 0xff)
             nmsg[2] = byte((cap_len >> 8) & 0xff)
@@ -1586,7 +1602,8 @@ peer call `getpeername`.
             nmsg[5] = byte(0)
             nmsg[6] = byte(0)
             nmsg[7] = byte(0)
-            val nr = ipc_send(port, nmsg, 8, reply, 1500)
+            nmsg[8] = peek_byte
+            val nr = ipc_send(port, nmsg, 9, reply, 1500)
             if nr < 0
                 posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
@@ -1602,7 +1619,7 @@ peer call `getpeername`.
             // Blocking with SO_RCVTIMEO: bounded wait. Linux returns
             // -EAGAIN (or -EWOULDBLOCK, same value) on timeout — same
             // shape as O_NONBLOCK on empty queue.
-            var tmsg: [8]byte
+            var tmsg: [9]byte
             tmsg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
             tmsg[1] = byte(inet_fd & 0xff)
             tmsg[2] = byte((cap_len >> 8) & 0xff)
@@ -1611,7 +1628,8 @@ peer call `getpeername`.
             tmsg[5] = byte((rcvtimeo_ms >> 16) & 0xff)
             tmsg[6] = byte((rcvtimeo_ms >> 8) & 0xff)
             tmsg[7] = byte(rcvtimeo_ms & 0xff)
-            val tr = ipc_send(port, tmsg, 8, reply, 1500)
+            tmsg[8] = peek_byte
+            val tr = ipc_send(port, tmsg, 9, reply, 1500)
             if tr < 0
                 posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
@@ -1624,12 +1642,13 @@ peer call `getpeername`.
                 posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
         else
-            var msg: [4]byte
+            var msg: [5]byte
             msg[0] = byte(INET_CMD_RECVFROM)
             msg[1] = byte(inet_fd & 0xff)
             msg[2] = byte((cap_len >> 8) & 0xff)
             msg[3] = byte(cap_len & 0xff)
-            val r = ipc_send(port, msg, 4, reply, 1500)
+            msg[4] = peek_byte
+            val r = ipc_send(port, msg, 5, reply, 1500)
             if r < 0
                 posix_fd_set_error(fd, i64(-5))
                 return i64(-5)
@@ -1642,8 +1661,9 @@ peer call `getpeername`.
         // Connected-UDP filter (Linux semantics): if a peer was
         // saved via sys_connect_udp and the source doesn't match,
         // recurse to drop the datagram and try again. Each non-
-        // matching datagram is already dequeued from inet, so it's
-        // effectively dropped on the floor.
+        // matching datagram is already dequeued from inet (the
+        // peek-stripped recurse below handles the MSG_PEEK case so
+        // we don't busy-loop on a queued mismatched head).
         if posix_fd_table[idx].udp_connected != 0
             val r_port = shim_read_u16(reply, 2)
             var matches = 1
@@ -1658,6 +1678,25 @@ peer call `getpeername`.
             if (int(reply[7]) & 0xff) != posix_fd_table[idx].udp_peer_d
                 matches = 0
             if matches == 0
+                // First, dequeue the mismatched head if MSG_PEEK left
+                // it in the queue. Strip the peek bit and issue a
+                // throwaway non-blocking RECVFROM_TIMEOUT(0) — Linux
+                // discards mismatched datagrams from the kernel queue
+                // regardless of the user's MSG_PEEK flag.
+                if (flags & POSIX_MSG_PEEK) != 0
+                    var dmsg: [9]byte
+                    dmsg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
+                    dmsg[1] = byte(inet_fd & 0xff)
+                    dmsg[2] = byte((cap_len >> 8) & 0xff)
+                    dmsg[3] = byte(cap_len & 0xff)
+                    dmsg[4] = byte(0)
+                    dmsg[5] = byte(0)
+                    dmsg[6] = byte(0)
+                    dmsg[7] = byte(0)
+                    dmsg[8] = byte(0)
+                    var dreply: [1500]byte
+                    val dr = ipc_send(port, dmsg, 9, dreply, 1500)
+                    // Best-effort drop; ignore reply status.
                 return sys_recvfrom(fd, buf, len, flags, addr_ptr, addrlen_ptr)
         val src_port = shim_read_u16(reply, 2)
         val payload_len = shim_read_u16(reply, 8)

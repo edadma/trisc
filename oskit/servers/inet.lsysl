@@ -163,6 +163,7 @@ traffic.
         q_count: int
         pending_tid: int
         pending_maxlen: int
+        pending_peek: int
         recv_deadline: int
         pending_error: int
         // Phase 3 chunk 2: forward link in the UDP-port hash bucket
@@ -337,6 +338,7 @@ client can reach us.
         while i < INET_MAX_SOCKETS
             inet_sockets[i].in_use = 0
             inet_sockets[i].pending_tid = -1
+            inet_sockets[i].pending_peek = 0
             inet_sockets[i].recv_deadline = 0
             inet_sockets[i].pending_error = 0
             inet_sockets[i].next_in_udp_bucket = -1
@@ -439,11 +441,22 @@ Used by both the loopback sendto path and the UDP RX path. Assumes
 the recvfrom reply (same shape as `inet_deliver_head` produces), and
 replies via IPC.
 
+When the parked recv was a peek (`pending_peek != 0`), the dgram is
+also enqueued so a follow-up non-peek recv sees the same bytes. If
+the queue is full we fall back to a direct delivery — the peek loses
+its "leave-it-queued" guarantee, but UDP is lossy by definition and
+this corner only fires when an app is already over the per-socket
+queue cap.
+
     inet_deliver_to_waiter(fd: int, src_ip: u32, src_port: int, data: *byte, dlen: int)
         val waiter = inet_sockets[fd].pending_tid
         val mlen = inet_sockets[fd].pending_maxlen
+        val peek = inet_sockets[fd].pending_peek
         inet_sockets[fd].pending_tid = -1
+        inet_sockets[fd].pending_peek = 0
         inet_sockets[fd].recv_deadline = 0
+        if peek != 0
+            inet_enqueue(fd, src_ip, src_port, data, dlen)
         val widx = inet_frame_alloc()
         val wr = inet_frame_buf(widx)
         var deliver_len = dlen
@@ -468,7 +481,11 @@ Writes the recvfrom reply into `reply` and returns its length.
 Only called when we know there's both a queued dgram and a
 waiter. `maxlen` caps how many payload bytes we hand back.
 
-    inet_deliver_head(fd: int, maxlen: int, reply: *byte) -> int
+When `peek != 0` (POSIX MSG_PEEK), the head dgram is left in the
+queue — `q_head` and `q_count` are not updated. A follow-up recv
+without MSG_PEEK then dequeues the same bytes.
+
+    inet_deliver_head(fd: int, maxlen: int, reply: *byte, peek: int) -> int
         val slot = inet_sockets[fd].q_head
         val src_ip = inet_sockets[fd].queue[slot].src_ip
         val src_port = inet_sockets[fd].queue[slot].src_port
@@ -484,8 +501,9 @@ waiter. `maxlen` caps how many payload bytes we hand back.
         while i < dlen
             reply[10 + i] = inet_sockets[fd].queue[slot].data[i]
             i += 1
-        inet_sockets[fd].q_head = (slot + 1) % INET_MAX_QUEUE
-        inet_sockets[fd].q_count -= 1
+        if peek == 0
+            inet_sockets[fd].q_head = (slot + 1) % INET_MAX_QUEUE
+            inet_sockets[fd].q_count -= 1
         10 + dlen
 
 
@@ -542,6 +560,7 @@ waiter. `maxlen` caps how many payload bytes we hand back.
         inet_sockets[idx].q_tail = 0
         inet_sockets[idx].q_count = 0
         inet_sockets[idx].pending_tid = -1
+        inet_sockets[idx].pending_peek = 0
         inet_sockets[idx].recv_deadline = 0
         inet_sockets[idx].pending_error = 0
         inet_sockets[idx].next_in_udp_bucket = -1
@@ -717,6 +736,10 @@ Only one pending recv per socket. A second recv while one is
 already pending is rejected. Good enough for single-threaded
 programs; multi-waiter support is on the list.
 
+Wire layout: `cmd(1) + fd(1) + maxlen(2) + peek(1)` = 5 bytes.
+The `peek` byte is non-zero when the caller passed MSG_PEEK in
+flags; the dgram is read but not dequeued.
+
     inet_handle_recvfrom(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
         if inet_fd_valid(fd, sender) == 0
@@ -728,6 +751,7 @@ programs; multi-waiter support is on the list.
         var maxlen = maxlen_raw
         if maxlen > INET_MAX_DATA
             maxlen = INET_MAX_DATA
+        val peek = int(buf[4]) & 0xff
         // Pending ICMP error wins over queued data — Linux returns
         // -ECONNREFUSED on the next recv() and only then resumes
         // delivering normal datagrams. We mirror that.
@@ -740,7 +764,7 @@ programs; multi-waiter support is on the list.
         if inet_sockets[fd].q_count > 0
             val ridx = inet_frame_alloc()
             val reply = inet_frame_buf(ridx)
-            val n = inet_deliver_head(fd, maxlen, reply)
+            val n = inet_deliver_head(fd, maxlen, reply, peek)
             ipc_reply(sender, reply, n)
             inet_frame_release(ridx)
             return
@@ -751,14 +775,15 @@ programs; multi-waiter support is on the list.
             return
         inet_sockets[fd].pending_tid = sender
         inet_sockets[fd].pending_maxlen = maxlen
+        inet_sockets[fd].pending_peek = peek
         // No reply — deferred until a dgram arrives or close.
 
 
 ### RECVFROM_TIMEOUT handler
 
 Same as RECVFROM but with a bounded wait. Request layout:
-`cmd(1) + fd(1) + maxlen(2) + timeout_ms(4)` = 8 bytes. The
-reply shape matches RECVFROM so callers can use the same parser.
+`cmd(1) + fd(1) + maxlen(2) + timeout_ms(4) + peek(1)` = 9 bytes.
+The reply shape matches RECVFROM so callers can use the same parser.
 
 Status byte in the reply distinguishes outcomes:
 - `0` — data delivered
@@ -785,6 +810,7 @@ possibly firing immediately.
         val tms_hi = inet_read_u16(buf, 4)
         val tms_lo = inet_read_u16(buf, 6)
         val timeout_ms = (tms_hi << 16) | tms_lo
+        val peek = int(buf[8]) & 0xff
         if inet_sockets[fd].pending_error != 0
             inet_sockets[fd].pending_error = 0
             var er: [10]byte
@@ -794,7 +820,7 @@ possibly firing immediately.
         if inet_sockets[fd].q_count > 0
             val ridx = inet_frame_alloc()
             val reply = inet_frame_buf(ridx)
-            val n = inet_deliver_head(fd, maxlen, reply)
+            val n = inet_deliver_head(fd, maxlen, reply, peek)
             ipc_reply(sender, reply, n)
             inet_frame_release(ridx)
             return
@@ -811,6 +837,7 @@ possibly firing immediately.
         val ticks = (timeout_ms + 9) / 10
         inet_sockets[fd].pending_tid = sender
         inet_sockets[fd].pending_maxlen = maxlen
+        inet_sockets[fd].pending_peek = peek
         inet_sockets[fd].recv_deadline = int(uptime()) + ticks
         // No reply — deferred until a dgram arrives, timeout
         // expires, or close.
@@ -999,6 +1026,7 @@ tick period. Good enough for DHCP-scale retransmits.
                         if now >= dl
                             val waiter = inet_sockets[i].pending_tid
                             inet_sockets[i].pending_tid = -1
+                            inet_sockets[i].pending_peek = 0
                             inet_sockets[i].recv_deadline = 0
                             var tr: [10]byte
                             tr[0] = byte(1)
@@ -1021,6 +1049,7 @@ the caller doesn't block forever.
         if inet_sockets[fd].pending_tid >= 0
             val waiter = inet_sockets[fd].pending_tid
             inet_sockets[fd].pending_tid = -1
+            inet_sockets[fd].pending_peek = 0
             inet_sockets[fd].recv_deadline = 0
             var wr: [10]byte
             wr[0] = byte(-1)
@@ -2226,6 +2255,7 @@ port may flag the wrong one, but that's bounded scope.
         if inet_sockets[target].pending_tid >= 0
             val waiter = inet_sockets[target].pending_tid
             inet_sockets[target].pending_tid = -1
+            inet_sockets[target].pending_peek = 0
             inet_sockets[target].recv_deadline = 0
             inet_sockets[target].pending_error = 0
             var er: [10]byte

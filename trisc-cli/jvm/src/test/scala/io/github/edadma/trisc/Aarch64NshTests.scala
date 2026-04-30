@@ -809,6 +809,23 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mstat: stat /no/such missing=1")
   }
 
+  "musl: MSG_PEEK on UDP" in {
+    // mpeek (slix/test/mpeek.c) walks the new MSG_PEEK path on UDP:
+    // bind, sendto self, recv with MSG_PEEK (queue stays at 1), recv
+    // with no flags returns the same bytes (queue drains to 0), and
+    // a third non-blocking recv returns -EAGAIN. Tests both the shim
+    // wire-format change (peek byte appended to RECVFROM /
+    // RECVFROM_TIMEOUT) and inet's split deliver-head path.
+    qemu.send("mpeek\n")
+    val output = qemu.waitFor("mpeek: done")
+    output should include("mpeek: bind=0")
+    output should include("mpeek: sendto=7")
+    output should include("mpeek: peek=7 data='PEEK-OK'")
+    output should include("mpeek: recv=7 data='PEEK-OK'")
+    output should include("mpeek: match=1")
+    output should include("mpeek: drained=EAGAIN errno=11")
+  }
+
   "musl: tar extract end-to-end (Phase 4 chunk 5)" in {
     // muntar (slix/test/untar.c) opens a synthesized USTAR archive
     // pre-baked into the ramdisk at /test.tar (bytes from

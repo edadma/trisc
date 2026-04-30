@@ -184,12 +184,13 @@ payload length on success, -1 on error.
         var cap_len = maxlen
         if cap_len > INET_MAX_DATA
             cap_len = INET_MAX_DATA
-        var msg: [4]byte
+        var msg: [5]byte
         msg[0] = byte(INET_CMD_RECVFROM)
         msg[1] = byte(fd & 0xff)
         net_write_u16(msg, 2, cap_len)
+        msg[4] = byte(0)            // peek=0 — kernel-side recvfrom is non-peeking
         var reply: [1500]byte
-        ipc_send(port, msg, 4, reply, 1500)
+        ipc_send(port, msg, 5, reply, 1500)
         if reply[0] != 0
             return -1
         val r_port = net_read_u16(reply, 2)
@@ -237,14 +238,15 @@ reply matches `recvfrom`. Status byte: `0` = data, `1` = timeout,
         var cap_len = maxlen
         if cap_len > INET_MAX_DATA
             cap_len = INET_MAX_DATA
-        var msg: [8]byte
+        var msg: [9]byte
         msg[0] = byte(INET_CMD_RECVFROM_TIMEOUT)
         msg[1] = byte(fd & 0xff)
         net_write_u16(msg, 2, cap_len)
         net_write_u16(msg, 4, (timeout_ms >> 16) & 0xffff)
         net_write_u16(msg, 6, timeout_ms & 0xffff)
+        msg[8] = byte(0)            // peek=0 — kernel-side timed recv is non-peeking
         var reply: [1500]byte
-        ipc_send(port, msg, 8, reply, 1500)
+        ipc_send(port, msg, 9, reply, 1500)
         val status = int(reply[0]) & 0xff
         if status == 0xff
             return -1
