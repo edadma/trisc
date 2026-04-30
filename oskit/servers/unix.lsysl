@@ -233,6 +233,7 @@ matching send/sendto wakes the slot.
         pending_accept_tid: int
         connector_path: [108]byte
         connector_path_len: int
+        fire_seq: int
 
     var unix_sockets: [16]UnixSocket
     var unix_port = -1
@@ -278,6 +279,7 @@ loop before `port_register`.
             unix_sockets[i].pending_recv_peek = 0
             unix_sockets[i].pending_accept_tid = -1
             unix_sockets[i].connector_path_len = 0
+            unix_sockets[i].fire_seq = 0
             var j = 0
             while j < UNIX_MAX_OWNERS
                 unix_sockets[i].owners[j] = -1
@@ -310,6 +312,20 @@ are O(UNIX_MAX_OWNERS), which is fine at n=4.
         unix_sockets[idx].owners[unix_sockets[idx].owners_count] = tid
         unix_sockets[idx].owners_count += 1
         1
+
+
+Bump the per-slot `fire_seq` counter so the shim's per-fd
+EPOLLET edge tracker can detect "this specific fd crossed a
+readiness boundary" without a per-instance bulk clear of
+`last_reported`. Called at every state change that affects
+EPOLLIN/OUT/HUP — sendto/sendmsg enqueue, recvfrom drain,
+send to peer, recv drain, listen-backlog push, accept drain,
+peer close.
+
+    unix_bump_fire_seq(idx: int)
+        if idx >= 0 && idx < UNIX_MAX_SOCKETS
+            if unix_sockets[idx].in_use != 0
+                unix_sockets[idx].fire_seq = unix_sockets[idx].fire_seq + 1
 
 Remove `tid` from the owners ring; compact the prefix so
 `owners[0..owners_count)` stays contiguous. No-op if the tid
@@ -404,6 +420,7 @@ or -1 if the table is full.
                 unix_sockets[i].pending_accept_tid = -1
                 unix_sockets[i].nrefs_in_queues = 0
                 unix_sockets[i].connector_path_len = 0
+                unix_sockets[i].fire_seq = 0
                 var j = 0
                 while j < UNIX_MAX_OWNERS
                     unix_sockets[i].owners[j] = -1
@@ -450,6 +467,7 @@ single-owner close used to do, then frees the slot.
             if unix_sockets[peer].in_use != 0
                 unix_sockets[peer].peer_closed = 1
                 unix_sockets[peer].peer_idx = -1
+                unix_bump_fire_seq(peer)
                 val parked = unix_sockets[peer].pending_recv_tid
                 if parked >= 0
                     unix_sockets[peer].pending_recv_tid = -1
@@ -471,6 +489,7 @@ single-owner close used to do, then frees the slot.
                         if unix_sockets[ppeer].in_use != 0
                             unix_sockets[ppeer].peer_closed = 1
                             unix_sockets[ppeer].peer_idx = -1
+                            unix_bump_fire_seq(ppeer)
                     unix_free_slot(pending)
 
         if unix_sockets[idx].pending_accept_tid >= 0
@@ -505,6 +524,7 @@ upstream send loops.
             i += 1
         unix_sockets[idx].rx_tail = t
         unix_sockets[idx].rx_count += to_copy
+        unix_bump_fire_seq(idx)
         to_copy
 
 
@@ -527,6 +547,7 @@ the bytes are copied without advancing the read cursor.
         if peek == 0
             unix_sockets[idx].rx_head = h
             unix_sockets[idx].rx_count -= to_copy
+            unix_bump_fire_seq(idx)
         to_copy
 
 
@@ -562,6 +583,7 @@ the caller sees a smaller `nsent`.
             i += 1
         unix_sockets[dst_idx].dg_tail = (slot + 1) % UNIX_DG_QUEUE
         unix_sockets[dst_idx].dg_count += 1
+        unix_bump_fire_seq(dst_idx)
         dl
 
 
@@ -612,6 +634,7 @@ this in its own dispatch.
             unix_sockets[idx].dg_queue[slot].in_use = 0
             unix_sockets[idx].dg_head = (slot + 1) % UNIX_DG_QUEUE
             unix_sockets[idx].dg_count -= 1
+            unix_bump_fire_seq(idx)
         2 + sp + 2 + dl
 
 
@@ -820,6 +843,7 @@ future accept(). The accept reply is variable-length:
             unix_sockets[target].pending_q[tail] = server_end
             unix_sockets[target].pending_tail = (tail + 1) % UNIX_BACKLOG_MAX
             unix_sockets[target].pending_count += 1
+            unix_bump_fire_seq(target)
 
 
 ### ACCEPT handler
@@ -855,6 +879,7 @@ first, so the trailing zero plen is harmless.
             val server_end = unix_sockets[fd].pending_q[head]
             unix_sockets[fd].pending_head = (head + 1) % UNIX_BACKLOG_MAX
             unix_sockets[fd].pending_count -= 1
+            unix_bump_fire_seq(fd)
             var reply: [128]byte
             reply[0] = 0
             reply[1] = byte(server_end & 0xff)
@@ -1382,6 +1407,7 @@ to 0 owners + 0 queue refs, run the orphan cleanup.
         unix_sockets[fd].dg_queue[slot].in_use = 0
         unix_sockets[fd].dg_head = (slot + 1) % UNIX_DG_QUEUE
         unix_sockets[fd].dg_count -= 1
+        unix_bump_fire_seq(fd)
         ipc_reply(sender, &pr[0], 2 + sp + 1 + grant + 2 + dl)
 
 
@@ -1398,10 +1424,10 @@ synchronously when the destination's queue is full (so
 EPOLLHUP fires on a STREAM that has lost its peer.
 
 Reply layout: `status(1) + mask_be(2) + fire_seq_le(4)`.
-The fire_seq slot is reserved for future EPOLLET edge-trigger
-support and is currently 0 — meaning sys_ppoll's
-"changed since last scan" check always sees no change, but
-that's harmless because ppoll re-queries every tick anyway.
+The fire_seq counter advances on every readiness edge so the
+shim's per-fd EPOLLET edge tracker can detect "this specific
+fd crossed a boundary since last scan" without bulk-clearing
+sibling entries' last_reported state.
 
     unix_handle_poll(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
@@ -1428,14 +1454,15 @@ that's harmless because ppoll re-queries every tick anyway.
                 if unix_sockets[fd].peer_closed != 0
                     mask = mask | UNIX_EPOLLIN
                     mask = mask | UNIX_EPOLLHUP
+        val seq = unix_sockets[fd].fire_seq
         var reply: [7]byte
         reply[0] = 0
         reply[1] = byte((mask >> 8) & 0xff)
         reply[2] = byte(mask & 0xff)
-        reply[3] = 0
-        reply[4] = 0
-        reply[5] = 0
-        reply[6] = 0
+        reply[3] = byte(seq & 0xff)
+        reply[4] = byte((seq >> 8) & 0xff)
+        reply[5] = byte((seq >> 16) & 0xff)
+        reply[6] = byte((seq >> 24) & 0xff)
         ipc_reply(sender, reply, 7)
 
 
