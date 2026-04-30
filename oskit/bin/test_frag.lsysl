@@ -1,0 +1,104 @@
+test_frag — IPv4 egress fragmentation self-test
+================================================
+
+First half of Option B (post-Phase 4 deferred queue priority #1):
+RFC 791 §3.2 IP fragmentation on the egress UDP path. Inet now
+consults a per-destination PMTU cache before deciding whether
+to send a UDP datagram as a single IP packet or split it into
+fragments.
+
+This test seeds the PMTU cache for the limited-broadcast address
+(skips ARP, so the test runs without depending on slirp ARP
+state), reads the running fragment-egress counter before and
+after a 1000-byte sendto, and asserts the delta matches the
+expected fragment count.
+
+Math (PMTU=300, dlen=1000):
+
+- IP payload size = UDP header(8) + data(1000) = 1008 bytes.
+- Per-fragment IP-payload = ((300 - 20) / 8) * 8 = 280 bytes.
+- N = ceil(1008 / 280) = 4 (sizes 280, 280, 280, 168).
+
+Pass criterion: prints `test_frag: ok`.
+
+    module oskit.bin.test_frag
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{socket, sendto, close_socket,
+        pmtu_inject_test, frag_egress_count}
+    import std.net.{AF_INET, SOCK_DGRAM, ipv4}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("test_frag: failed ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val fd = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd < 0
+            fail(1)
+            return
+
+Seed PMTU=300 for the broadcast destination. We use broadcast to
+sidestep ARP — sendto to a unicast destination would need the
+gateway MAC resolved, which depends on slirp timing. Broadcast
+just emits to ff:ff:ff:ff:ff:ff with IP src forced to 0.0.0.0
+(RFC 2131 §4.1) and the cache lookup still fires for the
+all-ones address.
+
+        if pmtu_inject_test(255, 255, 255, 255, 300) != 0
+            close_socket(fd)
+            fail(2)
+            return
+
+        val before = frag_egress_count()
+        if before < 0
+            close_socket(fd)
+            fail(3)
+            return
+
+        var payload: [1000]byte
+        var i = 0
+        while i < 1000
+            payload[i] = byte((i & 0xff))
+            i += 1
+
+        val sent = sendto(fd, &payload[0], 1000, ipv4(255, 255, 255, 255), 9000)
+        if sent != 1000
+            close_socket(fd)
+            fail(4)
+            return
+
+        val after = frag_egress_count()
+        if after < 0
+            close_socket(fd)
+            fail(5)
+            return
+
+        val delta = after - before
+        if delta != 4
+            puts("test_frag: expected 4 frags, got ")
+            print_idec(delta)
+            puts("\n")
+            close_socket(fd)
+            fail(6)
+            return
+
+        close_socket(fd)
+        puts("test_frag: ok\n")
+        exit()

@@ -56,6 +56,8 @@ Command codes — must track `oskit/servers/inet.lsysl`.
     val INET_CMD_PID_EXIT_SELFTEST   = 49
     val INET_CMD_GET_STATS           = 50
     val INET_CMD_FRAME_POOL_STATS    = 51
+    val INET_CMD_PMTU_INJECT_TEST    = 54
+    val INET_CMD_FRAG_EGRESS_COUNT   = 55
     val INET_CMD_TCP_OOO_SELFTEST = 99
 
     val ARP_PROBE_OP_START    = 0
@@ -889,6 +891,61 @@ both-sides UDP error story.
         var reply: [1]byte
         ipc_send(port, msg, 3, reply, 1)
         int(reply[0]) & 0xff
+
+
+### pmtu_inject_test (test-only)
+
+Seed a per-destination PMTU cap inside the inet server so the
+next `inet_send_udp` to that destination consults it. Until
+ICMP-driven discovery (Session 2 of Option B) lands, this is
+the only way the cache gets populated.
+
+`mtu` is clamped to [INET_PMTU_MIN, INET_LINK_MTU] server-side;
+the wrapper just forwards. Returns 0 on success.
+
+    pmtu_inject_test(a: int, b: int, c: int, d: int, mtu: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [7]byte
+        msg[0] = byte(INET_CMD_PMTU_INJECT_TEST)
+        msg[1] = byte(a & 0xff)
+        msg[2] = byte(b & 0xff)
+        msg[3] = byte(c & 0xff)
+        msg[4] = byte(d & 0xff)
+        msg[5] = byte((mtu >> 8) & 0xff)
+        msg[6] = byte(mtu & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 7, reply, 1)
+        int(reply[0]) & 0xff
+
+
+### frag_egress_count (test-only)
+
+Returns the running tally of IP fragments emitted by
+`inet_send_udp` (only the multi-fragment path bumps the
+counter; single-frame sends don't). A test can take a delta
+across a `sendto` and assert that fragmentation kicked in.
+
+Returns -1 on IPC error; otherwise the counter value as a
+non-negative int.
+
+    frag_egress_count() -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var msg: [1]byte
+        msg[0] = byte(INET_CMD_FRAG_EGRESS_COUNT)
+        var reply: [5]byte
+        if ipc_send(port, msg, 1, reply, 5) < 0
+            return -1
+        if reply[0] != 0
+            return -1
+        val v0 = (int(reply[1]) & 0xff) << 24
+        val v1 = (int(reply[2]) & 0xff) << 16
+        val v2 = (int(reply[3]) & 0xff) <<  8
+        val v3 =  int(reply[4]) & 0xff
+        v0 | v1 | v2 | v3
 
 
 ### tcp_inject_fail (test-only)

@@ -99,6 +99,8 @@ Protocol command codes (byte value of buf[0]).
     const INET_CMD_FRAME_POOL_STATS    = 51
     const INET_CMD_TCP_SET_USERTO      = 52
     const INET_CMD_TCP_BLACKHOLE_ACKS_TEST = 53
+    const INET_CMD_PMTU_INJECT_TEST    = 54
+    const INET_CMD_FRAG_EGRESS_COUNT   = 55
     const INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -2369,6 +2371,50 @@ Wire layout:
         ipc_reply(sender, reply, 1)
 
 
+### Test-only: seed PMTU cache + read fragment-egress counter
+
+`INET_CMD_PMTU_INJECT_TEST` writes a per-destination MTU cap that
+`inet_send_udp` will respect on the next send to that
+destination. Until ICMP-driven discovery lands (Session 2 of
+Option B), this is the only way to populate the cache from
+userspace. `INET_CMD_FRAG_EGRESS_COUNT` returns the running count
+of IP fragments that the egress path has emitted — the
+single-frame fast path doesn't bump it, so a test can do
+"counter_before + send + counter_after" and assert that
+fragmentation actually kicked in.
+
+Wire layouts:
+
+- PMTU_INJECT_TEST request: cmd(1) + dst_a(1) + dst_b(1) +
+  dst_c(1) + dst_d(1) + mtu_be(2) = 7 bytes.
+  reply: status(1) = 1 byte (0 always; the inserter clamps a
+  bad MTU rather than refusing).
+
+- FRAG_EGRESS_COUNT request: cmd(1) = 1 byte.
+  reply: status(1) + count_be32(4) = 5 bytes.
+
+    inet_handle_pmtu_inject_test(sender: int, buf: *byte)
+        val a = int(buf[1]) & 0xff
+        val b = int(buf[2]) & 0xff
+        val c = int(buf[3]) & 0xff
+        val d = int(buf[4]) & 0xff
+        val mtu = pkt_read_u16(buf, 5)
+        inet_pmtu_set(ipv4(a, b, c, d), mtu)
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+    inet_handle_frag_egress_count(sender: int, _buf: *byte)
+        val v = inet_frag_egress_count
+        var reply: [5]byte
+        reply[0] = 0
+        reply[1] = byte((v >> 24) & 0xff)
+        reply[2] = byte((v >> 16) & 0xff)
+        reply[3] = byte((v >>  8) & 0xff)
+        reply[4] = byte( v        & 0xff)
+        ipc_reply(sender, reply, 5)
+
+
 ### EtherType dispatch
 
 Called by the RX drain for every frame. ARP requests for us ->
@@ -2683,6 +2729,8 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_FRAME_POOL_STATS  -> inet_handle_frame_pool_stats(sender, buf)
                     INET_CMD_TCP_SET_USERTO    -> inet_handle_tcp_set_userto(sender, buf)
                     INET_CMD_TCP_BLACKHOLE_ACKS_TEST -> inet_handle_tcp_blackhole_acks_test(sender, buf)
+                    INET_CMD_PMTU_INJECT_TEST -> inet_handle_pmtu_inject_test(sender, buf)
+                    INET_CMD_FRAG_EGRESS_COUNT -> inet_handle_frag_egress_count(sender, buf)
                     INET_CMD_TCP_OOO_SELFTEST -> inet_handle_tcp_ooo_selftest(sender, buf)
                     else ->
                         var reply: [1]byte

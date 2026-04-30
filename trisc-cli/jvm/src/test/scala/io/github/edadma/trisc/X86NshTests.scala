@@ -605,6 +605,21 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "test_ip_reasm2: failed"
   }
 
+  "ip: egress fragmentation respects PMTU cache" in {
+    // First half of Option B (deferred-queue priority #1): RFC 791
+    // §3.2 IP fragmentation on the UDP egress path. test_frag seeds
+    // a per-destination PMTU cap of 300 for the limited-broadcast
+    // address via INET_CMD_PMTU_INJECT_TEST, reads the running
+    // fragment-egress counter, sends a 1000-byte sendto to that
+    // destination, and verifies the counter advanced by exactly 4
+    // (ceil((8 + 1000) / 280)). Broadcast bypasses ARP so the test
+    // is independent of slirp ARP timing.
+    val output = qemu.command("test_frag")
+    output should include("test_frag: ok")
+    output should not include "test_frag: failed"
+    output should not include "test_frag: expected"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

@@ -715,6 +715,119 @@ to embed and skipping the emit is mandatory.
             i += 1
 
 
+### Path-MTU cache + egress IP id (Phase 4 chunk + IP frag)
+
+A datagram bigger than the egress link MTU has to be split across
+multiple IP packets — RFC 791 §3.2 fragmentation. Slix already
+reassembles inbound fragments (the `IpReasmSlot` table just above);
+this section adds the egress half and the per-destination PMTU
+state that lets us drive segment size from a learned cap rather
+than always assuming the link MTU.
+
+`InetPmtuEntry` is a tiny per-destination cache. RFC 1191 §3 says
+hosts should record the `Next-Hop MTU` field carried in any
+inbound ICMP "Fragmentation Needed" (type 3, code 4) and shrink
+their send size to that value for the destination. Wire-up to the
+ICMP-error consumer is the second half of Option B (Session 2);
+for now the cache is populated by an explicit test injector
+(`INET_CMD_PMTU_INJECT_TEST`).
+
+Lookup miss returns `INET_LINK_MTU` (the virtio link MTU) so the
+existing single-frame fast path is unchanged for destinations the
+cache doesn't know about. The table is small (16 entries, linear
+scan) — the entire socket cap is 16 connections, so any scan over
+this table is bounded by a constant well under the per-syscall
+cost of one IPC round-trip.
+
+    val INET_LINK_MTU       = 1500
+    val INET_PMTU_SLOTS     = 16
+    val INET_PMTU_MIN       = 296   // RFC 791 §3.2: every host must accept ≥ 576 IP, and ≥ 68 fragmented; 296 is a comfortable practical floor (matches RFC 1122 §3.3.3 SHOULD).
+
+    struct InetPmtuEntry
+        in_use: int
+        dst_ip: u32
+        mtu: int
+        last_use: int            // monotonically increasing on each get/set; cheap LRU pivot.
+
+    var inet_pmtu_table: [16]InetPmtuEntry
+    var inet_pmtu_clock: int = 0
+
+    inet_pmtu_lookup_idx(dst_ip: u32) -> int
+        var i = 0
+        while i < INET_PMTU_SLOTS
+            if inet_pmtu_table[i].in_use != 0
+                if inet_pmtu_table[i].dst_ip == dst_ip
+                    return i
+            i += 1
+        -1
+
+    inet_pmtu_get(dst_ip: u32) -> int
+        val s = inet_pmtu_lookup_idx(dst_ip)
+        if s < 0
+            return INET_LINK_MTU
+        inet_pmtu_clock += 1
+        inet_pmtu_table[s].last_use = inet_pmtu_clock
+        inet_pmtu_table[s].mtu
+
+Insert / overwrite a per-destination cap. `mtu` is clamped to
+[INET_PMTU_MIN, INET_LINK_MTU] before insert — RFC 1191 lets a
+peer report any value, but values below the architectural
+minimum break L4 (TCP MSS clamping below 216 is degenerate) and
+values above the link MTU are useless. Returns 0 on success.
+
+    inet_pmtu_set(dst_ip: u32, mtu_in: int) -> int
+        var mtu = mtu_in
+        if mtu < INET_PMTU_MIN
+            mtu = INET_PMTU_MIN
+        if mtu > INET_LINK_MTU
+            mtu = INET_LINK_MTU
+        inet_pmtu_clock += 1
+        var s = inet_pmtu_lookup_idx(dst_ip)
+        if s < 0
+            s = 0
+            var i = 1
+            while i < INET_PMTU_SLOTS
+                if inet_pmtu_table[i].in_use == 0
+                    s = i
+                    i = INET_PMTU_SLOTS
+                else
+                    if inet_pmtu_table[i].last_use < inet_pmtu_table[s].last_use
+                        s = i
+                    i += 1
+            inet_pmtu_table[s].in_use = 1
+            inet_pmtu_table[s].dst_ip = dst_ip
+        inet_pmtu_table[s].mtu = mtu
+        inet_pmtu_table[s].last_use = inet_pmtu_clock
+        0
+
+
+### Egress IP identification + fragment counter
+
+Every fragmented datagram series shares a single 16-bit `ident`
+in the IP header so the receiver can group fragments. We bump a
+counter on each datagram we send (fragmented or not — single
+datagrams also get a fresh id, which is fine). Wraps at 16 bits
+naturally; collision odds within the 30 s reassembly window are
+negligible at slix's tx volumes.
+
+    var inet_ip_id_counter: int = 1
+
+    inet_next_ip_id() -> int
+        val v = inet_ip_id_counter
+        inet_ip_id_counter = (v + 1) & 0xffff
+        if inet_ip_id_counter == 0
+            inet_ip_id_counter = 1
+        v
+
+`inet_frag_egress_count` ticks once per IP fragment emitted by
+`inet_send_udp` when fragmentation was actually needed (i.e. the
+single-frame fast path doesn't increment it). Test scaffolding
+reads this through `INET_CMD_FRAG_EGRESS_COUNT` to assert that
+fragmentation kicked in for a given send.
+
+    var inet_frag_egress_count: int = 0
+
+
 ### Pending UDP queue
 
 Two-slot queue holding UDP datagrams whose next-hop MAC isn't
@@ -1632,54 +1745,138 @@ because the addr they want to use is what they are asking for.
                 if inet_queue_pending_udp(owner_tid, dst_ip, dst_port, src_port, data, dlen) != 0
                     return dlen
                 return -1
-        val fidx = inet_frame_alloc()
-        val frame = inet_frame_buf(fidx)
-        val total_len = 14 + 20 + 8 + dlen
 
-Ethernet header.
+Effective MTU. PMTU cache lookup; default = link MTU when no
+entry exists for this destination. The cache is keyed by dst_ip,
+so a test can seed an entry against 255.255.255.255 to drive the
+fragmentation path without depending on ARP resolution; in the
+typical case nothing is cached and the lookup returns link MTU,
+which keeps the single-fragment fast path active.
 
-        pkt_write_mac(frame, 0, next_hop_mac)
-        pkt_write_mac(frame, 6, inet_our_mac)
-        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+        val eff_mtu = inet_pmtu_get(dst_ip)
 
-IPv4 header (20 bytes, no options).
-
-        frame[14] = 0x45
-        frame[15] = 0
-        pkt_write_u16(frame, 16, 20 + 8 + dlen)
-        pkt_write_u16(frame, 18, 0)
-        pkt_write_u16(frame, 20, 0)
-        frame[22] = 64
-        frame[23] = byte(IP_PROTO_UDP)
-        pkt_write_u16(frame, 24, 0)
-        if is_bcast
-            pkt_write_ipv4(frame, 26, 0, 0, 0, 0)
-        else
-            pkt_write_ipv4(frame, 26,
-                INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
-        pkt_write_ipv4(frame, 30, ipv4_octet(dst_ip, 0), ipv4_octet(dst_ip, 1), ipv4_octet(dst_ip, 2), ipv4_octet(dst_ip, 3))
-        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
-
-UDP header + payload. Checksum field is zeroed before computing
-the pseudo-header checksum; the result lands at offset 40.
-
-        pkt_write_u16(frame, 34, src_port)
-        pkt_write_u16(frame, 36, dst_port)
-        pkt_write_u16(frame, 38, 8 + dlen)
-        pkt_write_u16(frame, 40, 0)
-        var i = 0
-        while i < dlen
-            frame[42 + i] = data[i]
-            i += 1
         var pseudo_src = inet_get_our_ip()
         if is_bcast
             pseudo_src = u32(0)
-        pkt_write_u16(frame, 40,
-            inet_udp_checksum(pseudo_src, dst_ip, frame, 34, 8 + dlen))
 
-        val rc = inet_nic_send_packet(frame, total_len)
-        inet_frame_release(fidx)
-        rc
+        val ip_ident = inet_next_ip_id()
+        val ip_total = 20 + 8 + dlen      // single-fragment IP total length
+
+Single-fragment fast path: the entire `ETH+IP+UDP+payload` fits
+within `eff_mtu` after adding the IP header. No frag flags, no
+offset, MF=0. This is the path traffic takes any time the cache
+either has no entry for the destination or learned an MTU large
+enough to swallow the full datagram.
+
+        if ip_total <= eff_mtu
+            val fidx = inet_frame_alloc()
+            val frame = inet_frame_buf(fidx)
+            val total_len = 14 + ip_total
+
+            pkt_write_mac(frame, 0, next_hop_mac)
+            pkt_write_mac(frame, 6, inet_our_mac)
+            pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+
+            frame[14] = 0x45
+            frame[15] = 0
+            pkt_write_u16(frame, 16, ip_total)
+            pkt_write_u16(frame, 18, ip_ident)
+            pkt_write_u16(frame, 20, 0)
+            frame[22] = 64
+            frame[23] = byte(IP_PROTO_UDP)
+            pkt_write_u16(frame, 24, 0)
+            if is_bcast
+                pkt_write_ipv4(frame, 26, 0, 0, 0, 0)
+            else
+                pkt_write_ipv4(frame, 26,
+                    INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+            pkt_write_ipv4(frame, 30, ipv4_octet(dst_ip, 0), ipv4_octet(dst_ip, 1), ipv4_octet(dst_ip, 2), ipv4_octet(dst_ip, 3))
+            pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+
+            pkt_write_u16(frame, 34, src_port)
+            pkt_write_u16(frame, 36, dst_port)
+            pkt_write_u16(frame, 38, 8 + dlen)
+            pkt_write_u16(frame, 40, 0)
+            var i = 0
+            while i < dlen
+                frame[42 + i] = data[i]
+                i += 1
+            pkt_write_u16(frame, 40,
+                inet_udp_checksum(pseudo_src, dst_ip, frame, 34, 8 + dlen))
+
+            val rc = inet_nic_send_packet(frame, total_len)
+            inet_frame_release(fidx)
+            return rc
+
+Fragmentation path (RFC 791 §3.2). The full L4 datagram is
+`UDP_header(8) + payload(dlen)` bytes; we stage it in
+`inet_udp_egress_buf`, compute the UDP checksum over the whole
+datagram, then walk the buffer in slices of `frag_payload`
+bytes, emitting one IP fragment per slice. Non-final slice
+sizes must be 8-byte multiples so `frag_offset` (in 8-byte
+units) lands on a boundary. The last fragment carries whatever
+remains and clears the MF flag.
+
+        var staging: [1480]byte
+        pkt_write_u16(staging, 0, src_port)
+        pkt_write_u16(staging, 2, dst_port)
+        pkt_write_u16(staging, 4, 8 + dlen)
+        pkt_write_u16(staging, 6, 0)
+        var bi = 0
+        while bi < dlen
+            staging[8 + bi] = data[bi]
+            bi += 1
+        pkt_write_u16(staging, 6,
+            inet_udp_checksum(pseudo_src, dst_ip, staging, 0, 8 + dlen))
+
+        val total_l4 = 8 + dlen
+        var frag_payload = ((eff_mtu - 20) / 8) * 8
+        if frag_payload < 8
+            frag_payload = 8
+
+        var off = 0
+        while off < total_l4
+            var this_len = total_l4 - off
+            var more = 0
+            if this_len > frag_payload
+                this_len = frag_payload
+                more = 1
+
+            val fidx = inet_frame_alloc()
+            val frame = inet_frame_buf(fidx)
+
+            pkt_write_mac(frame, 0, next_hop_mac)
+            pkt_write_mac(frame, 6, inet_our_mac)
+            pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+
+            frame[14] = 0x45
+            frame[15] = 0
+            pkt_write_u16(frame, 16, 20 + this_len)
+            pkt_write_u16(frame, 18, ip_ident)
+            val flags_frag = (more << 13) | (off / 8)
+            pkt_write_u16(frame, 20, flags_frag)
+            frame[22] = 64
+            frame[23] = byte(IP_PROTO_UDP)
+            pkt_write_u16(frame, 24, 0)
+            if is_bcast
+                pkt_write_ipv4(frame, 26, 0, 0, 0, 0)
+            else
+                pkt_write_ipv4(frame, 26,
+                    INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+            pkt_write_ipv4(frame, 30, ipv4_octet(dst_ip, 0), ipv4_octet(dst_ip, 1), ipv4_octet(dst_ip, 2), ipv4_octet(dst_ip, 3))
+            pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+
+            var k = 0
+            while k < this_len
+                frame[34 + k] = staging[off + k]
+                k += 1
+
+            inet_nic_send_packet(frame, 14 + 20 + this_len)
+            inet_frame_release(fidx)
+            inet_frag_egress_count += 1
+
+            off += this_len
+        dlen
 
 
 ### TCP — state machine
