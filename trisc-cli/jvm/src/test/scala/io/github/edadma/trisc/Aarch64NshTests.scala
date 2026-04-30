@@ -2036,6 +2036,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixstr: bad"
   }
 
+  "unix: AF_UNIX via POSIX socket()/bind()/listen()/accept()/write()/read()" in {
+    // Option C Session 1.5: AF_UNIX reachable through the standard
+    // POSIX syscall surface. sys_socket(AF_UNIX,...) routes via the
+    // shim into the unix server with POSIX_FD_UNIX_SOCKET=10 fd
+    // kind. Validates DGRAM round-trip (sockaddr_un + recvfrom-out
+    // peer path) plus STREAM listen/connect/accept/write/read +
+    // half-close → 0-byte read.
+    val output = qemu.command("test_punix")
+    output should include("posixunix: ok")
+    output should not include "posixunix: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

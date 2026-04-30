@@ -1,0 +1,271 @@
+test_punix — AF_UNIX via the standard POSIX syscall surface
+=============================================================
+
+Validates Session 1.5 of Option C: AF_UNIX sockets reachable
+via the standard POSIX syscall surface (socket / bind /
+listen / accept / connect / sendto / recvfrom / send / recv /
+close / write / read), routed through the shim into the unix
+server.
+
+Two sub-cases:
+
+  1. SOCK_DGRAM round-trip — bind two sockets to abstract
+     paths, sendto from one to the other, recvfrom drains.
+     Verifies sockaddr_un parsing in both directions.
+
+  2. SOCK_STREAM listen/connect/accept/send/recv — same
+     sequential pattern as the direct-IPC test_unixstr but
+     through POSIX. Validates write()/read() routing too.
+
+Pass criterion: prints `posixunix: ok`.
+
+    module oskit.bin.test_punix
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_WRITE      = 128
+    val NR_READ       = 130
+    val NR_ACCEPT     = 131
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_CONNECT    = 148
+    val NR_LISTEN     = 217
+    val NR_RECVFROM   = 276
+    val NR_SENDTO     = 307
+    val NR_SOCKET     = 337
+
+    val AF_UNIX_V     = 1
+    val SOCK_STREAM_V = 1
+    val SOCK_DGRAM_V  = 2
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("posixunix: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+Build a sockaddr_un at `out` with sun_family=AF_UNIX and the
+given NUL-terminated path bytes. Returns total addrlen
+(2 + path_len + 1 for the terminator).
+
+    fill_sockaddr_un(out: *byte, path: *byte, path_len: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < path_len
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + path_len] = byte(0)
+        2 + path_len + 1
+
+
+POSIX wrappers.
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, addrlen_p: *i32) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(addrlen_p), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen_p: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_p)))
+
+    posix_write(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_read(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+
+Sub-case 1: DGRAM round-trip. Two sockets bound to "PD-A" /
+"PD-B"; sendto a→b, recvfrom drains.
+
+        val a = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if a < 0
+            fail(1)
+            return
+        val b = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if b < 0
+            fail(2)
+            return
+
+        var path_a: [4]byte
+        path_a[0] = 'P'; path_a[1] = 'D'; path_a[2] = '-'; path_a[3] = 'A'
+        var path_b: [4]byte
+        path_b[0] = 'P'; path_b[1] = 'D'; path_b[2] = '-'; path_b[3] = 'B'
+
+        var sa_a: [128]byte
+        val al_a = fill_sockaddr_un(&sa_a[0], &path_a[0], 4)
+        if posix_bind(a, &sa_a[0], al_a) != 0
+            fail(3)
+            return
+
+        var sa_b: [128]byte
+        val al_b = fill_sockaddr_un(&sa_b[0], &path_b[0], 4)
+        if posix_bind(b, &sa_b[0], al_b) != 0
+            fail(4)
+            return
+
+        var send_buf: [16]byte
+        var i = 0
+        while i < 16
+            send_buf[i] = byte((i + 5) & 0xff)
+            i += 1
+        val ns = posix_sendto(a, &send_buf[0], 16, 0, &sa_b[0], al_b)
+        if ns != 16
+            puts("posixunix: sendto ")
+            print_idec(ns)
+            puts("\n")
+            fail(5)
+            return
+
+        var recv_buf: [16]byte
+        var src_addr: [128]byte
+        var src_alen: i32 = 128
+        val nr = posix_recvfrom(b, &recv_buf[0], 16, 0, &src_addr[0], &src_alen)
+        if nr != 16
+            puts("posixunix: recvfrom ")
+            print_idec(nr)
+            puts("\n")
+            fail(6)
+            return
+        i = 0
+        while i < 16
+            if recv_buf[i] != byte((i + 5) & 0xff)
+                fail(7)
+                return
+            i += 1
+
+The recvfrom-out sockaddr_un should report family=AF_UNIX
+and the source path "PD-A" (4 bytes).
+
+        if src_addr[0] != byte(AF_UNIX_V)
+            fail(8)
+            return
+        if src_addr[2] != 'P' || src_addr[3] != 'D'
+            fail(9)
+            return
+        if src_addr[4] != '-' || src_addr[5] != 'A'
+            fail(10)
+            return
+
+        posix_close(a)
+        posix_close(b)
+
+Sub-case 2: STREAM listen/connect/accept + write/read.
+
+        val ls = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if ls < 0
+            fail(11)
+            return
+        var path_s: [4]byte
+        path_s[0] = 'P'; path_s[1] = 'S'; path_s[2] = 'T'; path_s[3] = '1'
+        var sa_s: [128]byte
+        val al_s = fill_sockaddr_un(&sa_s[0], &path_s[0], 4)
+        if posix_bind(ls, &sa_s[0], al_s) != 0
+            fail(12)
+            return
+        if posix_listen(ls, 4) != 0
+            fail(13)
+            return
+
+        val cl = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if cl < 0
+            fail(14)
+            return
+        if posix_connect(cl, &sa_s[0], al_s) != 0
+            fail(15)
+            return
+
+        var peer_addr: [128]byte
+        var peer_alen: i32 = 128
+        val sv = posix_accept(ls, &peer_addr[0], &peer_alen)
+        if sv < 0
+            puts("posixunix: accept ")
+            print_idec(sv)
+            puts("\n")
+            fail(16)
+            return
+
+write() on connector → server reads via read(). 24 bytes.
+
+        var msg1: [24]byte
+        i = 0
+        while i < 24
+            msg1[i] = byte((i + 1) & 0xff)
+            i += 1
+        val nw = posix_write(cl, &msg1[0], 24)
+        if nw != 24
+            puts("posixunix: write ")
+            print_idec(nw)
+            puts("\n")
+            fail(17)
+            return
+
+        var rb: [24]byte
+        val nrd = posix_read(sv, &rb[0], 24)
+        if nrd != 24
+            puts("posixunix: read ")
+            print_idec(nrd)
+            puts("\n")
+            fail(18)
+            return
+        i = 0
+        while i < 24
+            if rb[i] != byte((i + 1) & 0xff)
+                fail(19)
+                return
+            i += 1
+
+Server-end close → client-side read returns 0 (EOF).
+
+        posix_close(sv)
+        var rb2: [4]byte
+        val nrd2 = posix_read(cl, &rb2[0], 4)
+        if nrd2 != 0
+            puts("posixunix: eof ")
+            print_idec(nrd2)
+            puts("\n")
+            fail(20)
+            return
+
+        posix_close(cl)
+        posix_close(ls)
+        puts("posixunix: ok\n")
+        exit()

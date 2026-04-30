@@ -90,6 +90,7 @@ posix_fd_bridge memory.
     val POSIX_FD_EPOLL       = 7
     val POSIX_FD_EVENTFD     = 8
     val POSIX_FD_TIMERFD     = 9
+    val POSIX_FD_UNIX_SOCKET = 10
 
     val POSIX_FDS_PER_PROC   = 64
 
@@ -459,9 +460,29 @@ keep the kernel link free of the full socket-API module.
 
     const INET_MAX_TCP_SEG     = 480
 
+    val POSIX_AF_UNIX        = 1
     val POSIX_AF_INET        = 2
     val POSIX_SOCK_DGRAM     = 2
     val POSIX_SOCK_STREAM    = 1
+
+
+AF_UNIX wire protocol mirror for the unix server. Track
+`oskit/servers/unix.lsysl`. Path is 108 bytes max
+(POSIX `sockaddr_un.sun_path[108]`).
+
+    const UNIX_CMD_SOCKET    = 1
+    const UNIX_CMD_BIND      = 2
+    const UNIX_CMD_CONNECT   = 3
+    const UNIX_CMD_LISTEN    = 4
+    const UNIX_CMD_ACCEPT    = 5
+    const UNIX_CMD_SENDTO    = 6
+    const UNIX_CMD_RECVFROM  = 7
+    const UNIX_CMD_SEND      = 8
+    const UNIX_CMD_RECV      = 9
+    const UNIX_CMD_CLOSE     = 10
+    const UNIX_CMD_PID_EXIT  = 11
+
+    const UNIX_PATH_MAX      = 108
 
 socket(2) / accept4(2) flag bits OR'd into `stype` / `flags`.
 SOCK_NONBLOCK is honoured (mirrored into the slot's flags field
@@ -511,6 +532,24 @@ fcntl command codes (`<fcntl.h>` in musl arch).
         if inet_port_cached < 0
             inet_port_cached = port_lookup("inet")
         inet_port_cached
+
+    var unix_port_cached = -1
+
+    unix_get_port() -> int
+        if unix_port_cached < 0
+            unix_port_cached = port_lookup("unix")
+        unix_port_cached
+
+
+Sign-extend a wire status byte. The unix server emits
+`byte(-EADDRINUSE)` etc., which round-trip back as unsigned
+0..255; this restores the negative value.
+
+    unix_status(b: byte) -> int
+        val v = int(b) & 0xff
+        if v >= 128
+            return v - 256
+        v
 
     shim_write_u16(p: *byte, off: int, v: int)
         p[off]     = byte((v >> 8) & 0xff)
@@ -941,6 +980,8 @@ vm_copy_from.
                 shim_uart_putc(int(p[i]))
                 i += 1
             return i64(len)
+        if k == POSIX_FD_UNIX_SOCKET
+            return sys_send_unix_stream(fd, buf, len)
         if k == POSIX_FD_TCP_SOCKET
             val inet_fd = posix_fd_target(fd)
             if inet_fd < 0
@@ -1113,6 +1154,8 @@ handles read from the TTY driver.
             val ubuf: *byte = *byte(buf)
             ubuf[0] = reply[1]
             return i64(1)
+        if k == POSIX_FD_UNIX_SOCKET
+            return sys_recv_unix_stream(fd, buf, len)
         if k == POSIX_FD_TCP_SOCKET
             val inet_fd = posix_fd_target(fd)
             if inet_fd < 0
@@ -1335,6 +1378,8 @@ still -1) skip the inet call — no backend was ever allocated.
             if k == POSIX_FD_EPOLL
                 epoll_inst_close_all(target)
                 epoll_inst_release(target)
+            if k == POSIX_FD_UNIX_SOCKET
+                shim_unix_close(target)
         posix_fd_clear(fd)
         i64(0)
 
@@ -1353,6 +1398,8 @@ the new fd's flags. `SOCK_CLOEXEC` is accepted-and-ignored (no
 exec yet).
 
     sys_socket(family: int, stype: int, proto: int) -> i64
+        if family == POSIX_AF_UNIX
+            return sys_socket_unix(stype)
         if family != POSIX_AF_INET
             return i64(-EAFNOSUPPORT)
         val sock_flag_mask = POSIX_SOCK_NONBLOCK | POSIX_SOCK_CLOEXEC
@@ -1399,6 +1446,428 @@ exec yet).
             return i64(posix_fd)
         i64(-EPROTONOSUPPORT)
 
+
+AF_UNIX socket family
+---------------------
+
+The unix server (oskit/servers/unix.lsysl) is a self-contained
+path-keyed registry — no NIC, no filesystem integration. Every
+AF_UNIX socket maps to a single server-side slot identified by
+a small integer (`target`). Both DGRAM and STREAM allocate the
+slot eagerly at `socket(2)` time, unlike the AF_INET TCP path
+which defers allocation to listen/connect.
+
+`sockaddr_un` layout (Linux):
+  offset 0..1 : sa_family (u16 native, AF_UNIX = 1)
+  offset 2..  : sun_path (NUL-terminated C string, ≤108 bytes)
+
+For now the path is interpreted as a C-string starting at
+offset 2: bytes are taken up to the first NUL or to addrlen-2,
+whichever comes first. Linux abstract-namespace (leading-NUL)
+support is deferred — slix's registry is already an abstract
+namespace, so a leading NUL just confuses key matching.
+
+    sys_socket_unix(stype: int) -> i64
+        val sock_flag_mask = POSIX_SOCK_NONBLOCK | POSIX_SOCK_CLOEXEC
+        val sock_flags = stype & sock_flag_mask
+        val base_type = stype & ~sock_flag_mask
+        if base_type != POSIX_SOCK_DGRAM
+            if base_type != POSIX_SOCK_STREAM
+                return i64(-EPROTONOSUPPORT)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [2]byte
+        msg[0] = byte(UNIX_CMD_SOCKET)
+        msg[1] = byte(base_type & 0xff)
+        var reply: [2]byte
+        val r = ipc_send(port, msg, 2, reply, 2)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            return i64(unix_status(reply[0]))
+        val unix_fd = int(reply[1]) & 0xff
+        val posix_fd = posix_fd_alloc(POSIX_FD_UNIX_SOCKET, unix_fd)
+        if posix_fd < 0
+            var close_msg: [2]byte
+            close_msg[0] = byte(UNIX_CMD_CLOSE)
+            close_msg[1] = byte(unix_fd & 0xff)
+            var close_rep: [1]byte
+            ipc_send(port, close_msg, 2, close_rep, 1)
+            return i64(-EMFILE)
+        // Stash stype in pos so subsequent helpers can route DGRAM
+        // vs STREAM without a second IPC.
+        val pid = posix_fd_current_pid()
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + posix_fd].pos = i64(base_type)
+        if (sock_flags & POSIX_SOCK_NONBLOCK) != 0
+            val cur = posix_fd_flags(posix_fd)
+            posix_fd_set_flags(posix_fd, cur | POSIX_O_NONBLOCK)
+        i64(posix_fd)
+
+
+Read sun_path into `out` and return the effective length.
+addrlen ≤ 2 → -1. Stops at the first NUL byte in
+[2..addrlen). Returns -1 if path is empty or > UNIX_PATH_MAX.
+
+    shim_unix_read_path(addr_ptr: i64, addrlen: int,
+            out: *byte, out_cap: int) -> int
+        if addrlen < 3
+            return -1
+        val src: *byte = *byte(addr_ptr)
+        var avail = addrlen - 2
+        if avail > out_cap
+            avail = out_cap
+        if avail > UNIX_PATH_MAX
+            avail = UNIX_PATH_MAX
+        var n = 0
+        var done = 0
+        while done == 0
+            if n >= avail
+                done = 1
+            else
+                val b = src[2 + n]
+                if b == byte(0)
+                    done = 1
+                else
+                    out[n] = b
+                    n += 1
+        if n <= 0
+            return -1
+        n
+
+
+Issue UNIX_CMD_CLOSE for `target`.
+
+    shim_unix_close(target: int)
+        if target < 0
+            return
+        val port = unix_get_port()
+        if port < 0
+            return
+        var msg: [2]byte
+        msg[0] = byte(UNIX_CMD_CLOSE)
+        msg[1] = byte(target & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 2, reply, 1)
+
+
+sys_bind for AF_UNIX. Sends the path key to the unix server.
+
+    sys_bind_unix(fd: int, addr_ptr: i64, addrlen: int) -> i64
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        var path: [108]byte
+        val plen = shim_unix_read_path(addr_ptr, addrlen, &path[0], 108)
+        if plen <= 0
+            return i64(-EINVAL)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [128]byte
+        msg[0] = byte(UNIX_CMD_BIND)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte(plen & 0xff)
+        var i = 0
+        while i < plen
+            msg[3 + i] = path[i]
+            i += 1
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 3 + plen, reply, 1)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            val status = unix_status(reply[0])
+            posix_fd_set_error(fd, i64(status))
+            return i64(status)
+        i64(0)
+
+
+sys_listen for AF_UNIX. STREAM only.
+
+    sys_listen_unix(fd: int, backlog: int) -> i64
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var bl = backlog
+        if bl < 0
+            bl = 0
+        if bl > 0xff
+            bl = 0xff
+        var msg: [3]byte
+        msg[0] = byte(UNIX_CMD_LISTEN)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte(bl & 0xff)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 3, reply, 1)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            return i64(unix_status(reply[0]))
+        val pid = posix_fd_current_pid()
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].is_listen = 1
+        i64(0)
+
+
+sys_accept for AF_UNIX. STREAM only. Allocates a fresh
+posix fd backed by the new server-end slot.
+
+    sys_accept_unix(fd: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [2]byte
+        msg[0] = byte(UNIX_CMD_ACCEPT)
+        msg[1] = byte(target & 0xff)
+        var reply: [2]byte
+        val r = ipc_send(port, msg, 2, reply, 2)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            return i64(unix_status(reply[0]))
+        val server_end = int(reply[1]) & 0xff
+        val new_posix_fd = posix_fd_alloc(POSIX_FD_UNIX_SOCKET, server_end)
+        if new_posix_fd < 0
+            shim_unix_close(server_end)
+            return i64(-EMFILE)
+        val pid = posix_fd_current_pid()
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + new_posix_fd].pos = i64(POSIX_SOCK_STREAM)
+        // sockaddr_out for AF_UNIX accept: family + (typically empty)
+        // peer path. We don't track which client connected so the path
+        // is just empty — Linux fills it from the connector's bound
+        // path, which we don't currently propagate through CONNECT.
+        if addr_ptr != i64(0)
+            val a: *byte = *byte(addr_ptr)
+            a[0] = byte(POSIX_AF_UNIX & 0xff)
+            a[1] = byte(0)
+            // Leave path bytes zero.
+        if addrlen_ptr != i64(0)
+            val alp: *i32 = *i32(addrlen_ptr)
+            *alp = i32(2)
+        i64(new_posix_fd)
+
+
+sys_connect for AF_UNIX. STREAM only.
+
+    sys_connect_unix(fd: int, addr_ptr: i64, addrlen: int) -> i64
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        var path: [108]byte
+        val plen = shim_unix_read_path(addr_ptr, addrlen, &path[0], 108)
+        if plen <= 0
+            return i64(-EINVAL)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [128]byte
+        msg[0] = byte(UNIX_CMD_CONNECT)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte(plen & 0xff)
+        var i = 0
+        while i < plen
+            msg[3 + i] = path[i]
+            i += 1
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 3 + plen, reply, 1)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            val status = unix_status(reply[0])
+            posix_fd_set_error(fd, i64(status))
+            return i64(status)
+        i64(0)
+
+
+DGRAM sendto for AF_UNIX.
+
+    sys_sendto_unix_dgram(fd: int, buf: i64, len: int,
+            addr_ptr: i64, addrlen: int) -> i64
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        if addr_ptr == i64(0)
+            return i64(-EINVAL)
+        var path: [108]byte
+        val plen = shim_unix_read_path(addr_ptr, addrlen, &path[0], 108)
+        if plen <= 0
+            return i64(-EINVAL)
+        if len < 0
+            return i64(-EINVAL)
+        var dlen = len
+        if dlen > 256
+            dlen = 256
+        val data: *byte = *byte(buf)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [512]byte
+        msg[0] = byte(UNIX_CMD_SENDTO)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte(plen & 0xff)
+        var i = 0
+        while i < plen
+            msg[3 + i] = path[i]
+            i += 1
+        msg[3 + plen]     = byte((dlen >> 8) & 0xff)
+        msg[3 + plen + 1] = byte(dlen & 0xff)
+        i = 0
+        while i < dlen
+            msg[3 + plen + 2 + i] = data[i]
+            i += 1
+        var reply: [3]byte
+        val r = ipc_send(port, msg, 3 + plen + 2 + dlen, reply, 3)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            val status = unix_status(reply[0])
+            posix_fd_set_error(fd, i64(status))
+            return i64(status)
+        val nsent = ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
+        i64(nsent)
+
+
+STREAM send for AF_UNIX. Used by both `sendto` (with NULL
+addr) and `write` on a STREAM unix fd.
+
+    sys_send_unix_stream(fd: int, buf: i64, len: int) -> i64
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        if len < 0
+            return i64(-EINVAL)
+        var dlen = len
+        if dlen > 2046
+            dlen = 2046
+        val data: *byte = *byte(buf)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [2050]byte
+        msg[0] = byte(UNIX_CMD_SEND)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte((dlen >> 8) & 0xff)
+        msg[3] = byte(dlen & 0xff)
+        var i = 0
+        while i < dlen
+            msg[4 + i] = data[i]
+            i += 1
+        var reply: [3]byte
+        val r = ipc_send(port, msg, 4 + dlen, reply, 3)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            val status = unix_status(reply[0])
+            posix_fd_set_error(fd, i64(status))
+            return i64(status)
+        val nsent = ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
+        i64(nsent)
+
+
+DGRAM recvfrom for AF_UNIX.
+
+    sys_recvfrom_unix_dgram(fd: int, buf: i64, len: int,
+            addr_ptr: i64, addrlen_ptr: i64) -> i64
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        var maxlen = len
+        if maxlen < 0
+            maxlen = 0
+        if maxlen > 256
+            maxlen = 256
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [4]byte
+        msg[0] = byte(UNIX_CMD_RECVFROM)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte((maxlen >> 8) & 0xff)
+        msg[3] = byte(maxlen & 0xff)
+        var reply: [512]byte
+        val r = ipc_send(port, msg, 4, reply, 512)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            val status = unix_status(reply[0])
+            posix_fd_set_error(fd, i64(status))
+            return i64(status)
+        val plen = int(reply[1]) & 0xff
+        val dlen = ((int(reply[2 + plen]) & 0xff) << 8) | (int(reply[2 + plen + 1]) & 0xff)
+        var dcopy = dlen
+        if dcopy > maxlen
+            dcopy = maxlen
+        val dst: *byte = *byte(buf)
+        var i = 0
+        while i < dcopy
+            dst[i] = reply[2 + plen + 2 + i]
+            i += 1
+        if addr_ptr != i64(0)
+            val a: *byte = *byte(addr_ptr)
+            a[0] = byte(POSIX_AF_UNIX & 0xff)
+            a[1] = byte(0)
+            var pcopy = plen
+            if pcopy > UNIX_PATH_MAX
+                pcopy = UNIX_PATH_MAX
+            i = 0
+            while i < pcopy
+                a[2 + i] = reply[2 + i]
+                i += 1
+            // NUL-terminate within bounds for C-string callers.
+            if 2 + pcopy < 110
+                a[2 + pcopy] = byte(0)
+        if addrlen_ptr != i64(0)
+            val alp: *i32 = *i32(addrlen_ptr)
+            *alp = i32(2 + plen)
+        i64(dcopy)
+
+
+STREAM recv for AF_UNIX. Used by both `recvfrom` and
+`read` on a STREAM unix fd.
+
+    sys_recv_unix_stream(fd: int, buf: i64, len: int) -> i64
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        var maxlen = len
+        if maxlen < 0
+            maxlen = 0
+        if maxlen > 2046
+            maxlen = 2046
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [4]byte
+        msg[0] = byte(UNIX_CMD_RECV)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte((maxlen >> 8) & 0xff)
+        msg[3] = byte(maxlen & 0xff)
+        var reply: [2050]byte
+        val r = ipc_send(port, msg, 4, reply, 2050)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            val status = unix_status(reply[0])
+            posix_fd_set_error(fd, i64(status))
+            return i64(status)
+        val dlen = ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
+        var dcopy = dlen
+        if dcopy > maxlen
+            dcopy = maxlen
+        val dst: *byte = *byte(buf)
+        var i = 0
+        while i < dcopy
+            dst[i] = reply[3 + i]
+            i += 1
+        i64(dcopy)
+
+
 SYS_BIND. For UDP sockets, forward to inet's BIND. For TCP
 sockets, stash the bound port in `slot.pos` so a subsequent
 `listen()` can use it — inet allocates the actual listen slot
@@ -1407,6 +1876,8 @@ family(2), port(2, BE), addr(4), zero(8).
 
     sys_bind(fd: int, addr_ptr: i64, addrlen: int) -> i64
         val k = posix_fd_kind(fd)
+        if k == POSIX_FD_UNIX_SOCKET
+            return sys_bind_unix(fd, addr_ptr, addrlen)
         if addrlen < 16
             return i64(-EINVAL)
         val a: *byte = *byte(addr_ptr)
@@ -1523,6 +1994,12 @@ MSG_DONTWAIT (0x40) is honored for TCP via sys_sendto_tcp.
 
     sys_sendto(fd: int, buf: i64, len: int, flags: int, addr_ptr: i64, addrlen: int) -> i64
         val k0 = posix_fd_kind(fd)
+        if k0 == POSIX_FD_UNIX_SOCKET
+            val pid = posix_fd_current_pid()
+            val stype = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].pos)
+            if stype == POSIX_SOCK_STREAM
+                return sys_send_unix_stream(fd, buf, len)
+            return sys_sendto_unix_dgram(fd, buf, len, addr_ptr, addrlen)
         if k0 == POSIX_FD_TCP_SOCKET
             return sys_sendto_tcp(fd, buf, len, flags)
         if k0 != POSIX_FD_UDP_SOCKET
@@ -1659,6 +2136,12 @@ peer call `getpeername`.
 
     sys_recvfrom(fd: int, buf: i64, len: int, flags: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
         val k0 = posix_fd_kind(fd)
+        if k0 == POSIX_FD_UNIX_SOCKET
+            val pid = posix_fd_current_pid()
+            val stype = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].pos)
+            if stype == POSIX_SOCK_STREAM
+                return sys_recv_unix_stream(fd, buf, len)
+            return sys_recvfrom_unix_dgram(fd, buf, len, addr_ptr, addrlen_ptr)
         if k0 == POSIX_FD_TCP_SOCKET
             return sys_recvfrom_tcp(fd, buf, len, flags, addr_ptr, addrlen_ptr)
         if k0 != POSIX_FD_UDP_SOCKET
@@ -2040,6 +2523,8 @@ something other than AF_INET / AF_UNSPEC.
 
     sys_connect(fd: int, addr_ptr: i64, addrlen: int) -> i64
         val k0 = posix_fd_kind(fd)
+        if k0 == POSIX_FD_UNIX_SOCKET
+            return sys_connect_unix(fd, addr_ptr, addrlen)
         if k0 == POSIX_FD_UDP_SOCKET
             return sys_connect_udp(fd, addr_ptr, addrlen)
         if k0 != POSIX_FD_TCP_SOCKET
@@ -2127,7 +2612,10 @@ returned listen fd as the backend target. `backlog` is advisory —
 inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
 
     sys_listen(fd: int, backlog: int) -> i64
-        if posix_fd_kind(fd) != POSIX_FD_TCP_SOCKET
+        val k = posix_fd_kind(fd)
+        if k == POSIX_FD_UNIX_SOCKET
+            return sys_listen_unix(fd, backlog)
+        if k != POSIX_FD_TCP_SOCKET
             return i64(-EBADF)
         if posix_fd_target(fd) >= 0
             return i64(-EINVAL)             // already listening or connected
@@ -2204,7 +2692,10 @@ also send data + FIN before accept returns, so the child can be in
 CLOSE_WAIT on arrival — read/close paths handle that already.
 
     sys_accept(fd: int, addr_ptr: i64, addrlen_ptr: i64) -> i64
-        if posix_fd_kind(fd) != POSIX_FD_TCP_SOCKET
+        val k = posix_fd_kind(fd)
+        if k == POSIX_FD_UNIX_SOCKET
+            return sys_accept_unix(fd, addr_ptr, addrlen_ptr)
+        if k != POSIX_FD_TCP_SOCKET
             return i64(-EBADF)
         val listen_fd = posix_fd_target(fd)
         if listen_fd < 0
