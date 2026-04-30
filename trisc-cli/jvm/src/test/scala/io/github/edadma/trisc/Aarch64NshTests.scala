@@ -2129,6 +2129,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixpoll: bad"
   }
 
+  "unix: epoll_ctl/epoll_wait on AF_UNIX with SUB/UNSUB plumbing" in {
+    // UNIX_CMD_EPOLL_SUB/UNSUB/INST_CLOSE handlers + shim
+    // epoll_unix_subscribe/unsubscribe/inst_close. epoll_ctl_add on
+    // an AF_UNIX fd registers a row in the unix server's subscriber
+    // table; sendto fires both the level-triggered POLL path and a
+    // notify_send_to to the epoll-owning thread. epoll_pwait returns
+    // the POLLIN event; close(epfd) drops the subscription.
+    val output = qemu.command("test_unixwk")
+    output should include("unixwk: ok")
+    output should not include "unixwk: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

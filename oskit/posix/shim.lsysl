@@ -484,10 +484,13 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_PID_EXIT  = 11
     const UNIX_CMD_SENDMSG   = 12
     const UNIX_CMD_RECVMSG   = 13
-    const UNIX_CMD_ACCEPT_NB    = 14
-    const UNIX_CMD_RECVFROM_NB  = 15
-    const UNIX_CMD_RECV_NB      = 16
-    const UNIX_CMD_POLL         = 17
+    const UNIX_CMD_ACCEPT_NB        = 14
+    const UNIX_CMD_RECVFROM_NB      = 15
+    const UNIX_CMD_RECV_NB          = 16
+    const UNIX_CMD_POLL             = 17
+    const UNIX_CMD_EPOLL_SUB        = 18
+    const UNIX_CMD_EPOLL_UNSUB      = 19
+    const UNIX_CMD_EPOLL_INST_CLOSE = 20
 
     const UNIX_PATH_MAX      = 108
     const UNIX_SCM_MAX_FDS   = 4
@@ -4848,6 +4851,54 @@ through entries with UNSUB.
         ipc_send(port, msg, 2, reply, 1)
 
 
+`epoll_unix_subscribe` / `_unsubscribe` / `_inst_close_unix`
+mirror the inet helpers for AF_UNIX-backed fds. Wire layout:
+`[cmd(1), unix_fd(1), inst(1)]`. The unix server's
+subscriber table is keyed on (sender_tid, unix_fd, inst).
+
+    epoll_unix_subscribe(target_fd: int, inst: int)
+        if posix_fd_kind(target_fd) != POSIX_FD_UNIX_SOCKET
+            return
+        val target = posix_fd_target(target_fd)
+        if target < 0
+            return
+        val port = unix_get_port()
+        if port < 0
+            return
+        var msg: [3]byte
+        msg[0] = byte(UNIX_CMD_EPOLL_SUB)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
+
+    epoll_unix_unsubscribe(target_fd: int, inst: int)
+        if posix_fd_kind(target_fd) != POSIX_FD_UNIX_SOCKET
+            return
+        val target = posix_fd_target(target_fd)
+        if target < 0
+            return
+        val port = unix_get_port()
+        if port < 0
+            return
+        var msg: [3]byte
+        msg[0] = byte(UNIX_CMD_EPOLL_UNSUB)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 3, reply, 1)
+
+    epoll_inst_close_unix(inst: int)
+        val port = unix_get_port()
+        if port < 0
+            return
+        var msg: [2]byte
+        msg[0] = byte(UNIX_CMD_EPOLL_INST_CLOSE)
+        msg[1] = byte(inst & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 2, reply, 1)
+
+
 `epoll_vfs_subscribe` mirrors the inet helper for VFS-backed fds
 (POSIX_FD_FILE — pipes, regular files, TTYs). VFS resolves the
 shipped handle to its `oft_idx` and keys the subscription on
@@ -4955,16 +5006,19 @@ belong to it, so calling both is safe and idempotent.
         epoll_inet_subscribe(target_fd, inst)
         epoll_vfs_subscribe(target_fd, inst)
         epoll_tty_subscribe(target_fd, inst)
+        epoll_unix_subscribe(target_fd, inst)
 
     epoll_unsubscribe(target_fd: int, inst: int)
         epoll_inet_unsubscribe(target_fd, inst)
         epoll_vfs_unsubscribe(target_fd, inst)
         epoll_tty_unsubscribe(target_fd, inst)
+        epoll_unix_unsubscribe(target_fd, inst)
 
     epoll_inst_close_all(inst: int)
         epoll_inst_close_inet(inst)
         epoll_inst_close_vfs(inst)
         epoll_inst_close_tty(inst)
+        epoll_inst_close_unix(inst)
 
 
 SYS_EPOLL_CREATE1. Allocates a fresh epoll instance and parks

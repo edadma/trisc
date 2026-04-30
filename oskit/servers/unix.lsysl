@@ -80,6 +80,19 @@ UNIX_PATH_MAX. Multi-byte integers are big-endian.
                 Readiness query only — no parking. Used by
                 shim's `epoll_query_ready` for `ppoll` /
                 `select` / `epoll` integration.
+- EPOLL_SUB (18)   req: cmd(1) + fd(1) + epoll_inst(1)
+                   rep: status(1)
+                   Subscribes (sender_tid, fd, epoll_inst).
+                   Idempotent.
+- EPOLL_UNSUB (19) req: cmd(1) + fd(1) + epoll_inst(1)
+                   rep: status(1)
+                   Drops the matching sub.
+- EPOLL_INST_CLOSE (20)
+                   req: cmd(1) + epoll_inst(1)
+                   rep: status(1)
+                   Drops every sub belonging to (sender_tid,
+                   epoll_inst) — bulk cleanup when an epoll
+                   fd closes.
 
 The `_NB` variants are used by the shim when the fd is in
 `O_NONBLOCK` mode (or when `MSG_DONTWAIT` is passed in the
@@ -97,7 +110,7 @@ queue entries that hold the slot alive while in transit.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
-    import oskit.services.{rs_ready}
+    import oskit.services.{rs_ready, notify_send_to}
 
 
 Protocol command codes (byte value of buf[0]).
@@ -115,10 +128,13 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_PID_EXIT  = 11
     const UNIX_CMD_SENDMSG   = 12
     const UNIX_CMD_RECVMSG   = 13
-    const UNIX_CMD_ACCEPT_NB    = 14
-    const UNIX_CMD_RECVFROM_NB  = 15
-    const UNIX_CMD_RECV_NB      = 16
-    const UNIX_CMD_POLL         = 17
+    const UNIX_CMD_ACCEPT_NB        = 14
+    const UNIX_CMD_RECVFROM_NB      = 15
+    const UNIX_CMD_RECV_NB          = 16
+    const UNIX_CMD_POLL             = 17
+    const UNIX_CMD_EPOLL_SUB        = 18
+    const UNIX_CMD_EPOLL_UNSUB      = 19
+    const UNIX_CMD_EPOLL_INST_CLOSE = 20
 
 EPOLL/POLL bit values match `POSIX_EPOLL*` 1:1 (POLLIN=0x001,
 POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010). The shim's
@@ -239,6 +255,76 @@ matching send/sendto wakes the slot.
     var unix_port = -1
 
 
+Epoll subscriber table. Each entry pins a (owner_tid, fd,
+epoll_inst) tuple so any readiness edge on that fd posts a
+wake to the owner. 16 entries is enough for the working
+set we expect — every AF_UNIX fd watched by a typical event
+loop holds one row.
+
+    const UNIX_MAX_EPOLL_SUBS = 16
+
+    struct UnixEpollSub
+        in_use: int
+        unix_fd: int
+        owner_tid: int
+        epoll_inst: int
+
+    var unix_epoll_subs: [16]UnixEpollSub
+
+    unix_epoll_init_subs()
+        var i = 0
+        while i < UNIX_MAX_EPOLL_SUBS
+            unix_epoll_subs[i].in_use = 0
+            i += 1
+
+
+    unix_epoll_alloc_sub() -> int
+        var i = 0
+        while i < UNIX_MAX_EPOLL_SUBS
+            if unix_epoll_subs[i].in_use == 0
+                return i
+            i += 1
+        -1
+
+
+    unix_epoll_find_sub(unix_fd: int, owner_tid: int, inst: int) -> int
+        var i = 0
+        while i < UNIX_MAX_EPOLL_SUBS
+            if unix_epoll_subs[i].in_use != 0
+                if unix_epoll_subs[i].unix_fd == unix_fd
+                    if unix_epoll_subs[i].owner_tid == owner_tid
+                        if unix_epoll_subs[i].epoll_inst == inst
+                            return i
+            i += 1
+        -1
+
+
+Drop every subscription belonging to a particular
+(owner_tid, epoll_inst) pair. Called by EPOLL_INST_CLOSE.
+
+    unix_epoll_drop_inst(owner_tid: int, inst: int)
+        var i = 0
+        while i < UNIX_MAX_EPOLL_SUBS
+            if unix_epoll_subs[i].in_use != 0
+                if unix_epoll_subs[i].owner_tid == owner_tid
+                    if unix_epoll_subs[i].epoll_inst == inst
+                        unix_epoll_subs[i].in_use = 0
+            i += 1
+
+
+Drop every subscription belonging to a particular owner_tid.
+Called from PID_EXIT so a process that died without closing
+its epoll fds doesn't leak rows.
+
+    unix_epoll_drop_owner(owner_tid: int)
+        var i = 0
+        while i < UNIX_MAX_EPOLL_SUBS
+            if unix_epoll_subs[i].in_use != 0
+                if unix_epoll_subs[i].owner_tid == owner_tid
+                    unix_epoll_subs[i].in_use = 0
+            i += 1
+
+
 Big-endian helpers.
 
     unix_read_u16(p: *byte, off: int) -> int
@@ -317,15 +403,24 @@ are O(UNIX_MAX_OWNERS), which is fine at n=4.
 Bump the per-slot `fire_seq` counter so the shim's per-fd
 EPOLLET edge tracker can detect "this specific fd crossed a
 readiness boundary" without a per-instance bulk clear of
-`last_reported`. Called at every state change that affects
-EPOLLIN/OUT/HUP — sendto/sendmsg enqueue, recvfrom drain,
-send to peer, recv drain, listen-backlog push, accept drain,
-peer close.
+`last_reported`. Then walk the epoll subscriber table and
+post a wake to every (owner_tid) subscribed to this slot,
+so a blocking `epoll_wait` can return without polling.
+
+Called at every state change that affects EPOLLIN/OUT/HUP —
+sendto/sendmsg enqueue, recvfrom drain, send to peer, recv
+drain, listen-backlog push, accept drain, peer close.
 
     unix_bump_fire_seq(idx: int)
         if idx >= 0 && idx < UNIX_MAX_SOCKETS
             if unix_sockets[idx].in_use != 0
                 unix_sockets[idx].fire_seq = unix_sockets[idx].fire_seq + 1
+                var i = 0
+                while i < UNIX_MAX_EPOLL_SUBS
+                    if unix_epoll_subs[i].in_use != 0
+                        if unix_epoll_subs[i].unix_fd == idx
+                            notify_send_to(unix_epoll_subs[i].owner_tid, 1)
+                    i += 1
 
 Remove `tid` from the owners ring; compact the prefix so
 `owners[0..owners_count)` stays contiguous. No-op if the tid
@@ -1466,6 +1561,59 @@ sibling entries' last_reported state.
         ipc_reply(sender, reply, 7)
 
 
+### EPOLL_SUB / UNSUB / INST_CLOSE handlers
+
+SUB upserts: if the same (sender_tid, unix_fd, epoll_inst)
+triple is already in the table, no-op success. The shim
+calls SUB on every CTL_ADD and CTL_MOD; the events mask isn't
+shipped because the unix server's job is just "wake on edge",
+not filter — the shim's epoll_query_ready handles filtering.
+
+    unix_handle_epoll_sub(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        val inst = int(buf[2]) & 0xff
+        var reply: [1]byte
+        if fd < 0 || fd >= UNIX_MAX_SOCKETS
+            reply[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, reply, 1)
+            return
+        val existing = unix_epoll_find_sub(fd, sender, inst)
+        if existing >= 0
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
+        val slot = unix_epoll_alloc_sub()
+        if slot < 0
+            reply[0] = byte(-UNIX_ENOMEM)
+            ipc_reply(sender, reply, 1)
+            return
+        unix_epoll_subs[slot].in_use = 1
+        unix_epoll_subs[slot].unix_fd = fd
+        unix_epoll_subs[slot].owner_tid = sender
+        unix_epoll_subs[slot].epoll_inst = inst
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+    unix_handle_epoll_unsub(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        val inst = int(buf[2]) & 0xff
+        var reply: [1]byte
+        val slot = unix_epoll_find_sub(fd, sender, inst)
+        if slot >= 0
+            unix_epoll_subs[slot].in_use = 0
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+    unix_handle_epoll_inst_close(sender: int, buf: *byte)
+        val inst = int(buf[1]) & 0xff
+        unix_epoll_drop_inst(sender, inst)
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
 ### CLOSE handler
 
 Frees the slot. If the slot has a STREAM peer, marks the
@@ -1517,6 +1665,7 @@ sweep is a no-op against everything else.
 
     unix_handle_pid_exit(sender: int, buf: *byte)
         val tid = unix_read_u32(buf, 1)
+        unix_epoll_drop_owner(tid)
         var i = 0
         while i < UNIX_MAX_SOCKETS
             if unix_sockets[i].in_use != 0
@@ -1538,6 +1687,7 @@ Synchronous request-reply, no notification path required
 
     unix_server()
         unix_init_sockets()
+        unix_epoll_init_subs()
         unix_port = port_create()
         port_register(unix_port, "unix")
         rs_ready()
@@ -1581,6 +1731,12 @@ Synchronous request-reply, no notification path required
                     unix_handle_recv(sender, buf, 1)
                 else if cmd == UNIX_CMD_POLL
                     unix_handle_poll(sender, buf)
+                else if cmd == UNIX_CMD_EPOLL_SUB
+                    unix_handle_epoll_sub(sender, buf)
+                else if cmd == UNIX_CMD_EPOLL_UNSUB
+                    unix_handle_epoll_unsub(sender, buf)
+                else if cmd == UNIX_CMD_EPOLL_INST_CLOSE
+                    unix_handle_epoll_inst_close(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)
