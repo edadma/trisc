@@ -876,8 +876,13 @@ class SyslParser extends StandardTokenParsers {
     ident ~ opt(":" ~> typeRef) ^^ { case name ~ typ => ClosureParamAST(name, typ) }
 
   lazy val closureBody: Parser[FunBodyAST] =
+    // `block` runs at top-level lambdas where the body is on its own indented
+    // line(s) (Newline+Indent emitted). Inside parens — call args, casts,
+    // tuples — the lexer suppresses Newline/Indent, so `block` won't match;
+    // the body comes back as one large expression. Use full `expr` so that
+    // expression includes if-then-else, match, and nested closures.
     block ^^ (stmts => BlockBodyAST(stmts)) |
-    logicalOr ^^ ExprBodyAST.apply
+    expr ^^ ExprBodyAST.apply
 
   lazy val matchExpr: Parser[MatchExprAST] =
     logicalOr ~ ("match" ~> Newline ~> Indent ~> rep1(matchArm) ~ opt(matchElse) <~ Dedent) <~ opt(endMarker("match")) ^^ {

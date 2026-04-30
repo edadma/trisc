@@ -1628,6 +1628,35 @@ transform = x ->
     doubled + 1
 ```
 
+**Body shape — single expression vs. block.** A closure body is either an
+indented statement block (when the `->` line ends with a newline at top
+level) or a single expression that includes any of: arithmetic, calls,
+`if`/`else`, `match`, and nested closures. Both forms are accepted in
+every expression position — top-level bindings, call arguments, cast
+arguments, tuple literals — so a non-trivial body can be written inline
+where the closure is used:
+
+```sysl
+// Multi-line if-else body inside a call argument
+apply((x: int) ->
+    if x > 0 then x * 2
+    else 0, 21)
+
+// Inside a generic-alias cast (parser-combinator idiom)
+type Parser[A] = new (Input) -> ParseResult[A]
+eof[A](v: A) -> Parser[A] =
+    Parser[A]((inp: Input) ->
+        if inp.at_end() then Success(v, inp)
+        else Failure("expected end of input", inp))
+```
+
+Inside parens (call arguments, casts, tuple literals) the lexer joins
+lines, so what looks like a multi-line body is one large expression to
+the parser — indentation is purely visual. A statement-block body
+(multiple statements separated by newlines) is only available at
+top-level lambda position where Newline/Indent/Dedent tokens are
+emitted.
+
 **Capture semantics:** Closures capture variables **by value** (copy at creation time). Mutations to the original variable after the closure is created do not affect the captured value:
 
 ```sysl
