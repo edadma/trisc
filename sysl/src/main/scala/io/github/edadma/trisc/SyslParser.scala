@@ -858,6 +858,17 @@ class SyslParser extends StandardTokenParsers {
       expr ^^ ExprStmtAST.apply
 
   // --- Precedence climbing ---
+  //
+  // Each level accepts its built-in operators *and* a user-op slot —
+  // `userBinOp(firstChars)` matches any Keyword whose chars start with one
+  // of the level's first chars and isn't a reserved/syntactic sigil. This
+  // lets user-defined operators (e.g. `<>`, `>>>`, `|>`, `~~`) slot into
+  // the precedence ladder via Scala-style first-char convention without
+  // needing per-operator declarations. The analyzer dispatches the user
+  // op via `lookupBinaryOperatorTrait` (Stage C).
+  //
+  // Compound assignments (`+=` etc.) and arrows (`->`, `=>`) are reserved
+  // and never match an expression-level user op.
 
   lazy val logicalOr: Parser[ExpressionAST] =
     logicalAnd ~ rep("||" ~> logicalAnd) ^^ {
@@ -870,7 +881,7 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val comparisonOp: Parser[String] =
-    "==" | "!=" | "<=" | ">=" | "<" | ">"
+    "==" | "!=" | "<=" | ">=" | "<" | ">" | userBinOp(comparisonFirstChars)
 
   lazy val comparison: Parser[ExpressionAST] =
     bitwiseOr ~ (opt("!") <~ "in") ~ bitwiseOr ~ (("..<" | "..") ~ bitwiseOr) ^^ {
@@ -890,18 +901,18 @@ class SyslParser extends StandardTokenParsers {
       }
 
   lazy val bitwiseOr: Parser[ExpressionAST] =
-    bitwiseXor ~ rep("|" ~> bitwiseXor) ^^ {
-      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "|", r))
+    bitwiseXor ~ rep(("|" | userBinOp(Set('|'))) ~ bitwiseXor) ^^ {
+      case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val bitwiseXor: Parser[ExpressionAST] =
-    bitwiseAnd ~ rep(("^" | "~") ~ bitwiseAnd) ^^ {
+    bitwiseAnd ~ rep(("^" | "~" | userBinOp(Set('^', '~'))) ~ bitwiseAnd) ^^ {
       case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val bitwiseAnd: Parser[ExpressionAST] =
-    shift ~ rep("&" ~> shift) ^^ {
-      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "&", r))
+    shift ~ rep(("&" | userBinOp(Set('&'))) ~ shift) ^^ {
+      case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val shift: Parser[ExpressionAST] =
@@ -910,14 +921,55 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val additive: Parser[ExpressionAST] =
-    multiplicative ~ rep(("+" | "-") ~ multiplicative) ^^ {
+    multiplicative ~ rep(("+" | "-" | userBinOp(Set('+', '-'))) ~ multiplicative) ^^ {
       case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val multiplicative: Parser[ExpressionAST] =
-    unary ~ rep(("*" | "/" | "%") ~ unary) ^^ {
+    unary ~ rep(("*" | "/" | "%" | userBinOp(Set('*', '/', '%'))) ~ unary) ^^ {
       case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
+
+  // ----- User-defined binary operator slots -----
+
+  // Operator strings that the language reserves and which therefore must
+  // never be picked up as a user-defined binary op. Includes:
+  //  - all built-in arithmetic / comparison / bitwise / shift / logical ops
+  //  - `++` `--` (prefix/postfix inc/dec)
+  //  - `=` and the compound assignments (statement-level)
+  //  - `->` `=>` (function arrow, match-arm arrow)
+  //  - `..` `..<` (range)
+  //  - `!` (unary not — overloadable later if/when prefix support lands)
+  private val reservedOps: Set[String] = Set(
+    "+", "-", "*", "/", "%",
+    "<<", ">>",
+    "==", "!=", "<=", ">=", "<", ">",
+    "&&", "||", "!", "&", "|", "^", "~",
+    "++", "--",
+    "=", "+=", "-=", "*=", "/=", "%=",
+    "&=", "|=", "^=", "<<=", ">>=",
+    "->", "=>",
+    "..", "..<",
+  )
+
+  // Comparison level (level 4) is special: shifts (`<<` `>>`) and shift-
+  // assigns (`<<=` `>>=`) also start with `<`/`>`, but live at a different
+  // level, so user comparison ops must exclude any string that *starts* with
+  // `<<` or `>>`. (E.g. `<<*` is a shift-level user op, not comparison.)
+  private val comparisonFirstChars: Set[Char] = Set('<', '>', '=', '!')
+
+  // Match any Keyword whose chars start with one of `firstChars`, and
+  // which isn't reserved. Used by each precedence level above to admit
+  // user-defined operators slotted by first-char convention.
+  private def userBinOp(firstChars: Set[Char]): Parser[String] =
+    acceptMatch(s"user binary operator", {
+      case k: lexical.Keyword
+          if k.chars.nonEmpty
+            && firstChars.contains(k.chars.head)
+            && !reservedOps.contains(k.chars)
+            && !(firstChars == comparisonFirstChars && (k.chars.startsWith("<<") || k.chars.startsWith(">>"))) =>
+        k.chars
+    })
 
   lazy val unary: Parser[ExpressionAST] =
     "++" ~> ident ~ ("." ~> ident) ^^ { case obj ~ field => FieldPreIncAST(VarRefAST(obj), field) } |
