@@ -487,6 +487,7 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_ACCEPT_NB    = 14
     const UNIX_CMD_RECVFROM_NB  = 15
     const UNIX_CMD_RECV_NB      = 16
+    const UNIX_CMD_POLL         = 17
 
     const UNIX_PATH_MAX      = 108
     const UNIX_SCM_MAX_FDS   = 4
@@ -5663,6 +5664,25 @@ multi-fd EPOLLET loops.
         val k = posix_fd_kind(target_fd)
         if k == POSIX_FD_FREE
             return POSIX_EPOLLERR
+        if k == POSIX_FD_UNIX_SOCKET
+            val target = posix_fd_target(target_fd)
+            if target < 0
+                return POSIX_EPOLLERR
+            val port = unix_get_port()
+            if port < 0
+                return 0
+            var msg: [2]byte
+            msg[0] = byte(UNIX_CMD_POLL)
+            msg[1] = byte(target & 0xff)
+            var reply: [7]byte
+            val r = ipc_send(port, msg, 2, reply, 7)
+            if r < 0
+                return POSIX_EPOLLERR
+            if reply[0] != 0
+                return POSIX_EPOLLERR
+            val raw = ((int(reply[1]) & 0xff) << 8) | (int(reply[2]) & 0xff)
+            *seq_out = (int(reply[3]) & 0xff) | ((int(reply[4]) & 0xff) << 8) | ((int(reply[5]) & 0xff) << 16) | ((int(reply[6]) & 0xff) << 24)
+            return raw & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         if k == POSIX_FD_UDP_SOCKET || k == POSIX_FD_TCP_SOCKET
             val port = inet_get_port()
             if port < 0

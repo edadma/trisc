@@ -754,6 +754,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "unixdup: bad"
   }
 
+  "unix: ppoll(2) on AF_UNIX socket fires on data arrival" in {
+    // New UNIX_CMD_POLL handler returns the standard EPOLLIN / EPOLLOUT
+    // / EPOLLHUP mask for AF_UNIX fds. shim's epoll_query_ready routes
+    // through it, so ppoll(2) and select(2) on AF_UNIX fds now fire
+    // correctly. EPOLLOUT is always set (slix doesn't enforce send-side
+    // backpressure); EPOLLIN follows queue/buffer state.
+    val output = qemu.command("test_unixpoll")
+    output should include("unixpoll: ok")
+    output should not include "unixpoll: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

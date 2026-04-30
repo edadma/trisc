@@ -75,6 +75,11 @@ UNIX_PATH_MAX. Multi-byte integers are big-endian.
 - RECV_NB (16)     same wire as RECV — returns -EAGAIN if rx_buf
                    empty *and* peer is still alive. EOF (peer
                    closed, no data) still returns 0.
+- POLL (17)     req: cmd(1) + fd(1)
+                rep: status(1) + mask_be(2) + fire_seq_le(4)
+                Readiness query only — no parking. Used by
+                shim's `epoll_query_ready` for `ppoll` /
+                `select` / `epoll` integration.
 
 The `_NB` variants are used by the shim when the fd is in
 `O_NONBLOCK` mode (or when `MSG_DONTWAIT` is passed in the
@@ -113,6 +118,17 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_ACCEPT_NB    = 14
     const UNIX_CMD_RECVFROM_NB  = 15
     const UNIX_CMD_RECV_NB      = 16
+    const UNIX_CMD_POLL         = 17
+
+EPOLL/POLL bit values match `POSIX_EPOLL*` 1:1 (POLLIN=0x001,
+POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010). The shim's
+`epoll_query_ready` masks the reply against the caller's
+want set + EPOLLERR + EPOLLHUP.
+
+    const UNIX_EPOLLIN  = 0x001
+    const UNIX_EPOLLOUT = 0x004
+    const UNIX_EPOLLERR = 0x008
+    const UNIX_EPOLLHUP = 0x010
 
 Socket types — match Linux `SOCK_STREAM=1`, `SOCK_DGRAM=2`.
 
@@ -1369,6 +1385,60 @@ to 0 owners + 0 queue refs, run the orphan cleanup.
         ipc_reply(sender, &pr[0], 2 + sp + 1 + grant + 2 + dl)
 
 
+### POLL handler
+
+Computes a readiness mask for the slot. EPOLLIN fires on:
+DGRAM with queued datagrams; STREAM with rx_buf bytes ready
+or peer-closed (so the next recv returns 0/EOF without
+blocking); listener with at least one pending connection.
+EPOLLOUT is always set — slix doesn't enforce send-side
+backpressure on STREAM, and DGRAM `sendto` returns -EAGAIN
+synchronously when the destination's queue is full (so
+"writable" is meaningless at the source-fd granularity).
+EPOLLHUP fires on a STREAM that has lost its peer.
+
+Reply layout: `status(1) + mask_be(2) + fire_seq_le(4)`.
+The fire_seq slot is reserved for future EPOLLET edge-trigger
+support and is currently 0 — meaning sys_ppoll's
+"changed since last scan" check always sees no change, but
+that's harmless because ppoll re-queries every tick anyway.
+
+    unix_handle_poll(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [7]byte
+            err[0] = byte(-UNIX_EBADF)
+            var i = 1
+            while i < 7
+                err[i] = 0
+                i += 1
+            ipc_reply(sender, err, 7)
+            return
+        var mask = UNIX_EPOLLOUT
+        if unix_sockets[fd].stype == UNIX_SOCK_DGRAM
+            if unix_sockets[fd].dg_count > 0
+                mask = mask | UNIX_EPOLLIN
+        else
+            if unix_sockets[fd].listening != 0
+                if unix_sockets[fd].pending_count > 0
+                    mask = mask | UNIX_EPOLLIN
+            else
+                if unix_sockets[fd].rx_count > 0
+                    mask = mask | UNIX_EPOLLIN
+                if unix_sockets[fd].peer_closed != 0
+                    mask = mask | UNIX_EPOLLIN
+                    mask = mask | UNIX_EPOLLHUP
+        var reply: [7]byte
+        reply[0] = 0
+        reply[1] = byte((mask >> 8) & 0xff)
+        reply[2] = byte(mask & 0xff)
+        reply[3] = 0
+        reply[4] = 0
+        reply[5] = 0
+        reply[6] = 0
+        ipc_reply(sender, reply, 7)
+
+
 ### CLOSE handler
 
 Frees the slot. If the slot has a STREAM peer, marks the
@@ -1482,6 +1552,8 @@ Synchronous request-reply, no notification path required
                     unix_handle_recvfrom(sender, buf, 1)
                 else if cmd == UNIX_CMD_RECV_NB
                     unix_handle_recv(sender, buf, 1)
+                else if cmd == UNIX_CMD_POLL
+                    unix_handle_poll(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)
