@@ -4808,17 +4808,50 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  this returns the user-visible binding name (or None for wildcard / literal). For a
    *  nested tuple pattern `(a, b)` the helper introduces a fresh synthetic outer name
    *  bound to the field, then appends `val a = sym._0; val b = sym._1` to `prelude` —
-   *  these are prepended to the arm body before it's analyzed. */
+   *  these are prepended to the arm body before it's analyzed.
+   *
+   *  For a nested **variant** pattern (e.g. `Outer(Inner(v))`'s `Inner(v)` slot), the
+   *  helper allocates a synthetic outer name AND records the recursive pattern in
+   *  `nestedOut`. Each backend's match-arm dispatcher applies the nested pattern after
+   *  the outer discriminator passes; bindings inside the nested pattern are added to
+   *  the arm scope via `analyzePattern`'s recursion. Returns the synthetic name in
+   *  the binding slot, plus the nested pattern in `nestedOut`. */
   private def analyzeFieldPattern(
       fieldPat: MatchPatternAST,
       fieldType: SyslType,
       prelude: scala.collection.mutable.ListBuffer[StmtAST],
+      nestedOut: scala.collection.mutable.ListBuffer[Option[TMatchPattern]],
   ): Option[String] = fieldPat match
-    case WildcardPatternAST => None
+    case WildcardPatternAST =>
+      nestedOut += None
+      None
     case ValuePatternAST(VarRefAST(bindName)) =>
-      if scopeStack != null then
-        currentScope(bindName) = SymInfo(bindName, fieldType, false)
-      Some(bindName)
+      // If the name is a no-arg variant of the field's enum type, treat as
+      // a nested variant pattern (zero-arg form), not a binding. Otherwise
+      // it's a fresh binding name. Without this, `Wrap(A)` (where `A` is a
+      // no-arg variant of `Inner`) would silently shadow the variant and
+      // match unconditionally — wrong behavior.
+      resolveVariant(bindName, fieldType) match
+        case Some((et, variantIdx)) =>
+          val (_, variantFields) = et.variants(variantIdx)
+          if variantFields.isEmpty then
+            val syn = freshTupleBindName()
+            if scopeStack != null then
+              currentScope(syn) = SymInfo(syn, fieldType, false)
+            nestedOut += Some(TVariantPattern(et, variantIdx, Nil, Nil))
+            Some(syn)
+          else
+            // Variant requires args but pattern wrote bare name — that's the
+            // user's bug, but the existing dispatcher message is clearer.
+            if scopeStack != null then
+              currentScope(bindName) = SymInfo(bindName, fieldType, false)
+            nestedOut += None
+            Some(bindName)
+        case None =>
+          if scopeStack != null then
+            currentScope(bindName) = SymInfo(bindName, fieldType, false)
+          nestedOut += None
+          Some(bindName)
     case ValuePatternAST(TupleLitAST(elems)) =>
       fieldType.underlying match
         case st: SyslType.StructType if st.name.startsWith("_Tuple") =>
@@ -4840,10 +4873,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 )
               case _ => ()
           }
+          nestedOut += None
           Some(syn)
         case other =>
           throw AnalysisError(s"tuple pattern requires tuple type, got $other")
-    case ValuePatternAST(_) => None
+    case dp: DestructurePatternAST =>
+      // Nested variant or struct pattern. Bind a synthetic outer name to the
+      // field, recurse to analyze the nested pattern under that synthetic
+      // scrutinee type, and stash it in `nestedOut`. The interpreter / codegen
+      // applies the nested pattern after the outer discriminator passes; if it
+      // doesn't match, the arm doesn't match and we fall through.
+      val syn = freshTupleBindName()
+      if scopeStack != null then
+        currentScope(syn) = SymInfo(syn, fieldType, false)
+      val nested = analyzePattern(dp, fieldType, prelude)
+      nestedOut += Some(nested)
+      Some(syn)
+    case ValuePatternAST(_) =>
+      nestedOut += None
+      None
     case _ => throw AnalysisError(s"unsupported pattern in destructure")
 
   private def analyzePattern(
@@ -4893,18 +4941,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           val (_, variantFields) = et.variants(variantIdx)
           if fields.length != variantFields.length then
             throw AnalysisError(s"variant '$name' has ${variantFields.length} fields, pattern has ${fields.length}")
+          val nestedOut = new scala.collection.mutable.ListBuffer[Option[TMatchPattern]]
           val bindings = fields.zip(variantFields).map { case (fieldPat, (_, fieldType)) =>
-            analyzeFieldPattern(fieldPat, fieldType, prelude)
+            analyzeFieldPattern(fieldPat, fieldType, prelude, nestedOut)
           }
-          TVariantPattern(et, variantIdx, bindings, variantFields.map(_._2))
+          val nested = if nestedOut.exists(_.isDefined) then nestedOut.toList else Nil
+          TVariantPattern(et, variantIdx, bindings, variantFields.map(_._2), nested)
         else
           val st = structTypes.getOrElse(name, throw AnalysisError(s"unknown struct or variant '$name' in match pattern"))
           if fields.length != st.fields.length then
             throw AnalysisError(s"struct '$name' has ${st.fields.length} fields, pattern has ${fields.length}")
+          val nestedOut = new scala.collection.mutable.ListBuffer[Option[TMatchPattern]]
           val bindings = fields.zip(st.fields).map { case (fieldPat, (_, fieldType)) =>
-            analyzeFieldPattern(fieldPat, fieldType, prelude)
+            analyzeFieldPattern(fieldPat, fieldType, prelude, nestedOut)
           }
-          TDestructurePattern(st, bindings, st.fields.map(_._2))
+          val nested = if nestedOut.exists(_.isDefined) then nestedOut.toList else Nil
+          TDestructurePattern(st, bindings, st.fields.map(_._2), nested)
 
   private def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
@@ -5069,11 +5121,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case _ => ()
         def patternBindings(pats: List[TMatchPattern]): Set[String] =
           val b = scala.collection.mutable.Set.empty[String]
-          for p <- pats do
-            p match
-              case TVariantPattern(_, _, bindings, _) => bindings.flatten.foreach(b += _)
-              case TDestructurePattern(_, bindings, _) => bindings.flatten.foreach(b += _)
-              case _ => ()
+          def walk(p: TMatchPattern): Unit = p match
+            case TVariantPattern(_, _, bindings, _, nested) =>
+              bindings.flatten.foreach(b += _)
+              nested.flatten.foreach(walk)
+            case TDestructurePattern(_, bindings, _, nested) =>
+              bindings.flatten.foreach(b += _)
+              nested.flatten.foreach(walk)
+            case _ => ()
+          for p <- pats do walk(p)
           b.toSet
         def scanCaptures(expr: TExpr, locals: Set[String]): Unit = expr match
           case TVarRef(name, typ) => recordCapture(name, typ, locals)
@@ -6431,7 +6487,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             for arm <- tArms; pat <- arm.patterns do
               if arm.guard.isEmpty then pat match
                 case TWildcard => wildcardCovers = true
-                case TVariantPattern(_, idx, _, _) => coveredVariants += idx
+                case TVariantPattern(_, idx, _, _, nested) if nested.forall(_.isEmpty) =>
+                  // Nested sub-patterns may fail to match — only an arm with NO
+                  // active nested pattern fully covers its variant.
+                  coveredVariants += idx
                 case _ =>
             if !wildcardCovers then
               val missing = et.variants.zipWithIndex.collect {

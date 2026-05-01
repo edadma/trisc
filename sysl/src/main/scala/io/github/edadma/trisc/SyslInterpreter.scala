@@ -74,17 +74,39 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TRangePattern(low, high) =>
         val v = toLong(value)
         v >= toLong(evalAny(low, env)) && v <= toLong(evalAny(high, env))
-      case TDestructurePattern(_, bindings, _) =>
-        true // struct destructure always matches (no value check, just binding)
-      case TVariantPattern(_, variantIndex, _, _) =>
-        value match
+      case TDestructurePattern(_, _, _, nested) =>
+        // Struct destructure always matches at the discriminator level (no
+        // value check, just binding). Nested sub-patterns must also match.
+        if nested.isEmpty then true
+        else
+          val (cells, off) = value match
+            case ArrVal(c, o) => (c, o)
+            case RefVal(c, _, _) => (c, 0)
+            case _ => return false
+          nested.zipWithIndex.forall {
+            case (Some(sub), i) => matchPattern(sub, cells(off + i).value, env)
+            case (None, _) => true
+          }
+      case TVariantPattern(_, variantIndex, _, _, nested) =>
+        val tagOk = value match
           case EnumVal(tag, _) => tag == variantIndex
           case RefEnumVal(tag, _, _) => tag == variantIndex
           case _ => false
+        if !tagOk then false
+        else if nested.isEmpty then true
+        else
+          val fields = value match
+            case EnumVal(_, f) => f
+            case RefEnumVal(_, f, _) => f
+            case _ => return false
+          nested.zipWithIndex.forall {
+            case (Some(sub), i) => matchPattern(sub, fields(i).value, env)
+            case (None, _) => true
+          }
 
   private def bindPattern(pat: TMatchPattern, value: Value, env: Env): Unit =
     pat match
-      case TDestructurePattern(_, bindings, fieldTypes) =>
+      case TDestructurePattern(_, bindings, _, nested) =>
         val (cells, off) = value match
           case ArrVal(c, o) => (c, o)
           case RefVal(c, _, _) => (c, 0)
@@ -93,7 +115,13 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           binding.foreach { name =>
             env(name) = new Cell(cells(off + i).value)
           }
-      case TVariantPattern(_, _, bindings, _) =>
+        // Recursively bind nested patterns AFTER binding the synthetic outer
+        // names. The synthetic names cover the field values; the nested pattern
+        // descends one level deeper to bind its own variant-field names.
+        if nested.nonEmpty then
+          for ((sub, i) <- nested.zipWithIndex; p <- sub) do
+            bindPattern(p, cells(off + i).value, env)
+      case TVariantPattern(_, _, bindings, _, nested) =>
         val fields = value match
           case EnumVal(_, f) => f
           case RefEnumVal(_, f, _) => f
@@ -102,6 +130,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           binding.foreach { name =>
             env(name) = new Cell(fields(i).value)
           }
+        if nested.nonEmpty then
+          for ((sub, i) <- nested.zipWithIndex; p <- sub) do
+            bindPattern(p, fields(i).value, env)
       case _ => // nothing to bind
 
   private def toLong(v: Value): Long = v match

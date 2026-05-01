@@ -98,8 +98,8 @@ class SyslSVMCodegen:
         for arm <- arms do
           for pat <- arm.patterns do
             pat match
-              case TDestructurePattern(_, bindings, _) => count += bindings.count(_.isDefined)
-              case TVariantPattern(_, _, bindings, _) => count += bindings.count(_.isDefined)
+              case TDestructurePattern(_, bindings, _, _) => count += bindings.count(_.isDefined)
+              case TVariantPattern(_, _, bindings, _, _) => count += bindings.count(_.isDefined)
               case TValuePattern(v) => scanExpr(v)
               case TRangePattern(lo, hi) => scanExpr(lo); scanExpr(hi)
               case _ =>
@@ -2575,9 +2575,13 @@ class SyslSVMCodegen:
           emit(if scrutinee.typ.isUnsigned then "  leu" else "  le")
           emit(s"  jumpnz $hitLabel")
           emit(s"$rangeNext:")
-        case TDestructurePattern(_, _, _) =>
+        case TDestructurePattern(_, _, _, nested) =>
+          if nested.exists(_.isDefined) then
+            sys.error("nested patterns in match arms are not yet supported on the SVM backend")
           emit(s"  jump $hitLabel")
-        case TVariantPattern(_, variantIndex, _, _) =>
+        case TVariantPattern(_, variantIndex, _, _, nested) =>
+          if nested.exists(_.isDefined) then
+            sys.error("nested patterns in match arms are not yet supported on the SVM backend")
           // Load tag (i32 at offset 0 of enum), compare with variant index
           emit(s"  local_get $scrIdx")
           emit("  load32")
@@ -2588,7 +2592,7 @@ class SyslSVMCodegen:
       emit(s"$hitLabel:")
       // Bind destructure/variant pattern fields to locals before guard
       for pat <- arm.patterns do pat match
-        case TVariantPattern(et, variantIndex, bindings, _) =>
+        case TVariantPattern(et, variantIndex, bindings, _, _) =>
           val dataOff = et.dataOffset.toInt
           val variantFields = et.variants(variantIndex)._2
           var fieldOff = 0
@@ -2607,7 +2611,7 @@ class SyslSVMCodegen:
               emit(s"  local_set $localIdx")
             }
             fieldOff += fieldType.sizeOf.toInt
-        case TDestructurePattern(st, bindings, _) =>
+        case TDestructurePattern(st, bindings, _, _) =>
           for (binding, i) <- bindings.zipWithIndex do
             val fieldType = st.fields(i)._2
             binding.foreach { name =>

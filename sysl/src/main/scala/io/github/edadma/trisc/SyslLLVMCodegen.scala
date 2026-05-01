@@ -2858,7 +2858,9 @@ class SyslLLVMCodegen(target: String = "host"):
                 both
               case TWildcard =>
                 "true" // always matches
-              case TVariantPattern(et, variantIdx, bindings, fieldTypes) =>
+              case TVariantPattern(et, variantIdx, bindings, fieldTypes, nested) =>
+                if nested.exists(_.isDefined) then
+                  sys.error("nested patterns in match arms are not yet supported on the LLVM backend")
                 // Load tag from scrutinee
                 val scrutCast = newReg()
                 emit(s"  $scrutCast = bitcast ${exprType(scrutinee)}* $scrut to i32*")
@@ -2867,7 +2869,9 @@ class SyslLLVMCodegen(target: String = "host"):
                 val cmp = newReg()
                 emit(s"  $cmp = icmp eq i32 $tag, $variantIdx")
                 cmp
-              case _: TDestructurePattern =>
+              case TDestructurePattern(_, _, _, nested) =>
+                if nested.exists(_.isDefined) then
+                  sys.error("nested patterns in match arms are not yet supported on the LLVM backend")
                 "true" // destructure always matches
           }
           // OR all pattern results
@@ -2909,7 +2913,7 @@ class SyslLLVMCodegen(target: String = "host"):
           val preArmLocals = locals.keySet.toSet
           // Bind variant/destructure fields if this is a binding pattern
           arm.patterns.headOption match
-            case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes)) =>
+            case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes, _)) =>
               val dataOffset = et.dataOffset
               val scrutCast2 = newReg()
               emit(s"  $scrutCast2 = bitcast ${exprType(scrutinee)}* $scrut to i8*")
@@ -2934,7 +2938,7 @@ class SyslLLVMCodegen(target: String = "host"):
                     locals(bName) = LocalVar(bName, alloc, ft)
                 }
                 fOffset += ft.sizeOf
-            case Some(TDestructurePattern(st, bindings, fieldTypes)) =>
+            case Some(TDestructurePattern(st, bindings, fieldTypes, _)) =>
               val cst = canonicalStruct(st)
               val structLt = llvmType(cst)
               for (binding, j) <- bindings.zipWithIndex do

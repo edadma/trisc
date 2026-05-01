@@ -4695,9 +4695,13 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                 emit("  slt r3, r1, r2")      // high < scrutinee?
                 emit(s"  beq r3, r0, $hitLabel") // hit if high >= scrutinee
                 emit(s"$rangeCheck")
-              case TDestructurePattern(_, _, _) =>
+              case TDestructurePattern(_, _, _, nested) =>
+                if nested.exists(_.isDefined) then
+                  sys.error("nested patterns in match arms are not yet supported on the TRISC backend")
                 emit(s"  bra $hitLabel")      // destructure always matches
-              case TVariantPattern(_, variantIndex, _, _) =>
+              case TVariantPattern(_, variantIndex, _, _, nested) =>
+                if nested.exists(_.isDefined) then
+                  sys.error("nested patterns in match arms are not yet supported on the TRISC backend")
                 // Load tag from scrutinee enum and compare with variant index
                 emitAddImm(1, 5, scrutineeOffset)
                 emit("  ldd r1, r1, r0")     // r1 = enum address
@@ -4710,7 +4714,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           // Bind destructure/variant patterns BEFORE guard (guard may reference bindings)
           for pat <- arm.patterns do
             pat match
-              case TDestructurePattern(st, bindings, fieldTypes) =>
+              case TDestructurePattern(st, bindings, fieldTypes, _) =>
                 for (binding, i) <- bindings.zipWithIndex do
                   val fieldType = fieldTypes(i)
                   binding.foreach { name =>
@@ -4746,7 +4750,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                         emitAddImm(2, 5, local.offset)
                         emitStore(1, 2, fieldType)
                   }
-              case TVariantPattern(et, variantIndex, bindings, fieldTypes) =>
+              case TVariantPattern(et, variantIndex, bindings, fieldTypes, _) =>
                 val dataOff = et.dataOffset.toInt
                 val variantFields = et.variants(variantIndex)._2
                 var fieldOff = 0

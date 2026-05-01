@@ -291,6 +291,40 @@ s match
     Rect(w, h) -> 3
 ```
 
+**Nested variant patterns:**
+
+A field position inside a variant pattern can itself be another variant
+pattern. The outer discriminator is checked first; if it matches, each
+nested sub-pattern is checked in turn. If any nested pattern fails, the
+arm doesn't match and the next arm is tried.
+
+```sysl
+enum Inner
+    Val(x: int)
+    None
+
+enum Outer
+    Wrap(i: Inner)
+    Empty
+
+go(o: Outer) -> int
+    o match
+        Wrap(Val(v)) -> v       // bind v if Outer is Wrap AND Inner is Val
+        Wrap(None) -> -1
+        Empty -> 0
+        else -> -99             // exhaustiveness fallback (see note)
+```
+
+Limitations on the current implementation:
+- Nested patterns currently work only on the **interpreter** backend.
+  The SVM, LLVM, and TRISC backends throw a clear "not yet supported"
+  error when they encounter one.
+- The exhaustiveness check treats any arm with an active nested
+  pattern as not fully covering its outer variant (since the inner
+  pattern might fail). Add an `else` arm or wildcard fallback when
+  using nested patterns. Full nested-coverage analysis is a future
+  improvement.
+
 **Heap-allocated enums (`new` on variants):**
 
 `new VariantName(args)` heap-allocates an enum value and returns a ref-counted
