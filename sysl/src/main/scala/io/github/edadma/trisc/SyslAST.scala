@@ -17,6 +17,11 @@ case class SliceTypeAST(elem: TypeAST) extends TypeAST
 case class FuncTypeAST(params: List[TypeAST], ret: TypeAST, escaping: Boolean = false, effects: FuncEffects = FuncEffects.Unknown) extends TypeAST
 case class TupleTypeAST(elems: List[TypeAST]) extends TypeAST
 case class RefTypeAST(inner: TypeAST) extends TypeAST
+// `=> T` — call-by-name parameter type. Only valid in parameter position.
+// Resolves to a stored type of `() -> T` (a zero-arg thunk); the analyzer
+// auto-wraps incoming args as `() -> arg` and auto-calls body references as
+// `name()`, matching Scala-style call-by-name semantics (no memoization).
+case class ByNameTypeAST(inner: TypeAST) extends TypeAST
 
 // Import selectors
 sealed trait ImportSelector

@@ -23,7 +23,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  lower to `TDerefAssignStmt(TVarRef(name, *T), v)`. The caller passes an lvalue
    *  auto-wrapped with `TAddrOf*`. `typ` is still the underlying `T` (what the body
    *  sees); the pointer wrap is invisible to user code. */
-  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false, autoIndirect: Boolean = false, isGhost: Boolean = false)
+  // `isByName`: this symbol is a call-by-name parameter. The visible-to-user
+  // type is `typ` (T), but the actual storage is a `() -> T` thunk. References
+  // through `VarRefAST` auto-emit a thunk call; args at by-name slots are
+  // auto-wrapped at the call site. Set only on parameter symbols.
+  private case class SymInfo(name: String, typ: SyslType, mutable: Boolean, isConst: Boolean = false, autoIndirect: Boolean = false, isGhost: Boolean = false, isByName: Boolean = false)
   /** `modes` is parallel to `params`: one entry per parameter. Empty means "all In"
    *  (default, back-compat). `params` stores the call-side signature: for `Out`/`Inout`
    *  this is `*T` so `checkArgs` and codegen see the hidden-pointer type; the body-scope
@@ -33,8 +37,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  declared an empty set ("no module-level effects"). Resolution to the canonical
    *  mangled name + mutability/scope validation is deferred to `validateEffects`, which
    *  runs after the function body is analyzed (so all relevant globals are in scope). */
-  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isGhost: Boolean = false):
+  // `byName`: indices of call-by-name params (storage type `() -> T`,
+  // user-visible as `T`). Empty list (the default) means no by-name params.
+  // Parallel to `params`/`modes` when non-empty.
+  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isGhost: Boolean = false, byName: List[Boolean] = Nil):
     def modeOf(i: Int): ParamMode = if modes.isEmpty then ParamMode.In else modes(i)
+    def isByNameAt(i: Int): Boolean = byName.nonEmpty && i < byName.length && byName(i)
     def hasEffectAnnotations: Boolean = reads.isDefined || writes.isDefined || isPure
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
@@ -430,6 +438,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case SliceTypeAST(e)          => collectNamedTypeNames(e)
     case FuncTypeAST(ps, r, _, _) => ps.flatMap(collectNamedTypeNames).toSet ++ collectNamedTypeNames(r)
     case TupleTypeAST(elems)      => elems.flatMap(collectNamedTypeNames).toSet
+    case ByNameTypeAST(i)         => collectNamedTypeNames(i)
 
   /** Stage F.5 — orphan rule. An impl is allowed iff this module owns the trait OR at
    *  least one named type appearing in the impl's target patterns. Empty `currentModule`
@@ -930,8 +939,23 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             // For Out/Inout params, the call-side signature carries `*T` (hidden pointer);
             // the body sees the inner `T` with autoIndirect via SymInfo. Store modes parallel
             // to params so checkArgs and SMETA can consult them.
+            // For `=> T` (call-by-name) params, the storage type is `() -> T`. Mode
+            // must be `In` — by-name is incompatible with out/inout (the thunk has
+            // no lvalue to write back to). Track by-name positions in `byNameFlags`
+            // so the call-site auto-wrap and body auto-eval paths can find them.
+            val byNameFlags = params.map(_.typ.isInstanceOf[ByNameTypeAST])
+            val anyByName = byNameFlags.exists(identity)
+            for (p <- params) do
+              if p.typ.isInstanceOf[ByNameTypeAST] then
+                if p.mode != ParamMode.In then
+                  throw AnalysisError(s"parameter '${p.name}' of '$name' is by-name (`=> T`) and cannot also be '${p.mode.toString.toLowerCase}'", decl)
+                if p.default.isDefined then
+                  throw AnalysisError(s"parameter '${p.name}' of '$name' is by-name (`=> T`) and cannot have a default value", decl)
             val paramTypes = params.map { p =>
-              val inner = resolveType(p.typ)
+              val (effectiveAst, isByName) = p.typ match
+                case ByNameTypeAST(inner) => (FuncTypeAST(Nil, inner), true)
+                case other => (other, false)
+              val inner = resolveType(effectiveAst)
               val sigType = p.mode match
                 case ParamMode.In => inner
                 case ParamMode.Out | ParamMode.Inout => PtrType(inner)
@@ -973,7 +997,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               throw AnalysisError(s"#ghost on '$name' is incompatible with #pure (ghost code is removed before codegen, so #pure is meaningless)", fd)
             if isGhost && (readsSet.isDefined || writesSet.isDefined) then
               throw AnalysisError(s"#ghost on '$name' is incompatible with #reads/#writes (ghost code is removed before codegen)", fd)
-            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet, isGhost)
+            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet, isGhost, if anyByName then byNameFlags else Nil)
             // Record #deprecated info
             for attr <- fd.attributes if attr.name == "deprecated" do
               val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
@@ -1375,12 +1399,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             case ParamMode.Out | ParamMode.Inout => paramType match
               case PtrType(inner) => (inner, true)
               case other => (other, false) // shouldn't happen — collectDecls wrapped it
-          currentScope(paramName) = SymInfo(paramName, bodyType, true, autoIndirect = autoInd)
+          // For by-name params, the actual storage is `() -> T`, but the body sees
+          // the symbol with type `T` (and isByName=true). VarRefAST resolution
+          // handles the auto-call.
+          val isByN = funInfo.isByNameAt(idx)
+          val visibleType = bodyType match
+            case FuncType(Nil, ret, _, _) if isByN => ret
+            case other => other
+          currentScope(paramName) = SymInfo(paramName, visibleType, true, autoIndirect = autoInd, isByName = isByN)
           // Auto-alias the implicit method receiver: `self` -> `__self__`
           // so method bodies can write `self.x` while the actual parameter
           // is named `__self__` to avoid conflicting with user-declared names.
           if paramName == "__self__" then
-            currentScope("self") = SymInfo(paramName, bodyType, true, autoIndirect = autoInd)
+            currentScope("self") = SymInfo(paramName, visibleType, true, autoIndirect = autoInd, isByName = isByN)
         val savedExp = currentExpected
         currentExpected = if funInfo.returnType == UnitType then None else Some(funInfo.returnType)
         val tBody = try body match
@@ -2363,6 +2394,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
     case SliceTypeAST(elem) => SliceType(resolveType(elem))
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
+    case ByNameTypeAST(_) =>
+      // Only valid in parameter position — the param-collection path peels off
+      // the marker before calling resolveType. Any other position is a syntax
+      // error: `=> T` is not a usable type.
+      throw AnalysisError("`=> T` is only valid as a function parameter type")
     case FuncTypeAST(params, ret, esc, eff) =>
       // Resolve raw names in #reads/#writes through globalScope to mangled form so subset
       // checks at indirect-call sites compare apples-to-apples with the caller's #reads/#writes
@@ -3316,6 +3352,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case FuncTypeAST(params, ret, esc, eff) => FuncTypeAST(params.map(substituteTypeAST(_, subst)), substituteTypeAST(ret, subst), esc, eff)
     case TupleTypeAST(elems) => TupleTypeAST(elems.map(substituteTypeAST(_, subst)))
     case RefTypeAST(inner) => RefTypeAST(substituteTypeAST(inner, subst))
+    case ByNameTypeAST(inner) => ByNameTypeAST(substituteTypeAST(inner, subst))
 
   /** Strict structural equality with effect-lattice tolerance for FuncType.
    *  Used for impl-dispatch post-validation. `slot` is the impl pattern resolved
@@ -5262,6 +5299,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               compileTimeConstants.getOrElse(name,
                 throw AnalysisError(s"const '$name' missing folded value")))
             return TIntLit(v, sym.typ)
+          case Some(sym) if sym.isByName =>
+            // By-name param: storage is `() -> T`, every reference auto-calls
+            // (no memoization). Forwarding to another by-name slot at a call
+            // site re-wraps as `() -> name()`, which is correct (each outer
+            // eval re-enters the original thunk).
+            val thunkType = FuncType(Nil, sym.typ, effects = FuncEffects.Unknown)
+            return TIndirectCall(TVarRef(sym.name, thunkType), Nil, sym.typ)
           case Some(sym) if sym.autoIndirect =>
             return TDeref(TVarRef(sym.name, PtrType(sym.typ)), sym.typ)
           case Some(sym) =>
@@ -5287,6 +5331,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 compileTimeConstants.getOrElse(name,
                   throw AnalysisError(s"const '$name' missing folded value")))
               TIntLit(v, sym.typ)
+            case Some(sym) if sym.isByName =>
+              val thunkType = FuncType(Nil, sym.typ, effects = FuncEffects.Unknown)
+              TIndirectCall(TVarRef(sym.name, thunkType), Nil, sym.typ)
             case Some(sym) if sym.autoIndirect =>
               // Out/Inout param: reads auto-dereference the hidden pointer so the body
               // sees a plain T value.
@@ -5884,7 +5931,32 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             case None =>
               throw AnalysisError(s"struct $structName has no method or field '$method'")
 
-      case CallAST(name, args) =>
+      case CallAST(name, args0) =>
+        // Call-by-name auto-wrap: if `name` resolves to a known function with
+        // by-name params, wrap each positional arg at a by-name slot in
+        // `ClosureAST(Nil, ExprBodyAST(arg))` BEFORE analysis. This makes
+        // `use_lazy(bump())` desugar to `use_lazy(() -> bump())` so the arg is
+        // never evaluated at the call site. The wrap must be at the AST level —
+        // wrapping after analysis would already have evaluated the expression's
+        // side effects. Named args go through `resolveNamedArgsTyped`, which
+        // also calls `wrapByNameAtIndex`. Indirect calls (local-shadow path)
+        // can't carry by-name info — only registered functions do.
+        val args =
+          if args0.exists(_.isInstanceOf[NamedArgAST]) then args0
+          else
+            val byNameInfoOpt: Option[List[Boolean]] =
+              if traitCallRewrite.contains(name) then
+                Some(functions(traitCallRewrite(name)).byName)
+              else if functions.contains(name) then Some(functions(name).byName)
+              else if builtinFunctions.contains(name) then Some(builtinFunctions(name).byName)
+              else None
+            byNameInfoOpt match
+              case Some(flags) if flags.nonEmpty && flags.exists(identity) =>
+                args0.zipWithIndex.map { case (a, i) =>
+                  if i < flags.length && flags(i) then ClosureAST(Nil, ExprBodyAST(a))
+                  else a
+                }
+              case _ => args0
         // Local shadow: if `name` is bound in the current function's scope chain
         // AND the binding is a function/closure value, treat the call as an indirect
         // call through that local. This must run BEFORE the global-function lookup

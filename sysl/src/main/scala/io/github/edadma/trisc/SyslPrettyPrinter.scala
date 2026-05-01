@@ -44,6 +44,7 @@ object SyslPrettyPrinter:
       s"$esca(${params.map(typeToSource).mkString(", ")}) -> ${typeToSource(ret)}$effS"
     case TupleTypeAST(elems)        => s"(${elems.map(typeToSource).mkString(", ")})"
     case RefTypeAST(inner)          => s"&${typeToSource(inner)}"
+    case ByNameTypeAST(inner)       => s"=> ${typeToSource(inner)}"
 
   // --- Declarations ---
 

@@ -384,15 +384,25 @@ class SyslParser extends StandardTokenParsers {
     (ident ^? { case "inout" => ParamMode.Inout })                             |
     (ident ^? { case "out"   => ParamMode.Out   })
 
+  // `=> T` — call-by-name marker on a param type. Only legal in param position
+  // (the analyzer surfaces a clean error if it shows up in any other type
+  // context). `=>` is otherwise the closure-arrow token, but in parser context
+  // here it can only mean "by-name introducer" — a closure literal is an
+  // expression, never a type.
+  lazy val byNameTypeRef: Parser[TypeAST] =
+    "=>" ~> typeRef ^^ ByNameTypeAST.apply
+
+  lazy val paramTypeRef: Parser[TypeAST] = byNameTypeRef | typeRef
+
   // Two branches with explicit `|` alternation, not `opt(paramMode) ~ ident` — we
   // need backtracking when `paramMode` matches the *name* of a param (e.g. `out: T`
   // where the param is actually named `out`). `opt` commits on success, so the
   // modeful branch is tried first and failure falls through to the mode-less branch.
   lazy val param: Parser[ParamAST] =
-    (paramMode ~ ident ~ (":" ~> typeRef) ~ opt("=" ~> expr) ^^ {
+    (paramMode ~ ident ~ (":" ~> paramTypeRef) ~ opt("=" ~> expr) ^^ {
       case mode ~ name ~ t ~ default => ParamAST(name, t, default, mode)
     }) |
-    (ident ~ (":" ~> typeRef) ~ opt("=" ~> expr) ^^ {
+    (ident ~ (":" ~> paramTypeRef) ~ opt("=" ~> expr) ^^ {
       case name ~ t ~ default => ParamAST(name, t, default)
     })
 
