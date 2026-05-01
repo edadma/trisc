@@ -119,6 +119,66 @@ class SyslArrayLitSliceTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 10
   }
 
+  // ===== Annotation drives inference through assignment too =====
+
+  "assign to existing []T var: `xs = []` produces a slice" in {
+    // Existing-target assignment forwards the var's declared type as the RHS
+    // expected type. Without this the bare `[]` would fail with "cannot infer
+    // element type for empty array literal" — there's no declared type at the
+    // RHS site.
+    eval(
+      """main() -> int
+        |    var xs: []int = [1, 2, 3]
+        |    xs = []
+        |    xs = append(xs, 99)
+        |    len(xs)
+        |""".stripMargin) shouldBe 1
+  }
+
+  "assign to existing []T var: `xs = [a, b]` re-coerces to slice" in {
+    eval(
+      """main() -> int
+        |    var xs: []int = []
+        |    xs = [10, 20, 30]
+        |    xs = append(xs, 40)
+        |    len(xs)
+        |""".stripMargin) shouldBe 4
+  }
+
+  "field assign: `self.buf = []` produces a slice when field is []T" in {
+    // FieldAssignStmtAST forwards the field's declared type as the RHS expected.
+    // Without this, the field-assign equivalent of `self.buf = (new [0]byte)[:0]`
+    // couldn't shrink to the natural `self.buf = []`.
+    eval(
+      """struct Builder
+        |    items: []int
+        |
+        |reset(self: *Builder) -> int
+        |    self.items = []
+        |    len(self.items)
+        |
+        |main() -> int
+        |    var b = Builder([1, 2, 3])
+        |    reset(&b)
+        |""".stripMargin) shouldBe 0
+  }
+
+  "field assign: `self.buf = [a, b]` coerces to slice" in {
+    eval(
+      """struct Builder
+        |    items: []int
+        |
+        |seed(self: *Builder) -> int
+        |    self.items = [7, 8, 9, 10]
+        |    self.items = append(self.items, 11)
+        |    len(self.items)
+        |
+        |main() -> int
+        |    var b = Builder([])
+        |    seed(&b)
+        |""".stripMargin) shouldBe 5
+  }
+
   // ===== Regressions: fixed-size array context unchanged =====
 
   "regression: var arr: [3]int = [1, 2, 3] is still a fixed-size array" in {

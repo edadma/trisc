@@ -4293,16 +4293,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         TDerefAssignStmt(TCast(TIntLit(addr, I64), PtrType(typ)), tValue)
 
       case AssignStmtAST(target, value) =>
-        val tValue0 = analyzeExpr(value)
         // Did this name already exist (param, prior decl, or global), or are we about
-        // to implicitly create a fresh local? Capture this BEFORE `lookupOrCreate` so the
-        // newly-bound case can be distinguished. Bare `name = expr` (no `var`/`val`)
+        // to implicitly create a fresh local? Capture this BEFORE analyzing the RHS so
+        // the newly-bound case can be distinguished. Bare `name = expr` (no `var`/`val`)
         // inside a function body is sysl's implicit-local syntax — when the analyzer
         // creates a fresh local, downstream passes need to see it as a binding (TVarStmt),
         // not a write to an existing variable (TAssignStmt). Closure capture-detection
         // walks TAssignStmt as an assignment to an outer name, so emitting TAssignStmt
         // here would incorrectly mark a freshly-created inner local as a captured outer.
         val existedBefore = tryLookup(target).isDefined
+        // For an existing target, forward its declared type as the RHS expected type so
+        // bidirectional inference fires (e.g. `xs = []` when `xs: []int` is in scope
+        // produces a slice, not a stuck "cannot infer element type"). For a fresh local,
+        // the type still flows the other way — RHS → new var.
+        val savedExp = currentExpected
+        currentExpected = if existedBefore then Some(tryLookup(target).get.typ) else None
+        val tValue0 = try analyzeExpr(value) finally currentExpected = savedExp
         val sym = lookupOrCreate(target, tValue0.typ)
         if !sym.mutable then throw AnalysisError(s"cannot assign to immutable variable '$target'")
         val tValue = applyTargetType(tValue0, sym.typ)
@@ -4362,7 +4368,6 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case FieldAssignStmtAST(obj, field, value) =>
         val tObj = analyzeExpr(obj)
-        val tValue = analyzeExpr(value)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
           // Use latestStruct on the deref'd type — for self-referential generic
@@ -4376,6 +4381,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
         if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        // Forward the field's declared type as the RHS expected type so
+        // bidirectional inference fires (parallels the var-decl rule —
+        // `self.buf = []` when `buf: []byte` produces a slice, not a stuck
+        // "cannot infer element type").
+        val savedExp = currentExpected
+        currentExpected = Some(structType.fields(idx)._2)
+        val tValue = try analyzeExpr(value) finally currentExpected = savedExp
         val assign = TFieldAssignStmt(resolvedObj, idx, tValue)
         val checks = buildStructInvariantChecks(obj, structType.name)
         if checks.isEmpty then assign else TMultiStmt(assign :: checks)
@@ -5942,13 +5954,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // Single field → unwrap to that type; multiple fields → unwrap to tuple
         val successType = if successFields.length == 1 then successFields(0)._2
           else SyslType.tupleType(successFields.map(_._2))
-        // Verify the enclosing function's return type matches
-        currentExpected match
-          case Some(et: SyslType.EnumType) if et.name == enumType.name => ()
-          case Some(other) =>
+        // Verify the enclosing function's return type matches. Reads from
+        // `currentReturnType` (the function-level field), NOT `currentExpected`
+        // — the latter is the *immediate* expected type, which gets overridden
+        // by inner contexts (var-decl LHS, field-assign LHS, closure body
+        // expected, etc.). The `?` operator's contract is about where it
+        // returns to, which is the enclosing function only.
+        currentReturnType match
+          case et: SyslType.EnumType if et.name == enumType.name => ()
+          case other =>
             throw AnalysisError(s"'?' on $enumType requires enclosing function to return $enumType, got $other")
-          case None =>
-            throw AnalysisError(s"'?' operator requires enclosing function with matching return type")
         // Build: match tInner { Success(v) -> v; Failure(e) -> return Failure(e) }
         val successBindNames = successFields.indices.map(i => s"_try_v$i").toList
         val failureBindNames = failureFields.indices.map(i => s"_try_e$i").toList

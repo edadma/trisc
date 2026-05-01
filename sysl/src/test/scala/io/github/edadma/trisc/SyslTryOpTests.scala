@@ -169,4 +169,68 @@ class SyslTryOpTests extends SyslTestHelpers {
         |main() -> int = mismatched(Some(10))
         |""".stripMargin)
   }
+
+  // ===== `?` reads the function return type, not currentExpected =====
+  //
+  // Reads from `currentReturnType`, not `currentExpected`. The latter is the
+  // *immediate* expected type and gets overridden by inner contexts (var-decl
+  // LHS, field-assign LHS, closure body expected, etc). The `?` operator's
+  // contract is about where it returns to — the enclosing function — so it
+  // must look at the function-level return type independently of whatever
+  // immediate context we're in.
+
+  "? inside RHS of var-decl with explicit `: T` annotation" in {
+    // The var's annotated type sets `currentExpected = T` for the RHS, which
+    // is *not* the enclosing function's return type. Reading from
+    // `currentReturnType` keeps `?` working.
+    eval(
+      optionEnum +
+      """unwrap_or_zero(o: Option[int]) -> Option[int]
+        |    val v: int = o?
+        |    Some(v + 1)
+        |
+        |main() -> int
+        |    val r = unwrap_or_zero(Some(41))
+        |    r match
+        |        Some(v) -> v
+        |        None -> -1
+        |""".stripMargin) shouldBe 42
+  }
+
+  "? inside RHS of plain assignment to typed local" in {
+    eval(
+      optionEnum +
+      """double_or_short_circuit(o: Option[int]) -> Option[int]
+        |    var n: int = 0
+        |    n = o?
+        |    Some(n * 2)
+        |
+        |main() -> int
+        |    val r = double_or_short_circuit(Some(21))
+        |    r match
+        |        Some(v) -> v
+        |        None -> -1
+        |""".stripMargin) shouldBe 42
+  }
+
+  "? inside RHS of field assign on a typed field" in {
+    // FieldAssignStmtAST forwards the field's declared type as the RHS expected.
+    // `?` must still see the function's return type, not the field type.
+    eval(
+      optionEnum +
+      """struct Box
+        |    n: int
+        |
+        |store(o: Option[int], b: *Box) -> Option[int]
+        |    b.n = o?
+        |    Some(b.n)
+        |
+        |main() -> int
+        |    var b = Box(0)
+        |    val r = store(Some(99), &b)
+        |    r match
+        |        Some(v) -> v
+        |        None -> -1
+        |""".stripMargin) shouldBe 99
+  }
 }
