@@ -2176,6 +2176,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixname: bad"
   }
 
+  "unix: socketpair STREAM bidirectional + flag/family/type errno" in {
+    // socketpair(AF_UNIX, SOCK_STREAM, 0): two distinct fds with
+    // bidirectional payload + EOF on one-side close. SOCK_NONBLOCK
+    // propagates to both fds (visible via fcntl F_GETFL) and an
+    // empty read returns -EAGAIN. AF_INET socketpair is rejected
+    // with -EAFNOSUPPORT, AF_UNIX SOCK_DGRAM with -EOPNOTSUPP
+    // (peer-default DGRAM short-circuit deferred).
+    val output = qemu.command("test_unixpair")
+    output should include("unixpair: ok")
+    output should not include "unixpair: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

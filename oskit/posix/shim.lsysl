@@ -494,6 +494,7 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_RECVMSG_NB       = 21
     const UNIX_CMD_GETSOCKNAME      = 22
     const UNIX_CMD_GETPEERNAME      = 23
+    const UNIX_CMD_SOCKETPAIR       = 24
 
     const UNIX_PATH_MAX      = 108
     const UNIX_SCM_MAX_FDS   = 4
@@ -843,6 +844,8 @@ to the same UDP stack that native sysl programs use via
             return sys_shutdown(int(a0), int(a1))
         if num == 337
             return sys_socket(int(a0), int(a1), int(a2))
+        if num == 338
+            return sys_socketpair(int(a0), int(a1), int(a2), a3)
         if num == 254
             return sys_openat(int(a0), a1, int(a2), int(a3))
         if num == 178
@@ -1532,6 +1535,72 @@ namespace, so a leading NUL just confuses key matching.
             val cur = posix_fd_flags(posix_fd)
             posix_fd_set_flags(posix_fd, cur | POSIX_O_NONBLOCK)
         i64(posix_fd)
+
+
+sys_socketpair for AF_UNIX SOCK_STREAM. Asks the unix server to
+allocate two pre-connected slots, then parks each in a fresh
+posix-fd slot and writes the pair into `sv_ptr[0..1]` (an
+`int[2]` in user memory, matching musl's `socketpair(int sv[2])`
+prototype).
+
+`type` may carry `SOCK_NONBLOCK` / `SOCK_CLOEXEC` flags; we mask
+them off, propagate `O_NONBLOCK` to both new fds, and accept-and
+-ignore CLOEXEC. AF_UNIX SOCK_DGRAM and any other family return
+errno consistent with Linux: `-EOPNOTSUPP` for the unsupported
+type within AF_UNIX (no peer-default DGRAM short-circuit yet),
+`-EAFNOSUPPORT` for non-AF_UNIX domains (no AF_INET socketpair —
+Linux itself returns EOPNOTSUPP there too).
+
+If allocating either posix-fd slot fails, the unix-server slots
+are reclaimed via `shim_unix_close` so the server doesn't leak.
+
+    sys_socketpair(family: int, stype: int, proto: int,
+            sv_ptr: i64) -> i64
+        if family != POSIX_AF_UNIX
+            return i64(-EAFNOSUPPORT)
+        if sv_ptr == i64(0)
+            return i64(-EFAULT)
+        val sock_flag_mask = POSIX_SOCK_NONBLOCK | POSIX_SOCK_CLOEXEC
+        val sock_flags = stype & sock_flag_mask
+        val base_type = stype & ~sock_flag_mask
+        if base_type != POSIX_SOCK_STREAM
+            return i64(-EOPNOTSUPP)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [2]byte
+        msg[0] = byte(UNIX_CMD_SOCKETPAIR)
+        msg[1] = byte(base_type & 0xff)
+        var reply: [3]byte
+        val r = ipc_send(port, msg, 2, reply, 3)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            return i64(unix_status(reply[0]))
+        val ufd0 = int(reply[1]) & 0xff
+        val ufd1 = int(reply[2]) & 0xff
+        val pfd0 = posix_fd_alloc(POSIX_FD_UNIX_SOCKET, ufd0)
+        if pfd0 < 0
+            shim_unix_close(ufd0)
+            shim_unix_close(ufd1)
+            return i64(-EMFILE)
+        val pfd1 = posix_fd_alloc(POSIX_FD_UNIX_SOCKET, ufd1)
+        if pfd1 < 0
+            sys_close(pfd0)
+            shim_unix_close(ufd1)
+            return i64(-EMFILE)
+        val pid = posix_fd_current_pid()
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + pfd0].pos = i64(base_type)
+        posix_fd_table[pid * POSIX_FDS_PER_PROC + pfd1].pos = i64(base_type)
+        if (sock_flags & POSIX_SOCK_NONBLOCK) != 0
+            val cur0 = posix_fd_flags(pfd0)
+            posix_fd_set_flags(pfd0, cur0 | POSIX_O_NONBLOCK)
+            val cur1 = posix_fd_flags(pfd1)
+            posix_fd_set_flags(pfd1, cur1 | POSIX_O_NONBLOCK)
+        var fdp: *int = *int(sv_ptr)
+        fdp[0] = pfd0
+        fdp[1] = pfd1
+        i64(0)
 
 
 Read sun_path into `out` and return the effective length.

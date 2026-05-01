@@ -142,6 +142,7 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_RECVMSG_NB       = 21
     const UNIX_CMD_GETSOCKNAME      = 22
     const UNIX_CMD_GETPEERNAME      = 23
+    const UNIX_CMD_SOCKETPAIR       = 24
 
 EPOLL/POLL bit values match `POSIX_EPOLL*` 1:1 (POLLIN=0x001,
 POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010). The shim's
@@ -1811,6 +1812,53 @@ Wire format:
         ipc_reply(sender, &reply[0], 2 + plen)
 
 
+### SOCKETPAIR handler
+
+Linux's `socketpair(AF_UNIX, SOCK_STREAM, 0, sv)` returns a
+pair of pre-connected fds suitable for bidirectional IPC —
+musl's threading internals lean on this heavily. We allocate
+two fresh slots owned by the caller and link them via
+`peer_idx`, which is exactly the post-accept STREAM topology
+that the existing send/recv handlers already understand.
+
+DGRAM is rejected with `-EINVAL` for now: the DGRAM datapath
+addresses by bound path, not peer slot, so a default-peer
+short-circuit would need new wiring. Real users of
+`socketpair` overwhelmingly want STREAM.
+
+Wire format. Request: `cmd(1) + stype(1)` = 2 bytes.
+Reply: `status(1) + fd0(1) + fd1(1)` = 3 bytes (or
+`status(1)` alone on validation/allocation failure).
+
+    unix_handle_socketpair(sender: int, buf: *byte)
+        val stype = int(buf[1]) & 0xff
+        if stype != UNIX_SOCK_STREAM
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        val fd0 = unix_alloc_slot(sender, stype)
+        if fd0 < 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_ENOMEM)
+            ipc_reply(sender, err, 1)
+            return
+        val fd1 = unix_alloc_slot(sender, stype)
+        if fd1 < 0
+            unix_free_slot(fd0)
+            var err: [1]byte
+            err[0] = byte(-UNIX_ENOMEM)
+            ipc_reply(sender, err, 1)
+            return
+        unix_sockets[fd0].peer_idx = fd1
+        unix_sockets[fd1].peer_idx = fd0
+        var reply: [3]byte
+        reply[0] = 0
+        reply[1] = byte(fd0 & 0xff)
+        reply[2] = byte(fd1 & 0xff)
+        ipc_reply(sender, &reply[0], 3)
+
+
 ### PID_EXIT handler
 
 PM calls this when a process exits, with the dead thread's
@@ -1904,6 +1952,8 @@ Synchronous request-reply, no notification path required
                     unix_handle_getsockname(sender, buf)
                 else if cmd == UNIX_CMD_GETPEERNAME
                     unix_handle_getpeername(sender, buf)
+                else if cmd == UNIX_CMD_SOCKETPAIR
+                    unix_handle_socketpair(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)
