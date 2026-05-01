@@ -337,11 +337,24 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   )
 
   private val customBinaryOperatorTraits = new mutable.LinkedHashMap[String, (String, String)]
+  private val customUnaryOperatorTraits  = new mutable.LinkedHashMap[String, (String, String)]
 
   private def lookupBinaryOperatorTrait(op: String): Option[(String, String)] =
     customBinaryOperatorTraits.get(op).orElse(builtinBinaryOperatorTraits.get(op))
 
-  /** Register #operator / #op attributes from trait methods. */
+  private def lookupUnaryOperatorTrait(op: String): Option[(String, String)] =
+    customUnaryOperatorTraits.get(op)
+
+  // Built-in prefix operators handled by the analyzer's UnaryAST arm directly.
+  // Reserved against #operator (single-arg) registration so users can't shadow
+  // the built-in semantics of `-x`, `!x`, `~x`, `*p`, `&x`, `++x`, `--x`.
+  private val builtinPrefixOps: Set[String] =
+    Set("-", "!", "~", "*", "&", "++", "--")
+
+  /** Register #operator / #op attributes from trait methods. Arity routes the
+   *  registration: a single-param trait method becomes a prefix operator;
+   *  two-param methods become infix. Anything else is rejected.
+   */
   private def registerTraitOperatorEntries(traitName: String, methods: List[TraitMethodAST], node: Any): Unit =
     for m <- methods do
       val opAttrs = m.attributes.filter(a => a.name == "operator" || a.name == "op")
@@ -349,24 +362,40 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         throw AnalysisError(s"trait method '${m.name}' has multiple #operator / #op attributes", m)
       opAttrs.headOption.foreach { attr =>
         val sym = extractOperatorSymbol(attr, m)
-        if builtinBinaryOperatorTraits.contains(sym) then
-          throw AnalysisError(
-            s"operator '$sym' is reserved for built-in trait dispatch; use the standard trait (${builtinBinaryOperatorTraits(sym)._1}) instead of #operator",
-            m,
-          )
-        customBinaryOperatorTraits.get(sym) match
-          case Some((t, meth)) if t != traitName || meth != m.name =>
+        m.params.length match
+          case 2 =>
+            if builtinBinaryOperatorTraits.contains(sym) then
+              throw AnalysisError(
+                s"operator '$sym' is reserved for built-in trait dispatch; use the standard trait (${builtinBinaryOperatorTraits(sym)._1}) instead of #operator",
+                m,
+              )
+            customBinaryOperatorTraits.get(sym) match
+              case Some((t, meth)) if t != traitName || meth != m.name =>
+                throw AnalysisError(
+                  s"operator '$sym' is already bound to trait '$t' (method '$meth')",
+                  m,
+                )
+              case _ => ()
+            customBinaryOperatorTraits(sym) = (traitName, m.name)
+          case 1 =>
+            if builtinPrefixOps.contains(sym) then
+              throw AnalysisError(
+                s"prefix operator '$sym' is reserved for built-in dispatch; cannot overload via #operator",
+                m,
+              )
+            customUnaryOperatorTraits.get(sym) match
+              case Some((t, meth)) if t != traitName || meth != m.name =>
+                throw AnalysisError(
+                  s"prefix operator '$sym' is already bound to trait '$t' (method '$meth')",
+                  m,
+                )
+              case _ => ()
+            customUnaryOperatorTraits(sym) = (traitName, m.name)
+          case n =>
             throw AnalysisError(
-              s"operator '$sym' is already bound to trait '$t' (method '$meth')",
+              s"trait method '${m.name}' with #operator(\"$sym\") must take one (prefix) or two (infix) parameters; got $n",
               m,
             )
-          case _ => ()
-        if m.params.length != 2 then
-          throw AnalysisError(
-            s"trait method '${m.name}' with #operator(\"$sym\") must take exactly two parameters",
-            m,
-          )
-        customBinaryOperatorTraits(sym) = (traitName, m.name)
       }
 
   private def extractOperatorSymbol(attr: Attribute, at: Any): String =
@@ -3541,6 +3570,30 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case multi =>
             throw AnalysisError(s"ambiguous: ${multi.length} impls of '$traitName' match operator '$op' on ${operands.mkString(", ")}")
 
+  /** Prefix-operator dispatch. Only fires for ops registered via
+   *  `#operator("sym")` on a single-param trait method. Built-in prefix ops
+   *  (`-`, `!`, `~`, `*`, `&`, `++`, `--`) are blocked at registration time, so
+   *  they never reach this path and the analyzer's UnaryAST arm handles them
+   *  directly. The caller is expected to gate on `customUnaryOperatorTraits`
+   *  so missing-trait / no-impl cases here always become hard errors.
+   */
+  private def tryUnaryOperatorDispatch(op: String, tOperand: TExpr): TExpr =
+    val (traitName, methodName) = customUnaryOperatorTraits(op)
+    if !traits.contains(traitName) then
+      throw AnalysisError(
+        s"prefix operator '$op' on ${tOperand.typ} requires trait '$traitName' but it is not defined")
+    val candidates = enumerateImplCandidates(traitName, methodName, List(tOperand.typ))
+    candidates match
+      case Nil =>
+        throw AnalysisError(s"no impl of '$traitName' for prefix operator '$op' on ${tOperand.typ}")
+      case (template, subst) :: Nil =>
+        val (mangled, funInfo) = instantiateImpl(template, traitName, methodName, subst)
+        val checkedArgs = checkArgs(mangled, funInfo.params, List(tOperand))
+        TCall(mangled, checkedArgs, funInfo.returnType)
+      case multi =>
+        throw AnalysisError(
+          s"ambiguous: ${multi.length} impls of '$traitName' match prefix operator '$op' on ${tOperand.typ}")
+
   /** Lookahead helper for binary-operator expected-type forwarding. Given the
    *  trait+method that `op` resolves to, the LHS operand's already-resolved
    *  type, and an optional outer expected type for the result, find the unique
@@ -5594,6 +5647,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case UnaryAST(op, operand) =>
         val tOperand = analyzeExpr(operand)
+        // User-defined prefix operator (registered via #operator on a single-param
+        // trait method). Built-in prefix ops (-, !, ~, *, &, ++, --) are blocked
+        // at registration time, so they always fall through to the analyzer's
+        // built-in arms below.
+        if customUnaryOperatorTraits.contains(op) then
+          return tryUnaryOperatorDispatch(op, tOperand)
         val resultType = op match
           case "-" => tOperand.typ
           case "~" =>
@@ -5602,6 +5661,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case "!" =>
             if tOperand.typ != BoolType then throw AnalysisError(s"unary ! requires bool, got ${tOperand.typ}")
             BoolType
+          case other =>
+            throw AnalysisError(
+              s"unknown prefix operator '$other' on ${tOperand.typ}; bind it via #operator(\"$other\") on a single-param trait method")
         TUnary(op, tOperand, resultType)
 
       case BinaryAST(left0, op, right0) =>

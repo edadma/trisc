@@ -1628,6 +1628,68 @@ so user-defined operators may not start with `*` followed by `+`/`-`/`&`,
 or with `&` followed by `*`/`+`/`-`/`~`/`!`. Operators like `*>`, `*<`,
 `<*`, `<*>`, `&|>` are allowed.
 
+#### User-Defined Prefix Operators
+
+A trait method that takes **one** parameter (rather than two) and is
+annotated with `#operator("sym")` registers `sym` as a **prefix** operator.
+The same `#operator(...)` attribute is used for both forms; the trait
+method's arity decides which slot the symbol fills:
+
+- **2 params → infix** (binary operator, the form documented above).
+- **1 param → prefix** (unary operator, applied to the operand on its
+  right). Anything else is a registration error.
+
+The lexer admits the same operator-character set as for binary, so any
+greedy sequence of operator chars that doesn't shadow a built-in prefix
+sigil (`-`, `!`, `~`, `*`, `&`, `++`, `--`) or any binary-reserved
+operator can become a user prefix op:
+
+```sysl
+struct N
+    v: int
+
+trait Boost[T]
+    #operator("<>")
+    boost(a: T) -> T
+
+impl Boost[N]
+    boost(a: N) -> N = N(a.v * 2 + 1)
+
+main() -> int
+    var x = N(7)
+    var r = <>x              // desugars to Boost.boost(x)
+    r.v                      // 15
+```
+
+Chaining requires whitespace (or parentheses) between successive
+prefix tokens, since the lexer is maximal-munch: `<><><>x` lexes as
+the single operator `<><><>`, but `<> <> <> x` lexes as three
+separate `<>` tokens, applied right-associatively.
+
+The same symbol may be registered both as a prefix and as an infix
+operator if it lives on two distinct traits — arity routes the
+registration into separate dispatch tables. Within a single trait
+method, only the param count matters.
+
+Diagnostics:
+
+- A built-in prefix sigil (`-`, `!`, `~`, `*`, `&`, `++`, `--`) used
+  with `#operator(...)` on a single-param trait method is rejected at
+  registration time: *prefix operator '-' is reserved for built-in
+  dispatch; cannot overload via #operator*.
+- An unbound prefix-shaped expression like `<>x` (no trait carries
+  `#operator("<>")` on a single-param method) produces *unknown
+  prefix operator '<>' on T; bind it via `#operator("<>")` on a
+  single-param trait method*.
+- A registered prefix op applied to an operand whose type doesn't
+  match any impl produces *no impl of 'Boost' for prefix operator
+  '<>' on int*.
+
+Prefix overloading does **not** extend to the built-in unary minus,
+bitwise-not, or logical-not — those keep their fixed semantics.
+Adding a `Neg` trait for unary `-` on user types is a deliberate
+follow-up, not part of this surface.
+
 #### Multi-Parameter Traits
 
 A trait may declare more than one type parameter. Each `impl` then provides

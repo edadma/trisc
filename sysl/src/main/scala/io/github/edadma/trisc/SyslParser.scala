@@ -1109,6 +1109,30 @@ class SyslParser extends StandardTokenParsers {
         k.chars
     })
 
+  // Match any Keyword that could be a user-defined prefix operator. Two
+  // filters keep this from grabbing every Keyword in sight (parens, `then`,
+  // `false`, …): (a) the chars must be made entirely of operator chars
+  // (the same set the lexer's `operatorMuncher` consumes), and (b) the
+  // string must not be reserved by the grammar (built-in prefix sigils
+  // `-`, `!`, `~`, `*`, `&`, `++`, `--`, every entry in `reservedOps`).
+  // Whatever survives is a candidate for the analyzer, which makes the
+  // final call (registered via `#operator` vs. error).
+  private val builtinPrefixOps: Set[String] =
+    Set("-", "!", "~", "*", "&", "++", "--")
+
+  private val opChars: Set[Char] =
+    Set('+', '-', '*', '/', '%', '<', '>', '=', '!', '&', '|', '^', '~')
+
+  private def userPrefixOp: Parser[String] =
+    acceptMatch("user prefix operator", {
+      case k: lexical.Keyword
+          if k.chars.nonEmpty
+            && k.chars.forall(opChars.contains)
+            && !reservedOps.contains(k.chars)
+            && !builtinPrefixOps.contains(k.chars) =>
+        k.chars
+    })
+
   lazy val unary: Parser[ExpressionAST] =
     "++" ~> ident ~ ("." ~> ident) ^^ { case obj ~ field => FieldPreIncAST(VarRefAST(obj), field) } |
       "--" ~> ident ~ ("." ~> ident) ^^ { case obj ~ field => FieldPreDecAST(VarRefAST(obj), field) } |
@@ -1130,6 +1154,7 @@ class SyslParser extends StandardTokenParsers {
         AddrOfIndexAST(indexed, idxs.last)
       } |
       "&" ~> ident ^^ AddrOfAST.apply |
+      userPrefixOp ~ unary ^^ { case op ~ e => UnaryAST(op, e) } |
       postfix
 
   lazy val postfix: Parser[ExpressionAST] =
