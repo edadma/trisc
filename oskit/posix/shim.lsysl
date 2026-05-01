@@ -5583,10 +5583,13 @@ Returns 0 on success, -ENOENT on miss.
         i64(pfd)
 
 SYS_LSEEK. VFS tracks file position server-side, so we just
-forward `whence` (0=SEEK_SET, 1=SEEK_CUR; SEEK_END not yet
-supported by VFS) and the offset. VFS replies with the new
-absolute position. Non-file kinds (sockets, STDIO) report ESPIPE
-the way Linux does for unseekable fds.
+forward `whence` (0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END) and the
+offset. VFS replies with the new absolute position. A status
+byte != 0 in the reply means VFS rejected the seek (negative
+result position, unknown whence, or stat failure on SEEK_END);
+we map that to -EINVAL the way Linux does. Non-file kinds
+(sockets, STDIO) report ESPIPE the way Linux does for
+unseekable fds.
 
     sys_lseek(fd: int, offset: i64, whence: int) -> i64
         val k = posix_fd_kind(fd)

@@ -1,0 +1,169 @@
+test_seek_end — SEEK_END whence on lseek
+=========================================
+
+Validates that VFS honours `whence == 2` (SEEK_END) and that the
+shim's `sys_lseek` plumbs `whence` and the returned position
+through unchanged. Also covers the negative-result guard
+(`pos = size + offset < 0` → `-EINVAL`).
+
+Test plan
+---------
+
+The runner pre-fills `/etc/passwd` with 58 bytes (`root:x:0:0:
+root:/root:/nsh\ned:x:1000:1000:ed:/home/ed:/nsh` — no trailing
+newline). The last byte is `h`; the first five bytes are `root:`.
+
+1. `openat("/etc/passwd", O_RDONLY)` → `fd`.
+2. `lseek(fd, 0, SEEK_END)` must return `58`.
+3. `lseek(fd, -1, SEEK_END)` must return `57`.
+4. `read(fd, 1)` must return `'h'`.
+5. `lseek(fd, 0, SEEK_SET)` must return `0`.
+6. `read(fd, 5)` must return `"root:"`.
+7. `lseek(fd, 100, SEEK_END)` must return `158` — Linux allows
+   positioning past EOF (the gap is a sparse "hole").
+8. `lseek(fd, -100, SEEK_END)` must return `-EINVAL` — the
+   negative-result guard rejects offsets that drive the
+   absolute position below zero.
+
+Pass criterion: prints `seek_end: ok`.
+
+    module oskit.bin.test_seek_end
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_READ      = 130
+    val NR_LSEEK     = 221
+    val NR_CLOSE     = 147
+    val NR_OPENAT    = 254
+
+    val AT_FDCWD     = -100
+    val O_RDONLY     = 0
+
+    val EINVAL       = 22
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("seek_end: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_openat(dirfd: int, path: *byte, oflags: int, mode: int) -> int
+        int(syscall6(NR_OPENAT, i64(dirfd), i64(path),
+            i64(oflags), i64(mode), 0, 0))
+
+    posix_lseek(fd: int, offset: i64, whence: int) -> i64
+        syscall6(NR_LSEEK, i64(fd), offset, i64(whence), 0, 0, 0)
+
+    posix_read(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+        var path: [12]byte
+        path[0]  = byte('/')
+        path[1]  = byte('e')
+        path[2]  = byte('t')
+        path[3]  = byte('c')
+        path[4]  = byte('/')
+        path[5]  = byte('p')
+        path[6]  = byte('a')
+        path[7]  = byte('s')
+        path[8]  = byte('s')
+        path[9]  = byte('w')
+        path[10] = byte('d')
+        path[11] = byte(0)
+        val fd = posix_openat(AT_FDCWD, &path[0], O_RDONLY, 0)
+        if fd < 0
+            fail(1)
+            return
+
+Step 2 — SEEK_END with offset 0 returns the size (58).
+
+        val sz = posix_lseek(fd, i64(0), 2)
+        if sz != i64(58)
+            puts("seek_end: size=")
+            print_idec(int(sz))
+            puts("\n")
+            fail(2)
+            return
+
+Step 3 — SEEK_END with -1 returns size - 1.
+
+        if posix_lseek(fd, i64(-1), 2) != i64(57)
+            fail(3)
+            return
+
+Step 4 — last byte is 'h'.
+
+        var lb: [1]byte
+        if posix_read(fd, &lb[0], 1) != 1
+            fail(4)
+            return
+        if lb[0] != byte('h')
+            puts("seek_end: lb=")
+            print_idec(int(lb[0]))
+            puts("\n")
+            fail(5)
+            return
+
+Step 5 — SEEK_SET 0 rewinds.
+
+        if posix_lseek(fd, i64(0), 0) != i64(0)
+            fail(6)
+            return
+
+Step 6 — first five bytes are "root:".
+
+        var hb: [5]byte
+        var got = 0
+        while got < 5
+            val r = posix_read(fd, &hb[got], 5 - got)
+            if r <= 0
+                fail(7)
+                return
+            got += r
+        if hb[0] != byte('r')
+            fail(8)
+            return
+        if hb[4] != byte(':')
+            fail(9)
+            return
+
+Step 7 — positioning past end is allowed.
+
+        if posix_lseek(fd, i64(100), 2) != i64(158)
+            fail(10)
+            return
+
+Step 8 — SEEK_END with offset that drives the resulting position
+negative is rejected with -EINVAL.
+
+        val bad = posix_lseek(fd, i64(-100), 2)
+        if bad != i64(-EINVAL)
+            puts("seek_end: bad=")
+            print_idec(int(bad))
+            puts("\n")
+            fail(11)
+            return
+
+        posix_close(fd)
+        puts("seek_end: ok\n")
+        exit()

@@ -1672,9 +1672,15 @@ Client reply:    [status(1)]
 Handle SEEK: resolve handle, adjust file position.
 Client request:  [cmd(1), handle(4), offset(4), whence(1)]
 Client reply:    [status(1), position(4)]
-whence: 0 = SEEK_SET, 1 = SEEK_CUR
+whence: 0 = SEEK_SET, 1 = SEEK_CUR, 2 = SEEK_END
 
-    vfs_do_seek(sender: int, buf: *byte)
+For `SEEK_END` on `OFT_TYPE_FILE` we query the backend for the
+current size via `TFS_CMD_STAT` and set `pos = size + offset`.
+The negative-position guard rejects callers that pass an offset
+more negative than the file size (Linux returns `-EINVAL`); the
+client treats `status != 0` as `-EINVAL`.
+
+    vfs_do_seek(sender: int, buf: *byte, backend: int)
         val handle = vfs_msg_read_i32(buf, 1)
         val offset = vfs_msg_read_i32(buf, 5)
         val whence = int(buf[9])
@@ -1686,9 +1692,44 @@ whence: 0 = SEEK_SET, 1 = SEEK_CUR
             ipc_reply(sender, reply, 1)
             return
         if whence == 0
+            if offset < 0
+                reply[0] = -1
+                ipc_reply(sender, reply, 1)
+                return
             oft_pos[fid] = offset
         else if whence == 1
-            oft_pos[fid] += offset
+            val new_pos = oft_pos[fid] + offset
+            if new_pos < 0
+                reply[0] = -1
+                ipc_reply(sender, reply, 1)
+                return
+            oft_pos[fid] = new_pos
+        else if whence == 2
+            if oft_type[fid] != OFT_TYPE_FILE
+                reply[0] = -1
+                ipc_reply(sender, reply, 1)
+                return
+            val ino = oft_ino[fid]
+            var tfs_msg: [5]byte
+            tfs_msg[0] = 6   // TFS_CMD_STAT
+            vfs_msg_write_i32(tfs_msg, 1, ino)
+            var stat_reply: [29]byte
+            ipc_send(backend, tfs_msg, 5, stat_reply, 29)
+            if stat_reply[0] != 0
+                reply[0] = -1
+                ipc_reply(sender, reply, 1)
+                return
+            val size = vfs_msg_read_i32(stat_reply, 17)
+            val new_pos = size + offset
+            if new_pos < 0
+                reply[0] = -1
+                ipc_reply(sender, reply, 1)
+                return
+            oft_pos[fid] = new_pos
+        else
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
         reply[0] = 0
         vfs_msg_write_i32(reply, 1, oft_pos[fid])
         ipc_reply(sender, reply, 5)
@@ -2351,7 +2392,7 @@ the appropriate backend.
                 else if cmd == VFS_CMD_CLOSE
                     vfs_do_close(sender, buf)
                 else if cmd == VFS_CMD_SEEK
-                    vfs_do_seek(sender, buf)
+                    vfs_do_seek(sender, buf, backend)
                 else if cmd == VFS_CMD_CONNECT
                     vfs_handle_connect(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_INHERIT

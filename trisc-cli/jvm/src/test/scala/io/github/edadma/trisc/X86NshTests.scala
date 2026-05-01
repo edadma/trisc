@@ -906,6 +906,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "unixscmf: bad"
   }
 
+  "vfs: lseek SEEK_END" in {
+    // Validates the new VFS-side SEEK_END (whence=2) handling.
+    // Opens /etc/passwd, walks SEEK_END/SEEK_SET, reads boundary
+    // bytes, and confirms the negative-result guard returns
+    // -EINVAL.
+    val output = qemu.command("test_seek_end")
+    output should include("seek_end: ok")
+    output should not include "seek_end: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no
