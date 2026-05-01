@@ -335,4 +335,54 @@ class SyslPrefixOperatorTests extends SyslTestHelpers {
         |    int(&p)
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== `&expr` parser loosened: parens / calls / arbitrary exprs accept =====
+  //
+  // Pre-fix the parser only matched `&` against bare-identifier-shaped lvalues
+  // (`&q`, `&q.x`, `&q[i]`). PEG-style code wants `&(literal("ab"))` and
+  // `&parser_call()` too — both forms now route through `UnaryAST("&", expr)`
+  // and dispatch to the user impl when the operand type matches.
+
+  "& on a parenthesized call dispatches to user impl when type isn't lvalue-shaped" in {
+    eval(
+      """type P = new int
+        |
+        |trait Peek[T, R]
+        |    #operator("&")
+        |    peek(p: T) -> R
+        |
+        |impl Peek[P, P]
+        |    peek(p: P) -> P = P(int(p) * 2)
+        |
+        |make_p(v: int) -> P = P(v)
+        |
+        |main() -> int = int(&(make_p(7)))
+        |""".stripMargin) shouldBe 14
+  }
+
+  "& on a bare call expression dispatches to user impl" in {
+    eval(
+      """type P = new int
+        |
+        |trait Peek[T, R]
+        |    #operator("&")
+        |    peek(p: T) -> R
+        |
+        |impl Peek[P, P]
+        |    peek(p: P) -> P = P(int(p) * 2)
+        |
+        |make_p(v: int) -> P = P(v)
+        |
+        |main() -> int = int(&make_p(7))
+        |""".stripMargin) shouldBe 14
+  }
+
+  "& on lvalue still produces built-in address-of (no user impl interposed)" in {
+    eval(
+      """main() -> int
+        |    var x = 42
+        |    val p = &x
+        |    *p
+        |""".stripMargin) shouldBe 42
+  }
 }

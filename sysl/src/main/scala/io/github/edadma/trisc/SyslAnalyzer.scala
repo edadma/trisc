@@ -3678,26 +3678,35 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case multi =>
             throw AnalysisError(s"ambiguous: ${multi.length} impls of '$traitName' match operator '$op' on ${operands.mkString(", ")}")
 
-  /** Prefix-operator dispatch. Only fires for ops registered via
-   *  `#operator("sym")` on a single-param trait method. Built-in prefix ops
-   *  (`-`, `!`, `~`, `*`, `&`, `++`, `--`) are blocked at registration time, so
-   *  they never reach this path and the analyzer's UnaryAST arm handles them
-   *  directly. The caller is expected to gate on `customUnaryOperatorTraits`
-   *  so missing-trait / no-impl cases here always become hard errors.
+  /** Prefix-operator dispatch. Caller is expected to have already gated on
+   *  `customUnaryOperatorTraits.contains(op)`. Throws when the bound trait
+   *  is missing or no impl matches; throws on ambiguity. Use
+   *  `tryUnaryOperatorDispatchOpt` instead at sites that want to fall back
+   *  to a different lowering when no impl matches (e.g. the `&` arm where
+   *  built-in address-of is the fallback for true lvalues).
    */
   private def tryUnaryOperatorDispatch(op: String, tOperand: TExpr): TExpr =
+    tryUnaryOperatorDispatchOpt(op, tOperand).getOrElse {
+      val (traitName, _) = customUnaryOperatorTraits(op)
+      if !traits.contains(traitName) then
+        throw AnalysisError(
+          s"prefix operator '$op' on ${tOperand.typ} requires trait '$traitName' but it is not defined")
+      throw AnalysisError(s"no impl of '$traitName' for prefix operator '$op' on ${tOperand.typ}")
+    }
+
+  /** Same as `tryUnaryOperatorDispatch` but returns `None` instead of
+   *  throwing when zero impls match. Ambiguity (>1 impl) still throws.
+   */
+  private def tryUnaryOperatorDispatchOpt(op: String, tOperand: TExpr): Option[TExpr] =
     val (traitName, methodName) = customUnaryOperatorTraits(op)
-    if !traits.contains(traitName) then
-      throw AnalysisError(
-        s"prefix operator '$op' on ${tOperand.typ} requires trait '$traitName' but it is not defined")
+    if !traits.contains(traitName) then return None
     val candidates = enumerateImplCandidates(traitName, methodName, List(tOperand.typ))
     candidates match
-      case Nil =>
-        throw AnalysisError(s"no impl of '$traitName' for prefix operator '$op' on ${tOperand.typ}")
+      case Nil => None
       case (template, subst) :: Nil =>
         val (mangled, funInfo) = instantiateImpl(template, traitName, methodName, subst)
         val checkedArgs = checkArgs(mangled, funInfo.params, List(tOperand))
-        TCall(mangled, checkedArgs, funInfo.returnType)
+        Some(TCall(mangled, checkedArgs, funInfo.returnType))
       case multi =>
         throw AnalysisError(
           s"ambiguous: ${multi.length} impls of '$traitName' match prefix operator '$op' on ${tOperand.typ}")
@@ -5767,6 +5776,37 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case UnaryAST(op, operand) =>
         val tOperand = analyzeExpr(operand)
+        // `&` falls through the parser as `UnaryAST("&", expr)` whenever the
+        // operand isn't one of the bare-identifier / field / index lvalue
+        // shapes the parser handles directly. Lvalue-vs-rvalue + built-in-vs-
+        // user-impl decisions move here:
+        //   1. If a `#operator("&")` impl matches the operand type AND the
+        //      type is outside `&`'s built-in domain, dispatch to it.
+        //   2. Else if the operand reduces to a recognizable lvalue, lower
+        //      to the existing built-in `TAddrOf*` family.
+        //   3. Else error — neither shape applies.
+        if op == "&" then
+          // `&funcName` (where `funcName` is a global function) is just the
+          // function pointer. `analyzeExpr(VarRefAST(name))` already lowered
+          // it to a `TFuncRef` by the time we get here, so the `&` is a
+          // no-op — return the operand unchanged. Same applies to a bare
+          // function reference produced through any other path.
+          tOperand match
+            case fr: TFuncRef => return fr
+            case _ => ()
+          if customUnaryOperatorTraits.contains("&") &&
+             !builtinPrefixDomainContains("&", tOperand.typ) then
+            tryUnaryOperatorDispatchOpt("&", tOperand) match
+              case Some(t) => return t
+              case None    => () // fall through to built-in lvalue lowering
+          tOperand match
+            case TVarRef(n, t)             => return TAddrOf(n, PtrType(t))
+            case TFieldAccess(obj, idx, t) => return TAddrOfField(obj, idx, PtrType(t))
+            case TIndex(arr, ix, t)        => return TAddrOfIndex(arr, ix, PtrType(t))
+            case TDeref(p, _)              => return p // &*p = p
+            case _ =>
+              throw AnalysisError(
+                s"cannot take address of ${tOperand.typ}: not an lvalue and no #operator(\"&\") impl matches")
         // Dispatch order for `-`, `!`, `~`: built-in semantics own their
         // natural operand types (numeric, bool, integral). For an operand
         // *outside* that domain, fall through to a user `#operator(<sigil>)`

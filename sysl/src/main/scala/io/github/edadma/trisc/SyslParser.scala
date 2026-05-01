@@ -1143,17 +1143,14 @@ class SyslParser extends StandardTokenParsers {
       "~" ~> unary ^^ (e => UnaryAST("~", e)) |
       "*" ~> (scalarCastType | ident) ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(PtrTypeAST(NamedTypeAST(t)), e) } |
       "*" ~> unary ^^ DerefAST.apply |
-      "&" ~> ident ~ rep1("." ~> ident) ^^ { case name ~ fields =>
-        val base: ExpressionAST = VarRefAST(name)
-        val chain = fields.init.foldLeft(base)((e, f) => FieldAccessAST(e, f))
-        AddrOfFieldAST(chain, fields.last)
-      } |
-      "&" ~> ident ~ rep1("[" ~> expr <~ "]") ^^ { case name ~ idxs =>
-        val base: ExpressionAST = VarRefAST(name)
-        val indexed = idxs.init.foldLeft(base)((e, idx) => IndexAST(e, idx))
-        AddrOfIndexAST(indexed, idxs.last)
-      } |
-      "&" ~> ident ^^ AddrOfAST.apply |
+      // `&expr` accepts any prefix-tier expression. The analyzer routes the
+      // result: lvalue shapes (TVarRef / TFieldAccess / TIndex / TDeref) lower
+      // to the existing `TAddrOf*` family; non-lvalue shapes (calls, paren
+      // exprs) dispatch to a `#operator("&")` user impl when one matches; a
+      // bare rvalue with no impl errors out. This keeps PEG-style sugar like
+      // `&(literal("ab"))` and `&parser_call()` parseable while preserving
+      // every existing built-in address-of shape.
+      "&" ~> unary ^^ (e => UnaryAST("&", e)) |
       userPrefixOp ~ unary ^^ { case op ~ e => UnaryAST(op, e) } |
       postfix
 
