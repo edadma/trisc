@@ -2012,10 +2012,13 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
 
     val TCP_SACK_BOARD = 8
 
+    val INET_OWNERS_MAX = 4
+
     struct TcpSocket
         in_use: int
         state: int
-        owner_tid: int
+        owners: [4]int
+        owners_count: int
         local_port: int
         remote_ip: u32
         remote_port: int
@@ -2307,6 +2310,81 @@ listen-vs-conn discriminator at close time avoids unnecessary walks.
         if s >= 0 && s < TCP_MAX_SOCKETS
             tcp_sockets[s].fire_seq = tcp_sockets[s].fire_seq + 1
 
+
+Owners-ring helpers for `tcp_sockets[s]`. Mirrors the unix-socket
+shape (UNIX_MAX_OWNERS): up to `INET_OWNERS_MAX` tids per slot, the
+live entries occupy the prefix `[0..owners_count)` and -1 elsewhere.
+The primary owner sits at `owners[0]` — that's the tid we charge
+the per-tid slot/buffer budget against (Phase 2 chunk 2). Add/remove
+preserve `owners[0]` identity for budgeting consistency: removing
+the primary owner shifts the array down so the next owner becomes
+primary.
+
+    inet_tcp_owners_init(s: int)
+        var i = 0
+        while i < INET_OWNERS_MAX
+            tcp_sockets[s].owners[i] = -1
+            i += 1
+        tcp_sockets[s].owners_count = 0
+
+    inet_tcp_owners_set(s: int, tid: int)
+        var i = 0
+        while i < INET_OWNERS_MAX
+            tcp_sockets[s].owners[i] = -1
+            i += 1
+        tcp_sockets[s].owners[0] = tid
+        tcp_sockets[s].owners_count = 1
+
+    inet_tcp_owners_primary(s: int) -> int
+        if tcp_sockets[s].owners_count == 0
+            return -1
+        tcp_sockets[s].owners[0]
+
+    inet_tcp_owners_has(s: int, tid: int) -> int
+        var i = 0
+        while i < tcp_sockets[s].owners_count
+            if tcp_sockets[s].owners[i] == tid
+                return 1
+            i += 1
+        0
+
+    inet_tcp_owners_add(s: int, tid: int) -> int
+        if inet_tcp_owners_has(s, tid) != 0
+            return 1
+        if tcp_sockets[s].owners_count >= INET_OWNERS_MAX
+            return 0
+        tcp_sockets[s].owners[tcp_sockets[s].owners_count] = tid
+        tcp_sockets[s].owners_count += 1
+        1
+
+    inet_tcp_owners_remove(s: int, tid: int) -> int
+        var i = 0
+        while i < tcp_sockets[s].owners_count
+            if tcp_sockets[s].owners[i] == tid
+                var j = i
+                while j < tcp_sockets[s].owners_count - 1
+                    tcp_sockets[s].owners[j] = tcp_sockets[s].owners[j + 1]
+                    j += 1
+                tcp_sockets[s].owners_count -= 1
+                // Don't wipe the trailing slot when count drops to
+                // 0 — `inet_handle_tcp_get_err` reads `owners[0]` to
+                // gate SO_ERROR access in the post-close window
+                // before alloc reuses the slot. For count > 0 we
+                // still wipe so the prefix-only invariant holds.
+                if tcp_sockets[s].owners_count > 0
+                    tcp_sockets[s].owners[tcp_sockets[s].owners_count] = -1
+                return tcp_sockets[s].owners_count
+            i += 1
+        tcp_sockets[s].owners_count
+
+    inet_tcp_owners_was_last(s: int, tid: int) -> int
+        // True iff `tid` is the slot's primary owner — even when
+        // `owners_count == 0` (slot already torn down). Used by
+        // `inet_handle_tcp_get_err` to gate SO_ERROR after close.
+        if tcp_sockets[s].owners[0] == tid
+            return 1
+        0
+
     tcp_next_iss() -> u32
         val v = tcp_iss_counter
         tcp_iss_counter = v + u32(65536)
@@ -2336,37 +2414,43 @@ forward fn ref but not a forward var ref.
             ti += 1
 
 
-Phase 2 of the net-stack quality plan: count TCP slots whose
-`owner_tid` matches `tid`.  Companion to `inet_count_udp_owner`
-in inet.lsysl; callers add the two for the full per-tid usage.
-Lives in this file because cross-file VAR reads break the
-analyzer (see feedback_sysl_syntax_gotchas #19); cross-file FN
-calls are fine, hence the split.
+Phase 2 of the net-stack quality plan: count TCP slots that
+include `tid` in their owners ring. Companion to
+`inet_count_udp_owner` in inet.lsysl; callers add the two for the
+full per-tid usage. Lives in this file because cross-file VAR
+reads break the analyzer (see feedback_sysl_syntax_gotchas #19);
+cross-file FN calls are fine, hence the split.
+
+Multi-owner ramification: a slot transplanted from A to B counts
+against *both* A's and B's per-tid quotas until A closes its
+fd. Conservative; the alternative (count only the primary owner)
+would let post-transplant code outrun B's budget.
 
     inet_count_tcp_owner(tid: int) -> int
         var n = 0
         var i = 0
         while i < TCP_MAX_SOCKETS
             if tcp_sockets[i].in_use != 0
-                if tcp_sockets[i].owner_tid == tid
+                if inet_tcp_owners_has(i, tid) != 0
                     n += 1
             i += 1
         n
 
 
 Phase 2 chunk 2 — sum the heap-backed send_buf_size +
-recv_buf_size of every in-use slot that belongs to `tid`.
-Used by `inet_tcp_resize_buf` to clamp setsockopt(SO_SNDBUF/
-SO_RCVBUF), and by alloc-paths (`inet_tcp_begin_connect`,
-`inet_tcp_begin_listen`, `inet_tcp_handle_passive_syn`) to
-gate new sockets against the per-tid `TCP_PER_TID_BUF_MAX`.
+recv_buf_size of every in-use slot that includes `tid` in its
+owners ring. Used by `inet_tcp_resize_buf` to clamp
+setsockopt(SO_SNDBUF/SO_RCVBUF), and by alloc-paths
+(`inet_tcp_begin_connect`, `inet_tcp_begin_listen`,
+`inet_tcp_handle_passive_syn`) to gate new sockets against the
+per-tid `TCP_PER_TID_BUF_MAX`.
 
     inet_tcp_buf_bytes_owner(tid: int) -> int
         var n = 0
         var i = 0
         while i < TCP_MAX_SOCKETS
             if tcp_sockets[i].in_use != 0
-                if tcp_sockets[i].owner_tid == tid
+                if inet_tcp_owners_has(i, tid) != 0
                     n += tcp_sockets[i].send_buf_size
                     n += tcp_sockets[i].recv_buf_size
             i += 1
@@ -3208,6 +3292,10 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
             tcp_sockets[s].accept_waiter = -1
         tcp_sockets[s].in_use = 0
         tcp_sockets[s].state = TCP_STATE_CLOSED
+        // owners ring intentionally NOT cleared here — `owners[0]`
+        // survives close to gate post-close SO_ERROR reads via
+        // `inet_tcp_owners_was_last`. `inet_tcp_alloc` calls
+        // `inet_tcp_owners_init` to reset on slot reuse.
         tcp_sockets[s].is_listen = 0
         tcp_sockets[s].accept_count = 0
         tcp_sockets[s].accept_head = 0
@@ -3285,6 +3373,7 @@ success, -1 when the slot is already closed (idempotent).
             if tcp_sockets[i].in_use == 0
                 tcp_sockets[i].in_use = 1
                 tcp_sockets[i].state = TCP_STATE_CLOSED
+                inet_tcp_owners_init(i)
                 tcp_sockets[i].send_len = 0
                 tcp_sockets[i].recv_len = 0
                 tcp_sockets[i].retries = 0
@@ -3393,10 +3482,10 @@ out-of-range kind.
         // Phase 2 chunk 2 — per-tid TCP buffer-memory cap.  Linux-
         // ish silent clamp: if growing the buffer would push owner
         // over TCP_PER_TID_BUF_MAX, shrink the request to whatever
-        // budget remains. owner_tid < 0 means alloc has run but
+        // budget remains. owners_count == 0 means alloc has run but
         // begin_*/handle_passive_syn hasn't stamped yet — skip the
         // check; the caller will own the budget after stamping.
-        val owner = tcp_sockets[s].owner_tid
+        val owner = inet_tcp_owners_primary(s)
         if owner >= 0
             var current = tcp_sockets[s].send_buf_size
             if kind != 0
@@ -3662,10 +3751,10 @@ the socket index on success (caller blocks until ESTABLISHED),
         if lp < 0
             tcp_sockets[s].in_use = 0
             return -1
-        // Stamp owner_tid before the pre-connect resize_buf calls
+        // Stamp owners[0] before the pre-connect resize_buf calls
         // so the budget clamp (Phase 2 chunk 2) sees a real owner;
-        // alloc leaves owner_tid = -1.
-        tcp_sockets[s].owner_tid = owner_tid
+        // alloc leaves owners_count = 0.
+        inet_tcp_owners_set(s, owner_tid)
         // Apply any setsockopt(SO_SNDBUF / SO_RCVBUF) the caller
         // stashed pre-connect.  resize_buf no-ops below TCP_BUF_MIN
         // and clamps to TCP_BUF_MAX. Done here while state is still
@@ -3715,9 +3804,9 @@ so a tiny but positive queue depth is always available.
         val s = inet_tcp_alloc()
         if s < 0
             return -1
-        // See begin_connect — owner_tid stamped before resize so
+        // See begin_connect — owners[0] stamped before resize so
         // the budget clamp has a real owner to count against.
-        tcp_sockets[s].owner_tid = owner_tid
+        inet_tcp_owners_set(s, owner_tid)
         // Pre-listen setsockopt sizing — see begin_connect.  The
         // listening socket carries its sizes through to children
         // in handle_passive_syn (Linux semantics: accepted child
@@ -3760,8 +3849,9 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         // on accept paths too. A misbehaving peer otherwise drives
         // unbounded child sockets through a single listener. Drop
         // silently; the SYN will be retransmitted once budget
-        // frees up. Owner of the new child = listener's owner_tid.
-        val parent_tid = tcp_sockets[ls].owner_tid
+        // frees up. Owner of the new child = listener's primary
+        // owner.
+        val parent_tid = inet_tcp_owners_primary(ls)
         if inet_count_tcp_owner(parent_tid) >= 8
             return
         val def_total = TCP_SEND_BUF_DEFAULT + TCP_RECV_BUF_DEFAULT
@@ -3773,7 +3863,7 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         // Stamp owner before inherit-resize so the budget clamp
         // (Phase 2 chunk 2) sees the right tid; resize will
         // silently shrink the inherit if parent's sizes don't fit.
-        tcp_sockets[s].owner_tid = parent_tid
+        inet_tcp_owners_set(s, parent_tid)
         // Inherit the listener's per-socket buffer sizes (Linux:
         // accepted children carry the listening socket's
         // SO_SNDBUF / SO_RCVBUF). resize_buf no-ops when the size
@@ -4307,39 +4397,49 @@ Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
         -1
 
 
-Reclaim every TCP slot whose `owner_tid` matches a terminated
+Reclaim every TCP slot whose owners ring contains a terminated
 thread. Called from the PID_EXIT IPC path when PM notifies inet
-that a process is dying. Children of a listen() inherit
-`owner_tid` from the listener at passive-open time, so the same
-loop catches queued-but-not-yet-accepted connections. Ungraceful
-close via `inet_tcp_close_slot` — peers of ESTABLISHED sockets
-won't see a FIN (they'd get one had the process called close()
-itself); a graceful variant that sends RST or drives FIN through
-the state machine is a future refinement.
+that a process is dying. Children of a listen() inherit the
+listener's primary owner at passive-open time, so the same loop
+catches queued-but-not-yet-accepted connections.
+
+Multi-owner: just removing `tid` from the ring is the right move
+when it isn't the last owner — another live thread still has a
+shim slot pointing at this socket, and tearing it down would
+orphan that fd. Only when the ring empties do we close the slot.
+Ungraceful close via `inet_tcp_close_slot` — peers of ESTABLISHED
+sockets won't see a FIN (they'd get one had the process called
+close() itself); a graceful variant that sends RST or drives FIN
+through the state machine is a future refinement.
 
     inet_tcp_cleanup_owner(tid: int)
         var i = 0
         while i < TCP_MAX_SOCKETS
             if tcp_sockets[i].in_use != 0
-                if tcp_sockets[i].owner_tid == tid
-                    // Try graceful close first — emits FIN and lets
-                    // the state machine + scan_timers handle the
-                    // rest. do_close returns -1 for states it can't
-                    // handle (SYN_RCVD, FIN_WAIT_*, LAST_ACK,
-                    // TIME_WAIT); fall back to force-free for those.
-                    // caller_tid = -1 so no waiter is parked on
-                    // close_waiter; the state-step path already
-                    // guards `close_waiter >= 0` before replying.
-                    val r = inet_tcp_do_close(i, -1)
-                    if r < 0
-                        inet_tcp_close_slot(i, -1)
+                if inet_tcp_owners_has(i, tid) != 0
+                    val left = inet_tcp_owners_remove(i, tid)
+                    if left == 0
+                        // Try graceful close first — emits FIN and
+                        // lets the state machine + scan_timers
+                        // handle the rest. do_close returns -1 for
+                        // states it can't handle (SYN_RCVD,
+                        // FIN_WAIT_*, LAST_ACK, TIME_WAIT); fall
+                        // back to force-free for those. caller_tid
+                        // = -1 so no waiter is parked on
+                        // close_waiter.
+                        val r = inet_tcp_do_close(i, -1)
+                        if r < 0
+                            inet_tcp_close_slot(i, -1)
             i += 1
 
 
 Combined fd/ownership check for the TCP handlers. Returns 1 when
-the slot is in-range, in-use, AND owned by `sender`; 0 otherwise.
-Replaces the earlier pattern of "bounds check + in_use check" —
-adds the missing owner_tid guard the inet_fd_valid memo flagged.
+the slot is in-range, in-use, AND `sender` is in the owners ring;
+0 otherwise. Replaces the earlier pattern of "bounds check +
+in_use check" — adds the missing ownership guard the
+`inet_fd_valid` memo flagged. Multi-owner-aware: any tid in the
+slot's owners ring passes (added in Phase 2A of the SCM_RIGHTS
+work).
 
     inet_tcp_slot_owned(fd: int, sender: int) -> int
         if fd < 0
@@ -4348,7 +4448,7 @@ adds the missing owner_tid guard the inet_fd_valid memo flagged.
             return 0
         if tcp_sockets[fd].in_use == 0
             return 0
-        if tcp_sockets[fd].owner_tid != sender
+        if inet_tcp_owners_has(fd, sender) == 0
             return 0
         1
 
@@ -5098,7 +5198,7 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         tcp_sockets[s].rcv_nxt = u32(100)
         tcp_sockets[s].snd_una = u32(1)
         tcp_sockets[s].snd_nxt = u32(1)
-        tcp_sockets[s].owner_tid = -1
+        inet_tcp_owners_init(s)
         tcp_sockets[s].local_port = 0
         tcp_sockets[s].remote_port = 0
         tcp_sockets[s].remote_ip = u32(0)
@@ -5294,7 +5394,7 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         tcp_sockets[ss].close_waiter = -1
         tcp_sockets[ss].accept_waiter = -1
         tcp_sockets[ss].is_listen = 0
-        tcp_sockets[ss].owner_tid = -1
+        inet_tcp_owners_init(ss)
         tcp_sockets[ss].local_port = 0
         tcp_sockets[ss].remote_port = 0
         tcp_sockets[ss].remote_ip = u32(0)
@@ -5507,7 +5607,6 @@ Returns 0 on pass, 1..3 on the failure step.
             inet_set_ip_config(saved_ip, saved_mask, saved_gw)
             return 1
         tcp_sockets[s].state = TCP_STATE_ESTABLISHED
-        tcp_sockets[s].owner_tid = -1
         val test_ip = ipv4(10, 0, 2, 99)
         tcp_sockets[s].remote_ip = test_ip
         tcp_sockets[s].arp_pending = 1
@@ -5534,7 +5633,6 @@ Returns 0 on pass, 1..3 on the failure step.
         if s < 0
             return 1
         tcp_sockets[s].state = TCP_STATE_ESTABLISHED
-        tcp_sockets[s].owner_tid = -1
 
         if tcp_sockets[s].send_waiter != -1
             inet_tcp_close_slot(s, 0)

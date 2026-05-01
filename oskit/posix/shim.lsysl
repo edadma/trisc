@@ -517,14 +517,23 @@ must move with the slot.
         posix_fd_table[dst_idx].send_timeout_ms = posix_fd_table[src_idx].send_timeout_ms
         posix_fd_table[dst_idx].tcp_user_timeout_ms = posix_fd_table[src_idx].tcp_user_timeout_ms
 
-For AF_UNIX slots, fan out to the unix server so its
-owners ring tracks the destination process's main thread
-as a co-owner. Without this fan-out the destination
-process's `unix_fd_valid(target, my_tid)` check would
-reject every subsequent op against the slot.
+For backed-by-server kinds, fan out to the appropriate backend
+so its owners ring tracks the destination process's main thread
+as a co-owner. Without this the destination process's per-server
+`*_fd_valid(target, my_tid)` check would reject every subsequent
+op against the slot, and a close from the source process would
+tear the slot down out from under the destination.
 
-        if posix_fd_table[src_idx].kind == POSIX_FD_UNIX_SOCKET
-            val dst_main_tid = kernel_get_process_main_tid(dst_pid)
+AF_UNIX uses `UNIX_CMD_ADD_OWNER` (handle = unix-socket slot
+index, 1 byte). TCP/UDP use `INET_CMD_ADD_OWNER` (handle = inet
+slot index, 2 bytes BE). Phase 2A: VFS support deferred — files
+fall through and the source-side close still tears the file down
+unless the source process is careful (Phase 2A test scope is
+TCP-only).
+
+        val src_kind = posix_fd_table[src_idx].kind
+        val dst_main_tid = kernel_get_process_main_tid(dst_pid)
+        if src_kind == POSIX_FD_UNIX_SOCKET
             val unix_p = unix_get_port()
             if unix_p >= 0
                 if dst_main_tid > 0
@@ -537,6 +546,38 @@ reject every subsequent op against the slot.
                     msg[5] = byte(dst_main_tid & 0xff)
                     var rep: [1]byte
                     ipc_send(unix_p, &msg[0], 6, &rep[0], 1)
+        if src_kind == POSIX_FD_TCP_SOCKET
+            val inet_p = inet_get_port()
+            if inet_p >= 0
+                if dst_main_tid > 0
+                    val target = posix_fd_table[src_idx].target
+                    var msg: [8]byte
+                    msg[0] = byte(58)
+                    msg[1] = byte(1)
+                    msg[2] = byte((target >> 8) & 0xff)
+                    msg[3] = byte(target & 0xff)
+                    msg[4] = byte((dst_main_tid >> 24) & 0xff)
+                    msg[5] = byte((dst_main_tid >> 16) & 0xff)
+                    msg[6] = byte((dst_main_tid >> 8) & 0xff)
+                    msg[7] = byte(dst_main_tid & 0xff)
+                    var rep: [1]byte
+                    ipc_send(inet_p, &msg[0], 8, &rep[0], 1)
+        if src_kind == POSIX_FD_UDP_SOCKET
+            val inet_p = inet_get_port()
+            if inet_p >= 0
+                if dst_main_tid > 0
+                    val target = posix_fd_table[src_idx].target
+                    var msg: [8]byte
+                    msg[0] = byte(58)
+                    msg[1] = byte(0)
+                    msg[2] = byte((target >> 8) & 0xff)
+                    msg[3] = byte(target & 0xff)
+                    msg[4] = byte((dst_main_tid >> 24) & 0xff)
+                    msg[5] = byte((dst_main_tid >> 16) & 0xff)
+                    msg[6] = byte((dst_main_tid >> 8) & 0xff)
+                    msg[7] = byte(dst_main_tid & 0xff)
+                    var rep: [1]byte
+                    ipc_send(inet_p, &msg[0], 8, &rep[0], 1)
         0
 
 
@@ -581,6 +622,7 @@ keep the kernel link free of the full socket-API module.
     const INET_CMD_TCP_GET_INFO    = 43
     const INET_CMD_TCP_SET_USERTO  = 52
     const INET_CMD_TCP_BLACKHOLE_ACKS_TEST = 53
+    const INET_CMD_ADD_OWNER_C     = 58
 
     const INET_MAX_TCP_SEG     = 480
 

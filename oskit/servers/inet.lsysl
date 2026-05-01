@@ -104,6 +104,7 @@ Protocol command codes (byte value of buf[0]).
     const INET_CMD_FRAG_EGRESS_COUNT   = 55
     const INET_CMD_PMTU_DISCOVER_INJECT = 56
     const INET_CMD_TCP_DATA_SEG_COUNT  = 57
+    const INET_CMD_ADD_OWNER           = 58
     const INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -160,7 +161,8 @@ traffic.
 
     struct InetSocket
         in_use: int
-        owner_tid: int
+        owners: [4]int
+        owners_count: int
         bound: int
         bound_ip: u32
         bound_port: int
@@ -254,8 +256,66 @@ sweeps a socket that close() already cleaned up.
             cur = nx
 
 
+Owners-ring helpers for `inet_sockets[s]`. Mirrors the TCP shape
+in inet_proto.lsysl: up to `INET_OWNERS_MAX` tids per slot, the
+live entries occupy the prefix `[0..owners_count)` and -1
+elsewhere. Primary owner sits at `owners[0]`; that's the tid we
+charge against the per-tid slot/buffer budget.
+
+    inet_udp_owners_init(s: int)
+        var i = 0
+        while i < INET_OWNERS_MAX
+            inet_sockets[s].owners[i] = -1
+            i += 1
+        inet_sockets[s].owners_count = 0
+
+    inet_udp_owners_set(s: int, tid: int)
+        var i = 0
+        while i < INET_OWNERS_MAX
+            inet_sockets[s].owners[i] = -1
+            i += 1
+        inet_sockets[s].owners[0] = tid
+        inet_sockets[s].owners_count = 1
+
+    inet_udp_owners_primary(s: int) -> int
+        if inet_sockets[s].owners_count == 0
+            return -1
+        inet_sockets[s].owners[0]
+
+    inet_udp_owners_has(s: int, tid: int) -> int
+        var i = 0
+        while i < inet_sockets[s].owners_count
+            if inet_sockets[s].owners[i] == tid
+                return 1
+            i += 1
+        0
+
+    inet_udp_owners_add(s: int, tid: int) -> int
+        if inet_udp_owners_has(s, tid) != 0
+            return 1
+        if inet_sockets[s].owners_count >= INET_OWNERS_MAX
+            return 0
+        inet_sockets[s].owners[inet_sockets[s].owners_count] = tid
+        inet_sockets[s].owners_count += 1
+        1
+
+    inet_udp_owners_remove(s: int, tid: int) -> int
+        var i = 0
+        while i < inet_sockets[s].owners_count
+            if inet_sockets[s].owners[i] == tid
+                var j = i
+                while j < inet_sockets[s].owners_count - 1
+                    inet_sockets[s].owners[j] = inet_sockets[s].owners[j + 1]
+                    j += 1
+                inet_sockets[s].owners_count -= 1
+                inet_sockets[s].owners[inet_sockets[s].owners_count] = -1
+                return inet_sockets[s].owners_count
+            i += 1
+        inet_sockets[s].owners_count
+
+
 Phase 2 of the net-stack quality plan: count UDP slots whose
-`owner_tid` matches `tid`.  Companion to `inet_count_tcp_owner`
+owners ring contains `tid`.  Companion to `inet_count_tcp_owner`
 in inet_proto.lsysl; callers add the two for the full per-tid
 usage.  Lives in this file because cross-file VAR reads break
 the analyzer (see feedback_sysl_syntax_gotchas #19); cross-file
@@ -266,7 +326,7 @@ FN calls are fine, hence the split.
         var i = 0
         while i < INET_MAX_SOCKETS
             if inet_sockets[i].in_use != 0
-                if inet_sockets[i].owner_tid == tid
+                if inet_udp_owners_has(i, tid) != 0
                     n += 1
             i += 1
         n
@@ -559,7 +619,7 @@ without MSG_PEEK then dequeues the same bytes.
             ipc_reply(sender, err, 2)
             return
         inet_sockets[idx].in_use = 1
-        inet_sockets[idx].owner_tid = sender
+        inet_udp_owners_set(idx, sender)
         inet_sockets[idx].bound = 0
         inet_sockets[idx].bound_ip = INADDR_ANY
         inet_sockets[idx].bound_port = 0
@@ -580,12 +640,13 @@ without MSG_PEEK then dequeues the same bytes.
 
 
 Validate an fd belongs to `sender`. Rejects out-of-range fds,
-free slots, and slots whose `owner_tid` points at a different
-thread — the latter is the ownership check that prevents process
-A from issuing IPC with process B's inet fd (A would need to
-guess the fd number today, but the guard makes the surface
-explicit regardless). Returns 1 if OK, 0 otherwise. Call sites
-pass the IPC `sender` argument.
+free slots, and slots whose owners ring doesn't include `sender`
+— the latter is the ownership check that prevents process A from
+issuing IPC with process B's inet fd (A would need to guess the
+fd number today, but the guard makes the surface explicit
+regardless). Multi-owner-aware: any tid in the slot's owners ring
+passes (added in Phase 2A of the SCM_RIGHTS work). Returns 1 if
+OK, 0 otherwise. Call sites pass the IPC `sender` argument.
 
     inet_fd_valid(fd: int, sender: int) -> int
         if fd < 0
@@ -594,7 +655,7 @@ pass the IPC `sender` argument.
             return 0
         if inet_sockets[fd].in_use == 0
             return 0
-        if inet_sockets[fd].owner_tid != sender
+        if inet_udp_owners_has(fd, sender) == 0
             return 0
         1
 
@@ -1053,6 +1114,16 @@ the caller doesn't block forever.
             err[0] = byte(-1)
             ipc_reply(sender, err, 1)
             return
+        // Phase 2A: drop sender from the owners ring. If another tid
+        // still references this slot (e.g. via SCM_RIGHTS or
+        // PM_CMD_TRANSPLANT_FD), keep the slot alive — only the last
+        // close reaches the actual teardown path.
+        val left = inet_udp_owners_remove(fd, sender)
+        if left > 0
+            var ack: [1]byte
+            ack[0] = 0
+            ipc_reply(sender, ack, 1)
+            return
         if inet_sockets[fd].pending_tid >= 0
             val waiter = inet_sockets[fd].pending_tid
             inet_sockets[fd].pending_tid = -1
@@ -1337,6 +1408,15 @@ Reply: status(1).
             err[0] = byte(-1)
             ipc_reply(sender, err, 1)
             return
+        // Phase 2A: drop sender from the owners ring. If another tid
+        // still references this slot (transplanted or SCM-passed),
+        // keep it alive — peer connection survives the partial close.
+        val left = inet_tcp_owners_remove(fd, sender)
+        if left > 0
+            var ack: [1]byte
+            ack[0] = 0
+            ipc_reply(sender, ack, 1)
+            return
         val r = inet_tcp_do_close(fd, sender)
         if r == 1
             var reply: [1]byte
@@ -1422,10 +1502,13 @@ bytes — 0 errno means "no pending error".
 This intentionally bypasses `inet_tcp_slot_owned`'s `in_use=0`
 check: by the time the shim queries us, `close_slot` has almost
 always already torn the slot down (that's the whole reason the
-field exists).  We still gate on `owner_tid == sender` so a
-different process can't read another's pending error in the
-window before alloc reuses the slot — alloc resets the field, so
-a same-pid reuse just sees 0, which is correct.
+field exists). We still gate on `inet_tcp_owners_was_last(fd,
+sender)` — i.e. `sender` is the slot's primary owner per
+`owners[0]`, which Phase 2A's `owners_remove` deliberately leaves
+intact when the ring drops to count=0. That keeps the original
+"only the original owner can read another's pending error"
+guarantee, plus admits any tid still in the ring while the slot
+is in use (multi-owner via SCM_RIGHTS).
 
     inet_handle_tcp_get_err(sender: int, buf: *byte)
         val fd = inet_read_u16(buf, 1) & 0xffff
@@ -1435,7 +1518,12 @@ a same-pid reuse just sees 0, which is correct.
             reply[1] = byte(0)
             ipc_reply(sender, reply, 2)
             return
-        if tcp_sockets[fd].owner_tid != sender
+        // Either still-live multi-owner or the original primary
+        // surviving close — both legitimate for SO_ERROR access.
+        var ok = inet_tcp_owners_has(fd, sender)
+        if ok == 0
+            ok = inet_tcp_owners_was_last(fd, sender)
+        if ok == 0
             reply[0] = byte(-1)
             reply[1] = byte(0)
             ipc_reply(sender, reply, 2)
@@ -1486,7 +1574,7 @@ struct = 105 bytes. Status -1 if fd out of range or not owned.
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 105)
             return
-        if tcp_sockets[fd].owner_tid != sender
+        if inet_tcp_owners_has(fd, sender) == 0
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 105)
             return
@@ -1695,6 +1783,15 @@ since no FIN handshake happens.
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 1)
             return
+        // Phase 2A: linger=0 abort still has to wait for the last
+        // owner before sending RST. Earlier closes just drop the
+        // closer from the owners ring — they don't get to RST a
+        // socket another tid still references.
+        val left = inet_tcp_owners_remove(fd, sender)
+        if left > 0
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
         val rc = inet_tcp_abort(fd)
         reply[0] = byte(rc & 0xff)
         ipc_reply(sender, reply, 1)
@@ -1781,32 +1878,35 @@ cmd(1) + ip(4) + mask(4) + gw(4) = 13 bytes in; 1 byte status out.
 
 ### inet_handle_pid_exit
 
-Reclaim every socket owned by a terminated thread. PM sends the
-dead process's main_tid as a big-endian i32 at buf[1..5]; inet
-scans both the UDP and TCP tables and closes any socket whose
-`owner_tid` matches. This is how we prevent inet_sockets[] /
-tcp_sockets[] slots from leaking when a process exits without
-calling close(). Wire format: cmd(1) + tid(4) = 5 in, status(1)
-out. Cleanup is ungraceful — TCP sockets skip FIN and go straight
-to CLOSED, which is fine for the pid-exit case (the process is
-gone and the peer will observe connection loss via timeout or a
-future RST).
+Reclaim every socket whose owners ring contains a terminated
+thread. PM sends the dead process's main_tid as a big-endian i32
+at buf[1..5]; inet scans both the UDP and TCP tables, removes the
+tid from each slot's owners ring, and closes the slot only when
+the ring empties (Phase 2A multi-owner support). This is how we
+prevent inet_sockets[] / tcp_sockets[] slots from leaking when a
+process exits without calling close(). Wire format: cmd(1) +
+tid(4) = 5 in, status(1) out. Cleanup is ungraceful — TCP sockets
+skip FIN and go straight to CLOSED, which is fine for the
+pid-exit case (the process is gone and the peer will observe
+connection loss via timeout or a future RST).
 
     inet_handle_pid_exit(sender: int, buf: *byte)
         val tid = ((int(buf[1]) & 0xff) << 24) | ((int(buf[2]) & 0xff) << 16) | ((int(buf[3]) & 0xff) << 8) | (int(buf[4]) & 0xff)
         var i = 0
         while i < INET_MAX_SOCKETS
             if inet_sockets[i].in_use != 0
-                if inet_sockets[i].owner_tid == tid
-                    if inet_sockets[i].bound != 0
-                        inet_udp_hash_remove(i)
-                    inet_sockets[i].in_use = 0
-                    inet_sockets[i].bound = 0
-                    inet_sockets[i].q_count = 0
-                    inet_sockets[i].q_head = 0
-                    inet_sockets[i].q_tail = 0
-                    inet_sockets[i].pending_tid = -1
-                    inet_sockets[i].recv_deadline = 0
+                if inet_udp_owners_has(i, tid) != 0
+                    val left = inet_udp_owners_remove(i, tid)
+                    if left == 0
+                        if inet_sockets[i].bound != 0
+                            inet_udp_hash_remove(i)
+                        inet_sockets[i].in_use = 0
+                        inet_sockets[i].bound = 0
+                        inet_sockets[i].q_count = 0
+                        inet_sockets[i].q_head = 0
+                        inet_sockets[i].q_tail = 0
+                        inet_sockets[i].pending_tid = -1
+                        inet_sockets[i].recv_deadline = 0
             i += 1
         inet_tcp_cleanup_owner(tid)
         inet_epoll_drop_owner(tid)
@@ -1821,6 +1921,75 @@ future RST).
         inet_pending_udp_cleanup_owner(tid)
         var reply: [1]byte
         reply[0] = byte(0)
+        ipc_reply(sender, reply, 1)
+
+
+### inet_handle_add_owner
+
+Phase 2A multi-owner support: append `new_tid` to the owners ring
+of the addressed slot. Used by `posix_fd_transplant` (and, in
+Phase 2B, the SCM_RIGHTS receive path) so a TCP/UDP socket whose
+fd was passed cross-process keeps its kernel state alive past the
+sender's close().
+
+Wire: cmd(1) + kind(1) + slot_idx_be(2) + new_tid_be(4) = 8 in;
+status(1) out. `kind` is 0 for UDP, 1 for TCP. Status: 0 = OK,
+-1 = bad kind / bad index / slot free, -2 = ring full.
+
+The handler doesn't validate the *sender* (any caller can add any
+tid). Privilege gating happens upstream via the RS syscall
+allow-mask: only the shim helper invoked from `SYS_FD_TRANSPLANT`
+or the unix server's SCM_RIGHTS path reaches this code path, and
+both of those sit inside server-trusted contexts.
+
+    inet_handle_add_owner(sender: int, buf: *byte)
+        val kind = int(buf[1]) & 0xff
+        val idx = inet_read_u16(buf, 2)
+        val nt_hi = inet_read_u16(buf, 4)
+        val nt_lo = inet_read_u16(buf, 6)
+        val new_tid = (nt_hi << 16) | nt_lo
+        var reply: [1]byte
+        if kind == 0
+            if idx < 0
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if idx >= INET_MAX_SOCKETS
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if inet_sockets[idx].in_use == 0
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if inet_udp_owners_add(idx, new_tid) == 0
+                reply[0] = byte(-2)
+                ipc_reply(sender, reply, 1)
+                return
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
+        if kind == 1
+            if idx < 0
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if idx >= TCP_MAX_SOCKETS
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if tcp_sockets[idx].in_use == 0
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if inet_tcp_owners_add(idx, new_tid) == 0
+                reply[0] = byte(-2)
+                ipc_reply(sender, reply, 1)
+                return
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
+        reply[0] = byte(-1)
         ipc_reply(sender, reply, 1)
 
 
@@ -2817,6 +2986,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_ICMP_SEND   -> inet_handle_icmp_send(sender, buf)
                     INET_CMD_ICMP_CHECK  -> inet_handle_icmp_check(sender, buf)
                     INET_CMD_PID_EXIT    -> inet_handle_pid_exit(sender, buf)
+                    INET_CMD_ADD_OWNER   -> inet_handle_add_owner(sender, buf)
                     INET_CMD_UDP_GETNAME -> inet_handle_udp_getname(sender, buf)
                     INET_CMD_TCP_GETNAME -> inet_handle_tcp_getname(sender, buf)
                     INET_CMD_TCP_RECV_NB -> inet_handle_tcp_recv_nb(sender, buf)

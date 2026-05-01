@@ -2271,6 +2271,23 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "pmtfd: bad"
   }
 
+  "pm: TRANSPLANT_FD across processes (TCP fd)" in {
+    // Phase 2A of arbitrary-kind SCM_RIGHTS. Parent listens on
+    // 127.0.0.1:9200 and accepts a self-loopback connection,
+    // writes PING through the client side, then transplants
+    // its accepted fd into a suspended child via
+    // PM_CMD_TRANSPLANT_FD. The new INET_CMD_ADD_OWNER fan-out
+    // adds the child's main_tid to the slot's owners ring;
+    // parent then closes its own copy and resumes the child.
+    // Child reads PING from fd 3 and writes OK\n back. Verifies
+    // multi-owner semantics on the inet TCP path: parent's
+    // close decrements but doesn't FIN, recv buffer survives,
+    // child can still operate.
+    val output = qemu.command("test_pmtfd2")
+    output should include("pmtfd2: ok")
+    output should not include "pmtfd2: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

@@ -1,0 +1,56 @@
+test_pmtfd2c — child of test_pmtfd2
+====================================
+
+Spawned suspended by `test_pmtfd2`. Slot 3 is a transplanted TCP
+fd whose owners ring already includes our main_tid (the parent
+fanned out `INET_CMD_ADD_OWNER` before resume). On resume we read
+4 bytes of `PING`, write `OK\n` back, and exit clean.
+
+    module oskit.bin.test_pmtfd2c
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_WRITE = 128
+    val NR_READ  = 130
+
+
+    posix_read(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+
+    main(argv: []string)
+        var rb: [4]byte
+        var got = 0
+        while got < 4
+            val r = posix_read(3, &rb[got], 4 - got)
+            if r <= 0
+                exit_with(20)
+                return
+            got += r
+        if rb[0] != 'P'
+            exit_with(21)
+            return
+        if rb[1] != 'I'
+            exit_with(22)
+            return
+        if rb[2] != 'N'
+            exit_with(23)
+            return
+        if rb[3] != 'G'
+            exit_with(24)
+            return
+
+        var ok: [3]byte
+        ok[0] = 'O'
+        ok[1] = 'K'
+        ok[2] = '\n'
+        val w = posix_write(3, &ok[0], 3)
+        if w != 3
+            exit_with(25)
+            return
+
+        exit()
