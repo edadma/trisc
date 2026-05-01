@@ -2235,6 +2235,19 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixcred: bad"
   }
 
+  "unix: STREAM SCM_RIGHTS fd-passing" in {
+    // sendmsg/recvmsg with cmsg=[fd] on a connected SOCK_STREAM
+    // pair. The cmsg anchors at the byte position of the
+    // sendmsg call (peer.rx_total_drained + peer.rx_count); a
+    // recvmsg whose drain crosses the anchor receives the fds
+    // and gets a fresh aliased posix_fd. Verifies a
+    // close(original)+bind(aliased) round-trip plus a probe
+    // sendto/recvfrom to confirm the aliased fd is fully usable.
+    val output = qemu.command("test_unixscms")
+    output should include("unixscms: ok")
+    output should not include "unixscms: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

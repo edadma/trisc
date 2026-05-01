@@ -2133,11 +2133,33 @@ and dispatches:
         val pid = posix_fd_current_pid()
         val stype = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].pos)
         if stype == POSIX_SOCK_STREAM
-            if nfds > 0
-                return i64(-EOPNOTSUPP)
-            // No cmsg → fall back to plain stream write.
-            var gather: [2048]byte
-            var gtotal = 0
+            if nfds == 0
+                // No cmsg → fall back to plain stream write.
+                var gather_p: [2048]byte
+                var gtotal_p = 0
+                val iov_base_p: *byte = *byte(iov_ptr)
+                var ii_p = 0
+                while ii_p < iov_len
+                    val ent_off_p = ii_p * 16
+                    val base_p    = shim_read_ptr(iov_base_p, ent_off_p)
+                    val seg_len_p = int(shim_read_ptr(iov_base_p, ent_off_p + 8))
+                    if seg_len_p > 0
+                        if base_p == i64(0)
+                            return i64(-EFAULT)
+                        val src_p: *byte = *byte(base_p)
+                        var jj_p = 0
+                        while jj_p < seg_len_p
+                            if gtotal_p < 2046
+                                gather_p[gtotal_p] = src_p[jj_p]
+                                gtotal_p += 1
+                            jj_p += 1
+                    ii_p += 1
+                return sys_send_unix_stream(fd, i64(&gather_p[0]), gtotal_p)
+            // STREAM with cmsg → UNIX_CMD_SENDMSG, plen=0 (target is
+            // peer; path unused). Cap data at 256 to match the
+            // DGRAM SENDMSG payload budget.
+            var gather_s: [256]byte
+            var gtotal_s = 0
             val iov_base_s: *byte = *byte(iov_ptr)
             var ii_s = 0
             while ii_s < iov_len
@@ -2150,12 +2172,46 @@ and dispatches:
                     val src_s: *byte = *byte(base_s)
                     var jj_s = 0
                     while jj_s < seg_len_s
-                        if gtotal < 2046
-                            gather[gtotal] = src_s[jj_s]
-                            gtotal += 1
+                        if gtotal_s < 256
+                            gather_s[gtotal_s] = src_s[jj_s]
+                            gtotal_s += 1
                         jj_s += 1
                 ii_s += 1
-            return sys_send_unix_stream(fd, i64(&gather[0]), gtotal)
+            val target_s = posix_fd_target(fd)
+            if target_s < 0
+                return i64(-EBADF)
+            val port_s = unix_get_port()
+            if port_s < 0
+                return i64(-ENODEV)
+            var msg_s: [512]byte
+            msg_s[0] = byte(UNIX_CMD_SENDMSG)
+            msg_s[1] = byte(target_s & 0xff)
+            msg_s[2] = byte(0)
+            msg_s[3] = byte(nfds & 0xff)
+            var i_s = 0
+            while i_s < nfds
+                msg_s[4 + i_s] = slots[i_s]
+                i_s += 1
+            val slots_off_s = 4 + nfds
+            msg_s[slots_off_s]     = byte((gtotal_s >> 8) & 0xff)
+            msg_s[slots_off_s + 1] = byte(gtotal_s & 0xff)
+            i_s = 0
+            while i_s < gtotal_s
+                msg_s[slots_off_s + 2 + i_s] = gather_s[i_s]
+                i_s += 1
+            var reply_s: [3]byte
+            val rs = ipc_send(port_s, msg_s, slots_off_s + 2 + gtotal_s,
+                reply_s, 3)
+            if rs < 0
+                return i64(-EIO)
+            if reply_s[0] != 0
+                val status_s = unix_status(reply_s[0])
+                posix_fd_set_error(fd, i64(status_s))
+                return i64(status_s)
+            val ns_hi = (int(reply_s[1]) & 0xff) << 8
+            val ns_lo = int(reply_s[2]) & 0xff
+            val nsent_s = ns_hi | ns_lo
+            return i64(nsent_s)
 
 DGRAM path: name is required, gather iovec, build the
 SENDMSG wire message.
@@ -2229,6 +2285,174 @@ Wire layout: cmd(1) + fd(1) + plen(1) + path(P) + nfds(1)
         i64(nsent)
 
 
+STREAM recvmsg helper. Reuses the same UNIX_CMD_RECVMSG wire
+as DGRAM (server's `unix_handle_recvmsg_stream` returns plen=0
+in the reply since STREAM has no per-message src). Allocates
+a posix_fd per transferred slot with `pos = POSIX_SOCK_STREAM`
+so future ops on the inherited fd dispatch as STREAM.
+
+A zero-byte reply (`status=0, plen=0, nfds=0, dlen=0`)
+indicates clean EOF (peer closed or `shut_wr`). Returns 0 to
+the caller; iovec / cmsg / namelen left untouched.
+
+    sys_recvmsg_unix_stream(fd: int, mh: *byte, ctrl_ptr: i64,
+            ctrl_len: int, iov_ptr: i64, iov_len: int,
+            flags: int) -> i64
+        var max_nfds = 0
+        if ctrl_ptr != i64(0)
+            if ctrl_len >= SHIM_CMSG_HDR_LEN
+                max_nfds = (ctrl_len - SHIM_CMSG_HDR_LEN) / 4
+                if max_nfds > UNIX_SCM_MAX_FDS
+                    max_nfds = UNIX_SCM_MAX_FDS
+                if max_nfds < 0
+                    max_nfds = 0
+        var cap = 0
+        val iov_base: *byte = *byte(iov_ptr)
+        var ii = 0
+        while ii < iov_len
+            val ent_off = ii * 16
+            val seg_len = int(shim_read_ptr(iov_base, ent_off + 8))
+            if seg_len > 0
+                cap += seg_len
+            ii += 1
+        if cap > 2046
+            cap = 2046
+        if cap < 0
+            cap = 0
+        val target = posix_fd_target(fd)
+        if target < 0
+            return i64(-EBADF)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
+        if (flags & POSIX_MSG_DONTWAIT) != 0
+            nb = POSIX_O_NONBLOCK
+        var msg: [5]byte
+        if nb != 0
+            msg[0] = byte(UNIX_CMD_RECVMSG_NB)
+        else
+            msg[0] = byte(UNIX_CMD_RECVMSG)
+        msg[1] = byte(target & 0xff)
+        msg[2] = byte(max_nfds & 0xff)
+        msg[3] = byte((cap >> 8) & 0xff)
+        msg[4] = byte(cap & 0xff)
+        var reply: [2070]byte
+        val r = ipc_send(port, msg, 5, reply, 2070)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            val status = unix_status(reply[0])
+            posix_fd_set_error(fd, i64(status))
+            return i64(status)
+
+Reply layout: status(1) + plen(1)=0 + nfds(1) + slots(F) +
+stypes(F) + dlen_be(2) + data(D). plen is always 0 on
+STREAM. stypes carries the server-side stype of each
+transferred slot so the new posix_fd's `pos` matches.
+
+        val src_plen = int(reply[1]) & 0xff
+        val nfds_in_reply = int(reply[2 + src_plen]) & 0xff
+        val slots_off = 2 + src_plen + 1
+        val stypes_off = slots_off + nfds_in_reply
+        val dl_off = stypes_off + nfds_in_reply
+        val dl_hi = (int(reply[dl_off]) & 0xff) << 8
+        val dl_lo = int(reply[dl_off + 1]) & 0xff
+        val dlen = dl_hi | dl_lo
+        val data_off = dl_off + 2
+
+Allocate posix_fds for each transferred slot; mark them
+with the per-slot stype the server reported. Same two-pass
+dedup-on-close pattern as the DGRAM recvmsg path.
+
+        var new_fds: [4]int
+        var n_new = 0
+        var nf = 0
+        while nf < nfds_in_reply
+            val sidx = int(reply[slots_off + nf]) & 0xff
+            val sst  = int(reply[stypes_off + nf]) & 0xff
+            val pfd = posix_fd_alloc(POSIX_FD_UNIX_SOCKET, sidx)
+            if pfd >= 0
+                val pid2 = posix_fd_current_pid()
+                posix_fd_table[pid2 * POSIX_FDS_PER_PROC + pfd].pos = i64(sst)
+                new_fds[n_new] = pfd
+                n_new += 1
+            nf += 1
+
+        var sidx_closed: [4]int
+        var n_closed = 0
+        nf = 0
+        while nf < nfds_in_reply
+            val sidx = int(reply[slots_off + nf]) & 0xff
+            var has_alloc = 0
+            var i = 0
+            while i < n_new
+                if posix_fd_target(new_fds[i]) == sidx
+                    has_alloc = 1
+                    break
+                i += 1
+            if has_alloc == 0
+                var dup = 0
+                i = 0
+                while i < n_closed
+                    if sidx_closed[i] == sidx
+                        dup = 1
+                        break
+                    i += 1
+                if dup == 0
+                    shim_unix_close(sidx)
+                    sidx_closed[n_closed] = sidx
+                    n_closed += 1
+            nf += 1
+
+Scatter data into the iovec.
+
+        var written = 0
+        ii = 0
+        while ii < iov_len
+            val ent_off = ii * 16
+            val base    = shim_read_ptr(iov_base, ent_off)
+            val seg_len = int(shim_read_ptr(iov_base, ent_off + 8))
+            if seg_len > 0
+                if base != i64(0)
+                    val dst: *byte = *byte(base)
+                    var take = dlen - written
+                    if take > seg_len
+                        take = seg_len
+                    if take < 0
+                        take = 0
+                    var jj = 0
+                    while jj < take
+                        dst[jj] = reply[data_off + written + jj]
+                        jj += 1
+                    written += take
+            ii += 1
+
+Build SCM_RIGHTS cmsg in the user's control buffer if fds
+were granted.
+
+        var ctrl_used = 0
+        if n_new > 0
+            if ctrl_ptr != i64(0)
+                val cb: *byte = *byte(ctrl_ptr)
+                val cmsg_len_v = SHIM_CMSG_HDR_LEN + n_new * 4
+                if cmsg_len_v <= ctrl_len
+                    var i = 0
+                    while i < 8
+                        cb[i] = byte((cmsg_len_v >> (i * 8)) & 0xff)
+                        i += 1
+                    shim_write_i32(cb, 8, SHIM_SOL_SOCKET)
+                    shim_write_i32(cb, 12, SHIM_SCM_RIGHTS)
+                    var fi = 0
+                    while fi < n_new
+                        shim_write_i32(cb, SHIM_CMSG_HDR_LEN + fi * 4, new_fds[fi])
+                        fi += 1
+                    ctrl_used = cmsg_len_v
+        shim_write_i32(mh, 40, ctrl_used)
+        shim_write_i32(mh, 48, 0)
+        i64(written)
+
+
 sys_recvmsg helper for AF_UNIX. Issues UNIX_CMD_RECVMSG,
 unpacks the reply (src_path + ancillary fds + data),
 allocates a fresh posix_fd entry per transferred slot,
@@ -2236,8 +2460,8 @@ scatters data into the iovec, and writes a single
 SOL_SOCKET/SCM_RIGHTS cmsg into the user's `msg_control`
 buffer. Returns the number of payload bytes received.
 
-For STREAM, no SCM_RIGHTS path exists in this session —
-delegate to sys_read.
+STREAM dispatches to `sys_recvmsg_unix_stream`; DGRAM stays
+in this function.
 
     sys_recvmsg_unix(fd: int, msghdr_ptr: i64, flags: int) -> i64
         if msghdr_ptr == i64(0)
@@ -2258,45 +2482,8 @@ delegate to sys_read.
         val pid = posix_fd_current_pid()
         val stype = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].pos)
         if stype == POSIX_SOCK_STREAM
-            // STREAM: no SCM_RIGHTS in Session 2 — read into the
-            // gather/scatter scratch then signal "no ancillary".
-            var cap = 0
-            val iov_base_s: *byte = *byte(iov_ptr)
-            var ii_s = 0
-            while ii_s < iov_len
-                val ent_off_s = ii_s * 16
-                val seg_len_s = int(shim_read_ptr(iov_base_s, ent_off_s + 8))
-                if seg_len_s > 0
-                    cap += seg_len_s
-                ii_s += 1
-            if cap > 2046
-                cap = 2046
-            var scratch_s: [2048]byte
-            val got_s = sys_recv_unix_stream(fd, i64(&scratch_s[0]), cap, flags)
-            if got_s < i64(0)
-                return got_s
-            val nbytes_s = int(got_s)
-            var written_s = 0
-            ii_s = 0
-            while ii_s < iov_len
-                val ent_off_s = ii_s * 16
-                val base_s    = shim_read_ptr(iov_base_s, ent_off_s)
-                val seg_len_s = int(shim_read_ptr(iov_base_s, ent_off_s + 8))
-                if seg_len_s > 0
-                    if base_s != i64(0)
-                        val dst_s: *byte = *byte(base_s)
-                        var take_s = nbytes_s - written_s
-                        if take_s > seg_len_s
-                            take_s = seg_len_s
-                        var jj_s = 0
-                        while jj_s < take_s
-                            dst_s[jj_s] = scratch_s[written_s + jj_s]
-                            jj_s += 1
-                        written_s += take_s
-                ii_s += 1
-            shim_write_i32(mh, 40, 0)
-            shim_write_i32(mh, 48, 0)
-            return i64(nbytes_s)
+            return sys_recvmsg_unix_stream(fd, mh, ctrl_ptr, ctrl_len,
+                iov_ptr, iov_len, flags)
 
 DGRAM path: budget the cmsg buffer for max_nfds, send the
 RECVMSG cmd, parse the reply.
@@ -2350,13 +2537,19 @@ RECVMSG cmd, parse the reply.
             return i64(status)
 
 Reply layout: status(1) + src_plen(1) + src_path(P) +
-nfds(1) + slots(F) + dlen_be(2) + data(D).
+nfds(1) + slots(F) + stypes(F) + dlen_be(2) + data(D).
+The stypes block carries the server-side stype of each
+transferred slot (1 = STREAM, 2 = DGRAM) so the new
+posix_fd's `pos` matches the underlying server slot.
 
         val src_plen = int(reply[1]) & 0xff
         val nfds_in_reply = int(reply[2 + src_plen]) & 0xff
         val slots_off = 2 + src_plen + 1
-        val dlen_off = slots_off + nfds_in_reply
-        val dlen = ((int(reply[dlen_off]) & 0xff) << 8) | (int(reply[dlen_off + 1]) & 0xff)
+        val stypes_off = slots_off + nfds_in_reply
+        val dlen_off = stypes_off + nfds_in_reply
+        val dl_hi = (int(reply[dlen_off]) & 0xff) << 8
+        val dl_lo = int(reply[dlen_off + 1]) & 0xff
+        val dlen = dl_hi | dl_lo
         val data_off = dlen_off + 2
 
 Allocate posix_fds for each transferred slot. Linux's
@@ -2380,10 +2573,11 @@ twice).
         var nf = 0
         while nf < nfds_in_reply
             val sidx = int(reply[slots_off + nf]) & 0xff
+            val sst  = int(reply[stypes_off + nf]) & 0xff
             val pfd = posix_fd_alloc(POSIX_FD_UNIX_SOCKET, sidx)
             if pfd >= 0
                 val pid2 = posix_fd_current_pid()
-                posix_fd_table[pid2 * POSIX_FDS_PER_PROC + pfd].pos = i64(POSIX_SOCK_DGRAM)
+                posix_fd_table[pid2 * POSIX_FDS_PER_PROC + pfd].pos = i64(sst)
                 new_fds[n_new] = pfd
                 n_new += 1
             nf += 1

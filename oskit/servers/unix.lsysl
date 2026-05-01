@@ -14,9 +14,13 @@ new SENDMSG/RECVMSG commands. The owner check for every command
 is now multi-tid — each slot keeps an `owners[UNIX_MAX_OWNERS]`
 ring plus `nrefs_in_queues` so a slot stays alive across
 sendmsg-then-recvmsg even if all original owners close in
-between. STREAM SCM_RIGHTS is deferred (no per-byte ancillary
-plumbing yet); transferring non-AF_UNIX fds is also deferred
-(the wire format only carries unix-server slot indices).
+between. STREAM SCM_RIGHTS rides the same SENDMSG/RECVMSG
+command codes, with cmsg fds anchored to the byte position of
+the corresponding sendmsg via the per-slot `pending_scm`
+queue + monotonic `rx_total_drained` counter (Linux-style
+"first byte of the write" anchoring). Transferring non-AF_UNIX
+fds is still deferred (the wire format only carries unix-server
+slot indices).
 
 Path namespace
 --------------
@@ -67,7 +71,11 @@ UNIX_PATH_MAX. Multi-byte integers are big-endian.
                 rep: status(1) + nsent_be(2)
 - RECVMSG (13)  req: cmd(1) + fd(1) + max_nfds(1) + maxlen_be(2)
                 rep: status(1) + plen(1) + path(N) +
-                     nfds(1) + slots(F) + dlen_be(2) + data(M)
+                     nfds(1) + slots(F) + stypes(F) +
+                     dlen_be(2) + data(M)
+                stypes carries the per-slot socket type
+                (1 = STREAM, 2 = DGRAM) so the receiving shim
+                can set the new posix_fd's stype correctly.
 - ACCEPT_NB (14)   same wire as ACCEPT — returns -EAGAIN when no
                    pending connection (never parks).
 - RECVFROM_NB (15) same wire as RECVFROM — returns -EAGAIN on
@@ -186,6 +194,7 @@ matches the POSIX `sockaddr_un.sun_path[108]`.
     const UNIX_BACKLOG_MAX = 8
     const UNIX_MAX_OWNERS  = 4
     const UNIX_SCM_MAX_FDS = 4
+    const UNIX_STREAM_SCM_QUEUE = 4
 
 Server-side IPC buffer. Max wire request is SENDTO with full
 DGRAM payload: cmd(1) + fd(1) + plen(1) + path(108) + dlen(2) +
@@ -204,6 +213,23 @@ return it to the caller via the standard sockaddr_un round-trip.
         src_path_len: int
         data: [256]byte
         data_len: int
+        nfds: int
+        fds: [4]int
+
+
+STREAM ancillary attachment. Anchors a list of cmsg fds to a
+specific point in the receiver's byte stream — `byte_off` is
+the absolute drain position (`rx_total_drained + rx_count` at
+enqueue time) past which a recvmsg drain will deliver these
+fds. Linux semantics anchor SCM_RIGHTS to the *first byte* of
+the corresponding sendmsg call; we use `byte_off < end_off`
+as the claim predicate (where `end_off` is the post-drain
+position), which is equivalent: a recvmsg whose drain crosses
+the anchor byte gets the fds.
+
+    struct UnixStreamScm
+        in_use: int
+        byte_off: int
         nfds: int
         fds: [4]int
 
@@ -264,6 +290,8 @@ matching send/sendto wakes the slot.
         fire_seq: int
         shut_wr: int
         shut_rd: int
+        rx_total_drained: int
+        pending_scm: [4]UnixStreamScm
 
     var unix_sockets: [16]UnixSocket
     var unix_port = -1
@@ -384,6 +412,7 @@ loop before `port_register`.
             unix_sockets[i].fire_seq = 0
             unix_sockets[i].shut_wr = 0
             unix_sockets[i].shut_rd = 0
+            unix_sockets[i].rx_total_drained = 0
             var j = 0
             while j < UNIX_MAX_OWNERS
                 unix_sockets[i].owners[j] = -1
@@ -391,6 +420,10 @@ loop before `port_register`.
             j = 0
             while j < UNIX_DG_QUEUE
                 unix_sockets[i].dg_queue[j].in_use = 0
+                j += 1
+            j = 0
+            while j < UNIX_STREAM_SCM_QUEUE
+                unix_sockets[i].pending_scm[j].in_use = 0
                 j += 1
             i += 1
 
@@ -538,6 +571,7 @@ or -1 if the table is full.
                 unix_sockets[i].fire_seq = 0
                 unix_sockets[i].shut_wr = 0
                 unix_sockets[i].shut_rd = 0
+                unix_sockets[i].rx_total_drained = 0
                 var j = 0
                 while j < UNIX_MAX_OWNERS
                     unix_sockets[i].owners[j] = -1
@@ -547,6 +581,10 @@ or -1 if the table is full.
                 j = 0
                 while j < UNIX_DG_QUEUE
                     unix_sockets[i].dg_queue[j].in_use = 0
+                    j += 1
+                j = 0
+                while j < UNIX_STREAM_SCM_QUEUE
+                    unix_sockets[i].pending_scm[j].in_use = 0
                     j += 1
                 return i
             i += 1
@@ -579,6 +617,15 @@ peer-EOF / backlog-flush / parked-accept-EBADF dance the
 single-owner close used to do, then frees the slot.
 
     unix_full_close(idx: int)
+
+Drop any pending STREAM SCM ancillary references this slot
+holds. Without this, a STREAM receiver that never drained
+queued cmsg fds would leak `nrefs_in_queues` on the source
+slots.
+
+        var dummy_slots: [1]byte
+        unix_stream_scm_consume(idx, 0x7fffffff, -1, 0, &dummy_slots[0])
+
         val peer = unix_sockets[idx].peer_idx
         if peer >= 0
             if unix_sockets[peer].in_use != 0
@@ -664,8 +711,94 @@ the bytes are copied without advancing the read cursor.
         if peek == 0
             unix_sockets[idx].rx_head = h
             unix_sockets[idx].rx_count -= to_copy
+            unix_sockets[idx].rx_total_drained += to_copy
             unix_bump_fire_seq(idx)
         to_copy
+
+
+STREAM SCM consume helper. Walks the pending_scm queue and
+processes every entry whose anchor `byte_off` is strictly less
+than `end_off` (i.e., whose anchor byte was just covered by
+the most recent drain). For each such entry:
+
+- Decrements every fd's `nrefs_in_queues`.
+- If `claim_for >= 0` and there is room left in the receiver's
+  `max_grant` budget, transfers ownership to the receiver and
+  appends the slot index to `out_slots`. Otherwise drops the
+  fd silently — orphaned slots whose ref counts fall to zero
+  get reaped via `unix_full_close`.
+- Frees the entry.
+
+Returns the number of fds claimed (written into `out_slots`).
+Used by both the recvmsg path (claim mode) and the recv path
+(drop mode, via `claim_for=-1`).
+
+    unix_stream_scm_consume(idx: int, end_off: int, claim_for: int,
+            max_grant: int, out_slots: *byte) -> int
+        var granted = 0
+        var s = 0
+        while s < UNIX_STREAM_SCM_QUEUE
+            if unix_sockets[idx].pending_scm[s].in_use != 0
+                if unix_sockets[idx].pending_scm[s].byte_off < end_off
+                    val n = unix_sockets[idx].pending_scm[s].nfds
+                    var k = 0
+                    while k < n
+                        val sidx = unix_sockets[idx].pending_scm[s].fds[k]
+                        unix_sockets[sidx].nrefs_in_queues -= 1
+                        if claim_for >= 0
+                            if granted < max_grant
+                                unix_slot_add_owner(sidx, claim_for)
+                                out_slots[granted] = byte(sidx & 0xff)
+                                granted += 1
+                        if unix_sockets[sidx].owners_count == 0
+                            if unix_sockets[sidx].nrefs_in_queues == 0
+                                if unix_sockets[sidx].in_use != 0
+                                    unix_full_close(sidx)
+                        k += 1
+                    unix_sockets[idx].pending_scm[s].in_use = 0
+                    unix_sockets[idx].pending_scm[s].nfds = 0
+            s += 1
+        granted
+
+
+STREAM recvmsg drain helper. Drains up to `maxlen` bytes from
+slot `idx`'s rx ring into a reply for `receiver`, claims every
+pending_scm entry whose anchor byte falls in the drained range
+(capped at `max_nfds`), and ipc-replies. Used both by the
+direct recvmsg path (when rx_count > 0) and by the SENDMSG /
+SEND wake paths when the parker was a recvmsg.
+
+Reply layout matches the recvmsg wire shape (status(1) +
+plen(1) + src_path(P) + nfds(1) + slots(F) + dlen_be(2) +
+data(D)) — STREAM has no per-message src, so plen=0 and the
+src_path region is zero-length.
+
+    unix_stream_drain_for_msg(idx: int, receiver: int, max_nfds: int,
+            maxlen: int)
+        var data_buf: [2048]byte
+        val n = unix_rx_drain(idx, &data_buf[0], maxlen, 0)
+        val end_off = unix_sockets[idx].rx_total_drained
+        var slots_buf: [4]byte
+        val granted = unix_stream_scm_consume(idx, end_off, receiver,
+            max_nfds, &slots_buf[0])
+        var pr: [2078]byte
+        pr[0] = 0
+        pr[1] = 0
+        pr[2] = byte(granted & 0xff)
+        var k = 0
+        while k < granted
+            val sidx = int(slots_buf[k]) & 0xff
+            pr[3 + k] = slots_buf[k]
+            pr[3 + granted + k] = byte(unix_sockets[sidx].stype & 0xff)
+            k += 1
+        val dlen_off = 3 + granted + granted
+        unix_write_u16(&pr[0], dlen_off, n)
+        val data_off = dlen_off + 2
+        var i = 0
+        while i < n
+            pr[data_off + i] = data_buf[i]
+            i += 1
+        ipc_reply(receiver, &pr[0], data_off + n)
 
 
 Enqueue a datagram on `dst_idx`'s dgram queue, sourced from
@@ -1286,17 +1419,30 @@ unblocks it. If the peer is gone (`peer_closed`), returns
         unix_write_u16(&sreply[0], 1, nsent)
         ipc_reply(sender, sreply, 3)
 
-If the peer is parked on recv, drain and unblock.
+If the peer is parked on recv or recvmsg, drain and unblock.
+A recvmsg parker uses the recvmsg-shaped reply; recv uses the
+recv-shaped reply. Either way the rx_total_drained advance
+covers any pending_scm anchor that fell in the drained range:
+recvmsg claims them, recv drops them.
 
         val parked = unix_sockets[peer].pending_recv_tid
         if parked >= 0
-            unix_sockets[peer].pending_recv_tid = -1
             val maxlen = unix_sockets[peer].pending_recv_maxlen
-            var pr: [2050]byte
-            pr[0] = 0
-            val n = unix_rx_drain(peer, &pr[3], maxlen, 0)
-            unix_write_u16(&pr[0], 1, n)
-            ipc_reply(parked, &pr[0], 3 + n)
+            val pmsg = unix_sockets[peer].pending_recv_is_msg
+            val pmaxn = unix_sockets[peer].pending_recv_max_nfds
+            unix_sockets[peer].pending_recv_tid = -1
+            unix_sockets[peer].pending_recv_is_msg = 0
+            if pmsg != 0
+                unix_stream_drain_for_msg(peer, parked, pmaxn, maxlen)
+            else
+                var pr: [2050]byte
+                pr[0] = 0
+                val n = unix_rx_drain(peer, &pr[3], maxlen, 0)
+                val end_off = unix_sockets[peer].rx_total_drained
+                var dummy: [1]byte
+                unix_stream_scm_consume(peer, end_off, -1, 0, &dummy[0])
+                unix_write_u16(&pr[0], 1, n)
+                ipc_reply(parked, &pr[0], 3 + n)
 
 
 ### RECV handler (STREAM)
@@ -1335,6 +1481,9 @@ how POSIX distinguishes "would block" from "stream closed".
             var pr: [2050]byte
             pr[0] = 0
             val n = unix_rx_drain(fd, &pr[3], maxlen, 0)
+            val end_off = unix_sockets[fd].rx_total_drained
+            var dummy: [1]byte
+            unix_stream_scm_consume(fd, end_off, -1, 0, &dummy[0])
             unix_write_u16(&pr[0], 1, n)
             ipc_reply(sender, &pr[0], 3 + n)
             return
@@ -1370,28 +1519,39 @@ how POSIX distinguishes "would block" from "stream closed".
         unix_sockets[fd].pending_recv_is_msg = 0
 
 
-### SENDMSG handler (DGRAM, SCM_RIGHTS)
+### SENDMSG handler (DGRAM + STREAM, SCM_RIGHTS)
 
-Bundles an in-band datagram with up to `UNIX_SCM_MAX_FDS`
-ancillary unix-socket fds. The caller passes a list of
-slot indices it owns; the server validates ownership,
-increments each slot's `nrefs_in_queues`, and enqueues the
-datagram + fd payload onto the destination's `dg_queue`.
-The receiver claims co-ownership in `unix_handle_recvmsg`.
+Bundles an in-band message with up to `UNIX_SCM_MAX_FDS`
+ancillary unix-socket fds. The caller passes a list of slot
+indices it owns; the server validates ownership, increments
+each slot's `nrefs_in_queues`, and queues the cmsg payload
+on the destination so a future recvmsg can transfer
+co-ownership.
+
+DGRAM dispatch enqueues a `UnixDgram` slot on the target's
+`dg_queue`, with the fds attached to that single message.
+
+STREAM dispatch attaches the fds to the next byte the peer
+will see — `pending_scm[s].byte_off = peer.rx_total_drained
++ peer.rx_count` is captured *before* `unix_rx_append`, so
+the anchor is the position of the first byte appended by
+this sendmsg. A future `recvmsg` whose drain crosses the
+anchor receives the fds; a plain `recv` whose drain crosses
+the anchor silently drops them (matching Linux).
 
 Wire format mirrors SENDTO with a single ancillary block
 slotted between the path and the payload:
 `cmd(1) + fd(1) + plen(1) + path(P) + nfds(1) + slots(F)
-+ dlen_be(2) + data(D)`.
++ dlen_be(2) + data(D)`. STREAM uses `plen=0` (target is
+the connected peer; path is unused).
 
-Limitations: DGRAM only (STREAM SCM_RIGHTS deferred);
-fd-passing is restricted to AF_UNIX socket fds (transferring
-TCP/UDP/file fds is a separate Session-3 concern). After
-the enqueue, if a thread is parked on `recvfrom` for the
-same target, this handler drains the head of queue and
-wakes it — the cmsg fds in that drained entry are silently
-dropped because recvfrom doesn't carry ancillary, but their
-queue-refs are released by `unix_dg_dequeue_reply`.
+Limitations: fd-passing is restricted to AF_UNIX socket fds
+(transferring TCP/UDP/file fds is a separate Session-3
+concern). DGRAM SENDMSG enqueues onto the target's
+`dg_queue` (sized at UNIX_DG_QUEUE) — full queues return
+-EAGAIN. STREAM SENDMSG attaches the SCM to the peer's
+`pending_scm` (sized at UNIX_STREAM_SCM_QUEUE) — full
+queues likewise return -EAGAIN before any data is appended.
 
     unix_handle_sendmsg(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
@@ -1401,6 +1561,9 @@ queue-refs are released by `unix_dg_dequeue_reply`.
             err[1] = 0
             err[2] = 0
             ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].stype == UNIX_SOCK_STREAM
+            unix_handle_sendmsg_stream(sender, fd, buf)
             return
         if unix_sockets[fd].stype != UNIX_SOCK_DGRAM
             var err: [3]byte
@@ -1523,6 +1686,166 @@ recvmsg-drain helper which transfers fd ownership.
                 ipc_reply(parked, &pr[0], n)
 
 
+### SENDMSG handler — STREAM branch
+
+Validates the sender's STREAM connection (peer present, not
+shut for write, peer not closed), validates each cmsg fd's
+ownership, reserves a `pending_scm` slot at the peer (if
+`nfds > 0`), captures the anchor offset, then appends the
+data to the peer's rx_buf and finalizes the SCM entry.
+
+The anchor `byte_off = peer.rx_total_drained + peer.rx_count`
+is captured *before* `unix_rx_append`, so it points at the
+first byte this sendmsg will append. After append, any drain
+that crosses the anchor delivers (recvmsg) or drops (recv)
+the fds. If the rx_buf is full and `unix_rx_append` returns
+0, the cmsg still gets queued at the would-be anchor — a
+later send/sendmsg that successfully appends a byte at that
+position will surface the cmsg via the next drain.
+
+    unix_handle_sendmsg_stream(sender: int, fd: int, buf: *byte)
+        val peer = unix_sockets[fd].peer_idx
+        if peer < 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_ENOTCONN)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].peer_closed != 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EPIPE)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].shut_wr != 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EPIPE)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val plen = int(buf[2]) & 0xff
+        val nfds = int(buf[3 + plen]) & 0xff
+        if nfds > UNIX_SCM_MAX_FDS
+            var err: [3]byte
+            err[0] = byte(-UNIX_EINVAL)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val slots_off = 3 + plen + 1
+        val dlen = unix_read_u16(buf, slots_off + nfds)
+        val data: *byte = buf + slots_off + nfds + 2
+
+Validate every cmsg fd up front. Same checks as the DGRAM
+path: in range, in_use, owned by sender.
+
+        var k = 0
+        while k < nfds
+            val sidx = int(buf[slots_off + k]) & 0xff
+            if sidx < 0
+                var err: [3]byte
+                err[0] = byte(-UNIX_EINVAL)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            if sidx >= UNIX_MAX_SOCKETS
+                var err: [3]byte
+                err[0] = byte(-UNIX_EINVAL)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            if unix_sockets[sidx].in_use == 0
+                var err: [3]byte
+                err[0] = byte(-UNIX_EBADF)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            if unix_slot_has_owner(sidx, sender) == 0
+                var err: [3]byte
+                err[0] = byte(-UNIX_EBADF)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            k += 1
+
+If we have cmsg fds, find a free pending_scm slot at peer
+before doing anything visible. A full queue must reject the
+whole sendmsg with -EAGAIN — partially appending data while
+losing the cmsg would silently corrupt the stream's
+ancillary anchoring.
+
+        var scm_slot = -1
+        if nfds > 0
+            var s = 0
+            while s < UNIX_STREAM_SCM_QUEUE
+                if unix_sockets[peer].pending_scm[s].in_use == 0
+                    scm_slot = s
+                    s = UNIX_STREAM_SCM_QUEUE
+                else
+                    s += 1
+            if scm_slot < 0
+                var err: [3]byte
+                err[0] = byte(-UNIX_EAGAIN)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+
+Capture anchor *before* the append, then append. The
+anchor points at the position of the first byte we'll
+write — exactly Linux's "first byte of the corresponding
+sendmsg" semantics.
+
+        val drained_off = unix_sockets[peer].rx_total_drained
+        val anchor = drained_off + unix_sockets[peer].rx_count
+        val nsent = unix_rx_append(peer, data, dlen)
+        if nfds > 0
+            unix_sockets[peer].pending_scm[scm_slot].in_use = 1
+            unix_sockets[peer].pending_scm[scm_slot].byte_off = anchor
+            unix_sockets[peer].pending_scm[scm_slot].nfds = nfds
+            var k2 = 0
+            while k2 < nfds
+                val sidx = int(buf[slots_off + k2]) & 0xff
+                unix_sockets[peer].pending_scm[scm_slot].fds[k2] = sidx
+                unix_sockets[sidx].nrefs_in_queues += 1
+                k2 += 1
+        var sreply: [3]byte
+        sreply[0] = 0
+        unix_write_u16(&sreply[0], 1, nsent)
+        ipc_reply(sender, sreply, 3)
+
+If a thread is parked on recv/recvmsg at the peer, drain and
+unblock. recvmsg gets the recvmsg-shaped reply (claims any
+cmsg in the drained range); recv gets the recv-shaped reply
+(drops cmsg in the drained range).
+
+        val parked = unix_sockets[peer].pending_recv_tid
+        if parked >= 0
+            val pmaxlen = unix_sockets[peer].pending_recv_maxlen
+            val pmsg = unix_sockets[peer].pending_recv_is_msg
+            val pmaxn = unix_sockets[peer].pending_recv_max_nfds
+            unix_sockets[peer].pending_recv_tid = -1
+            unix_sockets[peer].pending_recv_is_msg = 0
+            if pmsg != 0
+                unix_stream_drain_for_msg(peer, parked, pmaxn, pmaxlen)
+            else
+                var pr: [2050]byte
+                pr[0] = 0
+                val n = unix_rx_drain(peer, &pr[3], pmaxlen, 0)
+                val end_off = unix_sockets[peer].rx_total_drained
+                var dummy: [1]byte
+                unix_stream_scm_consume(peer, end_off, -1, 0, &dummy[0])
+                unix_write_u16(&pr[0], 1, n)
+                ipc_reply(parked, &pr[0], 3 + n)
+
+
 ### RECVMSG handler (DGRAM, SCM_RIGHTS)
 
 Drains one queued datagram. For each ancillary fd in the
@@ -1566,14 +1889,16 @@ advances the head pointer.
         while i < grant
             val sidx = unix_sockets[idx].dg_queue[slot].fds[i]
             pr[2 + sp + 1 + i] = byte(sidx & 0xff)
+            pr[2 + sp + 1 + grant + i] = byte(unix_sockets[sidx].stype & 0xff)
             i += 1
         var dl = unix_sockets[idx].dg_queue[slot].data_len
         if dl > maxlen
             dl = maxlen
-        unix_write_u16(&pr[0], 2 + sp + 1 + grant, dl)
+        val dlen_off = 2 + sp + 1 + grant + grant
+        unix_write_u16(&pr[0], dlen_off, dl)
         i = 0
         while i < dl
-            pr[2 + sp + 1 + grant + 2 + i] = unix_sockets[idx].dg_queue[slot].data[i]
+            pr[dlen_off + 2 + i] = unix_sockets[idx].dg_queue[slot].data[i]
             i += 1
         i = 0
         while i < queued_nfds
@@ -1590,7 +1915,7 @@ advances the head pointer.
         unix_sockets[idx].dg_head = (slot + 1) % UNIX_DG_QUEUE
         unix_sockets[idx].dg_count -= 1
         unix_bump_fire_seq(idx)
-        ipc_reply(receiver, &pr[0], 2 + sp + 1 + grant + 2 + dl)
+        ipc_reply(receiver, &pr[0], dlen_off + 2 + dl)
 
 
     unix_handle_recvmsg(sender: int, buf: *byte, no_park: int)
@@ -1603,6 +1928,14 @@ advances the head pointer.
             err[3] = 0
             ipc_reply(sender, err, 4)
             return
+        val max_nfds_raw = int(buf[2]) & 0xff
+        var max_nfds = max_nfds_raw
+        if max_nfds > UNIX_SCM_MAX_FDS
+            max_nfds = UNIX_SCM_MAX_FDS
+        val maxlen = unix_read_u16(buf, 3)
+        if unix_sockets[fd].stype == UNIX_SOCK_STREAM
+            unix_handle_recvmsg_stream(sender, fd, max_nfds, maxlen, no_park)
+            return
         if unix_sockets[fd].stype != UNIX_SOCK_DGRAM
             var err: [4]byte
             err[0] = byte(-UNIX_EINVAL)
@@ -1611,13 +1944,84 @@ advances the head pointer.
             err[3] = 0
             ipc_reply(sender, err, 4)
             return
-        val max_nfds_raw = int(buf[2]) & 0xff
-        var max_nfds = max_nfds_raw
-        if max_nfds > UNIX_SCM_MAX_FDS
-            max_nfds = UNIX_SCM_MAX_FDS
-        val maxlen = unix_read_u16(buf, 3)
         if unix_sockets[fd].dg_count > 0
             unix_dg_drain_for_msg(fd, sender, max_nfds, maxlen)
+            return
+        if no_park != 0
+            var err: [4]byte
+            err[0] = byte(-UNIX_EAGAIN)
+            err[1] = 0
+            err[2] = 0
+            err[3] = 0
+            ipc_reply(sender, err, 4)
+            return
+        unix_sockets[fd].pending_recv_tid = sender
+        unix_sockets[fd].pending_recv_maxlen = maxlen
+        unix_sockets[fd].pending_recv_peek = 0
+        unix_sockets[fd].pending_recv_is_msg = 1
+        unix_sockets[fd].pending_recv_max_nfds = max_nfds
+
+
+### RECVMSG handler — STREAM branch
+
+Mirrors `unix_handle_recv` for the EOF/empty/park triage:
+
+- `shut_rd` set: clean EOF (status=0, plen=0, nfds=0, dlen=0).
+- `rx_count > 0`: drain via `unix_stream_drain_for_msg`,
+  which reads bytes and claims any pending_scm whose anchor
+  fell in the drained range.
+- Empty + peer gone (peer_idx<0 / peer_closed / peer.shut_wr):
+  clean EOF reply, no cmsg.
+- Empty + peer alive + `no_park`: -EAGAIN.
+- Otherwise park (set `pending_recv_is_msg=1`); a future
+  SEND/SENDMSG at the peer will wake via the parker dispatch
+  in those handlers, which routes to `unix_stream_drain_for_msg`.
+
+The empty-EOF reply shape matches a successful zero-byte
+recvmsg: `status(0) + plen(0) + nfds(0) + dlen_be(0)` = 5
+bytes. The shim treats this as a clean stream end.
+
+    unix_handle_recvmsg_stream(sender: int, fd: int, max_nfds: int,
+            maxlen: int, no_park: int)
+        if unix_sockets[fd].shut_rd != 0
+            var pr: [5]byte
+            pr[0] = 0
+            pr[1] = 0
+            pr[2] = 0
+            pr[3] = 0
+            pr[4] = 0
+            ipc_reply(sender, pr, 5)
+            return
+        if unix_sockets[fd].rx_count > 0
+            unix_stream_drain_for_msg(fd, sender, max_nfds, maxlen)
+            return
+        if unix_sockets[fd].peer_idx < 0
+            var pr: [5]byte
+            pr[0] = 0
+            pr[1] = 0
+            pr[2] = 0
+            pr[3] = 0
+            pr[4] = 0
+            ipc_reply(sender, pr, 5)
+            return
+        if unix_sockets[fd].peer_closed != 0
+            var pr: [5]byte
+            pr[0] = 0
+            pr[1] = 0
+            pr[2] = 0
+            pr[3] = 0
+            pr[4] = 0
+            ipc_reply(sender, pr, 5)
+            return
+        val peer_for_eof = unix_sockets[fd].peer_idx
+        if unix_sockets[peer_for_eof].shut_wr != 0
+            var pr: [5]byte
+            pr[0] = 0
+            pr[1] = 0
+            pr[2] = 0
+            pr[3] = 0
+            pr[4] = 0
+            ipc_reply(sender, pr, 5)
             return
         if no_park != 0
             var err: [4]byte
