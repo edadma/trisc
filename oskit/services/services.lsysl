@@ -226,6 +226,7 @@ importing them directly.
     val SYS_VM_SET_PTBR_SC     = 51
     val SYS_GET_THREAD_PID     = 52
     val SYS_GET_THREAD_PTBR    = 53
+    val SYS_GET_THREAD_UID     = 84
     val SYS_VM_COPY_TO         = 54
     val SYS_VM_COPY_FROM       = 55
     val SYS_PROC_STATE         = 56
@@ -260,6 +261,9 @@ importing them directly.
 
     svc_get_thread_pid(tid: int) -> int
         syscall(SYS_GET_THREAD_PID, tid)
+
+    svc_get_thread_uid(tid: int) -> int
+        syscall(SYS_GET_THREAD_UID, tid)
 
     svc_get_thread_ptbr(tid: int) -> u64
         u64(syscall(SYS_GET_THREAD_PTBR, tid))

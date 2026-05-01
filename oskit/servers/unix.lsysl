@@ -131,7 +131,7 @@ queue entries that hold the slot alive while in transit.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
-    import oskit.services.{rs_ready, notify_send_to, svc_get_thread_pid}
+    import oskit.services.{rs_ready, notify_send_to, svc_get_thread_pid, svc_get_thread_uid}
 
 
 Protocol command codes (byte value of buf[0]).
@@ -2474,10 +2474,11 @@ For SLIX:
 - PID: resolved from the peer slot's first owner (TID) via
   `svc_get_thread_pid`. socketpair-pairs and stream peers
   alike track owners[0] from creation.
-- UID / GID: 0 for now. SLIX has a single-user kernel UID
-  model (services.lsysl getuid/setuid is per-thread but no
-  inter-thread query primitive yet); a future
-  `svc_get_thread_uid(tid)` would let us return real values.
+- UID: resolved from the same TID via `svc_get_thread_uid`.
+- GID: 0 — SLIX doesn't track per-thread groups today (POSIX
+  `getgid` is faked to 0 in the shim). Daemons that gate on
+  GID will see "wheel" universally; revisit when a group
+  table lands.
 
 DGRAM is rejected with `-ENOPROTOOPT` per Linux semantics
 (SO_PEERCRED only meaningful on connection-oriented socks).
@@ -2507,20 +2508,28 @@ bytes (or `status(1)` alone on failure).
             return
         val tid = unix_sockets[peer].owners[0]
         var pid = 0
+        var uid = 0
         if tid >= 0
             pid = svc_get_thread_pid(tid)
             if pid < 0
                 pid = 0
+            uid = svc_get_thread_uid(tid)
+            if uid < 0
+                uid = 0
         var reply: [13]byte
         reply[0] = 0
         reply[1] = byte(pid & 0xff)
         reply[2] = byte((pid >> 8) & 0xff)
         reply[3] = byte((pid >> 16) & 0xff)
         reply[4] = byte((pid >> 24) & 0xff)
-        var i = 5
-        while i < 13
-            reply[i] = byte(0)
-            i += 1
+        reply[5] = byte(uid & 0xff)
+        reply[6] = byte((uid >> 8) & 0xff)
+        reply[7] = byte((uid >> 16) & 0xff)
+        reply[8] = byte((uid >> 24) & 0xff)
+        reply[9] = byte(0)
+        reply[10] = byte(0)
+        reply[11] = byte(0)
+        reply[12] = byte(0)
         ipc_reply(sender, &reply[0], 13)
 
 

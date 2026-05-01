@@ -7,7 +7,8 @@ gid;}` (12 bytes; 3 × i32 LE).
 
 Cases:
   1. Connected STREAM pair (single-process): both ends report
-     the same PID (caller's getpid()) and uid=gid=0.
+     the same PID (caller's getpid()) and uid matching
+     getuid() (gid=0 — slix has no per-thread group table).
   2. Unconnected STREAM (just `socket()`) → -ENOTCONN.
   3. DGRAM fd → -EINVAL (returned at server level for STREAM-
      only options).
@@ -27,6 +28,7 @@ Pass criterion: prints `unixcred: ok`.
     val NR_SOCKET      = 337
     val NR_GETSOCKOPT  = 204
     val NR_GETPID      = 194
+    val NR_GETUID      = 207
 
     val AF_UNIX_V      = 1
     val SOCK_STREAM_V  = 1
@@ -99,6 +101,9 @@ Pass criterion: prints `unixcred: ok`.
     posix_getpid() -> int
         int(syscall6(NR_GETPID, 0, 0, 0, 0, 0, 0))
 
+    posix_getuid() -> int
+        int(syscall6(NR_GETUID, 0, 0, 0, 0, 0, 0))
+
 
 Decode an i32 from `b[off..off+4]` as little-endian.
 
@@ -148,6 +153,7 @@ PID, uid=gid=0.
         if mypid <= 0
             fail(7)
             return
+        val myuid = posix_getuid()
 
         var cred: [12]byte
         var cl: i32 = 12
@@ -168,7 +174,12 @@ PID, uid=gid=0.
             puts("\n")
             fail(10)
             return
-        if uid_s != 0
+        if uid_s != myuid
+            puts("unixcred: server uid=")
+            print_idec(uid_s)
+            puts(" myuid=")
+            print_idec(myuid)
+            puts("\n")
             fail(11)
             return
         if gid_s != 0

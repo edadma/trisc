@@ -651,6 +651,9 @@ Set a thread's page table base register.
     kernel_get_thread_pid(tid: int) -> int
         threads[tid].pid
 
+    kernel_get_thread_uid(tid: int) -> int
+        threads[tid].uid
+
 Return the main_tid of a process, or -1 for an invalid pid.
 Used as a generation marker: distinct process instances at the
 same pid get distinct main_tids, so lazy per-pid state (POSIX
@@ -776,6 +779,17 @@ Arg = tid. Returns ptbr.
     sys_get_thread_ptbr_handler(arg: int)
         val result = kernel_get_thread_ptbr(arg)
         syscall_return(i64(result))
+        kernel_continue_current()
+
+SYS_GET_THREAD_UID (84): Get a thread's UID.
+Arg = tid. Returns uid (0 = root). Used by SO_PEERCRED so a
+unix server running as a separate process can resolve the
+peer thread's effective uid without poking thread state
+directly.
+
+    sys_get_thread_uid_handler(arg: int)
+        val result = kernel_get_thread_uid(arg)
+        syscall_return(result)
         kernel_continue_current()
 
 SYS_VM_COPY_TO (54): Copy data into another address space.
@@ -1197,6 +1211,7 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall(80, sys_virtio_pci_info_handler)
         register_syscall(81, sys_timer_subscribe_handler)
         register_syscall(83, sys_sleep_or_notify_handler)
+        register_syscall(84, sys_get_thread_uid_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
