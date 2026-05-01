@@ -2533,6 +2533,104 @@ class SyslSVMCodegen:
           emit("  push_i64 4294967295"); emit("  and")
         case _ => // no-op for same-width or i64/u64/ptr
 
+  // Recursively emit a discriminator check for a (possibly nested) match
+  // pattern. The outer scrutinee value's address is in local `scrIdx`.
+  // `absOff` is the offset from the scrutinee's address where this nested
+  // sub-value lives. For variant patterns, loads the tag at the field
+  // address (i32 at offset 0 of the nested enum) and `jumpz`-es to
+  // `failLabel` on mismatch; recurses for any deeper nested patterns.
+  // For struct destructure patterns, recurses without a discriminator
+  // check. Other pattern shapes (TWildcard / primitives) act as
+  // wildcards in nested position.
+  private def emitNestedPatternCheckSVM(
+      pat: TMatchPattern,
+      fieldType: SyslType,
+      scrIdx: Int,
+      absOff: Int,
+      failLabel: String,
+  ): Unit = pat match
+    case TWildcard => ()
+    case TVariantPattern(et, variantIndex, _, _, deeperNested) =>
+      // Push field address (= scrutinee addr + absOff)
+      emit(s"  local_get $scrIdx")
+      if absOff != 0 then { emitPushInt(absOff); emit("  add") }
+      // Load tag (i32 at offset 0 of the nested enum)
+      emit("  load32")
+      emitPushInt(variantIndex)
+      emit("  eq")
+      emit(s"  jumpz $failLabel")
+      // Recurse into deeper nested
+      val variantFields = et.variants(variantIndex)._2
+      val dataOff = et.dataOffset.toInt
+      var fieldOff = 0
+      for ((deeperOpt, i) <- deeperNested.zipWithIndex) do
+        val (_, deeperFieldType) = variantFields(i)
+        val align = deeperFieldType.alignOf.toInt.max(1)
+        fieldOff = ((fieldOff + align - 1) / align) * align
+        deeperOpt.foreach { deeper =>
+          emitNestedPatternCheckSVM(deeper, deeperFieldType, scrIdx, absOff + dataOff + fieldOff, failLabel)
+        }
+        fieldOff += deeperFieldType.sizeOf.toInt
+    case TDestructurePattern(st, _, _, deeperNested) =>
+      for ((deeperOpt, i) <- deeperNested.zipWithIndex) do
+        deeperOpt.foreach { deeper =>
+          val deeperFieldType = st.fields(i)._2
+          val off = fieldOffset(st, i).toInt
+          emitNestedPatternCheckSVM(deeper, deeperFieldType, scrIdx, absOff + off, failLabel)
+        }
+    case _ => () // primitive nested patterns — treat as wildcard
+
+  // Recursively emit name bindings for a (possibly nested) match pattern.
+  // The outer scrutinee value's address is in local `scrIdx`. `absOff`
+  // is the offset from the scrutinee where this nested sub-value lives.
+  // Each named binding inside the nested pattern allocates a new local
+  // and copies the field value (loaded relative to scrutinee + absOff +
+  // local field offset).
+  private def emitNestedPatternBindingsSVM(
+      pat: TMatchPattern,
+      fieldType: SyslType,
+      scrIdx: Int,
+      absOff: Int,
+  ): Unit = pat match
+    case TVariantPattern(et, variantIndex, bindings, fieldTypes, deeperNested) =>
+      val variantFields = et.variants(variantIndex)._2
+      val dataOff = et.dataOffset.toInt
+      var fieldOff = 0
+      for (((binding, ft), i) <- bindings.zip(fieldTypes).zipWithIndex) do
+        val align = ft.alignOf.toInt.max(1)
+        fieldOff = ((fieldOff + align - 1) / align) * align
+        binding.foreach { name =>
+          val localIdx = nextLocalIndex
+          nextLocalIndex += 1
+          locals(name) = LocalInfo(localIdx, ft)
+          emit(s"  local_get $scrIdx")
+          val totalOff = absOff + dataOff + fieldOff
+          if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
+          emitLoad(ft)
+          emit(s"  local_set $localIdx")
+        }
+        if i < deeperNested.length then deeperNested(i).foreach { deeper =>
+          emitNestedPatternBindingsSVM(deeper, ft, scrIdx, absOff + dataOff + fieldOff)
+        }
+        fieldOff += ft.sizeOf.toInt
+    case TDestructurePattern(st, bindings, fieldTypes, deeperNested) =>
+      for (((binding, ft), i) <- bindings.zip(fieldTypes).zipWithIndex) do
+        val off = fieldOffset(st, i).toInt
+        binding.foreach { name =>
+          val localIdx = nextLocalIndex
+          nextLocalIndex += 1
+          locals(name) = LocalInfo(localIdx, ft)
+          emit(s"  local_get $scrIdx")
+          val totalOff = absOff + off
+          if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
+          emitLoad(ft)
+          emit(s"  local_set $localIdx")
+        }
+        if i < deeperNested.length then deeperNested(i).foreach { deeper =>
+          emitNestedPatternBindingsSVM(deeper, ft, scrIdx, absOff + off)
+        }
+    case _ => ()
+
   private def fieldOffset(st: SyslType.StructType, fieldIndex: Int): Long =
     if fieldIndex >= st.fields.length then
       sys.error(s"fieldOffset: index $fieldIndex out of range for struct '${st.name}' with ${st.fields.length} fields")
@@ -2575,24 +2673,46 @@ class SyslSVMCodegen:
           emit(if scrutinee.typ.isUnsigned then "  leu" else "  le")
           emit(s"  jumpnz $hitLabel")
           emit(s"$rangeNext:")
-        case TDestructurePattern(_, _, _, nested) =>
-          if nested.exists(_.isDefined) then
-            sys.error("nested patterns in match arms are not yet supported on the SVM backend")
-          emit(s"  jump $hitLabel")
-        case TVariantPattern(_, variantIndex, _, _, nested) =>
-          if nested.exists(_.isDefined) then
-            sys.error("nested patterns in match arms are not yet supported on the SVM backend")
+        case TDestructurePattern(st, _, _, nested) =>
+          if nested.forall(_.isEmpty) then
+            emit(s"  jump $hitLabel")
+          else
+            val patFail = newLabel("pat_fail")
+            for ((subOpt, i) <- nested.zipWithIndex) do subOpt.foreach { sub =>
+              val off = fieldOffset(st, i)
+              emitNestedPatternCheckSVM(sub, st.fields(i)._2, scrIdx, off.toInt, patFail)
+            }
+            emit(s"  jump $hitLabel")
+            emit(s"$patFail:")
+        case TVariantPattern(et, variantIndex, _, _, nested) =>
           // Load tag (i32 at offset 0 of enum), compare with variant index
           emit(s"  local_get $scrIdx")
           emit("  load32")
           emitPushInt(variantIndex)
           emit("  eq")
-          emit(s"  jumpnz $hitLabel")
+          if nested.forall(_.isEmpty) then
+            emit(s"  jumpnz $hitLabel")
+          else
+            val patFail = newLabel("pat_fail")
+            emit(s"  jumpz $patFail")
+            val variantFields = et.variants(variantIndex)._2
+            val dataOff = et.dataOffset.toInt
+            var fieldOff = 0
+            for ((subOpt, i) <- nested.zipWithIndex) do
+              val (_, fieldType) = variantFields(i)
+              val align = fieldType.alignOf.toInt.max(1)
+              fieldOff = ((fieldOff + align - 1) / align) * align
+              subOpt.foreach { sub =>
+                emitNestedPatternCheckSVM(sub, fieldType, scrIdx, dataOff + fieldOff, patFail)
+              }
+              fieldOff += fieldType.sizeOf.toInt
+            emit(s"  jump $hitLabel")
+            emit(s"$patFail:")
       emit(s"  jump $nextArm")
       emit(s"$hitLabel:")
       // Bind destructure/variant pattern fields to locals before guard
       for pat <- arm.patterns do pat match
-        case TVariantPattern(et, variantIndex, bindings, _, _) =>
+        case TVariantPattern(et, variantIndex, bindings, _, nested) =>
           val dataOff = et.dataOffset.toInt
           val variantFields = et.variants(variantIndex)._2
           var fieldOff = 0
@@ -2610,8 +2730,11 @@ class SyslSVMCodegen:
               emitLoad(fieldType)
               emit(s"  local_set $localIdx")
             }
+            if i < nested.length then nested(i).foreach { sub =>
+              emitNestedPatternBindingsSVM(sub, fieldType, scrIdx, dataOff + fieldOff)
+            }
             fieldOff += fieldType.sizeOf.toInt
-        case TDestructurePattern(st, bindings, _, _) =>
+        case TDestructurePattern(st, bindings, _, nested) =>
           for (binding, i) <- bindings.zipWithIndex do
             val fieldType = st.fields(i)._2
             binding.foreach { name =>
@@ -2623,6 +2746,9 @@ class SyslSVMCodegen:
               if off != 0 then { emitPushInt(off); emit("  add") }
               emitLoad(fieldType)
               emit(s"  local_set $localIdx")
+            }
+            if i < nested.length then nested(i).foreach { sub =>
+              emitNestedPatternBindingsSVM(sub, fieldType, scrIdx, fieldOffset(st, i).toInt)
             }
         case _ =>
       arm.guard.foreach { g =>

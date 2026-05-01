@@ -11,10 +11,11 @@ class SyslNestedPatternTests extends SyslTestHelpers {
   // binds the field to a synthetic outer name, then recursively
   // analyzes the nested pattern. The resulting `TVariantPattern` /
   // `TDestructurePattern` carries an optional `nestedPatterns` list
-  // parallel to its `bindings` list. Currently only the interpreter
-  // backend executes nested patterns; the SVM, LLVM, and TRISC
-  // backends throw a clear "not yet supported" error if they
-  // encounter one. Tests therefore use `eval` (interpreter only).
+  // parallel to its `bindings` list. Runtime support is implemented in
+  // the interpreter (these tests, via `eval`) and in all three native
+  // backends (TRISC, LLVM, SVM) — see SyslNestedPatternBackendTests
+  // for codegen-only verification across the native backends. The
+  // `--backend trisc` runner exercises end-to-end correctness in std/.
   //
   // Limitation: the analyzer's exhaustiveness check treats any arm
   // with an active nested pattern as NOT fully covering its outer

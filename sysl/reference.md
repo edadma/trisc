@@ -315,15 +315,13 @@ go(o: Outer) -> int
         else -> -99             // exhaustiveness fallback (see note)
 ```
 
-Limitations on the current implementation:
-- Nested patterns currently work only on the **interpreter** backend.
-  The SVM, LLVM, and TRISC backends throw a clear "not yet supported"
-  error when they encounter one.
-- The exhaustiveness check treats any arm with an active nested
-  pattern as not fully covering its outer variant (since the inner
-  pattern might fail). Add an `else` arm or wildcard fallback when
-  using nested patterns. Full nested-coverage analysis is a future
-  improvement.
+Limitation: the exhaustiveness check treats any arm with an active
+nested pattern as not fully covering its outer variant (since the
+inner pattern might fail to match). Add an `else` arm or wildcard
+fallback when using nested patterns. Full nested-coverage analysis
+(recognising that, e.g., `Wrap(A) | Wrap(B)` together cover
+`Wrap(Inner)` when `Inner` has only `A` and `B`) is a future
+improvement.
 
 **Heap-allocated enums (`new` on variants):**
 
