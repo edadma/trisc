@@ -1,0 +1,242 @@
+test_unixshut — AF_UNIX shutdown(SHUT_WR/RD/RDWR)
+==================================================
+
+Validates `shutdown(2)` semantics on AF_UNIX SOCK_STREAM.
+
+Cases:
+  1. SHUT_WR: write before shutdown drains; peer sees the
+     payload then EOF (0). Subsequent write on the
+     shut-down fd returns -EPIPE.
+  2. SHUT_RD: read on the shut-down fd returns 0 (EOF)
+     even if the peer wrote first.
+  3. SHUT_RDWR: composite — both behaviors.
+  4. Bad how: shutdown(fd, 99) → -EINVAL.
+  5. Non-socket fd: shutdown(stdin, SHUT_WR) → -EBADF.
+  6. SHUT_WR on AF_UNIX SOCK_DGRAM: no-op (returns 0).
+
+Pass criterion: prints `unixshut: ok`.
+
+    module oskit.bin.test_unixshut
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_SOCKETPAIR  = 338
+    val NR_SOCKET      = 337
+    val NR_CLOSE       = 147
+    val NR_READ        = 130
+    val NR_WRITE       = 128
+    val NR_SHUTDOWN    = 334
+
+    val AF_UNIX_V      = 1
+    val SOCK_STREAM_V  = 1
+    val SOCK_DGRAM_V   = 2
+
+    val SHUT_RD_V      = 0
+    val SHUT_WR_V      = 1
+    val SHUT_RDWR_V    = 2
+
+    val EBADF_V        = 9
+    val EINVAL_V       = 22
+    val EPIPE_V        = 32
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixshut: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_socketpair(family: int, stype: int, proto: int,
+            sv: *int) -> int
+        int(syscall6(NR_SOCKETPAIR, i64(family), i64(stype),
+            i64(proto), i64(sv), 0, 0))
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype),
+            i64(proto), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_read(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+    posix_shutdown(fd: int, how: int) -> int
+        int(syscall6(NR_SHUTDOWN, i64(fd), i64(how), 0, 0, 0, 0))
+
+
+    main(argv: []string)
+
+Case 1: SHUT_WR — peer drains then sees EOF; writer sees
+-EPIPE.
+
+        var sv: [2]int
+        sv[0] = -1
+        sv[1] = -1
+        if posix_socketpair(AF_UNIX_V, SOCK_STREAM_V, 0, &sv[0]) != 0
+            fail(1)
+            return
+
+        var msg: [4]byte
+        msg[0] = 'h'; msg[1] = 'i'; msg[2] = '!'; msg[3] = byte(0)
+        if posix_write(sv[0], &msg[0], 3) != 3
+            fail(2)
+            return
+        if posix_shutdown(sv[0], SHUT_WR_V) != 0
+            fail(3)
+            return
+
+Peer drains the 3 bytes…
+
+        var rb: [8]byte
+        if posix_read(sv[1], &rb[0], 8) != 3
+            fail(4)
+            return
+        if rb[0] != byte('h')
+            fail(5)
+            return
+        if rb[1] != byte('i')
+            fail(6)
+            return
+
+…then a second read returns 0 (EOF).
+
+        if posix_read(sv[1], &rb[0], 8) != 0
+            fail(7)
+            return
+
+A write on the shut-down end is -EPIPE.
+
+        val w = posix_write(sv[0], &msg[0], 1)
+        if w != -EPIPE_V
+            puts("unixshut: shutwr write r=")
+            print_idec(w)
+            puts("\n")
+            fail(8)
+            return
+
+        if posix_close(sv[0]) != 0
+            fail(9)
+            return
+        if posix_close(sv[1]) != 0
+            fail(10)
+            return
+
+Case 2: SHUT_RD — local read returns 0 even with peer
+already having sent.
+
+        var sv2: [2]int
+        sv2[0] = -1
+        sv2[1] = -1
+        if posix_socketpair(AF_UNIX_V, SOCK_STREAM_V, 0, &sv2[0]) != 0
+            fail(11)
+            return
+        if posix_write(sv2[1], &msg[0], 3) != 3
+            fail(12)
+            return
+        if posix_shutdown(sv2[0], SHUT_RD_V) != 0
+            fail(13)
+            return
+        if posix_read(sv2[0], &rb[0], 8) != 0
+            fail(14)
+            return
+        if posix_close(sv2[0]) != 0
+            fail(15)
+            return
+        if posix_close(sv2[1]) != 0
+            fail(16)
+            return
+
+Case 3: SHUT_RDWR — both directions closed locally.
+
+        var sv3: [2]int
+        sv3[0] = -1
+        sv3[1] = -1
+        if posix_socketpair(AF_UNIX_V, SOCK_STREAM_V, 0, &sv3[0]) != 0
+            fail(17)
+            return
+        if posix_shutdown(sv3[0], SHUT_RDWR_V) != 0
+            fail(18)
+            return
+        if posix_read(sv3[0], &rb[0], 8) != 0
+            fail(19)
+            return
+        val w3 = posix_write(sv3[0], &msg[0], 1)
+        if w3 != -EPIPE_V
+            puts("unixshut: rdwr write r=")
+            print_idec(w3)
+            puts("\n")
+            fail(20)
+            return
+        if posix_close(sv3[0]) != 0
+            fail(21)
+            return
+        if posix_close(sv3[1]) != 0
+            fail(22)
+            return
+
+Case 4: bad how → -EINVAL.
+
+        var sv4: [2]int
+        sv4[0] = -1
+        sv4[1] = -1
+        if posix_socketpair(AF_UNIX_V, SOCK_STREAM_V, 0, &sv4[0]) != 0
+            fail(23)
+            return
+        val r4 = posix_shutdown(sv4[0], 99)
+        if r4 != -EINVAL_V
+            puts("unixshut: bad_how r=")
+            print_idec(r4)
+            puts("\n")
+            fail(24)
+            return
+        if posix_close(sv4[0]) != 0
+            fail(25)
+            return
+        if posix_close(sv4[1]) != 0
+            fail(26)
+            return
+
+Case 5: shutdown on non-socket fd (stdin) → -EBADF.
+
+        val r5 = posix_shutdown(0, SHUT_WR_V)
+        if r5 != -EBADF_V
+            puts("unixshut: stdin r=")
+            print_idec(r5)
+            puts("\n")
+            fail(27)
+            return
+
+Case 6: shutdown on AF_UNIX DGRAM → 0 (no-op, matches Linux
+behavior).
+
+        val df = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if df < 0
+            fail(28)
+            return
+        if posix_shutdown(df, SHUT_WR_V) != 0
+            fail(29)
+            return
+        if posix_close(df) != 0
+            fail(30)
+            return
+
+        puts("unixshut: ok\n")
+        exit()

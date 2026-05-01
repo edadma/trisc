@@ -143,6 +143,7 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_GETSOCKNAME      = 22
     const UNIX_CMD_GETPEERNAME      = 23
     const UNIX_CMD_SOCKETPAIR       = 24
+    const UNIX_CMD_SHUTDOWN         = 25
 
 EPOLL/POLL bit values match `POSIX_EPOLL*` 1:1 (POLLIN=0x001,
 POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010). The shim's
@@ -260,6 +261,8 @@ matching send/sendto wakes the slot.
         connector_path: [108]byte
         connector_path_len: int
         fire_seq: int
+        shut_wr: int
+        shut_rd: int
 
     var unix_sockets: [16]UnixSocket
     var unix_port = -1
@@ -378,6 +381,8 @@ loop before `port_register`.
             unix_sockets[i].pending_accept_tid = -1
             unix_sockets[i].connector_path_len = 0
             unix_sockets[i].fire_seq = 0
+            unix_sockets[i].shut_wr = 0
+            unix_sockets[i].shut_rd = 0
             var j = 0
             while j < UNIX_MAX_OWNERS
                 unix_sockets[i].owners[j] = -1
@@ -530,6 +535,8 @@ or -1 if the table is full.
                 unix_sockets[i].nrefs_in_queues = 0
                 unix_sockets[i].connector_path_len = 0
                 unix_sockets[i].fire_seq = 0
+                unix_sockets[i].shut_wr = 0
+                unix_sockets[i].shut_rd = 0
                 var j = 0
                 while j < UNIX_MAX_OWNERS
                     unix_sockets[i].owners[j] = -1
@@ -1224,6 +1231,13 @@ unblocks it. If the peer is gone (`peer_closed`), returns
             err[2] = 0
             ipc_reply(sender, err, 3)
             return
+        if unix_sockets[fd].shut_wr != 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EPIPE)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
         val dlen = unix_read_u16(buf, 2)
         val data: *byte = buf + 4
         val nsent = unix_rx_append(peer, data, dlen)
@@ -1271,6 +1285,12 @@ how POSIX distinguishes "would block" from "stream closed".
             ipc_reply(sender, err, 3)
             return
         val maxlen = unix_read_u16(buf, 2)
+        if unix_sockets[fd].shut_rd != 0
+            var pr: [3]byte
+            pr[0] = 0
+            unix_write_u16(&pr[0], 1, 0)
+            ipc_reply(sender, pr, 3)
+            return
         if unix_sockets[fd].rx_count > 0
             var pr: [2050]byte
             pr[0] = 0
@@ -1285,6 +1305,13 @@ how POSIX distinguishes "would block" from "stream closed".
             ipc_reply(sender, pr, 3)
             return
         if unix_sockets[fd].peer_closed != 0
+            var pr: [3]byte
+            pr[0] = 0
+            unix_write_u16(&pr[0], 1, 0)
+            ipc_reply(sender, pr, 3)
+            return
+        val peer_for_eof = unix_sockets[fd].peer_idx
+        if unix_sockets[peer_for_eof].shut_wr != 0
             var pr: [3]byte
             pr[0] = 0
             unix_write_u16(&pr[0], 1, 0)
@@ -1610,6 +1637,12 @@ sibling entries' last_reported state.
                 if unix_sockets[fd].peer_closed != 0
                     mask = mask | UNIX_EPOLLIN
                     mask = mask | UNIX_EPOLLHUP
+                if unix_sockets[fd].shut_rd != 0
+                    mask = mask | UNIX_EPOLLIN
+                val ppi = unix_sockets[fd].peer_idx
+                if ppi >= 0
+                    if unix_sockets[ppi].shut_wr != 0
+                        mask = mask | UNIX_EPOLLIN
         val seq = unix_sockets[fd].fire_seq
         var reply: [7]byte
         reply[0] = 0
@@ -1859,6 +1892,92 @@ Reply: `status(1) + fd0(1) + fd1(1)` = 3 bytes (or
         ipc_reply(sender, &reply[0], 3)
 
 
+### SHUTDOWN handler
+
+Linux `shutdown(fd, how)` semantics on AF_UNIX SOCK_STREAM:
+SHUT_RD (0) silences future reads on this fd (returns 0 EOF
+without consuming `rx_buf` data — Linux preserves the buffer);
+SHUT_WR (1) signals end-of-stream to the peer so its reads
+drain `rx_buf` and then return 0 EOF, while writes on this fd
+return -EPIPE; SHUT_RDWR (2) is both. DGRAM is treated as a
+no-op (matches Linux + the existing UDP path in
+`sys_shutdown`).
+
+We bump `fire_seq` on both this fd and the peer so any
+epoll/poll watcher wakes up to observe the new EOF/HUP edge.
+Any reader parked on the peer is unblocked with a zero-byte
+EOF reply for SHUT_WR; any reader parked locally is unblocked
+for SHUT_RD.
+
+Wire format. Request: `cmd(1) + fd(1) + how(1)` = 3 bytes.
+Reply: `status(1)` (0 on success, errno byte on failure).
+
+    unix_handle_shutdown(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        val how = int(buf[2]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, err, 1)
+            return
+        if how != 0
+            if how != 1
+                if how != 2
+                    var err: [1]byte
+                    err[0] = byte(-UNIX_EINVAL)
+                    ipc_reply(sender, err, 1)
+                    return
+        if unix_sockets[fd].stype != UNIX_SOCK_STREAM
+            // DGRAM no-op — matches sys_shutdown's UDP handling.
+            var ok: [1]byte
+            ok[0] = 0
+            ipc_reply(sender, ok, 1)
+            return
+        val want_rd = if how == 0 then 1 else if how == 2 then 1 else 0
+        val want_wr = if how == 1 then 1 else if how == 2 then 1 else 0
+        if want_rd != 0
+            unix_sockets[fd].shut_rd = 1
+        if want_wr != 0
+            unix_sockets[fd].shut_wr = 1
+        unix_bump_fire_seq(fd)
+        val peer = unix_sockets[fd].peer_idx
+        if peer >= 0
+            unix_bump_fire_seq(peer)
+
+If we just shut our write side, anyone parked reading on the
+peer gets an EOF reply now — its `rx_buf` is already empty
+(otherwise it wouldn't be parked) and our `shut_wr` is what
+the post-buf path now checks.
+
+        if want_wr != 0
+            if peer >= 0
+                val parked = unix_sockets[peer].pending_recv_tid
+                if parked >= 0
+                    unix_sockets[peer].pending_recv_tid = -1
+                    var pr: [3]byte
+                    pr[0] = 0
+                    unix_write_u16(&pr[0], 1, 0)
+                    ipc_reply(parked, &pr[0], 3)
+
+Symmetric: a SHUT_RD with a local parker means the parker
+should also wake — its next recv will see `shut_rd` and return
+0. (Rare but possible if the caller raced a self-shutdown
+with an in-flight blocking recv.)
+
+        if want_rd != 0
+            val self_parked = unix_sockets[fd].pending_recv_tid
+            if self_parked >= 0
+                unix_sockets[fd].pending_recv_tid = -1
+                var pr: [3]byte
+                pr[0] = 0
+                unix_write_u16(&pr[0], 1, 0)
+                ipc_reply(self_parked, &pr[0], 3)
+
+        var ok: [1]byte
+        ok[0] = 0
+        ipc_reply(sender, ok, 1)
+
+
 ### PID_EXIT handler
 
 PM calls this when a process exits, with the dead thread's
@@ -1954,6 +2073,8 @@ Synchronous request-reply, no notification path required
                     unix_handle_getpeername(sender, buf)
                 else if cmd == UNIX_CMD_SOCKETPAIR
                     unix_handle_socketpair(sender, buf)
+                else if cmd == UNIX_CMD_SHUTDOWN
+                    unix_handle_shutdown(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)

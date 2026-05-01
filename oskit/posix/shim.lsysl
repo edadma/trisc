@@ -495,6 +495,7 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_GETSOCKNAME      = 22
     const UNIX_CMD_GETPEERNAME      = 23
     const UNIX_CMD_SOCKETPAIR       = 24
+    const UNIX_CMD_SHUTDOWN         = 25
 
     const UNIX_PATH_MAX      = 108
     const UNIX_SCM_MAX_FDS   = 4
@@ -3362,6 +3363,28 @@ recv data). Not valid on non-TCP fds.
             // Linux accepts shutdown on UDP as a no-op; some apps
             // call shutdown(udp_fd, SHUT_WR) before close as a
             // best-effort flush hint.
+            return i64(0)
+        if k == POSIX_FD_UNIX_SOCKET
+            val target = posix_fd_target(fd)
+            if target < 0
+                return i64(-EBADF)
+            if how < 0
+                return i64(-EINVAL)
+            if how > 2
+                return i64(-EINVAL)
+            val uport = unix_get_port()
+            if uport < 0
+                return i64(-ENODEV)
+            var umsg: [3]byte
+            umsg[0] = byte(UNIX_CMD_SHUTDOWN)
+            umsg[1] = byte(target & 0xff)
+            umsg[2] = byte(how & 0xff)
+            var ureply: [1]byte
+            val ur = ipc_send(uport, umsg, 3, ureply, 1)
+            if ur < 0
+                return i64(-EIO)
+            if ureply[0] != 0
+                return i64(unix_status(ureply[0]))
             return i64(0)
         if k != POSIX_FD_TCP_SOCKET
             return i64(-EBADF)

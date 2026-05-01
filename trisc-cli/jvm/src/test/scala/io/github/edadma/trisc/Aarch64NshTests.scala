@@ -2188,6 +2188,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixpair: bad"
   }
 
+  "unix: shutdown SHUT_WR/RD/RDWR + bad-how + DGRAM no-op" in {
+    // shutdown(SHUT_WR) drains buffered data then peer reads EOF;
+    // subsequent write on the shut-down fd returns -EPIPE.
+    // shutdown(SHUT_RD) returns 0 immediately on read even with
+    // peer-queued data. SHUT_RDWR is the composite. how>2 →
+    // -EINVAL; non-socket fd → -EBADF; DGRAM is a no-op (matches
+    // Linux + the existing UDP path).
+    val output = qemu.command("test_unixshut")
+    output should include("unixshut: ok")
+    output should not include "unixshut: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates
