@@ -2259,6 +2259,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixscma: bad"
   }
 
+  "unix: STREAM SCM_RIGHTS carries file fd (Phase 2B chunk 4)" in {
+    // Pass a /etc/passwd file fd through AF_UNIX SCM_RIGHTS, close
+    // the original BEFORE the receiver drains, then read "root:" via
+    // the resurrected fd. Exercises vfs's oft_queued_refs counter
+    // (VFS_CMD_OFT_QUEUE_REF_BY_HANDLE +1, REGISTER_FD_BY_OFT, and
+    // OFT_QUEUE_REF -1 surrounding the SENDMSG/RECVMSG drain).
+    val output = qemu.command("test_unixscmf")
+    output should include("unixscmf: ok")
+    output should not include "unixscmf: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

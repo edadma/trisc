@@ -188,13 +188,17 @@ receiver. Servers not listed fall through to 0.
                 return 0
             return 1 << nic_port
         else if idx == 8
-            // unix: sends to inet for SCM_RIGHTS drop-on-close
-            // (INET_CMD_QUEUE_REF(-1) on abandoned TCP/UDP tuples).
-            // No nic / vfs / disk reach — strictly the inet ref-drop
-            // channel.
-            if inet_port < 0
-                return 0
-            return 1 << inet_port
+            // unix: sends to inet (Phase 2B chunk 3) and vfs
+            // (Phase 2B chunk 4) for SCM_RIGHTS drop-on-close —
+            // INET_CMD_QUEUE_REF(-1) on abandoned TCP/UDP tuples,
+            // VFS_CMD_OFT_QUEUE_REF(-1) on abandoned FILE tuples.
+            // No nic / disk reach — strictly the ref-drop channels.
+            var m = 0
+            if inet_port >= 0
+                m = m | (1 << inet_port)
+            if vfs_port >= 0
+                m = m | (1 << vfs_port)
+            return m
         else if idx == 9
             // init: sends to pm, vfs
             return (1 << pm_port) | (1 << vfs_port)

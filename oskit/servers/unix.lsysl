@@ -366,6 +366,34 @@ exact race queued_refs is designed to gracefully recover from.
         ipc_send(port, &msg[0], 5, &reply[0], 1)
 
 
+Phase 2B chunk 4 — VFS counterpart of `unix_inet_queue_ref_drop`.
+Issues `VFS_CMD_OFT_QUEUE_REF(oft_idx, delta=-1)` to release an
+abandoned FILE-kind pending_scm tuple. The cmsg `handle` already
+carries the OFT idx (the sender shim remapped per-pid handle →
+OFT idx during SENDMSG bump), so no further translation needed.
+
+    var unix_vfs_port = -2
+
+    unix_get_vfs_port() -> int
+        if unix_vfs_port == -2
+            unix_vfs_port = port_lookup("fs")
+        unix_vfs_port
+
+    unix_vfs_oft_queue_ref_drop(oft_idx: int)
+        val port = unix_get_vfs_port()
+        if port < 0
+            return
+        var msg: [6]byte
+        msg[0] = byte(27)  // VFS_CMD_OFT_QUEUE_REF
+        msg[1] = byte((oft_idx >> 24) & 0xff)
+        msg[2] = byte((oft_idx >> 16) & 0xff)
+        msg[3] = byte((oft_idx >> 8) & 0xff)
+        msg[4] = byte(oft_idx & 0xff)
+        msg[5] = byte(0xff)  // delta = -1
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 6, &reply[0], 1)
+
+
 Epoll subscriber table. Each entry pins a (owner_tid, fd,
 epoll_inst) tuple so any readiness edge on that fd posts a
 wake to the owner. 16 entries is enough for the working
@@ -854,6 +882,20 @@ single-byte scratch buffers since nothing is written when
                                     granted += 1
                             else
                                 unix_inet_queue_ref_drop(kind, handle)
+                        else if kind == 6
+                            // FILE — handle is the global OFT idx (the
+                            // sender shim already remapped per-pid handle
+                            // → OFT during SENDMSG). Phase 2B chunk 4: in
+                            // claim mode forward; in drop mode call vfs.
+                            if claim_for >= 0
+                                if granted < max_grant
+                                    out_kinds[granted]               = byte(kind & 0xff)
+                                    out_handles[granted * 2]         = byte((handle >> 8) & 0xff)
+                                    out_handles[granted * 2 + 1]     = byte(handle & 0xff)
+                                    out_stypes[granted]              = byte(stype & 0xff)
+                                    granted += 1
+                            else
+                                unix_vfs_oft_queue_ref_drop(handle)
                         k += 1
                     unix_sockets[idx].pending_scm[s].in_use = 0
                     unix_sockets[idx].pending_scm[s].nfds = 0
@@ -1945,12 +1987,11 @@ rejects them earlier, but defending here keeps us honest).
                     err[2] = 0
                     ipc_reply(sender, err, 3)
                     return
-            else if kind == 4 || kind == 5
-                // TCP/UDP: trust the shim's pre-validated handle.
-                // Range-check defensively — `handle` rides a 2-byte
-                // BE field on the wire, so `< 0` shouldn't happen,
-                // but the range guard keeps us from poisoning
-                // pending_scm with a wild index.
+            else if kind == 4 || kind == 5 || kind == 6
+                // TCP/UDP/FILE: trust the shim's pre-validated handle
+                // (TCP/UDP: inet slot idx; FILE: OFT idx — both already
+                // ref-bumped at the source server). Range-check
+                // defensively against the 2-byte wire field.
                 if handle < 0
                     var err: [3]byte
                     err[0] = byte(-UNIX_EINVAL)

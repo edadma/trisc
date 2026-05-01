@@ -34,6 +34,13 @@ index, and reference count. A slot is free when refcount is 0.
     // EPOLLET tracker can detect "this fd actually fired" without
     // a per-instance bulk last_reported clear.
     var oft_fire_seq: [32]int
+    // Phase 2B chunk 4 — in-flight SCM_RIGHTS references on this
+    // OFT entry. Bumped by the sender shim before SENDMSG (via
+    // VFS_CMD_OFT_QUEUE_REF_BY_HANDLE), dropped by the receiver
+    // shim after a successful REGISTER_FD_BY_OFT, or by the unix
+    // server's drop-on-close path on abandoned pending_scm tuples.
+    // OFT teardown waits for both `oft_ref + queued_refs == 0`.
+    var oft_queued_refs: [32]int
 
 Pipe infrastructure. Each pipe is a 512-byte circular buffer
 managed entirely within VFS. Deferred-reply pattern: when a
@@ -81,17 +88,18 @@ or -1 if the table is full.
         var i = 0
         while i < VFS_MAX_OPEN_FILES
             if oft_ref[i] == 0
-                oft_ino[i] = ino
-                oft_pos[i] = 0
-                oft_mount[i] = mount_idx
-                oft_ref[i] = 1
-                oft_type[i] = ftype
-                oft_console[i] = 0
-                // A recycled OFT slot must start at 0 so the new
-                // user's first POLL doesn't think the previous
-                // owner's edges belonged to them.
-                oft_fire_seq[i] = 0
-                return i
+                if oft_queued_refs[i] == 0
+                    oft_ino[i] = ino
+                    oft_pos[i] = 0
+                    oft_mount[i] = mount_idx
+                    oft_ref[i] = 1
+                    oft_type[i] = ftype
+                    oft_console[i] = 0
+                    // A recycled OFT slot must start at 0 so the new
+                    // user's first POLL doesn't think the previous
+                    // owner's edges belonged to them.
+                    oft_fire_seq[i] = 0
+                    return i
             i += 1
         -1
 
@@ -103,12 +111,18 @@ reaches 0, mark that end as closed and wake blocked readers.
             if fid < VFS_MAX_OPEN_FILES
                 oft_ref[fid] -= 1
                 if oft_ref[fid] <= 0
-                    if oft_type[fid] == OFT_TYPE_PIPE
-                        vfs_pipe_close_end(fid)
-                    else if oft_type[fid] == OFT_TYPE_TCP
-                        vfs_tcp_close_end(fid)
-                    else if oft_type[fid] == OFT_TYPE_TCP_LISTEN
-                        vfs_tcp_close_end(fid)
+                    // Phase 2B chunk 4 — defer the type-specific
+                    // close-end actions while an in-flight SCM_RIGHTS
+                    // tuple holds a queued ref. The matching
+                    // `VFS_CMD_OFT_QUEUE_REF(-1)` runs the same
+                    // close-end path when refs hit 0.
+                    if oft_queued_refs[fid] == 0
+                        if oft_type[fid] == OFT_TYPE_PIPE
+                            vfs_pipe_close_end(fid)
+                        else if oft_type[fid] == OFT_TYPE_TCP
+                            vfs_tcp_close_end(fid)
+                        else if oft_type[fid] == OFT_TYPE_TCP_LISTEN
+                            vfs_tcp_close_end(fid)
 
 Compute readiness bits for a given oft_idx. Used both by the
 shim's `VFS_CMD_POLL` query and by `vfs_epoll_fire` to skip
@@ -766,6 +780,16 @@ reply is always 1 byte. On success, length depends on command.
     // draining SCM_RIGHTS. Mints a fresh dst-side handle and bumps
     // `oft_ref`. Caller is trusted (kernel-side path) — no auth check.
     val VFS_CMD_DUP_HANDLE = 25
+    // Phase 2B chunk 4 — in-flight SCM_RIGHTS ref-counting on OFT
+    // entries. `OFT_QUEUE_REF_BY_HANDLE` resolves a (src_pid,
+    // src_handle) pair to an OFT idx and applies a ±1 delta to
+    // `oft_queued_refs`. The receiver shim later balances the +1
+    // via `OFT_QUEUE_REF`, and `REGISTER_FD_BY_OFT` mints a fresh
+    // dst-pid handle bound to the same OFT (oft_ref bumped, queued
+    // ref left alone).
+    val VFS_CMD_OFT_QUEUE_REF_BY_HANDLE = 26
+    val VFS_CMD_OFT_QUEUE_REF           = 27
+    val VFS_CMD_REGISTER_FD_BY_OFT      = 28
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
@@ -795,6 +819,12 @@ reply is always 1 byte. On success, length depends on command.
         if cmd == VFS_CMD_POLL
             return 3
         if cmd == VFS_CMD_DUP_HANDLE
+            return 5
+        if cmd == VFS_CMD_OFT_QUEUE_REF_BY_HANDLE
+            return 5
+        if cmd == VFS_CMD_OFT_QUEUE_REF
+            return 1
+        if cmd == VFS_CMD_REGISTER_FD_BY_OFT
             return 5
         1
 
@@ -1746,6 +1776,182 @@ Status: 0 success, -1 invalid src (handle not open / pid bad),
         vfs_msg_write_i32(reply, 1, dst_handle)
         ipc_reply(sender, reply, 5)
 
+
+Phase 2B chunk 4 — `VFS_CMD_OFT_QUEUE_REF_BY_HANDLE`. Combined
+lookup-and-bump for the sender shim's STREAM SENDMSG path: given
+the sender's `(src_pid, src_handle)`, resolve to an OFT idx,
+apply a ±1 delta to `oft_queued_refs`, and return the OFT idx so
+the shim can stuff it into the cmsg payload (the receiver-side
+will use it with `REGISTER_FD_BY_OFT` to mint its own handle).
+
+Combining lookup + bump in one IPC saves a roundtrip per cmsg fd
+on the SENDMSG hot path. The shim's roll-back path also uses the
+same IPC with `delta = -1` and discards the returned idx.
+
+Request: `cmd(1) + src_pid_be(4) + src_handle_be(4) + delta(1, signed) = 10`
+Reply:   `status(1) + oft_idx_be(4) = 5`
+
+Status: 0 = OK, -1 = bad pid / handle / delta, -2 = OFT idx
+out of range (shouldn't happen — kept defensive).
+
+    vfs_handle_oft_queue_ref_by_handle(sender: int, buf: *byte)
+        val src_pid = vfs_msg_read_i32(buf, 1)
+        val src_handle = vfs_msg_read_i32(buf, 5)
+        val delta_raw = int(buf[9]) & 0xff
+        var delta = 0
+        if delta_raw == 1
+            delta = 1
+        else if delta_raw == 0xff
+            delta = -1
+        var reply: [5]byte
+        reply[1] = 0
+        reply[2] = 0
+        reply[3] = 0
+        reply[4] = 0
+        if delta == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if src_pid < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if src_pid >= MAX_PROCESSES
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        val oft_idx = vfs_handle_lookup(src_pid, src_handle)
+        if oft_idx < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if oft_idx >= VFS_MAX_OPEN_FILES
+            reply[0] = byte(-2)
+            ipc_reply(sender, reply, 5)
+            return
+        if oft_ref[oft_idx] <= 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        oft_queued_refs[oft_idx] += delta
+        if oft_queued_refs[oft_idx] < 0
+            oft_queued_refs[oft_idx] = 0
+        // No teardown to drive on the +1 case (oft_ref is still
+        // >= 1). On the -1 rollback case the original handle is
+        // still open in src_pid, so likewise no teardown — the
+        // owner will close() in the normal path later.
+        reply[0] = 0
+        vfs_msg_write_i32(reply, 1, oft_idx)
+        ipc_reply(sender, reply, 5)
+
+
+Phase 2B chunk 4 — `VFS_CMD_OFT_QUEUE_REF`. Drop or bump the
+queued-ref counter on a known OFT idx. Used by the receiver
+shim (after `REGISTER_FD_BY_OFT` succeeds) and by the unix
+server's drop-on-close path on abandoned pending_scm tuples.
+
+When `oft_ref + queued_refs` reaches 0 after the drop, run the
+type-specific close-end action that `vfs_oft_free` skipped.
+
+Request: `cmd(1) + oft_idx_be(4) + delta(1, signed) = 6`
+Reply:   `status(1) = 1`
+
+    vfs_handle_oft_queue_ref(sender: int, buf: *byte)
+        val oft_idx = vfs_msg_read_i32(buf, 1)
+        val delta_raw = int(buf[5]) & 0xff
+        var delta = 0
+        if delta_raw == 1
+            delta = 1
+        else if delta_raw == 0xff
+            delta = -1
+        var reply: [1]byte
+        if delta == 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        if oft_idx < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        if oft_idx >= VFS_MAX_OPEN_FILES
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        oft_queued_refs[oft_idx] += delta
+        if oft_queued_refs[oft_idx] < 0
+            oft_queued_refs[oft_idx] = 0
+        if oft_ref[oft_idx] <= 0
+            if oft_queued_refs[oft_idx] == 0
+                // Run the type-specific close-end action
+                // `vfs_oft_free` deferred while queued_refs > 0.
+                if oft_type[oft_idx] == OFT_TYPE_PIPE
+                    vfs_pipe_close_end(oft_idx)
+                else if oft_type[oft_idx] == OFT_TYPE_TCP
+                    vfs_tcp_close_end(oft_idx)
+                else if oft_type[oft_idx] == OFT_TYPE_TCP_LISTEN
+                    vfs_tcp_close_end(oft_idx)
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+Phase 2B chunk 4 — `VFS_CMD_REGISTER_FD_BY_OFT`. The receiver
+shim's complement to `OFT_QUEUE_REF_BY_HANDLE`: given a
+(dst_pid, oft_idx) pair carried in the cmsg payload, allocate a
+fresh dst-side handle pointing at that OFT entry. Bumps
+`oft_ref` so a close from the receiver doesn't tear the OFT
+down before the queued ref drops.
+
+Request: `cmd(1) + dst_pid_be(4) + oft_idx_be(4) = 9`
+Reply:   `status(1) + dst_handle_be(4) = 5`
+
+Status: 0 = OK, -1 = bad pid / oft idx / OFT not in use,
+-2 = dst handle table full.
+
+    vfs_handle_register_fd_by_oft(sender: int, buf: *byte)
+        val dst_pid = vfs_msg_read_i32(buf, 1)
+        val oft_idx = vfs_msg_read_i32(buf, 5)
+        var reply: [5]byte
+        reply[1] = 0
+        reply[2] = 0
+        reply[3] = 0
+        reply[4] = 0
+        if dst_pid < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if dst_pid >= MAX_PROCESSES
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if oft_idx < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if oft_idx >= VFS_MAX_OPEN_FILES
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        // Phase 2B chunk 4: accept the OFT as long as something —
+        // either oft_ref or oft_queued_refs — keeps it alive. The
+        // sender may have already close()'d its handle, dropping
+        // oft_ref to 0; the SCM ref is what's holding the slot for
+        // us, and our oft_ref += 1 below is what brings it back to
+        // a "real" open count.
+        if oft_ref[oft_idx] + oft_queued_refs[oft_idx] <= 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        val dst_handle = vfs_handle_alloc(dst_pid, oft_idx)
+        if dst_handle < 0
+            reply[0] = byte(-2)
+            ipc_reply(sender, reply, 5)
+            return
+        oft_ref[oft_idx] += 1
+        reply[0] = 0
+        vfs_msg_write_i32(reply, 1, dst_handle)
+        ipc_reply(sender, reply, 5)
+
+
 Resolve a path to an inode via TFS OPEN.
 Returns the inode or -1 on error.
 
@@ -2152,6 +2358,12 @@ the appropriate backend.
                     vfs_handle_inherit(sender, buf)
                 else if cmd == VFS_CMD_DUP_HANDLE
                     vfs_handle_dup(sender, buf)
+                else if cmd == VFS_CMD_OFT_QUEUE_REF_BY_HANDLE
+                    vfs_handle_oft_queue_ref_by_handle(sender, buf)
+                else if cmd == VFS_CMD_OFT_QUEUE_REF
+                    vfs_handle_oft_queue_ref(sender, buf)
+                else if cmd == VFS_CMD_REGISTER_FD_BY_OFT
+                    vfs_handle_register_fd_by_oft(sender, buf)
                 else if cmd == VFS_CMD_PIPE
                     vfs_handle_pipe(sender)
                 else if cmd == VFS_CMD_ACCEPT
