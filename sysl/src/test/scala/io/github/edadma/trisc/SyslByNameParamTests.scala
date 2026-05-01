@@ -177,6 +177,62 @@ class SyslByNameParamTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
+  // ===== `unifyTypes` understands `ByNameTypeAST` =====
+  //
+  // Once BinaryAST auto-wraps a by-name operand, the dispatcher must match
+  // the wrapped arg type (`() -> T`) against the impl's `=> T` pattern.
+  // `unifyTypes` previously had no case for `ByNameTypeAST`, so the inner
+  // type variable never bound — `tryUnifyAll`'s structural post-check
+  // resolved the pattern under an empty env and rejected the candidate. The
+  // resulting "no impl matches" error blocked the parsyl `~>` / `<~` shape
+  // when the second arg was a recursive call.
+  //
+  // Fix: in `unifyTypes`, treat `ByNameTypeAST(inner)` like
+  // `FuncTypeAST(Nil, inner)` — unify `inner` against the FuncType's return
+  // type. Same shape as the existing `FuncTypeAST` arm.
+
+  "by-name impl method param unifies against auto-wrapped arg (multi-impl ambiguity-free)" in {
+    eval(
+      """type Parser[A] = new int
+        |
+        |trait SeqR[A, B, R]
+        |    #operator("~>")
+        |    seqr(a: A, b: => B) -> R
+        |
+        |impl[B] SeqR[string, Parser[B], Parser[B]]
+        |    seqr(s: string, b: => Parser[B]) -> Parser[B] = b
+        |
+        |impl[A, B] SeqR[Parser[A], Parser[B], Parser[B]]
+        |    seqr(a: Parser[A], b: => Parser[B]) -> Parser[B] = b
+        |
+        |make() -> Parser[int] = "+" ~> Parser[int](7)
+        |
+        |main() -> int = 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "by-name impl method param unifies — Parser-LHS variant of the same trait" in {
+    eval(
+      """type Parser[A] = new int
+        |
+        |trait SeqR[A, B, R]
+        |    #operator("~>")
+        |    seqr(a: A, b: => B) -> R
+        |
+        |impl[B] SeqR[string, Parser[B], Parser[B]]
+        |    seqr(s: string, b: => Parser[B]) -> Parser[B] = b
+        |
+        |impl[A, B] SeqR[Parser[A], Parser[B], Parser[B]]
+        |    seqr(a: Parser[A], b: => Parser[B]) -> Parser[B] = b
+        |
+        |p_int() -> Parser[int] = Parser[int](7)
+        |
+        |make() -> Parser[int] = p_int() ~> Parser[int](42)
+        |
+        |main() -> int = 0
+        |""".stripMargin) shouldBe 0
+  }
+
   // ===== Regression — normal `T` params unchanged =====
 
   "regression: ordinary param semantics unchanged (eager eval)" in {

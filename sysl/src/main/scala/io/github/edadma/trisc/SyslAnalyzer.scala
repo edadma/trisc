@@ -3251,6 +3251,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             for (pt, at) <- paramTypes.zip(argParams) do unifyTypes(pt, at, typeParams, env)
           unifyTypes(ret, argRet, typeParams, env)
         case _ => ()
+      case ByNameTypeAST(inner) => arg match
+        // `=> T` desugars to `() -> T`. Treat it identically here so impl
+        // patterns with by-name slots unify against call-site args that have
+        // already been auto-wrapped to a zero-arg thunk.
+        case FuncType(Nil, argRet, _, _) => unifyTypes(inner, argRet, typeParams, env)
+        case _ => () // structural mismatch handled later by tryUnifyAll's post-check
       case TupleTypeAST(elems) => arg match
         case StructType(_, fields, _) if elems.length == fields.length =>
           for (e, (_, ft)) <- elems.zip(fields) do unifyTypes(e, ft, typeParams, env)
