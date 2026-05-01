@@ -1,0 +1,229 @@
+test_unixdiss — AF_UNIX DGRAM AF_UNSPEC dissolve
+==================================================
+
+Validates Linux's `connect(fd, sin_family=AF_UNSPEC, ...)`
+dissolve on a DGRAM-connected AF_UNIX socket.
+
+After connect, `send(fd, ...)` (no addr) routes to the default
+peer. After AF_UNSPEC dissolve, the socket goes back to
+unconnected — `send` returns -ENOTCONN, but explicit
+`sendto(addr)` still works.
+
+Cases:
+  1. socket; bind A; socket; bind B; connect(B, A); send(B,
+     "abc") → A receives. Default-peer routing works.
+  2. connect(B, AF_UNSPEC) → 0; send(B, "xyz") → -ENOTCONN.
+     The dissolve cleared peer_idx.
+  3. After dissolve, sendto(B, A, "p") still works — A
+     receives "p".
+  4. STREAM dissolve attempt → -EINVAL.
+
+Pass: prints `unixdiss: ok`.
+
+    module oskit.bin.test_unixdiss
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_BIND       = 135
+    val NR_CONNECT    = 148
+    val NR_CLOSE      = 147
+    val NR_SOCKET     = 337
+    val NR_RECVFROM   = 276
+    val NR_SENDTO     = 307
+    val NR_WRITE      = 128
+
+    val AF_UNIX_V     = 1
+    val AF_UNSPEC_V   = 0
+    val SOCK_STREAM_V = 1
+    val SOCK_DGRAM_V  = 2
+
+    val ENOTCONN_V    = 107
+    val EINVAL_V      = 22
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixdiss: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, plen: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < plen
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + plen] = byte(0)
+        2 + plen + 1
+
+
+Fill a sockaddr-shaped header with `sa_family = AF_UNSPEC`
+for the dissolve call. Linux reads the family field and
+ignores the rest, but we still need to pass a non-zero
+addrlen so the syscall layer doesn't reject the call.
+
+    fill_sockaddr_unspec(out: *byte) -> int
+        out[0] = byte(AF_UNSPEC_V & 0xff)
+        out[1] = byte(0)
+        out[2] = byte(0)
+        3
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen_p: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen_p)))
+
+    posix_write(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+
+    main(argv: []string)
+
+Set up two DGRAM sockets bound to "DSA" and "DSB"; connect B
+to A so a default peer is in place.
+
+        var path_a: [3]byte
+        path_a[0] = 'D'; path_a[1] = 'S'; path_a[2] = 'A'
+        var path_b: [3]byte
+        path_b[0] = 'D'; path_b[1] = 'S'; path_b[2] = 'B'
+
+        var sa_a: [128]byte
+        val al_a = fill_sockaddr_un(&sa_a[0], &path_a[0], 3)
+        var sa_b: [128]byte
+        val al_b = fill_sockaddr_un(&sa_b[0], &path_b[0], 3)
+
+        val a = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if a < 0
+            fail(1)
+            return
+        if posix_bind(a, &sa_a[0], al_a) != 0
+            fail(2)
+            return
+        val b = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if b < 0
+            fail(3)
+            return
+        if posix_bind(b, &sa_b[0], al_b) != 0
+            fail(4)
+            return
+        if posix_connect(b, &sa_a[0], al_a) != 0
+            fail(5)
+            return
+
+Case 1: write() through the default peer (B → A).
+
+        var msg1: [3]byte
+        msg1[0] = 'a'; msg1[1] = 'b'; msg1[2] = 'c'
+        if posix_write(b, &msg1[0], 3) != 3
+            fail(6)
+            return
+
+        var rbuf1: [16]byte
+        var rsrc1: [128]byte
+        var ralen1: i32 = 128
+        val n1 = posix_recvfrom(a, &rbuf1[0], 16, 0,
+            &rsrc1[0], &ralen1)
+        if n1 != 3
+            fail(7)
+            return
+        if rbuf1[0] != 'a'
+            fail(8)
+            return
+        if rbuf1[1] != 'b'
+            fail(9)
+            return
+        if rbuf1[2] != 'c'
+            fail(10)
+            return
+
+Case 2: AF_UNSPEC dissolve. After this, default-peer send()
+must fail with -ENOTCONN.
+
+        var sa_unspec: [16]byte
+        val al_u = fill_sockaddr_unspec(&sa_unspec[0])
+        if posix_connect(b, &sa_unspec[0], al_u) != 0
+            fail(11)
+            return
+
+        var msg2: [3]byte
+        msg2[0] = 'x'; msg2[1] = 'y'; msg2[2] = 'z'
+        val r2 = posix_write(b, &msg2[0], 3)
+        if r2 != -ENOTCONN_V
+            puts("unixdiss: post-dissolve write r=")
+            print_idec(r2)
+            puts("\n")
+            fail(12)
+            return
+
+Case 3: explicit sendto with the original address still
+works after dissolve.
+
+        val r3 = posix_sendto(b, &msg2[0], 3, 0, &sa_a[0], al_a)
+        if r3 != 3
+            fail(13)
+            return
+
+        var rbuf2: [16]byte
+        var rsrc2: [128]byte
+        var ralen2: i32 = 128
+        val n3 = posix_recvfrom(a, &rbuf2[0], 16, 0,
+            &rsrc2[0], &ralen2)
+        if n3 != 3
+            fail(14)
+            return
+        if rbuf2[0] != 'x'
+            fail(15)
+            return
+
+Case 4: dissolve on STREAM → -EINVAL.
+
+        val s = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if s < 0
+            fail(16)
+            return
+        val r4 = posix_connect(s, &sa_unspec[0], al_u)
+        if r4 != -EINVAL_V
+            puts("unixdiss: stream dissolve r=")
+            print_idec(r4)
+            puts("\n")
+            fail(17)
+            return
+
+        posix_close(s)
+        posix_close(b)
+        posix_close(a)
+        puts("unixdiss: ok\n")
+        exit()

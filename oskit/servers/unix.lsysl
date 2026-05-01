@@ -105,6 +105,15 @@ UNIX_PATH_MAX. Multi-byte integers are big-endian.
                    empty queue (never parks). RECVMSG itself
                    parks by default (POSIX-conformant
                    blocking recvmsg).
+- DISCONNECT (27)  req: cmd(1) + fd(1) = 2 bytes
+                   rep: status(1)
+                   AF_UNSPEC dissolve on a DGRAM-connected
+                   socket: clears peer_idx so subsequent
+                   `send()` (no addr) returns -ENOTCONN while
+                   explicit `sendto(addr)` still works.
+                   STREAM → -EINVAL. Linux libc emits this
+                   when a userland program calls connect()
+                   with `sin_family = AF_UNSPEC`.
 
 The `_NB` variants are used by the shim when the fd is in
 `O_NONBLOCK` mode (or when `MSG_DONTWAIT` is passed in the
@@ -153,6 +162,7 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_SOCKETPAIR       = 24
     const UNIX_CMD_SHUTDOWN         = 25
     const UNIX_CMD_PEERCRED         = 26
+    const UNIX_CMD_DISCONNECT       = 27
 
 EPOLL/POLL bit values match `POSIX_EPOLL*` 1:1 (POLLIN=0x001,
 POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010). The shim's
@@ -1128,6 +1138,39 @@ future accept(). The accept reply is variable-length:
             unix_sockets[target].pending_tail = (tail + 1) % UNIX_BACKLOG_MAX
             unix_sockets[target].pending_count += 1
             unix_bump_fire_seq(target)
+
+
+### DISCONNECT handler
+
+AF_UNSPEC dissolve on a DGRAM-connected socket. POSIX/Linux
+allows `connect(fd, sin_family=AF_UNSPEC, ...)` on a DGRAM
+socket to clear the previously-set default peer; subsequent
+`send()` returns -ENOTCONN while explicit `sendto(addr)`
+still works. STREAM is rejected with -EINVAL — Linux dissolve
+on STREAM is a no-op-error in practice (the stream is
+already connected and disconnecting is a `shutdown` /
+`close` concern, not a connect concern).
+
+The shim emits this command when it sees `sun_family ==
+AF_UNSPEC` in the connect address; otherwise `sys_connect`
+hits the regular `UNIX_CMD_CONNECT` path.
+
+    unix_handle_disconnect(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_DGRAM
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        unix_sockets[fd].peer_idx = -1
+        var ok: [1]byte
+        ok[0] = 0
+        ipc_reply(sender, ok, 1)
 
 
 ### ACCEPT handler
@@ -2580,6 +2623,8 @@ Synchronous request-reply, no notification path required
                     unix_handle_shutdown(sender, buf)
                 else if cmd == UNIX_CMD_PEERCRED
                     unix_handle_peercred(sender, buf)
+                else if cmd == UNIX_CMD_DISCONNECT
+                    unix_handle_disconnect(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)

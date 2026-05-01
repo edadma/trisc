@@ -461,6 +461,7 @@ keep the kernel link free of the full socket-API module.
 
     const INET_MAX_TCP_SEG     = 480
 
+    val POSIX_AF_UNSPEC      = 0
     val POSIX_AF_UNIX        = 1
     val POSIX_AF_INET        = 2
     val POSIX_SOCK_DGRAM     = 2
@@ -497,6 +498,7 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_SOCKETPAIR       = 24
     const UNIX_CMD_SHUTDOWN         = 25
     const UNIX_CMD_PEERCRED         = 26
+    const UNIX_CMD_DISCONNECT       = 27
 
     const UNIX_PATH_MAX      = 108
     const UNIX_SCM_MAX_FDS   = 4
@@ -1811,19 +1813,44 @@ unbound connector so callers can distinguish.
         i64(new_posix_fd)
 
 
-sys_connect for AF_UNIX. STREAM only.
+sys_connect for AF_UNIX. Routes STREAM and DGRAM connect()
+(both reuse UNIX_CMD_CONNECT — the server branches on stype).
+
+If `sun_family == AF_UNSPEC`, this is a Linux dissolve: clear
+the DGRAM socket's default peer via UNIX_CMD_DISCONNECT, so a
+subsequent `send()` (no addr) fails with -ENOTCONN while
+explicit `sendto(addr)` keeps working.
 
     sys_connect_unix(fd: int, addr_ptr: i64, addrlen: int) -> i64
         val target = posix_fd_target(fd)
         if target < 0
             return i64(-EBADF)
+        if addrlen < 2
+            return i64(-EINVAL)
+        if addr_ptr == i64(0)
+            return i64(-EFAULT)
+        val sa: *byte = *byte(addr_ptr)
+        val fam = (int(sa[0]) & 0xff) | ((int(sa[1]) & 0xff) << 8)
+        val port = unix_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        if fam == POSIX_AF_UNSPEC
+            var dmsg: [2]byte
+            dmsg[0] = byte(UNIX_CMD_DISCONNECT)
+            dmsg[1] = byte(target & 0xff)
+            var dreply: [1]byte
+            val dr = ipc_send(port, dmsg, 2, dreply, 1)
+            if dr < 0
+                return i64(-EIO)
+            if dreply[0] != 0
+                val status = unix_status(dreply[0])
+                posix_fd_set_error(fd, i64(status))
+                return i64(status)
+            return i64(0)
         var path: [108]byte
         val plen = shim_unix_read_path(addr_ptr, addrlen, &path[0], 108)
         if plen <= 0
             return i64(-EINVAL)
-        val port = unix_get_port()
-        if port < 0
-            return i64(-ENODEV)
         var msg: [128]byte
         msg[0] = byte(UNIX_CMD_CONNECT)
         msg[1] = byte(target & 0xff)

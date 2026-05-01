@@ -884,6 +884,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "unixscms: bad"
   }
 
+  "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
+    // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
+    // the DGRAM socket's default peer; subsequent send() (no
+    // addr) returns -ENOTCONN while sendto(addr) keeps working.
+    // STREAM dissolve attempt → -EINVAL.
+    val output = qemu.command("test_unixdiss")
+    output should include("unixdiss: ok")
+    output should not include "unixdiss: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates
