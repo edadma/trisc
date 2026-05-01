@@ -504,4 +504,28 @@ class AssemblerParserTests extends AnyFreeSpec with Matchers {
     val data = result(1).asInstanceOf[DataLineAST]
     data.data should have size 2
   }
+
+  // Audit item #33: large i64 literals must round-trip through the parser.
+  // Surfaced when std/math/bits TRISC-codegen output references Long.MinValue
+  // (= -9223372036854775808). Magnitude 9223372036854775808 overflows Long
+  // when parsed unsigned; we use BigInt + two's-complement truncation.
+
+  "intLit Long.MaxValue parses as positive long" in {
+    parseExpr("9223372036854775807") shouldBe LongExprAST(Long.MaxValue)
+  }
+
+  "intLit Long.MinValue magnitude wraps via two's-complement" in {
+    // The bare magnitude (no minus sign) wraps to Long.MinValue. The compiler
+    // only emits this in `-9223372036854775808` form; the unary `-` is then a
+    // no-op on Long.MinValue (since `-Long.MinValue == Long.MinValue` in i64).
+    parseExpr("9223372036854775808") shouldBe LongExprAST(Long.MinValue)
+  }
+
+  "intLit beyond Long.MinValue magnitude errors" in {
+    an[Exception] shouldBe thrownBy(parseExpr("9223372036854775809"))
+  }
+
+  "negative Long.MinValue parses correctly" in {
+    parseExpr("-9223372036854775808") shouldBe UnaryExprAST("-", LongExprAST(Long.MinValue))
+  }
 }

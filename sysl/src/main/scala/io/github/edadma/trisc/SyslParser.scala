@@ -155,9 +155,9 @@ class SyslParser extends StandardTokenParsers {
     "where" ~> logicalOr
 
   lazy val traitDecl: Parser[TraitDeclAST] =
-    "trait" ~> ident ~ ("[" ~> ident <~ "]") ~
+    "trait" ~> ident ~ ("[" ~> rep1sep(ident, ",") <~ "]") ~
       (Newline ~> Indent ~> rep1sep(traitMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("trait")) ^^ {
-        case name ~ tparam ~ methods => TraitDeclAST(name, tparam, methods)
+        case name ~ tparams ~ methods => TraitDeclAST(name, tparams, methods)
       }
 
   lazy val traitMethod: Parser[TraitMethodAST] =
@@ -170,9 +170,10 @@ class SyslParser extends StandardTokenParsers {
       funBlockBody
 
   lazy val implDecl: Parser[ImplDeclAST] =
-    "impl" ~> ident ~ ("[" ~> typeRef <~ "]") ~
+    "impl" ~> opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ident ~ ("[" ~> rep1sep(typeRef, ",") <~ "]") ~
       (Newline ~> Indent ~> rep1sep(implMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("impl")) ^^ {
-        case name ~ typ ~ methods => ImplDeclAST(name, typ, methods)
+        case tparams ~ name ~ targets ~ methods =>
+          ImplDeclAST(name, tparams.getOrElse(Nil), targets, methods)
       }
 
   lazy val implMethod: Parser[FunDeclAST] =
@@ -191,7 +192,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val interfaceMember: Parser[Either[String, InterfaceMethodAST]] =
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ opt("->" ~> typeRef) ~ funcTypeEffects ^^ {
-      case name ~ params ~ rt ~ eff => Right(InterfaceMethodAST(name, params, rt.getOrElse(NamedTypeAST("void")), eff))
+      case name ~ params ~ rt ~ eff => Right(InterfaceMethodAST(name, params, rt.getOrElse(NamedTypeAST("unit")), eff))
     } |
     ident ^^ (name => Left(name))
 
@@ -397,9 +398,13 @@ class SyslParser extends StandardTokenParsers {
 
   // Function call argument: `name = expr` (named) or `expr` (positional).
   // The `ident ~ "="` lookahead must succeed only when both tokens are present.
+  // Bare `_` is left as a placeholder so the enclosing call can absorb it
+  // (partial application: `f(_, 0)` → `x -> f(x, 0)`); other exprs containing
+  // `_` are wrapped here so the arg itself becomes the lambda body
+  // (`f(_+1, 0)` → `f(x -> x+1, 0)`).
   lazy val callArg: Parser[ExpressionAST] =
-    ident ~ ("=" ~> expr) ^^ { case name ~ value => NamedArgAST(name, value) } |
-      expr
+    ident ~ ("=" ~> expr) ^^ { case name ~ value => NamedArgAST(name, wrapPlaceholders(value)) } |
+      expr ^^ wrapPlaceholders
 
   // Optional type argument list for generic type references: [T], [T, U], or absent
   lazy val typeArgList: Parser[List[TypeAST]] =
@@ -407,7 +412,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val typeName: Parser[TypeAST] =
     ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "string") ^^ (n => NamedTypeAST(n)) |
-      "unit" ^^^ NamedTypeAST("void") |
+      "unit" ^^^ NamedTypeAST("unit") |
       ident ~ typeArgList ^^ { case name ~ args => NamedTypeAST(name, args) }
 
   // Full type reference: *int, **int, &Node, [5]int, []int (slice), (int)->int, @escaping (int)->int, string, int, etc.
@@ -486,7 +491,7 @@ class SyslParser extends StandardTokenParsers {
     "assume" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => AssumeStmtAST(e, msg) }
 
   lazy val stmt: Parser[StmtAST] =
-    ghostVarStmt | innerFunStmt | asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ ExprStmtAST.apply
+    ghostVarStmt | innerFunStmt | asmStmt | invariantStmt | variantStmt | assumeStmt | labeledLoop | forStmt | doWhileStmt | whileStmt | loopStmt | returnStmt | breakStmt | continueStmt | deferStmt | destructureStmt | derefAssignStmt | identStmt | expr ^^ (e => ExprStmtAST(wrapPlaceholders(e)))
 
   /** `def name(params) -> ret body` (or `def name -> ret body` zero-arg) at statement
    *  position — declares a recursively-callable named local closure. The analyzer lowers
@@ -575,8 +580,19 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val bindName: Parser[String] = ident | "_"
 
+  /** Right-hand side of a `val`/`var` initializer or an assignment. Accepts
+   *  either an inline expression (`val x = expr`) or an indented expression
+   *  on the next line (`val x =` ⏎ Indent expr Dedent), mirroring the way
+   *  function bodies take both `= expr` and `= ⏎ Indent stmts Dedent`. The
+   *  multi-line form is common when the RHS is a long generic call or a
+   *  deeply parenthesized constructor and the user wants to break after `=`.
+   */
+  lazy val valRhs: Parser[ExpressionAST] =
+    (Newline ~> Indent ~> tupleExpr <~ opt(Newline) <~ Dedent) |
+      tupleExpr
+
   lazy val identStmt: Parser[StmtAST] =
-    opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
+    opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeExpr) ~ ("=" ~> valRhs) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
       opt("volatile") ~ mutability ~ ident ~ (":" ~> typeExpr) ^^ { case vol ~ mut ~ name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
         VarStmtAST(name, Some(t), ArrayDeclAST(size, t), mut.isMutable, vol.isDefined, mut.isConst)
@@ -584,9 +600,9 @@ class SyslParser extends StandardTokenParsers {
       opt("volatile") ~ mutability ~ ident ~ (":" ~> typeRef) ~ not("=") ^^ { case vol ~ mut ~ name ~ t ~ _ =>
         VarStmtAST(name, Some(t), UninitDeclAST(t), mut.isMutable, vol.isDefined, mut.isConst)
       } |
-      opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
-      opt("volatile") ~ mutability ~ bindName ~ ("=" ~> tupleExpr) ^^ { case vol ~ mut ~ name ~ e => VarStmtAST(name, None, e, mut.isMutable, vol.isDefined, mut.isConst) } |
-      ident ~ (":" ~> typeExpr) ~ ("=" ~> tupleExpr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
+      opt("volatile") ~ mutability ~ bindName ~ (":" ~> typeRef) ~ ("=" ~> valRhs) ^^ { case vol ~ mut ~ name ~ t ~ e => VarStmtAST(name, Some(t), e, mut.isMutable, vol.isDefined, mut.isConst) } |
+      opt("volatile") ~ mutability ~ bindName ~ ("=" ~> valRhs) ^^ { case vol ~ mut ~ name ~ e => VarStmtAST(name, None, e, mut.isMutable, vol.isDefined, mut.isConst) } |
+      ident ~ (":" ~> typeExpr) ~ ("=" ~> valRhs) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ (":" ~> typeExpr) ^^ { case name ~ t =>
         val size = t match { case ArrayTypeAST(s, _) => s; case _ => 0 }
         VarStmtAST(name, Some(t), ArrayDeclAST(size, t))
@@ -594,11 +610,11 @@ class SyslParser extends StandardTokenParsers {
       ident ~ (":" ~> typeRef) ~ not("=") ^^ { case name ~ t ~ _ =>
         VarStmtAST(name, Some(t), UninitDeclAST(t))
       } |
-      ident ~ (":" ~> typeRef) ~ ("=" ~> tupleExpr) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
+      ident ~ (":" ~> typeRef) ~ ("=" ~> valRhs) ^^ { case name ~ t ~ e => VarStmtAST(name, Some(t), e) } |
       ident ~ lvalueChain ~ compoundOp ~ expr ^^ { case name ~ chain ~ op ~ value =>
         buildCompoundAssign(name, chain, op.init, value)
       } |
-      ident ~ lvalueChain ~ ("=" ~> tupleExpr) ^^ { case name ~ chain ~ value =>
+      ident ~ lvalueChain ~ ("=" ~> valRhs) ^^ { case name ~ chain ~ value =>
         buildAssign(name, chain, value)
       }
 
@@ -748,8 +764,82 @@ class SyslParser extends StandardTokenParsers {
   // Comma-separated expressions form a tuple at statement level (like Go/Python)
   // Inside f(args) and [elems], plain expr is used so commas stay as separators
   lazy val tupleExpr: Parser[ExpressionAST] =
-    expr ~ rep1("," ~> expr) ^^ { case first ~ rest => TupleLitAST(first :: rest) } |
-      expr
+    expr ~ rep1("," ~> expr) ^^ { case first ~ rest => TupleLitAST((first :: rest).map(wrapPlaceholders)) } |
+      expr ^^ wrapPlaceholders
+
+  // ----- Underscore placeholder expansion (Scala-style anonymous functions) -----
+  //
+  // `_` in expression position is parsed as `UnderscorePlaceholderAST` and then
+  // desugared into a `ClosureAST` at the smallest enclosing "boundary" — see
+  // `wrapPlaceholders` below. The boundary is the smallest enclosing expression
+  // that does NOT propagate `_` further upward; specifically:
+  //
+  //   - parenthesized expression (`(_ + 1)` is `x -> x + 1`)
+  //   - call / method-call / new-call argument that is not bare `_` (`f(_+1)`
+  //     wraps the arg as `f(x -> x+1)`; `f(_)` instead absorbs the bare `_`
+  //     into the call → `x -> f(x)` for partial application)
+  //   - statement-level expression (`var f = _ + 1` is `var f = x -> x + 1`)
+  //   - return value, array literal element, tuple literal element
+  //
+  // Within a single boundary, `_` "bubbles up" through binary/unary operators,
+  // field/index access, and the receiver of a method/indirect call — these
+  // refuse to absorb. Bare `_` at a call-arg position is handled separately
+  // via `absorbBarePlaceholdersInCall` (the call itself becomes the lambda).
+
+  /** Walk `e`, replacing each direct `UnderscorePlaceholderAST` with a fresh
+   *  `VarRefAST`. Recurses through "non-absorbing" expression shapes; stops at
+   *  closures, call-arg lists (already processed), and statement-shaped exprs.
+   *  Returns the substituted expression and the list of fresh names in
+   *  left-to-right order. */
+  private def substitutePlaceholders(e: ExpressionAST): (ExpressionAST, List[String]) =
+    val names = scala.collection.mutable.ListBuffer.empty[String]
+    def fresh(): String =
+      val n = s"_ph${names.size}"
+      names += n
+      n
+    def go(x: ExpressionAST): ExpressionAST = x match
+      case _: UnderscorePlaceholderAST => VarRefAST(fresh())
+      case BinaryAST(l, op, r)         => BinaryAST(go(l), op, go(r))
+      case UnaryAST(op, x2)            => UnaryAST(op, go(x2))
+      case CallAST(name, args)         => CallAST(name, args)
+      case MethodCallAST(obj, m, args) => MethodCallAST(go(obj), m, args)
+      case IndirectCallAST(c, args)    => IndirectCallAST(go(c), args)
+      case FieldAccessAST(obj, f)      => FieldAccessAST(go(obj), f)
+      case IndexAST(o, i)              => IndexAST(go(o), go(i))
+      case AddrOfFieldAST(obj, f)      => AddrOfFieldAST(go(obj), f)
+      case AddrOfIndexAST(o, i)        => AddrOfIndexAST(go(o), go(i))
+      case DerefAST(e2)                => DerefAST(go(e2))
+      case CastAST(t, e2)              => CastAST(t, go(e2))
+      case SliceExprAST(a, lo, hi)     => SliceExprAST(go(a), lo.map(go), hi.map(go))
+      case TryAST(e2)                  => TryAST(go(e2))
+      case other                       => other
+    val transformed = go(e)
+    (transformed, names.toList)
+
+  /** Wrap `e` in a `ClosureAST` if it contains `_` placeholders to be bound
+   *  here; otherwise return `e` unchanged. Bare `_` is left alone — that's
+   *  reserved for outer call-argument absorption (partial application). */
+  private def wrapPlaceholders(e: ExpressionAST): ExpressionAST = e match
+    case _: UnderscorePlaceholderAST => e
+    case _ =>
+      val (sub, names) = substitutePlaceholders(e)
+      if names.isEmpty then e
+      else ClosureAST(names.map(n => ClosureParamAST(n, None)), ExprBodyAST(sub))
+
+  /** If `args` contains any bare `_` placeholders, wrap the whole call in a
+   *  ClosureAST (partial application). `rebuild` reconstructs the call AST
+   *  from the substituted arg list. Otherwise the call is returned as-is. */
+  private def absorbBarePlaceholdersInCall(args: List[ExpressionAST], rebuild: List[ExpressionAST] => ExpressionAST): ExpressionAST =
+    val names = scala.collection.mutable.ListBuffer.empty[String]
+    val newArgs = args.map {
+      case _: UnderscorePlaceholderAST =>
+        val n = s"_ph${names.size}"
+        names += n
+        VarRefAST(n)
+      case other => other
+    }
+    if names.isEmpty then rebuild(args)
+    else ClosureAST(names.toList.map(n => ClosureParamAST(n, None)), ExprBodyAST(rebuild(newArgs)))
 
   // --- Expressions ---
 
@@ -793,22 +883,50 @@ class SyslParser extends StandardTokenParsers {
       ClosureAST(List(ClosureParamAST(name, None)), body)
     }
 
+  // `_` is accepted as a discard binder — the param has a fresh slot in the
+  // closure but is unreferenceable in the body. The analyzer rewrites `_` to
+  // a unique synthetic name so multiple `_` params don't collide and so any
+  // `_` in the body falls through to the placeholder rule, not a var lookup.
   lazy val closureParam: Parser[ClosureParamAST] =
-    ident ~ opt(":" ~> typeRef) ^^ { case name ~ typ => ClosureParamAST(name, typ) }
+    (ident | "_") ~ opt(":" ~> typeRef) ^^ { case name ~ typ => ClosureParamAST(name, typ) }
 
   lazy val closureBody: Parser[FunBodyAST] =
+    // `block` runs at top-level lambdas where the body is on its own indented
+    // line(s) (Newline+Indent emitted). Inside parens — call args, casts,
+    // tuples — the lexer suppresses Newline/Indent, so `block` won't match;
+    // the body comes back as one large expression. Use full `expr` so that
+    // expression includes if-then-else, match, and nested closures.
     block ^^ (stmts => BlockBodyAST(stmts)) |
-    logicalOr ^^ ExprBodyAST.apply
+    expr ^^ ExprBodyAST.apply
 
   lazy val matchExpr: Parser[MatchExprAST] =
-    logicalOr ~ ("match" ~> Newline ~> Indent ~> rep1(matchArm) ~ opt(matchElse) <~ Dedent) <~ opt(endMarker("match")) ^^ {
+    logicalOr ~ ("match" ~> (matchArmsIndented | matchArmsInline)) <~ opt(endMarker("match")) ^^ {
       case scrutinee ~ (arms ~ default) => MatchExprAST(scrutinee, arms, default)
     }
+
+  // Indented form (top-level / outside parens). Newline/Indent/Dedent emitted by the lexer.
+  private lazy val matchArmsIndented: Parser[List[MatchArmAST] ~ Option[List[StmtAST]]] =
+    Newline ~> Indent ~> rep1(matchArm) ~ opt(matchElse) <~ Dedent
+
+  // Inline form for paren / line-joining contexts (call arg, cast arg, tuple lit) where
+  // the lexer suppresses Newline/Indent/Dedent. Arms are detected greedily by their
+  // pattern; rep1 stops at the first token that doesn't begin a pattern (e.g. `,` or
+  // `)` of the enclosing call). Bodies are single expressions, not blocks.
+  private lazy val matchArmsInline: Parser[List[MatchArmAST] ~ Option[List[StmtAST]]] =
+    rep1(matchArmInline) ~ opt(matchElseInline)
 
   lazy val matchArm: Parser[MatchArmAST] =
     rep1sep(matchPattern, ",") ~ opt("if" ~> logicalOr) ~ ("->" ~> (block | inlineStmt ^^ (s => List(s)))) <~ opt(Newline) ^^ {
       case patterns ~ guard ~ body => MatchArmAST(patterns, guard, body)
     }
+
+  lazy val matchArmInline: Parser[MatchArmAST] =
+    rep1sep(matchPattern, ",") ~ opt("if" ~> logicalOr) ~ ("->" ~> expr) ^^ {
+      case patterns ~ guard ~ body => MatchArmAST(patterns, guard, List(ExprStmtAST(body)))
+    }
+
+  lazy val matchElseInline: Parser[List[StmtAST]] =
+    "else" ~> "->" ~> expr ^^ (e => List(ExprStmtAST(e)))
 
   lazy val matchPattern: Parser[MatchPatternAST] =
     "_" ^^^ WildcardPatternAST |
@@ -850,14 +968,25 @@ class SyslParser extends StandardTokenParsers {
   lazy val inlineStmt: Parser[StmtAST] =
     breakStmt | continueStmt | returnStmt | derefAssignStmt |
       ident ~ lvalueChain ~ compoundOp ~ expr ^^ { case name ~ chain ~ op ~ value =>
-        buildCompoundAssign(name, chain, op.init, value)
+        buildCompoundAssign(name, chain, op.init, wrapPlaceholders(value))
       } |
       ident ~ lvalueChain ~ ("=" ~> expr) ^^ { case name ~ chain ~ value =>
-        buildAssign(name, chain, value)
+        buildAssign(name, chain, wrapPlaceholders(value))
       } |
-      expr ^^ ExprStmtAST.apply
+      expr ^^ (e => ExprStmtAST(wrapPlaceholders(e)))
 
   // --- Precedence climbing ---
+  //
+  // Each level accepts its built-in operators *and* a user-op slot —
+  // `userBinOp(firstChars)` matches any Keyword whose chars start with one
+  // of the level's first chars and isn't a reserved/syntactic sigil. This
+  // lets user-defined operators (e.g. `<>`, `>>>`, `|>`, `~~`) slot into
+  // the precedence ladder via Scala-style first-char convention without
+  // needing per-operator declarations. The analyzer dispatches the user
+  // op via `lookupBinaryOperatorTrait` (Stage C).
+  //
+  // Compound assignments (`+=` etc.) and arrows (`->`, `=>`) are reserved
+  // and never match an expression-level user op.
 
   lazy val logicalOr: Parser[ExpressionAST] =
     logicalAnd ~ rep("||" ~> logicalAnd) ^^ {
@@ -870,7 +999,7 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val comparisonOp: Parser[String] =
-    "==" | "!=" | "<=" | ">=" | "<" | ">"
+    "==" | "!=" | "<=" | ">=" | "<" | ">" | userBinOp(comparisonFirstChars)
 
   lazy val comparison: Parser[ExpressionAST] =
     bitwiseOr ~ (opt("!") <~ "in") ~ bitwiseOr ~ (("..<" | "..") ~ bitwiseOr) ^^ {
@@ -890,18 +1019,18 @@ class SyslParser extends StandardTokenParsers {
       }
 
   lazy val bitwiseOr: Parser[ExpressionAST] =
-    bitwiseXor ~ rep("|" ~> bitwiseXor) ^^ {
-      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "|", r))
+    bitwiseXor ~ rep(("|" | userBinOp(Set('|'))) ~ bitwiseXor) ^^ {
+      case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val bitwiseXor: Parser[ExpressionAST] =
-    bitwiseAnd ~ rep(("^" | "~") ~ bitwiseAnd) ^^ {
+    bitwiseAnd ~ rep(("^" | "~" | userBinOp(Set('^', '~'))) ~ bitwiseAnd) ^^ {
       case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val bitwiseAnd: Parser[ExpressionAST] =
-    shift ~ rep("&" ~> shift) ^^ {
-      case first ~ rest => rest.foldLeft(first)((l, r) => BinaryAST(l, "&", r))
+    shift ~ rep(("&" | userBinOp(Set('&'))) ~ shift) ^^ {
+      case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val shift: Parser[ExpressionAST] =
@@ -910,14 +1039,54 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val additive: Parser[ExpressionAST] =
-    multiplicative ~ rep(("+" | "-") ~ multiplicative) ^^ {
+    multiplicative ~ rep(("+" | "-" | userBinOp(Set('+', '-'))) ~ multiplicative) ^^ {
       case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
 
   lazy val multiplicative: Parser[ExpressionAST] =
-    unary ~ rep(("*" | "/" | "%") ~ unary) ^^ {
+    unary ~ rep(("*" | "/" | "%" | userBinOp(Set('*', '/', '%'))) ~ unary) ^^ {
       case first ~ rest => rest.foldLeft(first) { case (l, op ~ r) => BinaryAST(l, op, r) }
     }
+
+  // ----- User-defined binary operator slots -----
+
+  // Operator strings that the language reserves and which therefore must
+  // never be picked up as a user-defined binary op. Includes:
+  //  - all built-in arithmetic / comparison / bitwise / shift / logical ops
+  //  - `++` `--` (prefix/postfix inc/dec)
+  //  - `=` and the compound assignments (statement-level)
+  //  - `->` `=>` (function arrow, match-arm arrow)
+  //  - `..` `..<` (range)
+  //  - `!` (unary not — overloadable later if/when prefix support lands)
+  private val reservedOps: Set[String] = Set(
+    "+", "-", "*", "/", "%",
+    "<<", ">>",
+    "==", "!=", "<=", ">=", "<", ">",
+    "&&", "||", "!", "&", "|", "^", "~",
+    "++", "--",
+    "=", "+=", "-=", "*=", "/=", "%=",
+    "&=", "|=", "^=", "<<=", ">>=",
+    "->", "=>",
+    "..", "..<",
+  )
+
+  // Comparison level (level 4) — first chars of comparison user ops.
+  // Built-in shifts (`<<` `>>`) and shift-assigns (`<<=` `>>=`) are excluded
+  // via `reservedOps`; user ops like `<<<` / `>>>` slot here (Scala-style:
+  // first char rules).
+  private val comparisonFirstChars: Set[Char] = Set('<', '>', '=', '!')
+
+  // Match any Keyword whose chars start with one of `firstChars`, and
+  // which isn't reserved. Used by each precedence level above to admit
+  // user-defined operators slotted by first-char convention.
+  private def userBinOp(firstChars: Set[Char]): Parser[String] =
+    acceptMatch(s"user binary operator", {
+      case k: lexical.Keyword
+          if k.chars.nonEmpty
+            && firstChars.contains(k.chars.head)
+            && !reservedOps.contains(k.chars) =>
+        k.chars
+    })
 
   lazy val unary: Parser[ExpressionAST] =
     "++" ~> ident ~ ("." ~> ident) ^^ { case obj ~ field => FieldPreIncAST(VarRefAST(obj), field) } |
@@ -950,6 +1119,12 @@ class SyslParser extends StandardTokenParsers {
       primary ~ rep(
         ("[" ~> (
           ":" ~> opt(expr) ^^ (hi => (4, null, "", List(null, hi.orNull): List[ExpressionAST])) |
+          // Function type as a generic type-arg, only inside `[ ]` (so it doesn't
+          // collide with closures / match patterns / paren expressions elsewhere):
+          //   Parser[(int, int) -> int]   chainl1[A](op: Parser[(A, A) -> A])
+          // Tried BEFORE the expr alternative below — funcTypeRef requires `(... ) -> typeRef`
+          // and backtracks cleanly when the bracket holds an indexing expression instead.
+          funcTypeRef ^^ (t => (0, TypeRefExprAST(t), "", Nil: List[ExpressionAST])) |
           expr ~ opt(":" ~> opt(expr)) ^^ {
             case e ~ None => (0, e, "", Nil: List[ExpressionAST])
             case lo ~ Some(hi) => (4, null, "", List(lo, hi.orNull): List[ExpressionAST])
@@ -964,12 +1139,12 @@ class SyslParser extends StandardTokenParsers {
         case base ~ ops => ops.foldLeft(base) {
           case (e, (0, idx, _, _)) => IndexAST(e, idx)
           case (e, (1, _, field, _)) => FieldAccessAST(e, field)
-          case (e, (2, _, method, args)) => MethodCallAST(e, method, args)
+          case (e, (2, _, method, args)) => absorbBarePlaceholdersInCall(args, a => MethodCallAST(e, method, a))
           case (e, (3, _, _, args)) =>
             // Indirect call: expr(args) — e is a function pointer
             e match
-              case VarRefAST(name) => CallAST(name, args)
-              case _ => IndirectCallAST(e, args)
+              case VarRefAST(name) => absorbBarePlaceholdersInCall(args, a => CallAST(name, a))
+              case _               => absorbBarePlaceholdersInCall(args, a => IndirectCallAST(e, a))
           case (e, (4, _, _, args)) =>
             SliceExprAST(e, Option(args(0)), Option(args(1)))
           case (e, (5, _, _, _)) => TryAST(e)
@@ -988,7 +1163,7 @@ class SyslParser extends StandardTokenParsers {
       funcTypeRef ^^ SizeofTypeAST.apply |
       "[" ~> "]" ~> typeRef ^^ (t => SizeofTypeAST(SliceTypeAST(t))) |
       ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "string") ^^ (n => SizeofTypeAST(NamedTypeAST(n))) |
-      "unit" ^^ (_ => SizeofTypeAST(NamedTypeAST("void"))) |
+      "unit" ^^ (_ => SizeofTypeAST(NamedTypeAST("unit"))) |
       expr ^^ SizeofExprAST.apply
 
   lazy val scalarCastType: Parser[String] =
@@ -1012,24 +1187,45 @@ class SyslParser extends StandardTokenParsers {
       stringLit ^^ StringLitExprAST.apply |
       "true" ^^^ BoolLitAST(true) |
       "false" ^^^ BoolLitAST(false) |
-      "[" ~> repsep(expr, ",") <~ "]" ^^ ArrayLitAST.apply |
+      // Slice / array types as expressions — used inside [] for generic type args:
+      //   Parser[[]A](closure)  or  Parser[[5]int](closure)
+      // These must be tried BEFORE the array-literal rule so that `[]A` isn't read as
+      // the empty-array literal followed by a stray `A`.
+      "[" ~> "]" ~> typeRef ^^ (t => TypeRefExprAST(SliceTypeAST(t))) |
+      "[" ~> numericLit ~ ("]" ~> typeRef) ^^ { case n ~ t =>
+        TypeRefExprAST(ArrayTypeAST(n.toInt, t))
+      } |
+      "[" ~> repsep(expr, ",") <~ "]" ^^ (es => ArrayLitAST(es.map(wrapPlaceholders))) |
       "asm" ~> "(" ~> stringLit <~ ")" ^^ AsmExprAST.apply |
       "sizeof" ~> "(" ~> sizeofArg <~ ")" |
-      "new" ~> "[" ~> expr ~ ("]" ~> typeRef) ^^ { case size ~ elemType => NewArrayAST(size, elemType) } |
-      "new" ~> ident ~ ("(" ~> repsep(expr, ",") <~ ")") ^^ { case name ~ args => NewExprAST(name, args) } |
-      "string" ~> "(" ~> rep1sep(expr, ",") <~ ")" ^^ { args => CallAST("string", args) } |
+      "new" ~> "[" ~> expr ~ ("]" ~> typeRef) ^^ { case size ~ elemType => NewArrayAST(wrapPlaceholders(size), elemType) } |
+      "new" ~> ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args =>
+        absorbBarePlaceholdersInCall(args, a => NewExprAST(name, a))
+      } |
+      "string" ~> "(" ~> rep1sep(callArg, ",") <~ ")" ^^ { args =>
+        absorbBarePlaceholdersInCall(args, a => CallAST("string", a))
+      } |
       cast |
-      ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args => CallAST(name, args) } |
+      ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args =>
+        absorbBarePlaceholdersInCall(args, a => CallAST(name, a))
+      } |
       // Type attribute: Type::Attr or Type::Attr(arg). Must come before the bare
       // VarRefAST rule so the `::`-suffix is recognized.
       ident ~ ("::" ~> ident) ~ opt("(" ~> expr <~ ")") ^^ {
         case typeName ~ attr ~ argOpt => TypeAttrAST(typeName, attr, argOpt)
       } |
-      // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42)
-      ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool") ^^ VarRefAST.apply |
+      // Scalar type keywords as expressions — used inside [] for generic type args: Box[int](42).
+      // `string` belongs here for the same reason as the others — `Parser[string](...)` should
+      // parse uniformly. The `string ~> "("` string-builder rule earlier in `primary` still
+      // wins for the legitimate call form `string(arg, ...)` because it's tried first and
+      // succeeds when the `(` is actually present; this fallback only fires when there's no
+      // following `(` (i.e., the bare keyword inside a type-arg bracket).
+      ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "unit" | "string") ^^ VarRefAST.apply |
+      "_" ^^^ UnderscorePlaceholderAST() |
       ident ^^ VarRefAST.apply |
+      "(" ~ ")" ^^^ UnitLitAST() |  // `()` — unit value literal
       "(" ~> expr ~ rep("," ~> expr) <~ ")" ^^ {
-        case first ~ Nil => first  // (expr) — parenthesized expression
-        case first ~ rest => TupleLitAST(first :: rest)  // (expr, expr, ...) — tuple
+        case first ~ Nil  => wrapPlaceholders(first)  // (expr) — parens form a placeholder boundary
+        case first ~ rest => TupleLitAST((first :: rest).map(wrapPlaceholders))
       }
 }

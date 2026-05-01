@@ -293,7 +293,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _, _, _) =>
+        case TVarDecl(name, _, init, _, _, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
     functions.get("main") match
@@ -321,7 +321,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
               case -1 => f.name.dropRight(7)
               case i  => f.name.substring(i + 2).dropRight(7)
             deinitMap(structName) = f.name
-        case TVarDecl(name, _, init, _, _, _) =>
+        case TVarDecl(name, _, init, _, _, _, _) =>
           globals(name) = new Cell(evalAny(init, new mutable.LinkedHashMap))
 
   /** Invoke a zero-arg function by name. Throws RuntimeError on panic. */
@@ -467,7 +467,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
     case SyslType.StringType => StringVal(Array.empty)
     case _: SyslType.IntType | _: SyslType.UIntType => IntVal(0)
     case _: SyslType.FloatType => FloatVal(0.0)
-    case SyslType.VoidType | (_: SyslType.FuncType) | SyslType.InterfaceType(_, _) => IntVal(0)
+    case SyslType.UnitType | (_: SyslType.FuncType) | SyslType.InterfaceType(_, _) => IntVal(0)
     case SyslType.EnumType(_, _) => EnumVal(0, Array.empty)
     case SyslType.RefType(inner) =>
       // Uninitialized ref cell — represented as null-ish placeholder
@@ -681,6 +681,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TIntLit(n, _) => IntVal(n)
       case TFloatLit(d, _) => FloatVal(d)
       case TBoolLit(b, _) => IntVal(if b then 1L else 0L)
+      case TUnitLit(_)    => IntVal(0L)  // 0-byte type — represented as 0 at runtime
 
       case TStringLit(s, _) => StringVal(s.getBytes("UTF-8"))
 

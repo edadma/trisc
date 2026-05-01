@@ -1,0 +1,323 @@
+Regex VM exec() crash repro
+=============================
+
+Tries to localize the OOB panic in std/regex/vm.exec() to a small,
+backend-independent shape. The full exec() opens with a stack-local VM
+struct, then assigns slice/string/int parameters into its fields, then
+mallocs best_starts/best_ends slices and starts looping. Compile and
+parse pass on TRISC; exec is the only thing failing across 96 tests.
+
+    module sysl.tests.regex_repro
+
+    struct MyInst
+        op: int
+        arg1: int
+        arg2: int
+
+    struct MyCharClass
+        negated: bool
+
+    struct MyVM
+        insts: []MyInst
+        classes: []MyCharClass
+        input: string
+        n_slots: int
+
+
+A1 — call with the same parameter set, return the int directly
+---------------------------------------------------------------
+
+Smallest possible test: just take the same parameter set and return.
+
+    a1(insts: []MyInst, classes: []MyCharClass, input: string, n_slots: int) -> int
+        return n_slots
+
+    #test
+    test_a1_just_returns() -> unit
+        val ix = new [4]MyInst
+        val cx = new [4]MyCharClass
+        val r = a1(ix[:0], cx[:0], "hi", 7)
+        assert(r == 7, "n_slots passed through")
+
+
+A2 — same as A1 plus stack-local VM and field assignments
+---------------------------------------------------------
+
+Mirrors the opening of exec(). If A1 passes and A2 fails, the bug is
+in stack-local struct construction with mixed slice/string fields.
+
+    a2(insts: []MyInst, classes: []MyCharClass, input: string, n_slots: int) -> int
+        var vm: MyVM
+        vm.insts = insts
+        vm.classes = classes
+        vm.input = input
+        vm.n_slots = n_slots
+        return vm.n_slots
+
+    #test
+    test_a2_stack_struct_field_assigns() -> unit
+        val ix = new [4]MyInst
+        val cx = new [4]MyCharClass
+        val r = a2(ix[:0], cx[:0], "hi", 7)
+        assert(r == 7, "vm.n_slots round-trips")
+
+
+A3 — A2 + read back vm.input.len
+---------------------------------
+
+Forces actually reading a string field that was written by parameter
+assignment.
+
+    a3(insts: []MyInst, classes: []MyCharClass, input: string, n_slots: int) -> int
+        var vm: MyVM
+        vm.insts = insts
+        vm.classes = classes
+        vm.input = input
+        vm.n_slots = n_slots
+        return len(vm.input)
+
+    #test
+    test_a3_read_back_string_len() -> unit
+        val ix = new [4]MyInst
+        val cx = new [4]MyCharClass
+        val r = a3(ix[:0], cx[:0], "hello", 7)
+        assert(r == 5, s"len('hello') == 5, got $r")
+
+
+A4 — A3 plus a malloc afterward (matches exec layout)
+------------------------------------------------------
+
+After the field assignments, exec() does new [n_slots]int. If A3
+passes and A4 fails, the malloc/slice path is the smoking gun.
+
+    a4(insts: []MyInst, classes: []MyCharClass, input: string, n_slots: int) -> int
+        var vm: MyVM
+        vm.insts = insts
+        vm.classes = classes
+        vm.input = input
+        vm.n_slots = n_slots
+        val _bs = new [n_slots]int
+        var best_starts = _bs[:n_slots]
+        return len(best_starts)
+
+    #test
+    test_a4_malloc_after_struct() -> unit
+        val ix = new [4]MyInst
+        val cx = new [4]MyCharClass
+        val r = a4(ix[:0], cx[:0], "hello", 4)
+        assert(r == 4, s"len(best_starts) == 4, got $r")
+
+
+A5 — full exec() prologue: 2 slices before vm, struct return
+-------------------------------------------------------------
+
+Match struct return forces r1 = hidden return slot (not return value),
+shifting how parameters are passed. Two pre-allocated slices reorder
+the stack layout substantially.
+
+    struct MyMatch
+        starts: []int
+        ends: []int
+        n_groups: int
+
+    a5(insts: []MyInst, classes: []MyCharClass, input: string, n_groups: int) -> MyMatch
+        val n_slots = (n_groups + 1) * 2
+        val _bs = new [n_groups + 1]int
+        var best_starts = _bs[:n_groups + 1]
+        val _be = new [n_groups + 1]int
+        var best_ends = _be[:n_groups + 1]
+        var matched = false
+
+        for var i = 0; i <= n_groups; i++
+            best_starts[i] = -1
+            best_ends[i] = -1
+
+        var vm: MyVM
+        vm.insts = insts
+        vm.classes = classes
+        vm.input = input
+        vm.n_slots = n_slots
+
+        val _cur = new [16]int
+        var current = _cur[:0]
+        val _nxt = new [16]int
+        var next_list = _nxt[:0]
+        val input_len = len(input)
+
+        MyMatch(best_starts, best_ends, n_groups + 1)
+
+    #test
+    test_a5_full_exec_prologue() -> unit
+        val ix = new [4]MyInst
+        val cx = new [4]MyCharClass
+        val m = a5(ix[:0], cx[:0], "hello", 0)
+        assert(m.n_groups == 1, s"n_groups+1 = 1, got ${m.n_groups}")
+        assert(len(m.starts) == 1, s"len(starts) == 1, got ${len(m.starts)}")
+        assert(m.starts[0] == -1, s"starts[0] == -1, got ${m.starts[0]}")
+
+
+A6 — outer for-loop body that mallocs each iteration
+-----------------------------------------------------
+
+exec()'s outer loop does several mallocs per character of input. Tests
+whether the bump allocator + repeated slice mallocs trigger the OOB.
+
+    a6(insts: []MyInst, classes: []MyCharClass, input: string, n_groups: int) -> MyMatch
+        val n_slots = (n_groups + 1) * 2
+        val _bs = new [n_groups + 1]int
+        var best_starts = _bs[:n_groups + 1]
+        val _be = new [n_groups + 1]int
+        var best_ends = _be[:n_groups + 1]
+
+        for var i = 0; i <= n_groups; i++
+            best_starts[i] = -1
+            best_ends[i] = -1
+
+        var vm: MyVM
+        vm.insts = insts
+        vm.classes = classes
+        vm.input = input
+        vm.n_slots = n_slots
+
+        val _cur = new [16]int
+        var current = _cur[:0]
+        val _nxt = new [16]int
+        var next_list = _nxt[:0]
+        val input_len = len(input)
+
+        for var sp = 0; sp <= input_len; sp++
+            val _is = new [n_slots]int
+            var init_saves = _is[:n_slots]
+            for var j = 0; j < n_slots; j++ do init_saves[j] = -1
+            val _v = new [len(insts)]bool
+            var visited = _v[:len(insts)]
+            for var k = 0; k < len(visited); k++ do visited[k] = false
+
+        MyMatch(best_starts, best_ends, n_groups + 1)
+
+    #test
+    test_a6_outer_loop_mallocs() -> unit
+        val ix = new [6]MyInst
+        ix[0].op = 0
+        ix[1].op = 0
+        ix[2].op = 0
+        ix[3].op = 0
+        ix[4].op = 0
+        ix[5].op = 2
+        val cx = new [4]MyCharClass
+        val m = a6(ix[:6], cx[:0], "say hello world", 0)
+        assert(m.starts[0] == -1, s"starts[0] == -1, got ${m.starts[0]}")
+
+
+A7 — if-expression with guarded string subscript (the suspect)
+---------------------------------------------------------------
+
+exec() does `val ch = if sp < input_len then input[sp] else -1` while
+sp ranges 0..=input_len. If TRISC eagerly evaluates the then-branch's
+input[sp] when sp == input_len, the bounds check trips OOB. Interpreter
+likely lazy-evaluates per branch.
+
+    a7(input: string) -> int
+        var sum = 0
+        val n = len(input)
+        for var sp = 0; sp <= n; sp++
+            val ch = if sp < n then input[sp] else -1
+            sum = sum + ch
+        return sum
+
+    #test
+    test_a7_if_expr_string_subscript() -> unit
+        val r = a7("ab")
+        // bytes: 'a'=97, 'b'=98, then -1 at sp=2 → 97 + 98 - 1 = 194
+        assert(r == 194, s"sum == 194, got $r")
+
+
+A8 — narrow the if-expr value bug
+----------------------------------
+
+    a8_just_then(input: string, sp: int, n: int) -> int
+        return if sp < n then input[sp] else -1
+
+    #test
+    test_a8_then_branch_value() -> unit
+        val r = a8_just_then("ab", 0, 2)
+        assert(r == 97, s"want 97, got $r")
+
+    #test
+    test_a8_else_branch_value() -> unit
+        val r = a8_just_then("ab", 2, 2)
+        assert(r == -1, s"want -1, got $r")
+
+
+A9 — same loop without if-expr (unconditional)
+-----------------------------------------------
+
+    a9(input: string) -> int
+        var sum = 0
+        val n = len(input)
+        for var sp = 0; sp < n; sp++
+            sum = sum + input[sp]
+        return sum
+
+    #test
+    test_a9_loop_no_if() -> unit
+        val r = a9("ab")
+        assert(r == 195, s"sum == 195, got $r")
+
+
+A10 — loop with if-expr, but no string subscript in then
+---------------------------------------------------------
+
+    a10(n: int) -> int
+        var sum = 0
+        for var sp = 0; sp <= n; sp++
+            val ch = if sp < n then 97 else -1
+            sum = sum + ch
+        return sum
+
+    #test
+    test_a10_if_no_subscript() -> unit
+        val r = a10(2)
+        // 97 + 97 + (-1) = 193
+        assert(r == 193, s"sum == 193, got $r")
+
+
+A11 — loop with if-expr that has subscript both branches
+---------------------------------------------------------
+
+    a11(input: string) -> int
+        var sum = 0
+        val n = len(input)
+        for var sp = 0; sp < n; sp++
+            val ch = if sp < n then input[sp] else -1
+            sum = sum + ch
+        return sum
+
+    #test
+    test_a11_if_subscript_in_bounds() -> unit
+        val r = a11("ab")
+        assert(r == 195, s"sum == 195, got $r")
+
+
+A12 — capture the actual sum value
+-----------------------------------
+
+If TRISC unifies the if-expr type to byte (zero-extending -1 to 255),
+sum = 97+98+255 = 450. If correctly int-extended, sum = 194.
+
+    a12(input: string) -> int
+        var sum = 0
+        val n = len(input)
+        for var sp = 0; sp <= n; sp++
+            val ch = if sp < n then input[sp] else -1
+            sum = sum + ch
+        return sum
+
+    // Pinned: if-expr's branch types are now widened (byte/-1 → int).
+    // Pre-fix: TRISC stored ch as byte and -1 truncated to 255, sum=450.
+    #test
+    test_a12_correct() -> unit
+        val r = a12("ab")
+        assert(r == 194, s"want 194 (97+98+(-1)), got $r")
+
+

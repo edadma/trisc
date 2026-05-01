@@ -11,6 +11,11 @@ class SyslLexical extends IndentationLexical(
   lineComment = "//",
   blockCommentStart = "/*",
   blockCommentEnd = "*/",
+  // Re-enable Newline/Indent/Dedent emission for closure bodies whose `->` is
+  // followed by a newline + indented block, even when the closure itself sits
+  // inside a paren / cast-arg context. Without this, multi-statement closure
+  // bodies inside parens can't parse.
+  blockTriggerToken = Some("->"),
 ) {
   reserved ++= List(
     "if", "then", "elif", "else", "while", "do", "for", "loop", "in", "downTo", "step", "break", "continue", "return", "defer", "match", "is", "_",
@@ -21,6 +26,13 @@ class SyslLexical extends IndentationLexical(
     "end",
   )
 
+  // Operator-char sequences (composed of + - * / % < > = ! & | ^ ~) are
+  // tokenized greedily by `operatorMuncher` below into a single Keyword
+  // token, but each built-in operator string must still be registered
+  // here — scala-parser-combinators 2.4 enforces a parser-literal
+  // whitelist against `delimiters`/`reserved`. So the listing of
+  // operator strings here is now a *vocabulary registration* for the
+  // parser, not a tokenization rule.
   delimiters ++= List(
     "(", ")", "[", "]", "{", "}",
     "++", "--",
@@ -34,6 +46,66 @@ class SyslLexical extends IndentationLexical(
     "->", "=>",
     ",", "::", ":", ";", "..<", "..", ".", "#", "?",
   )
+
+  // Operator characters — any greedy sequence of these forms one
+  // OPERATOR token (Keyword). Built-in operators (+ - * / % == != < <= > >=
+  // && || << >> & | ^ ~ ! and the assignment compounds += -= ... ->) and
+  // user-defined operators (e.g. <> >>> |> ~~) all funnel through this
+  // path; the parser/analyzer then dispatches by symbol. See
+  // project_sysl_operator_overload_design.md for the full design.
+  private val opChars: Set[Char] =
+    Set('+', '-', '*', '/', '%', '<', '>', '=', '!', '&', '|', '^', '~')
+
+  // True if `r` starts a comment (`//` or `/*`). Comments take precedence
+  // over operator munching: a `/` that begins a comment must NOT be eaten
+  // as part of an operator token.
+  private def startsComment(r: scala.util.parsing.input.Reader[Char]): Boolean =
+    !r.atEnd && r.first == '/' && !r.rest.atEnd &&
+      (r.rest.first == '/' || r.rest.first == '*')
+
+  // Decide whether the muncher should stop *before* appending `c` to `buf`.
+  // This is the only place where `*` and `&` get context-sensitive — both
+  // act as prefix unary operators (deref / addr-of) and as type sigils, so
+  // they MUST lex as single-char tokens when followed by other prefix
+  // operators or by `*`/`&` themselves. Without this rule, `**T`, `*&a`,
+  // `*++p`, `*=*p`, etc. would all be miscategorized.
+  //
+  // Rules (applied in order):
+  //   1. Buf already contains `*` AND next is `*`: stop. (Preserves `**T`
+  //      type syntax and `*=*p` chains.)
+  //   2. Buf is exactly `*` AND next is one of `+ - &`: stop. (Preserves
+  //      `*++p`, `*--p`, `*&a` — these mean `*<unary-op> operand`.)
+  //   3. Buf is exactly `&` AND next is one of `* + - ~ !`: stop.
+  //      (Preserves `&&` (allowed) and `&=` (allowed) but blocks `&*`,
+  //      `&-`, etc. as adjacent prefix-unary patterns.)
+  //
+  // Otherwise, allow munching. So `<*>`, `*>`, `<*`, `*<`, `<+>` and
+  // similar user-definable operator names lex as single tokens, while
+  // `<<=`, `>>=`, `==`, `!=`, `++`, `--`, `||`, `&&`, `->`, `=>`, `..`
+  // continue to munch as built-ins.
+  private def shouldStop(buf: StringBuilder, c: Char): Boolean =
+    if buf.isEmpty then false
+    else if c == '*' && buf.toString.contains('*') then true
+    else if buf.length == 1 && buf.charAt(0) == '*' && (c == '+' || c == '-' || c == '&') then true
+    else if buf.length == 1 && buf.charAt(0) == '&' && (c == '*' || c == '+' || c == '-' || c == '~' || c == '!') then true
+    else false
+
+  private def operatorMuncher: Parser[Token] =
+    Parser { in =>
+      if in.atEnd || !opChars(in.first) || startsComment(in) then
+        Failure("not an operator", in)
+      else
+        val buf = new StringBuilder
+        var cur: scala.util.parsing.input.Reader[Char] = in
+        var stop = false
+        while !stop && !cur.atEnd && opChars(cur.first) && !startsComment(cur) do
+          if shouldStop(buf, cur.first) then
+            stop = true
+          else
+            buf.append(cur.first)
+            cur = cur.rest
+        Success(Keyword(buf.toString), cur)
+    }
 
   private def hexDigit = elem("hex digit", c => c.isDigit || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F')
 
@@ -132,5 +204,7 @@ class SyslLexical extends IndentationLexical(
     // String literal with escape processing: "hello\nworld"
     '"' ~> rep(escapeChar | chrExcept('"', '\n', EofCh)) <~ '"' ^^ { chars =>
       StringLit(chars.mkString)
-    } | super.token
+    } |
+    operatorMuncher |
+    super.token
 }

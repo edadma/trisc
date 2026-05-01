@@ -12,7 +12,7 @@ class SyslTypePrefixTests extends AnyFreeSpec with Matchers {
   "i32 toPrefix" in { I32.toPrefix shouldBe "i32" }
   "i8 toPrefix" in { I8.toPrefix shouldBe "i8" }
   "bool toPrefix" in { BoolType.toPrefix shouldBe "bool" }
-  "void toPrefix" in { VoidType.toPrefix shouldBe "void" }
+  "unit toPrefix" in { UnitType.toPrefix shouldBe "unit" }
 
   "ptr i64 toPrefix" in {
     PtrType(I64).toPrefix shouldBe "ptr i64"
@@ -40,7 +40,7 @@ class SyslTypePrefixTests extends AnyFreeSpec with Matchers {
   "char fromPrefix" in { SyslType.fromPrefix("char") shouldBe U32 }
   "byte fromPrefix" in { SyslType.fromPrefix("byte") shouldBe U8 }
   "bool fromPrefix" in { SyslType.fromPrefix("bool") shouldBe BoolType }
-  "void fromPrefix" in { SyslType.fromPrefix("void") shouldBe VoidType }
+  "unit fromPrefix" in { SyslType.fromPrefix("unit") shouldBe UnitType }
 
   "ptr int fromPrefix" in {
     SyslType.fromPrefix("ptr int") shouldBe PtrType(I32)
@@ -65,7 +65,7 @@ class SyslTypePrefixTests extends AnyFreeSpec with Matchers {
   // ===== Round-trips =====
 
   "all base types round-trip" in {
-    for t <- List(I64, I32, I8, BoolType, VoidType) do
+    for t <- List(I64, I32, I8, BoolType, UnitType) do
       SyslType.fromPrefix(t.toPrefix) shouldBe t
   }
 
@@ -111,19 +111,19 @@ class SyslTypePrefixTests extends AnyFreeSpec with Matchers {
   }
 
   "func sig with pointer params" in {
-    val sig = SyslType.funcSigToPrefix(List(PtrType(I64), PtrType(I64)), VoidType)
-    sig shouldBe "2 ptr i64 ptr i64 void"
+    val sig = SyslType.funcSigToPrefix(List(PtrType(I64), PtrType(I64)), UnitType)
+    sig shouldBe "2 ptr i64 ptr i64 unit"
     val (params, ret) = SyslType.funcSigFromPrefix(sig)
     params shouldBe List(PtrType(I64), PtrType(I64))
-    ret shouldBe VoidType
+    ret shouldBe UnitType
   }
 
   "func sig with array param" in {
-    val sig = SyslType.funcSigToPrefix(List(ArrayType(I64, 5), I64), VoidType)
-    sig shouldBe "2 arr 5 i64 i64 void"
+    val sig = SyslType.funcSigToPrefix(List(ArrayType(I64, 5), I64), UnitType)
+    sig shouldBe "2 arr 5 i64 i64 unit"
     val (params, ret) = SyslType.funcSigFromPrefix(sig)
     params shouldBe List(ArrayType(I64, 5), I64)
-    ret shouldBe VoidType
+    ret shouldBe UnitType
   }
 
   "func sig round-trip complex" in {

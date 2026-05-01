@@ -1,0 +1,40 @@
+`emitStore` 16-byte copy must not clobber srcReg before reading word 8 (TRISC)
+================================================================================
+
+Pinned 2026-04-29. The TRISC `emitStore` case for `StringType` /
+`FuncType` / `InterfaceType` (the 16-byte fat-pointer types) loaded
+src[0] into r4 first and then re-derived src+8 from `srcReg`. When
+the caller had passed `srcReg = r4` (e.g. the `append`-grow path
+for `[]string`, which loads the elem into r4 before calling
+emitStore), the first `ldd r4, srcReg, r0` clobbered srcReg, so
+`addi r4, srcReg, 8` produced `ptr_field + 8` instead of `src + 8`
+— and the store wrote whatever happened to live at `[ptr_field+8]`
+into the destination's len slot. `len(slice)` thereafter returned
+garbage, so every test that built `[]string` via `append` (the
+entire `std/encoding/csv` cluster, plus `std/io test_writer_interface`
+/ `test_copy`) panicked on a follow-up `len()`/index assert.
+
+Fix: pre-load both source words into r3 (lo) and r4 (hi) before
+storing, choosing the load order so the load that overwrites
+`srcReg` runs *last*. Handles the only currently-occurring
+collisions, `srcReg ∈ {3, 4}`.
+
+    module sysl.tests.csv_repro
+
+    #test
+    test_append_string_to_empty_slice() -> unit
+        var xs = (new [0]string)[:0]
+        xs = append(xs, "a")
+        assert(len(xs) == 1, "len should be 1 after one string append")
+        assert(xs[0] == "a", "appended string must round-trip")
+
+    #test
+    test_append_three_strings() -> unit
+        var xs = (new [0]string)[:0]
+        xs = append(xs, "a")
+        xs = append(xs, "b")
+        xs = append(xs, "c")
+        assert(len(xs) == 3, "len 3 after three appends")
+        assert(xs[0] == "a", "xs[0]")
+        assert(xs[1] == "b", "xs[1]")
+        assert(xs[2] == "c", "xs[2]")

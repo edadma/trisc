@@ -251,6 +251,7 @@ class SyslSVMCodegen:
   private def constEval(e: TExpr): Option[Long] = e match
     case TIntLit(n, _) => Some(n)
     case TBoolLit(v, _) => Some(if v then 1 else 0)
+    case TUnitLit(_) => Some(0)
     case TVarRef(name, _) => globalConstants.get(name)
     case TUnary("-", operand, _) => constEval(operand).map(-_)
     case TUnary("~", operand, _) => constEval(operand).map(~_)
@@ -332,7 +333,7 @@ class SyslSVMCodegen:
     val bssGlobals = new mutable.ListBuffer[TDecl]
 
     for decl <- program.decls do decl match
-      case v @ TVarDecl(_, typ, init, _, _, _) =>
+      case v @ TVarDecl(_, typ, init, _, _, _, _) =>
         globals(v.name) = typ
         constEval(init).foreach(n => globalConstants(v.name) = n)
         if isZeroInit(typ, init) then bssGlobals += v
@@ -363,13 +364,13 @@ class SyslSVMCodegen:
     // For arrays of strings: per-element labels, indexed by (arrayName, i).
     val stringArrayElemLabels = new mutable.HashMap[(String, Int), String]
     for decl <- dataGlobals do decl match
-      case TVarDecl(name, SyslType.StringType, TStringLit(s, _), _, _, _) =>
+      case TVarDecl(name, SyslType.StringType, TStringLit(s, _), _, _, _, _) =>
         labelCounter += 1
         val lbl = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_${labelCounter}__g_$name"
                   else s"__str_${labelCounter}__g_$name"
         stringLiterals += ((lbl, s))
         stringGlobalLabels(name) = lbl
-      case TVarDecl(name, SyslType.ArrayType(SyslType.StringType, _), TArrayLit(elements, _), _, _, _) =>
+      case TVarDecl(name, SyslType.ArrayType(SyslType.StringType, _), TArrayLit(elements, _), _, _, _, _) =>
         for (e, idx) <- elements.zipWithIndex do e match
           case TStringLit(s, _) =>
             labelCounter += 1
@@ -409,11 +410,11 @@ class SyslSVMCodegen:
     if dataGlobals.nonEmpty then
       emit("segment data")
       for decl <- dataGlobals do decl match
-        case TVarDecl(name, typ, _, _, _, _) =>
+        case TVarDecl(name, typ, _, _, _, _, _) =>
           emit(s"global $name, data, ${typ.sizeOf.max(8)}")
         case _ =>
       for decl <- dataGlobals do decl match
-        case TVarDecl(name, typ, init, _, _, _) =>
+        case TVarDecl(name, typ, init, _, _, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           typ match
@@ -501,11 +502,11 @@ class SyslSVMCodegen:
     if bssGlobals.nonEmpty then
       emit("segment bss")
       for decl <- bssGlobals do decl match
-        case TVarDecl(name, typ, _, _, _, _) =>
+        case TVarDecl(name, typ, _, _, _, _, _) =>
           emit(s"global $name, data, ${typ.sizeOf.max(8)}")
         case _ =>
       for decl <- bssGlobals do decl match
-        case TVarDecl(name, typ, _, _, _, _) =>
+        case TVarDecl(name, typ, _, _, _, _, _) =>
           emit(s"  align 8")
           emit(s"$name:")
           val size = typ.sizeOf.max(8)
@@ -516,7 +517,7 @@ class SyslSVMCodegen:
     val generated = out.toString
     val definedSymbols = program.decls.flatMap {
       case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _, _, _) => Some(name)
       case _ => None
     }.toSet
     val metaSymbols = meta.symbols.map(_.name).toSet
@@ -661,7 +662,7 @@ class SyslSVMCodegen:
         if stmts.isEmpty then
           emitDefers()
           emit("  ret")
-        else if fun.returnType != SyslType.VoidType then
+        else if fun.returnType != SyslType.UnitType then
           genStmtsAsExpr(stmts)
           emitDefers()
           emit("  ret")
@@ -739,7 +740,7 @@ class SyslSVMCodegen:
         emit(s"  local_get $envIdx")                     // [d, d, env]
         if selfOff > 0 then { emitPushInt(selfOff); emit("  add") } // [d, d, env+off]
         // emitStore for FuncType copies 16 bytes from src to dest and pops both.
-        emitStore(SyslType.FuncType(Nil, SyslType.VoidType))
+        emitStore(SyslType.FuncType(Nil, SyslType.UnitType))
         // Stack after emitStore: [d]
 
   /** Emit a hoisted closure body as a regular function. The first param is a
@@ -816,7 +817,7 @@ class SyslSVMCodegen:
         if stmts.isEmpty then
           emitDefers()
           emit("  ret")
-        else if c.returnType != SyslType.VoidType then
+        else if c.returnType != SyslType.UnitType then
           genStmtsAsExpr(stmts)
           emitDefers()
           emit("  ret")
@@ -895,7 +896,7 @@ class SyslSVMCodegen:
       stmts.last match
         case TExprStmt(expr) =>
           genExpr(expr)
-          if expr.typ == SyslType.VoidType then emitPushInt(0)
+          if expr.typ == SyslType.UnitType then emitPushInt(0)
         case TReturnStmt(Some(expr)) => genExpr(expr); emitDefers(); emit("  ret")
         case other => genStmt(other); emitPushInt(0)
 
@@ -1140,10 +1141,10 @@ class SyslSVMCodegen:
       emit(s"  jump ${continueLabels.top}")
 
     case TExprStmt(TMatchExpr(scrutinee, arms, default, matchTyp)) =>
-      genMatch(scrutinee, arms, default, matchTyp, asExpr = matchTyp != SyslType.VoidType)
-      if matchTyp != SyslType.VoidType then emit("  drop")
+      genMatch(scrutinee, arms, default, matchTyp, asExpr = matchTyp != SyslType.UnitType)
+      if matchTyp != SyslType.UnitType then emit("  drop")
 
-    case TExprStmt(TIfExpr(cond, thenBody, elseBody, ifTyp)) if ifTyp == SyslType.VoidType =>
+    case TExprStmt(TIfExpr(cond, thenBody, elseBody, ifTyp)) if ifTyp == SyslType.UnitType =>
       // Void-typed if-stmt: generate bodies as plain statements (no synthetic
       // 0 push, which would leak onto the data stack because the outer
       // TExprStmt won't drop void-typed values).
@@ -1161,7 +1162,7 @@ class SyslSVMCodegen:
 
     case TExprStmt(expr) =>
       genExpr(expr)
-      if expr.typ != SyslType.VoidType then emit("  drop")
+      if expr.typ != SyslType.UnitType then emit("  drop")
 
     case TAsmStmt(code) =>
       emit(s"  $code")
@@ -1223,7 +1224,7 @@ class SyslSVMCodegen:
           emit(s"  local_set ${target.index}")
       emit("  drop")
 
-    case _ => // TODO: remaining stmt types
+    case _ => sys.error(s"unhandled TStmt in SVM codegen: ${stmt.getClass.getSimpleName}")
 
   // ========================================================================
   // genExpr — leaves exactly one value on the data stack
@@ -1239,6 +1240,8 @@ class SyslSVMCodegen:
 
     case TBoolLit(true, _) => emit("  push_1")
     case TBoolLit(false, _) => emit("  push_0")
+
+    case TUnitLit(_) => emit("  push_0")  // unit is 0-byte; represent at runtime as 0
 
     case TSizeof(size, _) => emitPushInt(size)
 
@@ -1579,14 +1582,14 @@ class SyslSVMCodegen:
       val endLabel = newLabel("endif")
       genExpr(cond)
       emit(s"  jumpz $elseLabel")
-      if typ == SyslType.VoidType then genStmts(thenBody) else genStmtsAsExpr(thenBody)
+      if typ == SyslType.UnitType then genStmts(thenBody) else genStmtsAsExpr(thenBody)
       emit(s"  jump $endLabel")
       emit(s"$elseLabel:")
-      if typ == SyslType.VoidType then genStmts(elseBody) else genStmtsAsExpr(elseBody)
+      if typ == SyslType.UnitType then genStmts(elseBody) else genStmtsAsExpr(elseBody)
       emit(s"$endLabel:")
 
     case TIfExpr(cond, thenBody, None, typ) =>
-      if typ == SyslType.VoidType then
+      if typ == SyslType.UnitType then
         val endLabel = newLabel("endif")
         genExpr(cond)
         emit(s"  jumpz $endLabel")
@@ -1928,7 +1931,7 @@ class SyslSVMCodegen:
       // accept.
       val (paramTypes, retType) = typ match
         case SyslType.FuncType(p, r, _, _) => (p, r)
-        case _ => (Nil, SyslType.VoidType)
+        case _ => (Nil, SyslType.UnitType)
       val shim = shimNameFor(name)
       if !emittedShims.contains(shim) then
         emittedShims += shim
@@ -2403,8 +2406,7 @@ class SyslSVMCodegen:
       emitStore(fieldType)
 
     case _ =>
-      // TODO: remaining expr types
-      emitPushInt(0) // placeholder
+      sys.error(s"unhandled TExpr in SVM codegen: ${expr.getClass.getSimpleName}")
 
   // ========================================================================
   // Helpers

@@ -57,7 +57,7 @@ case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[Stri
 
 // Range for `within lo..hi` / `within lo..<hi` type constraints
 case class RangeAST(lo: ExpressionAST, hi: ExpressionAST, exclusiveHi: Boolean) extends Positional
-case class TraitDeclAST(name: String, typeParam: String, methods: List[TraitMethodAST], attributes: List[Attribute] = Nil) extends DeclAST
+case class TraitDeclAST(name: String, typeParams: List[String], methods: List[TraitMethodAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class TraitMethodAST(
     name: String,
     params: List[ParamAST],
@@ -65,7 +65,7 @@ case class TraitMethodAST(
     body: Option[FunBodyAST],
     attributes: List[Attribute] = Nil,
 ) extends Positional
-case class ImplDeclAST(traitName: String, targetType: TypeAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
+case class ImplDeclAST(traitName: String, typeParams: List[String], targetTypes: List[TypeAST], methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, effects: FuncEffects = FuncEffects.Unknown) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST
@@ -159,6 +159,11 @@ case class FloatLitAST(value: Double) extends ExpressionAST
 case class CharLitAST(value: Char) extends ExpressionAST
 case class StringLitAST(value: String) extends ExpressionAST
 case class BoolLitAST(value: Boolean) extends ExpressionAST
+case class UnitLitAST() extends ExpressionAST  // `()` — sole inhabitant of `unit`
+// Wraps a parsed TypeAST so it can appear in expression position — used for
+// generic type-argument shapes that don't have an expression-syntax form
+// (e.g. `Parser[[]A]`, `Parser[[5]A]`). The analyzer unwraps via exprToTypeAST.
+case class TypeRefExprAST(typ: TypeAST) extends ExpressionAST
 case class VarRefAST(name: String) extends ExpressionAST
 case class BinaryAST(left: ExpressionAST, op: String, right: ExpressionAST) extends ExpressionAST
 case class UnaryAST(op: String, operand: ExpressionAST) extends ExpressionAST
@@ -204,6 +209,10 @@ case class NewArrayAST(size: ExpressionAST, elemType: TypeAST) extends Expressio
 case class StringLitExprAST(value: String) extends ExpressionAST
 case class ClosureParamAST(name: String, typ: Option[TypeAST])
 case class ClosureAST(params: List[ClosureParamAST], body: FunBodyAST) extends ExpressionAST
+// `_` placeholder in expression position — desugars at parse time to a fresh
+// parameter of an enclosing anonymous function. See `expandPlaceholders` in
+// the parser for the boundary rules. This node never reaches the analyzer.
+case class UnderscorePlaceholderAST() extends ExpressionAST
 // Type attribute: `T::First`, `T::Last`, `T::Range`, `T::Image(x)`, `T::Pos(x)`, `T::Val(n)`.
 // `arg` is set only for attributes that take one (Image, Pos, Val). `Range` is only valid
 // syntactically inside `for i in T::Range` and is desugared at parse time; it is never analyzed.

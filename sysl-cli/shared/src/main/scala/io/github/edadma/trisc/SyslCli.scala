@@ -568,9 +568,395 @@ object SyslCli:
           case _ => Pass
       case e: Throwable => Fail(s"unexpected error: ${e.getClass.getSimpleName}: ${e.getMessage}", captured)
 
+  /** Compile + run a single test on the TRISC emulator.
+    *
+    * Strategy: codegen the test's scoped program to TRISC asm, append a boot
+    * wrapper with a vector table that calls the target test function and
+    * halts. The wrapper's trap and fault ISRs each record a distinct sentinel
+    * byte at a known memory location before halting, because TRISC `trap N`
+    * doesn't halt the CPU — it transfers control to the matching vector slot,
+    * which would otherwise look identical to a clean return.
+    *
+    * Memory layout:
+    *   0x00000..0x0009F  vector table (20 slots × 8 bytes)
+    *   0x000A0..0x1FEF7  code + data + stack (grows down from 0x1FEF8)
+    *   0x1FF00           panic flag byte (0=clean, sysl-code=panic, 222=fault)
+    *   0x20000           STDOUT MMIO (1 byte)
+    *
+    * Outcome is read from `cpu.state` and the panic flag byte:
+    *   - state == Halt, flag == 0     → clean return → Pass (or Fail if shouldPanic)
+    *   - state == Halt, flag in 1..5  → sysl panic → Pass if shouldPanic, else Fail
+    *   - state == Halt, flag == 222   → CPU fault routed through fault ISR → Fail
+    *   - state == Run                 → cycle-limit reached → Fail (timeout)
+    *   - any other state              → CPU fault before fault ISR ran → Fail
+    *
+    * Limitations: TRISC `assert`/`panic` lower to inline `trap 1` with no
+    * message printing, so the `should_panic = "msg"` substring match cannot
+    * be verified — any trap satisfies a shouldPanic test. Tests that exercise
+    * heap allocation (`new`, dynamic strings, `s"..."` interpolation) require
+    * malloc/free externs which this minimal runtime does not yet provide;
+    * those tests will fail at link time. Both gaps are tracked as follow-ups.
+    *
+    * `TRISC_DUMP_ASM=1` writes the generated asm to /tmp for inspection.
+    * `TRISC_TRACE=1` prints a one-line per-test summary and lets the CPU emit
+    * its diagnostic stderr (otherwise quiet).
+    */
+  private def runOneTRISC(program: TProgram, t: DiscoveredTest): TestOutcome =
+    val outputBuf = new StringBuilder
+    val asm =
+      try (new SyslTriscCodegen).generate(program)
+      catch case e: Throwable =>
+        if System.getenv("TRISC_TRACE") != null then e.printStackTrace()
+        return Fail(s"TRISC codegen failed: ${e.getClass.getSimpleName}: ${e.getMessage}")
+    if System.getenv("TRISC_DUMP_ASM") != null then
+      java.nio.file.Files.writeString(
+        java.nio.file.Paths.get(s"/tmp/trisc_${t.unitName.replace("/", "_")}.s"), asm)
+    // Memory layout (1MB RAM):
+    //   0x000000..0x00009F  vector table (20 × 8 bytes)
+    //   0x0000A0..          wrapper code, then user program code + rodata +
+    //                       data + const segments, all packed sequentially
+    //                       by the linker. Allowed to grow up to HEAP_START.
+    //   0x080000..0x0FFE00  bump-allocator heap (~512 KB)
+    //   0x0FFEF8            initial SP (stack grows down into 0x0FFE00..0x0FFEF8)
+    //   0x0FFF00            panic flag (1 byte)
+    //   0x0FFF08            heap brk pointer (8 bytes; init to 0 by RAM zero,
+    //                       lazily set to HEAP_START on first malloc)
+    //   0x0FFF10            saved-PC slot (8 bytes, written by fault_isr; the
+    //                       supervisor exception frame puts saved PC at [r7])
+    //   0x0FFF20..0x0FFF4F  saved r1..r6 (6 × 8 bytes, written by fault_isr
+    //                       before its body clobbers them; r6=LR is most
+    //                       useful for "jalr to garbage" CPU faults)
+    //   0x100000            STDOUT (1 byte, write-only device)
+    //
+    // Earlier layout pinned SP and the metadata slots at ~0x1FF00, with the
+    // heap above. That broke for any program whose code+rodata exceeded
+    // ~128 KB (e.g. std/strings) — the linker placed rodata over the
+    // metadata region, silently corrupting BRK_PTR. Pushing the metadata
+    // up to high RAM (just below STDOUT) and HEAP_START to 0x80000 gives
+    // ~512 KB of program space and ~512 KB of heap.
+    val stdoutAddr = 0x100000L
+    val ramSize = 0x100000L
+    val panicFlagAddr = 0xFFF00L
+    val brkPtrAddr = 0xFFF08L
+    val faultPcAddr = 0xFFF10L
+    val faultRegsAddr = 0xFFF20L  // r1..r6, 8 bytes each
+    val heapStart = 0x80000L
+    val heapEnd = 0xFFE00L
+    val initialSP = 0xFFEF8L
+    val faultIsrSlots = (1 to 7).map(_ => "  dl fault_isr").mkString("\n")
+    val trapIsrSlots = (1 to 8).map(_ => "  dl panic_isr").mkString("\n")
+    val tailFaultSlots = (1 to 3).map(_ => "  dl fault_isr").mkString("\n")
+    val wrapperAsm =
+      s"""|STDOUT = $stdoutAddr
+          |BRK_PTR = $brkPtrAddr
+          |HEAP_START = $heapStart
+          |HEAP_END = $heapEnd
+          |FAULT_PC = $faultPcAddr
+          |FAULT_REGS = $faultRegsAddr
+          |
+          |segment vectors
+          |  dl $initialSP
+          |  dl boot
+          |$faultIsrSlots
+          |$trapIsrSlots
+          |$tailFaultSlots
+          |
+          |segment code
+          |
+          |extern ${t.fn.name}
+          |
+          |global boot, func
+          |entry boot
+          |
+          |boot
+          |  movi r4, ${t.fn.name}
+          |  jalr r6, r4
+          |  halt
+          |
+          |global putchar, func
+          |putchar
+          |  movi r2, STDOUT
+          |  stb r1, r2, r0
+          |  jalr r0, r6
+          |
+          |; panic_isr: invoked by trap N (sysl panics). r1 holds the sysl
+          |; error code (1=oob, 2=null, 3=abort, 4=assert/panic, 5=div0,
+          |; 99=brk-corruption sentinel).
+          |; Records r1 to the panic flag AND saves the faulting PC and r1..r4
+          |; into the same FAULT_REGS slots used by fault_isr, so the runner
+          |; can dump them on demand for trap-99 (brk-corrupt) diagnostics.
+          |global panic_isr, func
+          |panic_isr
+          |  ; Save r1..r4 — clobbered below.
+          |  movi r6, FAULT_REGS
+          |  std r1, r6, r0
+          |  addi r6, r6, 8
+          |  std r2, r6, r0
+          |  addi r6, r6, 8
+          |  std r3, r6, r0
+          |  addi r6, r6, 8
+          |  std r4, r6, r0
+          |  ; Save the faulting PC (same exception frame layout as fault_isr).
+          |  ldd r3, r7, r0
+          |  movi r2, FAULT_PC
+          |  std r3, r2, r0
+          |  ; Record the panic code.
+          |  movi r2, $panicFlagAddr
+          |  stb r1, r2, r0
+          |  halt
+          |
+          |; fault_isr: invoked by hardware faults (instruction-access, etc.).
+          |; Records a distinct sentinel + the saved PC so the runner can
+          |; distinguish a CPU fault from a sysl panic AND report the actual
+          |; faulting instruction. On exception entry the CPU pushes PSR then
+          |; PC onto the supervisor stack (see CPU.enterException), so when
+          |; fault_isr starts r7 points at the saved PC.
+          |global fault_isr, func
+          |fault_isr
+          |  ; Save all caller registers r1..r6 to FAULT_REGS for diagnostics.
+          |  ; r6 is the link register — for "we jalr'd to garbage" CPU faults
+          |  ; it's the most useful clue, so we preserve its original value by
+          |  ; pushing it on the supervisor stack BEFORE using r6 as scratch.
+          |  pshd r6
+          |  movi r6, FAULT_REGS
+          |  std r1, r6, r0
+          |  addi r6, r6, 8
+          |  std r2, r6, r0
+          |  addi r6, r6, 8
+          |  std r3, r6, r0
+          |  addi r6, r6, 8
+          |  std r4, r6, r0
+          |  addi r6, r6, 8
+          |  std r5, r6, r0
+          |  ; r6 slot: read original r6 back from the supervisor stack (we
+          |  ; pushed it first, so it sits at [r7+0]) and store to FAULT_REGS+40.
+          |  addi r6, r6, 8
+          |  ldd r4, r7, r0
+          |  std r4, r6, r0
+          |  addi r7, r7, 8       ; pop the saved-r6 slot
+          |  ; Save the faulting PC. On exception entry the CPU pushes
+          |  ; PSR then PC onto the supervisor stack, and the new r7 points
+          |  ; at the saved PC (see CPU.enterException).
+          |  ldd r3, r7, r0
+          |  movi r2, FAULT_PC
+          |  std r3, r2, r0
+          |  ; Sentinel.
+          |  movi r1, 222
+          |  movi r2, $panicFlagAddr
+          |  stb r1, r2, r0
+          |  halt
+          |
+          |; malloc(size: i64) -> *byte
+          |; Bump allocator. Aligns size up to 8, advances brk, returns the
+          |; old brk. Returns 0 on heap exhaustion. Never reclaims (free is
+          |; a no-op) — fine for a one-shot test runner: each test gets a
+          |; fresh CPU+memory.
+          |;
+          |; ABI: only clobbers r1..r4 — r5 is the caller's frame pointer,
+          |; r6 the link register, r7 the stack pointer. Touching r5 used
+          |; to corrupt the caller's stack-relative addressing.
+          |global malloc, func
+          |malloc
+          |  addi r1, r1, 7         ; size += 7
+          |  addi r2, r0, -8        ; r2 = -8 = ~7  (movi rejects negative)
+          |  and r1, r1, r2         ; r1 = aligned size
+          |  movi r2, BRK_PTR
+          |  ldd r3, r2, r0         ; r3 = current brk
+          |  beq r3, r0, .first     ; first call: lazy init below
+          |  ; Validate brk in [HEAP_START, HEAP_END]. Unsigned compare catches
+          |  ; both negative (= huge unsigned) and positive-but-bogus values.
+          |  movi r4, HEAP_START
+          |  bgu r4, r3, .corrupt   ; HEAP_START > brk → bogus
+          |  movi r4, HEAP_END
+          |  bgu r3, r4, .corrupt   ; brk > HEAP_END → bogus (incl. negatives)
+          |  bra .have
+          |.first
+          |  movi r3, HEAP_START
+          |.have
+          |  add r1, r3, r1         ; r1 = new brk (consumes the size in r1)
+          |  movi r4, HEAP_END
+          |  bgu r1, r4, .oom       ; if new brk > HEAP_END, OOM
+          |  std r1, r2, r0         ; brk = new brk
+          |  mov r1, r3             ; return old brk
+          |  jalr r0, r6
+          |.oom
+          |  movi r1, 0
+          |  jalr r0, r6
+          |.corrupt
+          |  ; BRK_PTR was clobbered by a previous call. Trap with sentinel 99
+          |  ; so the runner reports `trap (code=99)` instead of the usual OOB.
+          |  movi r1, 99
+          |  trap 1
+          |
+          |; free(p: *byte) — no-op (bump allocator)
+          |global free, func
+          |free
+          |  jalr r0, r6
+          |""".stripMargin
+    val programTof =
+      try assemble(asm, relocatable = true)
+      catch case e: Throwable => return Fail(s"TRISC assembly failed: ${e.getMessage}", outputBuf.toString)
+    val wrapperTof =
+      try assemble(wrapperAsm, relocatable = true)
+      catch case e: Throwable => return Fail(s"TRISC wrapper assembly failed: ${e.getMessage}", outputBuf.toString)
+    // Two-pass link: first link the user program TOF (relocatable), then merge
+    // with the wrapper at base 0. This mirrors OSKitTestHelpers.runWithBoot and
+    // ensures the wrapper's `vectors` segment lands at address 0 even if the
+    // user program also declares vectors-shaped data.
+    val linkedProgram =
+      try Linker.link(Seq(programTof), relocatable = true)
+      catch case e: Throwable => return Fail(s"TRISC user-link failed: ${e.getMessage}", outputBuf.toString)
+    val linked =
+      try Linker.link(Seq(wrapperTof, linkedProgram))
+      catch case e: Throwable => return Fail(s"TRISC link failed: ${e.getMessage}", outputBuf.toString)
+    val stdout = new Device with WriteOnlyAddressable {
+      val name = "stdout"
+      val base: Long = stdoutAddr
+      val size: Long = 1
+      def writeByte(addr: Long, data: Long): Unit = outputBuf += data.toChar
+      override def loadByte(addr: Long, data: Long): Unit = ()
+    }
+    // Optional write-watchpoints (set TRISC_WATCH=<hex_addr>:<width>,...).
+    // Common targets: TRISC_WATCH=0xFFF08:8 watches BRK_PTR. The watchpoint
+    // skips writes during initial load (before CPU exists) and prints the
+    // CPU's current PC to stderr on every match. Several ranges may be set
+    // by separating with commas. Wraps RAM with an override only when set.
+    var watchCpu: Option[CPU] = None
+    val watchRanges: List[(Long, Long)] =
+      Option(System.getenv("TRISC_WATCH")).map { spec =>
+        spec.split(",").toList.flatMap { r =>
+          r.split(":") match
+            case Array(addrStr, widthStr) =>
+              val addr = java.lang.Long.parseLong(addrStr.stripPrefix("0x"), 16)
+              val width = widthStr.toLong
+              Some((addr, addr + width))
+            case _ => None
+        }
+      }.getOrElse(Nil)
+    val ram: Addressable =
+      if watchRanges.nonEmpty then
+        new RAM(0, ramSize) {
+          private def maybeReport(addr: Long, data: Long, width: String): Unit =
+            if watchRanges.exists((lo, hi) => addr >= lo && addr < hi) then
+              watchCpu.foreach { c =>
+                System.err.println(f"[WATCH] $width 0x$data%x to 0x$addr%x at PC=0x${c.pc.toHexString}")
+              }
+          override def writeByte(addr: Long, data: Long): Unit =
+            maybeReport(addr, data, "stb"); super.writeByte(addr, data)
+          override def writeShort(addr: Long, data: Long): Unit =
+            maybeReport(addr, data, "sts"); super.writeShort(addr, data)
+          override def writeInt(addr: Long, data: Long): Unit =
+            maybeReport(addr, data, "stw"); super.writeInt(addr, data)
+          override def writeLong(addr: Long, data: Long): Unit =
+            maybeReport(addr, data, "std"); super.writeLong(addr, data)
+        }
+      else new RAM(0, ramSize)
+    val mem = new Memory("Memory", ram, stdout)
+    try linked.load(mem)
+    catch case e: Throwable => return Fail(s"TRISC load failed: ${e.getMessage}", outputBuf.toString)
+    if System.getenv("TRISC_DUMP_DISASM") != null then
+      // Build PC -> symbol map from the linked TOF.
+      val syms: Map[Long, String] =
+        (for seg <- linked.segments; sym <- seg.symbols
+         yield (seg.org + sym.offset) -> sym.name).toMap
+      val buf = new StringBuilder
+      val tmpCpu = new CPU(mem)
+      for seg <- linked.segments do
+        val end = seg.org + seg.chunks.map {
+          case TOF.DataChunk(d)  => d.length.toLong
+          case TOF.ResChunk(s)   => s
+          case TOF.CommentChunk(_) => 0L
+        }.sum
+        buf ++= s"# segment ${seg.name} org=0x${seg.org.toHexString} end=0x${end.toHexString}\n"
+        var addr = seg.org
+        while addr < end do
+          syms.get(addr).foreach(n => buf ++= s"$n:\n")
+          val w = mem.readShortUnsigned(addr)
+          tmpCpu.pc = addr + 2
+          val text = Decode(w).disassemble(tmpCpu)
+          buf ++= f"  0x$addr%04x  $text%n"
+          addr += 2
+      java.nio.file.Files.writeString(
+        java.nio.file.Paths.get(s"/tmp/trisc_${t.unitName.replace("/", "_")}.dis"), buf.toString)
+    val cpu = new CPU(mem) { limit = 50_000_000; quiet = System.getenv("TRISC_TRACE") == null }
+    watchCpu = Some(cpu)
+    try
+      cpu.reset()
+      cpu.run()
+    catch case e: Throwable =>
+      return Fail(s"TRISC runtime error: ${e.getClass.getSimpleName}: ${e.getMessage} at PC=0x${cpu.pc.toHexString}", outputBuf.toString)
+    val captured = outputBuf.toString
+    val flag = mem.readByte(panicFlagAddr) & 0xFF
+    if System.getenv("TRISC_TRACE") != null then
+      System.err.println(s"TRISC_TRACE: ${t.fn.name} state=${cpu.state} pc=0x${cpu.pc.toHexString} r1=${cpu.r(1).read} flag=$flag")
+    def readFaultRegs(): String =
+      try
+        val r1v = mem.readLong(faultRegsAddr)
+        val r2v = mem.readLong(faultRegsAddr + 8)
+        val r3v = mem.readLong(faultRegsAddr + 16)
+        val r4v = mem.readLong(faultRegsAddr + 24)
+        val r5v = mem.readLong(faultRegsAddr + 32)
+        val r6v = mem.readLong(faultRegsAddr + 40)
+        f"\n      regs: r1=0x$r1v%x r2=0x$r2v%x r3=0x$r3v%x r4=0x$r4v%x r5=0x$r5v%x r6=0x$r6v%x"
+      catch case _: Throwable => ""
+    def disasmWindow(faultPc: Long): String =
+      if faultPc < 0 || faultPc + 4 >= ramSize then ""
+      else
+        val rng = if System.getenv("TRISC_TRACE") != null then -32 to 8 by 2 else -4 to 4 by 2
+        val window = rng.flatMap { d =>
+          val p = faultPc + d
+          if p < 0 || p + 1 >= ramSize then None
+          else
+            try
+              val w = mem.readShortUnsigned(p)
+              val mark = if d == 0 then " <-- FAULT" else ""
+              Some(f"      0x$p%04x: ${Decode(w).disassemble(cpu)}$mark")
+            catch case _: Throwable => None
+        }
+        if window.isEmpty then "" else "\n" + window.mkString("\n")
+    cpu.state match
+      case State.Halt =>
+        flag match
+          case 0 =>
+            if t.shouldPanic then Fail("expected panic, got normal return", captured) else Pass
+          case 222 =>
+            val savedPc = mem.readLong(faultPcAddr)
+            // CPU advances pc *before* executing the instruction, so the saved
+            // PC on the exception frame is one past the faulting instruction.
+            val faultPc = savedPc - 2
+            val regs = readFaultRegs()
+            val ctx = disasmWindow(faultPc)
+            Fail(s"CPU fault at PC=0x${faultPc.toHexString} (saved PC=0x${savedPc.toHexString})$regs$ctx", captured)
+          case code =>
+            val codeName = code match
+              case 1 => "out-of-bounds"
+              case 2 => "null-deref"
+              case 3 => "abort"
+              case 4 => "assert/panic"
+              case 5 => "divide-by-zero"
+              case 99 => "brk-corrupt (test-runner sentinel)"
+              case _ => s"trap (code=$code)"
+            // For trap-99 (brk-corruption diagnostics) and TRISC_TRACE always
+            // append the saved-PC + reg dump so we can see *which* trap fired
+            // in the user code (panic_isr now saves the same exception frame
+            // info that fault_isr does).
+            val showDiag = code == 99 || System.getenv("TRISC_TRACE") != null
+            val diag =
+              if !showDiag then ""
+              else
+                val savedPc = try mem.readLong(faultPcAddr) catch case _: Throwable => 0L
+                val faultPc = savedPc - 2
+                s"\n      at PC=0x${faultPc.toHexString} (saved=0x${savedPc.toHexString})${readFaultRegs()}${disasmWindow(faultPc)}"
+            if t.shouldPanic then Pass
+            else Fail(s"panic ($codeName)$diag", captured)
+      case State.Run =>
+        Fail(s"TRISC test timed out (cycle limit reached) at PC=0x${cpu.pc.toHexString}", captured)
+      case other =>
+        Fail(s"unexpected CPU state: $other at PC=0x${cpu.pc.toHexString}", captured)
+
   private def executeTest(cmd: TestCommand): Unit =
-    if cmd.backend == "trisc" || cmd.backend == "all" then
-      System.err.println(s"error: backend '${cmd.backend}' not yet implemented (use 'interpreter', 'llvm-host', or 'svm-host')")
+    if cmd.backend == "all" then
+      System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', or 'trisc')")
       throw CliError("unsupported backend")
 
     // Always use project root as base so module paths resolve correctly.
@@ -660,6 +1046,7 @@ object SyslCli:
       val outcome = cmd.backend match
         case "llvm-host" => runOneLLVM(programFor(t.unitName), t, llvmBinCache)
         case "svm-host"  => runOneSVM(programFor(t.unitName), t)
+        case "trisc"     => runOneTRISC(programFor(t.unitName), t)
         case _           => runOneInterpreter(programFor(t.unitName), stdlibImports, t)
       val elapsedMs = (System.nanoTime() - start) / 1e6
       outcome match

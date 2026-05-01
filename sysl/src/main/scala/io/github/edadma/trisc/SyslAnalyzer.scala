@@ -56,7 +56,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   private val moduleNamespaces = new mutable.LinkedHashMap[String, ModuleMeta]  // short name → module meta (for qualified imports)
   // alias name → (target type AST, isNew flag, optional within-range, optional where-predicate AST)
   private val typeAliases = new mutable.LinkedHashMap[String, (TypeAST, Boolean, Option[RangeAST], Option[ExpressionAST])]
-  private val genericTypeAliases = new mutable.LinkedHashMap[String, (List[String], TypeAST)]  // name → (type params, target)
+  // name → (type params, target, isNew). `isNew=true` means each instantiation is a
+  // distinct nominal type (`type Parser[A] = new (Input) -> ParseResult[A]`); `false` is
+  // the historical transparent expansion. `within`/`where` remain rejected for generic
+  // aliases (no scalar ordering / no operations on a bare T without trait bounds).
+  private val genericTypeAliases = new mutable.LinkedHashMap[String, (List[String], TypeAST, Boolean)]
+  // Cached SyslType for each instantiation of a `new` generic alias. Keyed by (template
+  // name, type args). Mirrors `genericStructInstantiations` so repeated mentions of
+  // `Parser[i32]` return the same NamedType instance (object-equality dispatch).
+  private val genericAliasInstantiations = new mutable.LinkedHashMap[(String, List[SyslType]), SyslType]
+  // Reverse map: mangled instantiation name → (template name, concrete args). Used by
+  // the unifier to bind type vars when matching `Parser[A]` against `NamedType("Parser_i32", ...)`.
+  private val genericAliasToTemplate = new mutable.LinkedHashMap[String, (String, List[SyslType])]
   // Memoized resolved form of a named/derived/constrained alias. Plain transparent aliases
   // do not appear here — they resolve directly to their base.
   private val resolvedNamedTypes = new mutable.LinkedHashMap[String, SyslType]
@@ -216,7 +227,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case other => List(other)
     }
     (pre.toList, newBody)
-  private var currentReturnType: SyslType = VoidType
+  private var currentReturnType: SyslType = UnitType
 
   // Module-path name mangling: set from ModuleDeclAST during analyze()
   private var currentModule: Option[String] = None // e.g. "std_strings"
@@ -298,6 +309,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
    *  the names are stable per function. */
   private var variantCallCounter: Int = 0
 
+  /** Counter for closure params bound by `_` (discard). Each `_` slot gets a unique
+   *  synthetic name so multiple discards in the same param list don't collide and the
+   *  body's `_` falls through to the placeholder rule, not a var lookup.
+   */
+  private var discardParamCounter: Int = 0
+
   // Built-in binary operator → (trait name, method name). Extensible via #operator("sym") on trait methods.
   private val builtinBinaryOperatorTraits: Map[String, (String, String)] = Map(
     "<"  -> ("Ord", "lt"),  "<=" -> ("Ord", "le"),
@@ -349,26 +366,132 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         throw AnalysisError(s"#${attr.name} requires a non-empty string literal, e.g. #operator(\"~\")", at)
 
   // Trait / impl support
-  private case class TraitInfo(name: String, typeParam: String, methods: List[TraitMethodAST])
+  private case class TraitInfo(name: String, typeParams: List[String], methods: List[TraitMethodAST])
   private case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
+  /** A registered impl block — concrete or generic.
+   *
+   *  `targetPatterns` are TypeAST so generic impls can carry type variables (e.g. `Parser[X]`).
+   *  For concrete impls (`typeParams.isEmpty`), `resolvedConcrete` carries the resolved
+   *  SyslTypes — populated at registration time so dispatch sites can compare against
+   *  operand types without re-resolving on every call.
+   *
+   *  `methodASTs` carries the raw, un-analyzed impl method bodies; only generic impls need
+   *  this (concrete impls analyze their bodies once at registration into `methodInfos`).
+   *
+   *  `definingModule` is the module that declared the impl, used by the orphan rule
+   *  (Stage F.5) to gate cross-module impls.
+   */
+  private case class ImplTemplate(
+      typeParams: List[String],
+      targetPatterns: List[TypeAST],
+      resolvedConcrete: Option[List[SyslType]],
+      methods: mutable.LinkedHashMap[String, String], // methodName -> mangledFunName
+      methodInfos: List[ImplMethodInfo],
+      methodASTs: List[FunDeclAST],                   // raw impl bodies (generic impls only)
+      definingModule: String,
+      implDecl: Option[ImplDeclAST] = None,           // for source-defined impls; None when imported
+  )
   private val traits = new mutable.LinkedHashMap[String, TraitInfo]
-  // (traitName, targetType) -> (methodName -> mangledFunName)
-  private val impls = new mutable.LinkedHashMap[(String, SyslType), mutable.LinkedHashMap[String, String]]
-  // Methods to analyze (provided + synthesized defaults) keyed by (traitName, targetType)
-  private val implMethodInfos = new mutable.LinkedHashMap[(String, SyslType), List[ImplMethodInfo]]
+  // traitName -> list of registered impls (templates). Order is registration order.
+  private val implTemplates = new mutable.LinkedHashMap[String, mutable.ListBuffer[ImplTemplate]]
+
+  // Stage F.5 bookkeeping: which module defined each trait / named type. Populated as
+  // declarations are processed; consulted by the orphan rule at impl registration.
+  private val traitDefiningModule = new mutable.LinkedHashMap[String, String]
+  private val typeDefiningModule = new mutable.LinkedHashMap[String, String]
+
+  /** Concrete-impl lookup: find a registered impl whose first resolved target is exactly
+   *  `operandType` and which has no type params. Used by built-in trait method calls,
+   *  concrete operator dispatch, and generic-bound checks. */
+  private def findConcreteImpl(traitName: String, operandType: SyslType): Option[ImplTemplate] =
+    implTemplates.get(traitName).flatMap { ts =>
+      ts.find(t => t.typeParams.isEmpty && t.resolvedConcrete.flatMap(_.headOption).contains(operandType))
+    }
+
+  /** Iterate over all registered concrete impls (legacy shape) for cross-unit serialization
+   *  and similar bookkeeping that hasn't been generalized yet. */
+  private def concreteImpls: Iterator[(String, SyslType, mutable.LinkedHashMap[String, String])] =
+    implTemplates.iterator.flatMap { case (traitName, ts) =>
+      ts.iterator.collect {
+        case t if t.typeParams.isEmpty && t.resolvedConcrete.exists(_.length == 1) =>
+          (traitName, t.resolvedConcrete.get.head, t.methods)
+      }
+    }
+
+  /** Walk a TypeAST collecting every named-type reference (`NamedTypeAST` heads), used by
+   *  the orphan rule. Built-in scalar names (`int`, `i64`, `string`, …) are filtered out
+   *  by the caller via `typeDefiningModule.contains`. */
+  private def collectNamedTypeNames(t: TypeAST): Set[String] = t match
+    case NamedTypeAST(n, args)    => Set(n) ++ args.flatMap(collectNamedTypeNames)
+    case PtrTypeAST(i)            => collectNamedTypeNames(i)
+    case PtrNonNullTypeAST(i)     => collectNamedTypeNames(i)
+    case RefTypeAST(i)            => collectNamedTypeNames(i)
+    case ArrayTypeAST(_, e)       => collectNamedTypeNames(e)
+    case SliceTypeAST(e)          => collectNamedTypeNames(e)
+    case FuncTypeAST(ps, r, _, _) => ps.flatMap(collectNamedTypeNames).toSet ++ collectNamedTypeNames(r)
+    case TupleTypeAST(elems)      => elems.flatMap(collectNamedTypeNames).toSet
+
+  /** Stage F.5 — orphan rule. An impl is allowed iff this module owns the trait OR at
+   *  least one named type appearing in the impl's target patterns. Empty `currentModule`
+   *  (no `module` declaration) is treated as the implicit "root" module: orphan check
+   *  is bypassed since there is no other module to conflict with.
+   *
+   *  This deliberately does NOT recurse through generic-instance struct names — if the
+   *  user impls `Concat[Parser[Foo], Parser[Bar], Parser[(Foo, Bar)]]`, owning `Foo` or
+   *  `Bar` (or `Parser` or `Concat`) is sufficient.
+   */
+  private def checkOrphanRule(
+      traitName: String,
+      targetPatterns: List[TypeAST],
+      currentMod: String,
+      at: Any,
+  ): Unit =
+    if currentMod.isEmpty then return
+    val traitOwner = traitDefiningModule.getOrElse(traitName, "")
+    if traitOwner == currentMod then return
+    val allNames = targetPatterns.flatMap(collectNamedTypeNames).toSet
+    val ownsAnyNamedType = allNames.exists(n => typeDefiningModule.get(n).contains(currentMod))
+    if !ownsAnyNamedType then
+      throw AnalysisError(
+        s"orphan impl: module '$currentMod' defines neither trait '$traitName' nor any named type in the impl's target patterns",
+        at,
+      )
+
+  /** Stage F.5 — at-most-one coherence. Walk existing templates for `traitName`; reject
+   *  if the new template's operand patterns overlap with any existing template's. The
+   *  result-position pattern is functionally determined and excluded from the overlap
+   *  check (per the FD positional convention).
+   */
+  private def checkCoherence(
+      traitName: String,
+      newTemplate: ImplTemplate,
+      at: Any,
+  ): Unit =
+    val operandCount = math.min(2, newTemplate.targetPatterns.length)
+    val newOperands = newTemplate.targetPatterns.take(operandCount)
+    for existing <- implTemplates.getOrElse(traitName, Nil) do
+      val combinedTvars = (newTemplate.typeParams ++ existing.typeParams).toSet
+      val existingOperands = existing.targetPatterns.take(operandCount)
+      if patternsOverlap(newOperands, existingOperands, combinedTvars) then
+        throw AnalysisError(
+          s"impl of '$traitName' for [${newTemplate.targetPatterns.mkString(", ")}] overlaps with existing impl for [${existing.targetPatterns.mkString(", ")}]",
+          at,
+        )
   // When analyzing a synthesized default method body, rewrite unqualified calls
   // to sibling trait methods to their impl's mangled names
   private var traitCallRewrite: Map[String, String] = Map.empty
 
-  /** Get trait impl metadata for cross-unit serialization. */
+  /** Get trait impl metadata for cross-unit serialization. Currently only concrete
+   *  (non-generic, single-target) impls round-trip across units; generic impls (Stage F.5+)
+   *  will need an extended IMPL line format. */
   def getTraitImplMetas: List[TraitImplMeta] =
-    impls.map { case ((traitName, targetType), methodMap) =>
+    concreteImpls.map { case (traitName, targetType, methodMap) =>
       TraitImplMeta(traitName, targetType, methodMap.toMap)
     }.toList
 
   /** Get trait declaration AST nodes for serialization in TEMPLATES section. */
   def getTraitDecls: List[TraitDeclAST] =
-    traits.values.map(t => TraitDeclAST(t.name, t.typeParam, t.methods)).toList
+    traits.values.map(t => TraitDeclAST(t.name, t.typeParams, t.methods)).toList
 
   /** Get generic enum instance mappings for cross-module type inference. */
   def getGenericEnumInstances: List[GenericEnumInstanceMeta] =
@@ -395,19 +518,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
   private val builtinFunctions = Map(
     "putchar" -> FunInfo("putchar", List("c" -> U32), U32),
-    "print" -> FunInfo("print", List("n" -> I32), VoidType),
-    "println" -> FunInfo("println", List("n" -> I32), VoidType),
-    "puts" -> FunInfo("puts", List("s" -> StringType), VoidType),
-    "puti" -> FunInfo("puti", List("n" -> I32), VoidType),
+    "print" -> FunInfo("print", List("n" -> I32), UnitType),
+    "println" -> FunInfo("println", List("n" -> I32), UnitType),
+    "puts" -> FunInfo("puts", List("s" -> StringType), UnitType),
+    "puti" -> FunInfo("puti", List("n" -> I32), UnitType),
     "malloc" -> FunInfo("malloc", List("size" -> I64), PtrType(I8)),
-    "free" -> FunInfo("free", List("ptr" -> PtrType(I8)), VoidType),
+    "free" -> FunInfo("free", List("ptr" -> PtrType(I8)), UnitType),
     "calloc" -> FunInfo("calloc", List("count" -> I64, "size" -> I64), PtrType(I8)),
     "realloc" -> FunInfo("realloc", List("ptr" -> PtrType(I8), "size" -> I64), PtrType(I8)),
     "sbrk" -> FunInfo("sbrk", List("increment" -> I32), PtrType(I8)),
-    "abort" -> FunInfo("abort", Nil, VoidType),
-    "panic" -> FunInfo("panic", List("msg" -> StringType), VoidType),
-    "assert" -> FunInfo("assert", List("cond" -> BoolType, "msg" -> StringType), VoidType),
-    "expect" -> FunInfo("expect", List("actual" -> I64, "expected" -> I64, "msg" -> StringType), VoidType),
+    "abort" -> FunInfo("abort", Nil, UnitType),
+    "panic" -> FunInfo("panic", List("msg" -> StringType), UnitType),
+    "assert" -> FunInfo("assert", List("cond" -> BoolType, "msg" -> StringType), UnitType),
+    "expect" -> FunInfo("expect", List("actual" -> I64, "expected" -> I64, "msg" -> StringType), UnitType),
   )
 
   def registerImport(meta: ModuleMeta, selectors: List[ImportSelector] = List(WildcardImport), modulePath: String = ""): Unit =
@@ -479,13 +602,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if reads.isDefined || writes.isDefined then
               resolvedEffectsCache(sym.name) = (reads.getOrElse(Set.empty), writes.getOrElse(Set.empty))
             externalSymbols += localKey
-        case SymbolMeta.Kind.Data(dataType) =>
+        case SymbolMeta.Kind.Data(dataType, isMutable) =>
           if globalScope.contains(localKey) then
             val existing = globalScope(localKey)
             if !sym.isExtern && existing.name != sym.name then
               throw AnalysisError(s"imported symbol '$localKey' conflicts with existing global")
           else
-            globalScope(localKey) = SymInfo(sym.name, dataType, mutable = false)
+            globalScope(localKey) = SymInfo(sym.name, dataType, mutable = isMutable)
             externalSymbols += localKey
         case SymbolMeta.Kind.Const(constType, value) =>
           // Cross-file `const`: register in globalScope (so VarRef name resolution
@@ -527,13 +650,30 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               for ((vname, _), idx) <- et.variants.zipWithIndex do
                 variantToEnum(vname) = (et, idx)
         case SymbolMeta.Kind.Impl(traitName, targetType, methods) =>
-          val key = (traitName, targetType)
-          if !impls.contains(key) then
-            impls(key) = mutable.LinkedHashMap.from(methods)
+          if findConcreteImpl(traitName, targetType).isEmpty then
+            val mm = mutable.LinkedHashMap.from(methods)
+            implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) +=
+              ImplTemplate(
+                typeParams = Nil,
+                targetPatterns = List(syslTypeToAST(targetType)),
+                resolvedConcrete = Some(List(targetType)),
+                methods = mm,
+                methodInfos = Nil,
+                methodASTs = Nil,
+                definingModule = "",   // imported impls — orphan check skipped on import
+              )
 
-    // Register generic templates from imported module (needed for cross-module generic instantiation)
+    // Register generic templates from imported module (needed for cross-module generic instantiation).
+    // Selective imports (`import std.option.{Option, Some, None}`) must filter generic templates
+    // by selector — otherwise generic functions like `std.option.expect[T]` leak into scope and
+    // shadow the testing-builtin `expect` (or whatever else the user wants to use). Wildcard
+    // imports register everything as before.
+    val genericTemplateFilter: Option[Set[String]] = selectors match
+      case List(WildcardImport) => None
+      case named =>
+        Some(named.collect { case NamedImport(n, _) => n }.toSet)
     if meta.genericTemplates.nonEmpty then
-      registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates))
+      registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates), genericTemplateFilter)
 
     // Register generic enum instance mappings for cross-module type inference
     for inst <- meta.genericEnumInstances do
@@ -543,17 +683,26 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     // Register trait declarations from imported templates
     for template <- meta.genericTemplates do
       template match
-        case TraitDeclAST(name, tparam, methods, _) =>
+        case TraitDeclAST(name, tparams, methods, _) =>
           if !traits.contains(name) then
-            traits(name) = TraitInfo(name, tparam, methods)
+            traits(name) = TraitInfo(name, tparams, methods)
             registerTraitOperatorEntries(name, methods, template)
         case _ =>
 
     // Register trait impl mappings from imported module
     for impl <- meta.traitImpls do
-      val key = (impl.traitName, impl.targetType)
-      if !impls.contains(key) then
-        impls(key) = mutable.LinkedHashMap.from(impl.methods)
+      if findConcreteImpl(impl.traitName, impl.targetType).isEmpty then
+        val mm = mutable.LinkedHashMap.from(impl.methods)
+        implTemplates.getOrElseUpdate(impl.traitName, mutable.ListBuffer.empty) +=
+          ImplTemplate(
+            typeParams = Nil,
+            targetPatterns = List(syslTypeToAST(impl.targetType)),
+            resolvedConcrete = Some(List(impl.targetType)),
+            methods = mm,
+            methodInfos = Nil,
+            methodASTs = Nil,
+            definingModule = "",
+          )
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
@@ -576,7 +725,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case "u64" => Some(SyslType.U64)
         case "bool" => Some(SyslType.BoolType)
         case "string" => Some(SyslType.StringType)
-        case "void" => Some(SyslType.VoidType)
+        case "unit" => Some(SyslType.UnitType)
         case "f32" | "float" => Some(SyslType.F32)
         case "f64" | "double" => Some(SyslType.F64)
         case _ => None
@@ -593,11 +742,27 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         }
 
   /** Generic templates are omitted from `ModuleMeta` / typed `TProgram`; same-package siblings need the raw AST templates to resolve calls like `alt(...)`. */
-  def registerGenericTemplatesFrom(program: ProgramAST): Unit =
+  /** Register generic templates (functions, structs, data enums) for the current
+   *  unit or for a cross-module import. When `filter` is `None` (wildcard / own
+   *  module), every template is registered.
+   *
+   *  When `filter` is `Some(set)`, only **functions** whose name is in the set are
+   *  registered — this is what makes selective imports actually selective for
+   *  generic functions, which is where shadowing bugs surface (the canonical
+   *  case: `import std.option.{Option, Some, None}` should NOT pull in the
+   *  generic `expect[T]`). Generic structs / data enums are still registered
+   *  unconditionally because their names appear in user-written types and the
+   *  analyzer needs them resolvable; the symbol-table import path already
+   *  filters them through publicSymbols. */
+  def registerGenericTemplatesFrom(
+      program: ProgramAST,
+      filter: Option[Set[String]] = None,
+  ): Unit =
+    def funcSelected(name: String): Boolean = filter.forall(_.contains(name))
     for decl <- program.decls do
       decl match
         case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _) if tps.nonEmpty =>
-          if !genericTemplates.contains(name) && !functions.contains(name) then
+          if funcSelected(name) && !genericTemplates.contains(name) && !functions.contains(name) then
             genericTemplates(name) = fd
         case sd @ StructDeclAST(name, _, tps, _, _) if tps.nonEmpty =>
           if !genericStructs.contains(name) then
@@ -643,6 +808,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case ModuleDeclAST(path) =>
           currentModule = Some(path.mkString("_"))
         case _ =>
+
+    // Stage F.5 — record locally-defined types for the orphan rule. Done eagerly so the
+    // impl-registration pass can consult these maps without ordering surprises.
+    val curMod = currentModule.getOrElse("")
+    if curMod.nonEmpty then
+      for decl <- program.decls do
+        decl match
+          case StructDeclAST(name, _, _, _, _)        => typeDefiningModule(name) = curMod
+          case DataEnumDeclAST(name, _, _, _)         => typeDefiningModule(name) = curMod
+          case EnumDeclAST(name, _, _)                => typeDefiningModule(name) = curMod
+          case InterfaceDeclAST(name, _, _, _)        => typeDefiningModule(name) = curMod
+          case TypeAliasDeclAST(name, _, _, _, _, _, _) => typeDefiningModule(name) = curMod
+          case TraitDeclAST(name, _, _, _)            => traitDefiningModule(name) = curMod
+          case _ => ()
 
     // Pass 0.5: resolve struct and data-enum FIELDS before any function signature.
     // Functions declared before their referenced structs/enums would otherwise capture
@@ -693,7 +872,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         case ExternFuncDeclAST(name, params, returnType, _) =>
           if !functions.contains(name) && !builtinFunctions.contains(name) then
             val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
-            val retType = returnType.map(resolveType).getOrElse(VoidType)
+            val retType = returnType.map(resolveType).getOrElse(UnitType)
             functions(name) = FunInfo(name, paramTypes, retType)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
@@ -759,7 +938,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               (p.name, sigType)
             }
             val paramModes = params.map(_.mode)
-            val retType = returnType.map(resolveType).getOrElse(VoidType)
+            val retType = returnType.map(resolveType).getOrElse(UnitType)
             if functions.contains(name) || genericTemplates.contains(name) then
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
@@ -852,18 +1031,24 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           if typeAliases.contains(name) || genericTypeAliases.contains(name) then
             throw AnalysisError(s"duplicate type alias: '$name'", decl)
           if tparams.nonEmpty then
-            if isNew || range.nonEmpty || predicate.nonEmpty then
-              throw AnalysisError(s"generic type aliases cannot use 'new', 'within', or 'where': '$name'", decl)
-            genericTypeAliases(name) = (tparams, target)
+            // `within` and `where` need scalar ordering / operations on T; both are
+            // unavailable on a bare type parameter without trait bounds. `new` does NOT
+            // need either — it's just nominal identity per instantiation, fully supported
+            // by the existing monomorphization machinery.
+            if range.nonEmpty || predicate.nonEmpty then
+              throw AnalysisError(s"generic type aliases cannot use 'within' or 'where': '$name'", decl)
+            genericTypeAliases(name) = (tparams, target, isNew)
           else
             typeAliases(name) = (target, isNew, range, predicate)
-        case TraitDeclAST(name, tparam, methods, _) =>
+        case TraitDeclAST(name, tparams, methods, _) =>
           if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
           // Check no duplicate method names within the trait
           val methodNames = methods.map(_.name)
           if methodNames.distinct.length != methodNames.length then
             throw AnalysisError(s"duplicate method names in trait '$name'")
-          traits(name) = TraitInfo(name, tparam, methods)
+          if tparams.distinct.length != tparams.length then
+            throw AnalysisError(s"duplicate type parameter names in trait '$name'")
+          traits(name) = TraitInfo(name, tparams, methods)
           registerTraitOperatorEntries(name, methods, decl)
         case InterfaceDeclAST(name, methodASTs, embeddedNames, _) =>
           if interfaceTypes.contains(name) then throw AnalysisError(s"duplicate interface: '$name'", decl)
@@ -892,7 +1077,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           if names.distinct.length != names.length then
             throw AnalysisError(s"duplicate method names in interface '$name'")
           interfaceTypes(name) = SyslType.InterfaceType(name, allMethods)
-        case ImplDeclAST(_, _, _, _) =>
+        case _: ImplDeclAST =>
           // Deferred to registerImpls after all traits are known
           ()
         case VarDeclAST(name, _, _, _, isMutable, attrs, _, isConst) =>
@@ -905,7 +1090,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           // and `isConst`) are set correctly from the AST here.
           val mangled = if shouldMangle(name) then mangleName(name) else name
           val isGhost = attrs.exists(_.name == "ghost")
-          globalScope(name) = SymInfo(mangled, SyslType.VoidType, isMutable, isConst = isConst, isGhost = isGhost)
+          globalScope(name) = SymInfo(mangled, SyslType.UnitType, isMutable, isConst = isConst, isGhost = isGhost)
         case _: StaticAssertDeclAST => // evaluated in pass 2
         case _ => // other decls (e.g. CondDeclAST) handled elsewhere
 
@@ -940,55 +1125,92 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do
       decl match
-        case ImplDeclAST(traitName, targetType, methods, _) =>
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _) =>
           val trait_ = traits.getOrElse(traitName,
             throw AnalysisError(s"impl references unknown trait '$traitName'", decl))
-          val resolvedTarget = resolveType(targetType)
-          if impls.contains((traitName, resolvedTarget)) then
-            throw AnalysisError(s"duplicate impl: trait '$traitName' already implemented for ${resolvedTarget}")
+          if targetTypes.length != trait_.typeParams.length then
+            throw AnalysisError(s"impl of '$traitName' has ${targetTypes.length} target type(s) but the trait has ${trait_.typeParams.length} type parameter(s)", decl)
           // Check required methods are all provided
           val providedNames = methods.map(_.name).toSet
           val missing = trait_.methods.filter(m => m.body.isEmpty && !providedNames.contains(m.name))
           if missing.nonEmpty then
-            throw AnalysisError(s"impl ${traitName}[$resolvedTarget] missing required method(s): ${missing.map(_.name).mkString(", ")}")
+            throw AnalysisError(s"impl ${traitName}[${targetTypes.mkString(", ")}] missing required method(s): ${missing.map(_.name).mkString(", ")}")
           // Check each impl method exists in trait
           for m <- methods do
             if !trait_.methods.exists(_.name == m.name) then
               throw AnalysisError(s"impl method '${m.name}' is not declared in trait '$traitName'")
-          // Register mangled functions for both provided methods and synthesized defaults
-          val methodMap = mutable.LinkedHashMap.empty[String, String]
-          val infos = mutable.ListBuffer.empty[ImplMethodInfo]
-          val typeMangled = typeToMangled(resolvedTarget)
-          val savedEnv = typeEnv
-          typeEnv = Map(trait_.typeParam -> resolvedTarget)
-          try
-            for traitMethod <- trait_.methods do
-              val rawMangled = s"${traitName}_${traitMethod.name}_${typeMangled}"
-              val mangled = if shouldMangle(rawMangled) then mangleName(rawMangled) else rawMangled
-              if functions.contains(mangled) then
-                throw AnalysisError(s"impl method collides with existing function '$mangled'")
-              val expectedParams = traitMethod.params.map(p => (p.name, resolveType(p.typ)))
-              val expectedRet = resolveType(traitMethod.returnType)
-              val providedOpt = methods.find(_.name == traitMethod.name)
-              val (paramTypes, retType, body, synthesized) = providedOpt match
-                case Some(implMethod) =>
-                  val pTypes = implMethod.params.map(p => (p.name, resolveType(p.typ)))
-                  val r = implMethod.returnType.map(resolveType).getOrElse(VoidType)
-                  // Verify signature matches trait
-                  if pTypes.map(_._2) != expectedParams.map(_._2) then
-                    throw AnalysisError(s"impl method '${implMethod.name}' parameter types don't match trait: expected ${expectedParams.map(_._2).mkString("(", ", ", ")")}, got ${pTypes.map(_._2).mkString("(", ", ", ")")}")
-                  if r != expectedRet then
-                    throw AnalysisError(s"impl method '${implMethod.name}' return type doesn't match trait: expected $expectedRet, got $r")
-                  (pTypes, r, implMethod.body, false)
-                case None =>
-                  // Synthesized default — body comes from the trait (we checked it's Some above)
-                  (expectedParams, expectedRet, traitMethod.body.get, true)
-              functions(mangled) = FunInfo(mangled, paramTypes, retType)
-              methodMap(traitMethod.name) = mangled
-              infos += ImplMethodInfo(mangled, paramTypes, retType, body, isSynthesized = synthesized)
-          finally typeEnv = savedEnv
-          impls((traitName, resolvedTarget)) = methodMap
-          implMethodInfos((traitName, resolvedTarget)) = infos.toList
+          if implTypeParams.nonEmpty then
+            // Generic impl: defer signature checking + mangling to specialization time.
+            // Every declared impl tvar must appear in at least one target pattern,
+            // otherwise it's never bindable at dispatch time and the impl can't match
+            // anything — fail fast with a clear diagnostic.
+            val patternTvars = targetTypes.flatMap(collectNamedTypeNames).toSet
+            val unused = implTypeParams.filterNot(patternTvars.contains)
+            if unused.nonEmpty then
+              throw AnalysisError(s"impl of '$traitName' declares unused type parameter(s) ${unused.mkString(", ")} (must appear in target patterns)", decl)
+            // Coherence check (Stage F.5) walks here before we add to implTemplates.
+            val newTemplate = ImplTemplate(
+              typeParams = implTypeParams,
+              targetPatterns = targetTypes,
+              resolvedConcrete = None,
+              methods = mutable.LinkedHashMap.empty,
+              methodInfos = Nil,
+              methodASTs = methods,
+              definingModule = currentModule.getOrElse(""),
+              implDecl = Some(impl),
+            )
+            checkOrphanRule(traitName, targetTypes, currentModule.getOrElse(""), decl)
+            checkCoherence(traitName, newTemplate, decl)
+            implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += newTemplate
+          else
+            // Concrete impl: resolve targets, register one mangled function per trait method.
+            val resolvedTargets = targetTypes.map(resolveType)
+            if findConcreteImpl(traitName, resolvedTargets.head).exists(t =>
+                t.resolvedConcrete.contains(resolvedTargets)) then
+              throw AnalysisError(s"duplicate impl: trait '$traitName' already implemented for ${resolvedTargets.mkString(", ")}", decl)
+            // Mangle suffix: join all resolved targets with `_` so multi-param impls don't collide
+            val typeMangled = resolvedTargets.map(typeToMangled).mkString("_")
+            val methodMap = mutable.LinkedHashMap.empty[String, String]
+            val infos = mutable.ListBuffer.empty[ImplMethodInfo]
+            val savedEnv = typeEnv
+            typeEnv = trait_.typeParams.zip(resolvedTargets).toMap
+            try
+              for traitMethod <- trait_.methods do
+                val rawMangled = s"${traitName}_${traitMethod.name}_${typeMangled}"
+                val mangled = if shouldMangle(rawMangled) then mangleName(rawMangled) else rawMangled
+                if functions.contains(mangled) then
+                  throw AnalysisError(s"impl method collides with existing function '$mangled'", decl)
+                val expectedParams = traitMethod.params.map(p => (p.name, resolveType(p.typ)))
+                val expectedRet = resolveType(traitMethod.returnType)
+                val providedOpt = methods.find(_.name == traitMethod.name)
+                val (paramTypes, retType, body, synthesized) = providedOpt match
+                  case Some(implMethod) =>
+                    val pTypes = implMethod.params.map(p => (p.name, resolveType(p.typ)))
+                    val r = implMethod.returnType.map(resolveType).getOrElse(UnitType)
+                    if pTypes.map(_._2) != expectedParams.map(_._2) then
+                      throw AnalysisError(s"impl method '${implMethod.name}' parameter types don't match trait: expected ${expectedParams.map(_._2).mkString("(", ", ", ")")}, got ${pTypes.map(_._2).mkString("(", ", ", ")")}", decl)
+                    if r != expectedRet then
+                      throw AnalysisError(s"impl method '${implMethod.name}' return type doesn't match trait: expected $expectedRet, got $r", decl)
+                    (pTypes, r, implMethod.body, false)
+                  case None =>
+                    (expectedParams, expectedRet, traitMethod.body.get, true)
+                functions(mangled) = FunInfo(mangled, paramTypes, retType)
+                methodMap(traitMethod.name) = mangled
+                infos += ImplMethodInfo(mangled, paramTypes, retType, body, isSynthesized = synthesized)
+            finally typeEnv = savedEnv
+            val newTemplate = ImplTemplate(
+              typeParams = Nil,
+              targetPatterns = targetTypes,
+              resolvedConcrete = Some(resolvedTargets),
+              methods = methodMap,
+              methodInfos = infos.toList,
+              methodASTs = Nil,
+              definingModule = currentModule.getOrElse(""),
+              implDecl = Some(impl),
+            )
+            checkOrphanRule(traitName, targetTypes, currentModule.getOrElse(""), decl)
+            checkCoherence(traitName, newTemplate, decl)
+            implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += newTemplate
         case _ =>
 
     // Second pass: produce typed AST (skip generic templates; they're instantiated on demand)
@@ -1098,7 +1320,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case ExternFuncDeclAST(name, params, returnType, _) =>
         val paramTypes = params.map(p => resolveType(p.typ))
-        val retType = returnType.map(resolveType).getOrElse(VoidType)
+        val retType = returnType.map(resolveType).getOrElse(UnitType)
         TExternFuncDecl(name, paramTypes, retType)
 
       case ExternVarDeclAST(name, typ, _) =>
@@ -1116,7 +1338,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         TDataEnumDecl(name, dataEnumTypes(name))
 
       case TypeAliasDeclAST(name, _, tparams, _, _, _, _) =>
-        if tparams.nonEmpty then TTypeAliasDecl(name, VoidType) // generic alias: type-only, no codegen
+        if tparams.nonEmpty then TTypeAliasDecl(name, UnitType) // generic alias: type-only, no codegen
         else TTypeAliasDecl(name, resolveType(NamedTypeAST(name))) // force resolution (and range validation)
 
       case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs, _) =>
@@ -1160,21 +1382,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           if paramName == "__self__" then
             currentScope("self") = SymInfo(paramName, bodyType, true, autoIndirect = autoInd)
         val savedExp = currentExpected
-        currentExpected = if funInfo.returnType == VoidType then None else Some(funInfo.returnType)
+        currentExpected = if funInfo.returnType == UnitType then None else Some(funInfo.returnType)
         val tBody = try body match
           case ExprBodyAST(expr) =>
             val tExpr = analyzeExpr(expr)
             // Apply return-type range check for expression-body functions.
-            val checked = if funInfo.returnType != VoidType then applyTargetType(tExpr, funInfo.returnType) else tExpr
+            val checked = if funInfo.returnType != UnitType then applyTargetType(tExpr, funInfo.returnType) else tExpr
             TExprBody(checked)
           case BlockBodyAST(stmts, contracts) =>
             analyzeBlockWithContracts(stmts, contracts, funInfo.returnType, funInfo.name, funInfo.params.map(_._1))
         finally currentExpected = savedExp
         // For def functions with no explicit return type, infer from body
-        val retType = if funInfo.isDef && funInfo.returnType == VoidType then
+        val retType = if funInfo.isDef && funInfo.returnType == UnitType then
           val inferred = tBody match
             case TExprBody(expr) => expr.typ
-            case _ => VoidType
+            case _ => UnitType
           // Update FunInfo so other references see the correct type
           functions(name) = funInfo.copy(returnType = inferred)
           inferred
@@ -1259,7 +1481,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     // via compileTimeConstants lookup during VarRef analysis. The value is also carried on
     // the typed decl so cross-file ModuleMeta serialization can publish it to sibling files.
     if isConst then TConstDecl(mangledVarName, declType, compileTimeConstants(mangledVarName))
-    else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile, isGhost = isGhost)
+    else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile, isGhost = isGhost, isMutable = isMutable)
 
   private def warnDeprecated(name: String): Unit =
     if deprecations.contains(name) && !warnedDeprecations.contains(name) then
@@ -1301,7 +1523,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case None    => false // unknown: conservative reject
 
     def checkExpr(e: TExpr): Unit = e match
-      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TUnitLit => ()
       case _: TVarRef | _: TAddrOf | _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl => ()
       case TArrayLit(els, _)               => els.foreach(checkExpr)
       case TAddrOfIndex(a, i, _)           => checkExpr(a); checkExpr(i)
@@ -1521,7 +1743,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           reject(s"writes to global '$name' not declared in #writes")
 
     def checkExpr(e: TExpr): Unit = e match
-      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TUnitLit => ()
       case TVarRef(name, _)                => checkRead(name)
       case TAddrOf(name, _)                => checkRead(name)
       case _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl => ()
@@ -1726,7 +1948,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     def checkExpr(e: TExpr): Unit =
       if bailed then return
       e match
-        case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit => ()
+        case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TUnitLit => ()
         case _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl | _: TStructLit | _: TEnumConstruct => ()
         case TVarRef(n, _) => mutableGlobal(n).foreach(reads += _)
         case TAddrOf(n, _) => mutableGlobal(n).foreach(reads += _)
@@ -1926,7 +2148,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       globalScope.values.exists(s => s.name == name && !s.isGhost && s.mutable && !s.isConst)
 
     def checkExpr(e: TExpr, ghostCtx: Boolean): Unit = e match
-      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TArrayDecl => ()
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TUnitLit | _: TStringLit | _: TArrayDecl => ()
       case _: TAddrLit | _: TFuncRef | _: TSizeof | _: TStructLit | _: TEnumConstruct => ()
       case _: TPreInc | _: TPreDec | _: TPostInc | _: TPostDec => ()
       case TVarRef(name, _) =>
@@ -2065,7 +2287,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case Some(attr) =>
         if fd.params.nonEmpty then
           throw AnalysisError(s"#test function '${fd.name}' must take zero parameters", fd)
-        if info.returnType != VoidType then
+        if info.returnType != UnitType then
           throw AnalysisError(s"#test function '${fd.name}' must return unit", fd)
         if fd.typeParams.nonEmpty then
           throw AnalysisError(s"#test function '${fd.name}' cannot be generic", fd)
@@ -2078,14 +2300,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case NamedTypeAST(name, typeArgs) if typeArgs.nonEmpty =>
       val resolved = typeArgs.map(resolveType)
       if genericTypeAliases.contains(name) then
-        val (tparams, target) = genericTypeAliases(name)
+        val (tparams, target, isNew) = genericTypeAliases(name)
         if resolved.length != tparams.length then
           throw AnalysisError(s"type alias '$name' expects ${tparams.length} type argument(s), got ${resolved.length}")
-        val savedEnv = typeEnv
-        typeEnv = typeEnv ++ tparams.zip(resolved).toMap
-        val result = resolveType(target)
-        typeEnv = savedEnv
-        result
+        if isNew then instantiateGenericNominalAlias(name, tparams, target, resolved)
+        else
+          val savedEnv = typeEnv
+          typeEnv = typeEnv ++ tparams.zip(resolved).toMap
+          val result = resolveType(target)
+          typeEnv = savedEnv
+          result
       else if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
       else if genericEnums.contains(name) then instantiateGenericEnum(name, resolved)
       else throw AnalysisError(s"'$name' is not a generic type")
@@ -2103,7 +2327,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case "short" | "i16"  => I16
       case "ushort" | "u16"  => U16
       case "bool" => BoolType
-      case "void" => VoidType
+      case "unit" => UnitType
       case "string" => StringType
       case name if typeAliases.contains(name) =>
         resolvedNamedTypes.getOrElseUpdate(name, {
@@ -2534,9 +2758,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   private def latestStruct(st: SyslType.StructType): SyslType.StructType =
     structTypes.getOrElse(st.name, st)
 
-  /** Convert an expression AST to a type AST (for explicit type args parsed as index expressions). */
+  /** Convert an expression AST to a type AST (for explicit type args parsed as index expressions).
+   *  The expression-position grammar parses generic type args as expressions, so this maps
+   *  the relevant shapes back to types: `A` (VarRef), `Parser[A]` (Index of VarRef),
+   *  `(A, B)` (TupleLit), and `[]A` / `[5]A` (TypeRefExprAST wrappers emitted by the parser
+   *  for slice / array type literals appearing in expression position). */
   private def exprToTypeAST(expr: ExpressionAST): TypeAST = expr match
+    case TypeRefExprAST(t) => t
     case VarRefAST(name) => NamedTypeAST(name)
+    case TupleLitAST(elems) => TupleTypeAST(elems.map(exprToTypeAST))
+    case IndexAST(VarRefAST(name), arg) => NamedTypeAST(name, List(exprToTypeAST(arg)))
+    // Zero-param fn type: `() -> R` is greedy-parsed by closureExpr's
+    // `"(" ~ ")" ~ "->" ~> closureBody` form, so it arrives as a ClosureAST(Nil, body).
+    // Lift it back into a FuncTypeAST when the body is a type-shaped expression.
+    // Multi-param fn types (`(P, ...) -> R`) come through funcTypeRef as TypeRefExprAST.
+    case ClosureAST(Nil, ExprBodyAST(retExpr)) =>
+      FuncTypeAST(Nil, exprToTypeAST(retExpr))
     case _ => throw AnalysisError(s"expected type argument, got expression")
 
   /** Look up a method function by struct name and method name, trying both unmangled and mangled forms. */
@@ -2820,7 +3057,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case BoolType        => "bool"
     case FloatType(w)    => s"f$w"
     case StringType      => "string"
-    case VoidType        => "void"
+    case UnitType        => "unit"
     case PtrType(i)      => "ptr" + typeToMangled(i)
     case RefType(i)      => "ref" + typeToMangled(i)
     case ArrayType(e, n) => s"arr${n}${typeToMangled(e)}"
@@ -2834,6 +3071,109 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   private def mangleGenericName(base: String, typeArgs: List[SyslType]): String =
     base + "_" + typeArgs.map(typeToMangled).mkString("_")
 
+  /** Inverse-ish of `resolveType`: lift a fully-resolved SyslType back into a TypeAST that
+   *  re-resolves to the same type. Used when storing impl `targetPatterns` for cross-unit
+   *  imports (their patterns arrive as SyslTypes; the unifier consumes TypeASTs).
+   *
+   *  This is a structural lift — it does not preserve the original surface syntax (e.g.
+   *  generic-instance struct names are emitted as `NamedTypeAST(mangledName, Nil)`, not as
+   *  `NamedTypeAST(base, args)` — both resolve to the same StructType because the mangled
+   *  name is already registered in `structTypes`).
+   */
+  private def syslTypeToAST(t: SyslType): TypeAST = t match
+    case IntType(8)        => NamedTypeAST("i8", Nil)
+    case IntType(16)       => NamedTypeAST("i16", Nil)
+    case IntType(32)       => NamedTypeAST("i32", Nil)
+    case IntType(64)       => NamedTypeAST("i64", Nil)
+    case UIntType(8)       => NamedTypeAST("u8", Nil)
+    case UIntType(16)      => NamedTypeAST("u16", Nil)
+    case UIntType(32)      => NamedTypeAST("u32", Nil)
+    case UIntType(64)      => NamedTypeAST("u64", Nil)
+    case BoolType          => NamedTypeAST("bool", Nil)
+    case FloatType(32)     => NamedTypeAST("f32", Nil)
+    case FloatType(64)     => NamedTypeAST("f64", Nil)
+    case FloatType(w)      => NamedTypeAST(s"f$w", Nil)
+    case IntType(w)        => NamedTypeAST(s"i$w", Nil)
+    case UIntType(w)       => NamedTypeAST(s"u$w", Nil)
+    case StringType        => NamedTypeAST("string", Nil)
+    case UnitType          => NamedTypeAST("unit", Nil)
+    case PtrType(i)        => PtrTypeAST(syslTypeToAST(i))
+    case RefType(i)        => RefTypeAST(syslTypeToAST(i))
+    case ArrayType(e, n)   => ArrayTypeAST(n, syslTypeToAST(e))
+    case SliceType(e)      => SliceTypeAST(syslTypeToAST(e))
+    case FuncType(ps, r, esc, eff) =>
+      FuncTypeAST(ps.map(syslTypeToAST), syslTypeToAST(r), esc, eff)
+    case StructType(n, _, _)        => NamedTypeAST(n, Nil)
+    case EnumType(n, _)             => NamedTypeAST(n, Nil)
+    case InterfaceType(n, _)        => NamedTypeAST(n, Nil)
+    case NamedType(n, _, _, _, _)   => NamedTypeAST(n, Nil)
+
+  /** Least upper bound of two effect signatures under the effect lattice
+   *  (`Pure ≤ RW(R, W) ≤ Unknown`, with `RW` ordered by subset on its sets).
+   *  Returns `None` when the two are incomparable — i.e., both are `RW` but
+   *  neither's read/write sets are a subset of the other's. The LUB is the
+   *  *less-specific* (larger, higher) of the two when comparable, so the
+   *  merged binding is wide enough that **both** original observations flow
+   *  into it as actuals via `effectsSatisfy`. (Picking the smaller — the GLB —
+   *  would let the merge succeed but make the larger observation fail
+   *  `checkArgs` immediately afterwards.)
+   */
+  private def lubEffect(e1: FuncEffects, e2: FuncEffects): Option[FuncEffects] =
+    if e1 == e2 then Some(e1)
+    else if e1.isUnknown || e2.isUnknown then Some(FuncEffects.Unknown)
+    else if e1.isPure then Some(e2)
+    else if e2.isPure then Some(e1)
+    else
+      val r1 = e1.reads.getOrElse(Set.empty)
+      val w1 = e1.writes.getOrElse(Set.empty)
+      val r2 = e2.reads.getOrElse(Set.empty)
+      val w2 = e2.writes.getOrElse(Set.empty)
+      if r1.subsetOf(r2) && w1.subsetOf(w2) then Some(e2)
+      else if r2.subsetOf(r1) && w2.subsetOf(w1) then Some(e1)
+      else None
+
+  /** Merge two concrete-type observations of the same generic type variable,
+   *  taking the lattice LUB on `FuncType` effects rather than demanding
+   *  structural equality. Recurses through container types (slice / array /
+   *  ptr / ref / struct / named) so an embedded `FuncType` anywhere in the
+   *  shape uses the lattice. Returns `None` when the two types are
+   *  structurally incompatible or carry incomparable effect annotations.
+   *
+   *  This is the inference-engine analogue of `latticeEqual`: that one decides
+   *  *whether* a single observation flows into a slot; this one decides *what*
+   *  binding to pick when several observations of the same type variable
+   *  appear at different use sites. The merged binding is wide enough that
+   *  every original observation still satisfies it as a slot.
+   */
+  private def mergeBindings(t1: SyslType, t2: SyslType): Option[SyslType] =
+    if t1 == t2 then Some(t1)
+    else
+      (t1, t2) match
+        case (FuncType(p1, r1, esc1, eff1), FuncType(p2, r2, _, eff2)) if p1.length == p2.length =>
+          val mergedParams = p1.zip(p2).map((a, b) => mergeBindings(a, b))
+          if mergedParams.exists(_.isEmpty) then None
+          else
+            mergeBindings(r1, r2).flatMap { mr =>
+              lubEffect(eff1, eff2).map { eff =>
+                FuncType(mergedParams.map(_.get), mr, esc1, eff)
+              }
+            }
+        case (SliceType(a), SliceType(b)) => mergeBindings(a, b).map(SliceType.apply)
+        case (ArrayType(a, n1), ArrayType(b, n2)) if n1 == n2 =>
+          mergeBindings(a, b).map(ArrayType(_, n1))
+        case (PtrType(a), PtrType(b)) => mergeBindings(a, b).map(PtrType.apply)
+        case (RefType(a), RefType(b)) => mergeBindings(a, b).map(RefType.apply)
+        case (StructType(n1, f1, v1), StructType(n2, f2, v2))
+            if n1 == n2 && v1 == v2 && f1.length == f2.length &&
+              f1.zip(f2).forall { case ((fn1, _), (fn2, _)) => fn1 == fn2 } =>
+          val merged = f1.zip(f2).map { case ((fn, ft1), (_, ft2)) => mergeBindings(ft1, ft2).map((fn, _)) }
+          if merged.exists(_.isEmpty) then None
+          else Some(StructType(n1, merged.map(_.get), v1))
+        case (NamedType(n1, u1, nom1, ro1, pr1), NamedType(n2, u2, nom2, ro2, pr2))
+            if n1 == n2 && nom1 == nom2 && ro1 == ro2 && pr1 == pr2 =>
+          mergeBindings(u1, u2).map(NamedType(n1, _, nom1, ro1, pr1))
+        case _ => None
+
   // Unify a parameter TypeAST (which may contain type variables) against a concrete SyslType,
   // recording type variable bindings. Returns true if unification succeeded structurally.
   private def unifyTypes(param: TypeAST, arg: SyslType, typeParams: Set[String], env: mutable.Map[String, SyslType]): Unit =
@@ -2842,7 +3182,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         env.get(name) match
           case Some(existing) if existing == arg => ()
           case Some(existing) =>
-            throw AnalysisError(s"cannot infer type parameter '$name': seen both $existing and $arg")
+            // Lattice merge: two concrete observations of the same type variable
+            // are compatible iff one is ≤ the other under the effect/structure
+            // lattice. The merged binding is the GLB (more-specific). Without
+            // this, any combinator-library call where the user supplies a
+            // literal closure (auto-`#pure`) and the same type variable is also
+            // constrained by an unannotated context is rejected.
+            mergeBindings(existing, arg) match
+              case Some(merged) => env(name) = merged
+              case None =>
+                throw AnalysisError(s"cannot infer type parameter '$name': seen both $existing and $arg")
           case None => env(name) = arg
       case PtrTypeAST(inner) => arg match
         case PtrType(a) => unifyTypes(inner, a, typeParams, env)
@@ -2869,15 +3218,26 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case NamedTypeAST(name, tArgs) if tArgs.nonEmpty =>
         // If this is a generic type alias, expand it and unify the expanded type
         if genericTypeAliases.contains(name) then
-          val (tparams, target) = genericTypeAliases(name)
+          val (tparams, target, isNew) = genericTypeAliases(name)
           if tArgs.length == tparams.length then
-            // Substitute alias type params with the call's type args in the target TypeAST,
-            // then unify the expanded structure against the argument type.
-            // e.g., type Parser[T] = (string, int) -> Result[T, string]
-            //   Parser[A] → substitute T→A in target → (string, int) -> Result[A, string]
-            val subst = tparams.zip(tArgs).toMap
-            val expanded = substituteTypeAST(target, subst)
-            unifyTypes(expanded, arg, typeParams, env)
+            if isNew then
+              // Nominal generic alias: the actual must be a NamedType whose mangled name
+              // resolves back through `genericAliasToTemplate` to this template.
+              arg match
+                case SyslType.NamedType(argName, _, true, _, _) =>
+                  genericAliasToTemplate.get(argName) match
+                    case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
+                      for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+                    case _ => () // structural mismatch — caught by post-validation
+                case _ => ()
+            else
+              // Transparent: substitute alias type params with the call's type args in
+              // the target TypeAST, then unify the expanded structure against the actual.
+              // e.g., type Parser[T] = (string, int) -> Result[T, string]
+              //   Parser[A] → substitute T→A in target → (string, int) -> Result[A, string]
+              val subst = tparams.zip(tArgs).toMap
+              val expanded = substituteTypeAST(target, subst)
+              unifyTypes(expanded, arg, typeParams, env)
         else arg match
           case SyslType.StructType(argName, _, _) =>
             structToTemplate.get(argName) match
@@ -2904,30 +3264,243 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case TupleTypeAST(elems) => TupleTypeAST(elems.map(substituteTypeAST(_, subst)))
     case RefTypeAST(inner) => RefTypeAST(substituteTypeAST(inner, subst))
 
+  /** Strict structural equality with effect-lattice tolerance for FuncType.
+   *  Used for impl-dispatch post-validation. `slot` is the impl pattern resolved
+   *  with the unifier-bound env; `actual` is the call-site type. They must be
+   *  structurally identical *except* that nested FuncType effects compare by
+   *  `effectsSatisfy(actualEff, slotEff)` rather than `==`. This lets a `#pure`
+   *  closure (auto-inferred for any side-effect-free body) flow into an
+   *  unannotated higher-order parameter — the common shape for combinator
+   *  libraries that haven't yet opted into the effect discipline.
+   *
+   *  Containers (slice/array/ref/ptr/tuple/struct/enum) recurse component-wise
+   *  so the lattice rule fires on FuncType anywhere in the tree.
+   */
+  private def latticeEqual(slot: SyslType, actual: SyslType): Boolean =
+    (slot, actual) match
+      case (FuncType(p1, r1, _, eff1), FuncType(p2, r2, _, eff2)) =>
+        // Parameters and return types match by lattice (recursive). Effects
+        // checked one-way: actual must satisfy slot. Escape flag ignored — it's
+        // an optimization hint, not a type distinction (mirrors `compatible`).
+        p1.length == p2.length &&
+          p1.zip(p2).forall((a, b) => latticeEqual(a, b)) &&
+          latticeEqual(r1, r2) &&
+          effectsSatisfy(eff2, eff1)
+      case (SliceType(a), SliceType(b)) => latticeEqual(a, b)
+      case (ArrayType(a, n1), ArrayType(b, n2)) => n1 == n2 && latticeEqual(a, b)
+      case (PtrType(a), PtrType(b)) => latticeEqual(a, b)
+      case (RefType(a), RefType(b)) => latticeEqual(a, b)
+      case (StructType(n1, f1, v1), StructType(n2, f2, v2)) if n1 == n2 && v1 == v2 && f1.length == f2.length =>
+        // Same nominal struct — recurse on fields so an embedded FuncType still uses
+        // the lattice (anonymous tuple structs land here too — they share generated names).
+        f1.zip(f2).forall { case ((fn1, ft1), (fn2, ft2)) => fn1 == fn2 && latticeEqual(ft1, ft2) }
+      case (NamedType(n1, u1, nom1, r1, p1), NamedType(n2, u2, nom2, r2, p2)) =>
+        n1 == n2 && nom1 == nom2 && r1 == r2 && p1 == p2 && latticeEqual(u1, u2)
+      // Default: strict equality. Covers primitives (int, float, bool, string, unit),
+      // enums, interfaces — anywhere effects don't appear in the shape.
+      case (s, a) => s == a
+
+  /** Stage F.3 entry point — try to unify a list of TypeAST patterns against a list of
+   *  concrete SyslType actuals, returning the inferred binding map on success or None on
+   *  any failure. Failure modes captured: arity mismatch, type-var conflict (caught as
+   *  AnalysisError from the underlying `unifyTypes`), unbound type parameters, or
+   *  structural mismatch that the recursive walker silently no-ops past.
+   *
+   *  The post-validation step substitutes the inferred env into each pattern, re-resolves
+   *  it via `resolveType`, and demands `latticeEqual` against the actual. The lattice
+   *  rule lets a candidate FuncType with stricter effects (e.g. `#pure`) flow into an
+   *  unannotated slot — the common shape for combinator-library impls. Without this, a
+   *  literal closure (always inferred `#pure` for side-effect-free bodies) would never
+   *  match an `(A) -> B` impl pattern.
+   */
+  private def tryUnifyAll(
+      patterns: List[TypeAST],
+      actuals: List[SyslType],
+      tvars: Set[String],
+  ): Option[Map[String, SyslType]] =
+    if patterns.length != actuals.length then None
+    else
+      val env = mutable.Map.empty[String, SyslType]
+      val unifyOk =
+        try
+          for (p, a) <- patterns.zip(actuals) do
+            unifyTypes(p, a, tvars, env)
+          true
+        catch case _: AnalysisError => false
+      if !unifyOk then None
+      else
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ env
+        val structuralOk =
+          try
+            patterns.zip(actuals).forall { (p, a) =>
+              val resolved =
+                try Some(resolveType(p))
+                catch case _: Throwable => None
+              resolved.exists(r => latticeEqual(r, a))
+            }
+          finally typeEnv = savedEnv
+        if !structuralOk then None
+        else if !tvars.forall(env.contains) then None
+        else Some(env.toMap)
+
+  /** Stage F.5 helper — pattern-to-pattern overlap. Two impl templates overlap iff there
+   *  exists a concrete substitution that satisfies both pattern lists simultaneously.
+   *
+   *  Approach: walk both patterns side-by-side, unifying type-var-bearing structure into
+   *  a single combined env (`tvarsA ∪ tvarsB`). When both sides hit the same concrete
+   *  shape they must agree structurally; when one is a tvar it binds.
+   *
+   *  This is symmetric, conservative, and good enough for the at-most-one coherence rule.
+   *  False positives (rejecting non-overlapping templates) are preferred to false
+   *  negatives (admitting actual ambiguity).
+   */
+  private def patternsOverlap(
+      a: List[TypeAST],
+      b: List[TypeAST],
+      tvars: Set[String],
+  ): Boolean =
+    if a.length != b.length then return false
+    val env = mutable.Map.empty[String, TypeAST]
+    def bindOrEqual(name: String, t: TypeAST): Boolean =
+      env.get(name) match
+        case Some(prev) => prev == t
+        case None => env(name) = t; true
+    def overlap(x: TypeAST, y: TypeAST): Boolean = (x, y) match
+      case (NamedTypeAST(nx, Nil), _) if tvars.contains(nx) => bindOrEqual(nx, y)
+      case (_, NamedTypeAST(ny, Nil)) if tvars.contains(ny) => bindOrEqual(ny, x)
+      case (NamedTypeAST(nx, ax), NamedTypeAST(ny, ay)) =>
+        nx == ny && ax.length == ay.length && ax.zip(ay).forall((p, q) => overlap(p, q))
+      case (PtrTypeAST(ix), PtrTypeAST(iy)) => overlap(ix, iy)
+      case (RefTypeAST(ix), RefTypeAST(iy)) => overlap(ix, iy)
+      case (SliceTypeAST(ex), SliceTypeAST(ey)) => overlap(ex, ey)
+      case (ArrayTypeAST(_, ex), ArrayTypeAST(_, ey)) => overlap(ex, ey)
+      case (FuncTypeAST(px, rx, _, _), FuncTypeAST(py, ry, _, _)) =>
+        px.length == py.length && px.zip(py).forall((p, q) => overlap(p, q)) && overlap(rx, ry)
+      case (TupleTypeAST(ex), TupleTypeAST(ey)) =>
+        ex.length == ey.length && ex.zip(ey).forall((p, q) => overlap(p, q))
+      case _ => false
+    a.zip(b).forall((p, q) => overlap(p, q))
+
   // Instantiate a generic function with inferred type arguments, returning the mangled name
   // and FunInfo of the instantiated function. Reuses cached instantiations.
   // If an operator has a user-defined struct/enum operand, desugar to the corresponding trait call.
   // Returns None if no desugaring applies (use built-in dispatch).
-  private def tryOperatorDispatch(op: String, tLeft: TExpr, tRight: TExpr): Option[TExpr] =
+  //
+  // `strict` controls behaviour when no impl matches:
+  //   - strict=true: throw "no impl of trait for operator on operands" — used when an
+  //     operand is non-arithmetic (struct/enum/nominal alias of non-numeric) and built-in
+  //     fallback can't possibly succeed; the better diagnostic names trait + operands.
+  //   - strict=false: return None silently — used when both operands are numeric (or
+  //     nominal aliases of numerics) and the built-in arithmetic path is a valid fallback,
+  //     so `Meters + Meters` with no `impl Add[Meters]` still does plain int arithmetic.
+  private def tryOperatorDispatch(op: String, tLeft: TExpr, tRight: TExpr, strict: Boolean): Option[TExpr] =
     lookupBinaryOperatorTrait(op) match
       case None => None
       case Some((traitName, methodName)) =>
-        val operandType = tLeft.typ
-        operandType match
-          case _: SyslType.StructType | _: SyslType.EnumType =>
-            if !traits.contains(traitName) then
-              throw AnalysisError(s"operator '$op' on $operandType requires trait '$traitName' but it is not defined")
-            impls.get((traitName, operandType)) match
-              case Some(methodMap) =>
-                val mangled = methodMap(methodName)
-                val funInfo = functions(mangled)
-                val checkedArgs = checkArgs(mangled, funInfo.params, List(tLeft, tRight))
-                Some(TCall(mangled, checkedArgs, funInfo.returnType))
-              case None =>
-                throw AnalysisError(s"no impl of '$traitName' for $operandType: operator '$op' not defined")
+        val operands = List(tLeft.typ, tRight.typ)
+        // Only fire user-defined operator dispatch when at least one operand is a
+        // user-defined type. This preserves the user-friendly "unknown operator on i32"
+        // error path for built-in operands.
+        val hasUserType = operands.exists {
+          case _: SyslType.StructType | _: SyslType.EnumType | _: SyslType.NamedType => true
+          case _ => false
+        }
+        if !hasUserType then return None
+        if !traits.contains(traitName) then
+          if strict then
+            throw AnalysisError(s"operator '$op' on ${operands.mkString(", ")} requires trait '$traitName' but it is not defined")
+          else return None
+        val candidates = enumerateImplCandidates(traitName, methodName, operands)
+        candidates match
+          case Nil =>
+            if strict then
+              throw AnalysisError(s"no impl of '$traitName' for operator '$op' on ${operands.mkString(", ")}")
+            else None
+          case (template, subst) :: Nil =>
+            val (mangled, funInfo) = instantiateImpl(template, traitName, methodName, subst)
+            val checkedArgs = checkArgs(mangled, funInfo.params, List(tLeft, tRight))
+            Some(TCall(mangled, checkedArgs, funInfo.returnType))
+          case multi =>
+            throw AnalysisError(s"ambiguous: ${multi.length} impls of '$traitName' match operator '$op' on ${operands.mkString(", ")}")
+
+  /** Enumerate every registered impl template of `traitName` whose `methodName` parameter
+   *  patterns unify with `argTypes`. Concrete impls fast-path through `==` checks;
+   *  generic impls go through `tryUnifyAll` against the raw impl-method param TypeAST.
+   *
+   *  Returned in registration order. The dispatcher above expects: 0 → no impl, 1 → use,
+   *  N>1 → ambiguous.
+   */
+  private def enumerateImplCandidates(
+      traitName: String,
+      methodName: String,
+      argTypes: List[SyslType],
+  ): List[(ImplTemplate, Map[String, SyslType])] =
+    implTemplates.getOrElse(traitName, Nil).iterator.flatMap { t =>
+      if t.typeParams.isEmpty then
+        // Concrete: compare argTypes against this impl method's bound parameter types.
+        // Use either the recorded methodInfo (source-defined impl) or, for cross-unit
+        // imports without methodInfos, fall back to `functions(mangled).params`.
+        val infoOpt = t.methodInfos.find(_.mangled.endsWith("_" + methodName) || true).find(i =>
+          // We index by name embedded in `mangled`; safest is to look up the mangled name first
+          t.methods.get(methodName).contains(i.mangled)
+        )
+        val paramTypes = infoOpt.map(_.paramTypes.map(_._2))
+          .orElse(t.methods.get(methodName).flatMap(m => functions.get(m).map(_.params.map(_._2))))
+          .orElse(t.methods.get(methodName).flatMap(m => functions.get(shortName(m)).map(_.params.map(_._2))))
+        paramTypes match
+          case Some(ps) if ps == argTypes => Some((t, Map.empty[String, SyslType]))
           case _ => None
+      else
+        // Generic: unify raw impl method param TypeAST against arg types.
+        val implMethod = t.methodASTs.find(_.name == methodName)
+        implMethod match
+          case Some(im) =>
+            val patternTypes = im.params.map(_.typ)
+            tryUnifyAll(patternTypes, argTypes, t.typeParams.toSet).map(s => (t, s))
+          case None =>
+            // Generic impl with synthesized default — derive trait-method param patterns
+            // by substituting impl's targetPatterns into the trait method's params, then
+            // unify against arg types.
+            val trait_ = traits(traitName)
+            trait_.methods.find(_.name == methodName).flatMap { tm =>
+              // Build a tparam→TypeAST substitution: traitParam → impl's targetPattern at that index
+              val traitToImpl = trait_.typeParams.zip(t.targetPatterns).toMap
+              val patternTypes = tm.params.map(p => substituteTypeAST(p.typ, traitToImpl))
+              tryUnifyAll(patternTypes, argTypes, t.typeParams.toSet).map(s => (t, s))
+            }
+    }.toList
 
   // Instantiate a generic struct with concrete type arguments, returning its StructType
+  /** Instantiate a `new` generic alias (`type Parser[A] = new (Input) -> ParseResult[A]`)
+   *  for a specific list of type args. Each instantiation gets a unique mangled name
+   *  (e.g. `Parser_i32`) and is wrapped as a nominal `NamedType` so it is distinct from
+   *  both its underlying base and from other instantiations.
+   *
+   *  Cached so that two mentions of `Parser[i32]` produce object-equal `SyslType` values —
+   *  this is what makes trait/impl dispatch see them as the same type.
+   */
+  private def instantiateGenericNominalAlias(
+      name: String,
+      tparams: List[String],
+      target: TypeAST,
+      typeArgs: List[SyslType],
+  ): SyslType =
+    val cacheKey = (name, typeArgs)
+    genericAliasInstantiations.get(cacheKey) match
+      case Some(t) => t
+      case None =>
+        val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ tparams.zip(typeArgs).toMap
+        val base =
+          try resolveType(target)
+          finally typeEnv = savedEnv
+        val nt = SyslType.NamedType(mangled, base, nominal = true, range = None, predicateFunc = None)
+        genericAliasInstantiations(cacheKey) = nt
+        genericAliasToTemplate(mangled) = (name, typeArgs)
+        nt
+
   private def instantiateGenericStruct(name: String, typeArgs: List[SyslType]): SyslType.StructType =
     val cacheKey = (name, typeArgs)
     genericStructInstantiations.get(cacheKey) match
@@ -2981,18 +3554,26 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
   // Analyze each impl method (including synthesized defaults) as a mangled top-level function
   private def analyzeImplMethods(impl: ImplDeclAST): List[TDecl] =
-    val resolvedTarget = resolveType(impl.targetType)
-    val methodMap = impls((impl.traitName, resolvedTarget))
-    val infos = implMethodInfos((impl.traitName, resolvedTarget))
+    // Generic impls (typeParams.nonEmpty) are NOT analyzed at registration time —
+    // they're specialized on demand at each dispatch site by `instantiateImpl`.
+    if impl.typeParams.nonEmpty then return Nil
+    val resolvedTargets = impl.targetTypes.map(resolveType)
+    val template = implTemplates.getOrElse(impl.traitName, Nil).find(t =>
+      t.typeParams.isEmpty && t.resolvedConcrete.contains(resolvedTargets)
+    ).getOrElse(
+      throw AnalysisError(s"internal: impl of '${impl.traitName}' for ${resolvedTargets.mkString(", ")} not registered"))
+    val methodMap = template.methods
+    val infos = template.methodInfos
     val trait_ = traits(impl.traitName)
     val savedEnv = typeEnv
     val savedRewrite = traitCallRewrite
     try
-      // For synthesized defaults, set typeEnv + traitCallRewrite so T resolves and
-      // unqualified calls to sibling trait methods route to the impl's mangled functions.
+      // For synthesized defaults, set typeEnv + traitCallRewrite so trait params resolve
+      // and unqualified calls to sibling trait methods route to the impl's mangled
+      // functions. Multi-param traits get a multi-entry env; the convention scales.
       infos.map { info =>
         if info.isSynthesized then
-          typeEnv = Map(trait_.typeParam -> resolvedTarget)
+          typeEnv = trait_.typeParams.zip(resolvedTargets).toMap
           traitCallRewrite = methodMap.toMap
         else
           typeEnv = savedEnv
@@ -3012,27 +3593,122 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       typeEnv = savedEnv
       traitCallRewrite = savedRewrite
 
-  // Resolve a trait method call like Ord.cmp(a, b) to the appropriate impl's mangled function
+  /** Stage G — specialize a generic impl method at a use site, or fast-path return for a
+   *  concrete impl. Cached by `(template-identity, methodName, sortedSubst)` so repeated
+   *  dispatches with the same operand types reuse one mangled function.
+   *
+   *  For concrete impls (`subst.isEmpty`), looks up the pre-mangled function. For generic
+   *  impls, builds a typeEnv from `trait.typeParams ++ impl.typeParams` (the impl's vars
+   *  also need to be in scope — patterns like `Bar[X]` mention `X`), resolves param/return
+   *  types, mangles by hash of the substitution, registers a TFunDecl, and emits it via
+   *  `specializedDecls`.
+   */
+  private def instantiateImpl(
+      template: ImplTemplate,
+      traitName: String,
+      methodName: String,
+      subst: Map[String, SyslType],
+  ): (String, FunInfo) =
+    if template.typeParams.isEmpty then
+      // Concrete: pre-registered at impl-declaration time
+      val mangled = template.methods.getOrElse(methodName,
+        throw AnalysisError(s"trait method '$traitName.$methodName' not implemented in this impl"))
+      val funInfo = functions.getOrElse(mangled,
+        functions.getOrElse(shortName(mangled),
+          throw AnalysisError(s"trait method '$traitName.$methodName' resolved to '$mangled' but function not found")))
+      (mangled, funInfo)
+    else
+      // Generic: specialize on demand. Cache key includes the substitution applied to
+      // every type variable (sorted for determinism) plus the template identity.
+      val sortedSubst = template.typeParams.map(tp => tp -> subst(tp))
+      val cacheKey = (System.identityHashCode(template), methodName, sortedSubst)
+      genericImplInstantiations.get(cacheKey) match
+        case Some((m, fi)) => (m, fi)
+        case None =>
+          val trait_ = traits(traitName)
+          // Resolve the trait's targetPatterns under the new substitution to obtain the
+          // concrete trait-level types — these become the trait typeParam → concrete map.
+          val savedEnv = typeEnv
+          typeEnv = typeEnv ++ subst
+          val resolvedTargets =
+            try template.targetPatterns.map(resolveType)
+            finally typeEnv = savedEnv
+          val typeMangled = resolvedTargets.map(typeToMangled).mkString("_")
+          val implMethod = template.methodASTs.find(_.name == methodName).getOrElse {
+            // Method not provided by impl — must be a synthesized default from the trait
+            val tm = trait_.methods.find(_.name == methodName).getOrElse(
+              throw AnalysisError(s"trait '$traitName' has no method '$methodName'"))
+            // Synthesize a FunDeclAST from the trait method's default body
+            val body = tm.body.getOrElse(
+              throw AnalysisError(s"impl missing required method '$methodName' (no default in trait)"))
+            FunDeclAST(tm.name, tm.params, Some(tm.returnType), body)
+          }
+          val rawMangled = s"${traitName}_${methodName}_${typeMangled}"
+          val mangled = if shouldMangle(rawMangled) then mangleName(rawMangled) else rawMangled
+          // Build the full typeEnv: trait type params bound to resolved targets, plus
+          // impl type params bound to subst (so patterns like `Bar[X]` referenced inside
+          // the method resolve correctly).
+          val fullEnv = trait_.typeParams.zip(resolvedTargets).toMap ++ subst
+          typeEnv = typeEnv ++ fullEnv
+          val (paramTypes, retType, body, isSynthesized) =
+            try
+              val pTypes = implMethod.params.map(p => (p.name, resolveType(p.typ)))
+              val r = implMethod.returnType.map(resolveType).getOrElse(UnitType)
+              val provided = template.methodASTs.exists(_.name == methodName)
+              (pTypes, r, implMethod.body, !provided)
+            finally typeEnv = savedEnv
+          val funInfo = FunInfo(mangled, paramTypes, retType)
+          functions(mangled) = funInfo
+          // Save into template.methods so cross-method dispatch (e.g. default methods that
+          // call sibling methods) finds the same specialization.
+          template.methods(methodName) = mangled
+          genericImplInstantiations(cacheKey) = (mangled, funInfo)
+          // Analyze the body in the substituted env, with traitCallRewrite set so default
+          // methods route sibling trait-method calls to this impl's mangled functions.
+          val savedRewrite = traitCallRewrite
+          val savedScope = scopeStack
+          val savedLoopDepth = loopDepth
+          typeEnv = typeEnv ++ fullEnv
+          if isSynthesized then traitCallRewrite = template.methods.toMap
+          scopeStack = new mutable.ArrayBuffer
+          loopDepth = 0
+          pushScope()
+          for (paramName, paramType) <- paramTypes do
+            currentScope(paramName) = SymInfo(paramName, paramType, true)
+          val tBody =
+            try body match
+              case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
+              case BlockBodyAST(stmts, _) => TBlockBody(analyzeBlock(stmts))
+            finally
+              typeEnv = savedEnv
+              traitCallRewrite = savedRewrite
+              scopeStack = savedScope
+              loopDepth = savedLoopDepth
+          val tParams = paramTypes.map((n, t) => TParam(n, t))
+          specializedDecls += TFunDecl(mangled, tParams, retType, tBody, isPrivate = false)
+          (mangled, funInfo)
+
+  private val genericImplInstantiations = new mutable.HashMap[(Int, String, List[(String, SyslType)]), (String, FunInfo)]
+
+  // Resolve a trait method call like Ord.cmp(a, b) to the appropriate impl's mangled function.
+  // Stage G: enumerates candidates by unifying each impl's method param patterns directly
+  // against the call's arg types. Result-position trait params (e.g. R in Concat[A, B, R])
+  // don't need to be inferable from arg types — they're determined by which impl matches.
   private def analyzeTraitCall(traitName: String, methodName: String, tArgs: List[TExpr]): (String, FunInfo) =
     val trait_ = traits(traitName)
     val method = trait_.methods.find(_.name == methodName).getOrElse(
       throw AnalysisError(s"trait '$traitName' has no method '$methodName'"))
     if method.params.length != tArgs.length then
       throw AnalysisError(s"trait method '$traitName.$methodName' expects ${method.params.length} argument(s), got ${tArgs.length}")
-    // Infer the target type by unifying each param type against the arg type, using typeParam as the variable
-    val env = mutable.Map.empty[String, SyslType]
-    for (p, a) <- method.params.zip(tArgs) do
-      unifyTypes(p.typ, a.typ, Set(trait_.typeParam), env)
-    val targetType = env.get(trait_.typeParam).getOrElse(
-      throw AnalysisError(s"cannot infer target type for trait method '$traitName.$methodName'"))
-    val methodMap = impls.getOrElse((traitName, targetType),
-      throw AnalysisError(s"no impl of trait '$traitName' for type $targetType"))
-    val mangled = methodMap(methodName)
-    // Look up by full mangled name first, then by short name (for cross-module imports)
-    val funInfo = functions.getOrElse(mangled,
-      functions.getOrElse(shortName(mangled),
-        throw AnalysisError(s"trait method '$traitName.$methodName' resolved to '$mangled' but function not found")))
-    (mangled, funInfo)
+    val argTypes = tArgs.map(_.typ)
+    val candidates = enumerateImplCandidates(traitName, methodName, argTypes)
+    candidates match
+      case Nil =>
+        throw AnalysisError(s"no impl of trait '$traitName.$methodName' matches arg type(s) ${argTypes.mkString(", ")}")
+      case (template, subst) :: Nil =>
+        instantiateImpl(template, traitName, methodName, subst)
+      case multi =>
+        throw AnalysisError(s"ambiguous: ${multi.length} impls of '$traitName' match $methodName(${argTypes.mkString(", ")})")
 
   private def instantiateGeneric(
       name: String,
@@ -3064,7 +3740,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       for traitName <- bounds do
         if !traits.contains(traitName) then
           throw AnalysisError(s"bound '$traitName' on type parameter '$tp' of '$name' refers to unknown trait")
-        if !impls.contains((traitName, concreteType)) then
+        // Bound is satisfied if the trait has any registered impl whose first target
+        // pattern unifies with `concreteType` (concrete fast-path or generic impl).
+        val trait_ = traits(traitName)
+        val matched = implTemplates.getOrElse(traitName, Nil).exists { t =>
+          if t.typeParams.isEmpty then
+            t.resolvedConcrete.flatMap(_.headOption).contains(concreteType)
+          else
+            tryUnifyAll(t.targetPatterns.headOption.toList, List(concreteType), t.typeParams.toSet).isDefined
+        }
+        if !matched then
           throw AnalysisError(s"type $concreteType does not satisfy bound '$traitName' for type parameter '$tp' in call to '$name'")
     val cacheKey = (name, inferredArgs)
     instantiations.get(cacheKey) match
@@ -3083,7 +3768,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         try
           // Resolve param/return types in the new env
           val paramTypes = template.params.map(p => (p.name, resolveType(p.typ)))
-          val retType = template.returnType.map(resolveType).getOrElse(VoidType)
+          val retType = template.returnType.map(resolveType).getOrElse(UnitType)
           val funInfo = FunInfo(mangled, paramTypes, retType)
           // Register before analyzing body to support recursion
           functions(mangled) = funInfo
@@ -3265,7 +3950,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       throw AnalysisError(s"function may declare at most one `variant` clause, got ${variantClauses.length}")
     // Pre-declare __result__ in the function scope so that `result` aliased to it resolves
     // during ensure analysis, and later references inside the injected rewrite work.
-    val hasResult = returnType != VoidType
+    val hasResult = returnType != UnitType
     if hasResult then
       currentScope("__result__") = SymInfo("__result__", returnType, mutable = true)
       currentScope("result") = SymInfo("__result__", returnType, mutable = false)
@@ -3320,7 +4005,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     stmts.map(s => rewriteStmtForEnsure(s, returnType, ensureChecks))
 
   private def rewriteStmtForEnsure(stmt: TStmt, returnType: SyslType, ensureChecks: List[TStmt]): TStmt = stmt match
-    case TReturnStmt(Some(v)) if returnType != VoidType =>
+    case TReturnStmt(Some(v)) if returnType != UnitType =>
       TMultiStmt(List(TAssignStmt("__result__", v)) ++ ensureChecks ++
         List(TReturnStmt(Some(TVarRef("__result__", returnType)))))
     case TReturnStmt(None) =>
@@ -3347,7 +4032,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   /** If the rewritten body lacks a trailing explicit return, append one so ensure runs
    * at the implicit fall-through point. The last TExprStmt (if any) becomes the return value. */
   private def finalizeFallThroughReturn(stmts: List[TStmt], returnType: SyslType, ensureChecks: List[TStmt]): List[TStmt] =
-    if returnType == VoidType then
+    if returnType == UnitType then
       // Append bare ensure + return at the end unless the last stmt is already a return
       if stmts.lastOption.exists(isTerminalReturn) then stmts
       else stmts ++ ensureChecks :+ TReturnStmt(None)
@@ -3680,8 +4365,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tValue = analyzeExpr(value)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          // Use latestStruct on the deref'd type — for self-referential generic
+          // structs the field's StructType may still be the placeholder created
+          // during monomorphization (with empty .fields). Codegen reads obj.typ
+          // directly, so a stale annotation here propagates a 0-field StructType
+          // that crashes index lookups.
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -3695,8 +4385,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tValue = analyzeExpr(value)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -3872,7 +4562,63 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         else variantToEnum.get(name)
       case _ => variantToEnum.get(name)
 
-  private def analyzePattern(pat: MatchPatternAST, scrutineeType: SyslType): TMatchPattern =
+  // Counter for synthesizing unique outer-bindings for nested tuple patterns.
+  private var tuplePatternCounter: Int = 0
+  private def freshTupleBindName(): String =
+    tuplePatternCounter += 1
+    s"_match_tup_$tuplePatternCounter"
+
+  private def isTupleStructType(t: SyslType): Boolean = t.underlying match
+    case st: SyslType.StructType => st.name.startsWith("_Tuple")
+    case _ => false
+
+  /** Analyze a field pattern inside a destructure (variant or struct). For most shapes
+   *  this returns the user-visible binding name (or None for wildcard / literal). For a
+   *  nested tuple pattern `(a, b)` the helper introduces a fresh synthetic outer name
+   *  bound to the field, then appends `val a = sym._0; val b = sym._1` to `prelude` —
+   *  these are prepended to the arm body before it's analyzed. */
+  private def analyzeFieldPattern(
+      fieldPat: MatchPatternAST,
+      fieldType: SyslType,
+      prelude: scala.collection.mutable.ListBuffer[StmtAST],
+  ): Option[String] = fieldPat match
+    case WildcardPatternAST => None
+    case ValuePatternAST(VarRefAST(bindName)) =>
+      if scopeStack != null then
+        currentScope(bindName) = SymInfo(bindName, fieldType, false)
+      Some(bindName)
+    case ValuePatternAST(TupleLitAST(elems)) =>
+      fieldType.underlying match
+        case st: SyslType.StructType if st.name.startsWith("_Tuple") =>
+          if elems.length != st.fields.length then
+            throw AnalysisError(
+              s"tuple pattern has ${elems.length} elements but field type has ${st.fields.length}"
+            )
+          val syn = freshTupleBindName()
+          if scopeStack != null then
+            currentScope(syn) = SymInfo(syn, fieldType, false)
+          elems.zip(st.fields).foreach { case (elemExpr, (fname, _)) =>
+            elemExpr match
+              case VarRefAST("_") => ()
+              case VarRefAST(bindName) =>
+                prelude += VarStmtAST(
+                  bindName, None,
+                  FieldAccessAST(VarRefAST(syn), fname),
+                  isMutable = false,
+                )
+              case _ => ()
+          }
+          Some(syn)
+        case other =>
+          throw AnalysisError(s"tuple pattern requires tuple type, got $other")
+    case ValuePatternAST(_) => None
+    case _ => throw AnalysisError(s"unsupported pattern in destructure")
+
+  private def analyzePattern(
+      pat: MatchPatternAST,
+      scrutineeType: SyslType,
+      prelude: scala.collection.mutable.ListBuffer[StmtAST],
+  ): TMatchPattern =
     pat match
       case WildcardPatternAST => TWildcard
       case ValuePatternAST(VarRefAST(name)) if resolveVariant(name, scrutineeType).isDefined =>
@@ -3881,6 +4627,23 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val (_, variantFields) = et.variants(variantIdx)
         if variantFields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${variantFields.length} argument(s) in pattern")
         TVariantPattern(et, variantIdx, Nil, Nil)
+      // Top-level tuple pattern on a tuple-typed scrutinee — destructure directly.
+      case ValuePatternAST(TupleLitAST(elems)) if isTupleStructType(scrutineeType) =>
+        val st = scrutineeType.underlying.asInstanceOf[SyslType.StructType]
+        if elems.length != st.fields.length then
+          throw AnalysisError(
+            s"tuple pattern has ${elems.length} elements but scrutinee type has ${st.fields.length}"
+          )
+        val bindings = elems.zip(st.fields).map { case (elemExpr, (_, fty)) =>
+          elemExpr match
+            case VarRefAST("_") => None
+            case VarRefAST(bindName) =>
+              if scopeStack != null then
+                currentScope(bindName) = SymInfo(bindName, fty, false)
+              Some(bindName)
+            case _ => None
+        }
+        TDestructurePattern(st, bindings, st.fields.map(_._2))
       case ValuePatternAST(expr) =>
         val tv = analyzeExpr(expr)
         val coerced = coerceLiteral(tv, scrutineeType)
@@ -3898,33 +4661,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           val (_, variantFields) = et.variants(variantIdx)
           if fields.length != variantFields.length then
             throw AnalysisError(s"variant '$name' has ${variantFields.length} fields, pattern has ${fields.length}")
-          val bindings = fields.zip(variantFields).map { case (fieldPat, (fieldName, fieldType)) =>
-            fieldPat match
-              case WildcardPatternAST => None
-              case ValuePatternAST(VarRefAST(bindName)) =>
-                if scopeStack != null then
-                  currentScope(bindName) = SymInfo(bindName, fieldType, false)
-                Some(bindName)
-              case ValuePatternAST(expr) => None
-              case _ => throw AnalysisError(s"unsupported pattern in variant destructure")
+          val bindings = fields.zip(variantFields).map { case (fieldPat, (_, fieldType)) =>
+            analyzeFieldPattern(fieldPat, fieldType, prelude)
           }
           TVariantPattern(et, variantIdx, bindings, variantFields.map(_._2))
         else
           val st = structTypes.getOrElse(name, throw AnalysisError(s"unknown struct or variant '$name' in match pattern"))
           if fields.length != st.fields.length then
             throw AnalysisError(s"struct '$name' has ${st.fields.length} fields, pattern has ${fields.length}")
-          val bindings = fields.zip(st.fields).map { case (fieldPat, (fieldName, fieldType)) =>
-            fieldPat match
-              case WildcardPatternAST => None
-              case ValuePatternAST(VarRefAST(bindName)) =>
-                // In destructure context, bare names are bindings
-                if scopeStack != null then
-                  currentScope(bindName) = SymInfo(bindName, fieldType, false) // val binding
-                Some(bindName)
-              case ValuePatternAST(expr) =>
-                // Literal value — not a binding
-                None
-              case _ => throw AnalysisError(s"unsupported pattern in struct destructure")
+          val bindings = fields.zip(st.fields).map { case (fieldPat, (_, fieldType)) =>
+            analyzeFieldPattern(fieldPat, fieldType, prelude)
           }
           TDestructurePattern(st, bindings, st.fields.map(_._2))
 
@@ -3940,6 +4686,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case FloatLitAST(d) => TFloatLit(d, F64)
       case CharLitAST(c) => TIntLit(c.toLong, U32)
       case BoolLitAST(b) => TBoolLit(b, BoolType)
+      case UnitLitAST()  => TUnitLit(UnitType)
       case StringLitAST(s) => TStringLit(s, StringType)
       case StringLitExprAST(s) =>
         if s.startsWith("s:") then analyzeInterpolatedString(s.substring(2))
@@ -3989,16 +4736,47 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case ArrayLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
+        // The expected slice type, if context demands one. When `currentExpected`
+        // is `[]T`, the literal must produce a slice descriptor (so `append`,
+        // `len`, etc. work); when it's `[N]T` (or there is none), the literal
+        // stays a fixed-size array. Without this, the long-standing footgun was:
+        // `var xs: []int = [1, 2, 3]` silently produced a `[3]int` and any
+        // later `append(xs, …)` would panic at runtime with "append requires a
+        // slice". The wrap below is the same `arr[:]` operation users had to
+        // write by hand (`(new [0]T)[:0]`); doing it in the analyzer makes
+        // annotation-driven inference do what the user expects.
+        val sliceTarget: Option[SyslType] = currentExpected.map(_.underlying) match
+          case Some(SyslType.SliceType(et)) => Some(et)
+          case _ => None
         if tElems.isEmpty then
-          // Empty array literal — element type comes from target context (e.g. [0]string = [])
-          val elemType = currentExpected.flatMap {
-            case SyslType.ArrayType(et, _) => Some(et)
-            case _ => None
-          }.getOrElse(throw AnalysisError("cannot infer element type for empty array literal []"))
-          TArrayLit(Nil, SyslType.ArrayType(elemType, 0))
+          // Empty array literal — element type comes from `currentExpected`. The
+          // canonical use case is the empty-accumulator idiom: `var xs: []int = []`,
+          // `f() -> []int = []`, `Bag([])`, `match { ... -> [] }`. This mirrors the
+          // expected-type-from-context rule that variant constructors with phantom
+          // type parameters already use for `None`-style zero-data variants.
+          //
+          // Slice expected → produce a [0]T literal then wrap in TSliceExpr so the
+          // runtime gets a proper SliceVal{cells, len:0, cap:0}. Fixed-array [0]T
+          // expected → match directly. Other expected types fall through to the
+          // unambiguous error.
+          val elemType: SyslType = currentExpected.map(_.underlying) match
+            case Some(SyslType.SliceType(et))      => et
+            case Some(SyslType.ArrayType(et, 0))   => et
+            case Some(SyslType.ArrayType(_, n))    =>
+              throw AnalysisError(s"empty literal `[]` cannot satisfy fixed-array type with $n element(s)")
+            case _ =>
+              throw AnalysisError("cannot infer element type for empty array literal []")
+          val arr = TArrayLit(Nil, SyslType.ArrayType(elemType, 0))
+          sliceTarget match
+            case Some(_) => TSliceExpr(arr, None, None, SyslType.SliceType(elemType))
+            case None    => arr
         else
           val elemType = tElems.head.typ
-          TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
+          val arr = TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
+          sliceTarget match
+            case Some(et) if compatible(elemType, et) =>
+              TSliceExpr(arr, None, None, SyslType.SliceType(et))
+            case _ => arr
 
       case ClosureAST(params, body) =>
         // Infer parameter types from currentExpected (the target func type)
@@ -4015,20 +4793,32 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 case Some(ft) if ft.params.length == params.length && i < ft.params.length =>
                   ft.params(i)
                 case _ => throw AnalysisError(s"cannot infer type for closure parameter '${p.name}' — add a type annotation")
-          TParam(p.name, paramType)
+          // `_` discard binders get a unique synthetic name. Multiple `_` slots
+          // are distinct (no name collision in the TParam list / codegen frame)
+          // and `_` in the body still falls through to the placeholder rule.
+          val finalName =
+            if p.name == "_" then
+              val n = s"__discard_$discardParamCounter"
+              discardParamCounter += 1
+              n
+            else p.name
+          TParam(finalName, paramType)
         }
         val expectedRet = expectedFunc.map(_.returnType).getOrElse(
           currentExpected match
-            case Some(t) if t != VoidType => t
-            case _ => VoidType
+            case Some(t) if t != UnitType => t
+            case _ => UnitType
         )
-        // Push scope with closure params
+        // Push scope with closure params (discard params are NOT bound — `__discard_<n>`
+        // is unspellable in source and the placeholder rule for `_` in expression position
+        // is preserved).
         pushScope()
-        for p <- typedParams do
-          currentScope(p.name) = SymInfo(p.name, p.typ, mutable = false)
+        for (p, src) <- typedParams.zip(params) do
+          if src.name != "_" then
+            currentScope(p.name) = SymInfo(p.name, p.typ, mutable = false)
         // Analyze body
         val savedExp = currentExpected
-        currentExpected = if expectedRet == VoidType then None else Some(expectedRet)
+        currentExpected = if expectedRet == UnitType then None else Some(expectedRet)
         val tBody = try body match
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
           case BlockBodyAST(stmts, _) => TBlockBody(analyzeBlock(stmts))
@@ -4180,7 +4970,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           case TBlockBody(stmts) =>
             stmts.lastOption match
               case Some(TExprStmt(e)) => e.typ
-              case _ => VoidType
+              case _ => UnitType
         // Determine if this closure escapes — it does if the expected type is @escaping,
         // or if there is no expected type (e.g. assigned to a local with no annotation).
         val escapesFlag = expectedFunc match
@@ -4217,8 +5007,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4229,8 +5019,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4241,8 +5031,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4253,8 +5043,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4402,7 +5192,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tObj = analyzeExpr(obj)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot take address of field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4464,7 +5254,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val sym = meta.publicSymbols.find(s => shortName(s.name) == member)
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
-          case SymbolMeta.Kind.Data(dataType) => TVarRef(sym.name, dataType)
+          case SymbolMeta.Kind.Data(dataType, _) => TVarRef(sym.name, dataType)
           case SymbolMeta.Kind.Const(constType, value) => TIntLit(value, constType)
           case SymbolMeta.Kind.Func(params, retType, _, _, _, eff) => TFuncRef(sym.name, SyslType.FuncType(params, retType, effects = eff))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
@@ -4489,8 +5279,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // Auto-dereference pointers to structs (p.x works like (*p).x)
         val (resolvedObj, structType0) = tObj.typ match
           case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, st), st)
-          case RefType(st: StructType) => (TDeref(tObj, st), st)
+          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
+          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
           case other => throw AnalysisError(s"cannot access field '$field' on $other")
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
@@ -4517,6 +5307,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case BinaryAST(left, op, right) =>
         val tLeft00 = analyzeExpr(left)
         val tRight00 = analyzeExpr(right)
+        // Operator overloading on nominal aliases (`type Parser[A] = new ...`,
+        // `type Meters = new f64`, etc.) needs the dispatcher to see the outer
+        // NamedType — not the underlying — or `impl Concat[Parser[X], ...]`
+        // never matches an operand whose static type is `Parser[i32]`.
+        // Try dispatch first, before any nominal-unwrap or signedness coercion.
+        // Strict mode: at least one operand can't fall back to built-in arithmetic
+        // (struct, enum, or nominal alias of a non-numeric). Lenient otherwise so
+        // `Meters + Meters` without an impl still does plain int arithmetic.
+        def couldFallToArith(t: SyslType): Boolean =
+          t.underlying.isNumeric || t.underlying == StringType || t.underlying == BoolType
+        val strict = !couldFallToArith(tLeft00.typ) || !couldFallToArith(tRight00.typ)
+        val dispatchedOpt = tryOperatorDispatch(op, tLeft00, tRight00, strict)
+        if dispatchedOpt.isDefined then return dispatchedOpt.get
         // Handle NamedType operands:
         //   nominal + nominal (same name)  → result keeps that nominal type
         //   nominal + anything else         → error (explicit cast required)
@@ -4537,9 +5340,6 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // Coerce integer literal signedness to match the other operand (preserve width)
         val tLeft = if tRight0.typ.isIntegral then coerceSignedness(tLeft0, tRight0.typ) else tLeft0
         val tRight = if tLeft.typ.isIntegral then coerceSignedness(tRight0, tLeft.typ) else tRight0
-        // Try to desugar operator to a trait call when operands are user-defined types
-        val dispatchedOpt = tryOperatorDispatch(op, tLeft, tRight)
-        if dispatchedOpt.isDefined then return dispatchedOpt.get
         val resultType = op match
           case "+" if tLeft.typ == StringType && tRight.typ == StringType => StringType // string concatenation
           case "+" | "-" if tLeft.typ == StringType && tRight.typ.isNumeric =>
@@ -4589,7 +5389,24 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             if tLeft.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tLeft.typ}")
             if tRight.typ != BoolType then throw AnalysisError(s"$op requires bool operands, got ${tRight.typ}")
             BoolType
-          case _ => throw AnalysisError(s"unknown operator: $op")
+          case _ =>
+            // Unknown operator. Distinguish three cases for the user:
+            //   (a) the operator IS bound to a trait, but neither operand is a user
+            //       type that impls that trait → suggest casting / type-wrapping
+            //   (b) the operator looks user-defined (composed of op chars) but is
+            //       not bound anywhere → tell them how to bind it via #operator
+            //   (c) the operator is genuinely garbage (shouldn't happen post-parse)
+            lookupBinaryOperatorTrait(op) match
+              case Some((traitName, _)) =>
+                throw AnalysisError(
+                  s"operator '$op' is bound to trait '$traitName', but no impl matches operand types (${tLeft.typ}, ${tRight.typ}) — operands must be a struct, enum, or nominal alias (`type T = new ...`) that impls '$traitName'",
+                )
+              case None if op.forall(c => "+-*/%<>=!&|^~".contains(c)) =>
+                throw AnalysisError(
+                  s"operator '$op' is not bound; declare it via `#operator(\"$op\")` on a trait method",
+                )
+              case None =>
+                throw AnalysisError(s"unknown operator: $op")
         // Insert implicit int→float promotion / float-width casts for mixed operands
         val promotedLeft  = if resultType.isFloat && tLeft.typ  != resultType then TCast(tLeft,  resultType) else tLeft
         val promotedRight = if resultType.isFloat && tRight.typ != resultType then TCast(tRight, resultType) else tRight
@@ -4737,9 +5554,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       // Generic struct/function constructor with explicit type args: Name[T](args)
       // The parser sees this as IndirectCallAST(IndexAST(VarRefAST(name), typeExpr), args)
       case IndirectCallAST(IndexAST(VarRefAST(name), typeExpr), args)
-        if genericStructs.contains(name) || genericTemplates.contains(name) =>
+        if genericStructs.contains(name) || genericTemplates.contains(name) || genericTypeAliases.contains(name) =>
         val typeArg = resolveType(exprToTypeAST(typeExpr))
-        val tArgs = args.map(analyzeExpr)
+        // For a generic-alias cast `Parser[i32](closure)`, propagate the alias's underlying
+        // type as the expected type for the (single) cast argument so that closure-shaped
+        // args get parameter inference, return-type context, and downstream type-arg
+        // inference for variant constructors that don't pin all type params from arg types.
+        val tArgs =
+          if genericTypeAliases.contains(name) && args.length == 1 then
+            val target = resolveType(NamedTypeAST(name, List(exprToTypeAST(typeExpr))))
+            val savedExp = currentExpected
+            currentExpected = Some(target.underlying)
+            try args.map(analyzeExpr) finally currentExpected = savedExp
+          else
+            args.map(analyzeExpr)
         if genericStructs.contains(name) then
           val st = instantiateGenericStruct(name, List(typeArg))
           if tArgs.length != st.fields.length then
@@ -4751,6 +5579,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             coerced
           }
           TStructConstruct(st, checkedArgs)
+        else if genericTypeAliases.contains(name) then
+          // Generic-alias cast: `Parser[i32](closure)`. For nominal aliases this wraps
+          // the value in a TCast to the NamedType (the explicit-cast requirement is what
+          // makes the type nominal in the first place). For transparent aliases the cast
+          // is a no-op — use the resolved underlying type directly.
+          if tArgs.length != 1 then
+            throw AnalysisError(s"generic alias '$name[...]' cast expects exactly 1 argument, got ${tArgs.length}")
+          val target = resolveType(NamedTypeAST(name, List(exprToTypeAST(typeExpr))))
+          val arg = tArgs.head
+          target match
+            case nt @ SyslType.NamedType(_, base, true, _, _) =>
+              val coreCast =
+                if arg.typ.underlying == base.underlying then arg
+                else if compatible(arg.typ, base) then arg
+                else throw AnalysisError(s"cannot cast ${arg.typ} to '$name[...]' (underlying $base)")
+              TCast(coreCast, nt)
+            case other =>
+              if compatible(arg.typ, other) then arg
+              else throw AnalysisError(s"cannot cast ${arg.typ} to transparent alias '$name[...]' (= $other)")
         else
           val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ), List(typeArg))
           val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
@@ -4759,13 +5606,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case IndirectCallAST(callee, args) =>
         val tCallee = analyzeExpr(callee)
         val tArgs = args.map(analyzeExpr)
-        tCallee.typ match
+        tCallee.typ.underlying match
           case FuncType(paramTypes, returnType, _, _) =>
             val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
             val checkedArgs = checkArgs("<indirect>", params, tArgs)
             TIndirectCall(tCallee, checkedArgs, returnType)
           case other =>
-            throw AnalysisError(s"cannot call expression of type $other as a function")
+            throw AnalysisError(s"cannot call expression of type ${tCallee.typ} as a function")
 
       case MethodCallAST(VarRefAST(nsName), method, args) if moduleNamespaces.contains(nsName) =>
         // Qualified import call: strings.has_prefix(s, prefix)
@@ -4863,7 +5710,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // `f(int) -> int`, causing a misleading argument-type error.
         lookupLocal(name) match
           case Some(sym) =>
-            sym.typ match
+            // Match through nominal aliases: a local `p: Parser[int]` whose
+            // underlying type is a FuncType is callable, and must shadow any
+            // like-named global.
+            sym.typ.underlying match
               case ft: FuncType =>
                 val expectedTypes = ft.params.map(t => Some(t): Option[SyslType])
                 val tArgs = args.zip(expectedTypes.padTo(args.length, None)).map { case (a, exp) =>
@@ -4909,7 +5759,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               else Nil
             resolveNamedArgsTyped(name, paramNames, expectedFor(paramTypes, modesForNamed), args)
           else
-            // Determine expected types for args if callee has known concrete signature
+            // Determine expected types for args if callee has known concrete signature.
+            // Variant constructors are critical here: a no-arg variant (e.g. `None`) inside
+            // another variant's args would otherwise inherit the OUTER expected type and
+            // misresolve. By passing each field's type as expected, the inner variant can
+            // disambiguate to the right enum instantiation.
             val argExpected: List[Option[SyslType]] =
               if traitCallRewrite.contains(name) then
                 val mangled = traitCallRewrite(name)
@@ -4920,6 +5774,28 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
               else if structTypes.contains(name) then
                 structTypes(name).fields.map(f => Some(f._2))
+              else if variantToEnum.contains(name) then
+                val (et, variantIdx) = variantToEnum(name)
+                et.variants(variantIdx)._2.map(f => Some(f._2))
+              else if genericVariantToEnum.contains(name) then
+                val (enumName, variantIdx) = genericVariantToEnum(name)
+                val template = genericEnums(enumName)
+                val variant = template.variants(variantIdx)
+                // Use currentExpected (the enum's instantiation) to recover type args,
+                // then resolve each field's TypeAST under that substitution.
+                val typeArgs: Option[List[SyslType]] = currentExpected match
+                  case Some(et: SyslType.EnumType) =>
+                    genericEnumInstantiations.collectFirst {
+                      case ((n, args), inst) if n == enumName && inst.name == et.name => args
+                    }
+                  case _ => None
+                typeArgs match
+                  case Some(tArgs) =>
+                    val savedEnv = typeEnv
+                    typeEnv = typeEnv ++ template.typeParams.zip(tArgs).toMap
+                    try variant.fields.map(f => Some(resolveType(f._2)))
+                    finally typeEnv = savedEnv
+                  case None => List.fill(args.length)(None)
               else
                 List.fill(args.length)(None)
             args.zip(argExpected.padTo(args.length, None)).map { case (a, exp) =>
@@ -5042,15 +5918,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           }
           TEnumConstruct(et, variantIdx, checkedArgs)
         else
-          // Try as a variable of FuncType
+          // Try as a variable of FuncType (including a nominal alias whose underlying is a FuncType)
           val sym = lookup(name)
-          sym.typ match
+          sym.typ.underlying match
             case FuncType(paramTypes, returnType, _, _) =>
               val params = paramTypes.zipWithIndex.map { case (t, i) => (s"arg$i", t) }
               val checkedArgs = checkArgs(name, params, tArgs)
               TIndirectCall(TVarRef(name, sym.typ), checkedArgs, returnType)
-            case other =>
-              throw AnalysisError(s"'$name' is not a function (type: $other)")
+            case _ =>
+              throw AnalysisError(s"'$name' is not a function (type: ${sym.typ})")
 
       case TryAST(inner) =>
         val tInner = analyzeExpr(inner)
@@ -5108,11 +5984,26 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val tElse = elseBody.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
         // Pick a non-void branch type if one exists (e.g., `if cond then panic("...") else x`
         // — first branch is void but overall expression is x's type). Fall back to the then
-        // branch's type, or VoidType if the then branch has no trailing expression.
+        // branch's type, or UnitType if the then branch has no trailing expression.
         val branchLastTypes = (tThen.lastOption :: tElse.toList.flatMap(_.lastOption.map(Some(_)))).collect {
           case Some(TExprStmt(e)) => e.typ
         }
-        val resultType = branchLastTypes.find(_ != VoidType).orElse(branchLastTypes.headOption).getOrElse(VoidType)
+        // When both non-void branches are integral, widen to the larger type so the
+        // result slot fits the value of either branch (e.g. `if c then byte else -1`
+        // must store ch as int, not byte — otherwise -1 truncates to 255).
+        val nonVoid = branchLastTypes.filter(_ != UnitType)
+        val resultType = nonVoid match
+          case List(a, b) if a.isIntegral && b.isIntegral =>
+            (a, b) match
+              case (FloatType(x), FloatType(y)) => FloatType(x max y)
+              case (_: FloatType, _) => a
+              case (_, _: FloatType) => b
+              case (IntType(x), IntType(y))   => IntType(x max y)
+              case (UIntType(x), UIntType(y)) => UIntType(x max y)
+              case (UIntType(x), IntType(y)) if x < y => IntType(y)
+              case (IntType(x), UIntType(y)) if y < x => IntType(x)
+              case _ => a
+          case _ => nonVoid.headOption.orElse(branchLastTypes.headOption).getOrElse(UnitType)
         TIfExpr(tCond, tThen, tElse, resultType)
 
       case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>
@@ -5133,19 +6024,37 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case MatchExprAST(scrutinee, arms, default) =>
         val tScrutinee = analyzeExpr(scrutinee)
+        // The match expression's own expected type (if any) propagates into each arm's
+        // body and into the optional `else` body. This is what lets variant constructors
+        // with phantom type parameters (e.g. `Failure(m, n)` for `ParseResult[A]` where
+        // `A` doesn't appear in `Failure`'s fields) infer their type args from context.
+        val matchExpectedOpt = currentExpected
         val tArms = arms.map { arm =>
           pushScope()
-          val tPatterns = arm.patterns.map(p => analyzePattern(p, tScrutinee.typ))
+          val prelude = scala.collection.mutable.ListBuffer.empty[StmtAST]
+          val tPatterns = arm.patterns.map(p => analyzePattern(p, tScrutinee.typ, prelude))
           val tGuard = arm.guard.map { g =>
             val tg = analyzeExpr(g)
             if tg.typ != BoolType then throw AnalysisError(s"match guard must be bool, got ${tg.typ}")
             tg
           }
-          val tBody = analyzeBlock(arm.body)
+          val savedExp = currentExpected
+          currentExpected = matchExpectedOpt
+          // Synthetic prelude statements (e.g. `val a = sym._0` for nested tuple
+          // patterns) are introduced before the user's arm body.
+          val bodyWithPrelude = prelude.toList ++ arm.body
+          val tBody = try analyzeBlock(bodyWithPrelude) finally currentExpected = savedExp
           popScope()
           TMatchArm(tPatterns, tGuard, tBody)
         }
-        val tDefault = default.map { stmts => pushScope(); val r = analyzeBlock(stmts); popScope(); r }
+        val tDefault = default.map { stmts =>
+          pushScope()
+          val savedExp = currentExpected
+          currentExpected = matchExpectedOpt
+          val r = try analyzeBlock(stmts) finally currentExpected = savedExp
+          popScope()
+          r
+        }
         // Exhaustiveness check for matches on enum types. A guarded arm does not cover
         // its variant (the guard could be false). Wildcard or default provides full coverage.
         tScrutinee.typ.underlying match
@@ -5167,10 +6076,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 )
           case _ => // non-enum or has default — skip
         // Pick a non-void arm type if one exists (e.g., one arm panics, another returns a value).
-        // Fall back to the first arm's last-expression type, or VoidType if no arm ends with an expression.
+        // Fall back to the first arm's last-expression type, or UnitType if no arm ends with an expression.
         val armLastTypes = tArms.flatMap(_.body.lastOption).collect { case TExprStmt(e) => e.typ } ++
           tDefault.toList.flatMap(_.lastOption).collect { case TExprStmt(e) => e.typ }
-        val resultType = armLastTypes.find(_ != VoidType).orElse(armLastTypes.headOption).getOrElse(VoidType)
+        val resultType = armLastTypes.find(_ != UnitType).orElse(armLastTypes.headOption).getOrElse(UnitType)
         TMatchExpr(tScrutinee, tArms, tDefault, resultType)
 
   private def analyzeInterpolatedString(s: String): TExpr =

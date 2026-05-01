@@ -27,7 +27,6 @@ object SyslPrettyPrinter:
   // --- Types ---
 
   def typeToSource(t: TypeAST): String = t match
-    case NamedTypeAST("void", _)    => "unit"
     case NamedTypeAST(name, Nil)    => name
     case NamedTypeAST(name, args)   => s"$name[${args.map(typeToSource).mkString(", ")}]"
     case PtrTypeAST(inner)          => s"*${typeToSource(inner)}"
@@ -88,7 +87,7 @@ object SyslPrettyPrinter:
         val bodyStr = bodyToSource(body, 1)
         s"$priv$defKw$name$tpStr($paramStr)$retStr$bodyStr"
 
-    case TraitDeclAST(name, typeParam, methods, _) =>
+    case TraitDeclAST(name, typeParams, methods, _) =>
       val body = methods.map { m =>
         val attrStr = attributesBlockToSource(m.attributes, IND)
         val paramStr = m.params.map(p => s"${p.name}: ${typeToSource(p.typ)}").mkString(", ")
@@ -98,7 +97,7 @@ object SyslPrettyPrinter:
           case Some(b) => s"${m.name}($paramStr)$retStr${bodyToSource(b, 2)}"
         s"$attrStr${IND}$sig"
       }.mkString("\n")
-      s"trait $name[$typeParam]\n$body"
+      s"trait $name[${typeParams.mkString(", ")}]\n$body"
 
     case _ => s"// unsupported declaration: ${d.getClass.getSimpleName}"
 

@@ -30,7 +30,8 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = x
         |""".stripMargin))
     val x = meta.symbols.find(_.name == "x").get
-    x.typ shouldBe SymbolMeta.Kind.Data(I32)
+    // `x = 42` at module level is shorthand for `var x = 42` — mutable.
+    x.typ shouldBe SymbolMeta.Kind.Data(I32, isMutable = true)
   }
 
   "marks private symbols" in {
@@ -86,9 +87,9 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = x
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("DATA x i32")
+    text should include("DATA x i32 MUT")
     val meta2 = ModuleMeta.fromSmeta(text).get
-    meta2.symbols.find(_.name == "x").get.typ shouldBe SymbolMeta.Kind.Data(I32)
+    meta2.symbols.find(_.name == "x").get.typ shouldBe SymbolMeta.Kind.Data(I32, isMutable = true)
   }
 
   "round-trips pointer types" in {
@@ -100,10 +101,10 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = 0
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("FUNC swap 2 ptr i32 ptr i32 void")
+    text should include("FUNC swap 2 ptr i32 ptr i32 unit")
     val meta2 = ModuleMeta.fromSmeta(text).get
     val swap = meta2.symbols.find(_.name == "swap").get
-    swap.typ shouldBe SymbolMeta.Kind.Func(List(PtrType(I32), PtrType(I32)), VoidType)
+    swap.typ shouldBe SymbolMeta.Kind.Func(List(PtrType(I32), PtrType(I32)), UnitType)
   }
 
   "round-trips array types" in {
@@ -112,9 +113,9 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = 0
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("DATA buf arr 10 i32")
+    text should include("DATA buf arr 10 i32 MUT")
     val meta2 = ModuleMeta.fromSmeta(text).get
-    meta2.symbols.find(_.name == "buf").get.typ shouldBe SymbolMeta.Kind.Data(ArrayType(I32, 10))
+    meta2.symbols.find(_.name == "buf").get.typ shouldBe SymbolMeta.Kind.Data(ArrayType(I32, 10), isMutable = true)
   }
 
   "round-trips no-param void function" in {
@@ -124,9 +125,9 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |main() -> int = 0
         |""".stripMargin))
     val text = meta.toSmeta
-    text should include("FUNC doNothing 0 void")
+    text should include("FUNC doNothing 0 unit")
     val meta2 = ModuleMeta.fromSmeta(text).get
-    meta2.symbols.find(_.name == "doNothing").get.typ shouldBe SymbolMeta.Kind.Func(Nil, VoidType)
+    meta2.symbols.find(_.name == "doNothing").get.typ shouldBe SymbolMeta.Kind.Func(Nil, UnitType)
   }
 
   // ===== toAsmGlobals =====

@@ -100,6 +100,36 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
     cmd.output shouldBe Some("outdir")
   }
 
+  // --- Test command backend selection ---
+  //
+  // Audit item #19: TRISC was previously rejected at executeTest with "not yet
+  // implemented". Confirm both the parser-level allowed list and the new
+  // dispatch wire-up are in place. The actual end-to-end TRISC run is exercised
+  // by `sbt syslCliJVM/run test --backend trisc sysl/tests/panic_test/`.
+
+  "parse test --backend trisc is accepted" in {
+    val Some(config) = SyslCli.parse(Seq("test", "--backend", "trisc", "foo.lsysl")): @unchecked
+    val cmd = config.command.asInstanceOf[TestCommand]
+    cmd.backend shouldBe "trisc"
+    cmd.inputs shouldBe Seq("foo.lsysl")
+  }
+
+  "parse test --backend interpreter (default fallback)" in {
+    val Some(config) = SyslCli.parse(Seq("test", "foo.lsysl")): @unchecked
+    val cmd = config.command.asInstanceOf[TestCommand]
+    cmd.backend shouldBe "interpreter"
+  }
+
+  "parse test --backend rejects unknown values" in {
+    SyslCli.parse(Seq("test", "--backend", "bogus", "foo.lsysl")) shouldBe None
+  }
+
+  "parse test --backend allows all four real backends" in {
+    for backend <- Seq("interpreter", "llvm-host", "svm-host", "trisc") do
+      val Some(config) = SyslCli.parse(Seq("test", "--backend", backend, "f.lsysl")): @unchecked
+      config.command.asInstanceOf[TestCommand].backend shouldBe backend
+  }
+
   // --- Doc rendering ---
 
   "renderHTML produces highlighted code" in {

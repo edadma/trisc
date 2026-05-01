@@ -1,0 +1,72 @@
+Aggregate copy at field offset >= 64 (TRISC codegen)
+=====================================================
+
+Pinned 2026-04-29. `emitAddImm(destReg, baseReg, offset)` for an
+out-of-immediate-range offset was emitting
+
+```
+movi r3, 64
+add  r4, r3, r3   ; <-- baseReg clobbered before use
+```
+
+when called as `emitAddImm(4, 3, 64)`. The temp-register pick
+only avoided `destReg`, so `tmp == baseReg == 3` and the offset
+load wiped the source pointer; `add` then doubled the offset
+into r4, producing a wild address.
+
+The bug only fired for aggregate field-by-field copies whose
+offset crossed the 64-byte addi-immediate boundary. `StrBuilder`
+inside a 10-field `TabWriter` (the trigger): `cell_buf` lives
+at offset 72, and copying the constructed temp `TabWriter` into
+the hidden-return slot used the by-byte copy loop with offsets
+0, 8, ..., 56, 64, 72, ..., 112. Offsets <= 56 used `addi` and
+worked; offsets >= 64 corrupted the source pointer, so the
+*destination* wrote the right bytes (its offset path was fine)
+but the *source* read garbage.
+
+Fix: in `emitAddImm`, pick a temp that is neither `destReg` nor
+`baseReg` (preferring r3, then r2, then r4, then r1).
+
+The minimal repro mirrors the real-world structure that
+surfaced the bug: a 10-field struct whose 9th field is itself a
+struct that gets a single mutating call after construction.
+Triggered all 3 std/text/tabwriter tests.
+
+    module sysl.tests.aggregate_copy_offset_64
+
+    import std.builder.{new_builder, StrBuilder}
+    import std.debug.{assert}
+
+    struct TabwriterCell
+        text: string
+        width: int
+        htab: bool
+
+    struct TabwriterLine
+        cells: []TabwriterCell
+
+    struct TabWriter
+        out: StrBuilder
+        minwidth: int
+        tabwidth: int
+        padding: int
+        padchar: byte
+        flags: int
+        align_right: bool
+        lines: []TabwriterLine
+        cell_buf: StrBuilder
+        widths: []int
+
+    new_tab_writer() -> TabWriter
+        var lines0 = (new [0]TabwriterLine)[:0]
+        lines0 = append(lines0, TabwriterLine((new [0]TabwriterCell)[:0]))
+        TabWriter(new_builder(), 0, 8, 0, byte(32), 0, false, lines0, new_builder(), (new [0]int)[:0])
+
+    TabWriter.write_byte(b: byte)
+        self.cell_buf.write_byte(b)
+
+    #test
+    test_aggregate_copy_offset_64_persists() -> unit
+        var w = new_tab_writer()
+        w.write_byte(byte('a'))
+        assert(w.cell_buf.len() == 1, "one byte")

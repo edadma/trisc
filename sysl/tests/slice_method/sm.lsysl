@@ -1,0 +1,16 @@
+    module sysl.tests.slice_method
+
+    struct Inst
+        op: int
+        arg1: int
+        arg2: int
+
+### inline append (no method call) — does append produce len=1?
+
+    #test
+    test_inline_append() -> unit
+        val insts = new [16]Inst
+        var s = insts[:0]
+        s = append(s, Inst(7, 8, 9))
+        val n = len(s)
+        assert(n == 1, "len after append")

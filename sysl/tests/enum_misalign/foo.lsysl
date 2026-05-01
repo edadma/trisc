@@ -1,0 +1,26 @@
+TRISC enum match misalignment regression
+========================================
+
+Reproduces the `std r4, r3, r0` MisalignedAccess fault discovered by the
+TRISC test runner (audit item #19) when matching on a parameterized
+enum like `Result[T, E]` whose payload contains another enum.
+
+    module sysl.tests.enum_misalign
+
+    enum Inner
+        A
+        B(value: int)
+
+    enum Outer
+        First(inner: Inner)
+        Second
+
+    #test
+    test_match_outer_first() -> unit
+        val o: Outer = First(B(42))
+        o match
+            First(i) ->
+                i match
+                    A -> assert(false, "expected B")
+                    B(v) -> assert(v == 42, "got value")
+            Second -> assert(false, "expected First")

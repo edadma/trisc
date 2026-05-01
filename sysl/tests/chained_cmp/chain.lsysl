@@ -1,0 +1,61 @@
+Chained comparison tests
+========================
+
+The reference promises `1 <= x <= 10` and `a < b < c` semantics —
+each adjacent pair is checked, joined with `&&`, with short-circuit
+on the first false pair. The desugar lives in the parser
+(`SyslParser.scala` `comparison` rule), so all backends inherit it.
+This file exercises the lowering across `--backend interpreter`,
+`llvm-host`, and `svm-host`.
+
+    module sysl.tests.chained_cmp
+
+
+    #test
+    test_inside_range() -> unit
+        val x = 5
+        assert(1 <= x <= 10, "5 is in [1, 10]")
+
+    #test
+    test_above_range() -> unit
+        val x = 100
+        assert(!(1 <= x <= 10), "100 is not in [1, 10]")
+
+    #test
+    test_below_range() -> unit
+        val x = -5
+        assert(!(1 <= x <= 10), "-5 is not in [1, 10]")
+
+    #test
+    test_three_way_strict() -> unit
+        val a = 1
+        val b = 2
+        val c = 3
+        assert(a < b < c, "1 < 2 < 3")
+
+    #test
+    test_three_way_strict_fails_middle() -> unit
+        val a = 1
+        val b = 5
+        val c = 3
+        assert(!(a < b < c), "1 < 5 not less than 3")
+
+    #test
+    test_short_circuit_left() -> unit
+        // If parser desugars to operand && operand pairs, the first
+        // false short-circuits and the right side is never evaluated.
+        val x = 0
+        assert(!(1 <= x <= 10), "first pair false")
+
+    #test
+    test_mixed_operators() -> unit
+        val x = 5
+        // 1 < x == 5 -> (1 < 5) && (5 == 5) -> true
+        assert(1 < x == 5, "mixed < and ==")
+
+    #test
+    test_eq_chain() -> unit
+        val a = 7
+        val b = 7
+        val c = 7
+        assert(a == b == c, "7 == 7 == 7")

@@ -103,6 +103,64 @@ class SyslRecursiveTypeTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 13
   }
 
+  // ===== Recursive enum with slice-of-self field (regression for sysl@9ee727db) =====
+
+  "enum with slice-of-self field type-checks" in {
+    eval(
+      """enum Tree
+        |    Leaf(value: int)
+        |    Node(children: []Tree)
+        |
+        |main() -> int
+        |    val t = Leaf(42)
+        |    t match
+        |        Leaf(v) -> v
+        |        Node(_) -> 0
+        |""".stripMargin) shouldBe 42
+  }
+
+  "enum slice-of-self variant constructs and pattern-matches" in {
+    eval(
+      """enum Tree
+        |    Leaf(value: int)
+        |    Node(children: []Tree)
+        |
+        |main() -> int
+        |    var cs = (new [3]Tree)[:0]
+        |    cs = append(cs, Leaf(10))
+        |    cs = append(cs, Leaf(20))
+        |    val t = Node(cs)
+        |    t match
+        |        Leaf(_) -> 0
+        |        Node(c) -> i32(len(c))
+        |""".stripMargin) shouldBe 2
+  }
+
+  "enum slice-of-self supports recursive traversal" in {
+    eval(
+      """enum Tree
+        |    Leaf(value: int)
+        |    Node(children: []Tree)
+        |
+        |sum_leaves(t: *Tree) -> int
+        |    *t match
+        |        Leaf(v) -> v
+        |        Node(c) ->
+        |            var total = 0
+        |            for i in 0..<len(c)
+        |                total = total + sum_leaves(&c[i])
+        |            total
+        |
+        |main() -> int
+        |    var cs = (new [3]Tree)[:0]
+        |    cs = append(cs, Leaf(1))
+        |    cs = append(cs, Leaf(2))
+        |    cs = append(cs, Leaf(7))
+        |    var t = Node(cs)
+        |    sum_leaves(&t)
+        |""".stripMargin) shouldBe 10
+  }
+
   // ===== Mutual recursion =====
 
   "mutually recursive structs" in {

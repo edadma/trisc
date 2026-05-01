@@ -10,7 +10,7 @@ case class TImportDecl(path: String) extends TDecl
 case class TExternFuncDecl(name: String, params: List[SyslType], returnType: SyslType) extends TDecl
 case class TExternVarDecl(name: String, typ: SyslType) extends TDecl
 case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil, isDef: Boolean = false, isGhost: Boolean = false, effects: FuncEffects = FuncEffects.Unknown) extends TDecl
-case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false, isVolatile: Boolean = false, isGhost: Boolean = false) extends TDecl
+case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false, isVolatile: Boolean = false, isGhost: Boolean = false, isMutable: Boolean = false) extends TDecl
 case class TStructDecl(name: String, fields: List[(String, SyslType)], volatileFields: Set[Int] = Set.empty) extends TDecl
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
 case class TDataEnumDecl(name: String, enumType: SyslType.EnumType) extends TDecl
@@ -61,6 +61,7 @@ trait TExpr:
 case class TIntLit(value: Long, typ: SyslType) extends TExpr
 case class TFloatLit(value: Double, typ: SyslType) extends TExpr
 case class TBoolLit(value: Boolean, typ: SyslType) extends TExpr
+case class TUnitLit(typ: SyslType) extends TExpr  // `()` — zero-byte value of `unit`
 case class TStringLit(value: String, typ: SyslType) extends TExpr
 case class TArrayDecl(size: Int, typ: SyslType) extends TExpr
 case class TArrayLit(elements: List[TExpr], typ: SyslType) extends TExpr
@@ -80,7 +81,7 @@ case class TStructLit(typ: SyslType) extends TExpr
 case class TStructConstruct(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = structType }
 case class TSizeof(size: Long, typ: SyslType.IntType) extends TExpr
 // Internal: address relative to frame pointer (for hidden return slot args)
-case class TAddrLit(fpOffset: Int) extends TExpr { def typ: SyslType = SyslType.PtrType(SyslType.VoidType) }
+case class TAddrLit(fpOffset: Int) extends TExpr { def typ: SyslType = SyslType.PtrType(SyslType.UnitType) }
 case class TPreInc(name: String, typ: SyslType) extends TExpr
 case class TPreDec(name: String, typ: SyslType) extends TExpr
 case class TPostInc(name: String, typ: SyslType) extends TExpr

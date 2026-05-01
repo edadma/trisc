@@ -64,8 +64,36 @@ Source code always uses the short name — the compiler resolves it to the mangl
 | `f32` | `float` | 4 bytes | IEEE-754 single-precision floating point |
 | `f64` | `double` | 8 bytes | IEEE-754 double-precision floating point |
 | `bool` | | 1 byte | `true` or `false` |
-| `unit` | | 0 bytes | no value |
+| `unit` | | 0 bytes | sole value `()` |
 | `string` | | 16 bytes | fat pointer: `{ptr: *u8, len: i64}` |
+
+### The `unit` Type
+
+`unit` is a first-class scalar type with a single value, written `()`.
+It is the canonical translation of Scala's `Unit`, Rust's `()`, Haskell's
+`()`, and the C concept "function that returns nothing." It works
+everywhere any other scalar type works:
+
+- Variable type: `val x: unit = ()`, `var y: unit = ()`
+- Parameter type: `f(x: unit) -> int = ...`
+- Return type: `g() -> unit = ()`
+- Generic type argument: `Option[unit]`, `Parser[unit]`, `Result[unit, string]`
+- Struct field: `struct S { f: unit; n: int }`
+- Enum-variant payload: `Some(())`, custom variants like `Done(x: unit)`
+
+`unit` does not implicitly convert to or from `int`, `bool`, or any other
+type — it is a distinct nominal scalar.
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+eof() -> Parser[unit] = Parser[unit]((inp: Input) -> Success((), inp))
+```
+
+The size is 0 bytes; `sizeof(unit) == 0`. A struct field of type `unit`
+contributes nothing to the parent struct's size or alignment beyond the
+existing layout. At runtime, codegen treats `()` as a discardable
+zero-byte placeholder.
 
 ### Integer Overflow
 
@@ -125,6 +153,25 @@ pointer is non-null. A null value traps at the produce site. The check is insert
 same `where`-predicate mechanism used for user-defined predicates (a synthesized checker
 function per inner type). `*T not null` is pointer-compatible with `*T`, so it can be passed
 anywhere a `*T` is expected.
+
+**Empty array / slice literals (`[]`).** An empty literal infers its element
+type from the expected type at the use site — the same expected-type-from-
+context rule that no-data variant constructors (`None`, etc.) use. This is
+the canonical "empty accumulator" idiom:
+
+```sysl
+var xs: []int = []                  // expected []int → element T = int
+val ys: []string = []               // works for any element type
+f() -> []int = []                   // expected return type
+g(items: []int) -> int = ...
+g([])                               // expected from parameter type
+struct Bag { items: []int; n: int }
+Bag([], 0)                          // expected from struct field type
+```
+
+`val xs = []` (no expected type) still errors with "cannot infer element
+type". A non-zero fixed-array type rejects `[]` (you can't give zero
+elements to a `[3]int`). Only `[0]T` accepts the empty fixed-array form.
 
 ### Struct Types
 
@@ -268,7 +315,7 @@ main() -> int
 automatically freed when the refcount reaches zero, just like `&Struct`.
 
 **Recursive types:** Structs and enums may reference themselves (or each other)
-through pointers (`*T`) or refs (`&T`):
+through pointers (`*T`), refs (`&T`), or slices (`[]T`):
 
 ```sysl
 struct Node
@@ -277,8 +324,13 @@ struct Node
 
 enum Tree
     Leaf(value: int)
-    Branch(left: &Tree, right: &Tree)   // recursive via ref
+    Branch(left: &Tree, right: &Tree)   // binary tree via ref
+    Node(children: []Tree)              // n-ary tree via slice-of-self
 ```
+
+A `[]Self` field stores a fixed-size slice descriptor, so the variant size is
+bounded — no infinite type. Build it with `(new [n]Tree)[:0]` and `append`,
+walk it by pattern-matching the variant and indexing the slice.
 
 **Memory layout:** `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
 
@@ -336,6 +388,61 @@ Plain aliases are the first form above — a transparent name for a type:
 type IntPtr = *int
 type Callback = (int) -> int
 ```
+
+#### Generic Type Aliases
+
+A type alias may take type parameters in `[...]` after the name. The
+parameters bind in the right-hand side and are substituted at each use
+site. Generic aliases are pure type-level abbreviations — no codegen is
+emitted for the alias itself.
+
+```sysl
+type Transform[T]   = (T) -> T                  // generic function alias
+type Pair[A, B]     = (A) -> B                  // multiple parameters
+type Predicate[T]   = (T) -> bool               // common combinator shape
+type ParseResult[T] = Result[T, string]         // re-parameterize a generic enum
+```
+
+Aliases compose with generic functions and methods naturally:
+
+```sysl
+apply(f: Transform[int], x: int) -> int = f(x)
+
+unwrap_or[T, E](r: Result[T, E], default: T) -> T
+    r match
+        Ok(v)  -> v
+        Err(_) -> default
+```
+
+**Nominal generic aliases (`new`).** Adding `new` makes each
+instantiation a distinct nominal type — the same Ada-derived semantics
+as `type X = new B`, just generalized to one nominal identity per
+substitution:
+
+```sysl
+type Parser[A] = new (int) -> ParseResult[A]
+
+id_i32(x: int) -> int = x
+
+main() -> int
+    var p: Parser[int] = Parser[int](id_i32)   // wrap with explicit cast
+    7
+```
+
+Each instantiation (`Parser[int]`, `Parser[string]`, …) is its own
+type. Trait/impl dispatch and operator overloading bind on the
+instantiation, not the underlying base, which makes patterns like
+`impl[A, B] Concat[Parser[A], Parser[B], Parser[(A, B)]]` express
+heterogeneous combinator operators directly. Wrapping uses the
+explicit cast `Parser[A](value)`; unwrapping uses an explicit cast to
+the underlying. There is no implicit conversion in either direction.
+
+**Restrictions.** `within` and `where` are still rejected on generic
+aliases — both need scalar ordering or operations on `T`, neither of
+which is available without trait bounds. They are rejected even when
+combined with `new` (the `within`/`where` clause is what's
+unsupported). Use a plain (non-generic) type declaration when you
+want a constrained type.
 
 ### Type Attributes (`T::Attr`)
 
@@ -446,6 +553,24 @@ volatile var status: u32 = 0
 volatile var flag: int
 ```
 
+**Multi-line initializer.** When the right-hand side is long (a deeply
+parenthesized constructor, a verbose generic call, etc.), break after `=`
+and indent the value on the next line. This works for `val`, `var`, and
+plain assignment, with or without a type annotation:
+
+```sysl
+val sub: Parser[(int, int) -> int] =
+    success[(int, int) -> int]((a: int, b: int) -> a - b)
+
+var n: int =
+    100 + 23
+
+x =
+    f(some_long_argument)
+```
+
+The form mirrors function bodies' `=` ⏎ Indent stmts Dedent layout.
+
 ### Volatile
 
 The `volatile` qualifier prevents the compiler from optimizing away, reordering, or coalescing loads and stores. Use it for memory-mapped I/O registers and shared-memory variables.
@@ -522,6 +647,28 @@ supported — `const PI: f64 = 3.14` is not yet accepted.
 Note: `val` is also folded when the initializer happens to be constant, but unlike `const`
 it additionally allocates storage (and accepts non-const initializers). Prefer `const` when
 you want the guarantee and zero-storage behaviour.
+
+### `static_assert(cond [, "message"])`
+
+Module-scope compile-time check. The condition is evaluated by the same constant
+folder as `const` initializers (supports `sizeof`, comparisons, bitwise, shifts,
+arithmetic, and references to other `const` names) and must produce a `bool`. A
+true result emits no code; a false result is a compile error citing the optional
+message.
+
+```sysl
+struct EthHeader
+    dst: [6]byte
+    src: [6]byte
+    ethertype: u16
+
+static_assert(sizeof(EthHeader) == 14, "EthHeader must be 14 bytes")
+static_assert(MAX_FRAME >= 64 && MAX_FRAME <= 1518)
+```
+
+The canonical use is locking down on-the-wire and on-disk struct layouts so an
+accidental field reorder or padding shift fails the build instead of corrupting
+packets at runtime.
 
 ---
 
@@ -1007,6 +1154,35 @@ route through the bounded trait's methods.
 - Operations on a type parameter that are invalid for the concrete type produce
   an error at the call site where the instantiation happens.
 
+**Type-argument shapes.** Generic type arguments accept the full type grammar
+— named types, tuples, slices, fixed-size arrays, nested generics, and
+**function types**. Function-typed type arguments are essential for
+combinator-shaped libraries:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+// Parse an operand, then a binary operator that combines two operands
+chainl1[A](operand: Parser[A], op: Parser[(A, A) -> A]) -> Parser[A]
+chainr1[A](operand: Parser[A], op: Parser[(A, A) -> A]) -> Parser[A]
+
+// Container holding a callback
+struct Cell[T] { value: T }
+val c: Cell[(int) -> int] = Cell((x: int) -> x + 1)
+
+// Option / Result wrapping a function
+var maybe_handler: Option[(Event) -> unit] = None
+fn lookup(name: string) -> Result[(int) -> int, string]
+
+// Zero-arg fn type
+val thunk: Parser[() -> int] = ...
+```
+
+Multi-parameter function types must use the parens form: `(int, int) -> int`
+(not `int, int -> int` — the latter is a multi-arg generic of `int, int`
+followed by a stray `->`). Bare `T -> R` (no parens) is not currently
+accepted as a type-argument shape; use `(T) -> R`.
+
 ### Generic Structs
 
 Structs may declare type parameters in square brackets after the name. Each
@@ -1120,10 +1296,11 @@ separate statements also work (e.g. `x = a?` followed by `y = b?`).
 
 ### Traits and `impl` blocks
 
-Traits describe a set of methods a type may implement. Each trait is parameterized
-by a subject type `T` (the type that will conform). Methods may have default
-bodies; implementers override or inherit them. No orphan rule — any `impl` may
-be written anywhere.
+Traits describe a set of methods a type may implement. A trait is parameterized
+by one or more type parameters. The simplest case — and the most common — is a
+single subject type `T` (the type that will conform). Methods may have default
+bodies; implementers override or inherit them. Cross-module impls are governed
+by an orphan rule (see *Coherence* below).
 
 ```sysl
 trait Ord[T]
@@ -1187,12 +1364,235 @@ main() -> int
 ```
 
 Built-in numeric operators are unaffected — `3 + 4` on `int` still uses the
-native instruction. Dispatch through a trait only applies when the left operand
-is a struct or enum type.
+native instruction. Dispatch through a trait applies whenever **at least one**
+operand is a user-defined named type (struct, enum, or nominal type alias) and
+a matching `impl` exists. When neither operand is user-defined, the operator
+falls through to the built-in operator table; built-in scalar types are not
+overloadable through this mechanism.
+
+Mixed-operand impls let primitives appear on either side. For example, with
+
+```sysl
+struct Vec3
+    x: int
+    y: int
+    z: int
+
+trait Mul[A, B, R]
+    mul(a: A, b: B) -> R
+
+impl Mul[int, Vec3, Vec3]
+    mul(s: int, v: Vec3) -> Vec3 = Vec3(s * v.x, s * v.y, s * v.z)
+```
+
+`3 * Vec3(1, 2, 4)` dispatches via `Mul[int, Vec3, Vec3]`. The reverse
+(`Vec3(...) * 3`) needs its own `impl Mul[Vec3, int, Vec3]` — there is no
+implicit symmetry. Dispatch is by operand types, not LHS-only.
 
 Operator sugar composes with generic functions. Inside `max[T](a: T, b: T)`,
 writing `a > b` works for any `T` that has an `Ord` impl, checked at
 instantiation time.
+
+#### User-Defined Operator Symbols
+
+Beyond the fixed built-in operators in the table above, users can introduce
+new binary operator symbols by attaching `#operator("sym")` to a trait
+method. The lexer is greedy over the operator characters
+
+```
++  -  *  /  %  <  >  =  !  &  |  ^  ~
+```
+
+so any sequence of these characters lexes as one operator token, including
+new symbols like `<>`, `>>>`, `|>`, `<*>`, or `~~`. The parser slots each
+user operator into the precedence ladder by its **first character**
+(Scala-style):
+
+| First char | Level | Examples |
+|---|---|---|
+| `*` `/` `%` | multiplicative | `<*` `*>` `/?` |
+| `+` `-` | additive | `+++` `<+>` |
+| `<` `>` `=` `!` | comparison | `<>` `<=>` `>>>` `===` `!==` |
+| `&` | bitwise-and | `&&&` (user) |
+| `^` `~` | bitwise-xor | `~~` `^^` |
+| `\|` | bitwise-or | `\|>` `<\|` |
+
+Reserved sigils (not redefinable): `( ) [ ] { } , ; : :: . .. ..< -> => ? #
+//` `/*` `*/` plus assignment / compound-assignment (`=`, `+=`, `-=`, ...,
+`<<=`, `>>=`), the built-in arithmetic / comparison / shift operators
+listed in the table above, the logical `&&` `||`, and `++` `--`.
+
+Declare a new operator on a trait method:
+
+```sysl
+struct Set
+    bits: int
+
+trait Union[T]
+    #operator("<>")
+    union(a: T, b: T) -> T
+
+impl Union[Set]
+    union(a: Set, b: Set) -> Set = Set(a.bits | b.bits)
+
+main() -> int
+    a = Set(3)
+    b = Set(12)
+    c = a <> b               // desugars to Union.union(a, b)
+    c.bits                   // 15
+```
+
+The dispatch rules are the same as for built-in operators: an operator
+binds when at least one operand is a user-defined named type and an `impl`
+of the trait carrying the `#operator` annotation matches. When neither
+operand is user-defined, the operator falls through to the built-in
+operator table (or fails to type-check). Built-in scalar types are not
+overloadable through this mechanism.
+
+This makes parser-combinator-style sugar work directly:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+trait Concat[A, B, R]
+    #operator("~")
+    concat(a: A, b: B) -> R
+
+impl[A, B] Concat[Parser[A], Parser[B], Parser[(A, B)]]
+    concat(a: Parser[A], b: Parser[B]) -> Parser[(A, B)] = seq(a, b)
+
+impl[A] Concat[string, Parser[A], Parser[(string, A)]]
+    concat(a: string, b: Parser[A]) -> Parser[(string, A)] = seq(literal(a), b)
+```
+
+`"foo" ~ ident` dispatches via the second impl even though the LHS is a
+primitive `string`.
+
+Two failure modes get specific diagnostics:
+
+- **Unbound operator.** `a <~> b` where `<~>` isn't bound anywhere produces
+  `operator '<~>' is not bound; declare it via #operator("<~>") on a trait
+  method`.
+- **Bound but no impl matches.** `1 |> 2` when `|>` is bound to `Pipe[T]`
+  but neither operand is user-defined produces `operator '|>' is bound to
+  trait 'Pipe', but no impl matches operand types (int, int) — operands must
+  be a struct, enum, or nominal alias (`type T = new ...`) that impls 'Pipe'`.
+  When one operand is user-defined but no matching impl exists (e.g.
+  `1 ~ Box(2)` with only `impl Concat[Box, Box, _]` defined), you get
+  `no impl of 'Concat' for operator '~' on int, Box`.
+
+Nominal aliases preserve their outer type through operator dispatch — the
+unifier matches an operand whose static type is `Parser[i32]` against a
+generic impl `impl[X, Y] Concat[Parser[X], Parser[Y], R]`, even though
+`Parser[A]` desugars to `new (Input) -> ParseResult[A]`. The nominal name
+gates the dispatch; the underlying function type is only consulted when
+the alias is *called*. Combined with the "either operand is user-defined"
+rule, `success(1) ~ success(2)` (both nominal) and `"x" ~ ident` (mixed
+primitive + nominal) both work.
+
+Nominal aliases of numeric types stay arithmetically usable too: `Meters
++ Meters` (where `type Meters = new int`) does plain int arithmetic and
+re-wraps the result, even with no `impl Add[Meters]`. If you *do* register
+an impl, dispatch fires through it instead.
+
+Context-sensitive prefix operators (`*` deref, `&` addr-of) are preserved:
+`*++p`, `*&a`, `**T`, `*=*p` all lex as today (they split the muncher),
+so user-defined operators may not start with `*` followed by `+`/`-`/`&`,
+or with `&` followed by `*`/`+`/`-`/`~`/`!`. Operators like `*>`, `*<`,
+`<*`, `<*>`, `&|>` are allowed.
+
+#### Multi-Parameter Traits
+
+A trait may declare more than one type parameter. Each `impl` then provides
+one target type per trait parameter:
+
+```sysl
+trait Concat[A, B, R]
+    concat(a: A, b: B) -> R
+
+impl Concat[int, int, int]
+    concat(a: int, b: int) -> int = a * 10 + b
+
+main() -> int = Concat.concat(3, 7)   // 37
+```
+
+`Concat.concat(3, 7)` finds the impl whose first two trait targets unify
+with the operand types `(int, int)`; the third target (`R`) is determined
+by which impl matches. This is the **functional-dependency convention**:
+the first two trait positions are operands, the rest are derived. It is
+not currently expressible in syntax — it is just how the dispatcher
+matches candidates.
+
+#### Generic `impl` Blocks
+
+`impl[X, Y, ...]` introduces type variables that may appear in the impl's
+target patterns and in its method signatures. The dispatcher unifies the
+impl's method-parameter patterns against actual argument types at each
+call site to produce a substitution, then specializes the method body
+into a fresh top-level function (with caching, so repeated dispatches at
+the same operand types reuse one mangled function).
+
+```sysl
+struct Box[T]
+    v: T
+
+trait Show[T]
+    showInt(x: T) -> int
+
+impl[X] Show[Box[X]]
+    showInt(x: Box[X]) -> int = 7
+
+main() -> int
+    var b = Box[int](5)
+    Show.showInt(b)         // dispatches to Show_showInt_Box_i32, returns 7
+```
+
+Combined with multi-param traits, generic impls express dependency-style
+relations:
+
+```sysl
+struct Wrap[T]
+    v: T
+
+trait Combine[X, Y, R]
+    combine(x: X, y: Y) -> R
+
+impl[U] Combine[Wrap[U], int, int]
+    combine(x: Wrap[U], y: int) -> int = y * 2
+
+main() -> int
+    var w = Wrap[bool](true)
+    Combine.combine(w, 21)   // 42
+```
+
+**Rules for impl declarations:**
+- Every declared impl tvar (`[X, Y, ...]`) must appear in at least one
+  target pattern. An unused tvar can never be bound at dispatch time and
+  is rejected at registration.
+- The number of target types must match the trait's type-parameter count.
+
+#### Coherence: Orphan Rule and At-Most-One
+
+To keep dispatch unambiguous, two rules apply at impl registration:
+
+- **Orphan rule.** A module may declare `impl T[Args...]` only if it
+  defined trait `T` itself, or it defined at least one named type that
+  appears anywhere in the impl's target patterns. This prevents two
+  unrelated modules from each registering an impl of someone else's
+  trait for someone else's type and producing a conflict on import.
+  The "root" module (no `module` declaration) is exempt — it has
+  nothing to conflict with.
+
+- **At-most-one (coherence).** No two impl templates of the same trait
+  may have overlapping operand patterns (positions 0–1 by the FD
+  convention; the result position is excluded). Two `impl[T]
+  Show[Box[T]]` blocks overlap, as do `impl[T] Show[Box[T]]` and
+  `impl Show[Box[int]]`. Both are rejected at registration.
+
+When dispatch finds zero matching impls, the analyzer emits "no impl of
+trait 'X.method' matches arg type(s) ..."; when more than one matches,
+"ambiguous: N impls of 'X' match ...". Coherence ensures the second
+case can only happen across modules that violate the orphan rule.
 
 ### Methods
 
@@ -1309,6 +1709,70 @@ transform = x ->
     doubled + 1
 ```
 
+**Body shape — single expression vs. block.** A closure body is either an
+indented statement block (when the `->` line ends with a newline at top
+level) or a single expression that includes any of: arithmetic, calls,
+`if`/`else`, `match`, and nested closures. Both forms are accepted in
+every expression position — top-level bindings, call arguments, cast
+arguments, tuple literals — so a non-trivial body can be written inline
+where the closure is used:
+
+```sysl
+// Multi-line if-else body inside a call argument
+apply((x: int) ->
+    if x > 0 then x * 2
+    else 0, 21)
+
+// Inside a generic-alias cast (parser-combinator idiom)
+type Parser[A] = new (Input) -> ParseResult[A]
+eof[A](v: A) -> Parser[A] =
+    Parser[A]((inp: Input) ->
+        if inp.at_end() then Success(v, inp)
+        else Failure("expected end of input", inp))
+```
+
+Statement-block bodies (multiple statements separated by newlines, e.g.
+a `var` accumulator + a `for` loop + a result expression) work in any
+position — including inside call arguments, cast arguments, tuple
+literals — even though the lexer normally suppresses Newline/Indent/
+Dedent inside parens. The lexer recognizes `->` followed by an indented
+block as a body trigger and re-enables indent processing for the body's
+extent. The body terminates at the first dedent below the `->` line's
+indent or at the matching close-delimiter / `,` — whichever comes first.
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+rep[A](p: Parser[A]) -> Parser[[]A] =
+    Parser[[]A]((inp: Input) ->
+        var result: []A = []
+        var current = inp
+        while ...
+        Success(result, current))
+```
+
+A single-expression body inside parens still works as before — the
+trigger only re-enables indent processing when the body actually starts
+on a new indented line.
+
+`match` works in this position too: it carries an inline-arms form that
+detects each arm by the start of its pattern, so the indented arm list
+parses without Newline/Indent/Dedent tokens being available:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+map[A, B](p: Parser[A], f: (A) -> B) -> Parser[B] =
+    Parser[B]((inp: Input) ->
+        p(inp) match
+            Success(v, n) -> Success(f(v), n)
+            Failure(m, n) -> Failure(m, n))
+```
+
+The arm list terminates at the first token that doesn't begin a pattern
+— typically the closing `)` of the enclosing call or a `,` that
+introduces another argument.
+
 **Capture semantics:** Closures capture variables **by value** (copy at creation time). Mutations to the original variable after the closure is created do not affect the captured value:
 
 ```sysl
@@ -1366,6 +1830,117 @@ Non-escaping closures are more efficient (no heap allocation) but the compiler t
 - **Escaping, OR any rc-bearing capture** (string, ref, struct-with-string, enum-with-string, …): the environment is heap-allocated with a `[rc:i64 @ -16 | deinit_ptr:i8* @ -8 | data]` header. Closure descriptor scope-exit decrements the env's refcount; at zero, a per-closure-id deinit walks the captures (decr'ing rc-bearing entries) and `free` reclaims the env block.
 
 The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention (LLVM passes it as the first hidden parameter `i8* %env`).
+
+### Underscore Placeholder Syntax
+
+`_` in expression position is a **placeholder** that desugars to a fresh
+parameter of an enclosing anonymous function. Each occurrence introduces one
+parameter, in lexical (left-to-right) order:
+
+```sysl
+xs.map(_ + 1)            // xs.map(x -> x + 1)
+xs.filter(_ > 0)         // xs.filter(x -> x > 0)
+xs.sortBy(_.timestamp)   // xs.sortBy(x -> x.timestamp)
+items.fold(_ + _)        // items.fold((a, b) -> a + b)
+```
+
+The lambda body is the **smallest enclosing expression** that contains the
+placeholder(s). Parens and call-arg boundaries delimit the body; binary/unary
+operators, field access, indexing, and method-receiver positions do not — so
+`_` "bubbles up" through them until it hits a boundary. Boundaries:
+
+- **Parens** explicitly delimit: `(_ + 1) * 2` is `(x -> x + 1) * 2`, not
+  `x -> (x + 1) * 2`.
+- **Function-call arguments**: an arg expression that *contains* `_` (but is
+  not bare `_`) wraps at the arg position — `xs.map(_ + 1)` is
+  `xs.map(x -> x + 1)`.
+- **Statement-level expressions** (var/val init, return value, expression
+  statements): `var f: (int) -> int = _ + 1` binds `f` to `x -> x + 1`.
+
+**Partial application — bare `_` at an argument position.** When a `_` is
+*directly* a call argument (with no surrounding operators), it is absorbed by
+the **enclosing call**, making the whole call the lambda body:
+
+```sysl
+xs.map(f(_, 0))          // xs.map(x -> f(x, 0))
+xs.map(f(0, _))          // xs.map(x -> f(0, x))
+xs.map(f(_, _))          // xs.map((x, y) -> f(x, y))
+```
+
+This is the canonical "wildcard-arg" partial-application form.
+
+**Type inference.** A placeholder lambda is type-checked the same as any other
+closure — its parameters infer from the expected type of the surrounding
+context (e.g., the function-typed parameter that consumes it). A
+placeholder-lambda *without* an expected type (`var f = _ + 1` without an
+ascription) cannot infer the parameter's type and must be annotated:
+
+```sysl
+var f: (int) -> int = _ + 1   // OK — expected type drives inference
+var f = _ + 1                 // error: cannot infer placeholder's type
+```
+
+**Disambiguation with existing `_` uses.** The placeholder meaning is *purely
+expression-positional*. The other three positions where `_` appears keep their
+existing meaning:
+
+| Position                                | Meaning              |
+|-----------------------------------------|----------------------|
+| LHS of `var _ = ...` / `val _`          | discard binding      |
+| Destructuring binder `(_, b) =`         | discard              |
+| `match` arm pattern `_ ->`              | wildcard pattern     |
+| Lambda parameter list `(_: T) -> body`  | discard parameter    |
+| Expression position (`_ + 1`)           | placeholder (lambda) |
+
+The five positions are syntactically disjoint, so there is no parser
+ambiguity.
+
+**Discard parameter.** In a lambda parameter list, `_` introduces a
+parameter slot that is unreferenceable from the body. Type annotation is
+optional (inferred from context, like any closure parameter). Multiple `_`
+parameters in the same list are independent — they don't collide:
+
+```sysl
+apply((_: int) -> 42, 7)               // ignore the int, return 42
+apply2((_: int, _: int) -> 99, 1, 2)   // both slots discarded
+apply2((x: int, _: string) -> x, ...)  // mix named + discard
+```
+
+The single-param shorthand `name -> body` does **not** treat `_` as a
+discard binder — `_ -> body` parses `_` as the expression-position
+placeholder (yielding a `(_x) -> _x`-shaped lambda). Use the parens form
+`(_) -> body` for a discard parameter without an annotation. `out _: T`
+and `inout _: T` are not valid (modes require an lvalue caller-side).
+
+### Inner `def` — Recursive Named Local Closures
+
+Inside a function body, `def name(params) -> ret body` declares a **recursively
+callable named local closure** with full capture support. The recursive call
+resolves to the local binding (not a global), and outer-scope variables are
+captured through the same pipeline as anonymous closures.
+
+```sysl
+outer(bonus: int) -> int
+    def sum_with_bonus(n: int) -> int
+        if n == 0 then return 0
+        n + bonus + sum_with_bonus(n - 1)
+    sum_with_bonus(3)
+```
+
+The body sees `bonus` (captured from `outer`) and `sum_with_bonus` itself
+(self-referential). Non-recursive inner defs (no self-call in the body) cost the
+same as an anonymous lambda; the self-cell is only allocated when needed.
+
+**Required signature.** Inner defs must declare the return type — self-references
+need the binding's type to resolve, and inference would require a two-pass
+analysis. Top-level functions still allow inferred return types.
+
+**Restrictions:** no type parameters, no return-type inference, no mutual
+recursion (`def f` then `def g` calling each other would need both names
+pre-bound before either body is analyzed). Contracts (`require`/`ensure`) parse
+but are currently ignored on inner defs.
+
+Implemented across all four backends (interpreter, LLVM, SVM, TRISC).
 
 ### Extern Declarations
 
@@ -1610,6 +2185,16 @@ s match
     Rect(w, h) -> w * h       // each variant checked by tag
     Empty -> 0                 // no-data variant
     Circle(r) if r > 5 -> 1   // guard with variant binding
+
+// tuple pattern — destructure a tuple-typed scrutinee
+t match                       // t: (int, int)
+    (a, b) -> a + b
+    (a, _) -> a               // wildcard at any position
+
+// nested tuple pattern inside a variant or struct
+r match                       // r: Result with Ok(p: (int, int))
+    Ok((a, b)) -> a + b       // tuple field destructured in place
+    Err(_) -> 0
 
 // match with block bodies
 x match
@@ -2502,6 +3087,40 @@ each(arr, (v: int) -> count = count + v)        // writes `count` → fits #writ
 Reads of captured outer locals don't contribute to the inferred sets — captures are opaque dataflow dependencies, not module-level effects. Writes through captures, by contrast, force the inference to `Unknown` (you can't summarize a write to an arbitrary outer-scope local as a fixed set of global names).
 
 When a closure is passed to a callback slot, the slot's declared effects are checked against the inferred ones via the same subset rule used everywhere else: closure effects must be a subset of the slot's `#reads ∪ #writes` for reads, and a subset of the slot's `#writes` for writes.
+
+**Lattice rule at type-equality / unifier sites.** The same lattice (`#pure ≤ #reads(R)/#writes(W) ≤ unannotated`, modulo subset on the read/write sets) is what generic-impl dispatch uses when matching a function-typed actual against an impl-pattern function-type slot. A `#pure` closure is always accepted by an unannotated `(A) -> B` impl pattern — the common shape for combinator libraries that accept any callback the user supplies:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+trait Map[A, F, R]
+    #operator("^^")
+    pmap(a: A, f: F) -> R
+
+impl[A, B] Map[Parser[A], (A) -> B, Parser[B]]
+    pmap(a: Parser[A], f: (A) -> B) -> Parser[B] = map(a, f)
+
+success[int](21) ^^ ((x: int) -> x * 2)
+//                  ^^^^^^^^^^^^^^^^^^^^^^
+// Closure infers `#pure`. Impl pattern's `(A) -> B` is unannotated.
+// Lattice: `#pure ≤ unannotated` → dispatch fires. B binds to `int`.
+```
+
+The direction is one-way: an unannotated callable can't flow into a `#pure` slot (the compiler can't prove the absence of effects), but a `#pure` callable flows into anything. The unifier mirrors the indirect-call rules above so that a value's effect signature stays compatible across every site where its type is checked, not just at the point of the call itself.
+
+**Lattice rule at generic-parameter inference sites.** The same lattice also applies when the inference engine merges multiple concrete observations of the same generic type variable. If an explicit type argument or one call-site argument observes `(A) -> B` (unannotated) and another argument observes `(A) -> B #pure`, the type variable is bound to the **lattice LUB** — `(A) -> B` (the wider one) — rather than rejected as "seen both X and X #pure". The merged binding is wide enough that every original observation still flows in as an actual via `effectsSatisfy`. For the read/write axis, two `#reads` (or `#writes`) annotations whose sets are subset-related merge to the wider set; sets that are *not* subset-related (e.g. `#reads(x)` and `#writes(y)` with no overlap in either axis) remain a hard error so the user can disambiguate. Combinator libraries written against unannotated function types (`success[A](v: A) -> Parser[A]`, then `success[(int, int) -> int]((a, b) -> a - b)`) infer through this rule:
+
+```sysl
+type Parser[A] = new (int) -> int
+success[A](v: A) -> Parser[A] = Parser[A]((x: int) -> x)
+
+val sub: Parser[(int, int) -> int] =
+    success[(int, int) -> int]((a: int, b: int) -> a - b)
+//                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+// Closure infers `(int, int) -> int #pure`. Explicit type arg
+// pre-seeds A as `(int, int) -> int` (unannotated). Lattice LUB
+// keeps A unannotated; the closure flows in as `#pure ≤ unannotated`.
+```
 
 ### `#ghost` — verification-only declarations
 

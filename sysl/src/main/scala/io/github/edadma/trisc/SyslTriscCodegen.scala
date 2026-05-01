@@ -116,7 +116,27 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   private val itables = new mutable.LinkedHashMap[String, List[String]] // itable label → list of function names
   private var declaredFunctions = Set.empty[String] // all function names in this compilation unit
 
-  def generate(program: TProgram): String =
+  def generate(program0: TProgram): String =
+    // Dedupe decls by name across compilation units. The test runner merges
+    // multiple units into one TProgram via `flatMap(_.typed.decls)`; if two
+    // units both instantiated the same generic (e.g. `is_err[i64, Error]`)
+    // we'd emit two `global is_err_i64_Error, ...` lines and two
+    // `is_err_i64_Error:` labels, and the asm assembler rejects the duplicate
+    // symbol. Keep the first occurrence per name; subsequent duplicates are
+    // identical re-instantiations of the same template and can be skipped.
+    val program: TProgram =
+      val seen = mutable.Set.empty[String]
+      def keep(name: String): Boolean =
+        if seen.contains(name) then false else { seen += name; true }
+      val deduped = program0.decls.filter {
+        case TFunDecl(name, _, _, _, _, _, _, _, _) => keep(name)
+        case TVarDecl(name, _, _, _, _, _, _) => keep(name)
+        case TExternFuncDecl(name, _, _) => keep(name)
+        case TExternVarDecl(name, _) => keep(name)
+        case _ => true
+      }
+      TProgram(deduped)
+
     out.clear()
     labelCounter = 0
     stringLiterals.clear()
@@ -162,7 +182,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
     for decl <- program.decls do
       decl match
-        case v @ TVarDecl(_, typ, init, _, _, _) =>
+        case v @ TVarDecl(_, typ, init, _, _, _, _) =>
           globals(v.name) = typ
           // Track constant values for cross-reference in other global initializers
           constEval(init).foreach(n => globalConstants(v.name) = n)
@@ -230,6 +250,29 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // Emit __str_float helper if needed (float to string conversion)
     if needsStrFloat then emitStrFloatHelper()
 
+    // Pre-walk dataGlobals to intern any string-literal initializers (scalar or
+    // array elements). This must run before rodata emission so the bodies land
+    // in rodata; the data segment loop below then re-uses the precomputed
+    // (label, len) pairs without re-interning.
+    val dataGlobalStringLabels = new mutable.HashMap[Int, List[(String, Int)]]
+    for (decl, idx) <- dataGlobals.toList.zipWithIndex do
+      decl match
+        case TVarDecl(_, typ, init, _, _, _, _) =>
+          init match
+            case TArrayLit(elements, _) =>
+              val isStringArray = typ match
+                case SyslType.ArrayType(e, _) => e.underlying == SyslType.StringType
+                case _ => false
+              if isStringArray then
+                dataGlobalStringLabels(idx) = elements.map {
+                  case TStringLit(value, _) => internStringLiteral(value)
+                  case _ => ("0", 0)
+                }.toList
+            case TStringLit(value, _) =>
+              dataGlobalStringLabels(idx) = List(internStringLiteral(value))
+            case _ =>
+        case _ =>
+
     // Emit rodata segment — string literals and interface tables
     if stringLiterals.nonEmpty || itables.nonEmpty then
       emit("segment rodata")
@@ -259,9 +302,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // Emit data segment — initialized globals
     if dataGlobals.nonEmpty then
       emit("segment data")
-      for decl <- dataGlobals do
+      for (decl, idx) <- dataGlobals.toList.zipWithIndex do
         decl match
-          case TVarDecl(name, typ, init, _, _, _) =>
+          case TVarDecl(name, typ, init, _, _, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -271,11 +314,30 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                 val declElemType = typ match
                   case SyslType.ArrayType(e, _) => e
                   case other => throw new RuntimeException(s"global array literal: expected ArrayType, got $other")
-                val elemDir = emitDataDirective(declElemType)
-                for elem <- elements do
-                  constEval(elem) match
-                    case Some(n) => emit(s"  $elemDir $n")
-                    case None => emit(s"  $elemDir 0")
+                declElemType.underlying match
+                  case SyslType.StringType =>
+                    // Each element is a 16-byte {ptr, len} descriptor pointing at
+                    // an interned string blob in rodata (interned in the pre-walk).
+                    val labels = dataGlobalStringLabels(idx)
+                    for (label, lenBytes) <- labels do
+                      if label == "0" then
+                        emit("  dl 0")
+                        emit("  dl 0")
+                      else
+                        emit(s"  dl $label")
+                        emit(s"  dl $lenBytes")
+                  case _ =>
+                    val elemDir = emitDataDirective(declElemType)
+                    for elem <- elements do
+                      constEval(elem) match
+                        case Some(n) => emit(s"  $elemDir $n")
+                        case None => emit(s"  $elemDir 0")
+              case TStringLit(_, _) =>
+                // Module-level scalar string init: emit a 16-byte {ptr, len} descriptor
+                // pointing at the interned blob.
+                val (label, lenBytes) = dataGlobalStringLabels(idx).head
+                emit(s"  dl $label")
+                emit(s"  dl $lenBytes")
               case _ =>
                 val directive = emitDataDirective(typ)
                 floatConstEval(init) match
@@ -291,7 +353,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emit("segment bss")
       for decl <- bssGlobals do
         decl match
-          case TVarDecl(name, typ, _, _, _, _) =>
+          case TVarDecl(name, typ, _, _, _, _, _) =>
             val align = stackAlign(typ)
             if align > 1 then emit(s"  align $align")
             emit(s"# global: $name")
@@ -309,7 +371,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // Scan the structured Instr array directly — no string formatting needed.
     val definedSymbols = (for decl <- program.decls yield decl match
       case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
-      case TVarDecl(name, _, _, _, _, _) => Some(name)
+      case TVarDecl(name, _, _, _, _, _, _) => Some(name)
       case _ => None).flatten.toSet
     def referencesSymbol(sym: String): Boolean =
       out.exists {
@@ -405,6 +467,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   private def isZeroInit(typ: SyslType, init: TExpr): Boolean =
     init match
       case TArrayLit(_, _) => false // array literal has explicit values → data
+      case TStringLit("", _) => true  // empty string descriptor is {ptr=0, len=0} → bss
+      case TStringLit(_, _) => false  // non-empty string literal needs interned data → data
       case _ =>
         floatConstEval(init) match
           case Some(0.0) => true  // explicit zero float → bss
@@ -461,6 +525,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   private def constEval(expr: TExpr): Option[Long] = expr match
     case TIntLit(n, _) => Some(n)
     case TBoolLit(b, _) => Some(if b then 1 else 0)
+    case TUnitLit(_) => Some(0)
     case TVarRef(name, _) => globalConstants.get(name)
     case TUnary("-", operand, _) => constEval(operand).map(-_)
     case TUnary("~", operand, _) => constEval(operand).map(~_)
@@ -509,6 +574,36 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         throw new RuntimeException(s"emitLoad: unexpected type $other")
 
   // Emit store from rSrc to [rBase + 0], using width-appropriate instruction
+  /** Copy `size` bytes from [srcReg] to [addrReg], using either 8-byte or
+    *  4-byte memory ops based on `align`. Required because TRISC `std`/`ldd`
+    *  fault on misaligned addresses, and an aggregate's natural alignment
+    *  determines the worst-case alignment of its in-memory address. */
+  private def emitAggregateCopy(srcReg: Int, addrReg: Int, size: Int, align: Int): Unit =
+    // The loop uses r3 and r4 as scratch (r4 = loaded value, r3 = dest addr).
+    // If srcReg is 3 or 4, the inner loop would clobber the source-base
+    // pointer between iterations (e.g. `addi r4, r4, i; ldw r4, r4, r0`
+    // computes from the previously-loaded VALUE instead of the source ADDR).
+    // Same for addrReg in {3, 4}. Copy any conflicting reg to r2 / r1 first.
+    val srcBase = if srcReg == 3 || srcReg == 4 then 2 else srcReg
+    if srcBase != srcReg then emit(s"  mov r$srcBase, r$srcReg")
+    val destBase =
+      if addrReg == 3 || addrReg == 4 then
+        if srcBase == 1 then 2 else 1
+      else addrReg
+    if destBase != addrReg then emit(s"  mov r$destBase, r$addrReg")
+    if align >= 8 then
+      for i <- 0 until size by 8 do
+        emitAddImm(4, srcBase, i)
+        emit("  ldd r4, r4, r0")
+        emitAddImm(3, destBase, i)
+        emit("  std r4, r3, r0")
+    else
+      for i <- 0 until size by 4 do
+        emitAddImm(4, srcBase, i)
+        emit("  ldw r4, r4, r0")
+        emitAddImm(3, destBase, i)
+        emit("  stw r4, r3, r0")
+
   private def emitStore(srcReg: Int, addrReg: Int, typ: SyslType): Unit =
     typ.underlying match
       case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType =>
@@ -518,13 +613,30 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case SyslType.IntType(32) | SyslType.UIntType(32) =>
         emit(s"  stw r$srcReg, r$addrReg, r0")
       case SyslType.StringType | (_: SyslType.FuncType) | _: SyslType.InterfaceType =>
-        // 16-byte copy: srcReg = source address, addrReg = dest address
-        emit(s"  ldd r4, r$srcReg, r0")
-        emit(s"  std r4, r$addrReg, r0")
-        emitAddImm(4, srcReg, 8)
-        emit("  ldd r4, r4, r0")
+        // 16-byte copy. srcReg may be one of our scratches (r3 or r4); pick
+        // a load order that doesn't clobber srcReg before its second use.
+        // Bug history: the previous order loaded src[0] into r4 first, then
+        // re-derived src+8 from srcReg — which produced garbage when
+        // srcReg == r4 (e.g. the append-grow path for `[]string`,
+        // where the elem was loaded into r4). Now: read both source words
+        // *before* any store, into r3 (lo) and r4 (hi), with the pair
+        // ordered so the load that clobbers srcReg comes last.
+        if srcReg == 3 then
+          // srcReg already in r3; compute src+8 (clobbers r4 only) and load
+          // src[8] first, then load src[0] last (clobbering r3 = srcReg).
+          emitAddImm(4, srcReg, 8)
+          emit("  ldd r4, r4, r0")            // r4 = src[8]
+          emit(s"  ldd r3, r$srcReg, r0")     // r3 = src[0]  (srcReg dies here)
+        else
+          // srcReg is r1/r2/r4 — load src[0] into r3 (no srcReg clobber unless
+          // srcReg=3, handled above), then derive src+8 into r4 (clobbers
+          // srcReg if srcReg=4, fine because src[0] is already saved).
+          emit(s"  ldd r3, r$srcReg, r0")     // r3 = src[0]
+          emitAddImm(4, srcReg, 8)
+          emit("  ldd r4, r4, r0")            // r4 = src[8]
+        emit(s"  std r3, r$addrReg, r0")      // dst[0] = src[0]
         emitAddImm(3, addrReg, 8)
-        emit("  std r4, r3, r0")
+        emit("  std r4, r3, r0")              // dst[8] = src[8]
       case SyslType.SliceType(_) =>
         // 24-byte copy: {ptr(8), len+cap(8), backref(8)}
         for i <- 0 until 24 by 8 do
@@ -533,21 +645,23 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emitAddImm(3, addrReg, i)
           emit("  std r4, r3, r0")
       case st: SyslType.StructType =>
-        // Struct copy: srcReg = source address, addrReg = dest address
-        val size = stackSize(st)
-        for i <- 0 until size by 8 do
-          emitAddImm(4, srcReg, i)
-          emit("  ldd r4, r4, r0")
-          emitAddImm(3, addrReg, i)
-          emit("  std r4, r3, r0")
+        // Struct copy: srcReg = source address, addrReg = dest address.
+        // If the struct's natural alignment is < 8, the destination is only
+        // 4-aligned (e.g. a struct field at a non-8-aligned offset), so we
+        // must use 4-byte loads/stores. Otherwise 8-byte ops are fine.
+        emitAggregateCopy(srcReg, addrReg, stackSize(st), stackAlign(st))
+      case at: SyslType.ArrayType =>
+        // Fixed-size array copy: srcReg = source address, addrReg = dest address.
+        // Used when an array is a struct field (e.g. `buf: [1024]u8` in std/bufio).
+        emitAggregateCopy(srcReg, addrReg, stackSize(at), stackAlign(at))
       case et: SyslType.EnumType =>
-        // Enum copy: srcReg = source address, addrReg = dest address
-        val size = stackSize(et)
-        for i <- 0 until size by 8 do
-          emitAddImm(4, srcReg, i)
-          emit("  ldd r4, r4, r0")
-          emitAddImm(3, addrReg, i)
-          emit("  std r4, r3, r0")
+        // Enum copy: srcReg = source address, addrReg = dest address.
+        // Same alignment story as struct — enums whose payloads are only
+        // 4-aligned (e.g. an enum carrying `int`-only variants embedded in
+        // another enum) sit at 4-aligned offsets and must not be copied
+        // with `std`. See audit item #32 (TRISC enum-match misalignment,
+        // surfaced by item #19's runner).
+        emitAggregateCopy(srcReg, addrReg, stackSize(et), stackAlign(et))
       case SyslType.IntType(64) | SyslType.UIntType(64) | SyslType.FloatType(64) |
            _: SyslType.PtrType | _: SyslType.RefType =>
         emit(s"  std r$srcReg, r$addrReg, r0")
@@ -772,7 +886,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case TFunDecl(_, _, _, body, _, _, _, _, _) => body match
         case TExprBody(e) => scanE(e)
         case TBlockBody(stmts) => stmts.exists(scanS)
-      case TVarDecl(_, _, init, _, _, _) => scanE(init)
+      case TVarDecl(_, _, init, _, _, _, _) => scanE(init)
       case _ => false
     }
 
@@ -1157,6 +1271,17 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       stackOffset -= 16
     else if arg.typ.isInstanceOf[SyslType.EnumType] || arg.typ.isInstanceOf[SyslType.StructType] then
       val aligned = (stackSize(arg.typ) + 7) & ~7
+      // Compensate for any extra stack used by genExpr (e.g., a struct
+      // constructor that materialised the value into a temporary). Without
+      // this, subsequent args end up at the wrong offsets and the callee
+      // reads garbage. Same pattern slice/string/scalar branches use.
+      // r1 still points to the source bytes — they live in the just-popped
+      // region until our copy reads them, and nothing in this loop writes
+      // there before we ldd from it.
+      val extra = preOffset - stackOffset
+      if extra > 0 then
+        emitAddImm(7, 7, extra)
+        stackOffset = preOffset
       emitAddImm(7, 7, -aligned)
       stackOffset -= aligned
       for off <- 0 until aligned by 8 do
@@ -1736,14 +1861,24 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emitRefCleanup()
       emitEpilogue()
 
+  // Emit a divide-by-zero check on `divisorReg`. If the divisor is zero,
+  // trap with error code 5 before the div/divu issues — TRISC `div` on
+  // zero is hardware-undefined, so we must fault deterministically.
+  private def emitDivByZeroCheck(divisorReg: String): Unit =
+    val ok = newLabel("div_ok")
+    emit(s"  bne $divisorReg, r0, $ok")
+    emit("  ldi r1, 5")           // error code: 5 = divide-by-zero
+    emit("  trap 1")
+    emit(s"$ok")
+
   // Emit binary operation: r1 = r1 op r3
   private def emitBinOp(op: String): Unit =
     op match
       case "+"  => emit("  add r1, r1, r3")
       case "-"  => emit("  sub r1, r1, r3")
       case "*"  => emit("  mul r1, r1, r3")
-      case "/"  => emit("  div r1, r1, r3")
-      case "%"  => emit("  rem r1, r3")
+      case "/"  => emitDivByZeroCheck("r3"); emit("  div r1, r1, r3")
+      case "%"  => emitDivByZeroCheck("r3"); emit("  rem r1, r3")
       case "&"  => emit("  and r1, r1, r3")
       case "|"  => emit("  or r1, r1, r3")
       case "^"  => emit("  xor r1, r1, r3")
@@ -1753,24 +1888,32 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   // Copy multi-word value from src address (r1) to _ret_ptr, then set r1 = _ret_ptr
   // Works for both StructType and StringType (16 bytes)
   private def emitStructReturn(): Unit =
-    val size = currentFunction.returnType match
-      case st: SyslType.StructType => stackSize(st)
-      case et: SyslType.EnumType => stackSize(et)
-      case SyslType.StringType | _: SyslType.FuncType | _: SyslType.InterfaceType => 16
-      case _: SyslType.SliceType => 24
-      case _ => 8
+    val (size, align) = currentFunction.returnType match
+      case st: SyslType.StructType => (stackSize(st), stackAlign(st))
+      case et: SyslType.EnumType => (stackSize(et), stackAlign(et))
+      case SyslType.StringType | _: SyslType.FuncType | _: SyslType.InterfaceType => (16, 8)
+      case _: SyslType.SliceType => (24, 8)
+      case _ => (8, 8)
     val retLocal = locals("_ret_ptr")
     // r1 = source address; load _ret_ptr into r2
     emit("  pshd r1")                       // save source
     emitAddImm(2, 5, retLocal.offset)
     emit("  ldd r2, r2, r0")               // r2 = _ret_ptr (destination)
     emit("  popd r3")                       // r3 = source
-    // Copy size bytes from r3 to r2
-    for i <- 0 until size by 8 do
-      emitAddImm(4, 3, i)
-      emit("  ldd r4, r4, r0")
-      emitAddImm(1, 2, i)
-      emit("  std r4, r1, r0")
+    // Copy size bytes from r3 to r2 using width-appropriate ops. See
+    // `emitAggregateCopy` for the alignment story (audit item #32).
+    if align >= 8 then
+      for i <- 0 until size by 8 do
+        emitAddImm(4, 3, i)
+        emit("  ldd r4, r4, r0")
+        emitAddImm(1, 2, i)
+        emit("  std r4, r1, r0")
+    else
+      for i <- 0 until size by 4 do
+        emitAddImm(4, 3, i)
+        emit("  ldw r4, r4, r0")
+        emitAddImm(1, 2, i)
+        emit("  stw r4, r1, r0")
     // r1 = _ret_ptr (for the caller)
     emit("  mov r1, r2")
     // Increment string fields in the destination so the source local can be
@@ -2012,7 +2155,13 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emitAddImm(1, 5, tmpLocal.offset)
           emit("  ldd r1, r1, r0")  // r1 = tuple address
           if off != 0 then emitAddImm(1, 1, off)
-          emitLoad(1, 1, fieldType)  // r1 = field value
+          // Aggregates use address-as-value; emitStore→emitAggregateCopy will
+          // do the byte-copy. Scalars need an actual load before the store.
+          fieldType.underlying match
+            case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType
+              | _: SyslType.SliceType | _: SyslType.EnumType
+              | _: SyslType.FuncType | _: SyslType.InterfaceType => ()
+            case _ => emitLoad(1, 1, fieldType)
           val local = allocLocal(name, fieldType)
           emitAddImm(2, 5, local.offset)
           emitStore(1, 2, fieldType)
@@ -2031,7 +2180,11 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emitAddImm(1, 5, tmpLocal.offset)
           emit("  ldd r1, r1, r0")  // r1 = tuple address
           if off != 0 then emitAddImm(1, 1, off)
-          emitLoad(1, 1, fieldType)  // r1 = field value
+          fieldType.underlying match
+            case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType
+              | _: SyslType.SliceType | _: SyslType.EnumType
+              | _: SyslType.FuncType | _: SyslType.InterfaceType => ()
+            case _ => emitLoad(1, 1, fieldType)
           if locals != null && locals.contains(name) then
             val local = locals(name)
             emitAddImm(2, 5, local.offset)
@@ -2586,8 +2739,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           case "+"  => emit("  add r2, r2, r1")
           case "-"  => emit("  sub r2, r2, r1")
           case "*"  => emit("  mul r2, r2, r1")
-          case "/"  => emit("  div r2, r2, r1")
-          case "%"  => emit("  rem r2, r1")
+          case "/"  => emitDivByZeroCheck("r1"); emit("  div r2, r2, r1")
+          case "%"  => emitDivByZeroCheck("r1"); emit("  rem r2, r1")
           case "&"  => emit("  and r2, r2, r1")
           case "|"  => emit("  or r2, r2, r1")
           case "^"  => emit("  xor r2, r2, r1")
@@ -2616,6 +2769,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
       case TBoolLit(true, _) => emit("  ldi r1, 1")
       case TBoolLit(false, _) => emit("  ldi r1, 0")
+
+      case TUnitLit(_) => emit("  ldi r1, 0")  // unit is 0-byte; placeholder constant
 
       case TVarRef(name, typ) =>
         if locals != null && locals.contains(name) then
@@ -2874,35 +3029,160 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             emit("  mul r1, r1, r2")
             emitNarrow(1, typ)
           case "saturating_add" | "saturating_sub" | "saturating_mul" =>
-            if width >= 64 then
-              throw new RuntimeException(s"$name on 64-bit types is not yet supported in the TRISC backend")
+            // Special case: saturating_mul on u32 — the full u64 product can exceed
+            // signed i64 range (e.g. 0xFFFFFFFF * 0xFFFFFFFF = 0xFFFFFFFE_00000001),
+            // so the generic signed-clamp path below would misinterpret it as
+            // negative and saturate to 0. Use unsigned compare against u32 max
+            // instead; no LOW clamp is needed because `mul` on unsigned operands
+            // never produces a value below 0 in unsigned interpretation.
             if name == "saturating_mul" && unsigned && width == 32 then
-              throw new RuntimeException("saturating_mul on u32 is not yet supported in the TRISC backend (would overflow signed i64)")
-            // Compute in 64-bit; for narrow widths the intermediate fits in signed i64.
-            // Then signed-clamp to [minV, maxV]. For unsigned types maxV is set to the
-            // unsigned max, but we still use signed slt because the intermediate is in signed range.
-            name match
-              case "saturating_add" => emit("  add r1, r1, r2")
-              case "saturating_sub" => emit("  sub r1, r1, r2")
-              case "saturating_mul" => emit("  mul r1, r1, r2")
-              case _ =>
-            val (minV, maxV) =
-              if unsigned then (0L, (1L << width) - 1)
-              else (-(1L << (width - 1)), (1L << (width - 1)) - 1)
-            // Clamp HIGH: if r1 > maxV then r1 = maxV  (signed compare)
-            loadImm(3, maxV)
-            emit("  slt r4, r3, r1")       // r4 = (max < r1)
-            val noHi = newLabel("nohi")
-            emit(s"  beq r4, r0, $noHi")
-            emit("  mov r1, r3")
-            emit(s"$noHi")
-            // Clamp LOW: if r1 < minV then r1 = minV  (signed compare)
-            loadImm(3, minV)
-            emit("  slt r4, r1, r3")       // r4 = (r1 < min)
-            val noLo = newLabel("nolo")
-            emit(s"  beq r4, r0, $noLo")
-            emit("  mov r1, r3")
-            emit(s"$noLo")
+              // u32 × u32 product fits in u64; `mul` (low 64 bits) is the full result.
+              emit("  mul r1, r1, r2")     // r1 = full u64 product
+              loadImm(3, (1L << 32) - 1)   // r3 = u32 max = 0xFFFFFFFF
+              emit("  sltu r4, r3, r1")    // r4 = 1 if u32max < r1 unsigned
+              val noHi = newLabel("sat_nohi")
+              emit(s"  beq r4, r0, $noHi")
+              emit("  mov r1, r3")
+              emit(s"$noHi")
+            else if width >= 64 then
+              // 64-bit saturating arithmetic. The narrow signed-clamp path below
+              // doesn't work — operands already span the full i64 range, so the
+              // intermediate computation cannot be widened. Use overflow detection
+              // on the wrapped result and clamp to type-specific bounds.
+              (name, unsigned) match
+                case ("saturating_add", true) =>
+                  // u64 add: overflow iff (a + b) < a unsigned.
+                  emit("  pshd r1")             // save a
+                  stackOffset -= 8
+                  emit("  add r1, r1, r2")      // r1 = a + b (wrapped)
+                  emit("  popd r3")             // r3 = a
+                  stackOffset += 8
+                  emit("  sltu r4, r1, r3")     // r4 = 1 iff sum < a
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r4, r0, $noOf")
+                  loadImm(1, -1L)               // MAX_U64 = 0xFFFF_FFFF_FFFF_FFFF
+                  emit(s"$noOf")
+                case ("saturating_sub", true) =>
+                  // u64 sub: would-underflow iff a < b unsigned.
+                  emit("  sltu r4, r1, r2")     // r4 = 1 iff a < b
+                  emit("  sub r1, r1, r2")      // r1 = a - b (wrapped)
+                  val noUn = newLabel("sat_noun")
+                  emit(s"  beq r4, r0, $noUn")
+                  emit("  ldi r1, 0")
+                  emit(s"$noUn")
+                case ("saturating_mul", true) =>
+                  // u64 mul: compute high (mulhu) and low (mul) separately —
+                  // mulhu is destructive on rd, so save a in r3 first.
+                  // Overflow iff high half is non-zero.
+                  emit("  mov r3, r1")          // r3 = a (preserve for mulhu)
+                  emit("  mulhu r3, r2")        // r3 = high(a *u b)
+                  emit("  mul r1, r1, r2")      // r1 = low(a * b)
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r3, r0, $noOf")
+                  loadImm(1, -1L)               // MAX_U64
+                  emit(s"$noOf")
+                case ("saturating_add", false) =>
+                  // i64 add: signed overflow iff sign(a)==sign(b) && sign(result)!=sign(a).
+                  // XOR trick: ((a ^ result) & (b ^ result)) is negative ⇔ overflow.
+                  emit("  pshd r1")             // save a
+                  stackOffset -= 8
+                  emit("  pshd r2")             // save b
+                  stackOffset -= 8
+                  emit("  add r1, r1, r2")      // r1 = result (wrapped)
+                  emit("  popd r2")             // r2 = b
+                  stackOffset += 8
+                  emit("  popd r3")             // r3 = a
+                  stackOffset += 8
+                  emit("  xor r4, r3, r1")      // a ^ result
+                  emit("  xor r5, r2, r1")      // b ^ result
+                  emit("  and r4, r4, r5")
+                  emit("  slt r4, r4, r0")      // r4 = 1 iff combined indicator < 0
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r4, r0, $noOf")
+                  // Overflow direction: same sign as a (== sign of b).
+                  emit("  slt r4, r3, r0")      // r4 = 1 iff a < 0
+                  val neg = newLabel("sat_neg")
+                  emit(s"  bne r4, r0, $neg")
+                  loadImm(1, Long.MaxValue)
+                  emit(s"  bra $noOf")
+                  emit(s"$neg")
+                  loadImm(1, Long.MinValue)
+                  emit(s"$noOf")
+                case ("saturating_sub", false) =>
+                  // i64 sub: overflow iff sign(a)!=sign(b) && sign(result)!=sign(a).
+                  // XOR trick: ((a ^ b) & (a ^ result)) is negative ⇔ overflow.
+                  emit("  pshd r1")             // save a
+                  stackOffset -= 8
+                  emit("  pshd r2")             // save b
+                  stackOffset -= 8
+                  emit("  sub r1, r1, r2")      // r1 = result (wrapped)
+                  emit("  popd r2")             // r2 = b
+                  stackOffset += 8
+                  emit("  popd r3")             // r3 = a
+                  stackOffset += 8
+                  emit("  xor r4, r3, r2")      // a ^ b
+                  emit("  xor r5, r3, r1")      // a ^ result
+                  emit("  and r4, r4, r5")
+                  emit("  slt r4, r4, r0")      // r4 = 1 iff combined indicator < 0
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r4, r0, $noOf")
+                  // Overflow direction: same sign as a.
+                  emit("  slt r4, r3, r0")      // r4 = 1 iff a < 0
+                  val neg = newLabel("sat_neg")
+                  emit(s"  bne r4, r0, $neg")
+                  loadImm(1, Long.MaxValue)
+                  emit(s"  bra $noOf")
+                  emit(s"$neg")
+                  loadImm(1, Long.MinValue)
+                  emit(s"$noOf")
+                case ("saturating_mul", false) =>
+                  // i64 mul: compute high (mulh, destructive) and low (mul) separately.
+                  // Overflow iff high != asr(low, 63), i.e. high doesn't equal the
+                  // sign-extension of the low half.
+                  emit("  mov r3, r1")          // r3 = a (preserve for mulh)
+                  emit("  mulh r3, r2")         // r3 = high(a *s b)
+                  emit("  mul r1, r1, r2")      // r1 = low(a * b)
+                  emit("  ldi r4, 63")
+                  emit("  asr r4, r1, r4")      // r4 = sign-extended low (expected high)
+                  val noOf = newLabel("sat_noof")
+                  emit(s"  beq r4, r3, $noOf")
+                  // Overflow direction: sign of actual high tells us positive vs negative.
+                  emit("  slt r4, r3, r0")      // r4 = 1 iff high < 0
+                  val neg = newLabel("sat_neg")
+                  emit(s"  bne r4, r0, $neg")
+                  loadImm(1, Long.MaxValue)
+                  emit(s"  bra $noOf")
+                  emit(s"$neg")
+                  loadImm(1, Long.MinValue)
+                  emit(s"$noOf")
+                case _ =>
+            else
+              // Compute in 64-bit; for narrow widths the intermediate fits in signed i64.
+              // Then signed-clamp to [minV, maxV]. For unsigned types maxV is set to the
+              // unsigned max, but we still use signed slt because the intermediate is in signed range.
+              // mul-low is identical signed/unsigned per the post-Stage-2 ISA.
+              name match
+                case "saturating_add" => emit("  add r1, r1, r2")
+                case "saturating_sub" => emit("  sub r1, r1, r2")
+                case "saturating_mul" => emit("  mul r1, r1, r2")
+                case _ =>
+              val (minV, maxV) =
+                if unsigned then (0L, (1L << width) - 1)
+                else (-(1L << (width - 1)), (1L << (width - 1)) - 1)
+              // Clamp HIGH: if r1 > maxV then r1 = maxV  (signed compare)
+              loadImm(3, maxV)
+              emit("  slt r4, r3, r1")       // r4 = (max < r1)
+              val noHi = newLabel("nohi")
+              emit(s"  beq r4, r0, $noHi")
+              emit("  mov r1, r3")
+              emit(s"$noHi")
+              // Clamp LOW: if r1 < minV then r1 = minV  (signed compare)
+              loadImm(3, minV)
+              emit("  slt r4, r1, r3")       // r4 = (r1 < min)
+              val noLo = newLabel("nolo")
+              emit(s"  beq r4, r0, $noLo")
+              emit("  mov r1, r3")
+              emit(s"$noLo")
           case other => throw new RuntimeException(s"unknown intrinsic: $other")
 
       case TBinary(left, op, right, resultType) =>
@@ -2944,9 +3224,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           op match
             case "+"  => emit("  add r1, r1, r2")
             case "-"  => emit("  sub r1, r1, r2")
-            case "*"  => emit("  mul r1, r1, r2")
-            case "/"  => emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
-            case "%"  => emit(if unsigned then "  remu r1, r2" else "  rem r1, r2")
+            case "*"  => emit("  mul r1, r1, r2")  // mul-low is identical signed/unsigned post-Stage-2
+            case "/"  => emitDivByZeroCheck("r2"); emit(if unsigned then "  divu r1, r1, r2" else "  div r1, r1, r2")
+            case "%"  => emitDivByZeroCheck("r2"); emit(if unsigned then "  remu r1, r2" else "  rem r1, r2")
             case "&"  => emit("  and r1, r1, r2")
             case "|"  => emit("  or r1, r1, r2")
             case "^"  => emit("  xor r1, r1, r2")
@@ -3297,11 +3577,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                          _: SyslType.FuncType | _: SyslType.InterfaceType |
                          SyslType.StringType =>
                       emitAddImm(3, 5, local.offset)
-                      for i <- 0 until size by 8 do
-                        emitAddImm(4, 3, i)
-                        emit("  ldd r4, r4, r0")
-                        emitAddImm(1, 2, i)
-                        emit("  std r4, r1, r0")
+                      emitAggregateCopy(3, 2, size, stackAlign(typ))
                     case _ =>
                       // Use local.typ for the load — params are stored in 8-byte
                       // I64 slots (big-endian; ldw at the slot base reads the
@@ -3317,11 +3593,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                          _: SyslType.SliceType | _: SyslType.EnumType |
                          _: SyslType.FuncType | _: SyslType.InterfaceType |
                          SyslType.StringType =>
-                      for i <- 0 until size by 8 do
-                        emitAddImm(4, 3, i)
-                        emit("  ldd r4, r4, r0")
-                        emitAddImm(1, 2, i)
-                        emit("  std r4, r1, r0")
+                      emitAggregateCopy(3, 2, size, stackAlign(typ))
                     case _ =>
                       emitLoad(3, 3, typ)
                       emitStore(3, 2, typ)
@@ -3402,11 +3674,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                     case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType |
                          _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
                       emitAddImm(3, 5, local.offset)
-                      for i <- 0 until size by 8 do
-                        emitAddImm(4, 3, i)
-                        emit("  ldd r4, r4, r0")
-                        emitAddImm(1, 2, i)
-                        emit("  std r4, r1, r0")
+                      emitAggregateCopy(3, 2, size, stackAlign(typ))
                     case _ =>
                       // Use local.typ for the load — params are stored in 8-byte
                       // I64 slots (big-endian; ldw at the slot base reads the
@@ -3420,11 +3688,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                   typ match
                     case _: SyslType.ArrayType | _: SyslType.StructType | SyslType.StringType |
                          _: SyslType.SliceType | _: SyslType.EnumType | _: SyslType.FuncType | _: SyslType.InterfaceType =>
-                      for i <- 0 until size by 8 do
-                        emitAddImm(4, 3, i)
-                        emit("  ldd r4, r4, r0")
-                        emitAddImm(1, 2, i)
-                        emit("  std r4, r1, r0")
+                      emitAggregateCopy(3, 2, size, stackAlign(typ))
                     case _ =>
                       emitLoad(3, 3, typ)
                       emitStore(3, 2, typ)
@@ -3470,45 +3734,32 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
         expr.typ match
           case st: SyslType.StructType =>
-            // Value type: heap-allocate a copy, data_ptr = heap address
-            val dataSize = stackSize(st)
-            needsAllocExtern = true
-            // Evaluate struct expression first — r1 = address of struct data
-            genExpr(expr)
-            emit("  pshd r1")               // save struct address
-            stackOffset -= 8
-            // Allocate heap space
-            emitLoadImm(1, dataSize.toInt)
-            emit("  movi r4, malloc")
-            emit("  jalr r6, r4")
-            // r1 = heap data_ptr, check for null
-            val allocOk = newLabel("ibox_alloc_ok")
-            emit(s"  bne r1, r0, $allocOk")
-            emit("  ldi r1, 2")             // error code: null pointer
-            emit("  trap 1")
-            emit(s"$allocOk:")
+            // Box by reference: data_ptr = original struct's address. No copy,
+            // no malloc. Mutations through the boxed interface propagate back
+            // to the source, matching direct-call semantics (`w.method()`
+            // passes &w as self) and the interpreter's behavior (which wraps
+            // the value in a Cell that the method writes through).
+            //
+            // The historical implementation heap-allocated a copy here, which
+            // made interface dispatch silently lose any mutating-method side
+            // effect — `w.write(buf)` through a `Writer` iface filled a heap
+            // copy that was discarded on return, so `w` in the caller stayed
+            // empty (entire `std/io` test_writer_interface + test_copy
+            // cluster). The lifetime risk (returning a Writer of a stack
+            // local now dangles) is the same risk the language already has
+            // for `*T` of a stack local; it's the user's responsibility,
+            // and direct dispatch already had the same shape.
+            genExpr(expr)                    // r1 = address of struct data (the original)
             emit("  pshd r1")               // save data_ptr
             stackOffset -= 8
-            // Copy struct data: src on stack below, dst = data_ptr in r1
-            emit("  mov r2, r1")            // r2 = dst (heap)
-            emitAddImm(3, 7, 8)             // r3 = src (original struct addr, pushed earlier)
-            emit("  ldd r3, r3, r0")        // r3 = actual src address
-            for i <- 0 until dataSize.toInt by 8 do
-              emitAddImm(4, 3, i)
-              emit("  ldd r4, r4, r0")
-              emitAddImm(1, 2, i)
-              emit("  std r4, r1, r0")
-            // Build {itable_ptr, data_ptr} pair on stack (16 bytes)
-            emit("  popd r2")               // r2 = data_ptr
-            stackOffset += 8
-            emit("  popd r3")               // discard saved struct addr
-            stackOffset += 8
             emitAddImm(7, 7, -16)
             stackOffset -= 16
             emit(s"  movi r1, $itableLabel")
             emit("  std r1, r7, r0")         // itable_ptr at [sp+0]
-            emitAddImm(3, 7, 8)
-            emit("  std r2, r3, r0")         // data_ptr at [sp+8]
+            emitAddImm(2, 7, 8)
+            emit("  popd r3")               // r3 = data_ptr (the saved original)
+            stackOffset += 8
+            emit("  std r3, r2, r0")         // data_ptr at [sp+8]
             emit("  mov r1, r7")             // r1 = address of the pair
 
           case _: SyslType.PtrType | _: SyslType.RefType =>
@@ -4003,8 +4254,16 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         val elemSize = stackSize(elemType)
         genExpr(index)           // r1 = index
         emit("  pshd r1")
-        genExpr(array)           // r1 = array base address
+        genExpr(array)           // r1 = array/slice base; for SliceType this is the descriptor's address
         emit("  popd r2")        // r2 = index
+        // For slices the descriptor's `ptr` field (offset 0) is the data start;
+        // genExpr returns the descriptor address, so we must deref to get the
+        // data pointer. Arrays/pointers/RefType(SliceType) already give the
+        // data pointer directly. Without this, &slot[i] resolves to the
+        // address of the descriptor itself rather than the heap data, so any
+        // write through the resulting pointer corrupts the caller's frame.
+        if array.typ.isInstanceOf[SyslType.SliceType] then
+          emit("  ldd r1, r1, r0") // r1 = slice.ptr
         emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = base + offset
@@ -4464,7 +4723,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                     emit("  ldd r1, r1, r0")  // r1 = scrutinee address
                     if off != 0 then emitAddImm(1, 1, off)
                     fieldType match
-                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType =>
+                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType
+                        | _: SyslType.SliceType | _: SyslType.ArrayType
+                        | _: SyslType.FuncType | _: SyslType.InterfaceType =>
                         // Aggregate: r1 = field address (src), copy bytes to local.
                         emitAddImm(2, 5, local.offset)
                         emitStore(1, 2, fieldType)
@@ -4502,7 +4763,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                     emit("  ldd r1, r1, r0")  // r1 = enum address
                     if dataOff + fieldOff != 0 then emitAddImm(1, 1, dataOff + fieldOff)
                     fieldType match
-                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType =>
+                      case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType
+                        | _: SyslType.SliceType | _: SyslType.ArrayType
+                        | _: SyslType.FuncType | _: SyslType.InterfaceType =>
                         // Aggregate: r1 = field address (src), copy bytes to local.
                         emitAddImm(2, 5, local.offset)
                         emitStore(1, 2, fieldType)
@@ -4829,10 +5092,26 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         val elemSize = stackSize(elemType)
         needsAllocExtern = true
 
-        // Pre-allocate 24-byte result slot
-        emitAddImm(7, 7, -24)
-        stackOffset -= 24
+        // Aggregate elem types (struct, array, string, slice, enum, func, iface)
+        // need extra care: their `genExpr` typically allocates a stack temp and
+        // returns r1 = address of that temp. The subsequent `popd r1; popd r2;
+        // popd r3; popd r4` would read INTO that temp instead of the slice
+        // components above it. Worse, the no-grow path then `pshd`'s into the
+        // temp's space. To make the rest of the codegen address-stable, we
+        // copy aggregate elem bytes into a dedicated frame scratch slot and
+        // reclaim the stack temp before the popd shuffle.
+        val isAggregateElem = elemType.underlying match
+          case _: SyslType.StructType | _: SyslType.ArrayType | SyslType.StringType
+             | _: SyslType.SliceType | _: SyslType.EnumType
+             | _: SyslType.FuncType | _: SyslType.InterfaceType => true
+          case _ => false
+        val elemScratchSize = if isAggregateElem then (elemSize + 7) & ~7 else 0
+
+        // Pre-allocate 24-byte result slot + optional elem scratch.
+        emitAddImm(7, 7, -(24 + elemScratchSize))
+        stackOffset -= (24 + elemScratchSize)
         val resultOffset = stackOffset
+        val elemScratchOffset = resultOffset + 24
 
         // Evaluate slice → push ptr, len, cap, backref onto stack
         genExpr(sliceExpr)
@@ -4850,9 +5129,20 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  pshd r2")              // [ptr] [len] [cap] [backref]
         stackOffset -= 24
 
-        // Evaluate elem, push
+        // Evaluate elem. For aggregate types this may push a stack temp; we
+        // copy the bytes into the frame scratch slot and reclaim the temp
+        // so the subsequent popd's see an undisturbed [ptr][len][cap] stack.
+        val preElem = stackOffset
         genExpr(elemExpr)
-        emit("  pshd r1")              // [elem] [ptr] [len] [cap]
+        val elemTempBytes = preElem - stackOffset
+        if isAggregateElem then
+          emit("  mov r2, r1")                 // r2 = source addr (stack temp or stable)
+          emitAddImm(1, 5, elemScratchOffset)  // r1 = frame scratch addr
+          emitAggregateCopy(2, 1, elemSize, stackAlign(elemType))
+          if elemTempBytes > 0 then
+            emitAddImm(7, 7, elemTempBytes)
+            stackOffset += elemTempBytes
+        emit("  pshd r1")              // [elem] [ptr] [len] [cap] [backref]
         stackOffset -= 8
 
         // Load all into regs: r1=elem, r2=ptr, r3=len, r4=cap
@@ -4879,7 +5169,12 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emit("  mul r1, r1, r4")     // r1 = len * elemSize
         emit("  add r1, r2, r1")       // r1 = dest addr
         emit("  popd r2")              // r2 = elem
+        // For aggregate elem types, emitStore → emitAggregateCopy clobbers r3
+        // and r4. Save/restore r3 (len) so the new_len computation below sees
+        // the right value. (cap is reloaded fresh from the stack, so r4 is OK.)
+        if isAggregateElem then emit("  pshd r3")
         emitStore(2, 1, elemType)      // store elem at dest
+        if isAggregateElem then emit("  popd r3")
         emit("  popd r2")              // r2 = ptr
         emit("  popd r4")              // r4 = cap
         emit("  addi r3, r3, 1")       // new_len = len + 1
@@ -5501,8 +5796,23 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     if offset >= -64 && offset <= 63 then
       emit(s"  addi r$destReg, r$baseReg, $offset")
     else
-      // Use a temp register to avoid clobbering baseReg when destReg == baseReg
-      val tmp = if destReg == 3 then 2 else 3
+      // Use destReg itself as the offset scratch when destReg != baseReg —
+      // `movi destReg, X; add destReg, baseReg, destReg` reads baseReg before
+      // writing destReg, so baseReg is preserved and no third register is
+      // clobbered. When destReg == baseReg, fall back to a separate temp
+      // (r2 if destReg=3 else r3).
+      //
+      // Earlier bug: tmp was picked as r3 with only destReg avoided, so
+      // emitAddImm(4, 3, ≥64) emitted `movi r3, X; add r4, r3, r3` and
+      // clobbered the source pointer (sysl/tests/aggregate_copy_offset_64).
+      // A first attempt routed the temp away from r3 by picking r2 — that
+      // unblocked tabwriter but broke emitStructReturn, which holds r2 and
+      // r3 live as destBase/srcBase across the copy loop. Self-tmp avoids
+      // both pitfalls.
+      val tmp =
+        if destReg != baseReg then destReg
+        else if destReg == 3 then 2
+        else 3
       if offset >= 0 then
         emit(s"  movi r$tmp, $offset")
         emit(s"  add r$destReg, r$baseReg, r$tmp")
@@ -5543,6 +5853,15 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emitStructAddr(innerObj)  // r1 = parent struct address
         if off != 0 then emitAddImm(1, 1, off)
       case _ => genExpr(obj) // struct value (local/global) — genExpr produces address for struct types
+
+  // Allocate a unique label for a string-literal blob and queue it for rodata
+  // emission. Returns (label, byte-length). The blob in rodata is 8 bytes of
+  // immortal-refcount header followed by the UTF-8 bytes plus a NUL terminator.
+  private def internStringLiteral(value: String): (String, Int) =
+    labelCounter += 1
+    val label = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
+    stringLiterals += ((label, value))
+    (label, value.getBytes("UTF-8").length)
 
   // Data directive for a type: db (1 byte), ds (2), dw (4), dl (8)
   private def emitDataDirective(typ: SyslType): String = typ match

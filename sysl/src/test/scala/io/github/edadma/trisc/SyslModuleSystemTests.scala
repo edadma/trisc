@@ -30,9 +30,9 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
 
   "smeta groups symbols under same SOURCE" in {
     val meta = new ModuleMeta(List(
-      SymbolMeta("f1", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, sourceFile = Some("a.sysl")),
-      SymbolMeta("f2", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, sourceFile = Some("a.sysl")),
-      SymbolMeta("f3", SymbolMeta.Kind.Func(Nil, SyslType.VoidType), isPrivate = false, sourceFile = Some("b.sysl")),
+      SymbolMeta("f1", SymbolMeta.Kind.Func(Nil, SyslType.UnitType), isPrivate = false, sourceFile = Some("a.sysl")),
+      SymbolMeta("f2", SymbolMeta.Kind.Func(Nil, SyslType.UnitType), isPrivate = false, sourceFile = Some("a.sysl")),
+      SymbolMeta("f3", SymbolMeta.Kind.Func(Nil, SyslType.UnitType), isPrivate = false, sourceFile = Some("b.sysl")),
     ))
     val smeta = meta.toSmeta
     smeta.split("SOURCE a.sysl").length shouldBe 2
