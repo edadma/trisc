@@ -851,30 +851,26 @@ we enforce that.
         ipc_reply(sender, reply, 1)
 
 
-### CONNECT handler (STREAM)
+### CONNECT handler (STREAM + DGRAM)
 
-Allocates a server-end slot owned by the listener's owner,
-pairs it with the connector, enqueues it on the listener's
-backlog. If a thread is already blocked on accept(), unparks
-it. Reply to the connector is immediate (no pending state) —
-matches loopback-AF_UNIX semantics where connect succeeds the
-moment the new socket is queued.
+For STREAM: allocates a server-end slot owned by the
+listener's owner, pairs it with the connector, enqueues it on
+the listener's backlog. If a thread is already blocked on
+accept(), unparks it. Reply to the connector is immediate (no
+pending state) — matches loopback-AF_UNIX semantics where
+connect succeeds the moment the new socket is queued.
+
+For DGRAM: just looks up the target by path and sets
+`peer_idx` so subsequent `send(2)` / `write(2)` route there
+without an explicit destination. No backlog, no listening
+requirement — Linux DGRAM connect is purely a default-peer
+record. Re-connecting overwrites the previous peer.
 
     unix_handle_connect(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
         if unix_fd_valid(fd, sender) == 0
             var err: [1]byte
             err[0] = byte(-UNIX_EBADF)
-            ipc_reply(sender, err, 1)
-            return
-        if unix_sockets[fd].stype != UNIX_SOCK_STREAM
-            var err: [1]byte
-            err[0] = byte(-UNIX_EINVAL)
-            ipc_reply(sender, err, 1)
-            return
-        if unix_sockets[fd].peer_idx >= 0
-            var err: [1]byte
-            err[0] = byte(-UNIX_EINVAL)
             ipc_reply(sender, err, 1)
             return
         val plen = int(buf[2]) & 0xff
@@ -887,6 +883,32 @@ moment the new socket is queued.
         if target < 0
             var err: [1]byte
             err[0] = byte(-UNIX_ECONNREFUSED)
+            ipc_reply(sender, err, 1)
+            return
+
+DGRAM short-circuit: target must also be DGRAM, then just
+set peer_idx and ack.
+
+        if unix_sockets[fd].stype == UNIX_SOCK_DGRAM
+            if unix_sockets[target].stype != UNIX_SOCK_DGRAM
+                var err: [1]byte
+                err[0] = byte(-UNIX_ECONNREFUSED)
+                ipc_reply(sender, err, 1)
+                return
+            unix_sockets[fd].peer_idx = target
+            var ok: [1]byte
+            ok[0] = 0
+            ipc_reply(sender, ok, 1)
+            return
+
+        if unix_sockets[fd].stype != UNIX_SOCK_STREAM
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[fd].peer_idx >= 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
             ipc_reply(sender, err, 1)
             return
         if unix_sockets[target].listening == 0

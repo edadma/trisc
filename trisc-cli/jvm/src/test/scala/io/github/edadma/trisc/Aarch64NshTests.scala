@@ -2212,6 +2212,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixabs: bad"
   }
 
+  "unix: DGRAM connect() sets default peer" in {
+    // connect(2) on a DGRAM AF_UNIX fd records peer_idx so
+    // subsequent write(2) routes there without sendto. Re-
+    // connect overwrites the default peer; unconnected write →
+    // -ENOTCONN; connect to a non-existent or wrong-stype slot
+    // → -ECONNREFUSED.
+    val output = qemu.command("test_unixdgc")
+    output should include("unixdgc: ok")
+    output should not include "unixdgc: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

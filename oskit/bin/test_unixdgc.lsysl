@@ -1,0 +1,267 @@
+test_unixdgc — AF_UNIX DGRAM connect()
+=======================================
+
+Validates `connect(2)` on AF_UNIX SOCK_DGRAM. Linux semantics:
+sets a default destination so subsequent `send(2)` / `write(2)`
+routes there without an explicit `sendto`. SLIX implements this
+as `peer_idx` on the connector slot.
+
+Cases:
+  1. Bind a DGRAM listener at "ucs1"; connect a fresh DGRAM
+     to it; write through the connected fd; the listener
+     drains the datagram via recvfrom.
+  2. write() (no addr) on an unconnected DGRAM returns
+     -ENOTCONN.
+  3. Re-connect to a different path overwrites the default
+     peer; subsequent write goes to the new peer.
+  4. Connect to a non-existent path returns -ECONNREFUSED.
+  5. Connect from DGRAM to a STREAM socket returns
+     -ECONNREFUSED.
+
+Pass criterion: prints `unixdgc: ok`.
+
+    module oskit.bin.test_unixdgc
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_BIND     = 135
+    val NR_CONNECT  = 148
+    val NR_LISTEN   = 217
+    val NR_CLOSE    = 147
+    val NR_SOCKET   = 337
+    val NR_WRITE    = 128
+    val NR_READ     = 130
+    val NR_RECVFROM = 276
+
+    val AF_UNIX_V     = 1
+    val SOCK_STREAM_V = 1
+    val SOCK_DGRAM_V  = 2
+
+    val ENOTCONN_V       = 107
+    val ECONNREFUSED_V   = 111
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixdgc: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, plen: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < plen
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + plen] = byte(0)
+        2 + plen + 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype),
+            i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen),
+            0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen),
+            0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+    posix_recvfrom(fd: int, buf: *byte, n: int,
+            addr: *byte, alp: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(n), 0,
+            i64(addr), i64(alp)))
+
+
+    main(argv: []string)
+
+Case 1: bind DGRAM "ucs1", connect from fresh DGRAM, write
+through the connected fd, listener drains.
+
+        var nm1: [4]byte
+        nm1[0] = 'u'; nm1[1] = 'c'; nm1[2] = 's'; nm1[3] = '1'
+        var sa1: [128]byte
+        val al1 = fill_sockaddr_un(&sa1[0], &nm1[0], 4)
+
+        val srv = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if srv < 0
+            fail(1)
+            return
+        if posix_bind(srv, &sa1[0], al1) != 0
+            fail(2)
+            return
+
+        val cli = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if cli < 0
+            fail(3)
+            return
+        if posix_connect(cli, &sa1[0], al1) != 0
+            fail(4)
+            return
+
+        var msg: [4]byte
+        msg[0] = 'h'; msg[1] = 'i'; msg[2] = '!'; msg[3] = '?'
+        if posix_write(cli, &msg[0], 4) != 4
+            fail(5)
+            return
+
+        var rbuf: [16]byte
+        var ra: [128]byte
+        var ral: i32 = 128
+        val rn = posix_recvfrom(srv, &rbuf[0], 16, &ra[0], &ral)
+        if rn != 4
+            puts("unixdgc: recvfrom rn=")
+            print_idec(rn)
+            puts("\n")
+            fail(6)
+            return
+        if rbuf[0] != byte('h')
+            fail(7)
+            return
+        if rbuf[3] != byte('?')
+            fail(8)
+            return
+
+Case 2: unconnected DGRAM write → -ENOTCONN.
+
+        val ucli = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if ucli < 0
+            fail(9)
+            return
+        val w2 = posix_write(ucli, &msg[0], 4)
+        if w2 != -ENOTCONN_V
+            puts("unixdgc: unconn write r=")
+            print_idec(w2)
+            puts("\n")
+            fail(10)
+            return
+        if posix_close(ucli) != 0
+            fail(11)
+            return
+
+Case 3: re-connect to a different path; write goes to the
+new peer.
+
+        var nm2: [4]byte
+        nm2[0] = 'u'; nm2[1] = 'c'; nm2[2] = 's'; nm2[3] = '2'
+        var sa2: [128]byte
+        val al2 = fill_sockaddr_un(&sa2[0], &nm2[0], 4)
+
+        val srv2 = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if srv2 < 0
+            fail(12)
+            return
+        if posix_bind(srv2, &sa2[0], al2) != 0
+            fail(13)
+            return
+
+        if posix_connect(cli, &sa2[0], al2) != 0
+            fail(14)
+            return
+        var m2: [3]byte
+        m2[0] = 'x'; m2[1] = 'y'; m2[2] = 'z'
+        if posix_write(cli, &m2[0], 3) != 3
+            fail(15)
+            return
+        ral = 128
+        val rn2 = posix_recvfrom(srv2, &rbuf[0], 16, &ra[0], &ral)
+        if rn2 != 3
+            fail(16)
+            return
+        if rbuf[2] != byte('z')
+            fail(17)
+            return
+
+Case 4: connect to a non-existent path → -ECONNREFUSED.
+
+        var nm3: [4]byte
+        nm3[0] = 'n'; nm3[1] = 'o'; nm3[2] = 'p'; nm3[3] = 'e'
+        var sa3: [128]byte
+        val al3 = fill_sockaddr_un(&sa3[0], &nm3[0], 4)
+        val cli3 = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if cli3 < 0
+            fail(18)
+            return
+        val r4 = posix_connect(cli3, &sa3[0], al3)
+        if r4 != -ECONNREFUSED_V
+            puts("unixdgc: nopath r=")
+            print_idec(r4)
+            puts("\n")
+            fail(19)
+            return
+        if posix_close(cli3) != 0
+            fail(20)
+            return
+
+Case 5: connect from DGRAM to a STREAM socket → -ECONNREFUSED.
+
+        var nm4: [4]byte
+        nm4[0] = 's'; nm4[1] = 't'; nm4[2] = 'r'; nm4[3] = '!'
+        var sa4: [128]byte
+        val al4 = fill_sockaddr_un(&sa4[0], &nm4[0], 4)
+        val sl = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if sl < 0
+            fail(21)
+            return
+        if posix_bind(sl, &sa4[0], al4) != 0
+            fail(22)
+            return
+        if posix_listen(sl, 4) != 0
+            fail(23)
+            return
+        val cli5 = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if cli5 < 0
+            fail(24)
+            return
+        val r5 = posix_connect(cli5, &sa4[0], al4)
+        if r5 != -ECONNREFUSED_V
+            puts("unixdgc: dgram->stream r=")
+            print_idec(r5)
+            puts("\n")
+            fail(25)
+            return
+        if posix_close(cli5) != 0
+            fail(26)
+            return
+        if posix_close(sl) != 0
+            fail(27)
+            return
+
+        if posix_close(cli) != 0
+            fail(28)
+            return
+        if posix_close(srv) != 0
+            fail(29)
+            return
+        if posix_close(srv2) != 0
+            fail(30)
+            return
+
+        puts("unixdgc: ok\n")
+        exit()
