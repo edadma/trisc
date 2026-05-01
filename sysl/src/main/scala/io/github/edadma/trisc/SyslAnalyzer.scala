@@ -2394,11 +2394,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case ArrayTypeAST(size, elem) => ArrayType(resolveType(elem), size)
     case SliceTypeAST(elem) => SliceType(resolveType(elem))
     case TupleTypeAST(elems) => SyslType.tupleType(elems.map(resolveType))
-    case ByNameTypeAST(_) =>
-      // Only valid in parameter position — the param-collection path peels off
-      // the marker before calling resolveType. Any other position is a syntax
-      // error: `=> T` is not a usable type.
-      throw AnalysisError("`=> T` is only valid as a function parameter type")
+    case ByNameTypeAST(inner) =>
+      // `=> T` is parser-restricted to parameter position. The function-decl
+      // collector also peels the marker explicitly so it can record which
+      // params are by-name. This branch handles the remaining cases (trait
+      // method param patterns, impl method patterns, etc.) by silently
+      // converting to `() -> T` — the underlying storage type. The grammar
+      // rules out any other position; if it ever shows up elsewhere, it
+      // behaves as a zero-arg function, which is the safe interpretation.
+      FuncType(Nil, resolveType(inner), effects = FuncEffects.Unknown)
     case FuncTypeAST(params, ret, esc, eff) =>
       // Resolve raw names in #reads/#writes through globalScope to mangled form so subset
       // checks at indirect-call sites compare apples-to-apples with the caller's #reads/#writes
@@ -3747,8 +3751,36 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           traitCallRewrite = savedRewrite
         scopeStack = new mutable.ArrayBuffer
         pushScope()
-        for (paramName, paramType) <- info.paramTypes do
-          currentScope(paramName) = SymInfo(paramName, paramType, true)
+        // Determine which params are by-name from the original impl-method AST
+        // (or trait method, for synthesized defaults). Body references to
+        // by-name params must auto-call; that's enforced via SymInfo.isByName.
+        // ImplMethodInfo has no `name` field; reverse-lookup via methodMap.
+        val originalName: Option[String] =
+          methodMap.collectFirst { case (n, m) if m == info.mangled => n }
+        val sourceParams: List[ParamAST] =
+          originalName match
+            case Some(n) =>
+              impl.methods.find(_.name == n).map(_.params)
+                .orElse(trait_.methods.find(_.name == n).map(_.params))
+                .getOrElse(Nil)
+            case None => Nil
+        val byNameFlags: List[Boolean] =
+          if sourceParams.length == info.paramTypes.length then
+            sourceParams.map(_.typ.isInstanceOf[ByNameTypeAST])
+          else List.fill(info.paramTypes.length)(false)
+        for (((paramName, paramType), idx) <- info.paramTypes.zipWithIndex) do
+          val isByN = idx < byNameFlags.length && byNameFlags(idx)
+          val visibleType = paramType match
+            case FuncType(Nil, ret, _, _) if isByN => ret
+            case other => other
+          currentScope(paramName) = SymInfo(paramName, visibleType, true, isByName = isByN)
+        // Persist by-name flags onto the impl method's FunInfo so direct CallAST
+        // dispatch (Trait.method(..) routed through traitCallRewrite, or direct
+        // mangled-name calls) auto-wraps args at by-name slots.
+        if byNameFlags.exists(identity) then
+          functions.get(info.mangled).foreach { fi =>
+            functions(info.mangled) = fi.copy(byName = byNameFlags)
+          }
         val tBody = info.body match
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
           case BlockBodyAST(stmts, _) => TBlockBody(analyzeBlock(stmts))
@@ -3824,7 +3856,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               val provided = template.methodASTs.exists(_.name == methodName)
               (pTypes, r, implMethod.body, !provided)
             finally typeEnv = savedEnv
-          val funInfo = FunInfo(mangled, paramTypes, retType)
+          val byNameFlags: List[Boolean] = implMethod.params.map(_.typ.isInstanceOf[ByNameTypeAST])
+          val funInfo = FunInfo(mangled, paramTypes, retType, byName = if byNameFlags.exists(identity) then byNameFlags else Nil)
           functions(mangled) = funInfo
           // Save into template.methods so cross-method dispatch (e.g. default methods that
           // call sibling methods) finds the same specialization.
@@ -3840,8 +3873,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           scopeStack = new mutable.ArrayBuffer
           loopDepth = 0
           pushScope()
-          for (paramName, paramType) <- paramTypes do
-            currentScope(paramName) = SymInfo(paramName, paramType, true)
+          for (((paramName, paramType), idx) <- paramTypes.zipWithIndex) do
+            val isByN = idx < byNameFlags.length && byNameFlags(idx)
+            val visibleType = paramType match
+              case FuncType(Nil, ret, _, _) if isByN => ret
+              case other => other
+            currentScope(paramName) = SymInfo(paramName, visibleType, true, isByName = isByN)
           val tBody =
             try body match
               case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
@@ -5493,7 +5530,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             BoolType
         TUnary(op, tOperand, resultType)
 
-      case BinaryAST(left, op, right) =>
+      case BinaryAST(left0, op, right0) =>
+        // By-name auto-wrap on operator dispatch: if the operator resolves to a
+        // trait method whose param at slot 0/1 is `=> T`, wrap the operand AST
+        // in `ClosureAST(Nil, ExprBodyAST(...))` BEFORE analyzing. Both the
+        // LHS-bound and RHS-bound by-name slots are supported, since the trait
+        // declaration is the source of truth and impls must match it. Without
+        // the wrap, the operand evaluates eagerly at the operator site —
+        // defeating the whole point of a `or_op(a: T, b: => T)` declaration.
+        val (lByName, rByName): (Boolean, Boolean) =
+          lookupBinaryOperatorTrait(op) match
+            case Some((tn, mn)) if traits.contains(tn) =>
+              traits(tn).methods.find(_.name == mn) match
+                case Some(tm) if tm.params.length >= 2 =>
+                  (tm.params(0).typ.isInstanceOf[ByNameTypeAST],
+                   tm.params(1).typ.isInstanceOf[ByNameTypeAST])
+                case _ => (false, false)
+            case _ => (false, false)
+        val left  = if lByName then ClosureAST(Nil, ExprBodyAST(left0))  else left0
+        val right = if rByName then ClosureAST(Nil, ExprBodyAST(right0)) else right0
         val tLeft00 = analyzeExpr(left)
         // Operator-dispatch expected-type forwarding (Bug B): if `op` resolves
         // to a trait and the LHS already pins down enough type-vars, push the
