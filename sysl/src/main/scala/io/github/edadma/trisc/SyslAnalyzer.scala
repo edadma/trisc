@@ -3452,14 +3452,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case None => None
       case Some((traitName, methodName)) =>
         val operands = List(tLeft.typ, tRight.typ)
-        // Only fire user-defined operator dispatch when at least one operand is a
-        // user-defined type. This preserves the user-friendly "unknown operator on i32"
-        // error path for built-in operands.
-        val hasUserType = operands.exists {
-          case _: SyslType.StructType | _: SyslType.EnumType | _: SyslType.NamedType => true
-          case _ => false
-        }
-        if !hasUserType then return None
+        // For built-in operators (`+`, `-`, `==`, …), only fire user-defined
+        // dispatch when at least one operand is a user type. This preserves the
+        // friendly "unknown operator on i32" path and keeps `1 + 2` from going
+        // through trait machinery. Custom operators (registered via #operator)
+        // have no built-in fallback, so the gate is wrong for them: e.g. with
+        // `impl[B] MapTo[string, B, Parser[B]]`, the dispatch
+        // `"+" ^^^ (_ + _)` has operand types `(string, fn)` — both built-in —
+        // but it must still go through trait dispatch to be meaningful.
+        val isCustomOp = customBinaryOperatorTraits.contains(op)
+        if !isCustomOp then
+          val hasUserType = operands.exists {
+            case _: SyslType.StructType | _: SyslType.EnumType | _: SyslType.NamedType => true
+            case _ => false
+          }
+          if !hasUserType then return None
         if !traits.contains(traitName) then
           if strict then
             throw AnalysisError(s"operator '$op' on ${operands.mkString(", ")} requires trait '$traitName' but it is not defined")

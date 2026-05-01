@@ -231,4 +231,85 @@ class SyslOpDispatchTypeFlowTests extends SyslTestHelpers {
         |    0
         |""".stripMargin) shouldBe 0
   }
+
+  // ===== Custom-operator dispatch must fire even when both operands are
+  //       built-in types =====
+  //
+  // Earlier the dispatcher gated on `hasUserType` for *all* operators —
+  // intended to keep `1 + 2` from going through trait machinery. But that
+  // gate is wrong for *custom* operators (registered via `#operator(...)`):
+  // those have no built-in fallback to preserve. With the gate in place,
+  // `"+" ^^^ (_ + _)` failed at the dispatcher itself: even after the
+  // closure-RHS resolved to `(int, int) -> int` via expected-type forwarding
+  // from the impl's `R = Parser[B]` slot, the dispatcher silently returned
+  // `None` because both operands were built-in (`string`, `fn`). Fix: gate
+  // `hasUserType` only when the op IS a built-in (`+`, `-`, …); otherwise,
+  // always go through dispatch.
+
+  "MapTo with string LHS infers B from expected result type via R = Parser[B]" in {
+    eval(
+      """type Parser[A] = new (int) -> A
+        |
+        |trait MapTo[A, V, R]
+        |    #operator("^^^")
+        |    pmapto(a: A, v: V) -> R
+        |
+        |impl[B] MapTo[string, B, Parser[B]]
+        |    pmapto(s: string, v: B) -> Parser[B] =
+        |        Parser[B]((_x: int) -> v)
+        |
+        |make() -> Parser[(int, int) -> int] = "+" ^^^ (_ + _)
+        |
+        |main() -> int = 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "custom op on `(string, int)` dispatches when single impl matches" in {
+    // Same fix exercised from a different angle: both operands built-in,
+    // single matching impl, no closure-placeholder involvement.
+    eval(
+      """trait Tag[A, V, R]
+        |    #operator("^^^")
+        |    tag(a: A, v: V) -> R
+        |
+        |impl Tag[string, int, int]
+        |    tag(a: string, v: int) -> int = v * 10
+        |
+        |main() -> int = "label" ^^^ 7
+        |""".stripMargin) shouldBe 70
+  }
+
+  "no expected result type still rejects placeholder closure" in {
+    // Negative — without a context that pins B, the `(_ + _)` placeholder
+    // closure has nothing to resolve _ph0 against, and the analyzer must
+    // still error. The fix permits dispatch on built-in-typed operands; it
+    // must not paper over genuine "no expected type" failures upstream.
+    val ex = intercept[Exception] {
+      eval(
+        """type Parser[A] = new (int) -> A
+          |
+          |trait MapTo[A, V, R]
+          |    #operator("^^^")
+          |    pmapto(a: A, v: V) -> R
+          |
+          |impl[B] MapTo[string, B, Parser[B]]
+          |    pmapto(s: string, v: B) -> Parser[B] =
+          |        Parser[B]((_x: int) -> v)
+          |
+          |main() -> int
+          |    val _ = "+" ^^^ (_ + _)
+          |    0
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage.toLowerCase
+    assert(msg.contains("infer") || msg.contains("type"),
+      s"placeholder closure with no expected type should still error, got: ${ex.getMessage}")
+  }
+
+  "regression: `1 + 2` still uses built-in arithmetic, not Add dispatch" in {
+    // Built-in operators must keep the hasUserType gate — `+` on (i32, i32)
+    // should never go through trait dispatch even if some `impl Add[i32]`
+    // exists somewhere. Otherwise primitive arithmetic regresses.
+    eval("""main() -> int = 1 + 2 * 3""".stripMargin) shouldBe 7
+  }
 }
