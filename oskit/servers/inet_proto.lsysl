@@ -2019,6 +2019,9 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         state: int
         owners: [4]int
         owners_count: int
+        // Phase 2B chunk 3: in-flight SCM_RIGHTS references. See
+        // InetSocket.queued_refs in inet.lsysl for the contract.
+        queued_refs: int
         local_port: int
         remote_ip: u32
         remote_port: int
@@ -2496,6 +2499,7 @@ per-tid `TCP_PER_TID_BUF_MAX`.
             tcp_sockets[i].sack_rexmit_valid = 0
             tcp_sockets[i].rexmit_count = 0
             tcp_sockets[i].fire_seq = 0
+            tcp_sockets[i].queued_refs = 0
             var k = 0
             while k < TCP_REORDER_SLOTS
                 tcp_sockets[i].reorder[k].in_use = 0
@@ -3374,6 +3378,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].in_use = 1
                 tcp_sockets[i].state = TCP_STATE_CLOSED
                 inet_tcp_owners_init(i)
+                tcp_sockets[i].queued_refs = 0
                 tcp_sockets[i].send_len = 0
                 tcp_sockets[i].recv_len = 0
                 tcp_sockets[i].retries = 0
@@ -4419,17 +4424,22 @@ through the state machine is a future refinement.
                 if inet_tcp_owners_has(i, tid) != 0
                     val left = inet_tcp_owners_remove(i, tid)
                     if left == 0
-                        // Try graceful close first — emits FIN and
-                        // lets the state machine + scan_timers
-                        // handle the rest. do_close returns -1 for
-                        // states it can't handle (SYN_RCVD,
-                        // FIN_WAIT_*, LAST_ACK, TIME_WAIT); fall
-                        // back to force-free for those. caller_tid
-                        // = -1 so no waiter is parked on
-                        // close_waiter.
-                        val r = inet_tcp_do_close(i, -1)
-                        if r < 0
-                            inet_tcp_close_slot(i, -1)
+                        // Phase 2B chunk 3: defer teardown while an
+                        // in-flight SCM cmsg holds a queue ref. The
+                        // matching QUEUE_REF(-1) reaches the deferred
+                        // close path in `inet_handle_queue_ref`.
+                        if tcp_sockets[i].queued_refs == 0
+                            // Try graceful close first — emits FIN and
+                            // lets the state machine + scan_timers
+                            // handle the rest. do_close returns -1 for
+                            // states it can't handle (SYN_RCVD,
+                            // FIN_WAIT_*, LAST_ACK, TIME_WAIT); fall
+                            // back to force-free for those. caller_tid
+                            // = -1 so no waiter is parked on
+                            // close_waiter.
+                            val r = inet_tcp_do_close(i, -1)
+                            if r < 0
+                                inet_tcp_close_slot(i, -1)
             i += 1
 
 

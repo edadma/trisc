@@ -105,6 +105,7 @@ Protocol command codes (byte value of buf[0]).
     const INET_CMD_PMTU_DISCOVER_INJECT = 56
     const INET_CMD_TCP_DATA_SEG_COUNT  = 57
     const INET_CMD_ADD_OWNER           = 58
+    const INET_CMD_QUEUE_REF           = 59
     const INET_CMD_TCP_OOO_SELFTEST = 99
 
 
@@ -163,6 +164,13 @@ traffic.
         in_use: int
         owners: [4]int
         owners_count: int
+        // Phase 2B chunk 3: in-flight SCM_RIGHTS references. Bumped
+        // by the sender shim before SENDMSG; dropped by the receiver
+        // shim after the cmsg drains, or by the UNIX_CMD_CLOSE reply
+        // path when a recv-side socket closes with un-drained pending
+        // SCM tuples. Slot teardown is gated on
+        // `owners_count + queued_refs == 0`.
+        queued_refs: int
         bound: int
         bound_ip: u32
         bound_port: int
@@ -409,6 +417,7 @@ client can reach us.
             inet_sockets[i].recv_deadline = 0
             inet_sockets[i].pending_error = 0
             inet_sockets[i].next_in_udp_bucket = -1
+            inet_sockets[i].queued_refs = 0
             i += 1
         inet_udp_hash_init()
         // Note: `inet_udp_fire_seq` (in inet_proto.lsysl) is left at
@@ -620,6 +629,7 @@ without MSG_PEEK then dequeues the same bytes.
             return
         inet_sockets[idx].in_use = 1
         inet_udp_owners_set(idx, sender)
+        inet_sockets[idx].queued_refs = 0
         inet_sockets[idx].bound = 0
         inet_sockets[idx].bound_ip = INADDR_ANY
         inet_sockets[idx].bound_port = 0
@@ -1124,6 +1134,16 @@ the caller doesn't block forever.
             ack[0] = 0
             ipc_reply(sender, ack, 1)
             return
+        // Phase 2B chunk 3: an in-flight SCM_RIGHTS cmsg holds a
+        // queue ref on this slot. Defer teardown — the receiver-side
+        // drain (or close-with-undrained) will drop the queue ref via
+        // INET_CMD_QUEUE_REF(-1), and at that point owners_count and
+        // queued_refs are both 0 and the slot tears down there.
+        if inet_sockets[fd].queued_refs > 0
+            var ack: [1]byte
+            ack[0] = 0
+            ipc_reply(sender, ack, 1)
+            return
         if inet_sockets[fd].pending_tid >= 0
             val waiter = inet_sockets[fd].pending_tid
             inet_sockets[fd].pending_tid = -1
@@ -1413,6 +1433,17 @@ Reply: status(1).
         // keep it alive — peer connection survives the partial close.
         val left = inet_tcp_owners_remove(fd, sender)
         if left > 0
+            var ack: [1]byte
+            ack[0] = 0
+            ipc_reply(sender, ack, 1)
+            return
+        // Phase 2B chunk 3: defer the FIN handshake while in-flight
+        // SCM_RIGHTS still holds a queue ref. The receiver-side
+        // QUEUE_REF(-1) drops the slot through `inet_tcp_close_slot`,
+        // which is ungraceful for a connection that the sender has
+        // already orphaned — acceptable, since the sender called
+        // close() and the peer learns of the tear-down via RST.
+        if tcp_sockets[fd].queued_refs > 0
             var ack: [1]byte
             ack[0] = 0
             ipc_reply(sender, ack, 1)
@@ -1792,6 +1823,15 @@ since no FIN handshake happens.
             reply[0] = 0
             ipc_reply(sender, reply, 1)
             return
+        // Phase 2B chunk 3: defer the RST while in-flight SCM_RIGHTS
+        // still holds a queue ref. The QUEUE_REF(-1) path will free
+        // the slot ungracefully then — the RST opportunity is lost,
+        // but linger=0 already chose the brutal path and the peer
+        // sees the connection drop one way or another.
+        if tcp_sockets[fd].queued_refs > 0
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
         val rc = inet_tcp_abort(fd)
         reply[0] = byte(rc & 0xff)
         ipc_reply(sender, reply, 1)
@@ -1897,16 +1937,22 @@ connection loss via timeout or a future RST).
             if inet_sockets[i].in_use != 0
                 if inet_udp_owners_has(i, tid) != 0
                     val left = inet_udp_owners_remove(i, tid)
+                    // Phase 2B chunk 3: same teardown gate as
+                    // INET_CMD_CLOSE — defer free while an in-flight
+                    // SCM cmsg holds a queued_ref. Receiver-side
+                    // QUEUE_REF(-1) reaches the deferred-free path
+                    // in inet_handle_queue_ref.
                     if left == 0
-                        if inet_sockets[i].bound != 0
-                            inet_udp_hash_remove(i)
-                        inet_sockets[i].in_use = 0
-                        inet_sockets[i].bound = 0
-                        inet_sockets[i].q_count = 0
-                        inet_sockets[i].q_head = 0
-                        inet_sockets[i].q_tail = 0
-                        inet_sockets[i].pending_tid = -1
-                        inet_sockets[i].recv_deadline = 0
+                        if inet_sockets[i].queued_refs == 0
+                            if inet_sockets[i].bound != 0
+                                inet_udp_hash_remove(i)
+                            inet_sockets[i].in_use = 0
+                            inet_sockets[i].bound = 0
+                            inet_sockets[i].q_count = 0
+                            inet_sockets[i].q_head = 0
+                            inet_sockets[i].q_tail = 0
+                            inet_sockets[i].pending_tid = -1
+                            inet_sockets[i].recv_deadline = 0
             i += 1
         inet_tcp_cleanup_owner(tid)
         inet_epoll_drop_owner(tid)
@@ -1986,6 +2032,99 @@ both of those sit inside server-trusted contexts.
                 reply[0] = byte(-2)
                 ipc_reply(sender, reply, 1)
                 return
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
+        reply[0] = byte(-1)
+        ipc_reply(sender, reply, 1)
+
+
+### inet_handle_queue_ref
+
+Phase 2B chunk 3 — bump or drop a slot's `queued_refs` counter for
+in-flight SCM_RIGHTS cmsg. The sender shim does `+1` before
+SENDMSG so the slot survives even if the sender's `close()` races
+the receiver's drain; the receiver shim (or the closing-side shim
+on un-drained pending_scm) does `-1` to balance it.
+
+Reaching `owners_count + queued_refs == 0` triggers the deferred
+teardown path that the per-kind close handlers skipped while
+either ring/refcount was non-zero.
+
+Wire: `cmd(1) + kind(1) + slot_idx_be(2) + delta(1, signed) =
+5 bytes` in; status(1) out. `kind` is 0 for UDP, 1 for TCP.
+`delta` is +1 or -1 (any other value rejected). Status: 0 = OK,
+-1 = bad kind / bad index / bad delta.
+
+The handler doesn't authenticate the sender. The privilege model
+matches `INET_CMD_ADD_OWNER`: only the shim helpers in the
+posix-shim path reach this code, and that path is gated upstream.
+
+    inet_handle_queue_ref(sender: int, buf: *byte)
+        val kind = int(buf[1]) & 0xff
+        val idx = inet_read_u16(buf, 2)
+        val delta_raw = int(buf[4]) & 0xff
+        var delta = 0
+        if delta_raw == 1
+            delta = 1
+        else if delta_raw == 0xff
+            delta = -1
+        else
+            var bad: [1]byte
+            bad[0] = byte(-1)
+            ipc_reply(sender, bad, 1)
+            return
+        var reply: [1]byte
+        if kind == 0
+            if idx < 0
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if idx >= INET_MAX_SOCKETS
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if inet_sockets[idx].in_use == 0
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            inet_sockets[idx].queued_refs += delta
+            if inet_sockets[idx].queued_refs < 0
+                inet_sockets[idx].queued_refs = 0
+            if inet_sockets[idx].owners_count == 0
+                if inet_sockets[idx].queued_refs == 0
+                    if inet_sockets[idx].bound != 0
+                        inet_udp_hash_remove(idx)
+                    inet_sockets[idx].in_use = 0
+                    inet_sockets[idx].bound = 0
+                    inet_sockets[idx].q_count = 0
+                    inet_sockets[idx].q_head = 0
+                    inet_sockets[idx].q_tail = 0
+                    inet_sockets[idx].pending_tid = -1
+                    inet_sockets[idx].recv_deadline = 0
+                    inet_sockets[idx].pending_error = 0
+            reply[0] = 0
+            ipc_reply(sender, reply, 1)
+            return
+        if kind == 1
+            if idx < 0
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if idx >= TCP_MAX_SOCKETS
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if tcp_sockets[idx].in_use == 0
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            tcp_sockets[idx].queued_refs += delta
+            if tcp_sockets[idx].queued_refs < 0
+                tcp_sockets[idx].queued_refs = 0
+            if tcp_sockets[idx].owners_count == 0
+                if tcp_sockets[idx].queued_refs == 0
+                    inet_tcp_close_slot(idx, -1)
             reply[0] = 0
             ipc_reply(sender, reply, 1)
             return
@@ -2987,6 +3126,7 @@ silently skip link-layer setup and still serve UDP loopback.
                     INET_CMD_ICMP_CHECK  -> inet_handle_icmp_check(sender, buf)
                     INET_CMD_PID_EXIT    -> inet_handle_pid_exit(sender, buf)
                     INET_CMD_ADD_OWNER   -> inet_handle_add_owner(sender, buf)
+                    INET_CMD_QUEUE_REF   -> inet_handle_queue_ref(sender, buf)
                     INET_CMD_UDP_GETNAME -> inet_handle_udp_getname(sender, buf)
                     INET_CMD_TCP_GETNAME -> inet_handle_tcp_getname(sender, buf)
                     INET_CMD_TCP_RECV_NB -> inet_handle_tcp_recv_nb(sender, buf)

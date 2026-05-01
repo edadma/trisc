@@ -1,0 +1,350 @@
+test_unixscma — TCP fd through AF_UNIX SCM_RIGHTS
+==================================================
+
+Validates Phase 2B chunk 3 — STREAM SCM_RIGHTS now carries
+arbitrary `(kind, handle, stype)` tuples, and the inet server's
+new `queued_refs` counter keeps a TCP slot alive across the
+sender-closes / receiver-drains race.
+
+Test plan
+---------
+
+Single-process choreography:
+
+1. Unix STREAM pair on path "SCA1" (listen/connect/accept), so we
+   have `(uc, us)` connected unix sockets.
+2. TCP loopback on 127.0.0.1:9301 (listen/connect/accept), giving
+   `(tl, tc, ta)` for listener / client / accepted.
+3. `write(tc, "TCP", 3)`: bytes land in `ta`'s recv buffer.
+4. `sendmsg(uc, "ok", cmsg=[ta])`: the sender shim bumps the inet
+   slot's `queued_refs` via `INET_CMD_QUEUE_REF(+1)` and the unix
+   server stashes the tuple in `us.pending_scm`.
+5. `close(ta)`: the inet TCP close handler sees
+   `owners_count == 0` but `queued_refs > 0` and defers the
+   teardown.  Without chunk 3 this would tear the slot down and
+   step 7 would read EBADF.
+6. `recvmsg(us)`: receiver shim mints a fresh `ta2`, fires
+   `INET_CMD_ADD_OWNER`, then drops the queued ref via
+   `INET_CMD_QUEUE_REF(-1)`. Slot now has owners_count=1,
+   queued_refs=0 — fully usable.
+7. `read(ta2, ...)`: returns "TCP" (the bytes step 3 put in the
+   buffer survived close-before-drain).
+
+Pass criterion: prints `unixscma: ok`.
+
+    module oskit.bin.test_unixscma
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_BIND       = 135
+    val NR_CONNECT    = 148
+    val NR_LISTEN     = 217
+    val NR_ACCEPT     = 131
+    val NR_CLOSE      = 147
+    val NR_SOCKET     = 337
+    val NR_RECVMSG    = 278
+    val NR_SENDMSG    = 306
+    val NR_WRITE      = 128
+    val NR_READ       = 130
+
+    val AF_UNIX_V     = 1
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+
+    val SOL_SOCKET_V  = 1
+    val SCM_RIGHTS_V  = 1
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixscma: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, plen: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < plen
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + plen] = byte(0)
+        2 + plen + 1
+
+
+    fill_sockaddr_in(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, alp: *i32) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(alp), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_sendmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_SENDMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+    posix_recvmsg(fd: int, mh: *byte, flags: int) -> int
+        int(syscall6(NR_RECVMSG, i64(fd), i64(mh), i64(flags), 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_read(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+
+    write_i64(p: *byte, off: int, v: i64)
+        var i = 0
+        while i < 8
+            p[off + i] = byte((v >> (i * 8)) & i64(0xff))
+            i += 1
+
+    write_i32(p: *byte, off: int, v: int)
+        p[off]     = byte(v & 0xff)
+        p[off + 1] = byte((v >> 8) & 0xff)
+        p[off + 2] = byte((v >> 16) & 0xff)
+        p[off + 3] = byte((v >> 24) & 0xff)
+
+    read_i32(p: *byte, off: int) -> int
+        val b0 = int(p[off]) & 0xff
+        val b1 = int(p[off + 1]) & 0xff
+        val b2 = int(p[off + 2]) & 0xff
+        val b3 = int(p[off + 3]) & 0xff
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+
+    main(argv: []string)
+
+Step 1 — Unix STREAM pair on "SCA1".
+
+        var nm: [4]byte
+        nm[0] = 'S'; nm[1] = 'C'; nm[2] = 'A'; nm[3] = '1'
+        var sa: [128]byte
+        val al = fill_sockaddr_un(&sa[0], &nm[0], 4)
+
+        val ul = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if ul < 0
+            fail(1)
+            return
+        if posix_bind(ul, &sa[0], al) != 0
+            fail(2)
+            return
+        if posix_listen(ul, 4) != 0
+            fail(3)
+            return
+        val uc = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if uc < 0
+            fail(4)
+            return
+        if posix_connect(uc, &sa[0], al) != 0
+            fail(5)
+            return
+        var aa: [128]byte
+        var aal: i32 = 128
+        val us = posix_accept(ul, &aa[0], &aal)
+        if us < 0
+            fail(6)
+            return
+
+Step 2 — TCP loopback on 127.0.0.1:9301.
+
+        val tl = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if tl < 0
+            fail(7)
+            return
+        var bind_addr: [16]byte
+        fill_sockaddr_in(&bind_addr[0], 9301, 0, 0, 0, 0)
+        if posix_bind(tl, &bind_addr[0], 16) != 0
+            fail(8)
+            return
+        if posix_listen(tl, 4) != 0
+            fail(9)
+            return
+        val tc = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if tc < 0
+            fail(10)
+            return
+        var conn_addr: [16]byte
+        fill_sockaddr_in(&conn_addr[0], 9301, 127, 0, 0, 1)
+        if posix_connect(tc, &conn_addr[0], 16) != 0
+            fail(11)
+            return
+        var peer: [16]byte
+        var peer_len: i32 = 16
+        val ta = posix_accept(tl, &peer[0], &peer_len)
+        if ta < 0
+            fail(12)
+            return
+
+Step 3 — write "TCP" from `tc`; bytes land in `ta`'s recv buf.
+The loopback fastpath delivers synchronously, so by the time
+write returns the bytes are buffered.
+
+        var tcp_msg: [3]byte
+        tcp_msg[0] = 'T'; tcp_msg[1] = 'C'; tcp_msg[2] = 'P'
+        if posix_write(tc, &tcp_msg[0], 3) != 3
+            fail(13)
+            return
+
+Step 4 — sendmsg(uc, "ok", cmsg=[ta]).
+
+        var ctrl_send: [32]byte
+        write_i64(&ctrl_send[0], 0, i64(20))
+        write_i32(&ctrl_send[0], 8, SOL_SOCKET_V)
+        write_i32(&ctrl_send[0], 12, SCM_RIGHTS_V)
+        write_i32(&ctrl_send[0], 16, ta)
+
+        var msg_payload: [2]byte
+        msg_payload[0] = 'o'; msg_payload[1] = 'k'
+
+        var send_iov: [16]byte
+        write_i64(&send_iov[0], 0, i64(&msg_payload[0]))
+        write_i64(&send_iov[0], 8, i64(2))
+
+        var send_mh: [56]byte
+        write_i64(&send_mh[0], 0, i64(0))
+        write_i32(&send_mh[0], 8, 0)
+        write_i32(&send_mh[0], 12, 0)
+        write_i64(&send_mh[0], 16, i64(&send_iov[0]))
+        write_i32(&send_mh[0], 24, 1)
+        write_i32(&send_mh[0], 28, 0)
+        write_i64(&send_mh[0], 32, i64(&ctrl_send[0]))
+        write_i32(&send_mh[0], 40, 20)
+        write_i32(&send_mh[0], 44, 0)
+        write_i32(&send_mh[0], 48, 0)
+
+        val ns = posix_sendmsg(uc, &send_mh[0], 0)
+        if ns != 2
+            puts("unixscma: scm sendmsg ")
+            print_idec(ns)
+            puts("\n")
+            fail(14)
+            return
+
+Step 5 — close `ta` BEFORE the receiver drains. With chunk 3 the
+inet slot survives via queued_refs; without it the next read
+through the fresh fd would EBADF.
+
+        if posix_close(ta) != 0
+            fail(15)
+            return
+
+Step 6 — recvmsg(us). Expect "ok" + one cmsg fd.
+
+        var recv_payload: [16]byte
+        var recv_iov: [16]byte
+        write_i64(&recv_iov[0], 0, i64(&recv_payload[0]))
+        write_i64(&recv_iov[0], 8, i64(16))
+        var ctrl_recv: [32]byte
+        var recv_mh: [56]byte
+        write_i64(&recv_mh[0], 0, i64(0))
+        write_i32(&recv_mh[0], 8, 0)
+        write_i32(&recv_mh[0], 12, 0)
+        write_i64(&recv_mh[0], 16, i64(&recv_iov[0]))
+        write_i32(&recv_mh[0], 24, 1)
+        write_i32(&recv_mh[0], 28, 0)
+        write_i64(&recv_mh[0], 32, i64(&ctrl_recv[0]))
+        write_i32(&recv_mh[0], 40, 32)
+        write_i32(&recv_mh[0], 44, 0)
+        write_i32(&recv_mh[0], 48, 0)
+        val nr = posix_recvmsg(us, &recv_mh[0], 0)
+        if nr != 2
+            puts("unixscma: scm recvmsg ")
+            print_idec(nr)
+            puts("\n")
+            fail(16)
+            return
+        if recv_payload[0] != 'o'
+            fail(17)
+            return
+        if recv_payload[1] != 'k'
+            fail(18)
+            return
+
+        val ctrl_used = read_i32(&recv_mh[0], 40)
+        if ctrl_used != 20
+            puts("unixscma: ctrl_used ")
+            print_idec(ctrl_used)
+            puts("\n")
+            fail(19)
+            return
+        val cmsg_level = read_i32(&ctrl_recv[0], 8)
+        val cmsg_type  = read_i32(&ctrl_recv[0], 12)
+        if cmsg_level != SOL_SOCKET_V
+            fail(20)
+            return
+        if cmsg_type != SCM_RIGHTS_V
+            fail(21)
+            return
+        val ta2 = read_i32(&ctrl_recv[0], 16)
+        if ta2 < 0
+            fail(22)
+            return
+
+Step 7 — read "TCP" from the resurrected fd.
+
+        var tcp_buf: [3]byte
+        var got = 0
+        while got < 3
+            val r = posix_read(ta2, &tcp_buf[got], 3 - got)
+            if r <= 0
+                fail(23)
+                return
+            got += r
+        if tcp_buf[0] != 'T'
+            fail(24)
+            return
+        if tcp_buf[1] != 'C'
+            fail(25)
+            return
+        if tcp_buf[2] != 'P'
+            fail(26)
+            return
+
+        posix_close(ta2)
+        posix_close(tc)
+        posix_close(tl)
+        posix_close(us)
+        posix_close(uc)
+        posix_close(ul)
+        puts("unixscma: ok\n")
+        exit()

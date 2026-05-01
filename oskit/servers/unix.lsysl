@@ -130,7 +130,7 @@ queue entries that hold the slot alive while in transit.
 
     module oskit.servers
 
-    import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
+    import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply, ipc_send, port_lookup}
     import oskit.services.{rs_ready, notify_send_to, svc_get_thread_pid, svc_get_thread_uid}
 
 
@@ -318,6 +318,52 @@ matching send/sendto wakes the slot.
 
     var unix_sockets: [16]UnixSocket
     var unix_port = -1
+
+Cached inet server port for the Phase 2B chunk 3 abandoned-tuple
+drop path. Looked up lazily on first use (resolves to -1 in test
+configurations that boot without inet — drops are silently
+skipped there). The unix server is otherwise a pure receiver;
+this is the only outbound IPC channel and is gated by
+`rs_ipc_mask_for_idx(8)`.
+
+    var unix_inet_port = -2
+
+    unix_get_inet_port() -> int
+        if unix_inet_port == -2
+            unix_inet_port = port_lookup("inet")
+        unix_inet_port
+
+Drop one in-flight SCM_RIGHTS reference on an inet slot. Called
+from `unix_stream_scm_consume` when an abandoned pending_scm
+tuple holds a TCP or UDP handle that the receiver-side will
+never drain (close-without-recv, peer-disconnect cascade,
+PID_EXIT cleanup). `kind_byte` is the cmsg kind (4=UDP, 5=TCP);
+`handle` is the inet slot index.
+
+Wire: `cmd(1) + kind(1) + slot_be(2) + delta(1) = 5` bytes;
+1-byte status. Reply ignored — failures only happen when the
+inet slot was already torn down asynchronously, which is the
+exact race queued_refs is designed to gracefully recover from.
+
+    unix_inet_queue_ref_drop(kind_byte: int, handle: int)
+        val port = unix_get_inet_port()
+        if port < 0
+            return
+        var inet_kind = -1
+        if kind_byte == 4
+            inet_kind = 0
+        if kind_byte == 5
+            inet_kind = 1
+        if inet_kind < 0
+            return
+        var msg: [5]byte
+        msg[0] = byte(59)
+        msg[1] = byte(inet_kind & 0xff)
+        msg[2] = byte((handle >> 8) & 0xff)
+        msg[3] = byte(handle & 0xff)
+        msg[4] = byte(0xff)  // delta = -1 (signed byte)
+        var reply: [1]byte
+        ipc_send(port, &msg[0], 5, &reply[0], 1)
 
 
 Epoll subscriber table. Each entry pins a (owner_tid, fd,
@@ -791,6 +837,23 @@ single-byte scratch buffers since nothing is written when
                                 if unix_sockets[handle].nrefs_in_queues == 0
                                     if unix_sockets[handle].in_use != 0
                                         unix_full_close(handle)
+                        else if kind == 4 || kind == 5
+                            // TCP / UDP — handle is the inet slot index.
+                            // Phase 2B chunk 3: in claim mode just forward
+                            // the tuple to the receiver shim; the shim does
+                            // INET_CMD_ADD_OWNER + INET_CMD_QUEUE_REF(-1)
+                            // itself. In drop mode (claim_for < 0) we must
+                            // still drop the queued ref, so call inet
+                            // directly via the unix→inet IPC channel.
+                            if claim_for >= 0
+                                if granted < max_grant
+                                    out_kinds[granted]               = byte(kind & 0xff)
+                                    out_handles[granted * 2]         = byte((handle >> 8) & 0xff)
+                                    out_handles[granted * 2 + 1]     = byte(handle & 0xff)
+                                    out_stypes[granted]              = byte(stype & 0xff)
+                                    granted += 1
+                            else
+                                unix_inet_queue_ref_drop(kind, handle)
                         k += 1
                     unix_sockets[idx].pending_scm[s].in_use = 0
                     unix_sockets[idx].pending_scm[s].nfds = 0
@@ -1832,15 +1895,19 @@ position will surface the cmsg via the next drain.
 
 Validate every cmsg fd up front. Wire format per fd is the
 4-byte tuple `kind(1) + handle_be(2) + stype(1)`. Phase 2B
-chunk 2 only accepts `kind = POSIX_FD_UNIX_SOCKET (10)` —
-the sender shim's allow-list rejects other kinds before they
-reach the server, but the validation here is defensive.
+chunk 3 accepts:
 
-For UNIX kind, `handle` is the unix slot index; we still apply
-the existing in-range / in_use / owned-by-sender checks. Other
-kinds skip validation here (the chunk 3+ allow-list expansion
-will route per-kind validation through the appropriate backend
-server before reaching SENDMSG).
+- `kind = POSIX_FD_UNIX_SOCKET (10)` — `handle` is the unix
+  slot index; in-range / in_use / owned-by-sender are checked
+  here.
+- `kind = POSIX_FD_TCP_SOCKET  (5)` — `handle` is an inet TCP
+  slot index. The sender shim has already incremented the
+  inet slot's `queued_refs` via `INET_CMD_QUEUE_REF(+1)` and
+  validated ownership; we accept the tuple at face value.
+- `kind = POSIX_FD_UDP_SOCKET  (4)` — same as TCP for UDP slots.
+
+Other kinds are rejected with `-EINVAL` (the shim allow-list
+rejects them earlier, but defending here keeps us honest).
 
         var k = 0
         while k < nfds
@@ -1849,37 +1916,58 @@ server before reaching SENDMSG).
             val handle_hi = int(buf[tup_off + 1]) & 0xff
             val handle_lo = int(buf[tup_off + 2]) & 0xff
             val handle = (handle_hi << 8) | handle_lo
-            if kind != 10
+            if kind == 10
+                if handle < 0
+                    var err: [3]byte
+                    err[0] = byte(-UNIX_EINVAL)
+                    err[1] = 0
+                    err[2] = 0
+                    ipc_reply(sender, err, 3)
+                    return
+                if handle >= UNIX_MAX_SOCKETS
+                    var err: [3]byte
+                    err[0] = byte(-UNIX_EINVAL)
+                    err[1] = 0
+                    err[2] = 0
+                    ipc_reply(sender, err, 3)
+                    return
+                if unix_sockets[handle].in_use == 0
+                    var err: [3]byte
+                    err[0] = byte(-UNIX_EBADF)
+                    err[1] = 0
+                    err[2] = 0
+                    ipc_reply(sender, err, 3)
+                    return
+                if unix_slot_has_owner(handle, sender) == 0
+                    var err: [3]byte
+                    err[0] = byte(-UNIX_EBADF)
+                    err[1] = 0
+                    err[2] = 0
+                    ipc_reply(sender, err, 3)
+                    return
+            else if kind == 4 || kind == 5
+                // TCP/UDP: trust the shim's pre-validated handle.
+                // Range-check defensively — `handle` rides a 2-byte
+                // BE field on the wire, so `< 0` shouldn't happen,
+                // but the range guard keeps us from poisoning
+                // pending_scm with a wild index.
+                if handle < 0
+                    var err: [3]byte
+                    err[0] = byte(-UNIX_EINVAL)
+                    err[1] = 0
+                    err[2] = 0
+                    ipc_reply(sender, err, 3)
+                    return
+                if handle > 65535
+                    var err: [3]byte
+                    err[0] = byte(-UNIX_EINVAL)
+                    err[1] = 0
+                    err[2] = 0
+                    ipc_reply(sender, err, 3)
+                    return
+            else
                 var err: [3]byte
                 err[0] = byte(-UNIX_EINVAL)
-                err[1] = 0
-                err[2] = 0
-                ipc_reply(sender, err, 3)
-                return
-            if handle < 0
-                var err: [3]byte
-                err[0] = byte(-UNIX_EINVAL)
-                err[1] = 0
-                err[2] = 0
-                ipc_reply(sender, err, 3)
-                return
-            if handle >= UNIX_MAX_SOCKETS
-                var err: [3]byte
-                err[0] = byte(-UNIX_EINVAL)
-                err[1] = 0
-                err[2] = 0
-                ipc_reply(sender, err, 3)
-                return
-            if unix_sockets[handle].in_use == 0
-                var err: [3]byte
-                err[0] = byte(-UNIX_EBADF)
-                err[1] = 0
-                err[2] = 0
-                ipc_reply(sender, err, 3)
-                return
-            if unix_slot_has_owner(handle, sender) == 0
-                var err: [3]byte
-                err[0] = byte(-UNIX_EBADF)
                 err[1] = 0
                 err[2] = 0
                 ipc_reply(sender, err, 3)

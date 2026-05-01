@@ -145,7 +145,14 @@ receiver. Servers not listed fall through to 0.
         val nic_port = rs_server_ports[6]
         val inet_port = rs_server_ports[7]
         val unix_port = rs_server_ports[8]
-        // idx 0 (disk), 5 (ds), 6 (nic), 8 (unix) are pure receivers → 0.
+        // idx 0 (disk), 5 (ds), 6 (nic) are pure receivers → 0. unix
+        // (idx 8) gains a single outbound channel to inet for the
+        // Phase 2B chunk 3 SCM_RIGHTS drop-on-close path: when a
+        // pending_scm tuple is abandoned (close-without-drain or
+        // PID_EXIT), unix calls INET_CMD_QUEUE_REF(-1) directly so
+        // the inet slot's queued_refs balances. Worst-case abuse is
+        // unix issuing QUEUE_REF on an unrelated slot — the inet
+        // handler's in_use/range checks make that a no-op.
         if idx == 1
             // tfs: sends to disk
             return 1 << disk_port
@@ -180,6 +187,14 @@ receiver. Servers not listed fall through to 0.
             if nic_port < 0
                 return 0
             return 1 << nic_port
+        else if idx == 8
+            // unix: sends to inet for SCM_RIGHTS drop-on-close
+            // (INET_CMD_QUEUE_REF(-1) on abandoned TCP/UDP tuples).
+            // No nic / vfs / disk reach — strictly the inet ref-drop
+            // channel.
+            if inet_port < 0
+                return 0
+            return 1 << inet_port
         else if idx == 9
             // init: sends to pm, vfs
             return (1 << pm_port) | (1 << vfs_port)

@@ -777,6 +777,84 @@ fcntl command codes (`<fcntl.h>` in musl arch).
             unix_port_cached = port_lookup("unix")
         unix_port_cached
 
+Phase 2B chunk 3 — bump or drop one in-flight SCM_RIGHTS
+reference on a TCP / UDP slot. The wire format mirrors
+`inet_handle_queue_ref` directly: 5-byte request, 1-byte reply.
+
+`kind` is the POSIX_FD_* enum value (4=UDP, 5=TCP); we map to
+inet's 0/1 internal kind. `delta` must be +1 or -1; the inet
+server rejects any other byte. The +1 leg is balanced by either
+the receiver shim's drain (`-1` after ADD_OWNER lands) or the
+unix server's drop-on-close path (`-1` from
+`unix_inet_queue_ref_drop`). Returns 0 on success, -1 otherwise.
+
+Add `new_tid` to the inet slot's owners ring. Mirrors the
+inline `INET_CMD_ADD_OWNER` send from `posix_fd_transplant`,
+factored out so the SCM_RIGHTS receive path can reuse it.
+
+    shim_inet_add_owner(posix_kind: int, handle: int, new_tid: int) -> int
+        if new_tid <= 0
+            return -1
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var inet_kind = -1
+        if posix_kind == POSIX_FD_UDP_SOCKET
+            inet_kind = 0
+        if posix_kind == POSIX_FD_TCP_SOCKET
+            inet_kind = 1
+        if inet_kind < 0
+            return -1
+        var msg: [8]byte
+        msg[0] = byte(58)
+        msg[1] = byte(inet_kind & 0xff)
+        msg[2] = byte((handle >> 8) & 0xff)
+        msg[3] = byte(handle & 0xff)
+        msg[4] = byte((new_tid >> 24) & 0xff)
+        msg[5] = byte((new_tid >> 16) & 0xff)
+        msg[6] = byte((new_tid >> 8) & 0xff)
+        msg[7] = byte(new_tid & 0xff)
+        var reply: [1]byte
+        val rc = ipc_send(port, &msg[0], 8, &reply[0], 1)
+        if rc < 0
+            return -1
+        if int(reply[0]) & 0xff != 0
+            return -1
+        0
+
+
+    shim_inet_queue_ref(posix_kind: int, handle: int, delta: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var inet_kind = -1
+        if posix_kind == POSIX_FD_UDP_SOCKET
+            inet_kind = 0
+        if posix_kind == POSIX_FD_TCP_SOCKET
+            inet_kind = 1
+        if inet_kind < 0
+            return -1
+        var delta_byte = 0
+        if delta == 1
+            delta_byte = 1
+        else if delta == -1
+            delta_byte = 0xff
+        else
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(59)
+        msg[1] = byte(inet_kind & 0xff)
+        msg[2] = byte((handle >> 8) & 0xff)
+        msg[3] = byte(handle & 0xff)
+        msg[4] = byte(delta_byte & 0xff)
+        var reply: [1]byte
+        val rc = ipc_send(port, &msg[0], 5, &reply[0], 1)
+        if rc < 0
+            return -1
+        if int(reply[0]) & 0xff != 0
+            return -1
+        0
+
 
 Sign-extend a wire status byte. The unix server emits
 `byte(-EADDRINUSE)` etc., which round-trip back as unsigned
@@ -2355,19 +2433,25 @@ STREAM SENDMSG SCM_RIGHTS extractor. Same cmsg parse as
 payload to match the chunk-2 STREAM wire format: each fd
 becomes a (kind, handle_be, stype) tuple in the three parallel
 output buffers. Returns the number of fds written, -1 on parse
-error or kind not supported by the chunk's allow-list.
+error or kind not supported by the current allow-list.
 
-Phase 2B chunk 2 allow-list: `POSIX_FD_UNIX_SOCKET` only.
-Other backed-by-server kinds (TCP/UDP/FILE) need queued-ref
-machinery in their respective backends to survive the
-sender-closes-before-receive race; they're rejected with -1
-here so the caller surfaces -EOPNOTSUPP. Chunk 3 will widen the
-allow-list as those refs land.
+Phase 2B chunk 3 allow-list: `POSIX_FD_UNIX_SOCKET`,
+`POSIX_FD_TCP_SOCKET`, `POSIX_FD_UDP_SOCKET`. TCP and UDP rely
+on the inet server's queued_refs counter (see
+`INET_CMD_QUEUE_REF`) to survive the sender-closes-before-
+receive race. `POSIX_FD_FILE` waits on chunk 4, eventfd /
+timerfd are out of scope (Linux supports passing them but
+slix's per-fd counter state would split incorrectly across
+processes — see the Phase 2B handoff for details). Both still
+return -1 so the caller surfaces -EOPNOTSUPP.
 
-For the UNIX kind, `handle = posix_fd.target` (the unix slot
-index, fits comfortably in 16 bits — UNIX_MAX_SOCKETS is 16),
-and `stype = posix_fd.pos` (the stream/dgram type the receiver
-shim's freshly-minted posix_fd should record).
+For each kind:
+- UNIX: `handle = posix_fd.target` (unix slot index, fits in a
+  byte — UNIX_MAX_SOCKETS is 16), `stype = posix_fd.pos`
+  (stream/dgram type recorded by the receiver shim's freshly
+  minted posix_fd).
+- TCP / UDP: `handle = posix_fd.target` (inet slot index, also
+  byte-sized today). `stype` is meaningless and recorded as 0.
 
     shim_unix_extract_scm_tuples(ctrl_ptr: i64, ctrl_len: int,
             out_kinds: *byte, out_handles_be: *byte,
@@ -2398,10 +2482,19 @@ shim's freshly-minted posix_fd should record).
                         val user_fd = shim_read_i32(cm,
                             off + SHIM_CMSG_HDR_LEN + i * 4)
                         val k = posix_fd_kind(user_fd)
-                        if k != POSIX_FD_UNIX_SOCKET
+                        var ok = 0
+                        if k == POSIX_FD_UNIX_SOCKET
+                            ok = 1
+                        if k == POSIX_FD_TCP_SOCKET
+                            ok = 1
+                        if k == POSIX_FD_UDP_SOCKET
+                            ok = 1
+                        if ok == 0
                             return -1
                         val handle = posix_fd_target(user_fd)
-                        val stype = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + user_fd].pos)
+                        var stype = 0
+                        if k == POSIX_FD_UNIX_SOCKET
+                            stype = int(posix_fd_table[pid * POSIX_FDS_PER_PROC + user_fd].pos)
                         out_kinds[nfds]                = byte(k & 0xff)
                         out_handles_be[nfds * 2]       = byte((handle >> 8) & 0xff)
                         out_handles_be[nfds * 2 + 1]   = byte(handle & 0xff)
@@ -2504,6 +2597,33 @@ and dispatches:
             val port_s = unix_get_port()
             if port_s < 0
                 return i64(-ENODEV)
+            // Phase 2B chunk 3 — bump queued_refs on every TCP/UDP
+            // tuple before SENDMSG. The unix server takes ownership
+            // of the +1 once the cmsg lands in pending_scm; if any
+            // step from here fails we roll back. Doing this *before*
+            // SENDMSG closes the race where the sender process exits
+            // (or close()s the source fd) between SENDMSG and the
+            // receiver's drain.
+            var bumped = 0
+            while bumped < nfds
+                val bk = int(s_kinds[bumped]) & 0xff
+                if bk == POSIX_FD_TCP_SOCKET || bk == POSIX_FD_UDP_SOCKET
+                    val bh_hi = int(s_handles[bumped * 2]) & 0xff
+                    val bh_lo = int(s_handles[bumped * 2 + 1]) & 0xff
+                    val bh = (bh_hi << 8) | bh_lo
+                    if shim_inet_queue_ref(bk, bh, 1) < 0
+                        // Roll back any bumps already done.
+                        var rb = 0
+                        while rb < bumped
+                            val rk = int(s_kinds[rb]) & 0xff
+                            if rk == POSIX_FD_TCP_SOCKET || rk == POSIX_FD_UDP_SOCKET
+                                val rh_hi = int(s_handles[rb * 2]) & 0xff
+                                val rh_lo = int(s_handles[rb * 2 + 1]) & 0xff
+                                val rh = (rh_hi << 8) | rh_lo
+                                shim_inet_queue_ref(rk, rh, -1)
+                            rb += 1
+                        return i64(-EBADF)
+                bumped += 1
             var msg_s: [512]byte
             msg_s[0] = byte(UNIX_CMD_SENDMSG)
             msg_s[1] = byte(target_s & 0xff)
@@ -2527,9 +2647,31 @@ and dispatches:
             var reply_s: [3]byte
             val rs = ipc_send(port_s, msg_s, data_off_s + 2 + gtotal_s,
                 reply_s, 3)
+            // Roll back queued_refs on any failure path. Unix's
+            // SENDMSG is atomic — it validates the whole cmsg before
+            // stashing — so non-zero status means nothing was stashed
+            // and the +1s above have no balancer.
             if rs < 0
+                var rb_e = 0
+                while rb_e < nfds
+                    val rk_e = int(s_kinds[rb_e]) & 0xff
+                    if rk_e == POSIX_FD_TCP_SOCKET || rk_e == POSIX_FD_UDP_SOCKET
+                        val rh_hi_e = int(s_handles[rb_e * 2]) & 0xff
+                        val rh_lo_e = int(s_handles[rb_e * 2 + 1]) & 0xff
+                        val rh_e = (rh_hi_e << 8) | rh_lo_e
+                        shim_inet_queue_ref(rk_e, rh_e, -1)
+                    rb_e += 1
                 return i64(-EIO)
             if reply_s[0] != 0
+                var rb_f = 0
+                while rb_f < nfds
+                    val rk_f = int(s_kinds[rb_f]) & 0xff
+                    if rk_f == POSIX_FD_TCP_SOCKET || rk_f == POSIX_FD_UDP_SOCKET
+                        val rh_hi_f = int(s_handles[rb_f * 2]) & 0xff
+                        val rh_lo_f = int(s_handles[rb_f * 2 + 1]) & 0xff
+                        val rh_f = (rh_hi_f << 8) | rh_lo_f
+                        shim_inet_queue_ref(rk_f, rh_f, -1)
+                    rb_f += 1
                 val status_s = unix_status(reply_s[0])
                 posix_fd_set_error(fd, i64(status_s))
                 return i64(status_s)
@@ -2694,16 +2836,21 @@ data(D). plen is always 0 on STREAM.
         val data_off = dl_off + 2
 
 Allocate posix_fds for each transferred (kind, handle, stype)
-tuple. Phase 2B chunk 2 only routes UNIX_SOCKET; the unix
-server's allow-list rejects others before they ever reach the
-queue, so a `kind != 10` here would only happen on a server
-bug. Same two-pass dedup-on-close pattern as the DGRAM recvmsg
-path: any tuple we couldn't allocate (or whose duplicate-handle
-mate also failed) gets a UNIX_CMD_CLOSE so the unix server
-drops the ownership ref it transferred to us.
+tuple. Phase 2B chunk 3 routes UNIX_SOCKET, TCP_SOCKET, and
+UDP_SOCKET. For TCP/UDP, the inet slot's queued_refs holds a
++1 placed by the sender shim that this drain inherits — we
+must always balance it with QUEUE_REF(-1), even on alloc
+failure. Successful allocs additionally fan out
+INET_CMD_ADD_OWNER so the inet owners ring tracks the receiver.
+
+The dedup-on-close fallback for failed allocs differs by kind:
+UNIX → shim_unix_close (unix server transferred ownership in
+the drain, we hand it back); inet → shim_inet_queue_ref(-1)
+(unix never bumped owners, only the queued_ref we now drop).
 
         var new_fds: [4]int
         var n_new = 0
+        val recv_main_tid = kernel_get_process_main_tid(posix_fd_current_pid())
         var nf = 0
         while nf < nfds_in_reply
             val s_kind = int(reply[kinds_off + nf]) & 0xff
@@ -2718,10 +2865,32 @@ drops the ownership ref it transferred to us.
                     posix_fd_table[pid2 * POSIX_FDS_PER_PROC + pfd].pos = i64(s_stype)
                     new_fds[n_new] = pfd
                     n_new += 1
+            else if s_kind == POSIX_FD_TCP_SOCKET || s_kind == POSIX_FD_UDP_SOCKET
+                val pfd = posix_fd_alloc(s_kind, s_handle)
+                if pfd >= 0
+                    // ADD_OWNER lands the receiver's main_tid in the
+                    // inet slot's owners ring; QUEUE_REF(-1) drops the
+                    // sender's queued +1 now that ownership has been
+                    // taken. Order matters: ADD_OWNER first so the
+                    // slot can't transition to "no owners and no queue
+                    // refs" between the two calls.
+                    if shim_inet_add_owner(s_kind, s_handle, recv_main_tid) == 0
+                        shim_inet_queue_ref(s_kind, s_handle, -1)
+                        new_fds[n_new] = pfd
+                        n_new += 1
+                    else
+                        // ADD_OWNER failed (slot torn down between
+                        // unix's claim and our drain). Free the local
+                        // posix_fd and drop the queued_ref so the
+                        // counter doesn't leak.
+                        posix_fd_clear(pfd)
+                        shim_inet_queue_ref(s_kind, s_handle, -1)
             nf += 1
 
         var sidx_closed: [4]int
         var n_closed = 0
+        var inet_dropped: [4]int
+        var n_inet_dropped = 0
         nf = 0
         while nf < nfds_in_reply
             val s_kind = int(reply[kinds_off + nf]) & 0xff
@@ -2732,9 +2901,10 @@ drops the ownership ref it transferred to us.
                 var has_alloc = 0
                 var i = 0
                 while i < n_new
-                    if posix_fd_target(new_fds[i]) == s_handle
-                        has_alloc = 1
-                        break
+                    if posix_fd_kind(new_fds[i]) == POSIX_FD_UNIX_SOCKET
+                        if posix_fd_target(new_fds[i]) == s_handle
+                            has_alloc = 1
+                            break
                     i += 1
                 if has_alloc == 0
                     var dup = 0
@@ -2748,6 +2918,34 @@ drops the ownership ref it transferred to us.
                         shim_unix_close(s_handle)
                         sidx_closed[n_closed] = s_handle
                         n_closed += 1
+            else if s_kind == POSIX_FD_TCP_SOCKET || s_kind == POSIX_FD_UDP_SOCKET
+                // Was this tuple allocated above? If so we already
+                // ran ADD_OWNER + QUEUE_REF(-1); skip. If we hit the
+                // alloc-failure branch we also already dropped the
+                // queue ref locally — same skip. Otherwise this
+                // branch only reaches a tuple whose alloc was
+                // skipped (table full at the front, e.g. when n_new
+                // ran past 4) and the queue-ref is still un-dropped.
+                var found = 0
+                var ai = 0
+                while ai < n_new
+                    if posix_fd_kind(new_fds[ai]) == s_kind
+                        if posix_fd_target(new_fds[ai]) == s_handle
+                            found = 1
+                            break
+                    ai += 1
+                if found == 0
+                    var dup_i = 0
+                    var ii = 0
+                    while ii < n_inet_dropped
+                        if inet_dropped[ii] == (s_kind << 16) | (s_handle & 0xffff)
+                            dup_i = 1
+                            break
+                        ii += 1
+                    if dup_i == 0
+                        shim_inet_queue_ref(s_kind, s_handle, -1)
+                        inet_dropped[n_inet_dropped] = (s_kind << 16) | (s_handle & 0xffff)
+                        n_inet_dropped += 1
             nf += 1
 
 Scatter data into the iovec.
