@@ -78,9 +78,9 @@ If `padchar` is tab, right-alignment is disabled (same as Go).
 
         if padchar == byte(9) then ar = false
 
-        var lines0 = (new [0]TabwriterLine)[:0]
-        lines0 = append(lines0, TabwriterLine((new [0]TabwriterCell)[:0]))
-        TabWriter(new_builder(), minwidth, tabwidth, padding, padchar, flags, ar, lines0, new_builder(), (new [0]int)[:0])
+        var lines0: []TabwriterLine = []
+        lines0 = append(lines0, TabwriterLine([]))
+        TabWriter(new_builder(), minwidth, tabwidth, padding, padchar, flags, ar, lines0, new_builder(), [])
 
 
 TabWriter.to_str
@@ -98,9 +98,9 @@ Clears formatted output and internal buffers.
     TabWriter.reset()
         self.out.reset()
         self.cell_buf.reset()
-        self.widths = (new [0]int)[:0]
-        self.lines = (new [0]TabwriterLine)[:0]
-        self.lines = append(self.lines, TabwriterLine((new [0]TabwriterCell)[:0]))
+        self.widths = []
+        self.lines = []
+        self.lines = append(self.lines, TabwriterLine([]))
 
 
 TabWriter.flush
@@ -158,7 +158,7 @@ Private implementation
 
 
     private tabwriter_add_line(tw: *TabWriter)
-        var nl = TabwriterLine((new [0]TabwriterCell)[:0])
+        var nl = TabwriterLine([])
         tw.lines = append(tw.lines, nl)
 
 
@@ -181,10 +181,10 @@ Private implementation
 
 
     private tabwriter_reset_lines(tw: *TabWriter)
-        tw.lines = (new [0]TabwriterLine)[:0]
-        tw.lines = append(tw.lines, TabwriterLine((new [0]TabwriterCell)[:0]))
+        tw.lines = []
+        tw.lines = append(tw.lines, TabwriterLine([]))
         tw.cell_buf.reset()
-        tw.widths = (new [0]int)[:0]
+        tw.widths = []
 
 
     private tabwriter_write_padding(tw: *TabWriter, textw: int, cellw: int, use_tabs: bool)

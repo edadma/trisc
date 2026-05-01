@@ -98,7 +98,7 @@ Returns `(bytes, ok)`.
         val n = len(s)
 
         if n % 2 != 0
-            val empty = (new [0]byte)[:]
+            val empty: []byte = []
             return empty, false
 
         val out = (new [n / 2]byte)[:]

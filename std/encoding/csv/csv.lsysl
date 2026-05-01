@@ -101,7 +101,7 @@ appended. The empty string line yields one empty field.
 
     parse_record(line: string, comma: byte) -> Result[[]string, Error]
         val n = len(line)
-        var fields = (new [0]string)[:0]
+        var fields: []string = []
 
         if n == 0
             val one = new [1]string

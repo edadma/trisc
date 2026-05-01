@@ -619,8 +619,8 @@ duplicates, single-element, empty, all-same, large random.
 
     #test
     test_sort_int_empty() -> unit
-        val s = new [0]int
-        sort_int(s[:])
+        val s: []int = []
+        sort_int(s)
 
     #test
     test_sort_int_negative() -> unit
@@ -696,8 +696,8 @@ duplicates, single-element, empty, all-same, large random.
 
     #test
     test_is_sorted_empty() -> unit
-        val s = new [0]int
-        assert(is_sorted(s[:], cmp_int), "empty is sorted")
+        val s: []int = []
+        assert(is_sorted(s, cmp_int), "empty is sorted")
 
     #test
     test_is_sorted_single() -> unit
@@ -862,8 +862,8 @@ recursion.
 
     #test
     test_quick_sort_empty() -> unit
-        val s = new [0]int
-        quick_sort_by(s[:], cmp_int)
+        val s: []int = []
+        quick_sort_by(s, cmp_int)
 
     #test
     test_quick_sort_large() -> unit
@@ -1034,8 +1034,8 @@ buffered variant.
 
     #test
     test_stable_sort_empty() -> unit
-        val s = new [0]int
-        stable_sort_int(s[:])
+        val s: []int = []
+        stable_sort_int(s)
 
 The non-allocating variant takes a caller-provided buffer of at
 least `len(s)` elements.

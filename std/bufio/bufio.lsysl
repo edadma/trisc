@@ -64,7 +64,7 @@ Returns `(line, ok)` where `line` excludes the newline.
 Returns `("", false)` at EOF.
 
     BufReader.read_line() -> (string, bool)
-        var result = (new [0]byte)[:0]
+        var result: []byte = []
         var found = false
 
         while !found

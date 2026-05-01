@@ -46,7 +46,7 @@ streaming — suitable for small to medium inputs.
         buf: []byte
 
     new_sha256() -> Sha256Hash
-        return Sha256Hash((new [0]byte)[:0])
+        return Sha256Hash([])
 
     Sha256Hash.write(data: []byte) -> int
         val n = len(data)
@@ -58,7 +58,7 @@ streaming — suitable for small to medium inputs.
         sha256(self.buf, out)
 
     Sha256Hash.reset()
-        self.buf = (new [0]byte)[:0]
+        self.buf = []
 
     Sha256Hash.size() -> int = 32
 

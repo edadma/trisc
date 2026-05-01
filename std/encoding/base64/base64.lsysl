@@ -159,14 +159,14 @@ The output buffer is sized exactly: take the maximum from
         val n = len(s)
 
         if n == 0
-            val empty = (new [0]byte)[:]
+            val empty: []byte = []
             return empty, true
 
 A well-formed standard-base64 string with padding is always a multiple
 of four characters. Anything else is malformed.
 
         if n % 4 != 0
-            val empty = (new [0]byte)[:]
+            val empty: []byte = []
             return empty, false
 
 Snapshot the string into a byte slice for indexed access.
@@ -201,18 +201,18 @@ The first two characters of every group must be alphabet characters
 — never padding, never invalid.
 
             if c0 < 0 || c1 < 0
-                val empty = (new [0]byte)[:]
+                val empty: []byte = []
                 return empty, false
 
 The third and fourth characters may be padding (`-1`) but never
 invalid (`-2`).
 
             if c2 == -2
-                val empty = (new [0]byte)[:]
+                val empty: []byte = []
                 return empty, false
 
             if c3 == -2
-                val empty = (new [0]byte)[:]
+                val empty: []byte = []
                 return empty, false
 
 Padding is only legal in the last 4-character group. Reject any
@@ -221,7 +221,7 @@ padding that appears earlier.
             val is_last = i == groups - 1
             if !is_last
                 if c2 == -1 || c3 == -1
-                    val empty = (new [0]byte)[:]
+                    val empty: []byte = []
                     return empty, false
 
 Emit one, two, or three output bytes depending on how much padding
