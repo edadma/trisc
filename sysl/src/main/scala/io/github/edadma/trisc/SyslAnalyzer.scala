@@ -4736,6 +4736,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case ArrayLitAST(elements) =>
         val tElems = elements.map(analyzeExpr)
+        // The expected slice type, if context demands one. When `currentExpected`
+        // is `[]T`, the literal must produce a slice descriptor (so `append`,
+        // `len`, etc. work); when it's `[N]T` (or there is none), the literal
+        // stays a fixed-size array. Without this, the long-standing footgun was:
+        // `var xs: []int = [1, 2, 3]` silently produced a `[3]int` and any
+        // later `append(xs, …)` would panic at runtime with "append requires a
+        // slice". The wrap below is the same `arr[:]` operation users had to
+        // write by hand (`(new [0]T)[:0]`); doing it in the analyzer makes
+        // annotation-driven inference do what the user expects.
+        val sliceTarget: Option[SyslType] = currentExpected.map(_.underlying) match
+          case Some(SyslType.SliceType(et)) => Some(et)
+          case _ => None
         if tElems.isEmpty then
           // Empty array literal — element type comes from `currentExpected`. The
           // canonical use case is the empty-accumulator idiom: `var xs: []int = []`,
@@ -4743,9 +4755,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           // expected-type-from-context rule that variant constructors with phantom
           // type parameters already use for `None`-style zero-data variants.
           //
-          // Slice expected → produce a [0]T literal; the existing array→slice
-          // coercion path handles the conversion. Fixed-array [0]T expected → match
-          // directly. Other expected types fall through to the unambiguous error.
+          // Slice expected → produce a [0]T literal then wrap in TSliceExpr so the
+          // runtime gets a proper SliceVal{cells, len:0, cap:0}. Fixed-array [0]T
+          // expected → match directly. Other expected types fall through to the
+          // unambiguous error.
           val elemType: SyslType = currentExpected.map(_.underlying) match
             case Some(SyslType.SliceType(et))      => et
             case Some(SyslType.ArrayType(et, 0))   => et
@@ -4753,10 +4766,17 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               throw AnalysisError(s"empty literal `[]` cannot satisfy fixed-array type with $n element(s)")
             case _ =>
               throw AnalysisError("cannot infer element type for empty array literal []")
-          TArrayLit(Nil, SyslType.ArrayType(elemType, 0))
+          val arr = TArrayLit(Nil, SyslType.ArrayType(elemType, 0))
+          sliceTarget match
+            case Some(_) => TSliceExpr(arr, None, None, SyslType.SliceType(elemType))
+            case None    => arr
         else
           val elemType = tElems.head.typ
-          TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
+          val arr = TArrayLit(tElems, SyslType.ArrayType(elemType, tElems.length))
+          sliceTarget match
+            case Some(et) if compatible(elemType, et) =>
+              TSliceExpr(arr, None, None, SyslType.SliceType(et))
+            case _ => arr
 
       case ClosureAST(params, body) =>
         // Infer parameter types from currentExpected (the target func type)
