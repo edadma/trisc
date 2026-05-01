@@ -3221,13 +3221,34 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           val (tparams, target, isNew) = genericTypeAliases(name)
           if tArgs.length == tparams.length then
             if isNew then
-              // Nominal generic alias: the actual must be a NamedType whose mangled name
-              // resolves back through `genericAliasToTemplate` to this template.
+              // Nominal generic alias: gate on `genericAliasToTemplate` so the
+              // actual's mangled name still has to resolve back to *this* template
+              // (otherwise `Parser2[A]` would unify against a `Parser[T]`-shaped
+              // underlying).
+              //
+              // Two binding sources are consulted, in this order:
+              //   1. Cached `concreteArgs` from `genericAliasToTemplate`. Works
+              //      directly even for phantom type parameters that don't appear
+              //      in the alias's `target` (e.g. `type Box[T] = new int`).
+              //   2. Refinement via expand-and-unify against `arg.underlying`.
+              //      This catches the case where `typeToMangled` collides two
+              //      distinct instantiations (e.g. `Parser[(int)->int]` and
+              //      `Parser[(int)->int #pure]` both mangle to `Parser_fni32Retfni32Reti32`),
+              //      so the cached `concreteArgs` may have been overwritten by a
+              //      different instantiation. Pulling the per-instance bindings
+              //      from the underlying recovers the correct effect annotations.
+              //
+              // `unifyTypes` already merges conflicting bindings via the effect
+              // lattice, so doing both is safe — the underlying-unification
+              // either confirms the cache or refines it.
               arg match
-                case SyslType.NamedType(argName, _, true, _, _) =>
+                case SyslType.NamedType(argName, argUnderlying, true, _, _) =>
                   genericAliasToTemplate.get(argName) match
                     case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
                       for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+                      val subst = tparams.zip(tArgs).toMap
+                      val expandedTarget = substituteTypeAST(target, subst)
+                      unifyTypes(expandedTarget, argUnderlying, typeParams, env)
                     case _ => () // structural mismatch — caught by post-validation
                 case _ => ()
             else
@@ -3423,6 +3444,60 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             Some(TCall(mangled, checkedArgs, funInfo.returnType))
           case multi =>
             throw AnalysisError(s"ambiguous: ${multi.length} impls of '$traitName' match operator '$op' on ${operands.mkString(", ")}")
+
+  /** Lookahead helper for binary-operator expected-type forwarding. Given the
+   *  trait+method that `op` resolves to, the LHS operand's already-resolved
+   *  type, and an optional outer expected type for the result, find the unique
+   *  impl that matches the LHS at param 0 (and the result if expected is given),
+   *  then resolve and return the type of the second formal parameter under the
+   *  inferred type-param bindings. Returns `None` if zero or many impls match,
+   *  or if any required type variable is still unbound after the partial
+   *  unification.
+   *
+   *  This lets a closure-literal RHS (`lhs ^^^ (_ + _)`) typecheck with the
+   *  expected type the dispatcher would use *after* dispatch — exactly the same
+   *  service ordinary call sites already provide for closure-literal args.
+   */
+  private def expectedTypeForBinaryOpRhs(
+      traitName: String,
+      methodName: String,
+      leftType: SyslType,
+      expectedReturnType: Option[SyslType],
+  ): Option[SyslType] =
+    if !traits.contains(traitName) then return None
+    val results = implTemplates.getOrElse(traitName, Nil).iterator.flatMap { t =>
+      // Recover the impl method's pattern types — explicit AST when present,
+      // else derived from the trait method by substituting impl's targetPatterns.
+      val (paramPatterns, retPattern): (List[TypeAST], TypeAST) =
+        t.methodASTs.find(_.name == methodName) match
+          case Some(im) =>
+            (im.params.map(_.typ), im.returnType.getOrElse(NamedTypeAST("unit", Nil)))
+          case None =>
+            traits(traitName).methods.find(_.name == methodName) match
+              case Some(tm) =>
+                val traitToImpl = traits(traitName).typeParams.zip(t.targetPatterns).toMap
+                (tm.params.map(p => substituteTypeAST(p.typ, traitToImpl)),
+                 substituteTypeAST(tm.returnType, traitToImpl))
+              case None => (Nil, NamedTypeAST("unit", Nil))
+      if paramPatterns.length != 2 then None
+      else
+        val tvars = t.typeParams.toSet
+        val env = mutable.Map.empty[String, SyslType]
+        try
+          unifyTypes(paramPatterns.head, leftType, tvars, env)
+          expectedReturnType.foreach(rt => unifyTypes(retPattern, rt, tvars, env))
+          // Resolve the second-param pattern under the partial env. If any
+          // tvar is still unbound, `resolveType` throws and we drop this candidate.
+          val savedEnv = typeEnv
+          typeEnv = typeEnv ++ env.toMap
+          try Some(resolveType(paramPatterns(1)))
+          catch case _: Throwable => None
+          finally typeEnv = savedEnv
+        catch case _: AnalysisError => None
+    }.toList
+    results match
+      case single :: Nil => Some(single)
+      case _ => None
 
   /** Enumerate every registered impl template of `traitName` whose `methodName` parameter
    *  patterns unify with `argTypes`. Concrete impls fast-path through `==` checks;
@@ -5318,7 +5393,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case BinaryAST(left, op, right) =>
         val tLeft00 = analyzeExpr(left)
-        val tRight00 = analyzeExpr(right)
+        // Operator-dispatch expected-type forwarding (Bug B): if `op` resolves
+        // to a trait and the LHS already pins down enough type-vars, push the
+        // matching impl's second-formal-param type as `currentExpected` while
+        // analyzing the RHS. Without this, a closure-literal RHS with a `_`
+        // placeholder fails its own type inference *before* dispatch even runs.
+        val rhsExpected: Option[SyslType] =
+          lookupBinaryOperatorTrait(op).flatMap { case (tn, mn) =>
+            expectedTypeForBinaryOpRhs(tn, mn, tLeft00.typ, currentExpected)
+          }
+        val tRight00 =
+          if rhsExpected.isEmpty then analyzeExpr(right)
+          else
+            val savedExp = currentExpected
+            currentExpected = rhsExpected
+            try analyzeExpr(right) finally currentExpected = savedExp
         // Operator overloading on nominal aliases (`type Parser[A] = new ...`,
         // `type Meters = new f64`, etc.) needs the dispatcher to see the outer
         // NamedType — not the underlying — or `impl Concat[Parser[X], ...]`
