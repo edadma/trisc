@@ -2,9 +2,10 @@
 // Kernel bootstraps RS from boot info. RS starts all servers
 // (disk, tfs, tty, pm, vfs) then init which runs nsh.
 
-import oskit.kernel.{create_process_suspended, resume_process, first_thread_ssp, kernel_set_system_info, register_syscall}
+import oskit.kernel.{create_process_suspended, resume_process, first_thread_ssp, kernel_set_system_info, register_syscall, register_syscall6}
 import oskit.arch.{vm_create_server_pt, vm_copy_to}
 import oskit.arch.x86_64.{uart_puts, sys_puts_handler}
+import oskit.posix.sys_fd_transplant_handler
 import oskit.drivers.virtio.virtio_net_bringup
 import oskit.ipc.ipc_init
 import oskit.hal.memset
@@ -73,6 +74,7 @@ kernel_main() -> i64
     // this line on x86, `tty_handle_puts` silently no-ops, so every
     // write from a user process (login, dhclient, …) goes nowhere.
     register_syscall(82, sys_puts_handler)
+    register_syscall6(85, sys_fd_transplant_handler)
 
     // Probe virtio-pci for virtio-net and log MAC/fail-code.
     // Runs before RS so the nic server (later: as a boot module)

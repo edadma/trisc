@@ -82,6 +82,9 @@ Command bytes for TFS and TTY server protocols.
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
     val PM_CMD_SPAWN   = 3
+    val PM_CMD_SPAWN_SUSP    = 7
+    val PM_CMD_TRANSPLANT_FD = 8
+    val PM_CMD_RESUME        = 9
 
 Big-endian message helpers — pack/unpack 32-bit integers
 in IPC message buffers.
@@ -687,6 +690,75 @@ Spawn a process with no handle inheritance.
 
     pm_spawn(path: string, argv: *string, argc: int) -> int
         pm_spawn_handles(path, argv, argc, *byte(0), 0)
+
+Spawn a process suspended (no handles inherited, no auto-resume).
+Caller follows up with `pm_transplant_fd` and `pm_resume`. Used
+for fd-transplant flows where the parent wants to set up the
+child's fd table before it starts running.
+
+    pm_spawn_susp(path: string, argv: *string, argc: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        val plen = len(path)
+        var msg: [512]byte
+        val blob_off = 5 + plen
+        val cap = 512 - blob_off
+        val blob_len = build_argv_blob(argv, argc, &msg[blob_off], cap)
+        if blob_len < 0
+            return -1
+        msg[0] = byte(PM_CMD_SPAWN_SUSP)
+        msg[1] = byte(plen)
+        msg[2] = byte(blob_len & 0xFF)
+        msg[3] = byte((blob_len >> 8) & 0xFF)
+        msg[4] = 0
+        val pp = *byte(path)
+        var i = 0
+        while i < plen
+            msg[5 + i] = pp[i]
+            i += 1
+        var reply: [5]byte
+        ipc_send(port, msg, blob_off + blob_len, reply, 5)
+        if reply[0] != 0
+            return -1
+        msg_read_i32(reply, 1)
+
+Copy one of the calling process's posix_fd_table slots into
+a destination process's slot. dst_fd must be unused on the
+target side (caller's responsibility to close any prior
+occupant). Returns 0 on success or a negative status byte
+forwarded from PM. Used in tandem with `pm_spawn_susp` /
+`pm_resume`.
+
+    pm_transplant_fd(dst_pid: int, src_fd: int, dst_fd: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_TRANSPLANT_FD)
+        msg[1] = byte(dst_pid & 0xff)
+        msg[2] = byte((dst_pid >> 8) & 0xff)
+        msg[3] = byte(src_fd & 0xff)
+        msg[4] = byte(dst_fd & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 5, reply, 1)
+        var rc = int(reply[0])
+        if rc >= 128
+            rc = rc - 256
+        rc
+
+Resume a previously SPAWN_SUSP-ed child.
+
+    pm_resume(pid: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_RESUME)
+        msg_write_i32(msg, 1, pid)
+        var reply: [1]byte
+        ipc_send(port, msg, 5, reply, 1)
+        int(reply[0])
 
 Print an integer to stdout.
 

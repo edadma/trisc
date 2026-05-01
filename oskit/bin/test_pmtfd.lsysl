@@ -1,0 +1,158 @@
+test_pmtfd — PM_CMD_TRANSPLANT_FD primitive
+============================================
+
+Stage 1 of the SCM_RIGHTS-fanout work. Validates the new
+PM-mediated fd-transplant primitive end-to-end:
+
+  1. Open an AF_UNIX SOCK_STREAM socketpair `(a, b)`.
+  2. Spawn `test_pmtfdc` suspended via `pm_spawn_susp`.
+  3. `pm_transplant_fd` copies the parent's `a` slot into
+     the child's slot 3. The shim's helper picks up that
+     `a` is `POSIX_FD_UNIX_SOCKET` and fans out a
+     `UNIX_CMD_ADD_OWNER` to the unix server so the slot's
+     owners ring tracks the child's main thread.
+  4. Parent closes its own `a` so only the child holds it.
+  5. `pm_resume` starts the child running.
+  6. Parent writes `PING` through `b`; the child reads it
+     from its slot 3, replies `OK\n`, and exits 0.
+  7. Parent reads `OK\n` from `b` and `pm_waitpid`s the
+     child to confirm clean exit.
+
+Pass criterion: prints `pmtfd: ok`. Any earlier fail
+prints `pmtfd: bad <code>` so the failing step is obvious.
+
+    module oskit.bin.test_pmtfd
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6,
+        pm_spawn_susp, pm_transplant_fd, pm_resume,
+        pm_waitpid}
+
+
+    val NR_CLOSE      = 147
+    val NR_READ       = 130
+    val NR_WRITE      = 128
+    val NR_SOCKETPAIR = 338
+
+    val AF_UNIX_V     = 1
+    val SOCK_STREAM_V = 1
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("pmtfd: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_socketpair(family: int, stype: int, proto: int,
+            sv: *int) -> int
+        int(syscall6(NR_SOCKETPAIR, i64(family), i64(stype),
+            i64(proto), i64(sv), 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_read(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+
+    main(argv: []string)
+        var sv: [2]int
+        if posix_socketpair(AF_UNIX_V, SOCK_STREAM_V, 0, &sv[0]) != 0
+            fail(1)
+            return
+        val a = sv[0]
+        val b = sv[1]
+        if a < 0
+            fail(2)
+            return
+        if b < 0
+            fail(3)
+            return
+
+        var noargs: [1]string
+        noargs[0] = "test_pmtfdc"
+        val pid = pm_spawn_susp("/bin/test_pmtfdc", &noargs[0], 1)
+        if pid <= 0
+            puts("pmtfd: spawn=")
+            print_idec(pid)
+            puts("\n")
+            fail(4)
+            return
+
+        val tr = pm_transplant_fd(pid, a, 3)
+        if tr != 0
+            puts("pmtfd: transplant=")
+            print_idec(tr)
+            puts("\n")
+            fail(5)
+            return
+
+        if posix_close(a) != 0
+            fail(6)
+            return
+
+        if pm_resume(pid) != 0
+            fail(7)
+            return
+
+        var pingb: [4]byte
+        pingb[0] = 'P'
+        pingb[1] = 'I'
+        pingb[2] = 'N'
+        pingb[3] = 'G'
+        val w = posix_write(b, &pingb[0], 4)
+        if w != 4
+            puts("pmtfd: write=")
+            print_idec(w)
+            puts("\n")
+            fail(8)
+            return
+
+        var rb: [3]byte
+        val r = posix_read(b, &rb[0], 3)
+        if r != 3
+            puts("pmtfd: read=")
+            print_idec(r)
+            puts("\n")
+            fail(9)
+            return
+        if rb[0] != 'O'
+            fail(10)
+            return
+        if rb[1] != 'K'
+            fail(11)
+            return
+        if rb[2] != '\n'
+            fail(12)
+            return
+
+        val rc = pm_waitpid(pid)
+        if rc != 0
+            puts("pmtfd: waitpid=")
+            print_idec(rc)
+            puts("\n")
+            fail(13)
+            return
+
+        if posix_close(b) != 0
+            fail(14)
+            return
+
+        puts("pmtfd: ok\n")
+        exit()

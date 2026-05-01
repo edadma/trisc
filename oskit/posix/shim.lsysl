@@ -39,7 +39,8 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
     import oskit.services.{sleep, notify_wait, notify_read_self, sleep_or_notify, uptime}
     import oskit.kernel.{current_thread, terminate_current,
         kernel_grant_create_inline, kernel_grant_revoke_inline,
-        kernel_get_thread_pid, kernel_get_process_main_tid}
+        kernel_get_thread_pid, kernel_get_process_main_tid,
+        kernel_continue_current}
     import oskit.arch.{pack_kstat, KSTAT_SIZE}
 
     extern shim_uart_putc(c: int)
@@ -415,6 +416,128 @@ of two pointing at the same target closes.
         posix_fd_table[idx].target = 0
         posix_fd_table[idx].flags = 0
         posix_fd_table[idx].pos = i64(0)
+
+
+PM-mediated cross-process fd transplant
+---------------------------------------
+
+`posix_fd_transplant` copies a `PosixFd` slot from the
+sender's process into a destination process's slot. Used by
+`PM_CMD_TRANSPLANT_FD` (and, in a future commit, by the
+arbitrary-kind SCM_RIGHTS receive path) to give a second
+process its own fd that points at the same backend handle
+as the sender's fd.
+
+The destination slot must currently be `POSIX_FD_FREE` —
+the caller is responsible for closing any prior occupant.
+Returning `-EEXIST` instead of silently overwriting matches
+how `dup3` rejects an active dst.
+
+For `POSIX_FD_UNIX_SOCKET` slots the unix server's
+multi-owner ring also needs the destination's main_tid added
+so subsequent `unix_fd_valid(target, dst_tid)` checks pass
+and so PID_EXIT cleanup walks the ring correctly. Other
+backends (inet/vfs/eventfd/timerfd) carry per-fd state
+without an explicit ownership ring; the slot copy alone is
+enough for Stage 1 — Stage 2 (arbitrary-kind SCM_RIGHTS)
+will revisit ownership for inet/vfs.
+
+`sender_tid` is the IPC sender (PM, in normal use); we
+resolve their pid via `kernel_get_thread_pid` before doing
+the slot lookup.
+
+    const UNIX_CMD_ADD_OWNER_C = 28
+
+    posix_fd_transplant(sender_tid: int, src_fd: int, dst_pid: int, dst_fd: int) -> int
+        if src_fd < 0
+            return -EBADF
+        if src_fd >= POSIX_FDS_PER_PROC
+            return -EBADF
+        if dst_fd < 0
+            return -EBADF
+        if dst_fd >= POSIX_FDS_PER_PROC
+            return -EBADF
+        val src_pid = kernel_get_thread_pid(sender_tid)
+        if src_pid <= 0
+            return -EINVAL
+        if src_pid >= 16
+            return -EINVAL
+        if dst_pid <= 0
+            return -EINVAL
+        if dst_pid >= 16
+            return -EINVAL
+        if src_pid == dst_pid
+            if src_fd == dst_fd
+                return -EINVAL
+        posix_fd_ensure_init(src_pid)
+        posix_fd_ensure_init(dst_pid)
+        val src_idx = src_pid * POSIX_FDS_PER_PROC + src_fd
+        val dst_idx = dst_pid * POSIX_FDS_PER_PROC + dst_fd
+        if posix_fd_table[src_idx].kind == POSIX_FD_FREE
+            return -EBADF
+        if posix_fd_table[dst_idx].kind != POSIX_FD_FREE
+            return -EEXIST
+
+Copy the entire PosixFd struct field by field — sysl
+doesn't expose a struct assignment that handles per-field
+i64 vs int slots in one shot, and the slots carry per-fd
+state (eventfd_count, timerfd_*, last_error, etc.) that
+must move with the slot.
+
+        posix_fd_table[dst_idx].kind = posix_fd_table[src_idx].kind
+        posix_fd_table[dst_idx].target = posix_fd_table[src_idx].target
+        posix_fd_table[dst_idx].flags = posix_fd_table[src_idx].flags
+        posix_fd_table[dst_idx].pos = posix_fd_table[src_idx].pos
+        posix_fd_table[dst_idx].pending_sndbuf = posix_fd_table[src_idx].pending_sndbuf
+        posix_fd_table[dst_idx].pending_rcvbuf = posix_fd_table[src_idx].pending_rcvbuf
+        posix_fd_table[dst_idx].flag_reuseaddr = posix_fd_table[src_idx].flag_reuseaddr
+        posix_fd_table[dst_idx].flag_broadcast = posix_fd_table[src_idx].flag_broadcast
+        posix_fd_table[dst_idx].flag_keepalive = posix_fd_table[src_idx].flag_keepalive
+        posix_fd_table[dst_idx].flag_reuseport = posix_fd_table[src_idx].flag_reuseport
+        posix_fd_table[dst_idx].flag_nodelay = posix_fd_table[src_idx].flag_nodelay
+        posix_fd_table[dst_idx].linger_on = posix_fd_table[src_idx].linger_on
+        posix_fd_table[dst_idx].linger_secs = posix_fd_table[src_idx].linger_secs
+        posix_fd_table[dst_idx].keep_idle_secs = posix_fd_table[src_idx].keep_idle_secs
+        posix_fd_table[dst_idx].keep_intvl_secs = posix_fd_table[src_idx].keep_intvl_secs
+        posix_fd_table[dst_idx].keep_cnt = posix_fd_table[src_idx].keep_cnt
+        posix_fd_table[dst_idx].eventfd_count = posix_fd_table[src_idx].eventfd_count
+        posix_fd_table[dst_idx].eventfd_semaphore = posix_fd_table[src_idx].eventfd_semaphore
+        posix_fd_table[dst_idx].timerfd_interval_ticks = posix_fd_table[src_idx].timerfd_interval_ticks
+        posix_fd_table[dst_idx].timerfd_next_tick = posix_fd_table[src_idx].timerfd_next_tick
+        posix_fd_table[dst_idx].timerfd_expirations = posix_fd_table[src_idx].timerfd_expirations
+        posix_fd_table[dst_idx].last_error = posix_fd_table[src_idx].last_error
+        posix_fd_table[dst_idx].is_listen = posix_fd_table[src_idx].is_listen
+        posix_fd_table[dst_idx].udp_connected = posix_fd_table[src_idx].udp_connected
+        posix_fd_table[dst_idx].udp_peer_port = posix_fd_table[src_idx].udp_peer_port
+        posix_fd_table[dst_idx].udp_peer_a = posix_fd_table[src_idx].udp_peer_a
+        posix_fd_table[dst_idx].udp_peer_b = posix_fd_table[src_idx].udp_peer_b
+        posix_fd_table[dst_idx].udp_peer_c = posix_fd_table[src_idx].udp_peer_c
+        posix_fd_table[dst_idx].udp_peer_d = posix_fd_table[src_idx].udp_peer_d
+        posix_fd_table[dst_idx].recv_timeout_ms = posix_fd_table[src_idx].recv_timeout_ms
+        posix_fd_table[dst_idx].send_timeout_ms = posix_fd_table[src_idx].send_timeout_ms
+        posix_fd_table[dst_idx].tcp_user_timeout_ms = posix_fd_table[src_idx].tcp_user_timeout_ms
+
+For AF_UNIX slots, fan out to the unix server so its
+owners ring tracks the destination process's main thread
+as a co-owner. Without this fan-out the destination
+process's `unix_fd_valid(target, my_tid)` check would
+reject every subsequent op against the slot.
+
+        if posix_fd_table[src_idx].kind == POSIX_FD_UNIX_SOCKET
+            val dst_main_tid = kernel_get_process_main_tid(dst_pid)
+            val unix_p = unix_get_port()
+            if unix_p >= 0
+                if dst_main_tid > 0
+                    var msg: [6]byte
+                    msg[0] = byte(UNIX_CMD_ADD_OWNER_C)
+                    msg[1] = byte(posix_fd_table[src_idx].target & 0xff)
+                    msg[2] = byte((dst_main_tid >> 24) & 0xff)
+                    msg[3] = byte((dst_main_tid >> 16) & 0xff)
+                    msg[4] = byte((dst_main_tid >> 8) & 0xff)
+                    msg[5] = byte(dst_main_tid & 0xff)
+                    var rep: [1]byte
+                    ipc_send(unix_p, &msg[0], 6, &rep[0], 1)
+        0
 
 
 INET client helpers (shim-side)
@@ -801,6 +924,22 @@ above; see `posix_fd_kind` / `posix_fd_target`. Socket syscalls
 translate to inet-server IPC, giving musl programs direct access
 to the same UDP stack that native sysl programs use via
 `oskit.net.client`.
+
+SYS_FD_TRANSPLANT (85) — kernel-syscall entry for
+`posix_fd_transplant`. Registered via `register_syscall6`
+from the arch boot file; PM is the only intended caller
+(see `pm_handle_transplant_fd`). Args:
+  a0 = sender_tid (the IPC sender PM is acting on behalf of)
+  a1 = src_fd
+  a2 = dst_pid
+  a3 = dst_fd
+Returns 0 on success, negative errno on failure.
+
+    sys_fd_transplant_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val r = posix_fd_transplant(int(a0), int(a1), int(a2), int(a3))
+        kernel_continue_current()
+        i64(r)
+
 
     posix_dispatch(num: int, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
         if num == 128

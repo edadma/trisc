@@ -32,7 +32,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         kernel_stack_usp, kernel_stack_ssp, schedule,
         syscall_table, syscall_table_6, syscall_ssp_set, syscall_check_allowed,
         create_process_suspended, resume_process,
-        register_syscall, syscall_return,
+        register_syscall, register_syscall6, syscall_return,
         kb_enqueue, kb_notify_tid, notify_send,
         virtio_notify_tid,
         kernel_set_system_info,
@@ -41,7 +41,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
     import oskit.services.{get_thread_count, uptime, yield}
-    import oskit.posix.posix_dispatch
+    import oskit.posix.{posix_dispatch, sys_fd_transplant_handler}
     import oskit.hal.memset
     import oskit.drivers.virtio.{virtio_device_id, virtio_present,
         VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE, VIRTIO_MMIO_MAX, VIRTIO_DEV_NET}
@@ -699,6 +699,7 @@ line per 64 bytes of code.
         ipc_init()
         register_syscall(1, sys_putc_handler)
         register_syscall(82, sys_puts_handler)
+        register_syscall6(85, sys_fd_transplant_handler)
 
         uart_puts("[user] creating process PT\n")
         val new_pt = vm_create_process_pt()
@@ -770,6 +771,7 @@ ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
         ipc_init()
         register_syscall(1, sys_putc_handler)
         register_syscall(82, sys_puts_handler)
+        register_syscall6(85, sys_fd_transplant_handler)
 
         uart_puts("[uipc] creating echo server thread\n")
         create_thread(i64(&kentry_a), kernel_stack_usp(0),
@@ -840,6 +842,7 @@ which is the baseline we want for this commit).
         ipc_init()
         register_syscall(1, sys_putc_handler)
         register_syscall(82, sys_puts_handler)
+        register_syscall6(85, sys_fd_transplant_handler)
 
         // Populate kernel-side system info so sys_getinfo can
         // answer RS and server queries without the per-process

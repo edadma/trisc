@@ -2258,6 +2258,19 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixdiss: bad"
   }
 
+  "pm: PM_CMD_TRANSPLANT_FD across processes" in {
+    // PM-mediated cross-process posix_fd transplant. Parent
+    // creates an AF_UNIX socketpair, spawns a child suspended
+    // via PM_CMD_SPAWN_SUSP, transplants one end into the
+    // child's slot 3, resumes the child, then PINGs through
+    // its own end and reads back OK\n. Exercises the new
+    // SYS_FD_TRANSPLANT shim helper plus its UNIX_CMD_ADD_OWNER
+    // fan-out to the unix server's owners ring.
+    val output = qemu.command("test_pmtfd")
+    output should include("pmtfd: ok")
+    output should not include "pmtfd: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

@@ -20,7 +20,7 @@ IPC commands:
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
-    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range}
+    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range, svc_fd_transplant}
     import oskit.loader.load_tof_to_ptbr
     import oskit.arch.{PROG_USP, PROG_SSP}
 
@@ -30,6 +30,9 @@ IPC commands:
     val PM_CMD_SIGNAL  = 4
     val PM_CMD_SET_FG  = 5
     val PM_CMD_SIGINT  = 6
+    val PM_CMD_SPAWN_SUSP    = 7
+    val PM_CMD_TRANSPLANT_FD = 8
+    val PM_CMD_RESUME        = 9
 
 Signal numbers (SLIX-native, not POSIX).
 
@@ -261,14 +264,30 @@ System V ABI init stack frame in the child's user stack (see
 argv.
 
     pm_handle_spawn(sender: int, buf: *byte)
+        pm_handle_spawn_inner(sender, buf, 1)
+
+PM_CMD_SPAWN_SUSP: identical wire format and lifecycle as
+PM_CMD_SPAWN, but the child is left suspended after the
+reply is sent. The caller is expected to follow up with
+PM_CMD_TRANSPLANT_FD (one or more times) and finally
+PM_CMD_RESUME to start the child running. Used by the
+synthetic transplant test (and, looking ahead, by
+arbitrary-kind SCM_RIGHTS-on-fork-style flows).
+
+    pm_handle_spawn_susp(sender: int, buf: *byte)
+        pm_handle_spawn_inner(sender, buf, 0)
+
+Shared spawn body. `resume_after != 0` resumes the child
+before replying (the original SPAWN behaviour); `0` leaves
+the child suspended for follow-up TRANSPLANT_FD/RESUME.
+
+    pm_handle_spawn_inner(sender: int, buf: *byte, resume_after: int)
         val path_len = int(buf[1])
         val blob_len = (int(buf[2]) & 0xFF) | ((int(buf[3]) & 0xFF) << 8)
         val num_handles = int(buf[4])
 
-        // Extract path as string
         val path = string(buf + 5, path_len)
 
-        // Create per-process page table
         val proc_pt = svc_vm_create_pt()
         if proc_pt == 0
             var reply: [1]byte
@@ -276,7 +295,6 @@ argv.
             ipc_reply(sender, reply, 1)
             return
 
-        // Load binary into child's address space via cross-address-space copy
         val entry = load_tof_to_ptbr(path, proc_pt)
         if entry < 0
             var reply: [1]byte
@@ -284,13 +302,6 @@ argv.
             ipc_reply(sender, reply, 1)
             return
 
-
-
-        // Build the System V init stack frame (argc + argv + envp +
-        // auxv + string data) in a local buffer, then copy to the
-        // child's stack. The child's initial SP points at argc — the
-        // bottom of the frame — and `_start` on each arch loads argc
-        // and &argv[0] from [sp] before calling sysl_start.
         var stack_buf: [4096]byte
         val fsz = pm_build_sysv_stack(buf + 5 + path_len, blob_len,
                                       &stack_buf[0], 4096, PROG_USP)
@@ -302,32 +313,81 @@ argv.
         val child_sp = PROG_USP - i64(fsz)
         svc_vm_copy_to(proc_pt, u64(child_sp), &stack_buf[0], fsz)
 
-        // Create the process suspended — it won't run until we resume it.
-        // `child_sp` (bottom of the SysV frame) is the initial user SP.
         val pid = svc_create_proc_susp(entry, child_sp, PROG_SSP, path, proc_pt)
-
-
 
         var reply: [5]byte
         if pid < 0
             reply[0] = -1
             ipc_reply(sender, reply, 1)
         else
-            // aarch64 and x86 spawn ELF binaries; enable the POSIX
-            // syscall range (128-511) unconditionally so musl-linked
-            // programs can invoke write/read/exit_group/etc. TRISC
-            // will load TRB here in future; granting bits for
-            // POSIX syscalls that TRISC never issues is harmless.
             svc_grant_posix_range(pid)
-            // Copy handles from parent to child via VFS (child is suspended)
             if num_handles > 0
                 val sender_pid = svc_get_thread_pid(sender)
                 pm_inherit_handles(sender_pid, pid, buf, path_len, blob_len, num_handles)
-            // Now resume the child — handles are set up
-            svc_resume_proc(pid)
+            if resume_after != 0
+                svc_resume_proc(pid)
             reply[0] = 0
             pm_msg_write_i32(reply, 1, pid)
             ipc_reply(sender, reply, 5)
+
+PM_CMD_RESUME: resume a previously SPAWN_SUSP-ed child.
+Wire: cmd(1) + pid(4) → status(1).
+
+    pm_handle_resume(sender: int, buf: *byte)
+        val pid = pm_msg_read_i32(buf, 1)
+        var reply: [1]byte
+        if pid <= 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        if pid >= MAX_PROCESSES
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        if svc_proc_state(pid) != PROC_RUNNING
+            // Resume only makes sense on a suspended-but-live process;
+            // suspended children show up as PROC_RUNNING because
+            // `svc_create_proc_susp` already promoted them past PROC_FREE
+            // (the process slot is allocated; it's just the main
+            // thread that's parked in suspended state until svc_resume_proc
+            // requeues it). We rely on that invariant rather than a
+            // separate PROC_SUSPENDED state.
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        svc_resume_proc(pid)
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+PM_CMD_TRANSPLANT_FD: copy a posix_fd_table slot from the
+sender's process into a target process's slot. Used to set
+up an fd in a SPAWN_SUSP child before resuming it. The
+heavy lifting (slot copy + unix server owners-ring fan-out)
+happens in the shim's `posix_fd_transplant`; this handler
+validates dst_pid is a live process and forwards.
+
+Wire: cmd(1) + dst_pid(2) + src_fd(1) + dst_fd(1) → status(1).
+
+    pm_handle_transplant_fd(sender: int, buf: *byte)
+        val dst_pid = (int(buf[1]) & 0xff) | ((int(buf[2]) & 0xff) << 8)
+        val src_fd = int(buf[3]) & 0xff
+        val dst_fd = int(buf[4]) & 0xff
+        var reply: [1]byte
+        if dst_pid <= 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        if dst_pid >= MAX_PROCESSES
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        if svc_proc_state(dst_pid) != PROC_RUNNING
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val rc = svc_fd_transplant(sender, src_fd, dst_pid, dst_fd)
+        reply[0] = byte(rc & 0xff)
+        ipc_reply(sender, reply, 1)
 
 Send handle inheritance request to VFS.
 
@@ -441,6 +501,12 @@ IPC messages (waitpid/kill from userspace) or notifications
                     pm_handle_set_fg(sender, buf)
                 else if cmd == PM_CMD_SIGINT
                     pm_handle_sigint(sender, buf)
+                else if cmd == PM_CMD_SPAWN_SUSP
+                    pm_handle_spawn_susp(sender, buf)
+                else if cmd == PM_CMD_TRANSPLANT_FD
+                    pm_handle_transplant_fd(sender, buf)
+                else if cmd == PM_CMD_RESUME
+                    pm_handle_resume(sender, buf)
                 else
                     // Unknown command
                     var reply: [1]byte
@@ -624,9 +690,21 @@ in `cap` or the blob is malformed.
         frame_size
 
     pm_spawn(path: string, argv: *string, argc: int) -> int
-        pm_spawn_handles(path, argv, argc, *byte(0), 0)
+        pm_spawn_handles_inner(path, argv, argc, *byte(0), 0, byte(PM_CMD_SPAWN))
 
     pm_spawn_handles(path: string, argv: *string, argc: int, handle_pairs: *byte, num_handles: int) -> int
+        pm_spawn_handles_inner(path, argv, argc, handle_pairs, num_handles, byte(PM_CMD_SPAWN))
+
+`pm_spawn_susp` shares wire format with `pm_spawn`; the
+only delta is the cmd byte. The child is left suspended;
+caller follows up with `pm_transplant_fd` (one or more
+times) and `pm_resume` to start the child.
+
+    pm_spawn_susp(path: string, argv: *string, argc: int) -> int
+        pm_spawn_handles_inner(path, argv, argc, *byte(0), 0, byte(PM_CMD_SPAWN_SUSP))
+
+    pm_spawn_handles_inner(path: string, argv: *string, argc: int,
+                           handle_pairs: *byte, num_handles: int, cmd: byte) -> int
         val port = port_lookup("pm")
         if port < 0
             return -1
@@ -637,7 +715,7 @@ in `cap` or the blob is malformed.
         val blob_len = pm_build_argv_blob(argv, argc, &msg[blob_off], cap)
         if blob_len < 0
             return -1
-        msg[0] = byte(PM_CMD_SPAWN)
+        msg[0] = cmd
         msg[1] = byte(plen)
         msg[2] = byte(blob_len & 0xFF)
         msg[3] = byte((blob_len >> 8) & 0xFF)
@@ -656,6 +734,41 @@ in `cap` or the blob is malformed.
         if reply[0] != 0
             return -1
         pm_msg_read_i32(reply, 1)
+
+`pm_transplant_fd` copies one of the caller's posix_fd_table
+slots into a destination process's slot. dst_fd must be
+unused in the destination's table; the caller must close
+any prior occupant first.
+
+    pm_transplant_fd(dst_pid: int, src_fd: int, dst_fd: int) -> int
+        val port = port_lookup("pm")
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_TRANSPLANT_FD)
+        msg[1] = byte(dst_pid & 0xff)
+        msg[2] = byte((dst_pid >> 8) & 0xff)
+        msg[3] = byte(src_fd & 0xff)
+        msg[4] = byte(dst_fd & 0xff)
+        var reply: [1]byte
+        ipc_send(port, msg, 5, reply, 1)
+        var rc = int(reply[0])
+        if rc >= 128
+            rc = rc - 256
+        rc
+
+`pm_resume` resumes a previously SPAWN_SUSP-ed child.
+
+    pm_resume(pid: int) -> int
+        val port = port_lookup("pm")
+        if port < 0
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(PM_CMD_RESUME)
+        pm_msg_write_i32(msg, 1, pid)
+        var reply: [1]byte
+        ipc_send(port, msg, 5, reply, 1)
+        int(reply[0])
 
     pm_kill(pid: int) -> int
         val port = port_lookup("pm")

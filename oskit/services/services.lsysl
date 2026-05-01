@@ -227,6 +227,7 @@ importing them directly.
     val SYS_GET_THREAD_PID     = 52
     val SYS_GET_THREAD_PTBR    = 53
     val SYS_GET_THREAD_UID     = 84
+    val SYS_FD_TRANSPLANT      = 85
     val SYS_VM_COPY_TO         = 54
     val SYS_VM_COPY_FROM       = 55
     val SYS_PROC_STATE         = 56
@@ -288,6 +289,16 @@ importing them directly.
 
     svc_proc_set_parent_tid(pid: int, parent_tid: int)
         syscall6(SYS_PROC_SET_PARENT_TID, i64(pid), i64(parent_tid), 0, 0, 0, 0)
+
+`svc_fd_transplant` is the kernel-syscall entry for
+`PM_CMD_TRANSPLANT_FD`. PM is the only intended caller —
+the actual ownership/state work happens inside the shim
+(see `posix_fd_transplant`). `sender_tid` is the IPC
+sender PM is acting on behalf of (the source process's
+main_tid, in normal use).
+
+    svc_fd_transplant(sender_tid: int, src_fd: int, dst_pid: int, dst_fd: int) -> int
+        int(syscall6(SYS_FD_TRANSPLANT, i64(sender_tid), i64(src_fd), i64(dst_pid), i64(dst_fd), 0, 0))
 
 Translate a virtual address to physical using the current
 thread's page table. Used by drivers that need DMA addresses.

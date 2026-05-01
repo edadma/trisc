@@ -163,6 +163,7 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_SHUTDOWN         = 25
     const UNIX_CMD_PEERCRED         = 26
     const UNIX_CMD_DISCONNECT       = 27
+    const UNIX_CMD_ADD_OWNER        = 28
 
 EPOLL/POLL bit values match `POSIX_EPOLL*` 1:1 (POLLIN=0x001,
 POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010). The shim's
@@ -2533,6 +2534,45 @@ bytes (or `status(1)` alone on failure).
         ipc_reply(sender, &reply[0], 13)
 
 
+### ADD_OWNER handler
+
+Used by the shim's `posix_fd_transplant` path: when PM
+copies an AF_UNIX `posix_fd_table` slot from one process
+into another, the unix server's owners ring also needs the
+new owner's tid added so subsequent ownership checks (and
+PID_EXIT cleanup) recognize it. Caller passes the slot
+index (the same value stored in `posix_fd_table[..].target`
+for unix-socket fds) and the new owner tid.
+
+Wire format. Request: `cmd(1) + slot_idx(1) + new_tid(4)`
+= 6 bytes. Reply: `status(1)`. Returns 0 on success;
+`-EBADF` if the slot is out of range or free; `-EINVAL`
+if the ring is already at `UNIX_MAX_OWNERS`.
+
+    unix_handle_add_owner(sender: int, buf: *byte)
+        val idx = int(buf[1]) & 0xff
+        val new_tid = unix_read_u32(buf, 2)
+        var reply: [1]byte
+        if idx < 0
+            reply[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, reply, 1)
+            return
+        if idx >= UNIX_MAX_SOCKETS
+            reply[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, reply, 1)
+            return
+        if unix_sockets[idx].in_use == 0
+            reply[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, reply, 1)
+            return
+        if unix_slot_add_owner(idx, new_tid) == 0
+            reply[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, reply, 1)
+            return
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
 ### PID_EXIT handler
 
 PM calls this when a process exits, with the dead thread's
@@ -2634,6 +2674,8 @@ Synchronous request-reply, no notification path required
                     unix_handle_peercred(sender, buf)
                 else if cmd == UNIX_CMD_DISCONNECT
                     unix_handle_disconnect(sender, buf)
+                else if cmd == UNIX_CMD_ADD_OWNER
+                    unix_handle_add_owner(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)

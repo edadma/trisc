@@ -1,0 +1,65 @@
+test_pmtfdc — child for the PM_CMD_TRANSPLANT_FD test
+======================================================
+
+Spawned by `test_pmtfd` via `pm_spawn_susp`. The parent
+transplants one end of a unix-domain socketpair into the
+child's slot 3 before resuming the child.
+
+Behaviour:
+  1. Read up to 4 bytes from fd 3 — the transplanted unix
+     socket.
+  2. If those bytes are exactly `PING`, write `OK\n` back
+     through fd 3 and exit 0.
+  3. Otherwise exit with a small non-zero code so the
+     parent can distinguish "child ran but read wrong
+     data" from "child never ran" (waitpid would still
+     succeed, but with exit_code != 0).
+
+This binary stays small on purpose — the larger frame the
+parent test uses already pushes the sysl LLVM aarch64
+backend; keeping the child trivial avoids compounding any
+frame-layout heisenbugs.
+
+    module oskit.bin.test_pmtfdc
+
+    import oskit.ulib.{exit, exit_with, syscall6}
+
+
+    val NR_READ  = 130
+    val NR_WRITE = 128
+
+
+    posix_read(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+
+    main(argv: []string)
+        var rb: [4]byte
+        val r = posix_read(3, &rb[0], 4)
+        if r != 4
+            exit_with(11)
+            return
+        if rb[0] != 'P'
+            exit_with(12)
+            return
+        if rb[1] != 'I'
+            exit_with(13)
+            return
+        if rb[2] != 'N'
+            exit_with(14)
+            return
+        if rb[3] != 'G'
+            exit_with(15)
+            return
+        var wb: [3]byte
+        wb[0] = 'O'
+        wb[1] = 'K'
+        wb[2] = '\n'
+        val w = posix_write(3, &wb[0], 3)
+        if w != 3
+            exit_with(16)
+            return
+        exit()
