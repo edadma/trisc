@@ -694,11 +694,52 @@ double(x: int) = x * 2
 // No parameters
 getAnswer() -> int = 42
 
+// Parameterless: no `()` on the decl, no `()` at the call site.
+// Bare-name reference auto-calls. Useful for "computed value" patterns.
+seven -> int = 7
+factorial_5 -> int
+    var n = 1
+    for i in 1..<6 do n = n * i
+    n
+// Use site: just `seven` and `factorial_5` (no parens), each evaluates the body.
+
 // Statement body — for/while/do-while loops can appear after `=`
 // as a single-line void body
 uart_puts(s: string) = for c in s do uart_putc(int(c))
 wait_ready() = while !ready() do noop()
 ```
+
+### Parameterless Function Declarations
+
+Sysl distinguishes a **parameterless** function (`f -> T = body`, no parens
+on the decl, called as `f`) from a **zero-argument** function
+(`f() -> T = body`, called as `f()`). Mirrors Scala's
+`def foo` vs `def bar()`.
+
+```sysl
+seven -> int = 7              // parameterless
+greet -> int                  // block-body parameterless
+    puts("hi")
+    0
+
+main() -> int = seven         // bare name auto-calls
+```
+
+The two forms cannot share a name in the same scope. Internally the
+parameterless form lowers to the same `() -> T` mangling as the
+zero-arg form; the only difference is at the use site.
+
+The body has no purity restriction — unlike `def`, a parameterless
+function may mutate global state, call any function, etc. It is purely
+a syntactic-shortening device for "things that are computed each time
+their name is read."
+
+Generic parameterless functions are not supported (there is no call
+site to fix the type arguments).
+
+A parameterless function cannot be passed as a function value: bare
+`f` always auto-calls. If you need a function value, declare `f() -> T`
+instead — bare `f` then produces a function reference, and `f()` calls.
 
 ### Design by Contract — `require` / `ensure`
 
@@ -1025,6 +1066,60 @@ Internally the body auto-dereferences reads and writes: `x` in the body lowers t
 write-back**: every assignment commits immediately. Contextual-keyword rules: `in`
 is already reserved; `out` and `inout` are contextual, so user identifiers with
 those names still work outside parameter position.
+
+### Call-by-Name Parameters — `=> T`
+
+A parameter type prefixed with `=>` declares **call-by-name** semantics:
+the argument is not evaluated at the call site. Instead it is
+implicitly wrapped as a zero-arg thunk; every body reference to the
+parameter re-enters the thunk (no memoization — Scala-style, not lazy
+val).
+
+```sysl
+use_lazy(b: => int) -> int = b + b   // each `b` re-evaluates
+ignore(b: => int) -> int = 0         // `b` never evaluated → arg never runs
+
+main() -> int
+    val r = use_lazy(bump())          // `bump()` runs twice (b+b)
+    ignore(panic_if_called())         // safe: arg never fires
+```
+
+The user-visible type of a by-name param is `T` (you read `b + b`,
+not `b() + b()`). Internally the storage type is `() -> T`; the
+analyzer auto-wraps each call-site argument and auto-calls each body
+reference. Forwarding to another by-name slot composes naturally:
+
+```sysl
+outer(b: => int) -> int = inner(b)   // forwards correctly
+inner(c: => int) -> int = c + 1
+main() -> int = outer(41)            // 42
+```
+
+By-name interacts with operator dispatch: traits and impls may declare
+operator slots `=> T`, and the analyzer wraps the corresponding operand
+AST before analysis. This is the natural shape for combinator
+libraries that want short-circuiting `|` or recursive grammars without
+explicit thunks:
+
+```sysl
+trait Or[T]
+    #operator("|")
+    or_op(a: T, b: => T) -> T
+
+impl[A] Or[Parser[A]]
+    or_op(a: Parser[A], b: => Parser[A]) -> Parser[A] = a
+
+// `expr_p()` is wrapped — recursive grammars don't infinite-loop at
+// construction time:
+factor_p -> Parser[int] = number_p | ("(" ~> expr_p <~ ")")
+```
+
+Restrictions:
+- `=> T` is only valid in parameter position (not in arbitrary type
+  contexts like `var x: => int`).
+- A by-name parameter cannot also be `out` / `inout` (the thunk has
+  no lvalue to write back to).
+- A by-name parameter cannot have a default value.
 
 ### `def` — Expression Functions
 
