@@ -3525,13 +3525,29 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         try
           unifyTypes(paramPatterns.head, leftType, tvars, env)
           expectedReturnType.foreach(rt => unifyTypes(retPattern, rt, tvars, env))
-          // Resolve the second-param pattern under the partial env. If any
-          // tvar is still unbound, `resolveType` throws and we drop this candidate.
+          // `unifyTypes` silently no-ops on shape mismatches (its callers post-
+          // validate via `latticeEqual`). Ordinary dispatch (`tryUnifyAll`) does
+          // the post-check; this lookahead must do the same, otherwise a
+          // non-matching impl (e.g. `MapTo[Parser[A], …]` against `string` LHS)
+          // sneaks through and `expectedTypeForBinaryOpRhs` returns None
+          // (ambiguous). The placeholder closure then has nothing to resolve
+          // against. Match the dispatcher's structural check 1:1.
           val savedEnv = typeEnv
           typeEnv = typeEnv ++ env.toMap
-          try Some(resolveType(paramPatterns(1)))
-          catch case _: Throwable => None
-          finally typeEnv = savedEnv
+          val structuralOk =
+            try
+              latticeEqual(resolveType(paramPatterns.head), leftType) &&
+                expectedReturnType.forall(rt =>
+                  try latticeEqual(resolveType(retPattern), rt)
+                  catch case _: Throwable => false)
+            catch case _: Throwable => false
+          val out =
+            if !structuralOk then None
+            else
+              try Some(resolveType(paramPatterns(1)))
+              catch case _: Throwable => None
+          typeEnv = savedEnv
+          out
         catch case _: AnalysisError => None
     }.toList
     results match

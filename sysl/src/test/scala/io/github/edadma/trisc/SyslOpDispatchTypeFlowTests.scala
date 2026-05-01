@@ -312,4 +312,71 @@ class SyslOpDispatchTypeFlowTests extends SyslTestHelpers {
     // exists somewhere. Otherwise primitive arithmetic regresses.
     eval("""main() -> int = 1 + 2 * 3""".stripMargin) shouldBe 7
   }
+
+  // ===== `expectedTypeForBinaryOpRhs` post-check parity with the dispatcher =====
+  //
+  // `unifyTypes` is silently no-op on shape mismatches (case `_ => ()` arms);
+  // its callers post-validate via `latticeEqual`. Ordinary dispatch through
+  // `tryUnifyAll` does the post-check; the closure-RHS lookahead
+  // `expectedTypeForBinaryOpRhs` originally did not. With two `MapTo` impls
+  // registered (`MapTo[Parser[A], …]` and `MapTo[string, …]`), `string` LHS
+  // would non-deterministically "unify" against the Parser pattern (no throw),
+  // then both candidates returned `Some(...)`, the lookahead aggregated to
+  // `None` (ambiguous), and the placeholder RHS had no expected type.
+  //
+  // Fix: do the same `latticeEqual(resolved, actual)` post-check the
+  // dispatcher does, before resolving the second-param pattern. With it, the
+  // Parser-pattern candidate is correctly dropped on `string` LHS, the
+  // string-pattern candidate is the unique winner, and `B` is bound from
+  // either the closure's eventual unify *or* the expected-result `Parser[B]`
+  // slot — the placeholder RHS resolves cleanly.
+
+  "two impls (Parser-LHS + string-LHS) — placeholder RHS dispatches with string LHS" in {
+    eval(
+      """type Parser[A] = new (int) -> A
+        |
+        |trait MapTo[A, V, R]
+        |    #operator("^^^")
+        |    pmapto(a: A, v: V) -> R
+        |
+        |impl[A, B] MapTo[Parser[A], B, Parser[B]]
+        |    pmapto(a: Parser[A], v: B) -> Parser[B] =
+        |        Parser[B]((_x: int) -> v)
+        |
+        |impl[B] MapTo[string, B, Parser[B]]
+        |    pmapto(s: string, v: B) -> Parser[B] =
+        |        Parser[B]((_x: int) -> v)
+        |
+        |make() -> Parser[(int, int) -> int] = "+" ^^^ (_ + _)
+        |
+        |main() -> int = 0
+        |""".stripMargin) shouldBe 0
+  }
+
+  "two impls — Parser-LHS variant still works in the placeholder shape" in {
+    // Mirror case: with the same two impls, a Parser-typed LHS must select
+    // the Parser-pattern impl and the placeholder RHS must still resolve.
+    // Confirms the post-check rejects the wrong impl in both directions.
+    eval(
+      """type Parser[A] = new (int) -> A
+        |
+        |literal(s: string) -> Parser[string] = Parser[string]((_x: int) -> s)
+        |
+        |trait MapTo[A, V, R]
+        |    #operator("^^^")
+        |    pmapto(a: A, v: V) -> R
+        |
+        |impl[A, B] MapTo[Parser[A], B, Parser[B]]
+        |    pmapto(a: Parser[A], v: B) -> Parser[B] =
+        |        Parser[B]((_x: int) -> v)
+        |
+        |impl[B] MapTo[string, B, Parser[B]]
+        |    pmapto(s: string, v: B) -> Parser[B] =
+        |        Parser[B]((_x: int) -> v)
+        |
+        |make() -> Parser[(int, int) -> int] = literal("+") ^^^ (_ + _)
+        |
+        |main() -> int = 0
+        |""".stripMargin) shouldBe 0
+  }
 }
