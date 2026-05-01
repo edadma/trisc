@@ -1020,9 +1020,18 @@ object SyslCli:
         .flatMap(discoverTest(unit.name, _))
     }
 
+    // Scope: only run tests defined in the user-supplied paths. The driver
+    // also pulls in transitively-imported modules so type-check + codegen
+    // succeed, but their `#test` functions are NOT in the user's intent —
+    // running them muddies failure attribution and inflates test counts
+    // (e.g. parsyl getting std.bytes / std.utf8 / std.builder for free
+    // just by importing them).
+    val inScopeUnits = initialSources.keys.toSet
+    val inScopeDiscovered = discovered.filter(t => inScopeUnits(t.unitName))
+
     val filtered = cmd.filter match
-      case None => discovered
-      case Some(pat) => discovered.filter(t =>
+      case None => inScopeDiscovered
+      case Some(pat) => inScopeDiscovered.filter(t =>
         shortFnName(t.fn.name).contains(pat) || t.displayName.contains(pat) || t.fn.name.contains(pat))
 
     println(s"running ${filtered.size} tests (backend: ${cmd.backend})")
@@ -1064,7 +1073,9 @@ object SyslCli:
           if cmd.failFast then stop = true
 
     val totalMs = (System.nanoTime() - totalStart) / 1e6
-    val skipped = discovered.size - filtered.size
+    // `skipped` reports tests excluded by `--filter`; the scope filter above
+    // is silent (the user didn't ask for those tests in the first place).
+    val skipped = inScopeDiscovered.size - filtered.size
     println(f"\n$passed passed, $failed failed, $skipped skipped — $totalMs%.1fms")
     if failed > 0 then throw CliError(s"$failed test(s) failed")
 
