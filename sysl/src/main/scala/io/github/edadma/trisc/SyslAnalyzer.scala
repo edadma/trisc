@@ -5919,50 +5919,85 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               else Nil
             resolveNamedArgsTyped(name, paramNames, expectedFor(paramTypes, modesForNamed), args)
           else
-            // Determine expected types for args if callee has known concrete signature.
-            // Variant constructors are critical here: a no-arg variant (e.g. `None`) inside
-            // another variant's args would otherwise inherit the OUTER expected type and
-            // misresolve. By passing each field's type as expected, the inner variant can
-            // disambiguate to the right enum instantiation.
-            val argExpected: List[Option[SyslType]] =
-              if traitCallRewrite.contains(name) then
-                val mangled = traitCallRewrite(name)
-                val fi = functions(mangled)
-                expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
-              else if functions.contains(name) || builtinFunctions.contains(name) then
-                val fi = lookupFun(name)
-                expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
-              else if structTypes.contains(name) then
-                structTypes(name).fields.map(f => Some(f._2))
-              else if variantToEnum.contains(name) then
-                val (et, variantIdx) = variantToEnum(name)
-                et.variants(variantIdx)._2.map(f => Some(f._2))
-              else if genericVariantToEnum.contains(name) then
-                val (enumName, variantIdx) = genericVariantToEnum(name)
-                val template = genericEnums(enumName)
-                val variant = template.variants(variantIdx)
-                // Use currentExpected (the enum's instantiation) to recover type args,
-                // then resolve each field's TypeAST under that substitution.
-                val typeArgs: Option[List[SyslType]] = currentExpected match
-                  case Some(et: SyslType.EnumType) =>
-                    genericEnumInstantiations.collectFirst {
-                      case ((n, args), inst) if n == enumName && inst.name == et.name => args
-                    }
-                  case _ => None
-                typeArgs match
-                  case Some(tArgs) =>
-                    val savedEnv = typeEnv
-                    typeEnv = typeEnv ++ template.typeParams.zip(tArgs).toMap
-                    try variant.fields.map(f => Some(resolveType(f._2)))
-                    finally typeEnv = savedEnv
-                  case None => List.fill(args.length)(None)
-              else
-                List.fill(args.length)(None)
-            args.zip(argExpected.padTo(args.length, None)).map { case (a, exp) =>
-              val saved = currentExpected
-              currentExpected = exp.orElse(saved)
-              try analyzeExpr(a) finally currentExpected = saved
-            }
+            // For generic-template calls without explicit type arguments, analyze args
+            // left-to-right and incrementally bind type parameters as soon as earlier
+            // arguments pin them. After each arg is analyzed, unify the formal-param
+            // TypeAST against the actual arg type to grow the binding env; for the next
+            // arg, substitute env into its formal TypeAST and use the resolved type as
+            // `currentExpected`. Without this, a placeholder closure (`_ + _`) at arg
+            // index ≥ 1 fails because its expected type still mentions a free type
+            // variable — even when an earlier sibling arg has already pinned it.
+            // Tolerant: if substitution still leaves type-vars free (resolveType throws)
+            // or the partial unify fails, we just don't supply an expected type for that
+            // arg — `instantiateGeneric` will surface the real failure later.
+            if !traitCallRewrite.contains(name)
+               && !functions.contains(name) && !builtinFunctions.contains(name)
+               && !structTypes.contains(name) && !variantToEnum.contains(name)
+               && !genericVariantToEnum.contains(name)
+               && genericTemplates.contains(name)
+               && genericTemplates(name).params.length == args.length then
+              val template = genericTemplates(name)
+              val tparamSet = template.typeParams.toSet
+              val env = mutable.Map.empty[String, SyslType]
+              args.zip(template.params).map { case (a, formal) =>
+                val expectedOpt: Option[SyslType] =
+                  val savedTE = typeEnv
+                  typeEnv = typeEnv ++ env.toMap
+                  try Some(resolveType(formal.typ))
+                  catch case _: Throwable => None
+                  finally typeEnv = savedTE
+                val saved = currentExpected
+                currentExpected = expectedOpt.orElse(saved)
+                val tA = try analyzeExpr(a) finally currentExpected = saved
+                try unifyTypes(formal.typ, tA.typ, tparamSet, env)
+                catch case _: Throwable => ()
+                tA
+              }
+            else
+              // Determine expected types for args if callee has known concrete signature.
+              // Variant constructors are critical here: a no-arg variant (e.g. `None`) inside
+              // another variant's args would otherwise inherit the OUTER expected type and
+              // misresolve. By passing each field's type as expected, the inner variant can
+              // disambiguate to the right enum instantiation.
+              val argExpected: List[Option[SyslType]] =
+                if traitCallRewrite.contains(name) then
+                  val mangled = traitCallRewrite(name)
+                  val fi = functions(mangled)
+                  expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
+                else if functions.contains(name) || builtinFunctions.contains(name) then
+                  val fi = lookupFun(name)
+                  expectedFor(fi.params.map(_._2), fi.modes).map(Some(_))
+                else if structTypes.contains(name) then
+                  structTypes(name).fields.map(f => Some(f._2))
+                else if variantToEnum.contains(name) then
+                  val (et, variantIdx) = variantToEnum(name)
+                  et.variants(variantIdx)._2.map(f => Some(f._2))
+                else if genericVariantToEnum.contains(name) then
+                  val (enumName, variantIdx) = genericVariantToEnum(name)
+                  val template = genericEnums(enumName)
+                  val variant = template.variants(variantIdx)
+                  // Use currentExpected (the enum's instantiation) to recover type args,
+                  // then resolve each field's TypeAST under that substitution.
+                  val typeArgs: Option[List[SyslType]] = currentExpected match
+                    case Some(et: SyslType.EnumType) =>
+                      genericEnumInstantiations.collectFirst {
+                        case ((n, args), inst) if n == enumName && inst.name == et.name => args
+                      }
+                    case _ => None
+                  typeArgs match
+                    case Some(tArgs) =>
+                      val savedEnv = typeEnv
+                      typeEnv = typeEnv ++ template.typeParams.zip(tArgs).toMap
+                      try variant.fields.map(f => Some(resolveType(f._2)))
+                      finally typeEnv = savedEnv
+                    case None => List.fill(args.length)(None)
+                else
+                  List.fill(args.length)(None)
+              args.zip(argExpected.padTo(args.length, None)).map { case (a, exp) =>
+                val saved = currentExpected
+                currentExpected = exp.orElse(saved)
+                try analyzeExpr(a) finally currentExpected = saved
+              }
         // Check for trait-method-call rewrite (inside a synthesized default body)
         if traitCallRewrite.contains(name) then
           val mangled = traitCallRewrite(name)
