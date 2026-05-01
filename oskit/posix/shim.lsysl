@@ -496,6 +496,7 @@ AF_UNIX wire protocol mirror for the unix server. Track
     const UNIX_CMD_GETPEERNAME      = 23
     const UNIX_CMD_SOCKETPAIR       = 24
     const UNIX_CMD_SHUTDOWN         = 25
+    const UNIX_CMD_PEERCRED         = 26
 
     const UNIX_PATH_MAX      = 108
     const UNIX_SCM_MAX_FDS   = 4
@@ -3865,6 +3866,46 @@ is left untouched in that case.
 
     sys_getsockopt(fd: int, level: int, optname: int, optval: i64, len_ptr: i64) -> i64
         val k = posix_fd_kind(fd)
+
+`SO_PEERCRED` (level=SOL_SOCKET=1, optname=17) is the one
+SOL_SOCKET option meaningful on AF_UNIX STREAM today. Route
+it to UNIX_CMD_PEERCRED and write the 12-byte struct ucred
+into the user buffer.
+
+        if k == POSIX_FD_UNIX_SOCKET
+            if level == 1
+                if optname == 17
+                    if len_ptr == i64(0)
+                        return i64(-EFAULT)
+                    val plp: *i32 = *i32(len_ptr)
+                    val pcap = int(*plp)
+                    if pcap < 12
+                        return i64(-EINVAL)
+                    if optval == i64(0)
+                        return i64(-EFAULT)
+                    val ptarget = posix_fd_target(fd)
+                    if ptarget < 0
+                        return i64(-EBADF)
+                    val pport = unix_get_port()
+                    if pport < 0
+                        return i64(-ENODEV)
+                    var pmsg: [2]byte
+                    pmsg[0] = byte(UNIX_CMD_PEERCRED)
+                    pmsg[1] = byte(ptarget & 0xff)
+                    var preply: [13]byte
+                    val pr = ipc_send(pport, pmsg, 2, preply, 13)
+                    if pr < 0
+                        return i64(-EIO)
+                    if preply[0] != 0
+                        return i64(unix_status(preply[0]))
+                    val pop: *byte = *byte(optval)
+                    var pi = 0
+                    while pi < 12
+                        pop[pi] = preply[1 + pi]
+                        pi += 1
+                    *plp = i32(12)
+                    return i64(0)
+            return i64(-ENOPROTOOPT)
         if k != POSIX_FD_UDP_SOCKET
             if k != POSIX_FD_TCP_SOCKET
                 return i64(-EBADF)

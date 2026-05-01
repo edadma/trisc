@@ -1,0 +1,239 @@
+test_unixcred — AF_UNIX SO_PEERCRED
+====================================
+
+Validates `getsockopt(SOL_SOCKET, SO_PEERCRED)` on AF_UNIX
+STREAM. Returns `struct ucred {pid_t pid; uid_t uid; gid_t
+gid;}` (12 bytes; 3 × i32 LE).
+
+Cases:
+  1. Connected STREAM pair (single-process): both ends report
+     the same PID (caller's getpid()) and uid=gid=0.
+  2. Unconnected STREAM (just `socket()`) → -ENOTCONN.
+  3. DGRAM fd → -EINVAL (returned at server level for STREAM-
+     only options).
+
+Pass criterion: prints `unixcred: ok`.
+
+    module oskit.bin.test_unixcred
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_BIND        = 135
+    val NR_CONNECT     = 148
+    val NR_LISTEN      = 217
+    val NR_ACCEPT      = 131
+    val NR_CLOSE       = 147
+    val NR_SOCKET      = 337
+    val NR_GETSOCKOPT  = 204
+    val NR_GETPID      = 194
+
+    val AF_UNIX_V      = 1
+    val SOCK_STREAM_V  = 1
+    val SOCK_DGRAM_V   = 2
+
+    val SOL_SOCKET_V   = 1
+    val SO_PEERCRED_V  = 17
+
+    val ENOTCONN_V     = 107
+    val EINVAL_V       = 22
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixcred: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, plen: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < plen
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + plen] = byte(0)
+        2 + plen + 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype),
+            i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen),
+            0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, alp: *i32) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(alp),
+            0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen),
+            0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_getsockopt(fd: int, level: int, optname: int,
+            optval: *byte, lp: *i32) -> int
+        int(syscall6(NR_GETSOCKOPT, i64(fd), i64(level),
+            i64(optname), i64(optval), i64(lp), 0))
+
+    posix_getpid() -> int
+        int(syscall6(NR_GETPID, 0, 0, 0, 0, 0, 0))
+
+
+Decode an i32 from `b[off..off+4]` as little-endian.
+
+    le32(b: *byte, off: int) -> int
+        val b0 = int(b[off]) & 0xff
+        val b1 = int(b[off + 1]) & 0xff
+        val b2 = int(b[off + 2]) & 0xff
+        val b3 = int(b[off + 3]) & 0xff
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+
+    main(argv: []string)
+
+Case 1: connected STREAM pair → both ends see this process's
+PID, uid=gid=0.
+
+        var nm: [4]byte
+        nm[0] = 'c'; nm[1] = 'r'; nm[2] = 'd'; nm[3] = '1'
+        var sa: [128]byte
+        val al = fill_sockaddr_un(&sa[0], &nm[0], 4)
+
+        val l = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if l < 0
+            fail(1)
+            return
+        if posix_bind(l, &sa[0], al) != 0
+            fail(2)
+            return
+        if posix_listen(l, 4) != 0
+            fail(3)
+            return
+        val c = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if c < 0
+            fail(4)
+            return
+        if posix_connect(c, &sa[0], al) != 0
+            fail(5)
+            return
+        var aa: [128]byte
+        var aal: i32 = 128
+        val s = posix_accept(l, &aa[0], &aal)
+        if s < 0
+            fail(6)
+            return
+
+        val mypid = posix_getpid()
+        if mypid <= 0
+            fail(7)
+            return
+
+        var cred: [12]byte
+        var cl: i32 = 12
+        if posix_getsockopt(s, SOL_SOCKET_V, SO_PEERCRED_V, &cred[0], &cl) != 0
+            fail(8)
+            return
+        if cl != i32(12)
+            fail(9)
+            return
+        val pid_s = le32(&cred[0], 0)
+        val uid_s = le32(&cred[0], 4)
+        val gid_s = le32(&cred[0], 8)
+        if pid_s != mypid
+            puts("unixcred: server pid=")
+            print_idec(pid_s)
+            puts(" mypid=")
+            print_idec(mypid)
+            puts("\n")
+            fail(10)
+            return
+        if uid_s != 0
+            fail(11)
+            return
+        if gid_s != 0
+            fail(12)
+            return
+
+        cl = 12
+        if posix_getsockopt(c, SOL_SOCKET_V, SO_PEERCRED_V, &cred[0], &cl) != 0
+            fail(13)
+            return
+        val pid_c = le32(&cred[0], 0)
+        if pid_c != mypid
+            puts("unixcred: client pid=")
+            print_idec(pid_c)
+            puts(" mypid=")
+            print_idec(mypid)
+            puts("\n")
+            fail(14)
+            return
+
+        if posix_close(s) != 0
+            fail(15)
+            return
+        if posix_close(c) != 0
+            fail(16)
+            return
+        if posix_close(l) != 0
+            fail(17)
+            return
+
+Case 2: unconnected STREAM → -ENOTCONN.
+
+        val u = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if u < 0
+            fail(18)
+            return
+        cl = 12
+        val r2 = posix_getsockopt(u, SOL_SOCKET_V, SO_PEERCRED_V, &cred[0], &cl)
+        if r2 != -ENOTCONN_V
+            puts("unixcred: unconn r=")
+            print_idec(r2)
+            puts("\n")
+            fail(19)
+            return
+        if posix_close(u) != 0
+            fail(20)
+            return
+
+Case 3: DGRAM → -EINVAL (server-side STREAM-only check).
+
+        val d = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if d < 0
+            fail(21)
+            return
+        cl = 12
+        val r3 = posix_getsockopt(d, SOL_SOCKET_V, SO_PEERCRED_V, &cred[0], &cl)
+        if r3 != -EINVAL_V
+            puts("unixcred: dgram r=")
+            print_idec(r3)
+            puts("\n")
+            fail(22)
+            return
+        if posix_close(d) != 0
+            fail(23)
+            return
+
+        puts("unixcred: ok\n")
+        exit()

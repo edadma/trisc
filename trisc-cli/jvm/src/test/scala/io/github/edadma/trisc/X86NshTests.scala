@@ -859,6 +859,18 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "unixdgc: bad"
   }
 
+  "unix: SO_PEERCRED on STREAM" in {
+    // getsockopt(SOL_SOCKET, SO_PEERCRED) returns struct ucred
+    // {pid, uid, gid}. Both ends of a connected pair report the
+    // creating process's pid (resolved via svc_get_thread_pid
+    // from the peer slot's owners[0]). uid/gid are 0 today —
+    // slix has no inter-thread uid query primitive yet.
+    // Disconnected STREAM → -ENOTCONN; DGRAM → -EINVAL.
+    val output = qemu.command("test_unixcred")
+    output should include("unixcred: ok")
+    output should not include "unixcred: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

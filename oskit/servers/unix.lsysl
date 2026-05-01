@@ -114,7 +114,7 @@ queue entries that hold the slot alive while in transit.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
-    import oskit.services.{rs_ready, notify_send_to}
+    import oskit.services.{rs_ready, notify_send_to, svc_get_thread_pid}
 
 
 Protocol command codes (byte value of buf[0]).
@@ -144,6 +144,7 @@ Protocol command codes (byte value of buf[0]).
     const UNIX_CMD_GETPEERNAME      = 23
     const UNIX_CMD_SOCKETPAIR       = 24
     const UNIX_CMD_SHUTDOWN         = 25
+    const UNIX_CMD_PEERCRED         = 26
 
 EPOLL/POLL bit values match `POSIX_EPOLL*` 1:1 (POLLIN=0x001,
 POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010). The shim's
@@ -2015,6 +2016,67 @@ with an in-flight blocking recv.)
         ipc_reply(sender, ok, 1)
 
 
+### PEERCRED handler
+
+`getsockopt(SOL_SOCKET, SO_PEERCRED)` returns the peer's
+`struct ucred {pid_t pid; uid_t uid; gid_t gid;}` — used by
+daemons (D-Bus, polkit, systemd) to identify the connected
+client without trusting in-band claims.
+
+For SLIX:
+- PID: resolved from the peer slot's first owner (TID) via
+  `svc_get_thread_pid`. socketpair-pairs and stream peers
+  alike track owners[0] from creation.
+- UID / GID: 0 for now. SLIX has a single-user kernel UID
+  model (services.lsysl getuid/setuid is per-thread but no
+  inter-thread query primitive yet); a future
+  `svc_get_thread_uid(tid)` would let us return real values.
+
+DGRAM is rejected with `-ENOPROTOOPT` per Linux semantics
+(SO_PEERCRED only meaningful on connection-oriented socks).
+Disconnected STREAM (no peer_idx) → `-ENOTCONN`.
+
+Wire format. Request: `cmd(1) + fd(1)` = 2 bytes.
+Reply: `status(1) + pid_le(4) + uid_le(4) + gid_le(4)` = 13
+bytes (or `status(1)` alone on failure).
+
+    unix_handle_peercred(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_STREAM
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        val peer = unix_sockets[fd].peer_idx
+        if peer < 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_ENOTCONN)
+            ipc_reply(sender, err, 1)
+            return
+        val tid = unix_sockets[peer].owners[0]
+        var pid = 0
+        if tid >= 0
+            pid = svc_get_thread_pid(tid)
+            if pid < 0
+                pid = 0
+        var reply: [13]byte
+        reply[0] = 0
+        reply[1] = byte(pid & 0xff)
+        reply[2] = byte((pid >> 8) & 0xff)
+        reply[3] = byte((pid >> 16) & 0xff)
+        reply[4] = byte((pid >> 24) & 0xff)
+        var i = 5
+        while i < 13
+            reply[i] = byte(0)
+            i += 1
+        ipc_reply(sender, &reply[0], 13)
+
+
 ### PID_EXIT handler
 
 PM calls this when a process exits, with the dead thread's
@@ -2112,6 +2174,8 @@ Synchronous request-reply, no notification path required
                     unix_handle_socketpair(sender, buf)
                 else if cmd == UNIX_CMD_SHUTDOWN
                     unix_handle_shutdown(sender, buf)
+                else if cmd == UNIX_CMD_PEERCRED
+                    unix_handle_peercred(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = byte(-1)
