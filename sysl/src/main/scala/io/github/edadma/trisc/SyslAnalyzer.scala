@@ -3260,15 +3260,47 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               val expanded = substituteTypeAST(target, subst)
               unifyTypes(expanded, arg, typeParams, env)
         else arg match
-          case SyslType.StructType(argName, _, _) =>
+          case SyslType.StructType(argName, argFields, _) =>
+            // Same lossy-cache caveat as the nominal-alias branch above:
+            // `typeToMangled` drops effect annotations on `FuncType`, so two
+            // distinct generic-struct instantiations can collide on the same
+            // mangled name and clobber each other in `structToTemplate`. The
+            // cache lookup gates the template identity (so `Foo[T]` doesn't
+            // match an unrelated `Bar[T]`), but the per-instance bindings are
+            // refined by walking the actual struct's fields and unifying each
+            // field's TypeAST (with the pattern's tArgs substituted in) against
+            // the field's resolved type. `unifyTypes` merges any conflicting
+            // binding via the effect lattice — so doing both is safe.
             structToTemplate.get(argName) match
               case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
                 for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+                genericStructs.get(name).foreach { template =>
+                  if template.typeParams.length == tArgs.length && template.fields.length == argFields.length then
+                    val subst = template.typeParams.zip(tArgs).toMap
+                    for ((fnTpl, ftAst, _), (fnAct, ftActual)) <- template.fields.zip(argFields) do
+                      if fnTpl == fnAct then
+                        val expanded = substituteTypeAST(ftAst, subst)
+                        unifyTypes(expanded, ftActual, typeParams, env)
+                }
               case _ => ()
-          case SyslType.EnumType(argName, _) =>
+          case SyslType.EnumType(argName, argVariants) =>
+            // Same lossy-cache caveat as above. The variants-walk refinement
+            // is what makes nested function-typed enum payloads (e.g.
+            // `enum PR[A] { Ok(value: A, ...) }` with `A = (...) -> int`)
+            // recover their per-instance effect annotations even when the
+            // shared mangled name has clobbered the cache.
             enumToTemplate.get(argName) match
               case Some((templateName, concreteArgs)) if templateName == name && concreteArgs.length == tArgs.length =>
                 for (p, a) <- tArgs.zip(concreteArgs) do unifyTypes(p, a, typeParams, env)
+                genericEnums.get(name).foreach { template =>
+                  if template.typeParams.length == tArgs.length && template.variants.length == argVariants.length then
+                    val subst = template.typeParams.zip(tArgs).toMap
+                    for (vAst, (vName, vFields)) <- template.variants.zip(argVariants) do
+                      if vAst.name == vName && vAst.fields.length == vFields.length then
+                        for ((_, ftAst), (_, ftActual)) <- vAst.fields.zip(vFields) do
+                          val expanded = substituteTypeAST(ftAst, subst)
+                          unifyTypes(expanded, ftActual, typeParams, env)
+                }
               case _ => ()
           case _ => ()
       case _ => () // concrete parameter type, nothing to infer
