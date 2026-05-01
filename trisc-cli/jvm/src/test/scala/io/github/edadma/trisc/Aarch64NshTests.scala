@@ -2288,6 +2288,25 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "pmtfd2: bad"
   }
 
+  "pm: TRANSPLANT_FD across processes (file fd)" in {
+    // Phase 2B chunk 1 of arbitrary-kind SCM_RIGHTS. Parent
+    // open()s /etc/passwd, reads 5 bytes ("root:") so the OFT
+    // pos advances to 5, then transplants the file fd into a
+    // suspended child via PM_CMD_TRANSPLANT_FD. The new
+    // VFS_CMD_DUP_HANDLE fan-out asks vfs to mint a fresh
+    // dst-side handle pointing at the same OFT entry; child's
+    // slot's `target` is rewritten to the new handle. Parent
+    // closes its own fd (oft_ref drops 2->1, OFT survives),
+    // resumes the child. Child reads 1 byte from fd 3 and must
+    // get 'x' (offset 5 of /etc/passwd, since OFT pos is
+    // shared). Verifies the per-pid handle-table allocation
+    // works and that share-the-OFT-entry semantics match
+    // POSIX/Linux file-fd-passing.
+    val output = qemu.command("test_pmtfd3")
+    output should include("pmtfd3: ok")
+    output should not include "pmtfd3: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

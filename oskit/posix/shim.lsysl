@@ -578,6 +578,44 @@ TCP-only).
                     msg[7] = byte(dst_main_tid & 0xff)
                     var rep: [1]byte
                     ipc_send(inet_p, &msg[0], 8, &rep[0], 1)
+
+POSIX_FD_FILE has per-pid VFS handles (the `target` field is the
+src process's handle into the *src*'s vfs handle table, meaningless
+to dst). Ask vfs to mint a fresh dst-side handle pointing at the
+same OFT entry; on success we overwrite dst's `target`. If the IPC
+fails we leave the slot in its (src-target) state and roll back to
+POSIX_FD_FREE so the dst doesn't see a phantom file. VFS_CMD_DUP_HANDLE
+wire is `cmd(1) + src_pid_be(4) + src_handle_be(4) + dst_pid_be(4)`.
+
+        if src_kind == POSIX_FD_FILE
+            val vfs_p = vfs_get_port()
+            if vfs_p >= 0
+                val src_handle = posix_fd_table[src_idx].target
+                var msg: [13]byte
+                msg[0] = byte(25)
+                msg[1] = byte((src_pid >> 24) & 0xff)
+                msg[2] = byte((src_pid >> 16) & 0xff)
+                msg[3] = byte((src_pid >> 8) & 0xff)
+                msg[4] = byte(src_pid & 0xff)
+                msg[5] = byte((src_handle >> 24) & 0xff)
+                msg[6] = byte((src_handle >> 16) & 0xff)
+                msg[7] = byte((src_handle >> 8) & 0xff)
+                msg[8] = byte(src_handle & 0xff)
+                msg[9] = byte((dst_pid >> 24) & 0xff)
+                msg[10] = byte((dst_pid >> 16) & 0xff)
+                msg[11] = byte((dst_pid >> 8) & 0xff)
+                msg[12] = byte(dst_pid & 0xff)
+                var rep: [5]byte
+                ipc_send(vfs_p, &msg[0], 13, &rep[0], 5)
+                if rep[0] == 0
+                    val new_handle = (int(rep[1]) << 24) | (int(rep[2]) << 16) | (int(rep[3]) << 8) | int(rep[4])
+                    posix_fd_table[dst_idx].target = new_handle
+                else
+                    posix_fd_table[dst_idx].kind = POSIX_FD_FREE
+                    return -EBADF
+            else
+                posix_fd_table[dst_idx].kind = POSIX_FD_FREE
+                return -EBADF
         0
 
 

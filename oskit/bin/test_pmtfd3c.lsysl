@@ -1,0 +1,49 @@
+test_pmtfd3c — child of test_pmtfd3
+====================================
+
+Spawned suspended by `test_pmtfd3`. Slot 3 is a transplanted file
+fd whose target is a *fresh* dst-side VFS handle pointing at the
+same OFT entry as the parent's handle (the shim called
+`VFS_CMD_DUP_HANDLE` before resume). On resume we read 1 byte
+from fd 3 and verify it's `'x'` — the byte at offset 5 of
+`/etc/passwd`, since the parent advanced the *shared* OFT pos
+to 5 before transplanting. If we got `'r'` instead, OFT pos
+wasn't shared (handles point to different OFT entries — bug).
+If read failed, the parent's close tore down the file under us.
+
+    module oskit.bin.test_pmtfd3c
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_WRITE = 128
+    val NR_READ  = 130
+
+
+    posix_read(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+    posix_write(fd: int, buf: *byte, n: int) -> int
+        int(syscall6(NR_WRITE, i64(fd), i64(buf), i64(n), 0, 0, 0))
+
+
+    main(argv: []string)
+        var rb: [1]byte
+        val r = posix_read(3, &rb[0], 1)
+        if r != 1
+            exit_with(20)
+            return
+        if rb[0] != byte('x')
+            exit_with(21)
+            return
+
+        var ok: [3]byte
+        ok[0] = 'O'
+        ok[1] = 'K'
+        ok[2] = '\n'
+        val w = posix_write(1, &ok[0], 3)
+        if w != 3
+            exit_with(22)
+            return
+
+        exit()

@@ -760,6 +760,12 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_EPOLL_INST_CLOSE  = 23
     // Phase 4 chunk 2 — fstat by handle. Same reply shape as STAT.
     val VFS_CMD_FSTAT   = 24
+    // Phase 2B chunk 1 — dup a handle from one process into another,
+    // sharing the same OFT entry. Used by `posix_fd_transplant` for
+    // POSIX_FD_FILE and (Phase 2B chunk 2) by the receiver shim when
+    // draining SCM_RIGHTS. Mints a fresh dst-side handle and bumps
+    // `oft_ref`. Caller is trusted (kernel-side path) — no auth check.
+    val VFS_CMD_DUP_HANDLE = 25
 
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
@@ -788,6 +794,8 @@ reply is always 1 byte. On success, length depends on command.
             return 11
         if cmd == VFS_CMD_POLL
             return 3
+        if cmd == VFS_CMD_DUP_HANDLE
+            return 5
         1
 
 Big-endian message helpers (local to VFS).
@@ -1680,6 +1688,64 @@ Reply:   [status(1)]
         reply[0] = 0
         ipc_reply(sender, reply, 1)
 
+Handle VFS_CMD_DUP_HANDLE: dup a handle from a source process into
+a destination process so both processes' handles point at the same
+OFT entry. Used by arbitrary-kind SCM_RIGHTS / `posix_fd_transplant`
+to give a second process its own VFS handle (which lives in a
+*per-pid* handle table) onto the same open file the source already
+has open. Bumps `oft_ref` so a close from either side leaves the
+other side intact.
+
+Request: [cmd(1), src_pid_be(4), src_handle_be(4), dst_pid_be(4)] = 13
+Reply:   [status(1), dst_handle_be(4)] = 5
+
+Status: 0 success, -1 invalid src (handle not open / pid bad),
+-2 dst handle table full.
+
+    vfs_handle_dup(sender: int, buf: *byte)
+        val src_pid = vfs_msg_read_i32(buf, 1)
+        val src_handle = vfs_msg_read_i32(buf, 5)
+        val dst_pid = vfs_msg_read_i32(buf, 9)
+        var reply: [5]byte
+        reply[1] = 0
+        reply[2] = 0
+        reply[3] = 0
+        reply[4] = 0
+        if src_pid < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if src_pid >= MAX_PROCESSES
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if dst_pid < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if dst_pid >= MAX_PROCESSES
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        val oft_idx = vfs_handle_lookup(src_pid, src_handle)
+        if oft_idx < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        if oft_ref[oft_idx] <= 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 5)
+            return
+        val dst_handle = vfs_handle_alloc(dst_pid, oft_idx)
+        if dst_handle < 0
+            reply[0] = byte(-2)
+            ipc_reply(sender, reply, 5)
+            return
+        oft_ref[oft_idx] += 1
+        reply[0] = 0
+        vfs_msg_write_i32(reply, 1, dst_handle)
+        ipc_reply(sender, reply, 5)
+
 Resolve a path to an inode via TFS OPEN.
 Returns the inode or -1 on error.
 
@@ -2084,6 +2150,8 @@ the appropriate backend.
                     vfs_handle_connect(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_INHERIT
                     vfs_handle_inherit(sender, buf)
+                else if cmd == VFS_CMD_DUP_HANDLE
+                    vfs_handle_dup(sender, buf)
                 else if cmd == VFS_CMD_PIPE
                     vfs_handle_pipe(sender)
                 else if cmd == VFS_CMD_ACCEPT
