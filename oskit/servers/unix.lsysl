@@ -238,11 +238,23 @@ as the claim predicate (where `end_off` is the post-drain
 position), which is equivalent: a recvmsg whose drain crosses
 the anchor byte gets the fds.
 
+Each fd carries its `(kind, handle, stype)` triple — Phase 2B
+chunk 2 widened the wire from 1-byte (unix-slot index) per fd
+to 4 bytes (kind + handle_lo + handle_hi + stype) so a future
+chunk can fan out TCP/UDP/file fds the same way. As of chunk 2
+the unix server only validates and ref-tracks the
+`POSIX_FD_UNIX_SOCKET` kind (10); other kinds currently fail the
+sender-shim's allow-list and never reach this stash. The wire
+shape stays kind-agnostic so chunk 3 can flip the allow-list and
+add per-kind ownership fan-out without touching the queue layout.
+
     struct UnixStreamScm
         in_use: int
         byte_off: int
         nfds: int
-        fds: [4]int
+        fd_kinds: [4]int
+        fd_handles: [4]int
+        fd_stypes: [4]int
 
 
 Per-slot state. The same struct serves DGRAM and STREAM
@@ -635,7 +647,8 @@ queued cmsg fds would leak `nrefs_in_queues` on the source
 slots.
 
         var dummy_slots: [1]byte
-        unix_stream_scm_consume(idx, 0x7fffffff, -1, 0, &dummy_slots[0])
+        unix_stream_scm_consume(idx, 0x7fffffff, -1, 0,
+            &dummy_slots[0], &dummy_slots[0], &dummy_slots[0])
 
         val peer = unix_sockets[idx].peer_idx
         if peer >= 0
@@ -730,22 +743,28 @@ the bytes are copied without advancing the read cursor.
 STREAM SCM consume helper. Walks the pending_scm queue and
 processes every entry whose anchor `byte_off` is strictly less
 than `end_off` (i.e., whose anchor byte was just covered by
-the most recent drain). For each such entry:
+the most recent drain). For each fd in such an entry:
 
-- Decrements every fd's `nrefs_in_queues`.
-- If `claim_for >= 0` and there is room left in the receiver's
-  `max_grant` budget, transfers ownership to the receiver and
-  appends the slot index to `out_slots`. Otherwise drops the
-  fd silently — orphaned slots whose ref counts fall to zero
-  get reaped via `unix_full_close`.
+- For UNIX-kind fds: decrement `nrefs_in_queues`. If
+  `claim_for >= 0` and `out_*` has room, transfer ownership to
+  the receiver and emit the (kind, handle, stype) triple.
+  Otherwise drop the fd silently; orphaned unix slots whose
+  ref counts fall to zero get reaped via `unix_full_close`.
+- Other kinds (deferred to chunk 3+; allow-list at the sender
+  shim today rejects them with -EOPNOTSUPP) would echo the
+  triple unchanged.
 - Frees the entry.
 
-Returns the number of fds claimed (written into `out_slots`).
-Used by both the recvmsg path (claim mode) and the recv path
-(drop mode, via `claim_for=-1`).
+Returns the number of fds claimed (written into the parallel
+`out_kinds` / `out_handles` / `out_stypes` runs). Used by the
+recvmsg path (claim mode) and the recv path (drop mode, via
+`claim_for=-1`, with all `out_*` arguments allowed to be
+single-byte scratch buffers since nothing is written when
+`claim_for < 0`).
 
     unix_stream_scm_consume(idx: int, end_off: int, claim_for: int,
-            max_grant: int, out_slots: *byte) -> int
+            max_grant: int, out_kinds: *byte, out_handles: *byte,
+            out_stypes: *byte) -> int
         var granted = 0
         var s = 0
         while s < UNIX_STREAM_SCM_QUEUE
@@ -754,17 +773,24 @@ Used by both the recvmsg path (claim mode) and the recv path
                     val n = unix_sockets[idx].pending_scm[s].nfds
                     var k = 0
                     while k < n
-                        val sidx = unix_sockets[idx].pending_scm[s].fds[k]
-                        unix_sockets[sidx].nrefs_in_queues -= 1
-                        if claim_for >= 0
-                            if granted < max_grant
-                                unix_slot_add_owner(sidx, claim_for)
-                                out_slots[granted] = byte(sidx & 0xff)
-                                granted += 1
-                        if unix_sockets[sidx].owners_count == 0
-                            if unix_sockets[sidx].nrefs_in_queues == 0
-                                if unix_sockets[sidx].in_use != 0
-                                    unix_full_close(sidx)
+                        val kind = unix_sockets[idx].pending_scm[s].fd_kinds[k]
+                        val handle = unix_sockets[idx].pending_scm[s].fd_handles[k]
+                        val stype = unix_sockets[idx].pending_scm[s].fd_stypes[k]
+                        if kind == 10
+                            // UNIX_SOCKET — handle is the unix slot index.
+                            unix_sockets[handle].nrefs_in_queues -= 1
+                            if claim_for >= 0
+                                if granted < max_grant
+                                    unix_slot_add_owner(handle, claim_for)
+                                    out_kinds[granted]               = byte(kind & 0xff)
+                                    out_handles[granted * 2]         = byte((handle >> 8) & 0xff)
+                                    out_handles[granted * 2 + 1]     = byte(handle & 0xff)
+                                    out_stypes[granted]              = byte(stype & 0xff)
+                                    granted += 1
+                            if unix_sockets[handle].owners_count == 0
+                                if unix_sockets[handle].nrefs_in_queues == 0
+                                    if unix_sockets[handle].in_use != 0
+                                        unix_full_close(handle)
                         k += 1
                     unix_sockets[idx].pending_scm[s].in_use = 0
                     unix_sockets[idx].pending_scm[s].nfds = 0
@@ -779,30 +805,36 @@ pending_scm entry whose anchor byte falls in the drained range
 direct recvmsg path (when rx_count > 0) and by the SENDMSG /
 SEND wake paths when the parker was a recvmsg.
 
-Reply layout matches the recvmsg wire shape (status(1) +
-plen(1) + src_path(P) + nfds(1) + slots(F) + dlen_be(2) +
-data(D)) — STREAM has no per-message src, so plen=0 and the
-src_path region is zero-length.
+Reply layout (Phase 2B chunk 2 wire): status(1) + plen(1) +
+src_path(P) + nfds(1) + kinds(F) + handles(F*2 BE) +
+stypes(F) + dlen_be(2) + data(D). STREAM has no per-message
+src, so plen=0 and the src_path region is zero-length.
 
     unix_stream_drain_for_msg(idx: int, receiver: int, max_nfds: int,
             maxlen: int)
         var data_buf: [2048]byte
         val n = unix_rx_drain(idx, &data_buf[0], maxlen, 0)
         val end_off = unix_sockets[idx].rx_total_drained
-        var slots_buf: [4]byte
+        var kinds_buf: [4]byte
+        var handles_buf: [8]byte
+        var stypes_buf: [4]byte
         val granted = unix_stream_scm_consume(idx, end_off, receiver,
-            max_nfds, &slots_buf[0])
-        var pr: [2078]byte
+            max_nfds, &kinds_buf[0], &handles_buf[0], &stypes_buf[0])
+        var pr: [2086]byte
         pr[0] = 0
         pr[1] = 0
         pr[2] = byte(granted & 0xff)
+        val kinds_off = 3
+        val handles_off = kinds_off + granted
+        val stypes_off = handles_off + granted * 2
         var k = 0
         while k < granted
-            val sidx = int(slots_buf[k]) & 0xff
-            pr[3 + k] = slots_buf[k]
-            pr[3 + granted + k] = byte(unix_sockets[sidx].stype & 0xff)
+            pr[kinds_off + k]            = kinds_buf[k]
+            pr[handles_off + k * 2]      = handles_buf[k * 2]
+            pr[handles_off + k * 2 + 1]  = handles_buf[k * 2 + 1]
+            pr[stypes_off + k]           = stypes_buf[k]
             k += 1
-        val dlen_off = 3 + granted + granted
+        val dlen_off = stypes_off + granted
         unix_write_u16(&pr[0], dlen_off, n)
         val data_off = dlen_off + 2
         var i = 0
@@ -1484,7 +1516,8 @@ recvmsg claims them, recv drops them.
                 val n = unix_rx_drain(peer, &pr[3], maxlen, 0)
                 val end_off = unix_sockets[peer].rx_total_drained
                 var dummy: [1]byte
-                unix_stream_scm_consume(peer, end_off, -1, 0, &dummy[0])
+                unix_stream_scm_consume(peer, end_off, -1, 0,
+                    &dummy[0], &dummy[0], &dummy[0])
                 unix_write_u16(&pr[0], 1, n)
                 ipc_reply(parked, &pr[0], 3 + n)
 
@@ -1527,7 +1560,8 @@ how POSIX distinguishes "would block" from "stream closed".
             val n = unix_rx_drain(fd, &pr[3], maxlen, 0)
             val end_off = unix_sockets[fd].rx_total_drained
             var dummy: [1]byte
-            unix_stream_scm_consume(fd, end_off, -1, 0, &dummy[0])
+            unix_stream_scm_consume(fd, end_off, -1, 0,
+                &dummy[0], &dummy[0], &dummy[0])
             unix_write_u16(&pr[0], 1, n)
             ipc_reply(sender, &pr[0], 3 + n)
             return
@@ -1585,17 +1619,30 @@ the anchor silently drops them (matching Linux).
 
 Wire format mirrors SENDTO with a single ancillary block
 slotted between the path and the payload:
-`cmd(1) + fd(1) + plen(1) + path(P) + nfds(1) + slots(F)
-+ dlen_be(2) + data(D)`. STREAM uses `plen=0` (target is
-the connected peer; path is unused).
 
-Limitations: fd-passing is restricted to AF_UNIX socket fds
-(transferring TCP/UDP/file fds is a separate Session-3
-concern). DGRAM SENDMSG enqueues onto the target's
-`dg_queue` (sized at UNIX_DG_QUEUE) — full queues return
--EAGAIN. STREAM SENDMSG attaches the SCM to the peer's
-`pending_scm` (sized at UNIX_STREAM_SCM_QUEUE) — full
-queues likewise return -EAGAIN before any data is appended.
+  - DGRAM (legacy): `cmd(1) + fd(1) + plen(1) + path(P) +
+    nfds(1) + slots(F) + dlen_be(2) + data(D)` — 1 byte per
+    fd, encoding only the unix slot index. AF_UNIX-only.
+  - STREAM (Phase 2B chunk 2): `cmd(1) + fd(1) + plen(1)=0 +
+    nfds(1) + tuples(F*4) + dlen_be(2) + data(D)` — 4 bytes
+    per fd, each tuple is `kind(1) + handle_be(2) + stype(1)`.
+    plen is always 0 on STREAM (target is the connected peer;
+    path is unused).
+
+Allow-list (chunk 2): only `kind = POSIX_FD_UNIX_SOCKET (10)`
+is accepted on the STREAM path; the receiver-shim's mint path
+likewise only knows how to materialize a unix-socket fd. Other
+kinds (TCP/UDP/file) are rejected at the sender shim with
+-EOPNOTSUPP and never reach this server. Chunk 3 will lift the
+allow-list once queued-ref machinery exists in the inet/vfs
+backends to survive a sender that closes before the receiver
+drains.
+
+DGRAM SENDMSG enqueues onto the target's `dg_queue` (sized at
+UNIX_DG_QUEUE) — full queues return -EAGAIN. STREAM SENDMSG
+attaches the SCM to the peer's `pending_scm` (sized at
+UNIX_STREAM_SCM_QUEUE) — full queues likewise return -EAGAIN
+before any data is appended.
 
     unix_handle_sendmsg(sender: int, buf: *byte)
         val fd = int(buf[1]) & 0xff
@@ -1779,38 +1826,58 @@ position will surface the cmsg via the next drain.
             err[2] = 0
             ipc_reply(sender, err, 3)
             return
-        val slots_off = 3 + plen + 1
-        val dlen = unix_read_u16(buf, slots_off + nfds)
-        val data: *byte = buf + slots_off + nfds + 2
+        val tuples_off = 3 + plen + 1
+        val dlen = unix_read_u16(buf, tuples_off + nfds * 4)
+        val data: *byte = buf + tuples_off + nfds * 4 + 2
 
-Validate every cmsg fd up front. Same checks as the DGRAM
-path: in range, in_use, owned by sender.
+Validate every cmsg fd up front. Wire format per fd is the
+4-byte tuple `kind(1) + handle_be(2) + stype(1)`. Phase 2B
+chunk 2 only accepts `kind = POSIX_FD_UNIX_SOCKET (10)` —
+the sender shim's allow-list rejects other kinds before they
+reach the server, but the validation here is defensive.
+
+For UNIX kind, `handle` is the unix slot index; we still apply
+the existing in-range / in_use / owned-by-sender checks. Other
+kinds skip validation here (the chunk 3+ allow-list expansion
+will route per-kind validation through the appropriate backend
+server before reaching SENDMSG).
 
         var k = 0
         while k < nfds
-            val sidx = int(buf[slots_off + k]) & 0xff
-            if sidx < 0
+            val tup_off = tuples_off + k * 4
+            val kind = int(buf[tup_off]) & 0xff
+            val handle_hi = int(buf[tup_off + 1]) & 0xff
+            val handle_lo = int(buf[tup_off + 2]) & 0xff
+            val handle = (handle_hi << 8) | handle_lo
+            if kind != 10
                 var err: [3]byte
                 err[0] = byte(-UNIX_EINVAL)
                 err[1] = 0
                 err[2] = 0
                 ipc_reply(sender, err, 3)
                 return
-            if sidx >= UNIX_MAX_SOCKETS
+            if handle < 0
                 var err: [3]byte
                 err[0] = byte(-UNIX_EINVAL)
                 err[1] = 0
                 err[2] = 0
                 ipc_reply(sender, err, 3)
                 return
-            if unix_sockets[sidx].in_use == 0
+            if handle >= UNIX_MAX_SOCKETS
+                var err: [3]byte
+                err[0] = byte(-UNIX_EINVAL)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            if unix_sockets[handle].in_use == 0
                 var err: [3]byte
                 err[0] = byte(-UNIX_EBADF)
                 err[1] = 0
                 err[2] = 0
                 ipc_reply(sender, err, 3)
                 return
-            if unix_slot_has_owner(sidx, sender) == 0
+            if unix_slot_has_owner(handle, sender) == 0
                 var err: [3]byte
                 err[0] = byte(-UNIX_EBADF)
                 err[1] = 0
@@ -1856,9 +1923,17 @@ sendmsg" semantics.
             unix_sockets[peer].pending_scm[scm_slot].nfds = nfds
             var k2 = 0
             while k2 < nfds
-                val sidx = int(buf[slots_off + k2]) & 0xff
-                unix_sockets[peer].pending_scm[scm_slot].fds[k2] = sidx
-                unix_sockets[sidx].nrefs_in_queues += 1
+                val tup_off = tuples_off + k2 * 4
+                val kind = int(buf[tup_off]) & 0xff
+                val handle_hi = int(buf[tup_off + 1]) & 0xff
+                val handle_lo = int(buf[tup_off + 2]) & 0xff
+                val handle = (handle_hi << 8) | handle_lo
+                val stype = int(buf[tup_off + 3]) & 0xff
+                unix_sockets[peer].pending_scm[scm_slot].fd_kinds[k2] = kind
+                unix_sockets[peer].pending_scm[scm_slot].fd_handles[k2] = handle
+                unix_sockets[peer].pending_scm[scm_slot].fd_stypes[k2] = stype
+                if kind == 10
+                    unix_sockets[handle].nrefs_in_queues += 1
                 k2 += 1
         var sreply: [3]byte
         sreply[0] = 0
@@ -1885,7 +1960,8 @@ cmsg in the drained range); recv gets the recv-shaped reply
                 val n = unix_rx_drain(peer, &pr[3], pmaxlen, 0)
                 val end_off = unix_sockets[peer].rx_total_drained
                 var dummy: [1]byte
-                unix_stream_scm_consume(peer, end_off, -1, 0, &dummy[0])
+                unix_stream_scm_consume(peer, end_off, -1, 0,
+                    &dummy[0], &dummy[0], &dummy[0])
                 unix_write_u16(&pr[0], 1, n)
                 ipc_reply(parked, &pr[0], 3 + n)
 
