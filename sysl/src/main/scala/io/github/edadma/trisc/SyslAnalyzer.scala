@@ -5572,12 +5572,39 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // type as the expected type for the (single) cast argument so that closure-shaped
         // args get parameter inference, return-type context, and downstream type-arg
         // inference for variant constructors that don't pin all type params from arg types.
+        //
+        // For a generic-function call `success[[]int]([])`, do the analogous thing per-arg:
+        // substitute the explicit type args into each formal param's TypeAST and use the
+        // result as the expected type during that arg's analysis. Without this, an empty
+        // `[]` (or any context-dependent literal) at the call site fails with "cannot infer
+        // element type" — the analyzer has all the info to know it's `[]int` but never
+        // forwards it. This mirrors the var-decl/return/non-generic-arg paths the
+        // array-lit-to-slice fix already plugged into.
         val tArgs =
           if genericTypeAliases.contains(name) && args.length == 1 then
             val target = resolveType(NamedTypeAST(name, List(exprToTypeAST(typeExpr))))
             val savedExp = currentExpected
             currentExpected = Some(target.underlying)
             try args.map(analyzeExpr) finally currentExpected = savedExp
+          else if genericTemplates.contains(name) then
+            val template = genericTemplates(name)
+            val typeArgAST = exprToTypeAST(typeExpr)
+            // Single-tparam case is the only shape this AST node carries (the parser
+            // produces IndirectCallAST(IndexAST(...), args) with one type-arg slot).
+            val subst: Map[String, TypeAST] =
+              if template.typeParams.length == 1 then Map(template.typeParams.head -> typeArgAST)
+              else Map.empty
+            if template.params.length == args.length && subst.nonEmpty then
+              args.zip(template.params).map { case (a, p) =>
+                val expected =
+                  try Some(resolveType(substituteTypeAST(p.typ, subst)))
+                  catch case _: Throwable => None
+                val savedExp = currentExpected
+                currentExpected = expected.orElse(savedExp)
+                try analyzeExpr(a) finally currentExpected = savedExp
+              }
+            else
+              args.map(analyzeExpr)
           else
             args.map(analyzeExpr)
         if genericStructs.contains(name) then

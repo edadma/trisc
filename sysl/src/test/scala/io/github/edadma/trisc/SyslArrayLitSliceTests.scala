@@ -179,6 +179,64 @@ class SyslArrayLitSliceTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 5
   }
 
+  // ===== Expected-type propagates into generic-call args =====
+  //
+  // A generic-function call with explicit type args — `success[[]int]([])` —
+  // analyzes its arguments AFTER the explicit type-arg substitution, so each
+  // arg's expected type is `subst(formalParam.typ)`. Without this hookup, the
+  // empty `[]` (or any context-dependent literal) at the call site failed
+  // with "cannot infer element type" — same lever as the var-decl path, just
+  // sourced from a different upstream expected-type. Closes the last hold-out
+  // the array-lit-to-slice fix didn't already cover.
+
+  "[] as arg to generic call with explicit type-arg coerces to slice" in {
+    eval(
+      """f[B](v: B) -> int = len(v)
+        |
+        |main() -> int = f[[]int]([])
+        |""".stripMargin) shouldBe 0
+  }
+
+  "[a, b, c] as arg to generic call with explicit type-arg coerces to slice" in {
+    eval(
+      """f[B](v: B) -> int = len(v)
+        |
+        |main() -> int = f[[]int]([1, 2, 3])
+        |""".stripMargin) shouldBe 3
+  }
+
+  "[] under nested generic context propagates expected type" in {
+    eval(
+      """f[B](v: B) -> B = v
+        |g[A]() -> []A = f[[]A]([])
+        |
+        |main() -> int = len(g[int]())
+        |""".stripMargin) shouldBe 0
+  }
+
+  "parsyl-style success[[]A]([]) one-liner compiles and runs" in {
+    eval(
+      """type Parser[A] = new (int) -> A
+        |
+        |success[B](v: B) -> Parser[B] = Parser[B]((_x: int) -> v)
+        |
+        |empty_list[A]() -> Parser[[]A] = success[[]A]([])
+        |
+        |main() -> int
+        |    val p = empty_list[int]()
+        |    len(p(0))
+        |""".stripMargin) shouldBe 0
+  }
+
+  "regression: bare [] with no expected type still errors" in {
+    val ex = intercept[Exception] {
+      eval("""main() -> int = len([])""")
+    }
+    val msg = ex.getMessage.toLowerCase
+    assert(msg.contains("infer") || msg.contains("element type"),
+      s"bare [] without context should still error, got: ${ex.getMessage}")
+  }
+
   // ===== Regressions: fixed-size array context unchanged =====
 
   "regression: var arr: [3]int = [1, 2, 3] is still a fixed-size array" in {
