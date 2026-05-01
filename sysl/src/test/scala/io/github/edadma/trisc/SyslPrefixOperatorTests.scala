@@ -109,27 +109,46 @@ class SyslPrefixOperatorTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe -7
   }
 
-  // ===== Negative — built-in prefix ops are reserved =====
+  // ===== Negative — built-in prefix sigils protect their natural domain =====
 
-  "trait method tagged `#operator(\"-\")` on a single param is rejected" in {
+  "user `#operator(\"-\")` on a struct is fine (no built-in collision)" in {
+    // Built-in `-` only owns numeric scalars. A struct operand sits outside
+    // that domain, so the user impl is accepted at registration AND fires
+    // on `-N(...)` while leaving `-(int)` untouched.
+    eval(
+      """struct N
+        |    v: int
+        |
+        |trait Neg[T]
+        |    #operator("-")
+        |    neg(a: T) -> T
+        |
+        |impl Neg[N]
+        |    neg(a: N) -> N = N(0 - a.v)
+        |
+        |main() -> int
+        |    var x = N(7)
+        |    var r = -x
+        |    r.v
+        |""".stripMargin) shouldBe -7
+  }
+
+  "impl `Neg[int]` for #operator(\"-\") is rejected (steals built-in)" in {
     val ex = intercept[Exception] {
       eval(
-        """struct N
-          |    v: int
-          |
-          |trait Neg[T]
+        """trait Neg[T]
           |    #operator("-")
           |    neg(a: T) -> T
           |
-          |impl Neg[N]
-          |    neg(a: N) -> N = N(0 - a.v)
+          |impl Neg[int]
+          |    neg(a: int) -> int = a
           |
           |main() -> int = 0
           |""".stripMargin)
     }
     val msg = ex.getMessage.toLowerCase
-    assert(msg.contains("reserved") || msg.contains("built-in") || msg.contains("'-'"),
-      s"`-` should be reserved, got: ${ex.getMessage}")
+    assert(msg.contains("conflict") || msg.contains("built-in") || msg.contains("'-'") || msg.contains("natural"),
+      s"impl on natural type should be rejected, got: ${ex.getMessage}")
   }
 
   "trait method with `#operator(...)` and zero params is rejected" in {
@@ -237,5 +256,83 @@ class SyslPrefixOperatorTests extends SyslTestHelpers {
         |    var c = a <> b
         |    c.bits
         |""".stripMargin) shouldBe 15
+  }
+
+  // ===== Built-in prefix sigils overloaded for non-built-in operand types =====
+  //
+  // The sigils `-`, `!`, `~`, `*`, `&` keep their built-in semantics for
+  // their natural operand types (numeric / bool / integral / pointer). For
+  // *other* operand types the analyzer falls through to a `#operator(<sigil>)`
+  // user impl. This unblocks the canonical PEG-style `!p` / `&p` lookahead
+  // sugar parsyl wants.
+
+  "user prefix `!` on nominal-alias type dispatches to impl" in {
+    eval(
+      """type P = new int
+        |
+        |trait Neg[T, R]
+        |    #operator("!")
+        |    neg(p: T) -> R
+        |
+        |impl Neg[P, P]
+        |    neg(p: P) -> P = P(0 - int(p))
+        |
+        |main() -> int
+        |    val q: P = P(7)
+        |    int(!q)
+        |""".stripMargin) shouldBe -7
+  }
+
+  "built-in `!` on bool wins over a user impl on a different type" in {
+    eval(
+      """type P = new int
+        |
+        |trait Neg[T, R]
+        |    #operator("!")
+        |    neg(p: T) -> R
+        |
+        |impl Neg[P, P]
+        |    neg(p: P) -> P = P(0 - int(p))
+        |
+        |main() -> int = if !false then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "user impl that conflicts with built-in `!`'s domain (bool) is rejected" in {
+    val ex = intercept[Exception] {
+      eval(
+        """trait Neg[T, R]
+          |    #operator("!")
+          |    neg(p: T) -> R
+          |
+          |impl Neg[bool, bool]
+          |    neg(p: bool) -> bool = p
+          |
+          |main() -> int = 0
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage.toLowerCase
+    assert(msg.contains("conflict") || msg.contains("built-in") || msg.contains("natural") || msg.contains("'!'"),
+      s"impl on bool should be rejected, got: ${ex.getMessage}")
+  }
+
+  "user prefix `&` on Parser-shaped type dispatches to impl (positive lookahead)" in {
+    // The headline PEG case: `&p` dispatches to `Peek.peek(p)` instead of
+    // taking the address of `p`. The built-in address-of remains available
+    // for everything outside the user impl's matched type.
+    eval(
+      """type Parser[A] = new int
+        |
+        |trait Peek[A, R]
+        |    #operator("&")
+        |    peek(a: A) -> R
+        |
+        |impl[A] Peek[Parser[A], Parser[A]]
+        |    peek(a: Parser[A]) -> Parser[A] = a
+        |
+        |main() -> int
+        |    val p: Parser[int] = Parser[int](42)
+        |    int(&p)
+        |""".stripMargin) shouldBe 42
   }
 }

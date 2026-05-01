@@ -345,11 +345,68 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   private def lookupUnaryOperatorTrait(op: String): Option[(String, String)] =
     customUnaryOperatorTraits.get(op)
 
-  // Built-in prefix operators handled by the analyzer's UnaryAST arm directly.
-  // Reserved against #operator (single-arg) registration so users can't shadow
-  // the built-in semantics of `-x`, `!x`, `~x`, `*p`, `&x`, `++x`, `--x`.
+  // Lvalue-mutation prefix sigils. Always reserved — `++x` / `--x` are
+  // statement-shaped and the lvalue semantics make user impls trickier than
+  // the parser-combinator use cases the language wants to enable. The other
+  // five built-in prefix sigils (`-`, `!`, `~`, `*`, `&`) are NOT in this
+  // set: a `#operator(<sigil>)` registration is allowed for them, gated at
+  // *impl* time on the operand-type vs. the sigil's natural built-in domain
+  // (so users can `impl Lookahead[Parser[A]]` with `#operator("&")` while
+  // a stray `impl ![bool]` is still rejected).
   private val builtinPrefixOps: Set[String] =
-    Set("-", "!", "~", "*", "&", "++", "--")
+    Set("++", "--")
+
+  /** Set of named-type names a `#operator(<sigil>)` impl is NOT allowed to
+   *  cover, because the sigil's built-in semantics already own that type.
+   *  Used by the impl-registration conflict check; checks the *raw* AST so
+   *  nominal aliases (`type Meters = new int`) remain user-overloadable.
+   */
+  private def builtinPrefixDomainNames(op: String): Set[String] =
+    val numeric = Set("int", "uint", "long", "ulong", "short", "ushort",
+      "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+      "float", "f32", "double", "f64", "char", "byte")
+    val integral = Set("int", "uint", "long", "ulong", "short", "ushort",
+      "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "char", "byte")
+    op match
+      case "-" => numeric
+      case "!" => Set("bool")
+      case "~" => integral
+      case "&" => numeric + "bool"
+      case "*" => Set.empty // pointer dereference collisions caught structurally below
+      case _   => Set.empty
+
+  /** Does `pat` (an impl's first target-type pattern) conflict with the
+   *  built-in semantics of `op`? Walks the AST head only — generic patterns
+   *  like `Parser[A]`, struct names, enum names all read as user-defined
+   *  and pass; only direct references to built-in scalar / pointer shapes
+   *  fail. The check uses the raw AST so that `type Meters = new int`
+   *  (a NamedTypeAST head of `Meters`) is freely overloadable even though
+   *  its underlying is `int`.
+   */
+  private def implOperandConflictsWithBuiltinPrefix(op: String, pat: TypeAST): Boolean =
+    val names = builtinPrefixDomainNames(op)
+    pat match
+      case NamedTypeAST(n, _) => names.contains(n)
+      case PtrTypeAST(_) | PtrNonNullTypeAST(_) | RefTypeAST(_) =>
+        op == "*" || op == "&"
+      case _ => false
+
+  /** Runtime counterpart of `builtinPrefixDomainNames`, applied to a resolved
+   *  `SyslType` at a use site. Used by the dispatch arms (UnaryAST, AddrOfAST,
+   *  DerefAST) to decide *built-in vs. user-impl-first*. Nominal aliases keep
+   *  their outer NamedType so dispatch on `type Meters = new int` doesn't
+   *  accidentally route through the built-in numeric path.
+   */
+  private def builtinPrefixDomainContains(op: String, t: SyslType): Boolean =
+    op match
+      case "-" => t.isInstanceOf[IntType] || t.isInstanceOf[UIntType] || t.isInstanceOf[FloatType]
+      case "!" => t == BoolType
+      case "~" => t.isInstanceOf[IntType] || t.isInstanceOf[UIntType]
+      case "*" => t.isInstanceOf[PtrType] || t.isInstanceOf[RefType] || t.isInstanceOf[ArrayType]
+      case "&" =>
+        t.isInstanceOf[IntType] || t.isInstanceOf[UIntType] || t.isInstanceOf[FloatType] ||
+          t == BoolType || t.isInstanceOf[PtrType] || t.isInstanceOf[RefType]
+      case _   => false
 
   /** Register #operator / #op attributes from trait methods. Arity routes the
    *  registration: a single-param trait method becomes a prefix operator;
@@ -1236,6 +1293,23 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           for m <- methods do
             if !trait_.methods.exists(_.name == m.name) then
               throw AnalysisError(s"impl method '${m.name}' is not declared in trait '$traitName'")
+          // Built-in prefix-sigil collision: when a trait method carries
+          // `#operator(<sigil>)` for one of `-`, `!`, `~`, `*`, `&`, the impl's
+          // first target pattern must NOT cover the sigil's natural built-in
+          // domain (e.g. `impl Neg[bool]` for `#operator("!")` would steal
+          // `!true`). Generic patterns (`Parser[A]`) and nominal aliases
+          // (`type Meters = new int`) read as user-defined and pass freely;
+          // only direct references to built-in scalar / pointer shapes fail.
+          if targetTypes.nonEmpty then
+            for sigilTraitMethod <- trait_.methods do
+              val opAttrs = sigilTraitMethod.attributes.filter(a => a.name == "operator" || a.name == "op")
+              for attr <- opAttrs.headOption do
+                val sigil = extractOperatorSymbol(attr, sigilTraitMethod)
+                if sigilTraitMethod.params.length == 1 && implOperandConflictsWithBuiltinPrefix(sigil, targetTypes.head) then
+                  throw AnalysisError(
+                    s"impl of '$traitName' for ${targetTypes.head} conflicts with built-in prefix '$sigil' on its natural type; pick a different operand type",
+                    decl,
+                  )
           if implTypeParams.nonEmpty then
             // Generic impl: defer signature checking + mangling to specialization time.
             // Every declared impl tvar must appear in at least one target pattern,
@@ -5573,6 +5647,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
           TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType, effects = funInfoEffects(f)))
         else
           val sym = lookup(name)
+          // User-defined `#operator("&")`: when the local's type sits OUTSIDE
+          // the built-in domain (i.e. it's a struct, enum, or nominal alias),
+          // try a user-impl dispatch first. The trait method receives the
+          // *value* of the local (not its address), matching the prefix-op
+          // contract for other custom operators.
+          if !builtinPrefixDomainContains("&", sym.typ) && customUnaryOperatorTraits.contains("&") then
+            return tryUnaryOperatorDispatch("&", TVarRef(sym.name, sym.typ))
           TAddrOf(sym.name, PtrType(sym.typ))
 
       case AddrOfFieldAST(obj, field) =>
@@ -5599,14 +5680,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case DerefAST(inner) =>
         val tInner = analyzeExpr(inner)
-        val resultType = tInner.typ.underlying match
-          case PtrType(t) => t
-          case RefType(t) => t
-          case ArrayType(t, _) => t
+        // Built-in `*` owns pointer/ref/array shapes (matched on `.underlying`
+        // to preserve the existing nominal-alias unwrap). For anything else,
+        // try a user `#operator("*")` impl before raising the no-deref error.
+        tInner.typ.underlying match
+          case PtrType(t) => return TDeref(tInner, t)
+          case RefType(t) => return TDeref(tInner, t)
+          case ArrayType(t, _) => return TDeref(tInner, t)
           case StringType => throw AnalysisError("cannot dereference string — use indexing instead")
           case SliceType(_) => throw AnalysisError("cannot dereference slice — use indexing instead")
-          case t => throw AnalysisError(s"cannot dereference $t")
-        TDeref(tInner, resultType)
+          case _ => ()
+        if customUnaryOperatorTraits.contains("*") then
+          return tryUnaryOperatorDispatch("*", tInner)
+        throw AnalysisError(s"cannot dereference ${tInner.typ}")
 
       case IndexAST(arr, index) =>
         val tArr = analyzeExpr(arr)
@@ -5681,20 +5767,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case UnaryAST(op, operand) =>
         val tOperand = analyzeExpr(operand)
-        // User-defined prefix operator (registered via #operator on a single-param
-        // trait method). Built-in prefix ops (-, !, ~, *, &, ++, --) are blocked
-        // at registration time, so they always fall through to the analyzer's
-        // built-in arms below.
+        // Dispatch order for `-`, `!`, `~`: built-in semantics own their
+        // natural operand types (numeric, bool, integral). For an operand
+        // *outside* that domain, fall through to a user `#operator(<sigil>)`
+        // impl if one is registered. Pure-user prefix ops (e.g. `<>`) skip
+        // the built-in branch entirely and go straight to dispatch.
+        val isBuiltinSigil = op == "-" || op == "!" || op == "~"
+        if isBuiltinSigil && builtinPrefixDomainContains(op, tOperand.typ) then
+          val resultType = op match
+            case "-" => tOperand.typ
+            case "~" => tOperand.typ
+            case "!" => BoolType
+            case _   => throw AnalysisError(s"impossible op: $op")
+          return TUnary(op, tOperand, resultType)
         if customUnaryOperatorTraits.contains(op) then
           return tryUnaryOperatorDispatch(op, tOperand)
         val resultType = op match
-          case "-" => tOperand.typ
-          case "~" =>
-            if !tOperand.typ.isIntegral then throw AnalysisError(s"unary ~ requires integral type, got ${tOperand.typ}")
-            tOperand.typ
-          case "!" =>
-            if tOperand.typ != BoolType then throw AnalysisError(s"unary ! requires bool, got ${tOperand.typ}")
-            BoolType
+          case "-" => throw AnalysisError(s"unary - requires numeric type, got ${tOperand.typ}; bind it via #operator(\"-\") on a single-param trait method")
+          case "~" => throw AnalysisError(s"unary ~ requires integral type, got ${tOperand.typ}; bind it via #operator(\"~\") on a single-param trait method")
+          case "!" => throw AnalysisError(s"unary ! requires bool, got ${tOperand.typ}; bind it via #operator(\"!\") on a single-param trait method")
           case other =>
             throw AnalysisError(
               s"unknown prefix operator '$other' on ${tOperand.typ}; bind it via #operator(\"$other\") on a single-param trait method")

@@ -1640,9 +1640,11 @@ method's arity decides which slot the symbol fills:
   right). Anything else is a registration error.
 
 The lexer admits the same operator-character set as for binary, so any
-greedy sequence of operator chars that doesn't shadow a built-in prefix
-sigil (`-`, `!`, `~`, `*`, `&`, `++`, `--`) or any binary-reserved
-operator can become a user prefix op:
+greedy sequence of operator chars that doesn't shadow a binary-reserved
+operator or the lvalue-mutation sigils `++` / `--` can become a user
+prefix op. The five built-in prefix sigils — `-`, `!`, `~`, `*`, `&` —
+*are* overloadable, but only for operand types that fall outside their
+natural built-in domain (see "Built-in prefix sigils" below).
 
 ```sysl
 struct N
@@ -1671,12 +1673,51 @@ operator if it lives on two distinct traits — arity routes the
 registration into separate dispatch tables. Within a single trait
 method, only the param count matters.
 
-Diagnostics:
+**Built-in prefix sigils.** The five sigils `-`, `!`, `~`, `*`, `&`
+keep their fixed built-in semantics on their natural operand types:
 
-- A built-in prefix sigil (`-`, `!`, `~`, `*`, `&`, `++`, `--`) used
-  with `#operator(...)` on a single-param trait method is rejected at
-  registration time: *prefix operator '-' is reserved for built-in
-  dispatch; cannot overload via #operator*.
+| Sigil | Built-in domain          | Built-in meaning                |
+|-------|--------------------------|---------------------------------|
+| `-`   | numeric (int / uint / float) | arithmetic negation         |
+| `!`   | `bool`                   | logical negation                |
+| `~`   | integral (int / uint)    | bitwise complement              |
+| `*`   | pointer / ref            | dereference                     |
+| `&`   | built-in scalars + ptr   | address-of                      |
+
+For *other* operand types the analyzer falls through to a user
+`#operator(<sigil>)` impl when one is registered. This is what makes
+PEG-style libraries express `&p` / `!p` lookahead naturally:
+
+```sysl
+type Parser[A] = new int
+
+trait Peek[A, R]
+    #operator("&")
+    peek(a: A) -> R
+
+impl[A] Peek[Parser[A], Parser[A]]
+    peek(a: Parser[A]) -> Parser[A] = a   // positive lookahead
+
+trait Not[A, R]
+    #operator("!")
+    notp(a: A) -> R
+
+impl[A] Not[Parser[A], Parser[unit]]
+    notp(a: Parser[A]) -> Parser[unit] = ...  // negative lookahead
+```
+
+`&p` for `p: Parser[int]` dispatches to `Peek.peek(p)` and returns a
+`Parser[int]`; `&i` for `i: int` still produces `*int` (built-in
+address-of), since `int` is in `&`'s natural domain.
+
+`++` and `--` remain reserved (statement-shaped lvalue mutation).
+
+**Diagnostics:**
+
+- An impl that would steal a built-in's natural domain — e.g.
+  `impl Neg[bool]` with `#operator("!")` — is rejected at
+  registration: *impl of 'Neg' for bool conflicts with built-in
+  prefix '!' on its natural type; pick a different operand type*.
 - An unbound prefix-shaped expression like `<>x` (no trait carries
   `#operator("<>")` on a single-param method) produces *unknown
   prefix operator '<>' on T; bind it via `#operator("<>")` on a
@@ -1684,11 +1725,6 @@ Diagnostics:
 - A registered prefix op applied to an operand whose type doesn't
   match any impl produces *no impl of 'Boost' for prefix operator
   '<>' on int*.
-
-Prefix overloading does **not** extend to the built-in unary minus,
-bitwise-not, or logical-not — those keep their fixed semantics.
-Adding a `Neg` trait for unary `-` on user types is a deliberate
-follow-up, not part of this surface.
 
 #### Multi-Parameter Traits
 
