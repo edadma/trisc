@@ -233,6 +233,56 @@ class SyslByNameParamTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 0
   }
 
+  // ===== Apply chained to a by-name reference: `b(x)` =====
+  //
+  // When `b: => T` and the user writes `b(args)`, `b` must auto-evaluate
+  // the thunk *first* (yielding a value of type T), and `args` must apply
+  // to that value. Without this composition the analyzer was treating
+  // `b(args)` as a direct invocation of the thunk with the user's args —
+  // silently producing nonsense at runtime because the thunk has 0 params
+  // but was being called with the user's arg list. This was the bug
+  // blocking parsyl's `~>` impl (`b(na)` in the Success arm).
+  //
+  // Fix: in the CallAST local-shadow path, if the local is by-name AND
+  // its visible type T is callable, emit
+  //   TIndirectCall( TIndirectCall(TVarRef(b, ()->T), Nil, T),
+  //                  args, ResultType )
+  // — inner indirect-call evaluates the thunk; outer applies args to
+  // the resulting value. If T is not callable, surface a clear error.
+
+  "b(x) where b is by-name and T is a nominal alias of a function type" in {
+    eval(
+      """type Box = new (int) -> int
+        |
+        |apply_byname(b: => Box, x: int) -> int = b(x)
+        |
+        |id_box() -> Box = Box((x: int) -> x)
+        |
+        |main() -> int = apply_byname(id_box(), 7)
+        |""".stripMargin) shouldBe 7
+  }
+
+  "b(x) where b is by-name and T is a bare function type" in {
+    eval(
+      """apply_byname(b: => (int) -> int, x: int) -> int = b(x)
+        |id_fn(x: int) -> int = x
+        |main() -> int = apply_byname(id_fn, 7)
+        |""".stripMargin) shouldBe 7
+  }
+
+  "b(x) where T is not callable is rejected with a clear error" in {
+    val ex = intercept[Exception] {
+      eval(
+        """apply_byname(b: => int, x: int) -> int = b(x)
+          |main() -> int = apply_byname(7, 0)
+          |""".stripMargin)
+    }
+    val msg = ex.getMessage.toLowerCase
+    assert(msg.contains("call") || msg.contains("apply") ||
+           msg.contains("not a function") || msg.contains("not callable"),
+      s"applying to a non-callable by-name should error, got: ${ex.getMessage}")
+  }
+
   // ===== Regression — normal `T` params unchanged =====
 
   "regression: ordinary param semantics unchanged (eager eval)" in {

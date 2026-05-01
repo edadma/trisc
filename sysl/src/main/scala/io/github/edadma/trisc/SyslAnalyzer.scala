@@ -6097,6 +6097,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             // Match through nominal aliases: a local `p: Parser[int]` whose
             // underlying type is a FuncType is callable, and must shadow any
             // like-named global.
+            //
+            // By-name composition: if `b: => T` and the user writes `b(args)`,
+            // we must first auto-evaluate the thunk to get a value of type T,
+            // *then* apply args to that value. The visible-to-user type of `b`
+            // is `T`; the storage type is `() -> T`. So the inner step is
+            // `TIndirectCall(TVarRef(b, () -> T), Nil, T)`, and the outer step
+            // applies args through that result the same way it would for a
+            // bare local of type T. If T is not callable, fall through to
+            // surface a normal "not a function" diagnostic at checkArgs.
             sym.typ.underlying match
               case ft: FuncType =>
                 val expectedTypes = ft.params.map(t => Some(t): Option[SyslType])
@@ -6107,7 +6116,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                 }
                 val paramPairs = ft.params.zipWithIndex.map((t, i) => (s"_p$i", t))
                 val checkedArgs = checkArgs(name, paramPairs, tArgs)
-                return TIndirectCall(TVarRef(name, sym.typ), checkedArgs, ft.returnType)
+                val callee: TExpr =
+                  if sym.isByName then
+                    val thunkType = FuncType(Nil, sym.typ, effects = FuncEffects.Unknown)
+                    TIndirectCall(TVarRef(sym.name, thunkType), Nil, sym.typ)
+                  else
+                    TVarRef(name, sym.typ)
+                return TIndirectCall(callee, checkedArgs, ft.returnType)
+              case _ if sym.isByName =>
+                throw AnalysisError(
+                  s"by-name parameter '$name' has type ${sym.typ}, which is not callable; cannot apply arguments")
               case _ => () // local exists but isn't callable — fall through to global
           case None => ()
         // For each param, the expected arg type during analysis. For Out/Inout the
