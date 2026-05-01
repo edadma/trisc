@@ -2277,6 +2277,58 @@ x &= 0xFF   x |= 0x01   x ^= 0xAA   x <<= 2   x >>= 1
 p += 2    p -= 1
 ```
 
+### Line Continuation
+
+A binary operator at the end of a line — built-in or user-defined via
+`#operator(...)` — suppresses the implicit newline so the right-hand
+side can live on the next indented line. This mirrors what `(`, `[`,
+`{` already do for the tokens *inside* them; here it's driven by the
+*trailing* token instead.
+
+```sysl
+// Built-in operators
+val x = some_long_call() +
+    another_call() * 2
+
+if condition_one &&
+    condition_two then ...
+
+x +=
+    expensive_computation()
+
+// User-defined operators (parser-combinator style)
+val parser = literal("ab") ~>
+    rep(digit) <~
+    literal(";") ^^
+    ((digits) -> ...)
+```
+
+Tokens that look like binary operators by shape but are **excluded**
+from the rule (because they end a statement or drive their own
+indented-block construct):
+
+| Token       | Why excluded                                       |
+|-------------|----------------------------------------------------|
+| `=`         | introduces an indented val/var/function body       |
+| `->` `=>`   | block trigger (function body, match arm, etc.)     |
+| `++` `--`   | postfix; legitimately ends a statement             |
+| `*`         | the `import std.foo.*` glob marker                 |
+
+For multi-line multiplication, break **inside** parens or before — not
+after — the `*`:
+
+```sysl
+val product = (
+    very_long_factor *
+    another_factor *
+    one_more_factor
+)
+```
+
+Leading-operator continuation (operator at the *start* of the next
+line, after a complete expression) is not supported; only trailing-
+operator continuation is.
+
 ### Casts
 
 ```sysl

@@ -90,6 +90,27 @@ class SyslLexical extends IndentationLexical(
     else if buf.length == 1 && buf.charAt(0) == '&' && (c == '*' || c == '+' || c == '-' || c == '~' || c == '!') then true
     else false
 
+  // Tokens that look like binary operators by shape (all-opChar keywords) but
+  // do NOT continue an expression onto the next line. Excluded because they
+  // either:
+  //   - legitimately end a statement (`++` / `--`)
+  //   - drive their own indented-block parser construct (`=`, `->`, `=>`)
+  //   - serve as a non-operator marker in some position (`*` is the glob
+  //     wildcard in `import std.foo.*` — treating it as continuation would
+  //     glue the next decl onto the import line)
+  // Everything else made of opChars (built-in `+ - / %` etc., user-defined
+  // `^^ ~ ~> <~ |` etc.) is treated as a trailing-continuation token by
+  // `isLineContinuationToken`.
+  private val lineContinuationExclusions: Set[String] =
+    Set("=", "->", "=>", "++", "--", "*")
+
+  override protected def isLineContinuationToken(tok: Token): Boolean = tok match
+    case k: Keyword =>
+      k.chars.nonEmpty &&
+        k.chars.forall(opChars.contains) &&
+        !lineContinuationExclusions.contains(k.chars)
+    case _ => false
+
   private def operatorMuncher: Parser[Token] =
     Parser { in =>
       if in.atEnd || !opChars(in.first) || startsComment(in) then
