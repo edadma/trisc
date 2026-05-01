@@ -2200,6 +2200,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixshut: bad"
   }
 
+  "unix: abstract namespace bind/connect/getsockname round-trip" in {
+    // Linux abstract sockets (sun_path[0] == NUL): the leading
+    // NUL plus the body is the key. Verifies STREAM bind+listen+
+    // connect+accept on \0abs1, getsockname returns the leading
+    // NUL form (no trailing NUL, addrlen = 2 + plen), abstract
+    // and filesystem-style namespaces are disjoint, and DGRAM
+    // sendto/recvfrom against an abstract address works.
+    val output = qemu.command("test_unixabs")
+    output should include("unixabs: ok")
+    output should not include "unixabs: bad"
+  }
+
   "udp: 1024-byte datagram via 127.0.0.1 loopback" in {
     // Verifies the bumped UDP datagram cap (512 → 1472). Sends a
     // 1024-byte body with byte i = (i & 0xff), recvfrom-validates

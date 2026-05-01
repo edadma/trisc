@@ -1605,8 +1605,23 @@ are reclaimed via `shim_unix_close` so the server doesn't leak.
 
 
 Read sun_path into `out` and return the effective length.
-addrlen ≤ 2 → -1. Stops at the first NUL byte in
-[2..addrlen). Returns -1 if path is empty or > UNIX_PATH_MAX.
+addrlen ≤ 2 → -1.
+
+Two flavors:
+
+  - **Abstract namespace** (Linux): sun_path[0] is NUL and the
+    rest of the bytes up to addrlen are the key (no NUL
+    terminator inside; embedded NULs are part of the name).
+    We copy the leading NUL plus the remaining bytes into
+    `out`, so two abstract sockets named `\0foo` and `\0fo` are
+    distinct keys, and the abstract namespace is automatically
+    disjoint from filesystem-style keys (which never start
+    with NUL).
+  - **Filesystem path**: sun_path[0] is non-NUL and the bytes
+    up to the first NUL form the key (C-string convention).
+
+Returns -1 if the parsed key is empty or exceeds
+UNIX_PATH_MAX.
 
     shim_unix_read_path(addr_ptr: i64, addrlen: int,
             out: *byte, out_cap: int) -> int
@@ -1618,6 +1633,18 @@ addrlen ≤ 2 → -1. Stops at the first NUL byte in
             avail = out_cap
         if avail > UNIX_PATH_MAX
             avail = UNIX_PATH_MAX
+        if avail <= 0
+            return -1
+        if src[2] == byte(0)
+            // Abstract namespace: copy leading NUL + body verbatim
+            // (no NUL-terminator scan; embedded NULs are name bytes).
+            var n = 0
+            while n < avail
+                out[n] = src[2 + n]
+                n += 1
+            if n <= 1
+                return -1
+            return n
         var n = 0
         var done = 0
         while done == 0
@@ -4165,13 +4192,23 @@ peer short-circuit.
 
 Write a `sockaddr_un` into the caller's buffer and return the
 addrlen value Linux would set:
-  - empty path → addrlen = 2 (just the family field)
-  - non-empty path → addrlen = 2 + plen + 1 (family + path + NUL)
-The path is bounded to UNIX_PATH_MAX bytes; the trailing NUL is
-written when there's room (the receive buffer is sockaddr_un
-which is 110 bytes, so 2 + UNIX_PATH_MAX still fits).
+  - empty path → addrlen = 2 (just the family field).
+  - filesystem path (non-empty, path[0] != 0) → addrlen =
+    2 + plen + 1 (family + path + trailing NUL).
+  - abstract path (plen >= 1, path[0] == 0) → addrlen =
+    2 + plen (family + path including the leading NUL, NO
+    trailing NUL — Linux preserves abstract names exactly).
+
+The path is bounded to UNIX_PATH_MAX bytes; the trailing NUL
+on the filesystem branch is written when there's room (the
+receive buffer is sockaddr_un which is 110 bytes, so
+2 + UNIX_PATH_MAX still fits).
 
     shim_write_sockaddr_un(addr_ptr: i64, path: *byte, plen: int) -> int
+        var abstract_ns = 0
+        if plen >= 1
+            if path[0] == byte(0)
+                abstract_ns = 1
         if addr_ptr != i64(0)
             val a: *byte = *byte(addr_ptr)
             a[0] = byte(POSIX_AF_UNIX & 0xff)
@@ -4183,10 +4220,13 @@ which is 110 bytes, so 2 + UNIX_PATH_MAX still fits).
             while i < pcopy
                 a[2 + i] = path[i]
                 i += 1
-            if 2 + pcopy < 110
-                a[2 + pcopy] = byte(0)
+            if abstract_ns == 0
+                if 2 + pcopy < 110
+                    a[2 + pcopy] = byte(0)
         if plen == 0
             return 2
+        if abstract_ns != 0
+            return 2 + plen
         2 + plen + 1
 
 

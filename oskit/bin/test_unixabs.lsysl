@@ -1,0 +1,285 @@
+test_unixabs — AF_UNIX abstract namespace
+==========================================
+
+Validates Linux-style abstract sockets (sun_path[0] == NUL).
+slix's registry is byte-keyed, so the leading NUL is part of
+the key — abstract `\0foo` and filesystem `foo` are disjoint
+namespaces, matching Linux's separation.
+
+Cases:
+  1. STREAM bind to abstract `\0abs1`, listen, connect from
+     a fresh socket → connect succeeds.
+  2. getsockname on the bound listener returns family + leading
+     NUL + body, addrlen = 2 + 6 = 8 (NO trailing NUL).
+  3. STREAM bind to filesystem `abs1` (no leading NUL) does NOT
+     collide with the abstract `\0abs1` from case 1.
+  4. DGRAM bind+sendto on an abstract path → recvfrom drains.
+
+Pass criterion: prints `unixabs: ok`.
+
+    module oskit.bin.test_unixabs
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_BIND        = 135
+    val NR_CONNECT     = 148
+    val NR_LISTEN      = 217
+    val NR_ACCEPT      = 131
+    val NR_CLOSE       = 147
+    val NR_SOCKET      = 337
+    val NR_SENDTO      = 307
+    val NR_RECVFROM    = 276
+    val NR_GETSOCKNAME = 203
+
+    val AF_UNIX_V      = 1
+    val SOCK_STREAM_V  = 1
+    val SOCK_DGRAM_V   = 2
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("unixabs: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype),
+            i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen),
+            0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, alp: *i32) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(alp),
+            0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen),
+            0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, n: int,
+            addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(n), 0,
+            i64(addr), i64(addrlen)))
+
+    posix_recvfrom(fd: int, buf: *byte, n: int,
+            addr: *byte, alp: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(n), 0,
+            i64(addr), i64(alp)))
+
+    posix_getsockname(fd: int, addr: *byte, alp: *i32) -> int
+        int(syscall6(NR_GETSOCKNAME, i64(fd), i64(addr),
+            i64(alp), 0, 0, 0))
+
+
+Build a sockaddr_un for an abstract socket. `body` is the name
+*after* the leading NUL. addrlen = 2 + 1 + body_len.
+
+    fill_sockaddr_un_abs(out: *byte, body: *byte, blen: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        out[2] = byte(0)        // leading NUL = abstract marker
+        var i = 0
+        while i < blen
+            out[3 + i] = body[i]
+            i += 1
+        2 + 1 + blen
+
+
+Build a sockaddr_un for a filesystem-style socket. addrlen =
+2 + plen + 1 (NUL terminator).
+
+    fill_sockaddr_un_fs(out: *byte, path: *byte, plen: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < plen
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + plen] = byte(0)
+        2 + plen + 1
+
+
+    main(argv: []string)
+
+Case 1+2: STREAM listener bound to abstract `\0abs1`, client
+connects, getsockname on listener returns the abstract name.
+
+        var nm1: [4]byte
+        nm1[0] = 'a'; nm1[1] = 'b'; nm1[2] = 's'; nm1[3] = '1'
+
+        val l = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if l < 0
+            fail(1)
+            return
+        var sa: [128]byte
+        val al = fill_sockaddr_un_abs(&sa[0], &nm1[0], 4)
+        // al == 2 + 1 + 4 == 7
+        if posix_bind(l, &sa[0], al) != 0
+            fail(2)
+            return
+        if posix_listen(l, 4) != 0
+            fail(3)
+            return
+
+getsockname returns family(2) + NUL + "abs1" = 7 bytes.
+
+        var gsa: [128]byte
+        var gal: i32 = 128
+        if posix_getsockname(l, &gsa[0], &gal) != 0
+            fail(4)
+            return
+        if gal != i32(7)
+            puts("unixabs: gsn alen=")
+            print_idec(int(gal))
+            puts("\n")
+            fail(5)
+            return
+        if gsa[0] != byte(AF_UNIX_V)
+            fail(6)
+            return
+        if gsa[2] != byte(0)
+            fail(7)
+            return
+        if gsa[3] != byte('a')
+            fail(8)
+            return
+        if gsa[4] != byte('b')
+            fail(9)
+            return
+        if gsa[5] != byte('s')
+            fail(10)
+            return
+        if gsa[6] != byte('1')
+            fail(11)
+            return
+
+Connect a fresh socket to the abstract address.
+
+        val c = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if c < 0
+            fail(12)
+            return
+        if posix_connect(c, &sa[0], al) != 0
+            fail(13)
+            return
+
+Listener accepts and we close everything.
+
+        var aa: [128]byte
+        var aal: i32 = 128
+        val s = posix_accept(l, &aa[0], &aal)
+        if s < 0
+            fail(14)
+            return
+        if posix_close(c) != 0
+            fail(15)
+            return
+        if posix_close(s) != 0
+            fail(16)
+            return
+        if posix_close(l) != 0
+            fail(17)
+            return
+
+Case 3: a STREAM listener bound to filesystem `abs1` (no leading
+NUL) does NOT collide with the abstract `\0abs1` namespace.
+After case 1's listener was closed, the abstract key is freed.
+We re-bind it on a fresh listener AND a separate filesystem
+listener simultaneously — both must succeed.
+
+        val la = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if la < 0
+            fail(18)
+            return
+        if posix_bind(la, &sa[0], al) != 0
+            fail(19)
+            return
+        if posix_listen(la, 4) != 0
+            fail(20)
+            return
+        val lf = posix_socket(AF_UNIX_V, SOCK_STREAM_V, 0)
+        if lf < 0
+            fail(21)
+            return
+        var sf: [128]byte
+        val alf = fill_sockaddr_un_fs(&sf[0], &nm1[0], 4)
+        // alf == 2 + 4 + 1 == 7
+        if posix_bind(lf, &sf[0], alf) != 0
+            puts("unixabs: fs_bind collided\n")
+            fail(22)
+            return
+        if posix_close(la) != 0
+            fail(23)
+            return
+        if posix_close(lf) != 0
+            fail(24)
+            return
+
+Case 4: DGRAM bind + sendto + recvfrom on an abstract address.
+
+        var nm2: [4]byte
+        nm2[0] = 'a'; nm2[1] = 'b'; nm2[2] = 's'; nm2[3] = '2'
+        var sa2: [128]byte
+        val al2 = fill_sockaddr_un_abs(&sa2[0], &nm2[0], 4)
+
+        val ds = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if ds < 0
+            fail(25)
+            return
+        if posix_bind(ds, &sa2[0], al2) != 0
+            fail(26)
+            return
+
+        val dc = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if dc < 0
+            fail(27)
+            return
+        var pmsg: [3]byte
+        pmsg[0] = 'h'; pmsg[1] = 'i'; pmsg[2] = '!'
+        if posix_sendto(dc, &pmsg[0], 3, &sa2[0], al2) != 3
+            fail(28)
+            return
+        var rb: [16]byte
+        var rl: i32 = 128
+        var ra: [128]byte
+        val rn = posix_recvfrom(ds, &rb[0], 16, &ra[0], &rl)
+        if rn != 3
+            puts("unixabs: dg recv n=")
+            print_idec(rn)
+            puts("\n")
+            fail(29)
+            return
+        if rb[0] != byte('h')
+            fail(30)
+            return
+        if posix_close(ds) != 0
+            fail(31)
+            return
+        if posix_close(dc) != 0
+            fail(32)
+            return
+
+        puts("unixabs: ok\n")
+        exit()
