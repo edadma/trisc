@@ -473,6 +473,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     case TupleTypeAST(elems)      => elems.flatMap(collectNamedTypeNames).toSet
     case ByNameTypeAST(i)         => collectNamedTypeNames(i)
 
+  /** Walk a `SyslType` collecting every named struct/enum/nominal-alias name. Used by the
+   *  named-import path so that importing a function whose signature mentions a struct from
+   *  the same module also pulls in that struct's methods — methods belong to the type, not
+   *  the import scope.
+   */
+  private def collectStructAndEnumNames(t: SyslType): Set[String] = t match
+    case SyslType.StructType(name, _, _)        => Set(name)
+    case SyslType.EnumType(name, _)             => Set(name)
+    case SyslType.NamedType(name, base, _, _, _) => Set(name) ++ collectStructAndEnumNames(base)
+    case SyslType.PtrType(p)                    => collectStructAndEnumNames(p)
+    case SyslType.RefType(i)                    => collectStructAndEnumNames(i)
+    case SyslType.ArrayType(e, _)               => collectStructAndEnumNames(e)
+    case SyslType.SliceType(e)                  => collectStructAndEnumNames(e)
+    case SyslType.FuncType(ps, r, _, _)         => ps.iterator.flatMap(collectStructAndEnumNames).toSet ++ collectStructAndEnumNames(r)
+    case _                                      => Set.empty
+
   /** Stage F.5 — orphan rule. An impl is allowed iff this module owns the trait OR at
    *  least one named type appearing in the impl's target patterns. Empty `currentModule`
    *  (no `module` declaration) is treated as the implicit "root" module: orphan check
@@ -596,13 +612,31 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case List(WildcardImport) => dedup(meta.publicSymbols)
       case named =>
         val nameMap = named.collect { case NamedImport(n, r) => (n, r) }.toMap
-        // Match selectors against short names (without module prefix)
-        // When a struct or enum is imported by name, also pull in its methods (StructName_method)
+        // Match selectors against short names (without module prefix).
+        // When a struct or enum is imported by name, pull in its methods
+        // (StructName_method). When a *function* is imported and its
+        // signature mentions a struct/enum that lives in this same module,
+        // also pull in that type's methods — methods belong to the type, not
+        // the import scope, so `import std.builder.{new_builder}` should let
+        // the user call methods on the returned `StrBuilder` without naming
+        // it in the selector list.
         val directMatch = meta.publicSymbols.filter(sym => nameMap.contains(shortName(sym.name)))
-        val importedTypeNames = directMatch.collect {
+        val moduleStructAndEnumNames: Set[String] =
+          meta.publicSymbols.collect {
+            case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Struct] => shortName(sym.name)
+            case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Enum]   => shortName(sym.name)
+          }.toSet
+        val explicitlyImportedTypeNames = directMatch.collect {
           case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Struct] => shortName(sym.name)
-          case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Enum] => shortName(sym.name)
+          case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Enum]   => shortName(sym.name)
         }.toSet
+        val typesReachableFromImportedFuncs: Set[String] =
+          directMatch.iterator.collect {
+            case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Func] =>
+              val SymbolMeta.Kind.Func(params, ret, _, _, _, _) = sym.typ: @unchecked
+              (params :+ ret).iterator.flatMap(collectStructAndEnumNames).toSet
+          }.flatten.toSet.intersect(moduleStructAndEnumNames)
+        val importedTypeNames = explicitlyImportedTypeNames ++ typesReachableFromImportedFuncs
         val withMethods = if importedTypeNames.isEmpty then directMatch
         else directMatch ++ meta.publicSymbols.filter { sym =>
           sym.typ.isInstanceOf[SymbolMeta.Kind.Func] &&
