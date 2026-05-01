@@ -62,7 +62,7 @@ object SyslPrettyPrinter:
       val body = fields.map((n, t, _) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
       s"struct $name$tpStr\n$body"
 
-    case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _, isDef) =>
+    case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _, isDef, _) =>
       val priv = if isPrivate then "private " else ""
       val defKw = if isDef then "def " else ""
       val tpStr =

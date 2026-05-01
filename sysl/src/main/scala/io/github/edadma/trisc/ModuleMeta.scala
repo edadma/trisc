@@ -303,7 +303,7 @@ object ModuleMeta:
               ast.decls.filter {
                 case StructDeclAST(_, _, tps, _, _)        => tps.nonEmpty
                 case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
-                case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+                case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
                 case _: TraitDeclAST                        => true
                 case _                                      => false
               }

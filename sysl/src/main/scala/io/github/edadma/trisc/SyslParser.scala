@@ -254,6 +254,17 @@ class SyslParser extends StandardTokenParsers {
         val bounds = tps.collect { case (n, bs) if bs.nonEmpty => (n, bs) }.toMap
         FunDeclAST(name, params, rt, body, priv, names, bounds)
     } |
+      // Parameterless function: `name -> RetType = body` or
+      // `name -> RetType <indented block>`. Disambiguates from typed val
+      // (which uses `:`) by the `->` token. Cannot have type parameters
+      // (a generic parameterless makes no sense — there's nothing at the
+      // call site to fix the type args). Auto-called at every reference.
+      ident ~ ("->" ~> typeRef) ~ ("=" ~> bodyExprOrBlock) ^^ {
+        case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), body, priv, isParameterless = true)
+      } |
+      ident ~ ("->" ~> typeRef) ~ funBlockBody ^^ {
+        case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), body, priv, isParameterless = true)
+      } |
       opt("volatile") ~ opt(mutability) ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ {
         case vol ~ mut ~ name ~ t ~ e =>
           val m = mut.getOrElse(Mut(true, false))

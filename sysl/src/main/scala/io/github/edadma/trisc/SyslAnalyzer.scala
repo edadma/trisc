@@ -40,9 +40,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   // `byName`: indices of call-by-name params (storage type `() -> T`,
   // user-visible as `T`). Empty list (the default) means no by-name params.
   // Parallel to `params`/`modes` when non-empty.
-  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isGhost: Boolean = false, byName: List[Boolean] = Nil):
+  // `isParameterless`: declared without `()` (`f -> T = body`); referenced
+  // by bare name (auto-called at every VarRefAST). Same auto-call mechanism
+  // as `isDef` uses, but does not imply purity.
+  private case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isGhost: Boolean = false, byName: List[Boolean] = Nil, isParameterless: Boolean = false):
     def modeOf(i: Int): ParamMode = if modes.isEmpty then ParamMode.In else modes(i)
     def isByNameAt(i: Int): Boolean = byName.nonEmpty && i < byName.length && byName(i)
+    def autoCallsBare: Boolean = isDef || isParameterless
     def hasEffectAnnotations: Boolean = reads.isDefined || writes.isDefined || isPure
 
   private val globalScope = new mutable.LinkedHashMap[String, SymInfo]
@@ -770,7 +774,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
     def funcSelected(name: String): Boolean = filter.forall(_.contains(name))
     for decl <- program.decls do
       decl match
-        case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _) if tps.nonEmpty =>
+        case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _, _) if tps.nonEmpty =>
           if funcSelected(name) && !genericTemplates.contains(name) && !functions.contains(name) then
             genericTemplates(name) = fd
         case sd @ StructDeclAST(name, _, tps, _, _) if tps.nonEmpty =>
@@ -902,7 +906,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             // Fields already resolved by pass 0.5 (resolveStructsAndEnums).
             // Do not re-assign structTypes here — that would invalidate references captured
             // by function signatures processed later in this same source-order loop.
-        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _, isDef) =>
+        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _, isDef, _) =>
           // Duplicate-parameter-name check.
           val seenParams = mutable.HashSet[String]()
           for p <- params do
@@ -997,7 +1001,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
               throw AnalysisError(s"#ghost on '$name' is incompatible with #pure (ghost code is removed before codegen, so #pure is meaningless)", fd)
             if isGhost && (readsSet.isDefined || writesSet.isDefined) then
               throw AnalysisError(s"#ghost on '$name' is incompatible with #reads/#writes (ghost code is removed before codegen)", fd)
-            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet, isGhost, if anyByName then byNameFlags else Nil)
+            // Collision check: a parameterless decl and a zero-arg decl with the
+            // same name are ambiguous at the call site (`foo` could mean either),
+            // so reject. (Two zero-arg or two parameterless decls with the same
+            // name are caught by the regular duplicate-function check above.)
+            if fd.isParameterless && fd.typeParams.nonEmpty then
+              throw AnalysisError(s"parameterless function '$name' cannot be generic", decl)
+            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet, isGhost, if anyByName then byNameFlags else Nil, fd.isParameterless)
             // Record #deprecated info
             for attr <- fd.attributes if attr.name == "deprecated" do
               val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
@@ -1365,7 +1375,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         if tparams.nonEmpty then TTypeAliasDecl(name, UnitType) // generic alias: type-only, no codegen
         else TTypeAliasDecl(name, resolveType(NamedTypeAST(name))) // force resolution (and range validation)
 
-      case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs, _) =>
+      case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs, _, _) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val funInfo = functions(name)
@@ -1437,7 +1447,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
         if funInfo.isPure then
-          val isDefFn = fdAst match { case FunDeclAST(_, _, _, _, _, _, _, _, d) => d }
+          val isDefFn = fdAst match { case FunDeclAST(_, _, _, _, _, _, _, _, d, _) => d }
           validatePureFn(name, tBody, funInfo.params.map(_._1), isDefFn)
         if funInfo.reads.isDefined || funInfo.writes.isDefined then
           validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
@@ -5357,8 +5367,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         // Check if name is a function (used as a value = function pointer)
         if functions.contains(name) then
           val f = functions(name)
-          if f.isDef then
-            // Auto-call: bare reference to a def function emits a call
+          if f.autoCallsBare then
+            // Auto-call: bare reference to a `def` or parameterless function
+            // emits a call. Both forms are designed to read like a value at
+            // the use site — the call is implicit.
             TCall(f.name, Nil, f.returnType)
           else
             TFuncRef(f.name, FuncType(f.params.map(_._2), f.returnType, effects = funInfoEffects(f)))
@@ -6169,15 +6181,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         else if functions.contains(name) || builtinFunctions.contains(name) then
           warnDeprecated(name)
           val funInfo = lookupFun(name)
-          if funInfo.isDef && funInfo.params.isEmpty && tArgs.nonEmpty then
-            // Auto-call def, then indirect-call the result with the provided args
+          if funInfo.autoCallsBare && funInfo.params.isEmpty && tArgs.nonEmpty then
+            // Auto-call def or parameterless, then indirect-call the result
+            // with the provided args. Mirrors the bare-VarRef auto-call path.
             val autoCall = TCall(funInfo.name, Nil, funInfo.returnType)
             funInfo.returnType match
               case FuncType(fParams, fRet, _, _) =>
                 val paramPairs = fParams.zipWithIndex.map((t, i) => (s"_p$i", t))
                 val checkedArgs = checkArgs(name, paramPairs, tArgs)
                 TIndirectCall(autoCall, checkedArgs, fRet)
-              case _ => throw AnalysisError(s"def '$name' returns ${funInfo.returnType}, not a callable type")
+              case _ => throw AnalysisError(s"'$name' returns ${funInfo.returnType}, not a callable type")
           else
             val checkedArgs = checkArgs(name, funInfo.params, tArgs, funInfo.modes)
             TCall(funInfo.name, checkedArgs, funInfo.returnType)
