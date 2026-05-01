@@ -1,17 +1,18 @@
-test_unixpair — AF_UNIX SOCK_STREAM socketpair
-===============================================
+test_unixpair — AF_UNIX SOCK_STREAM + SOCK_DGRAM socketpair
+============================================================
 
-Validates `socketpair(AF_UNIX, SOCK_STREAM, 0, sv)`.
+Validates `socketpair(AF_UNIX, SOCK_STREAM/DGRAM, 0, sv)`.
 
 Cases:
-  1. Plain socketpair: two distinct, non-negative fds; write on
-     sv[0] is read by sv[1].
-  2. Bidirectional: write on sv[1] is read by sv[0].
+  1. Plain STREAM socketpair: two distinct, non-negative fds;
+     write on sv[0] is read by sv[1].
+  2. Bidirectional STREAM: write on sv[1] is read by sv[0].
   3. EOF semantics: close sv[0] → read on sv[1] returns 0.
   4. SOCK_NONBLOCK propagation: read on empty sv[0] returns
      -EAGAIN; fcntl(F_GETFL) reports O_NONBLOCK on both fds.
   5. AF_INET socketpair → -EAFNOSUPPORT.
-  6. AF_UNIX SOCK_DGRAM socketpair → -EOPNOTSUPP (deferred).
+  6. DGRAM socketpair: write/read round-trip both directions
+     (each fd has the other as default peer via peer_idx).
 
 Pass criterion: prints `unixpair: ok`.
 
@@ -36,7 +37,6 @@ Pass criterion: prints `unixpair: ok`.
     val O_NONBLOCK_V   = 2048
 
     val EAGAIN_V       = 11
-    val EOPNOTSUPP_V   = 95
     val EAFNOSUPPORT_V = 97
 
 
@@ -195,14 +195,55 @@ Case 5: AF_INET socketpair → -EAFNOSUPPORT.
             fail(20)
             return
 
-Case 6: AF_UNIX SOCK_DGRAM → -EOPNOTSUPP.
+Case 6: AF_UNIX SOCK_DGRAM socketpair — write/read both ways.
 
-        val r6 = posix_socketpair(AF_UNIX_V, SOCK_DGRAM_V, 0, &sv3[0])
-        if r6 != -EOPNOTSUPP_V
-            puts("unixpair: dgram r=")
-            print_idec(r6)
-            puts("\n")
+        var dv: [2]int
+        dv[0] = -1
+        dv[1] = -1
+        if posix_socketpair(AF_UNIX_V, SOCK_DGRAM_V, 0, &dv[0]) != 0
             fail(21)
+            return
+        if dv[0] < 0
+            fail(22)
+            return
+        if dv[1] < 0
+            fail(23)
+            return
+
+        var dg_a: [3]byte
+        dg_a[0] = 'a'; dg_a[1] = 'b'; dg_a[2] = 'c'
+        if posix_write(dv[0], &dg_a[0], 3) != 3
+            fail(24)
+            return
+        var dg_ra: [8]byte
+        if posix_read(dv[1], &dg_ra[0], 8) != 3
+            fail(25)
+            return
+        if dg_ra[0] != byte('a')
+            fail(26)
+            return
+        if dg_ra[2] != byte('c')
+            fail(27)
+            return
+
+        var dg_b: [4]byte
+        dg_b[0] = 'p'; dg_b[1] = 'q'; dg_b[2] = 'r'; dg_b[3] = 's'
+        if posix_write(dv[1], &dg_b[0], 4) != 4
+            fail(28)
+            return
+        var dg_rb: [8]byte
+        if posix_read(dv[0], &dg_rb[0], 8) != 4
+            fail(29)
+            return
+        if dg_rb[3] != byte('s')
+            fail(30)
+            return
+
+        if posix_close(dv[0]) != 0
+            fail(31)
+            return
+        if posix_close(dv[1]) != 0
+            fail(32)
             return
 
         puts("unixpair: ok\n")

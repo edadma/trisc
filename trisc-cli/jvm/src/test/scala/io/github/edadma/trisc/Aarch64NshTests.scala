@@ -2176,13 +2176,13 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "unixname: bad"
   }
 
-  "unix: socketpair STREAM bidirectional + flag/family/type errno" in {
-    // socketpair(AF_UNIX, SOCK_STREAM, 0): two distinct fds with
-    // bidirectional payload + EOF on one-side close. SOCK_NONBLOCK
-    // propagates to both fds (visible via fcntl F_GETFL) and an
-    // empty read returns -EAGAIN. AF_INET socketpair is rejected
-    // with -EAFNOSUPPORT, AF_UNIX SOCK_DGRAM with -EOPNOTSUPP
-    // (peer-default DGRAM short-circuit deferred).
+  "unix: socketpair STREAM + DGRAM bidirectional" in {
+    // socketpair(AF_UNIX, SOCK_STREAM/DGRAM, 0): two distinct fds
+    // with bidirectional payload. STREAM sees EOF on one-side
+    // close + SOCK_NONBLOCK propagates (fcntl F_GETFL) and an
+    // empty read returns -EAGAIN. DGRAM uses peer_idx as default
+    // destination so write/read round-trips both ways. AF_INET
+    // socketpair → -EAFNOSUPPORT.
     val output = qemu.command("test_unixpair")
     output should include("unixpair: ok")
     output should not include "unixpair: bad"

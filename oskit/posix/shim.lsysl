@@ -1014,6 +1014,10 @@ vm_copy_from.
                 i += 1
             return i64(len)
         if k == POSIX_FD_UNIX_SOCKET
+            val pidw = posix_fd_current_pid()
+            val styw = int(posix_fd_table[pidw * POSIX_FDS_PER_PROC + fd].pos)
+            if styw == POSIX_SOCK_DGRAM
+                return sys_sendto_unix_dgram(fd, buf, len, i64(0), 0)
             return sys_send_unix_stream(fd, buf, len)
         if k == POSIX_FD_TCP_SOCKET
             val inet_fd = posix_fd_target(fd)
@@ -1188,6 +1192,10 @@ handles read from the TTY driver.
             ubuf[0] = reply[1]
             return i64(1)
         if k == POSIX_FD_UNIX_SOCKET
+            val pidr = posix_fd_current_pid()
+            val styr = int(posix_fd_table[pidr * POSIX_FDS_PER_PROC + fd].pos)
+            if styr == POSIX_SOCK_DGRAM
+                return sys_recvfrom_unix_dgram(fd, buf, len, 0, i64(0), i64(0))
             return sys_recv_unix_stream(fd, buf, len, 0)
         if k == POSIX_FD_TCP_SOCKET
             val inet_fd = posix_fd_target(fd)
@@ -1546,11 +1554,11 @@ prototype).
 
 `type` may carry `SOCK_NONBLOCK` / `SOCK_CLOEXEC` flags; we mask
 them off, propagate `O_NONBLOCK` to both new fds, and accept-and
--ignore CLOEXEC. AF_UNIX SOCK_DGRAM and any other family return
-errno consistent with Linux: `-EOPNOTSUPP` for the unsupported
-type within AF_UNIX (no peer-default DGRAM short-circuit yet),
-`-EAFNOSUPPORT` for non-AF_UNIX domains (no AF_INET socketpair —
-Linux itself returns EOPNOTSUPP there too).
+-ignore CLOEXEC. STREAM and DGRAM are both supported; the server
+links the two slots via `peer_idx` and the DGRAM SENDTO path
+treats `plen == 0` as "default to peer_idx". `-EAFNOSUPPORT`
+for non-AF_UNIX domains (no AF_INET socketpair — Linux itself
+returns EOPNOTSUPP there too).
 
 If allocating either posix-fd slot fails, the unix-server slots
 are reclaimed via `shim_unix_close` so the server doesn't leak.
@@ -1565,7 +1573,8 @@ are reclaimed via `shim_unix_close` so the server doesn't leak.
         val sock_flags = stype & sock_flag_mask
         val base_type = stype & ~sock_flag_mask
         if base_type != POSIX_SOCK_STREAM
-            return i64(-EOPNOTSUPP)
+            if base_type != POSIX_SOCK_DGRAM
+                return i64(-EOPNOTSUPP)
         val port = unix_get_port()
         if port < 0
             return i64(-ENODEV)
@@ -1840,17 +1849,24 @@ DGRAM sendto for AF_UNIX.
         val target = posix_fd_target(fd)
         if target < 0
             return i64(-EBADF)
-        if addr_ptr == i64(0)
-            return i64(-EINVAL)
-        var path: [108]byte
-        val plen = shim_unix_read_path(addr_ptr, addrlen, &path[0], 108)
-        if plen <= 0
-            return i64(-EINVAL)
         if len < 0
             return i64(-EINVAL)
         var dlen = len
         if dlen > 256
             dlen = 256
+        var path: [108]byte
+        var plen = 0
+        if addr_ptr != i64(0)
+            plen = shim_unix_read_path(addr_ptr, addrlen, &path[0], 108)
+            if plen <= 0
+                return i64(-EINVAL)
+
+`addr_ptr == NULL` is the "no destination" form used by
+`send(2)` / `write(2)` on a connected DGRAM socket
+(socketpair pairs, or any future `connect(2)` on DGRAM).
+We forward `plen == 0` to the unix server and let it route
+via `peer_idx` (returns -ENOTCONN if unset).
+
         val data: *byte = *byte(buf)
         val port = unix_get_port()
         if port < 0
