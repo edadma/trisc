@@ -2280,6 +2280,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "seek_end: bad"
   }
 
+  "vfs: O_TRUNC + ftruncate" in {
+    // Phase 0a item 1. Validates O_TRUNC plumbing in sys_openat,
+    // sys_ftruncate (slix-musl 181), the new TFS_CMD_TRUNCATE +
+    // VFS_CMD_TRUNCATE primitives, and tfs_read's hole-as-zero
+    // semantics for sparse extension.
+    val output = qemu.command("test_truncate")
+    output should include("truncate: ok")
+    output should not include "truncate: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

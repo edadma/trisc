@@ -1016,6 +1016,7 @@ the way out so it doesn't leak.
     val VFS_CMD_EPOLL_INST_CLOSE_C  = 23
     // Phase 4 chunk 2 — fstat by handle.
     val VFS_CMD_FSTAT_C   = 24
+    val VFS_CMD_TRUNCATE_C = 29
 
 `GRANT_READ` / `GRANT_WRITE` mirror the values in `oskit.kernel`'s
 private grant table (1 = read by mapper, 2 = write by mapper).
@@ -1274,6 +1275,8 @@ Returns 0 on success, negative errno on failure.
             return sys_unlinkat(int(a0), a1, int(a2))
         if num == 221
             return sys_lseek(int(a0), a1, int(a2))
+        if num == 181
+            return sys_ftruncate(int(a0), a1)
         if num == 256
             return sys_pipe2(a0, int(a1))
         if num == 153
@@ -5580,7 +5583,52 @@ Returns 0 on success, -ENOENT on miss.
             ipc_send(port, cmsg, 5, crep, 1)
             return i64(-EMFILE)
         posix_fd_set_flags(pfd, oflags & POSIX_O_NONBLOCK)
+        if (oflags & POSIX_O_TRUNC) != 0
+            // Truncate the underlying inode to zero. We do this
+            // *after* posix_fd_alloc has succeeded so a failure
+            // here doesn't leak a VFS handle. Failure (e.g. file
+            // is a directory or backend rejects) is non-fatal:
+            // POSIX is silent on this corner and Linux just
+            // returns the open fd; we mirror that — the caller
+            // sees the file unchanged but with a working fd.
+            var tm: [9]byte
+            tm[0] = byte(VFS_CMD_TRUNCATE_C)
+            shim_write_be_i32(tm, 1, handle)
+            shim_write_be_i32(tm, 5, 0)
+            var trep: [1]byte
+            ipc_send(port, tm, 9, trep, 1)
         i64(pfd)
+
+SYS_FTRUNCATE. Sets the file referred to by `fd` to exactly
+`length` bytes. Shrinks free unused blocks; extension creates a
+sparse hole that reads as zeros. Non-file kinds report `-EINVAL`
+(Linux returns it for sockets/pipes; we mirror). The current
+file position is intentionally NOT updated — POSIX leaves it
+alone, even if the truncation moves it past the new EOF.
+
+    sys_ftruncate(fd: int, length: i64) -> i64
+        val k = posix_fd_kind(fd)
+        if k == POSIX_FD_FREE
+            return i64(-EBADF)
+        if k != POSIX_FD_FILE
+            return i64(-EINVAL)
+        if length < i64(0)
+            return i64(-EINVAL)
+        val handle = posix_fd_target(fd)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        var msg: [9]byte
+        msg[0] = byte(VFS_CMD_TRUNCATE_C)
+        shim_write_be_i32(msg, 1, handle)
+        shim_write_be_i32(msg, 5, int(length))
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 9, reply, 1)
+        if r < 0
+            return i64(-EIO)
+        if reply[0] != 0
+            return i64(-EINVAL)
+        i64(0)
 
 SYS_LSEEK. VFS tracks file position server-side, so we just
 forward `whence` (0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END) and the

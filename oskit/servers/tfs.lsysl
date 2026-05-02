@@ -30,7 +30,7 @@ Commands:
 
     module oskit.servers
 
-    import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, sync_superblock}
+    import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, tfs_truncate, sync_superblock}
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply, ipc_last_msg_len}
     import oskit.drivers.disk.{disk_read, disk_write}
     import oskit.services.{rs_ready, svc_grant_map, svc_grant_unmap}
@@ -47,6 +47,7 @@ Commands:
     val TFS_CMD_SYNC    = 10
     val TFS_CMD_CHMOD   = 11
     val TFS_CMD_RENAME  = 12
+    val TFS_CMD_TRUNCATE = 13
 
     var tfs_port = -1
 
@@ -296,6 +297,23 @@ Reply:   [status(1)]
             reply[0] = 0
         ipc_reply(sender, reply, 1)
 
+Handle TRUNCATE: set a file to exactly `new_size` bytes.
+Shrinks free unused blocks; extension creates a sparse hole that
+reads as zeros via `tfs_read`'s hole path.
+Request: [cmd(1), ino(4), new_size(4)]
+Reply:   [status(1)]
+
+    tfs_handle_truncate(sender: int, buf: *byte)
+        val ino = tfs_msg_read_i32(buf, 1)
+        val new_size = tfs_msg_read_i32(buf, 5)
+        val result = tfs_truncate(ino, new_size)
+        var reply: [1]byte
+        if result == -1
+            reply[0] = -1
+        else
+            reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
 The TFS server loop. Creates port, registers as "fs",
 initializes TFS, then loops handling filesystem requests.
 
@@ -344,6 +362,8 @@ since tfs_init() reads the superblock via rd_read → disk_read.
                     tfs_handle_chmod(sender, buf)
                 else if cmd == TFS_CMD_RENAME
                     tfs_handle_rename(sender, buf, msg_len)
+                else if cmd == TFS_CMD_TRUNCATE
+                    tfs_handle_truncate(sender, buf)
                 else
                     var reply: [1]byte
                     reply[0] = -1

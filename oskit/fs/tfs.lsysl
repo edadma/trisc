@@ -21,7 +21,7 @@ On-disk layout (block 0 = boot, block 1 = superblock):
 
     module oskit.fs
 
-    import oskit.hal.{memcpy}
+    import oskit.hal.{memcpy, memset}
 
     // === Block I/O — provided by the environment ===
 
@@ -367,25 +367,30 @@ Partial blocks or unaligned ranges still use `blkbuf` + `memcpy`.
             val blk_idx = (offset + buf_pos) / sb_block_size
             val blk_off = (offset + buf_pos) % sb_block_size
             val disk_blk = get_file_block(ibuf, blk_idx)
-            if disk_blk == 0
-                break
             var chunk = sb_block_size - blk_off
             if chunk > remaining
                 chunk = remaining
-            var rd_err = 0
-            if blk_off == 0
-                if chunk == sb_block_size
-                    rd_err = rd_read(disk_blk, buf + buf_pos)
+            if disk_blk == 0
+                // Sparse hole — POSIX says reads return zeros. Fill
+                // the chunk with NULs and continue. Holes are created
+                // by `tfs_truncate` extending past the allocated tail
+                // and (eventually) by sparse `tfs_write` skips.
+                memset(buf + buf_pos, 0, chunk)
+            else
+                var rd_err = 0
+                if blk_off == 0
+                    if chunk == sb_block_size
+                        rd_err = rd_read(disk_blk, buf + buf_pos)
+                    else
+                        rd_err = rd_read(disk_blk, blkbuf)
+                        if rd_err == 0
+                            memcpy(buf + buf_pos, blkbuf, chunk)
                 else
                     rd_err = rd_read(disk_blk, blkbuf)
                     if rd_err == 0
-                        memcpy(buf + buf_pos, blkbuf, chunk)
-            else
-                rd_err = rd_read(disk_blk, blkbuf)
-                if rd_err == 0
-                    memcpy(buf + buf_pos, blkbuf + blk_off, chunk)
-            if rd_err < 0
-                break
+                        memcpy(buf + buf_pos, blkbuf + blk_off, chunk)
+                if rd_err < 0
+                    break
             buf_pos += chunk
             remaining -= chunk
         total - remaining
@@ -412,14 +417,17 @@ from `buf` (DMA). Partial or unaligned ranges read-modify-write via
         var ind_blk = 0
         var i = 0
         var dst: *byte = buf
+        var new_block = 0
         while remaining > 0
             blk_idx = (offset + buf_pos) / sb_block_size
             blk_off = (offset + buf_pos) % sb_block_size
             disk_blk = get_file_block(ibuf, blk_idx)
+            new_block = 0
             if disk_blk == 0
                 disk_blk = alloc_block()
                 if disk_blk == -1
                     break
+                new_block = 1
                 if blk_idx < NUM_DIRECT
                     ino_set_direct(ibuf, blk_idx, disk_blk)
                 else
@@ -437,13 +445,26 @@ from `buf` (DMA). Partial or unaligned ranges read-modify-write via
                 chunk = remaining
             if blk_off == 0
                 if chunk == sb_block_size
+                    // Full-block write — bypass blkbuf entirely.
                     rd_write(disk_blk, buf + buf_pos)
                 else
-                    rd_read(disk_blk, blkbuf)
+                    // Partial write at block start. Newly allocated
+                    // blocks must be zero-filled first (alloc_block
+                    // returns blocks whose on-disk content is the
+                    // stale data from whoever freed them last —
+                    // both a correctness *and* an info-leak bug if
+                    // we let it through).
+                    if new_block == 1
+                        memset(blkbuf, 0, sb_block_size)
+                    else
+                        rd_read(disk_blk, blkbuf)
                     memcpy(blkbuf, buf + buf_pos, chunk)
                     rd_write(disk_blk, blkbuf)
             else
-                rd_read(disk_blk, blkbuf)
+                if new_block == 1
+                    memset(blkbuf, 0, sb_block_size)
+                else
+                    rd_read(disk_blk, blkbuf)
                 memcpy(blkbuf + blk_off, buf + buf_pos, chunk)
                 rd_write(disk_blk, blkbuf)
             buf_pos += chunk
@@ -689,14 +710,29 @@ tfs_freeinodes() -> int — Return number of free inodes.
     // === Truncate ===
 
 tfs_truncate(ino, new_size) -> int
-Shrink a file to new_size bytes. Frees blocks beyond the new size.
-Returns 0 on success, -1 on error.
+Set a file to exactly new_size bytes. Shrinks free blocks beyond
+the new size; extending past the allocated tail is allowed and
+creates a sparse hole — the new bytes read as zeros (`tfs_read`
+returns NULs for absent blocks). Returns 0 on success, -1 on
+error.
+
+`new_size < 0` is rejected (callers are expected to validate at
+the syscall layer, but the floor is enforced here too).
 
     tfs_truncate(ino: int, new_size: int) -> int
+        if new_size < 0
+            return -1
         var ibuf: [32]byte
         tfs_read_inode(ino, ibuf)
         val old_size = ino_size(ibuf)
-        if new_size >= old_size
+        if new_size > old_size
+            // Extension: just bump the size field. Reads through
+            // the new sparse region return zeros via the hole path
+            // in `tfs_read`.
+            ino_set_size(ibuf, new_size)
+            tfs_write_inode(ino, ibuf)
+            return 0
+        if new_size == old_size
             return 0
         // Calculate which blocks to keep
         var keep_blocks = new_size / sb_block_size

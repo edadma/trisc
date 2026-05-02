@@ -791,6 +791,13 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_OFT_QUEUE_REF           = 27
     val VFS_CMD_REGISTER_FD_BY_OFT      = 28
 
+    // Phase 0a (post-2B) — handle-based truncate. Resolves the
+    // (pid, handle) pair to an OFT entry, then forwards
+    // TFS_CMD_TRUNCATE to the backend with the OFT's inode + the
+    // requested new size. Used by `sys_ftruncate` and by
+    // `sys_openat`'s O_TRUNC path.
+    val VFS_CMD_TRUNCATE = 29
+
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
             return 1
@@ -826,6 +833,8 @@ reply is always 1 byte. On success, length depends on command.
             return 1
         if cmd == VFS_CMD_REGISTER_FD_BY_OFT
             return 5
+        if cmd == VFS_CMD_TRUNCATE
+            return 1
         1
 
 Big-endian message helpers (local to VFS).
@@ -2170,6 +2179,44 @@ translation table keeps working uniformly.
         // uid/gid/size/mtime/ctime stay zero.
         ipc_reply(sender, reply, 29)
 
+Handle-based TRUNCATE: [cmd(1), handle(4), new_size(4)]
+Reply: [status(1)]
+
+Resolves the (sender_pid, handle) pair to an OFT entry, rejects
+non-`OFT_TYPE_FILE` (TTY / PIPE / TCP can't be truncated; Linux
+returns `EINVAL`), then forwards `TFS_CMD_TRUNCATE` to the
+backend with the OFT's inode plus the requested new size. The
+client's stored `oft_pos` is intentionally NOT touched — POSIX
+ftruncate leaves the file offset alone, even if the truncation
+moves it past EOF.
+
+    vfs_handle_truncate(sender: int, buf: *byte, backend: int)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val new_size = vfs_msg_read_i32(buf, 5)
+        val pid = svc_get_thread_pid(sender)
+        val fid = vfs_handle_lookup(pid, handle)
+        var reply: [1]byte
+        if fid < 0
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        if oft_type[fid] != OFT_TYPE_FILE
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        if new_size < 0
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+        val ino = oft_ino[fid]
+        var tfs_msg: [9]byte
+        tfs_msg[0] = byte(13)        // TFS_CMD_TRUNCATE
+        vfs_msg_write_i32(tfs_msg, 1, ino)
+        vfs_msg_write_i32(tfs_msg, 5, new_size)
+        var be_reply: [1]byte
+        ipc_send(backend, tfs_msg, 9, be_reply, 1)
+        ipc_reply(sender, be_reply, 1)
+
 Path-based MKDIR: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
 Reply: [status(1), ino(4)]
 
@@ -2435,6 +2482,8 @@ the appropriate backend.
                     vfs_path_stat(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_FSTAT
                     vfs_handle_fstat(sender, buf, backend)
+                else if cmd == VFS_CMD_TRUNCATE
+                    vfs_handle_truncate(sender, buf, backend)
                 else if cmd == VFS_CMD_MKDIR
                     vfs_path_mkdir(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_RMDIR
