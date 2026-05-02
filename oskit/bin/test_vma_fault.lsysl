@@ -1,0 +1,78 @@
+test_vma_fault — VMA-driven page-fault end-to-end test
+======================================================
+
+Phase 1 chunk 2: validates that the page-fault handler routes
+through `kernel_handle_user_fault` → `vma_handle_fault` and that
+a fresh zero page is installed on first touch of an anonymous
+VMA.
+
+The address range chosen — `[0x60100000, 0x60101000)` — falls
+inside the user PT created by `vm_create_process_pt` but in a
+slot left non-present (the eager mapping only covers the first
+144 pages, ending at `0x60090000`). So the very first load from
+that page will fault with no PTE present, the arch handler will
+ask the VMA tree, and `vma_handle_fault` will allocate a zero
+page and install it.
+
+Pass criterion: prints `vma2: ok`.
+
+    module oskit.bin.test_vma_fault
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val SYS_VMA_CREATE = 87
+
+    val VMA_PROT_READ  = 1
+    val VMA_PROT_WRITE = 2
+
+    val VMA_MAP_PRIVATE = 0x02
+    val VMA_MAP_ANON    = 0x20
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("vma2: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val vstart: i64 = i64(0x60100000)
+        val vend:   i64 = i64(0x60101000)
+        val prot:   i64 = i64(VMA_PROT_READ | VMA_PROT_WRITE)
+        val flags:  i64 = i64(VMA_MAP_PRIVATE | VMA_MAP_ANON)
+        val rc = int(syscall6(SYS_VMA_CREATE, vstart, vend, prot, flags, 0, 0))
+        if rc < 0
+            fail(1)
+            return
+
+        // First touch: read should yield a zero-filled page (the fault
+        // path installs a fresh zero frame).
+        var p: *i64 = *i64(u64(vstart))
+        if *p != i64(0)
+            fail(2)
+            return
+
+        // Second touch: write a sentinel and read it back. After the
+        // first fault the page is mapped writable, so this completes
+        // without a second fault.
+        *p = i64(0x12345678)
+        if *p != i64(0x12345678)
+            fail(3)
+            return
+
+        puts("vma2: ok\n")
+        exit()

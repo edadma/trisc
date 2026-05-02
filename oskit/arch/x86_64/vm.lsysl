@@ -519,6 +519,48 @@ address to physical using the given PML4.
         page | offset
 
 
+Install a leaf PTE for `vaddr` in `ptbr`. Walks PML4 → PDPT → PD;
+expects the table levels to already exist (true for the user
+carve-out region built by `vm_create_process_pt`). Writes the
+leaf 4 KB PTE in PT and flushes TLB. Returns 0 on success, -1
+if any intermediate level is missing or the existing PD entry
+is a 2 MB superpage (cannot be subdivided here).
+
+Phase 1 chunk 2 introduces this for the page-fault path:
+`vma_handle_fault` allocates a fresh frame and calls this to
+install it at the faulting vaddr.
+
+    vm_install_user_page(ptbr: u64, vaddr: u64, paddr: u64, writable: int) -> int
+        val pml4_idx = (vaddr >> 39) & u64(0x1FF)
+        val pdpt_idx = (vaddr >> 30) & u64(0x1FF)
+        val pd_idx   = (vaddr >> 21) & u64(0x1FF)
+        val pt_idx   = (vaddr >> 12) & u64(0x1FF)
+
+        val pml4e = vm_read_pte64(ptbr + pml4_idx * 8)
+        if (pml4e & PTE_P) == 0
+            return -1
+        val pdpt_addr = u64(pml4e & PTE_ADDR_MASK)
+
+        val pdpte = vm_read_pte64(pdpt_addr + pdpt_idx * 8)
+        if (pdpte & PTE_P) == 0
+            return -1
+        val pd_addr = u64(pdpte & PTE_ADDR_MASK)
+
+        val pde = vm_read_pte64(pd_addr + pd_idx * 8)
+        if (pde & PTE_P) == 0
+            return -1
+        if (pde & PTE_PS) != 0
+            return -1
+        val pt_addr = u64(pde & PTE_ADDR_MASK)
+
+        var flags = PTE_P | PTE_U
+        if writable != 0
+            flags = flags | PTE_W
+        vm_write_pte64(pt_addr + pt_idx * 8, i64(paddr) | flags)
+        vm_flush_tlb()
+        0
+
+
 Copy data into another address space using physical addressing.
 
     vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int)

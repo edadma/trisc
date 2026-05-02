@@ -36,6 +36,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         kb_enqueue, kb_notify_tid, notify_send,
         virtio_notify_tid,
         kernel_set_system_info,
+        kernel_handle_user_fault,
         current_thread, ticks}
     import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
@@ -205,6 +206,26 @@ Sync dispatcher — decode ESR and route.
         val ec = int((esr >> u64(26)) & u64(0x3F))
         if ec == 0x15
             syscall_dispatch(frame)
+        else if ec == 0x20 || ec == 0x24
+            // Lower-EL instruction (0x20) or data (0x24) abort. ISS bit 6
+            // ("WnR" in DA, "RES0" in IA) tells us whether a data abort
+            // was caused by a write. Treat instruction aborts as reads.
+            val far = read_far_el1()
+            var write = 0
+            if ec == 0x24
+                if (esr & u64(0x40)) != u64(0)
+                    write = 1
+            if kernel_handle_user_fault(far, write) == 0
+                return
+            uart_puts("[unhandled EL0 fault, ESR=")
+            uart_puthex(esr)
+            uart_puts(" FAR=")
+            uart_puthex(far)
+            uart_puts(" ELR=")
+            var elr_p2: *i64 = *i64(frame + u64(0x108))
+            uart_puthex(u64(*elr_p2))
+            uart_puts("]\n")
+            abort()
         else
             uart_puts("[unhandled sync, ESR=")
             uart_puthex(esr)

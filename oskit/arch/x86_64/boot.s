@@ -95,6 +95,10 @@ mboot_mod_end:   .skip 8    # end address of first module
 mboot_mod1_start: .skip 8   # physical address of second module (boot info)
 mboot_mod1_end:   .skip 8   # end address of second module
 
+# Scratch slot for the CPU-pushed page-fault error code, captured
+# before exc_page_fault saves the user context to its frame.
+page_fault_errcode: .skip 8
+
 # ============================================================================
 # 32-bit entry point
 # ============================================================================
@@ -934,12 +938,42 @@ exc_gpf:
 .global exc_page_fault
 exc_page_fault:
     cli
-    popq %rsi
-    movq %cr2, %rdx
+    # CPU pushed [errcode][RIP][CS][RFLAGS][RSP][SS]. Stash the
+    # error code in a scratch slot, drop it from the stack so the
+    # remaining frame is identical to timer_isr_entry's, then
+    # save the full user context so `do_schedule` can save the
+    # thread and `restore_context` can iretq back on retry.
+    pushq %rax
+    movq 8(%rsp), %rax
+    movq %rax, page_fault_errcode(%rip)
+    popq %rax
+    addq $8, %rsp
+
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+
     movq $14, %rdi
+    movq page_fault_errcode(%rip), %rsi
+    movq %cr2, %rdx
     movq %cr3, %rcx
     call oskit_arch_x86_64__exception_handler
-    jmp exc_idle
+
+    testq %rax, %rax
+    jnz exc_idle
+    jmp do_schedule
 
 .global exc_double_fault
 exc_double_fault:

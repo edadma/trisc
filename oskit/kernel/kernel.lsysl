@@ -912,6 +912,51 @@ syscall has to pick a number not already claimed elsewhere.)
         syscall_return(i64(rc))
         kernel_continue_current()
 
+SYS_VMA_CREATE (87): debug-only syscall — register an anonymous
+VMA in the calling process's VMA tree.
+
+Args: a0 = vstart, a1 = vend, a2 = prot bits (R/W/X), a3 = flags
+(VMA_MAP_ANON | MAP_PRIVATE expected). Returns the VMA index, or
+-1 on failure.
+
+This exists only to drive the chunk-2 fault test from userspace
+without yet introducing the real `mmap` surface (chunk 4). It
+performs no overlap checking — caller is responsible for
+choosing a vaddr range that doesn't collide with the eager-mapped
+program/stack region.
+
+    sys_vma_create_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        if current_thread < 0
+            return i64(-1)
+        val pid = threads[current_thread].pid
+        if pid < 0
+            return i64(-1)
+        if pid >= MAX_PROCESSES
+            return i64(-1)
+        val idx = vma_create(&processes[pid].vma_tree,
+                             u64(a0), u64(a1),
+                             int(a2), int(a3), -1, u64(0))
+        i64(idx)
+
+
+Page-fault hook called from the arch fault handlers. Resolves the
+faulting thread's pid + ptbr, then routes to `vma_handle_fault`.
+Returns 0 if the fault was satisfied and the faulting instruction
+can retry, -1 to fall through to the arch's legacy "kill process"
+path.
+
+    kernel_handle_user_fault(vaddr: u64, write: int) -> int
+        if current_thread < 0
+            return -1
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        val ptbr = threads[current_thread].ptbr
+        vma_handle_fault(&processes[pid].vma_tree, vaddr, ptbr, write)
+
+
     sys_kbhit_handler(arg: int)
         syscall_return(kb_has_key())
         kernel_continue_current()
@@ -1241,6 +1286,7 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall(83, sys_sleep_or_notify_handler)
         register_syscall(84, sys_get_thread_uid_handler)
         register_syscall(86, sys_vma_selftest_handler)
+        register_syscall6(87, sys_vma_create_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events

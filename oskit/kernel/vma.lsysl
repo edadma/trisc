@@ -34,6 +34,7 @@ fault handler through `vma_lookup_addr`; chunk 3 makes
     module oskit.kernel
 
     import oskit.config.{MAX_VMAS}
+    import oskit.arch.{page_alloc_zero, vm_install_user_page}
 
 VMA_NIL serves the same role as rbtree.lsysl's NIL — a sentinel
 "no node" value distinct from any pool index.
@@ -517,6 +518,44 @@ Counts. Used by tests; cheap to compute via in-order walk.
             c += 1
             n = vma_next(n)
         c
+
+Page-fault entry point. The arch handlers (x86 page-fault ISR,
+aarch64 EL0 sync) call this with the faulting `vaddr`, the
+process's `pid` and `ptbr`, and a `write` flag (1 if the fault
+was caused by a store, 0 if a load or instruction fetch).
+
+Returns 0 if the fault was satisfied (a frame was installed and
+the faulting instruction can retry), -1 if no VMA covers the
+address or the fault couldn't be handled here. The arch code
+falls through to its legacy "kill process" path on -1.
+
+Phase 1 chunk 2 only handles anonymous (MAP_ANON) VMAs by
+installing a fresh zero page. File-backed and COW logic land in
+later chunks (5 + 7).
+
+    vma_handle_fault(t: *VMATree, vaddr: u64, ptbr: u64, write: int) -> int
+        val v = vma_lookup_addr(t, vaddr)
+        if v == VMA_NIL
+            return -1
+        if (vma_pool[v].flags & VMA_MAP_ANON) == 0
+            return -1
+        if write != 0
+            if (vma_pool[v].prot & VMA_PROT_WRITE) == 0
+                return -1
+        else
+            if (vma_pool[v].prot & VMA_PROT_READ) == 0
+                return -1
+        val page_va = vaddr & ~u64(0xFFF)
+        val pa = page_alloc_zero()
+        if pa == u64(0)
+            return -1
+        var writable = 0
+        if (vma_pool[v].prot & VMA_PROT_WRITE) != 0
+            writable = 1
+        if vm_install_user_page(ptbr, page_va, pa, writable) != 0
+            return -1
+        0
+
 
 Selftest -- exercises the public surface and validates invariants
 without going through any kernel state. Used by the chunk-1

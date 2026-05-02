@@ -259,7 +259,7 @@ Event format: (ascii << 24) | (1 << 17) | (1 << 16)
 
     import oskit.kernel.{kb_enqueue, kb_notify_tid, notify_send,
         virtio_pci_isr, virtio_notify_tid, register_syscall,
-        syscall_return}
+        syscall_return, kernel_handle_user_fault}
 
     serial_handler()
         var lsr = inb(0x3FD)
@@ -325,7 +325,23 @@ configs.
 
 Exception handler (called from boot.s stubs).
 
-    exception_handler(exc_num: i64, error_code: i64, addr: i64, cr3_val: i64)
+For vector 14 (page fault), the third argument is CR2 (the
+faulting linear address) and `error_code`'s bit 1 is the W/R bit
+(1 = write-caused). Route through `kernel_handle_user_fault`; if
+it returns 0, the boot.s stub re-enters userspace via the
+scheduler and the faulting instruction retries.
+
+For all other vectors (and unhandled page faults), print the
+diagnostic header and return -1 so the stub falls through to
+`exc_idle`.
+
+    exception_handler(exc_num: i64, error_code: i64, addr: i64, cr3_val: i64) -> i64
+        if exc_num == i64(14)
+            var write = 0
+            if (error_code & i64(2)) != i64(0)
+                write = 1
+            if kernel_handle_user_fault(u64(addr), write) == 0
+                return i64(0)
         uart_puts("\n!!! EXCEPTION vec=")
         val hex = "0123456789ABCDEF"
         val hp = *byte(hex)
@@ -351,5 +367,6 @@ Exception handler (called from boot.s stubs).
             uart_putc(int(hp[(c >> s2) & 0xF]))
             s2 -= 4
         uart_puts(" !!!\n")
+        i64(-1)
 
 

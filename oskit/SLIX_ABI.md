@@ -147,6 +147,7 @@ user-mode). Numbers are stable. Definitions live in
 | 84  | SYS_GET_THREAD_UID    | sys_get_thread_uid_handler           |
 | 85  | SYS_FD_TRANSPLANT     | (fd handoff helper)                  |
 | 86  | SYS_VMA_SELFTEST      | sys_vma_selftest_handler (debug)     |
+| 87  | SYS_VMA_CREATE        | sys_vma_create_handler (debug)       |
 
 PHASE 1 NOTE. The VM/process syscalls (44–60, 63, 66, 79) all
 assume the current "fixed-region eager mapping" model. They
@@ -612,3 +613,14 @@ fixed-region state.
   defines a per-process VMA red-black tree; `Process` struct grows
   a `vma_tree: VMATree` field. No kernel codepath consults the
   tree yet — chunks 2 and 3 wire it into page-fault handling.
+- **2026-05-02 / Phase 1 chunk 2** — page-fault path now consults
+  the VMA tree. Both arch fault handlers (x86_64 ISR vector 14,
+  aarch64 EC=0x20/0x24 EL0 abort) call into
+  `kernel_handle_user_fault` → `vma_handle_fault`. On a hit for
+  an anonymous VMA the handler allocates a zero page and installs
+  it via the new `vm_install_user_page(ptbr, vaddr, paddr, writable)`
+  helper, then returns to retry the faulting instruction; on a
+  miss the legacy "kill on fault" path runs unchanged. Adds debug
+  syscall SYS_VMA_CREATE (87) so test programs can register a VMA
+  before `mmap` lands in chunk 4. No COW / file-backed support yet
+  (chunks 5 + 7).

@@ -1104,6 +1104,21 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "vma: bad"
   }
 
+  "vma2: page-fault handler routes through VMA tree" in {
+    // Phase 1 chunk 2. Page-fault handler now consults the
+    // per-process VMA tree before falling through to the legacy
+    // "kill on fault" path. test_vma_fault registers an anonymous
+    // VMA at 0x60100000 (a slot inside the user PT but outside the
+    // eager-mapped region), then loads from it. The first load
+    // page-faults; the handler asks vma_lookup_addr, allocates a
+    // fresh zero page, installs the PTE, and returns to retry. The
+    // load completes, sees zero, then a write+readback confirms the
+    // page is mapped writable.
+    val output = qemu.command("test_vma_fault")
+    output should include("vma2: ok")
+    output should not include "vma2: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no
