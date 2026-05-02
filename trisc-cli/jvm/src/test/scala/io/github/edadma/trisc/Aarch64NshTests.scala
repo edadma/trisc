@@ -2290,6 +2290,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "truncate: bad"
   }
 
+  "unix: DGRAM recvfrom MSG_PEEK" in {
+    // Phase 0a item 2. Validates that MSG_PEEK on AF_UNIX
+    // recvfrom reads the head dgram without dequeuing — peek
+    // then drain returns the same bytes twice.
+    val output = qemu.command("test_upunixpk")
+    output should include("upunixpk: ok")
+    output should not include "upunixpk: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

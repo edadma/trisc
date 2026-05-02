@@ -1,0 +1,181 @@
+test_upunixpk — AF_UNIX DGRAM recvfrom MSG_PEEK
+================================================
+
+Phase 0a item 2. Validates that `recvfrom(MSG_PEEK)` on an
+AF_UNIX DGRAM socket reads the head dgram without dequeuing
+(matching the inet path's existing peek semantics).
+
+Test plan
+---------
+
+1. Create two AF_UNIX DGRAM sockets, bind to "PK1" and "PK2".
+2. `sendto(PK2 → PK1, "hello")`.
+3. `recvfrom(PK1, MSG_PEEK)` returns 5 + "hello"; queue still
+   has the dgram.
+4. `recvfrom(PK1)` returns 5 + "hello" again; queue is now
+   empty.
+5. `recvfrom(PK1, MSG_DONTWAIT)` returns `-EAGAIN`.
+
+Pass criterion: prints `upunixpk: ok`.
+
+    module oskit.bin.test_upunixpk
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_SOCKET     = 337
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_SENDTO     = 307
+    val NR_RECVFROM   = 276
+
+    val AF_UNIX_V     = 1
+    val SOCK_DGRAM_V  = 2
+    val MSG_PEEK_V    = 2
+    val MSG_DONTWAIT  = 64
+
+    val EAGAIN        = 11
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("upunixpk: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr_un(out: *byte, path: *byte, plen: int) -> int
+        out[0] = byte(AF_UNIX_V & 0xff)
+        out[1] = byte(0)
+        var i = 0
+        while i < plen
+            out[2 + i] = path[i]
+            i += 1
+        out[2 + plen] = byte(0)
+        2 + plen + 1
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_sendto(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_SENDTO, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+    posix_recvfrom(fd: int, buf: *byte, blen: int, flags: int,
+            addr: *byte, addrlen: *i32) -> int
+        int(syscall6(NR_RECVFROM, i64(fd), i64(buf), i64(blen),
+            i64(flags), i64(addr), i64(addrlen)))
+
+
+    main(argv: []string)
+
+Step 1 — bind PK1.
+
+        var n1: [3]byte
+        n1[0] = 'P'; n1[1] = 'K'; n1[2] = '1'
+        var sa1: [128]byte
+        val al1 = fill_sockaddr_un(&sa1[0], &n1[0], 3)
+        val s1 = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if s1 < 0
+            fail(1)
+            return
+        if posix_bind(s1, &sa1[0], al1) != 0
+            fail(2)
+            return
+
+Step 2 — bind PK2 and sendto PK1.
+
+        var n2: [3]byte
+        n2[0] = 'P'; n2[1] = 'K'; n2[2] = '2'
+        var sa2: [128]byte
+        val al2 = fill_sockaddr_un(&sa2[0], &n2[0], 3)
+        val s2 = posix_socket(AF_UNIX_V, SOCK_DGRAM_V, 0)
+        if s2 < 0
+            fail(3)
+            return
+        if posix_bind(s2, &sa2[0], al2) != 0
+            fail(4)
+            return
+        var payload: [5]byte
+        payload[0] = 'h'; payload[1] = 'e'; payload[2] = 'l'
+        payload[3] = 'l'; payload[4] = 'o'
+        val ns = posix_sendto(s2, &payload[0], 5, 0, &sa1[0], al1)
+        if ns != 5
+            puts("upunixpk: sendto=")
+            print_idec(ns)
+            puts("\n")
+            fail(5)
+            return
+
+Step 3 — recvfrom(PK1, MSG_PEEK) reads without consuming.
+
+        var rb: [16]byte
+        val nr1 = posix_recvfrom(s1, &rb[0], 16, MSG_PEEK_V,
+            *byte(0), *i32(0))
+        if nr1 != 5
+            puts("upunixpk: peek1=")
+            print_idec(nr1)
+            puts("\n")
+            fail(6)
+            return
+        if rb[0] != byte('h')
+            fail(7)
+            return
+        if rb[4] != byte('o')
+            fail(8)
+            return
+
+Step 4 — second recvfrom (no flag) consumes the same dgram.
+
+        var rb2: [16]byte
+        val nr2 = posix_recvfrom(s1, &rb2[0], 16, 0,
+            *byte(0), *i32(0))
+        if nr2 != 5
+            puts("upunixpk: drain=")
+            print_idec(nr2)
+            puts("\n")
+            fail(9)
+            return
+        if rb2[0] != byte('h')
+            fail(10)
+            return
+        if rb2[4] != byte('o')
+            fail(11)
+            return
+
+Step 5 — non-blocking recvfrom on now-empty queue gets EAGAIN.
+
+        var rb3: [16]byte
+        val nr3 = posix_recvfrom(s1, &rb3[0], 16, MSG_DONTWAIT,
+            *byte(0), *i32(0))
+        if nr3 != -EAGAIN
+            puts("upunixpk: empty=")
+            print_idec(nr3)
+            puts("\n")
+            fail(12)
+            return
+
+        posix_close(s2)
+        posix_close(s1)
+        puts("upunixpk: ok\n")
+        exit()

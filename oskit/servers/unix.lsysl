@@ -1442,8 +1442,10 @@ nfds=0 — sendto carries no ancillary).
         if parked >= 0
             if unix_sockets[target].dg_count == 0
                 val is_msg = unix_sockets[target].pending_recv_is_msg
+                val parked_peek = unix_sockets[target].pending_recv_peek
                 unix_sockets[target].pending_recv_tid = -1
                 unix_sockets[target].pending_recv_is_msg = 0
+                unix_sockets[target].pending_recv_peek = 0
                 val maxlen = unix_sockets[target].pending_recv_maxlen
                 var dl = dlen
                 if dl > UNIX_DG_DATA_MAX
@@ -1481,6 +1483,13 @@ nfds=0 — sendto carries no ancillary).
                         pr[2 + spl + 2 + i] = data[i]
                         i += 1
                     ipc_reply(parked, &pr[0], 2 + spl + 2 + dlcap)
+                // If the parker was MSG_PEEK, also enqueue: peek
+                // must leave the dgram observable to a follow-up
+                // recv. The "deliver-without-enqueue" fast path
+                // is correct only for non-peek consumers.
+                if parked_peek != 0
+                    if unix_sockets[target].dg_count < UNIX_DG_QUEUE
+                        unix_dg_enqueue(target, fd, data, dlen)
                 var sr: [3]byte
                 sr[0] = 0
                 unix_write_u16(&sr[0], 1, dl)
@@ -1508,7 +1517,18 @@ Otherwise enqueue and reply with the count.
 Drains one datagram and replies. If empty, parks the caller
 via `pending_recv_tid`. The `_NB` cmd byte
 (UNIX_CMD_RECVFROM_NB) sets `no_park=1`, which makes an empty
-queue reply with -EAGAIN immediately.
+queue reply with -EAGAIN immediately. `buf[4]` carries the
+POSIX `MSG_PEEK` flag — when non-zero, the head dgram is
+copied to the caller without dequeuing (a subsequent recv
+re-reads the same bytes), and the parked-recv path stores
+peek so a later sender enqueues *and* delivers (peek must
+leave the dgram observable to a follow-up reader).
+
+The wire was extended from 4 to 5 bytes when peek landed.
+Older callers passing 4-byte requests cause `buf[4]` to read
+the first byte after the message — `ipc_recv` zeroes the
+unused tail in our buffer, so this naturally degrades to
+peek=0. Still, callers must send 5 bytes from this point on.
 
     unix_handle_recvfrom(sender: int, buf: *byte, no_park: int)
         val fd = int(buf[1]) & 0xff
@@ -1529,9 +1549,10 @@ queue reply with -EAGAIN immediately.
             ipc_reply(sender, err, 4)
             return
         val maxlen = unix_read_u16(buf, 2)
+        val peek = int(buf[4]) & 0xff
         if unix_sockets[fd].dg_count > 0
             var pr: [512]byte
-            val n = unix_dg_dequeue_reply(fd, maxlen, 0, &pr[0])
+            val n = unix_dg_dequeue_reply(fd, maxlen, peek, &pr[0])
             ipc_reply(sender, &pr[0], n)
             return
         if no_park != 0
@@ -1544,7 +1565,7 @@ queue reply with -EAGAIN immediately.
             return
         unix_sockets[fd].pending_recv_tid = sender
         unix_sockets[fd].pending_recv_maxlen = maxlen
-        unix_sockets[fd].pending_recv_peek = 0
+        unix_sockets[fd].pending_recv_peek = peek
         unix_sockets[fd].pending_recv_is_msg = 0
 
 

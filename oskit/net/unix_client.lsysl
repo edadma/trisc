@@ -233,12 +233,13 @@ negative errno.
             return -1
         if maxlen < 0
             return -1
-        var msg: [4]byte
+        var msg: [5]byte
         msg[0] = byte(UNIX_CMD_RECVFROM)
         msg[1] = byte(fd & 0xff)
         unix_write_u16(&msg[0], 2, maxlen)
+        msg[4] = byte(0)        // peek=0 (UNIX_CMD_RECVFROM wire byte 4)
         var reply: [512]byte
-        val r = ipc_send(port, msg, 4, reply, 512)
+        val r = ipc_send(port, msg, 5, reply, 512)
         if r < 0
             return -1
         if reply[0] != 0

@@ -2371,7 +2371,11 @@ addr) and `write` on a STREAM unix fd.
 
 DGRAM recvfrom for AF_UNIX. If the fd is `O_NONBLOCK` (or
 `MSG_DONTWAIT` is in flags) and the queue is empty, returns
--EAGAIN via `UNIX_CMD_RECVFROM_NB`.
+-EAGAIN via `UNIX_CMD_RECVFROM_NB`. `MSG_PEEK` (0x02) reads
+the head dgram without dequeuing, matching the inet path's
+peek semantics — the unix server's parked-recv path also
+tracks peek so a subsequent sender re-enqueues after
+delivering, leaving the dgram observable.
 
     sys_recvfrom_unix_dgram(fd: int, buf: i64, len: int, flags: int,
             addr_ptr: i64, addrlen_ptr: i64) -> i64
@@ -2389,7 +2393,7 @@ DGRAM recvfrom for AF_UNIX. If the fd is `O_NONBLOCK` (or
         var nb = posix_fd_flags(fd) & POSIX_O_NONBLOCK
         if (flags & POSIX_MSG_DONTWAIT) != 0
             nb = POSIX_O_NONBLOCK
-        var msg: [4]byte
+        var msg: [5]byte
         if nb != 0
             msg[0] = byte(UNIX_CMD_RECVFROM_NB)
         else
@@ -2397,8 +2401,12 @@ DGRAM recvfrom for AF_UNIX. If the fd is `O_NONBLOCK` (or
         msg[1] = byte(target & 0xff)
         msg[2] = byte((maxlen >> 8) & 0xff)
         msg[3] = byte(maxlen & 0xff)
+        if (flags & POSIX_MSG_PEEK) != 0
+            msg[4] = byte(1)
+        else
+            msg[4] = byte(0)
         var reply: [512]byte
-        val r = ipc_send(port, msg, 4, reply, 512)
+        val r = ipc_send(port, msg, 5, reply, 512)
         if r < 0
             return i64(-EIO)
         if reply[0] != 0
