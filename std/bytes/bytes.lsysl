@@ -353,8 +353,7 @@ every byte, and at the end — yielding `n + 1` total insertions.
 
     repeat(s: []byte, n: int) -> []byte
         if n <= 0
-            val empty = new [0]byte
-            return empty[:]
+            return []
 
         val slen = len(s)
         val buf = new [slen * n]byte
@@ -424,8 +423,7 @@ with `sep` between each pair.
         val n = len(parts)
 
         if n == 0
-            val empty = new [0]byte
-            return empty[:]
+            return []
 
 Two-pass build: first sum the lengths to size the output buffer
 exactly, then copy each part with the separator between consecutive
@@ -712,8 +710,8 @@ Tests
 
     #test
     test_bytes_join_empty() -> unit
-        val parts = new [0][]byte
-        val joined = join(parts[:], as_bytes(","))
+        val parts: [][]byte = []
+        val joined = join(parts, as_bytes(","))
         assert(len(joined) == 0, "empty")
 
 

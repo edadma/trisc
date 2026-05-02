@@ -19,6 +19,61 @@ case class CompilationResult(
     packageMetas: Map[String, ModuleMeta] = Map.empty,
 )
 
+object SyslDriver:
+  /** Marker file whose presence in a directory designates that directory as a
+   *  sysl project root. Module paths for source files under such a directory
+   *  are computed *relative to the project root* rather than relative to the
+   *  filesystem root, so a file at `<root>/parsyl/parsyl.lsysl` can declare
+   *  `module parsyl` regardless of where `<root>` lives on disk. v1 only uses
+   *  the marker's existence; future versions may parse its contents for
+   *  package metadata. */
+  val ProjectMarker: String = "sysl.toml"
+
+  /** Walk up from `filePath`'s parent directory looking for `marker` (default
+   *  `ProjectMarker`). Returns the directory path containing the marker, or
+   *  None if no marker is found between the file and the filesystem root.
+   *  Works for both absolute and relative paths; relative paths are resolved
+   *  against the cwd via the underlying `FileOps.exists`. */
+  def findProjectRoot(io: FileOps, filePath: String, marker: String = ProjectMarker): Option[String] =
+    def parent(p: String): Option[String] =
+      val stripped = p.stripSuffix("/")
+      val i = stripped.lastIndexOf('/')
+      if i < 0 then if stripped.isEmpty then None else Some("")
+      else if i == 0 then if stripped == "/" then None else Some("/")
+      else Some(stripped.substring(0, i))
+    @scala.annotation.tailrec
+    def walk(dir: String): Option[String] =
+      val markerHere = if dir.isEmpty then marker else io.joinPath(dir, marker)
+      if io.exists(markerHere) then Some(if dir.isEmpty then "." else dir)
+      else parent(dir) match
+        case None => None
+        case Some(p) => walk(p)
+    parent(filePath).flatMap(walk)
+
+  /** Compute the source-map key for a file at `filePath` given an optional
+   *  explicit `baseDir`. An explicit `baseDir` (non-empty) is the base; with
+   *  no `baseDir`, falls back to project-marker discovery and then to the
+   *  full slash-stripped path. The returned key is the path *without* the
+   *  `.sysl` / `.lsysl` extension. */
+  def computeSourceKey(io: FileOps, filePath: String, baseDir: String = ""): String =
+    val name = io.fileName(filePath)
+    val effectiveBase =
+      if baseDir.nonEmpty then baseDir
+      else findProjectRoot(io, filePath) match
+        case Some(root) =>
+          val r = if root == "." then "" else root
+          if r.isEmpty || r.endsWith("/") then r else r + "/"
+        case None => ""
+    val relPath = if effectiveBase.nonEmpty && filePath.startsWith(effectiveBase) then
+      val rel = filePath.drop(effectiveBase.length).dropWhile(c => c == '/' || c == '\\')
+      if rel.nonEmpty then rel else name
+    else if effectiveBase.isEmpty then
+      val rel = filePath.dropWhile(c => c == '/' || c == '\\')
+      if rel.nonEmpty then rel else name
+    else name
+    if relPath.endsWith(".lsysl") then relPath.stripSuffix(".lsysl")
+    else relPath.stripSuffix(".sysl")
+
 class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, config: Map[String, String] = Map.empty, tangler: Option[String => String] = None):
 
   case class DriverError(msg: String) extends RuntimeException(msg)
@@ -150,7 +205,17 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               if packageMetaCache.contains(imp.modulePath) then
                 analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors, imp.modulePath)
             val typed = analyzer.analyze(ast)
-            ModuleMeta.fromProgram(typed, Some(s"$name.sysl"))
+            val baseMeta = ModuleMeta.fromProgram(typed, Some(s"$name.sysl"))
+            // Carry the analyzer's per-file extension entries through so sibling
+            // files in the same module see them via the next iteration's
+            // registerImport(siblings) call.
+            new ModuleMeta(
+              baseMeta.symbols,
+              Nil,
+              analyzer.getTraitImplMetas,
+              analyzer.getGenericEnumInstances,
+              analyzer.getExtensionMetas,
+            )
           } match
             case scala.util.Success(fileMeta) =>
               meta = meta.merge(fileMeta)
@@ -186,6 +251,31 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           analyzer.registerImport(siblings)
         }
 
+      // Phase 2b-Predef-auto-import: silently inject an extensions-only import
+      // for every Predef module that's present in the meta cache (or
+      // resolvable via resolveExternalMeta) and isn't the unit's own module.
+      // This is what makes `"hi".chars` work without a literal
+      // `import std.string`. Only the extension entries + their `__ext_*` synth
+      // functions are pulled in — regular functions (e.g. `contains`) stay
+      // out of the importing unit's namespace so they don't clash with
+      // same-named functions in other modules. If the Predef module isn't in
+      // the source set, this is a no-op (no error).
+      val ownModulePath: Option[String] = modules.get(name)
+      val explicitImportPaths: Set[String] = imports(name).map(_.modulePath).toSet
+      for predef <- analyzer.predefModulePaths do
+        if !ownModulePath.contains(predef) && !explicitImportPaths.contains(predef) then
+          if packageMetaCache.contains(predef) then
+            analyzer.registerImport(packageMetaCache(predef), List(ExtensionsOnlyImport), predef)
+          else if smetaCache.contains(predef) then
+            ModuleMeta.fromSmeta(smetaCache(predef)).foreach(
+              analyzer.registerImport(_, List(ExtensionsOnlyImport), predef))
+          else
+            resolveExternalMeta(predef) match
+              case Some(meta) =>
+                packageMetaCache(predef) = meta
+                analyzer.registerImport(meta, List(ExtensionsOnlyImport), predef)
+              case None => ()
+
       // Register imports from previously compiled modules (or stdlib)
       for imp0 <- imports(name) do
         // Resolve QualifiedImport ambiguity: import std.strings could be a qualified
@@ -219,15 +309,18 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
       val typed = analyzer.analyze(ast)
       val modPath = modules.get(name)
-      // Extract generic templates and trait declarations from the source AST
+      // Extract generic templates and trait declarations from the source AST.
+      // `analyzer.getExtensionTemplates` adds generic-receiver extension synth
+      // FunDecls (Phase 2d) — these come from `lowerExtensions` and aren't in
+      // `ast.decls` directly.
       val templates = ast.decls.filter {
         case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
         case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
-        case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+        case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
         case _ => false
-      } ++ analyzer.getTraitDecls
+      } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
-      val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances)
+      val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances, analyzer.getExtensionMetas)
       val smeta = meta.toSmeta
 
       modPath match
@@ -345,14 +438,14 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         val templates = stripped.decls.filter {
           case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
           case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
-          case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+          case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
           case _ => false
         }
         scala.util.Try {
           val analyzer = new SyslAnalyzer(contractsEnabled = contractsEnabled)
           val typed = analyzer.analyze(stripped)
           val meta = ModuleMeta.fromProgram(typed)
-          new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances)
+          new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances, analyzer.getExtensionMetas)
         }.toOption
       case Left(_) => None
 

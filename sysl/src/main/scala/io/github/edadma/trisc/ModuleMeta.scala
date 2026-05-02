@@ -19,7 +19,19 @@ object SymbolMeta:
 case class TraitImplMeta(traitName: String, targetType: SyslType, methods: Map[String, String]) // methodName → mangledFuncName
 case class GenericEnumInstanceMeta(mangledName: String, baseName: String, typeArgs: List[SyslType])
 
-class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclAST] = Nil, val traitImpls: List[TraitImplMeta] = Nil, val genericEnumInstances: List[GenericEnumInstanceMeta] = Nil):
+/** Metadata for one extension method (Phase 2b cross-module visibility).
+ *  Mirrors a single `ExtensionEntry` from the analyzer side-table, with the
+ *  receiver type already resolved to a concrete `SyslType` so it can round-trip
+ *  through SMETA. Generic-extension serialization is deferred to Phase 2d. */
+case class ExtensionMeta(methodName: String, definingModule: String, receiverType: SyslType, mangledFnName: String)
+
+class ModuleMeta(
+    val symbols: List[SymbolMeta],
+    val genericTemplates: List[DeclAST] = Nil,
+    val traitImpls: List[TraitImplMeta] = Nil,
+    val genericEnumInstances: List[GenericEnumInstanceMeta] = Nil,
+    val extensions: List[ExtensionMeta] = Nil,
+):
 
   def toSmeta: String =
     val buf = new StringBuilder
@@ -74,6 +86,13 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
     for impl <- traitImpls do
       val methods = impl.methods.map((k, v) => s"$k=$v").mkString(" ")
       buf ++= s"IMPL ${impl.traitName} ${impl.targetType.toPrefix} $methods\n"
+    // Emit extension entries (Phase 2b — cross-module visibility).
+    // Format: EXT <methodName> <definingModule> <mangledFnName> <receiverTypePrefix>
+    // Receiver type goes last because `parseType` consumes a variable token count;
+    // the leading three fixed-width fields make decoding unambiguous.
+    for ext <- extensions do
+      val dm = if ext.definingModule.isEmpty then "_" else ext.definingModule
+      buf ++= s"EXT ${ext.methodName} $dm ${ext.mangledFnName} ${ext.receiverType.toPrefix}\n"
     if genericTemplates.nonEmpty then
       buf ++= "TEMPLATES\n"
       for template <- genericTemplates do
@@ -109,7 +128,13 @@ class ModuleMeta(val symbols: List[SymbolMeta], val genericTemplates: List[DeclA
   def merge(other: ModuleMeta): ModuleMeta =
     val replacedSources = other.symbols.flatMap(_.sourceFile).toSet
     val kept = symbols.filterNot(s => s.sourceFile.exists(replacedSources.contains))
-    new ModuleMeta(kept ++ other.symbols, genericTemplates ++ other.genericTemplates, traitImpls ++ other.traitImpls, genericEnumInstances ++ other.genericEnumInstances)
+    new ModuleMeta(
+      kept ++ other.symbols,
+      genericTemplates ++ other.genericTemplates,
+      traitImpls ++ other.traitImpls,
+      genericEnumInstances ++ other.genericEnumInstances,
+      extensions ++ other.extensions,
+    )
 
   /** Get the set of source files that define the given symbol names. */
   def sourceFilesFor(names: Set[String]): Set[String] =
@@ -128,8 +153,10 @@ object ModuleMeta:
    *  v11 adds `CONST <name> <type> <value>` lines so module-level `const` declarations
    *  are visible (with their folded value) to sibling files of the same module.
    *  v12 adds an optional `MUT` trailer on DATA lines so module-level `var` (vs `val`)
-   *  is preserved across files — sibling-imported vars stay writable. */
-  val SMETA_VERSION = 12
+   *  is preserved across files — sibling-imported vars stay writable.
+   *  v13 adds `EXT <method> <definingModule|_> <mangledFn> <receiverTypePrefix>` lines
+   *  so Scala-3-style `extension` blocks round-trip across compilation units. */
+  val SMETA_VERSION = 13
 
   /** Encode a FuncEffects as space-separated tokens — `U` (Unknown), `P` (Pure), or
    *  `RW <nReads> <readsNames…> <nWrites> <writesNames…>`. Used both in the FUNC-line
@@ -196,6 +223,7 @@ object ModuleMeta:
       val syms = scala.collection.mutable.ListBuffer[SymbolMeta]()
       val implMetas = scala.collection.mutable.ListBuffer[TraitImplMeta]()
       val genInstMetas = scala.collection.mutable.ListBuffer[GenericEnumInstanceMeta]()
+      val extMetas = scala.collection.mutable.ListBuffer[ExtensionMeta]()
       var lineNum = 0
       var headerSeen = false
       var currentSource: Option[String] = None
@@ -240,6 +268,15 @@ object ModuleMeta:
                 val pair = tokens.next().split("=", 2)
                 if pair.length == 2 then methods(pair(0)) = pair(1)
               implMetas += TraitImplMeta(traitName, targetType, methods.toMap)
+            else if line.startsWith("EXT ") then
+              // EXT methodName definingModule|_ mangledFnName <receiverTypePrefix...>
+              val tokens = line.drop(4).split("\\s+").iterator
+              val methodName = tokens.next()
+              val dmRaw = tokens.next()
+              val definingModule = if dmRaw == "_" then "" else dmRaw
+              val mangledFnName = tokens.next()
+              val receiverType = SyslType.parseType(tokens)
+              extMetas += ExtensionMeta(methodName, definingModule, receiverType, mangledFnName)
             else
               val (isPrivate, rest) = if line.startsWith("PRIVATE ") then (true, line.drop(8)) else (false, line)
               val tokens = rest.split("\\s+").iterator
@@ -303,10 +340,10 @@ object ModuleMeta:
               ast.decls.filter {
                 case StructDeclAST(_, _, tps, _, _)        => tps.nonEmpty
                 case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
-                case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+                case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
                 case _: TraitDeclAST                        => true
                 case _                                      => false
               }
             case Left(_) => Nil // silently ignore parse failures in templates
         else Nil
-        Some(new ModuleMeta(syms.toList, templates, implMetas.toList, genInstMetas.toList))
+        Some(new ModuleMeta(syms.toList, templates, implMetas.toList, genInstMetas.toList, extMetas.toList))

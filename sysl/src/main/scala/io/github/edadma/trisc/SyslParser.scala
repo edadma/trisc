@@ -42,7 +42,7 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val declBare: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | staticAssertDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | extensionDecl | interfaceDecl | typeAliasDecl | staticAssertDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
 
   lazy val staticAssertDecl: Parser[StaticAssertDeclAST] =
     "static_assert" ~> "(" ~> expr ~ opt("," ~> stringLit) <~ ")" ^^ {
@@ -77,6 +77,7 @@ class SyslParser extends StandardTokenParsers {
     case v: VarDeclAST        => v.copy(attributes = attrs ++ v.attributes)
     case t: TraitDeclAST      => t.copy(attributes = attrs ++ t.attributes)
     case i: ImplDeclAST       => i.copy(attributes = attrs ++ i.attributes)
+    case x: ExtensionDeclAST  => x.copy(attributes = attrs ++ x.attributes)
     case t: TypeAliasDeclAST  => t.copy(attributes = attrs ++ t.attributes)
     case e: ExternFuncDeclAST => e.copy(attributes = attrs ++ e.attributes)
     case e: ExternVarDeclAST  => e.copy(attributes = attrs ++ e.attributes)
@@ -181,6 +182,33 @@ class SyslParser extends StandardTokenParsers {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
     }
 
+  // Scala 3-style extension block:
+  //   extension [T,U](recv: TypeAST)
+  //       def method(...) -> Ret = body
+  //       #operator("+")
+  //       def +(other: TypeAST) -> Ret = body
+  // The receiver name is in scope inside each method body. Each method uses
+  // `def` (mirrors the user-facing surface; disambiguates from any other
+  // construct that might appear in the block).
+  lazy val extensionDecl: Parser[ExtensionDeclAST] =
+    "extension" ~> opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ("(" ~> param <~ ")") ~
+      (Newline ~> Indent ~> rep1sep(extensionMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("extension")) ^^ {
+        case tparams ~ recv ~ methods =>
+          ExtensionDeclAST(tparams.getOrElse(Nil), recv, methods)
+      }
+
+  lazy val extensionMember: Parser[FunDeclAST] =
+    // Two forms:
+    //   `def name(...)` — pure (validatePureFn applies; cannot call impure helpers).
+    //   bare `name(...)` — impure-by-default (mirrors top-level functions),
+    //     so extensions can wrap impure helpers like `regex(s)` (panics on bad pattern).
+    // Only function-shaped decls are allowed inside an extension block; var/val
+    // decls fail via the `^?` partial-function filter on `declBody`.
+    rep(positioned(attribute) <~ rep1(Newline)) ~
+      (("def" ~> defDecl(false)) | (declBody(false) ^? { case f: FunDeclAST => f })) ^^ {
+        case attrs ~ d => if attrs.isEmpty then d else d.copy(attributes = attrs ++ d.attributes)
+      }
+
   lazy val interfaceDecl: Parser[InterfaceDeclAST] =
     "interface" ~> ident ~
       (Newline ~> Indent ~> rep1sep(interfaceMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("interface")) ^^ {
@@ -254,6 +282,17 @@ class SyslParser extends StandardTokenParsers {
         val bounds = tps.collect { case (n, bs) if bs.nonEmpty => (n, bs) }.toMap
         FunDeclAST(name, params, rt, body, priv, names, bounds)
     } |
+      // Parameterless function: `name -> RetType = body` or
+      // `name -> RetType <indented block>`. Disambiguates from typed val
+      // (which uses `:`) by the `->` token. Cannot have type parameters
+      // (a generic parameterless makes no sense — there's nothing at the
+      // call site to fix the type args). Auto-called at every reference.
+      ident ~ ("->" ~> typeRef) ~ ("=" ~> bodyExprOrBlock) ^^ {
+        case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), body, priv, isParameterless = true)
+      } |
+      ident ~ ("->" ~> typeRef) ~ funBlockBody ^^ {
+        case name ~ rt ~ body => FunDeclAST(name, Nil, Some(rt), body, priv, isParameterless = true)
+      } |
       opt("volatile") ~ opt(mutability) ~ ident ~ (":" ~> typeExpr) ~ ("=" ~> expr) ^^ {
         case vol ~ mut ~ name ~ t ~ e =>
           val m = mut.getOrElse(Mut(true, false))
@@ -384,15 +423,25 @@ class SyslParser extends StandardTokenParsers {
     (ident ^? { case "inout" => ParamMode.Inout })                             |
     (ident ^? { case "out"   => ParamMode.Out   })
 
+  // `=> T` — call-by-name marker on a param type. Only legal in param position
+  // (the analyzer surfaces a clean error if it shows up in any other type
+  // context). `=>` is otherwise the closure-arrow token, but in parser context
+  // here it can only mean "by-name introducer" — a closure literal is an
+  // expression, never a type.
+  lazy val byNameTypeRef: Parser[TypeAST] =
+    "=>" ~> typeRef ^^ ByNameTypeAST.apply
+
+  lazy val paramTypeRef: Parser[TypeAST] = byNameTypeRef | typeRef
+
   // Two branches with explicit `|` alternation, not `opt(paramMode) ~ ident` — we
   // need backtracking when `paramMode` matches the *name* of a param (e.g. `out: T`
   // where the param is actually named `out`). `opt` commits on success, so the
   // modeful branch is tried first and failure falls through to the mode-less branch.
   lazy val param: Parser[ParamAST] =
-    (paramMode ~ ident ~ (":" ~> typeRef) ~ opt("=" ~> expr) ^^ {
+    (paramMode ~ ident ~ (":" ~> paramTypeRef) ~ opt("=" ~> expr) ^^ {
       case mode ~ name ~ t ~ default => ParamAST(name, t, default, mode)
     }) |
-    (ident ~ (":" ~> typeRef) ~ opt("=" ~> expr) ^^ {
+    (ident ~ (":" ~> paramTypeRef) ~ opt("=" ~> expr) ^^ {
       case name ~ t ~ default => ParamAST(name, t, default)
     })
 
@@ -1088,6 +1137,30 @@ class SyslParser extends StandardTokenParsers {
         k.chars
     })
 
+  // Match any Keyword that could be a user-defined prefix operator. Two
+  // filters keep this from grabbing every Keyword in sight (parens, `then`,
+  // `false`, …): (a) the chars must be made entirely of operator chars
+  // (the same set the lexer's `operatorMuncher` consumes), and (b) the
+  // string must not be reserved by the grammar (built-in prefix sigils
+  // `-`, `!`, `~`, `*`, `&`, `++`, `--`, every entry in `reservedOps`).
+  // Whatever survives is a candidate for the analyzer, which makes the
+  // final call (registered via `#operator` vs. error).
+  private val builtinPrefixOps: Set[String] =
+    Set("-", "!", "~", "*", "&", "++", "--")
+
+  private val opChars: Set[Char] =
+    Set('+', '-', '*', '/', '%', '<', '>', '=', '!', '&', '|', '^', '~')
+
+  private def userPrefixOp: Parser[String] =
+    acceptMatch("user prefix operator", {
+      case k: lexical.Keyword
+          if k.chars.nonEmpty
+            && k.chars.forall(opChars.contains)
+            && !reservedOps.contains(k.chars)
+            && !builtinPrefixOps.contains(k.chars) =>
+        k.chars
+    })
+
   lazy val unary: Parser[ExpressionAST] =
     "++" ~> ident ~ ("." ~> ident) ^^ { case obj ~ field => FieldPreIncAST(VarRefAST(obj), field) } |
       "--" ~> ident ~ ("." ~> ident) ^^ { case obj ~ field => FieldPreDecAST(VarRefAST(obj), field) } |
@@ -1098,17 +1171,15 @@ class SyslParser extends StandardTokenParsers {
       "~" ~> unary ^^ (e => UnaryAST("~", e)) |
       "*" ~> (scalarCastType | ident) ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(PtrTypeAST(NamedTypeAST(t)), e) } |
       "*" ~> unary ^^ DerefAST.apply |
-      "&" ~> ident ~ rep1("." ~> ident) ^^ { case name ~ fields =>
-        val base: ExpressionAST = VarRefAST(name)
-        val chain = fields.init.foldLeft(base)((e, f) => FieldAccessAST(e, f))
-        AddrOfFieldAST(chain, fields.last)
-      } |
-      "&" ~> ident ~ rep1("[" ~> expr <~ "]") ^^ { case name ~ idxs =>
-        val base: ExpressionAST = VarRefAST(name)
-        val indexed = idxs.init.foldLeft(base)((e, idx) => IndexAST(e, idx))
-        AddrOfIndexAST(indexed, idxs.last)
-      } |
-      "&" ~> ident ^^ AddrOfAST.apply |
+      // `&expr` accepts any prefix-tier expression. The analyzer routes the
+      // result: lvalue shapes (TVarRef / TFieldAccess / TIndex / TDeref) lower
+      // to the existing `TAddrOf*` family; non-lvalue shapes (calls, paren
+      // exprs) dispatch to a `#operator("&")` user impl when one matches; a
+      // bare rvalue with no impl errors out. This keeps PEG-style sugar like
+      // `&(literal("ab"))` and `&parser_call()` parseable while preserving
+      // every existing built-in address-of shape.
+      "&" ~> unary ^^ (e => UnaryAST("&", e)) |
+      userPrefixOp ~ unary ^^ { case op ~ e => UnaryAST(op, e) } |
       postfix
 
   lazy val postfix: Parser[ExpressionAST] =

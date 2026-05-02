@@ -499,9 +499,9 @@ lets resynchronization (skip one byte and retry) make progress.
 
     #test
     test_decode_empty() -> unit
-        val buf = new [0]byte
+        val buf: []byte = []
 
-        val r, n = decode_rune(buf[:])
+        val r, n = decode_rune(buf)
         assert(r == RUNE_ERROR, "empty yields replacement")
         assert(n == 0, "empty consumes zero")
 
@@ -582,8 +582,8 @@ lets resynchronization (skip one byte and retry) make progress.
 
     #test
     test_rune_count_empty() -> unit
-        val buf = new [0]byte
-        assert(rune_count(buf[:]) == 0, "empty has zero runes")
+        val buf: []byte = []
+        assert(rune_count(buf) == 0, "empty has zero runes")
 
 
 ### `valid`
@@ -599,8 +599,8 @@ lets resynchronization (skip one byte and retry) make progress.
 
     #test
     test_valid_empty_is_true() -> unit
-        val buf = new [0]byte
-        assert(valid(buf[:]), "empty is valid UTF-8")
+        val buf: []byte = []
+        assert(valid(buf), "empty is valid UTF-8")
 
     #test
     test_valid_replacement_char_passes() -> unit

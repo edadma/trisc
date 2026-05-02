@@ -17,11 +17,17 @@ case class SliceTypeAST(elem: TypeAST) extends TypeAST
 case class FuncTypeAST(params: List[TypeAST], ret: TypeAST, escaping: Boolean = false, effects: FuncEffects = FuncEffects.Unknown) extends TypeAST
 case class TupleTypeAST(elems: List[TypeAST]) extends TypeAST
 case class RefTypeAST(inner: TypeAST) extends TypeAST
+// `=> T` — call-by-name parameter type. Only valid in parameter position.
+// Resolves to a stored type of `() -> T` (a zero-arg thunk); the analyzer
+// auto-wraps incoming args as `() -> arg` and auto-calls body references as
+// `name()`, matching Scala-style call-by-name semantics (no memoization).
+case class ByNameTypeAST(inner: TypeAST) extends TypeAST
 
 // Import selectors
 sealed trait ImportSelector
 case object WildcardImport extends ImportSelector
 case object QualifiedImport extends ImportSelector  // import std.strings → access as strings.foo
+case object ExtensionsOnlyImport extends ImportSelector  // driver-synthesized for Predef auto-import: pull only extension entries + `__ext_*` synth funcs
 case class NamedImport(name: String, rename: Option[String] = None) extends ImportSelector
 
 // Attributes (annotations)
@@ -43,7 +49,7 @@ case class ModuleDeclAST(path: List[String]) extends DeclAST
 case class ImportDeclAST(modulePath: String, selectors: List[ImportSelector]) extends DeclAST
 case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class ExternVarDeclAST(name: String, typ: TypeAST, attributes: List[Attribute] = Nil) extends DeclAST
-case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil, typeBounds: Map[String, List[String]] = Map.empty, attributes: List[Attribute] = Nil, isDef: Boolean = false) extends DeclAST
+case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil, typeBounds: Map[String, List[String]] = Map.empty, attributes: List[Attribute] = Nil, isDef: Boolean = false, isParameterless: Boolean = false) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true, attributes: List[Attribute] = Nil, isVolatile: Boolean = false, isConst: Boolean = false) extends DeclAST
 // `#ghost` marker for `var`/`val` at statement position. Ghost locals exist only for
 // the verifier; the strip pass drops them (and any assignment to them, and any contract
@@ -66,6 +72,11 @@ case class TraitMethodAST(
     attributes: List[Attribute] = Nil,
 ) extends Positional
 case class ImplDeclAST(traitName: String, typeParams: List[String], targetTypes: List[TypeAST], methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
+// Scala 3-style extension block: `extension [T](recv: TypeAST) { def foo(...) = ...; ... }`.
+// Carries type-params (from the optional `[...]`), the receiver param, and the
+// inner method declarations. Lowering happens in the analyzer, not the parser,
+// so the receiver TypeAST shape stays available for generic dispatch.
+case class ExtensionDeclAST(typeParams: List[String], receiver: ParamAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, effects: FuncEffects = FuncEffects.Unknown) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST

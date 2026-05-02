@@ -25,6 +25,19 @@ import posix.string.*                // wildcard import
 import posix.io.{open => fopen}      // aliased import
 ```
 
+### Project root marker (`sysl.toml`)
+
+A file named `sysl.toml` placed in a directory designates that directory as a *project root*. Source files under such a directory have their declared module paths checked relative to the project root rather than relative to the filesystem root. v1 only uses the marker's existence; future versions may parse its contents for package metadata.
+
+```
+parsyl/
+├── sysl.toml                 ← marker (empty file is fine)
+└── parsyl/
+    └── parsyl.lsysl          ← `module parsyl` (matches dir under root)
+```
+
+With the marker, `sbt syslCliJVM/run test /Users/ed/dev/parsyl/parsyl/parsyl.lsysl` succeeds because the expected module is computed as `parsyl` (the directory under the marker), not `Users.ed.dev.parsyl.parsyl` (the full filesystem path). Files outside any marker'd tree fall back to filesystem-path-based validation, so the in-tree `std/`, `oskit/`, and `posix/` packages keep working unchanged.
+
 ### Visibility
 
 ```sysl
@@ -290,6 +303,38 @@ s match
     Circle(r) -> 2
     Rect(w, h) -> 3
 ```
+
+**Nested variant patterns:**
+
+A field position inside a variant pattern can itself be another variant
+pattern. The outer discriminator is checked first; if it matches, each
+nested sub-pattern is checked in turn. If any nested pattern fails, the
+arm doesn't match and the next arm is tried.
+
+```sysl
+enum Inner
+    Val(x: int)
+    None
+
+enum Outer
+    Wrap(i: Inner)
+    Empty
+
+go(o: Outer) -> int
+    o match
+        Wrap(Val(v)) -> v       // bind v if Outer is Wrap AND Inner is Val
+        Wrap(None) -> -1
+        Empty -> 0
+        else -> -99             // exhaustiveness fallback (see note)
+```
+
+Limitation: the exhaustiveness check treats any arm with an active
+nested pattern as not fully covering its outer variant (since the
+inner pattern might fail to match). Add an `else` arm or wildcard
+fallback when using nested patterns. Full nested-coverage analysis
+(recognising that, e.g., `Wrap(A) | Wrap(B)` together cover
+`Wrap(Inner)` when `Inner` has only `A` and `B`) is a future
+improvement.
 
 **Heap-allocated enums (`new` on variants):**
 
@@ -694,11 +739,52 @@ double(x: int) = x * 2
 // No parameters
 getAnswer() -> int = 42
 
+// Parameterless: no `()` on the decl, no `()` at the call site.
+// Bare-name reference auto-calls. Useful for "computed value" patterns.
+seven -> int = 7
+factorial_5 -> int
+    var n = 1
+    for i in 1..<6 do n = n * i
+    n
+// Use site: just `seven` and `factorial_5` (no parens), each evaluates the body.
+
 // Statement body — for/while/do-while loops can appear after `=`
 // as a single-line void body
 uart_puts(s: string) = for c in s do uart_putc(int(c))
 wait_ready() = while !ready() do noop()
 ```
+
+### Parameterless Function Declarations
+
+Sysl distinguishes a **parameterless** function (`f -> T = body`, no parens
+on the decl, called as `f`) from a **zero-argument** function
+(`f() -> T = body`, called as `f()`). Mirrors Scala's
+`def foo` vs `def bar()`.
+
+```sysl
+seven -> int = 7              // parameterless
+greet -> int                  // block-body parameterless
+    puts("hi")
+    0
+
+main() -> int = seven         // bare name auto-calls
+```
+
+The two forms cannot share a name in the same scope. Internally the
+parameterless form lowers to the same `() -> T` mangling as the
+zero-arg form; the only difference is at the use site.
+
+The body has no purity restriction — unlike `def`, a parameterless
+function may mutate global state, call any function, etc. It is purely
+a syntactic-shortening device for "things that are computed each time
+their name is read."
+
+Generic parameterless functions are not supported (there is no call
+site to fix the type arguments).
+
+A parameterless function cannot be passed as a function value: bare
+`f` always auto-calls. If you need a function value, declare `f() -> T`
+instead — bare `f` then produces a function reference, and `f()` calls.
 
 ### Design by Contract — `require` / `ensure`
 
@@ -1025,6 +1111,60 @@ Internally the body auto-dereferences reads and writes: `x` in the body lowers t
 write-back**: every assignment commits immediately. Contextual-keyword rules: `in`
 is already reserved; `out` and `inout` are contextual, so user identifiers with
 those names still work outside parameter position.
+
+### Call-by-Name Parameters — `=> T`
+
+A parameter type prefixed with `=>` declares **call-by-name** semantics:
+the argument is not evaluated at the call site. Instead it is
+implicitly wrapped as a zero-arg thunk; every body reference to the
+parameter re-enters the thunk (no memoization — Scala-style, not lazy
+val).
+
+```sysl
+use_lazy(b: => int) -> int = b + b   // each `b` re-evaluates
+ignore(b: => int) -> int = 0         // `b` never evaluated → arg never runs
+
+main() -> int
+    val r = use_lazy(bump())          // `bump()` runs twice (b+b)
+    ignore(panic_if_called())         // safe: arg never fires
+```
+
+The user-visible type of a by-name param is `T` (you read `b + b`,
+not `b() + b()`). Internally the storage type is `() -> T`; the
+analyzer auto-wraps each call-site argument and auto-calls each body
+reference. Forwarding to another by-name slot composes naturally:
+
+```sysl
+outer(b: => int) -> int = inner(b)   // forwards correctly
+inner(c: => int) -> int = c + 1
+main() -> int = outer(41)            // 42
+```
+
+By-name interacts with operator dispatch: traits and impls may declare
+operator slots `=> T`, and the analyzer wraps the corresponding operand
+AST before analysis. This is the natural shape for combinator
+libraries that want short-circuiting `|` or recursive grammars without
+explicit thunks:
+
+```sysl
+trait Or[T]
+    #operator("|")
+    or_op(a: T, b: => T) -> T
+
+impl[A] Or[Parser[A]]
+    or_op(a: Parser[A], b: => Parser[A]) -> Parser[A] = a
+
+// `expr_p()` is wrapped — recursive grammars don't infinite-loop at
+// construction time:
+factor_p -> Parser[int] = number_p | ("(" ~> expr_p <~ ")")
+```
+
+Restrictions:
+- `=> T` is only valid in parameter position (not in arbitrary type
+  contexts like `var x: => int`).
+- A by-name parameter cannot also be `out` / `inout` (the thunk has
+  no lvalue to write back to).
+- A by-name parameter cannot have a default value.
 
 ### `def` — Expression Functions
 
@@ -1500,6 +1640,104 @@ Context-sensitive prefix operators (`*` deref, `&` addr-of) are preserved:
 so user-defined operators may not start with `*` followed by `+`/`-`/`&`,
 or with `&` followed by `*`/`+`/`-`/`~`/`!`. Operators like `*>`, `*<`,
 `<*`, `<*>`, `&|>` are allowed.
+
+#### User-Defined Prefix Operators
+
+A trait method that takes **one** parameter (rather than two) and is
+annotated with `#operator("sym")` registers `sym` as a **prefix** operator.
+The same `#operator(...)` attribute is used for both forms; the trait
+method's arity decides which slot the symbol fills:
+
+- **2 params → infix** (binary operator, the form documented above).
+- **1 param → prefix** (unary operator, applied to the operand on its
+  right). Anything else is a registration error.
+
+The lexer admits the same operator-character set as for binary, so any
+greedy sequence of operator chars that doesn't shadow a binary-reserved
+operator or the lvalue-mutation sigils `++` / `--` can become a user
+prefix op. The five built-in prefix sigils — `-`, `!`, `~`, `*`, `&` —
+*are* overloadable, but only for operand types that fall outside their
+natural built-in domain (see "Built-in prefix sigils" below).
+
+```sysl
+struct N
+    v: int
+
+trait Boost[T]
+    #operator("<>")
+    boost(a: T) -> T
+
+impl Boost[N]
+    boost(a: N) -> N = N(a.v * 2 + 1)
+
+main() -> int
+    var x = N(7)
+    var r = <>x              // desugars to Boost.boost(x)
+    r.v                      // 15
+```
+
+Chaining requires whitespace (or parentheses) between successive
+prefix tokens, since the lexer is maximal-munch: `<><><>x` lexes as
+the single operator `<><><>`, but `<> <> <> x` lexes as three
+separate `<>` tokens, applied right-associatively.
+
+The same symbol may be registered both as a prefix and as an infix
+operator if it lives on two distinct traits — arity routes the
+registration into separate dispatch tables. Within a single trait
+method, only the param count matters.
+
+**Built-in prefix sigils.** The five sigils `-`, `!`, `~`, `*`, `&`
+keep their fixed built-in semantics on their natural operand types:
+
+| Sigil | Built-in domain          | Built-in meaning                |
+|-------|--------------------------|---------------------------------|
+| `-`   | numeric (int / uint / float) | arithmetic negation         |
+| `!`   | `bool`                   | logical negation                |
+| `~`   | integral (int / uint)    | bitwise complement              |
+| `*`   | pointer / ref            | dereference                     |
+| `&`   | built-in scalars + ptr   | address-of                      |
+
+For *other* operand types the analyzer falls through to a user
+`#operator(<sigil>)` impl when one is registered. This is what makes
+PEG-style libraries express `&p` / `!p` lookahead naturally:
+
+```sysl
+type Parser[A] = new int
+
+trait Peek[A, R]
+    #operator("&")
+    peek(a: A) -> R
+
+impl[A] Peek[Parser[A], Parser[A]]
+    peek(a: Parser[A]) -> Parser[A] = a   // positive lookahead
+
+trait Not[A, R]
+    #operator("!")
+    notp(a: A) -> R
+
+impl[A] Not[Parser[A], Parser[unit]]
+    notp(a: Parser[A]) -> Parser[unit] = ...  // negative lookahead
+```
+
+`&p` for `p: Parser[int]` dispatches to `Peek.peek(p)` and returns a
+`Parser[int]`; `&i` for `i: int` still produces `*int` (built-in
+address-of), since `int` is in `&`'s natural domain.
+
+`++` and `--` remain reserved (statement-shaped lvalue mutation).
+
+**Diagnostics:**
+
+- An impl that would steal a built-in's natural domain — e.g.
+  `impl Neg[bool]` with `#operator("!")` — is rejected at
+  registration: *impl of 'Neg' for bool conflicts with built-in
+  prefix '!' on its natural type; pick a different operand type*.
+- An unbound prefix-shaped expression like `<>x` (no trait carries
+  `#operator("<>")` on a single-param method) produces *unknown
+  prefix operator '<>' on T; bind it via `#operator("<>")` on a
+  single-param trait method*.
+- A registered prefix op applied to an operand whose type doesn't
+  match any impl produces *no impl of 'Boost' for prefix operator
+  '<>' on int*.
 
 #### Multi-Parameter Traits
 
@@ -2051,6 +2289,58 @@ x &= 0xFF   x |= 0x01   x ^= 0xAA   x <<= 2   x >>= 1
 // Also works on pointers (scaled by element size)
 p += 2    p -= 1
 ```
+
+### Line Continuation
+
+A binary operator at the end of a line — built-in or user-defined via
+`#operator(...)` — suppresses the implicit newline so the right-hand
+side can live on the next indented line. This mirrors what `(`, `[`,
+`{` already do for the tokens *inside* them; here it's driven by the
+*trailing* token instead.
+
+```sysl
+// Built-in operators
+val x = some_long_call() +
+    another_call() * 2
+
+if condition_one &&
+    condition_two then ...
+
+x +=
+    expensive_computation()
+
+// User-defined operators (parser-combinator style)
+val parser = literal("ab") ~>
+    rep(digit) <~
+    literal(";") ^^
+    ((digits) -> ...)
+```
+
+Tokens that look like binary operators by shape but are **excluded**
+from the rule (because they end a statement or drive their own
+indented-block construct):
+
+| Token       | Why excluded                                       |
+|-------------|----------------------------------------------------|
+| `=`         | introduces an indented val/var/function body       |
+| `->` `=>`   | block trigger (function body, match arm, etc.)     |
+| `++` `--`   | postfix; legitimately ends a statement             |
+| `*`         | the `import std.foo.*` glob marker                 |
+
+For multi-line multiplication, break **inside** parens or before — not
+after — the `*`:
+
+```sysl
+val product = (
+    very_long_factor *
+    another_factor *
+    one_more_factor
+)
+```
+
+Leading-operator continuation (operator at the *start* of the next
+line, after a complete expression) is not supported; only trailing-
+operator continuation is.
 
 ### Casts
 

@@ -186,7 +186,7 @@ lazy val sysl = crossProject(JSPlatform, JVMPlatform, NativePlatform)
     name := "trisc-sysl",
     libraryDependencies ++= Seq(
       "org.scala-lang.modules" %%% "scala-parser-combinators" % "2.4.0",
-      "io.github.edadma" %%% "indentation" % "0.0.3",
+      "io.github.edadma" %%% "indentation" % "0.0.4",
     ),
   )
   .dependsOn(docs)

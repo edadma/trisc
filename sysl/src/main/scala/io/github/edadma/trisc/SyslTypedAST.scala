@@ -104,8 +104,13 @@ sealed trait TMatchPattern
 case object TWildcard extends TMatchPattern
 case class TValuePattern(expr: TExpr) extends TMatchPattern
 case class TRangePattern(low: TExpr, high: TExpr) extends TMatchPattern
-case class TDestructurePattern(structType: SyslType.StructType, bindings: List[Option[String]], fieldTypes: List[SyslType]) extends TMatchPattern
-case class TVariantPattern(enumType: SyslType.EnumType, variantIndex: Int, bindings: List[Option[String]], fieldTypes: List[SyslType]) extends TMatchPattern
+// `nestedPatterns`: optional per-field sub-pattern. When `Some(p)` at index i,
+// the field at index i must additionally satisfy `p` for the arm to match
+// (and any bindings inside `p` are added to the arm scope). Empty `Nil`
+// means no nested patterns — the legacy default. Parallel to `bindings` /
+// `fieldTypes` when non-empty.
+case class TDestructurePattern(structType: SyslType.StructType, bindings: List[Option[String]], fieldTypes: List[SyslType], nestedPatterns: List[Option[TMatchPattern]] = Nil) extends TMatchPattern
+case class TVariantPattern(enumType: SyslType.EnumType, variantIndex: Int, bindings: List[Option[String]], fieldTypes: List[SyslType], nestedPatterns: List[Option[TMatchPattern]] = Nil) extends TMatchPattern
 case class TEnumConstruct(enumType: SyslType.EnumType, variantIndex: Int, args: List[TExpr]) extends TExpr { def typ: SyslType = enumType }
 case class TNew(structType: SyslType.StructType, args: List[TExpr]) extends TExpr { def typ: SyslType = SyslType.RefType(structType) }
 case class TNewEnum(enumType: SyslType.EnumType, variantIndex: Int, args: List[TExpr]) extends TExpr { def typ: SyslType = SyslType.RefType(enumType) }

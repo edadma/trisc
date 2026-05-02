@@ -2858,17 +2858,10 @@ class SyslLLVMCodegen(target: String = "host"):
                 both
               case TWildcard =>
                 "true" // always matches
-              case TVariantPattern(et, variantIdx, bindings, fieldTypes) =>
-                // Load tag from scrutinee
-                val scrutCast = newReg()
-                emit(s"  $scrutCast = bitcast ${exprType(scrutinee)}* $scrut to i32*")
-                val tag = newReg()
-                emit(s"  $tag = load i32, i32* $scrutCast")
-                val cmp = newReg()
-                emit(s"  $cmp = icmp eq i32 $tag, $variantIdx")
-                cmp
-              case _: TDestructurePattern =>
-                "true" // destructure always matches
+              case vp @ TVariantPattern(_, _, _, _, _) =>
+                emitNestedPatternCheckLLVM(vp, scrut)
+              case dp @ TDestructurePattern(_, _, _, _) =>
+                emitNestedPatternCheckLLVM(dp, scrut)
           }
           // OR all pattern results
           val finalCond = if matched.length == 1 then matched.head
@@ -2909,7 +2902,7 @@ class SyslLLVMCodegen(target: String = "host"):
           val preArmLocals = locals.keySet.toSet
           // Bind variant/destructure fields if this is a binding pattern
           arm.patterns.headOption match
-            case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes)) =>
+            case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes, nested)) =>
               val dataOffset = et.dataOffset
               val scrutCast2 = newReg()
               emit(s"  $scrutCast2 = bitcast ${exprType(scrutinee)}* $scrut to i8*")
@@ -2933,8 +2926,16 @@ class SyslLLVMCodegen(target: String = "host"):
                     emit(s"  store $flt $loaded, $flt* $alloc")
                     locals(bName) = LocalVar(bName, alloc, ft)
                 }
+                if j < nested.length then nested(j).foreach { sub =>
+                  val flt = llvmType(ft)
+                  val fAddr = newReg()
+                  emit(s"  $fAddr = getelementptr i8, i8* $scrutCast2, i64 ${dataOffset + fOffset}")
+                  val typedFAddr = newReg()
+                  emit(s"  $typedFAddr = bitcast i8* $fAddr to $flt*")
+                  emitNestedPatternBindingsLLVM(sub, typedFAddr)
+                }
                 fOffset += ft.sizeOf
-            case Some(TDestructurePattern(st, bindings, fieldTypes)) =>
+            case Some(TDestructurePattern(st, bindings, fieldTypes, nested)) =>
               val cst = canonicalStruct(st)
               val structLt = llvmType(cst)
               for (binding, j) <- bindings.zipWithIndex do
@@ -2951,6 +2952,11 @@ class SyslLLVMCodegen(target: String = "host"):
                     emit(s"  $loaded = load $flt, $flt* $fAddr")
                     emit(s"  store $flt $loaded, $flt* $alloc")
                     locals(bName) = LocalVar(bName, alloc, ft)
+                }
+                if j < nested.length then nested(j).foreach { sub =>
+                  val fAddr = newReg()
+                  emit(s"  $fAddr = getelementptr $structLt, $structLt* $scrut, i32 0, i32 $j")
+                  emitNestedPatternBindingsLLVM(sub, fAddr)
                 }
             case _ => // no bindings needed
           val savedHR = hasReturned
@@ -3724,6 +3730,136 @@ class SyslLLVMCodegen(target: String = "host"):
       case _ =>
         emit(s"  ; TODO: ${expr.getClass.getSimpleName}")
         "0"
+
+  // Recursively emit a discriminator check for a (possibly nested) match
+  // pattern. Returns an LLVM `i1` register name that is `true` iff the
+  // pattern matches the value at `valueAddr` (which is `<llvmType>*`).
+  // For TVariantPattern, loads the tag, compares with the variant index,
+  // and AND-s with the i1 results of every nested sub-pattern's check.
+  // For TDestructurePattern, returns AND of all nested sub-patterns
+  // (the destructure itself always matches at the outer level). Other
+  // pattern shapes (TWildcard / TValuePattern / TRangePattern) are not
+  // expected in nested position and currently return `true` — full
+  // nested-primitive support can layer on later.
+  private def emitNestedPatternCheckLLVM(pat: TMatchPattern, valueAddr: String): String = pat match
+    case TWildcard => "true"
+    case TVariantPattern(et, variantIdx, _, _, nested) =>
+      val scrutCast = newReg()
+      emit(s"  $scrutCast = bitcast ${llvmType(et)}* $valueAddr to i32*")
+      val tag = newReg()
+      emit(s"  $tag = load i32, i32* $scrutCast")
+      val outerCmp = newReg()
+      emit(s"  $outerCmp = icmp eq i32 $tag, $variantIdx")
+      if nested.forall(_.isEmpty) then outerCmp
+      else
+        val variantFields = et.variants(variantIdx)._2
+        val dataOff = et.dataOffset
+        val byteCast = newReg()
+        emit(s"  $byteCast = bitcast ${llvmType(et)}* $valueAddr to i8*")
+        var fOffset = 0L
+        var combined = outerCmp
+        for ((subOpt, i) <- nested.zipWithIndex) do
+          val (_, ft) = variantFields(i)
+          val align = ft.alignOf
+          fOffset = ((fOffset + align - 1) / align) * align
+          subOpt.foreach { sub =>
+            val flt = llvmType(ft)
+            val fAddr = newReg()
+            emit(s"  $fAddr = getelementptr i8, i8* $byteCast, i64 ${dataOff + fOffset}")
+            val typedFAddr = newReg()
+            emit(s"  $typedFAddr = bitcast i8* $fAddr to $flt*")
+            val subMatch = emitNestedPatternCheckLLVM(sub, typedFAddr)
+            val anded = newReg()
+            emit(s"  $anded = and i1 $combined, $subMatch")
+            combined = anded
+          }
+          fOffset += ft.sizeOf
+        combined
+    case TDestructurePattern(st, _, _, nested) =>
+      if nested.forall(_.isEmpty) then "true"
+      else
+        val cst = canonicalStruct(st)
+        val structLt = llvmType(cst)
+        var combined: String = "true"
+        for ((subOpt, i) <- nested.zipWithIndex) do
+          subOpt.foreach { sub =>
+            val ft = st.fields(i)._2
+            val flt = llvmType(ft)
+            val fAddr = newReg()
+            emit(s"  $fAddr = getelementptr $structLt, $structLt* $valueAddr, i32 0, i32 $i")
+            val subMatch = emitNestedPatternCheckLLVM(sub, fAddr)
+            if combined == "true" then combined = subMatch
+            else
+              val anded = newReg()
+              emit(s"  $anded = and i1 $combined, $subMatch")
+              combined = anded
+          }
+        combined
+    case _ => "true" // primitives in nested position — analyzer guards this
+
+  // Recursively emit name bindings for a (possibly nested) match pattern.
+  // For each named field deeper than the outer level, allocates a local
+  // (or aliases the field address for aggregates) the same way the outer
+  // binding code does, but using the field address derived from
+  // `valueAddr` (a `<llvmType>*` pointing to this nested level's value).
+  private def emitNestedPatternBindingsLLVM(pat: TMatchPattern, valueAddr: String): Unit = pat match
+    case TVariantPattern(et, variantIdx, bindings, fieldTypes, nested) =>
+      val variantFields = et.variants(variantIdx)._2
+      val dataOff = et.dataOffset
+      val byteCast = newReg()
+      emit(s"  $byteCast = bitcast ${llvmType(et)}* $valueAddr to i8*")
+      var fOffset = 0L
+      for (((binding, ft), i) <- bindings.zip(fieldTypes).zipWithIndex) do
+        val align = ft.alignOf
+        fOffset = ((fOffset + align - 1) / align) * align
+        binding.foreach { bName =>
+          val flt = llvmType(ft)
+          val fAddr = newReg()
+          emit(s"  $fAddr = getelementptr i8, i8* $byteCast, i64 ${dataOff + fOffset}")
+          val typedFAddr = newReg()
+          emit(s"  $typedFAddr = bitcast i8* $fAddr to $flt*")
+          if isAggregate(ft) then
+            locals(bName) = LocalVar(bName, typedFAddr, ft)
+          else
+            val alloc = deferAlloca(flt)
+            val loaded = newReg()
+            emit(s"  $loaded = load $flt, $flt* $typedFAddr")
+            emit(s"  store $flt $loaded, $flt* $alloc")
+            locals(bName) = LocalVar(bName, alloc, ft)
+        }
+        if i < nested.length then nested(i).foreach { sub =>
+          val flt = llvmType(ft)
+          val fAddr = newReg()
+          emit(s"  $fAddr = getelementptr i8, i8* $byteCast, i64 ${dataOff + fOffset}")
+          val typedFAddr = newReg()
+          emit(s"  $typedFAddr = bitcast i8* $fAddr to $flt*")
+          emitNestedPatternBindingsLLVM(sub, typedFAddr)
+        }
+        fOffset += ft.sizeOf
+    case TDestructurePattern(st, bindings, fieldTypes, nested) =>
+      val cst = canonicalStruct(st)
+      val structLt = llvmType(cst)
+      for (((binding, ft), i) <- bindings.zip(fieldTypes).zipWithIndex) do
+        binding.foreach { bName =>
+          val flt = llvmType(ft)
+          val fAddr = newReg()
+          emit(s"  $fAddr = getelementptr $structLt, $structLt* $valueAddr, i32 0, i32 $i")
+          if isAggregate(ft) then
+            locals(bName) = LocalVar(bName, fAddr, ft)
+          else
+            val alloc = deferAlloca(flt)
+            val loaded = newReg()
+            emit(s"  $loaded = load $flt, $flt* $fAddr")
+            emit(s"  store $flt $loaded, $flt* $alloc")
+            locals(bName) = LocalVar(bName, alloc, ft)
+        }
+        if i < nested.length then nested(i).foreach { sub =>
+          val flt = llvmType(ft)
+          val fAddr = newReg()
+          emit(s"  $fAddr = getelementptr $structLt, $structLt* $valueAddr, i32 0, i32 $i")
+          emitNestedPatternBindingsLLVM(sub, fAddr)
+        }
+    case _ => ()
 
   // Get the address (alloca pointer) for a struct-typed expression
   private def genStructAddr(obj: TExpr): String =

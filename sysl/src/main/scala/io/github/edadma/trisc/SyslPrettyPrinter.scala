@@ -44,6 +44,7 @@ object SyslPrettyPrinter:
       s"$esca(${params.map(typeToSource).mkString(", ")}) -> ${typeToSource(ret)}$effS"
     case TupleTypeAST(elems)        => s"(${elems.map(typeToSource).mkString(", ")})"
     case RefTypeAST(inner)          => s"&${typeToSource(inner)}"
+    case ByNameTypeAST(inner)       => s"=> ${typeToSource(inner)}"
 
   // --- Declarations ---
 
@@ -61,7 +62,7 @@ object SyslPrettyPrinter:
       val body = fields.map((n, t, _) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
       s"struct $name$tpStr\n$body"
 
-    case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _, isDef) =>
+    case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _, isDef, _) =>
       val priv = if isPrivate then "private " else ""
       val defKw = if isDef then "def " else ""
       val tpStr =
@@ -98,6 +99,12 @@ object SyslPrettyPrinter:
         s"$attrStr${IND}$sig"
       }.mkString("\n")
       s"trait $name[${typeParams.mkString(", ")}]\n$body"
+
+    case ImplDeclAST(traitName, typeParams, targetTypes, methods, _) =>
+      val tpStr = if typeParams.nonEmpty then s"[${typeParams.mkString(", ")}]" else ""
+      val targetStr = targetTypes.map(typeToSource).mkString(", ")
+      val body = methods.map(m => s"${IND}${declToSource(m).replace("\n", s"\n")}").mkString("\n")
+      s"impl$tpStr $traitName[$targetStr]\n$body"
 
     case _ => s"// unsupported declaration: ${d.getClass.getSimpleName}"
 

@@ -673,6 +673,143 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case other =>
         throw new RuntimeException(s"emitStore: unexpected type $other")
 
+  // Recursively emit a discriminator check for a NESTED match pattern.
+  // The outer scrutinee value's address is loaded from
+  // `(fp + scrutineeOffset)` (where scrutineeOffset is fp-relative).
+  // `absOffset` is the offset INSIDE that scrutinee where this nested
+  // sub-value lives (variant data offset + outer field offset chains).
+  // For variant patterns, loads the tag at the field address and branches
+  // to `failLabel` on mismatch; recurses for any deeper nested patterns.
+  // For struct destructure patterns, recurses without a discriminator
+  // check (struct destructure always matches at the outer level). Other
+  // pattern shapes (TWildcard / TValuePattern / TRangePattern) currently
+  // act as wildcards in nested position — full nested-primitive support
+  // can layer on later.
+  private def emitNestedPatternCheck(
+      pat: TMatchPattern,
+      fieldType: SyslType,
+      scrutineeOffset: Int,
+      absOffset: Long,
+      failLabel: String,
+  ): Unit = pat match
+    case TWildcard => () // always matches
+    case TVariantPattern(et, variantIndex, _, _, deeperNested) =>
+      // r1 = address of this nested enum value
+      emitAddImm(1, 5, scrutineeOffset)
+      emit("  ldd r1, r1, r0")
+      if absOffset != 0 then emitAddImm(1, 1, absOffset.toInt)
+      // Load tag from offset 0
+      emit("  ldw r1, r1, r0")
+      emitLoadImm(2, variantIndex)
+      emit(s"  bne r1, r2, $failLabel")
+      // Recurse into deeper nested patterns
+      val variantFields = et.variants(variantIndex)._2
+      val dataOff = et.dataOffset.toInt
+      var fieldOff = 0
+      for ((deeperOpt, i) <- deeperNested.zipWithIndex) do
+        val (_, deeperFieldType) = variantFields(i)
+        val align = stackAlign(deeperFieldType)
+        fieldOff = ((fieldOff + align - 1) / align) * align
+        deeperOpt.foreach { deeper =>
+          emitNestedPatternCheck(deeper, deeperFieldType, scrutineeOffset, absOffset + dataOff + fieldOff, failLabel)
+        }
+        fieldOff += deeperFieldType.sizeOf.toInt
+    case TDestructurePattern(st, _, _, deeperNested) =>
+      for ((deeperOpt, i) <- deeperNested.zipWithIndex) do
+        deeperOpt.foreach { deeper =>
+          val deeperFieldType = st.fields(i)._2
+          val off = fieldOffset(st, i)
+          emitNestedPatternCheck(deeper, deeperFieldType, scrutineeOffset, absOffset + off, failLabel)
+        }
+    case _ => () // primitive nested patterns — treat as wildcard (analyzer guards this)
+
+  // Recursively emit bindings for a nested match pattern. The outer
+  // scrutinee value's address is loaded from `(fp + scrutineeOffset)`.
+  // `absOffset` is the offset INSIDE that scrutinee where this nested
+  // sub-value lives. For each named binding inside the nested pattern,
+  // alloc a local and copy the corresponding field value (with refcount
+  // increment for refcounted aggregates, matching the outer-binding
+  // refcount discipline).
+  private def emitNestedPatternBindings(
+      pat: TMatchPattern,
+      fieldType: SyslType,
+      scrutineeOffset: Int,
+      absOffset: Long,
+  ): Unit = pat match
+    case TVariantPattern(et, variantIndex, bindings, fieldTypes, deeperNested) =>
+      val variantFields = et.variants(variantIndex)._2
+      val dataOff = et.dataOffset.toInt
+      var fieldOff = 0
+      for (((binding, ft), i) <- bindings.zip(fieldTypes).zipWithIndex) do
+        val align = stackAlign(ft)
+        fieldOff = ((fieldOff + align - 1) / align) * align
+        binding.foreach { name =>
+          val local = allocLocal(name, ft)
+          emitAddImm(1, 5, scrutineeOffset)
+          emit("  ldd r1, r1, r0")        // r1 = scrutinee enum address
+          val totalOff = absOffset + dataOff + fieldOff
+          if totalOff != 0 then emitAddImm(1, 1, totalOff.toInt)
+          ft match
+            case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType
+              | _: SyslType.SliceType | _: SyslType.ArrayType
+              | _: SyslType.FuncType | _: SyslType.InterfaceType =>
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, ft)
+              ft match
+                case SyslType.StringType if needsAllocExtern =>
+                  emitAddImm(1, 5, local.offset)
+                  emit("  ldd r1, r1, r0")
+                  emitRefIncr(1, 8)
+                case st2: SyslType.StructType if structHasStringFields(st2) =>
+                  emitStructStringFieldsRC(5, local.offset, st2, incr = true)
+                case et2: SyslType.EnumType if structHasStringFields(et2) =>
+                  emitEnumStringFieldsRC(5, local.offset, et2, incr = true)
+                case _ =>
+            case _ =>
+              emitLoad(1, 1, ft)
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, ft)
+        }
+        // Recurse into deeper nested for THIS field
+        if i < deeperNested.length then deeperNested(i).foreach { deeper =>
+          emitNestedPatternBindings(deeper, ft, scrutineeOffset, absOffset + dataOff + fieldOff)
+        }
+        fieldOff += ft.sizeOf.toInt
+    case TDestructurePattern(st, bindings, fieldTypes, deeperNested) =>
+      for (((binding, ft), i) <- bindings.zip(fieldTypes).zipWithIndex) do
+        val off = fieldOffset(st, i)
+        binding.foreach { name =>
+          val local = allocLocal(name, ft)
+          emitAddImm(1, 5, scrutineeOffset)
+          emit("  ldd r1, r1, r0")        // r1 = scrutinee struct address
+          val totalOff = absOffset + off
+          if totalOff != 0 then emitAddImm(1, 1, totalOff.toInt)
+          ft match
+            case SyslType.StringType | _: SyslType.StructType | _: SyslType.EnumType
+              | _: SyslType.SliceType | _: SyslType.ArrayType
+              | _: SyslType.FuncType | _: SyslType.InterfaceType =>
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, ft)
+              ft match
+                case SyslType.StringType if needsAllocExtern =>
+                  emitAddImm(1, 5, local.offset)
+                  emit("  ldd r1, r1, r0")
+                  emitRefIncr(1, 8)
+                case st2: SyslType.StructType if structHasStringFields(st2) =>
+                  emitStructStringFieldsRC(5, local.offset, st2, incr = true)
+                case et2: SyslType.EnumType if structHasStringFields(et2) =>
+                  emitEnumStringFieldsRC(5, local.offset, et2, incr = true)
+                case _ =>
+            case _ =>
+              emitLoad(1, 1, ft)
+              emitAddImm(2, 5, local.offset)
+              emitStore(1, 2, ft)
+        }
+        if i < deeperNested.length then deeperNested(i).foreach { deeper =>
+          emitNestedPatternBindings(deeper, ft, scrutineeOffset, absOffset + off)
+        }
+    case _ => () // wildcards / primitives — nothing to bind
+
   // Refcount header offset: refcount is at [ptr - headerOffset]
   // Structs: 8 (just refcount), Slices: 16 (refcount + length), Strings: 8 (just refcount, length in fat pointer)
   private def refHeaderOffset(typ: SyslType): Int = typ match
@@ -4695,22 +4832,55 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                 emit("  slt r3, r1, r2")      // high < scrutinee?
                 emit(s"  beq r3, r0, $hitLabel") // hit if high >= scrutinee
                 emit(s"$rangeCheck")
-              case TDestructurePattern(_, _, _) =>
-                emit(s"  bra $hitLabel")      // destructure always matches
-              case TVariantPattern(_, variantIndex, _, _) =>
-                // Load tag from scrutinee enum and compare with variant index
+              case TDestructurePattern(st, _, _, nested) =>
+                if nested.forall(_.isEmpty) then
+                  emit(s"  bra $hitLabel")      // destructure always matches
+                else
+                  // Nested checks: only branch to hit if ALL nested also match.
+                  // The struct itself is at scrutineeOffset; nested fields are
+                  // at field offsets within it.
+                  val patFail = newLabel("pat_fail")
+                  for ((subOpt, i) <- nested.zipWithIndex) do subOpt.foreach { sub =>
+                    val off = fieldOffset(st, i)
+                    emitNestedPatternCheck(sub, st.fields(i)._2, scrutineeOffset, off.toLong, patFail)
+                  }
+                  emit(s"  bra $hitLabel")
+                  emit(s"$patFail")
+              case TVariantPattern(et, variantIndex, _, _, nested) =>
+                // Load tag from scrutinee enum and compare with variant index.
                 emitAddImm(1, 5, scrutineeOffset)
                 emit("  ldd r1, r1, r0")     // r1 = enum address
                 emit("  ldw r1, r1, r0")     // r1 = tag (i32 at offset 0)
                 emitLoadImm(2, variantIndex)
-                emit(s"  beq r1, r2, $hitLabel")
+                if nested.forall(_.isEmpty) then
+                  emit(s"  beq r1, r2, $hitLabel")
+                else
+                  // Outer tag must match AND every nested sub-pattern must match
+                  // before we can go to hitLabel. Branch to a per-alternative
+                  // fail label on any mismatch; fall through to the next
+                  // pattern alternative on fail.
+                  val patFail = newLabel("pat_fail")
+                  emit(s"  bne r1, r2, $patFail")
+                  val variantFields = et.variants(variantIndex)._2
+                  val dataOff = et.dataOffset.toInt
+                  var fieldOff = 0
+                  for ((subOpt, i) <- nested.zipWithIndex) do
+                    val (_, fieldType) = variantFields(i)
+                    val align = stackAlign(fieldType)
+                    fieldOff = ((fieldOff + align - 1) / align) * align
+                    subOpt.foreach { sub =>
+                      emitNestedPatternCheck(sub, fieldType, scrutineeOffset, (dataOff + fieldOff).toLong, patFail)
+                    }
+                    fieldOff += fieldType.sizeOf.toInt
+                  emit(s"  bra $hitLabel")
+                  emit(s"$patFail")
           emit(s"  bra $nextArm")
           emit(s"$hitLabel")
           enterScope()
           // Bind destructure/variant patterns BEFORE guard (guard may reference bindings)
           for pat <- arm.patterns do
             pat match
-              case TDestructurePattern(st, bindings, fieldTypes) =>
+              case TDestructurePattern(st, bindings, fieldTypes, nested) =>
                 for (binding, i) <- bindings.zipWithIndex do
                   val fieldType = fieldTypes(i)
                   binding.foreach { name =>
@@ -4746,7 +4916,18 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                         emitAddImm(2, 5, local.offset)
                         emitStore(1, 2, fieldType)
                   }
-              case TVariantPattern(et, variantIndex, bindings, fieldTypes) =>
+                // Nested patterns: recurse to bind names from sub-patterns.
+                // The outer synthetic binding has already copied the field
+                // value into a local; we descend into the original scrutinee
+                // (with absolute offset accumulating through field positions)
+                // to bind any deeper named fields.
+                if nested.nonEmpty then
+                  for ((subOpt, i) <- nested.zipWithIndex) do subOpt.foreach { sub =>
+                    val ft = fieldTypes(i)
+                    val off = fieldOffset(st, i)
+                    emitNestedPatternBindings(sub, ft, scrutineeOffset, off.toLong)
+                  }
+              case TVariantPattern(et, variantIndex, bindings, fieldTypes, nested) =>
                 val dataOff = et.dataOffset.toInt
                 val variantFields = et.variants(variantIndex)._2
                 var fieldOff = 0
@@ -4785,6 +4966,10 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                         emitLoad(1, 1, fieldType)
                         emitAddImm(2, 5, local.offset)
                         emitStore(1, 2, fieldType)
+                  }
+                  // Recurse into nested for THIS field BEFORE incrementing fieldOff.
+                  if i < nested.length then nested(i).foreach { sub =>
+                    emitNestedPatternBindings(sub, fieldType, scrutineeOffset, (dataOff + fieldOff).toLong)
                   }
                   fieldOff += fieldType.sizeOf.toInt
               case _ =>

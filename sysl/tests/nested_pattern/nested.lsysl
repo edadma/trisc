@@ -1,0 +1,129 @@
+Nested variant pattern tests
+============================
+
+Match arms can carry nested patterns inside variant fields:
+`Wrap(A(v))`, `Box(Some(v), _)`, etc. The outer discriminator is
+checked first; if it matches, each nested sub-pattern is checked in
+turn. If any nested pattern fails, the arm doesn't match and the next
+arm is tried. Bindings inside nested patterns are added to the arm
+scope alongside the outer-level bindings.
+
+Runtime support for nested patterns lives in the interpreter and in
+all three native backends (TRISC, LLVM-host, SVM-host); this file is
+the cross-backend runtime regression. Codegen-only pinning lives in
+`sysl/src/test/scala/.../SyslNestedPatternBackendTests.scala`.
+
+    module sysl.tests.nested_pattern
+
+
+    enum Inner
+        Val(x: int)
+        None
+
+    enum Outer
+        Wrap(i: Inner)
+        Empty
+
+    unwrap(o: Outer) -> int
+        o match
+            Wrap(Val(v)) -> v
+            Wrap(None) -> -1
+            Empty -> 0
+            else -> -99
+
+
+    enum Z
+        Z1(v: int)
+        Z0
+
+    enum Y
+        Y1(z: Z)
+        Y0
+
+    enum X
+        X1(y: Y)
+        X0
+
+    peel(x: X) -> int
+        x match
+            X1(Y1(Z1(v))) -> v
+            X1(Y1(Z0)) -> -1
+            X1(Y0) -> -2
+            X0 -> -3
+            else -> -99
+
+
+    enum NoArgInner
+        A
+        B
+
+    enum NoArgOuter
+        Wrap2(i: NoArgInner)
+        Empty2
+
+    classify(o: NoArgOuter) -> int
+        o match
+            Wrap2(A) -> 1
+            Wrap2(B) -> 2
+            Empty2 -> 0
+            else -> -99
+
+
+    struct Box
+        inner: Inner
+        other: int
+
+    box_unwrap(b: Box) -> int
+        b match
+            Box(Val(v), _) -> v
+            Box(None, k) -> k
+            else -> -99
+
+
+    #test
+    test_wrap_val() -> unit
+        assert(unwrap(Wrap(Val(42))) == 42, "Wrap(Val(42))")
+
+    #test
+    test_wrap_none() -> unit
+        assert(unwrap(Wrap(None)) == -1, "Wrap(None)")
+
+    #test
+    test_empty() -> unit
+        assert(unwrap(Empty) == 0, "Empty")
+
+    #test
+    test_two_level() -> unit
+        assert(peel(X1(Y1(Z1(7)))) == 7, "X1(Y1(Z1(7)))")
+
+    #test
+    test_two_level_inner_z0() -> unit
+        assert(peel(X1(Y1(Z0))) == -1, "X1(Y1(Z0))")
+
+    #test
+    test_two_level_outer_y0() -> unit
+        assert(peel(X1(Y0)) == -2, "X1(Y0)")
+
+    #test
+    test_two_level_x0() -> unit
+        assert(peel(X0) == -3, "X0")
+
+    #test
+    test_no_arg_a() -> unit
+        assert(classify(Wrap2(A)) == 1, "Wrap2(A)")
+
+    #test
+    test_no_arg_b() -> unit
+        assert(classify(Wrap2(B)) == 2, "Wrap2(B)")
+
+    #test
+    test_no_arg_empty() -> unit
+        assert(classify(Empty2) == 0, "Empty2")
+
+    #test
+    test_box_val() -> unit
+        assert(box_unwrap(Box(Val(123), 7)) == 123, "Box(Val(123), 7)")
+
+    #test
+    test_box_none() -> unit
+        assert(box_unwrap(Box(None, 99)) == 99, "Box(None, 99)")

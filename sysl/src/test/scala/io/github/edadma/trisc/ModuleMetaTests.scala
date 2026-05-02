@@ -246,7 +246,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
     val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
     val templates = ast.decls.filter {
       case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
-      case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+      case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
       case _ => false
     }
     templates.length shouldBe 2
@@ -289,7 +289,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
     val baseMeta = ModuleMeta.fromProgram(typed)
     val templates = ast.decls.filter {
       case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
-      case FunDeclAST(_, _, _, _, _, tps, _, _, _) => tps.nonEmpty
+      case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
       case _ => false
     }
     val meta = new ModuleMeta(baseMeta.symbols, templates)
@@ -311,5 +311,44 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
     val userAnalyzer = new SyslAnalyzer
     userAnalyzer.registerImport(meta2)
     noException should be thrownBy userAnalyzer.analyze(userAst)
+  }
+
+  // ===== Extension method round-trip (Phase 2b) =====
+
+  "round-trips extension entries through smeta" in {
+    val src =
+      """module mylib
+        |
+        |extension (x: i32)
+        |    def doubled -> i32 = x * 2
+        |    def tripled -> i32 = x * 3
+        |""".stripMargin
+    val Right(ast) = (new SyslParser).parseProgram(src): @unchecked
+    val analyzer = new SyslAnalyzer
+    val typed = analyzer.analyze(ast)
+    val baseMeta = ModuleMeta.fromProgram(typed, Some("mylib.sysl"))
+    val meta = new ModuleMeta(
+      baseMeta.symbols,
+      Nil,
+      analyzer.getTraitImplMetas,
+      analyzer.getGenericEnumInstances,
+      analyzer.getExtensionMetas,
+    )
+    meta.extensions.length shouldBe 2
+    meta.extensions.map(_.methodName).toSet shouldBe Set("doubled", "tripled")
+    meta.extensions.foreach(_.definingModule shouldBe "mylib")
+    meta.extensions.foreach(_.receiverType shouldBe SyslType.IntType(32))
+
+    val text = meta.toSmeta
+    text should include("EXT doubled mylib")
+    text should include("EXT tripled mylib")
+    text should include("i32")
+
+    val meta2 = ModuleMeta.fromSmeta(text).get
+    meta2.extensions.length shouldBe 2
+    meta2.extensions.map(_.methodName).toSet shouldBe Set("doubled", "tripled")
+    meta2.extensions.foreach(_.definingModule shouldBe "mylib")
+    meta2.extensions.foreach(_.receiverType shouldBe SyslType.IntType(32))
+    meta2.extensions.find(_.methodName == "doubled").get.mangledFnName shouldBe "__ext_i32__doubled"
   }
 }

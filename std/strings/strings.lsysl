@@ -821,8 +821,8 @@ Tests
 
     #test
     test_join_empty_parts() -> unit
-        val parts = new [0]string
-        assert(join(parts[:], ",") == "", "empty")
+        val parts: []string = []
+        assert(join(parts, ",") == "", "empty")
 
 
 ### fields

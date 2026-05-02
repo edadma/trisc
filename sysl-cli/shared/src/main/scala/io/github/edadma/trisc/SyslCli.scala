@@ -1020,9 +1020,18 @@ object SyslCli:
         .flatMap(discoverTest(unit.name, _))
     }
 
+    // Scope: only run tests defined in the user-supplied paths. The driver
+    // also pulls in transitively-imported modules so type-check + codegen
+    // succeed, but their `#test` functions are NOT in the user's intent —
+    // running them muddies failure attribution and inflates test counts
+    // (e.g. parsyl getting std.bytes / std.utf8 / std.builder for free
+    // just by importing them).
+    val inScopeUnits = initialSources.keys.toSet
+    val inScopeDiscovered = discovered.filter(t => inScopeUnits(t.unitName))
+
     val filtered = cmd.filter match
-      case None => discovered
-      case Some(pat) => discovered.filter(t =>
+      case None => inScopeDiscovered
+      case Some(pat) => inScopeDiscovered.filter(t =>
         shortFnName(t.fn.name).contains(pat) || t.displayName.contains(pat) || t.fn.name.contains(pat))
 
     println(s"running ${filtered.size} tests (backend: ${cmd.backend})")
@@ -1064,7 +1073,9 @@ object SyslCli:
           if cmd.failFast then stop = true
 
     val totalMs = (System.nanoTime() - totalStart) / 1e6
-    val skipped = discovered.size - filtered.size
+    // `skipped` reports tests excluded by `--filter`; the scope filter above
+    // is silent (the user didn't ask for those tests in the first place).
+    val skipped = inScopeDiscovered.size - filtered.size
     println(f"\n$passed passed, $failed failed, $skipped skipped — $totalMs%.1fms")
     if failed > 0 then throw CliError(s"$failed test(s) failed")
 
@@ -1154,17 +1165,17 @@ object SyslCli:
   private def isSyslSource(name: String): Boolean =
     name.endsWith(".sysl") || name.endsWith(".lsysl")
 
-  /** Resolve a source file, returning (relative-path-without-extension, source-code). */
+  /** Resolve a source file, returning (relative-path-without-extension, source-code).
+    *
+    * Key computation is delegated to `SyslDriver.computeSourceKey`, which
+    * walks up looking for a project marker (`sysl.toml`) when no explicit
+    * `baseDir` is supplied — letting sysl-native repos declare module paths
+    * relative to the package root regardless of where the repo lives on disk.
+    */
   private def resolveSource(path: String, baseDir: String): (String, String) =
     val name = io.fileName(path)
     val raw = io.readFile(path)
-    // Compute relative path from base directory
-    val relPath = if path.startsWith(baseDir) then
-      val rel = path.drop(baseDir.length).dropWhile(c => c == '/' || c == '\\')
-      if rel.nonEmpty then rel else name
-    else name
-    val key = if relPath.endsWith(".lsysl") then relPath.stripSuffix(".lsysl")
-    else relPath.stripSuffix(".sysl")
+    val key = SyslDriver.computeSourceKey(io, path, baseDir)
     val source = if name.endsWith(".lsysl") then
       val doc = new LiterateParser().parse(raw)
       LiterateRenderer.tangle(doc)

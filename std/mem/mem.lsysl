@@ -237,12 +237,12 @@ Tests
 
     #test
     test_copy_empty_src() -> unit
-        val src = new [0]byte
+        val src: []byte = []
         val dst = new [3]byte
 
         dst[0] = 5
 
-        val n = copy(dst[:], src[:])
+        val n = copy(dst[:], src)
 
         assert(n == 0, "nothing copied")
         assert(dst[0] == 5, "dst untouched")
@@ -250,11 +250,11 @@ Tests
     #test
     test_copy_empty_dst() -> unit
         val src = new [3]byte
-        val dst = new [0]byte
+        val dst: []byte = []
 
         src[0] = 5
 
-        val n = copy(dst[:], src[:])
+        val n = copy(dst, src[:])
 
         assert(n == 0, "nothing copied")
 
@@ -277,9 +277,9 @@ passes if `set` simply returns without panicking.
 
     #test
     test_set_empty_is_noop() -> unit
-        val buf = new [0]byte
+        val buf: []byte = []
 
-        set(buf[:], 0xFF)
+        set(buf, 0xFF)
 
     #test
     test_zero_fills_zeros() -> unit
@@ -341,10 +341,10 @@ passes if `set` simply returns without panicking.
 
     #test
     test_eq_empty_empty() -> unit
-        val a = new [0]byte
-        val b = new [0]byte
+        val a: []byte = []
+        val b: []byte = []
 
-        assert(eq(a[:], b[:]), "empty slices are equal")
+        assert(eq(a, b), "empty slices are equal")
 
 
 ### cmp
@@ -400,10 +400,10 @@ passes if `set` simply returns without panicking.
 
     #test
     test_cmp_empty_empty() -> unit
-        val a = new [0]byte
-        val b = new [0]byte
+        val a: []byte = []
+        val b: []byte = []
 
-        assert(cmp(a[:], b[:]) == 0, "empty vs empty is zero")
+        assert(cmp(a, b) == 0, "empty vs empty is zero")
 
 
 ### index_byte
@@ -451,6 +451,6 @@ passes if `set` simply returns without panicking.
 
     #test
     test_index_byte_empty() -> unit
-        val s = new [0]byte
+        val s: []byte = []
 
-        assert(index_byte(s[:], 0) == -1, "empty slice never finds")
+        assert(index_byte(s, 0) == -1, "empty slice never finds")

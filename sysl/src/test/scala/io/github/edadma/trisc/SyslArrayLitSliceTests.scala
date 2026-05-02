@@ -119,6 +119,124 @@ class SyslArrayLitSliceTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 10
   }
 
+  // ===== Annotation drives inference through assignment too =====
+
+  "assign to existing []T var: `xs = []` produces a slice" in {
+    // Existing-target assignment forwards the var's declared type as the RHS
+    // expected type. Without this the bare `[]` would fail with "cannot infer
+    // element type for empty array literal" — there's no declared type at the
+    // RHS site.
+    eval(
+      """main() -> int
+        |    var xs: []int = [1, 2, 3]
+        |    xs = []
+        |    xs = append(xs, 99)
+        |    len(xs)
+        |""".stripMargin) shouldBe 1
+  }
+
+  "assign to existing []T var: `xs = [a, b]` re-coerces to slice" in {
+    eval(
+      """main() -> int
+        |    var xs: []int = []
+        |    xs = [10, 20, 30]
+        |    xs = append(xs, 40)
+        |    len(xs)
+        |""".stripMargin) shouldBe 4
+  }
+
+  "field assign: `self.buf = []` produces a slice when field is []T" in {
+    // FieldAssignStmtAST forwards the field's declared type as the RHS expected.
+    // Without this, the field-assign equivalent of `self.buf = (new [0]byte)[:0]`
+    // couldn't shrink to the natural `self.buf = []`.
+    eval(
+      """struct Builder
+        |    items: []int
+        |
+        |reset(self: *Builder) -> int
+        |    self.items = []
+        |    len(self.items)
+        |
+        |main() -> int
+        |    var b = Builder([1, 2, 3])
+        |    reset(&b)
+        |""".stripMargin) shouldBe 0
+  }
+
+  "field assign: `self.buf = [a, b]` coerces to slice" in {
+    eval(
+      """struct Builder
+        |    items: []int
+        |
+        |seed(self: *Builder) -> int
+        |    self.items = [7, 8, 9, 10]
+        |    self.items = append(self.items, 11)
+        |    len(self.items)
+        |
+        |main() -> int
+        |    var b = Builder([])
+        |    seed(&b)
+        |""".stripMargin) shouldBe 5
+  }
+
+  // ===== Expected-type propagates into generic-call args =====
+  //
+  // A generic-function call with explicit type args — `success[[]int]([])` —
+  // analyzes its arguments AFTER the explicit type-arg substitution, so each
+  // arg's expected type is `subst(formalParam.typ)`. Without this hookup, the
+  // empty `[]` (or any context-dependent literal) at the call site failed
+  // with "cannot infer element type" — same lever as the var-decl path, just
+  // sourced from a different upstream expected-type. Closes the last hold-out
+  // the array-lit-to-slice fix didn't already cover.
+
+  "[] as arg to generic call with explicit type-arg coerces to slice" in {
+    eval(
+      """f[B](v: B) -> int = len(v)
+        |
+        |main() -> int = f[[]int]([])
+        |""".stripMargin) shouldBe 0
+  }
+
+  "[a, b, c] as arg to generic call with explicit type-arg coerces to slice" in {
+    eval(
+      """f[B](v: B) -> int = len(v)
+        |
+        |main() -> int = f[[]int]([1, 2, 3])
+        |""".stripMargin) shouldBe 3
+  }
+
+  "[] under nested generic context propagates expected type" in {
+    eval(
+      """f[B](v: B) -> B = v
+        |g[A]() -> []A = f[[]A]([])
+        |
+        |main() -> int = len(g[int]())
+        |""".stripMargin) shouldBe 0
+  }
+
+  "parsyl-style success[[]A]([]) one-liner compiles and runs" in {
+    eval(
+      """type Parser[A] = new (int) -> A
+        |
+        |success[B](v: B) -> Parser[B] = Parser[B]((_x: int) -> v)
+        |
+        |empty_list[A]() -> Parser[[]A] = success[[]A]([])
+        |
+        |main() -> int
+        |    val p = empty_list[int]()
+        |    len(p(0))
+        |""".stripMargin) shouldBe 0
+  }
+
+  "regression: bare [] with no expected type still errors" in {
+    val ex = intercept[Exception] {
+      eval("""main() -> int = len([])""")
+    }
+    val msg = ex.getMessage.toLowerCase
+    assert(msg.contains("infer") || msg.contains("element type"),
+      s"bare [] without context should still error, got: ${ex.getMessage}")
+  }
+
   // ===== Regressions: fixed-size array context unchanged =====
 
   "regression: var arr: [3]int = [1, 2, 3] is still a fixed-size array" in {

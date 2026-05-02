@@ -95,7 +95,7 @@ result.
         buf: []byte
 
     new_writer() -> ByteWriter
-        return ByteWriter((new [0]byte)[:0])
+        return ByteWriter([])
 
     ByteWriter.write(data: []byte) -> int
         val n = len(data)
@@ -112,7 +112,7 @@ result.
     ByteWriter.len() -> int = len(self.buf)
 
     ByteWriter.reset()
-        self.buf = (new [0]byte)[:0]
+        self.buf = []
 
 
 Utilities
@@ -124,7 +124,7 @@ Utilities
 bytes read.
 
     read_all(r: Reader) -> []byte
-        var result = (new [0]byte)[:0]
+        var result: []byte = []
         var buf: [1024]byte
 
         var done = false
