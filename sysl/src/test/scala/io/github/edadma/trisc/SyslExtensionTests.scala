@@ -156,4 +156,80 @@ class SyslExtensionTests extends SyslTestHelpers {
         s"expected dispatch error, got: ${ex.getMessage}")
     }
   }
+
+  "operator extensions (Phase 2c)" - {
+
+    "extension cannot override a built-in operator (use impl Add[T] instead)" in {
+      val ex = intercept[Exception] {
+        eval(
+          """struct Vec
+            |    x: int
+            |    y: int
+            |
+            |extension (a: Vec)
+            |    #operator("+")
+            |    def add(b: Vec) -> Vec = Vec(a.x + b.x, a.y + b.y)
+            |
+            |main() -> int = 0
+            |""".stripMargin)
+      }
+      ex.getMessage.toLowerCase should include("reserved for built-in")
+    }
+
+    "non-built-in binary #operator on extension" in {
+      eval(
+        """struct Bag
+          |    n: int
+          |
+          |extension (a: Bag)
+          |    #operator("<>")
+          |    def merge(b: Bag) -> Bag = Bag(a.n + b.n)
+          |
+          |main() -> int
+          |    x = Bag(7)
+          |    y = Bag(35)
+          |    z = x <> y
+          |    z.n
+          |""".stripMargin) shouldBe 42
+    }
+
+    "prefix #operator on extension dispatches" in {
+      eval(
+        """struct Bag
+          |    n: int
+          |
+          |extension (a: Bag)
+          |    #operator("~~")
+          |    def flip -> Bag = Bag(0 - a.n)
+          |
+          |main() -> int
+          |    x = Bag(7)
+          |    y = ~~x
+          |    y.n
+          |""".stripMargin) shouldBe -7
+    }
+
+    "cross-module operator extension" in {
+      val libs = Map(
+        "veclib/vec" ->
+          """module veclib
+            |
+            |struct V
+            |    n: int
+            |
+            |extension (a: V)
+            |    #operator("<>")
+            |    def merge(b: V) -> V = V(a.n + b.n)
+            |""".stripMargin)
+      evalWithLibs(libs,
+        """import veclib.*
+          |
+          |main() -> int
+          |    a = V(11)
+          |    b = V(31)
+          |    c = a <> b
+          |    c.n
+          |""".stripMargin) shouldBe 42
+    }
+  }
 }

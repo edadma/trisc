@@ -543,7 +543,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
 
   /** Lower extension blocks to free FunDecls + side-table entries. Runs once at
    *  the top of analyze(), before pass 0, so the synthesized funcs flow through
-   *  the normal registration/analysis pipeline. */
+   *  the normal registration/analysis pipeline. Methods carrying `#operator(<sigil>)`
+   *  also emit a synth trait+impl pair so the existing `customBinaryOperatorTraits`
+   *  / `customUnaryOperatorTraits` dispatch fires unchanged (Phase 2c). */
   protected def lowerExtensions(decls: List[DeclAST]): (List[DeclAST], List[ExtensionEntry]) =
     val out = mutable.ListBuffer[DeclAST]()
     val entries = mutable.ListBuffer[ExtensionEntry]()
@@ -565,6 +567,48 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             )
             out += synth
             entries += ExtensionEntry(m.name, recv.typ, mangled, module)
+            // Phase 2c: an extension method with `#operator(<sigil>)` also synthesizes
+            // a trait+impl pair so the existing operator-dispatch machinery picks it
+            // up. The trait is generic in the receiver position only (`T`); other
+            // params and return type are concretely typed exactly as the user wrote.
+            // The impl provides a one-line body that delegates to the synth function.
+            val opAttrs = m.attributes.filter(a => a.name == "operator" || a.name == "op")
+            if opAttrs.length > 1 then
+              throw AnalysisError(s"extension method '${m.name}' has multiple #operator attributes", m)
+            for opAttr <- opAttrs.headOption do
+              if tparams.nonEmpty then
+                throw AnalysisError(
+                  s"#operator on a generic-receiver extension is not supported yet (Phase 2d): '${m.name}'",
+                  m,
+                )
+              val sigil = extractOperatorSymbol(opAttr, m)
+              val traitName = s"__ExtOp_${key}_${m.name}"
+              val tparam = "T"
+              val recvAsT = ParamAST("__ext_self__", NamedTypeAST(tparam, Nil), None, ParamMode.In)
+              val traitMethodParams = recvAsT :: m.params
+              val traitRet = m.returnType.getOrElse(NamedTypeAST("unit", Nil))
+              val traitMethod = TraitMethodAST(
+                m.name,
+                traitMethodParams,
+                traitRet,
+                None,
+                List(Attribute(opAttr.name, opAttr.args)),
+              )
+              out += TraitDeclAST(traitName, List(tparam), List(traitMethod))
+              // Impl body: delegate to the synth extension function so the lowered
+              // free function carries the user's body and the impl is just a thunk.
+              val implRecv = recv.copy(name = "__ext_self__")
+              val implParams = implRecv :: m.params
+              val callArgs: List[ExpressionAST] =
+                VarRefAST("__ext_self__") :: m.params.map(p => VarRefAST(p.name))
+              val implBody = ExprBodyAST(CallAST(mangled, callArgs))
+              val implMethod = FunDeclAST(
+                m.name,
+                implParams,
+                Some(traitRet),
+                implBody,
+              )
+              out += ImplDeclAST(traitName, Nil, List(recv.typ), List(implMethod))
         case other =>
           out += other
     (out.toList, entries.toList)
