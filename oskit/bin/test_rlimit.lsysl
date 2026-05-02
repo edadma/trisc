@@ -1,0 +1,154 @@
+test_rlimit — prlimit64 + getrlimit
+====================================
+
+Phase 0a item 7. `prlimit64` (slix-musl 263) and the older
+`getrlimit` (200) report slix's hardcoded capacities through
+the POSIX rlimit ABI: `NOFILE=64`, `NPROC=32`, `STACK=16384`,
+`CORE=0`, `NICE=0`. Other resources read as `RLIM_INFINITY`
+(`0xffffffffffffffff`). `new_limit` writes via `prlimit64` are
+silently accepted — slix doesn't track per-process overrides.
+Bogus resource IDs return `-EINVAL`.
+
+Test plan
+---------
+
+1. `prlimit64(0, RLIMIT_NOFILE, NULL, &out)` → out.rlim_cur ==
+   out.rlim_max == 64.
+2. `prlimit64(0, RLIMIT_NPROC, NULL, &out)` → 32.
+3. `prlimit64(0, RLIMIT_STACK, NULL, &out)` → 16384.
+4. `prlimit64(0, RLIMIT_CORE, NULL, &out)` → 0.
+5. `prlimit64(0, RLIMIT_AS, NULL, &out)` → all-ones (RLIM_INFINITY).
+6. `prlimit64(0, 99, NULL, &out)` → -EINVAL.
+7. `getrlimit(RLIMIT_NOFILE, &out)` → 64 (older API still works).
+8. `prlimit64(0, RLIMIT_NOFILE, &new_limit, NULL)` → 0 (write
+   silently accepted).
+
+Pass criterion: prints `rlimit: ok`.
+
+    module oskit.bin.test_rlimit
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_GETRLIMIT  = 200
+    val NR_PRLIMIT64  = 263
+
+    val RLIMIT_STACK  = 3
+    val RLIMIT_CORE   = 4
+    val RLIMIT_NPROC  = 6
+    val RLIMIT_NOFILE = 7
+    val RLIMIT_AS     = 9
+
+    val EINVAL        = 22
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("rlimit: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_prlimit64(pid: int, resource: int, new_limit: *byte,
+            old_limit: *byte) -> int
+        int(syscall6(NR_PRLIMIT64, i64(pid), i64(resource),
+            i64(new_limit), i64(old_limit), 0, 0))
+
+    posix_getrlimit(resource: int, rlim: *byte) -> int
+        int(syscall6(NR_GETRLIMIT, i64(resource), i64(rlim),
+            0, 0, 0, 0))
+
+
+    read_i64(p: *byte, off: int) -> i64
+        var v = i64(0)
+        var bi = 0
+        while bi < 8
+            v = v | (i64(int(p[off + bi]) & 0xff) << i64(bi * 8))
+            bi += 1
+        v
+
+
+    main(argv: []string)
+        var out: [16]byte
+
+        if posix_prlimit64(0, RLIMIT_NOFILE, *byte(0), &out[0]) != 0
+            fail(1)
+            return
+        if read_i64(&out[0], 0) != i64(64)
+            puts("rlimit: nofile_cur=")
+            print_idec(int(read_i64(&out[0], 0)))
+            puts("\n")
+            fail(2)
+            return
+        if read_i64(&out[0], 8) != i64(64)
+            fail(3)
+            return
+
+        if posix_prlimit64(0, RLIMIT_NPROC, *byte(0), &out[0]) != 0
+            fail(4)
+            return
+        if read_i64(&out[0], 0) != i64(32)
+            fail(5)
+            return
+
+        if posix_prlimit64(0, RLIMIT_STACK, *byte(0), &out[0]) != 0
+            fail(6)
+            return
+        if read_i64(&out[0], 0) != i64(16384)
+            fail(7)
+            return
+
+        if posix_prlimit64(0, RLIMIT_CORE, *byte(0), &out[0]) != 0
+            fail(8)
+            return
+        if read_i64(&out[0], 0) != i64(0)
+            fail(9)
+            return
+
+        if posix_prlimit64(0, RLIMIT_AS, *byte(0), &out[0]) != 0
+            fail(10)
+            return
+        if read_i64(&out[0], 0) != i64(-1)
+            puts("rlimit: as_cur=")
+            print_idec(int(read_i64(&out[0], 0)))
+            puts("\n")
+            fail(11)
+            return
+
+        if posix_prlimit64(0, 99, *byte(0), &out[0]) != -EINVAL
+            fail(12)
+            return
+
+        if posix_getrlimit(RLIMIT_NOFILE, &out[0]) != 0
+            fail(13)
+            return
+        if read_i64(&out[0], 0) != i64(64)
+            fail(14)
+            return
+
+        var new_limit: [16]byte
+        var bi = 0
+        while bi < 8
+            new_limit[bi] = byte(0)
+            new_limit[8 + bi] = byte(0)
+            bi += 1
+        new_limit[0] = byte(50)         // rlim_cur = 50
+        new_limit[8] = byte(60)         // rlim_max = 60
+        if posix_prlimit64(0, RLIMIT_NOFILE, &new_limit[0], *byte(0)) != 0
+            fail(15)
+            return
+
+        puts("rlimit: ok\n")
+        exit()

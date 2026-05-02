@@ -2309,6 +2309,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "clkpipe: bad"
   }
 
+  "posix: prlimit64 + getrlimit" in {
+    // Phase 0a item 7. prlimit64 / getrlimit report slix's
+    // hardcoded capacities (NOFILE=64, NPROC=32, STACK=16384,
+    // CORE=0); other resources read RLIM_INFINITY. The
+    // new_limit write side is silently accepted (no per-process
+    // tracking).
+    val output = qemu.command("test_rlimit")
+    output should include("rlimit: ok")
+    output should not include "rlimit: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

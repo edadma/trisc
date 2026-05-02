@@ -1359,6 +1359,18 @@ Returns 0 on success, negative errno on failure.
                 rp[ri] = byte(0)
                 ri += 1
             return i64(0)
+        if num == 263
+            // prlimit64(pid, resource, new_limit, old_limit).
+            // pid is ignored (multi-process rlimits aren't a thing
+            // yet); the new_limit pointer is silently accepted —
+            // we don't track per-process overrides, so changes are
+            // no-ops. The old_limit fill comes from a hardcoded
+            // table that mirrors slix's actual capacities.
+            return sys_prlimit64(int(a1), a2, a3)
+        if num == 200
+            // getrlimit(resource, *rlim) — older API; just defer
+            // to the same fill helper.
+            return sys_prlimit64(int(a0), i64(0), a1)
         if num == 274
             return sys_readv(int(a0), a1, int(a2))
         if num == 372
@@ -6640,6 +6652,92 @@ it but accepts the pointer. We do the same.
             while ti < 8
                 tzp[ti] = byte(0)
                 ti += 1
+        i64(0)
+
+`prlimit64` / `getrlimit` — read-only resource limits.
+
+Slix has hardcoded capacities (`POSIX_FDS_PER_PROC=64`,
+`MAX_PROCESSES=32`, kernel stacks 16 KB each, no swap). We
+expose those through the POSIX rlimit ABI so libc/musl init
+and any program that probes `getrlimit(RLIMIT_NOFILE)` for
+malloc heuristics or fd-table sizing learn the real numbers.
+The `new_limit` write side of `prlimit64` is silently accepted
+— we don't track per-process overrides, so changes are no-ops
+(matches the "lower without tracking" pattern POSIX programs
+expect when the limit isn't enforced).
+
+Resource codes (Linux x86_64 / aarch64 share these):
+
+  0  RLIMIT_CPU         no CPU time accounting → infinity
+  1  RLIMIT_FSIZE       no max file size → infinity
+  2  RLIMIT_DATA        no enforced limit → infinity
+  3  RLIMIT_STACK       16384 (slix THREAD_STACK_SIZE)
+  4  RLIMIT_CORE        0 (no coredumps)
+  5  RLIMIT_RSS         no RSS accounting → infinity
+  6  RLIMIT_NPROC       32 (MAX_PROCESSES)
+  7  RLIMIT_NOFILE      64 (POSIX_FDS_PER_PROC)
+  8  RLIMIT_MEMLOCK     no mlock → infinity
+  9  RLIMIT_AS          no enforced limit → infinity
+  10 RLIMIT_LOCKS       no lock accounting → infinity
+  11 RLIMIT_SIGPENDING  no signal accounting → infinity
+  12 RLIMIT_MSGQUEUE    no posix mqueues → infinity
+  13 RLIMIT_NICE        0 (no priority boosting)
+  14 RLIMIT_RTPRIO      0 (no realtime scheduling)
+  15 RLIMIT_RTTIME      no rt-time accounting → infinity
+
+Layout: `struct rlimit { rlim_cur: u64, rlim_max: u64 }` = 16 B.
+`RLIM_INFINITY` is `0xffffffffffffffff` (all-ones) on Linux.
+
+    shim_rlimit_value(resource: int) -> i64
+        if resource == 0
+            return i64(-1)         // RLIMIT_CPU
+        if resource == 1
+            return i64(-1)         // RLIMIT_FSIZE
+        if resource == 2
+            return i64(-1)         // RLIMIT_DATA
+        if resource == 3
+            return i64(16384)      // RLIMIT_STACK
+        if resource == 4
+            return i64(0)          // RLIMIT_CORE
+        if resource == 5
+            return i64(-1)         // RLIMIT_RSS
+        if resource == 6
+            return i64(32)         // RLIMIT_NPROC
+        if resource == 7
+            return i64(64)         // RLIMIT_NOFILE
+        if resource == 8
+            return i64(-1)         // RLIMIT_MEMLOCK
+        if resource == 9
+            return i64(-1)         // RLIMIT_AS
+        if resource == 10
+            return i64(-1)         // RLIMIT_LOCKS
+        if resource == 11
+            return i64(-1)         // RLIMIT_SIGPENDING
+        if resource == 12
+            return i64(-1)         // RLIMIT_MSGQUEUE
+        if resource == 13
+            return i64(0)          // RLIMIT_NICE
+        if resource == 14
+            return i64(0)          // RLIMIT_RTPRIO
+        if resource == 15
+            return i64(-1)         // RLIMIT_RTTIME
+        i64(-2)                    // sentinel: unknown
+
+    shim_write_rlimit(p: *byte, off: int, v: i64)
+        var bi = 0
+        while bi < 8
+            p[off + bi] = byte(int((v >> i64(bi * 8))) & 0xff)
+            bi += 1
+
+    sys_prlimit64(resource: int, new_limit: i64, old_limit: i64) -> i64
+        val rv = shim_rlimit_value(resource)
+        if rv == i64(-2)
+            return i64(-EINVAL)
+        if old_limit != i64(0)
+            val p: *byte = *byte(old_limit)
+            shim_write_rlimit(p, 0, rv)       // rlim_cur
+            shim_write_rlimit(p, 8, rv)       // rlim_max
+        // new_limit silently accepted — see docstring.
         i64(0)
 
 `nanosleep` and `clock_nanosleep` block for the requested
