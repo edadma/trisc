@@ -11,12 +11,13 @@ Keys are strings (max 32 bytes). Values are either integers
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply}
-    import oskit.services.{rs_ready, notify_send_to, svc_get_thread_pid, thread_id}
+    import oskit.services.{rs_ready, notify_send_to, svc_get_thread_pid, thread_id, exit}
 
-    val DS_CMD_PUBLISH   = 1
-    val DS_CMD_RETRIEVE  = 2
-    val DS_CMD_DELETE    = 3
-    val DS_CMD_SUBSCRIBE = 4
+    val DS_CMD_PUBLISH    = 1
+    val DS_CMD_RETRIEVE   = 2
+    val DS_CMD_DELETE     = 3
+    val DS_CMD_SUBSCRIBE  = 4
+    val DS_CMD_PANIC_SELF = 5
 
     val DS_TYPE_INT = 1
     val DS_TYPE_STR = 2
@@ -282,6 +283,28 @@ Message: [cmd(1), prefix_len(1), prefix(N)]
         reply[0] = 0
         ipc_reply(sender, reply, 1)
 
+Handle PANIC_SELF: debug-only command used by the Phase 0c chunk 8
+RS-restart resilience test. Reply first so the caller doesn't wedge
+in `ipc_send`, then `exit()` so PM forwards the death to RS, which
+restarts ds from its boot module via `rs_handle_crash`. From the
+caller's perspective the cached "ds" port stays valid because RS
+calls `port_transfer` to hand the same port id to the new ds thread
+before it runs.
+
+The dispatch loop has no way to know which command will be the last
+one served — so this handler is symmetric with every other branch
+up to the `exit()`. The exit could equally be a deliberate fault
+(null deref, divide by zero, etc.); the RS path doesn't care how
+the process died, only that it did, so the simpler clean exit pins
+the same restart contract without dragging the kernel fault handler
+into the test surface.
+
+    ds_handle_panic_self(sender: int)
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+        exit()
+
 DS server main loop.
 
     ds_server()
@@ -302,6 +325,8 @@ DS server main loop.
                     ds_handle_delete(sender, buf)
                 else if cmd == DS_CMD_SUBSCRIBE
                     ds_handle_subscribe(sender, buf)
+                else if cmd == DS_CMD_PANIC_SELF
+                    ds_handle_panic_self(sender)
                 else
                     var reply: [1]byte
                     reply[0] = -1

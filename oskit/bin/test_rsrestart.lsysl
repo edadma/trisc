@@ -1,0 +1,182 @@
+test_rsrestart — server crash + RS restart resilience test
+=============================================================
+
+Phase 0c chunk 8: pins the contract that RS reincarnates a dead
+boot-module server transparently to its clients. The cached `ds`
+port id must keep working across the restart because RS calls
+`port_transfer` to assign the new ds thread the same port id
+before it runs.
+
+We use the `ds` server because it's the lowest-cross-section
+restart target: pure key/value store, present on both x86 and
+aarch64 (unlike `nic`), no dependents in the boot path, no
+device grants, no client code in the rest of the test
+fixture that would race the restart.
+
+The trigger is a debug `DS_CMD_PANIC_SELF` (5) command added to
+`oskit/servers/ds.lsysl` for this test alone — the handler
+replies status=0 so the caller unblocks, then `exit()`s. The
+kernel terminates the process; PM's `pm_handle_exit` notices the
+parent is RS and calls `notify_send_to(rs_tid, dead_pid)`; RS's
+`rs_monitor` loop wakes, calls `rs_handle_crash(5)`, which:
+
+  1. reloads the ds boot module into a fresh process,
+  2. calls `port_transfer(old_port, new_main_tid)` so the new
+     ds thread inherits the same port id,
+  3. re-applies the ds privilege + ipc-send mask,
+  4. blocks in `rs_wait_ready()` until the new ds calls `rs_ready()`.
+
+While RS is in the middle of (1)–(4), the test's next
+`ipc_send` to the cached port id either delivers immediately
+(if the new ds is already past `port_create` + `ipc_recv`) or
+queues in the port FIFO and unblocks when the new ds runs. We
+don't poll explicitly; the kernel's send-then-block path handles
+the wait.
+
+Test plan
+---------
+
+  1. `port_lookup("ds")`. Expect a non-negative id.
+  2. Round-trip a publish + retrieve to confirm ds works
+     pre-panic. Sentinel value 42.
+  3. Send `DS_CMD_PANIC_SELF`. Expect ipc_send returns 0 and
+     `reply[0] == 0`.
+  4. Round-trip a *different* sentinel (99) post-panic via the
+     same cached port. Both publish and retrieve must succeed.
+     A different value rules out the test reading a stale reply
+     from a still-alive old ds.
+  5. Print `rsrestart: ok`.
+
+Pass: prints `rsrestart: ok`. Failure prints `rsrestart: bad N`
+where N tags the failing step. A hang (no output) means RS
+stopped restarting servers — the bug class this chunk pins.
+
+    module oskit.bin.test_rsrestart
+
+    import oskit.ulib.{puts, exit, exit_with, port_lookup, ipc_send}
+
+
+    val DS_CMD_PUBLISH    = 1
+    val DS_CMD_RETRIEVE   = 2
+    val DS_CMD_PANIC_SELF = 5
+    val DS_TYPE_INT       = 1
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("rsrestart: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+Wire helpers — duplicate of the ds client library (which we don't
+import, to keep the test self-contained and avoid coupling the
+restart test to client API churn).
+
+    ds_publish_int(port: int, key: string, value: int) -> int
+        val klen = len(key)
+        var msg: [80]byte
+        msg[0] = byte(DS_CMD_PUBLISH)
+        msg[1] = byte(DS_TYPE_INT)
+        msg[2] = byte(klen)
+        val kp: *byte = *byte(key)
+        var i = 0
+        while i < klen
+            msg[3 + i] = kp[i]
+            i += 1
+        msg[3 + klen]     = byte((value >> 24) & 0xFF)
+        msg[3 + klen + 1] = byte((value >> 16) & 0xFF)
+        msg[3 + klen + 2] = byte((value >> 8) & 0xFF)
+        msg[3 + klen + 3] = byte(value & 0xFF)
+        var reply: [1]byte
+        val r = ipc_send(port, msg, 3 + klen + 4, reply, 1)
+        if r != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        0
+
+
+    ds_retrieve_int(port: int, key: string) -> int
+        val klen = len(key)
+        var msg: [48]byte
+        msg[0] = byte(DS_CMD_RETRIEVE)
+        msg[1] = byte(klen)
+        val kp: *byte = *byte(key)
+        var i = 0
+        while i < klen
+            msg[2 + i] = kp[i]
+            i += 1
+        var reply: [68]byte
+        val r = ipc_send(port, msg, 2 + klen, reply, 68)
+        if r != 0
+            return -2147483647
+        if reply[0] != 0
+            return -2147483647
+        if int(reply[1]) != DS_TYPE_INT
+            return -2147483647
+        val b0 = int(reply[3]) & 0xFF
+        val b1 = int(reply[4]) & 0xFF
+        val b2 = int(reply[5]) & 0xFF
+        val b3 = int(reply[6]) & 0xFF
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+
+    main(argv: []string)
+        val port = port_lookup("ds")
+        if port < 0
+            fail(1)
+            return
+
+Pre-panic round trip. Confirms the ds we're about to kill is up
+and answering normally before we exercise the restart path.
+
+        if ds_publish_int(port, "rstest", 42) != 0
+            fail(2)
+            return
+        if ds_retrieve_int(port, "rstest") != 42
+            fail(3)
+            return
+
+Send the panic command. The handler replies before exiting, so
+this ipc_send returns 0. After the reply lands, ds exits → PM
+notifies RS → RS reincarnates ds.
+
+        var pmsg: [1]byte
+        pmsg[0] = byte(DS_CMD_PANIC_SELF)
+        var preply: [1]byte
+        val pr = ipc_send(port, pmsg, 1, preply, 1)
+        if pr != 0
+            fail(4)
+            return
+        if preply[0] != 0
+            fail(5)
+            return
+
+Post-panic round trip on the *same* cached port id. The send
+either reaches the live new ds, or queues in the port FIFO until
+the new ds runs `port_create` + `ipc_recv`. Either way it
+eventually completes. Sentinel 99 rules out reading a leftover
+reply from the dead instance.
+
+        if ds_publish_int(port, "rstest", 99) != 0
+            fail(6)
+            return
+        if ds_retrieve_int(port, "rstest") != 99
+            fail(7)
+            return
+
+        puts("rsrestart: ok\n")
+        exit()

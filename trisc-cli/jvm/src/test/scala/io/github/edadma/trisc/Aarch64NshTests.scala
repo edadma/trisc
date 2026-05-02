@@ -2411,6 +2411,23 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "procmax: bad"
   }
 
+  "rs: ds server crash triggers transparent restart" in {
+    // Phase 0c chunk 8. The test publishes a key to ds, sends a
+    // debug DS_CMD_PANIC_SELF that makes ds reply then exit(),
+    // then publishes + retrieves a *different* sentinel value
+    // through the same cached port id. RS's reincarnation path
+    // (rs_handle_crash → rs_start_from_module → port_transfer →
+    // rs_wait_ready) must hand the new ds thread the same port
+    // id so the cached client port keeps working transparently.
+    // A regression that broke port_transfer, the PM→RS death
+    // notify, or the rs_monitor loop would either hang the test
+    // (no reply ever returned) or fail the post-restart round
+    // trip.
+    val output = qemu.command("test_rsrestart")
+    output should include("rsrestart: ok")
+    output should not include "rsrestart: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no
