@@ -935,6 +935,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "upunixpk: bad"
   }
 
+  "posix: clock_gettime variants + F_GETPIPE_SZ/F_SETPIPE_SZ" in {
+    // Phase 0a items 4 + 5. clock_gettime accepts MONOTONIC_RAW,
+    // BOOTTIME, TAI etc. (all alias uptime in slix); CPUTIME
+    // variants return -EINVAL. F_GETPIPE_SZ returns 512 (slix's
+    // fixed PIPE_BUF_SIZE); F_SETPIPE_SZ accepts <=512.
+    val output = qemu.command("test_clkpipe")
+    output should include("clkpipe: ok")
+    output should not include "clkpipe: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

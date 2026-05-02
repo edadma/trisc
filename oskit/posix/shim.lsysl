@@ -103,6 +103,7 @@ are sourced from `linux/include/uapi/asm-generic/errno-base.h` plus
 codepath are listed here.  Keep numerically sorted so a future
 reader can scan by errno number.
 
+    const EPERM            = 1
     const ENOENT           = 2
     const EIO              = 5
     const EBADF            = 9
@@ -762,6 +763,8 @@ fcntl command codes (`<fcntl.h>` in musl arch).
     val POSIX_F_SETFD        = 2
     val POSIX_F_GETFL        = 3
     val POSIX_F_SETFL        = 4
+    val POSIX_F_SETPIPE_SZ   = 1031
+    val POSIX_F_GETPIPE_SZ   = 1032
 
     var inet_port_cached = -1
 
@@ -5426,6 +5429,16 @@ actually exercise before doing I/O:
   day an exec path lands, this is the place to start tracking.
 - `F_DUPFD` (0): not implemented — socket dup requires a separate
   fd-aliasing design (see POSIX-fd-bridge memory). Returns -EINVAL.
+- `F_GETPIPE_SZ` (1032): return slix's pipe buffer size (512 — the
+  fixed `PIPE_BUF_SIZE` in `oskit/servers/vfs.lsysl`). Linux
+  rejects this on non-pipe fds, but the shim doesn't track
+  pipe-vs-regular-FILE today, so we return the slix pipe size for
+  any FILE-kind fd and -EINVAL elsewhere. Real programs probe
+  this on actual pipe fds; the loose typing on FILE is harmless.
+- `F_SETPIPE_SZ` (1031): the buffer is fixed-size, so we accept
+  values up to 512 (round-up no-op) and return 512; larger values
+  return -EPERM (Linux: -EBUSY when buffer would lose data; we
+  haven't implemented capacity changes at all).
 
 Unknown command → -EINVAL so real misuse surfaces.
 
@@ -5444,6 +5457,16 @@ Unknown command → -EINVAL so real misuse surfaces.
             return i64(0)
         if cmd == POSIX_F_DUPFD
             return i64(-EINVAL)             // no dup yet
+        if cmd == POSIX_F_GETPIPE_SZ
+            if k == POSIX_FD_FILE
+                return i64(512)
+            return i64(-EINVAL)
+        if cmd == POSIX_F_SETPIPE_SZ
+            if k != POSIX_FD_FILE
+                return i64(-EINVAL)
+            if arg <= 512
+                return i64(512)
+            return i64(-EPERM)
         i64(-EINVAL)
 
 SYS_OPENAT. The user passes `(dirfd, pathname, flags, mode)`. We
@@ -6374,8 +6397,15 @@ tv_nsec(8)} + it_value{tv_sec(8), tv_nsec(8)}.
     val POSIX_TFD_NONBLOCK  = 2048
     val POSIX_TFD_CLOEXEC   = 524288
     val POSIX_TFD_TIMER_ABSTIME = 1
-    val POSIX_CLOCK_REALTIME  = 0
-    val POSIX_CLOCK_MONOTONIC = 1
+    val POSIX_CLOCK_REALTIME         = 0
+    val POSIX_CLOCK_MONOTONIC        = 1
+    val POSIX_CLOCK_PROCESS_CPUTIME  = 2
+    val POSIX_CLOCK_THREAD_CPUTIME   = 3
+    val POSIX_CLOCK_MONOTONIC_RAW    = 4
+    val POSIX_CLOCK_REALTIME_COARSE  = 5
+    val POSIX_CLOCK_MONOTONIC_COARSE = 6
+    val POSIX_CLOCK_BOOTTIME         = 7
+    val POSIX_CLOCK_TAI              = 11
 
     shim_itimerspec_to_ticks(p: *byte, off: int) -> int
         // Read tv_sec (low 8B) + tv_nsec (high 8B). Slix's tick
@@ -6536,7 +6566,35 @@ wallclock or per-thread CPU accounting yet, but apps that
 just need a monotonic timestamp (the overwhelming majority)
 keep working. timerfd already takes the same shortcut.
 
+Whitelist the clock IDs that are meaningful in slix today.
+We have no wallclock, no NTP slewing, no suspend, no leap-second
+handling, no per-thread/per-process CPU accounting — every
+"different" Linux clock here just maps onto uptime. The clocks
+that *would* require real accounting (CPUTIME_ID variants) are
+rejected so programs that probe them learn the truth instead of
+silently getting wrong numbers. The realtime-alarm variants are
+also rejected since they need signal delivery.
+
+    shim_clock_supported(clockid: int) -> int
+        if clockid == POSIX_CLOCK_REALTIME
+            return 1
+        if clockid == POSIX_CLOCK_MONOTONIC
+            return 1
+        if clockid == POSIX_CLOCK_MONOTONIC_RAW
+            return 1
+        if clockid == POSIX_CLOCK_REALTIME_COARSE
+            return 1
+        if clockid == POSIX_CLOCK_MONOTONIC_COARSE
+            return 1
+        if clockid == POSIX_CLOCK_BOOTTIME
+            return 1
+        if clockid == POSIX_CLOCK_TAI
+            return 1
+        0
+
     sys_clock_gettime(clockid: int, tp: i64) -> i64
+        if shim_clock_supported(clockid) == 0
+            return i64(-EINVAL)
         if tp == i64(0)
             return i64(-EFAULT)
         val p: *byte = *byte(tp)
@@ -6544,6 +6602,8 @@ keep working. timerfd already takes the same shortcut.
         i64(0)
 
     sys_clock_getres(clockid: int, tp: i64) -> i64
+        if shim_clock_supported(clockid) == 0
+            return i64(-EINVAL)
         if tp == i64(0)
             return i64(0)               // Linux: NULL is allowed for clock_getres
         val p: *byte = *byte(tp)

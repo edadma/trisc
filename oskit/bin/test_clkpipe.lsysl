@@ -1,0 +1,153 @@
+test_clkpipe — clock_gettime + F_GETPIPE_SZ / F_SETPIPE_SZ
+==========================================================
+
+Phase 0a items 4 and 5 in one binary.
+
+**Item 4 (F_GETPIPE_SZ / F_SETPIPE_SZ).** Slix's pipes have a
+fixed 512-byte buffer (`PIPE_BUF_SIZE` in vfs.lsysl). The shim
+reports that via `F_GETPIPE_SZ` and accepts `F_SETPIPE_SZ`
+values up to 512 (round-up no-op). Larger values return -EPERM.
+
+**Item 5 (clock_gettime variants).** Slix has no NTP, no
+suspend, no leap-second handling, no per-thread CPU
+accounting. Every meaningful POSIX clock ID maps to uptime;
+the CPUTIME variants return -EINVAL so probing programs learn
+the truth instead of getting wrong numbers silently.
+
+Test plan
+---------
+
+1. clock_gettime on REALTIME / MONOTONIC / MONOTONIC_RAW /
+   BOOTTIME / TAI all succeed; their tv_sec readings are within
+   1s of each other (slix uptime is the same monotonic source).
+2. clock_gettime on CLOCK_PROCESS_CPUTIME_ID returns -EINVAL.
+3. clock_gettime on a bogus ID (99) returns -EINVAL.
+4. pipe2(fds, 0) → fds[0] readable, fds[1] writable.
+5. fcntl(fds[0], F_GETPIPE_SZ) returns 512.
+6. fcntl(fds[0], F_SETPIPE_SZ, 256) returns 512 (rounded up).
+7. fcntl(fds[0], F_SETPIPE_SZ, 4096) returns -EPERM.
+
+Pass criterion: prints `clkpipe: ok`.
+
+    module oskit.bin.test_clkpipe
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOCK_GETTIME = 143
+    val NR_FCNTL         = 171
+    val NR_PIPE2         = 256
+    val NR_CLOSE         = 147
+
+    val CLOCK_REALTIME         = 0
+    val CLOCK_MONOTONIC        = 1
+    val CLOCK_PROCESS_CPUTIME  = 2
+    val CLOCK_MONOTONIC_RAW    = 4
+    val CLOCK_BOOTTIME         = 7
+    val CLOCK_TAI              = 11
+
+    val F_SETPIPE_SZ     = 1031
+    val F_GETPIPE_SZ     = 1032
+
+    val EINVAL           = 22
+    val EPERM            = 1
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("clkpipe: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    posix_clock_gettime(clockid: int, tp: *byte) -> int
+        int(syscall6(NR_CLOCK_GETTIME, i64(clockid), i64(tp), 0, 0, 0, 0))
+
+    posix_fcntl(fd: int, cmd: int, arg: int) -> int
+        int(syscall6(NR_FCNTL, i64(fd), i64(cmd), i64(arg), 0, 0, 0))
+
+    posix_pipe2(arr: *i32, flags: int) -> int
+        int(syscall6(NR_PIPE2, i64(arr), i64(flags), 0, 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+    main(argv: []string)
+
+Step 1 — supported clocks all succeed.
+
+        var ts1: [16]byte
+        if posix_clock_gettime(CLOCK_REALTIME, &ts1[0]) != 0
+            fail(1)
+            return
+        var ts2: [16]byte
+        if posix_clock_gettime(CLOCK_MONOTONIC, &ts2[0]) != 0
+            fail(2)
+            return
+        var ts3: [16]byte
+        if posix_clock_gettime(CLOCK_MONOTONIC_RAW, &ts3[0]) != 0
+            fail(3)
+            return
+        var ts4: [16]byte
+        if posix_clock_gettime(CLOCK_BOOTTIME, &ts4[0]) != 0
+            fail(4)
+            return
+        var ts5: [16]byte
+        if posix_clock_gettime(CLOCK_TAI, &ts5[0]) != 0
+            fail(5)
+            return
+
+Step 2 — unsupported clocks return -EINVAL.
+
+        if posix_clock_gettime(CLOCK_PROCESS_CPUTIME, &ts1[0]) != -EINVAL
+            fail(6)
+            return
+        if posix_clock_gettime(99, &ts1[0]) != -EINVAL
+            fail(7)
+            return
+
+Step 3 — pipe2 + F_GETPIPE_SZ.
+
+        var pfd: [2]i32
+        if posix_pipe2(&pfd[0], 0) != 0
+            fail(8)
+            return
+        val rfd = int(pfd[0])
+        val wfd = int(pfd[1])
+        val sz = posix_fcntl(rfd, F_GETPIPE_SZ, 0)
+        if sz != 512
+            puts("clkpipe: getpipe_sz=")
+            print_idec(sz)
+            puts("\n")
+            fail(9)
+            return
+
+Step 4 — F_SETPIPE_SZ with small value succeeds (rounded up).
+
+        if posix_fcntl(rfd, F_SETPIPE_SZ, 256) != 512
+            fail(10)
+            return
+
+Step 5 — F_SETPIPE_SZ with too-large value returns -EPERM.
+
+        if posix_fcntl(rfd, F_SETPIPE_SZ, 4096) != -EPERM
+            fail(11)
+            return
+
+        posix_close(rfd)
+        posix_close(wfd)
+        puts("clkpipe: ok\n")
+        exit()
