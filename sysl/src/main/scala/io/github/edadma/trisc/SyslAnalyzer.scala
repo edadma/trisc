@@ -1020,12 +1020,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           val sn = shortName(sym.name)
           if extFnShortNames.contains(sn) && !functions.contains(sn) then
             sym.typ match
-              case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects) =>
+              case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects, isParameterless) =>
                 val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
                 val (reads, writes) = effects match
                   case e if e.isPure || e.isUnknown => (None, None)
                   case e => (e.reads, e.writes)
-                functions(sn) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes)
+                functions(sn) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes, isParameterless = isParameterless)
                 if reads.isDefined || writes.isDefined then
                   resolvedEffectsCache(sym.name) = (reads.getOrElse(Set.empty), writes.getOrElse(Set.empty))
                 externalSymbols += sn
@@ -1141,7 +1141,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val typesReachableFromImportedFuncs: Set[String] =
           directMatch.iterator.collect {
             case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Func] =>
-              val SymbolMeta.Kind.Func(params, ret, _, _, _, _) = sym.typ: @unchecked
+              val SymbolMeta.Kind.Func(params, ret, _, _, _, _, _) = sym.typ: @unchecked
               (params :+ ret).iterator.flatMap(collectStructAndEnumNames).toSet
           }.flatten.toSet.intersect(moduleStructAndEnumNames)
         val importedTypeNames = explicitlyImportedTypeNames ++ typesReachableFromImportedFuncs
@@ -1168,8 +1168,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       val sn = shortName(sym.name)
       val localKey = shortToAlias.getOrElse(sn, sn) // use alias if provided
       sym.typ match
-        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects) =>
+        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects, isParameterless) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
+          // Even if the function itself is already known, walk its types to
+          // discover any nested generic-struct instances (e.g. an imported
+          // `eoi -> Box[unit]` surfaces `Box_unit`, which the importing unit
+          // needs to recognize as `Box[unit]` for downstream unification).
+          for p <- params do linkNestedGenericStructInstances(p)
+          linkNestedGenericStructInstances(returnType)
           if functions.contains(localKey) then
             // Allow same-module sibling re-registration (same mangled name) and externs
             val existing = functions(localKey)
@@ -1183,13 +1189,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               case e if e.isPure => (None, None)
               case e if e.isUnknown => (None, None)
               case e => (e.reads, e.writes)
-            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes)
+            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes, isParameterless = isParameterless)
             // Pre-populate the resolved-effects cache so cross-module reads use the same
             // already-mangled names without trying to look them up in this unit's globalScope.
             if reads.isDefined || writes.isDefined then
               resolvedEffectsCache(sym.name) = (reads.getOrElse(Set.empty), writes.getOrElse(Set.empty))
             externalSymbols += localKey
         case SymbolMeta.Kind.Data(dataType, isMutable) =>
+          linkNestedGenericStructInstances(dataType)
           if globalScope.contains(localKey) then
             val existing = globalScope(localKey)
             if !sym.isExtern && existing.name != sym.name then
@@ -1198,6 +1205,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             globalScope(localKey) = SymInfo(sym.name, dataType, mutable = isMutable)
             externalSymbols += localKey
         case SymbolMeta.Kind.Const(constType, value) =>
+          linkNestedGenericStructInstances(constType)
           // Cross-file `const`: register in globalScope (so VarRef name resolution
           // succeeds) AND in compileTimeConstants under both the local-key short name
           // and the fully-mangled name so the analyzer's constant-folding paths
@@ -1213,6 +1221,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           compileTimeConstants(sym.name) = value
         case SymbolMeta.Kind.Struct(st) =>
           structTypes(shortName(sym.name)) = st
+          linkImportedGenericStructToTemplate(st)
         case SymbolMeta.Kind.Interface(it) =>
           interfaceTypes(shortName(sym.name)) = it
         case SymbolMeta.Kind.Enum(et) =>
@@ -1262,6 +1271,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         Some(named.collect { case NamedImport(n, _) => n }.toSet)
     if meta.genericTemplates.nonEmpty then
       registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates), genericTemplateFilter)
+
+    // Generic struct templates may have just been registered above; the symbol
+    // loop walked imported function/data/const types before genericStructs was
+    // populated, so any nested generic-struct instances (e.g. `Box_unit` inside
+    // `eoi -> Box[unit]`) couldn't be linked then. Re-walk the publicSymbols'
+    // types now that templates are in scope so structToTemplate has the
+    // mangled-instance → template mapping for downstream unifyTypes.
+    for sym <- meta.publicSymbols do
+      sym.typ match
+        case SymbolMeta.Kind.Func(params, returnType, _, _, _, _, _) =>
+          for p <- params do linkNestedGenericStructInstances(p)
+          linkNestedGenericStructInstances(returnType)
+        case SymbolMeta.Kind.Data(t, _) => linkNestedGenericStructInstances(t)
+        case SymbolMeta.Kind.Const(t, _) => linkNestedGenericStructInstances(t)
+        case SymbolMeta.Kind.Struct(st) => linkImportedGenericStructToTemplate(st)
+        case _ => ()
 
     // Register generic enum instance mappings for cross-module type inference
     for inst <- meta.genericEnumInstances do
@@ -1442,6 +1467,64 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         parseMangledMonotype(suffix).foreach { t =>
           enumToTemplate(et.name) = (baseName, List(t))
         }
+
+  /** Cross-unit mirror of the local instantiation cache: when an imported
+   *  symbol's type names a generic-struct *instance* (e.g. `Box_unit`),
+   *  populate `structToTemplate` so subsequent `unifyTypes(Box[A], Box_unit)`
+   *  in this unit can recover the type-arg binding. Without this, sibling /
+   *  cross-module references to a value of generic-struct-instance type don't
+   *  drive type inference at the use site. Mirrors the enum equivalent above.
+   *  Single-target template only; multi-arg templates would need a richer
+   *  inverse mangler. */
+  protected def linkImportedGenericStructToTemplate(st: SyslType.StructType): Unit =
+    if genericStructs.isEmpty then return
+    if structToTemplate.contains(st.name) then return
+    for (baseName, decl) <- genericStructs if decl.typeParams.length == 1 do
+      val prefix = baseName + "_"
+      if st.name.startsWith(prefix) then
+        val suffix = st.name.drop(prefix.length)
+        parseMangledMonotype(suffix).foreach { t =>
+          structToTemplate(st.name) = (baseName, List(t))
+        }
+
+  /** Cross-unit mirror for generic *type aliases*: when an imported value's
+   *  type is a nominal alias instance (e.g. `Box_unit` where `type Box[A] = new A`),
+   *  populate `genericAliasToTemplate` so subsequent `unifyTypes(Box[A], Box_unit)`
+   *  can recover the type-arg binding. Mirrors the struct equivalent, but for
+   *  the `type X[A] = new ...` family. Single-target template only. */
+  protected def linkImportedGenericAliasToTemplate(nt: SyslType.NamedType): Unit =
+    if genericTypeAliases.isEmpty then return
+    if genericAliasToTemplate.contains(nt.name) then return
+    for (baseName, (tps, _, _)) <- genericTypeAliases if tps.length == 1 do
+      val prefix = baseName + "_"
+      if nt.name.startsWith(prefix) then
+        val suffix = nt.name.drop(prefix.length)
+        parseMangledMonotype(suffix).foreach { t =>
+          genericAliasToTemplate(nt.name) = (baseName, List(t))
+        }
+
+  /** Walk a SyslType and link any nested generic-struct or generic-alias
+   *  instance to its template. Used when registering imported function
+   *  signatures whose param/return types may surface instance types
+   *  (e.g. `Box_unit`) that aren't themselves imported as standalone symbols. */
+  protected def linkNestedGenericStructInstances(t: SyslType): Unit = t match
+    case st: SyslType.StructType =>
+      linkImportedGenericStructToTemplate(st)
+      for (_, ft) <- st.fields do linkNestedGenericStructInstances(ft)
+    case nt @ SyslType.NamedType(_, base, true, _, _) =>
+      linkImportedGenericAliasToTemplate(nt)
+      linkNestedGenericStructInstances(base)
+    case SyslType.NamedType(_, base, _, _, _) => linkNestedGenericStructInstances(base)
+    case SyslType.PtrType(p) => linkNestedGenericStructInstances(p)
+    case SyslType.RefType(p) => linkNestedGenericStructInstances(p)
+    case SyslType.ArrayType(e, _) => linkNestedGenericStructInstances(e)
+    case SyslType.SliceType(e) => linkNestedGenericStructInstances(e)
+    case SyslType.FuncType(ps, r, _, _) =>
+      for p <- ps do linkNestedGenericStructInstances(p)
+      linkNestedGenericStructInstances(r)
+    case SyslType.EnumType(_, variants) =>
+      for (_, fs) <- variants; (_, ft) <- fs do linkNestedGenericStructInstances(ft)
+    case _ => ()
 
   /** Generic templates are omitted from `ModuleMeta` / typed `TProgram`; same-package siblings need the raw AST templates to resolve calls like `alt(...)`. */
   /** Register generic templates (functions, structs, data enums) for the current
@@ -2192,7 +2275,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         if funInfo.reads.isDefined || funInfo.writes.isDefined then
           validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
         validateGhostDiscipline(name, funInfo, tBody)
-        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo))
+        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo), isParameterless = funInfo.isParameterless)
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>
         scopeStack = new mutable.ArrayBuffer

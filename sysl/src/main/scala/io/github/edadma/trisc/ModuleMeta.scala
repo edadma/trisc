@@ -6,7 +6,7 @@ case class SymbolMeta(name: String, typ: SymbolMeta.Kind, isPrivate: Boolean, is
 
 object SymbolMeta:
   enum Kind:
-    case Func(params: List[SyslType], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, effects: FuncEffects = FuncEffects.Unknown)
+    case Func(params: List[SyslType], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, effects: FuncEffects = FuncEffects.Unknown, isParameterless: Boolean = false)
     case Data(dataType: SyslType, isMutable: Boolean = false)
     case Struct(structType: SyslType.StructType)
     case Enum(enumType: SyslType.EnumType)
@@ -43,7 +43,7 @@ class ModuleMeta(
         currentSource = sym.sourceFile
       val vis = if sym.isPrivate then "PRIVATE " else ""
       sym.typ match
-        case SymbolMeta.Kind.Func(params, ret, isDef, isPure, modes, effects) =>
+        case SymbolMeta.Kind.Func(params, ret, isDef, isPure, modes, effects, _) =>
           // The FUNCP/DEFFUNCP keyword variants encode `#pure`. For `#reads`/`#writes`
           // (effects.isUnknown is false but isPure is also false), we emit an additional
           // `EFFECTS RW …` trailer.  When `isPure` is true we skip the EFFECTS trailer
@@ -107,7 +107,7 @@ class ModuleMeta(
       if sym.isExtern then
         buf ++= s"extern ${sym.name}\n"
       else sym.typ match
-        case SymbolMeta.Kind.Func(params, ret, _, _, _, _) =>
+        case SymbolMeta.Kind.Func(params, ret, _, _, _, _, _) =>
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType, _) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
@@ -203,7 +203,7 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, isExtern = true, sourceFile = sourceFile)
-      case TFunDecl(name, params, returnType, _, isPrivate, attrs, isDef, _, effects) =>
+      case TFunDecl(name, params, returnType, _, isPrivate, attrs, isDef, _, effects, isParameterless) =>
         val isPure = attrs.exists(_.name == "pure")
         // Param modes: infer from the pointer-wrapping of declared param types. The
         // analyzer stores Out/Inout params with type `*T`; the TFunDecl exposes that
@@ -212,7 +212,7 @@ object ModuleMeta:
         // auto-wrap without needing to re-derive mode from the type alone.
         val modes = params.map(_.mode)
         val needModes = modes.exists(_ != ParamMode.In)
-        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef, isPure, if needModes then modes else Nil, effects), isPrivate, sourceFile = sourceFile)
+        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef, isPure, if needModes then modes else Nil, effects, isParameterless), isPrivate, sourceFile = sourceFile)
       case TVarDecl(name, typ, _, isPrivate, _, _, isMutable) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ, isMutable), isPrivate, sourceFile = sourceFile)
       case TConstDecl(name, typ, value) =>

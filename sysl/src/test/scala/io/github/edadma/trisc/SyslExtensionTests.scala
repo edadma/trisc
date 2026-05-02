@@ -725,4 +725,117 @@ class SyslExtensionTests extends SyslTestHelpers {
       )) shouldBe 1015
     }
   }
+
+  "cross-file generic-fn body re-analysis (nested generic calls + parameterless)" - {
+
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "imported parameterless function auto-calls when referenced from sibling file" in {
+      // The narrowest gap: a parameterless function `f -> T` declared in one
+      // file is called bare from a sibling. Without the SymbolMeta isParameterless
+      // round-trip, the importing analyzer treats the bare reference as a
+      // function pointer instead of auto-calling, breaking type inference at
+      // every downstream use site.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |answer -> int = 42
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int = answer
+            |""".stripMargin,
+      )) shouldBe 42
+    }
+
+    "outer generic body calls inner generic on imported parameterless return" in {
+      // The fix-2 case: an outer generic function whose body calls an inner
+      // generic on a sibling-imported parameterless function. Cross-file
+      // generic-struct-instance link (`linkImportedGenericStructToTemplate`)
+      // is what makes this analyze — without it, unification of the inner
+      // generic's pattern against the parameterless's instance return type
+      // would fail to bind the type parameter.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box[A]
+            |    v: A
+            |
+            |eoi -> Box[unit] = Box[unit](())
+            |
+            |skip_w[A](b: Box[A]) -> Box[A] = b
+            |
+            |outer[A](p: Box[A]) -> Box[unit] = skip_w(eoi)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val p: Box[int] = Box[int](3)
+            |    val _ = outer[int](p)
+            |    0
+            |""".stripMargin,
+      )) shouldBe 0
+    }
+
+    "outer generic body uses sibling-defined operator-impl on generic struct instance" in {
+      // The fix-3 case: a user `#operator(...)` impl on a generic struct
+      // dispatches inside an outer generic's body when re-analyzed under a
+      // cross-file instantiation. Combines impl visibility (sysl@71cbdb89e)
+      // with struct-instance template linking (this fix).
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box[A]
+            |    v: A
+            |
+            |trait SeqL[A, B, R]
+            |    #operator("<~")
+            |    seql(a: A, b: B) -> R
+            |
+            |impl[A, B] SeqL[Box[A], Box[B], Box[A]]
+            |    seql(a: Box[A], b: Box[B]) -> Box[A] = a
+            |
+            |outer[A](p: Box[A], q: Box[unit]) -> Box[A] = p <~ q
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val p: Box[int] = Box[int](7)
+            |    val q: Box[unit] = Box[unit](())
+            |    val r = outer[int](p, q)
+            |    r.v
+            |""".stripMargin,
+      )) shouldBe 7
+    }
+
+    "regression: outer-just-calls-inner without operator/parameterless still works" in {
+      // Coverage for the boring case the prompt called out — confirms the
+      // new linking pass doesn't regress the simple cross-file generic-
+      // function call path.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |inner_call[A](v: A) -> A = v
+            |outer_call[A](v: A) -> A = inner_call(v)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int = outer_call[int](42)
+            |""".stripMargin,
+      )) shouldBe 42
+    }
+  }
 }

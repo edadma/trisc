@@ -516,7 +516,7 @@ class SyslSVMCodegen:
     // Emit extern declarations
     val generated = out.toString
     val definedSymbols = program.decls.flatMap {
-      case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
+      case TFunDecl(name, _, _, _, _, _, _, _, _, _) => Some(name)
       case TVarDecl(name, _, _, _, _, _, _) => Some(name)
       case _ => None
     }.toSet

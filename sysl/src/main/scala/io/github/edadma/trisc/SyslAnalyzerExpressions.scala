@@ -622,7 +622,7 @@ trait SyslAnalyzerExpressions:
         sym.typ match
           case SymbolMeta.Kind.Data(dataType, _) => TVarRef(sym.name, dataType)
           case SymbolMeta.Kind.Const(constType, value) => TIntLit(value, constType)
-          case SymbolMeta.Kind.Func(params, retType, _, _, _, eff) => TFuncRef(sym.name, SyslType.FuncType(params, retType, effects = eff))
+          case SymbolMeta.Kind.Func(params, retType, _, _, _, eff, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType, effects = eff))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")
           case SymbolMeta.Kind.Interface(_) => throw AnalysisError(s"'$nsName.$member' is an interface type, not a value")
@@ -1118,7 +1118,7 @@ trait SyslAnalyzerExpressions:
         val funcSym = meta.publicSymbols.find(s => shortName(s.name) == method)
           .getOrElse(throw AnalysisError(s"module '$nsName' has no function '$method'"))
         funcSym.typ match
-          case SymbolMeta.Kind.Func(params, returnType, _, _, modes, _) =>
+          case SymbolMeta.Kind.Func(params, returnType, _, _, modes, _, _) =>
             val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
             val checkedArgs = checkArgs(s"$nsName.$method", paramPairs, tArgs, modes)
             TCall(funcSym.name, checkedArgs, returnType)

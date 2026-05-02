@@ -9,7 +9,7 @@ case class TModuleDecl(path: List[String]) extends TDecl
 case class TImportDecl(path: String) extends TDecl
 case class TExternFuncDecl(name: String, params: List[SyslType], returnType: SyslType) extends TDecl
 case class TExternVarDecl(name: String, typ: SyslType) extends TDecl
-case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil, isDef: Boolean = false, isGhost: Boolean = false, effects: FuncEffects = FuncEffects.Unknown) extends TDecl
+case class TFunDecl(name: String, params: List[TParam], returnType: SyslType, body: TFunBody, isPrivate: Boolean = false, attributes: List[Attribute] = Nil, isDef: Boolean = false, isGhost: Boolean = false, effects: FuncEffects = FuncEffects.Unknown, isParameterless: Boolean = false) extends TDecl
 case class TVarDecl(name: String, typ: SyslType, init: TExpr, isPrivate: Boolean = false, isVolatile: Boolean = false, isGhost: Boolean = false, isMutable: Boolean = false) extends TDecl
 case class TStructDecl(name: String, fields: List[(String, SyslType)], volatileFields: Set[Int] = Set.empty) extends TDecl
 case class TEnumDecl(name: String, members: List[(String, Long)]) extends TDecl
