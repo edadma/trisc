@@ -1,0 +1,68 @@
+test_longname — exercise TFS-v2's 60-char filename support
+============================================================
+
+Phase 0e: TFS bumped `DIR_NAME_LEN` 14→60 and made directories use
+the same direct+indirect chain as files. This test creates a file
+under `/tmp` whose name is 40 characters long (well past the v1 cap
+of 14 but comfortably inside the v2 cap of 60), opens it back by
+path through the FS server, unlinks it, then re-opens to confirm
+the unlink stuck.
+
+A v1 filesystem would silently truncate the name on create; a v2
+filesystem should round-trip it identically.
+
+Pass: prints `longname: ok`. Failure prints `longname: bad N` where
+N tags the failing step.
+
+    module oskit.bin.test_longname
+
+    import oskit.ulib.{puts, exit, exit_with, create, open, unlink}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("longname: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        // 35-char basename — over v1's 14-char cap, well inside v2's 60-char cap.
+        val path = "/tmp/longname_phase0e_abc_end_xyz_q"
+
+        val ino = create(path, 1, 0x1A4)
+        if ino <= 0
+            fail(1)
+            return
+
+        // open() returns a per-process handle (not the inode). Just verify
+        // we get a non-error handle on the path we just created.
+        val handle = open(path)
+        if handle < 0
+            fail(2)
+            return
+
+        if unlink(path) != 0
+            fail(3)
+            return
+
+        // Post-unlink open must fail (path resolution returns ENOENT).
+        val gone = open(path)
+        if gone >= 0
+            fail(4)
+            return
+
+        puts("longname: ok\n")
+        exit()

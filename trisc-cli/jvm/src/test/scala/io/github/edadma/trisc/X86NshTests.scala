@@ -1064,6 +1064,20 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "rsrestart: bad"
   }
 
+  "tfs: 40-char filenames round-trip on TFS-v2" in {
+    // Phase 0e. TFS bumped DIR_NAME_LEN 14→60 and made directories
+    // span the same direct+indirect block chain files do. The test
+    // creates `/tmp/longname_phase0e_abcdefghij_xyz_end` (40 chars,
+    // well past v1's 14-char cap), opens it back through the FS
+    // server, unlinks it, then re-opens to confirm the unlink
+    // landed. A regression that reverted the wire format or kept
+    // single-block dir storage would either truncate the name on
+    // create or fail the open round-trip.
+    val output = qemu.command("test_longname")
+    output should include("longname: ok")
+    output should not include "longname: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

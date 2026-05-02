@@ -12,12 +12,12 @@ Lists the contents of a directory, skipping `.` and `..`.
         if len(argv) > 1
             dir = argv[1]
         var entry_ino: int
-        var entry_name: [14]byte
+        var entry_name: [60]byte
         var idx = 0
         while readdir(dir, idx, &entry_ino, entry_name) == 0
             // Find name length (NUL-padded)
             var n = 0
-            while n < 14
+            while n < 60
                 if entry_name[n] == 0
                     break
                 n += 1

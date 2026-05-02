@@ -23,7 +23,7 @@ Commands:
 - TFS_STAT    (6): [cmd, ino(4)] → [status(1), mode(4), nlinks(4), uid(4), gid(4), size(4), mtime(4), ctime(4)]
 - TFS_MKDIR   (7): [cmd, parent_ino(4), perm(2), name...NUL] → [status(1), ino(4)]
 - TFS_RMDIR   (8): [cmd, parent_ino(4), name...NUL] → [status(1)]
-- TFS_READDIR (9): [cmd, dir_ino(4), index(4)] → [status(1), ino(4), name(14)]
+- TFS_READDIR (9): [cmd, dir_ino(4), index(4)] → [status(1), ino(4), name(60)]
 - TFS_SYNC   (10): [cmd] → [status(1)]
 - TFS_CHMOD  (11): [cmd, ino(4), perm(2)] → [status(1)]
 - TFS_RENAME (12): [cmd, old_parent(4), new_parent(4), old_name_len(1), old_name(N), new_name(M)] → [status(1)]
@@ -232,15 +232,15 @@ Reply:   [status(1)]
 
 Handle READDIR: read a directory entry by index.
 Request: [cmd(1), dir_ino(4), index(4)]
-Reply:   [status(1), ino(4), name(14)]
+Reply:   [status(1), ino(4), name(60)]
 
     tfs_handle_readdir(sender: int, buf: *byte)
         val dir_ino = tfs_msg_read_i32(buf, 1)
         val index = tfs_msg_read_i32(buf, 5)
         var out_ino: int
-        var out_name: [14]byte
+        var out_name: [60]byte
         val result = tfs_readdir(dir_ino, index, &out_ino, out_name)
-        var reply: [19]byte
+        var reply: [65]byte
         if result == -1
             reply[0] = -1
             ipc_reply(sender, reply, 1)
@@ -248,10 +248,10 @@ Reply:   [status(1), ino(4), name(14)]
         reply[0] = 0
         tfs_msg_write_i32(reply, 1, out_ino)
         var i = 0
-        while i < 14
+        while i < 60
             reply[i + 5] = out_name[i]
             i += 1
-        ipc_reply(sender, reply, 19)
+        ipc_reply(sender, reply, 65)
 
 Handle SYNC: flush superblock to disk.
 Request: [cmd(1)]
@@ -330,11 +330,14 @@ since tfs_init() reads the superblock via rd_read → disk_read.
         // Signal RS that TFS is ready
         rs_ready()
 
-        // Server loop — 64-byte messages (Minix 3 style).
-        // Bulk data uses grant-based I/O (buffer address in message).
-        var buf: [64]byte
+        // Server loop — 256-byte messages. Bumped from the 64-byte
+        // Minix 3 default in Phase 0e because a v2 RENAME message
+        // can carry two 60-char names plus a 10-byte header (130 B);
+        // CREATE/UNLINK/MKDIR/RMDIR with one 60-char name fit
+        // comfortably here too. Bulk data still uses grant-based I/O.
+        var buf: [256]byte
         while 1 == 1
-            val sender = ipc_recv(tfs_port, buf, 64)
+            val sender = ipc_recv(tfs_port, buf, 256)
             if sender >= 0
                 val msg_len = ipc_last_msg_len()
                 val cmd = int(buf[0])

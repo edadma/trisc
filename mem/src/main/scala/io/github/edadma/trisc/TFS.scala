@@ -2,12 +2,12 @@ package io.github.edadma.trisc
 
 object TFS:
   val MAGIC = 0x54465300 // "TFS\0"
-  val VERSION = 1
+  val VERSION = 2 // Phase 0e — 14→60 char names, 16→64-byte dir entries, multi-block dirs
 
   // Structure sizes
   val INODE_SIZE = 32
-  val DIR_ENTRY_SIZE = 16
-  val DIR_NAME_LEN = 14
+  val DIR_ENTRY_SIZE = 64 // [ino:i32be][name:60 NUL-padded]
+  val DIR_NAME_LEN = 60
   val NUM_DIRECT = 6
 
   // Special inodes
@@ -81,8 +81,10 @@ object TFS:
     var nextBlock: Int = firstDataBlock
     var nextInode: Int = 2 // 0 reserved, 1 = root
 
-    // Directory tracking
-    case class DirState(dataBlock: Int, var entryCount: Int, var nlinks: Int)
+    // Directory tracking — `blocks` is the per-dir data-block list (parallel
+    // to inode direct[0..5] + indirect entries). `indirectBlock == 0` until
+    // the dir grows past NUM_DIRECT blocks and an indirect block gets allocated.
+    case class DirState(blocks: scala.collection.mutable.ArrayBuffer[Int], var entryCount: Int, var nlinks: Int, var indirectBlock: Int = 0)
     val dirState = scala.collection.mutable.Map[Int, DirState]()
     val pathToInode = scala.collection.mutable.Map[String, Int]()
 
@@ -98,7 +100,7 @@ object TFS:
       writeInode(ROOT_INODE, S_IFDIR | DEFAULT_DIR_PERM, 2, 0, 0, 2 * DIR_ENTRY_SIZE, Seq(rootBlk))
       writeDirEntry(rootBlk, 0, ROOT_INODE, ".")
       writeDirEntry(rootBlk, 1, ROOT_INODE, "..")
-      dirState(ROOT_INODE) = DirState(rootBlk, 2, 2)
+      dirState(ROOT_INODE) = DirState(scala.collection.mutable.ArrayBuffer(rootBlk), 2, 2)
       pathToInode("/") = ROOT_INODE
 
       // Parse prefill
@@ -168,7 +170,7 @@ object TFS:
       writeInode(ino, S_IFDIR | DEFAULT_DIR_PERM, 2, 0, 0, 2 * DIR_ENTRY_SIZE, Seq(blk))
       writeDirEntry(blk, 0, ino, ".")
       writeDirEntry(blk, 1, parentIno, "..")
-      dirState(ino) = DirState(blk, 2, 2)
+      dirState(ino) = DirState(scala.collection.mutable.ArrayBuffer(blk), 2, 2)
 
     private def ensureParents(path: String): Int =
       val segments = path.stripPrefix("/").split('/')
@@ -266,14 +268,36 @@ object TFS:
 
     private def writeDirEntry(dataBlock: Int, slot: Int, ino: Int, name: String): Unit =
       val off = dataBlock * blockSize + slot * DIR_ENTRY_SIZE
-      writeShort(disk, off, ino)
+      writeInt(disk, off, ino)
       val bytes = name.getBytes("UTF-8")
-      System.arraycopy(bytes, 0, disk, off + 2, math.min(bytes.length, DIR_NAME_LEN))
+      System.arraycopy(bytes, 0, disk, off + 4, math.min(bytes.length, DIR_NAME_LEN))
+
+    private def setIndirectEntry(indBlk: Int, idx: Int, blk: Int): Unit =
+      writeShort(disk, indBlk * blockSize + (idx - NUM_DIRECT) * 2, blk)
 
     private def addDirEntry(parentIno: Int, name: String, childIno: Int): Unit =
       val state = dirState(parentIno)
-      require(state.entryCount < dirEntriesPerBlock, s"TFS: directory full (max $dirEntriesPerBlock entries)")
-      writeDirEntry(state.dataBlock, state.entryCount, childIno, name)
+      val newSlotInBlock = state.entryCount % dirEntriesPerBlock
+      val newBlockIdx = state.entryCount / dirEntriesPerBlock
+      // Grow the dir if the current tail block is full.
+      if newSlotInBlock == 0 && state.entryCount > 0 then
+        val freshBlk = allocBlock()
+        if newBlockIdx < NUM_DIRECT then
+          val inoOff = inodeTableStart * blockSize + parentIno * INODE_SIZE
+          writeShort(disk, inoOff + INO_DIRECT0 + newBlockIdx * 2, freshBlk)
+        else
+          val indBlk =
+            if state.indirectBlock == 0 then
+              val b = allocBlock()
+              val inoOff = inodeTableStart * blockSize + parentIno * INODE_SIZE
+              writeShort(disk, inoOff + INO_INDIRECT, b)
+              state.indirectBlock = b
+              b
+            else state.indirectBlock
+          setIndirectEntry(indBlk, newBlockIdx, freshBlk)
+        state.blocks += freshBlk
+      val targetBlk = state.blocks(newBlockIdx)
+      writeDirEntry(targetBlk, newSlotInBlock, childIno, name)
       state.entryCount += 1
       updateInodeSize(parentIno, state.entryCount * DIR_ENTRY_SIZE)
 

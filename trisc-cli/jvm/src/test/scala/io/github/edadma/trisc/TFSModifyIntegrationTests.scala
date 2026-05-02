@@ -148,7 +148,7 @@ class TFSModifyIntegrationTests extends TFSTestHelpers {
          |    tfs_init()
          |    // Root has: . .. dev etc tmp (from prefill)
          |    var ino = 0
-         |    var name: [15]byte
+         |    var name: [60]byte
          |    // Entry 0 should be .
          |    tfs_readdir(1, 0, &ino, &name[0])
          |    putchar(name[0])

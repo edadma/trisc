@@ -22,11 +22,11 @@ class TFSHelperTests extends TFSTestHelpers {
     output shouldBe "Y"
   }
 
-  "DIR_ENTRY_SIZE is 16" in {
+  "DIR_ENTRY_SIZE is 64" in {
     val (_, output) = runTFS(
       """import oskit.fs.*
         |main() -> int
-        |    if DIR_ENTRY_SIZE == 16
+        |    if DIR_ENTRY_SIZE == 64
         |        putchar(89)
         |    else
         |        putchar(78)

@@ -2286,7 +2286,7 @@ Reply: [status(1)]
         ipc_reply(sender, reply, 1)
 
 Path-based READDIR: [cmd(1), index(4), path(N)]
-Reply: [status(1), ino(4), name(14)]
+Reply: [status(1), ino(4), name(60)]
 
     vfs_path_readdir(sender: int, buf: *byte, msg_len: int, backend: int)
         val index = vfs_msg_read_i32(buf, 1)
@@ -2302,12 +2302,12 @@ Reply: [status(1), ino(4), name(14)]
         tfs_msg[0] = 9  // TFS_CMD_READDIR
         vfs_msg_write_i32(tfs_msg, 1, dir_ino)
         vfs_msg_write_i32(tfs_msg, 5, index)
-        var reply: [19]byte
-        ipc_send(backend, tfs_msg, 9, reply, 19)
+        var reply: [65]byte
+        ipc_send(backend, tfs_msg, 9, reply, 65)
         if reply[0] != 0
             ipc_reply(sender, reply, 1)
         else
-            ipc_reply(sender, reply, 19)
+            ipc_reply(sender, reply, 65)
 
 Path-based CHMOD: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
 Reply: [status(1)]

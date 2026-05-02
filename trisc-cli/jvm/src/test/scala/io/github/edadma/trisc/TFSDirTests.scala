@@ -186,7 +186,7 @@ class TFSDirTests extends TFSTestHelpers {
         |main() -> int
         |    tfs_init()
         |    var ino = 0
-        |    var name: [15]byte
+        |    var name: [60]byte
         |    tfs_readdir(1, 0, &ino, &name[0])
         |    if ino == 1
         |        putchar(65)
@@ -203,7 +203,7 @@ class TFSDirTests extends TFSTestHelpers {
         |main() -> int
         |    tfs_init()
         |    var ino = 0
-        |    var name: [15]byte
+        |    var name: [60]byte
         |    val r = tfs_readdir(1, 999, &ino, &name[0])
         |    if r == -1
         |        putchar(89)

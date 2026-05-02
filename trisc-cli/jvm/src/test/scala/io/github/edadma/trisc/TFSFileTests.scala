@@ -252,7 +252,7 @@ class TFSFileTests extends TFSTestHelpers {
 
   // ===== tfs_truncate =====
 
-  "tfs_truncate no-op when new_size >= old_size" in {
+  "tfs_truncate extension bumps size (sparse hole)" in {
     val (_, output) = runTFS(
       s"""import oskit.fs.*
          |main() -> int
@@ -265,7 +265,7 @@ class TFSFileTests extends TFSTestHelpers {
          |    tfs_truncate(ino, 10)
          |    var stat: [7]int
          |    tfs_stat(ino, &stat[0])
-         |    if stat[4] == 3
+         |    if stat[4] == 10
          |        putchar(89)
          |    else
          |        putchar(78)

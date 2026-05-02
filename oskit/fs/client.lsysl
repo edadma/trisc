@@ -311,7 +311,7 @@ Protocol: [cmd(1), path(N)]
         int(reply[0])
 
 Read a directory entry by path and index.
-Protocol: [cmd(1), index(4), path(N)]
+Protocol: [cmd(1), index(4), path(N)] → [status(1), ino(4), name(60)]
 
     fs_readdir(path: string, index: int, out_ino: *int, out_name: *byte) -> int
         val port = fs_get_port()
@@ -324,15 +324,15 @@ Protocol: [cmd(1), index(4), path(N)]
         val pp: *byte = *byte(path)
         for var i = 0; i < plen; i++
             msg[5 + i] = pp[i]
-        var reply: [19]byte
-        val result = ipc_send(port, msg, plen + 5, reply, 19)
+        var reply: [65]byte
+        val result = ipc_send(port, msg, plen + 5, reply, 65)
         if result != 0
             return -1
         if reply[0] != 0
             return -1
         *out_ino = fs_msg_read_i32(reply, 1)
         var i = 0
-        while i < 14
+        while i < 60
             out_name[i] = reply[i + 5]
             i += 1
         0

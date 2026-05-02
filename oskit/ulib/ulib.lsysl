@@ -374,12 +374,12 @@ Read a directory entry by path and index. Returns 0 on success, -1 on end.
         msg_write_i32(msg, 1, idx)
         for var i = 0; i < plen; i++
             msg[5 + i] = pp[i]
-        var reply: [19]byte
-        ipc_send(port, msg, 5 + plen, reply, 19)
+        var reply: [65]byte
+        ipc_send(port, msg, 5 + plen, reply, 65)
         if reply[0] != 0
             return -1
         *entry_ino = msg_read_i32(reply, 1)
-        for var i = 0; i < 14; i++
+        for var i = 0; i < 60; i++
             entry_name[i] = reply[5 + i]
         0
 

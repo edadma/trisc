@@ -31,8 +31,9 @@ These conventions are uniform across all servers and the kernel.
   copied into servers; e.g. `EAGAIN=11`, `EINVAL=22`, `EBADF=9`).
 - **String args.** NUL-terminated (`path...NUL`) unless an
   explicit length precedes them. Path length cap is 255 bytes
-  including NUL; longer paths are truncated by the shim, which is
-  a known TFS limit (`DIR_NAME_LEN=14` per directory entry).
+  including NUL; per-component names are capped at TFS' on-disk
+  ceiling (`DIR_NAME_LEN=60` per directory entry, v2). Longer
+  components are truncated by the shim.
 - **fd args.** Server-side fd refers to a slot in that server's
   per-process socket/file table. Translation between the shim's
   posix-fd table and the server's slot is done by the shim.
@@ -272,16 +273,18 @@ copy facility to move data across PTs.
 | 6   | TFS_CMD_STAT      | `[6][ino:4be]`                                                      | `[status:1][mode:4be][nlinks:4be][uid:4be][gid:4be][size:4be][mtime:4be][ctime:4be]` |
 | 7   | TFS_CMD_MKDIR     | `[7][parent:4be][perm:2][name...NUL]`                               | `[status:1][ino:4be]`                                                |
 | 8   | TFS_CMD_RMDIR     | `[8][parent:4be][name...NUL]`                                       | `[status:1]`                                                         |
-| 9   | TFS_CMD_READDIR   | `[9][dir_ino:4be][index:4be]`                                       | `[status:1][ino:4be][name:14]`                                       |
+| 9   | TFS_CMD_READDIR   | `[9][dir_ino:4be][index:4be]`                                       | `[status:1][ino:4be][name:60]`                                       |
 | 10  | TFS_CMD_SYNC      | `[10]`                                                              | `[status:1]`                                                         |
 | 11  | TFS_CMD_CHMOD     | `[11][ino:4be][perm:2]`                                             | `[status:1]`                                                         |
 | 12  | TFS_CMD_RENAME    | `[12][old_parent:4be][new_parent:4be][old_name_len:1][old_name][new_name]` | `[status:1]`                                                  |
 | 13  | TFS_CMD_TRUNCATE  | (see code)                                                          | `[status:1]`                                                         |
 
-TFS limits to lock down before any FS-shape change: `DIR_NAME_LEN
-= 14` and inode count `64`. These are PHASE 0d items — the
-decision (extend in place vs design TFS-v2) determines whether
-this table is stable through Phase 7.
+TFS on-disk version: **2** (Phase 0e — `DIR_NAME_LEN=60`, dir
+entries are 64 bytes (`[ino:4be][name:60]`), directories use the
+same direct+indirect chain files do, so a single dir holds up to
+~131K entries at 4KB blocks. Block-pointer width stays i16; volume
+cap is 256 MB; inode count cap is 65535. These are stable through
+Phase 9 — see `project_slix_phase0d_done.md`.
 
 ### 3.3 tty — `oskit/drivers/tty/tty.lsysl` (port: "tty")
 
