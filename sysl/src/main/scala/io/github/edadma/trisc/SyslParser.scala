@@ -42,7 +42,7 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val declBare: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | interfaceDecl | typeAliasDecl | staticAssertDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | extensionDecl | interfaceDecl | typeAliasDecl | staticAssertDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
 
   lazy val staticAssertDecl: Parser[StaticAssertDeclAST] =
     "static_assert" ~> "(" ~> expr ~ opt("," ~> stringLit) <~ ")" ^^ {
@@ -77,6 +77,7 @@ class SyslParser extends StandardTokenParsers {
     case v: VarDeclAST        => v.copy(attributes = attrs ++ v.attributes)
     case t: TraitDeclAST      => t.copy(attributes = attrs ++ t.attributes)
     case i: ImplDeclAST       => i.copy(attributes = attrs ++ i.attributes)
+    case x: ExtensionDeclAST  => x.copy(attributes = attrs ++ x.attributes)
     case t: TypeAliasDeclAST  => t.copy(attributes = attrs ++ t.attributes)
     case e: ExternFuncDeclAST => e.copy(attributes = attrs ++ e.attributes)
     case e: ExternVarDeclAST  => e.copy(attributes = attrs ++ e.attributes)
@@ -179,6 +180,26 @@ class SyslParser extends StandardTokenParsers {
   lazy val implMethod: Parser[FunDeclAST] =
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ params ~ ((rt, body)) => FunDeclAST(name, params, rt, body)
+    }
+
+  // Scala 3-style extension block:
+  //   extension [T,U](recv: TypeAST)
+  //       def method(...) -> Ret = body
+  //       #operator("+")
+  //       def +(other: TypeAST) -> Ret = body
+  // The receiver name is in scope inside each method body. Each method uses
+  // `def` (mirrors the user-facing surface; disambiguates from any other
+  // construct that might appear in the block).
+  lazy val extensionDecl: Parser[ExtensionDeclAST] =
+    "extension" ~> opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ("(" ~> param <~ ")") ~
+      (Newline ~> Indent ~> rep1sep(extensionMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("extension")) ^^ {
+        case tparams ~ recv ~ methods =>
+          ExtensionDeclAST(tparams.getOrElse(Nil), recv, methods)
+      }
+
+  lazy val extensionMember: Parser[FunDeclAST] =
+    rep(positioned(attribute) <~ rep1(Newline)) ~ ("def" ~> defDecl(false)) ^^ {
+      case attrs ~ d => if attrs.isEmpty then d else d.copy(attributes = attrs ++ d.attributes)
     }
 
   lazy val interfaceDecl: Parser[InterfaceDeclAST] =

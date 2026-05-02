@@ -71,6 +71,11 @@ case class TraitMethodAST(
     attributes: List[Attribute] = Nil,
 ) extends Positional
 case class ImplDeclAST(traitName: String, typeParams: List[String], targetTypes: List[TypeAST], methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
+// Scala 3-style extension block: `extension [T](recv: TypeAST) { def foo(...) = ...; ... }`.
+// Carries type-params (from the optional `[...]`), the receiver param, and the
+// inner method declarations. Lowering happens in the analyzer, not the parser,
+// so the receiver TypeAST shape stays available for generic dispatch.
+case class ExtensionDeclAST(typeParams: List[String], receiver: ParamAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, effects: FuncEffects = FuncEffects.Unknown) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST

@@ -1390,6 +1390,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
       case s: StructDeclAST if s.typeParams.nonEmpty => Nil
       case e: DataEnumDeclAST if e.typeParams.nonEmpty => Nil
       case _: TraitDeclAST => Nil // traits emit nothing; only impls do
+      case _: ExtensionDeclAST => Nil // Phase 1 stub: parsed but not yet analyzed
       case i: InterfaceDeclAST => List(TInterfaceDecl(i.name, interfaceTypes(i.name)))
       case impl: ImplDeclAST   => analyzeImplMethods(impl)
       case sa: StaticAssertDeclAST =>
