@@ -1032,6 +1032,21 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "ipcfuzz: bad"
   }
 
+  "pm: process-table exhaustion refuses spawn until reap" in {
+    // Phase 0c chunk 6. MAX_PROCESSES = 16. The test loops
+    // pm_spawn("/bin/test_sleepy", ...) until pm_spawn returns
+    // -1, verifies the kernel's slot allocator does refuse new
+    // spawns once the table is full, then pm_kill + pm_waitpid
+    // one child to reap it and confirms the next pm_spawn
+    // succeeds. With ~13 slots already claimed (10 boot-module
+    // servers + login + nsh + this binary) the success count is
+    // small but the qualitative contract — refuse-then-reap-frees
+    // — is what we pin here.
+    val output = qemu.command("test_procmax")
+    output should include("procmax: ok")
+    output should not include "procmax: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

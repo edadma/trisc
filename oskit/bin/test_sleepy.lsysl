@@ -1,0 +1,31 @@
+test_sleepy — sleeper child for the process-table exhaustion test
+===================================================================
+
+Phase 0c chunk 6 helper. Spawned by `test_procmax`; just blocks
+in `nanosleep` long enough that the parent can stack a couple
+dozen copies before any of them get reaped, then exits cleanly
+if the parent ever forgets to kill it.
+
+5 seconds is far longer than the headless QEMU test runtime
+(<2 s post-boot) but short enough that a leaked instance
+self-reaps before the next test boots. The parent always
+`pm_kill`s + `pm_waitpid`s explicitly; this exit path is
+belt-and-suspenders.
+
+    module oskit.bin.test_sleepy
+
+    import oskit.ulib.{exit, syscall6}
+
+
+    val NR_NANOSLEEP = 251
+
+
+    main(argv: []string)
+        var ts: [16]byte
+        ts[0] = byte(5)   // tv_sec = 5
+        var i = 1
+        while i < 16
+            ts[i] = byte(0)
+            i += 1
+        syscall6(NR_NANOSLEEP, i64(&ts[0]), 0, 0, 0, 0, 0)
+        exit()

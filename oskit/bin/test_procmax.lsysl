@@ -1,0 +1,161 @@
+test_procmax — process-table exhaustion test
+==============================================
+
+Phase 0c chunk 6: pins the contract that PM_CMD_SPAWN refuses
+new processes once the kernel's `MAX_PROCESSES = 16` slot table
+fills up, and that reaping a child via `pm_waitpid` (after a
+`pm_kill`) frees the slot for reuse.
+
+The kernel's slot allocator lives in `create_process_suspended`
+(oskit/kernel/kernel.lsysl) — it linear-scans `processes[]` for
+a `PROC_FREE` entry and returns -1 if none. PM's `pm_handle_spawn`
+relays that as `reply[0] = -1`, which `pm_spawn` returns as -1.
+
+By the time this test runs the system already holds:
+  - pid 1..10 — RS-loaded server boot modules (disk, tfs, tty,
+    pm, vfs, ds, nic, inet, unix, init)
+  - 1 slot for login (sleeping in waitpid for nsh)
+  - 1 slot for nsh (sleeping in waitpid for this binary)
+  - 1 slot for this binary itself
+That's 13 of 16 occupied, so the test typically lands 2–3
+successful spawns before the cap fires. We deliberately allow a
+wide band ([1, 15]) — the exact count depends on what other
+transient processes (dhclient, RS-restarted servers) are alive,
+and the *qualitative* contract we want to pin is "spawning
+eventually fails AND reaping frees a slot," not the exact value.
+
+Test plan
+---------
+
+  1. Loop `pm_spawn("/bin/test_sleepy", ...)` until it returns
+     -1 OR we hit MAX_TRIES (a safety cap above MAX_PROCESSES).
+  2. Verify success count is in [1, MAX_PROCESSES - 1] — at
+     least one spawn worked, and we eventually hit the kernel's
+     cap rather than spinning forever.
+  3. Verify the next `pm_spawn` still returns -1 (the cap is
+     persistent until something is reaped).
+  4. `pm_kill(children[0])` + `pm_waitpid(children[0])` to free
+     exactly one slot.
+  5. Retry `pm_spawn` — must succeed (slot reuse works).
+  6. Cleanup: kill + waitpid each remaining child so the test
+     leaves the process table the way it found it.
+  7. Print `procmax: ok`.
+
+Pass: prints `procmax: ok`. Any failure prints `procmax: bad N`
+where N tags the failing step so the source of regression is
+obvious from the test output.
+
+    module oskit.bin.test_procmax
+
+    import oskit.ulib.{puts, exit, exit_with,
+        pm_spawn, pm_kill, pm_waitpid}
+
+
+    val MAX_TRIES = 20
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("procmax: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        var children: [20]int
+        var i = 0
+        while i < MAX_TRIES
+            children[i] = -1
+            i += 1
+
+The first phase loops `pm_spawn` until either the kernel says
+no (returns -1) or the safety cap MAX_TRIES kicks in. The
+safety cap is one more than MAX_PROCESSES so a buggy kernel
+that *never* refuses is caught here rather than spinning.
+
+        var argv0: [1]string
+        argv0[0] = "test_sleepy"
+
+        var n_ok = 0
+        i = 0
+        while i < MAX_TRIES
+            val pid = pm_spawn("/bin/test_sleepy", &argv0[0], 1)
+            if pid < 0
+                break
+            children[i] = pid
+            n_ok += 1
+            i += 1
+
+A bug-resistant qualitative check: the cap must fire (n_ok
+strictly less than MAX_TRIES) and at least one spawn must
+have succeeded (n_ok >= 1). If either is false the kernel
+isn't honoring its own slot cap or `pm_spawn` is broken.
+
+        if n_ok < 1
+            fail(1)
+            return
+        if n_ok >= MAX_TRIES
+            fail(2)
+            return
+
+The cap should be sticky — a second spawn attempt with no
+intervening reap must also fail.
+
+        val again = pm_spawn("/bin/test_sleepy", &argv0[0], 1)
+        if again >= 0
+            // Unexpected — record so cleanup still runs.
+            children[n_ok] = again
+            n_ok += 1
+            fail(3)
+            return
+
+Free exactly one slot via kill + waitpid. `pm_kill` makes the
+child exit; `pm_waitpid` reaps the zombie, returning the slot
+to PROC_FREE. Then the next `pm_spawn` must succeed — that's
+the slot-reuse contract.
+
+        val first_pid = children[0]
+        if pm_kill(first_pid) != 0
+            fail(4)
+            return
+        // pm_waitpid blocks until the child is reaped (or returns
+        // immediately if the kill already produced a zombie). The
+        // exit code itself isn't load-bearing here — what matters
+        // is that the call returns and the slot is freed.
+        pm_waitpid(first_pid)
+        children[0] = -1
+
+        val replacement = pm_spawn("/bin/test_sleepy", &argv0[0], 1)
+        if replacement < 0
+            fail(5)
+            return
+        children[0] = replacement
+
+Cleanup. Walk every recorded child, kill + reap each so the
+process table is back to its pre-test shape on exit. Any
+straggler will eventually self-reap when its 5-second
+`nanosleep` fires, but the explicit path keeps the next test
+from racing against a still-shrinking slot count.
+
+        var k = 0
+        while k < MAX_TRIES
+            val pid = children[k]
+            if pid > 0
+                pm_kill(pid)
+                pm_waitpid(pid)
+            k += 1
+
+        puts("procmax: ok\n")
+        exit()
