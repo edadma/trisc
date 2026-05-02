@@ -19,6 +19,7 @@ object TFS:
   val S_IFDIR = 0x2000
   val S_IFCHR = 0x3000
   val S_IFBLK = 0x4000
+  val S_IFLNK = 0x5000
 
   // Default permissions
   val DEFAULT_DIR_PERM = 0x1ed // rwxr-xr-x (0755)
@@ -162,6 +163,15 @@ object TFS:
             addDirEntry(parentIno, name, ino)
             dirState(parentIno).nlinks += 1
             pathToInode(path) = ino
+        case "symlink" =>
+          require(parts.length >= 3, s"TFS: symlink needs target: $line")
+          val target = parts.drop(2).mkString(" ")
+          val targetBytes = target.getBytes("UTF-8")
+          val ino = allocInode()
+          // 0x1FF = rwxrwxrwx; symlinks ignore mode but a non-zero
+          // value keeps `ls -l` from rendering them as ----------.
+          writeFileWithContent(ino, targetBytes, mode = S_IFLNK | 0x1FF)
+          addDirEntry(parentIno, name, ino)
         case other =>
           sys.error(s"TFS: unknown type '$other' in: $line")
 
@@ -191,7 +201,7 @@ object TFS:
             parentIno = ino
       parentIno
 
-    private def writeFileWithContent(ino: Int, content: Array[Byte]): Unit =
+    private def writeFileWithContent(ino: Int, content: Array[Byte], mode: Int = S_IFREG | DEFAULT_FILE_PERM): Unit =
       val blocksNeeded = ceilDiv(content.length, blockSize)
       val dataBlocks = (0 until blocksNeeded).map(_ => allocBlock())
 
@@ -204,7 +214,7 @@ object TFS:
           blk
         else 0
 
-      writeInode(ino, S_IFREG | DEFAULT_FILE_PERM, 1, 0, 0, content.length, dataBlocks.take(NUM_DIRECT), indirectBlk)
+      writeInode(ino, mode, 1, 0, 0, content.length, dataBlocks.take(NUM_DIRECT), indirectBlk)
 
       for (blk, i) <- dataBlocks.zipWithIndex do
         val srcOff = i * blockSize

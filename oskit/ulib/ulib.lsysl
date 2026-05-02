@@ -57,6 +57,8 @@ Command bytes for TFS and TTY server protocols.
     val FS_CMD_CONNECT = 15
     val FS_CMD_PIPE    = 18
     val FS_CMD_ACCEPT  = 19
+    val FS_CMD_SYMLINK = 30
+    val FS_CMD_READLINK = 31
     val TTY_CMD_PUTS   = 3
 
     val SYS_GETUID  = 61
@@ -759,6 +761,60 @@ Resume a previously SPAWN_SUSP-ed child.
         var reply: [1]byte
         ipc_send(port, msg, 5, reply, 1)
         int(reply[0])
+
+Create a symbolic link at `linkpath` pointing to `target`.
+Returns 0 on success, -1 on error.
+Protocol: [cmd(1), target_len(2be), target(N), linkpath(M)]
+
+    symlink(target: string, linkpath: string) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val tlen = len(target)
+        val tp = *byte(target)
+        val llen = len(linkpath)
+        val lp = *byte(linkpath)
+        var msg: [256]byte
+        msg[0] = byte(FS_CMD_SYMLINK)
+        msg[1] = byte((tlen >> 8) & 0xFF)
+        msg[2] = byte(tlen & 0xFF)
+        for var i = 0; i < tlen; i++
+            msg[3 + i] = tp[i]
+        for var i = 0; i < llen; i++
+            msg[3 + tlen + i] = lp[i]
+        var reply: [5]byte
+        ipc_send(port, msg, 3 + tlen + llen, reply, 5)
+        if reply[0] != 0
+            return -1
+        0
+
+Read the target of a symbolic link at `path` into `buf`.
+Returns the number of bytes copied (≤ buf_size), 0 if the
+target is empty, or -1 if `path` isn't a symlink / lookup fails.
+
+    readlink(path: string, buf: *byte, buf_size: int) -> int
+        val port = fs_port()
+        if port < 0
+            return -1
+        val plen = len(path)
+        val pp = *byte(path)
+        var msg: [128]byte
+        msg[0] = byte(FS_CMD_READLINK)
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
+        var reply: [251]byte
+        ipc_send(port, msg, 1 + plen, reply, 251)
+        if reply[0] != 0
+            return -1
+        val n = ((int(reply[1]) & 0xFF) << 8) | (int(reply[2]) & 0xFF)
+        var copied = n
+        if copied > buf_size
+            copied = buf_size
+        var i = 0
+        while i < copied
+            buf[i] = reply[3 + i]
+            i += 1
+        copied
 
 Print an integer to stdout.
 

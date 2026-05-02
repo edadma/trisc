@@ -1078,6 +1078,18 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "longname: bad"
   }
 
+  "tfs: S_IFLNK symlinks round-trip via FS server" in {
+    // Phase 0e (symlink piece). Creates `/tmp/lnk_phase0e` →
+    // `/etc/passwd` via the new FS_CMD_SYMLINK path, reads the
+    // target back through FS_CMD_READLINK, and verifies the
+    // type-check on the readlink path (a regular file rejects).
+    // Symlinks aren't auto-followed at the TFS or VFS layer — the
+    // test only exercises the primitive.
+    val output = qemu.command("test_symlink")
+    output should include("symlink: ok")
+    output should not include "symlink: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

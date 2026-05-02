@@ -1,0 +1,102 @@
+test_symlink — exercise TFS-v2's S_IFLNK symlink primitive
+============================================================
+
+Phase 0e (symlink piece): TFS gained `S_IFLNK = 5` plus `tfs_symlink`
+and `tfs_readlink`. Symlinks store their target as inline file data
+(reusing the file write/read path), and TFS does NOT auto-follow
+them — `tfs_lookup` returns the symlink's own inode unchanged. A
+real POSIX symlink layer (auto-follow at `open()` time) lands in
+the shim later if needed.
+
+This test covers the two primitive operations through the FS server:
+
+  1. `symlink("/some/target", "/tmp/lnk_a")` — creates the link.
+  2. `readlink("/tmp/lnk_a", buf)` — reads the target back; must
+     match what was written byte-for-byte.
+  3. Re-`readlink` after a second `open` to confirm the data block
+     is durable across opens.
+  4. `readlink` of a non-symlink path (the test binary itself,
+     `/bin/test_symlink`) must return -1 — proves the type check
+     in `tfs_readlink` actually fires.
+
+Pass: prints `symlink: ok`. Failure prints `symlink: bad N` where
+N tags the failing step.
+
+    module oskit.bin.test_symlink
+
+    import oskit.ulib.{puts, exit, exit_with, symlink, readlink}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("symlink: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val target = "/etc/passwd"
+        val link = "/tmp/lnk_phase0e"
+
+        if symlink(target, link) != 0
+            fail(1)
+            return
+
+        var buf: [64]byte
+        val n = readlink(link, &buf[0], 64)
+        if n != 11
+            fail(2)
+            return
+
+The target is "/etc/passwd" (11 bytes). Verify the bytes round-trip
+intact — a typo in the wire format or in `tfs_write`/`tfs_read`'s
+inline-data path would corrupt the readback.
+
+        val expected = "/etc/passwd"
+        val ep = *byte(expected)
+        var i = 0
+        while i < 11
+            if buf[i] != ep[i]
+                fail(3)
+                return
+            i += 1
+
+A second readlink on the same link must produce identical bytes.
+Catches bugs where the data block is consumed/freed by the first
+read.
+
+        var buf2: [64]byte
+        val n2 = readlink(link, &buf2[0], 64)
+        if n2 != 11
+            fail(4)
+            return
+        i = 0
+        while i < 11
+            if buf2[i] != ep[i]
+                fail(5)
+                return
+            i += 1
+
+readlink on a non-symlink must reject. /bin/test_symlink is the
+running binary itself — guaranteed to be a regular file.
+
+        var b3: [16]byte
+        val r = readlink("/bin/test_symlink", &b3[0], 16)
+        if r != -1
+            fail(6)
+            return
+
+        puts("symlink: ok\n")
+        exit()

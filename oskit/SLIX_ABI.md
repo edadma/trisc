@@ -278,6 +278,8 @@ copy facility to move data across PTs.
 | 11  | TFS_CMD_CHMOD     | `[11][ino:4be][perm:2]`                                             | `[status:1]`                                                         |
 | 12  | TFS_CMD_RENAME    | `[12][old_parent:4be][new_parent:4be][old_name_len:1][old_name][new_name]` | `[status:1]`                                                  |
 | 13  | TFS_CMD_TRUNCATE  | (see code)                                                          | `[status:1]`                                                         |
+| 14  | TFS_CMD_SYMLINK   | `[14][parent:4be][tlen:2be][target:tlen][name...]`                  | `[status:1][ino:4be]`                                                |
+| 15  | TFS_CMD_READLINK  | `[15][ino:4be]`                                                     | `[status:1][len:2be][target:len]`                                    |
 
 TFS on-disk version: **2** (Phase 0e — `DIR_NAME_LEN=60`, dir
 entries are 64 bytes (`[ino:4be][name:60]`), directories use the

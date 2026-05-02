@@ -39,6 +39,8 @@ VFS protocol commands (must match oskit/servers/vfs.lsysl).
     val FS_CMD_CONNECT = 15
     val FS_CMD_INHERIT = 16
     val FS_CMD_PIPE    = 18
+    val FS_CMD_SYMLINK = 30
+    val FS_CMD_READLINK = 31
 
 Cached port id (-1 = not yet looked up / last lookup failed).
 `fs_srv_name` is a 3-byte null-terminated "fs" buffer; it's
@@ -419,3 +421,61 @@ write handle to *write_h.
         *read_h = fs_msg_read_i32(reply, 1)
         *write_h = fs_msg_read_i32(reply, 5)
         0
+
+Create a symbolic link at `linkpath` pointing to `target`. Returns
+0 on success, -1 on error.
+Protocol: [cmd(1), target_len(2be), target(N), linkpath(M)]
+
+    fs_symlink(target: string, linkpath: string) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        val tlen = len(target)
+        val tp: *byte = *byte(target)
+        val llen = len(linkpath)
+        val lp: *byte = *byte(linkpath)
+        var msg: [256]byte
+        msg[0] = FS_CMD_SYMLINK
+        msg[1] = (tlen >> 8) & 0xFF
+        msg[2] = tlen & 0xFF
+        for var i = 0; i < tlen; i++
+            msg[3 + i] = tp[i]
+        for var i = 0; i < llen; i++
+            msg[3 + tlen + i] = lp[i]
+        var reply: [5]byte
+        val result = ipc_send(port, msg, 3 + tlen + llen, reply, 5)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        0
+
+Read the target of a symbolic link at `path` into `buf`. Returns
+the number of bytes read (≤ buf_size), 0 if the target is empty,
+or -1 on error (path not found, not a symlink, IPC failure).
+
+    fs_readlink(path: string, buf: *byte, buf_size: int) -> int
+        val port = fs_get_port()
+        if port < 0
+            return -1
+        val plen = len(path)
+        val pp: *byte = *byte(path)
+        var msg: [128]byte
+        msg[0] = FS_CMD_READLINK
+        for var i = 0; i < plen; i++
+            msg[1 + i] = pp[i]
+        var reply: [251]byte
+        val result = ipc_send(port, msg, 1 + plen, reply, 251)
+        if result != 0
+            return -1
+        if reply[0] != 0
+            return -1
+        val n = ((int(reply[1]) & 0xFF) << 8) | (int(reply[2]) & 0xFF)
+        var copied = n
+        if copied > buf_size
+            copied = buf_size
+        var i = 0
+        while i < copied
+            buf[i] = reply[3 + i]
+            i += 1
+        copied

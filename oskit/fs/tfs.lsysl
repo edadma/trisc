@@ -51,6 +51,7 @@ at every boot.
     val S_IFDIR = 2
     val S_IFCHR = 3
     val S_IFBLK = 4
+    val S_IFLNK = 5
 
     // === Cached superblock state ===
 
@@ -1038,3 +1039,63 @@ Returns 0 on success, -1 on error.
         tfs_write_inode(target_ino, ibuf)
         dir_add_entry(parent_ino, name, name_len, target_ino)
         0
+
+    // === Symlinks ===
+
+tfs_symlink(parent_ino, name, name_len, target, target_len) -> int
+Create an S_IFLNK inode with `target` stored as the file's data
+content. Path resolution is NOT auto-followed at the TFS layer —
+callers (or the shim) decide whether to follow. Returns the new
+inode number, or -1 on error.
+
+The target is bounded to `sb_block_size` bytes (= one data block,
+4 KB) — POSIX `PATH_MAX` is far below that and a longer link
+target makes no sense.
+
+    tfs_symlink(parent_ino: int, name: *byte, name_len: int, target: *byte, target_len: int) -> int
+        if target_len <= 0
+            return -1
+        if target_len > sb_block_size
+            return -1
+        val ino = alloc_inode()
+        if ino == -1
+            return -1
+        var ibuf: [32]byte
+        var i = 0
+        while i < INODE_SIZE
+            ibuf[i] = 0
+            i += 1
+        // 0x1FF = rwxrwxrwx (POSIX symlinks ignore mode but a non-zero
+        // value keeps `ls -l` from rendering them with empty perms).
+        val mode = (S_IFLNK << 12) | 0x1FF
+        ino_set_mode(ibuf, mode)
+        ino_set_nlinks(ibuf, 1)
+        tfs_write_inode(ino, ibuf)
+        // Write the target string as inline file data via tfs_write —
+        // exactly the same path tfs_create+tfs_write takes for regular
+        // files. Keeps the symlink primitive small (no separate storage).
+        val nw = tfs_write(ino, target, 0, target_len)
+        if nw != target_len
+            // Couldn't allocate a data block; bail out cleanly.
+            free_inode(ino)
+            return -1
+        dir_add_entry(parent_ino, name, name_len, ino)
+        ino
+
+tfs_readlink(ino, buf, buf_size) -> int
+Read the target string of an S_IFLNK inode into `buf`. Returns the
+number of bytes copied (≤ buf_size and ≤ target length), or -1 if
+the inode isn't a symlink.
+
+    tfs_readlink(ino: int, buf: *byte, buf_size: int) -> int
+        var ibuf: [32]byte
+        tfs_read_inode(ino, ibuf)
+        if ino_type(ibuf) != S_IFLNK
+            return -1
+        val sz = ino_size(ibuf)
+        var nread = sz
+        if nread > buf_size
+            nread = buf_size
+        if nread <= 0
+            return 0
+        tfs_read(ino, buf, 0, nread)

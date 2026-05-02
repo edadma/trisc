@@ -798,6 +798,14 @@ reply is always 1 byte. On success, length depends on command.
     // `sys_openat`'s O_TRUNC path.
     val VFS_CMD_TRUNCATE = 29
 
+    // Phase 0e — symlink primitive. SYMLINK creates an S_IFLNK
+    // inode with the target stored as inline data. READLINK reads
+    // the target back. TFS does NOT auto-follow symlinks during
+    // path resolution; the shim handles that when it lands a real
+    // POSIX symlink layer.
+    val VFS_CMD_SYMLINK  = 30
+    val VFS_CMD_READLINK = 31
+
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
             return 1
@@ -2385,6 +2393,70 @@ Reply: [status(1)]
         ipc_send(backend, tfs_msg, 10 + old_name_len + new_name_len, reply, 1)
         ipc_reply(sender, reply, 1)
 
+Path-based SYMLINK: [cmd(1), target_len(2be), target(target_len), link_path(N)]
+Reply: [status(1), ino(4)]
+Resolves the link's parent dir, splits the basename, then forwards
+TFS_CMD_SYMLINK with parent_ino + target + basename.
+
+    vfs_path_symlink(sender: int, buf: *byte, msg_len: int, backend: int)
+        val target_len = ((int(buf[1]) & 0xFF) << 8) | (int(buf[2]) & 0xFF)
+        val target: *byte = buf + 3
+        val link_path: *byte = buf + 3 + target_len
+        val link_path_len = msg_len - 3 - target_len
+        val slash = vfs_split_parent(link_path, link_path_len)
+        var parent_ino: int
+        if slash <= 0
+            parent_ino = 1
+        else
+            parent_ino = vfs_resolve_path(backend, link_path, slash)
+        if parent_ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        val name: *byte = link_path + slash + 1
+        val name_len = link_path_len - slash - 1
+        // Forward: [cmd(1), parent_ino(4), target_len(2), target(N), name(M)]
+        var tfs_msg: [256]byte
+        tfs_msg[0] = 14  // TFS_CMD_SYMLINK
+        vfs_msg_write_i32(tfs_msg, 1, parent_ino)
+        tfs_msg[5] = (target_len >> 8) & 0xFF
+        tfs_msg[6] = target_len & 0xFF
+        var ti = 0
+        while ti < target_len
+            tfs_msg[7 + ti] = target[ti]
+            ti += 1
+        var ni = 0
+        while ni < name_len
+            tfs_msg[7 + target_len + ni] = name[ni]
+            ni += 1
+        var reply: [5]byte
+        ipc_send(backend, tfs_msg, 7 + target_len + name_len, reply, 5)
+        ipc_reply(sender, reply, 5)
+
+Path-based READLINK: [cmd(1), path(N)]
+Reply: [status(1), len(2be), target(len)]
+
+    vfs_path_readlink(sender: int, buf: *byte, msg_len: int, backend: int)
+        val path: *byte = buf + 1
+        val path_len = msg_len - 1
+        val ino = vfs_resolve_path(backend, path, path_len)
+        if ino < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        var tfs_msg: [5]byte
+        tfs_msg[0] = 15  // TFS_CMD_READLINK
+        vfs_msg_write_i32(tfs_msg, 1, ino)
+        var reply: [251]byte
+        ipc_send(backend, tfs_msg, 5, reply, 251)
+        if reply[0] != 0
+            ipc_reply(sender, reply, 1)
+            return
+        val n = ((int(reply[1]) & 0xFF) << 8) | (int(reply[2]) & 0xFF)
+        ipc_reply(sender, reply, 3 + n)
+
 The VFS server loop. Registers as "fs", waits for TFS to
 come up, mounts root on TFS, then proxies all requests to
 the appropriate backend.
@@ -2420,10 +2492,13 @@ the appropriate backend.
         // Signal RS that VFS is ready
         rs_ready()
 
-        // Server loop: receive requests, forward to backend, relay reply
-        var buf: [128]byte
+        // Server loop: receive requests, forward to backend, relay reply.
+        // 256-byte buffer (bumped Phase 0e) handles SYMLINK with one
+        // 60-char target + one 60-char link path comfortably, plus the
+        // existing RENAME with two 60-char names.
+        var buf: [256]byte
         while 1 == 1
-            val sender = ipc_recv(vfs_port, buf, 128)
+            val sender = ipc_recv(vfs_port, buf, 256)
             if sender >= 0
                 val msg_len = ipc_last_msg_len()
                 val cmd = int(buf[0])
@@ -2499,6 +2574,10 @@ the appropriate backend.
                     vfs_path_chmod(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_RENAME
                     vfs_path_rename(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_SYMLINK
+                    vfs_path_symlink(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_READLINK
+                    vfs_path_readlink(sender, buf, msg_len, backend)
                 else
                     // Unknown command — forward and relay
                     var be_reply: [64]byte
