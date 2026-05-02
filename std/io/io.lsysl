@@ -188,7 +188,7 @@ Tests
 ### ByteReader
 
     #test
-    test_byte_reader_basic() -> void
+    test_byte_reader_basic() -> unit
         val data: [5]byte = "hello"
         var r = ByteReader(data[:], 0)
         var buf: [5]byte
@@ -198,7 +198,7 @@ Tests
         assert(buf[4] == byte('o'), "o")
 
     #test
-    test_byte_reader_partial() -> void
+    test_byte_reader_partial() -> unit
         val data: [5]byte = "hello"
         var r = ByteReader(data[:], 0)
         var buf: [3]byte
@@ -212,7 +212,7 @@ Tests
         assert(buf[1] == byte('o'), "o")
 
     #test
-    test_byte_reader_eof() -> void
+    test_byte_reader_eof() -> unit
         val data: [3]byte = "abc"
         var r = ByteReader(data[:], 0)
         var buf: [10]byte
@@ -222,7 +222,7 @@ Tests
         assert(n2 == 0, "eof")
 
     #test
-    test_byte_reader_empty() -> void
+    test_byte_reader_empty() -> unit
         val data: [0]byte = ""
         var r = ByteReader(data[:], 0)
         var buf: [10]byte
@@ -233,7 +233,7 @@ Tests
 ### ByteWriter
 
     #test
-    test_byte_writer_basic() -> void
+    test_byte_writer_basic() -> unit
         var w = new_writer()
         val data: [5]byte = "hello"
         val n = w.write(data[:])
@@ -242,7 +242,7 @@ Tests
         assert(w.to_string() == "hello", "hello")
 
     #test
-    test_byte_writer_multiple() -> void
+    test_byte_writer_multiple() -> unit
         var w = new_writer()
         val d1: [3]byte = "foo"
         val d2: [3]byte = "bar"
@@ -251,7 +251,7 @@ Tests
         assert(w.to_string() == "foobar", "foobar")
 
     #test
-    test_byte_writer_reset() -> void
+    test_byte_writer_reset() -> unit
         var w = new_writer()
         val data: [3]byte = "abc"
         val _ = w.write(data[:])
@@ -263,7 +263,7 @@ Tests
 ### Interface dispatch
 
     #test
-    test_reader_interface() -> void
+    test_reader_interface() -> unit
         val data: [5]byte = "hello"
         var r = ByteReader(data[:], 0)
         val result = read_all(r)
@@ -272,14 +272,14 @@ Tests
         assert(result[4] == byte('o'), "o")
 
     #test
-    test_writer_interface() -> void
+    test_writer_interface() -> unit
         var w = new_writer()
         val n = write_string(w, "hello world")
         assert(n == 11, "wrote 11")
         assert(w.to_string() == "hello world", "content")
 
     #test
-    test_copy() -> void
+    test_copy() -> unit
         val data: [11]byte = "hello world"
         var r = ByteReader(data[:], 0)
         var w = new_writer()
@@ -288,7 +288,7 @@ Tests
         assert(w.to_string() == "hello world", "content")
 
     #test
-    test_copy_empty() -> void
+    test_copy_empty() -> unit
         val data: [0]byte = ""
         var r = ByteReader(data[:], 0)
         var w = new_writer()
@@ -300,7 +300,7 @@ Tests
 ### write_string
 
     #test
-    test_write_string_empty() -> void
+    test_write_string_empty() -> unit
         var w = new_writer()
         val n = write_string(w, "")
         assert(n == 0, "wrote 0")
