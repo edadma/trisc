@@ -3805,8 +3805,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
         val paramTypes = infoOpt.map(_.paramTypes.map(_._2))
           .orElse(t.methods.get(methodName).flatMap(m => functions.get(m).map(_.params.map(_._2))))
           .orElse(t.methods.get(methodName).flatMap(m => functions.get(shortName(m)).map(_.params.map(_._2))))
+        // Compare via `latticeEqual` so a `(T) -> U #pure` actual matches a
+        // `(T) -> U` impl-pattern slot — the same lattice rule the generic
+        // path already uses in `tryUnifyAll`'s post-validation. Without this,
+        // a closure literal (always inferred `#pure` for side-effect-free
+        // bodies) would never dispatch through a concrete operator-trait impl.
         paramTypes match
-          case Some(ps) if ps == argTypes => Some((t, Map.empty[String, SyslType]))
+          case Some(ps) if ps.length == argTypes.length &&
+              ps.zip(argTypes).forall((p, a) => latticeEqual(p, a)) =>
+            Some((t, Map.empty[String, SyslType]))
           case _ => None
       else
         // Generic: unify raw impl method param TypeAST against arg types.
