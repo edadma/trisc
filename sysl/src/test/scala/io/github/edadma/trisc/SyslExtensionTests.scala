@@ -602,4 +602,127 @@ class SyslExtensionTests extends SyslTestHelpers {
       )) shouldBe 6
     }
   }
+
+  "same-module sibling trait impl visibility" - {
+
+    // Same helper as above — multi-file no-test-key.
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "non-generic multi-target operator impl declared in sibling file dispatches" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box
+            |    v: int
+            |
+            |trait Add[A, B, R]
+            |    #operator("|+|")
+            |    add(a: A, b: B) -> R
+            |
+            |impl Add[Box, Box, Box]
+            |    add(a: Box, b: Box) -> Box = Box(a.v + b.v)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val a = Box(1)
+            |    val b = Box(2)
+            |    val c = a |+| b
+            |    c.v
+            |""".stripMargin,
+      )) shouldBe 3
+    }
+
+    "generic operator impl declared in sibling file dispatches" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Wrap[T]
+            |    v: T
+            |
+            |trait Map[A, F, R]
+            |    #operator("^^")
+            |    pmap(a: A, f: F) -> R
+            |
+            |impl[A, B] Map[Wrap[A], (A) -> B, Wrap[B]]
+            |    pmap(a: Wrap[A], f: (A) -> B) -> Wrap[B] = Wrap[B](f(a.v))
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val w = Wrap[int](7)
+            |    val r = w ^^ ((n: int) -> n + 1)
+            |    r.v
+            |""".stripMargin,
+      )) shouldBe 8
+    }
+
+    "non-operator trait impl declared in sibling file dispatches via direct call" in {
+      // Trait method dispatch (no operator) from a sibling-declared concrete impl.
+      // Calls the impl method through its mangled name route via the trait
+      // dispatch path — exercises the same machinery as operator dispatch but
+      // through the explicit method-name surface.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box
+            |    v: int
+            |
+            |trait Show[T]
+            |    show(t: T) -> int
+            |
+            |impl Show[Box]
+            |    show(t: Box) -> int = t.v + 100
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val b = Box(7)
+            |    Show.show(b)
+            |""".stripMargin,
+      )) shouldBe 107
+    }
+
+    "cross-module precedence still works after sibling-impl visibility lands" in {
+      // Regression: same-module sibling visibility must not accidentally
+      // unify cross-module impls. Importing module A's wildcard should still
+      // pull in A's impl normally; the sibling-merge path is keyed on the
+      // current module's other source files, not on every imported module.
+      runMultiFile(Map(
+        "alib/types" ->
+          """module alib
+            |
+            |struct Box
+            |    v: int
+            |
+            |trait Add[A, B, R]
+            |    #operator("|+|")
+            |    add(a: A, b: B) -> R
+            |
+            |impl Add[Box, Box, Box]
+            |    add(a: Box, b: Box) -> Box = Box(a.v + b.v + 1000)
+            |""".stripMargin,
+        "user/main" ->
+          """import alib.*
+            |
+            |main() -> int
+            |    val a = Box(5)
+            |    val b = Box(10)
+            |    val c = a |+| b
+            |    c.v
+            |""".stripMargin,
+      )) shouldBe 1015
+    }
+  }
 }

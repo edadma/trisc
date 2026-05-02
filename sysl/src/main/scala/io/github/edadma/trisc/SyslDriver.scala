@@ -249,6 +249,13 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
               case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
               case TypeAliasDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
+              // Include generic and multi-target concrete ImplDeclASTs. Single-target
+              // concrete impls already round-trip via meta.traitImpls (TraitImplMeta
+              // is single-target only); multi-target concrete impls (e.g.
+              // `impl Combine[Box, Box, Box]`) and any generic impl have no
+              // representation there, so they ride along in genericTemplates and
+              // get registered through registerImport's ImplDeclAST handler.
+              case ImplDeclAST(_, tps, targets, _, _) => tps.nonEmpty || targets.length > 1
               case _ => false
             } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
             new ModuleMeta(
@@ -286,7 +293,13 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
       // Register same-module siblings (intra-module visibility),
       // excluding own symbols and externs (which are private to each file).
+      // Pre-seed the analyzer's currentModule so registerImport's mangling
+      // for sibling impl-method lookups produces the same prefix the
+      // importing unit's main pass will use — without this, sibling-imported
+      // multi-target concrete impls resolve to the unmangled form and the
+      // interpreter / linker can't find the function.
       for modPath <- modules.get(name) do
+        analyzer.preSetModule(modPath.replace('/', '_').replace('.', '_'))
         for src <- moduleToSources.getOrElse(modPath, Set.empty) if src != name do
           analyzer.registerGenericTemplatesFrom(asts(src))
         // Build a sibling-only view by merging every other file's per-file meta

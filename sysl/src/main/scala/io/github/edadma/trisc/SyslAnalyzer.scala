@@ -273,6 +273,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   def registerNoMangle(names: Iterable[String]): Unit =
     neverMangle ++= names
 
+  /** Pre-seed `currentModule` before `analyze()` runs. The driver uses this so
+   *  `registerImport` can mangle imported sibling-impl method names with the
+   *  same prefix the importing unit's own main pass would produce — necessary
+   *  because mangleName/shouldMangle key off `currentModule`, which `analyze()`
+   *  doesn't set until after sibling registration has already happened. */
+  def preSetModule(modPath: String): Unit =
+    currentModule = Some(modPath)
+
   /** Strip module prefix from a mangled name to get the short name.
     * Uses indexOf (first `__`) not lastIndexOf, because function names
     * can contain `_` (e.g. `_run_atexit` → mangled `mod___run_atexit`).
@@ -298,7 +306,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   // when those templates round-trip back through Step 5's sibling import.
   protected val importedTemplateNames = mutable.HashSet[String]()
   protected val importedTraitNames = mutable.HashSet[String]()
-  protected val importedConcreteImplKeys = mutable.HashSet[(String, SyslType)]()
+  // Concrete-impl key uses the full target list so multi-target impls
+  // (e.g. `impl Combine[Box, Box, Box]`) are tracked correctly. Single-target
+  // impls store a one-element list.
+  protected val importedConcreteImplKeys = mutable.HashSet[(String, List[SyslType])]()
+  // Generic-impl key uses raw TypeAST patterns since the targets may carry
+  // type variables that don't resolve to a SyslType at import time.
+  protected val importedGenericImplKeys = mutable.HashSet[(String, List[String], List[TypeAST])]()
   protected val importedExtensionKeys = mutable.HashSet[(String, String)]() // (definingModule, mangledFnName)
   protected val importedEnumInstNames = mutable.HashSet[String]()
 
@@ -889,7 +903,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   def getTraitImplMetas: List[TraitImplMeta] =
     concreteImpls
       .filterNot { case (traitName, targetType, _) =>
-        importedConcreteImplKeys.contains((traitName, targetType))
+        importedConcreteImplKeys.contains((traitName, List(targetType)))
       }
       .map { case (traitName, targetType, methodMap) =>
         TraitImplMeta(traitName, targetType, methodMap.toMap)
@@ -1235,7 +1249,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 methodASTs = Nil,
                 definingModule = "",   // imported impls — orphan check skipped on import
               )
-            importedConcreteImplKeys += ((traitName, targetType))
+            importedConcreteImplKeys += ((traitName, List(targetType)))
 
     // Register generic templates from imported module (needed for cross-module generic instantiation).
     // Selective imports (`import std.option.{Option, Some, None}`) must filter generic templates
@@ -1279,26 +1293,68 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             methodASTs = Nil,
             definingModule = "",
           )
-        importedConcreteImplKeys += ((impl.traitName, impl.targetType))
+        importedConcreteImplKeys += ((impl.traitName, List(impl.targetType)))
 
-    // Register generic ImplDeclASTs from imported templates (Phase 2d — currently
-    // only synth `__ExtOp_*` impls for generic-receiver operator extensions; user-
-    // written generic impls don't yet propagate through SMETA).
+    // Register ImplDeclASTs from imported templates. The driver puts every
+    // user-written generic impl + every multi-target concrete impl in the
+    // genericTemplates list — single-target concrete impls go through the
+    // meta.traitImpls path above, so they're not duplicated here.
     for template <- meta.genericTemplates do
       template match
-        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _) if implTypeParams.nonEmpty =>
-          if !implTemplates.getOrElse(traitName, Nil).exists(t =>
-              t.typeParams == implTypeParams && t.targetPatterns == targetTypes) then
-            implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
-              typeParams = implTypeParams,
-              targetPatterns = targetTypes,
-              resolvedConcrete = None,
-              methods = mutable.LinkedHashMap.empty,
-              methodInfos = Nil,
-              methodASTs = methods,
-              definingModule = "",
-              implDecl = Some(impl),
-            )
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _) =>
+          val alreadyHas = implTemplates.getOrElse(traitName, Nil).exists(t =>
+            t.typeParams == implTypeParams && t.targetPatterns == targetTypes)
+          if !alreadyHas then
+            if implTypeParams.nonEmpty then
+              // Generic impl: methods are analyzed lazily at instantiation time.
+              implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+                typeParams = implTypeParams,
+                targetPatterns = targetTypes,
+                resolvedConcrete = None,
+                methods = mutable.LinkedHashMap.empty,
+                methodInfos = Nil,
+                methodASTs = methods,
+                definingModule = "",
+                implDecl = Some(impl),
+              )
+              importedGenericImplKeys += ((traitName, implTypeParams, targetTypes))
+            else
+              // Multi-target concrete impl. Resolve targets so the dispatch
+              // path (`enumerateImplCandidates` concrete branch) can compare
+              // against them, and mangle method names with the *owning*
+              // module's prefix (not the importing analyzer's `currentModule`)
+              // so dispatch lands on the same name the impl's defining unit
+              // emitted. For cross-module imports, modulePath identifies the
+              // owning module; for same-module siblings (modulePath empty)
+              // the driver pre-seeds `currentModule` to the shared module.
+              // If targets can't resolve yet (rare — types are registered
+              // earlier in registerImport), skip and rely on a later import
+              // iteration to pick it up.
+              scala.util.Try(targetTypes.map(resolveType)).toOption.foreach { resolvedTargets =>
+                val owningModuleMangled =
+                  if modulePath.nonEmpty then modulePath.replace('/', '_').replace('.', '_')
+                  else currentModule.getOrElse("")
+                val typeMangled = resolvedTargets.map(typeToMangled).mkString("_")
+                val methodMap = mutable.LinkedHashMap.empty[String, String]
+                for m <- methods do
+                  val rawMangled = s"${traitName}_${m.name}_${typeMangled}"
+                  val mangled =
+                    if owningModuleMangled.nonEmpty && !neverMangle.contains(rawMangled) then
+                      s"${owningModuleMangled}__${rawMangled}"
+                    else rawMangled
+                  methodMap(m.name) = mangled
+                implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+                  typeParams = Nil,
+                  targetPatterns = targetTypes,
+                  resolvedConcrete = Some(resolvedTargets),
+                  methods = methodMap,
+                  methodInfos = Nil,
+                  methodASTs = Nil,
+                  definingModule = "",
+                  implDecl = Some(impl),
+                )
+                importedConcreteImplKeys += ((traitName, resolvedTargets))
+              }
         case _ => ()
 
     // Register imported extensions: every extension flows into the side table
