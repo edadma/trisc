@@ -1387,6 +1387,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                   // template wins so analyze(generic enum) does not see variantToEnum + empty genericVariantToEnum.
                   if variantToEnum.contains(vname) then variantToEnum.remove(vname)
                   genericVariantToEnum(vname) = (name, idx)
+        case TypeAliasDeclAST(name, target, tps, _, isNew, _, _) if tps.nonEmpty =>
+          if !genericTypeAliases.contains(name) && !typeAliases.contains(name) then
+            genericTypeAliases(name) = (tps, target, isNew)
         case _ => ()
 
   def analyze(programIn: ProgramAST): TProgram =

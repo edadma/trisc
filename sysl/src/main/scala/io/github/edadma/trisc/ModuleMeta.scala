@@ -155,8 +155,11 @@ object ModuleMeta:
    *  v12 adds an optional `MUT` trailer on DATA lines so module-level `var` (vs `val`)
    *  is preserved across files — sibling-imported vars stay writable.
    *  v13 adds `EXT <method> <definingModule|_> <mangledFn> <receiverTypePrefix>` lines
-   *  so Scala-3-style `extension` blocks round-trip across compilation units. */
-  val SMETA_VERSION = 13
+   *  so Scala-3-style `extension` blocks round-trip across compilation units.
+   *  v14 carries generic type aliases (`type Box[A] = new A`) through the TEMPLATES
+   *  block so they are visible across files of the same module and across module
+   *  imports. */
+  val SMETA_VERSION = 14
 
   /** Encode a FuncEffects as space-separated tokens — `U` (Unknown), `P` (Pure), or
    *  `RW <nReads> <readsNames…> <nWrites> <writesNames…>`. Used both in the FUNC-line
@@ -341,6 +344,7 @@ object ModuleMeta:
                 case StructDeclAST(_, _, tps, _, _)        => tps.nonEmpty
                 case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
                 case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
+                case TypeAliasDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
                 case _: TraitDeclAST                        => true
                 case _                                      => false
               }

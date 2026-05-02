@@ -366,4 +366,136 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     val meta = ModuleMeta.fromProgram(typed)
     meta.symbols.head.sourceFile shouldBe None
   }
+
+  // ===== Generic type aliases across files of the same module =====
+  // A generic type alias defined in one file of a multi-file module must be
+  // visible (with full generic syntax) from any other file in the same module.
+  // Mirrors how generic structs and generic functions already cross file
+  // boundaries within a module.
+
+  "generic newtype alias visible across files in same module" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+      "boxlib/use" ->
+        """module boxlib
+          |unbox(b: Box[int]) -> int = int(b)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "generic alias-of-function-type visible across files in same module" in {
+    val sources = Map(
+      "parselib/types" ->
+        """module parselib
+          |type Parser[A] = new (int) -> A
+          |""".stripMargin,
+      "parselib/runner" ->
+        """module parselib
+          |run(p: Parser[int], x: int) -> int = p(x)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "generic alias usable as return type in another file" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |""".stripMargin,
+      "boxlib/use" ->
+        """module boxlib
+          |make_int_box(v: int) -> Box[int] = Box[int](v)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "generic alias passed through another generic across files" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+      "boxlib/use" ->
+        """module boxlib
+          |take_any[A](b: Box[A]) -> Box[A] = b
+          |make_string_box(s: string) -> Box[string] = take_any[string](mk_box(s))
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "generic alias visible across module boundary (cross-module import)" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+      "app" ->
+        """import boxlib.*
+          |unbox(b: Box[int]) -> int = int(b)
+          |main() -> int = unbox(mk_box(42))
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val merged = TProgram(result.units.flatMap(_.typed.decls))
+    val interp = new SyslInterpreter()
+    interp.run(merged) shouldBe 42
+  }
+
+  "generic alias round-trips through SMETA" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val unit = result.units.head
+    // Round-trip: serialize, parse back, verify the generic alias survives
+    val parsed = ModuleMeta.fromSmeta(unit.smeta).get
+    val aliasTemplate = parsed.genericTemplates.collectFirst {
+      case ta @ TypeAliasDeclAST("Box", _, tps, _, isNew, _, _) if tps.nonEmpty => (ta, tps, isNew)
+    }
+    aliasTemplate.isDefined shouldBe true
+    aliasTemplate.get._2 shouldBe List("A")
+    aliasTemplate.get._3 shouldBe true
+  }
+
+  "executable test runs across files via interpreter" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+      "boxlib/use" ->
+        """module boxlib
+          |unbox(b: Box[int]) -> int = int(b)
+          |main() -> int
+          |    val b: Box[int] = mk_box(42)
+          |    unbox(b)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val merged = TProgram(result.units.flatMap(_.typed.decls))
+    val interp = new SyslInterpreter()
+    interp.run(merged) shouldBe 42
+  }
 }

@@ -106,6 +106,13 @@ object SyslPrettyPrinter:
       val body = methods.map(m => s"${IND}${declToSource(m).replace("\n", s"\n")}").mkString("\n")
       s"impl$tpStr $traitName[$targetStr]\n$body"
 
+    case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate) =>
+      val tpStr = if typeParams.nonEmpty then s"[${typeParams.mkString(", ")}]" else ""
+      val newStr = if isNew then "new " else ""
+      val rangeStr = range.map(r => s" within ${exprToSource(r.lo)}${if r.exclusiveHi then "..<" else ".."}${exprToSource(r.hi)}").getOrElse("")
+      val predStr = predicate.map(p => s" where ${exprToSource(p)}").getOrElse("")
+      s"type $name$tpStr = $newStr${typeToSource(target)}$rangeStr$predStr"
+
     case _ => s"// unsupported declaration: ${d.getClass.getSimpleName}"
 
   // --- Function body ---

@@ -317,6 +317,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
         case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
         case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
+        case TypeAliasDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
         case _ => false
       } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
