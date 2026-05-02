@@ -1,0 +1,132 @@
+test_emfile — per-process fd-table exhaustion returns EMFILE
+==============================================================
+
+Phase 0c chunk 1: validates that when the per-process POSIX fd
+table fills up, allocation returns -EMFILE cleanly (no crash, no
+silent corruption), and that closing a fd makes the slot
+allocatable again.
+
+Uses `eventfd2` because it goes straight through `posix_fd_alloc`
+with no backing server — an unconditional smoke test of the
+posix-fd machinery with no external state.
+
+Test plan
+---------
+
+  1. Loop calling eventfd2(0, 0). Count consecutive successes
+     until -EMFILE comes back.
+  2. The success count must be >= 50. The actual cap is
+     POSIX_FDS_PER_PROC - 3 = 61 (minus any fds inherited from
+     nsh, which is normally 3 — stdin/stdout/stderr — making the
+     observed count 61). The 50 floor is defensive headroom for
+     future inheritance changes.
+  3. The failing call must return exactly -EMFILE (-24). Anything
+     else (e.g. -1 from a generic failure path) is a regression.
+  4. Close one allocated fd. Call eventfd2 again — must succeed
+     (proving slot reuse works after exhaustion).
+  5. Close everything we allocated; print `emfile: ok`.
+
+Pass criterion: prints `emfile: ok`.
+
+    module oskit.bin.test_emfile
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE      = 147
+    val NR_EVENTFD2   = 156
+
+    val EMFILE_V      = 24
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("emfile: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        var fds: [128]int
+        var n = 0
+
+Step 1: allocate eventfd2 fds until -EMFILE. 128-slot cap is
+well above the 61 we expect, so this loop terminates either at
+the real cap or at our overflow guard (which would itself be a
+regression — the current cap is 64).
+
+        while n < 128
+            val r = int(syscall6(NR_EVENTFD2, i64(0), i64(0), i64(0), i64(0), i64(0), i64(0)))
+            if r < 0
+                if r != -EMFILE_V
+                    puts("emfile: unexpected errno ")
+                    print_idec(r)
+                    puts("\n")
+                    fail(1)
+                    return
+                if n < 50
+                    puts("emfile: cap too low: ")
+                    print_idec(n)
+                    puts("\n")
+                    fail(2)
+                    return
+                if n > 80
+                    puts("emfile: cap too high: ")
+                    print_idec(n)
+                    puts("\n")
+                    fail(3)
+                    return
+                break
+            fds[n] = r
+            n += 1
+
+Step 2: ran the loop to its 128-slot guard without seeing
+EMFILE. That'd mean the cap is broken (currently 64).
+
+        if n >= 128
+            puts("emfile: loop exhausted without EMFILE; cap regressed?\n")
+            fail(4)
+            return
+
+Step 3: close one fd; reallocate; must succeed.
+
+        val close1 = int(syscall6(NR_CLOSE, i64(fds[0]), i64(0), i64(0), i64(0), i64(0), i64(0)))
+        if close1 != 0
+            puts("emfile: close after fill returned ")
+            print_idec(close1)
+            puts("\n")
+            fail(5)
+            return
+
+        val refd = int(syscall6(NR_EVENTFD2, i64(0), i64(0), i64(0), i64(0), i64(0), i64(0)))
+        if refd < 0
+            puts("emfile: realloc after close returned ")
+            print_idec(refd)
+            puts("\n")
+            fail(6)
+            return
+        fds[0] = refd
+
+Step 4: tidy up — close all the fds we allocated. The kernel
+would reap them at exit anyway, but explicit close exercises the
+free path too.
+
+        var i = 0
+        while i < n
+            syscall6(NR_CLOSE, i64(fds[i]), i64(0), i64(0), i64(0), i64(0), i64(0))
+            i += 1
+
+        puts("emfile: ok\n")
+        exit()

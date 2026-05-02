@@ -967,6 +967,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "udgflt: bad"
   }
 
+  "posix: per-process fd-table exhaustion returns EMFILE" in {
+    // Phase 0c chunk 1. Per-process posix-fd cap is 64 (3
+    // reserved for stdin/stdout/stderr). Loops eventfd2 until
+    // the next call returns -EMFILE; verifies the cap is in
+    // the expected range, that the errno is exactly EMFILE,
+    // and that closing a fd makes the slot reusable.
+    val output = qemu.command("test_emfile")
+    output should include("emfile: ok")
+    output should not include "emfile: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no
