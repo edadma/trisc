@@ -1,0 +1,126 @@
+test_ipcfuzz — IPC dispatch fallback fuzz
+==========================================
+
+Phase 0c chunk 7: pins the contract that every system server's
+command dispatch has a panic-free fallback for unknown command
+bytes. Sends a malformed message (cmd byte = 0xFE, which is
+above every server's command-table maximum of 99) to each named
+server's port and verifies the server replies promptly with the
+-1 sentinel byte (0xFF).
+
+Servers fuzzed: `disk`, `tfs`, `fs` (= VFS), `tty`, `pm`, `ds`,
+`nic`, `inet`, `unix`. Each one ends its dispatch chain with an
+`else` arm that builds a 1-byte reply containing `byte(-1)` and
+calls `ipc_reply`. A regression that turned that arm into a
+panic, an early `return` without reply, or a wrong reply length
+would deadlock the caller — this test would then hang in CI
+rather than print its `ok` line.
+
+VFS is special: its `else` forwards unknown commands to the TFS
+backend and relays the reply. With cmd=0xFE the backend (TFS)
+replies status=-1 and `vfs_reply_len` collapses that to 1 byte,
+so the surface is the same.
+
+Test plan
+---------
+
+  1. For each server name, `port_lookup` → port. Skip if < 0
+     (server not registered in this fixture).
+  2. `ipc_send` a 1-byte buffer with `buf[0] = 0xFE`. Verify
+     return is 0 and `reply[0]` is 0xFF.
+  3. `ipc_send` a 32-byte buffer of all-0xFE. Verify the same.
+     This catches dispatch paths that branch on `msg_len` before
+     reading `buf[0]`.
+  4. Print `ipcfuzz: ok`.
+
+Pass criterion: prints `ipcfuzz: ok`. A hang (no output) means a
+server's else branch stopped replying.
+
+    module oskit.bin.test_ipcfuzz
+
+    import oskit.ulib.{puts, exit, exit_with, port_lookup, ipc_send}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fuzz_one(name: string)
+        val port = port_lookup(name)
+        if port < 0
+            return
+
+        var msg: [32]byte
+        var i = 0
+        while i < 32
+            msg[i] = byte(0xFE)
+            i += 1
+        var reply: [16]byte
+
+The 1-byte send exercises the dispatch's minimum input. A
+correct server reads `buf[0]` as the command byte, takes the
+else branch, and replies `-1`.
+
+        reply[0] = 0
+        val r1 = ipc_send(port, msg, 1, reply, 16)
+        if r1 != 0
+            puts("ipcfuzz: bad ")
+            puts(name)
+            puts(": 1B ipc_send returned ")
+            print_idec(r1)
+            puts("\n")
+            exit_with(1)
+            return
+        if (int(reply[0]) & 0xff) != 0xff
+            puts("ipcfuzz: bad ")
+            puts(name)
+            puts(": 1B reply ")
+            print_idec(int(reply[0]) & 0xff)
+            puts(" not 0xff\n")
+            exit_with(2)
+            return
+
+The 32-byte send exercises a longer payload of garbage. The
+dispatch must still take the else branch off `buf[0]`, not get
+confused by trailing bytes.
+
+        reply[0] = 0
+        val r2 = ipc_send(port, msg, 32, reply, 16)
+        if r2 != 0
+            puts("ipcfuzz: bad ")
+            puts(name)
+            puts(": 32B ipc_send returned ")
+            print_idec(r2)
+            puts("\n")
+            exit_with(3)
+            return
+        if (int(reply[0]) & 0xff) != 0xff
+            puts("ipcfuzz: bad ")
+            puts(name)
+            puts(": 32B reply ")
+            print_idec(int(reply[0]) & 0xff)
+            puts(" not 0xff\n")
+            exit_with(4)
+            return
+
+
+    main(argv: []string)
+        fuzz_one("disk")
+        fuzz_one("tfs")
+        fuzz_one("fs")
+        fuzz_one("tty")
+        fuzz_one("pm")
+        fuzz_one("ds")
+        fuzz_one("nic")
+        fuzz_one("inet")
+        fuzz_one("unix")
+        puts("ipcfuzz: ok\n")
+        exit()

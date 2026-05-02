@@ -2385,6 +2385,17 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "udpmax: bad"
   }
 
+  "ipc: dispatch fallback fuzz across all servers" in {
+    // Phase 0c chunk 7. Sends an unknown command byte (0xFE) to
+    // every named server's port (disk, tfs, fs, tty, pm, ds, nic,
+    // inet, unix) and verifies each replies with -1 (0xFF) without
+    // crashing or hanging. Pins the panic-free else-branch contract
+    // each dispatch loop is supposed to honor.
+    val output = qemu.command("test_ipcfuzz")
+    output should include("ipcfuzz: ok")
+    output should not include "ipcfuzz: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no
