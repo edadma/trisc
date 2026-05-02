@@ -1,0 +1,160 @@
+test_udgflt — AF_UNIX SOCK_DGRAM connected-peer filter
+========================================================
+
+Phase 0a-3: validates that a DGRAM socket which has called
+`connect(peer)` only receives datagrams from `peer`. Non-peer
+dgrams are silently dropped — the sender's `sendto()` still
+returns success (POSIX/Linux semantics: discard, don't error).
+
+Setup: three DGRAM sockets A, B, C bound to distinct paths.
+
+  1. C sendto A (no filter; A unconnected) — A recvs.
+  2. A connects to B.
+  3. C sendto A — silently dropped on the receive side; sendto
+     returns success.
+  4. B sendto A — queued.
+  5. A recvfrom — must return B's dgram, not C's.
+
+Pass criterion: prints `udgflt: ok`.
+
+    module oskit.bin.test_udgflt
+
+    import oskit.ulib.{puts, exit, exit_with}
+    import oskit.net.{unix_socket, unix_bind, unix_connect,
+        unix_sendto, unix_recvfrom, unix_close,
+        UNIX_SOCK_DGRAM}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("udgflt: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val a = unix_socket(UNIX_SOCK_DGRAM)
+        if a < 0
+            fail(1)
+            return
+        val b = unix_socket(UNIX_SOCK_DGRAM)
+        if b < 0
+            fail(2)
+            return
+        val c = unix_socket(UNIX_SOCK_DGRAM)
+        if c < 0
+            fail(3)
+            return
+
+        var pa: [4]byte
+        pa[0] = 'F'; pa[1] = 'A'; pa[2] = '0'; pa[3] = '1'
+        var pb: [4]byte
+        pb[0] = 'F'; pb[1] = 'B'; pb[2] = '0'; pb[3] = '1'
+        var pc: [4]byte
+        pc[0] = 'F'; pc[1] = 'C'; pc[2] = '0'; pc[3] = '1'
+
+        if unix_bind(a, &pa[0], 4) != 0
+            fail(4)
+            return
+        if unix_bind(b, &pb[0], 4) != 0
+            fail(5)
+            return
+        if unix_bind(c, &pc[0], 4) != 0
+            fail(6)
+            return
+
+Step 1: C → A while A is unconnected. Should arrive normally.
+
+        var pre: [4]byte
+        pre[0] = 'p'; pre[1] = 'r'; pre[2] = 'e'; pre[3] = 0
+        if unix_sendto(c, &pa[0], 4, &pre[0], 3) != 3
+            fail(7)
+            return
+
+        var rb1: [16]byte
+        var sp1: [16]byte
+        var spl1 = 0
+        val n1 = unix_recvfrom(a, &rb1[0], 16, &sp1[0], 16, &spl1)
+        if n1 != 3
+            fail(8)
+            return
+        if rb1[0] != 'p'
+            fail(9)
+            return
+        if spl1 != 4
+            fail(10)
+            return
+        if sp1[1] != 'C'
+            fail(11)
+            return
+
+Step 2: A connects to B. Now A only accepts dgrams from B.
+
+        if unix_connect(a, &pb[0], 4) != 0
+            fail(12)
+            return
+
+Step 3: C → A — must be silently dropped, but sendto returns
+success (the dlen was clamped to UNIX_DG_DATA_MAX, which is
+much larger than 4 here, so the return value is 4).
+
+        var noise: [4]byte
+        noise[0] = 'b'; noise[1] = 'a'; noise[2] = 'd'; noise[3] = 0
+        val nC = unix_sendto(c, &pa[0], 4, &noise[0], 4)
+        if nC != 4
+            puts("udgflt: dropped sendto returned ")
+            print_idec(nC)
+            puts("\n")
+            fail(13)
+            return
+
+Step 4: B → A — must arrive.
+
+        var ok_buf: [4]byte
+        ok_buf[0] = 'g'; ok_buf[1] = 'o'; ok_buf[2] = 'o'; ok_buf[3] = 'd'
+        if unix_sendto(b, &pa[0], 4, &ok_buf[0], 4) != 4
+            fail(14)
+            return
+
+Step 5: recvfrom — must read B's "good", not C's "bad".
+
+        var rb2: [16]byte
+        var sp2: [16]byte
+        var spl2 = 0
+        val n2 = unix_recvfrom(a, &rb2[0], 16, &sp2[0], 16, &spl2)
+        if n2 != 4
+            puts("udgflt: recvfrom returned ")
+            print_idec(n2)
+            puts("\n")
+            fail(15)
+            return
+        if rb2[0] != 'g'
+            fail(16)
+            return
+        if rb2[3] != 'd'
+            fail(17)
+            return
+        if spl2 != 4
+            fail(18)
+            return
+        if sp2[1] != 'B'
+            fail(19)
+            return
+
+        unix_close(a)
+        unix_close(b)
+        unix_close(c)
+        puts("udgflt: ok\n")
+        exit()

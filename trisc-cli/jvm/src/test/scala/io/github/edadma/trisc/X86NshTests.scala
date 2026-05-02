@@ -956,6 +956,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "rlimit: bad"
   }
 
+  "unix: DGRAM connected-peer recv filter" in {
+    // Phase 0a item 3. After connect() on an AF_UNIX DGRAM
+    // socket, only datagrams from the connected peer are
+    // delivered; non-peer dgrams are silently discarded by
+    // the receive path. Sender's sendto() still returns
+    // success (POSIX/Linux semantics).
+    val output = qemu.command("test_udgflt")
+    output should include("udgflt: ok")
+    output should not include "udgflt: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

@@ -220,6 +220,7 @@ return it to the caller via the standard sockaddr_un round-trip.
 
     struct UnixDgram
         in_use: int
+        src_idx: int
         src_path: [108]byte
         src_path_len: int
         data: [256]byte
@@ -958,6 +959,7 @@ the caller sees a smaller `nsent`.
     unix_dg_enqueue(dst_idx: int, src_idx: int, data: *byte, dlen: int) -> int
         val slot = unix_sockets[dst_idx].dg_tail
         unix_sockets[dst_idx].dg_queue[slot].in_use = 1
+        unix_sockets[dst_idx].dg_queue[slot].src_idx = src_idx
         // Default to no ancillary fds; SENDMSG overrides after this
         // call. Without this clear, a queue slot reused after a
         // previous SCM_RIGHTS send would carry stale fds into a plain
@@ -1034,6 +1036,49 @@ this in its own dispatch.
             unix_sockets[idx].dg_count -= 1
             unix_bump_fire_seq(idx)
         2 + sp + 2 + dl
+
+
+Drop the head dgram from `idx`'s queue without writing a reply.
+Releases queued cmsg fd refs the same way `unix_dg_dequeue_reply`
+does on a non-peek drain. Used by the connected-DGRAM filter to
+discard non-peer datagrams accumulated before `connect()` (post-
+connect arrivals are silently dropped at sendto/sendmsg time).
+
+    unix_dg_drop_head(idx: int)
+        val slot = unix_sockets[idx].dg_head
+        val nfds_drop = unix_sockets[idx].dg_queue[slot].nfds
+        var k = 0
+        while k < nfds_drop
+            val sidx = unix_sockets[idx].dg_queue[slot].fds[k]
+            unix_sockets[sidx].nrefs_in_queues -= 1
+            if unix_sockets[sidx].owners_count == 0
+                if unix_sockets[sidx].nrefs_in_queues == 0
+                    if unix_sockets[sidx].in_use != 0
+                        unix_full_close(sidx)
+            k += 1
+        unix_sockets[idx].dg_queue[slot].nfds = 0
+        unix_sockets[idx].dg_queue[slot].in_use = 0
+        unix_sockets[idx].dg_head = (slot + 1) % UNIX_DG_QUEUE
+        unix_sockets[idx].dg_count -= 1
+        unix_bump_fire_seq(idx)
+
+
+Walk-and-drop non-peer dgrams from the head of `idx`'s queue.
+Used by `unix_handle_recvfrom` when the receiver is connected
+(`peer_idx >= 0`): only datagrams from the connected peer survive
+to the recv. POSIX/Linux semantics — non-peer dgrams that landed
+in the queue (typically pre-connect arrivals) are silently
+discarded by the receive path.
+
+    unix_dg_drop_nonpeer_head(idx: int)
+        val peer = unix_sockets[idx].peer_idx
+        if peer < 0
+            return
+        while unix_sockets[idx].dg_count > 0
+            val slot = unix_sockets[idx].dg_head
+            if unix_sockets[idx].dg_queue[slot].src_idx == peer
+                return
+            unix_dg_drop_head(idx)
 
 
 ### SOCKET handler
@@ -1439,6 +1484,23 @@ is recvfrom (recvfrom-shape) or recvmsg (recvmsg-shape with
 nfds=0 — sendto carries no ancillary).
 
         val parked = unix_sockets[target].pending_recv_tid
+        // Connected-DGRAM filter: if target is connected to someone
+        // other than this sender, silently drop (POSIX/Linux: non-peer
+        // dgrams are silently discarded by a connected receiver).
+        // Acknowledge to the sender as if delivered. Doing this *before*
+        // touching the parker preserves the "parked ⇒ dg_count==0"
+        // invariant — neither deliver nor enqueue.
+        val tpeer = unix_sockets[target].peer_idx
+        if tpeer >= 0
+            if tpeer != fd
+                var dr: [3]byte
+                dr[0] = 0
+                var dl_drop = dlen
+                if dl_drop > UNIX_DG_DATA_MAX
+                    dl_drop = UNIX_DG_DATA_MAX
+                unix_write_u16(&dr[0], 1, dl_drop)
+                ipc_reply(sender, dr, 3)
+                return
         if parked >= 0
             if unix_sockets[target].dg_count == 0
                 val is_msg = unix_sockets[target].pending_recv_is_msg
@@ -1550,6 +1612,12 @@ peek=0. Still, callers must send 5 bytes from this point on.
             return
         val maxlen = unix_read_u16(buf, 2)
         val peek = int(buf[4]) & 0xff
+        // Connected-DGRAM filter (POSIX/Linux): if peer_idx is set,
+        // silently drop non-peer dgrams from the head of the queue
+        // before serving the recv. Post-connect arrivals are
+        // already filtered at sendto/sendmsg time; this catches
+        // the pre-connect-queue edge case.
+        unix_dg_drop_nonpeer_head(fd)
         if unix_sockets[fd].dg_count > 0
             var pr: [512]byte
             val n = unix_dg_dequeue_reply(fd, maxlen, peek, &pr[0])
@@ -1853,6 +1921,21 @@ in range, in_use, and in the sender's owners ring.
                 ipc_reply(sender, err, 3)
                 return
             k += 1
+
+        // Connected-DGRAM filter: silently drop if target is
+        // connected to someone other than this sender. Carried fds
+        // remain owned by the sender (no nrefs_in_queues bump).
+        val tpeer = unix_sockets[target].peer_idx
+        if tpeer >= 0
+            if tpeer != fd
+                var dr: [3]byte
+                dr[0] = 0
+                var dl_drop = dlen
+                if dl_drop > UNIX_DG_DATA_MAX
+                    dl_drop = UNIX_DG_DATA_MAX
+                unix_write_u16(&dr[0], 1, dl_drop)
+                ipc_reply(sender, dr, 3)
+                return
 
         if unix_sockets[target].dg_count >= UNIX_DG_QUEUE
             var err: [3]byte
@@ -2214,6 +2297,9 @@ advances the head pointer.
             err[3] = 0
             ipc_reply(sender, err, 4)
             return
+        // Connected-DGRAM filter (POSIX/Linux): drop pre-connect
+        // non-peer dgrams from the head before serving recvmsg.
+        unix_dg_drop_nonpeer_head(fd)
         if unix_sockets[fd].dg_count > 0
             unix_dg_drain_for_msg(fd, sender, max_nfds, maxlen)
             return
