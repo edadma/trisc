@@ -508,6 +508,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       definingModule: String,     // for visibility check (Phase 2b)
   )
   protected val extensionsByMethod = new mutable.LinkedHashMap[String, mutable.ListBuffer[ExtensionEntry]]
+  /** Synth ImplDeclASTs from generic-receiver operator extensions. Tracked
+   *  separately so they can be carried through `meta.genericTemplates` for
+   *  cross-module dispatch (Phase 2d). Concrete-receiver operator extensions
+   *  go through the regular `concreteImpls` channel (their typeParams is Nil). */
+  protected val extensionImplDecls = mutable.ListBuffer[ImplDeclAST]()
   /** Modules whose extensions are visible from this compilation unit: the unit's own
    *  module (set in `analyze`), every imported module path (registered via
    *  `registerImport`), and the empty-module sentinel (always visible — same-unit
@@ -586,17 +591,24 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             if opAttrs.length > 1 then
               throw AnalysisError(s"extension method '${m.name}' has multiple #operator attributes", m)
             for opAttr <- opAttrs.headOption do
-              if tparams.nonEmpty then
-                throw AnalysisError(
-                  s"#operator on a generic-receiver extension is not supported yet (Phase 2d): '${m.name}'",
-                  m,
-                )
               val sigil = extractOperatorSymbol(opAttr, m)
               val traitName = s"__ExtOp_${key}_${m.name}"
               val tparam = "T"
+              // Trait method uses T everywhere (receiver, other params, return).
+              // For the concrete-receiver case the impl substitutes T = recv.typ
+              // and signature checking ensures everything matches. For the
+              // generic-receiver case (Phase 2d) the impl is generic and the
+              // dispatcher uses the impl's methodAST directly for unification,
+              // so this stub trait signature isn't consulted at dispatch time —
+              // it just needs to be syntactically valid + carry the operator
+              // attribute + have the right arity for `registerTraitOperatorEntries`.
               val recvAsT = ParamAST("__ext_self__", NamedTypeAST(tparam, Nil), None, ParamMode.In)
-              val traitMethodParams = recvAsT :: m.params
-              val traitRet = m.returnType.getOrElse(NamedTypeAST("unit", Nil))
+              val traitMethodParams =
+                if tparams.isEmpty then recvAsT :: m.params
+                else recvAsT :: m.params.map(p => p.copy(typ = NamedTypeAST(tparam, Nil)))
+              val traitRet =
+                if tparams.isEmpty then m.returnType.getOrElse(NamedTypeAST("unit", Nil))
+                else NamedTypeAST(tparam, Nil)
               val traitMethod = TraitMethodAST(
                 m.name,
                 traitMethodParams,
@@ -612,13 +624,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               val callArgs: List[ExpressionAST] =
                 VarRefAST("__ext_self__") :: m.params.map(p => VarRefAST(p.name))
               val implBody = ExprBodyAST(CallAST(mangled, callArgs))
+              val userReturn = m.returnType.getOrElse(NamedTypeAST("unit", Nil))
               val implMethod = FunDeclAST(
                 m.name,
                 implParams,
-                Some(traitRet),
+                Some(userReturn),
                 implBody,
               )
-              out += ImplDeclAST(traitName, Nil, List(recv.typ), List(implMethod))
+              // Generic-receiver extensions yield a generic impl whose tparams
+              // are the user's extension-level tparams; the receiver pattern
+              // (using those tparams) becomes the trait's target type.
+              val implDecl = ImplDeclAST(traitName, tparams, List(recv.typ), List(implMethod))
+              out += implDecl
+              if tparams.nonEmpty then extensionImplDecls += implDecl
         case other =>
           out += other
     (out.toList, entries.toList)
@@ -892,6 +910,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   def getExtensionTemplates: List[FunDeclAST] =
     genericTemplates.values.filter(_.name.startsWith("__ext_")).toList
 
+  /** Synth ImplDeclASTs for generic-receiver operator extensions (Phase 2d).
+   *  Carried through `meta.genericTemplates` alongside extension synth funcs +
+   *  trait decls so importing units can reconstruct the generic impl in their
+   *  own `implTemplates`. Returns only impls with a `__ExtOp_` traitName so
+   *  user-written generic impls aren't pulled in here (they don't yet have a
+   *  cross-module path; that's a separate, larger change). */
+  def getExtensionImplDecls: List[ImplDeclAST] =
+    extensionImplDecls.iterator.filter(_.traitName.startsWith("__ExtOp_")).toList
+
   protected def pushScope(): Unit =
     scopeStack += new mutable.LinkedHashMap[String, SymInfo]
 
@@ -967,6 +994,33 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         }
         if extOnlyTemplates.nonEmpty then
           registerGenericTemplatesFrom(ProgramAST(extOnlyTemplates), filter = None)
+        // 2b. Register synth trait + generic impl decls for `__ExtOp_*` operator
+        //     extensions. The trait must be registered before the impl so the
+        //     impl-decl arity check passes; do trait first.
+        for template <- meta.genericTemplates do
+          template match
+            case TraitDeclAST(name, tparams, methods, _) if name.startsWith("__ExtOp_") =>
+              if !traits.contains(name) then
+                traits(name) = TraitInfo(name, tparams, methods)
+                registerTraitOperatorEntries(name, methods, template)
+            case _ => ()
+        for template <- meta.genericTemplates do
+          template match
+            case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _)
+                if traitName.startsWith("__ExtOp_") && implTypeParams.nonEmpty =>
+              if !implTemplates.getOrElse(traitName, Nil).exists(t =>
+                  t.typeParams == implTypeParams && t.targetPatterns == targetTypes) then
+                implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+                  typeParams = implTypeParams,
+                  targetPatterns = targetTypes,
+                  resolvedConcrete = None,
+                  methods = mutable.LinkedHashMap.empty,
+                  methodInfos = Nil,
+                  methodASTs = methods,
+                  definingModule = "",
+                  implDecl = Some(impl),
+                )
+            case _ => ()
         // 3. Register concrete extension entries from meta.extensions.
         for ext <- meta.extensions do
           val entry = ExtensionEntry(
@@ -1189,6 +1243,26 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             methodASTs = Nil,
             definingModule = "",
           )
+
+    // Register generic ImplDeclASTs from imported templates (Phase 2d — currently
+    // only synth `__ExtOp_*` impls for generic-receiver operator extensions; user-
+    // written generic impls don't yet propagate through SMETA).
+    for template <- meta.genericTemplates do
+      template match
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _) if implTypeParams.nonEmpty =>
+          if !implTemplates.getOrElse(traitName, Nil).exists(t =>
+              t.typeParams == implTypeParams && t.targetPatterns == targetTypes) then
+            implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+              typeParams = implTypeParams,
+              targetPatterns = targetTypes,
+              resolvedConcrete = None,
+              methods = mutable.LinkedHashMap.empty,
+              methodInfos = Nil,
+              methodASTs = methods,
+              definingModule = "",
+              implDecl = Some(impl),
+            )
+        case _ => ()
 
     // Register imported extensions: every extension flows into the side table
     // so dispatch can find it; visibility is gated at dispatch time. The

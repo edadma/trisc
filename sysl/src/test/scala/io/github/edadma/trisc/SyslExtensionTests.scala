@@ -343,4 +343,65 @@ class SyslExtensionTests extends SyslTestHelpers {
           |""".stripMargin) shouldBe 517
     }
   }
+
+  "generic operator extensions (Phase 2d)" - {
+
+    "binary #operator on a generic-receiver extension on []T" in {
+      eval(
+        """extension [T](xs: []T)
+          |    #operator("<>")
+          |    def merge(ys: []T) -> []T = xs
+          |
+          |main() -> int
+          |    arr: [3]int
+          |    arr[0] = 7
+          |    arr[1] = 14
+          |    arr[2] = 21
+          |    a = arr[:]
+          |    b = arr[:]
+          |    c = a <> b
+          |    c[1]
+          |""".stripMargin) shouldBe 14
+    }
+
+    "prefix #operator on a generic-receiver extension on parameterized struct" in {
+      eval(
+        """struct Box[T]
+          |    v: T
+          |
+          |extension [T](b: Box[T])
+          |    #operator("~~")
+          |    def flip -> Box[T] = b
+          |
+          |main() -> int
+          |    bx = Box(99)
+          |    cx = ~~bx
+          |    cx.v
+          |""".stripMargin) shouldBe 99
+    }
+
+    "cross-module generic operator extension" in {
+      val libs = Map(
+        "veclib/vec" ->
+          """module veclib
+            |
+            |extension [T](xs: []T)
+            |    #operator("<>")
+            |    def merge(ys: []T) -> []T = xs
+            |""".stripMargin)
+      evalWithLibs(libs,
+        """import veclib.*
+          |
+          |main() -> int
+          |    arr: [3]int
+          |    arr[0] = 11
+          |    arr[1] = 22
+          |    arr[2] = 33
+          |    a = arr[:]
+          |    b = arr[:]
+          |    c = a <> b
+          |    c[2]
+          |""".stripMargin) shouldBe 33
+    }
+  }
 }

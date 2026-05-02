@@ -100,6 +100,12 @@ object SyslPrettyPrinter:
       }.mkString("\n")
       s"trait $name[${typeParams.mkString(", ")}]\n$body"
 
+    case ImplDeclAST(traitName, typeParams, targetTypes, methods, _) =>
+      val tpStr = if typeParams.nonEmpty then s"[${typeParams.mkString(", ")}]" else ""
+      val targetStr = targetTypes.map(typeToSource).mkString(", ")
+      val body = methods.map(m => s"${IND}${declToSource(m).replace("\n", s"\n")}").mkString("\n")
+      s"impl$tpStr $traitName[$targetStr]\n$body"
+
     case _ => s"// unsupported declaration: ${d.getClass.getSimpleName}"
 
   // --- Function body ---
