@@ -493,6 +493,85 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
   // traitName -> list of registered impls (templates). Order is registration order.
   private val implTemplates = new mutable.LinkedHashMap[String, mutable.ListBuffer[ImplTemplate]]
 
+  // ---- Extension methods (Phase 2a: side-table for `expr.method` dispatch) ----
+  // Each `extension (recv: T) { def m(...) ... }` block lowers each method into
+  // a free FunDeclAST with the receiver as the first param, and registers an
+  // entry here keyed on the user-facing method name. Dispatch in the
+  // MethodCallAST arm consults this table whenever the normal lookup fails,
+  // gated on `definingModule` visibility (Phase 2b will add the cross-module
+  // gate; Phase 2a treats every entry as visible since they all live in the
+  // same compilation unit).
+  private case class ExtensionEntry(
+      methodName: String,         // user-facing call name, e.g. "shout"
+      receiverTypeAst: TypeAST,   // for dispatch type-match (resolved lazily)
+      mangledFnName: String,      // synthesized free-function name to call
+      definingModule: String,     // for visibility check (Phase 2b)
+  )
+  private val extensionsByMethod = new mutable.LinkedHashMap[String, mutable.ListBuffer[ExtensionEntry]]
+
+  /** Stable string key for a TypeAST, used to mangle the synthesized extension
+   *  function. Best-effort — collisions only matter for cross-block conflicts,
+   *  which dispatch ambiguity-checks anyway. */
+  private def extensionTypeKey(t: TypeAST): String = t match
+    case NamedTypeAST(name, Nil)  => name
+    case NamedTypeAST(name, args) => s"${name}_${args.map(extensionTypeKey).mkString("_")}"
+    case PtrTypeAST(e)            => s"ptr_${extensionTypeKey(e)}"
+    case PtrNonNullTypeAST(e)     => s"ptr_${extensionTypeKey(e)}"
+    case RefTypeAST(e)            => s"ref_${extensionTypeKey(e)}"
+    case ArrayTypeAST(_, e)       => s"slice_${extensionTypeKey(e)}"
+    case SliceTypeAST(e)          => s"slice_${extensionTypeKey(e)}"
+    case _                        => "anon"
+
+  /** Lower extension blocks to free FunDecls + side-table entries. Runs once at
+   *  the top of analyze(), before pass 0, so the synthesized funcs flow through
+   *  the normal registration/analysis pipeline. */
+  private def lowerExtensions(decls: List[DeclAST]): (List[DeclAST], List[ExtensionEntry]) =
+    val out = mutable.ListBuffer[DeclAST]()
+    val entries = mutable.ListBuffer[ExtensionEntry]()
+    val module = currentModule.getOrElse("")
+    for decl <- decls do
+      decl match
+        case ExtensionDeclAST(tparams, recv, methods, _) =>
+          val key = extensionTypeKey(recv.typ)
+          for m <- methods do
+            val mangled = s"__ext_${key}__${m.name}"
+            // Combine extension-level tparams with method-level tparams. Order
+            // matters for instantiation lookup later — extension tparams come
+            // first so a generic receiver's type bindings are stable.
+            val mergedTparams = tparams ++ m.typeParams
+            val synth = m.copy(
+              name = mangled,
+              params = recv :: m.params,
+              typeParams = mergedTparams,
+            )
+            out += synth
+            entries += ExtensionEntry(m.name, recv.typ, mangled, module)
+        case other =>
+          out += other
+    (out.toList, entries.toList)
+
+  /** Phase 2a dispatch: consult `extensionsByMethod` for a single concrete-type
+   *  match. Returns Some(call) on a unique hit, throws on ambiguity, returns None
+   *  when no entry matches (caller throws the original "no such method" error).
+   *  Visibility/generic/operator dispatch are deferred to later sub-chunks. */
+  private def tryExtensionDispatch(method: String, tObj: TExpr, tArgs: List[TExpr]): Option[TExpr] =
+    val candidates = extensionsByMethod.get(method).map(_.toList).getOrElse(Nil)
+    val matches = candidates.flatMap { entry =>
+      try
+        if resolveType(entry.receiverTypeAst) == tObj.typ then Some(entry) else None
+      catch case _: Throwable => None
+    }
+    matches match
+      case Nil => None
+      case List(entry) =>
+        val funInfo = functions(entry.mangledFnName)
+        val checkedArgs = checkArgs(entry.mangledFnName, funInfo.params.tail, tArgs, funInfo.modes.drop(1))
+        Some(TCall(funInfo.name, tObj :: checkedArgs, funInfo.returnType))
+      case multiple =>
+        throw AnalysisError(
+          s"extension method '$method' is ambiguous on receiver type ${tObj.typ}: " +
+            s"defined in modules ${multiple.map(_.definingModule).mkString(", ")}")
+
   // Stage F.5 bookkeeping: which module defined each trait / named type. Populated as
   // declarations are processed; consulted by the orphan rule at impl registration.
   private val traitDefiningModule = new mutable.LinkedHashMap[String, String]
@@ -915,7 +994,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
                   genericVariantToEnum(vname) = (name, idx)
         case _ => ()
 
-  def analyze(program: ProgramAST): TProgram =
+  def analyze(programIn: ProgramAST): TProgram =
+    // Pre-pass 0: extract module name, then lower extension blocks. Module
+    // extraction has to come first so each ExtensionEntry gets the right
+    // `definingModule` for visibility checks. Lowering replaces every
+    // ExtensionDeclAST with one synthesized free FunDeclAST per method, so
+    // the rest of the pipeline can register/analyze them as if the user had
+    // written `__ext_<recvType>__<method>(recv: T, ...) -> R = body` by hand.
+    for decl <- programIn.decls do
+      decl match
+        case ModuleDeclAST(path) => currentModule = Some(path.mkString("_"))
+        case _ =>
+    val (loweredDecls, extEntries) = lowerExtensions(programIn.decls)
+    for entry <- extEntries do
+      extensionsByMethod.getOrElseUpdate(entry.methodName, mutable.ListBuffer.empty) += entry
+    val program = ProgramAST(loweredDecls)
+
     // Pass 0: forward-declare all type names so recursive references resolve.
     // Struct and enum names are registered as placeholder types; fields are
     // resolved in the next pass once all names are visible.
@@ -5766,15 +5860,41 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
 
       case FieldAccessAST(obj, field) =>
         val tObj = analyzeExpr(obj)
-        // Auto-dereference pointers to structs (p.x works like (*p).x)
-        val (resolvedObj, structType0) = tObj.typ match
-          case st: StructType => (tObj, st)
-          case PtrType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
-          case RefType(st: StructType) => (TDeref(tObj, latestStruct(st)), st)
-          case other => throw AnalysisError(s"cannot access field '$field' on $other")
+        // Auto-dereference pointers to structs (p.x works like (*p).x).
+        // Non-struct receivers can still match a parameterless extension
+        // method (`extension (s: string) def shout -> string = s` makes
+        // `"hi".shout` legal); route through tryExtensionDispatch with
+        // empty args before raising the no-field error.
+        val structOpt: Option[(TExpr, StructType)] = tObj.typ match
+          case st: StructType          => Some((tObj, st))
+          case PtrType(st: StructType) => Some((TDeref(tObj, latestStruct(st)), st))
+          case RefType(st: StructType) => Some((TDeref(tObj, latestStruct(st)), st))
+          case _                       => None
+        if structOpt.isEmpty then
+          return tryExtensionDispatch(field, tObj, Nil).getOrElse(
+            throw AnalysisError(s"cannot access field '$field' on ${tObj.typ}"))
+        val (resolvedObj, structType0) = structOpt.get
         val structType = latestStruct(structType0)
         val idx = structType.fields.indexWhere(_._1 == field)
-        if idx < 0 then throw AnalysisError(s"struct ${structType.name} has no field '$field'")
+        if idx < 0 then
+          // No matching field. Before reaching for an extension, try the
+          // existing struct-method convention — a top-level function named
+          // `<StructName>_<field>` is a real method and must beat any
+          // extension of the same name (the no-surprises rule).
+          val methodFnName = s"${structType.name}_$field"
+          if functions.contains(methodFnName) then
+            val funInfo = functions(methodFnName)
+            // Build self argument (mirrors the MethodCallAST struct path).
+            val selfArg = tObj.typ match
+              case st: StructType => tObj match
+                case TVarRef(n, _)                  => TAddrOf(n, PtrType(st))
+                case TFieldAccess(innerObj, i, _)   => TAddrOfField(innerObj, i, PtrType(st))
+                case TIndex(arr, i, _)              => TAddrOfIndex(arr, i, PtrType(st))
+                case _                              => TTempAddr(tObj, PtrType(st))
+              case _ => tObj
+            return TCall(funInfo.name, List(selfArg), funInfo.returnType)
+          return tryExtensionDispatch(field, tObj, Nil).getOrElse(
+            throw AnalysisError(s"struct ${structType.name} has no field '$field'"))
         TFieldAccess(resolvedObj, idx, structType.fields(idx)._2)
 
       case PreIncAST(name) => val s = lookup(name); TPreInc(s.name, s.typ)
@@ -6242,12 +6362,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             val checkedArgs = checkArgs(s"${iface.name}.$method", params, tArgs)
             return TInterfaceDispatch(tObj, methodIdx, checkedArgs, retType)
           case _ => ()
-        // Determine the struct type (defer self-arg computation until we know it's a method)
-        val structType = tObj.typ match
-          case st: StructType          => st
-          case PtrType(st: StructType) => st
-          case RefType(st: StructType) => st
-          case other => throw AnalysisError(s"cannot call method '$method' on $other")
+        // Determine the struct type (defer self-arg computation until we know it's a method).
+        // Non-struct receivers can still match an `extension (recv: T)` block, so we route
+        // through tryExtensionDispatch before raising the no-method error.
+        val structTypeOpt: Option[StructType] = tObj.typ match
+          case st: StructType          => Some(st)
+          case PtrType(st: StructType) => Some(st)
+          case RefType(st: StructType) => Some(st)
+          case _                       => None
+        if structTypeOpt.isEmpty then
+          return tryExtensionDispatch(method, tObj, tArgs).getOrElse(
+            throw AnalysisError(s"cannot call method '$method' on ${tObj.typ}"))
+        val structType = structTypeOpt.get
         val structName = structType.name
         val funcName = s"${structName}_$method"
         if functions.contains(funcName) then
@@ -6293,7 +6419,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true):
             case Some(((_, other), _)) =>
               throw AnalysisError(s"field '$method' of struct $structName is $other, not a function")
             case None =>
-              throw AnalysisError(s"struct $structName has no method or field '$method'")
+              tryExtensionDispatch(method, tObj, tArgs).getOrElse(
+                throw AnalysisError(s"struct $structName has no method or field '$method'"))
 
       case CallAST(name, args0) =>
         // Call-by-name auto-wrap: if `name` resolves to a known function with
