@@ -42,6 +42,14 @@ Sized to MAX_THREADS × THREAD_STACK_SIZE. Sysl's array-bound
 grammar requires integer literals, so the dimensions here are
 hardcoded and MUST be kept in sync with `config.sysl`.
 
+PHASE 1 REPLACEMENT TARGET (master roadmap invariant 1):
+Static `[MAX_THREADS][THREAD_STACK_SIZE]` BSS array does not
+survive Phase 1's VMA layer — kernel stacks must become
+demand-allocated via a `alloc_stack(size) -> (usp, ssp)` API
+once per-process VMA lists exist. Until then, this is the
+intentional bring-up shape. Do not extend this array; do not
+add new fixed-size BSS regions for VM-adjacent state.
+
     var kernel_stacks: [32][16384]byte  // MAX_THREADS × THREAD_STACK_SIZE
 
 Return (usp, ssp) for a thread slot. USP is the top of the

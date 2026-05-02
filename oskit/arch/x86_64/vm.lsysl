@@ -165,6 +165,15 @@ Kernel pages (first 2MB except program region) are identity-mapped.
 PD[1..15] use 2MB superpages copied from the kernel PD.
 Returns PML4 address, or 0 on failure.
 
+PHASE 1 REPLACEMENT TARGET (master roadmap invariant 1):
+This function eagerly maps a single fixed-region program layout
+(legacy 0xCC000-0xFFFFF + the high musl carve-out at 0x60000000).
+Phase 1 replaces this with a VMA list per process, lazy/demand
+paging on first access, and `mmap`-driven layout — no
+fixed-region eager allocation should remain. The 64-bit address
+plumbing (PML4 / PDPT / PD / PT) stays; only the eager-mapping
+policy goes.
+
     vm_create_process_pt() -> u64
         val pml4 = page_alloc_zero()
         if pml4 == 0

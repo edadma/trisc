@@ -151,6 +151,13 @@ Create a per-process page table. Allocates L1 + L2 tables and
 physical pages for the program region (0xC0000-0xFFFFF = 64 pages).
 Returns L1 base address, or 0 on failure.
 
+PHASE 1 REPLACEMENT TARGET (master roadmap invariant 1):
+This eagerly maps a single fixed-region program layout
+(0xC0000-0xFFFFF, 64 pages). Phase 1 replaces this with a VMA
+list per process and demand paging — no eager fixed-region
+mapping should remain. The L1/L2 walker (and the lack of an
+x86-style guard page, justified at the top of this file) stays.
+
     vm_create_process_pt() -> u64
         val l1 = page_alloc_zero()
         if l1 == 0

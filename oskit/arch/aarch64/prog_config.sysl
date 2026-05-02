@@ -7,6 +7,15 @@
 // Mirrors the structure of oskit/arch/x86_64/prog_config.sysl: just
 // the cross-target constants a standalone user program needs, none
 // of the kernel-side externs that live in cpu.lsysl/vm.lsysl/exc.lsysl.
+//
+// PHASE 1 REPLACEMENT TARGET (master roadmap invariant 1):
+// PROG_USP/PROG_SSP as fixed addresses do not survive the VMA
+// rewrite. Once Phase 1 lands, every process gets a per-process
+// VMA list and stacks are allocated from a stack-VMA region by
+// the kernel; the initial SP comes back from `mmap`-equivalent
+// machinery, not a constant. Until then, this is the intentional
+// bring-up shape — do not add new fixed VAs here, route any new
+// per-process region through the would-be VMA layer instead.
 
 module oskit.arch
 

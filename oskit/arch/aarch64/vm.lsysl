@@ -146,6 +146,13 @@ DEMO_MODE=2 (EL0 demo) convenience. Real loaders should use
 `vm_copy_to` under the new process PTBR instead of poking these
 directly — only the first page is exposed this way.
 
+PHASE 1 REPLACEMENT TARGET (master roadmap invariant 1):
+USER_CODE_PAGES / USER_STACK_PAGES / USER_STACK_L3_START fix the
+per-process layout at compile time and force eager allocation in
+`vm_create_process_pt` below. Phase 1 replaces them with a VMA
+list per process and demand paging — these constants go away,
+not just shrink. The L0/L1/L2/L3 walker stays.
+
     val USER_CODE_PAGES  = 128
     val USER_STACK_PAGES = 16
     val USER_STACK_L3_START = 128
