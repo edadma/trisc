@@ -859,8 +859,13 @@ Client reply:    [status(1), handle(4), ino(4)]
         var be_reply: [64]byte
         ipc_send(backend, buf, msg_len, be_reply, 64)
         if be_reply[0] != 0
+            // Status 1 = ENOENT (path not found in backend). Distinct
+            // from status 2 (EMFILE, OFT/handle exhaustion) so the
+            // shim can map each surface to the correct errno without
+            // tripping the O_CREAT-then-retry path on a transient
+            // resource shortage.
             var err: [1]byte
-            err[0] = -1
+            err[0] = byte(1)
             ipc_reply(sender, err, 1)
             return
         val ino = vfs_msg_read_i32(be_reply, 1)
@@ -868,7 +873,7 @@ Client reply:    [status(1), handle(4), ino(4)]
         val oft_idx = vfs_oft_alloc(ino, 0, OFT_TYPE_FILE)
         if oft_idx < 0
             var err: [1]byte
-            err[0] = -1
+            err[0] = byte(2)
             ipc_reply(sender, err, 1)
             return
         // Allocate per-process handle
@@ -876,7 +881,7 @@ Client reply:    [status(1), handle(4), ino(4)]
         if handle < 0
             vfs_oft_free(oft_idx)
             var err: [1]byte
-            err[0] = -1
+            err[0] = byte(2)
             ipc_reply(sender, err, 1)
             return
         // Reply with handle and ino

@@ -350,6 +350,16 @@ PT_INTERP path that drops VMAs and fault-fills as part of Phase
 | 28  | VFS_CMD_REGISTER_FD_BY_OFT      |
 | 29  | VFS_CMD_TRUNCATE                |
 
+VFS_CMD_OPEN reply protocol (post Phase 0c chunk 4): byte 0 is a
+discriminated status — `0` = success (followed by `[handle:4][ino:4]`),
+`1` = ENOENT (path missing in backend), `2` = EMFILE (OFT slot
+pool or per-process handle table exhausted). The shim's `sys_openat`
+maps each surface to the matching errno; in particular, status `2`
+must skip the `O_CREAT`-then-retry path so a transient slot
+shortage doesn't masquerade as "file does not exist". Older clients
+that still use `if reply[0] != 0` continue to work — both error
+codes trigger the non-zero branch.
+
 PHASE 3 NOTE. The VFS server today is a routing-only shim that
 forwards file ops to TFS and pipe/TCP ops to inet/unix. The
 `oft_*` arrays are bring-up scaffolding. Phase 3 replaces this

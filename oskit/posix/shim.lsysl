@@ -5526,6 +5526,12 @@ Returns 0 on success, -ENOENT on miss.
         if r < 0
             return i64(-EIO)
         if reply[0] != 0
+            // VFS reply: 1=ENOENT, 2=EMFILE. faccessat treats the
+            // second as a transient resource shortage — same surface
+            // as Linux returning -EMFILE from a probe under fd
+            // pressure.
+            if (int(reply[0]) & 0xff) == 2
+                return i64(-EMFILE)
             return i64(-ENOENT)
         // Open succeeded — close the handle immediately, we just
         // wanted the existence check.
@@ -5566,6 +5572,11 @@ Returns 0 on success, -ENOENT on miss.
         val want_create = (oflags & POSIX_O_CREAT) != 0
         val want_excl   = (oflags & POSIX_O_EXCL)  != 0
         if reply[0] != 0
+            // VFS reply protocol: 0=success, 1=ENOENT, 2=EMFILE.
+            // Skip the O_CREAT-then-retry path on EMFILE — creating
+            // would leak a backend inode the OFT slot can't park.
+            if (int(reply[0]) & 0xff) == 2
+                return i64(-EMFILE)
             if !want_create
                 return i64(-ENOENT)
             // File doesn't exist and O_CREAT is set — ask VFS to
@@ -5601,6 +5612,8 @@ Returns 0 on success, -ENOENT on miss.
             if r2 < 0
                 return i64(-EIO)
             if reply[0] != 0
+                if (int(reply[0]) & 0xff) == 2
+                    return i64(-EMFILE)
                 return i64(-ENOENT)
         else if want_create && want_excl
             // File already exists and the caller asked for

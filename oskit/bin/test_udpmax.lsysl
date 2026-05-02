@@ -1,0 +1,131 @@
+test_udpmax — INET UDP socket pool exhaustion
+===============================================
+
+Phase 0c chunk 5: validates the inet server's per-tid UDP slot
+cap. Loops `socket(AF_INET, SOCK_DGRAM, 0)` until the inet
+server replies "no slots". Each successful call eagerly carves
+one slot from the global `inet_sockets[INET_MAX_SOCKETS=32]`
+pool, gated by `inet_count_udp_owner(sender) >= 8` — the
+per-tid cap fires first since the test is a single thread.
+
+Errno surface
+-------------
+
+When the per-tid cap (or global pool) is reached, the inet
+server replies status `0xFF`. The shim's `sys_socket(AF_INET,
+SOCK_DGRAM)` maps non-zero status to `-EMFILE` (shim.lsysl
+~line 1890). Compare with chunk 3 (AF_UNIX): unix server
+returns `-ENOMEM` raw and the shim sign-extends it; AF_INET
+gives the cleaner `-EMFILE` surface that POSIX programs
+actually look for.
+
+Test plan
+---------
+
+  1. socket(AF_INET, SOCK_DGRAM, 0) in a loop. Each success
+     records the fd. The Nth call past the per-tid cap
+     returns -EMFILE.
+  2. Success count should be in [6, 8] (defensive band around
+     the expected 8 in case the boot fixture changes).
+  3. close(one fd) + retry → must succeed.
+  4. Close everything. Print `udpmax: ok`.
+
+Pass criterion: prints `udpmax: ok`.
+
+    module oskit.bin.test_udpmax
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_CLOSE  = 147
+    val NR_SOCKET = 337
+
+    val AF_INET_V    = 2
+    val SOCK_DGRAM_V = 2
+
+    val EMFILE_V = 24
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("udpmax: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        var fds: [16]int
+        var n = 0
+
+Step 1: allocate AF_INET DGRAM sockets until exhaustion.
+
+        while n < 16
+            val r = int(syscall6(NR_SOCKET, i64(AF_INET_V), i64(SOCK_DGRAM_V), i64(0), i64(0), i64(0), i64(0)))
+            if r < 0
+                if r != -EMFILE_V
+                    puts("udpmax: unexpected errno ")
+                    print_idec(r)
+                    puts("\n")
+                    fail(1)
+                    return
+                if n < 6
+                    puts("udpmax: cap too low: ")
+                    print_idec(n)
+                    puts("\n")
+                    fail(2)
+                    return
+                if n > 8
+                    puts("udpmax: cap too high: ")
+                    print_idec(n)
+                    puts("\n")
+                    fail(3)
+                    return
+                break
+            fds[n] = r
+            n += 1
+
+        if n >= 16
+            puts("udpmax: loop exhausted without EMFILE; cap regressed?\n")
+            fail(4)
+            return
+
+Step 2: close one fd, verify reallocation succeeds.
+
+        val cr = int(syscall6(NR_CLOSE, i64(fds[0]), i64(0), i64(0), i64(0), i64(0), i64(0)))
+        if cr != 0
+            puts("udpmax: close returned ")
+            print_idec(cr)
+            puts("\n")
+            fail(5)
+            return
+
+        val refd = int(syscall6(NR_SOCKET, i64(AF_INET_V), i64(SOCK_DGRAM_V), i64(0), i64(0), i64(0), i64(0)))
+        if refd < 0
+            puts("udpmax: realloc after close returned ")
+            print_idec(refd)
+            puts("\n")
+            fail(6)
+            return
+        fds[0] = refd
+
+Step 3: clean up.
+
+        var i = 0
+        while i < n
+            syscall6(NR_CLOSE, i64(fds[i]), i64(0), i64(0), i64(0), i64(0), i64(0))
+            i += 1
+
+        puts("udpmax: ok\n")
+        exit()

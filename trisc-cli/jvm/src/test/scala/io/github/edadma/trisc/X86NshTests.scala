@@ -998,6 +998,29 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "unixmax: bad"
   }
 
+  "vfs: open-file-table exhaustion returns EMFILE" in {
+    // Phase 0c chunk 4. VFS_MAX_OPEN_FILES = 32. Loop openat
+    // until VFS replies "no slots". Pre-fix, VFS used a single
+    // 0xFF status for both ENOENT and EMFILE and the shim mapped
+    // both to -ENOENT; the chunk introduces a discriminated
+    // reply (1=ENOENT, 2=EMFILE) so the test sees the correct
+    // surface. Closing one fd frees the slot.
+    val output = qemu.command("test_vfsmax")
+    output should include("vfsmax: ok")
+    output should not include "vfsmax: bad"
+  }
+
+  "inet: UDP per-tid socket cap returns EMFILE" in {
+    // Phase 0c chunk 5. inet server enforces a per-tid UDP slot
+    // cap (8) inside `inet_handle_socket`; firing before the
+    // global INET_MAX_SOCKETS=32. The shim maps the inet
+    // server's status!=0 reply to -EMFILE. Closing one fd frees
+    // the slot.
+    val output = qemu.command("test_udpmax")
+    output should include("udpmax: ok")
+    output should not include "udpmax: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no
