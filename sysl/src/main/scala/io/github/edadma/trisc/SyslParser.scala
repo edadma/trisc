@@ -198,9 +198,16 @@ class SyslParser extends StandardTokenParsers {
       }
 
   lazy val extensionMember: Parser[FunDeclAST] =
-    rep(positioned(attribute) <~ rep1(Newline)) ~ ("def" ~> defDecl(false)) ^^ {
-      case attrs ~ d => if attrs.isEmpty then d else d.copy(attributes = attrs ++ d.attributes)
-    }
+    // Two forms:
+    //   `def name(...)` — pure (validatePureFn applies; cannot call impure helpers).
+    //   bare `name(...)` — impure-by-default (mirrors top-level functions),
+    //     so extensions can wrap impure helpers like `regex(s)` (panics on bad pattern).
+    // Only function-shaped decls are allowed inside an extension block; var/val
+    // decls fail via the `^?` partial-function filter on `declBody`.
+    rep(positioned(attribute) <~ rep1(Newline)) ~
+      (("def" ~> defDecl(false)) | (declBody(false) ^? { case f: FunDeclAST => f })) ^^ {
+        case attrs ~ d => if attrs.isEmpty then d else d.copy(attributes = attrs ++ d.attributes)
+      }
 
   lazy val interfaceDecl: Parser[InterfaceDeclAST] =
     "interface" ~> ident ~

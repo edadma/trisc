@@ -75,5 +75,26 @@ class SyslExtensionParseTests extends SyslTestHelpers {
       val ext = ast.decls.collect { case e: ExtensionDeclAST => e }.head
       ext.methods.length shouldBe 1
     }
+
+    "bare form (no def keyword) parses as impure" in {
+      val ast = parse(
+        """extension (s: string)
+          |    shout -> string = s
+          |""".stripMargin)
+      val ext = ast.decls.collect { case e: ExtensionDeclAST => e }.head
+      val m = ext.methods.head
+      m.name shouldBe "shout"
+      m.isDef shouldBe false
+    }
+
+    "mixed pure (def) + impure (bare) methods in one block" in {
+      val ast = parse(
+        """extension (s: string)
+          |    def quiet -> int = 0
+          |    shout -> string = s
+          |""".stripMargin)
+      val ext = ast.decls.collect { case e: ExtensionDeclAST => e }.head
+      ext.methods.map(m => (m.name, m.isDef)) shouldBe List(("quiet", true), ("shout", false))
+    }
   }
 }

@@ -404,4 +404,104 @@ class SyslExtensionTests extends SyslTestHelpers {
           |""".stripMargin) shouldBe 33
     }
   }
+
+  "bare-form extension methods (impure)" - {
+
+    "bare form on string receiver can call impure helper" in {
+      // `shout` is bare (no `def`), so it's impure-by-default and can call
+      // panic. The `def` form would reject the call to panic via validatePureFn.
+      eval(
+        """extension (s: string)
+          |    shout -> int =
+          |        if len(s) == 0 then panic("empty")
+          |        len(s)
+          |
+          |main() -> int
+          |    "hello".shout
+          |""".stripMargin) shouldBe 5
+    }
+
+    "def form still rejects impure callee (regression)" in {
+      val ex = intercept[Exception] {
+        eval(
+          """extension (s: string)
+            |    def shout -> int =
+            |        if len(s) == 0 then panic("empty")
+            |        len(s)
+            |
+            |main() -> int
+            |    "hello".shout
+            |""".stripMargin)
+      }
+      ex.getMessage.toLowerCase should (include("pure") or include("impure"))
+    }
+
+    "mixed pure + impure methods in one block both dispatch" in {
+      eval(
+        """extension (s: string)
+          |    def quiet -> int = len(s)
+          |    shout -> int =
+          |        if len(s) == 0 then panic("empty")
+          |        len(s) * 10
+          |
+          |main() -> int
+          |    "hi".quiet * 100 + "hello".shout
+          |""".stripMargin) shouldBe 250
+      // 2 * 100 + 5 * 10 = 250
+    }
+
+    "bare form with #operator" in {
+      eval(
+        """struct Bag
+          |    n: int
+          |
+          |extension (a: Bag)
+          |    #operator("<>")
+          |    merge(b: Bag) -> Bag =
+          |        if a.n < 0 then panic("negative")
+          |        Bag(a.n + b.n)
+          |
+          |main() -> int
+          |    x = Bag(7)
+          |    y = Bag(35)
+          |    z = x <> y
+          |    z.n
+          |""".stripMargin) shouldBe 42
+    }
+
+    "bare form generic-receiver extension" in {
+      eval(
+        """extension [T](xs: []T)
+          |    at(i: int) -> T =
+          |        if i < 0 then panic("negative index")
+          |        xs[i]
+          |
+          |main() -> int
+          |    arr: [3]int
+          |    arr[0] = 11
+          |    arr[1] = 22
+          |    arr[2] = 33
+          |    s = arr[:]
+          |    s.at(1)
+          |""".stripMargin) shouldBe 22
+    }
+
+    "cross-module bare-form extension" in {
+      val libs = Map(
+        "shoutlib/shout" ->
+          """module shoutlib
+            |
+            |extension (s: string)
+            |    shout -> int =
+            |        if len(s) == 0 then panic("empty")
+            |        len(s)
+            |""".stripMargin)
+      evalWithLibs(libs,
+        """import shoutlib.*
+          |
+          |main() -> int
+          |    "hello".shout
+          |""".stripMargin) shouldBe 5
+    }
+  }
 }
