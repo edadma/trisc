@@ -2342,6 +2342,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "emfile: bad"
   }
 
+  "vfs: pipe-pool exhaustion returns EMFILE" in {
+    // Phase 0c chunk 2. VFS server's pipe pool is MAX_PIPES = 4.
+    // The 5th pipe2() call returns -EMFILE; closing both ends
+    // of a pipe frees the slot.
+    val output = qemu.command("test_pipemax")
+    output should include("pipemax: ok")
+    output should not include "pipemax: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no
