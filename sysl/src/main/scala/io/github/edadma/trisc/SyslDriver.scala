@@ -205,7 +205,17 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               if packageMetaCache.contains(imp.modulePath) then
                 analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors, imp.modulePath)
             val typed = analyzer.analyze(ast)
-            ModuleMeta.fromProgram(typed, Some(s"$name.sysl"))
+            val baseMeta = ModuleMeta.fromProgram(typed, Some(s"$name.sysl"))
+            // Carry the analyzer's per-file extension entries through so sibling
+            // files in the same module see them via the next iteration's
+            // registerImport(siblings) call.
+            new ModuleMeta(
+              baseMeta.symbols,
+              Nil,
+              analyzer.getTraitImplMetas,
+              analyzer.getGenericEnumInstances,
+              analyzer.getExtensionMetas,
+            )
           } match
             case scala.util.Success(fileMeta) =>
               meta = meta.merge(fileMeta)
@@ -282,7 +292,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         case _ => false
       } ++ analyzer.getTraitDecls
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
-      val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances)
+      val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances, analyzer.getExtensionMetas)
       val smeta = meta.toSmeta
 
       modPath match
@@ -407,7 +417,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           val analyzer = new SyslAnalyzer(contractsEnabled = contractsEnabled)
           val typed = analyzer.analyze(stripped)
           val meta = ModuleMeta.fromProgram(typed)
-          new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances)
+          new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances, analyzer.getExtensionMetas)
         }.toOption
       case Left(_) => None
 

@@ -508,6 +508,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       definingModule: String,     // for visibility check (Phase 2b)
   )
   protected val extensionsByMethod = new mutable.LinkedHashMap[String, mutable.ListBuffer[ExtensionEntry]]
+  /** Modules whose extensions are visible from this compilation unit: the unit's own
+   *  module (set in `analyze`), every imported module path (registered via
+   *  `registerImport`), and the empty-module sentinel (always visible — same-unit
+   *  extensions of an unmoduled file). The Predef trick (extensions on a type T
+   *  visible because T is defined in the entry's module) is handled separately at
+   *  dispatch time using `typeDefiningModule` plus `primitiveDefiningModule`. */
+  protected val visibleExtensionModules = mutable.HashSet[String]("")
+  /** Hardwired Predef bindings for built-in types — extensions on these are visible
+   *  from any unit if defined in the named "owning" module. Mirrors Scala 3's
+   *  `Predef`: every program implicitly sees `string`'s extensions in `std.string`,
+   *  `int`/`i32`'s in `std.int`, etc. Used in `tryExtensionDispatch`'s visibility
+   *  filter alongside `typeDefiningModule`. */
+  protected val primitiveDefiningModule: Map[String, String] = Map(
+    "string" -> "std_string",
+    "i8" -> "std_int", "i16" -> "std_int", "i32" -> "std_int", "i64" -> "std_int", "int" -> "std_int",
+    "u8" -> "std_int", "u16" -> "std_int", "u32" -> "std_int", "u64" -> "std_int", "uint" -> "std_int",
+    "f32" -> "std_float", "f64" -> "std_float", "float" -> "std_float",
+    "bool" -> "std_bool",
+  )
 
   /** Stable string key for a TypeAST, used to mangle the synthesized extension
    *  function. Best-effort — collisions only matter for cross-block conflicts,
@@ -550,13 +569,47 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           out += other
     (out.toList, entries.toList)
 
-  /** Phase 2a dispatch: consult `extensionsByMethod` for a single concrete-type
-   *  match. Returns Some(call) on a unique hit, throws on ambiguity, returns None
-   *  when no entry matches (caller throws the original "no such method" error).
-   *  Visibility/generic/operator dispatch are deferred to later sub-chunks. */
+  /** Walk a SyslType collecting candidate "defining module" keys for the Predef-trick
+   *  visibility check. Returns every named/struct/enum/interface name *plus* the
+   *  underlying primitive name (so an extension on `string` defined in `std.string`
+   *  is visible without import). Pointer/ref/slice/array element types contribute
+   *  too — extensions on `[]u8` defined in `std.bytes` should be visible because
+   *  the element is a primitive owned by `std.int`/`std.bytes`/etc. */
+  protected def collectReceiverTypeNames(t: SyslType): Set[String] = t match
+    case SyslType.StringType                     => Set("string")
+    case SyslType.BoolType                       => Set("bool")
+    case SyslType.IntType(w)                     => Set(s"i$w", "int")
+    case SyslType.UIntType(w)                    => Set(s"u$w", "uint")
+    case SyslType.FloatType(w)                   => Set(s"f$w", "float")
+    case SyslType.StructType(name, _, _)         => Set(name)
+    case SyslType.EnumType(name, _)              => Set(name)
+    case SyslType.InterfaceType(name, _)         => Set(name)
+    case SyslType.NamedType(name, base, _, _, _) => Set(name) ++ collectReceiverTypeNames(base)
+    case SyslType.PtrType(p)                     => collectReceiverTypeNames(p)
+    case SyslType.RefType(i)                     => collectReceiverTypeNames(i)
+    case SyslType.ArrayType(e, _)                => collectReceiverTypeNames(e)
+    case SyslType.SliceType(e)                   => collectReceiverTypeNames(e)
+    case _                                       => Set.empty
+
+  /** Phase 2b dispatch: consult `extensionsByMethod` for a single concrete-type
+   *  match, gated by module visibility. An entry is visible iff its
+   *  `definingModule` is empty (same-unit, no module decl), or appears in
+   *  `visibleExtensionModules` (own module + every imported module), or matches
+   *  the Predef rule (the receiver type is owned by that module — either via
+   *  `typeDefiningModule` for user types or `primitiveDefiningModule` for
+   *  built-ins). Returns Some(call) on a unique visible hit, throws on
+   *  ambiguity, returns None when no entry matches. */
   protected def tryExtensionDispatch(method: String, tObj: TExpr, tArgs: List[TExpr]): Option[TExpr] =
     val candidates = extensionsByMethod.get(method).map(_.toList).getOrElse(Nil)
-    val matches = candidates.flatMap { entry =>
+    val recvNames = collectReceiverTypeNames(tObj.typ)
+    def isVisible(entry: ExtensionEntry): Boolean =
+      val dm = entry.definingModule
+      if dm.isEmpty then true
+      else if visibleExtensionModules.contains(dm) then true
+      else recvNames.exists { n =>
+        typeDefiningModule.get(n).contains(dm) || primitiveDefiningModule.get(n).contains(dm)
+      }
+    val matches = candidates.filter(isVisible).flatMap { entry =>
       try
         if resolveType(entry.receiverTypeAst) == tObj.typ then Some(entry) else None
       catch case _: Throwable => None
@@ -693,6 +746,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       GenericEnumInstanceMeta(mangledName, baseName, typeArgs)
     }.toList
 
+  /** Get extension method metadata for SMETA round-trip. Resolves each entry's
+   *  receiver TypeAST → SyslType (now possible since analyze is complete). Skips
+   *  entries whose receiver type fails to resolve — in practice these are the
+   *  generic-extension entries (Phase 2d) whose pattern carries free type vars
+   *  the unifier can't reduce to a concrete type. Generic extension serialization
+   *  needs an extended EXT line; deferred to Phase 2d. */
+  def getExtensionMetas: List[ExtensionMeta] =
+    val out = mutable.ListBuffer[ExtensionMeta]()
+    for (_, buf) <- extensionsByMethod do
+      for entry <- buf do
+        scala.util.Try(resolveType(entry.receiverTypeAst)).foreach { rt =>
+          out += ExtensionMeta(entry.methodName, entry.definingModule, rt, entry.mangledFnName)
+        }
+    out.toList
+
   protected def pushScope(): Unit =
     scopeStack += new mutable.LinkedHashMap[String, SymInfo]
 
@@ -744,6 +812,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         if group.size > 1 then group.find(!_.isExtern).getOrElse(group.head)
         else group.head
       }.toList
+    // Synthesized extension functions (`__ext_<typeKey>__<method>`) must be
+    // pulled in alongside their EXT entry whenever an EXT is being imported
+    // — even on a named-import like `import mylib.{add_one}` where the user
+    // didn't name the extension's method. Without this, `tryExtensionDispatch`
+    // would find the entry but fail to find the function in `functions`.
+    val extensionFnShortNames: Set[String] = meta.extensions.map(_.mangledFnName).toSet
     val selectedSymbols = selectors match
       case List(WildcardImport) => dedup(meta.publicSymbols)
       case named =>
@@ -778,7 +852,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           sym.typ.isInstanceOf[SymbolMeta.Kind.Func] &&
             importedTypeNames.exists(tn => shortName(sym.name).startsWith(s"${tn}_"))
         }
-        dedup(withMethods)
+        val withExtensions = withMethods ++ meta.publicSymbols.filter { sym =>
+          sym.typ.isInstanceOf[SymbolMeta.Kind.Func] && extensionFnShortNames.contains(shortName(sym.name))
+        }
+        dedup(withExtensions)
     // Build alias map for renamed imports: alias -> original mangled name
     val aliasMap: Map[String, String] = selectors match
       case List(WildcardImport) => Map.empty
@@ -916,6 +993,28 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             definingModule = "",
           )
 
+    // Register imported extensions: every extension flows into the side table
+    // so dispatch can find it; visibility is gated at dispatch time. The
+    // module's own key is also added to `visibleExtensionModules` so any
+    // extension *defined in* this imported module is callable in this unit
+    // (matches Scala 3's "import brings extensions" rule). Modules imported
+    // by short name via `modulePath` are stored in their underscore-mangled
+    // form to match the analyzer's `currentModule` representation.
+    for ext <- meta.extensions do
+      val entry = ExtensionEntry(
+        methodName = ext.methodName,
+        receiverTypeAst = syslTypeToAST(ext.receiverType),
+        mangledFnName = ext.mangledFnName,
+        definingModule = ext.definingModule,
+      )
+      val bucket = extensionsByMethod.getOrElseUpdate(ext.methodName, mutable.ListBuffer.empty)
+      // De-dup by (definingModule, mangledFnName) so siblings importing each
+      // other don't double-register the same extension.
+      if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
+        bucket += entry
+    if modulePath.nonEmpty then
+      visibleExtensionModules += modulePath.replace('/', '_').replace('.', '_')
+
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
 
@@ -1005,6 +1104,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       decl match
         case ModuleDeclAST(path) => currentModule = Some(path.mkString("_"))
         case _ =>
+    // Own module's extensions are always visible. Imported modules are added
+    // by `registerImport`; the empty sentinel handles unmoduled compilation
+    // units where same-unit extensions still need to dispatch.
+    currentModule.foreach(visibleExtensionModules.add)
     val (loweredDecls, extEntries) = lowerExtensions(programIn.decls)
     for entry <- extEntries do
       extensionsByMethod.getOrElseUpdate(entry.methodName, mutable.ListBuffer.empty) += entry
