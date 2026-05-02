@@ -635,14 +635,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     case SyslType.SliceType(e)                   => collectReceiverTypeNames(e)
     case _                                       => Set.empty
 
-  /** Phase 2b dispatch: consult `extensionsByMethod` for a single concrete-type
-   *  match, gated by module visibility. An entry is visible iff its
-   *  `definingModule` is empty (same-unit, no module decl), or appears in
-   *  `visibleExtensionModules` (own module + every imported module), or matches
-   *  the Predef rule (the receiver type is owned by that module — either via
-   *  `typeDefiningModule` for user types or `primitiveDefiningModule` for
-   *  built-ins). Returns Some(call) on a unique visible hit, throws on
-   *  ambiguity, returns None when no entry matches. */
+  /** Phase 2b/2d dispatch: consult `extensionsByMethod` for a visible match,
+   *  gated by module visibility. An entry is visible iff its `definingModule`
+   *  is empty (same-unit, no module decl), or appears in
+   *  `visibleExtensionModules` (own module + every imported module), or
+   *  matches the Predef rule (the receiver type is owned by that module —
+   *  either via `typeDefiningModule` for user types or
+   *  `primitiveDefiningModule` for built-ins).
+   *
+   *  Generic extensions (Phase 2d) — entries whose synth function lives in
+   *  `genericTemplates` — are matched via a structural unification of the
+   *  receiver pattern against the call-site type, and resolved through
+   *  `instantiateGeneric` so the lowered free function is specialized for
+   *  the inferred type args.
+   *
+   *  Returns Some(call) on a unique visible hit, throws on ambiguity, returns
+   *  None when no entry matches. */
   protected def tryExtensionDispatch(method: String, tObj: TExpr, tArgs: List[TExpr]): Option[TExpr] =
     val candidates = extensionsByMethod.get(method).map(_.toList).getOrElse(Nil)
     val recvNames = collectReceiverTypeNames(tObj.typ)
@@ -653,21 +661,82 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       else recvNames.exists { n =>
         typeDefiningModule.get(n).contains(dm) || primitiveDefiningModule.get(n).contains(dm)
       }
-    val matches = candidates.filter(isVisible).flatMap { entry =>
-      try
-        if resolveType(entry.receiverTypeAst) == tObj.typ then Some(entry) else None
-      catch case _: Throwable => None
-    }
+
+    // Try to match a candidate's receiver pattern to the call's receiver type.
+    // For non-generic candidates, fall through to a direct equality check; for
+    // generic candidates, run a structural unification — bindings are discarded
+    // here, the real instantiation happens below via `instantiateGeneric`.
+    def matchesReceiver(entry: ExtensionEntry): Boolean =
+      if genericTemplates.contains(entry.mangledFnName) then
+        val template = genericTemplates(entry.mangledFnName)
+        val tparams = template.typeParams.toSet
+        val env = mutable.Map.empty[String, SyslType]
+        try
+          unifyTypes(entry.receiverTypeAst, tObj.typ, tparams, env)
+          // The receiver pattern's structure must match the call type's outer
+          // shape; unifyTypes silently no-ops on shape mismatch (e.g. a slice
+          // pattern against a non-slice arg), so verify outer shape here.
+          receiverShapeMatches(entry.receiverTypeAst, tObj.typ) &&
+            // Every type variable that *appears* in the receiver pattern must
+            // be bound — unbound ones can still resolve via remaining args
+            // during instantiateGeneric, so we only require the receiver-side
+            // params to be pinned at this stage.
+            tparams.forall(tp => !receiverPatternUses(entry.receiverTypeAst, tp) || env.contains(tp))
+        catch case _: Throwable => false
+      else
+        try resolveType(entry.receiverTypeAst) == tObj.typ
+        catch case _: Throwable => false
+
+    val matches = candidates.filter(isVisible).filter(matchesReceiver)
     matches match
       case Nil => None
       case List(entry) =>
-        val funInfo = functions(entry.mangledFnName)
-        val checkedArgs = checkArgs(entry.mangledFnName, funInfo.params.tail, tArgs, funInfo.modes.drop(1))
-        Some(TCall(funInfo.name, tObj :: checkedArgs, funInfo.returnType))
+        if genericTemplates.contains(entry.mangledFnName) then
+          val argTypes = tObj.typ :: tArgs.map(_.typ)
+          val (mangled, funInfo) = instantiateGeneric(entry.mangledFnName, argTypes)
+          val checkedArgs = checkArgs(mangled, funInfo.params.tail, tArgs, funInfo.modes.drop(1))
+          Some(TCall(funInfo.name, tObj :: checkedArgs, funInfo.returnType))
+        else
+          val funInfo = functions(entry.mangledFnName)
+          val checkedArgs = checkArgs(entry.mangledFnName, funInfo.params.tail, tArgs, funInfo.modes.drop(1))
+          Some(TCall(funInfo.name, tObj :: checkedArgs, funInfo.returnType))
       case multiple =>
         throw AnalysisError(
           s"extension method '$method' is ambiguous on receiver type ${tObj.typ}: " +
             s"defined in modules ${multiple.map(_.definingModule).mkString(", ")}")
+
+  /** Outer-shape match for receiver patterns. Each constructor must agree at the
+   *  top level; deeper structure is checked recursively. NamedTypeAST that names
+   *  a type parameter matches anything; named types must agree by name (their
+   *  args are unified separately). */
+  protected def receiverShapeMatches(pat: TypeAST, t: SyslType): Boolean = pat match
+    case NamedTypeAST(_, _) => true // typevar OR named type — let unifyTypes / resolveType decide
+    case PtrTypeAST(inner) => t match
+      case SyslType.PtrType(p) => receiverShapeMatches(inner, p)
+      case _                   => false
+    case PtrNonNullTypeAST(inner) => t match
+      case SyslType.PtrType(p) => receiverShapeMatches(inner, p)
+      case _                   => false
+    case RefTypeAST(inner) => t match
+      case SyslType.RefType(i) => receiverShapeMatches(inner, i)
+      case _                   => false
+    case ArrayTypeAST(_, inner) => t match
+      case SyslType.ArrayType(e, _) => receiverShapeMatches(inner, e)
+      case _                        => false
+    case SliceTypeAST(inner) => t match
+      case SyslType.SliceType(e) => receiverShapeMatches(inner, e)
+      case _                     => false
+    case _ => true
+
+  /** Whether a receiver TypeAST pattern syntactically uses the named type variable. */
+  protected def receiverPatternUses(pat: TypeAST, tv: String): Boolean = pat match
+    case NamedTypeAST(name, args) => name == tv || args.exists(receiverPatternUses(_, tv))
+    case PtrTypeAST(inner)        => receiverPatternUses(inner, tv)
+    case PtrNonNullTypeAST(inner) => receiverPatternUses(inner, tv)
+    case RefTypeAST(inner)        => receiverPatternUses(inner, tv)
+    case ArrayTypeAST(_, inner)   => receiverPatternUses(inner, tv)
+    case SliceTypeAST(inner)      => receiverPatternUses(inner, tv)
+    case _                        => false
 
   // Stage F.5 bookkeeping: which module defined each trait / named type. Populated as
   // declarations are processed; consulted by the orphan rule at impl registration.
@@ -791,11 +860,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     }.toList
 
   /** Get extension method metadata for SMETA round-trip. Resolves each entry's
-   *  receiver TypeAST → SyslType (now possible since analyze is complete). Skips
-   *  entries whose receiver type fails to resolve — in practice these are the
-   *  generic-extension entries (Phase 2d) whose pattern carries free type vars
-   *  the unifier can't reduce to a concrete type. Generic extension serialization
-   *  needs an extended EXT line; deferred to Phase 2d. */
+   *  receiver TypeAST → SyslType (now possible since analyze is complete).
+   *  Generic-receiver entries whose pattern carries free type vars cannot
+   *  resolve to a concrete `SyslType`; for those the cross-module path uses
+   *  `getExtensionTemplates` instead, which carries the synth FunDeclAST
+   *  through `meta.genericTemplates`. Concrete entries flow through here. */
   def getExtensionMetas: List[ExtensionMeta] =
     val out = mutable.ListBuffer[ExtensionMeta]()
     for (_, buf) <- extensionsByMethod do
@@ -804,6 +873,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           out += ExtensionMeta(entry.methodName, entry.definingModule, rt, entry.mangledFnName)
         }
     out.toList
+
+  /** Generic-receiver extension synth FunDeclASTs (Phase 2d). The driver carries
+   *  these through `meta.genericTemplates` so importing units can register them
+   *  alongside other generic templates and instantiate per call site. The
+   *  side-table EXT entry is also needed (registered separately on import via
+   *  `extensionEntriesFromTemplates`) so dispatch can find them by method name. */
+  def getExtensionTemplates: List[FunDeclAST] =
+    genericTemplates.values.filter(_.name.startsWith("__ext_")).toList
 
   protected def pushScope(): Unit =
     scopeStack += new mutable.LinkedHashMap[String, SymInfo]
@@ -1044,6 +1121,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // (matches Scala 3's "import brings extensions" rule). Modules imported
     // by short name via `modulePath` are stored in their underscore-mangled
     // form to match the analyzer's `currentModule` representation.
+    val importedDefiningModule =
+      if modulePath.nonEmpty then modulePath.replace('/', '_').replace('.', '_') else ""
     for ext <- meta.extensions do
       val entry = ExtensionEntry(
         methodName = ext.methodName,
@@ -1056,8 +1135,31 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       // other don't double-register the same extension.
       if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
         bucket += entry
+    // Phase 2d: reconstruct ExtensionEntry's for generic synth templates that
+    // travelled through `meta.genericTemplates`. The synth name encodes the
+    // method (`__ext_<typeKey>__<methodName>`) and the first parameter's
+    // TypeAST is the original receiver pattern with its free type vars intact.
+    // The `definingModule` is the module we're currently importing — it's not
+    // carried in the FunDeclAST itself, so use `modulePath` (already mangled).
+    for template <- meta.genericTemplates do
+      template match
+        case fd: FunDeclAST if fd.name.startsWith("__ext_") && fd.params.nonEmpty =>
+          val sep = fd.name.indexOf("__", 6)  // skip leading "__ext_"
+          if sep > 0 then
+            val methodName = fd.name.substring(sep + 2)
+            val recv = fd.params.head
+            val entry = ExtensionEntry(
+              methodName = methodName,
+              receiverTypeAst = recv.typ,
+              mangledFnName = fd.name,
+              definingModule = importedDefiningModule,
+            )
+            val bucket = extensionsByMethod.getOrElseUpdate(methodName, mutable.ListBuffer.empty)
+            if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
+              bucket += entry
+        case _ => ()
     if modulePath.nonEmpty then
-      visibleExtensionModules += modulePath.replace('/', '_').replace('.', '_')
+      visibleExtensionModules += importedDefiningModule
 
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet

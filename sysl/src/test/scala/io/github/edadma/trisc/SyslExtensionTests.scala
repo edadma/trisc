@@ -232,4 +232,80 @@ class SyslExtensionTests extends SyslTestHelpers {
           |""".stripMargin) shouldBe 42
     }
   }
+
+  "generic extensions (Phase 2d)" - {
+
+    "extension on []T dispatches with T inferred from receiver" in {
+      eval(
+        """extension [T](xs: []T)
+          |    def head_at(i: int) -> T = xs[i]
+          |
+          |main() -> int
+          |    arr: [3]int
+          |    arr[0] = 11
+          |    arr[1] = 22
+          |    arr[2] = 33
+          |    s = arr[:]
+          |    s.head_at(1)
+          |""".stripMargin) shouldBe 22
+    }
+
+    "generic extension on a parameterized struct" in {
+      eval(
+        """struct Box[T]
+          |    v: T
+          |
+          |extension [T](b: Box[T])
+          |    def get -> T = b.v
+          |
+          |main() -> int
+          |    bx = Box(42)
+          |    bx.get
+          |""".stripMargin) shouldBe 42
+    }
+
+    "two generic extensions with different receiver shapes coexist" in {
+      eval(
+        """struct Box[T]
+          |    v: T
+          |
+          |extension [T](b: Box[T])
+          |    def kind -> int = 1
+          |
+          |extension [T](xs: []T)
+          |    def kind -> int = 2
+          |
+          |main() -> int
+          |    arr: [2]int
+          |    arr[0] = 7
+          |    arr[1] = 9
+          |    s = arr[:]
+          |    bx = Box(99)
+          |    a = bx.kind
+          |    b = s.kind
+          |    a * 10 + b
+          |""".stripMargin) shouldBe 12
+    }
+
+    "cross-module generic extension" in {
+      val libs = Map(
+        "vlib/v" ->
+          """module vlib
+            |
+            |extension [T](xs: []T)
+            |    def at(i: int) -> T = xs[i]
+            |""".stripMargin)
+      evalWithLibs(libs,
+        """import vlib.*
+          |
+          |main() -> int
+          |    arr: [3]int
+          |    arr[0] = 17
+          |    arr[1] = 99
+          |    arr[2] = 5
+          |    s = arr[:]
+          |    s.at(2) * 100 + s.at(0)
+          |""".stripMargin) shouldBe 517
+    }
+  }
 }

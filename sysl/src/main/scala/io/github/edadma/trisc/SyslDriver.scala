@@ -284,13 +284,16 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
       val typed = analyzer.analyze(ast)
       val modPath = modules.get(name)
-      // Extract generic templates and trait declarations from the source AST
+      // Extract generic templates and trait declarations from the source AST.
+      // `analyzer.getExtensionTemplates` adds generic-receiver extension synth
+      // FunDecls (Phase 2d) — these come from `lowerExtensions` and aren't in
+      // `ast.decls` directly.
       val templates = ast.decls.filter {
         case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
         case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
         case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
         case _ => false
-      } ++ analyzer.getTraitDecls
+      } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
       val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances, analyzer.getExtensionMetas)
       val smeta = meta.toSmeta
