@@ -251,6 +251,31 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           analyzer.registerImport(siblings)
         }
 
+      // Phase 2b-Predef-auto-import: silently inject an extensions-only import
+      // for every Predef module that's present in the meta cache (or
+      // resolvable via resolveExternalMeta) and isn't the unit's own module.
+      // This is what makes `"hi".chars` work without a literal
+      // `import std.string`. Only the extension entries + their `__ext_*` synth
+      // functions are pulled in — regular functions (e.g. `contains`) stay
+      // out of the importing unit's namespace so they don't clash with
+      // same-named functions in other modules. If the Predef module isn't in
+      // the source set, this is a no-op (no error).
+      val ownModulePath: Option[String] = modules.get(name)
+      val explicitImportPaths: Set[String] = imports(name).map(_.modulePath).toSet
+      for predef <- analyzer.predefModulePaths do
+        if !ownModulePath.contains(predef) && !explicitImportPaths.contains(predef) then
+          if packageMetaCache.contains(predef) then
+            analyzer.registerImport(packageMetaCache(predef), List(ExtensionsOnlyImport), predef)
+          else if smetaCache.contains(predef) then
+            ModuleMeta.fromSmeta(smetaCache(predef)).foreach(
+              analyzer.registerImport(_, List(ExtensionsOnlyImport), predef))
+          else
+            resolveExternalMeta(predef) match
+              case Some(meta) =>
+                packageMetaCache(predef) = meta
+                analyzer.registerImport(meta, List(ExtensionsOnlyImport), predef)
+              case None => ()
+
       // Register imports from previously compiled modules (or stdlib)
       for imp0 <- imports(name) do
         // Resolve QualifiedImport ambiguity: import std.strings could be a qualified

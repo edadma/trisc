@@ -528,6 +528,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     "bool" -> "std_bool",
   )
 
+  /** Predef modules whose extensions are auto-visible — slash-form module
+   *  paths for every primitive owner, suitable for the driver's
+   *  `packageMetaCache` / `smetaCache` lookup. The driver consults this to
+   *  inject a synthetic wildcard import for each Predef module that's present
+   *  in the source set, so e.g. `"hi".chars` works without a literal
+   *  `import std.string`. Modules not present in the source set are silently
+   *  skipped — no error if std isn't around. */
+  def predefModulePaths: Set[String] =
+    primitiveDefiningModule.values.toSet.map(_.replaceFirst("_", "/"))
+
   /** Stable string key for a TypeAST, used to mangle the synthesized extension
    *  function. Best-effort — collisions only matter for cross-block conflicts,
    *  which dispatch ambiguity-checks anyway. */
@@ -922,6 +932,72 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case List(QualifiedImport) =>
         val nsName = modulePath.split("/").last
         moduleNamespaces(nsName) = meta
+        return
+      case List(ExtensionsOnlyImport) =>
+        // Predef auto-import: only register extension entries + their `__ext_*`
+        // synth functions (and the generic templates that back generic
+        // extensions). Skip every other public symbol so the module's regular
+        // functions (e.g. `contains` in `std.string`) don't pollute the
+        // importing unit's namespace and collide with same-named functions in
+        // other modules. Visibility flag for the source module is still set so
+        // the dispatcher's `visibleExtensionModules` check passes.
+        val extFnShortNames: Set[String] = meta.extensions.map(_.mangledFnName).toSet
+        val importedDefMod =
+          if modulePath.nonEmpty then modulePath.replace('/', '_').replace('.', '_') else ""
+        // 1. Register the synth `__ext_*` functions (concrete-receiver case).
+        for sym <- meta.publicSymbols do
+          val sn = shortName(sym.name)
+          if extFnShortNames.contains(sn) && !functions.contains(sn) then
+            sym.typ match
+              case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects) =>
+                val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
+                val (reads, writes) = effects match
+                  case e if e.isPure || e.isUnknown => (None, None)
+                  case e => (e.reads, e.writes)
+                functions(sn) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes)
+                if reads.isDefined || writes.isDefined then
+                  resolvedEffectsCache(sym.name) = (reads.getOrElse(Set.empty), writes.getOrElse(Set.empty))
+                externalSymbols += sn
+              case _ => ()
+        // 2. Register generic-receiver synth templates (`__ext_*` FunDeclAST in
+        //    meta.genericTemplates) so cross-module generic extension dispatch
+        //    sees them. Filter to ext-only — don't pull in unrelated generics.
+        val extOnlyTemplates = meta.genericTemplates.collect {
+          case fd: FunDeclAST if fd.name.startsWith("__ext_") => fd: DeclAST
+        }
+        if extOnlyTemplates.nonEmpty then
+          registerGenericTemplatesFrom(ProgramAST(extOnlyTemplates), filter = None)
+        // 3. Register concrete extension entries from meta.extensions.
+        for ext <- meta.extensions do
+          val entry = ExtensionEntry(
+            methodName = ext.methodName,
+            receiverTypeAst = syslTypeToAST(ext.receiverType),
+            mangledFnName = ext.mangledFnName,
+            definingModule = ext.definingModule,
+          )
+          val bucket = extensionsByMethod.getOrElseUpdate(ext.methodName, mutable.ListBuffer.empty)
+          if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
+            bucket += entry
+        // 4. Reconstruct generic-receiver extension entries from synth templates.
+        for template <- extOnlyTemplates do
+          template match
+            case fd: FunDeclAST if fd.name.startsWith("__ext_") && fd.params.nonEmpty =>
+              val sep = fd.name.indexOf("__", 6)
+              if sep > 0 then
+                val methodName = fd.name.substring(sep + 2)
+                val recv = fd.params.head
+                val entry = ExtensionEntry(
+                  methodName = methodName,
+                  receiverTypeAst = recv.typ,
+                  mangledFnName = fd.name,
+                  definingModule = importedDefMod,
+                )
+                val bucket = extensionsByMethod.getOrElseUpdate(methodName, mutable.ListBuffer.empty)
+                if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
+                  bucket += entry
+            case _ => ()
+        if modulePath.nonEmpty then
+          visibleExtensionModules += importedDefMod
         return
       case _ =>
     // Symbol names in meta may be module-mangled (e.g. "std_strings__trim_space").

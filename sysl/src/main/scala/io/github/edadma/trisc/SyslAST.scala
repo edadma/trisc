@@ -27,6 +27,7 @@ case class ByNameTypeAST(inner: TypeAST) extends TypeAST
 sealed trait ImportSelector
 case object WildcardImport extends ImportSelector
 case object QualifiedImport extends ImportSelector  // import std.strings → access as strings.foo
+case object ExtensionsOnlyImport extends ImportSelector  // driver-synthesized for Predef auto-import: pull only extension entries + `__ext_*` synth funcs
 case class NamedImport(name: String, rename: Option[String] = None) extends ImportSelector
 
 // Attributes (annotations)

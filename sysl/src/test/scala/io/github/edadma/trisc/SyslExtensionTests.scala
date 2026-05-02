@@ -116,11 +116,48 @@ class SyslExtensionTests extends SyslTestHelpers {
       // 5 * 3 + 1 = 16
     }
 
-    "extension on string receiver dispatches across modules" in {
-      // Predef trick (visibility-without-import) is gated by
-      // `primitiveDefiningModule` in the analyzer but additionally requires the
-      // driver to auto-register Predef modules (deferred — see handoff memo).
-      // For now an explicit `import` exercises the cross-module dispatch path.
+    "Predef auto-import covers multiple primitive owners simultaneously" in {
+      // Both std.string and std.int are Predef owners. With both present in
+      // the source set and neither explicitly imported, extensions on string
+      // and i32 should both dispatch.
+      val libs = Map(
+        "std/string/string" ->
+          """module std.string
+            |
+            |extension (s: string)
+            |    def tag -> i32 = 7
+            |""".stripMargin,
+        "std/int/int" ->
+          """module std.int
+            |
+            |extension (x: i32)
+            |    def tag -> i32 = 11
+            |""".stripMargin)
+      evalWithLibs(libs,
+        """main() -> int
+          |    a = "hi".tag
+          |    b = (5).tag
+          |    a * 100 + b
+          |""".stripMargin) shouldBe 711
+    }
+
+    "Predef auto-import is silent when std modules are absent (no error)" in {
+      // No std/string or std/int modules in the source set — auto-Predef must
+      // skip silently. Extensions defined locally still dispatch.
+      eval(
+        """extension (s: string)
+          |    def hi_len -> i32 = 99
+          |
+          |main() -> int
+          |    "x".hi_len
+          |""".stripMargin) shouldBe 99
+    }
+
+    "extension on string receiver dispatches across modules without explicit import (Predef auto-import)" in {
+      // The driver auto-injects a wildcard import for every Predef module
+      // (std.string, std.int, std.float, std.bool) that exists in the source
+      // set. So `"hi".double_it` works with no `import` statement at all,
+      // mirroring Scala 3's `Predef`.
       val libs = Map(
         "std/string/string" ->
           """module std.string
@@ -129,9 +166,7 @@ class SyslExtensionTests extends SyslTestHelpers {
             |    def double_it -> i32 = 4
             |""".stripMargin)
       evalWithLibs(libs,
-        """import std.string.*
-          |
-          |main() -> int
+        """main() -> int
           |    "hi".double_it
           |""".stripMargin) shouldBe 4
     }
