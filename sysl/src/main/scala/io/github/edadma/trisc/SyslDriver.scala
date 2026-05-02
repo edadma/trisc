@@ -190,12 +190,21 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               analyzer.registerGenericTemplatesFrom(asts(src))
             val siblings = new ModuleMeta(meta.symbols.filter(s => !s.isExtern))
             analyzer.registerImport(siblings)
-            // Register cross-module imports from already-cached modules,
-            // applying the same QualifiedImport → NamedImport fallback as Step 5.
+            // Register cross-module imports — fall back to resolveExternalMeta so
+            // pre-collection can resolve imports of stdlib modules whose SMETA lives
+            // on disk and isn't in the source set. Without this fallback, any source
+            // file that imports a stdlib module fails pre-collection with an
+            // "undefined variable" error, leaving the whole module's package meta
+            // empty and causing misleading downstream errors in sibling files
+            // (e.g. "unknown type: 'Input'" when the real cause is "stdlib import
+            // not registered, so a function that uses stdlib was rejected").
+            // smetaCache isn't consulted here — it's empty during pre-collection.
             for imp0 <- imports.getOrElse(name, Nil) do
               val imp = imp0.selectors match
                 case List(QualifiedImport) =>
-                  if packageMetaCache.contains(imp0.modulePath) then imp0
+                  def isKnownModule(path: String): Boolean =
+                    packageMetaCache.contains(path) || resolveExternalMeta(path).isDefined
+                  if isKnownModule(imp0.modulePath) then imp0
                   else
                     val parts = imp0.modulePath.split("/")
                     if parts.length >= 2 then
@@ -204,14 +213,30 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
                 case _ => imp0
               if packageMetaCache.contains(imp.modulePath) then
                 analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors, imp.modulePath)
+              else
+                resolveExternalMeta(imp.modulePath) match
+                  case Some(em) =>
+                    packageMetaCache(imp.modulePath) = em
+                    analyzer.registerImport(em, imp.selectors, imp.modulePath)
+                  case None => ()
             val typed = analyzer.analyze(ast)
             val baseMeta = ModuleMeta.fromProgram(typed, Some(s"$name.sysl"))
-            // Carry the analyzer's per-file extension entries through so sibling
-            // files in the same module see them via the next iteration's
-            // registerImport(siblings) call.
+            // Extract generic templates so dependent modules (siblings + downstream
+            // imports during pre-collection) can register them via meta.genericTemplates
+            // — same templates list that Step 5 builds. Without this, generic types
+            // (Result[A, E], Option[T], the new TypeAliasDeclAST forms) are missing
+            // from the cached meta and dependent modules fail with errors like
+            // "'Result' is not a generic type" during pre-collection.
+            val templates = ast.decls.filter {
+              case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
+              case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
+              case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
+              case TypeAliasDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
+              case _ => false
+            } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
             new ModuleMeta(
               baseMeta.symbols,
-              Nil,
+              templates,
               analyzer.getTraitImplMetas,
               analyzer.getGenericEnumInstances,
               analyzer.getExtensionMetas,

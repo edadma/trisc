@@ -498,4 +498,56 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     val interp = new SyslInterpreter()
     interp.run(merged) shouldBe 42
   }
+
+  // ===== Pre-collection carries generic templates in cached meta =====
+  // Regression for the bug where pre-collection's cached meta dropped
+  // genericTemplates (passed `Nil` instead of extracting them like Step 5
+  // did). That left generic types invisible to dependent modules during
+  // pre-collection, cascading failures that left empty package metas and
+  // surfacing as misleading "unknown type" errors in sibling files.
+
+  "cross-module generic enum visible during pre-collection" in {
+    // Module A defines a generic enum. Module B imports it and uses it in a
+    // function signature. With the bug, B fails pre-collect ("'Result' is not
+    // a generic type"), leaving B's package meta empty, which would cascade
+    // to any sibling file in B's module.
+    val sources = Map(
+      "alib/types" ->
+        """module alib
+          |enum Result[A, E]
+          |    Ok(value: A)
+          |    Err(error: E)
+          |""".stripMargin,
+      "blib/use" ->
+        """module blib
+          |import alib.*
+          |wrap(x: int) -> Result[int, string] = Ok(x)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "cross-module generic struct visible during pre-collection (carries through templates)" in {
+    // Module A defines a generic struct in one file. Module B (separate
+    // module) imports A and uses A's generic in a function. With the
+    // pre-collection bug, A's pre-collect produced a cached meta with empty
+    // genericTemplates, so B's pre-collect failed with "'Box' is not a
+    // generic type".
+    val sources = Map(
+      "alib/box" ->
+        """module alib
+          |struct Box[A]
+          |    value: A
+          |""".stripMargin,
+      "blib/use" ->
+        """module blib
+          |import alib.*
+          |make_int_box(v: int) -> Box[int] = Box[int](v)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    try driver.compile(sources) catch
+      case e: Throwable => fail(s"compile failed: ${e.getMessage}", e)
+  }
 }
