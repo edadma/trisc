@@ -288,6 +288,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   protected val specializedDecls = mutable.ListBuffer.empty[TDecl]
   protected var typeEnv: Map[String, SyslType] = Map.empty
 
+  // Track which generic-template, trait, and concrete-impl entries arrived
+  // via cross-unit import (registerImport / registerGenericTemplatesFrom)
+  // versus being declared in this unit's own AST. The driver consults the
+  // `getOwn*` accessors when building this unit's per-file ModuleMeta so the
+  // sibling-mirroring path doesn't keep re-stamping imported symbols as if
+  // they originated locally — that would cause every sibling to claim
+  // ownership of the others' templates, then trigger duplicate registration
+  // when those templates round-trip back through Step 5's sibling import.
+  protected val importedTemplateNames = mutable.HashSet[String]()
+  protected val importedTraitNames = mutable.HashSet[String]()
+  protected val importedConcreteImplKeys = mutable.HashSet[(String, SyslType)]()
+  protected val importedExtensionKeys = mutable.HashSet[(String, String)]() // (definingModule, mangledFnName)
+  protected val importedEnumInstNames = mutable.HashSet[String]()
+
   // Generic struct support
   protected val genericStructs = new mutable.LinkedHashMap[String, StructDeclAST]
   protected val genericStructInstantiations = new mutable.LinkedHashMap[(String, List[SyslType]), SyslType.StructType]
@@ -873,19 +887,32 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
    *  (non-generic, single-target) impls round-trip across units; generic impls (Stage F.5+)
    *  will need an extended IMPL line format. */
   def getTraitImplMetas: List[TraitImplMeta] =
-    concreteImpls.map { case (traitName, targetType, methodMap) =>
-      TraitImplMeta(traitName, targetType, methodMap.toMap)
-    }.toList
+    concreteImpls
+      .filterNot { case (traitName, targetType, _) =>
+        importedConcreteImplKeys.contains((traitName, targetType))
+      }
+      .map { case (traitName, targetType, methodMap) =>
+        TraitImplMeta(traitName, targetType, methodMap.toMap)
+      }
+      .toList
 
-  /** Get trait declaration AST nodes for serialization in TEMPLATES section. */
+  /** Get trait declaration AST nodes for serialization in TEMPLATES section.
+   *  Excludes traits that arrived via cross-unit import — only own-AST traits
+   *  contribute to this unit's per-file ModuleMeta. */
   def getTraitDecls: List[TraitDeclAST] =
-    traits.values.map(t => TraitDeclAST(t.name, t.typeParams, t.methods)).toList
+    traits.values
+      .filterNot(t => importedTraitNames.contains(t.name))
+      .map(t => TraitDeclAST(t.name, t.typeParams, t.methods))
+      .toList
 
   /** Get generic enum instance mappings for cross-module type inference. */
   def getGenericEnumInstances: List[GenericEnumInstanceMeta] =
-    enumToTemplate.map { case (mangledName, (baseName, typeArgs)) =>
-      GenericEnumInstanceMeta(mangledName, baseName, typeArgs)
-    }.toList
+    enumToTemplate.iterator
+      .filterNot { case (mangledName, _) => importedEnumInstNames.contains(mangledName) }
+      .map { case (mangledName, (baseName, typeArgs)) =>
+        GenericEnumInstanceMeta(mangledName, baseName, typeArgs)
+      }
+      .toList
 
   /** Get extension method metadata for SMETA round-trip. Resolves each entry's
    *  receiver TypeAST → SyslType (now possible since analyze is complete).
@@ -897,9 +924,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val out = mutable.ListBuffer[ExtensionMeta]()
     for (_, buf) <- extensionsByMethod do
       for entry <- buf do
-        scala.util.Try(resolveType(entry.receiverTypeAst)).foreach { rt =>
-          out += ExtensionMeta(entry.methodName, entry.definingModule, rt, entry.mangledFnName)
-        }
+        if !importedExtensionKeys.contains((entry.definingModule, entry.mangledFnName)) then
+          scala.util.Try(resolveType(entry.receiverTypeAst)).foreach { rt =>
+            out += ExtensionMeta(entry.methodName, entry.definingModule, rt, entry.mangledFnName)
+          }
     out.toList
 
   /** Generic-receiver extension synth FunDeclASTs (Phase 2d). The driver carries
@@ -908,7 +936,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
    *  side-table EXT entry is also needed (registered separately on import via
    *  `extensionEntriesFromTemplates`) so dispatch can find them by method name. */
   def getExtensionTemplates: List[FunDeclAST] =
-    genericTemplates.values.filter(_.name.startsWith("__ext_")).toList
+    genericTemplates.values
+      .filter(fd => fd.name.startsWith("__ext_") && !importedTemplateNames.contains(fd.name))
+      .toList
 
   /** Synth ImplDeclASTs for generic-receiver operator extensions (Phase 2d).
    *  Carried through `meta.genericTemplates` alongside extension synth funcs +
@@ -1002,6 +1032,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             case TraitDeclAST(name, tparams, methods, _) if name.startsWith("__ExtOp_") =>
               if !traits.contains(name) then
                 traits(name) = TraitInfo(name, tparams, methods)
+                importedTraitNames += name
                 registerTraitOperatorEntries(name, methods, template)
             case _ => ()
         for template <- meta.genericTemplates do
@@ -1032,6 +1063,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           val bucket = extensionsByMethod.getOrElseUpdate(ext.methodName, mutable.ListBuffer.empty)
           if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
             bucket += entry
+          importedExtensionKeys += ((entry.definingModule, entry.mangledFnName))
         // 4. Reconstruct generic-receiver extension entries from synth templates.
         for template <- extOnlyTemplates do
           template match
@@ -1049,6 +1081,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 val bucket = extensionsByMethod.getOrElseUpdate(methodName, mutable.ListBuffer.empty)
                 if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
                   bucket += entry
+                importedExtensionKeys += ((entry.definingModule, entry.mangledFnName))
             case _ => ()
         if modulePath.nonEmpty then
           visibleExtensionModules += importedDefMod
@@ -1202,6 +1235,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 methodASTs = Nil,
                 definingModule = "",   // imported impls — orphan check skipped on import
               )
+            importedConcreteImplKeys += ((traitName, targetType))
 
     // Register generic templates from imported module (needed for cross-module generic instantiation).
     // Selective imports (`import std.option.{Option, Some, None}`) must filter generic templates
@@ -1219,6 +1253,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     for inst <- meta.genericEnumInstances do
       if !enumToTemplate.contains(inst.mangledName) then
         enumToTemplate(inst.mangledName) = (inst.baseName, inst.typeArgs)
+      importedEnumInstNames += inst.mangledName
 
     // Register trait declarations from imported templates
     for template <- meta.genericTemplates do
@@ -1226,6 +1261,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         case TraitDeclAST(name, tparams, methods, _) =>
           if !traits.contains(name) then
             traits(name) = TraitInfo(name, tparams, methods)
+            importedTraitNames += name
             registerTraitOperatorEntries(name, methods, template)
         case _ =>
 
@@ -1243,6 +1279,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             methodASTs = Nil,
             definingModule = "",
           )
+        importedConcreteImplKeys += ((impl.traitName, impl.targetType))
 
     // Register generic ImplDeclASTs from imported templates (Phase 2d — currently
     // only synth `__ExtOp_*` impls for generic-receiver operator extensions; user-
@@ -1285,6 +1322,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       // other don't double-register the same extension.
       if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
         bucket += entry
+      importedExtensionKeys += ((entry.definingModule, entry.mangledFnName))
     // Phase 2d: reconstruct ExtensionEntry's for generic synth templates that
     // travelled through `meta.genericTemplates`. The synth name encodes the
     // method (`__ext_<typeKey>__<methodName>`) and the first parameter's
@@ -1307,6 +1345,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             val bucket = extensionsByMethod.getOrElseUpdate(methodName, mutable.ListBuffer.empty)
             if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
               bucket += entry
+            importedExtensionKeys += ((entry.definingModule, entry.mangledFnName))
         case _ => ()
     if modulePath.nonEmpty then
       visibleExtensionModules += importedDefiningModule
@@ -1371,12 +1410,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _, _) if tps.nonEmpty =>
           if funcSelected(name) && !genericTemplates.contains(name) && !functions.contains(name) then
             genericTemplates(name) = fd
+            importedTemplateNames += name
         case sd @ StructDeclAST(name, _, tps, _, _) if tps.nonEmpty =>
           if !genericStructs.contains(name) then
             genericStructs(name) = sd
+            importedTemplateNames += name
         case de @ DataEnumDeclAST(name, variants, tps, _) if tps.nonEmpty =>
           if !genericEnums.contains(name) then
             genericEnums(name) = de
+            importedTemplateNames += name
             for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
               genericVariantToEnum.get(vname) match
                 case Some((n, i)) =>
@@ -1390,6 +1432,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         case TypeAliasDeclAST(name, target, tps, _, isNew, _, _) if tps.nonEmpty =>
           if !genericTypeAliases.contains(name) && !typeAliases.contains(name) then
             genericTypeAliases(name) = (tps, target, isNew)
+            importedTemplateNames += name
         case _ => ()
 
   def analyze(programIn: ProgramAST): TProgram =
@@ -1409,7 +1452,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     currentModule.foreach(visibleExtensionModules.add)
     val (loweredDecls, extEntries) = lowerExtensions(programIn.decls)
     for entry <- extEntries do
-      extensionsByMethod.getOrElseUpdate(entry.methodName, mutable.ListBuffer.empty) += entry
+      val bucket = extensionsByMethod.getOrElseUpdate(entry.methodName, mutable.ListBuffer.empty)
+      // Dedup against entries already mirrored from same-module siblings
+      // (driver passes meta.extensions through to siblings now). Without this,
+      // a sibling-file extension would already be in the bucket and the local
+      // lowering would re-add the same (definingModule, mangledFnName) pair,
+      // making tryExtensionDispatch report it as ambiguous.
+      if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
+        bucket += entry
     val program = ProgramAST(loweredDecls)
 
     // Pass 0: forward-declare all type names so recursive references resolve.

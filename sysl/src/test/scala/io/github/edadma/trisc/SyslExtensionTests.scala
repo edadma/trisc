@@ -504,4 +504,102 @@ class SyslExtensionTests extends SyslTestHelpers {
           |""".stripMargin) shouldBe 5
     }
   }
+
+  "same-module sibling extension visibility" - {
+
+    // Helper: compile + run a multi-file source set with no top-level "test" file.
+    // evalWithLibs forces a no-module-decl "test" key, which collides with the
+    // same-module-sibling case where every file declares the same module.
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "non-generic extension declared in sibling file dispatches without import" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |extension (s: string)
+            |    tag -> int = 7
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    "hi".tag
+            |""".stripMargin,
+      )) shouldBe 7
+    }
+
+    "generic-receiver extension declared in sibling file dispatches without import" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |extension [T](xs: []T)
+            |    head_or_zero -> T = xs[0]
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val xs: [3]int = [10, 20, 30]
+            |    xs[:].head_or_zero
+            |""".stripMargin,
+      )) shouldBe 10
+    }
+
+    "operator extension declared in sibling file dispatches via operator" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Bag
+            |    n: int
+            |
+            |extension (a: Bag)
+            |    #operator("<>")
+            |    merge(b: Bag) -> Bag = Bag(a.n + b.n)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val a = Bag(3)
+            |    val b = Bag(4)
+            |    val c = a <> b
+            |    c.n
+            |""".stripMargin,
+      )) shouldBe 7
+    }
+
+    "sibling extension dispatch with both files importing the same external module" in {
+      runMultiFile(Map(
+        "shoutlib/shout" ->
+          """module shoutlib
+            |
+            |loud(s: string) -> int = len(s) * 2
+            |""".stripMargin,
+        "sib/lib" ->
+          """module sib
+            |
+            |import shoutlib.*
+            |
+            |extension (s: string)
+            |    boom -> int = loud(s)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |import shoutlib.*
+            |
+            |main() -> int
+            |    "abc".boom
+            |""".stripMargin,
+      )) shouldBe 6
+    }
+  }
 }

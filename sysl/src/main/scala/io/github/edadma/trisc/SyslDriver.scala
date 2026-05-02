@@ -140,6 +140,13 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     // Modules are processed in dependency order derived from the file-level
     // topological sort, so cross-module imports are available during pre-collection.
     val packageMetaCache = new mutable.LinkedHashMap[String, ModuleMeta]
+    // Per-file metas keyed by source name. Step 4b stores each file's individual
+    // meta here so Step 5 can build sibling-only views by merging every other
+    // file in the same module — the merged-per-module packageMetaCache always
+    // includes the current file's own contributions, which would cause the
+    // analyzer's main pass to throw on duplicate trait/template/impl when
+    // sibling registration mirrored them in.
+    val perFileMetaCache = new mutable.LinkedHashMap[String, ModuleMeta]
     // Build module-level dependency graph: for each module, collect all modules
     // imported by any of its files.
     // Resolve an import's module path to a module key in moduleToSources,
@@ -188,7 +195,17 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             analyzer.registerNoMangle(globalExternNames)
             for src <- sourceNames if src != name do
               analyzer.registerGenericTemplatesFrom(asts(src))
-            val siblings = new ModuleMeta(meta.symbols.filter(s => !s.isExtern))
+            // Carry through extensions / impls / generic templates so cross-file
+            // same-module dispatch works during pre-collection. Without this,
+            // sibling-file extensions (and operator extension impls) would be
+            // invisible because the sibling registration only carried symbols.
+            val siblings = new ModuleMeta(
+              meta.symbols.filter(s => !s.isExtern),
+              meta.genericTemplates,
+              meta.traitImpls,
+              meta.genericEnumInstances,
+              meta.extensions,
+            )
             analyzer.registerImport(siblings)
             // Register cross-module imports — fall back to resolveExternalMeta so
             // pre-collection can resolve imports of stdlib modules whose SMETA lives
@@ -244,6 +261,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           } match
             case scala.util.Success(fileMeta) =>
               meta = meta.merge(fileMeta)
+              perFileMetaCache(name) = fileMeta
               changed = true
             case scala.util.Failure(_) =>
               stillFailing += name
@@ -271,10 +289,24 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       for modPath <- modules.get(name) do
         for src <- moduleToSources.getOrElse(modPath, Set.empty) if src != name do
           analyzer.registerGenericTemplatesFrom(asts(src))
-        packageMetaCache.get(modPath).foreach { meta =>
-          val siblings = new ModuleMeta(meta.symbols.filter(s => s.sourceFile != Some(s"$name.sysl") && !s.isExtern))
-          analyzer.registerImport(siblings)
+        // Build a sibling-only view by merging every other file's per-file meta
+        // in this module. This excludes the current file's contributions
+        // entirely, so mirrored extensions / traits / impls / templates won't
+        // collide with what the main analysis pass is about to register from
+        // the current file's own AST.
+        val siblingNames = moduleToSources.getOrElse(modPath, Set.empty) - name
+        val sibAccum = siblingNames.foldLeft(new ModuleMeta(Nil)) { (acc, src) =>
+          perFileMetaCache.get(src).map(acc.merge).getOrElse(acc)
         }
+        if siblingNames.nonEmpty then
+          val siblings = new ModuleMeta(
+            sibAccum.symbols.filter(!_.isExtern),
+            sibAccum.genericTemplates,
+            sibAccum.traitImpls,
+            sibAccum.genericEnumInstances,
+            sibAccum.extensions,
+          )
+          analyzer.registerImport(siblings)
 
       // Phase 2b-Predef-auto-import: silently inject an extensions-only import
       // for every Predef module that's present in the meta cache (or
