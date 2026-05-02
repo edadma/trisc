@@ -30,6 +30,7 @@ done
 # Source files — base kernel + arch
 SYSL_FILES=(
     oskit/kernel/kernel.lsysl
+    oskit/kernel/vma.lsysl
     oskit/arch/x86_64/cpu.lsysl
     oskit/arch/x86_64/prog_config.sysl
     oskit/arch/x86_64/vm.lsysl

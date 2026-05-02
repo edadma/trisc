@@ -2454,6 +2454,20 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "symlink: bad"
   }
 
+  "vma: kernel selftest of red-black VMA module" in {
+    // Phase 1 chunk 1. Kernel ships `oskit/kernel/vma.lsysl` with
+    // an intrusive red-black tree storing virtual memory areas
+    // keyed on `vstart`. The selftest (driven via debug syscall
+    // SYS_VMA_SELFTEST=86) exercises insert / point-lookup /
+    // split / remove / clear-all on a fresh VMATree, including a
+    // 64-VMA fan-out that forces tree rebalancing. No kernel
+    // codepath consults the VMA list yet — chunks 2 and 3 wire it
+    // into page-fault handling and demand paging.
+    val output = qemu.command("test_vma")
+    output should include("vma: ok")
+    output should not include "vma: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

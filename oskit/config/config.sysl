@@ -6,6 +6,7 @@ module oskit.config
 // [kernel]
 val MAX_THREADS     = 32
 val MAX_PROCESSES   = 16
+val MAX_VMAS        = 256
 val NUM_PRIORITIES  = 4
 val DEFAULT_QUANTUM = 5
 val TLS_SLOTS       = 4

@@ -146,6 +146,7 @@ loaded by nsh each get their own process entry.
         name: string
         syscall_allow: [8]i64   // 8 words × 64 bits = 512 bits, indexed by syscall number
         ipc_send_mask: int
+        vma_tree: VMATree       // Phase 1 chunk 1 — empty for now; chunks 2/3 wire it in
 
     var processes: [16]Process  // 16 = MAX_PROCESSES
     var next_pid = 1
@@ -892,6 +893,25 @@ Args: a0=pid, a1=parent_tid.
         syscall_return(0)
         kernel_continue_current()
 
+SYS_VMA_SELFTEST (86): kernel-side VMA module selftest.
+No args. Returns 0 on success, 1..N for failure-step.
+
+This is a debug-only syscall used by `oskit/bin/test_vma.lsysl`
+to validate the VMA module's invariants without needing a
+userspace mmap surface yet (chunk 4 brings that). Runs in
+kernel context with the VMA pool as scratch space; on return
+the pool is back to its pre-call state.
+
+(85 was taken in 2025 by `register_syscall6(85, sys_fd_transplant_handler)`
+in arch-specific `app_nsh.sysl`/`hello.lsysl`; that 6-arg variant
+runs before the single-arg table is consulted, so any new debug
+syscall has to pick a number not already claimed elsewhere.)
+
+    sys_vma_selftest_handler(arg: int)
+        val rc = vma_selftest()
+        syscall_return(i64(rc))
+        kernel_continue_current()
+
     sys_kbhit_handler(arg: int)
         syscall_return(kb_has_key())
         kernel_continue_current()
@@ -1220,6 +1240,7 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall(81, sys_timer_subscribe_handler)
         register_syscall(83, sys_sleep_or_notify_handler)
         register_syscall(84, sys_get_thread_uid_handler)
+        register_syscall(86, sys_vma_selftest_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -1524,6 +1545,7 @@ process ID (0 for kernel threads).
         for w in 0..<8
             processes[pid].syscall_allow[w] = i64(-1)
         processes[pid].ipc_send_mask = 0xFFFF
+        vma_tree_init(&processes[pid].vma_tree)
 
         // Link thread to process
         threads[tid].pid = pid
@@ -1625,6 +1647,7 @@ Unlike create_process, the thread is never enqueued — no race.
         for w in 0..<8
             processes[pid].syscall_allow[w] = i64(-1)
         processes[pid].ipc_send_mask = 0xFFFF
+        vma_tree_init(&processes[pid].vma_tree)
 
         // Link thread to process
         threads[tid].pid = pid
@@ -1640,6 +1663,7 @@ Resume a suspended process (created with create_process_suspended).
 
     reap_process(pid: int)
         grant_revoke_all(pid)
+        vma_clear_all(&processes[pid].vma_tree)
         // Free per-process kernel stack (2 pages, allocated for ring 3 threads)
         // Guard: only free if the thread slot still belongs to this process.
         // Thread slots can be reused by create_process_suspended before reap runs.

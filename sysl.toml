@@ -20,6 +20,7 @@ module = "oskit.config"
 [kernel]
 max_threads     = 32
 max_processes   = 16
+max_vmas        = 256
 num_priorities  = 4
 default_quantum = 5
 tls_slots       = 4

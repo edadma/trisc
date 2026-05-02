@@ -1,0 +1,650 @@
+VMA -- Virtual Memory Areas
+===========================
+
+Per-process record of *what* memory ranges are mapped. The page
+table records *what is currently resident*; the VMA list records
+*what should be there*. The two diverge under demand paging — a
+VMA exists for a range, but the PTE is non-present until first
+access. The page-fault handler consults the VMA list to decide
+whether to install a fresh frame, copy-on-write, page-in from a
+file, or kill the process.
+
+Master-roadmap invariant 1: per-process VMA list, not fixed
+regions. This module is the foundation chunk 1 lays before Phase
+1's demand-paging / fork / exec work hits.
+
+VMAs in a process never overlap. They form a sorted, disjoint
+cover of the user portion of the address space. Lookups are by
+address (point query): "which VMA covers `vaddr`?". This is
+served by a red-black tree keyed on `start`, which gives O(log
+n) insert, remove, and predecessor walk. (Augmented interval
+trees aren't needed since VMAs don't overlap — the predecessor
+of `vaddr` is the only candidate to check `vaddr < end` against.)
+
+The pool is process-shared (one global free list). Each process
+holds a `VMATree` root index. `vma_*` operations take the tree
+by `*VMATree` and the global pool is module state.
+
+This chunk is data-structure-only. No kernel codepath consults
+the VMA list yet — the existing fixed-region eager-mapping in
+`vm_create_process_pt` is unchanged. Chunk 2 wires the page-
+fault handler through `vma_lookup_addr`; chunk 3 makes
+`vm_create_process_pt` lazy.
+
+    module oskit.kernel
+
+    import oskit.config.{MAX_VMAS}
+
+VMA_NIL serves the same role as rbtree.lsysl's NIL — a sentinel
+"no node" value distinct from any pool index.
+
+    val VMA_NIL = -1
+
+POSIX-style protection bits, used as the `prot` field of a VMA.
+These match the values userspace uses for `mmap`/`mprotect`.
+
+    val VMA_PROT_NONE  = 0
+    val VMA_PROT_READ  = 1
+    val VMA_PROT_WRITE = 2
+    val VMA_PROT_EXEC  = 4
+
+POSIX-style mapping bits, used as the low half of `flags`. The
+high half is reserved for VMA-internal flags (COW, growsdown,
+etc.) so an `mmap`-style argument can be stored without conflict.
+
+    val VMA_MAP_SHARED  = 0x01
+    val VMA_MAP_PRIVATE = 0x02
+    val VMA_MAP_FIXED   = 0x10
+    val VMA_MAP_ANON    = 0x20
+
+Internal bits — set by the kernel, never accepted from userspace.
+
+    val VMA_FLAG_COW       = 0x10000
+    val VMA_FLAG_GROWSDOWN = 0x20000
+
+Red-black colors. RED on insert, BLACK after fixup balances. The
+root is always BLACK.
+
+    val VMA_RB_BLACK = 0
+    val VMA_RB_RED   = 1
+
+A VMA carries the user-visible mapping fields (start/end/prot/
+flags/fd/offset) plus its rb-tree-node fields (left/right/parent/
+color) and a free-list link. Inlining the tree node into the VMA
+struct avoids a parallel array — the same pool index serves both
+the data and the tree node.
+
+    struct VMA
+        vstart: u64
+        vend:   u64
+        prot:   int
+        flags:  int
+        fd:     int
+        offset: u64
+        left:   int
+        right:  int
+        parent: int
+        color:  int
+        next_free: int
+
+A `VMATree` is just the root index. Each process owns one. The
+struct exists (instead of a bare `int` field) so operations can
+take `*VMATree` and update `root` via field assignment, which
+matches the rbtree.lsysl convention.
+
+    struct VMATree
+        root: int
+
+Module-level pool. `MAX_VMAS` is set in `sysl.toml`/`oskit.config`
+so the limit is visible everywhere it matters. Static array; no
+allocator dependency.
+
+    var vma_pool: [256]VMA
+    var vma_free_head: int = 0
+    var vma_pool_init = false
+
+`vma_module_init` is idempotent and called lazily by `vma_alloc`.
+The first allocation links every slot into the free list. Doing
+it lazily keeps `kernel_init` free of an explicit init call.
+
+    vma_module_init()
+        if vma_pool_init
+            return
+        var i = 0
+        while i < MAX_VMAS - 1
+            vma_pool[i].next_free = i + 1
+            i += 1
+        vma_pool[MAX_VMAS - 1].next_free = VMA_NIL
+        vma_free_head = 0
+        vma_pool_init = true
+
+Take a VMA from the free list and zero its tree-node fields. The
+caller fills in start/end/prot/flags/fd/offset before inserting.
+
+    vma_alloc() -> int
+        vma_module_init()
+        val idx = vma_free_head
+        if idx == VMA_NIL
+            return VMA_NIL
+        vma_free_head = vma_pool[idx].next_free
+        vma_pool[idx].left   = VMA_NIL
+        vma_pool[idx].right  = VMA_NIL
+        vma_pool[idx].parent = VMA_NIL
+        vma_pool[idx].color  = VMA_RB_RED
+        vma_pool[idx].next_free = VMA_NIL
+        idx
+
+Return a VMA to the free list. Caller is responsible for having
+already removed it from any tree.
+
+    vma_free(idx: int)
+        if idx == VMA_NIL
+            return
+        vma_pool[idx].next_free = vma_free_head
+        vma_free_head = idx
+
+Initialize a freshly-allocated `VMATree` to "empty". Always called
+from process creation.
+
+    vma_tree_init(t: *VMATree)
+        t.root = VMA_NIL
+
+Color helpers — NIL is treated as BLACK.
+
+    vma_color(idx: int) -> int
+        if idx == VMA_NIL
+            return VMA_RB_BLACK
+        vma_pool[idx].color
+
+    vma_set_color(idx: int, c: int)
+        if idx != VMA_NIL
+            vma_pool[idx].color = c
+
+Standard BST rotations. `rotate_left` at `x` makes `x.right`
+the new subtree root.
+
+    vma_rotate_left(t: *VMATree, x: int)
+        val y = vma_pool[x].right
+        vma_pool[x].right = vma_pool[y].left
+        if vma_pool[y].left != VMA_NIL
+            vma_pool[vma_pool[y].left].parent = x
+        vma_pool[y].parent = vma_pool[x].parent
+        if vma_pool[x].parent == VMA_NIL
+            t.root = y
+        else
+            if x == vma_pool[vma_pool[x].parent].left
+                vma_pool[vma_pool[x].parent].left = y
+            else
+                vma_pool[vma_pool[x].parent].right = y
+        vma_pool[y].left = x
+        vma_pool[x].parent = y
+
+    vma_rotate_right(t: *VMATree, y: int)
+        val x = vma_pool[y].left
+        vma_pool[y].left = vma_pool[x].right
+        if vma_pool[x].right != VMA_NIL
+            vma_pool[vma_pool[x].right].parent = y
+        vma_pool[x].parent = vma_pool[y].parent
+        if vma_pool[y].parent == VMA_NIL
+            t.root = x
+        else
+            if y == vma_pool[vma_pool[y].parent].left
+                vma_pool[vma_pool[y].parent].left = x
+            else
+                vma_pool[vma_pool[y].parent].right = x
+        vma_pool[x].right = y
+        vma_pool[y].parent = x
+
+Restore red-black invariants after insertion. `z` is the freshly-
+inserted (red) node. Walk up fixing red-red violations by
+recoloring or rotating; the root is forced BLACK at the end.
+
+    vma_insert_fixup(t: *VMATree, z_in: int)
+        var z = z_in
+        while vma_pool[z].parent != VMA_NIL
+            val p = vma_pool[z].parent
+            if vma_pool[p].color != VMA_RB_RED
+                break
+            val gp = vma_pool[p].parent
+            if gp == VMA_NIL
+                break
+            if p == vma_pool[gp].left
+                val uncle = vma_pool[gp].right
+                if vma_color(uncle) == VMA_RB_RED
+                    vma_pool[p].color = VMA_RB_BLACK
+                    vma_set_color(uncle, VMA_RB_BLACK)
+                    vma_pool[gp].color = VMA_RB_RED
+                    z = gp
+                else
+                    if z == vma_pool[p].right
+                        z = p
+                        vma_rotate_left(t, z)
+                    val p2 = vma_pool[z].parent
+                    val gp2 = vma_pool[p2].parent
+                    vma_pool[p2].color = VMA_RB_BLACK
+                    vma_pool[gp2].color = VMA_RB_RED
+                    vma_rotate_right(t, gp2)
+            else
+                val uncle = vma_pool[gp].left
+                if vma_color(uncle) == VMA_RB_RED
+                    vma_pool[p].color = VMA_RB_BLACK
+                    vma_set_color(uncle, VMA_RB_BLACK)
+                    vma_pool[gp].color = VMA_RB_RED
+                    z = gp
+                else
+                    if z == vma_pool[p].left
+                        z = p
+                        vma_rotate_right(t, z)
+                    val p2 = vma_pool[z].parent
+                    val gp2 = vma_pool[p2].parent
+                    vma_pool[p2].color = VMA_RB_BLACK
+                    vma_pool[gp2].color = VMA_RB_RED
+                    vma_rotate_left(t, gp2)
+        vma_pool[t.root].color = VMA_RB_BLACK
+
+Insert a fresh VMA into the tree, keyed on `start`. Caller has
+already filled in start/end/prot/flags/fd/offset on the freshly
+allocated index. Returns the inserted node index (same as `idx`)
+for convenience. Does *not* check for overlap — callers are
+expected to use `vma_lookup_addr` first when overlap matters.
+
+    vma_insert(t: *VMATree, idx: int)
+        var parent = VMA_NIL
+        var cur = t.root
+        val key = vma_pool[idx].vstart
+        while cur != VMA_NIL
+            parent = cur
+            if key < vma_pool[cur].vstart
+                cur = vma_pool[cur].left
+            else
+                cur = vma_pool[cur].right
+        vma_pool[idx].parent = parent
+        if parent == VMA_NIL
+            t.root = idx
+        else
+            if key < vma_pool[parent].vstart
+                vma_pool[parent].left = idx
+            else
+                vma_pool[parent].right = idx
+        vma_insert_fixup(t, idx)
+
+Convenience wrapper: allocate a VMA, fill it in, insert it,
+return the index. Returns `VMA_NIL` if the pool is exhausted.
+
+    vma_create(t: *VMATree, vstart: u64, vend: u64, prot: int, flags: int, fd: int, offset: u64) -> int
+        val idx = vma_alloc()
+        if idx == VMA_NIL
+            return VMA_NIL
+        vma_pool[idx].vstart  = vstart
+        vma_pool[idx].vend    = vend
+        vma_pool[idx].prot   = prot
+        vma_pool[idx].flags  = flags
+        vma_pool[idx].fd     = fd
+        vma_pool[idx].offset = offset
+        vma_insert(t, idx)
+        idx
+
+Point query: which VMA covers `addr`? Returns the VMA index, or
+`VMA_NIL` if no VMA covers `addr`.
+
+The query exploits the disjoint-VMA invariant: walk down the BST
+tracking the largest node whose start ≤ addr; that is the only
+candidate, and it covers `addr` iff `addr < end`.
+
+    vma_lookup_addr(t: *VMATree, addr: u64) -> int
+        var cur = t.root
+        var best = VMA_NIL
+        while cur != VMA_NIL
+            if vma_pool[cur].vstart <= addr
+                best = cur
+                cur = vma_pool[cur].right
+            else
+                cur = vma_pool[cur].left
+        if best == VMA_NIL
+            return VMA_NIL
+        if addr < vma_pool[best].vend
+            return best
+        VMA_NIL
+
+In-order successor / predecessor — used by `vma_remove` and by
+range walks (chunks 4-6). NIL if none.
+
+    vma_min(idx_in: int) -> int
+        if idx_in == VMA_NIL
+            return VMA_NIL
+        var cur = idx_in
+        while vma_pool[cur].left != VMA_NIL
+            cur = vma_pool[cur].left
+        cur
+
+    vma_first(t: *VMATree) -> int
+        vma_min(t.root)
+
+    vma_next(idx: int) -> int
+        if idx == VMA_NIL
+            return VMA_NIL
+        if vma_pool[idx].right != VMA_NIL
+            return vma_min(vma_pool[idx].right)
+        var cur = idx
+        var p = vma_pool[cur].parent
+        while p != VMA_NIL
+            if vma_pool[p].left == cur
+                return p
+            cur = p
+            p = vma_pool[cur].parent
+        VMA_NIL
+
+Replace one subtree by another. `transplant(u, v)` swaps `v` into
+`u`'s position in the tree; `u` becomes detached.
+
+    vma_transplant(t: *VMATree, u: int, v: int)
+        if vma_pool[u].parent == VMA_NIL
+            t.root = v
+        else
+            val p = vma_pool[u].parent
+            if u == vma_pool[p].left
+                vma_pool[p].left = v
+            else
+                vma_pool[p].right = v
+        if v != VMA_NIL
+            vma_pool[v].parent = vma_pool[u].parent
+
+Restore red-black invariants after removal. `x` is the node that
+took the place of the removed black node (possibly NIL); `xp` is
+its parent (tracked separately because `x` may be NIL and have no
+parent pointer of its own).
+
+    vma_remove_fixup(t: *VMATree, x_in: int, xp_in: int)
+        var x = x_in
+        var xp = xp_in
+        while x != t.root
+            if vma_color(x) == VMA_RB_RED
+                break
+            if xp == VMA_NIL
+                break
+            if x == vma_pool[xp].left
+                var w = vma_pool[xp].right
+                if w == VMA_NIL
+                    break
+                if vma_pool[w].color == VMA_RB_RED
+                    vma_pool[w].color = VMA_RB_BLACK
+                    vma_pool[xp].color = VMA_RB_RED
+                    vma_rotate_left(t, xp)
+                    w = vma_pool[xp].right
+                    if w == VMA_NIL
+                        break
+                if vma_color(vma_pool[w].left) == VMA_RB_BLACK
+                    if vma_color(vma_pool[w].right) == VMA_RB_BLACK
+                        vma_pool[w].color = VMA_RB_RED
+                        x = xp
+                        xp = vma_pool[x].parent
+                        continue
+                if vma_color(vma_pool[w].right) == VMA_RB_BLACK
+                    vma_set_color(vma_pool[w].left, VMA_RB_BLACK)
+                    vma_pool[w].color = VMA_RB_RED
+                    vma_rotate_right(t, w)
+                    w = vma_pool[xp].right
+                vma_pool[w].color = vma_pool[xp].color
+                vma_pool[xp].color = VMA_RB_BLACK
+                vma_set_color(vma_pool[w].right, VMA_RB_BLACK)
+                vma_rotate_left(t, xp)
+                x = t.root
+                break
+            else
+                var w = vma_pool[xp].left
+                if w == VMA_NIL
+                    break
+                if vma_pool[w].color == VMA_RB_RED
+                    vma_pool[w].color = VMA_RB_BLACK
+                    vma_pool[xp].color = VMA_RB_RED
+                    vma_rotate_right(t, xp)
+                    w = vma_pool[xp].left
+                    if w == VMA_NIL
+                        break
+                if vma_color(vma_pool[w].right) == VMA_RB_BLACK
+                    if vma_color(vma_pool[w].left) == VMA_RB_BLACK
+                        vma_pool[w].color = VMA_RB_RED
+                        x = xp
+                        xp = vma_pool[x].parent
+                        continue
+                if vma_color(vma_pool[w].left) == VMA_RB_BLACK
+                    vma_set_color(vma_pool[w].right, VMA_RB_BLACK)
+                    vma_pool[w].color = VMA_RB_RED
+                    vma_rotate_left(t, w)
+                    w = vma_pool[xp].left
+                vma_pool[w].color = vma_pool[xp].color
+                vma_pool[xp].color = VMA_RB_BLACK
+                vma_set_color(vma_pool[w].left, VMA_RB_BLACK)
+                vma_rotate_right(t, xp)
+                x = t.root
+                break
+        vma_set_color(x, VMA_RB_BLACK)
+
+Detach a VMA from the tree and return its slot to the pool. The
+node index is invalidated after this call.
+
+    vma_remove(t: *VMATree, z: int)
+        if z == VMA_NIL
+            return
+        val y_orig_color = vma_pool[z].color
+        var x = VMA_NIL
+        var xp = VMA_NIL
+        if vma_pool[z].left == VMA_NIL
+            x = vma_pool[z].right
+            xp = vma_pool[z].parent
+            vma_transplant(t, z, vma_pool[z].right)
+        else
+            if vma_pool[z].right == VMA_NIL
+                x = vma_pool[z].left
+                xp = vma_pool[z].parent
+                vma_transplant(t, z, vma_pool[z].left)
+            else
+                var y = vma_pool[z].right
+                while vma_pool[y].left != VMA_NIL
+                    y = vma_pool[y].left
+                val y_color = vma_pool[y].color
+                x = vma_pool[y].right
+                if vma_pool[y].parent == z
+                    xp = y
+                else
+                    xp = vma_pool[y].parent
+                    vma_transplant(t, y, vma_pool[y].right)
+                    vma_pool[y].right = vma_pool[z].right
+                    vma_pool[vma_pool[y].right].parent = y
+                vma_transplant(t, z, y)
+                vma_pool[y].left = vma_pool[z].left
+                vma_pool[vma_pool[y].left].parent = y
+                vma_pool[y].color = vma_pool[z].color
+                if y_color == VMA_RB_BLACK
+                    vma_remove_fixup(t, x, xp)
+                vma_free(z)
+                return
+        if y_orig_color == VMA_RB_BLACK
+            vma_remove_fixup(t, x, xp)
+        vma_free(z)
+
+Split a VMA at `addr` (which must satisfy `start < addr < end`).
+The original VMA is shrunk to `[start, addr)`; a new VMA covering
+`[addr, end)` with the same prot/flags/fd is allocated and
+inserted. Returns the new (right-half) VMA's index, or VMA_NIL on
+allocator failure or invalid `addr`.
+
+For file-backed VMAs, the right half's `offset` advances by
+`(addr - original_start)` so file-byte alignment is preserved.
+
+    vma_split(t: *VMATree, idx: int, addr: u64) -> int
+        if idx == VMA_NIL
+            return VMA_NIL
+        if addr <= vma_pool[idx].vstart
+            return VMA_NIL
+        if addr >= vma_pool[idx].vend
+            return VMA_NIL
+        val new_idx = vma_alloc()
+        if new_idx == VMA_NIL
+            return VMA_NIL
+        val orig_start = vma_pool[idx].vstart
+        val orig_end   = vma_pool[idx].vend
+        vma_pool[new_idx].vstart  = addr
+        vma_pool[new_idx].vend    = orig_end
+        vma_pool[new_idx].prot   = vma_pool[idx].prot
+        vma_pool[new_idx].flags  = vma_pool[idx].flags
+        vma_pool[new_idx].fd     = vma_pool[idx].fd
+        vma_pool[new_idx].offset = vma_pool[idx].offset + (addr - orig_start)
+        vma_pool[idx].vend = addr
+        vma_insert(t, new_idx)
+        new_idx
+
+Tear down every VMA in a process. Used by `reap_process` and by
+the future `execve` path. After the call, the tree is empty and
+every node is back on the free list.
+
+We can't walk the tree while remove-rebalancing it, so we collect
+indices into a small stack via repeated `vma_first` calls. Pool
+size bounds the total work.
+
+    vma_clear_all(t: *VMATree)
+        var n = vma_first(t)
+        while n != VMA_NIL
+            vma_remove(t, n)
+            n = vma_first(t)
+
+Counts. Used by tests; cheap to compute via in-order walk.
+
+    vma_count(t: *VMATree) -> int
+        var c = 0
+        var n = vma_first(t)
+        while n != VMA_NIL
+            c += 1
+            n = vma_next(n)
+        c
+
+Selftest -- exercises the public surface and validates invariants
+without going through any kernel state. Used by the chunk-1
+test program via a debug syscall.
+
+Returns 0 on success; 1..N on failure at step N.
+
+    vma_selftest() -> int
+        var t: VMATree
+        vma_tree_init(&t)
+
+        // Step 1 — insert three disjoint VMAs in non-sorted order.
+        val a = vma_create(&t, u64(0x10000), u64(0x20000), VMA_PROT_READ, VMA_MAP_ANON | VMA_MAP_PRIVATE, -1, u64(0))
+        if a == VMA_NIL
+            return 1
+        val b = vma_create(&t, u64(0x40000), u64(0x50000), VMA_PROT_READ | VMA_PROT_WRITE, VMA_MAP_ANON | VMA_MAP_PRIVATE, -1, u64(0))
+        if b == VMA_NIL
+            return 1
+        val c = vma_create(&t, u64(0x30000), u64(0x35000), VMA_PROT_READ, VMA_MAP_ANON | VMA_MAP_PRIVATE, -1, u64(0))
+        if c == VMA_NIL
+            return 1
+        if vma_count(&t) != 3
+            return 2
+
+        // Step 3 — point lookups inside, at boundaries, between.
+        if vma_lookup_addr(&t, u64(0x10000)) != a
+            return 3
+        if vma_lookup_addr(&t, u64(0x1FFFF)) != a
+            return 3
+        if vma_lookup_addr(&t, u64(0x20000)) != VMA_NIL
+            return 3
+        if vma_lookup_addr(&t, u64(0x32000)) != c
+            return 3
+        if vma_lookup_addr(&t, u64(0x45678)) != b
+            return 3
+        if vma_lookup_addr(&t, u64(0x60000)) != VMA_NIL
+            return 3
+
+        // Step 4 — split b at midpoint; verify both halves still resolve.
+        val b_right = vma_split(&t, b, u64(0x48000))
+        if b_right == VMA_NIL
+            return 4
+        if vma_count(&t) != 4
+            return 4
+        if vma_lookup_addr(&t, u64(0x47000)) != b
+            return 4
+        if vma_lookup_addr(&t, u64(0x49000)) != b_right
+            return 4
+        if vma_pool[b].vend != u64(0x48000)
+            return 4
+        if vma_pool[b_right].vstart != u64(0x48000)
+            return 4
+        if vma_pool[b_right].vend != u64(0x50000)
+            return 4
+
+        // Step 5 — bad split args reject without leaking a slot.
+        val pre_count = vma_count(&t)
+        if vma_split(&t, a, u64(0x10000)) != VMA_NIL
+            return 5
+        if vma_split(&t, a, u64(0x20000)) != VMA_NIL
+            return 5
+        if vma_split(&t, a, u64(0x80000)) != VMA_NIL
+            return 5
+        if vma_count(&t) != pre_count
+            return 5
+
+        // Step 6 — remove the right-half of b and verify the lookup
+        // for that range now misses.
+        vma_remove(&t, b_right)
+        if vma_count(&t) != 3
+            return 6
+        if vma_lookup_addr(&t, u64(0x49000)) != VMA_NIL
+            return 6
+        if vma_lookup_addr(&t, u64(0x47000)) != b
+            return 6
+
+        // Step 7 — vma_first / vma_next yield VMAs in ascending order.
+        var prev_start: u64 = 0
+        var n = vma_first(&t)
+        while n != VMA_NIL
+            if vma_pool[n].vstart < prev_start
+                return 7
+            prev_start = vma_pool[n].vstart
+            n = vma_next(n)
+
+        // Step 8 — clear_all returns every slot to the pool.
+        vma_clear_all(&t)
+        if vma_count(&t) != 0
+            return 8
+        if t.root != VMA_NIL
+            return 8
+
+        // Step 9 — large fan-out exercise that forces rebalancing.
+        // Insert 64 VMAs with strides of 2 pages, then pick three at
+        // random and remove them, then walk in order and verify
+        // count + monotonicity.
+        var i = 0
+        while i < 64
+            val s = u64(0x100000) + u64(i) * u64(0x2000)
+            val e = s + u64(0x1000)
+            if vma_create(&t, s, e, VMA_PROT_READ, VMA_MAP_ANON | VMA_MAP_PRIVATE, -1, u64(0)) == VMA_NIL
+                return 9
+            i += 1
+        if vma_count(&t) != 64
+            return 9
+        // Remove the 0th, 32nd, and 63rd by point-lookup.
+        val r0 = vma_lookup_addr(&t, u64(0x100000))
+        val r1 = vma_lookup_addr(&t, u64(0x100000) + u64(32) * u64(0x2000))
+        val r2 = vma_lookup_addr(&t, u64(0x100000) + u64(63) * u64(0x2000))
+        if r0 == VMA_NIL
+            return 9
+        if r1 == VMA_NIL
+            return 9
+        if r2 == VMA_NIL
+            return 9
+        vma_remove(&t, r0)
+        vma_remove(&t, r1)
+        vma_remove(&t, r2)
+        if vma_count(&t) != 61
+            return 9
+        // Walk + monotonicity check.
+        var prev: u64 = 0
+        var n2 = vma_first(&t)
+        while n2 != VMA_NIL
+            if vma_pool[n2].vstart < prev
+                return 9
+            prev = vma_pool[n2].vstart
+            n2 = vma_next(n2)
+        vma_clear_all(&t)
+
+        0

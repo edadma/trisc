@@ -146,6 +146,7 @@ user-mode). Numbers are stable. Definitions live in
 | 83  | SYS_SLEEP_OR_NOTIFY   | sys_sleep_or_notify_handler          |
 | 84  | SYS_GET_THREAD_UID    | sys_get_thread_uid_handler           |
 | 85  | SYS_FD_TRANSPLANT     | (fd handoff helper)                  |
+| 86  | SYS_VMA_SELFTEST      | sys_vma_selftest_handler (debug)     |
 
 PHASE 1 NOTE. The VM/process syscalls (44–60, 63, 66, 79) all
 assume the current "fixed-region eager mapping" model. They
@@ -606,3 +607,8 @@ fixed-region state.
 - **2026-05-02 / slix@5f0804a9f** — Phase 0b lockdown, initial
   cut. Captures kernel ABI through SYS_FD_TRANSPLANT (85), POSIX
   shim through writev (372), all 9 servers as of post-0a-3.
+- **2026-05-02 / Phase 1 chunk 1** — kernel ABI extended with
+  SYS_VMA_SELFTEST (86, debug-only). New `oskit/kernel/vma.lsysl`
+  defines a per-process VMA red-black tree; `Process` struct grows
+  a `vma_tree: VMATree` field. No kernel codepath consults the
+  tree yet — chunks 2 and 3 wire it into page-fault handling.

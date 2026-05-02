@@ -1,0 +1,52 @@
+test_vma — VMA module selftest
+==============================
+
+Phase 1 chunk 1: validates the kernel's VMA red-black tree
+implementation (`oskit/kernel/vma.lsysl`) end-to-end via the
+debug syscall `SYS_VMA_SELFTEST` (85). The kernel runs the
+selftest in its own context, exercises insert / point-lookup /
+split / remove / clear-all on a fresh VMATree using the global
+pool as scratch space, and returns 0 on pass or `1..N` for the
+failure-step code.
+
+Userspace can't yet exercise the VMA API directly — `mmap` /
+`munmap` / `mprotect` land in chunk 4. This test exists so
+chunks 2 and 3 (page-fault routing, demand paging) have a
+known-good baseline to lean on.
+
+Pass criterion: prints `vma: ok`.
+
+    module oskit.bin.test_vma
+
+    import oskit.ulib.{puts, exit, exit_with, syscall}
+
+
+    val SYS_VMA_SELFTEST = 86
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("vma: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val rc = int(syscall(SYS_VMA_SELFTEST, i64(0)))
+        if rc != 0
+            fail(rc)
+            return
+        puts("vma: ok\n")
+        exit()
