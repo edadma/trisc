@@ -1165,17 +1165,17 @@ object SyslCli:
   private def isSyslSource(name: String): Boolean =
     name.endsWith(".sysl") || name.endsWith(".lsysl")
 
-  /** Resolve a source file, returning (relative-path-without-extension, source-code). */
+  /** Resolve a source file, returning (relative-path-without-extension, source-code).
+    *
+    * Key computation is delegated to `SyslDriver.computeSourceKey`, which
+    * walks up looking for a project marker (`sysl.toml`) when no explicit
+    * `baseDir` is supplied — letting sysl-native repos declare module paths
+    * relative to the package root regardless of where the repo lives on disk.
+    */
   private def resolveSource(path: String, baseDir: String): (String, String) =
     val name = io.fileName(path)
     val raw = io.readFile(path)
-    // Compute relative path from base directory
-    val relPath = if path.startsWith(baseDir) then
-      val rel = path.drop(baseDir.length).dropWhile(c => c == '/' || c == '\\')
-      if rel.nonEmpty then rel else name
-    else name
-    val key = if relPath.endsWith(".lsysl") then relPath.stripSuffix(".lsysl")
-    else relPath.stripSuffix(".sysl")
+    val key = SyslDriver.computeSourceKey(io, path, baseDir)
     val source = if name.endsWith(".lsysl") then
       val doc = new LiterateParser().parse(raw)
       LiterateRenderer.tangle(doc)

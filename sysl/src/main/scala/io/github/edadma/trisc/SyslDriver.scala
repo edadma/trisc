@@ -19,6 +19,61 @@ case class CompilationResult(
     packageMetas: Map[String, ModuleMeta] = Map.empty,
 )
 
+object SyslDriver:
+  /** Marker file whose presence in a directory designates that directory as a
+   *  sysl project root. Module paths for source files under such a directory
+   *  are computed *relative to the project root* rather than relative to the
+   *  filesystem root, so a file at `<root>/parsyl/parsyl.lsysl` can declare
+   *  `module parsyl` regardless of where `<root>` lives on disk. v1 only uses
+   *  the marker's existence; future versions may parse its contents for
+   *  package metadata. */
+  val ProjectMarker: String = "sysl.toml"
+
+  /** Walk up from `filePath`'s parent directory looking for `marker` (default
+   *  `ProjectMarker`). Returns the directory path containing the marker, or
+   *  None if no marker is found between the file and the filesystem root.
+   *  Works for both absolute and relative paths; relative paths are resolved
+   *  against the cwd via the underlying `FileOps.exists`. */
+  def findProjectRoot(io: FileOps, filePath: String, marker: String = ProjectMarker): Option[String] =
+    def parent(p: String): Option[String] =
+      val stripped = p.stripSuffix("/")
+      val i = stripped.lastIndexOf('/')
+      if i < 0 then if stripped.isEmpty then None else Some("")
+      else if i == 0 then if stripped == "/" then None else Some("/")
+      else Some(stripped.substring(0, i))
+    @scala.annotation.tailrec
+    def walk(dir: String): Option[String] =
+      val markerHere = if dir.isEmpty then marker else io.joinPath(dir, marker)
+      if io.exists(markerHere) then Some(if dir.isEmpty then "." else dir)
+      else parent(dir) match
+        case None => None
+        case Some(p) => walk(p)
+    parent(filePath).flatMap(walk)
+
+  /** Compute the source-map key for a file at `filePath` given an optional
+   *  explicit `baseDir`. An explicit `baseDir` (non-empty) is the base; with
+   *  no `baseDir`, falls back to project-marker discovery and then to the
+   *  full slash-stripped path. The returned key is the path *without* the
+   *  `.sysl` / `.lsysl` extension. */
+  def computeSourceKey(io: FileOps, filePath: String, baseDir: String = ""): String =
+    val name = io.fileName(filePath)
+    val effectiveBase =
+      if baseDir.nonEmpty then baseDir
+      else findProjectRoot(io, filePath) match
+        case Some(root) =>
+          val r = if root == "." then "" else root
+          if r.isEmpty || r.endsWith("/") then r else r + "/"
+        case None => ""
+    val relPath = if effectiveBase.nonEmpty && filePath.startsWith(effectiveBase) then
+      val rel = filePath.drop(effectiveBase.length).dropWhile(c => c == '/' || c == '\\')
+      if rel.nonEmpty then rel else name
+    else if effectiveBase.isEmpty then
+      val rel = filePath.dropWhile(c => c == '/' || c == '\\')
+      if rel.nonEmpty then rel else name
+    else name
+    if relPath.endsWith(".lsysl") then relPath.stripSuffix(".lsysl")
+    else relPath.stripSuffix(".sysl")
+
 class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, config: Map[String, String] = Map.empty, tangler: Option[String => String] = None):
 
   case class DriverError(msg: String) extends RuntimeException(msg)

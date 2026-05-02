@@ -25,6 +25,19 @@ import posix.string.*                // wildcard import
 import posix.io.{open => fopen}      // aliased import
 ```
 
+### Project root marker (`sysl.toml`)
+
+A file named `sysl.toml` placed in a directory designates that directory as a *project root*. Source files under such a directory have their declared module paths checked relative to the project root rather than relative to the filesystem root. v1 only uses the marker's existence; future versions may parse its contents for package metadata.
+
+```
+parsyl/
+├── sysl.toml                 ← marker (empty file is fine)
+└── parsyl/
+    └── parsyl.lsysl          ← `module parsyl` (matches dir under root)
+```
+
+With the marker, `sbt syslCliJVM/run test /Users/ed/dev/parsyl/parsyl/parsyl.lsysl` succeeds because the expected module is computed as `parsyl` (the directory under the marker), not `Users.ed.dev.parsyl.parsyl` (the full filesystem path). Files outside any marker'd tree fall back to filesystem-path-based validation, so the in-tree `std/`, `oskit/`, and `posix/` packages keep working unchanged.
+
 ### Visibility
 
 ```sysl
