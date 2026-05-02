@@ -987,6 +987,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "pipemax: bad"
   }
 
+  "unix: socket-pool exhaustion returns ENOMEM" in {
+    // Phase 0c chunk 3. Unix server's slot pool is
+    // UNIX_MAX_SOCKETS = 16. socket(AF_UNIX, DGRAM) past the
+    // cap returns -ENOMEM (the unix server's wire status, not
+    // EMFILE — the per-process posix-fd cap is 64 so it never
+    // bites first). Closing one socket frees the slot.
+    val output = qemu.command("test_unixmax")
+    output should include("unixmax: ok")
+    output should not include "unixmax: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no
