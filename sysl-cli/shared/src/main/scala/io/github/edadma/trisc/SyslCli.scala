@@ -291,7 +291,11 @@ object SyslCli:
 
   private def executeCompile(cmd: CompileCommand): Unit =
     val sources = resolveSources(cmd.inputs)
-    val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
+    val resolved = SyslResolver.resolve(io, cmd.inputs) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    val inputDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList
+    val baseDirs = (inputDirs ++ resolved.searchRoots).distinct match
       case Nil => List(".")
       case dirs => dirs
 
@@ -340,9 +344,11 @@ object SyslCli:
     val initialSources = resolveSources(cmd.inputs)
     val argv = cmd.programArgs.toArray
 
-    val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
-      case Nil => List(".")
-      case dirs => dirs
+    val resolved = SyslResolver.resolve(io, cmd.inputs) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    val inputDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList
+    val baseDirs = (inputDirs ++ resolved.searchRoots ++ List(".")).distinct
     val sources = resolveTransitiveSources(initialSources, baseDirs)
     val config = if cmd.noContracts then Map("contracts" -> "off") else Map.empty[String, String]
     val driver = new SyslDriver(Some(io), baseDirs, config = config, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
@@ -959,10 +965,14 @@ object SyslCli:
       System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', or 'trisc')")
       throw CliError("unsupported backend")
 
-    // Always use project root as base so module paths resolve correctly.
-    // e.g. std/regex/regex.lsysl → key "std/regex/regex" → module "std.regex"
-    // This works regardless of input depth (std/, std/regex/, std/regex/regex.lsysl).
-    val baseDirs = List(".")
+    // baseDirs always include "." so that legacy invocations from inside the
+    // trisc repo (sub-dir tests with no sysl.toml in scope) keep working.
+    // When a project + path deps are in scope, we add each dep's project root
+    // to baseDirs so import-based source discovery can find dep modules.
+    val resolved = SyslResolver.resolve(io, cmd.inputs) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    val baseDirs = (List(".") ++ resolved.searchRoots).distinct
     val initialSources: Map[String, String] =
       cmd.inputs.flatMap { p =>
         if !io.exists(p) then fail(s"error: file not found: $p")

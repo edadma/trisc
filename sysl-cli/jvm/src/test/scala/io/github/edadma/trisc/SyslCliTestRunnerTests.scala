@@ -2,7 +2,6 @@ package io.github.edadma.trisc
 
 import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
-import java.io.{ByteArrayOutputStream, PrintStream}
 import java.nio.file.{Files, Path}
 
 /** Integration tests for `sysl test <path>` test-discovery scope.
@@ -35,31 +34,7 @@ class SyslCliTestRunnerTests extends AnyFreeSpec with Matchers {
    *  test runner pins `user.dir` per JVM and a mid-test mutation does not
    *  reach `java.io.File.getAbsolutePath`).
    */
-  private def runCli(args: String*): (Int, String) =
-    val baos = new ByteArrayOutputStream()
-    val out = new PrintStream(baos, true, "UTF-8")
-    val savedSystemOut = System.out
-    val savedSystemErr = System.err
-    System.setOut(out)
-    System.setErr(out)
-    val code: Int =
-      try Console.withOut(out) {
-        Console.withErr(out) {
-          SyslCli.parse(args) match
-            case Some(config) =>
-              try { SyslCli.execute(config); 0 }
-              catch
-                case e: RuntimeException =>
-                  out.println(s"[runtime error] ${e.getClass.getSimpleName}: ${e.getMessage}")
-                  1
-            case None => 2
-        }
-      }
-      finally
-        out.flush()
-        System.setOut(savedSystemOut)
-        System.setErr(savedSystemErr)
-    (code, baos.toString("UTF-8"))
+  private def runCli(args: String*): (Int, String) = CliCapture.runCli(args)
 
   /** Stage test files under `target/sysl_test_runner/<label>_<n>/` inside
    *  the project root's actual CWD so the driver sees short relative paths
