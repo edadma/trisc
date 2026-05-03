@@ -965,16 +965,56 @@ object SyslCli:
       System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', or 'trisc')")
       throw CliError("unsupported backend")
 
+    val resolved = SyslResolver.resolve(io, cmd.inputs) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+
+    SyslResolver.workspaceMemberDirs(io, resolved) match
+      case Some(members) =>
+        // Workspace mode: each member is its own compilation. Re-resolve and
+        // run tests per member so module keys don't collide between members
+        // and each member sees only its own [dependencies].
+        val root = resolved.projectRoot.get
+        println(s"workspace at $root: testing ${members.size} member(s)")
+        var totalPassed = 0
+        var totalFailed = 0
+        var totalSkipped = 0
+        val workspaceStart = System.nanoTime()
+        for member <- members do
+          println(s"\n— member: $member")
+          val perMember = SyslResolver.resolve(io, Seq(member)) match
+            case Right(r) => r
+            case Left(msg) => fail(s"error in workspace member $member: $msg")
+          val (p, f, s) = runProjectTests(cmd, Seq(member), perMember)
+          totalPassed += p
+          totalFailed += f
+          totalSkipped += s
+        val workspaceMs = (System.nanoTime() - workspaceStart) / 1e6
+        println(f"\nworkspace total: $totalPassed passed, $totalFailed failed, $totalSkipped skipped — $workspaceMs%.1fms")
+        if totalFailed > 0 then throw CliError(s"$totalFailed test(s) failed")
+      case None =>
+        val (_, failed, _) = runProjectTests(cmd, cmd.inputs, resolved)
+        if failed > 0 then throw CliError(s"$failed test(s) failed")
+
+  /** Run the test discovery + execution pipeline for a single project (or for
+   *  legacy "no project root" inputs). Returns (passed, failed, skipped) so
+   *  the workspace dispatcher can aggregate. Throws CliError only on hard
+   *  errors (missing input file, resolver failure) — failing tests are
+   *  reported via the return tuple so the caller decides how to surface
+   *  workspace-wide totals.
+   */
+  private def runProjectTests(
+      cmd: TestCommand,
+      inputs: Seq[String],
+      resolved: ResolvedDeps,
+  ): (Int, Int, Int) =
     // baseDirs always include "." so that legacy invocations from inside the
     // trisc repo (sub-dir tests with no sysl.toml in scope) keep working.
     // When a project + path deps are in scope, we add each dep's project root
     // to baseDirs so import-based source discovery can find dep modules.
-    val resolved = SyslResolver.resolve(io, cmd.inputs) match
-      case Right(r) => r
-      case Left(msg) => fail(s"error: $msg")
     val baseDirs = (List(".") ++ resolved.searchRoots).distinct
     val initialSources: Map[String, String] =
-      cmd.inputs.flatMap { p =>
+      inputs.flatMap { p =>
         if !io.exists(p) then fail(s"error: file not found: $p")
         if io.isDirectory(p) then
           collectSyslFiles(p).map(f => resolveSource(f, ""))
@@ -1087,7 +1127,7 @@ object SyslCli:
     // is silent (the user didn't ask for those tests in the first place).
     val skipped = inScopeDiscovered.size - filtered.size
     println(f"\n$passed passed, $failed failed, $skipped skipped — $totalMs%.1fms")
-    if failed > 0 then throw CliError(s"$failed test(s) failed")
+    (passed, failed, skipped)
 
   private def executeProve(cmd: ProveCommand): Unit =
     // Phase 1: parse the input file and translate to WhyML directly. We do not run the

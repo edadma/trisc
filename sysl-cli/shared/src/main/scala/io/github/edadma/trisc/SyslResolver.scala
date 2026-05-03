@@ -50,7 +50,7 @@ object SyslResolver:
    *  input. All inputs must share a single project root — mixing paths from
    *  different projects in one CLI invocation isn't supported. */
   private def findProjectRoot(io: FileOps, inputs: Seq[String]): Option[String] =
-    val roots = inputs.flatMap(p => SyslDriver.findProjectRoot(io, p)).distinct
+    val roots = inputs.flatMap(p => findProjectRootForInput(io, p)).distinct
     roots match
       case Seq() => None
       case Seq(one) => Some(one)
@@ -59,6 +59,31 @@ object SyslResolver:
         // a sub-dir and another is the project root itself. Any cross-project
         // mismatch will surface as "module not found" later.
         Some(many.maxBy(_.length))
+
+  /** Locate the project root for a single CLI input. SyslDriver.findProjectRoot
+   *  walks up from the parent of the path, which is correct for file inputs
+   *  (the file's directory is the first one to check) but wrong for directory
+   *  inputs that *are themselves* a project root — it would skip the dir and
+   *  find some unrelated higher-up `sysl.toml`. Check the directory itself
+   *  first, then fall back to the walk-up. */
+  private def findProjectRootForInput(io: FileOps, input: String): Option[String] =
+    if io.exists(input) && io.isDirectory(input) then
+      val markerHere = io.joinPath(input, ManifestFile)
+      if io.exists(markerHere) then Some(input.stripSuffix("/"))
+      else SyslDriver.findProjectRoot(io, input)
+    else SyslDriver.findProjectRoot(io, input)
+
+  /** Workspace member directories, resolved against the workspace root, in
+   *  declaration order. Returns None if the resolved project is not a
+   *  workspace (or no project was discovered). Used by the CLI to dispatch a
+   *  per-member test/run pass when the user points at a workspace root. */
+  def workspaceMemberDirs(io: FileOps, resolved: ResolvedDeps): Option[List[String]] =
+    resolved.projectRoot.flatMap { root =>
+      resolved.manifests.get(root) match
+        case Some(WorkspaceManifest(ws)) =>
+          Some(ws.members.map(m => normalizePath(io.joinPath(root, m))))
+        case _ => None
+    }
 
   private def loadManifestAt(io: FileOps, dir: String): Either[String, SyslManifest] =
     val path = io.joinPath(dir, ManifestFile)

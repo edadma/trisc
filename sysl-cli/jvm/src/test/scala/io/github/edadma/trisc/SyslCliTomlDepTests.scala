@@ -171,6 +171,134 @@ class SyslCliTomlDepTests extends AnyFreeSpec with Matchers {
     }
   }
 
+  // Workspace tests (chunk 3): pointing the CLI at a workspace root iterates
+  // over every member, running each member as its own compilation. Module
+  // keys live in each member's own namespace, so two members can declare the
+  // same internal module name without colliding.
+
+  "a workspace tests every member from the workspace root" in {
+    val (abs, rel) = stagingDir("workspace")
+
+    // Workspace root: no [package], just the member list.
+    writeFile(abs, "sysl.toml",
+      """[workspace]
+        |members = ["alpha", "beta"]
+        |""".stripMargin)
+
+    // Member alpha: one #test.
+    writeFile(abs, "alpha/sysl.toml",
+      """[package]
+        |name = "alpha"
+        |version = "0.1.0"
+        |""".stripMargin)
+    writeFile(abs, "alpha/alpha/foo.lsysl",
+      """    module alpha
+        |
+        |    #test
+        |    test_alpha_one() -> unit
+        |        if false then panic("never")
+        |""".stripMargin)
+
+    // Member beta: a different #test, in its own namespace.
+    writeFile(abs, "beta/sysl.toml",
+      """[package]
+        |name = "beta"
+        |version = "0.1.0"
+        |""".stripMargin)
+    writeFile(abs, "beta/beta/bar.lsysl",
+      """    module beta
+        |
+        |    #test
+        |    test_beta_one() -> unit
+        |        if false then panic("never")
+        |""".stripMargin)
+
+    val (code, out) = runCli("test", rel)
+    withClue(out) {
+      code shouldBe 0
+      out should include("workspace at")
+      out should include("test_alpha_one")
+      out should include("test_beta_one")
+      out should include("workspace total: 2 passed")
+    }
+  }
+
+  "a workspace member that path-deps on a sibling resolves cross-member" in {
+    val (abs, rel) = stagingDir("workspace_xdep")
+
+    writeFile(abs, "sysl.toml",
+      """[workspace]
+        |members = ["lib", "app"]
+        |""".stripMargin)
+
+    writeFile(abs, "lib/sysl.toml",
+      """[package]
+        |name = "ws_lib"
+        |version = "0.1.0"
+        |""".stripMargin)
+    writeFile(abs, "lib/lib/lib.lsysl",
+      """    module lib
+        |
+        |    answer() -> int = 11
+        |""".stripMargin)
+
+    // Member app declares the sibling as a path dep — exactly the same form
+    // a non-workspace consumer would use. The workspace toml gives no
+    // implicit cross-member visibility; deps stay explicit.
+    writeFile(abs, "app/sysl.toml",
+      """[package]
+        |name = "ws_app"
+        |version = "0.1.0"
+        |
+        |[dependencies]
+        |ws_lib = { path = "../lib" }
+        |""".stripMargin)
+    writeFile(abs, "app/app/main.lsysl",
+      """    module app
+        |
+        |    import lib.{answer}
+        |
+        |    #test
+        |    test_app_uses_lib() -> unit
+        |        if answer() != 11 then panic("cross-member dep broken")
+        |""".stripMargin)
+
+    val (code, out) = runCli("test", rel)
+    withClue(out) {
+      code shouldBe 0
+      out should include("test_app_uses_lib")
+      out should include("workspace total: 1 passed")
+    }
+  }
+
+  "a workspace declaring a missing member fails with a clear error" in {
+    val (abs, rel) = stagingDir("workspace_missing")
+
+    writeFile(abs, "sysl.toml",
+      """[workspace]
+        |members = ["present", "absent"]
+        |""".stripMargin)
+
+    writeFile(abs, "present/sysl.toml",
+      """[package]
+        |name = "present_pkg"
+        |version = "0.1.0"
+        |""".stripMargin)
+    writeFile(abs, "present/present/p.lsysl",
+      """    module present
+        |
+        |    #test
+        |    t() -> unit = ()
+        |""".stripMargin)
+    // `absent/` doesn't exist — resolver must surface a clear member error.
+
+    val (_, out) = runCli("test", rel)
+    withClue(out) {
+      out should include("workspace member `absent`")
+      out should not include "workspace total"
+    }
+  }
+
   "a git dep is rejected with a helpful message until later chunks land" in {
     val (abs, rel) = stagingDir("gitdep")
     writeFile(abs, "app/sysl.toml",
