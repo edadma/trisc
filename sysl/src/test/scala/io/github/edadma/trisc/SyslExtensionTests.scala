@@ -970,4 +970,113 @@ class SyslExtensionTests extends SyslTestHelpers {
       )) shouldBe 42
     }
   }
+
+  "cross-file struct method visibility under accumulated state" - {
+
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "struct method declared in one file dispatches from sibling under trait+impl noise" in {
+      // Three files. File 1: struct + method + trait + generic impl + #operator
+      // (the "noise" that causes accumulated module state to interfere).
+      // File 2: a function calling the method. File 3: a #test using both.
+      // Without sibling-pre-collect handling free-fn (struct-method) decls,
+      // file 2's analyzer would fail with `struct S has no method 'doubled'`.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct S
+            |    v: int
+            |
+            |S.doubled() -> int = self.v * 2
+            |
+            |trait Marker[A, R]
+            |    #operator("@@")
+            |    mark(a: A) -> R
+            |
+            |impl Marker[S, S]
+            |    mark(s: S) -> S = s
+            |""".stripMargin,
+        "sib/use" ->
+          """module sib
+            |
+            |use_s(s: S) -> int = s.doubled()
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val s = S(7)
+            |    use_s(s)
+            |""".stripMargin,
+      )) shouldBe 14
+    }
+
+    "struct method declared after many unrelated decls in same file dispatches from sibling" in {
+      // File 1: struct + many unrelated declarations + method at the end.
+      // File 2 calls the method. The method's position in the source order
+      // is intentionally deep so the previously-failing under-accumulated-
+      // -state shape is exercised.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box
+            |    v: int
+            |
+            |dummy_a -> int = 1
+            |dummy_b -> int = 2
+            |dummy_c -> int = 3
+            |dummy_d -> int = 4
+            |dummy_e -> int = 5
+            |
+            |type Wrap[A] = new A
+            |
+            |unrelated_generic[T](x: T) -> T = x
+            |
+            |Box.doubled() -> int = self.v * 2
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val b = Box(11)
+            |    b.doubled()
+            |""".stripMargin,
+      )) shouldBe 22
+    }
+
+    "cross-file struct field access from sibling-declared free function" in {
+      // Mirrors parsyl's atoms.lsysl reading `inp.source[i]` where Input is
+      // declared in parsyl.lsysl. Without filling sibling struct fields at
+      // pre-register time (not just placeholder), body analysis throws
+      // `no field 'source'`.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Inp
+            |    source: int
+            |    offset: int
+            |""".stripMargin,
+        "sib/atoms" ->
+          """module sib
+            |
+            |read_at(inp: Inp) -> int = inp.source + inp.offset
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val i = Inp(40, 2)
+            |    read_at(i)
+            |""".stripMargin,
+      )) shouldBe 42
+    }
+  }
 }

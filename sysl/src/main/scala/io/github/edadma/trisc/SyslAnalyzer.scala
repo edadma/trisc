@@ -324,6 +324,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   // can drop and re-add them after own struct/alias placeholders have been
   // replaced with real fields-resolved types.
   protected val importedConcreteImplStubFunctions = mutable.HashSet[String]()
+  // Local-key names of non-generic free-function stubs registered by the
+  // sibling pre-register. Same cleanup-and-re-register dance as concrete
+  // impl stubs so cross-sibling free-fn signatures don't latch onto
+  // placeholder struct types from the first pre-register pass.
+  protected val importedSiblingFreeFnStubKeys = mutable.HashSet[String]()
   // Generic-impl key uses raw TypeAST patterns since the targets may carry
   // type variables that don't resolve to a SyslType at import time.
   protected val importedGenericImplKeys = mutable.HashSet[(String, List[String], List[TypeAST])]()
@@ -1609,18 +1614,62 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             traits(name) = TraitInfo(name, tparams, methods)
             importedTraitNames += name
             registerTraitOperatorEntries(name, methods, td)
-        case StructDeclAST(name, _, typeParams, _, _) if typeParams.isEmpty =>
-          if !structTypes.contains(name) then
-            structTypes(name) = SyslType.StructType(name, Nil)
+        case StructDeclAST(name, fields, typeParams, _, _) if typeParams.isEmpty =>
+          // Best-effort: register the struct with resolved fields so cross-
+          // sibling field accesses (e.g. atoms.lsysl reading `inp.source`
+          // when Input is in parsyl.lsysl) work during body analysis.
+          // Falls back to a Nil-fields placeholder if any field type can't
+          // resolve yet — the post-pass-1 hook re-runs and may complete it.
+          val existing = structTypes.get(name)
+          val needsFill = existing.forall(_.fields.isEmpty)
+          if needsFill then
+            val resolvedFields = scala.util.Try(fields.map { case (fn, ft, _) =>
+              (fn, resolveType(ft))
+            }).getOrElse(Nil)
+            structTypes(name) = SyslType.StructType(name, resolvedFields)
         case DataEnumDeclAST(name, variants, typeParams, _) if typeParams.isEmpty =>
-          if !dataEnumTypes.contains(name) then
-            dataEnumTypes(name) = SyslType.EnumType(name, variants.map(v => (v.name, Nil)))
+          // Best-effort: resolve variant fields too. Same fallback as struct.
+          val existing = dataEnumTypes.get(name)
+          val needsFill = existing.forall(_.variants.forall(_._2.isEmpty))
+          if needsFill then
+            val resolvedVariants = variants.map { case EnumVariantAST(vname, vfields) =>
+              val resolved = scala.util.Try(vfields.map { case (fn, ft) =>
+                (fn, resolveType(ft))
+              }).getOrElse(Nil)
+              (vname, resolved)
+            }
+            dataEnumTypes(name) = SyslType.EnumType(name, resolvedVariants)
             for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
               if !variantToEnum.contains(vname) && !genericVariantToEnum.contains(vname) then
                 variantToEnum(vname) = (dataEnumTypes(name), idx)
         case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate) if typeParams.isEmpty =>
           if !typeAliases.contains(name) && !genericTypeAliases.contains(name) then
             typeAliases(name) = (target, isNew, range, predicate)
+        case fd @ FunDeclAST(name, params, returnType, _, _, tps, _, attrs, isDef, isParameterless)
+            if tps.isEmpty && !name.startsWith("__") =>
+          // Non-generic free functions (including struct methods, parsed as
+          // `Input_at_end` etc.) — pre-register a stub FunInfo so cross-
+          // sibling references like `inp.at_end()` (which looks up
+          // `functions(Input_at_end)`) and direct calls (like `literal(s)`
+          // from operators.lsysl into atoms.lsysl) resolve. Param/return
+          // types may still be placeholder-typed at first pre-register; the
+          // post-pass-1 hook re-registers with real types after own pass 1
+          // populates struct fields. Skip if the name conflicts with an
+          // already-known function/template, or if signature resolution
+          // fails (sibling types not yet registered — retry next iteration).
+          if !functions.contains(name) && !genericTemplates.contains(name) then
+            scala.util.Try {
+              val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+              val retType = returnType.map(resolveType).getOrElse(UnitType)
+              val mangled = if shouldMangle(name) then mangleName(name) else name
+              val isPure = attrs.exists(_.name == "pure")
+              functions(name) = FunInfo(
+                mangled, paramTypes, retType, isDef, isPure,
+                isParameterless = isParameterless,
+              )
+              externalSymbols += name
+              importedSiblingFreeFnStubKeys += name
+            }
         case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _) =>
           val alreadyHas = implTemplates.getOrElse(traitName, Nil).exists(t =>
             t.typeParams == implTypeParams && t.targetPatterns == targetTypes)
@@ -2131,6 +2180,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         // Re-registration adds a fresh key.
         implTemplates.getOrElse(traitName, Nil).exists(_.methods.values.exists(stubSet.contains))
       }
+    // Same cleanup for free-fn stubs: drop so the re-pre re-registers with
+    // real types in scope (sibling pre-register may have latched onto
+    // placeholder struct types in the first pass).
+    val staleFreeFnStubs = importedSiblingFreeFnStubKeys.toList
+    if staleFreeFnStubs.nonEmpty then
+      for k <- staleFreeFnStubs do
+        functions.remove(k)
+        externalSymbols -= k
+      importedSiblingFreeFnStubKeys.clear()
     for sib <- siblingForwardDecls do
       registerSiblingForwardDeclsFrom(sib)
 
