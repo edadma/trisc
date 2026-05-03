@@ -193,8 +193,20 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             val analyzer = new SyslAnalyzer(contractsEnabled = contractsEnabled)
             // Register extern names so they are never mangled (ABI-level symbols)
             analyzer.registerNoMangle(globalExternNames)
-            for src <- sourceNames if src != name do
-              analyzer.registerGenericTemplatesFrom(asts(src))
+            // Pre-seed currentModule so any concrete-impl mangling done during
+            // sibling pre-register uses the right prefix (this matches Step 5).
+            modules.get(name).foreach(modPath =>
+              analyzer.preSetModule(modPath.replace('/', '_').replace('.', '_')))
+            // Sibling type/trait/impl forward-decls. The analyzer hooks
+            // `siblingForwardDecls` so its own analyze() can re-run the
+            // sibling decls after pass 1 (own types in scope), letting
+            // sibling concrete impls that reference own generic aliases
+            // resolve on the second pass — breaks the cycle for modules
+            // like parsyl-split where each sibling depends on the other.
+            val siblingASTs = sourceNames.iterator.filter(_ != name).map(asts(_)).toList
+            for src <- siblingASTs do
+              analyzer.registerSiblingForwardDeclsFrom(src)
+            analyzer.siblingForwardDecls = siblingASTs
             // Carry through extensions / impls / generic templates so cross-file
             // same-module dispatch works during pre-collection. Without this,
             // sibling-file extensions (and operator extension impls) would be
@@ -300,8 +312,17 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       // interpreter / linker can't find the function.
       for modPath <- modules.get(name) do
         analyzer.preSetModule(modPath.replace('/', '_').replace('.', '_'))
-        for src <- moduleToSources.getOrElse(modPath, Set.empty) if src != name do
-          analyzer.registerGenericTemplatesFrom(asts(src))
+        // Sibling forward-decls (the broader sibling-pre-collect path that
+        // also covers traits/impls/non-generic types). Step 5 uses the same
+        // shape as Step 4b so cyclic intra-module references can resolve
+        // even when one sibling's contributions weren't fully captured in
+        // the per-file meta cache (e.g. parsyl-split where operator traits
+        // and the types they reference live in different files).
+        val siblingSources = moduleToSources.getOrElse(modPath, Set.empty).iterator
+          .filter(_ != name).map(asts(_)).toList
+        for src <- siblingSources do
+          analyzer.registerSiblingForwardDeclsFrom(src)
+        analyzer.siblingForwardDecls = siblingSources
         // Build a sibling-only view by merging every other file's per-file meta
         // in this module. This excludes the current file's contributions
         // entirely, so mirrored extensions / traits / impls / templates won't

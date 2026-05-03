@@ -281,6 +281,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   def preSetModule(modPath: String): Unit =
     currentModule = Some(modPath)
 
+  /** Sibling source ASTs that the driver wants `analyze()` to re-pre-register
+   *  after own type registration completes. This breaks cyclic-deps between
+   *  same-module files where each sibling references the other's types AND
+   *  the other's traits/impls. The first pre-register (driver-side, before
+   *  analyze) sets up everything resolvable without own types in scope; this
+   *  hook re-registers them once own pass 1 has populated genericTypeAliases /
+   *  structTypes / etc., letting previously-skipped concrete impls resolve. */
+  var siblingForwardDecls: List[ProgramAST] = Nil
+
   /** Strip module prefix from a mangled name to get the short name.
     * Uses indexOf (first `__`) not lastIndexOf, because function names
     * can contain `_` (e.g. `_run_atexit` → mangled `mod___run_atexit`).
@@ -310,6 +319,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   // (e.g. `impl Combine[Box, Box, Box]`) are tracked correctly. Single-target
   // impls store a one-element list.
   protected val importedConcreteImplKeys = mutable.HashSet[(String, List[SyslType])]()
+  // Mangled function names registered as stubs by the sibling pre-register
+  // for concrete impl methods. Tracked so the post-pass-1 re-pre-register
+  // can drop and re-add them after own struct/alias placeholders have been
+  // replaced with real fields-resolved types.
+  protected val importedConcreteImplStubFunctions = mutable.HashSet[String]()
   // Generic-impl key uses raw TypeAST patterns since the targets may carry
   // type variables that don't resolve to a SyslType at import time.
   protected val importedGenericImplKeys = mutable.HashSet[(String, List[String], List[TypeAST])]()
@@ -1574,6 +1588,109 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             importedTemplateNames += name
         case _ => ()
 
+  /** Sibling forward-decl pass: registers structs/enums/aliases/traits/impls
+   *  from a same-module sibling file's source AST. Distinct from
+   *  registerGenericTemplatesFrom — that one is called from registerImport's
+   *  cross-module path and must NOT mangle with the importing module's
+   *  prefix. This method is only safe to call when the analyzer's
+   *  currentModule equals the sibling's owning module (i.e. they're in the
+   *  same module). The driver pre-seeds currentModule and calls this on
+   *  every sibling AST during Step 4b; the analyzer re-calls it after own
+   *  pass 1 so sibling concrete impls referencing own types can resolve.
+   *  Idempotent — every clause guards on existence. */
+  def registerSiblingForwardDeclsFrom(program: ProgramAST): Unit =
+    // Pre-pass: register generic templates first so cross-sibling generic
+    // types are visible to the type-checks in subsequent clauses.
+    registerGenericTemplatesFrom(program)
+    for decl <- program.decls do
+      decl match
+        case td @ TraitDeclAST(name, tparams, methods, _) =>
+          if !traits.contains(name) then
+            traits(name) = TraitInfo(name, tparams, methods)
+            importedTraitNames += name
+            registerTraitOperatorEntries(name, methods, td)
+        case StructDeclAST(name, _, typeParams, _, _) if typeParams.isEmpty =>
+          if !structTypes.contains(name) then
+            structTypes(name) = SyslType.StructType(name, Nil)
+        case DataEnumDeclAST(name, variants, typeParams, _) if typeParams.isEmpty =>
+          if !dataEnumTypes.contains(name) then
+            dataEnumTypes(name) = SyslType.EnumType(name, variants.map(v => (v.name, Nil)))
+            for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
+              if !variantToEnum.contains(vname) && !genericVariantToEnum.contains(vname) then
+                variantToEnum(vname) = (dataEnumTypes(name), idx)
+        case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate) if typeParams.isEmpty =>
+          if !typeAliases.contains(name) && !genericTypeAliases.contains(name) then
+            typeAliases(name) = (target, isNew, range, predicate)
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _) =>
+          val alreadyHas = implTemplates.getOrElse(traitName, Nil).exists(t =>
+            t.typeParams == implTypeParams && t.targetPatterns == targetTypes)
+          if !alreadyHas then
+            if implTypeParams.nonEmpty then
+              implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+                typeParams = implTypeParams,
+                targetPatterns = targetTypes,
+                resolvedConcrete = None,
+                methods = mutable.LinkedHashMap.empty,
+                methodInfos = Nil,
+                methodASTs = methods,
+                definingModule = "",
+                implDecl = Some(impl),
+              )
+              importedGenericImplKeys += ((traitName, implTypeParams, targetTypes))
+            else
+              // Concrete: best-effort resolve. Targets that don't resolve yet
+              // (sibling hasn't pre-collected its type decls) are skipped; a
+              // later call retries with more state. Build methods map by
+              // mangling so enumerateImplCandidates can look up paramTypes
+              // via `functions(mangled)` — empty methods map breaks dispatch.
+              scala.util.Try(targetTypes.map(resolveType)).toOption.foreach { resolvedTargets =>
+                val owningModuleMangled = currentModule.getOrElse("")
+                val typeMangled = resolvedTargets.map(typeToMangled).mkString("_")
+                val methodMap = mutable.LinkedHashMap.empty[String, String]
+                // Also register a stub FunInfo per impl method using the trait
+                // method's signature substituted with the impl's targets — so
+                // enumerateImplCandidates' concrete branch can fetch paramTypes
+                // from `functions(mangled)` and the dispatch comparison works.
+                // The function body is owned by the sibling's compilation unit;
+                // here we only need the type shape for dispatch.
+                val trait_ = traits.get(traitName)
+                for m <- methods do
+                  val rawMangled = s"${traitName}_${m.name}_${typeMangled}"
+                  val mangled =
+                    if owningModuleMangled.nonEmpty && !neverMangle.contains(rawMangled) then
+                      s"${owningModuleMangled}__${rawMangled}"
+                    else rawMangled
+                  methodMap(m.name) = mangled
+                  if !functions.contains(mangled) then
+                    trait_.foreach { ti =>
+                      ti.methods.find(_.name == m.name).foreach { tm =>
+                        scala.util.Try {
+                          val savedEnv = typeEnv
+                          typeEnv = typeEnv ++ ti.typeParams.zip(resolvedTargets).toMap
+                          try
+                            val paramTypes = tm.params.map(p => (p.name, resolveType(p.typ)))
+                            val retType = resolveType(tm.returnType)
+                            functions(mangled) = FunInfo(mangled, paramTypes, retType)
+                            externalSymbols += mangled
+                            importedConcreteImplStubFunctions += mangled
+                          finally typeEnv = savedEnv
+                        }
+                      }
+                    }
+                implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+                  typeParams = Nil,
+                  targetPatterns = targetTypes,
+                  resolvedConcrete = Some(resolvedTargets),
+                  methods = methodMap,
+                  methodInfos = Nil,
+                  methodASTs = Nil,
+                  definingModule = "",
+                  implDecl = Some(impl),
+                )
+                importedConcreteImplKeys += ((traitName, resolvedTargets))
+              }
+        case _ => ()
+
   def analyze(programIn: ProgramAST): TProgram =
     // Pre-pass 0: extract module name, then lower extension blocks. Module
     // extraction has to come first so each ExtensionEntry gets the right
@@ -1604,17 +1721,24 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // Pass 0: forward-declare all type names so recursive references resolve.
     // Struct and enum names are registered as placeholder types; fields are
     // resolved in the next pass once all names are visible.
+    //
+    // Same-file duplicate struct/enum declarations are still rejected
+    // (`pass0*` set tracks own-file decls). Cross-sibling pre-registration
+    // may have already placed a placeholder in `structTypes`/`dataEnumTypes`;
+    // that's allowed — the own file's declaration wins and pass 0.5 fills
+    // the real fields. Without this tolerance, two-file modules where each
+    // sibling pre-registers the other's types throw spurious duplicates.
     val pass0Structs = mutable.HashSet[String]()
     val pass0Enums = mutable.HashSet[String]()
     for decl <- program.decls do
       decl match
         case StructDeclAST(name, _, typeParams, _, _) if typeParams.isEmpty =>
-          if pass0Structs.contains(name) || structTypes.contains(name) then
+          if pass0Structs.contains(name) then
             throw AnalysisError(s"duplicate struct: '$name'", decl)
           pass0Structs += name
           structTypes(name) = SyslType.StructType(name, Nil) // placeholder — fields filled below
         case DataEnumDeclAST(name, _, typeParams, _) if typeParams.isEmpty =>
-          if pass0Enums.contains(name) || dataEnumTypes.contains(name) then
+          if pass0Enums.contains(name) then
             throw AnalysisError(s"duplicate enum: '$name'", decl)
           pass0Enums += name
           dataEnumTypes(name) = SyslType.EnumType(name, Nil) // placeholder — variants filled below
@@ -1880,15 +2004,30 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           else
             typeAliases(name) = (target, isNew, range, predicate)
         case TraitDeclAST(name, tparams, methods, _) =>
-          if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
-          // Check no duplicate method names within the trait
-          val methodNames = methods.map(_.name)
-          if methodNames.distinct.length != methodNames.length then
-            throw AnalysisError(s"duplicate method names in trait '$name'")
-          if tparams.distinct.length != tparams.length then
-            throw AnalysisError(s"duplicate type parameter names in trait '$name'")
-          traits(name) = TraitInfo(name, tparams, methods)
-          registerTraitOperatorEntries(name, methods, decl)
+          // Tolerate sibling-pre-registered traits (importedTraitNames) — those
+          // came from this same trait decl via cross-sibling forward-decl pass
+          // and are structurally identical. Without this, two-file modules
+          // where each sibling pre-registers the other's traits throw a
+          // spurious duplicate when the defining file's main pass reaches the
+          // decl. A real same-file duplicate (`importedTraitNames` doesn't
+          // contain it) is still rejected.
+          if traits.contains(name) && !importedTraitNames.contains(name) then
+            throw AnalysisError(s"duplicate trait: '$name'", decl)
+          if !traits.contains(name) then
+            // Check no duplicate method names within the trait
+            val methodNames = methods.map(_.name)
+            if methodNames.distinct.length != methodNames.length then
+              throw AnalysisError(s"duplicate method names in trait '$name'")
+            if tparams.distinct.length != tparams.length then
+              throw AnalysisError(s"duplicate type parameter names in trait '$name'")
+            traits(name) = TraitInfo(name, tparams, methods)
+            registerTraitOperatorEntries(name, methods, decl)
+          else
+            // Already registered (sibling pre-collect); the trait now owns
+            // this unit (this is the defining unit's main pass) so clear the
+            // imported flag so getTraitDecls includes it in this unit's
+            // perFileMeta.
+            importedTraitNames -= name
         case InterfaceDeclAST(name, methodASTs, embeddedNames, _) =>
           if interfaceTypes.contains(name) then throw AnalysisError(s"duplicate interface: '$name'", decl)
           // Resolve embedded interfaces and flatten methods
@@ -1960,6 +2099,40 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     for (structName, invariants) <- structInvariants do
       val st = structTypes(structName)
       validateStructInvariants(structName, st.fields, invariants)
+
+    // Re-register sibling forward-decls now that own types/aliases are in
+    // scope. Sibling concrete impls that reference own generic aliases
+    // (e.g. operators.lsysl declares `impl Peek[string, Parser[unit]]`
+    // where Parser is in parsyl.lsysl) failed to resolve in the driver's
+    // pre-pass; with own pass 1 done, they can now register. Idempotent —
+    // skip if already registered.
+    // Drop ONLY the stale impl entries that were registered by the sibling
+    // pre-register against type-placeholders (tracked via the stub-functions
+    // set). The post-hook re-registers them with real types now that own
+    // pass 1 has filled in struct fields. Cross-module imports (which use
+    // the proper symbol path) leave importedConcreteImplStubFunctions empty
+    // for their entries — they're untouched here.
+    val staleStubs = importedConcreteImplStubFunctions.toList
+    if staleStubs.nonEmpty then
+      // Locate impl entries whose mangled methods are stale stubs and drop them.
+      for (traitName, buf) <- implTemplates do
+        buf.filterInPlace(t =>
+          t.typeParams.nonEmpty || !t.methods.values.exists(staleStubs.contains))
+      // Also drop the stale FunInfo stubs and their imported-key entries.
+      for fn <- staleStubs do
+        functions.remove(fn)
+        externalSymbols -= fn
+      importedConcreteImplStubFunctions.clear()
+      // Drop concrete impl keys whose mangled name was a stale stub (others
+      // — proper cross-module imports — keep their entries).
+      val stubSet = staleStubs.toSet
+      importedConcreteImplKeys.filterInPlace { case (traitName, _) =>
+        // Conservative: drop a key only if the corresponding impl is gone.
+        // Re-registration adds a fresh key.
+        implTemplates.getOrElse(traitName, Nil).exists(_.methods.values.exists(stubSet.contains))
+      }
+    for sib <- siblingForwardDecls do
+      registerSiblingForwardDeclsFrom(sib)
 
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do

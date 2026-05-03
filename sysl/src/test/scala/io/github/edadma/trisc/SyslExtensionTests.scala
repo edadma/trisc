@@ -838,4 +838,136 @@ class SyslExtensionTests extends SyslTestHelpers {
       )) shouldBe 42
     }
   }
+
+  "cross-file alias body resolution from impl method body (cyclic sibling deps)" - {
+
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "sibling-file impl method-body uses cross-file alias (Stamp + Result + Tagged shape)" in {
+      // The narrowest cyclic dep: lib defines Stamp + Result + Tagged alias;
+      // ops defines a trait whose impl body constructs Tagged[(A,B)] inside,
+      // referring to Stamp from lib. Without sibling-pre-collect breaking the
+      // cycle, ops can't analyze (Stamp invisible) and lib can't analyze
+      // (^^/<> trait machinery in ops invisible) — neither succeeds in
+      // pre-collection's iterative loop without the forward-decl pass.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Stamp
+            |    kind: int
+            |
+            |enum Result[A]
+            |    Ok(value: A)
+            |    Bad(msg: string)
+            |
+            |type Tagged[A] = new (Stamp) -> Result[A]
+            |""".stripMargin,
+        "sib/ops" ->
+          """module sib
+            |
+            |trait Combine[A, B, R]
+            |    #operator("<>")
+            |    combine(a: A, b: B) -> R
+            |
+            |impl[A, B] Combine[Tagged[A], Tagged[B], Tagged[(A, B)]]
+            |    combine(a: Tagged[A], b: Tagged[B]) -> Tagged[(A, B)] =
+            |        Tagged[(A, B)]((s: Stamp) ->
+            |            a(s) match
+            |                Ok(va) -> b(s) match
+            |                    Ok(vb) -> Ok((va, vb))
+            |                    Bad(m) -> Bad(m)
+            |                Bad(m) -> Bad(m))
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |mk_a -> Tagged[int] = Tagged[int]((s: Stamp) -> Ok(s.kind))
+            |mk_b -> Tagged[string] = Tagged[string]((s: Stamp) -> Ok("hi"))
+            |
+            |main() -> int =
+            |    val a = mk_a
+            |    val b = mk_b
+            |    val _ = a <> b
+            |    0
+            |""".stripMargin,
+      )) shouldBe 0
+    }
+
+    "sibling-file generic operator impl on alias-instance dispatches from third sibling" in {
+      // Stripped-down version of parsyl's split: Wrap + generic Map impl
+      // declared in ops, used from main via the operator. Distinct from the
+      // existing 'generic operator impl declared in sibling file' case in
+      // that ops references types declared in lib (cross-cycle).
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Wrap[T]
+            |    v: T
+            |""".stripMargin,
+        "sib/ops" ->
+          """module sib
+            |
+            |trait Map[A, F, R]
+            |    #operator("^^")
+            |    pmap(a: A, f: F) -> R
+            |
+            |impl[A, B] Map[Wrap[A], (A) -> B, Wrap[B]]
+            |    pmap(a: Wrap[A], f: (A) -> B) -> Wrap[B] = Wrap[B](f(a.v))
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val w = Wrap[int](7)
+            |    val r = w ^^ ((n: int) -> n + 1)
+            |    r.v
+            |""".stripMargin,
+      )) shouldBe 8
+    }
+
+    "sibling-file concrete impl on bare-string operand uses sibling-defined alias" in {
+      // The parsyl `impl Not[string, Parser[unit]]` shape: a concrete impl
+      // whose target list mixes a built-in (string) and a sibling-defined
+      // alias instance (Parser[unit]). The sibling-pre-register's concrete-
+      // impl resolution must be able to resolve Parser[unit] before the
+      // defining sibling's body has analyzed.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Inp
+            |    n: int
+            |
+            |type Parser[A] = new (Inp) -> A
+            |
+            |make_int(s: string) -> Parser[int] = Parser[int]((i: Inp) -> 42)
+            |""".stripMargin,
+        "sib/ops" ->
+          """module sib
+            |
+            |trait Lift[A, B, R]
+            |    #operator("<<<")
+            |    lift(a: A, b: B) -> R
+            |
+            |impl Lift[string, string, Parser[int]]
+            |    lift(a: string, b: string) -> Parser[int] = make_int(a)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val p = "foo" <<< "bar"
+            |    val i: Inp = Inp(0)
+            |    p(i)
+            |""".stripMargin,
+      )) shouldBe 42
+    }
+  }
 }
