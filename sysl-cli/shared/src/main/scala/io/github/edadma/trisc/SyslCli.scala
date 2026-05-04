@@ -329,7 +329,7 @@ object SyslCli:
 
   private def executeCompile(cmd: CompileCommand): Unit =
     val sources = resolveSources(cmd.inputs)
-    val resolved = SyslResolver.resolve(io, cmd.inputs) match
+    val resolved = resolveDeps(cmd.inputs, ignoreLockPins = false) match
       case Right(r) => r
       case Left(msg) => fail(s"error: $msg")
     SyslLock.writeIfChanged(io, resolved)
@@ -383,7 +383,7 @@ object SyslCli:
     val initialSources = resolveSources(cmd.inputs)
     val argv = cmd.programArgs.toArray
 
-    val resolved = SyslResolver.resolve(io, cmd.inputs) match
+    val resolved = resolveDeps(cmd.inputs, ignoreLockPins = false) match
       case Right(r) => r
       case Left(msg) => fail(s"error: $msg")
     SyslLock.writeIfChanged(io, resolved)
@@ -1005,7 +1005,7 @@ object SyslCli:
       System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', or 'trisc')")
       throw CliError("unsupported backend")
 
-    val resolved = SyslResolver.resolve(io, cmd.inputs) match
+    val resolved = resolveDeps(cmd.inputs, ignoreLockPins = false) match
       case Right(r) => r
       case Left(msg) => fail(s"error: $msg")
     // Workspace-level resolve already enumerates every member + transitive
@@ -1026,7 +1026,7 @@ object SyslCli:
         val workspaceStart = System.nanoTime()
         for member <- members do
           println(s"\n— member: $member")
-          val perMember = SyslResolver.resolve(io, Seq(member)) match
+          val perMember = resolveDeps(Seq(member), ignoreLockPins = false) match
             case Right(r) => r
             case Left(msg) => fail(s"error in workspace member $member: $msg")
           val (p, f, s) = runProjectTests(cmd, Seq(member), perMember)
@@ -1175,10 +1175,10 @@ object SyslCli:
 
   /** `sysl fetch [root]` — resolve the dep graph rooted at `root` (or cwd) and
    *  write `sysl.lock` next to the manifest if it would change. No code is
-   *  compiled, no tests run. Establishes the lock-file workflow that future
-   *  git-cache work (chunk 5) hangs network short-circuiting off of. */
+   *  compiled, no tests run. For git deps, honors any sha pins in an existing
+   *  lock so a re-run with no manifest changes does no network IO. */
   private def executeFetch(cmd: FetchCommand): Unit =
-    val resolved = SyslResolver.resolve(io, Seq(cmd.root)) match
+    val resolved = resolveDeps(Seq(cmd.root), ignoreLockPins = false) match
       case Right(r) => r
       case Left(msg) => fail(s"error: $msg")
     resolved.projectRoot match
@@ -1191,25 +1191,69 @@ object SyslCli:
           case None        => println(s"sysl: $root has no resolvable packages; nothing to lock")
 
   /** `sysl update [root]` — re-resolve the dep graph from scratch and rewrite
-   *  the lock unconditionally. With path-only deps this is observationally
-   *  identical to `fetch` (the resolved set is deterministic given the
-   *  filesystem); the distinction matters once git refs land in chunk 5,
-   *  where `fetch` will honor pinned shas and `update` will refresh them. */
+   *  the lock unconditionally. Git deps re-resolve their refs (so a `branch
+   *  = "main"` dep advances to the new HEAD); path deps just refresh the
+   *  recorded directory. Reports per-package version transitions for any
+   *  dep whose `<name> <version>` (or sha) actually changed. */
   private def executeUpdate(cmd: UpdateCommand): Unit =
-    val resolved = SyslResolver.resolve(io, Seq(cmd.root)) match
+    val priorLock =
+      SyslResolver.findProjectRoot(io, Seq(cmd.root)).flatMap(SyslLock.loadFrom(io, _))
+    val resolved = resolveDeps(Seq(cmd.root), ignoreLockPins = true) match
       case Right(r) => r
       case Left(msg) => fail(s"error: $msg")
     resolved.projectRoot match
       case None =>
         println(s"sysl: no sysl.toml in scope at ${cmd.root}; nothing to update")
       case Some(root) =>
-        val lock = SyslLock.fromResolved(io, resolved)
-        if lock.packages.isEmpty then
+        val newLock = SyslLock.fromResolved(io, resolved)
+        if newLock.packages.isEmpty then
           println(s"sysl: $root has no resolvable packages; nothing to update")
         else
+          for line <- formatUpdateDiff(priorLock, newLock) do println(line)
           val path = io.joinPath(root, SyslLock.LockFile)
-          io.writeFile(path, SyslLock.render(lock))
+          io.writeFile(path, SyslLock.render(newLock))
           println(s"sysl: rewrote ${SyslLock.LockFile} at $root")
+
+  /** Cargo-style "Updating <name> v0.1.0 -> v0.2.0" lines, plus sha
+   *  transitions for git deps. Empty when nothing changed (so the user
+   *  sees only the "rewrote" confirmation). */
+  private def formatUpdateDiff(prior: Option[SyslLock], next: SyslLock): List[String] =
+    val priorByName: Map[String, LockedPackage] =
+      prior.map(_.packages.map(p => p.name -> p).toMap).getOrElse(Map.empty)
+    val out = List.newBuilder[String]
+    for p <- next.packages do
+      priorByName.get(p.name) match
+        case None =>
+          if prior.isDefined then out += s"sysl: adding ${p.name} v${p.version}"
+        case Some(old) =>
+          if old.version != p.version then
+            out += s"sysl: updating ${p.name} v${old.version} -> v${p.version}"
+          else (old.source, p.source) match
+            case (Some(LockedSource.Git(_, _, _, oldSha)), Some(LockedSource.Git(_, _, _, newSha)))
+                if oldSha != newSha =>
+              out += s"sysl: updating ${p.name} (${oldSha.take(7)} -> ${newSha.take(7)})"
+            case _ => ()
+    val nextNames = next.packages.map(_.name).toSet
+    for p <- prior.toList.flatMap(_.packages) if !nextNames.contains(p.name) do
+      out += s"sysl: removing ${p.name} v${p.version}"
+    out.result()
+
+  /** Helper that wraps `SyslResolver.resolve` to pull in the JVM-installed
+   *  GitFetcher (if any) and pre-load the on-disk `sysl.lock` for ref pins.
+   *
+   *  `ignoreLockPins = true` is `sysl update`'s mode — it forces re-resolution
+   *  of git refs even when the lock could satisfy them. Everything else
+   *  (build/test/run/fetch) defaults to honoring pins. */
+  private def resolveDeps(
+      inputs: Seq[String],
+      ignoreLockPins: Boolean,
+  ): Either[String, ResolvedDeps] =
+    val pins =
+      if ignoreLockPins then Map.empty[(String, String, String), String]
+      else SyslResolver.findProjectRoot(io, inputs)
+        .map(SyslLock.loadPins(io, _))
+        .getOrElse(Map.empty)
+    SyslResolver.resolve(io, inputs, GitFetcherProvider.instance, pins)
 
   private def executeProve(cmd: ProveCommand): Unit =
     // Phase 1: parse the input file and translate to WhyML directly. We do not run the

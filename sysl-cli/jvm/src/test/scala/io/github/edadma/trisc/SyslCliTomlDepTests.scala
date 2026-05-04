@@ -299,27 +299,35 @@ class SyslCliTomlDepTests extends AnyFreeSpec with Matchers {
     }
   }
 
-  "a git dep is rejected with a helpful message until later chunks land" in {
-    val (abs, rel) = stagingDir("gitdep")
-    writeFile(abs, "app/sysl.toml",
-      """[package]
-        |name = "gitdep_consumer"
-        |version = "0.1.0"
-        |
-        |[dependencies]
-        |something = { git = "https://example.invalid/repo", rev = "abc" }
-        |""".stripMargin)
-    writeFile(abs, "app/app/main.lsysl",
-      """    module app
-        |
-        |    #test
-        |    t() -> unit = ()
-        |""".stripMargin)
+  "a git dep on a CLI built without a git fetcher fails with a clear error" in {
+    // GitFetcherProvider.instance is None when no JVM main has run, but the
+    // suite setup may have left a fetcher installed by a sibling test
+    // class. Save / restore it so tests stay independent regardless of
+    // suite execution order.
+    val saved = GitFetcherProvider.instance
+    GitFetcherProvider.instance = None
+    try
+      val (abs, rel) = stagingDir("gitdep")
+      writeFile(abs, "app/sysl.toml",
+        """[package]
+          |name = "gitdep_consumer"
+          |version = "0.1.0"
+          |
+          |[dependencies]
+          |something = { git = "https://example.invalid/repo", rev = "abc" }
+          |""".stripMargin)
+      writeFile(abs, "app/app/main.lsysl",
+        """    module app
+          |
+          |    #test
+          |    t() -> unit = ()
+          |""".stripMargin)
 
-    val (_, out) = runCli("test", s"$rel/app/app/main.lsysl")
-    withClue(out) {
-      out should include("git dependencies are not yet supported")
-      out should not include "1 passed"
-    }
+      val (_, out) = runCli("test", s"$rel/app/app/main.lsysl")
+      withClue(out) {
+        out should include("git dependencies are not supported here")
+        out should not include "1 passed"
+      }
+    finally GitFetcherProvider.instance = saved
   }
 }

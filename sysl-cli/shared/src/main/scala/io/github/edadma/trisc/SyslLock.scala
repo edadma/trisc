@@ -5,13 +5,23 @@ import io.github.edadma.toml.{TomlParser, TomlValue}
 /** Source of a locked package. `None` (in `LockedPackage.source`) means the
  *  package is "local" — i.e. the project root itself or a workspace member —
  *  and lives next to the lock file. Path deps point to a resolved absolute
- *  filesystem location; git deps will pin a resolved SHA in a future chunk. */
+ *  filesystem location; git deps pin a resolved SHA plus the ref kind/name
+ *  the manifest asked for, so `sysl fetch` can match a manifest entry to a
+ *  lock entry without re-resolving the ref. */
 sealed trait LockedSource:
-  /** Cargo-style serialized form: `path+<abs>` or `git+<url>#<sha>`. */
+  /** Cargo-style serialized form. Examples:
+   *
+   *    path+/Users/ed/dev/parsyl
+   *    git+https://example/foo.git?branch=main#deadbeef...
+   *    git+https://example/foo.git?tag=v1.0#deadbeef...
+   *    git+https://example/foo.git?rev=deadbeef...#deadbeef... */
   def encoded: String
 object LockedSource:
   case class Path(absolutePath: String) extends LockedSource:
     def encoded: String = s"path+$absolutePath"
+
+  case class Git(url: String, refKind: GitRefKind, refName: String, sha: String) extends LockedSource:
+    def encoded: String = s"git+$url?${GitRefKind.label(refKind)}=$refName#$sha"
 
 /** One row in `[[package]]`. `dependencies` is a list of `"<name> <version>"`
  *  strings, sorted, mirroring Cargo.lock. */
@@ -43,17 +53,26 @@ object SyslLock:
     val rows = resolved.manifests.toList.flatMap {
       case (dir, m: PackageManifest) =>
         val pkg = m.p
-        val deps = pkg.deps.toList.flatMap {
-          case (alias, SyslDep.Path(p)) =>
-            val depDir = SyslResolver.resolveDepPath(io, dir, p)
-            resolved.manifests.get(depDir).flatMap(_.pkg).map(d => s"${d.name} ${d.version}")
-          case _ =>
-            // Resolver rejects non-path deps in this chunk; never reached.
-            None
+        val deps = pkg.deps.toList.flatMap { case (alias, _) =>
+          // Source-kind-agnostic: we only need the resolved dep directory
+          // to find its [package] table. depResolutions handles path/git
+          // uniformly; pre-chunk-5 fallback uses the path-only walker so
+          // call sites that don't populate the map keep working.
+          val depDir = resolved.depResolutions.getOrElse(
+            (dir, alias),
+            SyslResolver.resolveDepPath(io, dir, pkg.deps(alias) match {
+              case SyslDep.Path(p) => p
+              case _               => "" // git: must be in depResolutions
+            }),
+          )
+          resolved.manifests.get(depDir).flatMap(_.pkg).map(d => s"${d.name} ${d.version}")
         }.sorted
         val source =
           if localDirs.contains(dir) then None
-          else Some(LockedSource.Path(io.absolutePath(dir)))
+          else
+            resolved.gitSources.get(dir) match
+              case Some(g) => Some(LockedSource.Git(g.url, g.refKind, g.refName, g.sha))
+              case None    => Some(LockedSource.Path(io.absolutePath(dir)))
         Some(LockedPackage(pkg.name, pkg.version, source, deps))
       case _ => None
     }
@@ -159,7 +178,53 @@ object SyslLock:
 
   private def decodeSource(s: String): Option[LockedSource] =
     if s.startsWith("path+") then Some(LockedSource.Path(s.stripPrefix("path+")))
+    else if s.startsWith("git+") then decodeGitSource(s.stripPrefix("git+"))
     else None
+
+  /** Decode `<url>?<kind>=<name>#<sha>`. Returns None on any malformed shape
+   *  rather than throwing — callers (currently only `parse`) treat an
+   *  unrecognized source as no-source so an upgrade path can introduce new
+   *  schemes without hard-failing existing locks. */
+  private def decodeGitSource(rest: String): Option[LockedSource.Git] =
+    val hashIdx = rest.lastIndexOf('#')
+    if hashIdx < 0 then return None
+    val sha = rest.substring(hashIdx + 1)
+    val urlAndQuery = rest.substring(0, hashIdx)
+    val qIdx = urlAndQuery.lastIndexOf('?')
+    if qIdx < 0 then return None
+    val url = urlAndQuery.substring(0, qIdx)
+    val query = urlAndQuery.substring(qIdx + 1)
+    val eqIdx = query.indexOf('=')
+    if eqIdx < 0 then return None
+    val kindLabel = query.substring(0, eqIdx)
+    val refName = query.substring(eqIdx + 1)
+    GitRefKind.fromLabel(kindLabel).map(k => LockedSource.Git(url, k, refName, sha))
+
+  /** Read sysl.lock (if any) at the project root and decode it. Used by
+   *  `sysl fetch` so the resolver can short-circuit ref-resolution when the
+   *  pinned sha is still satisfiable. Missing or malformed lock → None;
+   *  callers fall back to a from-scratch resolve. */
+  def loadFrom(io: FileOps, projectRoot: String): Option[SyslLock] =
+    val path = io.joinPath(projectRoot, LockFile)
+    if !io.exists(path) then None
+    else
+      val content = try io.readFile(path) catch case _: Throwable => return None
+      parse(content, path).toOption
+
+  /** Build the `(url, refKindLabel, refName) -> sha` pin map the resolver
+   *  consumes. Path-source rows contribute nothing — the lock there exists
+   *  only to record the resolved location, not to pin it. */
+  def pinsFor(lock: SyslLock): Map[(String, String, String), String] =
+    lock.packages.flatMap(_.source).collect {
+      case LockedSource.Git(url, kind, name, sha) =>
+        (url, GitRefKind.label(kind), name) -> sha
+    }.toMap
+
+  /** Convenience: read `<root>/sysl.lock` (if any) and return its pin map.
+   *  Returns the empty map on missing or malformed lock so call sites can
+   *  use it unconditionally. */
+  def loadPins(io: FileOps, projectRoot: String): Map[(String, String, String), String] =
+    loadFrom(io, projectRoot).map(pinsFor).getOrElse(Map.empty)
 
   /** Compute the set of "local" directories — packages that live next to the
    *  lock file rather than being pulled in as path/git deps. */

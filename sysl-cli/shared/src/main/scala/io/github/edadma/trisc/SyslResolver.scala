@@ -24,6 +24,28 @@ case class ResolvedDeps(
     projectRoot: Option[String],
     searchRoots: List[String],
     manifests: Map[String, SyslManifest],
+    /** For every dep that came in via a git source (chunk 5+), the resolved
+     *  `(url, refKind, refName, sha)`. Keyed by checkout directory — same key
+     *  shape as `manifests` so the lock writer can join them in one pass.
+     *  Empty for path-only resolves. */
+    gitSources: Map[String, ResolvedGitSource] = Map.empty,
+    /** `(consumerDir, depAlias) -> depDir` for every edge in the dep graph.
+     *  Path deps point at the path-resolved directory; git deps point at the
+     *  git checkout directory. Lets the lock writer turn "this consumer
+     *  declared `foo = { ... }`" into the actual `<pkg.name> <pkg.version>`
+     *  string regardless of source kind. */
+    depResolutions: Map[(String, String), String] = Map.empty,
+)
+
+/** Outcome of a git-dep resolution: where the checkout lives + what the
+ *  lock should record. The (url, refKind, refName) tuple matches the
+ *  manifest's `[dependencies]` entry verbatim so manifest↔lock identity is
+ *  byte-stable across runs; `sha` is the rev-parsed commit. */
+case class ResolvedGitSource(
+    url: String,
+    refKind: GitRefKind,
+    refName: String,
+    sha: String,
 )
 
 object SyslResolver:
@@ -31,8 +53,21 @@ object SyslResolver:
   private val ManifestFile = SyslDriver.ProjectMarker
 
   /** Resolve the dep graph for the given CLI inputs. Errors are returned as
-   *  Left so callers can emit them with the rest of their diagnostics. */
-  def resolve(io: FileOps, inputs: Seq[String]): Either[String, ResolvedDeps] =
+   *  Left so callers can emit them with the rest of their diagnostics.
+   *
+   *  `gitFetcher` is the bridge to the git cache. Pass `None` for path-only
+   *  builds (or for the JS/Native CLIs that have no git support); a manifest
+   *  with a git dep then produces a clear "git dependencies are not
+   *  supported" error rather than a silent fallback. `lockPins` carries
+   *  resolved shas from `sysl.lock` so `sysl fetch` can short-circuit
+   *  network ref-resolution when the manifest is unchanged.
+   */
+  def resolve(
+      io: FileOps,
+      inputs: Seq[String],
+      gitFetcher: Option[GitFetcher] = None,
+      lockPins: Map[(String, String, String), String] = Map.empty,
+  ): Either[String, ResolvedDeps] =
     val rootOpt = findProjectRoot(io, inputs)
     rootOpt match
       case None =>
@@ -41,15 +76,35 @@ object SyslResolver:
         Right(ResolvedDeps(None, Nil, Map.empty))
       case Some(root) =>
         loadManifestAt(io, root).flatMap { manifest =>
+          val ctx = new ResolveCtx(io, gitFetcher, lockPins)
           manifest match
-            case PackageManifest(pkg) => resolvePackage(io, root, pkg)
-            case WorkspaceManifest(ws) => resolveWorkspace(io, root, ws)
+            case PackageManifest(pkg) => resolvePackage(ctx, root, pkg)
+            case WorkspaceManifest(ws) => resolveWorkspace(ctx, root, ws)
         }
+
+  /** Mutable per-resolve scratch space. Holds the visit order, dep-resolution
+   *  edges, and git source records so `walkPackageDeps` doesn't have to
+   *  thread three half-built maps through every recursive call. */
+  private class ResolveCtx(
+      val io: FileOps,
+      val gitFetcher: Option[GitFetcher],
+      val lockPins: Map[(String, String, String), String],
+  ):
+    val visited: mutable.LinkedHashMap[String, SyslManifest] = mutable.LinkedHashMap.empty
+    val gitSources: mutable.HashMap[String, ResolvedGitSource] = mutable.HashMap.empty
+    val depResolutions: mutable.HashMap[(String, String), String] = mutable.HashMap.empty
+    /** Per-URL conflict guard: same URL must resolve to the same sha across
+     *  every consumer in the tree (v1 has no version-resolution policy). */
+    val urlShas: mutable.HashMap[String, String] = mutable.HashMap.empty
 
   /** Find the project containing the user's inputs by walking up from each
    *  input. All inputs must share a single project root — mixing paths from
-   *  different projects in one CLI invocation isn't supported. */
-  private def findProjectRoot(io: FileOps, inputs: Seq[String]): Option[String] =
+   *  different projects in one CLI invocation isn't supported.
+   *
+   *  Public so the CLI can locate the lock file before invoking `resolve`,
+   *  which lets `sysl fetch` build a pin map from the on-disk lock without
+   *  paying for a wasted no-pins resolve first. */
+  def findProjectRoot(io: FileOps, inputs: Seq[String]): Option[String] =
     val roots = inputs.flatMap(p => findProjectRootForInput(io, p)).distinct
     roots match
       case Seq() => None
@@ -98,39 +153,44 @@ object SyslResolver:
     if !io.exists(path) then Left(s"$path: not found")
     else SyslManifest.parse(io.readFile(path), path)
 
-  private def resolvePackage(io: FileOps, root: String, pkg: SyslPackage): Either[String, ResolvedDeps] =
-    val visited = mutable.LinkedHashMap[String, SyslManifest]()
-    visited(root) = PackageManifest(pkg)
-    walkPackageDeps(io, root, pkg, visited).map { _ =>
+  private def resolvePackage(ctx: ResolveCtx, root: String, pkg: SyslPackage): Either[String, ResolvedDeps] =
+    ctx.visited(root) = PackageManifest(pkg)
+    walkPackageDeps(ctx, root, pkg).map { _ =>
       ResolvedDeps(
         projectRoot = Some(root),
-        searchRoots = visited.keys.toList,
-        manifests = visited.toMap,
+        searchRoots = ctx.visited.keys.toList,
+        manifests = ctx.visited.toMap,
+        gitSources = ctx.gitSources.toMap,
+        depResolutions = ctx.depResolutions.toMap,
       )
     }
 
-  private def resolveWorkspace(io: FileOps, root: String, ws: SyslWorkspace): Either[String, ResolvedDeps] =
-    val visited = mutable.LinkedHashMap[String, SyslManifest]()
-    visited(root) = WorkspaceManifest(ws)
+  private def resolveWorkspace(ctx: ResolveCtx, root: String, ws: SyslWorkspace): Either[String, ResolvedDeps] =
+    ctx.visited(root) = WorkspaceManifest(ws)
     var err: Option[String] = None
     for member <- ws.members if err.isEmpty do
-      val memberDir = normalizePath(io.joinPath(root, member))
-      loadManifestAt(io, memberDir) match
+      val memberDir = normalizePath(ctx.io.joinPath(root, member))
+      loadManifestAt(ctx.io, memberDir) match
         case Left(e) => err = Some(s"workspace member `$member` at $memberDir: $e")
         case Right(m) =>
-          visited(memberDir) = m
+          ctx.visited(memberDir) = m
           m match
-            case PackageManifest(p) => walkPackageDeps(io, memberDir, p, visited).left.foreach(e => err = Some(e))
+            case PackageManifest(p) => walkPackageDeps(ctx, memberDir, p).left.foreach(e => err = Some(e))
             case WorkspaceManifest(_) => err = Some(s"$memberDir: nested workspaces are not supported")
     err match
       case Some(e) => Left(e)
-      case None => Right(ResolvedDeps(Some(root), visited.keys.toList, visited.toMap))
+      case None => Right(ResolvedDeps(
+        projectRoot = Some(root),
+        searchRoots = ctx.visited.keys.toList,
+        manifests = ctx.visited.toMap,
+        gitSources = ctx.gitSources.toMap,
+        depResolutions = ctx.depResolutions.toMap,
+      ))
 
   private def walkPackageDeps(
-      io: FileOps,
+      ctx: ResolveCtx,
       ownerDir: String,
       pkg: SyslPackage,
-      visited: mutable.LinkedHashMap[String, SyslManifest],
   ): Either[String, Unit] =
     var err: Option[String] = None
     for (depName, dep) <- pkg.deps if err.isEmpty do
@@ -138,21 +198,53 @@ object SyslResolver:
         case SyslDep.Path(rel) =>
           // Absolute paths bypass joinPath (which would concatenate them onto
           // ownerDir on the JVM); relative paths resolve against ownerDir.
-          val raw = if rel.startsWith("/") then rel else io.joinPath(ownerDir, rel)
+          val raw = if rel.startsWith("/") then rel else ctx.io.joinPath(ownerDir, rel)
           val depDir = normalizePath(raw)
-          if visited.contains(depDir) then ()
+          ctx.depResolutions((ownerDir, depName)) = depDir
+          if ctx.visited.contains(depDir) then ()
           else
-            loadManifestAt(io, depDir) match
+            loadManifestAt(ctx.io, depDir) match
               case Left(e) => err = Some(s"dependency `$depName` at $depDir: $e")
               case Right(m) =>
                 m match
                   case PackageManifest(subPkg) =>
-                    visited(depDir) = m
-                    walkPackageDeps(io, depDir, subPkg, visited).left.foreach(e => err = Some(e))
+                    ctx.visited(depDir) = m
+                    walkPackageDeps(ctx, depDir, subPkg).left.foreach(e => err = Some(e))
                   case WorkspaceManifest(_) =>
                     err = Some(s"dependency `$depName` at $depDir is a workspace; depend on a workspace member directly")
-        case SyslDep.Git(_, _) =>
-          err = Some(s"dependency `$depName`: git dependencies are not yet supported in this build")
+        case SyslDep.Git(url, ref) =>
+          ctx.gitFetcher match
+            case None =>
+              err = Some(s"dependency `$depName`: git dependencies are not supported here (CLI built without git fetcher)")
+            case Some(fetcher) =>
+              val (refKind, refName) = GitRefKind.fromGitRef(ref)
+              val knownSha = ctx.lockPins.get((url, GitRefKind.label(refKind), refName))
+              fetcher.ensureCheckout(url, refKind, refName, knownSha) match
+                case Left(msg) =>
+                  err = Some(s"dependency `$depName` (git $url): $msg")
+                case Right((sha, dir)) =>
+                  // Conflict guard: same URL across two consumers must
+                  // resolve to the same sha. If two manifests pin different
+                  // refs of the same repo, this is the v1 hard error.
+                  ctx.urlShas.get(url) match
+                    case Some(prev) if prev != sha =>
+                      err = Some(s"dependency `$depName`: conflicting git refs for $url ($prev vs $sha); v1 requires a single resolved sha per url")
+                    case _ =>
+                      ctx.urlShas(url) = sha
+                      val depDir = normalizePath(dir)
+                      ctx.depResolutions((ownerDir, depName)) = depDir
+                      ctx.gitSources(depDir) = ResolvedGitSource(url, refKind, refName, sha)
+                      if ctx.visited.contains(depDir) then ()
+                      else
+                        loadManifestAt(ctx.io, depDir) match
+                          case Left(e) => err = Some(s"dependency `$depName` at $depDir: $e")
+                          case Right(m) =>
+                            m match
+                              case PackageManifest(subPkg) =>
+                                ctx.visited(depDir) = m
+                                walkPackageDeps(ctx, depDir, subPkg).left.foreach(e => err = Some(e))
+                              case WorkspaceManifest(_) =>
+                                err = Some(s"dependency `$depName` at $depDir is a workspace; depend on a workspace member directly")
     err match
       case Some(e) => Left(e)
       case None => Right(())
