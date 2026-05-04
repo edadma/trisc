@@ -267,7 +267,11 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               // `impl Combine[Box, Box, Box]`) and any generic impl have no
               // representation there, so they ride along in genericTemplates and
               // get registered through registerImport's ImplDeclAST handler.
-              case ImplDeclAST(_, tps, targets, _, _) => tps.nonEmpty || targets.length > 1
+              // Generic and multi-target concrete impls ride in genericTemplates as
+              // before; additionally, any concrete impl that declares associated-type
+              // bindings goes the same route since TraitImplMeta has no slot for them.
+              case ImplDeclAST(_, tps, targets, _, _, assocs) =>
+                tps.nonEmpty || targets.length > 1 || assocs.nonEmpty
               case _ => false
             } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
             new ModuleMeta(

@@ -22,6 +22,17 @@ case class RefTypeAST(inner: TypeAST) extends TypeAST
 // auto-wraps incoming args as `() -> arg` and auto-calls body references as
 // `name()`, matching Scala-style call-by-name semantics (no memoization).
 case class ByNameTypeAST(inner: TypeAST) extends TypeAST
+/** Associated-type projection in *type* position: `Qualifier::Member`.
+ *  `qualifier` is a bare identifier — the trait's `Self` placeholder, one of
+ *  the trait's type parameters, or (Phase A3) a generic-function type parameter
+ *  with a trait bound. `member` is the assoc-type name declared on the trait.
+ *  Resolved by `SyslAnalyzer.resolveType` against the active impl's bindings.
+ *
+ *  Distinct from `TypeAttrAST` (in expression position) which handles
+ *  `T::First`, `T::Image(x)`, etc. for enum / within-int introspection. The
+ *  reserved attribute names there are explicitly excluded from associated-type
+ *  declarations to avoid clashing. */
+case class ProjectionTypeAST(qualifier: String, member: String) extends TypeAST
 
 // Import selectors
 sealed trait ImportSelector
@@ -63,7 +74,17 @@ case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[Stri
 
 // Range for `within lo..hi` / `within lo..<hi` type constraints
 case class RangeAST(lo: ExpressionAST, hi: ExpressionAST, exclusiveHi: Boolean) extends Positional
-case class TraitDeclAST(name: String, typeParams: List[String], methods: List[TraitMethodAST], attributes: List[Attribute] = Nil) extends DeclAST
+case class TraitDeclAST(
+    name: String,
+    typeParams: List[String],
+    methods: List[TraitMethodAST],
+    attributes: List[Attribute] = Nil,
+    /** Associated types declared inside the trait body, e.g. `type Item` or
+     *  `type Item: Eq + Ord`. Bounds are trait names; resolution + checking is
+     *  deferred to a later phase (A4 in the master plan). For Phase A1 the
+     *  list is populated and validated, but bounds carry no enforcement yet. */
+    assocTypes: List[AssocTypeDeclAST] = Nil,
+) extends DeclAST
 case class TraitMethodAST(
     name: String,
     params: List[ParamAST],
@@ -71,7 +92,19 @@ case class TraitMethodAST(
     body: Option[FunBodyAST],
     attributes: List[Attribute] = Nil,
 ) extends Positional
-case class ImplDeclAST(traitName: String, typeParams: List[String], targetTypes: List[TypeAST], methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
+/** `type Name [: Bound + Bound]` inside a trait body. Bounds are trait names. */
+case class AssocTypeDeclAST(name: String, bounds: List[String] = Nil) extends Positional
+case class ImplDeclAST(
+    traitName: String,
+    typeParams: List[String],
+    targetTypes: List[TypeAST],
+    methods: List[FunDeclAST],
+    attributes: List[Attribute] = Nil,
+    /** Associated-type bindings declared inside the impl, e.g. `type Item = i64`. */
+    assocBindings: List[AssocTypeBindingAST] = Nil,
+) extends DeclAST
+/** `type Name = ConcreteType` inside an impl body. */
+case class AssocTypeBindingAST(name: String, target: TypeAST) extends Positional
 // Scala 3-style extension block: `extension [T](recv: TypeAST) { def foo(...) = ...; ... }`.
 // Carries type-params (from the optional `[...]`), the receiver param, and the
 // inner method declarations. Lowering happens in the analyzer, not the parser,

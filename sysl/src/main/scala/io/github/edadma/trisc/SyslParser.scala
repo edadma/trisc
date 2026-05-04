@@ -157,9 +157,22 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val traitDecl: Parser[TraitDeclAST] =
     "trait" ~> ident ~ ("[" ~> rep1sep(ident, ",") <~ "]") ~
-      (Newline ~> Indent ~> rep1sep(traitMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("trait")) ^^ {
-        case name ~ tparams ~ methods => TraitDeclAST(name, tparams, methods)
+      (Newline ~> Indent ~> rep1sep(traitMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("trait")) ^^ {
+        case name ~ tparams ~ members =>
+          val assocs = members.collect { case Left(a) => a }
+          val methods = members.collect { case Right(m) => m }
+          TraitDeclAST(name, tparams, methods, Nil, assocs)
       }
+
+  /** A trait body member is either an associated type declaration or a method. */
+  lazy val traitMember: Parser[Either[AssocTypeDeclAST, TraitMethodAST]] =
+    assocTypeDecl ^^ (Left(_)) | traitMethod ^^ (Right(_))
+
+  /** `type Name [: Bound + Bound]` inside a trait body. */
+  lazy val assocTypeDecl: Parser[AssocTypeDeclAST] =
+    positioned("type" ~> ident ~ opt(":" ~> rep1sep(ident, "+")) ^^ {
+      case name ~ bounds => AssocTypeDeclAST(name, bounds.getOrElse(Nil))
+    })
 
   lazy val traitMethod: Parser[TraitMethodAST] =
     rep(positioned(attribute) <~ rep1(Newline)) ~ ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ ("->" ~> typeRef) ~ opt(traitMethodBody) ^^ {
@@ -172,10 +185,22 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val implDecl: Parser[ImplDeclAST] =
     "impl" ~> opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ident ~ ("[" ~> rep1sep(typeRef, ",") <~ "]") ~
-      (Newline ~> Indent ~> rep1sep(implMethod, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("impl")) ^^ {
-        case tparams ~ name ~ targets ~ methods =>
-          ImplDeclAST(name, tparams.getOrElse(Nil), targets, methods)
+      (Newline ~> Indent ~> rep1sep(implMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("impl")) ^^ {
+        case tparams ~ name ~ targets ~ members =>
+          val assocs = members.collect { case Left(a) => a }
+          val methods = members.collect { case Right(m) => m }
+          ImplDeclAST(name, tparams.getOrElse(Nil), targets, methods, Nil, assocs)
       }
+
+  /** An impl body member is either an associated-type binding or a method. */
+  lazy val implMember: Parser[Either[AssocTypeBindingAST, FunDeclAST]] =
+    assocTypeBinding ^^ (Left(_)) | implMethod ^^ (Right(_))
+
+  /** `type Name = ConcreteType` inside an impl body. */
+  lazy val assocTypeBinding: Parser[AssocTypeBindingAST] =
+    positioned("type" ~> ident ~ ("=" ~> typeRef) ^^ {
+      case name ~ target => AssocTypeBindingAST(name, target)
+    })
 
   lazy val implMethod: Parser[FunDeclAST] =
     ident ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
@@ -462,6 +487,11 @@ class SyslParser extends StandardTokenParsers {
   lazy val typeName: Parser[TypeAST] =
     ("int" | "uint" | "long" | "ulong" | "short" | "ushort" | "char" | "byte" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "float" | "f32" | "double" | "f64" | "bool" | "string") ^^ (n => NamedTypeAST(n)) |
       "unit" ^^^ NamedTypeAST("unit") |
+      // `Qualifier::Member` in type position — associated-type projection. The
+      // qualifier is a bare ident (a trait type-param, `Self`, or — Phase A3 —
+      // a generic-fn type param). Type-arg lists on the qualifier are not
+      // accepted here (they'd require nested generics, deferred).
+      ident ~ ("::" ~> ident) ^^ { case qualifier ~ member => ProjectionTypeAST(qualifier, member) } |
       ident ~ typeArgList ^^ { case name ~ args => NamedTypeAST(name, args) }
 
   // Full type reference: *int, **int, &Node, [5]int, []int (slice), (int)->int, @escaping (int)->int, string, int, etc.

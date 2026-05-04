@@ -45,6 +45,7 @@ object SyslPrettyPrinter:
     case TupleTypeAST(elems)        => s"(${elems.map(typeToSource).mkString(", ")})"
     case RefTypeAST(inner)          => s"&${typeToSource(inner)}"
     case ByNameTypeAST(inner)       => s"=> ${typeToSource(inner)}"
+    case ProjectionTypeAST(q, m)    => s"$q::$m"
 
   // --- Declarations ---
 
@@ -88,8 +89,12 @@ object SyslPrettyPrinter:
         val bodyStr = bodyToSource(body, 1)
         s"$priv$defKw$name$tpStr($paramStr)$retStr$bodyStr"
 
-    case TraitDeclAST(name, typeParams, methods, _) =>
-      val body = methods.map { m =>
+    case TraitDeclAST(name, typeParams, methods, _, assocs) =>
+      val assocLines = assocs.map { a =>
+        val boundStr = if a.bounds.nonEmpty then s": ${a.bounds.mkString(" + ")}" else ""
+        s"${IND}type ${a.name}$boundStr"
+      }
+      val methodLines = methods.map { m =>
         val attrStr = attributesBlockToSource(m.attributes, IND)
         val paramStr = m.params.map(p => s"${p.name}: ${typeToSource(p.typ)}").mkString(", ")
         val retStr = s" -> ${typeToSource(m.returnType)}"
@@ -97,13 +102,16 @@ object SyslPrettyPrinter:
           case None    => s"${m.name}($paramStr)$retStr"
           case Some(b) => s"${m.name}($paramStr)$retStr${bodyToSource(b, 2)}"
         s"$attrStr${IND}$sig"
-      }.mkString("\n")
+      }
+      val body = (assocLines ++ methodLines).mkString("\n")
       s"trait $name[${typeParams.mkString(", ")}]\n$body"
 
-    case ImplDeclAST(traitName, typeParams, targetTypes, methods, _) =>
+    case ImplDeclAST(traitName, typeParams, targetTypes, methods, _, assocBindings) =>
       val tpStr = if typeParams.nonEmpty then s"[${typeParams.mkString(", ")}]" else ""
       val targetStr = targetTypes.map(typeToSource).mkString(", ")
-      val body = methods.map(m => s"${IND}${declToSource(m).replace("\n", s"\n")}").mkString("\n")
+      val assocLines = assocBindings.map(b => s"${IND}type ${b.name} = ${typeToSource(b.target)}")
+      val methodLines = methods.map(m => s"${IND}${declToSource(m).replace("\n", s"\n")}")
+      val body = (assocLines ++ methodLines).mkString("\n")
       s"impl$tpStr $traitName[$targetStr]\n$body"
 
     case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate) =>

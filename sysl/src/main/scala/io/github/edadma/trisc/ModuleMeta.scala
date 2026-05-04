@@ -158,8 +158,15 @@ object ModuleMeta:
    *  so Scala-3-style `extension` blocks round-trip across compilation units.
    *  v14 carries generic type aliases (`type Box[A] = new A`) through the TEMPLATES
    *  block so they are visible across files of the same module and across module
-   *  imports. */
-  val SMETA_VERSION = 14
+   *  imports.
+   *  v15 carries trait associated-type declarations (`type Item [: Bound + Bound]`
+   *  inside trait bodies) and impl associated-type bindings (`type Item = i64`
+   *  inside impl bodies) through the TEMPLATES block so they round-trip across
+   *  files. The pretty printer emits them inside trait/impl bodies; the read side
+   *  parses them back into the same trait/impl AST. Concrete-impl assoc bindings
+   *  also force the impl into the TEMPLATES path (TraitImplMeta carries no slot
+   *  for them). */
+  val SMETA_VERSION = 15
 
   /** Encode a FuncEffects as space-separated tokens — `U` (Unknown), `P` (Pure), or
    *  `RW <nReads> <readsNames…> <nWrites> <writesNames…>`. Used both in the FUNC-line
@@ -346,6 +353,10 @@ object ModuleMeta:
                 case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
                 case TypeAliasDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
                 case _: TraitDeclAST                        => true
+                // Generic / multi-target / assoc-binding impls round-trip via TEMPLATES
+                // because TraitImplMeta has no slot for type parameters or assoc bindings.
+                case ImplDeclAST(_, tps, targets, _, _, assocs) =>
+                  tps.nonEmpty || targets.length > 1 || assocs.nonEmpty
                 case _                                      => false
               }
             case Left(_) => Nil // silently ignore parse failures in templates
