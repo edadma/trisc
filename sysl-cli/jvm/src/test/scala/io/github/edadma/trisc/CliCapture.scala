@@ -11,7 +11,13 @@ import java.io.{ByteArrayOutputStream, PrintStream}
  *  for the full duration of an SyslCli invocation including capture flush. */
 object CliCapture:
 
-  private val ioLock = new Object
+  /** Public so tests that need to install a `GitFetcherProvider.instance` for
+   *  a sequence of runCli calls can hold the same lock around the whole
+   *  install/runCli/restore window — preventing other suites from racing in
+   *  and clobbering the installed fetcher between two of those calls. Java
+   *  synchronized is reentrant, so reads from `runCli` inside the held block
+   *  are still safe. */
+  val ioLock = new Object
 
   /** Run `sysl <args...>` programmatically, returning the combined captured
    *  stdout + stderr, plus an exit-style code (0 = clean, 1 = SyslCli threw,

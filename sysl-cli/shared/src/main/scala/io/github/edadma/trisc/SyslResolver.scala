@@ -67,6 +67,7 @@ object SyslResolver:
       inputs: Seq[String],
       gitFetcher: Option[GitFetcher] = None,
       lockPins: Map[(String, String, String), String] = Map.empty,
+      offline: Boolean = false,
   ): Either[String, ResolvedDeps] =
     val rootOpt = findProjectRoot(io, inputs)
     rootOpt match
@@ -76,7 +77,7 @@ object SyslResolver:
         Right(ResolvedDeps(None, Nil, Map.empty))
       case Some(root) =>
         loadManifestAt(io, root).flatMap { manifest =>
-          val ctx = new ResolveCtx(io, gitFetcher, lockPins)
+          val ctx = new ResolveCtx(io, gitFetcher, lockPins, offline)
           manifest match
             case PackageManifest(pkg) => resolvePackage(ctx, root, pkg)
             case WorkspaceManifest(ws) => resolveWorkspace(ctx, root, ws)
@@ -89,13 +90,27 @@ object SyslResolver:
       val io: FileOps,
       val gitFetcher: Option[GitFetcher],
       val lockPins: Map[(String, String, String), String],
+      val offline: Boolean,
   ):
     val visited: mutable.LinkedHashMap[String, SyslManifest] = mutable.LinkedHashMap.empty
     val gitSources: mutable.HashMap[String, ResolvedGitSource] = mutable.HashMap.empty
     val depResolutions: mutable.HashMap[(String, String), String] = mutable.HashMap.empty
     /** Per-URL conflict guard: same URL must resolve to the same sha across
-     *  every consumer in the tree (v1 has no version-resolution policy). */
-    val urlShas: mutable.HashMap[String, String] = mutable.HashMap.empty
+     *  every consumer in the tree (v1 has no version-resolution policy). The
+     *  first consumer's declaration is recorded so a later mismatch can name
+     *  *both* sides instead of just printing two opaque shas. */
+    val urlClaims: mutable.HashMap[String, GitClaim] = mutable.HashMap.empty
+
+  /** Records the first consumer to resolve a given git URL: where it came
+   *  from (manifest dir + dep alias) and what ref it asked for. Used only to
+   *  produce a richer conflict message; no functional impact. */
+  private case class GitClaim(
+      ownerDir: String,
+      depName: String,
+      refKind: GitRefKind,
+      refName: String,
+      sha: String,
+  )
 
   /** Find the project containing the user's inputs by walking up from each
    *  input. All inputs must share a single project root — mixing paths from
@@ -219,18 +234,19 @@ object SyslResolver:
             case Some(fetcher) =>
               val (refKind, refName) = GitRefKind.fromGitRef(ref)
               val knownSha = ctx.lockPins.get((url, GitRefKind.label(refKind), refName))
-              fetcher.ensureCheckout(url, refKind, refName, knownSha) match
+              fetcher.ensureCheckout(url, refKind, refName, knownSha, ctx.offline) match
                 case Left(msg) =>
                   err = Some(s"dependency `$depName` (git $url): $msg")
                 case Right((sha, dir)) =>
                   // Conflict guard: same URL across two consumers must
                   // resolve to the same sha. If two manifests pin different
                   // refs of the same repo, this is the v1 hard error.
-                  ctx.urlShas.get(url) match
-                    case Some(prev) if prev != sha =>
-                      err = Some(s"dependency `$depName`: conflicting git refs for $url ($prev vs $sha); v1 requires a single resolved sha per url")
+                  ctx.urlClaims.get(url) match
+                    case Some(prev) if prev.sha != sha =>
+                      err = Some(formatGitConflict(ctx.io, url, prev,
+                        GitClaim(ownerDir, depName, refKind, refName, sha)))
                     case _ =>
-                      ctx.urlShas(url) = sha
+                      ctx.urlClaims(url) = GitClaim(ownerDir, depName, refKind, refName, sha)
                       val depDir = normalizePath(dir)
                       ctx.depResolutions((ownerDir, depName)) = depDir
                       ctx.gitSources(depDir) = ResolvedGitSource(url, refKind, refName, sha)
@@ -248,6 +264,14 @@ object SyslResolver:
     err match
       case Some(e) => Left(e)
       case None => Right(())
+
+  /** Multi-line conflict diagnostic that names both consumers and the ref
+   *  each one declared, instead of just printing two opaque shas. */
+  private def formatGitConflict(io: FileOps, url: String, first: GitClaim, second: GitClaim): String =
+    def describe(c: GitClaim): String =
+      val manifest = io.joinPath(c.ownerDir, SyslDriver.ProjectMarker)
+      s"  $manifest declares `${c.depName}` as ${GitRefKind.label(c.refKind)} = \"${c.refName}\" (resolved sha ${c.sha.take(7)})"
+    s"conflicting git refs for $url:\n${describe(first)}\n${describe(second)}\nv1 requires a single resolved sha per url"
 
   /** Collapse `a/b/../c` to `a/c`. Idempotent on already-normalized paths. */
   private def normalizePath(path: String): String =

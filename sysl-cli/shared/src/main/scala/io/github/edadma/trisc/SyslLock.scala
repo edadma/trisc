@@ -141,16 +141,35 @@ object SyslLock:
         sb ++= "]\n"
     sb.toString
 
-  /** Parse lock TOML. Used by `sysl update` (and future inspection commands)
-   *  to confirm the on-disk lock is well-formed before overwriting. */
-  def parse(content: String, path: String): Either[String, SyslLock] =
+  /** Failure modes for `parse`. Callers tolerate `Malformed` (treat as no
+   *  baseline) but not `IncompatibleVersion` (would silently downgrade a
+   *  newer lock written by a future sysl). */
+  sealed trait LockLoadError:
+    def message: String
+  object LockLoadError:
+    /** Anything we can't make sense of: malformed TOML, missing required
+     *  fields, garbage `[[package]]` entries. Default-mode commands swallow
+     *  this and proceed as if no lock were present (with a warning). */
+    case class Malformed(message: String) extends LockLoadError
+    /** Lock file version is *higher* than this sysl knows. Always a hard
+     *  error: we can't safely re-render and we definitely shouldn't
+     *  overwrite the user's newer lock with our older format. */
+    case class IncompatibleVersion(message: String) extends LockLoadError
+
+  /** Parse lock TOML. Returns a structured error so callers can decide
+   *  per-command tolerance: most commands ignore `Malformed`, but every
+   *  command refuses `IncompatibleVersion`. */
+  def parse(content: String, path: String): Either[LockLoadError, SyslLock] =
     TomlParser.parse(content) match
-      case Left(msg) => Left(s"$path: $msg")
+      case Left(msg) => Left(LockLoadError.Malformed(s"$path: $msg"))
       case Right(doc) =>
         val v = doc.getInt("version").map(_.toInt).getOrElse(0)
-        if v <= 0 then Left(s"$path: missing or invalid `version` field")
+        if v <= 0 then Left(LockLoadError.Malformed(s"$path: missing or invalid `version` field"))
+        else if v > Version then
+          Left(LockLoadError.IncompatibleVersion(
+            s"$path: lock file version $v is newer than this sysl can read (max $Version); upgrade sysl"))
         else
-          decodePackages(doc, path).map(pkgs => SyslLock(v, pkgs))
+          decodePackages(doc, path).left.map(LockLoadError.Malformed.apply).map(pkgs => SyslLock(v, pkgs))
 
   private def decodePackages(doc: io.github.edadma.toml.TomlDocument, path: String): Either[String, List[LockedPackage]] =
     doc.getArr("package") match
@@ -200,16 +219,20 @@ object SyslLock:
     val refName = query.substring(eqIdx + 1)
     GitRefKind.fromLabel(kindLabel).map(k => LockedSource.Git(url, k, refName, sha))
 
-  /** Read sysl.lock (if any) at the project root and decode it. Used by
-   *  `sysl fetch` so the resolver can short-circuit ref-resolution when the
-   *  pinned sha is still satisfiable. Missing or malformed lock → None;
-   *  callers fall back to a from-scratch resolve. */
-  def loadFrom(io: FileOps, projectRoot: String): Option[SyslLock] =
+  /** Read sysl.lock (if any) at the project root and decode it.
+   *
+   *  - `Right(None)` — no lock file on disk; callers fall back to a from-scratch resolve.
+   *  - `Right(Some(lock))` — parsed successfully.
+   *  - `Left(LockLoadError)` — file is present but can't be parsed. Callers decide whether
+   *    each error kind is fatal: `Malformed` is usually tolerated (treated as no-baseline),
+   *    `IncompatibleVersion` is always fatal (silently overwriting would downgrade). */
+  def loadFrom(io: FileOps, projectRoot: String): Either[LockLoadError, Option[SyslLock]] =
     val path = io.joinPath(projectRoot, LockFile)
-    if !io.exists(path) then None
+    if !io.exists(path) then Right(None)
     else
-      val content = try io.readFile(path) catch case _: Throwable => return None
-      parse(content, path).toOption
+      val content = try io.readFile(path)
+                    catch case t: Throwable => return Left(LockLoadError.Malformed(s"$path: ${t.getMessage}"))
+      parse(content, path).map(Some(_))
 
   /** Build the `(url, refKindLabel, refName) -> sha` pin map the resolver
    *  consumes. Path-source rows contribute nothing — the lock there exists
@@ -221,10 +244,16 @@ object SyslLock:
     }.toMap
 
   /** Convenience: read `<root>/sysl.lock` (if any) and return its pin map.
-   *  Returns the empty map on missing or malformed lock so call sites can
-   *  use it unconditionally. */
-  def loadPins(io: FileOps, projectRoot: String): Map[(String, String, String), String] =
-    loadFrom(io, projectRoot).map(pinsFor).getOrElse(Map.empty)
+   *  Returns `Left` only on `IncompatibleVersion` — `Malformed` errors are
+   *  treated as "no useful pin map, fall back to from-scratch resolve" so a
+   *  garbage lock doesn't break a normal build. Callers that need stricter
+   *  treatment (e.g. `--locked`) can inspect `loadFrom` directly. */
+  def loadPins(io: FileOps, projectRoot: String): Either[LockLoadError, Map[(String, String, String), String]] =
+    loadFrom(io, projectRoot) match
+      case Right(Some(lock)) => Right(pinsFor(lock))
+      case Right(None)       => Right(Map.empty)
+      case Left(e: LockLoadError.IncompatibleVersion) => Left(e)
+      case Left(_: LockLoadError.Malformed)           => Right(Map.empty)
 
   /** Compute the set of "local" directories — packages that live next to the
    *  lock file rather than being pulled in as path/git deps. */

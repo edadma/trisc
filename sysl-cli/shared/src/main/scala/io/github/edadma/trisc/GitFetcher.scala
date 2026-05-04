@@ -26,6 +26,7 @@ trait GitFetcher:
       refKind: GitRefKind,
       refName: String,
       knownSha: Option[String],
+      offline: Boolean = false,
   ): Either[String, (String, String)]
 
   /** Cache root for diagnostic output. Implementations point this at

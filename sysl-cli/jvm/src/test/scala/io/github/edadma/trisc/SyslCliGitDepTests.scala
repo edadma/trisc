@@ -100,14 +100,18 @@ class SyslCliGitDepTests extends AnyFreeSpec with Matchers {
   /** Per-test fetcher anchored at a fresh cache root. Restored on exit so
    *  one test's fetcher doesn't bleed into another. */
   private def withFetcher[A](label: String)(body: (Path, JvmGitFetcher) => A): A =
-    val cacheRoot = java.nio.file.Paths.get("target", "sysl_test_git_cache", label + "_" + stagingCounter.incrementAndGet()).toAbsolutePath
-    if Files.exists(cacheRoot) then deleteRecursive(cacheRoot)
-    Files.createDirectories(cacheRoot)
-    val fetcher = new JvmGitFetcher(cacheRoot.toString)
-    val saved = GitFetcherProvider.instance
-    GitFetcherProvider.instance = Some(fetcher)
-    try body(cacheRoot, fetcher)
-    finally GitFetcherProvider.instance = saved
+    // Hold CliCapture.ioLock for the whole body so other suites' tests can't
+    // overwrite GitFetcherProvider.instance between two of our runCli calls.
+    CliCapture.ioLock.synchronized {
+      val cacheRoot = java.nio.file.Paths.get("target", "sysl_test_git_cache", label + "_" + stagingCounter.incrementAndGet()).toAbsolutePath
+      if Files.exists(cacheRoot) then deleteRecursive(cacheRoot)
+      Files.createDirectories(cacheRoot)
+      val fetcher = new JvmGitFetcher(cacheRoot.toString)
+      val saved = GitFetcherProvider.instance
+      GitFetcherProvider.instance = Some(fetcher)
+      try body(cacheRoot, fetcher)
+      finally GitFetcherProvider.instance = saved
+    }
 
   "a git dep with `branch = main` clones, runs the consumer's tests, and locks the resolved sha" in
     withFetcher("branch") { (cacheRoot, _) =>

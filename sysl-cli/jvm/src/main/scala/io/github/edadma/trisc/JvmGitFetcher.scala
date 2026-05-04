@@ -36,6 +36,7 @@ class JvmGitFetcher(val cacheRoot: String) extends GitFetcher:
       refKind: GitRefKind,
       refName: String,
       knownSha: Option[String],
+      offline: Boolean = false,
   ): Either[String, (String, String)] =
     // Lock-pinned happy path: if we already have the requested sha checked
     // out, skip every network step. This is the whole point of `sysl fetch`
@@ -44,6 +45,8 @@ class JvmGitFetcher(val cacheRoot: String) extends GitFetcher:
       case Some(sha) =>
         val co = checkoutPath(url, sha)
         if co.exists() then Right((sha, co.getAbsolutePath))
+        else if offline then
+          Left(s"offline mode (--frozen): no cached checkout for $url at $sha; run `sysl fetch` first")
         else
           for
             _   <- ensureBare(url)
@@ -51,12 +54,16 @@ class JvmGitFetcher(val cacheRoot: String) extends GitFetcher:
             dir <- ensureWorktree(url, sha)
           yield (sha, dir)
       case None =>
-        for
-          _   <- ensureBare(url)
-          _   <- ensureRefAvailable(url, refKind, refName, None)
-          sha <- resolveRef(url, refKind, refName)
-          dir <- ensureWorktree(url, sha)
-        yield (sha, dir)
+        // No pin → must ask the network for the ref → can't run offline.
+        if offline then
+          Left(s"offline mode (--frozen): git dep $url is not pinned by sysl.lock (run `sysl fetch` or `sysl update` first)")
+        else
+          for
+            _   <- ensureBare(url)
+            _   <- ensureRefAvailable(url, refKind, refName, None)
+            sha <- resolveRef(url, refKind, refName)
+            dir <- ensureWorktree(url, sha)
+          yield (sha, dir)
 
   private def repoName(url: String): String =
     val last = url.split("[/:]").lastOption.getOrElse("repo").stripSuffix(".git")
