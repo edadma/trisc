@@ -9,6 +9,13 @@ case class SyslPackage(
     name: String,
     version: String,
     deps: Map[String, SyslDep],
+    /** True when this package was synthesized from a `sysl.toml` that
+     *  declared neither `[package]` nor `[workspace]` — i.e. a "marker only"
+     *  manifest. The resolver still walks it (preserving back-compat for the
+     *  trisc repo's own SLIX-config sysl.toml and for path-deps like parsyl
+     *  that opt out of metadata), but `sysl.lock` skips the project-root
+     *  case so unconfigured trees don't get a noise lock file. */
+    synthetic: Boolean = false,
 )
 
 /** Decoded `[workspace]` table — a top-level `sysl.toml` that lists member
@@ -62,10 +69,11 @@ object SyslManifest:
     (hasPackage, hasWorkspace) match
       case (false, false) =>
         // Not a dep-resolution-aware manifest. Synthesize an empty package
-        // so the resolver still finds and walks this directory; the existing
-        // Step 3b behaviour of treating sysl.toml only as a project marker
-        // is preserved.
-        Right(PackageManifest(SyslPackage(name = inferName(path), version = "0.0.0", deps = Map.empty)))
+        // (marked synthetic = true) so source discovery treats this directory
+        // as a project root, while the lock writer skips it for project
+        // roots that have nothing real to lock (e.g. the trisc repo's own
+        // sysl.toml, which is just an SLIX build-config marker).
+        Right(PackageManifest(SyslPackage(name = inferName(path), version = "0.0.0", deps = Map.empty, synthetic = true)))
       case (true, true) =>
         Left(s"$path: a sysl.toml may declare either [package] or [workspace], not both")
       case (false, true) =>

@@ -30,6 +30,12 @@ case class ProveCommand(
     inputs: Seq[String] = Seq.empty,
     output: Option[String] = None,
 ) extends SyslCommand
+case class FetchCommand(
+    root: String = ".",
+) extends SyslCommand
+case class UpdateCommand(
+    root: String = ".",
+) extends SyslCommand
 
 case class SyslConfig(
     command: SyslCommand = CompileCommand(),
@@ -191,6 +197,36 @@ object SyslCli:
               )
             ),
         ),
+      // fetch: resolve the dep graph and write/refresh sysl.lock
+      cmd("fetch")
+        .text("Resolve [dependencies] and write sysl.lock without compiling")
+        .action((_, c) => c.copy(command = FetchCommand()))
+        .children(
+          arg[String]("[root]")
+            .optional()
+            .text("Project or workspace root (default: cwd)")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case fc: FetchCommand => fc.copy(root = v)
+                case other            => other
+              )
+            ),
+        ),
+      // update: re-resolve the dep graph and overwrite sysl.lock
+      cmd("update")
+        .text("Re-resolve [dependencies] and rewrite sysl.lock from scratch")
+        .action((_, c) => c.copy(command = UpdateCommand()))
+        .children(
+          arg[String]("[root]")
+            .optional()
+            .text("Project or workspace root (default: cwd)")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case uc: UpdateCommand => uc.copy(root = v)
+                case other             => other
+              )
+            ),
+        ),
       // prove: emit equivalent WhyML for offline discharge with Why3
       cmd("prove")
         .text("Translate Sysl source to WhyML (input language for the Why3 verifier)")
@@ -287,6 +323,8 @@ object SyslCli:
         case cmd: DocCommand     => executeDoc(cmd)
         case cmd: TestCommand    => executeTest(cmd)
         case cmd: ProveCommand   => executeProve(cmd)
+        case cmd: FetchCommand   => executeFetch(cmd)
+        case cmd: UpdateCommand  => executeUpdate(cmd)
     catch case CliError(_) => () // already printed
 
   private def executeCompile(cmd: CompileCommand): Unit =
@@ -294,6 +332,7 @@ object SyslCli:
     val resolved = SyslResolver.resolve(io, cmd.inputs) match
       case Right(r) => r
       case Left(msg) => fail(s"error: $msg")
+    SyslLock.writeIfChanged(io, resolved)
     val inputDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList
     val baseDirs = (inputDirs ++ resolved.searchRoots).distinct match
       case Nil => List(".")
@@ -347,6 +386,7 @@ object SyslCli:
     val resolved = SyslResolver.resolve(io, cmd.inputs) match
       case Right(r) => r
       case Left(msg) => fail(s"error: $msg")
+    SyslLock.writeIfChanged(io, resolved)
     val inputDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList
     val baseDirs = (inputDirs ++ resolved.searchRoots ++ List(".")).distinct
     val sources = resolveTransitiveSources(initialSources, baseDirs)
@@ -968,6 +1008,10 @@ object SyslCli:
     val resolved = SyslResolver.resolve(io, cmd.inputs) match
       case Right(r) => r
       case Left(msg) => fail(s"error: $msg")
+    // Workspace-level resolve already enumerates every member + transitive
+    // path dep, so a single lock write at the workspace root captures the
+    // whole graph (matches Cargo's "one Cargo.lock per workspace" rule).
+    SyslLock.writeIfChanged(io, resolved)
 
     SyslResolver.workspaceMemberDirs(io, resolved) match
       case Some(members) =>
@@ -1128,6 +1172,44 @@ object SyslCli:
     val skipped = inScopeDiscovered.size - filtered.size
     println(f"\n$passed passed, $failed failed, $skipped skipped — $totalMs%.1fms")
     (passed, failed, skipped)
+
+  /** `sysl fetch [root]` — resolve the dep graph rooted at `root` (or cwd) and
+   *  write `sysl.lock` next to the manifest if it would change. No code is
+   *  compiled, no tests run. Establishes the lock-file workflow that future
+   *  git-cache work (chunk 5) hangs network short-circuiting off of. */
+  private def executeFetch(cmd: FetchCommand): Unit =
+    val resolved = SyslResolver.resolve(io, Seq(cmd.root)) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    resolved.projectRoot match
+      case None =>
+        println(s"sysl: no sysl.toml in scope at ${cmd.root}; nothing to lock")
+      case Some(root) =>
+        SyslLock.writeIfChanged(io, resolved) match
+          case Some(true)  => println(s"sysl: wrote ${SyslLock.LockFile} at $root")
+          case Some(false) => println(s"sysl: ${SyslLock.LockFile} at $root is up to date")
+          case None        => println(s"sysl: $root has no resolvable packages; nothing to lock")
+
+  /** `sysl update [root]` — re-resolve the dep graph from scratch and rewrite
+   *  the lock unconditionally. With path-only deps this is observationally
+   *  identical to `fetch` (the resolved set is deterministic given the
+   *  filesystem); the distinction matters once git refs land in chunk 5,
+   *  where `fetch` will honor pinned shas and `update` will refresh them. */
+  private def executeUpdate(cmd: UpdateCommand): Unit =
+    val resolved = SyslResolver.resolve(io, Seq(cmd.root)) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    resolved.projectRoot match
+      case None =>
+        println(s"sysl: no sysl.toml in scope at ${cmd.root}; nothing to update")
+      case Some(root) =>
+        val lock = SyslLock.fromResolved(io, resolved)
+        if lock.packages.isEmpty then
+          println(s"sysl: $root has no resolvable packages; nothing to update")
+        else
+          val path = io.joinPath(root, SyslLock.LockFile)
+          io.writeFile(path, SyslLock.render(lock))
+          println(s"sysl: rewrote ${SyslLock.LockFile} at $root")
 
   private def executeProve(cmd: ProveCommand): Unit =
     // Phase 1: parse the input file and translate to WhyML directly. We do not run the

@@ -85,6 +85,14 @@ object SyslResolver:
         case _ => None
     }
 
+  /** Resolve a path-dep string against an owning manifest's directory. Mirrors
+   *  the logic in `walkPackageDeps` so other modules (lock writer, future
+   *  diagnostics) don't have to duplicate it. Absolute paths bypass joinPath;
+   *  the result is normalized. */
+  def resolveDepPath(io: FileOps, ownerDir: String, depPath: String): String =
+    val raw = if depPath.startsWith("/") then depPath else io.joinPath(ownerDir, depPath)
+    normalizePath(raw)
+
   private def loadManifestAt(io: FileOps, dir: String): Either[String, SyslManifest] =
     val path = io.joinPath(dir, ManifestFile)
     if !io.exists(path) then Left(s"$path: not found")

@@ -30,6 +30,7 @@ class SyslModulePathTests extends SyslTestHelpers {
     def fileName(path: String): String = java.io.File(path).getName
     def mkdirs(path: String): Unit = java.io.File(path).mkdirs()
     def joinPath(dir: String, name: String): String = Paths.get(dir, name).toString
+    def absolutePath(path: String): String = Paths.get(path).toAbsolutePath.toString
 
   /** Create a temp dir, write the given files into it (relative paths →
    *  contents), return the absolute root. Caller is responsible for cleanup
