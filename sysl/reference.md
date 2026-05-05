@@ -1374,6 +1374,10 @@ main() -> int
 - Generic functions and generic structs compose: a function like
   `swapPair[T](p: *Pair[T])` is fully supported — `T` is inferred from the
   concrete `Pair[i32]` passed in.
+- Type parameters may carry trait bounds and defaults exactly like generic
+  functions: `struct Wrap[T: Reader = int] { x: T::Token }`. The bound is
+  enforced at instantiation; field types may use associated-type projections
+  (`T::Item`), which resolve via the bound's matching impl.
 
 ### Generic Tagged Unions
 
@@ -1488,6 +1492,38 @@ main() -> int
 **Monomorphization:** each impl method — whether provided or synthesized from a
 default — compiles to a mangled top-level function like `Ord_cmp_i32`,
 `Ord_lt_i32`. There is no runtime dispatch; trait calls are resolved statically.
+
+**Associated types.** A trait body may declare named associated types, with
+optional bounds:
+
+```sysl
+trait Reader[I]
+    type Token
+    type Index: Eq + Ord
+    head(i: I) -> Self::Token
+```
+
+Each impl must bind every declared assoc type:
+
+```sysl
+impl Reader[string]
+    type Token = char
+    type Index = int
+    head(s: string) -> char = s[0]
+```
+
+Inside a trait method body or signature, `Self::Token` (or `I::Token` using
+the trait's first param as qualifier) projects to the impl's binding. At
+generic-fn use sites with a bound (`first[I: Reader](x: I) -> I::Token`), the
+projection resolves via the bound trait's matching impl. Generic struct
+fields may also use projections: `struct Wrap[T: Reader] { x: T::Token }`.
+
+Bounds declared on assoc types (`type Index: Eq + Ord`) are enforced at
+impl-registration time — the impl's binding type must satisfy each bound.
+When a generic-fn type parameter has multiple bounds (`T: A + B`) and both
+declare the same assoc name with different resolutions, the projection is
+rejected as ambiguous; identical bindings (same name, same resolved type) are
+allowed.
 
 ### Operator Overloading via Traits
 

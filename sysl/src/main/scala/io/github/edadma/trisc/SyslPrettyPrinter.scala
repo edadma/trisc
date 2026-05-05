@@ -77,8 +77,8 @@ object SyslPrettyPrinter:
       }.mkString("\n")
       s"enum $name$tpStr\n$body"
 
-    case StructDeclAST(name, fields, tps, _, _, defaults) =>
-      val tpStr = typeParamsWithDefaultsToSource(tps, Map.empty, defaults)
+    case StructDeclAST(name, fields, tps, _, _, defaults, bounds) =>
+      val tpStr = typeParamsWithDefaultsToSource(tps, bounds, defaults)
       val body = fields.map((n, t, _) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
       s"struct $name$tpStr\n$body"
 

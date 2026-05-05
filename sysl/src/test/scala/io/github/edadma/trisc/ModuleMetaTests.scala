@@ -215,7 +215,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
     val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
     val templates = ast.decls.filter {
-      case StructDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
+      case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
       case _ => false
     }
     templates.length shouldBe 1

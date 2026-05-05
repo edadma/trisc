@@ -257,7 +257,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             // from the cached meta and dependent modules fail with errors like
             // "'Result' is not a generic type" during pre-collection.
             val templates = ast.decls.filter {
-              case StructDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
+              case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
               case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
               case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
               case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
@@ -409,7 +409,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       // FunDecls (Phase 2d) — these come from `lowerExtensions` and aren't in
       // `ast.decls` directly.
       val templates = ast.decls.filter {
-        case StructDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
+        case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
         case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
         case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
         case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
@@ -532,7 +532,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         })
         // Extract generic templates (structs, enums, functions with type params)
         val templates = stripped.decls.filter {
-          case StructDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
+          case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
           case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
           case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
           case _ => false

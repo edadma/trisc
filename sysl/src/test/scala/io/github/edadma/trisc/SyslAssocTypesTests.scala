@@ -43,10 +43,11 @@ class SyslAssocTypesTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
-  "trait with associated type carrying bounds parses (bounds not yet enforced)" in {
-    // Phase A1 accepts the bound syntax but doesn't enforce it. The impl just
-    // has to provide the binding; we don't yet check that i64 implements Eq.
-    eval(
+  "trait with associated type carrying bounds parses (bounds enforced as of Phase C)" in {
+    // Phase A1 accepts the bound syntax; Phase C now enforces it. Bounds Eq + Ord
+    // are not declared in this snippet, so the impl trips the unknown-trait check.
+    // SyslAssocTypeBoundsTests covers the satisfied-bound positive paths.
+    val ex = intercept[Exception](eval(
       """trait It[I]
         |    type Item: Eq + Ord
         |    head(i: I) -> int
@@ -56,7 +57,8 @@ class SyslAssocTypesTests extends SyslTestHelpers {
         |    head(i: int) -> int = i * 2
         |
         |main() -> int = It.head(21)
-        |""".stripMargin) shouldBe 42
+        |""".stripMargin))
+    ex.getMessage should (include("Eq") or include("Ord") or include("unknown trait"))
   }
 
   "associated type alongside no-arg trait method" in {

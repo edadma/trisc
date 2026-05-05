@@ -66,7 +66,7 @@ case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, i
 // the verifier; the strip pass drops them (and any assignment to them, and any contract
 // clause that references them) before codegen. Discipline: real-code expressions cannot
 // read ghost names.
-case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, invariants: List[ExpressionAST] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
+case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, invariants: List[ExpressionAST] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty, typeBounds: Map[String, List[String]] = Map.empty) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])], attributes: List[Attribute] = Nil) extends DeclAST
 case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])

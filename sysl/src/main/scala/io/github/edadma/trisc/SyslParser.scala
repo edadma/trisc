@@ -105,11 +105,14 @@ class SyslParser extends StandardTokenParsers {
       "false" ^^^ "false"
 
   lazy val structDecl: Parser[StructDeclAST] =
-    "struct" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(structMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("struct")) ^^ {
-      case name ~ ((tps, defaults)) ~ members =>
+    "struct" ~> ident ~ typeParamListWithBounds ~ (Newline ~> Indent ~> rep1sep(structMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("struct")) ^^ {
+      case name ~ tps ~ members =>
         val fields = members.collect { case Left(f) => f }
         val invariants = members.collect { case Right(e) => e }
-        StructDeclAST(name, fields, tps, Nil, invariants, defaults)
+        val names = tps.map(_._1)
+        val bounds = tps.collect { case (n, bs, _) if bs.nonEmpty => (n, bs) }.toMap
+        val defaults = tps.collect { case (n, _, Some(d)) => (n, d) }.toMap
+        StructDeclAST(name, fields, names, Nil, invariants, defaults, bounds)
     }
 
   // A struct body member is either a field declaration or an `invariant <expr>` clause.
