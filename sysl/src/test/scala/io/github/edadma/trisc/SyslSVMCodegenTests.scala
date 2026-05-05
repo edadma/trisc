@@ -161,4 +161,31 @@ class SyslSVMCodegenTests extends AnyFreeSpec with Matchers {
         |    if b then s + t else 0
         |""".stripMargin)
   }
+
+  "array literal in argument position lowers" in {
+    // Pre-fix this hit `unhandled TExpr in SVM codegen: TArrayLit`. TVarDecl
+    // handled `TArrayLit` as a special-case init, but every other context
+    // (call args, return values, slice bases, etc.) fell through to the
+    // unhandled-node error. All 463 std/ failures on the svm-host backend
+    // were one instance of this gap; the regression test covers the smallest
+    // path that reproduces it (a `[N]T` literal as a call argument).
+    noException should be thrownBy codegen(
+      """sum3(p: [3]int) -> int = p[0] + p[1] + p[2]
+        |
+        |main() -> int = sum3([10, 20, 12])
+        |""".stripMargin)
+  }
+
+  "array literal as slice source lowers" in {
+    noException should be thrownBy codegen(
+      """sum_slice(s: []int) -> int
+        |    var t = 0
+        |    for v in s do t = t + v
+        |    t
+        |
+        |main() -> int
+        |    val a: [3]int = [1, 2, 3]
+        |    sum_slice(a[:])
+        |""".stripMargin)
+  }
 }
