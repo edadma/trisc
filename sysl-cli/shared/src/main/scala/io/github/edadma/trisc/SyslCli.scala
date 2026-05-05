@@ -767,6 +767,55 @@ object SyslCli:
           |  stb r1, r2, r0
           |  jalr r0, r6
           |
+          |; write_str(fd: int, s: string) -> int
+          |; The TRISC test runner has a single STDOUT device; fd is ignored.
+          |; ABI: r1 = fd (ignored), [r7+0] = s.ptr, [r7+8] = s.len. Returns
+          |; the number of bytes written (= s.len) in r1. Uses r1..r4 and the
+          |; return-stack slot pushed by pshd; preserves r5/r6/r7 per ABI and
+          |; does not mutate the caller's stack args.
+          |global write_str, func
+          |write_str
+          |  ldd r2, r7, r0        ; r2 = s.ptr
+          |  addi r3, r7, 8
+          |  ldd r3, r3, r0        ; r3 = s.len
+          |  pshd r3               ; save original len for return
+          |  movi r4, STDOUT
+          |.write_str_loop
+          |  beq r3, r0, .write_str_done
+          |  ldb r1, r2, r0        ; r1 = *p
+          |  stb r1, r4, r0        ; STDOUT = byte
+          |  addi r2, r2, 1        ; p++
+          |  addi r3, r3, -1       ; len--
+          |  bra .write_str_loop
+          |.write_str_done
+          |  popd r1               ; r1 = original len (return value)
+          |  jalr r0, r6
+          |
+          |; exit(code: int) — halt the VM. r1 = code (placed in panic flag for
+          |; debugger visibility but not interpreted by the test runner). The
+          |; runner treats `halt` as success unless the panic flag has a sysl
+          |; sentinel (1..5, 99); arbitrary `exit` codes from std.process are
+          |; therefore stored to keep the slot consistent but won't be confused
+          |; with a panic by the harness.
+          |global exit, func
+          |exit
+          |  halt
+          |
+          |; std.io descriptors. The test runner has only one device (stdout);
+          |; reads/writes to STDIN/STDERR FDs aren't routed anywhere special,
+          |; but the symbols must exist for std.log et al. to link.
+          |segment data
+          |  align 8
+          |global std_io__STDIN, data, 8
+          |std_io__STDIN:  dl 0
+          |  align 8
+          |global std_io__STDOUT, data, 8
+          |std_io__STDOUT: dl 1
+          |  align 8
+          |global std_io__STDERR, data, 8
+          |std_io__STDERR: dl 2
+          |segment code
+          |
           |; panic_isr: invoked by trap N (sysl panics). r1 holds the sysl
           |; error code (1=oob, 2=null, 3=abort, 4=assert/panic, 5=div0,
           |; 99=brk-corruption sentinel).
