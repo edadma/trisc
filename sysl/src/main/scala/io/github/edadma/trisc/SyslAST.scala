@@ -60,17 +60,17 @@ case class ModuleDeclAST(path: List[String]) extends DeclAST
 case class ImportDeclAST(modulePath: String, selectors: List[ImportSelector]) extends DeclAST
 case class ExternFuncDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], attributes: List[Attribute] = Nil) extends DeclAST
 case class ExternVarDeclAST(name: String, typ: TypeAST, attributes: List[Attribute] = Nil) extends DeclAST
-case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil, typeBounds: Map[String, List[String]] = Map.empty, attributes: List[Attribute] = Nil, isDef: Boolean = false, isParameterless: Boolean = false) extends DeclAST
+case class FunDeclAST(name: String, params: List[ParamAST], returnType: Option[TypeAST], body: FunBodyAST, isPrivate: Boolean = false, typeParams: List[String] = Nil, typeBounds: Map[String, List[String]] = Map.empty, attributes: List[Attribute] = Nil, isDef: Boolean = false, isParameterless: Boolean = false, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
 case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, isPrivate: Boolean = false, isMutable: Boolean = true, attributes: List[Attribute] = Nil, isVolatile: Boolean = false, isConst: Boolean = false) extends DeclAST
 // `#ghost` marker for `var`/`val` at statement position. Ghost locals exist only for
 // the verifier; the strip pass drops them (and any assignment to them, and any contract
 // clause that references them) before codegen. Discipline: real-code expressions cannot
 // read ghost names.
-case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, invariants: List[ExpressionAST] = Nil) extends DeclAST
+case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, invariants: List[ExpressionAST] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])], attributes: List[Attribute] = Nil) extends DeclAST
-case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil) extends DeclAST
+case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])
-case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, isNew: Boolean = false, range: Option[RangeAST] = None, predicate: Option[ExpressionAST] = None) extends DeclAST
+case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, isNew: Boolean = false, range: Option[RangeAST] = None, predicate: Option[ExpressionAST] = None, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
 
 // Range for `within lo..hi` / `within lo..<hi` type constraints
 case class RangeAST(lo: ExpressionAST, hi: ExpressionAST, exclusiveHi: Boolean) extends Positional
@@ -84,6 +84,7 @@ case class TraitDeclAST(
      *  deferred to a later phase (A4 in the master plan). For Phase A1 the
      *  list is populated and validated, but bounds carry no enforcement yet. */
     assocTypes: List[AssocTypeDeclAST] = Nil,
+    typeParamDefaults: Map[String, TypeAST] = Map.empty,
 ) extends DeclAST
 case class TraitMethodAST(
     name: String,
@@ -102,6 +103,7 @@ case class ImplDeclAST(
     attributes: List[Attribute] = Nil,
     /** Associated-type bindings declared inside the impl, e.g. `type Item = i64`. */
     assocBindings: List[AssocTypeBindingAST] = Nil,
+    typeParamDefaults: Map[String, TypeAST] = Map.empty,
 ) extends DeclAST
 /** `type Name = ConcreteType` inside an impl body. */
 case class AssocTypeBindingAST(name: String, target: TypeAST) extends Positional
@@ -109,7 +111,7 @@ case class AssocTypeBindingAST(name: String, target: TypeAST) extends Positional
 // Carries type-params (from the optional `[...]`), the receiver param, and the
 // inner method declarations. Lowering happens in the analyzer, not the parser,
 // so the receiver TypeAST shape stays available for generic dispatch.
-case class ExtensionDeclAST(typeParams: List[String], receiver: ParamAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil) extends DeclAST
+case class ExtensionDeclAST(typeParams: List[String], receiver: ParamAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
 case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, effects: FuncEffects = FuncEffects.Unknown) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST

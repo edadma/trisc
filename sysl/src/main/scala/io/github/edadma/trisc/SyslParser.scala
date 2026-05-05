@@ -106,10 +106,10 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val structDecl: Parser[StructDeclAST] =
     "struct" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(structMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("struct")) ^^ {
-      case name ~ tps ~ members =>
+      case name ~ ((tps, defaults)) ~ members =>
         val fields = members.collect { case Left(f) => f }
         val invariants = members.collect { case Right(e) => e }
-        StructDeclAST(name, fields, tps, Nil, invariants)
+        StructDeclAST(name, fields, tps, Nil, invariants, defaults)
     }
 
   // A struct body member is either a field declaration or an `invariant <expr>` clause.
@@ -122,7 +122,7 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val enumDecl: Parser[DeclAST] =
     "enum" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(enumVariantOrMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("enum")) ^^ {
-      case name ~ tps ~ members =>
+      case name ~ ((tps, defaults)) ~ members =>
         // If any member has fields, it's a data enum
         val hasData = members.exists(_.isInstanceOf[Right[?, ?]]) || tps.nonEmpty
         if hasData then
@@ -130,7 +130,7 @@ class SyslParser extends StandardTokenParsers {
             case Right(v) => v
             case Left((n, _)) => EnumVariantAST(n, Nil) // plain member in a data enum = no-arg variant
           }
-          DataEnumDeclAST(name, variants, tps)
+          DataEnumDeclAST(name, variants, tps, Nil, defaults)
         else
           EnumDeclAST(name, members.map { case Left(m) => m; case _ => ??? })
     }
@@ -142,9 +142,12 @@ class SyslParser extends StandardTokenParsers {
       ident ^^ (name => Left((name, None)))
 
   lazy val typeAliasDecl: Parser[TypeAliasDeclAST] =
-    "type" ~> ident ~ opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ("=" ~> opt("new")) ~ typeRef ~ opt(withinClause) ~ opt(whereClause) ^^ {
+    "type" ~> ident ~ opt("[" ~> rep1sep(typeParamWithDefault, ",") <~ "]") ~ ("=" ~> opt("new")) ~ typeRef ~ opt(withinClause) ~ opt(whereClause) ^^ {
       case name ~ tparams ~ isNew ~ target ~ range ~ predicate =>
-        TypeAliasDeclAST(name, target, tparams.getOrElse(Nil), Nil, isNew.isDefined, range, predicate)
+        val items = tparams.getOrElse(Nil)
+        val names = items.map(_._1)
+        val defaults = items.collect { case (n, Some(d)) => (n, d) }.toMap
+        TypeAliasDeclAST(name, target, names, Nil, isNew.isDefined, range, predicate, defaults)
     }
 
   lazy val withinClause: Parser[RangeAST] =
@@ -156,12 +159,14 @@ class SyslParser extends StandardTokenParsers {
     "where" ~> logicalOr
 
   lazy val traitDecl: Parser[TraitDeclAST] =
-    "trait" ~> ident ~ ("[" ~> rep1sep(ident, ",") <~ "]") ~
+    "trait" ~> ident ~ ("[" ~> rep1sep(typeParamWithDefault, ",") <~ "]") ~
       (Newline ~> Indent ~> rep1sep(traitMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("trait")) ^^ {
-        case name ~ tparams ~ members =>
+        case name ~ tpitems ~ members =>
           val assocs = members.collect { case Left(a) => a }
           val methods = members.collect { case Right(m) => m }
-          TraitDeclAST(name, tparams, methods, Nil, assocs)
+          val tparams = tpitems.map(_._1)
+          val defaults = tpitems.collect { case (n, Some(d)) => (n, d) }.toMap
+          TraitDeclAST(name, tparams, methods, Nil, assocs, defaults)
       }
 
   /** A trait body member is either an associated type declaration or a method. */
@@ -184,12 +189,15 @@ class SyslParser extends StandardTokenParsers {
       funBlockBody
 
   lazy val implDecl: Parser[ImplDeclAST] =
-    "impl" ~> opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ident ~ ("[" ~> rep1sep(typeRef, ",") <~ "]") ~
+    "impl" ~> opt("[" ~> rep1sep(typeParamWithDefault, ",") <~ "]") ~ ident ~ ("[" ~> rep1sep(typeRef, ",") <~ "]") ~
       (Newline ~> Indent ~> rep1sep(implMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("impl")) ^^ {
-        case tparams ~ name ~ targets ~ members =>
+        case tpitems ~ name ~ targets ~ members =>
           val assocs = members.collect { case Left(a) => a }
           val methods = members.collect { case Right(m) => m }
-          ImplDeclAST(name, tparams.getOrElse(Nil), targets, methods, Nil, assocs)
+          val items = tpitems.getOrElse(Nil)
+          val tparams = items.map(_._1)
+          val defaults = items.collect { case (n, Some(d)) => (n, d) }.toMap
+          ImplDeclAST(name, tparams, targets, methods, Nil, assocs, defaults)
       }
 
   /** An impl body member is either an associated-type binding or a method. */
@@ -216,10 +224,13 @@ class SyslParser extends StandardTokenParsers {
   // `def` (mirrors the user-facing surface; disambiguates from any other
   // construct that might appear in the block).
   lazy val extensionDecl: Parser[ExtensionDeclAST] =
-    "extension" ~> opt("[" ~> rep1sep(ident, ",") <~ "]") ~ ("(" ~> param <~ ")") ~
+    "extension" ~> opt("[" ~> rep1sep(typeParamWithDefault, ",") <~ "]") ~ ("(" ~> param <~ ")") ~
       (Newline ~> Indent ~> rep1sep(extensionMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("extension")) ^^ {
-        case tparams ~ recv ~ methods =>
-          ExtensionDeclAST(tparams.getOrElse(Nil), recv, methods)
+        case tpitems ~ recv ~ methods =>
+          val items = tpitems.getOrElse(Nil)
+          val tparams = items.map(_._1)
+          val defaults = items.collect { case (n, Some(d)) => (n, d) }.toMap
+          ExtensionDeclAST(tparams, recv, methods, Nil, defaults)
       }
 
   lazy val extensionMember: Parser[FunDeclAST] =
@@ -296,16 +307,18 @@ class SyslParser extends StandardTokenParsers {
         // params named `self`. The analyzer auto-aliases `self` -> `__self__` in
         // method bodies, so users still write `self.x`.
         val names = tps.map(_._1)
-        val bounds = tps.collect { case (n, bs) if bs.nonEmpty => (n, bs) }.toMap
+        val bounds = tps.collect { case (n, bs, _) if bs.nonEmpty => (n, bs) }.toMap
+        val defaults = tps.collect { case (n, _, Some(d)) => (n, d) }.toMap
         val typeArgs = names.map(n => NamedTypeAST(n): TypeAST)
         val selfParam = ParamAST("__self__", PtrTypeAST(NamedTypeAST(typeName, typeArgs)))
-        FunDeclAST(s"${typeName}_$methodName", selfParam :: params, rt, body, priv, names, bounds)
+        FunDeclAST(s"${typeName}_$methodName", selfParam :: params, rt, body, priv, names, bounds, typeParamDefaults = defaults)
     } |
     ident ~ typeParamListWithBounds ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ tps ~ params ~ ((rt, body)) =>
         val names = tps.map(_._1)
-        val bounds = tps.collect { case (n, bs) if bs.nonEmpty => (n, bs) }.toMap
-        FunDeclAST(name, params, rt, body, priv, names, bounds)
+        val bounds = tps.collect { case (n, bs, _) if bs.nonEmpty => (n, bs) }.toMap
+        val defaults = tps.collect { case (n, _, Some(d)) => (n, d) }.toMap
+        FunDeclAST(name, params, rt, body, priv, names, bounds, typeParamDefaults = defaults)
     } |
       // Parameterless function: `name -> RetType = body` or
       // `name -> RetType <indented block>`. Disambiguates from typed val
@@ -351,8 +364,9 @@ class SyslParser extends StandardTokenParsers {
     ident ~ typeParamListWithBounds ~ ("(" ~> repsep(param, ",") <~ ")") ~ funRest ^^ {
       case name ~ tps ~ params ~ ((rt, body)) =>
         val names = tps.map(_._1)
-        val bounds = tps.collect { case (n, bs) if bs.nonEmpty => (n, bs) }.toMap
-        FunDeclAST(name, params, rt, body, priv, names, bounds, isDef = true)
+        val bounds = tps.collect { case (n, bs, _) if bs.nonEmpty => (n, bs) }.toMap
+        val defaults = tps.collect { case (n, _, Some(d)) => (n, d) }.toMap
+        FunDeclAST(name, params, rt, body, priv, names, bounds, isDef = true, typeParamDefaults = defaults)
     } |
     // def name -> RetType body — zero-arg with explicit return type
     ident ~ ("->" ~> typeRef) ~ ("=" ~> bodyExprOrBlock) ^^ {
@@ -366,18 +380,32 @@ class SyslParser extends StandardTokenParsers {
       case name ~ body => FunDeclAST(name, Nil, None, body, priv, isDef = true)
     }
 
-  // Type parameter with optional trait bounds: T, T: Ord, T: Ord + Eq
-  lazy val typeParamWithBounds: Parser[(String, List[String])] =
-    ident ~ opt(":" ~> rep1sep(ident, "+")) ^^ {
-      case name ~ bounds => (name, bounds.getOrElse(Nil))
+  // Type parameter with optional trait bounds and default:
+  //   T, T: Ord, T: Ord + Eq, T = int, T: Ord = i64
+  // Order is bound first, default last (mirrors Rust).
+  lazy val typeParamWithBounds: Parser[(String, List[String], Option[TypeAST])] =
+    ident ~ opt(":" ~> rep1sep(ident, "+")) ~ opt("=" ~> typeRef) ^^ {
+      case name ~ bounds ~ default => (name, bounds.getOrElse(Nil), default)
     }
 
-  // Optional type parameter list for generic functions: [T], [T, U], [T: Ord], or absent
-  lazy val typeParamList: Parser[List[String]] =
-    opt("[" ~> rep1sep(ident, ",") <~ "]") ^^ (_.getOrElse(Nil))
+  // Type parameter with optional default (no bounds slot): T, T = int
+  lazy val typeParamWithDefault: Parser[(String, Option[TypeAST])] =
+    ident ~ opt("=" ~> typeRef) ^^ {
+      case name ~ default => (name, default)
+    }
 
-  // Type parameter list that captures bounds: [T: Ord], [T: Ord + Eq, U: Eq]
-  lazy val typeParamListWithBounds: Parser[List[(String, List[String])]] =
+  // Optional type parameter list for structs/enums/etc: [T], [T, U], [T = int], or absent
+  // Returns (names, defaults).
+  lazy val typeParamList: Parser[(List[String], Map[String, TypeAST])] =
+    opt("[" ~> rep1sep(typeParamWithDefault, ",") <~ "]") ^^ { res =>
+      val items = res.getOrElse(Nil)
+      val names = items.map(_._1)
+      val defaults = items.collect { case (n, Some(d)) => (n, d) }.toMap
+      (names, defaults)
+    }
+
+  // Type parameter list that captures bounds + defaults
+  lazy val typeParamListWithBounds: Parser[List[(String, List[String], Option[TypeAST])]] =
     opt("[" ~> rep1sep(typeParamWithBounds, ",") <~ "]") ^^ (_.getOrElse(Nil))
 
   lazy val funRest: Parser[(Option[TypeAST], FunBodyAST)] =

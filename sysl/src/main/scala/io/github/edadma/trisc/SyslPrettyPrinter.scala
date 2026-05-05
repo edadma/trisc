@@ -49,32 +49,43 @@ object SyslPrettyPrinter:
 
   // --- Declarations ---
 
+  /** Emit `[T, U = int]` or `[T: Ord = i64, U]`. Bounds (when supplied) come before the
+   *  default; the default is rendered after the bound to mirror Rust's `T: Ord = i64`. */
+  private def typeParamsWithDefaultsToSource(
+      typeParams: List[String],
+      typeBounds: Map[String, List[String]],
+      typeParamDefaults: Map[String, TypeAST],
+  ): String =
+    if typeParams.isEmpty then ""
+    else
+      val parts = typeParams.map { tp =>
+        val boundPart = typeBounds.get(tp) match
+          case Some(bs) if bs.nonEmpty => s"$tp: ${bs.mkString(" + ")}"
+          case _                       => tp
+        typeParamDefaults.get(tp) match
+          case Some(t) => s"$boundPart = ${typeToSource(t)}"
+          case None    => boundPart
+      }
+      s"[${parts.mkString(", ")}]"
+
   def declToSource(d: DeclAST): String = d match
-    case DataEnumDeclAST(name, variants, tps, _) =>
-      val tpStr = if tps.nonEmpty then s"[${tps.mkString(", ")}]" else ""
+    case DataEnumDeclAST(name, variants, tps, _, defaults) =>
+      val tpStr = typeParamsWithDefaultsToSource(tps, Map.empty, defaults)
       val body = variants.map { v =>
         if v.fields.isEmpty then s"${IND}${v.name}"
         else s"${IND}${v.name}(${v.fields.map((n, t) => s"$n: ${typeToSource(t)}").mkString(", ")})"
       }.mkString("\n")
       s"enum $name$tpStr\n$body"
 
-    case StructDeclAST(name, fields, tps, _, _) =>
-      val tpStr = if tps.nonEmpty then s"[${tps.mkString(", ")}]" else ""
+    case StructDeclAST(name, fields, tps, _, _, defaults) =>
+      val tpStr = typeParamsWithDefaultsToSource(tps, Map.empty, defaults)
       val body = fields.map((n, t, _) => s"${IND}$n: ${typeToSource(t)}").mkString("\n")
       s"struct $name$tpStr\n$body"
 
-    case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _, isDef, _) =>
+    case FunDeclAST(name, params, returnType, body, isPrivate, typeParams, typeBounds, _, isDef, _, defaults) =>
       val priv = if isPrivate then "private " else ""
       val defKw = if isDef then "def " else ""
-      val tpStr =
-        if typeParams.nonEmpty then
-          val tpParts = typeParams.map { tp =>
-            typeBounds.get(tp) match
-              case Some(bounds) if bounds.nonEmpty => s"$tp: ${bounds.mkString(" + ")}"
-              case _                              => tp
-          }
-          s"[${tpParts.mkString(", ")}]"
-        else ""
+      val tpStr = typeParamsWithDefaultsToSource(typeParams, typeBounds, defaults)
       if isDef && params.isEmpty then
         val retStr = returnType.map(t => s" -> ${typeToSource(t)}").getOrElse("")
         val bodyStr = body match
@@ -89,7 +100,8 @@ object SyslPrettyPrinter:
         val bodyStr = bodyToSource(body, 1)
         s"$priv$defKw$name$tpStr($paramStr)$retStr$bodyStr"
 
-    case TraitDeclAST(name, typeParams, methods, _, assocs) =>
+    case TraitDeclAST(name, typeParams, methods, _, assocs, defaults) =>
+      val tpStr = typeParamsWithDefaultsToSource(typeParams, Map.empty, defaults)
       val assocLines = assocs.map { a =>
         val boundStr = if a.bounds.nonEmpty then s": ${a.bounds.mkString(" + ")}" else ""
         s"${IND}type ${a.name}$boundStr"
@@ -104,18 +116,18 @@ object SyslPrettyPrinter:
         s"$attrStr${IND}$sig"
       }
       val body = (assocLines ++ methodLines).mkString("\n")
-      s"trait $name[${typeParams.mkString(", ")}]\n$body"
+      s"trait $name$tpStr\n$body"
 
-    case ImplDeclAST(traitName, typeParams, targetTypes, methods, _, assocBindings) =>
-      val tpStr = if typeParams.nonEmpty then s"[${typeParams.mkString(", ")}]" else ""
+    case ImplDeclAST(traitName, typeParams, targetTypes, methods, _, assocBindings, defaults) =>
+      val tpStr = typeParamsWithDefaultsToSource(typeParams, Map.empty, defaults)
       val targetStr = targetTypes.map(typeToSource).mkString(", ")
       val assocLines = assocBindings.map(b => s"${IND}type ${b.name} = ${typeToSource(b.target)}")
       val methodLines = methods.map(m => s"${IND}${declToSource(m).replace("\n", s"\n")}")
       val body = (assocLines ++ methodLines).mkString("\n")
       s"impl$tpStr $traitName[$targetStr]\n$body"
 
-    case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate) =>
-      val tpStr = if typeParams.nonEmpty then s"[${typeParams.mkString(", ")}]" else ""
+    case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate, defaults) =>
+      val tpStr = typeParamsWithDefaultsToSource(typeParams, Map.empty, defaults)
       val newStr = if isNew then "new " else ""
       val rangeStr = range.map(r => s" within ${exprToSource(r.lo)}${if r.exclusiveHi then "..<" else ".."}${exprToSource(r.hi)}").getOrElse("")
       val predStr = predicate.map(p => s" where ${exprToSource(p)}").getOrElse("")

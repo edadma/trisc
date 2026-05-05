@@ -470,7 +470,7 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     // Round-trip: serialize, parse back, verify the generic alias survives
     val parsed = ModuleMeta.fromSmeta(unit.smeta).get
     val aliasTemplate = parsed.genericTemplates.collectFirst {
-      case ta @ TypeAliasDeclAST("Box", _, tps, _, isNew, _, _) if tps.nonEmpty => (ta, tps, isNew)
+      case ta @ TypeAliasDeclAST("Box", _, tps, _, isNew, _, _, _) if tps.nonEmpty => (ta, tps, isNew)
     }
     aliasTemplate.isDefined shouldBe true
     aliasTemplate.get._2 shouldBe List("A")

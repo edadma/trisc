@@ -165,8 +165,12 @@ object ModuleMeta:
    *  files. The pretty printer emits them inside trait/impl bodies; the read side
    *  parses them back into the same trait/impl AST. Concrete-impl assoc bindings
    *  also force the impl into the TEMPLATES path (TraitImplMeta carries no slot
-   *  for them). */
-  val SMETA_VERSION = 15
+   *  for them).
+   *  v16 adds default type parameters (`[T = Default]`) on trait/struct/enum/alias/fn
+   *  declarations. They round-trip purely through the TEMPLATES pretty-printer +
+   *  parser (no new SMETA fields), but the version bump prevents v15 readers from
+   *  silently mis-parsing default-bearing templates. */
+  val SMETA_VERSION = 16
 
   /** Encode a FuncEffects as space-separated tokens — `U` (Unknown), `P` (Pure), or
    *  `RW <nReads> <readsNames…> <nWrites> <writesNames…>`. Used both in the FUNC-line
@@ -348,14 +352,14 @@ object ModuleMeta:
           parser.parseProgram(templateBuf.toString) match
             case Right(ast) =>
               ast.decls.filter {
-                case StructDeclAST(_, _, tps, _, _)        => tps.nonEmpty
-                case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
-                case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
-                case TypeAliasDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
+                case StructDeclAST(_, _, tps, _, _, _)        => tps.nonEmpty
+                case DataEnumDeclAST(_, _, tps, _, _)         => tps.nonEmpty
+                case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
+                case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
                 case _: TraitDeclAST                        => true
                 // Generic / multi-target / assoc-binding impls round-trip via TEMPLATES
                 // because TraitImplMeta has no slot for type parameters or assoc bindings.
-                case ImplDeclAST(_, tps, targets, _, _, assocs) =>
+                case ImplDeclAST(_, tps, targets, _, _, assocs, _) =>
                   tps.nonEmpty || targets.length > 1 || assocs.nonEmpty
                 case _                                      => false
               }

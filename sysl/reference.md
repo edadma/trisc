@@ -1284,6 +1284,25 @@ An unsatisfied bound produces a clear error naming the missing trait and the
 type parameter. Inside the generic body, operators like `a > b` and `a == b`
 route through the bounded trait's methods.
 
+**Default type parameters.** A type parameter may carry a default type
+expression that fills in when the argument is missing at instantiation time.
+The default appears after any bound, mirroring Rust's `T: Bound = Default`:
+
+```sysl
+make[T = i64]() -> T = ...           // no inference target — T defaults to i64
+pick[I, O = I](x: I) -> O = x         // later default may reference an earlier param
+
+struct Box[T = int] { v: T }
+enum Result[T, E = string] { Ok(value: T); Err(error: E) }
+type Parser[I = Input, A] = ...       // partial defaults
+```
+
+Inference still wins where it succeeds, and explicit type arguments override
+the default: `Box(7i64)` instantiates `Box[i64]`, `Box[i32](7)` instantiates
+`Box[i32]`, `Box(7)` (with `T = int`) falls back to the default. Defaults
+resolve under the partial type-arg env, so `[I, O = I]` is well-defined.
+Trailing slots that have no default and no inference target still error.
+
 **Rules:**
 - Type parameters may appear in parameter types, return type, and local variable
   type annotations.

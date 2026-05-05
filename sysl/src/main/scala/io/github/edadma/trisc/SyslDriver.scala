@@ -257,10 +257,10 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             // from the cached meta and dependent modules fail with errors like
             // "'Result' is not a generic type" during pre-collection.
             val templates = ast.decls.filter {
-              case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
-              case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
-              case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
-              case TypeAliasDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
+              case StructDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
+              case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+              case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
+              case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
               // Include generic and multi-target concrete ImplDeclASTs. Single-target
               // concrete impls already round-trip via meta.traitImpls (TraitImplMeta
               // is single-target only); multi-target concrete impls (e.g.
@@ -270,7 +270,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               // Generic and multi-target concrete impls ride in genericTemplates as
               // before; additionally, any concrete impl that declares associated-type
               // bindings goes the same route since TraitImplMeta has no slot for them.
-              case ImplDeclAST(_, tps, targets, _, _, assocs) =>
+              case ImplDeclAST(_, tps, targets, _, _, assocs, _) =>
                 tps.nonEmpty || targets.length > 1 || assocs.nonEmpty
               case _ => false
             } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
@@ -409,10 +409,10 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       // FunDecls (Phase 2d) — these come from `lowerExtensions` and aren't in
       // `ast.decls` directly.
       val templates = ast.decls.filter {
-        case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
-        case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
-        case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
-        case TypeAliasDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
+        case StructDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
+        case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+        case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
+        case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
         case _ => false
       } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
@@ -532,9 +532,9 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         })
         // Extract generic templates (structs, enums, functions with type params)
         val templates = stripped.decls.filter {
-          case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
-          case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
-          case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
+          case StructDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
+          case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+          case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
           case _ => false
         }
         scala.util.Try {
