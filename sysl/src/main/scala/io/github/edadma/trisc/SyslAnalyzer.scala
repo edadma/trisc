@@ -5183,7 +5183,39 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         // locally so the backend emits its body in this compilation unit.
         // Save and install typeEnv for this instantiation
         val savedEnv = typeEnv
+        val savedAssocsInst = assocBindingsEnv
         typeEnv = typeParams.zip(inferredArgs).toMap
+        // Phase A3 — for each bounded type parameter, locate the matching impl
+        // and pull its associated-type bindings into `assocBindingsEnv` so that
+        // projections like `T::Item` in the generic body resolve to the impl's
+        // declared type. The bound check above already validated that a matching
+        // impl exists; we re-find it here to capture both the impl template and
+        // (for generic impls) the substitution that pins its type parameters.
+        // Bindings are merged across all bounds; if two bounds declare the same
+        // associated name with different resolutions, last-write-wins for now
+        // (multi-bound disambiguation is future work).
+        val newAssocs = mutable.Map.empty[String, SyslType]
+        for tp <- typeParams do
+          val bounds = template.typeBounds.getOrElse(tp, Nil)
+          val concreteType = env(tp)
+          for traitName <- bounds do
+            val matched = implTemplates.getOrElse(traitName, Nil).iterator.flatMap { t =>
+              if t.typeParams.isEmpty then
+                if t.resolvedConcrete.flatMap(_.headOption).contains(concreteType)
+                then Some((t, Map.empty[String, SyslType]))
+                else None
+              else
+                tryUnifyAll(t.targetPatterns.headOption.toList, List(concreteType), t.typeParams.toSet)
+                  .map(s => (t, s))
+            }.nextOption()
+            for (impl, implSubst) <- matched do
+              val savedEnv2 = typeEnv
+              typeEnv = typeEnv ++ implSubst
+              try
+                for binding <- impl.assocBindings do
+                  newAssocs(binding.name) = resolveType(binding.target)
+              finally typeEnv = savedEnv2
+        assocBindingsEnv = newAssocs.toMap
         try
           // Resolve param/return types in the new env
           val paramTypes = template.params.map(p => (p.name, resolveType(p.typ)))
@@ -5224,6 +5256,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           (mangled, funInfo)
         finally
           typeEnv = savedEnv
+          assocBindingsEnv = savedAssocsInst
 
   /** Build a typed positional arg list from a mix of positional and named args.
     * Rules:
