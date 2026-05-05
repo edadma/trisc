@@ -268,6 +268,54 @@ class SyslArrayLitSliceTests extends SyslTestHelpers {
       s"unannotated [] should require expected type, got: $msg")
   }
 
+  // ===== Bound array → slice param at the call site =====
+  //
+  // When a `val a = [1, 2, 3]` (typed `[3]int` because no expected type was a
+  // SliceType) is then passed to a `f(xs: []int)` parameter, the analyzer used
+  // to leave the arg as ArrayType and downstream backends (TRISC in particular)
+  // pushed only the array's address as a single 8-byte scalar — the callee then
+  // read slice fields from arbitrary memory. Fix wraps such args with the same
+  // `TSliceExpr(arr, None, None, …)` the explicit `arr[:]` would produce, so
+  // the callee receives a real {ptr, len, backref} descriptor.
+
+  "bound [N]T → []T at call site coerces to slice (read len)" in {
+    eval(
+      """take(xs: []int) -> int = len(xs)
+        |main() -> int
+        |    val a = [10, 20, 30]
+        |    take(a)
+        |""".stripMargin) shouldBe 3
+  }
+
+  "bound [N]byte → []byte at call site coerces to slice (read elements)" in {
+    eval(
+      """take(xs: []byte) -> int
+        |    var sum = 0
+        |    for i in 0..<len(xs)
+        |        sum = sum + int(xs[i])
+        |    sum
+        |
+        |main() -> int
+        |    val a = [byte(1), byte(2), byte(3)]
+        |    take(a)
+        |""".stripMargin) shouldBe 6
+  }
+
+  "two bound arrays → two []T args (mirrors std/testing assert_slice_eq)" in {
+    eval(
+      """eq(got: []byte, want: []byte) -> int
+        |    if len(got) != len(want) then return -1
+        |    for i in 0..<len(got)
+        |        if got[i] != want[i] then return i
+        |    len(got)
+        |
+        |main() -> int
+        |    val a = [byte(1), byte(2), byte(3)]
+        |    val b = [byte(1), byte(2), byte(3)]
+        |    eq(a, b)
+        |""".stripMargin) shouldBe 3
+  }
+
   "regression: empty [] cannot satisfy [N]T with N > 0" in {
     val ex = intercept[Exception] {
       eval(
