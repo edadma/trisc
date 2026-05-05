@@ -797,9 +797,12 @@ five hours.
 
     #test
     test_duration_normalize() -> unit
-        val d = new_duration(0i64, 2500000000)
-        assert(d.seconds == 2i64, "seconds")
-        assert(d.nano == 500000000, "nano")
+        // 1.5e9 nanos exercises the `nano >= NANOS_PER_SECOND` branch while
+        // staying within signed-i32 range — values >= 2^31 do not fit in
+        // `nano: int` and would truncate before normalize ever runs.
+        val d = new_duration(0i64, 1500000000)
+        assert(d.seconds == 1i64, s"seconds: ${d.seconds}")
+        assert(d.nano == 500000000, s"nano: ${d.nano}")
 
 
 ### Formatting
