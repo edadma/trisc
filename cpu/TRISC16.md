@@ -97,14 +97,47 @@ A minimal exception mechanism. On any exception:
 
 1. EPC ← PC of faulting instruction
 2. ECAUSE ← cause code (see below)
-3. PSR.E ← 1 (in-exception bit set)
-4. PC ← 0x0004
+3. PSR.Mode ← 1 (entering supervisor / handler)
+4. An internal "in-handler" flag is set; a second exception fired before `rte` clears it triggers DoubleFault (TRISC16 has no nested-exception model — there's no shadow PSR to stack).
+5. PC ← 0x0004
 
 Three internal supervisor registers, accessed via dedicated instructions:
 
 - **EPC** — saved PC at time of exception
 - **ECAUSE** — cause code
-- **PSR** — processor status (one defined bit: PSR.E, set while in handler)
+- **PSR** — processor status; bit layout below
+
+### PSR Layout
+
+PSR is a 16-bit register. The bit positions and names match TRISC's PSR (see `specs/exceptions.md` in the TRISC repo) so a TRISC16 program reading PSR via `gpsr` observes the same bits it would on TRISC. Several bits have no meaning on TRISC16 and are reserved-as-zero.
+
+| Bit  | Name | Meaning on TRISC16 |
+|------|------|--------------------|
+| 0    | Ind  | Reserved on TRISC16 (no interrupts). Reads as 0; writes via `spsr` must be 0. |
+| 1    | Mode | 0 = user, 1 = in-handler (supervisor). Set on exception entry, cleared by `rte`. |
+| 2    | C    | Carry / borrow out from the last flag-setting instruction. |
+| 3    | —    | Reserved. Reads as 0. |
+| 4    | T    | Reserved on TRISC16 (no trace). Reads as 0; writes via `spsr` must be 0. |
+| 5    | V    | Signed overflow from the last flag-setting instruction. |
+| 6–15 | —    | Reserved. Read as 0. |
+
+Only `add`, `sub`, `adc`, `sbc`, and `neg` update C and V. All other instructions leave C and V unchanged. Specifically:
+
+- **C after `add`/`adc`** is the unsigned carry-out: 1 iff `ra + rb (+ C_in) ≥ 2¹⁶`.
+- **C after `sub`/`sbc`** is the borrow-out: 1 iff `ra < rb (+ C_in)` (i.e. the subtraction wrapped past zero).
+- **C after `neg`** is the borrow-out of `0 - rb`, which is 1 for any nonzero `rb` and 0 when `rb == 0`.
+- **V after add/sub/adc/sbc** is the signed-overflow flag: 1 iff the operand signs and the result sign disagree in the standard two's-complement sense (for add: same-sign operands producing opposite-sign result; for sub: different-sign operands producing a result whose sign differs from the minuend's).
+- **V after `neg`** is 1 iff `rb == 0x8000` (the only input whose negation overflows the signed 16-bit range).
+
+`adc` and `sbc` use the current value of PSR.C as the carry-in / borrow-in.
+
+`trapv` raises a cause-4 trap iff PSR.V is set at the moment of execution.
+
+### PSR Across Exceptions
+
+Exception entry sets PSR.Mode (re-entering supervisor regardless of what user code had done), and leaves the other PSR bits unchanged. There is no shadow PSR: TRISC16 cannot stack the user-mode PSR the way TRISC does, so `rte` does not restore Mode (or any other bit). Returning user code therefore inherits whatever PSR the handler last left, including any C, V, or Mode that the handler wrote.
+
+Handlers that want to preserve user-visible PSR save it with `gpsr` at entry and restore it with `spsr` immediately before `rte`. `rte` is a privileged operation: it traps cause 1 (PrivilegeViolation) if executed with PSR.Mode == 0, mirroring TRISC.
 
 ### Cause Codes
 
@@ -117,7 +150,7 @@ Three internal supervisor registers, accessed via dedicated instructions:
 | 4    | Overflow (`trapv`) or bounds check (`chk`) |
 | 8–15 | Software trap (`trap0`–`trap7`) |
 
-Returning from a handler is via `rte`, which restores PC ← EPC and clears PSR.E.
+Returning from a handler is via `rte`, which sets PC ← EPC and clears the internal in-handler flag (PSR is not restored; see "PSR Across Exceptions" below).
 
 ## Native Instructions
 
@@ -129,8 +162,8 @@ Returning from a handler is via `rte`, which restores PC ← EPC and clears PSR.
 | 0001 | stb  | mem[rb + rc] = ra (low byte) |
 | 0010 | lds  | rd = mem[ra + rb] (16-bit) |
 | 0011 | sts  | mem[rb + rc] = ra (16-bit) |
-| 1000 | add  | rd = ra + rb (sets carry) |
-| 1001 | sub  | rd = ra - rb (sets borrow) |
+| 1000 | add  | rd = ra + rb (updates PSR.C, PSR.V) |
+| 1001 | sub  | rd = ra - rb (updates PSR.C, PSR.V) |
 | 1010 | mul  | rd = low16(ra * rb) (signed/unsigned identical) |
 | 1011 | div  | rd = ra / rb (signed; div-by-zero traps) |
 | 1101 | and  | rd = ra & rb |
@@ -148,8 +181,8 @@ Reserved opcodes (`0100`–`0111`, `1100`) raise illegal-instruction.
 | 0010 | lsl  | rd = ra << rb (rb taken mod 16) |
 | 0011 | slt  | rd = (ra <s rb) ? 1 : 0 |
 | 0100 | sltu | rd = (ra <u rb) ? 1 : 0 |
-| 0101 | adc  | rd = ra + rb + carry (sets carry) |
-| 0110 | sbc  | rd = ra - rb - borrow (sets borrow) |
+| 0101 | adc  | rd = ra + rb + PSR.C (updates PSR.C, PSR.V) |
+| 0110 | sbc  | rd = ra - rb - PSR.C (updates PSR.C, PSR.V) |
 | 1000 | divu | rd = ra / rb (unsigned; div-by-zero traps) |
 
 All other opcodes reserved.
@@ -233,12 +266,13 @@ A full 16-bit absolute address is built with `ldi` + `sli` (two instructions cov
 | 0000001 | popb     | pop byte (zero-extended into rr; SP += 1) |
 | 0000010 | pshs     | push 16-bit (rr; SP -= 2) |
 | 0000011 | pops     | pop 16-bit (rr; SP += 2) |
+| 0001000 | spsr     | PSR = rr (supervisor only — traps cause 1 if PSR.Mode == 0) |
 | 0001001 | gpsr     | rr = PSR |
-| 0001010 | rte      | PC = EPC; PSR.E = 0 |
+| 0001010 | rte      | PC = EPC; clear in-handler state |
 | 0001011 | fence    | memory fence (no-op on single-core) |
 | 0001100 | gepc     | rr = EPC |
 | 0001101 | gcause   | rr = ECAUSE |
-| 0001111 | trapv    | trap (cause 4) if last add/sub/adc/sbc overflowed |
+| 0001111 | trapv    | trap (cause 4) if PSR.V == 1 |
 | 0010000 | pshr rN  | push r1..rN (2 bytes each, r1 deepest, rN on top); N = `rrr`, range 1..6 |
 | 0010001 | popr rN  | pop rN..r1 (rN first, r1 last); N = `rrr`, range 1..6 |
 
@@ -296,7 +330,7 @@ Instructions present in TRISC but absent in TRISC16 (floats, 32/64-bit loads/sto
 ## Implementation Order (Suggested)
 
 1. **Core datapath** (~23 instructions): addi, add, sub, and, or, xor, lsl, lsr, asr, slt, sltu, mov, ldi, sli, beq, bls, blu, jalr, lds, sts, ldb, stb, halt
-2. **Stack, convenience ops, exception infrastructure**: auipc, ld, st, pshs, pops, pshr, popr, neg, not, min, max, exg, seb, zeb; EPC/ECAUSE/PSR; gepc, gcause, gpsr, rte; illegal-instruction trap; trap0–trap7
+2. **Stack, convenience ops, exception infrastructure**: auipc, ld, st, pshs, pops, pshr, popr, neg, not, min, max, exg, seb, zeb; EPC/ECAUSE/PSR; gepc, gcause, gpsr, spsr, rte; illegal-instruction trap; trap0–trap7
 3. **Multiply/divide** (multi-cycle): mul, div, divu, mulh, mulhu, mulhsu, rem, remu (with div-by-zero now raising a real exception)
 4. **Bit manipulation**: clz, ctz, cnt, rev, rol, ror, btst, bset, bclr, sext, chk
 5. **Misc**: adc, sbc, fence (nop), trapv, sti, pshb, popb
