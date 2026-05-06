@@ -359,7 +359,7 @@ object ModuleMeta:
                 case _: TraitDeclAST                        => true
                 // Generic / multi-target / assoc-binding impls round-trip via TEMPLATES
                 // because TraitImplMeta has no slot for type parameters or assoc bindings.
-                case ImplDeclAST(_, tps, targets, _, _, assocs, _) =>
+                case ImplDeclAST(_, tps, targets, _, _, assocs, _, _) =>
                   tps.nonEmpty || targets.length > 1 || assocs.nonEmpty
                 case _                                      => false
               }

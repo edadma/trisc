@@ -532,6 +532,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       typeParams: List[String],
       methods: List[TraitMethodAST],
       assocTypes: List[AssocTypeDeclAST] = Nil,
+      /** Trait bounds on the trait's own type parameters, e.g.
+       *  `trait Container[T: Ord]`. Enforced at impl registration time —
+       *  each impl target type must satisfy the declared bound. */
+      typeBounds: Map[String, List[String]] = Map.empty,
   )
   protected case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
   /** A registered impl block — concrete or generic.
@@ -560,6 +564,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
        *  raw TypeAST per binding so projection resolution (Phase A3) can resolve
        *  them on demand using the dispatch-time substitution map. */
       assocBindings: List[AssocTypeBindingAST] = Nil,
+      /** Trait bounds on this impl's own type parameters (e.g.
+       *  `impl[T: Ord] Get[Box[T]]`). Enforced at `instantiateImpl` time when
+       *  the impl is selected for a concrete type substitution. */
+      typeBounds: Map[String, List[String]] = Map.empty,
   )
   protected val traits = new mutable.LinkedHashMap[String, TraitInfo]
   // traitName -> list of registered impls (templates). Order is registration order.
@@ -639,7 +647,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val module = currentModule.getOrElse("")
     for decl <- decls do
       decl match
-        case ExtensionDeclAST(tparams, recv, methods, _, _) =>
+        case ExtensionDeclAST(tparams, recv, methods, _, _, extTypeBounds) =>
           val key = extensionTypeKey(recv.typ)
           for m <- methods do
             val mangled = s"__ext_${key}__${m.name}"
@@ -647,10 +655,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             // matters for instantiation lookup later — extension tparams come
             // first so a generic receiver's type bindings are stable.
             val mergedTparams = tparams ++ m.typeParams
+            // Forward extension-level type bounds to the synth fn. The fn-level
+            // bounds carrier on FunDeclAST is `typeBounds`; method-level wins
+            // on collision (rare; the method-level set is typically empty here).
+            val mergedTypeBounds = extTypeBounds ++ m.typeBounds
             val synth = m.copy(
               name = mangled,
               params = recv :: m.params,
               typeParams = mergedTparams,
+              typeBounds = mergedTypeBounds,
             )
             out += synth
             entries += ExtensionEntry(m.name, recv.typ, mangled, module)
@@ -706,7 +719,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               // Generic-receiver extensions yield a generic impl whose tparams
               // are the user's extension-level tparams; the receiver pattern
               // (using those tparams) becomes the trait's target type.
-              val implDecl = ImplDeclAST(traitName, tparams, List(recv.typ), List(implMethod))
+              val implDecl = ImplDeclAST(traitName, tparams, List(recv.typ), List(implMethod), Nil, Nil, Map.empty, extTypeBounds)
               out += implDecl
               if tparams.nonEmpty then extensionImplDecls += implDecl
         case other =>
@@ -1095,7 +1108,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         //     impl-decl arity check passes; do trait first.
         for template <- meta.genericTemplates do
           template match
-            case TraitDeclAST(name, tparams, methods, _, _, _) if name.startsWith("__ExtOp_") =>
+            case TraitDeclAST(name, tparams, methods, _, _, _, _) if name.startsWith("__ExtOp_") =>
               if !traits.contains(name) then
                 traits(name) = TraitInfo(name, tparams, methods)
                 importedTraitNames += name
@@ -1103,7 +1116,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             case _ => ()
         for template <- meta.genericTemplates do
           template match
-            case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _)
+            case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _, _)
                 if traitName.startsWith("__ExtOp_") && implTypeParams.nonEmpty =>
               if !implTemplates.getOrElse(traitName, Nil).exists(t =>
                   t.typeParams == implTypeParams && t.targetPatterns == targetTypes) then
@@ -1349,9 +1362,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // Register trait declarations from imported templates
     for template <- meta.genericTemplates do
       template match
-        case TraitDeclAST(name, tparams, methods, _, assocs, _) =>
+        case TraitDeclAST(name, tparams, methods, _, assocs, _, tBounds) =>
           if !traits.contains(name) then
-            traits(name) = TraitInfo(name, tparams, methods, assocs)
+            traits(name) = TraitInfo(name, tparams, methods, assocs, tBounds)
             importedTraitNames += name
             registerTraitOperatorEntries(name, methods, template)
         case _ =>
@@ -1378,7 +1391,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // meta.traitImpls path above, so they're not duplicated here.
     for template <- meta.genericTemplates do
       template match
-        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _) =>
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _, implTBounds) =>
           val alreadyHas = implTemplates.getOrElse(traitName, Nil).exists(t =>
             t.typeParams == implTypeParams && t.targetPatterns == targetTypes)
           if !alreadyHas then
@@ -1393,6 +1406,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 methodASTs = methods,
                 definingModule = "",
                 implDecl = Some(impl),
+                typeBounds = implTBounds,
               )
               importedGenericImplKeys += ((traitName, implTypeParams, targetTypes))
             else
@@ -1644,9 +1658,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     registerGenericTemplatesFrom(program)
     for decl <- program.decls do
       decl match
-        case td @ TraitDeclAST(name, tparams, methods, _, assocs, _) =>
+        case td @ TraitDeclAST(name, tparams, methods, _, assocs, _, tBounds) =>
           if !traits.contains(name) then
-            traits(name) = TraitInfo(name, tparams, methods, assocs)
+            traits(name) = TraitInfo(name, tparams, methods, assocs, tBounds)
             importedTraitNames += name
             registerTraitOperatorEntries(name, methods, td)
         case StructDeclAST(name, fields, typeParams, _, _, _, _) if typeParams.isEmpty =>
@@ -1705,7 +1719,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               externalSymbols += name
               importedSiblingFreeFnStubKeys += name
             }
-        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _) =>
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _, implTBounds) =>
           val alreadyHas = implTemplates.getOrElse(traitName, Nil).exists(t =>
             t.typeParams == implTypeParams && t.targetPatterns == targetTypes)
           if !alreadyHas then
@@ -1719,6 +1733,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 methodASTs = methods,
                 definingModule = "",
                 implDecl = Some(impl),
+                typeBounds = implTBounds,
               )
               importedGenericImplKeys += ((traitName, implTypeParams, targetTypes))
             else
@@ -1770,6 +1785,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                   methodASTs = Nil,
                   definingModule = "",
                   implDecl = Some(impl),
+                  typeBounds = implTBounds,
                 )
                 importedConcreteImplKeys += ((traitName, resolvedTargets))
               }
@@ -1846,7 +1862,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           case EnumDeclAST(name, _, _)                => typeDefiningModule(name) = curMod
           case InterfaceDeclAST(name, _, _, _)        => typeDefiningModule(name) = curMod
           case TypeAliasDeclAST(name, _, _, _, _, _, _, _, _) => typeDefiningModule(name) = curMod
-          case TraitDeclAST(name, _, _, _, _, _)         => traitDefiningModule(name) = curMod
+          case TraitDeclAST(name, _, _, _, _, _, _)      => traitDefiningModule(name) = curMod
           case _ => ()
 
     // Pass 0.5: resolve struct and data-enum FIELDS before any function signature.
@@ -2089,7 +2105,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             if bounds.nonEmpty then genericTypeAliasBounds(name) = bounds
           else
             typeAliases(name) = (target, isNew, range, predicate)
-        case TraitDeclAST(name, tparams, methods, _, assocs, _) =>
+        case TraitDeclAST(name, tparams, methods, _, assocs, _, tBounds) =>
           // Tolerate sibling-pre-registered traits (importedTraitNames) — those
           // came from this same trait decl via cross-sibling forward-decl pass
           // and are structurally identical. Without this, two-file modules
@@ -2121,7 +2137,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 throw AnalysisError(s"associated type '${a.name}' shadows method name in trait '$name'", a)
               if SyslAnalyzer.ReservedTypeAttrNames.contains(a.name) then
                 throw AnalysisError(s"associated type '${a.name}' uses a reserved attribute name in trait '$name'; rename to avoid clashing with the built-in T::${a.name} introspection attribute", a)
-            traits(name) = TraitInfo(name, tparams, methods, assocs)
+            // Validate that every name on the LHS of typeBounds is one of the
+            // declared type parameters; flag-but-don't-fail if a bound names an
+            // unknown trait (resolution happens at impl registration to avoid
+            // ordering pitfalls between trait + impl decls).
+            for (bn, _) <- tBounds do
+              if !tparams.contains(bn) then
+                throw AnalysisError(s"trait '$name' declares bound on unknown type parameter '$bn'", decl)
+            traits(name) = TraitInfo(name, tparams, methods, assocs, tBounds)
             registerTraitOperatorEntries(name, methods, decl)
           else
             // Already registered (sibling pre-collect); the trait now owns
@@ -2247,7 +2270,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do
       decl match
-        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, assocBindings, _) =>
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, assocBindings, _, implTypeBounds) =>
           val trait_ = traits.getOrElse(traitName,
             throw AnalysisError(s"impl references unknown trait '$traitName'", decl))
           if targetTypes.length != trait_.typeParams.length then
@@ -2299,6 +2322,43 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                   }
                   if !matched then
                     throw AnalysisError(s"impl of '$traitName' binds 'type ${b.name} = $resolvedBindingTarget', which does not satisfy bound '$boundTrait' declared on the associated type", b)
+          // Phase C follow-up — enforce trait bounds declared on the trait's
+          // own type parameters (e.g. `trait Container[T: Ord]`). For each
+          // bounded trait tparam, the corresponding impl target must satisfy
+          // each bound trait. Concrete impls check their resolved targets
+          // directly; generic impls defer to `instantiateImpl` because a
+          // target pattern may reference impl tvars whose substitution isn't
+          // known until dispatch.
+          //
+          // Validate that each bound names a known trait up-front, regardless
+          // of impl-tparam-ness, so a typo on `trait Container[T: Ord]` fails
+          // at the first impl rather than at every dispatch site.
+          for (tp, tBounds) <- trait_.typeBounds do
+            for boundTrait <- tBounds do
+              if !traits.contains(boundTrait) then
+                throw AnalysisError(s"bound '$boundTrait' on trait '$traitName' type parameter '$tp' refers to unknown trait", decl)
+          if implTypeParams.isEmpty then
+            val resolvedTargetsForBoundCheck = targetTypes.map(resolveType)
+            for ((tp, tgt) <- trait_.typeParams.zip(resolvedTargetsForBoundCheck)) do
+              val tBounds = trait_.typeBounds.getOrElse(tp, Nil)
+              for boundTrait <- tBounds do
+                val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                  if t.typeParams.isEmpty then
+                    t.resolvedConcrete.flatMap(_.headOption).contains(tgt)
+                  else
+                    tryUnifyAll(t.targetPatterns.headOption.toList, List(tgt), t.typeParams.toSet).isDefined
+                }
+                if !matched then
+                  throw AnalysisError(s"impl of '$traitName' for $tgt does not satisfy bound '$boundTrait' declared on type parameter '$tp'", decl)
+          // Validate that any impl-level type-bound LHS names a declared impl
+          // tparam, and that each bound names a known trait. Defer the
+          // dispatch-time check itself to `instantiateImpl`.
+          for (bn, bs) <- implTypeBounds do
+            if !implTypeParams.contains(bn) then
+              throw AnalysisError(s"impl declares bound on unknown type parameter '$bn'", decl)
+            for bt <- bs do
+              if !traits.contains(bt) then
+                throw AnalysisError(s"bound '$bt' on impl type parameter '$bn' refers to unknown trait", decl)
           // Built-in prefix-sigil collision: when a trait method carries
           // `#operator(<sigil>)` for one of `-`, `!`, `~`, `*`, `&`, the impl's
           // first target pattern must NOT cover the sigil's natural built-in
@@ -2336,6 +2396,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               definingModule = currentModule.getOrElse(""),
               implDecl = Some(impl),
               assocBindings = assocBindings,
+              typeBounds = implTypeBounds,
             )
             checkOrphanRule(traitName, targetTypes, currentModule.getOrElse(""), decl)
             checkCoherence(traitName, newTemplate, decl)
@@ -2394,6 +2455,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               definingModule = currentModule.getOrElse(""),
               implDecl = Some(impl),
               assocBindings = assocBindings,
+              typeBounds = implTypeBounds,
             )
             checkOrphanRule(traitName, targetTypes, currentModule.getOrElse(""), decl)
             checkCoherence(traitName, newTemplate, decl)
@@ -5259,6 +5321,76 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         case Some((m, fi)) => (m, fi)
         case None =>
           val trait_ = traits(traitName)
+          // Phase C follow-up — enforce trait bounds on the impl's type
+          // parameters at the moment a concrete substitution is selected. For
+          // each impl tparam with bounds, verify that subst(tparam) is implemented
+          // by some impl of every bound trait. Mirrors `enforceBoundsAndBuildAssocs`
+          // shape but without assoc-binding env construction — those flow through
+          // the impl's own assocBindings.
+          for (tp, bounds) <- template.typeBounds do
+            val concrete = subst.getOrElse(tp,
+              throw AnalysisError(s"impl bound check: type parameter '$tp' has no substitution"))
+            for boundTrait <- bounds do
+              val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                if t.typeParams.isEmpty then
+                  t.resolvedConcrete.flatMap(_.headOption).contains(concrete)
+                else
+                  tryUnifyAll(t.targetPatterns.headOption.toList, List(concrete), t.typeParams.toSet).isDefined
+              }
+              if !matched then
+                throw AnalysisError(s"type $concrete does not satisfy bound '$boundTrait' for impl type parameter '$tp' of trait '$traitName'")
+          // Phase C follow-up — enforce trait bounds on the trait's own type
+          // parameters at the moment the impl is selected. For each trait
+          // tparam with bounds, the corresponding resolved target (under the
+          // impl's substitution) must satisfy each bound. Concrete impls
+          // checked this at registration; generic impls defer here because
+          // their target patterns may reference impl tvars whose substitution
+          // wasn't known until now.
+          if trait_.typeBounds.nonEmpty then
+            val savedEnvForTraitBounds = typeEnv
+            typeEnv = typeEnv ++ subst
+            try
+              for ((tp, pat) <- trait_.typeParams.zip(template.targetPatterns)) do
+                val tBounds = trait_.typeBounds.getOrElse(tp, Nil)
+                if tBounds.nonEmpty then
+                  val resolvedPat = resolveType(pat)
+                  for boundTrait <- tBounds do
+                    val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                      if t.typeParams.isEmpty then
+                        t.resolvedConcrete.flatMap(_.headOption).contains(resolvedPat)
+                      else
+                        tryUnifyAll(t.targetPatterns.headOption.toList, List(resolvedPat), t.typeParams.toSet).isDefined
+                    }
+                    if !matched then
+                      throw AnalysisError(s"impl of '$traitName' for $resolvedPat does not satisfy bound '$boundTrait' declared on type parameter '$tp'")
+            finally typeEnv = savedEnvForTraitBounds
+          // Phase C.2 — enforce trait bounds on associated-type bindings for
+          // generic impls. The concrete-impl path checks at registration; for
+          // generic impls the binding target may reference impl tvars (e.g.
+          // `type Token = T`), so we defer to here where `subst` is known.
+          // Resolve each binding under the substitution and validate against
+          // the trait's declared assoc bounds.
+          if template.assocBindings.nonEmpty && trait_.assocTypes.exists(_.bounds.nonEmpty) then
+            val assocBoundsByName = trait_.assocTypes.map(a => (a.name, a.bounds)).toMap
+            val savedEnvForAssocBounds = typeEnv
+            typeEnv = typeEnv ++ subst
+            try
+              for b <- template.assocBindings do
+                val bounds = assocBoundsByName.getOrElse(b.name, Nil)
+                if bounds.nonEmpty then
+                  val resolvedBindingTarget = resolveType(b.target)
+                  for boundTrait <- bounds do
+                    if !traits.contains(boundTrait) then
+                      throw AnalysisError(s"associated type 'type ${b.name}' on trait '$traitName' references unknown trait '$boundTrait'")
+                    val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                      if t.typeParams.isEmpty then
+                        t.resolvedConcrete.flatMap(_.headOption).contains(resolvedBindingTarget)
+                      else
+                        tryUnifyAll(t.targetPatterns.headOption.toList, List(resolvedBindingTarget), t.typeParams.toSet).isDefined
+                    }
+                    if !matched then
+                      throw AnalysisError(s"generic impl of '$traitName' binds 'type ${b.name} = $resolvedBindingTarget' (under substitution), which does not satisfy bound '$boundTrait' declared on the associated type")
+            finally typeEnv = savedEnvForAssocBounds
           // Resolve the trait's targetPatterns under the new substitution to obtain the
           // concrete trait-level types — these become the trait typeParam → concrete map.
           val savedEnv = typeEnv

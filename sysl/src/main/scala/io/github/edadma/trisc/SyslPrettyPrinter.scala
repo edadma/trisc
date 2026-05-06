@@ -100,8 +100,8 @@ object SyslPrettyPrinter:
         val bodyStr = bodyToSource(body, 1)
         s"$priv$defKw$name$tpStr($paramStr)$retStr$bodyStr"
 
-    case TraitDeclAST(name, typeParams, methods, _, assocs, defaults) =>
-      val tpStr = typeParamsWithDefaultsToSource(typeParams, Map.empty, defaults)
+    case TraitDeclAST(name, typeParams, methods, _, assocs, defaults, bounds) =>
+      val tpStr = typeParamsWithDefaultsToSource(typeParams, bounds, defaults)
       val assocLines = assocs.map { a =>
         val boundStr = if a.bounds.nonEmpty then s": ${a.bounds.mkString(" + ")}" else ""
         s"${IND}type ${a.name}$boundStr"
@@ -118,8 +118,8 @@ object SyslPrettyPrinter:
       val body = (assocLines ++ methodLines).mkString("\n")
       s"trait $name$tpStr\n$body"
 
-    case ImplDeclAST(traitName, typeParams, targetTypes, methods, _, assocBindings, defaults) =>
-      val tpStr = typeParamsWithDefaultsToSource(typeParams, Map.empty, defaults)
+    case ImplDeclAST(traitName, typeParams, targetTypes, methods, _, assocBindings, defaults, bounds) =>
+      val tpStr = typeParamsWithDefaultsToSource(typeParams, bounds, defaults)
       val targetStr = targetTypes.map(typeToSource).mkString(", ")
       val assocLines = assocBindings.map(b => s"${IND}type ${b.name} = ${typeToSource(b.target)}")
       val methodLines = methods.map(m => s"${IND}${declToSource(m).replace("\n", s"\n")}")

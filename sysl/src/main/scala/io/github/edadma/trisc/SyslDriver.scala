@@ -270,7 +270,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               // Generic and multi-target concrete impls ride in genericTemplates as
               // before; additionally, any concrete impl that declares associated-type
               // bindings goes the same route since TraitImplMeta has no slot for them.
-              case ImplDeclAST(_, tps, targets, _, _, assocs, _) =>
+              case ImplDeclAST(_, tps, targets, _, _, assocs, _, _) =>
                 tps.nonEmpty || targets.length > 1 || assocs.nonEmpty
               case _ => false
             } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
