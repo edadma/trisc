@@ -2504,7 +2504,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             val elemSize = stackSize(elem)
             if elemSize != 1 then
               emitLoadImm(3, elemSize)
-              emit("  mul r1, r1, r3") // r1 = offset * elemSize (r2 clobbered, ok)
+              emit("  mul r1, r1, r3") // r1 = offset * elemSize
           case _ =>
         emit("  pshd r1") // save scaled operand
         if locals != null && locals.contains(target) then
