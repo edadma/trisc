@@ -1359,8 +1359,7 @@ class SyslLLVMCodegen(target: String = "host"):
               emit(s"  store $flt $loaded, $flt* $alloca")
               locals(name) = LocalVar(name, alloca, ft)
 
-      case _ =>
-        emit(s"  ; TODO: ${stmt.getClass.getSimpleName}")
+      case _ => sys.error(s"unhandled TStmt in LLVM codegen: ${stmt.getClass.getSimpleName}")
 
   private def genExpr(expr: TExpr): String =
     val t = exprType(expr)
@@ -2205,9 +2204,8 @@ class SyslLLVMCodegen(target: String = "host"):
             val len32 = newReg()
             emit(s"  $len32 = load i32, i32* $lenGep")
             len32
-          case _ =>
-            emit(s"  ; TODO: len for ${array.typ}")
-            "0"
+          case other =>
+            sys.error(s"unhandled type for len() in LLVM codegen: $other")
 
       case TCap(array, _) =>
         array.typ match
@@ -2237,9 +2235,8 @@ class SyslLLVMCodegen(target: String = "host"):
                 val cap32 = newReg()
                 emit(s"  $cap32 = load i32, i32* $capPtr")
                 cap32
-          case _ =>
-            emit(s"  ; TODO: cap for ${array.typ}")
-            "0"
+          case other =>
+            sys.error(s"unhandled type for cap() in LLVM codegen: $other")
 
       // ===== Pointers =====
 
@@ -3237,9 +3234,8 @@ class SyslLLVMCodegen(target: String = "host"):
                 emit(s"  store $retLt $result, $retLt* $ra")
                 ra
               else result
-          case _ =>
-            emit(s"  ; TODO: indirect call on non-function type")
-            "0"
+          case other =>
+            sys.error(s"indirect call on non-function-typed callee in LLVM codegen: $other")
 
       case TStr(inner) =>
         inner.typ match
@@ -3282,12 +3278,8 @@ class SyslLLVMCodegen(target: String = "host"):
                 else emit(s"  $ext = zext $vt $v to i32")
                 ("@.fmt_d", 3, s"i32 $ext")
             emitSnprintfToString(fmtName, fmtLen, arg)
-          case _ =>
-            emit(s"  ; TODO: str() for ${inner.typ}")
-            val (label, byteLen) = internString("???")
-            val dataPtr = newReg()
-            emit(s"  $dataPtr = getelementptr <{ i64, [$byteLen x i8] }>, <{ i64, [$byteLen x i8] }>* $label, i32 0, i32 1, i32 0")
-            emitMakeString(dataPtr, s"${byteLen - 1}")
+          case other =>
+            sys.error(s"unhandled type for str() in LLVM codegen: $other")
 
       case TFmtStr(inner, spec) =>
         val v = genExpr(inner)
@@ -3727,9 +3719,7 @@ class SyslLLVMCodegen(target: String = "host"):
             alloca
           else result
 
-      case _ =>
-        emit(s"  ; TODO: ${expr.getClass.getSimpleName}")
-        "0"
+      case _ => sys.error(s"unhandled TExpr in LLVM codegen: ${expr.getClass.getSimpleName}")
 
   // Recursively emit a discriminator check for a (possibly nested) match
   // pattern. Returns an LLVM `i1` register name that is `true` iff the
