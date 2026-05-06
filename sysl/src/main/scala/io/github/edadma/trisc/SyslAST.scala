@@ -68,9 +68,9 @@ case class VarDeclAST(name: String, typ: Option[TypeAST], init: ExpressionAST, i
 // read ghost names.
 case class StructDeclAST(name: String, fields: List[(String, TypeAST, Boolean)], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, invariants: List[ExpressionAST] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty, typeBounds: Map[String, List[String]] = Map.empty) extends DeclAST
 case class EnumDeclAST(name: String, members: List[(String, Option[Long])], attributes: List[Attribute] = Nil) extends DeclAST
-case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
+case class DataEnumDeclAST(name: String, variants: List[EnumVariantAST], typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty, typeBounds: Map[String, List[String]] = Map.empty) extends DeclAST
 case class EnumVariantAST(name: String, fields: List[(String, TypeAST)])
-case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, isNew: Boolean = false, range: Option[RangeAST] = None, predicate: Option[ExpressionAST] = None, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
+case class TypeAliasDeclAST(name: String, target: TypeAST, typeParams: List[String] = Nil, attributes: List[Attribute] = Nil, isNew: Boolean = false, range: Option[RangeAST] = None, predicate: Option[ExpressionAST] = None, typeParamDefaults: Map[String, TypeAST] = Map.empty, typeBounds: Map[String, List[String]] = Map.empty) extends DeclAST
 
 // Range for `within lo..hi` / `within lo..<hi` type constraints
 case class RangeAST(lo: ExpressionAST, hi: ExpressionAST, exclusiveHi: Boolean) extends Positional
@@ -221,6 +221,12 @@ case class CallAST(name: String, args: List[ExpressionAST]) extends ExpressionAS
 case class NamedArgAST(name: String, value: ExpressionAST) extends ExpressionAST
 case class IndirectCallAST(callee: ExpressionAST, args: List[ExpressionAST]) extends ExpressionAST
 case class MethodCallAST(obj: ExpressionAST, method: String, args: List[ExpressionAST]) extends ExpressionAST
+/** Explicit multi-type-arg call at expression position: `expr[T1, T2, ...](args)`.
+ *  Distinct from `IndirectCallAST(IndexAST(VarRefAST(name), single), args)` — that
+ *  carrier holds exactly one type-arg slot, this one holds a comma-separated list
+ *  with ≥2 elements. The callee is usually a `VarRefAST` naming a generic struct,
+ *  generic alias, or generic function. */
+case class GenericCallAST(callee: ExpressionAST, typeArgs: List[ExpressionAST], args: List[ExpressionAST]) extends ExpressionAST
 case class CastAST(targetType: TypeAST, expr: ExpressionAST) extends ExpressionAST
 case class IfExprAST(cond: ExpressionAST, thenBody: List[StmtAST], elseBody: Option[List[StmtAST]]) extends ExpressionAST
 case class TryAST(expr: ExpressionAST) extends ExpressionAST

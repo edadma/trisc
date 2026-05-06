@@ -183,7 +183,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
     val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
     val templates = ast.decls.filter {
-      case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+      case DataEnumDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
       case _ => false
     }
     templates.length shouldBe 1
@@ -245,7 +245,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
         |""".stripMargin
     val Right(ast) = (new SyslParser).parseProgram(source): @unchecked
     val templates = ast.decls.filter {
-      case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+      case DataEnumDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
       case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
       case _ => false
     }
@@ -288,7 +288,7 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
     val typed = analyzer.analyze(ast)
     val baseMeta = ModuleMeta.fromProgram(typed)
     val templates = ast.decls.filter {
-      case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+      case DataEnumDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
       case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
       case _ => false
     }

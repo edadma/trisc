@@ -258,9 +258,9 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             // "'Result' is not a generic type" during pre-collection.
             val templates = ast.decls.filter {
               case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
-              case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+              case DataEnumDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
               case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
-              case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
+              case TypeAliasDeclAST(_, _, tps, _, _, _, _, _, _) => tps.nonEmpty
               // Include generic and multi-target concrete ImplDeclASTs. Single-target
               // concrete impls already round-trip via meta.traitImpls (TraitImplMeta
               // is single-target only); multi-target concrete impls (e.g.
@@ -410,9 +410,9 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       // `ast.decls` directly.
       val templates = ast.decls.filter {
         case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
-        case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+        case DataEnumDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
         case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
-        case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
+        case TypeAliasDeclAST(_, _, tps, _, _, _, _, _, _) => tps.nonEmpty
         case _ => false
       } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
@@ -533,7 +533,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         // Extract generic templates (structs, enums, functions with type params)
         val templates = stripped.decls.filter {
           case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
-          case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+          case DataEnumDeclAST(_, _, tps, _, _, _) => tps.nonEmpty
           case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
           case _ => false
         }

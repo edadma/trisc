@@ -1110,6 +1110,81 @@ trait SyslAnalyzerExpressions:
           case other =>
             throw AnalysisError(s"cannot call expression of type ${tCallee.typ} as a function")
 
+      // Explicit multi-type-arg call: `Name[T1, T2, ...](args)`. The single-type-arg
+      // form rides the IndirectCallAST(IndexAST(...), args) pattern above; this branch
+      // handles ≥2 type args, parsed as `GenericCallAST(VarRefAST(name), typeArgs, args)`.
+      case GenericCallAST(VarRefAST(name), typeExprs, args)
+        if genericStructs.contains(name) || genericTemplates.contains(name) || genericTypeAliases.contains(name) =>
+        val typeArgs = typeExprs.map(t => resolveType(exprToTypeAST(t)))
+        // Per-arg expected-type forwarding mirrors the single-arg path: substitute
+        // explicit type args into the callee's formal param/target types so closure
+        // shapes and context-dependent literals at the call site get inference.
+        val tArgs =
+          if genericTypeAliases.contains(name) then
+            // Generic alias cast — must take exactly 1 value arg, so multi-type-arg
+            // alias casts are exotic but legal. Forward the alias's underlying type
+            // to that arg.
+            val target = resolveType(NamedTypeAST(name, typeExprs.map(exprToTypeAST)))
+            val savedExp = currentExpected
+            currentExpected = Some(target.underlying)
+            try args.map(analyzeExpr) finally currentExpected = savedExp
+          else if genericTemplates.contains(name) then
+            val template = genericTemplates(name)
+            val typeArgASTs = typeExprs.map(exprToTypeAST)
+            val subst: Map[String, TypeAST] =
+              if template.typeParams.length == typeArgASTs.length then
+                template.typeParams.zip(typeArgASTs).toMap
+              else Map.empty
+            if template.params.length == args.length && subst.nonEmpty then
+              args.zip(template.params).map { case (a, p) =>
+                val expected =
+                  try Some(resolveType(substituteTypeAST(p.typ, subst)))
+                  catch case _: Throwable => None
+                val savedExp = currentExpected
+                currentExpected = expected.orElse(savedExp)
+                try analyzeExpr(a) finally currentExpected = savedExp
+              }
+            else
+              args.map(analyzeExpr)
+          else
+            args.map(analyzeExpr)
+        if genericStructs.contains(name) then
+          val st = instantiateGenericStruct(name, typeArgs)
+          if tArgs.length != st.fields.length then
+            throw AnalysisError(s"struct '${st.name}' has ${st.fields.length} field(s), got ${tArgs.length} argument(s)")
+          val checkedArgs = tArgs.zip(st.fields).map { case (arg, (fieldName, fieldType)) =>
+            val coerced = coerceLiteral(arg, fieldType)
+            if !compatible(coerced.typ, fieldType) then
+              throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
+            coerced
+          }
+          TStructConstruct(st, checkedArgs)
+        else if genericTypeAliases.contains(name) then
+          if tArgs.length != 1 then
+            throw AnalysisError(s"generic alias '$name[...]' cast expects exactly 1 argument, got ${tArgs.length}")
+          val target = resolveType(NamedTypeAST(name, typeExprs.map(exprToTypeAST)))
+          val arg = tArgs.head
+          target match
+            case nt @ SyslType.NamedType(_, base, true, _, _) =>
+              val coreCast =
+                if arg.typ.underlying == base.underlying then arg
+                else if compatible(arg.typ, base) then arg
+                else throw AnalysisError(s"cannot cast ${arg.typ} to '$name[...]' (underlying $base)")
+              TCast(coreCast, nt)
+            case other =>
+              if compatible(arg.typ, other) then arg
+              else throw AnalysisError(s"cannot cast ${arg.typ} to transparent alias '$name[...]' (= $other)")
+        else
+          val (mangled, funInfo) = instantiateGeneric(name, tArgs.map(_.typ), typeArgs)
+          val checkedArgs = checkArgs(mangled, funInfo.params, tArgs, funInfo.modes)
+          TCall(mangled, checkedArgs, funInfo.returnType)
+
+      case GenericCallAST(callee, typeExprs, args) =>
+        // Fall-through for unrecognized callees (e.g. method calls) — for now,
+        // refuse with a clear error. Future extension can route obj.method[A, B](v)
+        // through a parallel pattern.
+        throw AnalysisError(s"explicit multi-type-arg call requires a generic struct, alias, or function name")
+
       case MethodCallAST(VarRefAST(nsName), method, args) if moduleNamespaces.contains(nsName) =>
         // Qualified import call: strings.has_prefix(s, prefix)
         val meta = moduleNamespaces(nsName)
