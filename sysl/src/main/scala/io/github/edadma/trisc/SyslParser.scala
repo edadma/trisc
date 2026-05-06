@@ -124,8 +124,11 @@ class SyslParser extends StandardTokenParsers {
     opt("volatile") ~ ident ~ (":" ~> typeRef) ^^ { case vol ~ name ~ typ => (name, typ, vol.isDefined) }
 
   lazy val enumDecl: Parser[DeclAST] =
-    "enum" ~> ident ~ typeParamList ~ (Newline ~> Indent ~> rep1sep(enumVariantOrMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("enum")) ^^ {
-      case name ~ ((tps, defaults)) ~ members =>
+    "enum" ~> ident ~ typeParamListWithBounds ~ (Newline ~> Indent ~> rep1sep(enumVariantOrMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("enum")) ^^ {
+      case name ~ tpitems ~ members =>
+        val tps = tpitems.map(_._1)
+        val bounds = tpitems.collect { case (n, bs, _) if bs.nonEmpty => (n, bs) }.toMap
+        val defaults = tpitems.collect { case (n, _, Some(d)) => (n, d) }.toMap
         // If any member has fields, it's a data enum
         val hasData = members.exists(_.isInstanceOf[Right[?, ?]]) || tps.nonEmpty
         if hasData then
@@ -133,7 +136,7 @@ class SyslParser extends StandardTokenParsers {
             case Right(v) => v
             case Left((n, _)) => EnumVariantAST(n, Nil) // plain member in a data enum = no-arg variant
           }
-          DataEnumDeclAST(name, variants, tps, Nil, defaults)
+          DataEnumDeclAST(name, variants, tps, Nil, defaults, bounds)
         else
           EnumDeclAST(name, members.map { case Left(m) => m; case _ => ??? })
     }
@@ -145,12 +148,13 @@ class SyslParser extends StandardTokenParsers {
       ident ^^ (name => Left((name, None)))
 
   lazy val typeAliasDecl: Parser[TypeAliasDeclAST] =
-    "type" ~> ident ~ opt("[" ~> rep1sep(typeParamWithDefault, ",") <~ "]") ~ ("=" ~> opt("new")) ~ typeRef ~ opt(withinClause) ~ opt(whereClause) ^^ {
+    "type" ~> ident ~ opt("[" ~> rep1sep(typeParamWithBounds, ",") <~ "]") ~ ("=" ~> opt("new")) ~ typeRef ~ opt(withinClause) ~ opt(whereClause) ^^ {
       case name ~ tparams ~ isNew ~ target ~ range ~ predicate =>
         val items = tparams.getOrElse(Nil)
         val names = items.map(_._1)
-        val defaults = items.collect { case (n, Some(d)) => (n, d) }.toMap
-        TypeAliasDeclAST(name, target, names, Nil, isNew.isDefined, range, predicate, defaults)
+        val bounds = items.collect { case (n, bs, _) if bs.nonEmpty => (n, bs) }.toMap
+        val defaults = items.collect { case (n, _, Some(d)) => (n, d) }.toMap
+        TypeAliasDeclAST(name, target, names, Nil, isNew.isDefined, range, predicate, defaults, bounds)
     }
 
   lazy val withinClause: Parser[RangeAST] =
@@ -1307,6 +1311,13 @@ class SyslParser extends StandardTokenParsers {
   lazy val cast: Parser[CastAST] =
     castType ~ ("(" ~> expr <~ ")") ^^ { case t ~ e => CastAST(NamedTypeAST(t), e) }
 
+  // Type-argument expression for explicit multi-type-arg calls — accepts the same
+  // shapes that fit inside a single-arg `[ ]`: a function type, or any expression
+  // (which covers `T`, scalar keywords, `[]A`, `[5]int`, etc.). `:` slice forms
+  // are rejected by virtue of not being part of `expr`.
+  lazy val typeArgExpr: Parser[ExpressionAST] =
+    funcTypeRef ^^ (t => TypeRefExprAST(t)) | expr
+
   lazy val primary: Parser[ExpressionAST] =
     quantifierExpr |
       numericLit ^^ { n =>
@@ -1338,6 +1349,16 @@ class SyslParser extends StandardTokenParsers {
         absorbBarePlaceholdersInCall(args, a => CallAST("string", a))
       } |
       cast |
+      // Explicit multi-type-arg call: `f[T1, T2, ...](args)` (≥2 type args, immediately
+      // followed by `(args)`). Single-type-arg `f[T](args)` continues to flow through
+      // the indexing branch + the indirect-call branch — the analyzer already pattern-
+      // matches that shape. The 2-arg minimum disambiguates from indexing: `arr[i](v)`
+      // can't grow a comma without becoming a syntax error today, so committing to the
+      // generic-call interpretation here is unambiguous.
+      ident ~ ("[" ~> typeArgExpr ~ rep1("," ~> typeArgExpr) <~ "]") ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ {
+        case name ~ (head ~ tail) ~ args =>
+          absorbBarePlaceholdersInCall(args, a => GenericCallAST(VarRefAST(name), head :: tail, a))
+      } |
       ident ~ ("(" ~> repsep(callArg, ",") <~ ")") ^^ { case name ~ args =>
         absorbBarePlaceholdersInCall(args, a => CallAST(name, a))
       } |

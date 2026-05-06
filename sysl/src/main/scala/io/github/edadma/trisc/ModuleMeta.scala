@@ -353,9 +353,9 @@ object ModuleMeta:
             case Right(ast) =>
               ast.decls.filter {
                 case StructDeclAST(_, _, tps, _, _, _, _)        => tps.nonEmpty
-                case DataEnumDeclAST(_, _, tps, _, _)         => tps.nonEmpty
+                case DataEnumDeclAST(_, _, tps, _, _, _)         => tps.nonEmpty
                 case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
-                case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
+                case TypeAliasDeclAST(_, _, tps, _, _, _, _, _, _) => tps.nonEmpty
                 case _: TraitDeclAST                        => true
                 // Generic / multi-target / assoc-binding impls round-trip via TEMPLATES
                 // because TraitImplMeta has no slot for type parameters or assoc bindings.
