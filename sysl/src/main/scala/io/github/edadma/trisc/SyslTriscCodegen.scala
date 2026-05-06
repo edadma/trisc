@@ -4505,8 +4505,20 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         val elemSize = stackSize(elemType)
         genExpr(index)           // r1 = index
         emit("  pshd r1")
+        stackOffset -= 8
+        val preOffset = stackOffset
         genExpr(array)           // r1 = slice struct address
+        // Reclaim any stack temp genExpr left between the index slot and r7
+        // (e.g. a slice-returning call's 24-byte ret slot). Without this,
+        // popd r2 reads from inside that ret slot instead of the pushed
+        // index. r1 still points into the descriptor; subsequent ldds for
+        // ptr/len read it before anything overwrites it.
+        val extra = preOffset - stackOffset
+        if extra > 0 then
+          emitAddImm(7, 7, extra)
+          stackOffset = preOffset
         emit("  popd r2")        // r2 = index
+        stackOffset += 8
         // Bounds check
         emit("  addi r3, r1, 8")
         emit("  ldw r3, r3, r0") // r3 = len (32-bit in slice struct)

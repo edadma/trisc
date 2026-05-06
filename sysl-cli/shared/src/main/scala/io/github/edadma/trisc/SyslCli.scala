@@ -720,15 +720,19 @@ object SyslCli:
     // heap above. That broke for any program whose code+rodata exceeded
     // ~128 KB (e.g. std/strings) — the linker placed rodata over the
     // metadata region, silently corrupting BRK_PTR. Pushing the metadata
-    // up to high RAM (just below STDOUT) and HEAP_START to 0x80000 gives
-    // ~512 KB of program space and ~512 KB of heap.
+    // up to high RAM (just below STDOUT) and bumping HEAP_START gives
+    // generous program space. HEAP_START was 0x80000 (= 512 KB code,
+    // 512 KB heap) but std/flag's per-suite combined binary plus the
+    // method-on-temp / slice-index reclaims pushed it just past 0x80000;
+    // 0xC0000 gives ~768 KB of program space and ~256 KB of heap, which
+    // is plenty for every std/ test.
     val stdoutAddr = 0x100000L
     val ramSize = 0x100000L
     val panicFlagAddr = 0xFFF00L
     val brkPtrAddr = 0xFFF08L
     val faultPcAddr = 0xFFF10L
     val faultRegsAddr = 0xFFF20L  // r1..r6, 8 bytes each
-    val heapStart = 0x80000L
+    val heapStart = 0xC0000L
     val heapEnd = 0xFFE00L
     val initialSP = 0xFFEF8L
     val faultIsrSlots = (1 to 7).map(_ => "  dl fault_isr").mkString("\n")

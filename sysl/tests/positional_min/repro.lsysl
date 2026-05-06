@@ -1,0 +1,66 @@
+Indexing into a slice returned from a method.
+==============================================
+
+Pinned 2026-05-05. `h.args()[1]` builds a TIndex(TCall("Holder_args"),
+1, string). The TIndex codegen for SliceType pushed the index, then
+called `genExpr(array)` which left a 24-byte slice ret slot on the
+stack between the pushed index and the new r7. Two bugs ganged up:
+
+1. `pshd r1` for the index didn't update `stackOffset`, so the inner
+   `Holder_args` TCall's `retSlotOffset` was off by 8 — it wrote
+   `slice.ptr` at offset 8 instead of offset 0 of its ret slot, and
+   the ldd/std for the backref bled past the slot's end into the
+   pushed index's memory.
+2. After `genExpr(array)` returned (with r1 pointing into the slice
+   ret slot, r7 24 bytes lower), `popd r2` read from r7 — i.e., from
+   inside the ret slot — instead of from where the index was pushed.
+   The "index" became `slice.ptr`, the bounds check failed against a
+   pretend "len = some huge stack address", and either the next
+   instruction faulted or the wrong element was returned.
+
+Test_args_zero accidentally passed before fix #2 because reading
+slice.ptr at offset 0 of a *malformed* descriptor still gave the
+heap pointer for `pos`, and `slice.ptr + 0*16` was the correct first
+element address by luck.
+
+Fix in `SyslTriscCodegen.case TIndex`: track stackOffset around
+pshd/popd and reclaim any extra space genExpr left between the index
+slot and r7 before popd. Same shape as the regArg "extra reclaim" in
+TCall — the slice ret slot's data lives below r7 after reclaim, but
+nothing writes there before the next ldd reads ptr/len out of it.
+
+Applies to all four TIndex variants: StringType, SliceType, RefType,
+default (ArrayType / scalar). Runtime regression below; the codegen
+shape is covered in `SyslTriscMethodOnTempTests`.
+
+    module sysl.tests.positional_min
+
+    import std.debug.{assert}
+
+    struct Holder
+        items: []string
+        count: int
+
+    Holder.args() -> []string = self.items
+
+    new_holder() -> Holder
+        var pos = (new [4]string)[:0]
+        pos = append(pos, "foo")
+        pos = append(pos, "bar")
+        Holder(pos, 2)
+
+    #test
+    test_args_zero() -> unit
+        val h = new_holder()
+        assert(h.args()[0] == "foo", "args[0]=foo")
+
+    #test
+    test_args_one() -> unit
+        val h = new_holder()
+        assert(h.args()[1] == "bar", "args[1]=bar")
+
+    #test
+    test_args_both() -> unit
+        val h = new_holder()
+        assert(h.args()[0] == "foo", "args[0]=foo")
+        assert(h.args()[1] == "bar", "args[1]=bar")
