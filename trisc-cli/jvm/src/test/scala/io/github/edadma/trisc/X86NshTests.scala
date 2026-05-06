@@ -1119,6 +1119,21 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "vma2: bad"
   }
 
+  "vma3: demand-paged heap via PM-seeded VMA" in {
+    // Phase 1 chunk 3. vm_create_process_pt no longer eager-allocates
+    // 144 user pages; PM seeds two anon VMAs in every spawned child
+    // (code/data/heap [0x60000000, 0x60080000) and stack
+    // [0x60080000, 0x60090000)). test_vma_3 reads from 0x60050000
+    // which is past every binary's segments + BSS but inside the
+    // seeded heap VMA, so the very first load must fault and route
+    // through vma_handle_fault. Confirms the kernel-side spawn-
+    // pipeline writes (allocate-on-write vm_copy_to) and the
+    // user-runtime fault path agree on what's mapped.
+    val output = qemu.command("test_vma_3")
+    output should include("vma3: ok")
+    output should not include "vma3: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

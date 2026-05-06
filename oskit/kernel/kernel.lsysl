@@ -551,10 +551,22 @@ Returns mapped virtual address or -1 on error.
             kernel_continue_current()
             return i64(-1)
         val writable = grant_table[gid].flags & GRANT_WRITE
+        val granter_pid = grant_table[gid].granter_pid
         var i = 0
         while i < page_count
             val src_va = (granter_vaddr & ~u64(0xFFF)) + u64(i) * u64(4096)
-            val paddr = vm_v2p(granter_ptbr, src_va)
+            var paddr = vm_v2p(granter_ptbr, src_va)
+            if paddr == 0
+                // Phase 1 chunk 3: granter page may be a lazily-paged
+                // VMA region. Route through `vma_handle_fault` to
+                // allocate-and-install on demand instead of failing
+                // the grant. Without this, fs_read/grant-based IPC
+                // breaks the moment a fresh `malloc` buffer is the
+                // grant target — std.alloc returns memory in pages
+                // that haven't faulted yet.
+                if granter_pid > 0 && granter_pid < MAX_PROCESSES
+                    if vma_handle_fault(&processes[granter_pid].vma_tree, src_va, granter_ptbr, int(writable)) == 0
+                        paddr = vm_v2p(granter_ptbr, src_va)
             if paddr == 0
                 // Granter page not present — unmap what we did so far
                 vm_grant_unmap_pages(caller_ptbr, base_vaddr, i)
@@ -912,6 +924,37 @@ syscall has to pick a number not already claimed elsewhere.)
         syscall_return(i64(rc))
         kernel_continue_current()
 
+Phase 1 chunk 3 — seed the default per-process VMA layout.
+
+Both `create_process` and `create_process_suspended` call this
+right after `vma_tree_init` so every process starts with the same
+two anonymous VMAs covering the user carve-out:
+  - `[0x60000000, 0x60080000)` RWX — code/data/heap
+  - `[0x60080000, 0x60090000)` RW  — stack (no-exec)
+The eager 144-page mapping in `vm_create_process_pt` is gone, so
+runtime accesses to any unmapped page in either VMA route through
+`vma_handle_fault` and lazily get a fresh zero frame.
+
+Putting the seed in the kernel-side helper instead of in PM means
+RS (started directly by the kernel bootstrap, never by PM) and
+the boot-module servers all get the same layout without duplicated
+logic. Chunk 8's `exec()` will replace this with PHT-driven layout.
+
+    vma_seed_default_layout(pid: int)
+        if pid <= 0
+            return
+        if pid >= MAX_PROCESSES
+            return
+        val rwx = VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC
+        val rw  = VMA_PROT_READ | VMA_PROT_WRITE
+        val anon_priv = VMA_MAP_ANON | VMA_MAP_PRIVATE
+        vma_create(&processes[pid].vma_tree,
+                   u64(0x60000000), u64(0x60080000),
+                   rwx, anon_priv, -1, u64(0))
+        vma_create(&processes[pid].vma_tree,
+                   u64(0x60080000), u64(0x60090000),
+                   rw, anon_priv, -1, u64(0))
+
 SYS_VMA_CREATE (87): debug-only syscall — register an anonymous
 VMA in the calling process's VMA tree.
 
@@ -936,6 +979,25 @@ program/stack region.
         val idx = vma_create(&processes[pid].vma_tree,
                              u64(a0), u64(a1),
                              int(a2), int(a3), -1, u64(0))
+        i64(idx)
+
+SYS_VMA_CREATE_PID (88): seed a VMA in another process's tree.
+Args: a0=pid, a1=vstart, a2=vend, a3=prot, a4=flags. Returns
+the new VMA index, or -1 on failure. Used by PM during spawn
+to install the default code/data/heap and stack VMAs in the
+child before resume.
+
+    sys_vma_create_pid_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val pid = int(a0)
+        if pid <= 0
+            return i64(-1)
+        if pid >= MAX_PROCESSES
+            return i64(-1)
+        if processes[pid].state == PROC_FREE
+            return i64(-1)
+        val idx = vma_create(&processes[pid].vma_tree,
+                             u64(a1), u64(a2),
+                             int(a3), int(a4), -1, u64(0))
         i64(idx)
 
 
@@ -1287,6 +1349,7 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall(84, sys_get_thread_uid_handler)
         register_syscall(86, sys_vma_selftest_handler)
         register_syscall6(87, sys_vma_create_handler)
+        register_syscall6(88, sys_vma_create_pid_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -1592,6 +1655,7 @@ process ID (0 for kernel threads).
             processes[pid].syscall_allow[w] = i64(-1)
         processes[pid].ipc_send_mask = 0xFFFF
         vma_tree_init(&processes[pid].vma_tree)
+        vma_seed_default_layout(pid)
 
         // Link thread to process
         threads[tid].pid = pid
@@ -1694,6 +1758,7 @@ Unlike create_process, the thread is never enqueued — no race.
             processes[pid].syscall_allow[w] = i64(-1)
         processes[pid].ipc_send_mask = 0xFFFF
         vma_tree_init(&processes[pid].vma_tree)
+        vma_seed_default_layout(pid)
 
         // Link thread to process
         threads[tid].pid = pid

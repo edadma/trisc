@@ -458,3 +458,29 @@ collision with dev's SYS_GRANT_POSIX_RANGE.
         args[0] = i64(buf)
         args[1] = len
         syscall(SYS_PUTS, i64(args))
+
+SYS_VMA_CREATE_PID (88) — seed an anonymous VMA in another
+process's tree. Used by PM during spawn to install the default
+code/data/heap and stack VMAs in a child before resume so that
+runtime page faults route through `vma_handle_fault`.
+
+POSIX-style prot/flags values, mirrored from `oskit.kernel.vma`
+so server code (PM, future `mmap` callers in libc) can pass them
+across this syscall without importing the kernel-only VMA module.
+Keep in sync with `oskit/kernel/vma.lsysl`.
+
+    const VMA_PROT_NONE  = 0
+    const VMA_PROT_READ  = 1
+    const VMA_PROT_WRITE = 2
+    const VMA_PROT_EXEC  = 4
+
+    const VMA_MAP_SHARED  = 0x01
+    const VMA_MAP_PRIVATE = 0x02
+    const VMA_MAP_FIXED   = 0x10
+    const VMA_MAP_ANON    = 0x20
+
+    const SYS_VMA_CREATE_PID = 88
+
+    svc_vma_create(pid: int, vstart: u64, vend: u64, prot: int, flags: int) -> int
+        int(syscall6(SYS_VMA_CREATE_PID, i64(pid), i64(vstart), i64(vend),
+                     i64(prot), i64(flags), 0))

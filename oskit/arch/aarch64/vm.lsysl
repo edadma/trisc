@@ -131,34 +131,22 @@ small sub-region to AP=01/UXN=0 for EL0 user code later (without
 breaking kernel execute, which the implicit-PXN rule would do if
 we flipped AP on the 1GB block itself).
 
-User region layout (576KB total, 144 pages in L3[0..143] of L2[256]):
-  VA 0x60000000..0x6007FFFF — code region, 128 × 4KB pages (L3[0..127])
-                              AP=01 (EL0 RW), UXN=0 (EL0 execute)
-  VA 0x60080000..0x6008FFFF — stack region, 16 × 4KB pages (L3[128..143])
-                              AP=01, UXN=1. USP grows down from 0x60090000.
+User region layout (1 MB visible, 256 leaf slots in L3[0..255] of
+L2[256]):
+  VA 0x60000000..0x6007FFFF — code/data/heap, anonymous (PM seeds
+                              VMA on spawn). AP=01 / UXN=0 once a
+                              page is installed.
+  VA 0x60080000..0x6008FFFF — stack region. AP=01 / UXN=1. USP
+                              grows down from 0x60090000.
 Implicit-PXN forces PXN=1 on all user pages, which is what we want
 (EL1 never fetches from them). AP=01 means EL1 can still read/write.
 
 Returns the physical address of the new L0 table, or 0 on failure.
-Also sets `last_user_code_page` / `last_user_stack_page` to the
-physical address of the FIRST code / stack page respectively, for
-DEMO_MODE=2 (EL0 demo) convenience. Real loaders should use
-`vm_copy_to` under the new process PTBR instead of poking these
-directly — only the first page is exposed this way.
 
-PHASE 1 REPLACEMENT TARGET (master roadmap invariant 1):
-USER_CODE_PAGES / USER_STACK_PAGES / USER_STACK_L3_START fix the
-per-process layout at compile time and force eager allocation in
-`vm_create_process_pt` below. Phase 1 replaces them with a VMA
-list per process and demand paging — these constants go away,
-not just shrink. The L0/L1/L2/L3 walker stays.
-
-    val USER_CODE_PAGES  = 128
-    val USER_STACK_PAGES = 16
-    val USER_STACK_L3_START = 128
-
-    var last_user_code_page: u64 = 0
-    var last_user_stack_page: u64 = 0
+Phase 1 chunk 3: the 144-page eager loop is gone. The L3 table is
+allocated empty; leaf pages land lazily via `vm_install_user_page`
+(allocate-on-write spawn-pipeline `vm_copy_to`) or `vma_handle_fault`
+(runtime page fault routed through the per-process VMA tree).
 
     extern l1_table: byte
 
@@ -204,9 +192,8 @@ not just shrink. The L0/L1/L2/L3 walker stays.
             i += 1
 
         // L3 carve-out: replace L2[256] (VA 0x60000000..0x601FFFFF)
-        // with a table descriptor pointing at a fresh L3 populated
-        // with 32 user pages (see USER_CODE_PAGES / USER_STACK_PAGES
-        // at the top of this section).
+        // with a table descriptor pointing at a fresh empty L3.
+        // Leaf pages are installed lazily by vm_install_user_page.
         val new_l3 = page_alloc_zero()
         if new_l3 == 0
             page_free(new_l2)
@@ -217,43 +204,6 @@ not just shrink. The L0/L1/L2/L3 walker stays.
         // L2[256] -> new_l3 table
         vm_write_pte64(new_l2 + u64(256 * 8),
             i64(new_l3) | PTE_VALID | PTE_TABLE)
-
-        // Page encoding needs bit 1 = 1 (PTE_PAGE) unlike the block
-        // form, so mask that bit off ram_attrs first. AP=01 makes the
-        // page EL0-accessible; stack pages additionally set UXN to
-        // prevent EL0 execution from the stack.
-        val base_user_attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0
-
-        var total_pages = USER_CODE_PAGES + USER_STACK_PAGES
-        var p = 0
-        while p < total_pages
-            val pa = page_alloc_zero()
-            if pa == 0
-                // Unwind: free every user page we wrote, then the L3
-                // and the higher tables. Simpler than trying to recover.
-                var q = 0
-                while q < p
-                    val pte = vm_read_pte64(new_l3 + u64(q * 8))
-                    if (pte & i64(3)) == i64(3)
-                        page_free(u64(pte & PTE_ADDR_MASK))
-                    q += 1
-                page_free(new_l3)
-                page_free(new_l2)
-                page_free(new_l1)
-                page_free(new_l0)
-                return 0
-            var attrs = base_user_attrs
-            // Code pages (L3[0..127]) are EL0 R/W/X. Stack pages
-            // (L3[128..143]) are EL0 R/W but set UXN to block EL0 execute.
-            if p >= USER_STACK_L3_START
-                attrs = attrs | PTE_UXN
-            val l3_slot = p
-            vm_write_pte64(new_l3 + u64(l3_slot * 8), i64(pa) | attrs)
-            if p == 0
-                last_user_code_page = pa
-            if p == USER_STACK_L3_START
-                last_user_stack_page = pa
-            p += 1
 
         new_l0
 
@@ -316,7 +266,7 @@ The page attributes mirror the user-pages emitted by
 `vm_create_process_pt` (Normal WBWA, AF, AP=01 for EL0 access,
 implicit-PXN; UXN forced on for non-executable pages).
 
-    vm_install_user_page(ptbr: u64, vaddr: u64, paddr: u64, writable: int) -> int
+    vm_install_user_page(ptbr: u64, vaddr: u64, paddr: u64, writable: int, executable: int) -> int
         val l0_idx = int((vaddr >> u64(39)) & u64(0x1FF))
         val l1_idx = int((vaddr >> u64(30)) & u64(0x1FF))
         val l2_idx = int((vaddr >> u64(21)) & u64(0x1FF))
@@ -339,7 +289,9 @@ implicit-PXN; UXN forced on for non-executable pages).
 
         val kernel_l1 = u64(i64(&l1_table))
         val ram_attrs = vm_read_pte64(kernel_l1 + u64(8)) & ~PTE_ADDR_MASK
-        var attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0 | PTE_UXN
+        var attrs = (ram_attrs & ~i64(2)) | PTE_PAGE | PTE_AP_EL0
+        if executable == 0
+            attrs = attrs | PTE_UXN
         vm_write_pte64(l3_base + u64(l3_idx * 8), i64(paddr) | attrs)
         vm_flush_tlb()
         0
@@ -353,10 +305,19 @@ engine (e.g. rp2040) is free to route through it.
     vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int)
         var copied = 0
         while copied < len
-            val pa = vm_v2p(dst_ptbr, dst_vaddr + u64(copied))
+            val cur_va = dst_vaddr + u64(copied)
+            var pa = vm_v2p(dst_ptbr, cur_va)
+            if pa == u64(0)
+                if cur_va >= u64(0x60000000)
+                    if cur_va < u64(0x60200000)
+                        val frame = page_alloc_zero()
+                        if frame != u64(0)
+                            val page_va = cur_va & ~u64(0xFFF)
+                            if vm_install_user_page(dst_ptbr, page_va, frame, 1, 1) == 0
+                                pa = vm_v2p(dst_ptbr, cur_va)
             if pa == u64(0)
                 return
-            val page_off = int((dst_vaddr + u64(copied)) & u64(0xFFF))
+            val page_off = int(cur_va & u64(0xFFF))
             var chunk = PAGE_SIZE - page_off
             if chunk > len - copied
                 chunk = len - copied

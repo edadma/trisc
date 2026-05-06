@@ -1,0 +1,73 @@
+test_vma_3 — demand-paged heap access via PM-seeded VMA
+=======================================================
+
+Phase 1 chunk 3: PM seeds two anonymous VMAs into every spawned
+child — `[0x60000000, 0x60080000)` for code/data/heap and
+`[0x60080000, 0x60090000)` for stack. The eager 144-page user
+allocation in `vm_create_process_pt` is gone, so any address
+inside the heap VMA that the loader didn't already touch starts
+out non-present. First access faults, the page-fault handler
+routes through `kernel_handle_user_fault` → `vma_handle_fault`,
+which allocates a zero frame and installs the PTE.
+
+This test picks an address (`0x60050000`) safely past every test
+binary's segments + BSS but still inside the seeded heap VMA, so
+the very first read must fault. Pass criterion: prints
+`vma3: ok`.
+
+    module oskit.bin.test_vma_3
+
+    import oskit.ulib.{puts, exit, exit_with}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("vma3: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val heap_va: u64 = u64(0x60050000)
+
+        // First touch: read. Page is unmapped on entry; the
+        // fault path installs a fresh zero frame, the load
+        // completes, returns 0.
+        var p: *i64 = *i64(heap_va)
+        if *p != i64(0)
+            fail(1)
+            return
+
+        // Write a sentinel and read it back. The page is
+        // writable from the first install, so no second fault.
+        *p = i64(0xDEADBEEF12345678)
+        if *p != i64(0xDEADBEEF12345678)
+            fail(2)
+            return
+
+        // Touch a page beyond the first to make sure each
+        // subsequent unmapped page also resolves through the
+        // VMA path.
+        var q: *i64 = *i64(u64(0x60060000))
+        if *q != i64(0)
+            fail(3)
+            return
+        *q = i64(0x55AA55AA)
+        if *q != i64(0x55AA55AA)
+            fail(4)
+            return
+
+        puts("vma3: ok\n")
+        exit()

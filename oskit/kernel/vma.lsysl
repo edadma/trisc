@@ -552,7 +552,10 @@ later chunks (5 + 7).
         var writable = 0
         if (vma_pool[v].prot & VMA_PROT_WRITE) != 0
             writable = 1
-        if vm_install_user_page(ptbr, page_va, pa, writable) != 0
+        var executable = 0
+        if (vma_pool[v].prot & VMA_PROT_EXEC) != 0
+            executable = 1
+        if vm_install_user_page(ptbr, page_va, pa, writable, executable) != 0
             return -1
         0
 

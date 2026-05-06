@@ -20,9 +20,9 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
 
     import oskit.arch.{page_alloc_zero, kernel_ptbr, vm_flush_tlb,
         vm_create_process_pt, vm_set_ptbr, read_sctlr_el1,
-        read_esr_el1, abort,
-        last_user_code_page, last_user_stack_page, drop_to_el0,
+        read_esr_el1, abort, drop_to_el0,
         sync_icache_line, vm_v2p, vm_copy_to, vm_copy_from,
+        vm_install_user_page,
         cntfrq_el0, cntp_tval_set, cntp_ctl_set,
         build_stack_frame, arch_resume_process,
         STACK_FRAME_SIZE, arch_cli, arch_sti,
@@ -206,18 +206,25 @@ Sync dispatcher — decode ESR and route.
         val ec = int((esr >> u64(26)) & u64(0x3F))
         if ec == 0x15
             syscall_dispatch(frame)
-        else if ec == 0x20 || ec == 0x24
-            // Lower-EL instruction (0x20) or data (0x24) abort. ISS bit 6
-            // ("WnR" in DA, "RES0" in IA) tells us whether a data abort
-            // was caused by a write. Treat instruction aborts as reads.
+        else if ec == 0x20 || ec == 0x24 || ec == 0x25
+            // 0x20: instruction abort from lower EL (EL0)
+            // 0x24: data abort from lower EL (EL0)
+            // 0x25: data abort from current EL (EL1) — kernel-mode
+            //       write to a user vaddr in the carve-out whose page
+            //       isn't mapped yet. Phase 1 chunk 3: route through
+            //       the same VMA-driven allocate-and-install path so
+            //       direct user-buffer writes from syscall handlers
+            //       (sys_getinfo, etc.) work the same as user-mode
+            //       faults. ISS bit 6 ("WnR" in DA, "RES0" in IA)
+            //       tells us whether a DA was caused by a write.
             val far = read_far_el1()
             var write = 0
-            if ec == 0x24
+            if ec == 0x24 || ec == 0x25
                 if (esr & u64(0x40)) != u64(0)
                     write = 1
             if kernel_handle_user_fault(far, write) == 0
                 return
-            uart_puts("[unhandled EL0 fault, ESR=")
+            uart_puts("[unhandled fault, ESR=")
             uart_puthex(esr)
             uart_puts(" FAR=")
             uart_puthex(far)
@@ -675,30 +682,14 @@ copy-in needed.
             i += 1
         syscall_return(i64(0))
 
-Load `len` bytes from `src` into the process's user code region,
-walking its L3 entries so the binary spans multiple 4KB pages.
-VA 0x60000000..0x6000FFFF is identity-mapped in the user PT from
-vm_create_process_pt; since we're still under the kernel PTBR when
-this runs we reach each physical page directly.
+Load `len` bytes from `src` into the process's user code region.
+Phase 1 chunk 3: forwards to `vm_copy_to`, which is now allocate-on-
+write for unmapped pages in the user carve-out. The byte-by-byte
+walker that was here before chunk 3 used eager-mapped pages; with
+demand paging it would have aborted on the first VA it saw.
 
     user_load_program(ptbr: u64, src_va: i64, len: int)
-        // src_va points at the kernel-side blob; iterate one byte
-        // at a time walking the user PT to find each destination
-        // physical address. Slow but simple; replace with a stride-
-        // per-page memcpy once we have a real block copy.
-        var i = 0
-        while i < len
-            val user_va = u64(0x60000000) + u64(i)
-            val dst_pa = vm_v2p(ptbr, user_va)
-            if dst_pa == u64(0)
-                uart_puts("[user] load: unmapped VA at offset ")
-                uart_puthex(u64(i))
-                uart_puts("\n")
-                abort()
-            var dst: *byte = *byte(dst_pa)
-            var sp: *byte = *byte(src_va + i64(i))
-            dst[0] = sp[0]
-            i += 1
+        vm_copy_to(ptbr, u64(0x60000000), *byte(src_va), len)
 
 Flush the I-cache for every line covering `len` bytes starting at
 the user code region's first physical page. We walk the L3 entries
@@ -951,7 +942,13 @@ Legacy EL0 demo.
         uart_puthex(new_pt)
         uart_puts("\n")
 
-        val code_pa = last_user_code_page
+        // Phase 1 chunk 3: allocate + install the first user code
+        // page on demand; vm_create_process_pt no longer pre-fills it.
+        val code_pa = page_alloc_zero()
+        if code_pa == u64(0)
+            abort()
+        if vm_install_user_page(new_pt, u64(0x60000000), code_pa, 1, 1) != 0
+            abort()
         uart_puts("user code_pa=")
         uart_puthex(code_pa)
         uart_puts("\n")

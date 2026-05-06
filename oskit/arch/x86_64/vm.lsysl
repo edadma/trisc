@@ -240,17 +240,13 @@ policy goes.
                 val pde = vm_read_pte64(k_pd1 + u64(i1) * 8)
                 vm_write_pte64(pd1 + u64(i1) * 8, pde)
             i1 += 1
+        // Phase 1 chunk 3: PT allocated empty (zeroed). Leaf user
+        // pages land lazily — either via `vm_install_user_page` from
+        // a kernel-side `vm_copy_to` (allocate-on-write spawn-pipeline
+        // path) or via `vma_handle_fault` from a runtime page fault.
         val user_pt = page_alloc_zero()
         if user_pt == 0
             return 0
-        var up = 0
-        while up < 144
-            val upage = page_alloc_zero()
-            if upage == 0
-                return 0
-            vm_write_pte64(user_pt + u64(up) * 8,
-                i64(upage) | PTE_P | PTE_W | PTE_U)
-            up += 1
         vm_write_pte64(pd1 + u64(256) * 8,
             i64(user_pt) | PTE_P | PTE_W | PTE_U)
         vm_write_pte64(pdpt + u64(8), i64(pd1) | PTE_P | PTE_W | PTE_U)
@@ -530,7 +526,7 @@ Phase 1 chunk 2 introduces this for the page-fault path:
 `vma_handle_fault` allocates a fresh frame and calls this to
 install it at the faulting vaddr.
 
-    vm_install_user_page(ptbr: u64, vaddr: u64, paddr: u64, writable: int) -> int
+    vm_install_user_page(ptbr: u64, vaddr: u64, paddr: u64, writable: int, executable: int) -> int
         val pml4_idx = (vaddr >> 39) & u64(0x1FF)
         val pdpt_idx = (vaddr >> 30) & u64(0x1FF)
         val pd_idx   = (vaddr >> 21) & u64(0x1FF)
@@ -563,11 +559,29 @@ install it at the faulting vaddr.
 
 Copy data into another address space using physical addressing.
 
+Phase 1 chunk 3 introduces allocate-on-write: when the target VA
+falls inside the user carve-out [0x60000000, 0x60200000) and the
+PTE is non-present, allocate a fresh zero frame and install it
+via `vm_install_user_page` before memcpy. Lets the spawn pipeline
+write segments + stack into a process whose `vm_create_process_pt`
+no longer pre-allocates the 144 user pages.
+
     vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int)
         var copied = 0
         while copied < len
-            val pa = vm_v2p(dst_ptbr, dst_vaddr + u64(copied))
-            val page_off = int((dst_vaddr + u64(copied)) & u64(0xFFF))
+            val cur_va = dst_vaddr + u64(copied)
+            var pa = vm_v2p(dst_ptbr, cur_va)
+            if pa == u64(0)
+                if cur_va >= u64(0x60000000)
+                    if cur_va < u64(0x60200000)
+                        val frame = page_alloc_zero()
+                        if frame != u64(0)
+                            val page_va = cur_va & ~u64(0xFFF)
+                            if vm_install_user_page(dst_ptbr, page_va, frame, 1, 1) == 0
+                                pa = vm_v2p(dst_ptbr, cur_va)
+            if pa == u64(0)
+                return
+            val page_off = int(cur_va & u64(0xFFF))
             var chunk = PAGE_SIZE - page_off
             if chunk > len - copied
                 chunk = len - copied
