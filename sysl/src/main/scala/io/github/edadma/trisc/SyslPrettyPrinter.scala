@@ -69,8 +69,8 @@ object SyslPrettyPrinter:
       s"[${parts.mkString(", ")}]"
 
   def declToSource(d: DeclAST): String = d match
-    case DataEnumDeclAST(name, variants, tps, _, defaults) =>
-      val tpStr = typeParamsWithDefaultsToSource(tps, Map.empty, defaults)
+    case DataEnumDeclAST(name, variants, tps, _, defaults, bounds) =>
+      val tpStr = typeParamsWithDefaultsToSource(tps, bounds, defaults)
       val body = variants.map { v =>
         if v.fields.isEmpty then s"${IND}${v.name}"
         else s"${IND}${v.name}(${v.fields.map((n, t) => s"$n: ${typeToSource(t)}").mkString(", ")})"
@@ -126,8 +126,8 @@ object SyslPrettyPrinter:
       val body = (assocLines ++ methodLines).mkString("\n")
       s"impl$tpStr $traitName[$targetStr]\n$body"
 
-    case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate, defaults) =>
-      val tpStr = typeParamsWithDefaultsToSource(typeParams, Map.empty, defaults)
+    case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate, defaults, bounds) =>
+      val tpStr = typeParamsWithDefaultsToSource(typeParams, bounds, defaults)
       val newStr = if isNew then "new " else ""
       val rangeStr = range.map(r => s" within ${exprToSource(r.lo)}${if r.exclusiveHi then "..<" else ".."}${exprToSource(r.hi)}").getOrElse("")
       val predStr = predicate.map(p => s" where ${exprToSource(p)}").getOrElse("")

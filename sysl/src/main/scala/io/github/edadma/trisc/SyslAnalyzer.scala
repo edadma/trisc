@@ -77,6 +77,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   // by alias name; missing entries mean no defaults. Carried separately from
   // `genericTypeAliases` so existing call sites stay terse.
   protected val genericTypeAliasDefaults = new mutable.LinkedHashMap[String, Map[String, TypeAST]]
+  // Phase C follow-up — per-alias trait bounds on type parameters (`type Parser[I: Input, A] = ...`).
+  // Keyed by alias name; missing entries mean no bounds. Mirrors `StructDeclAST.typeBounds`
+  // and is consulted from `instantiateGenericNominalAlias` / the transparent-alias path.
+  protected val genericTypeAliasBounds = new mutable.LinkedHashMap[String, Map[String, List[String]]]
   // Cached SyslType for each instantiation of a `new` generic alias. Keyed by (template
   // name, type args). Mirrors `genericStructInstantiations` so repeated mentions of
   // `Parser[i32]` return the same NamedType instance (object-equality dispatch).
@@ -1602,7 +1606,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           if !genericStructs.contains(name) then
             genericStructs(name) = sd
             importedTemplateNames += name
-        case de @ DataEnumDeclAST(name, variants, tps, _, _) if tps.nonEmpty =>
+        case de @ DataEnumDeclAST(name, variants, tps, _, _, _) if tps.nonEmpty =>
           if !genericEnums.contains(name) then
             genericEnums(name) = de
             importedTemplateNames += name
@@ -1616,10 +1620,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                   // template wins so analyze(generic enum) does not see variantToEnum + empty genericVariantToEnum.
                   if variantToEnum.contains(vname) then variantToEnum.remove(vname)
                   genericVariantToEnum(vname) = (name, idx)
-        case TypeAliasDeclAST(name, target, tps, _, isNew, _, _, defs) if tps.nonEmpty =>
+        case TypeAliasDeclAST(name, target, tps, _, isNew, _, _, defs, bounds) if tps.nonEmpty =>
           if !genericTypeAliases.contains(name) && !typeAliases.contains(name) then
             genericTypeAliases(name) = (tps, target, isNew)
             if defs.nonEmpty then genericTypeAliasDefaults(name) = defs
+            if bounds.nonEmpty then genericTypeAliasBounds(name) = bounds
             importedTemplateNames += name
         case _ => ()
 
@@ -1657,7 +1662,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               (fn, resolveType(ft))
             }).getOrElse(Nil)
             structTypes(name) = SyslType.StructType(name, resolvedFields)
-        case DataEnumDeclAST(name, variants, typeParams, _, _) if typeParams.isEmpty =>
+        case DataEnumDeclAST(name, variants, typeParams, _, _, _) if typeParams.isEmpty =>
           // Best-effort: resolve variant fields too. Same fallback as struct.
           val existing = dataEnumTypes.get(name)
           val needsFill = existing.forall(_.variants.forall(_._2.isEmpty))
@@ -1672,7 +1677,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
               if !variantToEnum.contains(vname) && !genericVariantToEnum.contains(vname) then
                 variantToEnum(vname) = (dataEnumTypes(name), idx)
-        case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate, _) if typeParams.isEmpty =>
+        case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate, _, _) if typeParams.isEmpty =>
           if !typeAliases.contains(name) && !genericTypeAliases.contains(name) then
             typeAliases(name) = (target, isNew, range, predicate)
         case fd @ FunDeclAST(name, params, returnType, _, _, tps, _, attrs, isDef, isParameterless, _)
@@ -1816,7 +1821,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             throw AnalysisError(s"duplicate struct: '$name'", decl)
           pass0Structs += name
           structTypes(name) = SyslType.StructType(name, Nil) // placeholder — fields filled below
-        case DataEnumDeclAST(name, _, typeParams, _, _) if typeParams.isEmpty =>
+        case DataEnumDeclAST(name, _, typeParams, _, _, _) if typeParams.isEmpty =>
           if pass0Enums.contains(name) then
             throw AnalysisError(s"duplicate enum: '$name'", decl)
           pass0Enums += name
@@ -1837,10 +1842,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       for decl <- program.decls do
         decl match
           case StructDeclAST(name, _, _, _, _, _, _)        => typeDefiningModule(name) = curMod
-          case DataEnumDeclAST(name, _, _, _, _)         => typeDefiningModule(name) = curMod
+          case DataEnumDeclAST(name, _, _, _, _, _)         => typeDefiningModule(name) = curMod
           case EnumDeclAST(name, _, _)                => typeDefiningModule(name) = curMod
           case InterfaceDeclAST(name, _, _, _)        => typeDefiningModule(name) = curMod
-          case TypeAliasDeclAST(name, _, _, _, _, _, _, _) => typeDefiningModule(name) = curMod
+          case TypeAliasDeclAST(name, _, _, _, _, _, _, _, _) => typeDefiningModule(name) = curMod
           case TraitDeclAST(name, _, _, _, _, _)         => traitDefiningModule(name) = curMod
           case _ => ()
 
@@ -1872,7 +1877,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               val volSet = fields.zipWithIndex.collect { case ((_, _, true), i) => i }.toSet
               structTypes(name) = SyslType.StructType(name, resolvedFields, volSet)
               if invariants.nonEmpty then structInvariants(name) = invariants
-          case DataEnumDeclAST(name, variants, typeParams, _, _) if typeParams.isEmpty =>
+          case DataEnumDeclAST(name, variants, typeParams, _, _, _) if typeParams.isEmpty =>
             val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
               val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
               (vname, resolvedFields)
@@ -2049,7 +2054,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             if variantToEnum.contains(vname) || genericVariantToEnum.contains(vname) then
               throw AnalysisError(s"duplicate variant name: '$vname'")
             variantToEnum(vname) = (et, idx)
-        case de @ DataEnumDeclAST(name, variants, typeParams, _, _) =>
+        case de @ DataEnumDeclAST(name, variants, typeParams, _, _, _) =>
           if typeParams.nonEmpty then
             // Generic enum: store template, don't resolve fields
             if genericEnums.contains(name) || dataEnumTypes.contains(name) || enumTypes.contains(name) then
@@ -2069,7 +2074,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               throw AnalysisError(s"duplicate enum: '$name'", decl)
             // Variants already resolved by pass 0.5 (resolveStructsAndEnums).
             // Do not re-assign dataEnumTypes here — same reason as StructDeclAST above.
-        case TypeAliasDeclAST(name, target, tparams, _, isNew, range, predicate, defaults) =>
+        case TypeAliasDeclAST(name, target, tparams, _, isNew, range, predicate, defaults, bounds) =>
           if typeAliases.contains(name) || genericTypeAliases.contains(name) then
             throw AnalysisError(s"duplicate type alias: '$name'", decl)
           if tparams.nonEmpty then
@@ -2081,6 +2086,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               throw AnalysisError(s"generic type aliases cannot use 'within' or 'where': '$name'", decl)
             genericTypeAliases(name) = (tparams, target, isNew)
             if defaults.nonEmpty then genericTypeAliasDefaults(name) = defaults
+            if bounds.nonEmpty then genericTypeAliasBounds(name) = bounds
           else
             typeAliases(name) = (target, isNew, range, predicate)
         case TraitDeclAST(name, tparams, methods, _, assocs, _) =>
@@ -2516,10 +2522,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val members = enumTypes(name).toList.sortBy(_._2)
         TEnumDecl(name, members)
 
-      case DataEnumDeclAST(name, _, _, _, _) =>
+      case DataEnumDeclAST(name, _, _, _, _, _) =>
         TDataEnumDecl(name, dataEnumTypes(name))
 
-      case TypeAliasDeclAST(name, _, tparams, _, _, _, _, _) =>
+      case TypeAliasDeclAST(name, _, tparams, _, _, _, _, _, _) =>
         if tparams.nonEmpty then TTypeAliasDecl(name, UnitType) // generic alias: type-only, no codegen
         else TTypeAliasDecl(name, resolveType(NamedTypeAST(name))) // force resolution (and range validation)
 
@@ -3491,13 +3497,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       if genericTypeAliases.contains(name) then
         val (tparams, target, isNew) = genericTypeAliases(name)
         val defaults = genericTypeAliasDefaults.getOrElse(name, Map.empty)
+        val bounds = genericTypeAliasBounds.getOrElse(name, Map.empty)
         val filled = fillTypeArgsFromDefaults(name, "type alias", tparams, defaults, resolved)
         if isNew then instantiateGenericNominalAlias(name, tparams, target, filled)
         else
+          // Transparent alias: enforce bounds + bring assoc bindings into scope so
+          // the body can reference projections like `T::Item`. The nominal path
+          // (instantiateGenericNominalAlias) does the same.
+          enforceBoundsAndBuildAssocs(s"type alias '$name'", tparams, filled, bounds) match
+            case Left(err) => throw AnalysisError(err)
+            case Right(_)  => ()
           val savedEnv = typeEnv
+          val savedAssocs = assocBindingsEnv
           typeEnv = typeEnv ++ tparams.zip(filled).toMap
-          val result = resolveType(target)
-          typeEnv = savedEnv
+          assocBindingsEnv = buildAssocBindingsEnv(tparams, filled, bounds)
+          val result =
+            try resolveType(target)
+            finally
+              typeEnv = savedEnv
+              assocBindingsEnv = savedAssocs
           result
       else if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
       else if genericEnums.contains(name) then instantiateGenericEnum(name, resolved)
@@ -3513,13 +3531,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         } =>
       val (tparams, target, isNew) = genericTypeAliases(name)
       val defaults = genericTypeAliasDefaults(name)
+      val bounds = genericTypeAliasBounds.getOrElse(name, Map.empty)
       val filled = fillTypeArgsFromDefaults(name, "type alias", tparams, defaults, Nil)
       if isNew then instantiateGenericNominalAlias(name, tparams, target, filled)
       else
+        enforceBoundsAndBuildAssocs(s"type alias '$name'", tparams, filled, bounds) match
+          case Left(err) => throw AnalysisError(err)
+          case Right(_)  => ()
         val savedEnv = typeEnv
+        val savedAssocs = assocBindingsEnv
         typeEnv = typeEnv ++ tparams.zip(filled).toMap
-        val result = resolveType(target)
-        typeEnv = savedEnv
+        assocBindingsEnv = buildAssocBindingsEnv(tparams, filled, bounds)
+        val result =
+          try resolveType(target)
+          finally
+            typeEnv = savedEnv
+            assocBindingsEnv = savedAssocs
         result
     case NamedTypeAST(name, Nil) if !typeEnv.contains(name) && genericStructs.contains(name)
         && {
@@ -5021,18 +5048,30 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       typeArgs: List[SyslType],
   ): SyslType =
     val defaults = genericTypeAliasDefaults.getOrElse(name, Map.empty)
+    val bounds = genericTypeAliasBounds.getOrElse(name, Map.empty)
     val filledArgs = fillTypeArgsFromDefaults(name, "type alias", tparams, defaults, typeArgs)
     val cacheKey = (name, filledArgs)
     genericAliasInstantiations.get(cacheKey) match
       case Some(t) => t
       case None =>
         val typeArgs = filledArgs
+        // Enforce trait bounds declared on the alias's type parameters (Phase C
+        // follow-up) and bring projection assocs into scope while resolving the
+        // alias body, so `Parser[I: Input, A] = (I) -> ParseResult[I, A]` can
+        // resolve `I::Elem` references inside the target type.
+        enforceBoundsAndBuildAssocs(s"type alias '$name'", tparams, typeArgs, bounds) match
+          case Left(err) => throw AnalysisError(err)
+          case Right(_)  => ()
         val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
         val savedEnv = typeEnv
+        val savedAssocs = assocBindingsEnv
         typeEnv = typeEnv ++ tparams.zip(typeArgs).toMap
+        assocBindingsEnv = buildAssocBindingsEnv(tparams, typeArgs, bounds)
         val base =
           try resolveType(target)
-          finally typeEnv = savedEnv
+          finally
+            typeEnv = savedEnv
+            assocBindingsEnv = savedAssocs
         val nt = SyslType.NamedType(mangled, base, nominal = true, range = None, predicateFunc = None)
         genericAliasInstantiations(cacheKey) = nt
         genericAliasToTemplate(mangled) = (name, typeArgs)
@@ -5085,9 +5124,17 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case None =>
         val template = template0
         val typeArgs = filledArgs
+        // Enforce trait bounds declared on the enum's type parameters (Phase C
+        // follow-up) and build the assoc-bindings env so projection-typed variant
+        // fields like `pulled: T::Item` resolve via the matching impl.
+        enforceBoundsAndBuildAssocs(s"enum '$name'", template.typeParams, typeArgs, template.typeBounds) match
+          case Left(err) => throw AnalysisError(err)
+          case Right(_)  => ()
         val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
         val savedEnv = typeEnv
+        val savedAssocs = assocBindingsEnv
         typeEnv = typeEnv ++ template.typeParams.zip(typeArgs).toMap
+        assocBindingsEnv = buildAssocBindingsEnv(template.typeParams, typeArgs, template.typeBounds)
         try
           val resolvedVariants = template.variants.map { case EnumVariantAST(vname, fields) =>
             val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
@@ -5099,7 +5146,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           enumToTemplate(mangled) = (name, typeArgs)
           specializedDecls += TDataEnumDecl(mangled, et)
           et
-        finally typeEnv = savedEnv
+        finally
+          typeEnv = savedEnv
+          assocBindingsEnv = savedAssocs
 
   // Analyze each impl method (including synthesized defaults) as a mangled top-level function
   protected def analyzeImplMethods(impl: ImplDeclAST): List[TDecl] =
