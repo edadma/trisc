@@ -801,7 +801,7 @@ class TSR(r: Int) extends RInstruction(r):
 class AUIPC(r: Int, imm: Int) extends ImmediateInstruction(r, imm):
   val mnemonic = "auipc"
 
-  def apply(cpu: CPU): Unit = cpu.r(r).write(cpu.pc - 2 + (imm << 8))
+  def apply(cpu: CPU): Unit = cpu.r(r).write(cpu.pc - 2 + cpu.auipcOffset(imm))
 
 class LDB(d: Int, a: Int, b: Int) extends RRRInstruction(d, a, b):
   val mnemonic = "ldb"
@@ -814,12 +814,12 @@ abstract class LDSTInstruction(a: Int, b: Int, imm: Int) extends Instruction:
 class LD(a: Int, b: Int, imm: Int) extends LDSTInstruction(a, b, imm):
   val mnemonic = "ld"
 
-  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.readInt(cpu.r(b).read + imm * 2))
+  def apply(cpu: CPU): Unit = cpu.r(a).write(cpu.ldRead(cpu.r(b).read + imm * 2))
 
 class ST(a: Int, b: Int, imm: Int) extends LDSTInstruction(a, b, imm):
   val mnemonic = "st"
 
-  def apply(cpu: CPU): Unit = cpu.writeInt(cpu.r(b).read + imm * 2, cpu.r(a).read)
+  def apply(cpu: CPU): Unit = cpu.stWrite(cpu.r(b).read + imm * 2, cpu.r(a).read)
 
 class STB(a: Int, b: Int, c: Int) extends RRRInstruction(a, b, c):
   val mnemonic = "stb"
