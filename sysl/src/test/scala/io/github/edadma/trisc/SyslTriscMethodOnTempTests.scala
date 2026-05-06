@@ -98,4 +98,23 @@ class SyslTriscMethodOnTempTests extends AnyFreeSpec with Matchers {
     out should include("# function: use")
     out should include("Duration_is_zero")
   }
+
+  "indexing a slice returned from a method codegens (no fault)" in {
+    // Bug: TIndex(slice_returning_call, idx) pshd'd idx, then genExpr(array)
+    // left a 24-byte slice ret slot between the index slot and r7. popd r2
+    // read from inside the ret slot — never the pushed index. Fix: reclaim
+    // any extra stack genExpr left, then popd. Plus: track stackOffset
+    // around pshd/popd so the inner call's retSlotOffset is correct.
+    val out = asm(
+      """struct Holder
+        |    items: []string
+        |    count: int
+        |
+        |Holder.args() -> []string = self.items
+        |
+        |use(h: Holder) -> string = h.args()[1]
+        |""".stripMargin)
+    out should include("# function: use")
+    out should include("Holder_args")
+  }
 }
