@@ -56,10 +56,9 @@ class Trisc16CPU(
       pc = mem.readShortUnsigned(2).toLong
       // Keep Status.Mode set (CPU.reset() set it) so shared TRISC instructions
       // that gate on it (HALT, RTE, etc.) continue to work in our flat model.
-      // Clear only PSR.E.
+      // Clear only PSR.E. EPC/ECAUSE are left at their default 0 — they have
+      // no meaningful pre-state until the first fault writes them.
       psr = psr & ~PsrE
-      ecause = 0
-      epc = 0
       state = State.Run
       clearReservation()
       return
