@@ -1173,11 +1173,19 @@ class SyslSVMCodegen:
     case TMultiStmt(children) =>
       children.foreach(genStmt)
 
-    case TContractCheck(_, expr, _) =>
+    case TContractCheck(kind, expr, message) =>
+      // Emit a kind-tagged trap on failure rather than a bare `halt`. The
+      // SVM `trap u8` opcode (0x6A) calls `handleTrap(num)`; the default impl
+      // halts on any non-zero number, but a debugging harness can override
+      // it to recover the kind. The `; <kind>: <message>` comment is emitted
+      // immediately above the trap so the message survives in the asm output
+      // — historically this was discarded entirely, audit item #17.
       genExpr(expr)
       val pass = newLabel("contract_pass")
       emit(s"  jumpnz $pass")
-      emit("  halt")
+      val tag = if message == kind then kind else s"$kind: $message"
+      emit(s"  ; $tag")
+      emit("  trap 1")
       emit(s"$pass:")
 
     case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
