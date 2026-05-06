@@ -1,0 +1,53 @@
+SVM type-attribute reproducer
+=============================
+
+Audit item #15 claims SVM doesn't synthesize type attributes
+(T::Valid, T::Image, T::Pos, ...). The same source runs on every
+backend; the test runner reports per-backend pass/fail.
+
+    module sysl.tests.typeattr_test
+
+
+    enum Color
+        Red
+        Green
+        Blue
+
+
+    type Pct = int within 0..100
+
+
+    #test
+    test_simple_enum_first_last() -> unit
+        assert(Color::First == Color.Red, "Color::First is Red")
+        assert(Color::Last == Color.Blue, "Color::Last is Blue")
+
+    #test
+    test_simple_enum_pos_val() -> unit
+        assert(Color::Pos(Color.Green) == 1, "Green at position 1")
+        assert(Color::Val(2) == Color.Blue, "position 2 is Blue")
+
+    #test
+    test_simple_enum_image() -> unit
+        assert(Color::Image(Color.Red) == "Red", "Image of Red")
+
+    #test
+    test_simple_enum_succ_pred() -> unit
+        assert(Color::Succ(Color.Red) == Color.Green, "Succ Red")
+        assert(Color::Pred(Color.Blue) == Color.Green, "Pred Blue")
+
+    #test
+    test_within_int_first_last() -> unit
+        assert(Pct::First == 0, "Pct::First")
+        assert(Pct::Last == 100, "Pct::Last")
+
+    #test
+    test_within_int_valid() -> unit
+        assert(Pct::Valid(50), "50 is a valid Pct")
+        assert(!Pct::Valid(-1), "-1 not a valid Pct")
+        assert(!Pct::Valid(101), "101 not a valid Pct")
+
+    #test
+    test_simple_enum_valid() -> unit
+        assert(Color::Valid(0), "0 is a valid Color")
+        assert(!Color::Valid(99), "99 not a valid Color")

@@ -1,0 +1,29 @@
+SVM out/inout reproducer
+========================
+
+Audit item #16 claims `out`/`inout` parameter modes silently lose
+mutations on the SVM backend. This file probes whether that's still
+true post-Tier-2; the same source runs on every backend and the
+test runner reports per-backend pass/fail.
+
+    module sysl.tests.outparam_test
+
+
+    set_to_42(out x: int) -> unit
+        x = 42
+
+    inc(inout x: int) -> unit
+        x = x + 1
+
+
+    #test
+    test_out_param() -> unit
+        var y = 0
+        set_to_42(y)
+        assert(y == 42, "out param should mutate y to 42")
+
+    #test
+    test_inout_increment() -> unit
+        var z = 100
+        inc(z)
+        assert(z == 101, "inout param should mutate z")
