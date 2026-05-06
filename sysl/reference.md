@@ -489,6 +489,17 @@ combined with `new` (the `within`/`where` clause is what's
 unsupported). Use a plain (non-generic) type declaration when you
 want a constrained type.
 
+**Bounds and defaults.** Type parameters carry trait bounds and defaults
+exactly like generic functions, structs, and enums:
+
+```sysl
+type Cmp[T: Ord]                  = (T, T) -> int
+type Cache[K: Hash, V = string]   = ...
+```
+
+The bound is enforced at each instantiation site; defaults fill in when
+the argument is missing.
+
 ### Type Attributes (`T::Attr`)
 
 Range-constrained types and simple enums expose their metadata through `::`-suffixed
@@ -1410,6 +1421,10 @@ main() -> int
 - Each `(enum, type-args)` pair produces one monomorphized `EnumType` with a
   mangled name (e.g. `Option_i32`, `Result_i32_string`).
 - Pattern matching uses the scrutinee's concrete enum type to look up variants.
+- Type parameters may carry trait bounds and defaults exactly like generic
+  functions and structs: `enum Box[T: Ord = int]`. The bound is enforced at
+  instantiation; variant field types may use associated-type projections
+  (`Some(v: T::Token)`).
 
 **Type inference:** variant constructors prefer to infer type args from
 argument types (`Some(42)` infers `T=int`). When a variant doesn't pin all
@@ -1524,6 +1539,29 @@ When a generic-fn type parameter has multiple bounds (`T: A + B`) and both
 declare the same assoc name with different resolutions, the projection is
 rejected as ambiguous; identical bindings (same name, same resolved type) are
 allowed.
+
+**Bounds on trait, impl, and extension type-parameters.** The same
+`T: Trait + Trait` syntax that works on generic functions and generic
+struct/enum/type-alias declarations also works on trait, `impl`, and
+`extension` headers:
+
+```sysl
+trait Container[T: Ord]                      // enforced at every impl
+    head(c: T) -> T
+
+impl[T: Ord] Container[Box[T]]               // enforced at dispatch when T pins
+    head(c: Box[T]) -> Box[T] = c
+
+extension[T: Ord] (b: Box[T])                // enforced at every method call
+    def head() -> int = 0
+```
+
+`trait` bounds are checked at impl-registration time: each impl target type
+must satisfy each declared bound. `impl` and `extension` bounds are checked
+at dispatch time, when the impl/extension is selected for a concrete type
+substitution. Bounds on the trait's own params are also checked at dispatch
+when the impl is generic — the resolved target patterns under the impl's
+substitution must satisfy the trait's declared bounds.
 
 ### Operator Overloading via Traits
 

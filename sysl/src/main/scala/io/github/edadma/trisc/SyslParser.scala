@@ -166,14 +166,15 @@ class SyslParser extends StandardTokenParsers {
     "where" ~> logicalOr
 
   lazy val traitDecl: Parser[TraitDeclAST] =
-    "trait" ~> ident ~ ("[" ~> rep1sep(typeParamWithDefault, ",") <~ "]") ~
+    "trait" ~> ident ~ ("[" ~> rep1sep(typeParamWithBounds, ",") <~ "]") ~
       (Newline ~> Indent ~> rep1sep(traitMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("trait")) ^^ {
         case name ~ tpitems ~ members =>
           val assocs = members.collect { case Left(a) => a }
           val methods = members.collect { case Right(m) => m }
           val tparams = tpitems.map(_._1)
-          val defaults = tpitems.collect { case (n, Some(d)) => (n, d) }.toMap
-          TraitDeclAST(name, tparams, methods, Nil, assocs, defaults)
+          val bounds = tpitems.collect { case (n, bs, _) if bs.nonEmpty => (n, bs) }.toMap
+          val defaults = tpitems.collect { case (n, _, Some(d)) => (n, d) }.toMap
+          TraitDeclAST(name, tparams, methods, Nil, assocs, defaults, bounds)
       }
 
   /** A trait body member is either an associated type declaration or a method. */
@@ -196,15 +197,16 @@ class SyslParser extends StandardTokenParsers {
       funBlockBody
 
   lazy val implDecl: Parser[ImplDeclAST] =
-    "impl" ~> opt("[" ~> rep1sep(typeParamWithDefault, ",") <~ "]") ~ ident ~ ("[" ~> rep1sep(typeRef, ",") <~ "]") ~
+    "impl" ~> opt("[" ~> rep1sep(typeParamWithBounds, ",") <~ "]") ~ ident ~ ("[" ~> rep1sep(typeRef, ",") <~ "]") ~
       (Newline ~> Indent ~> rep1sep(implMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("impl")) ^^ {
         case tpitems ~ name ~ targets ~ members =>
           val assocs = members.collect { case Left(a) => a }
           val methods = members.collect { case Right(m) => m }
           val items = tpitems.getOrElse(Nil)
           val tparams = items.map(_._1)
-          val defaults = items.collect { case (n, Some(d)) => (n, d) }.toMap
-          ImplDeclAST(name, tparams, targets, methods, Nil, assocs, defaults)
+          val bounds = items.collect { case (n, bs, _) if bs.nonEmpty => (n, bs) }.toMap
+          val defaults = items.collect { case (n, _, Some(d)) => (n, d) }.toMap
+          ImplDeclAST(name, tparams, targets, methods, Nil, assocs, defaults, bounds)
       }
 
   /** An impl body member is either an associated-type binding or a method. */
@@ -231,13 +233,14 @@ class SyslParser extends StandardTokenParsers {
   // `def` (mirrors the user-facing surface; disambiguates from any other
   // construct that might appear in the block).
   lazy val extensionDecl: Parser[ExtensionDeclAST] =
-    "extension" ~> opt("[" ~> rep1sep(typeParamWithDefault, ",") <~ "]") ~ ("(" ~> param <~ ")") ~
+    "extension" ~> opt("[" ~> rep1sep(typeParamWithBounds, ",") <~ "]") ~ ("(" ~> param <~ ")") ~
       (Newline ~> Indent ~> rep1sep(extensionMember, rep1(Newline)) <~ opt(Newline) <~ Dedent) <~ opt(endMarker("extension")) ^^ {
         case tpitems ~ recv ~ methods =>
           val items = tpitems.getOrElse(Nil)
           val tparams = items.map(_._1)
-          val defaults = items.collect { case (n, Some(d)) => (n, d) }.toMap
-          ExtensionDeclAST(tparams, recv, methods, Nil, defaults)
+          val bounds = items.collect { case (n, bs, _) if bs.nonEmpty => (n, bs) }.toMap
+          val defaults = items.collect { case (n, _, Some(d)) => (n, d) }.toMap
+          ExtensionDeclAST(tparams, recv, methods, Nil, defaults, bounds)
       }
 
   lazy val extensionMember: Parser[FunDeclAST] =
