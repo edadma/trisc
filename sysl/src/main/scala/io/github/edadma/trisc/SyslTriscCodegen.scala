@@ -494,6 +494,22 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     val typ = typ0.underlying
     typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
 
+  // Method-on-temporary receiver where the inner expression is a call that
+  // returns a struct/enum by value. Only this shape produces a stack-resident
+  // ret slot that genExpr leaves r1 pointing into, so it needs a stable-slot
+  // copy in the OUTER call's regArg pre-eval. TTempAddr wrapping a TDeref
+  // (e.g. an `inout` param's auto-deref) just yields the dereferenced pointer
+  // and uses the existing else-branch path.
+  private def isStructLikeTempAddr(arg: TExpr): Boolean = arg match
+    case TTempAddr(inner, _) =>
+      val innerTyp = inner.typ
+      val isStructLike = innerTyp.isInstanceOf[SyslType.StructType] || innerTyp.isInstanceOf[SyslType.EnumType]
+      val producesStackTemp = inner match
+        case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => true
+        case _ => false
+      isStructLike && producesStackTemp
+    case _ => false
+
   // Size of a type on the stack in bytes, rounded up to alignment
   private def stackSize(typ: SyslType): Int =
     val raw = typ.sizeOf.toInt
@@ -4144,6 +4160,26 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
               emitAddImm(4, 7, off)
               emit("  std r3, r4, r0")
             regAggregateDataOffset = stackOffset
+          else if isStructLikeTempAddr(arg) then
+            // Method-on-temporary receiver where the inner expression returns
+            // a struct/enum by value: genExpr leaves the inner ret slot on
+            // the stack with r1 pointing into it. Copy those bytes into a
+            // fresh slot below the inner ret slot so the receiver pointer
+            // survives both the OUTER's "extra reclaim" and any subsequent
+            // stack-arg pushes. The OUTER's final cleanup at savedOffset
+            // reclaims both the copy and the now-dead inner ret slot in one
+            // go after the call.
+            val structType = arg.asInstanceOf[TTempAddr].expr.typ
+            genExpr(arg)
+            val aligned = (stackSize(structType) + 7) & ~7
+            emitAddImm(7, 7, -aligned)
+            stackOffset -= aligned
+            for off <- 0 until aligned by 8 do
+              emitAddImm(3, 1, off)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(4, 7, off)
+              emit("  std r3, r4, r0")
+            regAggregateDataOffset = stackOffset
         }
         // Push stack args (1+) right-to-left
         for arg <- stackArgs.reverse do
@@ -4158,6 +4194,10 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             emitAddImm(1, 5, regAggregateDataOffset)
           else if arg.typ.isInstanceOf[SyslType.StructType] || arg.typ.isInstanceOf[SyslType.EnumType] then
             // r1 = address of the pre-pushed struct bytes (above stack args)
+            emitAddImm(1, 5, regAggregateDataOffset)
+          else if isStructLikeTempAddr(arg) then
+            // Method-on-temporary receiver: pre-eval already copied the inner
+            // call's struct ret slot into a fresh slot at regAggregateDataOffset.
             emitAddImm(1, 5, regAggregateDataOffset)
           else
             val preOffset = stackOffset
@@ -4465,8 +4505,20 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         val elemSize = stackSize(elemType)
         genExpr(index)           // r1 = index
         emit("  pshd r1")
+        stackOffset -= 8
+        val preOffset = stackOffset
         genExpr(array)           // r1 = slice struct address
+        // Reclaim any stack temp genExpr left between the index slot and r7
+        // (e.g. a slice-returning call's 24-byte ret slot). Without this,
+        // popd r2 reads from inside that ret slot instead of the pushed
+        // index. r1 still points into the descriptor; subsequent ldds for
+        // ptr/len read it before anything overwrites it.
+        val extra = preOffset - stackOffset
+        if extra > 0 then
+          emitAddImm(7, 7, extra)
+          stackOffset = preOffset
         emit("  popd r2")        // r2 = index
+        stackOffset += 8
         // Bounds check
         emit("  addi r3, r1, 8")
         emit("  ldw r3, r3, r0") // r3 = len (32-bit in slice struct)

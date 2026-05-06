@@ -149,9 +149,14 @@ object TriscPeephole:
       List(Instr("addi", List(reg(d1), reg(a), (x + y).toString)))
   }
 
-  /** TRISC `addi` accepts a signed-16-bit immediate. Conservative — verify against
-   *  the actual assembler if you want to widen. */
-  private def fitsAddiImm(v: Long): Boolean = v >= -32768L && v <= 32767L
+  /** TRISC `addi` accepts a signed-7-bit immediate (-64..63). The assembler
+   *  rejects anything wider with "immediate must be a signed 7-bit value"
+   *  (asm/.../assemble.scala). The earlier i16 bound here was wrong and was
+   *  the root of all 24 std/flag + std/crypto/aead trisc-backend failures:
+   *  `addiFold` happily summed two valid addis into a single addi with an
+   *  out-of-range constant, producing asm that crashed the assembler.
+   */
+  private def fitsAddiImm(v: Long): Boolean = v >= -64L && v <= 63L
 
   /** TRISC load mnemonics that take the form `ldX rD, rA, rB` with addr = rA + rB. */
   private val loadMnemonics: Set[String] = Set("ldb", "lds", "ldw", "ldd")

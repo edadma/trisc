@@ -1,0 +1,62 @@
+Method-on-temporary receiver where the inner expression returns a struct
+========================================================================
+
+Pinned 2026-05-05. The chain `of_seconds(0i64).is_zero()` builds a
+`TTempAddr(of_seconds(...))` selfArg around a struct-returning call.
+The OUTER (`is_zero`) call's regArg path used to:
+
+1. `genExpr(arg)` — runs the inner of_seconds call. Inner cleanup
+   leaves r1 pointing into a stack-resident ret slot at retSlotOffset
+   and `stackOffset` descended below `preOffset`.
+2. Compute `extra = preOffset - stackOffset > 0`, then either
+   - reclaim with `addi r7, r7, extra` (discarding the ret slot, so r1
+     dangles into reclaimed memory — `is_zero`'s `pshd r5` overwrote
+     the nano half), or
+   - skip the reclaim (which seemed to keep the ret slot but breaks the
+     ABI: `caller_r7_at_jalr` must equal the lowest stack-arg slot, and
+     skipping leaves r7 *inside* the ret-slot region, so the callee
+     reads its first stack arg out of the receiver's bytes).
+
+The fix in `SyslTriscCodegen.checkRegArgPath` mirrors the existing
+StructType pre-eval: copy the struct bytes from the inner ret slot to
+a fresh slot below it (allocated with the same `addi r7, r7, -aligned`
++ unrolled `ldd/std`), then use the copy's address as `r1`. Both the
+copy and the now-dead inner ret slot are reclaimed in the OUTER call's
+final cleanup at savedOffset.
+
+Only TTempAddr wrapping a Call/IndirectCall/InterfaceDispatch returning
+Struct/Enum needs this — TTempAddr around a TDeref (e.g. an `inout`
+param's auto-deref) yields a real pointer with no stack-resident temp,
+and the existing else-branch handles that correctly. The `inner match`
+case in `isStructLikeTempAddr` enforces this distinction.
+
+`test_dur_temp` is the literal `of_seconds(0).is_zero()` shape;
+`test_dur_local` calls `is_zero` through a local variable, the path the
+buggy codegen happened to handle correctly even before the fix
+(receiver is `TVarRef → TAddrOf`, never `TTempAddr`).
+
+    module sysl.tests.dur_min
+
+    import std.debug.{assert}
+
+    struct Duration
+        seconds: i64
+        nano: i32
+
+    of_seconds(s: i64) -> Duration
+        var d: Duration
+        d.seconds = s
+        d.nano = 0
+        return d
+
+    Duration.is_zero() -> bool
+        return self.seconds == 0i64 && self.nano == 0
+
+    #test
+    test_dur_temp() -> unit
+        assert(of_seconds(0i64).is_zero(), "of_seconds(0).is_zero()")
+
+    #test
+    test_dur_local() -> unit
+        var d = of_seconds(0i64)
+        assert(d.is_zero(), "local d.is_zero()")

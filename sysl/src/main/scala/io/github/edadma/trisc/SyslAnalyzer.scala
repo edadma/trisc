@@ -5588,6 +5588,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               case (_: FuncType, IntType(64) | UIntType(64)) => TCast(coerced, pType)
               case (_, iface: InterfaceType) if !coerced.typ.isInstanceOf[InterfaceType] =>
                 TInterfaceBox(coerced, iface)
+              case (ArrayType(_, _), st: SliceType) =>
+                // Array → slice arg: backends need a concrete slice descriptor at the call
+                // site. Without this, TRISC pushes the array's address as a single 8-byte
+                // scalar and the callee reads slice fields from arbitrary memory. Modeling
+                // the conversion as `arg[:]` keeps codegen in one place.
+                TSliceExpr(coerced, None, None, st)
               case _ => coerced
           }
           applyTargetType(converted, pType)

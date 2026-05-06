@@ -2405,6 +2405,35 @@ class SyslSVMCodegen:
       emit("  rot")
       emitStore(fieldType)
 
+    case TArrayLit(elements, arrType) =>
+      // Allocate the array on the memory stack, populate elements, leave
+      // base address on TOS. Element layout matches `[N]T`: each slot at
+      // offset `i * elemType.sizeOf`.
+      val (elemType, declaredLen) = arrType match
+        case SyslType.ArrayType(e, n) => (e, n.toInt)
+        case _                        => (SyslType.I64, elements.length)
+      val len = declaredLen.max(elements.length)
+      val size = elemType.sizeOf * len
+      emitMemAlloc(size)
+      // Zero-init the whole region first (so any tail past `elements.length`
+      // is well-defined; matches the TVarDecl/TStructConstruct paths).
+      val aligned = ((size + 7) / 8 * 8).toInt
+      for i <- 0 until aligned by 8 do
+        emit("  dup")
+        if i > 0 then { emitPushInt(i); emit("  add") }
+        emit("  push_0")
+        emit("  swap")
+        emit("  store64")
+      // Now write each element. Stack invariant during the loop: ( base ).
+      for (elem, i) <- elements.zipWithIndex do
+        emit("  dup")                          // ( base base )
+        if i != 0 then
+          emitPushInt(i * elemType.sizeOf)
+          emit("  add")                        // ( base base+offset )
+        genExpr(elem)                          // ( base base+offset value )
+        emit("  swap")                         // ( base value base+offset )
+        emitStore(elemType)                    // ( base )
+
     case _ =>
       sys.error(s"unhandled TExpr in SVM codegen: ${expr.getClass.getSimpleName}")
 

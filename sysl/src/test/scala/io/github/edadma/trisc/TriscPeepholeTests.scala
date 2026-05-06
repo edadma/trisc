@@ -84,10 +84,28 @@ class TriscPeepholeTests extends AnyFreeSpec with Matchers:
     stats.perRule("addi-fold") shouldBe 1
   }
 
-  "addi-fold skips when the combined immediate would overflow" in {
-    val (out, stats) = TriscPeephole("  addi r3, r5, 32000\n  addi r3, r3, 32000\n")
-    out shouldBe "  addi r3, r5, 32000\n  addi r3, r3, 32000\n"
+  "addi-fold skips when the combined immediate would not fit in addi's i7 range" in {
+    // TRISC `addi` accepts a signed 7-bit immediate (-64..63). The peephole
+    // had previously used an i16 bound here, which let the rule fold two
+    // valid addis (e.g. 32 + 32 = 64) into a single addi with an
+    // out-of-range immediate. The assembler then crashed with
+    // `immediate must be a signed 7-bit value`. This test pins the i7
+    // bound so the regression cannot reappear.
+    val (out, stats) = TriscPeephole("  addi r3, r5, 32\n  addi r3, r3, 32\n")
+    out shouldBe "  addi r3, r5, 32\n  addi r3, r3, 32\n"
     stats.perRule.getOrElse("addi-fold", 0) shouldBe 0
+  }
+
+  "addi-fold folds at the i7 boundary (sums up to +63)" in {
+    val (out, stats) = TriscPeephole("  addi r3, r5, 30\n  addi r3, r3, 33\n")
+    out shouldBe "  addi r3, r5, 63\n"
+    stats.perRule("addi-fold") shouldBe 1
+  }
+
+  "addi-fold folds at the i7 boundary (sums down to -64)" in {
+    val (out, stats) = TriscPeephole("  addi r3, r5, -30\n  addi r3, r3, -34\n")
+    out shouldBe "  addi r3, r5, -64\n"
+    stats.perRule("addi-fold") shouldBe 1
   }
 
   // ===== Barrier behavior =====
