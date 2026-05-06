@@ -21,6 +21,26 @@ arch_sti:
     msr daifclr, #0x7
     ret
 
+// arch_irq_save() -> u64
+//   Returns current DAIF state, then masks A/I/F. Pair with
+//   arch_irq_restore for nestable critical sections — caller saves
+//   the previous mask, runs the critical section, restores. Lets
+//   page_alloc / page_free guard their free-list updates without
+//   prematurely re-enabling interrupts when called from inside an
+//   already-CLI'd region.
+.global arch_irq_save
+arch_irq_save:
+    mrs x0, daif
+    msr daifset, #0x7
+    ret
+
+// arch_irq_restore(prev: u64)
+//   Restores DAIF to a previously-saved value.
+.global arch_irq_restore
+arch_irq_restore:
+    msr daif, x0
+    ret
+
 // sync_icache_line(addr: i64)
 //   Clean the D-cache line containing `addr` to Point of Unification,
 //   invalidate the entire I-cache, then ISB. This is the short form

@@ -27,6 +27,8 @@ Hardware page-table operations (vm_asm.s).
     extern vm_get_ptbr() -> u64
     extern read_sctlr_el1() -> u64
     extern abort()
+    extern arch_irq_save() -> u64
+    extern arch_irq_restore(prev: u64)
     extern cntfrq_el0() -> u64
     extern cntpct_el0() -> u64
     extern cntp_tval_set(tval: u64)
@@ -87,6 +89,7 @@ between the kernel image and the top of our 1GB identity map.
     var page_free_list: u64 = 0
 
     page_alloc() -> u64
+        val prev_daif = arch_irq_save()
         if !page_pool_init
             var base = u64(i64(&_heap_start))
             val aligned = (base + u64(PAGE_SIZE - 1)) & ~u64(PAGE_SIZE - 1)
@@ -96,17 +99,22 @@ between the kernel image and the top of our 1GB identity map.
             val page = page_free_list
             var next: *i64 = *i64(page)
             page_free_list = u64(*next)
+            arch_irq_restore(prev_daif)
             return page
         if page_pool_next >= PAGE_POOL_END
+            arch_irq_restore(prev_daif)
             return 0
         val page = page_pool_next
         page_pool_next += u64(PAGE_SIZE)
+        arch_irq_restore(prev_daif)
         page
 
     page_free(addr: u64)
+        val prev_daif = arch_irq_save()
         var p: *i64 = *i64(addr)
         *p = i64(page_free_list)
         page_free_list = addr
+        arch_irq_restore(prev_daif)
 
     page_alloc_zero() -> u64
         val page = page_alloc()
