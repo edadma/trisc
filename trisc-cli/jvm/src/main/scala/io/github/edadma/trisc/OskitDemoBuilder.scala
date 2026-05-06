@@ -66,6 +66,7 @@ object OskitDemoBuilder:
     compileAndLink(
       Map(
         "oskit/kernel/kernel"         -> kernelSysl,
+        "oskit/kernel/kstack"         -> kstackSysl,
         "oskit/services/services"     -> servicesSysl,
         "oskit/arch/timer"            -> timerSysl,
         "oskit/sync/semaphore"        -> semaphoreSysl,
@@ -234,6 +235,7 @@ import oskit.hal.memset
     compileAndLink(
       Map(
         "oskit/kernel/kernel"        -> kernelSysl,
+        "oskit/kernel/kstack"        -> kstackSysl,
         "oskit/services/services"    -> servicesSysl,
         "oskit/arch/timer"           -> timerSysl,
         "oskit/sync/semaphore"       -> semaphoreSysl,

@@ -82,3 +82,18 @@ int fflush(void *stream) { (void)stream; return 0; }
 void exit(int status) { (void)status; for (;;) __asm__ volatile ("hlt"); }
 void abort(void) { for (;;) __asm__ volatile ("hlt"); }
 
+unsigned long arch_irq_save(void) {
+    unsigned long flags;
+    __asm__ volatile ("pushfq\n\t"
+                      "popq %0\n\t"
+                      "cli"
+                      : "=r"(flags) :: "memory");
+    return flags;
+}
+
+void arch_irq_restore(unsigned long prev) {
+    __asm__ volatile ("pushq %0\n\t"
+                      "popfq"
+                      :: "r"(prev) : "memory", "cc");
+}
+

@@ -29,6 +29,16 @@ CPU raises #DB on any write to the watched address.
 
     extern set_hw_watchpoint(addr: u64)
 
+Save and restore IRQ state for nestable critical sections.
+arch_irq_save reads RFLAGS, disables interrupts (cli), and
+returns the previous flags. arch_irq_restore writes the
+saved flags back, which re-enables interrupts iff IF was
+set when the save happened. Provided by stubs.c so the
+inline asm doesn't fight the Sysl prologue.
+
+    extern arch_irq_save() -> u64
+    extern arch_irq_restore(prev: u64)
+
 Spinlock acquire. Spins using lock cmpxchg until the lock
 is obtained, then disables interrupts. Lock is 0=free, 1=held.
 x86 calling convention: rdi = first arg (lock pointer).

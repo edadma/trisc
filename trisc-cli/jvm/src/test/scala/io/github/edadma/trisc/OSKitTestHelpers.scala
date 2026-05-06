@@ -12,6 +12,7 @@ object OSKitTestData {
 
   lazy val bootAsm: String = scala.io.Source.fromFile("oskit/arch/trisc/boot.asm").mkString
   lazy val kernelSysl: String = readLsysl("oskit/kernel/kernel.lsysl")
+  lazy val kstackSysl: String = readLsysl("oskit/kernel/kstack.lsysl")
   lazy val servicesSysl: String = readLsysl("oskit/services/services.lsysl")
   lazy val semaphoreSysl: String = readLsysl("oskit/sync/semaphore.lsysl")
   lazy val mutexSysl: String = readLsysl("oskit/sync/mutex.lsysl")
@@ -153,7 +154,7 @@ trait OSKitTestHelpers extends AnyFreeSpec with Matchers {
     val bootTof = assemble(bootAsm, relocatable = true)
 
     val allSources = Map(
-      "oskit/kernel/kernel" -> kernelSysl, "oskit/services/services" -> servicesSysl, "oskit/arch/timer" -> timerSysl, "oskit/sync/semaphore" -> semaphoreSysl,
+      "oskit/kernel/kernel" -> kernelSysl, "oskit/kernel/kstack" -> kstackSysl, "oskit/services/services" -> servicesSysl, "oskit/arch/timer" -> timerSysl, "oskit/sync/semaphore" -> semaphoreSysl,
       "oskit/sync/mutex" -> mutexSysl, "oskit/sync/condvar" -> condvarSysl, "oskit/sync/barrier" -> barrierSysl,
       "oskit/sync/rwlock" -> rwlockSysl, "oskit/sync/channel" -> channelSysl, "oskit/sync/mailbox" -> mailboxSysl,
       "oskit/sync/rmutex" -> rmutexSysl, "oskit/sync/qset" -> qsetSysl, "oskit/sync/pimutex" -> pimutexSysl,

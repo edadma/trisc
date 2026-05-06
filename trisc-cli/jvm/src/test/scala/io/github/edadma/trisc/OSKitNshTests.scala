@@ -43,6 +43,7 @@ class OSKitNshTests extends OSKitTestHelpers {
     val bootTof    = assemble(bootAsm, relocatable = true)
     val allSources = Map(
       "oskit/kernel/kernel"         -> kernelSysl,
+      "oskit/kernel/kstack"         -> kstackSysl,
       "oskit/services/services"     -> servicesSysl,
       "oskit/arch/timer"            -> timerSysl,
       "oskit/sync/semaphore"        -> semaphoreSysl,

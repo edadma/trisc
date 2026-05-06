@@ -1284,6 +1284,7 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
 
     kernel_init()
         vm_init()
+        kstack_init()
         register_syscall(0, sleep_current)
         register_syscall(2, yield_current)
         register_syscall(3, terminate_current)
@@ -1696,64 +1697,15 @@ Unlike create_process, the thread is never enqueued — no race.
             idx = thread_count
             thread_count += 1
 
-        // Allocate per-process kernel stack (2 pages = 8KB).
-        //
-        // The kernel's kstack must be a single contiguous 2-page region:
-        // kstack_top is computed as kstack_page + 2*PAGE_SIZE and SP_EL1
-        // grows down through both pages. After processes get reaped and
-        // pages return to the LIFO free list, the next two page_alloc
-        // calls usually return non-adjacent PAs — and writes from the
-        // kernel into the upper "page" then hit an unrelated allocation
-        // (often another live process's user data), corrupting both.
-        //
-        // Strategy: allocate pages up to a fixed budget; on each new
-        // page, scan the held pages for a contiguous neighbour. When
-        // found, use that pair and return the rest. Phase 1 chunk 4
-        // should replace this with a proper multi-page slab allocator.
-        val KSTACK_BUDGET = 256
-        var pages: [256]u64
-        var npages = 0
-        var kstack_page: u64 = 0
-        var kstack_page2: u64 = 0
-        var done = 0
-        while done == 0 && npages < KSTACK_BUDGET
-            val a = page_alloc_zero()
-            if a == 0
-                var fi = 0
-                while fi < npages
-                    page_free(pages[fi])
-                    fi += 1
-                arch_sti()
-                return -1
-            var matched = 0
-            var ci = 0
-            while ci < npages && matched == 0
-                if pages[ci] + u64(PAGE_SIZE) == a
-                    kstack_page = pages[ci]
-                    kstack_page2 = a
-                    pages[ci] = pages[npages - 1]
-                    npages -= 1
-                    matched = 1
-                else if a + u64(PAGE_SIZE) == pages[ci]
-                    kstack_page = a
-                    kstack_page2 = pages[ci]
-                    pages[ci] = pages[npages - 1]
-                    npages -= 1
-                    matched = 1
-                ci += 1
-            if matched == 1
-                done = 1
-            else
-                pages[npages] = a
-                npages += 1
-        var ri = 0
-        while ri < npages
-            page_free(pages[ri])
-            ri += 1
-        if done == 0
+        // Allocate per-process kernel stack (2 pages = 8KB) from the
+        // boot-time slab. See oskit/kernel/kstack.lsysl. The slab
+        // guarantees the two pages are contiguous, replacing the
+        // chunk-3 follow-up linear scan that walked up to 256 pages.
+        val kstack_page = kstack_alloc()
+        if kstack_page == u64(0)
             arch_sti()
             return -1
-        val kstack_top_val = i64(kstack_page + u64(2 * PAGE_SIZE))
+        val kstack_top_val = i64(kstack_page + u64(4 * PAGE_SIZE))
         threads[idx].kstack_top = kstack_top_val
         // Build context frame (arch-specific: x86 builds on kernel stack,
         // TRISC builds in buffer and copies to child's SSP)
@@ -1828,8 +1780,7 @@ Resume a suspended process (created with create_process_suspended).
         val rtid = processes[pid].main_tid
         if threads[rtid].pid == pid
             if threads[rtid].kstack_top != 0
-                page_free(u64(threads[rtid].kstack_top - i64(PAGE_SIZE)))
-                page_free(u64(threads[rtid].kstack_top - i64(2 * PAGE_SIZE)))
+                kstack_free(u64(threads[rtid].kstack_top - i64(4 * PAGE_SIZE)))
                 threads[rtid].kstack_top = 0
         vm_free_process_pt(processes[pid].ptbr)
         processes[pid].state = PROC_FREE

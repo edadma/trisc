@@ -1,0 +1,116 @@
+Kernel Stack Slab Allocator
+===========================
+
+Per-process kernel stacks are 16KB (four contiguous physical pages).
+Earlier 8KB / 2-page kstacks were too small once a process took a
+syscall path that itself called into a server: the SP_EL1 grow-down
+trace got close to the bottom of the lower page, and on aarch64 the
+slab made adjacent slots physically contiguous, so any overflow
+clobbered the *next* slot's saved exception frame at offsets
+0xF0/0xF8/0x108 — the precise bytes the scheduler reads to ERET.
+
+The chunk-3 follow-up worked around the fragmentation with a
+256-page linear scan that handed out non-contiguous neighbours;
+that masked overflow because writes past kstack_base just hit a
+free-list page nobody was using. The slab restores PA contiguity,
+so it surfaces the real overflow — pump the per-slot reservation
+to 16KB and the headroom is comfortable for any realistic syscall
+chain.
+
+Strategy: at boot, drain `MAX_KSTACKS` × 4 contiguous pages from
+the bump pool while it is still pristine — the bump pool returns
+sequential PAs, so each page lands at `base + i * PAGE_SIZE`.
+Track an in-use bit per slot. `kstack_alloc` returns the lower PA
+of a free slot; `kstack_free` clears the bit.
+
+Sized to match `MAX_THREADS` (32) so exhaustion is impossible
+until that ceiling lifts; both should be bumped together when
+the time comes.
+
+    module oskit.kernel
+
+    import oskit.config.{PAGE_SIZE}
+    import oskit.arch.{page_alloc_zero, arch_irq_save, arch_irq_restore, abort}
+
+Pool table — base PA of each 16KB chunk, plus a parallel in-use
+flag. Using literals (32, not `MAX_THREADS`) for the array size
+because module-level array bounds don't accept identifiers.
+
+    var kstack_bases:  [32]u64
+    var kstack_in_use: [32]bool
+    var kstack_count = 0
+
+Initialize the slab. Called from `kernel_init` after `vm_init`
+and before any thread creation. Drains 32 contiguous 4-page
+runs from the bump pool. Asserts adjacency on every page — a
+mismatch means the bump pool was already touched, which is a
+kernel bug.
+
+    kstack_init()
+        var i = 0
+        while i < 32
+            val p1 = page_alloc_zero()
+            val p2 = page_alloc_zero()
+            val p3 = page_alloc_zero()
+            val p4 = page_alloc_zero()
+            if p1 == u64(0) || p2 == u64(0) || p3 == u64(0) || p4 == u64(0)
+                abort()
+            if p2 != p1 + u64(PAGE_SIZE)
+                abort()
+            if p3 != p1 + u64(2 * PAGE_SIZE)
+                abort()
+            if p4 != p1 + u64(3 * PAGE_SIZE)
+                abort()
+            kstack_bases[i] = p1
+            kstack_in_use[i] = false
+            i += 1
+        kstack_count = 32
+
+Allocate one 16KB kstack. Returns the base PA of the lowest page
+(caller computes `kstack_top = base + 4*PAGE_SIZE`). Returns 0
+if the pool is exhausted. IRQ-disabled around the bitmap walk
+so concurrent allocs from the kernel and a slow-path syscall
+handler can't both grab the same slot.
+
+The chunk is zeroed before being handed back: the previous
+tenant left stale registers, return addresses, SP_EL0/SP_EL1
+slots, etc. on the kstack pages, and a few exception-return
+paths read saved-frame slots whose contents the new tenant
+hasn't fully written. Pre-chunk-3.5 the linear-scan allocator
+went through `page_alloc_zero`, so each page was zero on alloc;
+preserve that behaviour here so kstack reuse is observationally
+identical to fresh allocation. Zeroing happens after dropping
+the IRQ guard — the slot is already marked in-use, so the
+16KB byte loop runs with interrupts free.
+
+    kstack_alloc() -> u64
+        val prev = arch_irq_save()
+        var i = 0
+        while i < kstack_count
+            if !kstack_in_use[i]
+                kstack_in_use[i] = true
+                arch_irq_restore(prev)
+                val base = kstack_bases[i]
+                var p: *byte = *byte(base)
+                var j = 0
+                while j < 4 * PAGE_SIZE
+                    p[j] = byte(0)
+                    j += 1
+                return base
+            i += 1
+        arch_irq_restore(prev)
+        u64(0)
+
+Free a kstack by base PA. No-op if the base doesn't match any
+slot (which would indicate a bug in the caller).
+
+    kstack_free(base: u64)
+        val prev = arch_irq_save()
+        var i = 0
+        while i < kstack_count
+            if kstack_bases[i] == base
+                kstack_in_use[i] = false
+                arch_irq_restore(prev)
+                return
+            i += 1
+        arch_irq_restore(prev)
