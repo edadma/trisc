@@ -89,6 +89,20 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
 
   def loadByte(addr: Long, data: Long): Unit = mem.loadByte(addr, data)
 
+  /** Decode a 16-bit instruction word. Subclasses (e.g. Trisc16CPU) can install
+    * a different decoder to gate the ISA subset. */
+  protected def decode(inst: Int): Instruction = Decode(inst)
+
+  /** Offset added to PC by AUIPC. TRISC scales the 8-bit immediate by 256;
+    * Trisc16CPU overrides to scale by 2. */
+  def auipcOffset(imm: Int): Long = imm.toLong << 8
+
+  /** Memory read used by the LD instruction. Trisc16CPU overrides to a 16-bit read. */
+  def ldRead(addr: Long): Long = readInt(addr).toLong
+
+  /** Memory write used by the ST instruction. Trisc16CPU overrides to a 16-bit write. */
+  def stWrite(addr: Long, v: Long): Unit = writeInt(addr, v)
+
   /** Notify reservation monitor of a write (for SMP LL/SC invalidation). */
   private inline def notifyWrite(addr: Long): Unit =
     reservationMonitor match
@@ -147,15 +161,21 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
         mem.writeLong(paddr, data)
         notifyWrite(paddr)
 
+  /** Mask applied to every register write. Default is all-ones (no masking).
+    * Subclasses with narrower registers (e.g. Trisc16CPU) override this. */
+  protected def writeMask: Long = -1L
+
+  protected def newReg: Reg = new Reg
+
   val r = immutable.ArraySeq(
     new Reg0,
-    new Reg,
-    new Reg,
-    new Reg,
-    new Reg,
-    new Reg,
-    new Reg,
-    new Reg,
+    newReg,
+    newReg,
+    newReg,
+    newReg,
+    newReg,
+    newReg,
+    newReg,
   )
   var pc: Long = 0
   var psr: Int = 0
@@ -199,7 +219,7 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
         if old == expected then writeLong(addr, newValue)
         old
   var cycles: Long = 0
-  private var inException: Boolean = false
+  protected var inException: Boolean = false
 
   var limit: Int = -1
   var trace: Boolean = false
@@ -241,7 +261,7 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
     if !test(Status.Ind) && (state == State.Run || state == State.Wfi) then
       state = State.Interrupt
 
-  private def enterException(): Unit =
+  protected def enterException(): Unit =
     if inException then
       log.error(f"DoubleFault at pc=$pc%04x, original exception=$state", category = "CPU")
       if !quiet then
@@ -357,7 +377,7 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
           state = State.InstructionAccess
           return
 
-    val decoded = Decode(inst)
+    val decoded = decode(inst)
 
     if trace then println(f"$pc%04x: $inst%04x  ${decoded.disassemble(this)}")
 
@@ -384,7 +404,7 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
       val instLine =
         try
           val w = readShortUnsigned(faultingPc)
-          f" inst=${Decode(w).disassemble(this)}"
+          f" inst=${decode(w).disassemble(this)}"
         catch case _: Exception => ""
       val ptbrStr = mmu.map(m => f" ptbr=${m.ptbr}%08x").getOrElse("")
       val regsStr = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
@@ -406,7 +426,7 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
       val instLine =
         try
           val w = readShortUnsigned(faultingPc)
-          f" inst=${Decode(w).disassemble(this)}"
+          f" inst=${decode(w).disassemble(this)}"
         catch case _: Exception => ""
       val ptbrStr = mmu.map(m => f" ptbr=${m.ptbr}%08x").getOrElse("")
       val regsStr = (1 to 7).map(i => f"r$i=${r(i).read}%x").mkString(" ")
@@ -456,9 +476,9 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
 
     def readf: Double = java.lang.Double.longBitsToDouble(r)
 
-    def write(v: Long): Unit = r = v
+    def write(v: Long): Unit = r = v & writeMask
 
-    def write(v: Double): Unit = r = java.lang.Double.doubleToLongBits(v)
+    def write(v: Double): Unit = r = java.lang.Double.doubleToLongBits(v) & writeMask
 
   class Reg0 extends Reg:
     override def read: Long = 0

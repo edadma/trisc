@@ -10,6 +10,7 @@ case class RunCommand(
     trace: Boolean = false,
     gui: Boolean = false,
     smp: Int = 1,
+    target: String = "trisc",
 ) extends TriscCommand
 case class AsmCommand(
     input: String = "",
@@ -79,6 +80,18 @@ object TriscCli:
             .action((v, c) =>
               c.copy(command = c.command match
                 case rc: RunCommand => rc.copy(smp = v.max(1).min(8))
+                case other          => other
+              )
+            ),
+          opt[String]("target")
+            .text("ISA target: trisc (default) or trisc16")
+            .validate(v =>
+              if v == "trisc" || v == "trisc16" then success
+              else failure(s"unknown target '$v' (expected trisc or trisc16)")
+            )
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case rc: RunCommand => rc.copy(target = v)
                 case other          => other
               )
             ),
@@ -395,6 +408,22 @@ object TriscCli:
 
   private def executeRun(cmd: RunCommand): Unit =
     val linked = loadTof(cmd)
+
+    if cmd.target == "trisc16" then
+      if cmd.gui || cmd.smp > 1 then
+        System.err.println(s"error: --gui and --smp are not supported with --target=trisc16")
+        return
+      val memSize = cmd.memSize.min(0x10000)
+      val mem = new Memory("Memory", new RAM(0, memSize))
+      linked.load(mem)
+      val cpu = new Trisc16CPU(mem)
+      if cmd.trace then cpu.trace = true
+      cpu.limit = if cmd.limit > 0 then cmd.limit else -1
+      cpu.reset()
+      cpu.run()
+      val result = cpu.r(1).read
+      if result != 0 then System.err.println(s"exit: $result")
+      return
 
     if cmd.gui then
       guiLauncher match
