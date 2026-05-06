@@ -10,6 +10,11 @@ trait FileOps:
   def mkdirs(path: String): Unit
   def joinPath(dir: String, name: String): String
 
+  /** Resolve to an absolute filesystem path. Used by the dep resolver to
+   *  record path-dep locations in `sysl.lock` so the lock content does not
+   *  depend on the cwd from which the CLI was invoked. */
+  def absolutePath(path: String): String
+
 object FileOps:
   // Set by platform-specific entry point before CLI runs
   var instance: FileOps = null

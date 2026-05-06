@@ -73,6 +73,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   // the historical transparent expansion. `within`/`where` remain rejected for generic
   // aliases (no scalar ordering / no operations on a bare T without trait bounds).
   protected val genericTypeAliases = new mutable.LinkedHashMap[String, (List[String], TypeAST, Boolean)]
+  // Phase B — per-alias type-parameter defaults (`type Box[T = int] = ...`). Keyed
+  // by alias name; missing entries mean no defaults. Carried separately from
+  // `genericTypeAliases` so existing call sites stay terse.
+  protected val genericTypeAliasDefaults = new mutable.LinkedHashMap[String, Map[String, TypeAST]]
   // Cached SyslType for each instantiation of a `new` generic alias. Keyed by (template
   // name, type args). Mirrors `genericStructInstantiations` so repeated mentions of
   // `Parser[i32]` return the same NamedType instance (object-equality dispatch).
@@ -273,6 +277,23 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   def registerNoMangle(names: Iterable[String]): Unit =
     neverMangle ++= names
 
+  /** Pre-seed `currentModule` before `analyze()` runs. The driver uses this so
+   *  `registerImport` can mangle imported sibling-impl method names with the
+   *  same prefix the importing unit's own main pass would produce — necessary
+   *  because mangleName/shouldMangle key off `currentModule`, which `analyze()`
+   *  doesn't set until after sibling registration has already happened. */
+  def preSetModule(modPath: String): Unit =
+    currentModule = Some(modPath)
+
+  /** Sibling source ASTs that the driver wants `analyze()` to re-pre-register
+   *  after own type registration completes. This breaks cyclic-deps between
+   *  same-module files where each sibling references the other's types AND
+   *  the other's traits/impls. The first pre-register (driver-side, before
+   *  analyze) sets up everything resolvable without own types in scope; this
+   *  hook re-registers them once own pass 1 has populated genericTypeAliases /
+   *  structTypes / etc., letting previously-skipped concrete impls resolve. */
+  var siblingForwardDecls: List[ProgramAST] = Nil
+
   /** Strip module prefix from a mangled name to get the short name.
     * Uses indexOf (first `__`) not lastIndexOf, because function names
     * can contain `_` (e.g. `_run_atexit` → mangled `mod___run_atexit`).
@@ -287,6 +308,44 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   protected val instantiations = new mutable.LinkedHashMap[(String, List[SyslType]), String]
   protected val specializedDecls = mutable.ListBuffer.empty[TDecl]
   protected var typeEnv: Map[String, SyslType] = Map.empty
+  /** Active impl's associated-type bindings, set during impl-method
+   *  monomorphization (Phase A2). Each entry is `(assoc-name, resolved-type)`
+   *  taken from the impl's `assocBindings`. `resolveType` consults this map
+   *  when seeing a `ProjectionTypeAST`; an empty map means "no impl context"
+   *  and any projection is rejected with a clear diagnostic. The qualifier on
+   *  the projection (`Self::Item`, `I::Item`, …) is sugar — resolution looks
+   *  up by member name, since each impl has at most one binding per name. */
+  protected var assocBindingsEnv: Map[String, SyslType] = Map.empty
+
+  // Track which generic-template, trait, and concrete-impl entries arrived
+  // via cross-unit import (registerImport / registerGenericTemplatesFrom)
+  // versus being declared in this unit's own AST. The driver consults the
+  // `getOwn*` accessors when building this unit's per-file ModuleMeta so the
+  // sibling-mirroring path doesn't keep re-stamping imported symbols as if
+  // they originated locally — that would cause every sibling to claim
+  // ownership of the others' templates, then trigger duplicate registration
+  // when those templates round-trip back through Step 5's sibling import.
+  protected val importedTemplateNames = mutable.HashSet[String]()
+  protected val importedTraitNames = mutable.HashSet[String]()
+  // Concrete-impl key uses the full target list so multi-target impls
+  // (e.g. `impl Combine[Box, Box, Box]`) are tracked correctly. Single-target
+  // impls store a one-element list.
+  protected val importedConcreteImplKeys = mutable.HashSet[(String, List[SyslType])]()
+  // Mangled function names registered as stubs by the sibling pre-register
+  // for concrete impl methods. Tracked so the post-pass-1 re-pre-register
+  // can drop and re-add them after own struct/alias placeholders have been
+  // replaced with real fields-resolved types.
+  protected val importedConcreteImplStubFunctions = mutable.HashSet[String]()
+  // Local-key names of non-generic free-function stubs registered by the
+  // sibling pre-register. Same cleanup-and-re-register dance as concrete
+  // impl stubs so cross-sibling free-fn signatures don't latch onto
+  // placeholder struct types from the first pre-register pass.
+  protected val importedSiblingFreeFnStubKeys = mutable.HashSet[String]()
+  // Generic-impl key uses raw TypeAST patterns since the targets may carry
+  // type variables that don't resolve to a SyslType at import time.
+  protected val importedGenericImplKeys = mutable.HashSet[(String, List[String], List[TypeAST])]()
+  protected val importedExtensionKeys = mutable.HashSet[(String, String)]() // (definingModule, mangledFnName)
+  protected val importedEnumInstNames = mutable.HashSet[String]()
 
   // Generic struct support
   protected val genericStructs = new mutable.LinkedHashMap[String, StructDeclAST]
@@ -464,7 +523,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         throw AnalysisError(s"#${attr.name} requires a non-empty string literal, e.g. #operator(\"~\")", at)
 
   // Trait / impl support
-  protected case class TraitInfo(name: String, typeParams: List[String], methods: List[TraitMethodAST])
+  protected case class TraitInfo(
+      name: String,
+      typeParams: List[String],
+      methods: List[TraitMethodAST],
+      assocTypes: List[AssocTypeDeclAST] = Nil,
+  )
   protected case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
   /** A registered impl block — concrete or generic.
    *
@@ -488,6 +552,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       methodASTs: List[FunDeclAST],                   // raw impl bodies (generic impls only)
       definingModule: String,
       implDecl: Option[ImplDeclAST] = None,           // for source-defined impls; None when imported
+      /** Associated-type bindings declared on this impl (Phase A1). Carries the
+       *  raw TypeAST per binding so projection resolution (Phase A3) can resolve
+       *  them on demand using the dispatch-time substitution map. */
+      assocBindings: List[AssocTypeBindingAST] = Nil,
   )
   protected val traits = new mutable.LinkedHashMap[String, TraitInfo]
   // traitName -> list of registered impls (templates). Order is registration order.
@@ -567,7 +635,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val module = currentModule.getOrElse("")
     for decl <- decls do
       decl match
-        case ExtensionDeclAST(tparams, recv, methods, _) =>
+        case ExtensionDeclAST(tparams, recv, methods, _, _) =>
           val key = extensionTypeKey(recv.typ)
           for m <- methods do
             val mangled = s"__ext_${key}__${m.name}"
@@ -784,7 +852,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   protected def concreteImpls: Iterator[(String, SyslType, mutable.LinkedHashMap[String, String])] =
     implTemplates.iterator.flatMap { case (traitName, ts) =>
       ts.iterator.collect {
-        case t if t.typeParams.isEmpty && t.resolvedConcrete.exists(_.length == 1) =>
+        // Single-target concrete impls without associated-type bindings round-trip via
+        // TraitImplMeta. Impls *with* assoc bindings ride through the TEMPLATES section
+        // instead (since TraitImplMeta has no slot for them) — they're picked up by the
+        // driver's templates filter on `assocs.nonEmpty` and the analyzer's
+        // `getTraitDecls` / generic-template registration path.
+        case t if t.typeParams.isEmpty
+            && t.resolvedConcrete.exists(_.length == 1)
+            && t.assocBindings.isEmpty =>
           (traitName, t.resolvedConcrete.get.head, t.methods)
       }
     }
@@ -802,6 +877,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     case FuncTypeAST(ps, r, _, _) => ps.flatMap(collectNamedTypeNames).toSet ++ collectNamedTypeNames(r)
     case TupleTypeAST(elems)      => elems.flatMap(collectNamedTypeNames).toSet
     case ByNameTypeAST(i)         => collectNamedTypeNames(i)
+    case ProjectionTypeAST(_, _)  => Set.empty // qualifier is a type-param-or-Self placeholder, not a real type name
 
   /** Walk a `SyslType` collecting every named struct/enum/nominal-alias name. Used by the
    *  named-import path so that importing a function whose signature mentions a struct from
@@ -873,19 +949,32 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
    *  (non-generic, single-target) impls round-trip across units; generic impls (Stage F.5+)
    *  will need an extended IMPL line format. */
   def getTraitImplMetas: List[TraitImplMeta] =
-    concreteImpls.map { case (traitName, targetType, methodMap) =>
-      TraitImplMeta(traitName, targetType, methodMap.toMap)
-    }.toList
+    concreteImpls
+      .filterNot { case (traitName, targetType, _) =>
+        importedConcreteImplKeys.contains((traitName, List(targetType)))
+      }
+      .map { case (traitName, targetType, methodMap) =>
+        TraitImplMeta(traitName, targetType, methodMap.toMap)
+      }
+      .toList
 
-  /** Get trait declaration AST nodes for serialization in TEMPLATES section. */
+  /** Get trait declaration AST nodes for serialization in TEMPLATES section.
+   *  Excludes traits that arrived via cross-unit import — only own-AST traits
+   *  contribute to this unit's per-file ModuleMeta. */
   def getTraitDecls: List[TraitDeclAST] =
-    traits.values.map(t => TraitDeclAST(t.name, t.typeParams, t.methods)).toList
+    traits.values
+      .filterNot(t => importedTraitNames.contains(t.name))
+      .map(t => TraitDeclAST(t.name, t.typeParams, t.methods, Nil, t.assocTypes))
+      .toList
 
   /** Get generic enum instance mappings for cross-module type inference. */
   def getGenericEnumInstances: List[GenericEnumInstanceMeta] =
-    enumToTemplate.map { case (mangledName, (baseName, typeArgs)) =>
-      GenericEnumInstanceMeta(mangledName, baseName, typeArgs)
-    }.toList
+    enumToTemplate.iterator
+      .filterNot { case (mangledName, _) => importedEnumInstNames.contains(mangledName) }
+      .map { case (mangledName, (baseName, typeArgs)) =>
+        GenericEnumInstanceMeta(mangledName, baseName, typeArgs)
+      }
+      .toList
 
   /** Get extension method metadata for SMETA round-trip. Resolves each entry's
    *  receiver TypeAST → SyslType (now possible since analyze is complete).
@@ -897,9 +986,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val out = mutable.ListBuffer[ExtensionMeta]()
     for (_, buf) <- extensionsByMethod do
       for entry <- buf do
-        scala.util.Try(resolveType(entry.receiverTypeAst)).foreach { rt =>
-          out += ExtensionMeta(entry.methodName, entry.definingModule, rt, entry.mangledFnName)
-        }
+        if !importedExtensionKeys.contains((entry.definingModule, entry.mangledFnName)) then
+          scala.util.Try(resolveType(entry.receiverTypeAst)).foreach { rt =>
+            out += ExtensionMeta(entry.methodName, entry.definingModule, rt, entry.mangledFnName)
+          }
     out.toList
 
   /** Generic-receiver extension synth FunDeclASTs (Phase 2d). The driver carries
@@ -908,7 +998,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
    *  side-table EXT entry is also needed (registered separately on import via
    *  `extensionEntriesFromTemplates`) so dispatch can find them by method name. */
   def getExtensionTemplates: List[FunDeclAST] =
-    genericTemplates.values.filter(_.name.startsWith("__ext_")).toList
+    genericTemplates.values
+      .filter(fd => fd.name.startsWith("__ext_") && !importedTemplateNames.contains(fd.name))
+      .toList
 
   /** Synth ImplDeclASTs for generic-receiver operator extensions (Phase 2d).
    *  Carried through `meta.genericTemplates` alongside extension synth funcs +
@@ -976,12 +1068,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           val sn = shortName(sym.name)
           if extFnShortNames.contains(sn) && !functions.contains(sn) then
             sym.typ match
-              case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects) =>
+              case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects, isParameterless) =>
                 val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
                 val (reads, writes) = effects match
                   case e if e.isPure || e.isUnknown => (None, None)
                   case e => (e.reads, e.writes)
-                functions(sn) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes)
+                functions(sn) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes, isParameterless = isParameterless)
                 if reads.isDefined || writes.isDefined then
                   resolvedEffectsCache(sym.name) = (reads.getOrElse(Set.empty), writes.getOrElse(Set.empty))
                 externalSymbols += sn
@@ -999,14 +1091,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         //     impl-decl arity check passes; do trait first.
         for template <- meta.genericTemplates do
           template match
-            case TraitDeclAST(name, tparams, methods, _) if name.startsWith("__ExtOp_") =>
+            case TraitDeclAST(name, tparams, methods, _, _, _) if name.startsWith("__ExtOp_") =>
               if !traits.contains(name) then
                 traits(name) = TraitInfo(name, tparams, methods)
+                importedTraitNames += name
                 registerTraitOperatorEntries(name, methods, template)
             case _ => ()
         for template <- meta.genericTemplates do
           template match
-            case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _)
+            case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _)
                 if traitName.startsWith("__ExtOp_") && implTypeParams.nonEmpty =>
               if !implTemplates.getOrElse(traitName, Nil).exists(t =>
                   t.typeParams == implTypeParams && t.targetPatterns == targetTypes) then
@@ -1032,6 +1125,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           val bucket = extensionsByMethod.getOrElseUpdate(ext.methodName, mutable.ListBuffer.empty)
           if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
             bucket += entry
+          importedExtensionKeys += ((entry.definingModule, entry.mangledFnName))
         // 4. Reconstruct generic-receiver extension entries from synth templates.
         for template <- extOnlyTemplates do
           template match
@@ -1049,6 +1143,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 val bucket = extensionsByMethod.getOrElseUpdate(methodName, mutable.ListBuffer.empty)
                 if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
                   bucket += entry
+                importedExtensionKeys += ((entry.definingModule, entry.mangledFnName))
             case _ => ()
         if modulePath.nonEmpty then
           visibleExtensionModules += importedDefMod
@@ -1094,7 +1189,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val typesReachableFromImportedFuncs: Set[String] =
           directMatch.iterator.collect {
             case sym if sym.typ.isInstanceOf[SymbolMeta.Kind.Func] =>
-              val SymbolMeta.Kind.Func(params, ret, _, _, _, _) = sym.typ: @unchecked
+              val SymbolMeta.Kind.Func(params, ret, _, _, _, _, _) = sym.typ: @unchecked
               (params :+ ret).iterator.flatMap(collectStructAndEnumNames).toSet
           }.flatten.toSet.intersect(moduleStructAndEnumNames)
         val importedTypeNames = explicitlyImportedTypeNames ++ typesReachableFromImportedFuncs
@@ -1121,8 +1216,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       val sn = shortName(sym.name)
       val localKey = shortToAlias.getOrElse(sn, sn) // use alias if provided
       sym.typ match
-        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects) =>
+        case SymbolMeta.Kind.Func(params, returnType, isDef, isPure, modes, effects, isParameterless) =>
           val paramPairs = params.zipWithIndex.map((t, i) => (s"_p$i", t))
+          // Even if the function itself is already known, walk its types to
+          // discover any nested generic-struct instances (e.g. an imported
+          // `eoi -> Box[unit]` surfaces `Box_unit`, which the importing unit
+          // needs to recognize as `Box[unit]` for downstream unification).
+          for p <- params do linkNestedGenericStructInstances(p)
+          linkNestedGenericStructInstances(returnType)
           if functions.contains(localKey) then
             // Allow same-module sibling re-registration (same mangled name) and externs
             val existing = functions(localKey)
@@ -1136,13 +1237,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               case e if e.isPure => (None, None)
               case e if e.isUnknown => (None, None)
               case e => (e.reads, e.writes)
-            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes)
+            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes, isParameterless = isParameterless)
             // Pre-populate the resolved-effects cache so cross-module reads use the same
             // already-mangled names without trying to look them up in this unit's globalScope.
             if reads.isDefined || writes.isDefined then
               resolvedEffectsCache(sym.name) = (reads.getOrElse(Set.empty), writes.getOrElse(Set.empty))
             externalSymbols += localKey
         case SymbolMeta.Kind.Data(dataType, isMutable) =>
+          linkNestedGenericStructInstances(dataType)
           if globalScope.contains(localKey) then
             val existing = globalScope(localKey)
             if !sym.isExtern && existing.name != sym.name then
@@ -1151,6 +1253,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             globalScope(localKey) = SymInfo(sym.name, dataType, mutable = isMutable)
             externalSymbols += localKey
         case SymbolMeta.Kind.Const(constType, value) =>
+          linkNestedGenericStructInstances(constType)
           // Cross-file `const`: register in globalScope (so VarRef name resolution
           // succeeds) AND in compileTimeConstants under both the local-key short name
           // and the fully-mangled name so the analyzer's constant-folding paths
@@ -1166,6 +1269,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           compileTimeConstants(sym.name) = value
         case SymbolMeta.Kind.Struct(st) =>
           structTypes(shortName(sym.name)) = st
+          linkImportedGenericStructToTemplate(st)
         case SymbolMeta.Kind.Interface(it) =>
           interfaceTypes(shortName(sym.name)) = it
         case SymbolMeta.Kind.Enum(et) =>
@@ -1202,6 +1306,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 methodASTs = Nil,
                 definingModule = "",   // imported impls — orphan check skipped on import
               )
+            importedConcreteImplKeys += ((traitName, List(targetType)))
 
     // Register generic templates from imported module (needed for cross-module generic instantiation).
     // Selective imports (`import std.option.{Option, Some, None}`) must filter generic templates
@@ -1215,17 +1320,35 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     if meta.genericTemplates.nonEmpty then
       registerGenericTemplatesFrom(ProgramAST(meta.genericTemplates), genericTemplateFilter)
 
+    // Generic struct templates may have just been registered above; the symbol
+    // loop walked imported function/data/const types before genericStructs was
+    // populated, so any nested generic-struct instances (e.g. `Box_unit` inside
+    // `eoi -> Box[unit]`) couldn't be linked then. Re-walk the publicSymbols'
+    // types now that templates are in scope so structToTemplate has the
+    // mangled-instance → template mapping for downstream unifyTypes.
+    for sym <- meta.publicSymbols do
+      sym.typ match
+        case SymbolMeta.Kind.Func(params, returnType, _, _, _, _, _) =>
+          for p <- params do linkNestedGenericStructInstances(p)
+          linkNestedGenericStructInstances(returnType)
+        case SymbolMeta.Kind.Data(t, _) => linkNestedGenericStructInstances(t)
+        case SymbolMeta.Kind.Const(t, _) => linkNestedGenericStructInstances(t)
+        case SymbolMeta.Kind.Struct(st) => linkImportedGenericStructToTemplate(st)
+        case _ => ()
+
     // Register generic enum instance mappings for cross-module type inference
     for inst <- meta.genericEnumInstances do
       if !enumToTemplate.contains(inst.mangledName) then
         enumToTemplate(inst.mangledName) = (inst.baseName, inst.typeArgs)
+      importedEnumInstNames += inst.mangledName
 
     // Register trait declarations from imported templates
     for template <- meta.genericTemplates do
       template match
-        case TraitDeclAST(name, tparams, methods, _) =>
+        case TraitDeclAST(name, tparams, methods, _, assocs, _) =>
           if !traits.contains(name) then
-            traits(name) = TraitInfo(name, tparams, methods)
+            traits(name) = TraitInfo(name, tparams, methods, assocs)
+            importedTraitNames += name
             registerTraitOperatorEntries(name, methods, template)
         case _ =>
 
@@ -1243,25 +1366,68 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             methodASTs = Nil,
             definingModule = "",
           )
+        importedConcreteImplKeys += ((impl.traitName, List(impl.targetType)))
 
-    // Register generic ImplDeclASTs from imported templates (Phase 2d — currently
-    // only synth `__ExtOp_*` impls for generic-receiver operator extensions; user-
-    // written generic impls don't yet propagate through SMETA).
+    // Register ImplDeclASTs from imported templates. The driver puts every
+    // user-written generic impl + every multi-target concrete impl in the
+    // genericTemplates list — single-target concrete impls go through the
+    // meta.traitImpls path above, so they're not duplicated here.
     for template <- meta.genericTemplates do
       template match
-        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _) if implTypeParams.nonEmpty =>
-          if !implTemplates.getOrElse(traitName, Nil).exists(t =>
-              t.typeParams == implTypeParams && t.targetPatterns == targetTypes) then
-            implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
-              typeParams = implTypeParams,
-              targetPatterns = targetTypes,
-              resolvedConcrete = None,
-              methods = mutable.LinkedHashMap.empty,
-              methodInfos = Nil,
-              methodASTs = methods,
-              definingModule = "",
-              implDecl = Some(impl),
-            )
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _) =>
+          val alreadyHas = implTemplates.getOrElse(traitName, Nil).exists(t =>
+            t.typeParams == implTypeParams && t.targetPatterns == targetTypes)
+          if !alreadyHas then
+            if implTypeParams.nonEmpty then
+              // Generic impl: methods are analyzed lazily at instantiation time.
+              implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+                typeParams = implTypeParams,
+                targetPatterns = targetTypes,
+                resolvedConcrete = None,
+                methods = mutable.LinkedHashMap.empty,
+                methodInfos = Nil,
+                methodASTs = methods,
+                definingModule = "",
+                implDecl = Some(impl),
+              )
+              importedGenericImplKeys += ((traitName, implTypeParams, targetTypes))
+            else
+              // Multi-target concrete impl. Resolve targets so the dispatch
+              // path (`enumerateImplCandidates` concrete branch) can compare
+              // against them, and mangle method names with the *owning*
+              // module's prefix (not the importing analyzer's `currentModule`)
+              // so dispatch lands on the same name the impl's defining unit
+              // emitted. For cross-module imports, modulePath identifies the
+              // owning module; for same-module siblings (modulePath empty)
+              // the driver pre-seeds `currentModule` to the shared module.
+              // If targets can't resolve yet (rare — types are registered
+              // earlier in registerImport), skip and rely on a later import
+              // iteration to pick it up.
+              scala.util.Try(targetTypes.map(resolveType)).toOption.foreach { resolvedTargets =>
+                val owningModuleMangled =
+                  if modulePath.nonEmpty then modulePath.replace('/', '_').replace('.', '_')
+                  else currentModule.getOrElse("")
+                val typeMangled = resolvedTargets.map(typeToMangled).mkString("_")
+                val methodMap = mutable.LinkedHashMap.empty[String, String]
+                for m <- methods do
+                  val rawMangled = s"${traitName}_${m.name}_${typeMangled}"
+                  val mangled =
+                    if owningModuleMangled.nonEmpty && !neverMangle.contains(rawMangled) then
+                      s"${owningModuleMangled}__${rawMangled}"
+                    else rawMangled
+                  methodMap(m.name) = mangled
+                implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+                  typeParams = Nil,
+                  targetPatterns = targetTypes,
+                  resolvedConcrete = Some(resolvedTargets),
+                  methods = methodMap,
+                  methodInfos = Nil,
+                  methodASTs = Nil,
+                  definingModule = "",
+                  implDecl = Some(impl),
+                )
+                importedConcreteImplKeys += ((traitName, resolvedTargets))
+              }
         case _ => ()
 
     // Register imported extensions: every extension flows into the side table
@@ -1285,6 +1451,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       // other don't double-register the same extension.
       if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
         bucket += entry
+      importedExtensionKeys += ((entry.definingModule, entry.mangledFnName))
     // Phase 2d: reconstruct ExtensionEntry's for generic synth templates that
     // travelled through `meta.genericTemplates`. The synth name encodes the
     // method (`__ext_<typeKey>__<methodName>`) and the first parameter's
@@ -1307,6 +1474,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             val bucket = extensionsByMethod.getOrElseUpdate(methodName, mutable.ListBuffer.empty)
             if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
               bucket += entry
+            importedExtensionKeys += ((entry.definingModule, entry.mangledFnName))
         case _ => ()
     if modulePath.nonEmpty then
       visibleExtensionModules += importedDefiningModule
@@ -1348,6 +1516,64 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           enumToTemplate(et.name) = (baseName, List(t))
         }
 
+  /** Cross-unit mirror of the local instantiation cache: when an imported
+   *  symbol's type names a generic-struct *instance* (e.g. `Box_unit`),
+   *  populate `structToTemplate` so subsequent `unifyTypes(Box[A], Box_unit)`
+   *  in this unit can recover the type-arg binding. Without this, sibling /
+   *  cross-module references to a value of generic-struct-instance type don't
+   *  drive type inference at the use site. Mirrors the enum equivalent above.
+   *  Single-target template only; multi-arg templates would need a richer
+   *  inverse mangler. */
+  protected def linkImportedGenericStructToTemplate(st: SyslType.StructType): Unit =
+    if genericStructs.isEmpty then return
+    if structToTemplate.contains(st.name) then return
+    for (baseName, decl) <- genericStructs if decl.typeParams.length == 1 do
+      val prefix = baseName + "_"
+      if st.name.startsWith(prefix) then
+        val suffix = st.name.drop(prefix.length)
+        parseMangledMonotype(suffix).foreach { t =>
+          structToTemplate(st.name) = (baseName, List(t))
+        }
+
+  /** Cross-unit mirror for generic *type aliases*: when an imported value's
+   *  type is a nominal alias instance (e.g. `Box_unit` where `type Box[A] = new A`),
+   *  populate `genericAliasToTemplate` so subsequent `unifyTypes(Box[A], Box_unit)`
+   *  can recover the type-arg binding. Mirrors the struct equivalent, but for
+   *  the `type X[A] = new ...` family. Single-target template only. */
+  protected def linkImportedGenericAliasToTemplate(nt: SyslType.NamedType): Unit =
+    if genericTypeAliases.isEmpty then return
+    if genericAliasToTemplate.contains(nt.name) then return
+    for (baseName, (tps, _, _)) <- genericTypeAliases if tps.length == 1 do
+      val prefix = baseName + "_"
+      if nt.name.startsWith(prefix) then
+        val suffix = nt.name.drop(prefix.length)
+        parseMangledMonotype(suffix).foreach { t =>
+          genericAliasToTemplate(nt.name) = (baseName, List(t))
+        }
+
+  /** Walk a SyslType and link any nested generic-struct or generic-alias
+   *  instance to its template. Used when registering imported function
+   *  signatures whose param/return types may surface instance types
+   *  (e.g. `Box_unit`) that aren't themselves imported as standalone symbols. */
+  protected def linkNestedGenericStructInstances(t: SyslType): Unit = t match
+    case st: SyslType.StructType =>
+      linkImportedGenericStructToTemplate(st)
+      for (_, ft) <- st.fields do linkNestedGenericStructInstances(ft)
+    case nt @ SyslType.NamedType(_, base, true, _, _) =>
+      linkImportedGenericAliasToTemplate(nt)
+      linkNestedGenericStructInstances(base)
+    case SyslType.NamedType(_, base, _, _, _) => linkNestedGenericStructInstances(base)
+    case SyslType.PtrType(p) => linkNestedGenericStructInstances(p)
+    case SyslType.RefType(p) => linkNestedGenericStructInstances(p)
+    case SyslType.ArrayType(e, _) => linkNestedGenericStructInstances(e)
+    case SyslType.SliceType(e) => linkNestedGenericStructInstances(e)
+    case SyslType.FuncType(ps, r, _, _) =>
+      for p <- ps do linkNestedGenericStructInstances(p)
+      linkNestedGenericStructInstances(r)
+    case SyslType.EnumType(_, variants) =>
+      for (_, fs) <- variants; (_, ft) <- fs do linkNestedGenericStructInstances(ft)
+    case _ => ()
+
   /** Generic templates are omitted from `ModuleMeta` / typed `TProgram`; same-package siblings need the raw AST templates to resolve calls like `alt(...)`. */
   /** Register generic templates (functions, structs, data enums) for the current
    *  unit or for a cross-module import. When `filter` is `None` (wildcard / own
@@ -1368,15 +1594,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     def funcSelected(name: String): Boolean = filter.forall(_.contains(name))
     for decl <- program.decls do
       decl match
-        case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _, _) if tps.nonEmpty =>
+        case fd @ FunDeclAST(name, _, _, _, _, tps, _, _, _, _, _) if tps.nonEmpty =>
           if funcSelected(name) && !genericTemplates.contains(name) && !functions.contains(name) then
             genericTemplates(name) = fd
-        case sd @ StructDeclAST(name, _, tps, _, _) if tps.nonEmpty =>
+            importedTemplateNames += name
+        case sd @ StructDeclAST(name, _, tps, _, _, _, _) if tps.nonEmpty =>
           if !genericStructs.contains(name) then
             genericStructs(name) = sd
-        case de @ DataEnumDeclAST(name, variants, tps, _) if tps.nonEmpty =>
+            importedTemplateNames += name
+        case de @ DataEnumDeclAST(name, variants, tps, _, _) if tps.nonEmpty =>
           if !genericEnums.contains(name) then
             genericEnums(name) = de
+            importedTemplateNames += name
             for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
               genericVariantToEnum.get(vname) match
                 case Some((n, i)) =>
@@ -1387,6 +1616,158 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                   // template wins so analyze(generic enum) does not see variantToEnum + empty genericVariantToEnum.
                   if variantToEnum.contains(vname) then variantToEnum.remove(vname)
                   genericVariantToEnum(vname) = (name, idx)
+        case TypeAliasDeclAST(name, target, tps, _, isNew, _, _, defs) if tps.nonEmpty =>
+          if !genericTypeAliases.contains(name) && !typeAliases.contains(name) then
+            genericTypeAliases(name) = (tps, target, isNew)
+            if defs.nonEmpty then genericTypeAliasDefaults(name) = defs
+            importedTemplateNames += name
+        case _ => ()
+
+  /** Sibling forward-decl pass: registers structs/enums/aliases/traits/impls
+   *  from a same-module sibling file's source AST. Distinct from
+   *  registerGenericTemplatesFrom — that one is called from registerImport's
+   *  cross-module path and must NOT mangle with the importing module's
+   *  prefix. This method is only safe to call when the analyzer's
+   *  currentModule equals the sibling's owning module (i.e. they're in the
+   *  same module). The driver pre-seeds currentModule and calls this on
+   *  every sibling AST during Step 4b; the analyzer re-calls it after own
+   *  pass 1 so sibling concrete impls referencing own types can resolve.
+   *  Idempotent — every clause guards on existence. */
+  def registerSiblingForwardDeclsFrom(program: ProgramAST): Unit =
+    // Pre-pass: register generic templates first so cross-sibling generic
+    // types are visible to the type-checks in subsequent clauses.
+    registerGenericTemplatesFrom(program)
+    for decl <- program.decls do
+      decl match
+        case td @ TraitDeclAST(name, tparams, methods, _, assocs, _) =>
+          if !traits.contains(name) then
+            traits(name) = TraitInfo(name, tparams, methods, assocs)
+            importedTraitNames += name
+            registerTraitOperatorEntries(name, methods, td)
+        case StructDeclAST(name, fields, typeParams, _, _, _, _) if typeParams.isEmpty =>
+          // Best-effort: register the struct with resolved fields so cross-
+          // sibling field accesses (e.g. atoms.lsysl reading `inp.source`
+          // when Input is in parsyl.lsysl) work during body analysis.
+          // Falls back to a Nil-fields placeholder if any field type can't
+          // resolve yet — the post-pass-1 hook re-runs and may complete it.
+          val existing = structTypes.get(name)
+          val needsFill = existing.forall(_.fields.isEmpty)
+          if needsFill then
+            val resolvedFields = scala.util.Try(fields.map { case (fn, ft, _) =>
+              (fn, resolveType(ft))
+            }).getOrElse(Nil)
+            structTypes(name) = SyslType.StructType(name, resolvedFields)
+        case DataEnumDeclAST(name, variants, typeParams, _, _) if typeParams.isEmpty =>
+          // Best-effort: resolve variant fields too. Same fallback as struct.
+          val existing = dataEnumTypes.get(name)
+          val needsFill = existing.forall(_.variants.forall(_._2.isEmpty))
+          if needsFill then
+            val resolvedVariants = variants.map { case EnumVariantAST(vname, vfields) =>
+              val resolved = scala.util.Try(vfields.map { case (fn, ft) =>
+                (fn, resolveType(ft))
+              }).getOrElse(Nil)
+              (vname, resolved)
+            }
+            dataEnumTypes(name) = SyslType.EnumType(name, resolvedVariants)
+            for (EnumVariantAST(vname, _), idx) <- variants.zipWithIndex do
+              if !variantToEnum.contains(vname) && !genericVariantToEnum.contains(vname) then
+                variantToEnum(vname) = (dataEnumTypes(name), idx)
+        case TypeAliasDeclAST(name, target, typeParams, _, isNew, range, predicate, _) if typeParams.isEmpty =>
+          if !typeAliases.contains(name) && !genericTypeAliases.contains(name) then
+            typeAliases(name) = (target, isNew, range, predicate)
+        case fd @ FunDeclAST(name, params, returnType, _, _, tps, _, attrs, isDef, isParameterless, _)
+            if tps.isEmpty && !name.startsWith("__") =>
+          // Non-generic free functions (including struct methods, parsed as
+          // `Input_at_end` etc.) — pre-register a stub FunInfo so cross-
+          // sibling references like `inp.at_end()` (which looks up
+          // `functions(Input_at_end)`) and direct calls (like `literal(s)`
+          // from operators.lsysl into atoms.lsysl) resolve. Param/return
+          // types may still be placeholder-typed at first pre-register; the
+          // post-pass-1 hook re-registers with real types after own pass 1
+          // populates struct fields. Skip if the name conflicts with an
+          // already-known function/template, or if signature resolution
+          // fails (sibling types not yet registered — retry next iteration).
+          if !functions.contains(name) && !genericTemplates.contains(name) then
+            scala.util.Try {
+              val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+              val retType = returnType.map(resolveType).getOrElse(UnitType)
+              val mangled = if shouldMangle(name) then mangleName(name) else name
+              val isPure = attrs.exists(_.name == "pure")
+              functions(name) = FunInfo(
+                mangled, paramTypes, retType, isDef, isPure,
+                isParameterless = isParameterless,
+              )
+              externalSymbols += name
+              importedSiblingFreeFnStubKeys += name
+            }
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _) =>
+          val alreadyHas = implTemplates.getOrElse(traitName, Nil).exists(t =>
+            t.typeParams == implTypeParams && t.targetPatterns == targetTypes)
+          if !alreadyHas then
+            if implTypeParams.nonEmpty then
+              implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+                typeParams = implTypeParams,
+                targetPatterns = targetTypes,
+                resolvedConcrete = None,
+                methods = mutable.LinkedHashMap.empty,
+                methodInfos = Nil,
+                methodASTs = methods,
+                definingModule = "",
+                implDecl = Some(impl),
+              )
+              importedGenericImplKeys += ((traitName, implTypeParams, targetTypes))
+            else
+              // Concrete: best-effort resolve. Targets that don't resolve yet
+              // (sibling hasn't pre-collected its type decls) are skipped; a
+              // later call retries with more state. Build methods map by
+              // mangling so enumerateImplCandidates can look up paramTypes
+              // via `functions(mangled)` — empty methods map breaks dispatch.
+              scala.util.Try(targetTypes.map(resolveType)).toOption.foreach { resolvedTargets =>
+                val owningModuleMangled = currentModule.getOrElse("")
+                val typeMangled = resolvedTargets.map(typeToMangled).mkString("_")
+                val methodMap = mutable.LinkedHashMap.empty[String, String]
+                // Also register a stub FunInfo per impl method using the trait
+                // method's signature substituted with the impl's targets — so
+                // enumerateImplCandidates' concrete branch can fetch paramTypes
+                // from `functions(mangled)` and the dispatch comparison works.
+                // The function body is owned by the sibling's compilation unit;
+                // here we only need the type shape for dispatch.
+                val trait_ = traits.get(traitName)
+                for m <- methods do
+                  val rawMangled = s"${traitName}_${m.name}_${typeMangled}"
+                  val mangled =
+                    if owningModuleMangled.nonEmpty && !neverMangle.contains(rawMangled) then
+                      s"${owningModuleMangled}__${rawMangled}"
+                    else rawMangled
+                  methodMap(m.name) = mangled
+                  if !functions.contains(mangled) then
+                    trait_.foreach { ti =>
+                      ti.methods.find(_.name == m.name).foreach { tm =>
+                        scala.util.Try {
+                          val savedEnv = typeEnv
+                          typeEnv = typeEnv ++ ti.typeParams.zip(resolvedTargets).toMap
+                          try
+                            val paramTypes = tm.params.map(p => (p.name, resolveType(p.typ)))
+                            val retType = resolveType(tm.returnType)
+                            functions(mangled) = FunInfo(mangled, paramTypes, retType)
+                            externalSymbols += mangled
+                            importedConcreteImplStubFunctions += mangled
+                          finally typeEnv = savedEnv
+                        }
+                      }
+                    }
+                implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += ImplTemplate(
+                  typeParams = Nil,
+                  targetPatterns = targetTypes,
+                  resolvedConcrete = Some(resolvedTargets),
+                  methods = methodMap,
+                  methodInfos = Nil,
+                  methodASTs = Nil,
+                  definingModule = "",
+                  implDecl = Some(impl),
+                )
+                importedConcreteImplKeys += ((traitName, resolvedTargets))
+              }
         case _ => ()
 
   def analyze(programIn: ProgramAST): TProgram =
@@ -1406,23 +1787,37 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     currentModule.foreach(visibleExtensionModules.add)
     val (loweredDecls, extEntries) = lowerExtensions(programIn.decls)
     for entry <- extEntries do
-      extensionsByMethod.getOrElseUpdate(entry.methodName, mutable.ListBuffer.empty) += entry
+      val bucket = extensionsByMethod.getOrElseUpdate(entry.methodName, mutable.ListBuffer.empty)
+      // Dedup against entries already mirrored from same-module siblings
+      // (driver passes meta.extensions through to siblings now). Without this,
+      // a sibling-file extension would already be in the bucket and the local
+      // lowering would re-add the same (definingModule, mangledFnName) pair,
+      // making tryExtensionDispatch report it as ambiguous.
+      if !bucket.exists(e => e.definingModule == entry.definingModule && e.mangledFnName == entry.mangledFnName) then
+        bucket += entry
     val program = ProgramAST(loweredDecls)
 
     // Pass 0: forward-declare all type names so recursive references resolve.
     // Struct and enum names are registered as placeholder types; fields are
     // resolved in the next pass once all names are visible.
+    //
+    // Same-file duplicate struct/enum declarations are still rejected
+    // (`pass0*` set tracks own-file decls). Cross-sibling pre-registration
+    // may have already placed a placeholder in `structTypes`/`dataEnumTypes`;
+    // that's allowed — the own file's declaration wins and pass 0.5 fills
+    // the real fields. Without this tolerance, two-file modules where each
+    // sibling pre-registers the other's types throw spurious duplicates.
     val pass0Structs = mutable.HashSet[String]()
     val pass0Enums = mutable.HashSet[String]()
     for decl <- program.decls do
       decl match
-        case StructDeclAST(name, _, typeParams, _, _) if typeParams.isEmpty =>
-          if pass0Structs.contains(name) || structTypes.contains(name) then
+        case StructDeclAST(name, _, typeParams, _, _, _, _) if typeParams.isEmpty =>
+          if pass0Structs.contains(name) then
             throw AnalysisError(s"duplicate struct: '$name'", decl)
           pass0Structs += name
           structTypes(name) = SyslType.StructType(name, Nil) // placeholder — fields filled below
-        case DataEnumDeclAST(name, _, typeParams, _) if typeParams.isEmpty =>
-          if pass0Enums.contains(name) || dataEnumTypes.contains(name) then
+        case DataEnumDeclAST(name, _, typeParams, _, _) if typeParams.isEmpty =>
+          if pass0Enums.contains(name) then
             throw AnalysisError(s"duplicate enum: '$name'", decl)
           pass0Enums += name
           dataEnumTypes(name) = SyslType.EnumType(name, Nil) // placeholder — variants filled below
@@ -1441,12 +1836,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     if curMod.nonEmpty then
       for decl <- program.decls do
         decl match
-          case StructDeclAST(name, _, _, _, _)        => typeDefiningModule(name) = curMod
-          case DataEnumDeclAST(name, _, _, _)         => typeDefiningModule(name) = curMod
+          case StructDeclAST(name, _, _, _, _, _, _)        => typeDefiningModule(name) = curMod
+          case DataEnumDeclAST(name, _, _, _, _)         => typeDefiningModule(name) = curMod
           case EnumDeclAST(name, _, _)                => typeDefiningModule(name) = curMod
           case InterfaceDeclAST(name, _, _, _)        => typeDefiningModule(name) = curMod
-          case TypeAliasDeclAST(name, _, _, _, _, _, _) => typeDefiningModule(name) = curMod
-          case TraitDeclAST(name, _, _, _)            => traitDefiningModule(name) = curMod
+          case TypeAliasDeclAST(name, _, _, _, _, _, _, _) => typeDefiningModule(name) = curMod
+          case TraitDeclAST(name, _, _, _, _, _)         => traitDefiningModule(name) = curMod
           case _ => ()
 
     // Pass 0.5: resolve struct and data-enum FIELDS before any function signature.
@@ -1471,13 +1866,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     def resolveStructsAndEnums(): Unit =
       for decl <- program.decls do
         decl match
-          case StructDeclAST(name, fields, typeParams, _, invariants) if typeParams.isEmpty =>
+          case StructDeclAST(name, fields, typeParams, _, invariants, _, _) if typeParams.isEmpty =>
             if !genericStructs.contains(name) then
               val resolvedFields = fields.map((n, t, _) => (n, resolveType(t)))
               val volSet = fields.zipWithIndex.collect { case ((_, _, true), i) => i }.toSet
               structTypes(name) = SyslType.StructType(name, resolvedFields, volSet)
               if invariants.nonEmpty then structInvariants(name) = invariants
-          case DataEnumDeclAST(name, variants, typeParams, _) if typeParams.isEmpty =>
+          case DataEnumDeclAST(name, variants, typeParams, _, _) if typeParams.isEmpty =>
             val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
               val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
               (vname, resolvedFields)
@@ -1508,7 +1903,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             globalScope(name) = SymInfo(name, resolved, mutable = false)
             externalSymbols += name
           // else: already registered from same-module sibling or import — skip
-        case sd @ StructDeclAST(name, fields, typeParams, _, invariants) =>
+        case sd @ StructDeclAST(name, fields, typeParams, _, invariants, _, _) =>
           if typeParams.nonEmpty then
             // Generic struct: store as template, don't resolve fields yet
             if genericStructs.contains(name) then
@@ -1519,7 +1914,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             // Fields already resolved by pass 0.5 (resolveStructsAndEnums).
             // Do not re-assign structTypes here — that would invalidate references captured
             // by function signatures processed later in this same source-order loop.
-        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _, isDef, _) =>
+        case fd @ FunDeclAST(name, params, returnType, _, _, typeParams, _, _, isDef, _, _) =>
           // Duplicate-parameter-name check.
           val seenParams = mutable.HashSet[String]()
           for p <- params do
@@ -1654,7 +2049,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             if variantToEnum.contains(vname) || genericVariantToEnum.contains(vname) then
               throw AnalysisError(s"duplicate variant name: '$vname'")
             variantToEnum(vname) = (et, idx)
-        case de @ DataEnumDeclAST(name, variants, typeParams, _) =>
+        case de @ DataEnumDeclAST(name, variants, typeParams, _, _) =>
           if typeParams.nonEmpty then
             // Generic enum: store template, don't resolve fields
             if genericEnums.contains(name) || dataEnumTypes.contains(name) || enumTypes.contains(name) then
@@ -1674,7 +2069,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               throw AnalysisError(s"duplicate enum: '$name'", decl)
             // Variants already resolved by pass 0.5 (resolveStructsAndEnums).
             // Do not re-assign dataEnumTypes here — same reason as StructDeclAST above.
-        case TypeAliasDeclAST(name, target, tparams, _, isNew, range, predicate) =>
+        case TypeAliasDeclAST(name, target, tparams, _, isNew, range, predicate, defaults) =>
           if typeAliases.contains(name) || genericTypeAliases.contains(name) then
             throw AnalysisError(s"duplicate type alias: '$name'", decl)
           if tparams.nonEmpty then
@@ -1685,18 +2080,49 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             if range.nonEmpty || predicate.nonEmpty then
               throw AnalysisError(s"generic type aliases cannot use 'within' or 'where': '$name'", decl)
             genericTypeAliases(name) = (tparams, target, isNew)
+            if defaults.nonEmpty then genericTypeAliasDefaults(name) = defaults
           else
             typeAliases(name) = (target, isNew, range, predicate)
-        case TraitDeclAST(name, tparams, methods, _) =>
-          if traits.contains(name) then throw AnalysisError(s"duplicate trait: '$name'", decl)
-          // Check no duplicate method names within the trait
-          val methodNames = methods.map(_.name)
-          if methodNames.distinct.length != methodNames.length then
-            throw AnalysisError(s"duplicate method names in trait '$name'")
-          if tparams.distinct.length != tparams.length then
-            throw AnalysisError(s"duplicate type parameter names in trait '$name'")
-          traits(name) = TraitInfo(name, tparams, methods)
-          registerTraitOperatorEntries(name, methods, decl)
+        case TraitDeclAST(name, tparams, methods, _, assocs, _) =>
+          // Tolerate sibling-pre-registered traits (importedTraitNames) — those
+          // came from this same trait decl via cross-sibling forward-decl pass
+          // and are structurally identical. Without this, two-file modules
+          // where each sibling pre-registers the other's traits throw a
+          // spurious duplicate when the defining file's main pass reaches the
+          // decl. A real same-file duplicate (`importedTraitNames` doesn't
+          // contain it) is still rejected.
+          if traits.contains(name) && !importedTraitNames.contains(name) then
+            throw AnalysisError(s"duplicate trait: '$name'", decl)
+          if !traits.contains(name) then
+            // Check no duplicate method names within the trait
+            val methodNames = methods.map(_.name)
+            if methodNames.distinct.length != methodNames.length then
+              throw AnalysisError(s"duplicate method names in trait '$name'")
+            if tparams.distinct.length != tparams.length then
+              throw AnalysisError(s"duplicate type parameter names in trait '$name'")
+            // Validate associated-type declarations: unique names, no clash with
+            // type parameters, and no clash with the reserved `T::Attr` names used
+            // for enum / within-int introspection (First, Last, Range, Image,
+            // Value, Valid, Pos, Val, Succ, Pred). Until Phase A3 wires up
+            // projection resolution, bounds are accepted but not enforced.
+            val assocNames = assocs.map(_.name)
+            if assocNames.distinct.length != assocNames.length then
+              throw AnalysisError(s"duplicate associated-type names in trait '$name'")
+            for a <- assocs do
+              if tparams.contains(a.name) then
+                throw AnalysisError(s"associated type '${a.name}' shadows trait type parameter in '$name'", a)
+              if methodNames.contains(a.name) then
+                throw AnalysisError(s"associated type '${a.name}' shadows method name in trait '$name'", a)
+              if SyslAnalyzer.ReservedTypeAttrNames.contains(a.name) then
+                throw AnalysisError(s"associated type '${a.name}' uses a reserved attribute name in trait '$name'; rename to avoid clashing with the built-in T::${a.name} introspection attribute", a)
+            traits(name) = TraitInfo(name, tparams, methods, assocs)
+            registerTraitOperatorEntries(name, methods, decl)
+          else
+            // Already registered (sibling pre-collect); the trait now owns
+            // this unit (this is the defining unit's main pass) so clear the
+            // imported flag so getTraitDecls includes it in this unit's
+            // perFileMeta.
+            importedTraitNames -= name
         case InterfaceDeclAST(name, methodASTs, embeddedNames, _) =>
           if interfaceTypes.contains(name) then throw AnalysisError(s"duplicate interface: '$name'", decl)
           // Resolve embedded interfaces and flatten methods
@@ -1769,10 +2195,53 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       val st = structTypes(structName)
       validateStructInvariants(structName, st.fields, invariants)
 
+    // Re-register sibling forward-decls now that own types/aliases are in
+    // scope. Sibling concrete impls that reference own generic aliases
+    // (e.g. operators.lsysl declares `impl Peek[string, Parser[unit]]`
+    // where Parser is in parsyl.lsysl) failed to resolve in the driver's
+    // pre-pass; with own pass 1 done, they can now register. Idempotent —
+    // skip if already registered.
+    // Drop ONLY the stale impl entries that were registered by the sibling
+    // pre-register against type-placeholders (tracked via the stub-functions
+    // set). The post-hook re-registers them with real types now that own
+    // pass 1 has filled in struct fields. Cross-module imports (which use
+    // the proper symbol path) leave importedConcreteImplStubFunctions empty
+    // for their entries — they're untouched here.
+    val staleStubs = importedConcreteImplStubFunctions.toList
+    if staleStubs.nonEmpty then
+      // Locate impl entries whose mangled methods are stale stubs and drop them.
+      for (traitName, buf) <- implTemplates do
+        buf.filterInPlace(t =>
+          t.typeParams.nonEmpty || !t.methods.values.exists(staleStubs.contains))
+      // Also drop the stale FunInfo stubs and their imported-key entries.
+      for fn <- staleStubs do
+        functions.remove(fn)
+        externalSymbols -= fn
+      importedConcreteImplStubFunctions.clear()
+      // Drop concrete impl keys whose mangled name was a stale stub (others
+      // — proper cross-module imports — keep their entries).
+      val stubSet = staleStubs.toSet
+      importedConcreteImplKeys.filterInPlace { case (traitName, _) =>
+        // Conservative: drop a key only if the corresponding impl is gone.
+        // Re-registration adds a fresh key.
+        implTemplates.getOrElse(traitName, Nil).exists(_.methods.values.exists(stubSet.contains))
+      }
+    // Same cleanup for free-fn stubs: drop so the re-pre re-registers with
+    // real types in scope (sibling pre-register may have latched onto
+    // placeholder struct types in the first pass).
+    val staleFreeFnStubs = importedSiblingFreeFnStubKeys.toList
+    if staleFreeFnStubs.nonEmpty then
+      for k <- staleFreeFnStubs do
+        functions.remove(k)
+        externalSymbols -= k
+      importedSiblingFreeFnStubKeys.clear()
+    for sib <- siblingForwardDecls do
+      registerSiblingForwardDeclsFrom(sib)
+
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do
       decl match
-        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _) =>
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, assocBindings, _) =>
           val trait_ = traits.getOrElse(traitName,
             throw AnalysisError(s"impl references unknown trait '$traitName'", decl))
           if targetTypes.length != trait_.typeParams.length then
@@ -1786,6 +2255,44 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           for m <- methods do
             if !trait_.methods.exists(_.name == m.name) then
               throw AnalysisError(s"impl method '${m.name}' is not declared in trait '$traitName'")
+          // Validate associated-type bindings (Phase A1):
+          //   - every assoc type the trait declared must be bound;
+          //   - every binding must name a declared assoc;
+          //   - no duplicate binding names.
+          val bindingNames = assocBindings.map(_.name)
+          if bindingNames.distinct.length != bindingNames.length then
+            throw AnalysisError(s"duplicate associated-type binding(s) in impl of '$traitName'", decl)
+          val declaredAssocs = trait_.assocTypes.map(_.name).toSet
+          for b <- assocBindings do
+            if !declaredAssocs.contains(b.name) then
+              throw AnalysisError(s"impl of '$traitName' binds undeclared associated type 'type ${b.name}'", b)
+          val missingAssocs = trait_.assocTypes.map(_.name).filterNot(bindingNames.contains)
+          if missingAssocs.nonEmpty then
+            throw AnalysisError(s"impl of '$traitName' missing associated-type binding(s): ${missingAssocs.map("type " + _).mkString(", ")}", decl)
+          // Phase C — enforce trait bounds declared on associated types.
+          // For each assoc binding, look up the trait's declaration of that
+          // assoc; for each declared bound trait, validate that the binding
+          // target satisfies the bound (an impl exists). For now we enforce
+          // this only on concrete impls; generic impls would need
+          // instantiation-time deferral (their binding targets may reference
+          // impl tvars) and are tracked as Phase C.2.
+          if implTypeParams.isEmpty then
+            val assocBoundsByName = trait_.assocTypes.map(a => (a.name, a.bounds)).toMap
+            for b <- assocBindings do
+              val bounds = assocBoundsByName.getOrElse(b.name, Nil)
+              if bounds.nonEmpty then
+                val resolvedBindingTarget = resolveType(b.target)
+                for boundTrait <- bounds do
+                  if !traits.contains(boundTrait) then
+                    throw AnalysisError(s"associated type 'type ${b.name}' on trait '$traitName' references unknown trait '$boundTrait'", b)
+                  val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                    if t.typeParams.isEmpty then
+                      t.resolvedConcrete.flatMap(_.headOption).contains(resolvedBindingTarget)
+                    else
+                      tryUnifyAll(t.targetPatterns.headOption.toList, List(resolvedBindingTarget), t.typeParams.toSet).isDefined
+                  }
+                  if !matched then
+                    throw AnalysisError(s"impl of '$traitName' binds 'type ${b.name} = $resolvedBindingTarget', which does not satisfy bound '$boundTrait' declared on the associated type", b)
           // Built-in prefix-sigil collision: when a trait method carries
           // `#operator(<sigil>)` for one of `-`, `!`, `~`, `*`, `&`, the impl's
           // first target pattern must NOT cover the sigil's natural built-in
@@ -1822,6 +2329,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               methodASTs = methods,
               definingModule = currentModule.getOrElse(""),
               implDecl = Some(impl),
+              assocBindings = assocBindings,
             )
             checkOrphanRule(traitName, targetTypes, currentModule.getOrElse(""), decl)
             checkCoherence(traitName, newTemplate, decl)
@@ -1837,7 +2345,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             val methodMap = mutable.LinkedHashMap.empty[String, String]
             val infos = mutable.ListBuffer.empty[ImplMethodInfo]
             val savedEnv = typeEnv
+            val savedAssocs = assocBindingsEnv
             typeEnv = trait_.typeParams.zip(resolvedTargets).toMap
+            // Resolve impl's assoc bindings using the trait-param-substituted
+            // typeEnv so a binding like `type Item = T` (referring to a generic
+            // impl tvar) lands as the substituted concrete type. For non-generic
+            // impls, this is just direct resolution.
+            assocBindingsEnv = assocBindings.map(b => (b.name, resolveType(b.target))).toMap
             try
               for traitMethod <- trait_.methods do
                 val rawMangled = s"${traitName}_${traitMethod.name}_${typeMangled}"
@@ -1861,7 +2375,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 functions(mangled) = FunInfo(mangled, paramTypes, retType)
                 methodMap(traitMethod.name) = mangled
                 infos += ImplMethodInfo(mangled, paramTypes, retType, body, isSynthesized = synthesized)
-            finally typeEnv = savedEnv
+            finally
+              typeEnv = savedEnv
+              assocBindingsEnv = savedAssocs
             val newTemplate = ImplTemplate(
               typeParams = Nil,
               targetPatterns = targetTypes,
@@ -1871,6 +2387,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               methodASTs = Nil,
               definingModule = currentModule.getOrElse(""),
               implDecl = Some(impl),
+              assocBindings = assocBindings,
             )
             checkOrphanRule(traitName, targetTypes, currentModule.getOrElse(""), decl)
             checkCoherence(traitName, newTemplate, decl)
@@ -1991,7 +2508,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case ExternVarDeclAST(name, typ, _) =>
         TExternVarDecl(name, resolveType(typ))
 
-      case StructDeclAST(name, _, _, _, _) =>
+      case StructDeclAST(name, _, _, _, _, _, _) =>
         val st = structTypes(name)
         TStructDecl(name, st.fields, st.volatileFields)
 
@@ -1999,14 +2516,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val members = enumTypes(name).toList.sortBy(_._2)
         TEnumDecl(name, members)
 
-      case DataEnumDeclAST(name, _, _, _) =>
+      case DataEnumDeclAST(name, _, _, _, _) =>
         TDataEnumDecl(name, dataEnumTypes(name))
 
-      case TypeAliasDeclAST(name, _, tparams, _, _, _, _) =>
+      case TypeAliasDeclAST(name, _, tparams, _, _, _, _, _) =>
         if tparams.nonEmpty then TTypeAliasDecl(name, UnitType) // generic alias: type-only, no codegen
         else TTypeAliasDecl(name, resolveType(NamedTypeAST(name))) // force resolution (and range validation)
 
-      case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs, _, _) =>
+      case fdAst @ FunDeclAST(name, params, _, body, isPrivate, _, _, attrs, _, _, _) =>
         scopeStack = new mutable.ArrayBuffer
         pushScope()
         val funInfo = functions(name)
@@ -2078,12 +2595,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         scopeStack = null
         validateTestAttr(fdAst, funInfo)
         if funInfo.isPure then
-          val isDefFn = fdAst match { case FunDeclAST(_, _, _, _, _, _, _, _, d, _) => d }
+          val isDefFn = fdAst match { case FunDeclAST(_, _, _, _, _, _, _, _, d, _, _) => d }
           validatePureFn(name, tBody, funInfo.params.map(_._1), isDefFn)
         if funInfo.reads.isDefined || funInfo.writes.isDefined then
           validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
         validateGhostDiscipline(name, funInfo, tBody)
-        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo))
+        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo), isParameterless = funInfo.isParameterless)
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>
         scopeStack = new mutable.ArrayBuffer
@@ -2973,18 +3490,49 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       val resolved = typeArgs.map(resolveType)
       if genericTypeAliases.contains(name) then
         val (tparams, target, isNew) = genericTypeAliases(name)
-        if resolved.length != tparams.length then
-          throw AnalysisError(s"type alias '$name' expects ${tparams.length} type argument(s), got ${resolved.length}")
-        if isNew then instantiateGenericNominalAlias(name, tparams, target, resolved)
+        val defaults = genericTypeAliasDefaults.getOrElse(name, Map.empty)
+        val filled = fillTypeArgsFromDefaults(name, "type alias", tparams, defaults, resolved)
+        if isNew then instantiateGenericNominalAlias(name, tparams, target, filled)
         else
           val savedEnv = typeEnv
-          typeEnv = typeEnv ++ tparams.zip(resolved).toMap
+          typeEnv = typeEnv ++ tparams.zip(filled).toMap
           val result = resolveType(target)
           typeEnv = savedEnv
           result
       else if genericStructs.contains(name) then instantiateGenericStruct(name, resolved)
       else if genericEnums.contains(name) then instantiateGenericEnum(name, resolved)
       else throw AnalysisError(s"'$name' is not a generic type")
+    // Phase B — bare reference to a generic alias/struct/enum (no `[...]`).
+    // Only resolves if every type parameter has a default; otherwise we fall
+    // through and let later cases produce the appropriate diagnostic.
+    case NamedTypeAST(name, Nil) if !typeEnv.contains(name) && genericTypeAliases.contains(name)
+        && {
+          val (tparams, _, _) = genericTypeAliases(name)
+          val defaults = genericTypeAliasDefaults.getOrElse(name, Map.empty)
+          tparams.nonEmpty && tparams.forall(defaults.contains)
+        } =>
+      val (tparams, target, isNew) = genericTypeAliases(name)
+      val defaults = genericTypeAliasDefaults(name)
+      val filled = fillTypeArgsFromDefaults(name, "type alias", tparams, defaults, Nil)
+      if isNew then instantiateGenericNominalAlias(name, tparams, target, filled)
+      else
+        val savedEnv = typeEnv
+        typeEnv = typeEnv ++ tparams.zip(filled).toMap
+        val result = resolveType(target)
+        typeEnv = savedEnv
+        result
+    case NamedTypeAST(name, Nil) if !typeEnv.contains(name) && genericStructs.contains(name)
+        && {
+          val st = genericStructs(name)
+          st.typeParams.nonEmpty && st.typeParams.forall(st.typeParamDefaults.contains)
+        } =>
+      instantiateGenericStruct(name, Nil)
+    case NamedTypeAST(name, Nil) if !typeEnv.contains(name) && genericEnums.contains(name)
+        && {
+          val en = genericEnums(name)
+          en.typeParams.nonEmpty && en.typeParams.forall(en.typeParamDefaults.contains)
+        } =>
+      instantiateGenericEnum(name, Nil)
     case NamedTypeAST(name, _) if typeEnv.contains(name) => typeEnv(name)
     case NamedTypeAST(name, _) => name match
       case "int" | "i32" => I32
@@ -3044,6 +3592,27 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       // rules out any other position; if it ever shows up elsewhere, it
       // behaves as a zero-arg function, which is the safe interpretation.
       FuncType(Nil, resolveType(inner), effects = FuncEffects.Unknown)
+    case ProjectionTypeAST(qualifier, member) =>
+      // Phase A2: associated-type projection in type position. Inside an impl
+      // method monomorphization, `assocBindingsEnv` carries the impl's
+      // `type Item = X` bindings; we look up by member name. The qualifier
+      // (typically `Self`, but also any of the trait's type parameters) is
+      // tolerated as long as it names something currently in scope —
+      // typeEnv (a trait/impl type param) or the literal `Self`. Phase A3
+      // generalizes this to use sites where `T: SomeTrait` is a generic-fn
+      // bound; for now, projection outside an impl context is rejected.
+      if assocBindingsEnv.contains(member) then
+        // Validate qualifier is meaningful in current scope. `Self` always
+        // works; any other ident must currently be a type parameter
+        // (i.e. in typeEnv) — that filters out typos like `Foo::Item`
+        // when `Foo` isn't a trait param.
+        if qualifier != "Self" && !typeEnv.contains(qualifier) then
+          throw AnalysisError(s"associated-type projection '$qualifier::$member': '$qualifier' is not a known type parameter or 'Self' in this context")
+        assocBindingsEnv(member)
+      else if assocBindingsEnv.isEmpty then
+        throw AnalysisError(s"associated-type projection '$qualifier::$member' has no impl context; projection at use sites is not yet supported (Phase A3)")
+      else
+        throw AnalysisError(s"associated type '$member' not bound in current impl (available: ${assocBindingsEnv.keys.toList.sorted.mkString(", ")})")
     case FuncTypeAST(params, ret, esc, eff) =>
       // Resolve raw names in #reads/#writes through globalScope to mangled form so subset
       // checks at indirect-call sites compare apples-to-apples with the caller's #reads/#writes
@@ -4004,6 +4573,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     case TupleTypeAST(elems) => TupleTypeAST(elems.map(substituteTypeAST(_, subst)))
     case RefTypeAST(inner) => RefTypeAST(substituteTypeAST(inner, subst))
     case ByNameTypeAST(inner) => ByNameTypeAST(substituteTypeAST(inner, subst))
+    case ProjectionTypeAST(qualifier, member) =>
+      // If the qualifier is being substituted to a NamedTypeAST whose name we
+      // can use as the new qualifier, rewrite. Otherwise pass through unchanged
+      // — projection resolution happens at resolveType time against the
+      // active impl context. (Pre-A4 substitution semantics.)
+      subst.get(qualifier) match
+        case Some(NamedTypeAST(n, _)) => ProjectionTypeAST(n, member)
+        case _ => t
 
   /** Strict structural equality with effect-lattice tolerance for FuncType.
    *  Used for impl-dispatch post-validation. `slot` is the impl pattern resolved
@@ -4338,16 +4915,118 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
    *  Cached so that two mentions of `Parser[i32]` produce object-equal `SyslType` values —
    *  this is what makes trait/impl dispatch see them as the same type.
    */
+  /** Phase B — fill missing trailing type-arg slots from declared defaults.
+   *  Defaults resolve under the partial env of already-pinned slots so a later
+   *  default may reference an earlier param (e.g. `[I, O = I]`). The returned
+   *  list always has length `tparams.length`. Errors if `typeArgs.length` is
+   *  greater than `tparams.length`, or if a missing slot has no default.
+   *  `kind` is just for the diagnostic ("struct" / "enum" / "type alias"). */
+  protected def fillTypeArgsFromDefaults(
+      name: String,
+      kind: String,
+      tparams: List[String],
+      defaults: Map[String, TypeAST],
+      typeArgs: List[SyslType],
+  ): List[SyslType] =
+    if typeArgs.length == tparams.length then return typeArgs
+    if typeArgs.length > tparams.length then
+      throw AnalysisError(s"generic $kind '$name' expects ${tparams.length} type arg(s), got ${typeArgs.length}")
+    val pinned = mutable.Map.empty[String, SyslType]
+    for (tp, ty) <- tparams.zip(typeArgs) do pinned(tp) = ty
+    for tp <- tparams.drop(typeArgs.length) do
+      defaults.get(tp) match
+        case Some(defAst) =>
+          val savedEnv = typeEnv
+          typeEnv = typeEnv ++ pinned.toMap
+          try pinned(tp) = resolveType(defAst)
+          finally typeEnv = savedEnv
+        case None =>
+          throw AnalysisError(s"generic $kind '$name' expects ${tparams.length} type arg(s), got ${typeArgs.length} (no default for type parameter '$tp')")
+    tparams.map(pinned)
+
+  /** Validate that `typeArgs` satisfy the trait bounds declared on
+   *  `typeParams`, mirroring the bound check in `instantiateGeneric`. Returns
+   *  Left(msg) on failure, Right(()) on success. Multi-bound disambiguation
+   *  (when two bounds bind the same assoc name to different types) is detected
+   *  here too. The companion `buildAssocBindingsEnv` constructs the matching
+   *  assocBindingsEnv map. Both are used by struct/enum/alias instantiation. */
+  protected def enforceBoundsAndBuildAssocs(
+      what: String,
+      typeParams: List[String],
+      typeArgs: List[SyslType],
+      typeBounds: Map[String, List[String]],
+  ): Either[String, Unit] =
+    for tp <- typeParams do
+      val bounds = typeBounds.getOrElse(tp, Nil)
+      val concreteType = typeArgs(typeParams.indexOf(tp))
+      for traitName <- bounds do
+        if !traits.contains(traitName) then
+          return Left(s"bound '$traitName' on type parameter '$tp' of $what refers to unknown trait")
+        val matched = implTemplates.getOrElse(traitName, Nil).exists { t =>
+          if t.typeParams.isEmpty then
+            t.resolvedConcrete.flatMap(_.headOption).contains(concreteType)
+          else
+            tryUnifyAll(t.targetPatterns.headOption.toList, List(concreteType), t.typeParams.toSet).isDefined
+        }
+        if !matched then
+          return Left(s"type $concreteType does not satisfy bound '$traitName' for type parameter '$tp' in $what")
+    Right(())
+
+  /** Build the assoc-bindings env for `typeParams` instantiated to `typeArgs`,
+   *  by locating each bounded type parameter's matching impl and pulling its
+   *  assocBindings into the env. Mirrors the same logic in `instantiateGeneric`,
+   *  including multi-bound ambiguity rejection. */
+  protected def buildAssocBindingsEnv(
+      typeParams: List[String],
+      typeArgs: List[SyslType],
+      typeBounds: Map[String, List[String]],
+  ): Map[String, SyslType] =
+    val newAssocs = mutable.Map.empty[String, SyslType]
+    val newAssocSources = mutable.Map.empty[String, String]
+    for (tp, concreteType) <- typeParams.zip(typeArgs) do
+      val bounds = typeBounds.getOrElse(tp, Nil)
+      for traitName <- bounds do
+        val matched = implTemplates.getOrElse(traitName, Nil).iterator.flatMap { t =>
+          if t.typeParams.isEmpty then
+            if t.resolvedConcrete.flatMap(_.headOption).contains(concreteType)
+            then Some((t, Map.empty[String, SyslType]))
+            else None
+          else
+            tryUnifyAll(t.targetPatterns.headOption.toList, List(concreteType), t.typeParams.toSet)
+              .map(s => (t, s))
+        }.nextOption()
+        for (impl, implSubst) <- matched do
+          val savedEnv = typeEnv
+          typeEnv = typeEnv ++ implSubst
+          try
+            for binding <- impl.assocBindings do
+              val resolved = resolveType(binding.target)
+              newAssocs.get(binding.name) match
+                case Some(prior) if prior != resolved =>
+                  val priorTrait = newAssocSources.getOrElse(binding.name, "?")
+                  throw AnalysisError(
+                    s"projection '${tp}::${binding.name}' is ambiguous: " +
+                      s"bound '$priorTrait' binds it to $prior but bound '$traitName' binds it to $resolved",
+                  )
+                case _ =>
+                  newAssocs(binding.name) = resolved
+                  newAssocSources(binding.name) = traitName
+          finally typeEnv = savedEnv
+    newAssocs.toMap
+
   protected def instantiateGenericNominalAlias(
       name: String,
       tparams: List[String],
       target: TypeAST,
       typeArgs: List[SyslType],
   ): SyslType =
-    val cacheKey = (name, typeArgs)
+    val defaults = genericTypeAliasDefaults.getOrElse(name, Map.empty)
+    val filledArgs = fillTypeArgsFromDefaults(name, "type alias", tparams, defaults, typeArgs)
+    val cacheKey = (name, filledArgs)
     genericAliasInstantiations.get(cacheKey) match
       case Some(t) => t
       case None =>
+        val typeArgs = filledArgs
         val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
         val savedEnv = typeEnv
         typeEnv = typeEnv ++ tparams.zip(typeArgs).toMap
@@ -4360,14 +5039,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         nt
 
   protected def instantiateGenericStruct(name: String, typeArgs: List[SyslType]): SyslType.StructType =
-    val cacheKey = (name, typeArgs)
+    val template0 = genericStructs.getOrElse(name,
+      throw AnalysisError(s"'$name' is not a generic struct"))
+    val filledArgs = fillTypeArgsFromDefaults(name, "struct", template0.typeParams, template0.typeParamDefaults, typeArgs)
+    val cacheKey = (name, filledArgs)
     genericStructInstantiations.get(cacheKey) match
       case Some(st) => st
       case None =>
-        val template = genericStructs.getOrElse(name,
-          throw AnalysisError(s"'$name' is not a generic struct"))
-        if template.typeParams.length != typeArgs.length then
-          throw AnalysisError(s"generic struct '$name' expects ${template.typeParams.length} type arg(s), got ${typeArgs.length}")
+        val template = template0
+        val typeArgs = filledArgs
+        // Enforce trait bounds declared on the struct's type parameters and
+        // build the assoc-bindings env so projection-typed fields like
+        // `pulled: T::Item` resolve via the matching impl.
+        enforceBoundsAndBuildAssocs(s"struct '$name'", template.typeParams, typeArgs, template.typeBounds) match
+          case Left(err) => throw AnalysisError(err)
+          case Right(_)  => ()
         val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
         // Insert a placeholder StructType to handle recursive field types
         val placeholder: SyslType.StructType = SyslType.StructType(mangled, Nil)
@@ -4375,7 +5061,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         structTypes(mangled) = placeholder
         structToTemplate(mangled) = (name, typeArgs)
         val savedEnv = typeEnv
+        val savedAssocs = assocBindingsEnv
         typeEnv = typeEnv ++ template.typeParams.zip(typeArgs).toMap
+        assocBindingsEnv = buildAssocBindingsEnv(template.typeParams, typeArgs, template.typeBounds)
         try
           val resolvedFields = template.fields.map((n, t, _) => (n, resolveType(t)))
           val st: SyslType.StructType = SyslType.StructType(mangled, resolvedFields)
@@ -4383,17 +5071,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           structTypes(mangled) = st
           specializedDecls += TStructDecl(mangled, resolvedFields)
           st
-        finally typeEnv = savedEnv
+        finally
+          typeEnv = savedEnv
+          assocBindingsEnv = savedAssocs
 
   // Instantiate a generic enum with concrete type arguments, returning its EnumType
   protected def instantiateGenericEnum(name: String, typeArgs: List[SyslType]): SyslType.EnumType =
-    val cacheKey = (name, typeArgs)
+    val template0 = genericEnums(name)
+    val filledArgs = fillTypeArgsFromDefaults(name, "enum", template0.typeParams, template0.typeParamDefaults, typeArgs)
+    val cacheKey = (name, filledArgs)
     genericEnumInstantiations.get(cacheKey) match
       case Some(et) => et
       case None =>
-        val template = genericEnums(name)
-        if template.typeParams.length != typeArgs.length then
-          throw AnalysisError(s"generic enum '$name' expects ${template.typeParams.length} type arg(s), got ${typeArgs.length}")
+        val template = template0
+        val typeArgs = filledArgs
         val mangled = name + "_" + typeArgs.map(typeToMangled).mkString("_")
         val savedEnv = typeEnv
         typeEnv = typeEnv ++ template.typeParams.zip(typeArgs).toMap
@@ -4425,6 +5116,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val trait_ = traits(impl.traitName)
     val savedEnv = typeEnv
     val savedRewrite = traitCallRewrite
+    val savedAssocs = assocBindingsEnv
+    // Activate the impl's assoc bindings so projection types in trait method
+    // bodies (`var t: Self::Item = ...`, casts, etc.) resolve correctly when
+    // analyzing an inherited default body. The set is empty for impls without
+    // assoc types, in which case projection use is rejected as before.
+    assocBindingsEnv = template.assocBindings.map(b => (b.name, resolveType(b.target))).toMap
     try
       // For synthesized defaults, set typeEnv + traitCallRewrite so trait params resolve
       // and unqualified calls to sibling trait methods route to the impl's mangled
@@ -4478,6 +5175,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     finally
       typeEnv = savedEnv
       traitCallRewrite = savedRewrite
+      assocBindingsEnv = savedAssocs
 
   /** Stage G — specialize a generic impl method at a use site, or fast-path return for a
    *  concrete impl. Cached by `(template-identity, methodName, sortedSubst)` so repeated
@@ -4536,6 +5234,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           // the method resolve correctly).
           val fullEnv = trait_.typeParams.zip(resolvedTargets).toMap ++ subst
           typeEnv = typeEnv ++ fullEnv
+          // Activate the impl's assoc bindings — resolved under the substituted typeEnv
+          // so generic-impl bindings like `type Item = T` land as the substituted type.
+          val savedAssocs = assocBindingsEnv
+          assocBindingsEnv = template.assocBindings.map(b => (b.name, resolveType(b.target))).toMap
           val (paramTypes, retType, body, isSynthesized) =
             try
               val pTypes = implMethod.params.map(p => (p.name, resolveType(p.typ)))
@@ -4575,6 +5277,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               traitCallRewrite = savedRewrite
               scopeStack = savedScope
               loopDepth = savedLoopDepth
+              assocBindingsEnv = savedAssocs
           val tParams = paramTypes.map((n, t) => TParam(n, t))
           specializedDecls += TFunDecl(mangled, tParams, retType, tBody, isPrivate = false)
           (mangled, funInfo)
@@ -4620,6 +5323,30 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       throw AnalysisError(s"generic function '$name' expects ${template.params.length} argument(s), got ${argTypes.length}")
     for (p, a) <- template.params.zip(argTypes) do
       unifyTypes(p.typ, a, typeParams.toSet, env)
+    // Phase B — fill any still-unbound type parameters from declared defaults.
+    // Defaults resolve under the partial env so a later default may reference an
+    // earlier param (e.g. `[I, O = I]`). Iterate in declaration order so
+    // earlier-pinned params are visible to later defaults.
+    // Phase B.2 — defaults may also reference the projections of already-pinned
+    // bounded params (e.g. `[I: Reader, T = I::Token]`). Before resolving each
+    // default, build a partial assocBindingsEnv from the params pinned so far.
+    for tp <- typeParams if !env.contains(tp) do
+      template.typeParamDefaults.get(tp) match
+        case Some(defAst) =>
+          val savedEnvB = typeEnv
+          val savedAssocsB = assocBindingsEnv
+          typeEnv = typeEnv ++ env.toMap
+          val pinnedSoFar = typeParams.takeWhile(env.contains)
+          assocBindingsEnv = buildAssocBindingsEnv(
+            pinnedSoFar,
+            pinnedSoFar.map(env(_)),
+            template.typeBounds,
+          )
+          try env(tp) = resolveType(defAst)
+          finally
+            typeEnv = savedEnvB
+            assocBindingsEnv = savedAssocsB
+        case None => // leave unbound; the next pass produces the diagnostic
     // Require all type params to be pinned
     for tp <- typeParams if !env.contains(tp) do
       throw AnalysisError(s"cannot infer type parameter '$tp' for generic function '$name'")
@@ -4655,7 +5382,51 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         // locally so the backend emits its body in this compilation unit.
         // Save and install typeEnv for this instantiation
         val savedEnv = typeEnv
+        val savedAssocsInst = assocBindingsEnv
         typeEnv = typeParams.zip(inferredArgs).toMap
+        // Phase A3 — for each bounded type parameter, locate the matching impl
+        // and pull its associated-type bindings into `assocBindingsEnv` so that
+        // projections like `T::Item` in the generic body resolve to the impl's
+        // declared type. The bound check above already validated that a matching
+        // impl exists; we re-find it here to capture both the impl template and
+        // (for generic impls) the substitution that pins its type parameters.
+        // Multi-bound disambiguation: if two distinct bound traits both bind the
+        // same assoc name to *different* resolved types, the projection is
+        // ambiguous and we reject the call. Repeated identical bindings (same
+        // name, same resolved type) are fine.
+        val newAssocs = mutable.Map.empty[String, SyslType]
+        val newAssocSources = mutable.Map.empty[String, String]
+        for tp <- typeParams do
+          val bounds = template.typeBounds.getOrElse(tp, Nil)
+          val concreteType = env(tp)
+          for traitName <- bounds do
+            val matched = implTemplates.getOrElse(traitName, Nil).iterator.flatMap { t =>
+              if t.typeParams.isEmpty then
+                if t.resolvedConcrete.flatMap(_.headOption).contains(concreteType)
+                then Some((t, Map.empty[String, SyslType]))
+                else None
+              else
+                tryUnifyAll(t.targetPatterns.headOption.toList, List(concreteType), t.typeParams.toSet)
+                  .map(s => (t, s))
+            }.nextOption()
+            for (impl, implSubst) <- matched do
+              val savedEnv2 = typeEnv
+              typeEnv = typeEnv ++ implSubst
+              try
+                for binding <- impl.assocBindings do
+                  val resolved = resolveType(binding.target)
+                  newAssocs.get(binding.name) match
+                    case Some(prior) if prior != resolved =>
+                      val priorTrait = newAssocSources.getOrElse(binding.name, "?")
+                      throw AnalysisError(
+                        s"projection '${tp}::${binding.name}' is ambiguous in '$name': " +
+                          s"bound '$priorTrait' binds it to $prior but bound '$traitName' binds it to $resolved",
+                      )
+                    case _ =>
+                      newAssocs(binding.name) = resolved
+                      newAssocSources(binding.name) = traitName
+              finally typeEnv = savedEnv2
+        assocBindingsEnv = newAssocs.toMap
         try
           // Resolve param/return types in the new env
           val paramTypes = template.params.map(p => (p.name, resolveType(p.typ)))
@@ -4696,6 +5467,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           (mangled, funInfo)
         finally
           typeEnv = savedEnv
+          assocBindingsEnv = savedAssocsInst
 
   /** Build a typed positional arg list from a mix of positional and named args.
     * Rules:
@@ -5628,4 +6400,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           }
           val nested = if nestedOut.exists(_.isDefined) then nestedOut.toList else Nil
           TDestructurePattern(st, bindings, st.fields.map(_._2), nested)
+
+object SyslAnalyzer:
+  /** Reserved attribute names usable as `T::Attr` for enum and within-int
+   *  introspection. Associated-type declarations may not reuse these names —
+   *  doing so would cause ambiguity at projection sites once Phase A3 lands.
+   *  Listed in the language reference under "Type Attributes". */
+  val ReservedTypeAttrNames: Set[String] =
+    Set("First", "Last", "Range", "Image", "Value", "Valid", "Pos", "Val", "Succ", "Pred")
 

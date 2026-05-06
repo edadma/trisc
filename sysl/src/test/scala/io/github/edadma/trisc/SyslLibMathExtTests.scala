@@ -11,6 +11,7 @@ class SyslLibMathExtTests extends SyslTestHelpers {
     def fileName(path: String): String = java.io.File(path).getName
     def mkdirs(path: String): Unit = java.io.File(path).mkdirs()
     def joinPath(dir: String, name: String): String = java.nio.file.Paths.get(dir, name).toString
+    def absolutePath(path: String): String = java.nio.file.Paths.get(path).toAbsolutePath.toString
 
   private val simpleTangler: String => String = raw =>
     raw.linesIterator

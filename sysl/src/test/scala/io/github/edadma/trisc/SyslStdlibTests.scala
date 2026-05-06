@@ -14,6 +14,7 @@ class SyslStdlibTests extends AnyFreeSpec with Matchers {
     def fileName(path: String): String = java.io.File(path).getName
     def mkdirs(path: String): Unit = java.io.File(path).mkdirs()
     def joinPath(dir: String, name: String): String = java.nio.file.Paths.get(dir, name).toString
+    def absolutePath(path: String): String = java.nio.file.Paths.get(path).toAbsolutePath.toString
 
   // Minimal tangler: extract 4-space-indented code blocks from literate source
   private val simpleTangler: String => String = raw =>

@@ -140,6 +140,13 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
     // Modules are processed in dependency order derived from the file-level
     // topological sort, so cross-module imports are available during pre-collection.
     val packageMetaCache = new mutable.LinkedHashMap[String, ModuleMeta]
+    // Per-file metas keyed by source name. Step 4b stores each file's individual
+    // meta here so Step 5 can build sibling-only views by merging every other
+    // file in the same module — the merged-per-module packageMetaCache always
+    // includes the current file's own contributions, which would cause the
+    // analyzer's main pass to throw on duplicate trait/template/impl when
+    // sibling registration mirrored them in.
+    val perFileMetaCache = new mutable.LinkedHashMap[String, ModuleMeta]
     // Build module-level dependency graph: for each module, collect all modules
     // imported by any of its files.
     // Resolve an import's module path to a module key in moduleToSources,
@@ -186,16 +193,47 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             val analyzer = new SyslAnalyzer(contractsEnabled = contractsEnabled)
             // Register extern names so they are never mangled (ABI-level symbols)
             analyzer.registerNoMangle(globalExternNames)
-            for src <- sourceNames if src != name do
-              analyzer.registerGenericTemplatesFrom(asts(src))
-            val siblings = new ModuleMeta(meta.symbols.filter(s => !s.isExtern))
+            // Pre-seed currentModule so any concrete-impl mangling done during
+            // sibling pre-register uses the right prefix (this matches Step 5).
+            modules.get(name).foreach(modPath =>
+              analyzer.preSetModule(modPath.replace('/', '_').replace('.', '_')))
+            // Sibling type/trait/impl forward-decls. The analyzer hooks
+            // `siblingForwardDecls` so its own analyze() can re-run the
+            // sibling decls after pass 1 (own types in scope), letting
+            // sibling concrete impls that reference own generic aliases
+            // resolve on the second pass — breaks the cycle for modules
+            // like parsyl-split where each sibling depends on the other.
+            val siblingASTs = sourceNames.iterator.filter(_ != name).map(asts(_)).toList
+            for src <- siblingASTs do
+              analyzer.registerSiblingForwardDeclsFrom(src)
+            analyzer.siblingForwardDecls = siblingASTs
+            // Carry through extensions / impls / generic templates so cross-file
+            // same-module dispatch works during pre-collection. Without this,
+            // sibling-file extensions (and operator extension impls) would be
+            // invisible because the sibling registration only carried symbols.
+            val siblings = new ModuleMeta(
+              meta.symbols.filter(s => !s.isExtern),
+              meta.genericTemplates,
+              meta.traitImpls,
+              meta.genericEnumInstances,
+              meta.extensions,
+            )
             analyzer.registerImport(siblings)
-            // Register cross-module imports from already-cached modules,
-            // applying the same QualifiedImport → NamedImport fallback as Step 5.
+            // Register cross-module imports — fall back to resolveExternalMeta so
+            // pre-collection can resolve imports of stdlib modules whose SMETA lives
+            // on disk and isn't in the source set. Without this fallback, any source
+            // file that imports a stdlib module fails pre-collection with an
+            // "undefined variable" error, leaving the whole module's package meta
+            // empty and causing misleading downstream errors in sibling files
+            // (e.g. "unknown type: 'Input'" when the real cause is "stdlib import
+            // not registered, so a function that uses stdlib was rejected").
+            // smetaCache isn't consulted here — it's empty during pre-collection.
             for imp0 <- imports.getOrElse(name, Nil) do
               val imp = imp0.selectors match
                 case List(QualifiedImport) =>
-                  if packageMetaCache.contains(imp0.modulePath) then imp0
+                  def isKnownModule(path: String): Boolean =
+                    packageMetaCache.contains(path) || resolveExternalMeta(path).isDefined
+                  if isKnownModule(imp0.modulePath) then imp0
                   else
                     val parts = imp0.modulePath.split("/")
                     if parts.length >= 2 then
@@ -204,14 +242,41 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
                 case _ => imp0
               if packageMetaCache.contains(imp.modulePath) then
                 analyzer.registerImport(packageMetaCache(imp.modulePath), imp.selectors, imp.modulePath)
+              else
+                resolveExternalMeta(imp.modulePath) match
+                  case Some(em) =>
+                    packageMetaCache(imp.modulePath) = em
+                    analyzer.registerImport(em, imp.selectors, imp.modulePath)
+                  case None => ()
             val typed = analyzer.analyze(ast)
             val baseMeta = ModuleMeta.fromProgram(typed, Some(s"$name.sysl"))
-            // Carry the analyzer's per-file extension entries through so sibling
-            // files in the same module see them via the next iteration's
-            // registerImport(siblings) call.
+            // Extract generic templates so dependent modules (siblings + downstream
+            // imports during pre-collection) can register them via meta.genericTemplates
+            // — same templates list that Step 5 builds. Without this, generic types
+            // (Result[A, E], Option[T], the new TypeAliasDeclAST forms) are missing
+            // from the cached meta and dependent modules fail with errors like
+            // "'Result' is not a generic type" during pre-collection.
+            val templates = ast.decls.filter {
+              case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
+              case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+              case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
+              case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
+              // Include generic and multi-target concrete ImplDeclASTs. Single-target
+              // concrete impls already round-trip via meta.traitImpls (TraitImplMeta
+              // is single-target only); multi-target concrete impls (e.g.
+              // `impl Combine[Box, Box, Box]`) and any generic impl have no
+              // representation there, so they ride along in genericTemplates and
+              // get registered through registerImport's ImplDeclAST handler.
+              // Generic and multi-target concrete impls ride in genericTemplates as
+              // before; additionally, any concrete impl that declares associated-type
+              // bindings goes the same route since TraitImplMeta has no slot for them.
+              case ImplDeclAST(_, tps, targets, _, _, assocs, _) =>
+                tps.nonEmpty || targets.length > 1 || assocs.nonEmpty
+              case _ => false
+            } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
             new ModuleMeta(
               baseMeta.symbols,
-              Nil,
+              templates,
               analyzer.getTraitImplMetas,
               analyzer.getGenericEnumInstances,
               analyzer.getExtensionMetas,
@@ -219,6 +284,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           } match
             case scala.util.Success(fileMeta) =>
               meta = meta.merge(fileMeta)
+              perFileMetaCache(name) = fileMeta
               changed = true
             case scala.util.Failure(_) =>
               stillFailing += name
@@ -243,13 +309,42 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
 
       // Register same-module siblings (intra-module visibility),
       // excluding own symbols and externs (which are private to each file).
+      // Pre-seed the analyzer's currentModule so registerImport's mangling
+      // for sibling impl-method lookups produces the same prefix the
+      // importing unit's main pass will use — without this, sibling-imported
+      // multi-target concrete impls resolve to the unmangled form and the
+      // interpreter / linker can't find the function.
       for modPath <- modules.get(name) do
-        for src <- moduleToSources.getOrElse(modPath, Set.empty) if src != name do
-          analyzer.registerGenericTemplatesFrom(asts(src))
-        packageMetaCache.get(modPath).foreach { meta =>
-          val siblings = new ModuleMeta(meta.symbols.filter(s => s.sourceFile != Some(s"$name.sysl") && !s.isExtern))
-          analyzer.registerImport(siblings)
+        analyzer.preSetModule(modPath.replace('/', '_').replace('.', '_'))
+        // Sibling forward-decls (the broader sibling-pre-collect path that
+        // also covers traits/impls/non-generic types). Step 5 uses the same
+        // shape as Step 4b so cyclic intra-module references can resolve
+        // even when one sibling's contributions weren't fully captured in
+        // the per-file meta cache (e.g. parsyl-split where operator traits
+        // and the types they reference live in different files).
+        val siblingSources = moduleToSources.getOrElse(modPath, Set.empty).iterator
+          .filter(_ != name).map(asts(_)).toList
+        for src <- siblingSources do
+          analyzer.registerSiblingForwardDeclsFrom(src)
+        analyzer.siblingForwardDecls = siblingSources
+        // Build a sibling-only view by merging every other file's per-file meta
+        // in this module. This excludes the current file's contributions
+        // entirely, so mirrored extensions / traits / impls / templates won't
+        // collide with what the main analysis pass is about to register from
+        // the current file's own AST.
+        val siblingNames = moduleToSources.getOrElse(modPath, Set.empty) - name
+        val sibAccum = siblingNames.foldLeft(new ModuleMeta(Nil)) { (acc, src) =>
+          perFileMetaCache.get(src).map(acc.merge).getOrElse(acc)
         }
+        if siblingNames.nonEmpty then
+          val siblings = new ModuleMeta(
+            sibAccum.symbols.filter(!_.isExtern),
+            sibAccum.genericTemplates,
+            sibAccum.traitImpls,
+            sibAccum.genericEnumInstances,
+            sibAccum.extensions,
+          )
+          analyzer.registerImport(siblings)
 
       // Phase 2b-Predef-auto-import: silently inject an extensions-only import
       // for every Predef module that's present in the meta cache (or
@@ -314,9 +409,10 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       // FunDecls (Phase 2d) — these come from `lowerExtensions` and aren't in
       // `ast.decls` directly.
       val templates = ast.decls.filter {
-        case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
-        case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
-        case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
+        case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
+        case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+        case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
+        case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
         case _ => false
       } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
@@ -436,9 +532,9 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         })
         // Extract generic templates (structs, enums, functions with type params)
         val templates = stripped.decls.filter {
-          case StructDeclAST(_, _, tps, _, _) => tps.nonEmpty
-          case DataEnumDeclAST(_, _, tps, _) => tps.nonEmpty
-          case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
+          case StructDeclAST(_, _, tps, _, _, _, _) => tps.nonEmpty
+          case DataEnumDeclAST(_, _, tps, _, _) => tps.nonEmpty
+          case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
           case _ => false
         }
         scala.util.Try {

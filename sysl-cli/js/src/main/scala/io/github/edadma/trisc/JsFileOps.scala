@@ -18,6 +18,7 @@ private object FS extends js.Object:
 private object Path extends js.Object:
   def basename(path: String): String = js.native
   def join(paths: String*): String = js.native
+  def resolve(paths: String*): String = js.native
 
 object JsFileOps extends FileOps:
   def readFile(path: String): String = FS.readFileSync(path, "utf8")
@@ -28,3 +29,4 @@ object JsFileOps extends FileOps:
   def fileName(path: String): String = Path.basename(path)
   def mkdirs(path: String): Unit = FS.mkdirSync(path, js.Dynamic.literal(recursive = true))
   def joinPath(dir: String, name: String): String = Path.join(dir, name)
+  def absolutePath(path: String): String = Path.resolve(path)

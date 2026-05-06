@@ -6,7 +6,7 @@ case class SymbolMeta(name: String, typ: SymbolMeta.Kind, isPrivate: Boolean, is
 
 object SymbolMeta:
   enum Kind:
-    case Func(params: List[SyslType], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, effects: FuncEffects = FuncEffects.Unknown)
+    case Func(params: List[SyslType], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, effects: FuncEffects = FuncEffects.Unknown, isParameterless: Boolean = false)
     case Data(dataType: SyslType, isMutable: Boolean = false)
     case Struct(structType: SyslType.StructType)
     case Enum(enumType: SyslType.EnumType)
@@ -43,7 +43,7 @@ class ModuleMeta(
         currentSource = sym.sourceFile
       val vis = if sym.isPrivate then "PRIVATE " else ""
       sym.typ match
-        case SymbolMeta.Kind.Func(params, ret, isDef, isPure, modes, effects) =>
+        case SymbolMeta.Kind.Func(params, ret, isDef, isPure, modes, effects, _) =>
           // The FUNCP/DEFFUNCP keyword variants encode `#pure`. For `#reads`/`#writes`
           // (effects.isUnknown is false but isPure is also false), we emit an additional
           // `EFFECTS RW …` trailer.  When `isPure` is true we skip the EFFECTS trailer
@@ -107,7 +107,7 @@ class ModuleMeta(
       if sym.isExtern then
         buf ++= s"extern ${sym.name}\n"
       else sym.typ match
-        case SymbolMeta.Kind.Func(params, ret, _, _, _, _) =>
+        case SymbolMeta.Kind.Func(params, ret, _, _, _, _, _) =>
           buf ++= s"global ${sym.name}, func, ${SyslType.funcSigToPrefix(params, ret)}\n"
         case SymbolMeta.Kind.Data(dataType, _) =>
           buf ++= s"global ${sym.name}, data, ${dataType.toPrefix}\n"
@@ -155,8 +155,22 @@ object ModuleMeta:
    *  v12 adds an optional `MUT` trailer on DATA lines so module-level `var` (vs `val`)
    *  is preserved across files — sibling-imported vars stay writable.
    *  v13 adds `EXT <method> <definingModule|_> <mangledFn> <receiverTypePrefix>` lines
-   *  so Scala-3-style `extension` blocks round-trip across compilation units. */
-  val SMETA_VERSION = 13
+   *  so Scala-3-style `extension` blocks round-trip across compilation units.
+   *  v14 carries generic type aliases (`type Box[A] = new A`) through the TEMPLATES
+   *  block so they are visible across files of the same module and across module
+   *  imports.
+   *  v15 carries trait associated-type declarations (`type Item [: Bound + Bound]`
+   *  inside trait bodies) and impl associated-type bindings (`type Item = i64`
+   *  inside impl bodies) through the TEMPLATES block so they round-trip across
+   *  files. The pretty printer emits them inside trait/impl bodies; the read side
+   *  parses them back into the same trait/impl AST. Concrete-impl assoc bindings
+   *  also force the impl into the TEMPLATES path (TraitImplMeta carries no slot
+   *  for them).
+   *  v16 adds default type parameters (`[T = Default]`) on trait/struct/enum/alias/fn
+   *  declarations. They round-trip purely through the TEMPLATES pretty-printer +
+   *  parser (no new SMETA fields), but the version bump prevents v15 readers from
+   *  silently mis-parsing default-bearing templates. */
+  val SMETA_VERSION = 16
 
   /** Encode a FuncEffects as space-separated tokens — `U` (Unknown), `P` (Pure), or
    *  `RW <nReads> <readsNames…> <nWrites> <writesNames…>`. Used both in the FUNC-line
@@ -200,7 +214,7 @@ object ModuleMeta:
         SymbolMeta(name, SymbolMeta.Kind.Func(params, returnType), isPrivate = false, isExtern = true, sourceFile = sourceFile)
       case TExternVarDecl(name, typ) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ), isPrivate = false, isExtern = true, sourceFile = sourceFile)
-      case TFunDecl(name, params, returnType, _, isPrivate, attrs, isDef, _, effects) =>
+      case TFunDecl(name, params, returnType, _, isPrivate, attrs, isDef, _, effects, isParameterless) =>
         val isPure = attrs.exists(_.name == "pure")
         // Param modes: infer from the pointer-wrapping of declared param types. The
         // analyzer stores Out/Inout params with type `*T`; the TFunDecl exposes that
@@ -209,7 +223,7 @@ object ModuleMeta:
         // auto-wrap without needing to re-derive mode from the type alone.
         val modes = params.map(_.mode)
         val needModes = modes.exists(_ != ParamMode.In)
-        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef, isPure, if needModes then modes else Nil, effects), isPrivate, sourceFile = sourceFile)
+        SymbolMeta(name, SymbolMeta.Kind.Func(params.map(_.typ), returnType, isDef, isPure, if needModes then modes else Nil, effects, isParameterless), isPrivate, sourceFile = sourceFile)
       case TVarDecl(name, typ, _, isPrivate, _, _, isMutable) =>
         SymbolMeta(name, SymbolMeta.Kind.Data(typ, isMutable), isPrivate, sourceFile = sourceFile)
       case TConstDecl(name, typ, value) =>
@@ -338,10 +352,15 @@ object ModuleMeta:
           parser.parseProgram(templateBuf.toString) match
             case Right(ast) =>
               ast.decls.filter {
-                case StructDeclAST(_, _, tps, _, _)        => tps.nonEmpty
-                case DataEnumDeclAST(_, _, tps, _)         => tps.nonEmpty
-                case FunDeclAST(_, _, _, _, _, tps, _, _, _, _) => tps.nonEmpty
+                case StructDeclAST(_, _, tps, _, _, _, _)        => tps.nonEmpty
+                case DataEnumDeclAST(_, _, tps, _, _)         => tps.nonEmpty
+                case FunDeclAST(_, _, _, _, _, tps, _, _, _, _, _) => tps.nonEmpty
+                case TypeAliasDeclAST(_, _, tps, _, _, _, _, _) => tps.nonEmpty
                 case _: TraitDeclAST                        => true
+                // Generic / multi-target / assoc-binding impls round-trip via TEMPLATES
+                // because TraitImplMeta has no slot for type parameters or assoc bindings.
+                case ImplDeclAST(_, tps, targets, _, _, assocs, _) =>
+                  tps.nonEmpty || targets.length > 1 || assocs.nonEmpty
                 case _                                      => false
               }
             case Left(_) => Nil // silently ignore parse failures in templates

@@ -504,4 +504,579 @@ class SyslExtensionTests extends SyslTestHelpers {
           |""".stripMargin) shouldBe 5
     }
   }
+
+  "same-module sibling extension visibility" - {
+
+    // Helper: compile + run a multi-file source set with no top-level "test" file.
+    // evalWithLibs forces a no-module-decl "test" key, which collides with the
+    // same-module-sibling case where every file declares the same module.
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "non-generic extension declared in sibling file dispatches without import" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |extension (s: string)
+            |    tag -> int = 7
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    "hi".tag
+            |""".stripMargin,
+      )) shouldBe 7
+    }
+
+    "generic-receiver extension declared in sibling file dispatches without import" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |extension [T](xs: []T)
+            |    head_or_zero -> T = xs[0]
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val xs: [3]int = [10, 20, 30]
+            |    xs[:].head_or_zero
+            |""".stripMargin,
+      )) shouldBe 10
+    }
+
+    "operator extension declared in sibling file dispatches via operator" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Bag
+            |    n: int
+            |
+            |extension (a: Bag)
+            |    #operator("<>")
+            |    merge(b: Bag) -> Bag = Bag(a.n + b.n)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val a = Bag(3)
+            |    val b = Bag(4)
+            |    val c = a <> b
+            |    c.n
+            |""".stripMargin,
+      )) shouldBe 7
+    }
+
+    "sibling extension dispatch with both files importing the same external module" in {
+      runMultiFile(Map(
+        "shoutlib/shout" ->
+          """module shoutlib
+            |
+            |loud(s: string) -> int = len(s) * 2
+            |""".stripMargin,
+        "sib/lib" ->
+          """module sib
+            |
+            |import shoutlib.*
+            |
+            |extension (s: string)
+            |    boom -> int = loud(s)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |import shoutlib.*
+            |
+            |main() -> int
+            |    "abc".boom
+            |""".stripMargin,
+      )) shouldBe 6
+    }
+  }
+
+  "same-module sibling trait impl visibility" - {
+
+    // Same helper as above — multi-file no-test-key.
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "non-generic multi-target operator impl declared in sibling file dispatches" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box
+            |    v: int
+            |
+            |trait Add[A, B, R]
+            |    #operator("|+|")
+            |    add(a: A, b: B) -> R
+            |
+            |impl Add[Box, Box, Box]
+            |    add(a: Box, b: Box) -> Box = Box(a.v + b.v)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val a = Box(1)
+            |    val b = Box(2)
+            |    val c = a |+| b
+            |    c.v
+            |""".stripMargin,
+      )) shouldBe 3
+    }
+
+    "generic operator impl declared in sibling file dispatches" in {
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Wrap[T]
+            |    v: T
+            |
+            |trait Map[A, F, R]
+            |    #operator("^^")
+            |    pmap(a: A, f: F) -> R
+            |
+            |impl[A, B] Map[Wrap[A], (A) -> B, Wrap[B]]
+            |    pmap(a: Wrap[A], f: (A) -> B) -> Wrap[B] = Wrap[B](f(a.v))
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val w = Wrap[int](7)
+            |    val r = w ^^ ((n: int) -> n + 1)
+            |    r.v
+            |""".stripMargin,
+      )) shouldBe 8
+    }
+
+    "non-operator trait impl declared in sibling file dispatches via direct call" in {
+      // Trait method dispatch (no operator) from a sibling-declared concrete impl.
+      // Calls the impl method through its mangled name route via the trait
+      // dispatch path — exercises the same machinery as operator dispatch but
+      // through the explicit method-name surface.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box
+            |    v: int
+            |
+            |trait Show[T]
+            |    show(t: T) -> int
+            |
+            |impl Show[Box]
+            |    show(t: Box) -> int = t.v + 100
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int
+            |    val b = Box(7)
+            |    Show.show(b)
+            |""".stripMargin,
+      )) shouldBe 107
+    }
+
+    "cross-module precedence still works after sibling-impl visibility lands" in {
+      // Regression: same-module sibling visibility must not accidentally
+      // unify cross-module impls. Importing module A's wildcard should still
+      // pull in A's impl normally; the sibling-merge path is keyed on the
+      // current module's other source files, not on every imported module.
+      runMultiFile(Map(
+        "alib/types" ->
+          """module alib
+            |
+            |struct Box
+            |    v: int
+            |
+            |trait Add[A, B, R]
+            |    #operator("|+|")
+            |    add(a: A, b: B) -> R
+            |
+            |impl Add[Box, Box, Box]
+            |    add(a: Box, b: Box) -> Box = Box(a.v + b.v + 1000)
+            |""".stripMargin,
+        "user/main" ->
+          """import alib.*
+            |
+            |main() -> int
+            |    val a = Box(5)
+            |    val b = Box(10)
+            |    val c = a |+| b
+            |    c.v
+            |""".stripMargin,
+      )) shouldBe 1015
+    }
+  }
+
+  "cross-file generic-fn body re-analysis (nested generic calls + parameterless)" - {
+
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "imported parameterless function auto-calls when referenced from sibling file" in {
+      // The narrowest gap: a parameterless function `f -> T` declared in one
+      // file is called bare from a sibling. Without the SymbolMeta isParameterless
+      // round-trip, the importing analyzer treats the bare reference as a
+      // function pointer instead of auto-calling, breaking type inference at
+      // every downstream use site.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |answer -> int = 42
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int = answer
+            |""".stripMargin,
+      )) shouldBe 42
+    }
+
+    "outer generic body calls inner generic on imported parameterless return" in {
+      // The fix-2 case: an outer generic function whose body calls an inner
+      // generic on a sibling-imported parameterless function. Cross-file
+      // generic-struct-instance link (`linkImportedGenericStructToTemplate`)
+      // is what makes this analyze — without it, unification of the inner
+      // generic's pattern against the parameterless's instance return type
+      // would fail to bind the type parameter.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box[A]
+            |    v: A
+            |
+            |eoi -> Box[unit] = Box[unit](())
+            |
+            |skip_w[A](b: Box[A]) -> Box[A] = b
+            |
+            |outer[A](p: Box[A]) -> Box[unit] = skip_w(eoi)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val p: Box[int] = Box[int](3)
+            |    val _ = outer[int](p)
+            |    0
+            |""".stripMargin,
+      )) shouldBe 0
+    }
+
+    "outer generic body uses sibling-defined operator-impl on generic struct instance" in {
+      // The fix-3 case: a user `#operator(...)` impl on a generic struct
+      // dispatches inside an outer generic's body when re-analyzed under a
+      // cross-file instantiation. Combines impl visibility (sysl@71cbdb89e)
+      // with struct-instance template linking (this fix).
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box[A]
+            |    v: A
+            |
+            |trait SeqL[A, B, R]
+            |    #operator("<~")
+            |    seql(a: A, b: B) -> R
+            |
+            |impl[A, B] SeqL[Box[A], Box[B], Box[A]]
+            |    seql(a: Box[A], b: Box[B]) -> Box[A] = a
+            |
+            |outer[A](p: Box[A], q: Box[unit]) -> Box[A] = p <~ q
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val p: Box[int] = Box[int](7)
+            |    val q: Box[unit] = Box[unit](())
+            |    val r = outer[int](p, q)
+            |    r.v
+            |""".stripMargin,
+      )) shouldBe 7
+    }
+
+    "regression: outer-just-calls-inner without operator/parameterless still works" in {
+      // Coverage for the boring case the prompt called out — confirms the
+      // new linking pass doesn't regress the simple cross-file generic-
+      // function call path.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |inner_call[A](v: A) -> A = v
+            |outer_call[A](v: A) -> A = inner_call(v)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int = outer_call[int](42)
+            |""".stripMargin,
+      )) shouldBe 42
+    }
+  }
+
+  "cross-file alias body resolution from impl method body (cyclic sibling deps)" - {
+
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "sibling-file impl method-body uses cross-file alias (Stamp + Result + Tagged shape)" in {
+      // The narrowest cyclic dep: lib defines Stamp + Result + Tagged alias;
+      // ops defines a trait whose impl body constructs Tagged[(A,B)] inside,
+      // referring to Stamp from lib. Without sibling-pre-collect breaking the
+      // cycle, ops can't analyze (Stamp invisible) and lib can't analyze
+      // (^^/<> trait machinery in ops invisible) — neither succeeds in
+      // pre-collection's iterative loop without the forward-decl pass.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Stamp
+            |    kind: int
+            |
+            |enum Result[A]
+            |    Ok(value: A)
+            |    Bad(msg: string)
+            |
+            |type Tagged[A] = new (Stamp) -> Result[A]
+            |""".stripMargin,
+        "sib/ops" ->
+          """module sib
+            |
+            |trait Combine[A, B, R]
+            |    #operator("<>")
+            |    combine(a: A, b: B) -> R
+            |
+            |impl[A, B] Combine[Tagged[A], Tagged[B], Tagged[(A, B)]]
+            |    combine(a: Tagged[A], b: Tagged[B]) -> Tagged[(A, B)] =
+            |        Tagged[(A, B)]((s: Stamp) ->
+            |            a(s) match
+            |                Ok(va) -> b(s) match
+            |                    Ok(vb) -> Ok((va, vb))
+            |                    Bad(m) -> Bad(m)
+            |                Bad(m) -> Bad(m))
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |mk_a -> Tagged[int] = Tagged[int]((s: Stamp) -> Ok(s.kind))
+            |mk_b -> Tagged[string] = Tagged[string]((s: Stamp) -> Ok("hi"))
+            |
+            |main() -> int =
+            |    val a = mk_a
+            |    val b = mk_b
+            |    val _ = a <> b
+            |    0
+            |""".stripMargin,
+      )) shouldBe 0
+    }
+
+    "sibling-file generic operator impl on alias-instance dispatches from third sibling" in {
+      // Stripped-down version of parsyl's split: Wrap + generic Map impl
+      // declared in ops, used from main via the operator. Distinct from the
+      // existing 'generic operator impl declared in sibling file' case in
+      // that ops references types declared in lib (cross-cycle).
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Wrap[T]
+            |    v: T
+            |""".stripMargin,
+        "sib/ops" ->
+          """module sib
+            |
+            |trait Map[A, F, R]
+            |    #operator("^^")
+            |    pmap(a: A, f: F) -> R
+            |
+            |impl[A, B] Map[Wrap[A], (A) -> B, Wrap[B]]
+            |    pmap(a: Wrap[A], f: (A) -> B) -> Wrap[B] = Wrap[B](f(a.v))
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val w = Wrap[int](7)
+            |    val r = w ^^ ((n: int) -> n + 1)
+            |    r.v
+            |""".stripMargin,
+      )) shouldBe 8
+    }
+
+    "sibling-file concrete impl on bare-string operand uses sibling-defined alias" in {
+      // The parsyl `impl Not[string, Parser[unit]]` shape: a concrete impl
+      // whose target list mixes a built-in (string) and a sibling-defined
+      // alias instance (Parser[unit]). The sibling-pre-register's concrete-
+      // impl resolution must be able to resolve Parser[unit] before the
+      // defining sibling's body has analyzed.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Inp
+            |    n: int
+            |
+            |type Parser[A] = new (Inp) -> A
+            |
+            |make_int(s: string) -> Parser[int] = Parser[int]((i: Inp) -> 42)
+            |""".stripMargin,
+        "sib/ops" ->
+          """module sib
+            |
+            |trait Lift[A, B, R]
+            |    #operator("<<<")
+            |    lift(a: A, b: B) -> R
+            |
+            |impl Lift[string, string, Parser[int]]
+            |    lift(a: string, b: string) -> Parser[int] = make_int(a)
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val p = "foo" <<< "bar"
+            |    val i: Inp = Inp(0)
+            |    p(i)
+            |""".stripMargin,
+      )) shouldBe 42
+    }
+  }
+
+  "cross-file struct method visibility under accumulated state" - {
+
+    def runMultiFile(sources: Map[String, String]): Long =
+      val driver = new SyslDriver
+      val result = driver.compile(sources)
+      val merged = TProgram(result.units.flatMap(_.typed.decls))
+      val interp = new SyslInterpreter()
+      interp.run(merged)
+
+    "struct method declared in one file dispatches from sibling under trait+impl noise" in {
+      // Three files. File 1: struct + method + trait + generic impl + #operator
+      // (the "noise" that causes accumulated module state to interfere).
+      // File 2: a function calling the method. File 3: a #test using both.
+      // Without sibling-pre-collect handling free-fn (struct-method) decls,
+      // file 2's analyzer would fail with `struct S has no method 'doubled'`.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct S
+            |    v: int
+            |
+            |S.doubled() -> int = self.v * 2
+            |
+            |trait Marker[A, R]
+            |    #operator("@@")
+            |    mark(a: A) -> R
+            |
+            |impl Marker[S, S]
+            |    mark(s: S) -> S = s
+            |""".stripMargin,
+        "sib/use" ->
+          """module sib
+            |
+            |use_s(s: S) -> int = s.doubled()
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val s = S(7)
+            |    use_s(s)
+            |""".stripMargin,
+      )) shouldBe 14
+    }
+
+    "struct method declared after many unrelated decls in same file dispatches from sibling" in {
+      // File 1: struct + many unrelated declarations + method at the end.
+      // File 2 calls the method. The method's position in the source order
+      // is intentionally deep so the previously-failing under-accumulated-
+      // -state shape is exercised.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Box
+            |    v: int
+            |
+            |dummy_a -> int = 1
+            |dummy_b -> int = 2
+            |dummy_c -> int = 3
+            |dummy_d -> int = 4
+            |dummy_e -> int = 5
+            |
+            |type Wrap[A] = new A
+            |
+            |unrelated_generic[T](x: T) -> T = x
+            |
+            |Box.doubled() -> int = self.v * 2
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val b = Box(11)
+            |    b.doubled()
+            |""".stripMargin,
+      )) shouldBe 22
+    }
+
+    "cross-file struct field access from sibling-declared free function" in {
+      // Mirrors parsyl's atoms.lsysl reading `inp.source[i]` where Input is
+      // declared in parsyl.lsysl. Without filling sibling struct fields at
+      // pre-register time (not just placeholder), body analysis throws
+      // `no field 'source'`.
+      runMultiFile(Map(
+        "sib/lib" ->
+          """module sib
+            |
+            |struct Inp
+            |    source: int
+            |    offset: int
+            |""".stripMargin,
+        "sib/atoms" ->
+          """module sib
+            |
+            |read_at(inp: Inp) -> int = inp.source + inp.offset
+            |""".stripMargin,
+        "sib/main" ->
+          """module sib
+            |
+            |main() -> int =
+            |    val i = Inp(40, 2)
+            |    read_at(i)
+            |""".stripMargin,
+      )) shouldBe 42
+    }
+  }
 }

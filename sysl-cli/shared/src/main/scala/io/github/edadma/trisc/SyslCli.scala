@@ -30,9 +30,26 @@ case class ProveCommand(
     inputs: Seq[String] = Seq.empty,
     output: Option[String] = None,
 ) extends SyslCommand
+case class FetchCommand(
+    root: String = ".",
+) extends SyslCommand
+case class UpdateCommand(
+    root: String = ".",
+) extends SyslCommand
+case class TreeCommand(
+    root: String = ".",
+) extends SyslCommand
+
+/** How the CLI should treat `sysl.lock` for this invocation.
+ *  - `Default`: lock is written/refreshed as needed; resolver may hit the network for git refs.
+ *  - `Locked`: lock must already match what the resolver would produce; otherwise error. Lock is not rewritten.
+ *  - `Frozen`: stricter `Locked` — also forbids any network IO. Every git URL must already be pinned by the lock and present in the cache. */
+enum LockMode:
+  case Default, Locked, Frozen
 
 case class SyslConfig(
     command: SyslCommand = CompileCommand(),
+    lockMode: LockMode = LockMode.Default,
 )
 
 object SyslCli:
@@ -191,6 +208,51 @@ object SyslCli:
               )
             ),
         ),
+      // fetch: resolve the dep graph and write/refresh sysl.lock
+      cmd("fetch")
+        .text("Resolve [dependencies] and write sysl.lock without compiling")
+        .action((_, c) => c.copy(command = FetchCommand()))
+        .children(
+          arg[String]("[root]")
+            .optional()
+            .text("Project or workspace root (default: cwd)")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case fc: FetchCommand => fc.copy(root = v)
+                case other            => other
+              )
+            ),
+        ),
+      // update: re-resolve the dep graph and overwrite sysl.lock
+      cmd("update")
+        .text("Re-resolve [dependencies] and rewrite sysl.lock from scratch")
+        .action((_, c) => c.copy(command = UpdateCommand()))
+        .children(
+          arg[String]("[root]")
+            .optional()
+            .text("Project or workspace root (default: cwd)")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case uc: UpdateCommand => uc.copy(root = v)
+                case other             => other
+              )
+            ),
+        ),
+      // tree: print the resolved dep graph as an indented tree
+      cmd("tree")
+        .text("Print the resolved dependency graph as an indented tree")
+        .action((_, c) => c.copy(command = TreeCommand()))
+        .children(
+          arg[String]("[root]")
+            .optional()
+            .text("Project or workspace root (default: cwd)")
+            .action((v, c) =>
+              c.copy(command = c.command match
+                case tc: TreeCommand => tc.copy(root = v)
+                case other           => other
+              )
+            ),
+        ),
       // prove: emit equivalent WhyML for offline discharge with Why3
       cmd("prove")
         .text("Translate Sysl source to WhyML (input language for the Why3 verifier)")
@@ -241,6 +303,18 @@ object SyslCli:
             case other              => other
           )
         ),
+      // --locked / --frozen apply to every command that resolves dependencies.
+      // Made top-level (rather than per-command) so the flag works the same
+      // way regardless of subcommand. `--frozen` implies `--locked` plus
+      // "no network IO" — git refs must already be pinned in `sysl.lock`.
+      opt[Unit]("locked")
+        .text("Require sysl.lock to already match what the resolver would produce; do not modify it")
+        .action((_, c) =>
+          c.copy(lockMode = if c.lockMode == LockMode.Frozen then c.lockMode else LockMode.Locked)
+        ),
+      opt[Unit]("frozen")
+        .text("Like --locked, but also forbid network access (git deps must be pinned and cached)")
+        .action((_, c) => c.copy(lockMode = LockMode.Frozen)),
       checkConfig(c =>
         c.command match
           case CompileCommand(inputs, _, _, _, _) if inputs.isEmpty =>
@@ -253,6 +327,8 @@ object SyslCli:
             failure("No input files specified for test")
           case ProveCommand(inputs, _) if inputs.isEmpty =>
             failure("No input files specified for prove")
+          case _: UpdateCommand if c.lockMode != LockMode.Default =>
+            failure("--locked / --frozen are incompatible with `update` (which exists to mutate the lock)")
           case _ => success
       ),
     )
@@ -281,17 +357,26 @@ object SyslCli:
 
   def execute(config: SyslConfig): Unit =
     try
+      val lm = config.lockMode
       config.command match
-        case cmd: CompileCommand => executeCompile(cmd)
-        case cmd: RunCommand     => executeRun(cmd)
+        case cmd: CompileCommand => executeCompile(cmd, lm)
+        case cmd: RunCommand     => executeRun(cmd, lm)
         case cmd: DocCommand     => executeDoc(cmd)
-        case cmd: TestCommand    => executeTest(cmd)
+        case cmd: TestCommand    => executeTest(cmd, lm)
         case cmd: ProveCommand   => executeProve(cmd)
+        case cmd: FetchCommand   => executeFetch(cmd, lm)
+        case cmd: UpdateCommand  => executeUpdate(cmd)
+        case cmd: TreeCommand    => executeTree(cmd)
     catch case CliError(_) => () // already printed
 
-  private def executeCompile(cmd: CompileCommand): Unit =
+  private def executeCompile(cmd: CompileCommand, lockMode: LockMode): Unit =
     val sources = resolveSources(cmd.inputs)
-    val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
+    val resolved = resolveDeps(cmd.inputs, ignoreLockPins = false, lockMode) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    applyLockMode(resolved, lockMode)
+    val inputDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList
+    val baseDirs = (inputDirs ++ resolved.searchRoots).distinct match
       case Nil => List(".")
       case dirs => dirs
 
@@ -336,13 +421,16 @@ object SyslCli:
 
       case _ => System.err.println(s"Unknown emit format: ${cmd.emit}")
 
-  private def executeRun(cmd: RunCommand): Unit =
+  private def executeRun(cmd: RunCommand, lockMode: LockMode): Unit =
     val initialSources = resolveSources(cmd.inputs)
     val argv = cmd.programArgs.toArray
 
-    val baseDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList match
-      case Nil => List(".")
-      case dirs => dirs
+    val resolved = resolveDeps(cmd.inputs, ignoreLockPins = false, lockMode) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    applyLockMode(resolved, lockMode)
+    val inputDirs = cmd.inputs.filter(p => io.exists(p) && io.isDirectory(p)).toList
+    val baseDirs = (inputDirs ++ resolved.searchRoots ++ List(".")).distinct
     val sources = resolveTransitiveSources(initialSources, baseDirs)
     val config = if cmd.noContracts then Map("contracts" -> "off") else Map.empty[String, String]
     val driver = new SyslDriver(Some(io), baseDirs, config = config, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
@@ -954,17 +1042,65 @@ object SyslCli:
       case other =>
         Fail(s"unexpected CPU state: $other at PC=0x${cpu.pc.toHexString}", captured)
 
-  private def executeTest(cmd: TestCommand): Unit =
+  private def executeTest(cmd: TestCommand, lockMode: LockMode): Unit =
     if cmd.backend == "all" then
       System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', or 'trisc')")
       throw CliError("unsupported backend")
 
-    // Always use project root as base so module paths resolve correctly.
-    // e.g. std/regex/regex.lsysl → key "std/regex/regex" → module "std.regex"
-    // This works regardless of input depth (std/, std/regex/, std/regex/regex.lsysl).
-    val baseDirs = List(".")
+    val resolved = resolveDeps(cmd.inputs, ignoreLockPins = false, lockMode) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    // Workspace-level resolve already enumerates every member + transitive
+    // path dep, so a single lock write at the workspace root captures the
+    // whole graph (matches Cargo's "one Cargo.lock per workspace" rule).
+    applyLockMode(resolved, lockMode)
+
+    SyslResolver.workspaceMemberDirs(io, resolved) match
+      case Some(members) =>
+        // Workspace mode: each member is its own compilation. Re-resolve and
+        // run tests per member so module keys don't collide between members
+        // and each member sees only its own [dependencies].
+        val root = resolved.projectRoot.get
+        println(s"workspace at $root: testing ${members.size} member(s)")
+        var totalPassed = 0
+        var totalFailed = 0
+        var totalSkipped = 0
+        val workspaceStart = System.nanoTime()
+        for member <- members do
+          println(s"\n— member: $member")
+          val perMember = resolveDeps(Seq(member), ignoreLockPins = false, lockMode) match
+            case Right(r) => r
+            case Left(msg) => fail(s"error in workspace member $member: $msg")
+          val (p, f, s) = runProjectTests(cmd, Seq(member), perMember)
+          totalPassed += p
+          totalFailed += f
+          totalSkipped += s
+        val workspaceMs = (System.nanoTime() - workspaceStart) / 1e6
+        println(f"\nworkspace total: $totalPassed passed, $totalFailed failed, $totalSkipped skipped — $workspaceMs%.1fms")
+        if totalFailed > 0 then throw CliError(s"$totalFailed test(s) failed")
+      case None =>
+        val (_, failed, _) = runProjectTests(cmd, cmd.inputs, resolved)
+        if failed > 0 then throw CliError(s"$failed test(s) failed")
+
+  /** Run the test discovery + execution pipeline for a single project (or for
+   *  legacy "no project root" inputs). Returns (passed, failed, skipped) so
+   *  the workspace dispatcher can aggregate. Throws CliError only on hard
+   *  errors (missing input file, resolver failure) — failing tests are
+   *  reported via the return tuple so the caller decides how to surface
+   *  workspace-wide totals.
+   */
+  private def runProjectTests(
+      cmd: TestCommand,
+      inputs: Seq[String],
+      resolved: ResolvedDeps,
+  ): (Int, Int, Int) =
+    // baseDirs always include "." so that legacy invocations from inside the
+    // trisc repo (sub-dir tests with no sysl.toml in scope) keep working.
+    // When a project + path deps are in scope, we add each dep's project root
+    // to baseDirs so import-based source discovery can find dep modules.
+    val baseDirs = (List(".") ++ resolved.searchRoots).distinct
     val initialSources: Map[String, String] =
-      cmd.inputs.flatMap { p =>
+      inputs.flatMap { p =>
         if !io.exists(p) then fail(s"error: file not found: $p")
         if io.isDirectory(p) then
           collectSyslFiles(p).map(f => resolveSource(f, ""))
@@ -1077,7 +1213,239 @@ object SyslCli:
     // is silent (the user didn't ask for those tests in the first place).
     val skipped = inScopeDiscovered.size - filtered.size
     println(f"\n$passed passed, $failed failed, $skipped skipped — $totalMs%.1fms")
-    if failed > 0 then throw CliError(s"$failed test(s) failed")
+    (passed, failed, skipped)
+
+  /** `sysl fetch [root]` — resolve the dep graph rooted at `root` (or cwd) and
+   *  write `sysl.lock` next to the manifest if it would change. No code is
+   *  compiled, no tests run. For git deps, honors any sha pins in an existing
+   *  lock so a re-run with no manifest changes does no network IO. */
+  private def executeFetch(cmd: FetchCommand, lockMode: LockMode): Unit =
+    val resolved = resolveDeps(Seq(cmd.root), ignoreLockPins = false, lockMode) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    resolved.projectRoot match
+      case None =>
+        println(s"sysl: no sysl.toml in scope at ${cmd.root}; nothing to lock")
+      case Some(root) => lockMode match
+        case LockMode.Default =>
+          SyslLock.writeIfChanged(io, resolved) match
+            case Some(true)  => println(s"sysl: wrote ${SyslLock.LockFile} at $root")
+            case Some(false) => println(s"sysl: ${SyslLock.LockFile} at $root is up to date")
+            case None        => println(s"sysl: $root has no resolvable packages; nothing to lock")
+        case _ =>
+          // --locked / --frozen: byte-compare instead of writing. applyLockMode
+          // emits the standard "out of date" diagnostic; if it returns we know
+          // the lock matched.
+          applyLockMode(resolved, lockMode)
+          println(s"sysl: ${SyslLock.LockFile} at $root is up to date")
+
+  /** `sysl update [root]` — re-resolve the dep graph from scratch and rewrite
+   *  the lock unconditionally. Git deps re-resolve their refs (so a `branch
+   *  = "main"` dep advances to the new HEAD); path deps just refresh the
+   *  recorded directory. Reports per-package version transitions for any
+   *  dep whose `<name> <version>` (or sha) actually changed. */
+  private def executeUpdate(cmd: UpdateCommand): Unit =
+    val priorLock = SyslResolver.findProjectRoot(io, Seq(cmd.root)) match
+      case None => None
+      case Some(root) => SyslLock.loadFrom(io, root) match
+          case Right(opt) => opt
+          // A version-too-new lock is a hard failure even for `update`: we can't
+          // safely overwrite the user's newer file with our older format. Any
+          // other parse failure is just "no diff baseline" — proceed but warn.
+          case Left(e: SyslLock.LockLoadError.IncompatibleVersion) =>
+            fail(s"error: ${e.message}")
+          case Left(SyslLock.LockLoadError.Malformed(msg)) =>
+            System.err.println(s"warning: discarding unparseable prior lock: $msg")
+            None
+    val resolved = resolveDeps(Seq(cmd.root), ignoreLockPins = true) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    resolved.projectRoot match
+      case None =>
+        println(s"sysl: no sysl.toml in scope at ${cmd.root}; nothing to update")
+      case Some(root) =>
+        val newLock = SyslLock.fromResolved(io, resolved)
+        if newLock.packages.isEmpty then
+          println(s"sysl: $root has no resolvable packages; nothing to update")
+        else
+          for line <- formatUpdateDiff(priorLock, newLock) do println(line)
+          val path = io.joinPath(root, SyslLock.LockFile)
+          io.writeFile(path, SyslLock.render(newLock))
+          println(s"sysl: rewrote ${SyslLock.LockFile} at $root")
+
+  /** `sysl tree [root]` — resolve and print the dep graph as an indented
+   *  tree, like `cargo tree`. Single-package roots produce one tree;
+   *  workspaces produce one tree per member. Cycles short-circuit with a
+   *  `(*)` marker so a self-referential dep doesn't recurse forever. */
+  private def executeTree(cmd: TreeCommand): Unit =
+    val resolved = resolveDeps(Seq(cmd.root), ignoreLockPins = false) match
+      case Right(r) => r
+      case Left(msg) => fail(s"error: $msg")
+    resolved.projectRoot match
+      case None =>
+        println(s"sysl: no sysl.toml in scope at ${cmd.root}; nothing to print")
+      case Some(root) =>
+        resolved.manifests.get(root) match
+          case Some(WorkspaceManifest(ws)) =>
+            for (member, idx) <- ws.members.zipWithIndex do
+              if idx > 0 then println()
+              val memberDir = SyslResolver.resolveDepPath(io, root, member)
+              printTree(resolved, memberDir, Set.empty, "", isLast = true, isRoot = true)
+          case Some(PackageManifest(_)) =>
+            printTree(resolved, root, Set.empty, "", isLast = true, isRoot = true)
+          case _ =>
+            println(s"sysl: $root has no [package] or [workspace] table; nothing to print")
+
+  /** Cargo-style box-drawing tree print. `prefix` carries the accumulated
+   *  vertical bars from outer levels; `isLast` decides between `└──` and
+   *  `├──` for this node; `visited` is the cycle guard (compares by dep
+   *  directory because that's the unique identity post-resolution). */
+  private def printTree(
+      resolved: ResolvedDeps,
+      dir: String,
+      visited: Set[String],
+      prefix: String,
+      isLast: Boolean,
+      isRoot: Boolean,
+  ): Unit =
+    val label = treeLabel(resolved, dir)
+    val cycleMarker = if visited.contains(dir) then " (*)" else ""
+    val branch =
+      if isRoot then ""
+      else if isLast then "└── "
+      else "├── "
+    println(s"$prefix$branch$label$cycleMarker")
+    if visited.contains(dir) then return
+    val nextVisited = visited + dir
+    val children = childEdges(resolved, dir)
+    val childPrefix =
+      if isRoot then prefix
+      else prefix + (if isLast then "    " else "│   ")
+    for ((_, childDir), idx) <- children.zipWithIndex do
+      val childIsLast = idx == children.length - 1
+      printTree(resolved, childDir, nextVisited, childPrefix, childIsLast, isRoot = false)
+
+  /** "<name> v<version> (<source>)" for one node. Falls back to the directory
+   *  itself when no [package] is declared (synthetic / marker manifests). */
+  private def treeLabel(resolved: ResolvedDeps, dir: String): String =
+    resolved.manifests.get(dir).flatMap(_.pkg) match
+      case Some(pkg) =>
+        val sourceTag = resolved.gitSources.get(dir) match
+          case Some(g) => s" (git+${g.url}#${g.sha.take(7)})"
+          case None =>
+            // No git source ⇒ either path dep or local. We show "(local)" for the
+            // project root (or workspace member) and the absolute path otherwise.
+            if isLocalDir(resolved, dir) then " (local)"
+            else s" (${io.absolutePath(dir)})"
+        s"${pkg.name} v${pkg.version}$sourceTag"
+      case None => dir
+
+  /** Edges out of `dir`, in manifest declaration order. Returns
+   *  `(alias, depDir)`; the alias is what the parent's `[dependencies]` table
+   *  declared, the dir is the resolved location. */
+  private def childEdges(resolved: ResolvedDeps, dir: String): List[(String, String)] =
+    resolved.manifests.get(dir).flatMap(_.pkg) match
+      case None => Nil
+      case Some(pkg) =>
+        pkg.deps.toList.flatMap { case (alias, _) =>
+          resolved.depResolutions.get((dir, alias)).map(d => (alias, d))
+        }
+
+  /** A "local" directory is the project root in single-package mode, or a
+   *  workspace member in workspace mode. Mirrors `SyslLock.computeLocalDirs`
+   *  but kept private here because the tree printer needs it for labeling. */
+  private def isLocalDir(resolved: ResolvedDeps, dir: String): Boolean =
+    resolved.projectRoot match
+      case None => false
+      case Some(root) =>
+        resolved.manifests.get(root) match
+          case Some(WorkspaceManifest(ws)) =>
+            ws.members.exists(m => SyslResolver.resolveDepPath(io, root, m) == dir)
+          case Some(PackageManifest(_)) => dir == root
+          case _ => false
+
+  /** Cargo-style "Updating <name> v0.1.0 -> v0.2.0" lines, plus sha
+   *  transitions for git deps. Empty when nothing changed (so the user
+   *  sees only the "rewrote" confirmation). */
+  private def formatUpdateDiff(prior: Option[SyslLock], next: SyslLock): List[String] =
+    val priorByName: Map[String, LockedPackage] =
+      prior.map(_.packages.map(p => p.name -> p).toMap).getOrElse(Map.empty)
+    val out = List.newBuilder[String]
+    for p <- next.packages do
+      priorByName.get(p.name) match
+        case None =>
+          if prior.isDefined then out += s"sysl: adding ${p.name} v${p.version}"
+        case Some(old) =>
+          if old.version != p.version then
+            out += s"sysl: updating ${p.name} v${old.version} -> v${p.version}"
+          else (old.source, p.source) match
+            case (Some(LockedSource.Git(_, _, _, oldSha)), Some(LockedSource.Git(_, _, _, newSha)))
+                if oldSha != newSha =>
+              out += s"sysl: updating ${p.name} (${oldSha.take(7)} -> ${newSha.take(7)})"
+            case _ => ()
+    val nextNames = next.packages.map(_.name).toSet
+    for p <- prior.toList.flatMap(_.packages) if !nextNames.contains(p.name) do
+      out += s"sysl: removing ${p.name} v${p.version}"
+    out.result()
+
+  /** Helper that wraps `SyslResolver.resolve` to pull in the JVM-installed
+   *  GitFetcher (if any) and pre-load the on-disk `sysl.lock` for ref pins.
+   *
+   *  `ignoreLockPins = true` is `sysl update`'s mode — it forces re-resolution
+   *  of git refs even when the lock could satisfy them. Everything else
+   *  (build/test/run/fetch) defaults to honoring pins.
+   *
+   *  `lockMode` selects between Default (network allowed, lock writable),
+   *  Locked (network allowed, lock must already match), and Frozen (no
+   *  network, lock must already match and pin every git url). */
+  private def resolveDeps(
+      inputs: Seq[String],
+      ignoreLockPins: Boolean,
+      lockMode: LockMode = LockMode.Default,
+  ): Either[String, ResolvedDeps] =
+    val pinsResult: Either[String, Map[(String, String, String), String]] =
+      if ignoreLockPins then Right(Map.empty)
+      else SyslResolver.findProjectRoot(io, inputs) match
+          case None       => Right(Map.empty)
+          case Some(root) =>
+            // IncompatibleVersion is fatal (would silently downgrade a newer
+            // lock). Malformed prints a warning and falls back to an empty pin
+            // map so a corrupt lock doesn't break a normal build — the next
+            // write will replace it with a valid one. `--locked` adds a
+            // stricter byte-compare downstream via `applyLockMode`.
+            SyslLock.loadFrom(io, root) match
+              case Right(opt) => Right(opt.map(SyslLock.pinsFor).getOrElse(Map.empty))
+              case Left(e: SyslLock.LockLoadError.IncompatibleVersion) => Left(e.message)
+              case Left(SyslLock.LockLoadError.Malformed(msg)) =>
+                System.err.println(s"warning: ignoring unparseable sysl.lock: $msg")
+                Right(Map.empty)
+    pinsResult.flatMap(
+      SyslResolver.resolve(io, inputs, GitFetcherProvider.instance, _, offline = lockMode == LockMode.Frozen)
+    )
+
+  /** When `lockMode` is Default, write/refresh the lock as usual. Otherwise
+   *  byte-compare the rendered lock against any on-disk `sysl.lock` and abort
+   *  the command if they differ — the equivalent of Cargo's `--locked`/`--frozen`
+   *  consistency check. Skips silently when `writeIfChanged` itself would skip
+   *  (no project root, marker-only manifest, or zero packages). */
+  private def applyLockMode(resolved: ResolvedDeps, lockMode: LockMode): Unit =
+    lockMode match
+      case LockMode.Default => SyslLock.writeIfChanged(io, resolved)
+      case _ =>
+        val newLock = SyslLock.fromResolved(io, resolved)
+        if newLock.packages.isEmpty then return
+        SyslLock.lockPathFor(io, resolved) match
+          case None => ()
+          case Some(path) =>
+            val rendered = SyslLock.render(newLock)
+            val flag = if lockMode == LockMode.Frozen then "--frozen" else "--locked"
+            if !io.exists(path) then
+              fail(s"error: $flag specified but ${SyslLock.LockFile} is missing at $path; run `sysl fetch` first")
+            else
+              val current = try io.readFile(path) catch case t: Throwable =>
+                fail(s"error: $flag: cannot read $path: ${t.getMessage}")
+              if current != rendered then
+                fail(s"error: $flag: ${SyslLock.LockFile} at $path is out of date; run `sysl fetch` to refresh, or `sysl update` to re-resolve")
 
   private def executeProve(cmd: ProveCommand): Unit =
     // Phase 1: parse the input file and translate to WhyML directly. We do not run the

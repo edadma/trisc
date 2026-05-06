@@ -129,7 +129,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       def keep(name: String): Boolean =
         if seen.contains(name) then false else { seen += name; true }
       val deduped = program0.decls.filter {
-        case TFunDecl(name, _, _, _, _, _, _, _, _) => keep(name)
+        case TFunDecl(name, _, _, _, _, _, _, _, _, _) => keep(name)
         case TVarDecl(name, _, _, _, _, _, _) => keep(name)
         case TExternFuncDecl(name, _, _) => keep(name)
         case TExternVarDecl(name, _) => keep(name)
@@ -157,12 +157,12 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
 
     // Collect all declared function names for itable resolution
-    declaredFunctions = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _, _, _) => name }.toSet
+    declaredFunctions = program.decls.collect { case TFunDecl(name, _, _, _, _, _, _, _, _, _) => name }.toSet
 
     // Scan for deinit methods: functions named TypeName_deinit
     for decl <- program.decls do
       decl match
-        case TFunDecl(name, _, _, _, _, _, _, _, _) if name.endsWith("_deinit") =>
+        case TFunDecl(name, _, _, _, _, _, _, _, _, _) if name.endsWith("_deinit") =>
           val structName = name.indexOf("__") match
             case -1 => name.dropRight(7)
             case i  => name.substring(i + 2).dropRight(7)
@@ -370,7 +370,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // Emit extern declarations for malloc/free based on actual references in generated code.
     // Scan the structured Instr array directly — no string formatting needed.
     val definedSymbols = (for decl <- program.decls yield decl match
-      case TFunDecl(name, _, _, _, _, _, _, _, _) => Some(name)
+      case TFunDecl(name, _, _, _, _, _, _, _, _, _) => Some(name)
       case TVarDecl(name, _, _, _, _, _, _) => Some(name)
       case _ => None).flatten.toSet
     def referencesSymbol(sym: String): Boolean =
@@ -943,7 +943,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // set are external (different compilation unit) and may return a heap-env
     // closure we can't inspect. Used to flag TCall-returning-FuncType
     // conservatively without over-pulling extern free for purely-local programs.
-    val localFuncs = program.decls.collect { case TFunDecl(n, _, _, _, _, _, _, _, _) => n }.toSet
+    val localFuncs = program.decls.collect { case TFunDecl(n, _, _, _, _, _, _, _, _, _) => n }.toSet
     def scanE(e: TExpr): Boolean = e match
       case TBinary(_, "+", _, SyslType.StringType) => true
       case _: TStringFromPtr | _: TStringFromSlice | _: TStr | _: TFmtStr => true
@@ -1020,7 +1020,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case _ => false
 
     program.decls.exists {
-      case TFunDecl(_, _, _, body, _, _, _, _, _) => body match
+      case TFunDecl(_, _, _, body, _, _, _, _, _, _) => body match
         case TExprBody(e) => scanE(e)
         case TBlockBody(stmts) => stmts.exists(scanS)
       case TVarDecl(_, _, init, _, _, _, _) => scanE(init)

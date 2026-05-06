@@ -19,3 +19,4 @@ object JvmFileOps extends FileOps:
   def fileName(path: String): String = new File(path).getName
   def mkdirs(path: String): Unit = new File(path).mkdirs()
   def joinPath(dir: String, name: String): String = new File(dir, name).getPath
+  def absolutePath(path: String): String = new File(path).getAbsoluteFile.getPath

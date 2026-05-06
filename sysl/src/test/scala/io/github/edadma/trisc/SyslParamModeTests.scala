@@ -215,15 +215,15 @@ class SyslParamModeTests extends SyslTestHelpers {
 
     val Some(metaIn) = ModuleMeta.fromSmeta(smetaText): @unchecked
     metaIn.symbols.find(_.name.endsWith("set_to")).get.typ match
-      case SymbolMeta.Kind.Func(_, _, _, _, modes, _) =>
+      case SymbolMeta.Kind.Func(_, _, _, _, modes, _, _) =>
         modes shouldBe List(ParamMode.Out, ParamMode.In)
       case other => fail(s"expected Func, got $other")
     metaIn.symbols.find(_.name.endsWith("inc_by")).get.typ match
-      case SymbolMeta.Kind.Func(_, _, _, _, modes, _) =>
+      case SymbolMeta.Kind.Func(_, _, _, _, modes, _, _) =>
         modes shouldBe List(ParamMode.Inout, ParamMode.In)
       case other => fail(s"expected Func, got $other")
     metaIn.symbols.find(_.name.endsWith("add")).get.typ match
-      case SymbolMeta.Kind.Func(_, _, _, _, modes, _) =>
+      case SymbolMeta.Kind.Func(_, _, _, _, modes, _, _) =>
         modes shouldBe Nil // all-In omitted
       case other => fail(s"expected Func, got $other")
   }

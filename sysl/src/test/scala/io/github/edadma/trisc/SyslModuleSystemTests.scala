@@ -92,7 +92,7 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     merged.symbols.length shouldBe 2
     val strlen = merged.symbols.find(_.name == "strlen").get
     strlen.typ match
-      case SymbolMeta.Kind.Func(params, _, _, _, _, _) => params.length shouldBe 1
+      case SymbolMeta.Kind.Func(params, _, _, _, _, _, _) => params.length shouldBe 1
       case _ => fail("expected Func")
     merged.symbols.exists(_.name == "strcpy") shouldBe true
   }
@@ -365,5 +365,189 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     val typed = (new SyslAnalyzer).analyze(ast)
     val meta = ModuleMeta.fromProgram(typed)
     meta.symbols.head.sourceFile shouldBe None
+  }
+
+  // ===== Generic type aliases across files of the same module =====
+  // A generic type alias defined in one file of a multi-file module must be
+  // visible (with full generic syntax) from any other file in the same module.
+  // Mirrors how generic structs and generic functions already cross file
+  // boundaries within a module.
+
+  "generic newtype alias visible across files in same module" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+      "boxlib/use" ->
+        """module boxlib
+          |unbox(b: Box[int]) -> int = int(b)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "generic alias-of-function-type visible across files in same module" in {
+    val sources = Map(
+      "parselib/types" ->
+        """module parselib
+          |type Parser[A] = new (int) -> A
+          |""".stripMargin,
+      "parselib/runner" ->
+        """module parselib
+          |run(p: Parser[int], x: int) -> int = p(x)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "generic alias usable as return type in another file" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |""".stripMargin,
+      "boxlib/use" ->
+        """module boxlib
+          |make_int_box(v: int) -> Box[int] = Box[int](v)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "generic alias passed through another generic across files" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+      "boxlib/use" ->
+        """module boxlib
+          |take_any[A](b: Box[A]) -> Box[A] = b
+          |make_string_box(s: string) -> Box[string] = take_any[string](mk_box(s))
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "generic alias visible across module boundary (cross-module import)" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+      "app" ->
+        """import boxlib.*
+          |unbox(b: Box[int]) -> int = int(b)
+          |main() -> int = unbox(mk_box(42))
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val merged = TProgram(result.units.flatMap(_.typed.decls))
+    val interp = new SyslInterpreter()
+    interp.run(merged) shouldBe 42
+  }
+
+  "generic alias round-trips through SMETA" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val unit = result.units.head
+    // Round-trip: serialize, parse back, verify the generic alias survives
+    val parsed = ModuleMeta.fromSmeta(unit.smeta).get
+    val aliasTemplate = parsed.genericTemplates.collectFirst {
+      case ta @ TypeAliasDeclAST("Box", _, tps, _, isNew, _, _, _) if tps.nonEmpty => (ta, tps, isNew)
+    }
+    aliasTemplate.isDefined shouldBe true
+    aliasTemplate.get._2 shouldBe List("A")
+    aliasTemplate.get._3 shouldBe true
+  }
+
+  "executable test runs across files via interpreter" in {
+    val sources = Map(
+      "boxlib/lib" ->
+        """module boxlib
+          |type Box[A] = new A
+          |mk_box[A](v: A) -> Box[A] = Box[A](v)
+          |""".stripMargin,
+      "boxlib/use" ->
+        """module boxlib
+          |unbox(b: Box[int]) -> int = int(b)
+          |main() -> int
+          |    val b: Box[int] = mk_box(42)
+          |    unbox(b)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    val merged = TProgram(result.units.flatMap(_.typed.decls))
+    val interp = new SyslInterpreter()
+    interp.run(merged) shouldBe 42
+  }
+
+  // ===== Pre-collection carries generic templates in cached meta =====
+  // Regression for the bug where pre-collection's cached meta dropped
+  // genericTemplates (passed `Nil` instead of extracting them like Step 5
+  // did). That left generic types invisible to dependent modules during
+  // pre-collection, cascading failures that left empty package metas and
+  // surfacing as misleading "unknown type" errors in sibling files.
+
+  "cross-module generic enum visible during pre-collection" in {
+    // Module A defines a generic enum. Module B imports it and uses it in a
+    // function signature. With the bug, B fails pre-collect ("'Result' is not
+    // a generic type"), leaving B's package meta empty, which would cascade
+    // to any sibling file in B's module.
+    val sources = Map(
+      "alib/types" ->
+        """module alib
+          |enum Result[A, E]
+          |    Ok(value: A)
+          |    Err(error: E)
+          |""".stripMargin,
+      "blib/use" ->
+        """module blib
+          |import alib.*
+          |wrap(x: int) -> Result[int, string] = Ok(x)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    noException should be thrownBy driver.compile(sources)
+  }
+
+  "cross-module generic struct visible during pre-collection (carries through templates)" in {
+    // Module A defines a generic struct in one file. Module B (separate
+    // module) imports A and uses A's generic in a function. With the
+    // pre-collection bug, A's pre-collect produced a cached meta with empty
+    // genericTemplates, so B's pre-collect failed with "'Box' is not a
+    // generic type".
+    val sources = Map(
+      "alib/box" ->
+        """module alib
+          |struct Box[A]
+          |    value: A
+          |""".stripMargin,
+      "blib/use" ->
+        """module blib
+          |import alib.*
+          |make_int_box(v: int) -> Box[int] = Box[int](v)
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    try driver.compile(sources) catch
+      case e: Throwable => fail(s"compile failed: ${e.getMessage}", e)
   }
 }
