@@ -1534,7 +1534,14 @@ projection resolves via the bound trait's matching impl. Generic struct
 fields may also use projections: `struct Wrap[T: Reader] { x: T::Token }`.
 
 Bounds declared on assoc types (`type Index: Eq + Ord`) are enforced at
-impl-registration time — the impl's binding type must satisfy each bound.
+impl-registration time for concrete impls — the impl's binding type must
+satisfy each bound. For generic impls whose binding target references an
+impl tvar (`impl[T] Reader[Box[T]] { type Token = T }`), the bound check
+defers to dispatch time, when the substitution `T -> ConcreteType` is
+known. The same diagnostic shape is reused; the message reads
+"generic impl … binds 'type Token = …' (under substitution), which does
+not satisfy bound …".
+
 When a generic-fn type parameter has multiple bounds (`T: A + B`) and both
 declare the same assoc name with different resolutions, the projection is
 rejected as ambiguous; identical bindings (same name, same resolved type) are

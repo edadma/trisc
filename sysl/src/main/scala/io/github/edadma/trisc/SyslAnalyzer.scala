@@ -5364,6 +5364,33 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                     if !matched then
                       throw AnalysisError(s"impl of '$traitName' for $resolvedPat does not satisfy bound '$boundTrait' declared on type parameter '$tp'")
             finally typeEnv = savedEnvForTraitBounds
+          // Phase C.2 — enforce trait bounds on associated-type bindings for
+          // generic impls. The concrete-impl path checks at registration; for
+          // generic impls the binding target may reference impl tvars (e.g.
+          // `type Token = T`), so we defer to here where `subst` is known.
+          // Resolve each binding under the substitution and validate against
+          // the trait's declared assoc bounds.
+          if template.assocBindings.nonEmpty && trait_.assocTypes.exists(_.bounds.nonEmpty) then
+            val assocBoundsByName = trait_.assocTypes.map(a => (a.name, a.bounds)).toMap
+            val savedEnvForAssocBounds = typeEnv
+            typeEnv = typeEnv ++ subst
+            try
+              for b <- template.assocBindings do
+                val bounds = assocBoundsByName.getOrElse(b.name, Nil)
+                if bounds.nonEmpty then
+                  val resolvedBindingTarget = resolveType(b.target)
+                  for boundTrait <- bounds do
+                    if !traits.contains(boundTrait) then
+                      throw AnalysisError(s"associated type 'type ${b.name}' on trait '$traitName' references unknown trait '$boundTrait'")
+                    val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                      if t.typeParams.isEmpty then
+                        t.resolvedConcrete.flatMap(_.headOption).contains(resolvedBindingTarget)
+                      else
+                        tryUnifyAll(t.targetPatterns.headOption.toList, List(resolvedBindingTarget), t.typeParams.toSet).isDefined
+                    }
+                    if !matched then
+                      throw AnalysisError(s"generic impl of '$traitName' binds 'type ${b.name} = $resolvedBindingTarget' (under substitution), which does not satisfy bound '$boundTrait' declared on the associated type")
+            finally typeEnv = savedEnvForAssocBounds
           // Resolve the trait's targetPatterns under the new substitution to obtain the
           // concrete trait-level types — these become the trait typeParam → concrete map.
           val savedEnv = typeEnv
