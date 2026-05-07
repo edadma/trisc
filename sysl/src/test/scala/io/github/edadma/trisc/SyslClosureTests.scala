@@ -182,4 +182,46 @@ class SyslClosureTests extends SyslTestHelpers {
         |main() -> int = outer()
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== Inner def: contract clauses rejected (audit item #26) =====
+  //
+  // `defDecl` parses the same `funBlockBody` that top-level fns do, so a `require`
+  // or `ensure` clause on an inner def is syntactically accepted. But inner defs
+  // lower to closures, and the closure analyzer has no contract-emission path —
+  // before this fix the clauses were silently dropped, which is a footgun. The
+  // analyzer now rejects them with a clear "not supported on inner defs yet"
+  // diagnostic. Promote to a top-level fn (where contracts work) or hand-inline
+  // the check via `assert(...)`.
+
+  "inner def with require clause is rejected" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """outer() -> int
+          |    def helper(n: int) -> int
+          |        require n >= 0
+          |        n + 1
+          |    helper(5)
+          |
+          |main() -> int = outer()
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("inner def 'helper'")
+    thrown.getMessage should include("require/ensure")
+  }
+
+  "inner def with ensure clause is rejected" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """outer() -> int
+          |    def doubled(x: int) -> int
+          |        ensure result == x * 2
+          |        x + x
+          |    doubled(21)
+          |
+          |main() -> int = outer()
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("inner def 'doubled'")
+    thrown.getMessage should include("require/ensure")
+  }
 }
