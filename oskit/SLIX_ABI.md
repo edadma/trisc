@@ -208,9 +208,13 @@ they match Linux so musl-linked binaries Just Work. Source:
 | 205 | gettid                    | (returns current_thread)       |
 | 206 | gettimeofday              | sys_gettimeofday               |
 | 207 | getuid                    | (returns 0)                    |
+| 215 | munmap                    | sys_munmap                     |
+| 216 | mremap                    | (returns -ENOMEM, falls back)  |
 | 217 | listen                    | sys_listen                     |
 | 221 | lseek                     | sys_lseek                      |
+| 222 | mmap                      | sys_mmap                       |
 | 223 | madvise                   | (returns 0)                    |
+| 226 | mprotect                  | sys_mprotect                   |
 | 227 | mkdirat                   | sys_mkdirat                    |
 | 251 | nanosleep                 | sys_nanosleep                  |
 | 252 | newfstatat                | sys_newfstatat                 |
@@ -624,3 +628,20 @@ fixed-region state.
   syscall SYS_VMA_CREATE (87) so test programs can register a VMA
   before `mmap` lands in chunk 4. No COW / file-backed support yet
   (chunks 5 + 7).
+- **2026-05-07 / Phase 1 chunk 4** — userspace `mmap` (222) /
+  `munmap` (215) / `mprotect` (226) for anonymous mappings. The
+  shim layer routes to new kernel-side helpers
+  `kernel_mmap_anon` / `kernel_munmap` / `kernel_mprotect` which
+  wrap the existing VMA tree ops with edge-splitting + frame
+  freeing. User mmap arena lives at `[0x60100000, 0x60200000)` —
+  inside the existing 2MB user PT, so no intermediate-PT
+  allocation is needed (chunk 7 will lift that limit). `mremap`
+  (216) intentionally returns -ENOMEM so musl's realloc-via-
+  mremap path falls back to mmap+memcpy+munmap. Two arch helpers
+  added: `vm_unmap_user_page(ptbr, vaddr) -> u64` (clear PTE +
+  return previously-installed PA) and `vm_update_user_prot(ptbr,
+  vaddr, writable, executable) -> int` (re-flag an existing
+  PTE). The aarch64 `vm_install_user_page` was simultaneously
+  fixed to honour `writable=0` via AP=11 (was silently RW
+  regardless of arg) — without this fix `mprotect(PROT_READ)`
+  would be a no-op on aarch64.

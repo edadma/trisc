@@ -2498,6 +2498,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "vma3: bad"
   }
 
+  "mmap: anon mmap/munmap/mprotect end-to-end" in {
+    // Phase 1 chunk 4. test_mmap calls Linux ARM64 syscalls 222
+    // (mmap), 226 (mprotect), and 215 (munmap) via the POSIX shim.
+    // It allocates 64KB anon at the per-process arena (starts at
+    // 0x60100000), writes a stride pattern that demand-pages every
+    // page, reads it back, mprotects to RO, and unmaps. Pass:
+    // "mmap: ok".
+    val output = qemu.command("test_mmap")
+    output should include("mmap: ok")
+    output should not include "mmap: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

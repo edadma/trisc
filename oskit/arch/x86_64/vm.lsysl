@@ -557,6 +557,96 @@ install it at the faulting vaddr.
         0
 
 
+Clear the leaf PTE for `vaddr` in `ptbr`. Returns the physical
+address that was previously installed (or 0 if the PTE was already
+non-present, or if any intermediate level is missing). The caller
+is responsible for `page_free` on the returned PA — this helper
+only releases the PTE and flushes TLB.
+
+Phase 1 chunk 4 introduces this for `sys_munmap`: walking the
+unmapped range page-by-page and freeing the frames installed by
+prior demand-paging faults.
+
+    vm_unmap_user_page(ptbr: u64, vaddr: u64) -> u64
+        val pml4_idx = (vaddr >> 39) & u64(0x1FF)
+        val pdpt_idx = (vaddr >> 30) & u64(0x1FF)
+        val pd_idx   = (vaddr >> 21) & u64(0x1FF)
+        val pt_idx   = (vaddr >> 12) & u64(0x1FF)
+
+        val pml4e = vm_read_pte64(ptbr + pml4_idx * 8)
+        if (pml4e & PTE_P) == 0
+            return u64(0)
+        val pdpt_addr = u64(pml4e & PTE_ADDR_MASK)
+
+        val pdpte = vm_read_pte64(pdpt_addr + pdpt_idx * 8)
+        if (pdpte & PTE_P) == 0
+            return u64(0)
+        val pd_addr = u64(pdpte & PTE_ADDR_MASK)
+
+        val pde = vm_read_pte64(pd_addr + pd_idx * 8)
+        if (pde & PTE_P) == 0
+            return u64(0)
+        if (pde & PTE_PS) != 0
+            // 2MB superpage — refuse to subdivide
+            return u64(0)
+        val pt_addr = u64(pde & PTE_ADDR_MASK)
+
+        val pte = vm_read_pte64(pt_addr + pt_idx * 8)
+        if (pte & PTE_P) == 0
+            return u64(0)
+        val pa = u64(pte & PTE_ADDR_MASK)
+        vm_write_pte64(pt_addr + pt_idx * 8, i64(0))
+        vm_flush_tlb()
+        pa
+
+
+Update the protection bits on an existing leaf PTE. Returns 0 if
+the PTE was present and updated, -1 if any level is missing or the
+leaf is non-present (caller treats this as "nothing to do" — the
+VMA-recorded prot still governs future page-fault installs).
+
+Phase 1 chunk 4 introduces this for `sys_mprotect`: after splitting
+VMAs at the boundaries and updating their prot fields, we walk the
+PTE range and re-flag any pages already faulted in.
+
+    vm_update_user_prot(ptbr: u64, vaddr: u64, writable: int, executable: int) -> int
+        val pml4_idx = (vaddr >> 39) & u64(0x1FF)
+        val pdpt_idx = (vaddr >> 30) & u64(0x1FF)
+        val pd_idx   = (vaddr >> 21) & u64(0x1FF)
+        val pt_idx   = (vaddr >> 12) & u64(0x1FF)
+
+        val pml4e = vm_read_pte64(ptbr + pml4_idx * 8)
+        if (pml4e & PTE_P) == 0
+            return -1
+        val pdpt_addr = u64(pml4e & PTE_ADDR_MASK)
+
+        val pdpte = vm_read_pte64(pdpt_addr + pdpt_idx * 8)
+        if (pdpte & PTE_P) == 0
+            return -1
+        val pd_addr = u64(pdpte & PTE_ADDR_MASK)
+
+        val pde = vm_read_pte64(pd_addr + pd_idx * 8)
+        if (pde & PTE_P) == 0
+            return -1
+        if (pde & PTE_PS) != 0
+            return -1
+        val pt_addr = u64(pde & PTE_ADDR_MASK)
+
+        val pte = vm_read_pte64(pt_addr + pt_idx * 8)
+        if (pte & PTE_P) == 0
+            return -1
+        val pa = pte & PTE_ADDR_MASK
+        var flags = PTE_P | PTE_U
+        if writable != 0
+            flags = flags | PTE_W
+        // x86_64 has no per-PTE NX bit in this build (NXE not enabled
+        // in EFER); executable is implicit. Keep the param for API
+        // symmetry with aarch64.
+        vm_write_pte64(pt_addr + pt_idx * 8, pa | flags)
+        vm_flush_tlb()
+        0
+
+
 Copy data into another address space using physical addressing.
 
 Phase 1 chunk 3 introduces allocate-on-write: when the target VA

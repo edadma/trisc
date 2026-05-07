@@ -1019,6 +1019,154 @@ path.
         vma_handle_fault(&processes[pid].vma_tree, vaddr, ptbr, write)
 
 
+Phase 1 chunk 4 — `mmap` / `munmap` / `mprotect` for anonymous
+mappings. The shim layer (`oskit.posix`) doesn't have direct
+access to the per-process VMA tree, so it calls into these
+kernel-side helpers. All three operate on the calling thread's
+own process — they read `current_thread`'s pid + ptbr internally
+so no caller can target another process.
+
+`kernel_mmap_anon` registers a fresh anonymous VMA over `[vstart,
+vend)`. Returns 0 on success, -1 on overlap with an existing VMA
+or pool exhaustion. The shim is responsible for the address-
+allocation policy (bump pointer, range-check against the user
+mmap arena); this layer just enforces "no two VMAs overlap".
+
+    kernel_mmap_anon(vstart: u64, vend: u64, prot: int) -> int
+        if current_thread < 0
+            return -1
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        val t = &processes[pid].vma_tree
+        if vma_lookup_addr(t, vstart) != VMA_NIL
+            return -1
+        var n = vma_first(t)
+        while n != VMA_NIL
+            if vma_pool[n].vstart >= vend
+                break
+            if vma_pool[n].vstart >= vstart
+                return -1
+            n = vma_next(n)
+        val idx = vma_create(t, vstart, vend, prot,
+                             VMA_MAP_ANON | VMA_MAP_PRIVATE,
+                             -1, u64(0))
+        if idx == VMA_NIL
+            return -1
+        0
+
+
+Boundary-split helper used by both munmap and mprotect: ensures
+that `[vstart, vend)` is bordered exactly by VMA edges. Splits
+any VMA that straddles `vstart` or `vend`. Returns 0 on success,
+-1 on pool exhaustion during a split. Either edge that already
+falls on a VMA boundary (or in a hole) is a no-op.
+
+    kernel_vma_split_edges(t: *VMATree, vstart: u64, vend: u64) -> int
+        val left_v = vma_lookup_addr(t, vstart)
+        if left_v != VMA_NIL
+            if vma_pool[left_v].vstart < vstart
+                if vma_split(t, left_v, vstart) == VMA_NIL
+                    return -1
+        if vend > u64(0)
+            val right_v = vma_lookup_addr(t, vend - u64(1))
+            if right_v != VMA_NIL
+                if vma_pool[right_v].vend > vend
+                    if vma_split(t, right_v, vend) == VMA_NIL
+                        return -1
+        0
+
+
+`kernel_munmap` removes every VMA in `[vstart, vend)`, splitting
+edge VMAs first so partial-overlap unmaps work. Then it walks
+the affected PTE range and frees any frame the demand-paging
+fault path had installed. A page that was never faulted-in
+(zero PTE) costs one walk and no allocator activity.
+
+Returns 0 on success, -1 if a boundary split fails (pool
+exhausted). Empty ranges and ranges that hit no VMAs both
+return 0 — Linux semantics.
+
+    kernel_munmap(vstart: u64, vend: u64) -> int
+        if current_thread < 0
+            return -1
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        val ptbr = threads[current_thread].ptbr
+        val t = &processes[pid].vma_tree
+        if kernel_vma_split_edges(t, vstart, vend) != 0
+            return -1
+        var va = vstart
+        while va < vend
+            val pa = vm_unmap_user_page(ptbr, va)
+            if pa != u64(0)
+                page_free(pa)
+            va += u64(PAGE_SIZE)
+        var n = vma_lookup_addr(t, vstart)
+        while n != VMA_NIL
+            if vma_pool[n].vstart >= vend
+                break
+            val saved_end = vma_pool[n].vend
+            vma_remove(t, n)
+            if saved_end >= vend
+                break
+            n = vma_lookup_addr(t, saved_end)
+        0
+
+
+`kernel_mprotect` updates the prot field on every VMA in `[vstart,
+vend)` and re-flags any already-faulted-in pages. The range must
+be fully covered by VMAs (no holes); a hole rejects the call with
+-1 and leaves both VMAs and PTEs untouched. Linux returns ENOMEM
+in this case — the shim translates -1 accordingly.
+
+After updating the VMAs we walk the PTE range. Pages that haven't
+been faulted in yet are skipped (the VMA's new prot will govern
+their first install). Pages already present get their AP bits
+flipped via the arch-specific `vm_update_user_prot`.
+
+    kernel_mprotect(vstart: u64, vend: u64, prot: int) -> int
+        if current_thread < 0
+            return -1
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        val ptbr = threads[current_thread].ptbr
+        val t = &processes[pid].vma_tree
+        if kernel_vma_split_edges(t, vstart, vend) != 0
+            return -1
+        var probe = vstart
+        while probe < vend
+            val v = vma_lookup_addr(t, probe)
+            if v == VMA_NIL
+                return -1
+            probe = vma_pool[v].vend
+        var n = vma_lookup_addr(t, vstart)
+        while n != VMA_NIL
+            if vma_pool[n].vstart >= vend
+                break
+            vma_pool[n].prot = prot
+            n = vma_next(n)
+        var writable = 0
+        if (prot & VMA_PROT_WRITE) != 0
+            writable = 1
+        var executable = 0
+        if (prot & VMA_PROT_EXEC) != 0
+            executable = 1
+        var va = vstart
+        while va < vend
+            vm_update_user_prot(ptbr, va, writable, executable)
+            va += u64(PAGE_SIZE)
+        0
+
+
     sys_kbhit_handler(arg: int)
         syscall_return(kb_has_key())
         kernel_continue_current()

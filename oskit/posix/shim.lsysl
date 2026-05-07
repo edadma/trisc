@@ -40,7 +40,8 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
     import oskit.kernel.{current_thread, terminate_current,
         kernel_grant_create_inline, kernel_grant_revoke_inline,
         kernel_get_thread_pid, kernel_get_process_main_tid,
-        kernel_continue_current}
+        kernel_continue_current,
+        kernel_mmap_anon, kernel_munmap, kernel_mprotect}
     import oskit.arch.{pack_kstat, KSTAT_SIZE}
 
     extern shim_uart_putc(c: int)
@@ -1326,6 +1327,23 @@ Returns 0 on success, negative errno on failure.
             // flags arg in a4 instead of a3. We map to the same
             // helper (slix doesn't honor AT_SYMLINK_NOFOLLOW yet).
             return sys_faccessat(int(a0), a1, int(a2), int(a3))
+        if num == 215
+            // munmap(addr, len)
+            return sys_munmap(a0, a1)
+        if num == 216
+            // mremap(old_addr, old_len, new_len, flags, new_addr) —
+            // chunk 4 doesn't move/grow mappings. Returning -ENOMEM
+            // makes musl's realloc-via-mremap path fall back to
+            // mmap+memcpy+munmap, which works under our shim.
+            return i64(-ENOMEM)
+        if num == 222
+            // mmap(addr, len, prot, flags, fd, offset). Linux ARM64
+            // generic ABI passes 6 args; the 7-th args slot is
+            // ignored.
+            return sys_mmap(a0, a1, int(a2), int(a3), int(a4), a5)
+        if num == 226
+            // mprotect(addr, len, prot)
+            return sys_mprotect(a0, a1, int(a2))
         if num == 223
             // madvise(addr, len, advice) — unconditional 0. Slix
             // has no swap or page reclaim, so MADV_DONTNEED /
@@ -7035,6 +7053,132 @@ Musl's lite_malloc relies on the equality check
             return cur
         posix_break_addr[pid] = new_brk
         new_brk
+
+
+Phase 1 chunk 4 — `mmap` / `munmap` / `mprotect` for anonymous
+mappings. The user mmap arena lives at `[POSIX_MMAP_BASE,
+POSIX_MMAP_LIMIT)` — just above the brk heap, stack, and a 64KB
+guard gap, but still inside the single 2MB user PT created by
+`vm_create_process_pt`. Lazy intermediate-PT allocation lands in
+chunk 7 (ELF loader); until then any allocation that would extend
+past `POSIX_MMAP_LIMIT` returns -ENOMEM.
+
+The address-allocation policy is a per-process bump pointer. We
+never reuse a vaddr after munmap — Linux's address-space allocator
+is more sophisticated, but for chunk-4-scale workloads (a few
+small allocations, no long-running mmap-heavy programs) the
+1MB-of-headroom budget covers it.
+
+    val POSIX_MMAP_BASE:  i64 = i64(0x60100000)
+    val POSIX_MMAP_LIMIT: i64 = i64(0x60200000)
+
+    val POSIX_PROT_READ  = 1
+    val POSIX_PROT_WRITE = 2
+    val POSIX_PROT_EXEC  = 4
+
+    val POSIX_MAP_SHARED  = 0x01
+    val POSIX_MAP_PRIVATE = 0x02
+    val POSIX_MAP_FIXED   = 0x10
+    val POSIX_MAP_ANON    = 0x20
+
+    var posix_mmap_next: [16]i64
+    var posix_mmap_last_gen: [16]int
+
+    posix_mmap_ensure_init(pid: int)
+        val gen = kernel_get_process_main_tid(pid)
+        if posix_mmap_last_gen[pid] != gen
+            posix_mmap_next[pid] = POSIX_MMAP_BASE
+            posix_mmap_last_gen[pid] = gen
+
+
+Round `len` up to the page size. `mmap`/`munmap`/`mprotect` all
+operate page-at-a-time at the kernel layer; partial-page args are
+extended to the next page boundary. Returns 0 if the rounded len
+overflows or `len <= 0`.
+
+    posix_mmap_round_len(len: i64) -> i64
+        if len <= i64(0)
+            return i64(0)
+        val rounded = (len + i64(0xFFF)) & ~i64(0xFFF)
+        if rounded < len
+            return i64(0)
+        rounded
+
+
+`mmap(addr, len, prot, flags, fd, offset)` — anonymous-only.
+`MAP_FIXED` is honored when `addr` is page-aligned and falls
+inside the user mmap arena; the request fails (-ENOMEM) on any
+overlap with an existing VMA. Otherwise `addr` is a hint we
+ignore in favour of the per-process bump pointer.
+
+`prot` accepts any combination of POSIX_PROT_{READ,WRITE,EXEC};
+the bits are passed straight through to the VMA layer (the
+constants are aligned with `VMA_PROT_*`).
+
+File-backed mappings (fd != -1, !MAP_ANON) return -ENODEV — the
+ELF loader chunk lands the file-mmap path.
+
+    sys_mmap(addr: i64, len: i64, prot: int, flags: int, fd: int, offset: i64) -> i64
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return i64(-EINVAL)
+        if pid >= 16
+            return i64(-EINVAL)
+        if (flags & POSIX_MAP_ANON) == 0
+            return i64(-ENODEV)
+        val rounded = posix_mmap_round_len(len)
+        if rounded == i64(0)
+            return i64(-EINVAL)
+        var base = i64(0)
+        if (flags & POSIX_MAP_FIXED) != 0
+            if (addr & i64(0xFFF)) != i64(0)
+                return i64(-EINVAL)
+            if addr < POSIX_MMAP_BASE
+                return i64(-EINVAL)
+            if addr + rounded > POSIX_MMAP_LIMIT
+                return i64(-ENOMEM)
+            base = addr
+        else
+            posix_mmap_ensure_init(pid)
+            val cur = posix_mmap_next[pid]
+            if cur + rounded > POSIX_MMAP_LIMIT
+                return i64(-ENOMEM)
+            base = cur
+            posix_mmap_next[pid] = cur + rounded
+        if kernel_mmap_anon(u64(base), u64(base + rounded), prot) != 0
+            return i64(-ENOMEM)
+        base
+
+
+`munmap(addr, len)` — drops every VMA covering `[addr, addr+len)`
+(splitting at the boundaries first) and frees the underlying
+frames. Returns 0 even when the range hits no VMAs (Linux
+semantics). The kernel rejects unaligned `addr` via -EINVAL.
+
+    sys_munmap(addr: i64, len: i64) -> i64
+        if (addr & i64(0xFFF)) != i64(0)
+            return i64(-EINVAL)
+        val rounded = posix_mmap_round_len(len)
+        if rounded == i64(0)
+            return i64(-EINVAL)
+        if kernel_munmap(u64(addr), u64(addr + rounded)) != 0
+            return i64(-EINVAL)
+        i64(0)
+
+
+`mprotect(addr, len, prot)` — flips the protection bits on every
+VMA in the range. Returns -ENOMEM if the range straddles a hole
+(Linux semantics: a single unmapped page rejects the entire call).
+
+    sys_mprotect(addr: i64, len: i64, prot: int) -> i64
+        if (addr & i64(0xFFF)) != i64(0)
+            return i64(-EINVAL)
+        val rounded = posix_mmap_round_len(len)
+        if rounded == i64(0)
+            return i64(-EINVAL)
+        if kernel_mprotect(u64(addr), u64(addr + rounded), prot) != 0
+            return i64(-ENOMEM)
+        i64(0)
 
 
     sys_epoll_create1(epoll_flags: int) -> i64

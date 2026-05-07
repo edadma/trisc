@@ -1,0 +1,131 @@
+test_mmap — `mmap` / `munmap` / `mprotect` end-to-end
+=====================================================
+
+Phase 1 chunk 4: validates the userspace mmap surface (Linux ARM64
+generic ABI numbers 222 / 215 / 226). All three are routed by the
+shim layer (`oskit.posix.posix_dispatch`) into kernel-side helpers
+that live alongside the existing seed-VMA code in
+`oskit.kernel.kernel`.
+
+Steps:
+
+1. `mmap(NULL, 64KB, RW, ANON|PRIVATE)` — bump-allocates a fresh
+   VMA at the per-process mmap arena (starts at 0x60100000). The
+   pages aren't faulted in until the first access.
+2. Write a stride-pattern across the region; first touch of each
+   page faults via `vma_handle_fault` and gets a fresh zero frame
+   installed.
+3. Read the pattern back to confirm both the writes and the
+   reads went through correctly.
+4. `mprotect(p, 64KB, READ)` — strips PROT_WRITE. The PTE walk
+   updates the AP bits on every faulted-in page. We don't try to
+   trigger the resulting fault (no SIGSEGV delivery yet — that's
+   Phase 2); we only verify the call returns 0 and a subsequent
+   read still succeeds.
+5. `munmap(p, 64KB)` — splits/removes the VMA and frees the
+   physical frames back to the page pool.
+
+Pass criterion: prints `mmap: ok`.
+
+    module oskit.bin.test_mmap
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val SYS_MMAP     = 222
+    val SYS_MUNMAP   = 215
+    val SYS_MPROTECT = 226
+
+    val PROT_READ  = 1
+    val PROT_WRITE = 2
+
+    val MAP_PRIVATE = 0x02
+    val MAP_ANON    = 0x20
+
+    val LEN: i64 = i64(0x10000)   // 64 KB = 16 pages
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("mmap: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val rc = syscall6(SYS_MMAP, i64(0), LEN,
+                          i64(PROT_READ | PROT_WRITE),
+                          i64(MAP_PRIVATE | MAP_ANON),
+                          i64(-1), i64(0))
+        if rc <= i64(0)
+            fail(1)
+            return
+        val base = u64(rc)
+
+The arena starts at 0x60100000 (per shim's `POSIX_MMAP_BASE`),
+so the first allocation must land there.
+
+        if base != u64(0x60100000)
+            fail(2)
+            return
+
+Stripe-write — touch every page in the region and store a
+deterministic value derived from the offset. Each page faults
+in fresh on first touch.
+
+        var i: u64 = u64(0)
+        while i < u64(LEN)
+            var p: *i64 = *i64(base + i)
+            *p = i64(0x12340000) + i64(i)
+            i += u64(0x1000)
+
+Read everything back and verify.
+
+        i = u64(0)
+        while i < u64(LEN)
+            var p: *i64 = *i64(base + i)
+            if *p != i64(0x12340000) + i64(i)
+                fail(3)
+                return
+            i += u64(0x1000)
+
+`mprotect` to read-only. We don't attempt a write to verify the
+fault — that path requires SIGSEGV delivery (Phase 2 work). Just
+confirm the syscall returns 0 and a read still works.
+
+        val mpr = syscall6(SYS_MPROTECT, rc, LEN, i64(PROT_READ),
+                           i64(0), i64(0), i64(0))
+        if mpr != i64(0)
+            fail(4)
+            return
+        var p0: *i64 = *i64(base)
+        if *p0 != i64(0x12340000)
+            fail(5)
+            return
+
+`munmap` releases the VMAs and frees the underlying frames. We
+can't easily verify the frames went back to the pool from
+userspace — the regression test is "boot the OS, run this binary
+N times, observe no leak in the page-pool watermark." Chunk-4's
+acceptance bar is just "mmap: ok".
+
+        val um = syscall6(SYS_MUNMAP, rc, LEN, i64(0), i64(0),
+                          i64(0), i64(0))
+        if um != i64(0)
+            fail(6)
+            return
+
+        puts("mmap: ok\n")
+        exit()
