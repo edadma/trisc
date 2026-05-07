@@ -4214,13 +4214,32 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case _ => false
 
   // Coerce integer literals to the target type (like Rust's untyped integer literals)
+  /** Audit item #28: catch literal-overflow assignments that would silently
+   *  truncate. Returns Some(error message) if `value` does not fit in the
+   *  bit-width of the target sized-int type, None otherwise. i64/u64 are
+   *  unconstrained — every Long fits. */
+  protected def literalRangeMsg(value: Long, target: SyslType): Option[String] =
+    val (lo, hi, name) = target match
+      case IntType(8)  => (-128L,         127L,        "i8")
+      case IntType(16) => (-32768L,       32767L,      "i16")
+      case IntType(32) => (-2147483648L,  2147483647L, "int")
+      case UIntType(8)  => (0L,           0xFFL,       "u8")
+      case UIntType(16) => (0L,           0xFFFFL,     "u16")
+      case UIntType(32) => (0L,           0xFFFFFFFFL, "u32")
+      case _ => return None
+    if value < lo || value > hi then
+      Some(s"literal $value does not fit in $name (range $lo..$hi); cast explicitly: `$name(...)` if truncation is intended")
+    else None
+
   protected def coerceLiteral(expr: TExpr, target: SyslType): TExpr =
     // Don't auto-promote an untyped literal to a nominal NamedType — a cast is required.
     target match
       case NamedType(_, _, true, _, _) => return expr
       case _ =>
     expr match
-      case TIntLit(value, _) if target.isIntegral => TIntLit(value, target)
+      case TIntLit(value, _) if target.isIntegral =>
+        literalRangeMsg(value, target).foreach(msg => throw AnalysisError(msg))
+        TIntLit(value, target)
       case TIntLit(0, _) if target.isInstanceOf[PtrType] => TIntLit(0, target) // null pointer
       // Float literal → narrower float type (untyped float literal coercion)
       case TFloatLit(value, _) if target.isFloat => TFloatLit(value, target)
@@ -6384,6 +6403,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         // the interpreter can wire a self-cell into the captured env after construction.
         if decl.typeParams.nonEmpty then
           throw AnalysisError(s"inner def '${decl.name}' cannot declare type parameters")
+        // Inner defs lower to closures, and the closure analyzer has no contract-emission
+        // path — so a `require`/`ensure` clause on an inner def would be silently ignored.
+        // Reject explicitly until contract-on-closure support is implemented (audit item #26).
+        decl.body match
+          case BlockBodyAST(_, contracts) if contracts.nonEmpty =>
+            throw AnalysisError(
+              s"inner def '${decl.name}': require/ensure clauses are not supported on inner functions yet — " +
+                "promote to a top-level fn, or hand-inline the check (e.g. `assert(cond, \"msg\")`)."
+            )
+          case _ => ()
         val retTypeAST = decl.returnType.getOrElse(
           throw AnalysisError(s"inner def '${decl.name}' must declare an explicit return type")
         )

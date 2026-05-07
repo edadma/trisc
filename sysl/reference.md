@@ -2275,8 +2275,11 @@ analysis. Top-level functions still allow inferred return types.
 
 **Restrictions:** no type parameters, no return-type inference, no mutual
 recursion (`def f` then `def g` calling each other would need both names
-pre-bound before either body is analyzed). Contracts (`require`/`ensure`) parse
-but are currently ignored on inner defs.
+pre-bound before either body is analyzed). Contracts (`require`/`ensure`) on
+an inner def are rejected with a clear diagnostic — the closure-lowering path
+has no contract-emission stage yet, and silently dropping the clauses was a
+known footgun. Promote to a top-level `fn` (where contracts work fully) or
+hand-inline the check via `assert(cond, "msg")`.
 
 Implemented across all four backends (interpreter, LLVM, SVM, TRISC).
 
@@ -2322,6 +2325,23 @@ true, false           // bool
 1000u16               // u16
 100u32                // u32
 0xFFu64               // u64
+```
+
+**Literal overflow is a compile-time error.** A bare integer literal that does
+not fit in the type it's being assigned/coerced to produces a hard error rather
+than a silent truncation:
+
+```sysl
+var x: u8 = 256       // error: literal 256 does not fit in u8 (range 0..255)
+var y: i8 = 200       // error: literal 200 does not fit in i8 (range -128..127)
+var z: int = 0xFFFF_FFFF
+                      // error: literal 4294967295 does not fit in int (range -2147483648..2147483647)
+```
+
+If truncation is intended, write the cast explicitly:
+
+```sysl
+var x: u8 = u8(256)   // ok — wraps to 0; intent is clear
 ```
 
 Float literals (`3.14`, `1e5`) default to `f64`, but coerce to `f32` when the
@@ -2512,6 +2532,10 @@ else
 ```
 
 Desugars to `match` at parse time — no new analyzer or runtime machinery.
+A no-`else` `if-is` (`if x is Some(v) then body`) supplies an empty default,
+matching the behaviour of plain `if cond then body` — exhaustiveness is
+satisfied automatically and unmatched values are skipped silently. To
+recover a value from the no-match path, write the `else` arm explicitly.
 
 ---
 

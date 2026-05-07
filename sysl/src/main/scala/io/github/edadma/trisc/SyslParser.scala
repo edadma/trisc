@@ -980,12 +980,16 @@ class SyslParser extends StandardTokenParsers {
         QuantifierAST(kind, name, lo, hi, op == "..", pred)
     }
 
-  /** `if expr is Pattern then body [else elseBody]` — desugars to match. */
+  /** `if expr is Pattern then body [else elseBody]` — desugars to match.
+   *  If no `else` is given, supply an empty default so the lowered match
+   *  isn't tripped up by the analyzer's enum-exhaustiveness check (the
+   *  intent of the no-else form is "do body when matched, no-op otherwise",
+   *  matching the way plain `if cond then body` works without an else). */
   lazy val ifIsExpr: Parser[MatchExprAST] =
     "if" ~> logicalOr ~ ("is" ~> matchPattern) ~ ("then" ~> thenBody) ^^ {
       case scrutinee ~ pattern ~ ((thenStmts, elseStmts)) =>
         val arm = MatchArmAST(List(pattern), None, thenStmts)
-        MatchExprAST(scrutinee, List(arm), elseStmts)
+        MatchExprAST(scrutinee, List(arm), elseStmts.orElse(Some(Nil)))
     }
 
   lazy val closureExpr: Parser[ClosureAST] =

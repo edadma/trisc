@@ -1,0 +1,182 @@
+If-is end-to-end tests
+======================
+
+`if expr is Pattern then body [else else_body]` is a single-arm match
+desugar (parser at `SyslParser.scala:984`). The reference promises
+support for the same pattern shapes as `match`: literal value, range
+(`lo..hi`), wildcard, variant (`Some(v)`), and variant with nested
+sub-patterns. This file is the cross-backend runtime regression for
+those shapes — covers audit item #27 ("verify `if-is` non-trivial
+patterns end-to-end").
+
+The desugar happens at parser level, so all backends inherit the
+behaviour; failures here would mean a backend regression in the
+underlying `match` lowering.
+
+    module sysl.tests.if_is
+
+
+    enum Maybe
+        Some(v: int)
+        None
+
+    enum Pair
+        Two(a: int, b: int)
+        Empty
+
+    enum Wrap
+        W(m: Maybe)
+        Plain
+
+
+Variant with single binding
+---------------------------
+
+The classic `if x is Some(v) then v` shape.
+
+    #test
+    test_if_is_some() -> unit
+        val m = Some(42)
+        var got = -1
+        if m is Some(v) then got = v
+        assert(got == 42, "Some(42) → bound v=42")
+
+    #test
+    test_if_is_some_else_path() -> unit
+        val m = None
+        var got = -1
+        if m is Some(v) then got = v else got = 99
+        assert(got == 99, "None → else branch fired, got=99")
+
+    #test
+    test_if_is_none_no_args() -> unit
+        val m = None
+        var got = -1
+        if m is None then got = 7 else got = 8
+        assert(got == 7, "None matched no-arg variant")
+
+
+Variant with multiple bindings
+------------------------------
+
+`if p is Two(a, b) then ...` exposes both fields by name in the
+then-body's scope.
+
+    #test
+    test_if_is_two_bindings() -> unit
+        val p = Two(10, 32)
+        var sum = 0
+        if p is Two(a, b) then sum = a + b
+        assert(sum == 42, "Two(10,32) → a+b = 42")
+
+    #test
+    test_if_is_two_else() -> unit
+        val p = Empty
+        var sum = -1
+        if p is Two(a, b) then sum = a + b else sum = 99
+        assert(sum == 99, "Empty → else, sum = 99")
+
+
+Nested patterns
+---------------
+
+A nested variant pattern inside a binding slot — `W(Some(v))` checks
+the outer discriminator AND the inner discriminator before binding `v`.
+
+    #test
+    test_if_is_nested_match() -> unit
+        val w = W(Some(42))
+        var got = -1
+        if w is W(Some(v)) then got = v else got = 99
+        assert(got == 42, "W(Some(42)) → v=42 via nested")
+
+    #test
+    test_if_is_nested_inner_mismatch() -> unit
+        val w = W(None)
+        var got = -1
+        if w is W(Some(v)) then got = v else got = 99
+        assert(got == 99, "W(None) → inner None mismatches Some, else fires")
+
+    #test
+    test_if_is_nested_outer_mismatch() -> unit
+        val w = Plain
+        var got = -1
+        if w is W(Some(v)) then got = v else got = 99
+        assert(got == 99, "Plain → outer mismatch, else fires")
+
+
+Range patterns
+--------------
+
+`if x is lo..hi then ...` matches when `lo <= x <= hi` (inclusive).
+
+    #test
+    test_if_is_range_inside() -> unit
+        val x = 5
+        var hit = false
+        if x is 1..10 then hit = true
+        assert(hit, "5 in 1..10")
+
+    #test
+    test_if_is_range_low_boundary() -> unit
+        val x = 1
+        var hit = false
+        if x is 1..10 then hit = true
+        assert(hit, "1 in 1..10 (inclusive lo)")
+
+    #test
+    test_if_is_range_high_boundary() -> unit
+        val x = 10
+        var hit = false
+        if x is 1..10 then hit = true
+        assert(hit, "10 in 1..10 (inclusive hi)")
+
+    #test
+    test_if_is_range_below() -> unit
+        val x = 0
+        var hit = false
+        if x is 1..10 then hit = true else hit = false
+        assert(!hit, "0 below 1..10, else taken")
+
+    #test
+    test_if_is_range_above() -> unit
+        val x = 11
+        var hit = false
+        if x is 1..10 then hit = true else hit = false
+        assert(!hit, "11 above 1..10, else taken")
+
+
+Value-pattern equality
+----------------------
+
+A bare expression on the right of `is` matches by `==`. Useful for
+matching int / bool literals or named constants without a variant
+wrapper.
+
+    #test
+    test_if_is_int_literal() -> unit
+        val x = 42
+        var hit = false
+        if x is 42 then hit = true
+        assert(hit, "42 == 42")
+
+    #test
+    test_if_is_int_literal_else() -> unit
+        val x = 41
+        var label = -1
+        if x is 42 then label = 1 else label = 0
+        assert(label == 0, "41 != 42, else fires")
+
+
+Wildcard
+--------
+
+`if x is _ then ...` is a tautology — always matches. Edge case rather
+than something users should write, but the desugar needs to handle it.
+
+    #test
+    test_if_is_wildcard() -> unit
+        val x = 99
+        var hit = false
+        if x is _ then hit = true
+        assert(hit, "wildcard always matches")
