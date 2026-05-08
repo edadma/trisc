@@ -151,6 +151,7 @@ user-mode). Numbers are stable. Definitions live in
 | 88  | SYS_VMA_CREATE_PID    | sys_vma_create_pid_handler (debug)   |
 | 89  | SYS_COW_REFCNT_SELFTEST | sys_cow_refcnt_selftest_handler (debug) |
 | 90  | SYS_COW_SHARE_SELF    | sys_cow_share_self_handler (debug)   |
+| 91  | SYS_FORK              | sys_fork_handler                     |
 
 PHASE 1 NOTE. The VM/process syscalls (44–60, 63, 66, 79) all
 assume the current "fixed-region eager mapping" model. They
@@ -666,3 +667,30 @@ fixed-region state.
   same physical frame as `va_src` (both PTEs RO, refcount += 1)
   so a userspace test can drive the COW path without yet having
   `fork()` (chunk 6).
+- **2026-05-08 / Phase 1 chunk 6** — `fork()` (SYS_FORK = 91).
+  Kernel-direct syscall (no PM round-trip) clones the calling
+  process: fresh PTBR via `vm_create_process_pt`, deep copy of
+  the parent's VMA tree via new `vma_clone_for_fork`, and shared
+  RO mappings of every currently-resident user page with
+  refcount-bumped frames. New `arch_setup_fork_frame` (both
+  arches) builds the child's saved exception frame as a byte
+  copy of the parent's `syscall_ssp` frame with the syscall-
+  return register zeroed, so when the scheduler picks up the
+  child it ERETs/iretqs straight back to user mode at the
+  parent's post-syscall PC with `rc=0`; the parent gets the
+  child's PID via the dispatcher's normal return-write path.
+  Three adjacent fixes ride this commit: (1) `kfree_user_page`
+  falls through to `page_free` for in-pool frames at refcount=0
+  so chunk-3's raw-allocated `vm_copy_to` frames don't leak when
+  reap walks the VMA tree; (2) new `vma_unmap_all_pages` (called
+  from `reap_process` before `vm_free_process_pt`) walks every
+  VMA range, clears each leaf PTE, and drops the process's
+  refcount on each frame — fixes a pre-existing leak of mmap'd
+  pages on process exit; (3) new `arch_fork_clone_eager` byte-
+  copies the parent's legacy 0xCC..0xFF code region into the
+  child on x86 (no-op on aarch64) so forked children resume at
+  parent's post-syscall PC instead of trapping on the freshly-
+  allocated zero pages of the eager region. Migrating x86 user
+  programs to link at `0x60000000` (matching aarch64) is the
+  cleaner long-term path — once that lands the helper becomes
+  universally a no-op.

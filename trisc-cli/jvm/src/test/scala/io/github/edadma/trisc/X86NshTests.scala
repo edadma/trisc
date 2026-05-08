@@ -1159,6 +1159,21 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "cow: bad"
   }
 
+  "fork: parent/child anon write isolation" in {
+    // Phase 1 chunk 6. test_fork mmaps an anon page, writes 0xAA,
+    // forks, and lets the child write 0xBB into the same VA. The
+    // parent then waits via PM and verifies its own view of the
+    // page is still 0xAA — proves vma_clone_for_fork shared the
+    // frame (refcount++), demoted both PTEs to RO, and the child's
+    // write COW'd into a private frame so the two views decoupled.
+    // Also exercises kernel_reap_user_pages on the child's exit:
+    // the child's COW'd frame must drop refcount to 0 and return
+    // to the pool.
+    val output = qemu.command("test_fork")
+    output should include("fork: ok")
+    output should not include "fork: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

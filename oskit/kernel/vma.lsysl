@@ -34,7 +34,7 @@ fault handler through `vma_lookup_addr`; chunk 3 makes
     module oskit.kernel
 
     import oskit.config.{MAX_VMAS, PAGE_SIZE}
-    import oskit.arch.{vm_install_user_page, vm_v2p}
+    import oskit.arch.{vm_install_user_page, vm_update_user_prot, vm_unmap_user_page, vm_v2p}
 
 VMA_NIL serves the same role as rbtree.lsysl's NIL — a sentinel
 "no node" value distinct from any pool index.
@@ -610,6 +610,113 @@ returns a zeroed frame at refcount=1.
             kfree_user_page(pa)
             return -1
         0
+
+
+Clone a parent's VMA tree and resident pages into a freshly-
+created child for `fork()` (chunk 6). For every parent VMA we
+allocate a matching child VMA with the same range, prot, flags,
+fd and offset; for every page that's currently resident in the
+parent's PT we share the frame into the child's PT and demote
+both PTEs to read-only so the next write traps into
+`vma_handle_fault`'s COW branch.
+
+The protocol matches the chunk-5 `sys_cow_share_self` shape and
+relies on the same identity-map invariant: kernel mode sees PA =
+VA in the page-pool window on both arches, so a single
+`vm_install_user_page` into `child_ptbr` followed by a
+`vm_update_user_prot` on `parent_ptbr` is enough — no cross-AS
+copy is needed for the page contents because the frame is
+genuinely shared until somebody writes.
+
+  * **Refcount accounting.** `page_refcnt_share` migrates frames
+    that were never refcount-tracked (raw `vm_copy_to` allocate-
+    on-write under chunk-3) into the domain at fork time, so a
+    later `kfree_user_page` from either side correctly
+    decrements. Frames already tracked (chunk-5 demand-page
+    fault path) just see refcount += 1.
+  * **Read-only promotion.** Pages from a writable VMA get their
+    parent PTE flipped to RO; pages from a read-only VMA already
+    were RO and we only need to install the same RO mapping in
+    the child. Either way, the *child's* mapping is installed RO
+    here — when the child later writes, COW allocates it a fresh
+    frame.
+
+Returns 0 on full success. On any failure (VMA pool exhaustion,
+`vm_install_user_page` rejection, `vm_update_user_prot`
+rejection) returns -1; the caller (`kernel_fork`) is responsible
+for tearing down the partially-populated child via the same
+`kernel_reap_user_pages` + `vm_free_process_pt` path used on
+process exit, which correctly drops the bumped refcounts and
+releases the child's PT pages. We don't try to roll back the
+parent-side RO demotions inline — they're harmless (a subsequent
+write hits COW just like any other shared frame would) and
+rolling back would require an extra walk of the PT.
+
+    vma_clone_for_fork(parent_t: *VMATree, child_t: *VMATree,
+                       parent_ptbr: u64, child_ptbr: u64) -> int
+        var n = vma_first(parent_t)
+        while n != VMA_NIL
+            val pv_start  = vma_pool[n].vstart
+            val pv_end    = vma_pool[n].vend
+            val pv_prot   = vma_pool[n].prot
+            val pv_flags  = vma_pool[n].flags
+            val pv_fd     = vma_pool[n].fd
+            val pv_offset = vma_pool[n].offset
+
+            if vma_create(child_t, pv_start, pv_end, pv_prot,
+                          pv_flags, pv_fd, pv_offset) == VMA_NIL
+                return -1
+
+            var executable = 0
+            if (pv_prot & VMA_PROT_EXEC) != 0
+                executable = 1
+            var parent_writable = 0
+            if (pv_prot & VMA_PROT_WRITE) != 0
+                parent_writable = 1
+
+            var va = pv_start
+            while va < pv_end
+                val ppa = vm_v2p(parent_ptbr, va)
+                if ppa != u64(0)
+                    page_refcnt_share(ppa)
+                    if vm_install_user_page(child_ptbr, va, ppa, 0, executable) != 0
+                        kfree_user_page(ppa)
+                        return -1
+                    if parent_writable != 0
+                        if vm_update_user_prot(parent_ptbr, va, 0, executable) != 0
+                            return -1
+                va += u64(PAGE_SIZE)
+
+            n = vma_next(n)
+        0
+
+
+Walk every VMA in `t` and release the page (if any) backing each
+covered VA in `ptbr`. Used by `reap_process` (chunk 6) to drop the
+process's references to its user pages before the page-table
+structures themselves are freed by `vm_free_process_pt`. After
+this call every leaf PTE under a VMA is cleared and any refcount
+the process held on a frame has been dropped via
+`kfree_user_page` (which page_free's the frame at refcount=0).
+
+`vm_unmap_user_page` returns the cleared PA so we don't have to
+walk the PT twice; a non-mapped slot returns 0 and we skip.
+`kfree_user_page` correctly handles both refcount-tracked frames
+(decrement; release at zero) and untracked frames (release
+immediately) per chunk-6's `page_refcnt.lsysl` extension, so this
+loop is correct regardless of how the leaf got into the PT.
+
+    vma_unmap_all_pages(t: *VMATree, ptbr: u64)
+        var n = vma_first(t)
+        while n != VMA_NIL
+            var va = vma_pool[n].vstart
+            val vend = vma_pool[n].vend
+            while va < vend
+                val pa = vm_unmap_user_page(ptbr, va)
+                if pa != u64(0)
+                    kfree_user_page(pa)
+                va += u64(PAGE_SIZE)
+            n = vma_next(n)
 
 
 Selftest -- exercises the public surface and validates invariants

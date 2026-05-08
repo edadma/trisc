@@ -1567,6 +1567,7 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall6(88, sys_vma_create_pid_handler)
         register_syscall(89, sys_cow_refcnt_selftest_handler)
         register_syscall6(90, sys_cow_share_self_handler)
+        register_syscall6(91, sys_fork_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -1987,8 +1988,213 @@ Resume a suspended process (created with create_process_suspended).
                 val tid = processes[pid].main_tid
                 resume_thread(tid)
 
+
+Phase 1 chunk 6 — `fork()`.
+
+Duplicate the calling process. The child gets a fresh PID and
+PTBR, a deep copy of the parent's VMA tree, and shared (RO,
+COW-on-write) mappings of every currently-resident user page.
+File-table cloning, signal disposition copying, etc. are
+placeholders until those subsystems exist (Phase 2 / chunk
+follow-ups).
+
+Return value semantics, per POSIX:
+  * **Parent** sees the child's PID — written by the syscall
+    dispatcher into the parent's saved RAX/x0 from the i64 we
+    return here.
+  * **Child** sees 0 — written into the child's saved
+    return-value register slot inside `arch_setup_fork_frame`,
+    so when the scheduler eventually picks up the child its
+    `restore_context` / ERET replays exactly the parent's
+    post-syscall state but with rc=0.
+
+Failure modes return -1 to the parent and leave no observable
+state behind. Rollback walks the partially-built child via
+`vma_unmap_all_pages` + `vma_clear_all` + `vm_free_process_pt`
+— the same shape `reap_process` uses, which correctly drops the
+parent's bumped refcounts on the shared frames and releases the
+child's PT pages. `kstack_free` and the thread/process slot
+cleanup are inline mirrors of the same teardown.
+
+The handler runs in parent's context (PTBR=parent), but
+`vm_install_user_page` writes into the child's PTBR via the
+identity-map of the page-pool window — same trick `vma_handle_
+fault`'s COW path relies on. No PTBR switch is needed.
+
+    kernel_fork() -> int
+        if current_thread < 0
+            return -1
+        val parent_pid = threads[current_thread].pid
+        if parent_pid <= 0
+            return -1
+        if parent_pid >= MAX_PROCESSES
+            return -1
+        val parent_tid = current_thread
+        val parent_ptbr = threads[parent_tid].ptbr
+        val parent_ssp  = syscall_ssp
+
+        // Allocate child PID.
+        var child_pid = -1
+        var pi = 1
+        while pi < MAX_PROCESSES
+            if processes[pi].state == PROC_FREE
+                child_pid = pi
+                break
+            pi += 1
+        if child_pid < 0
+            return -1
+
+        // Reserve the slot eagerly so a parallel fork on another
+        // CPU can't grab it under us. Cleared on rollback.
+        processes[child_pid].state = PROC_RUNNING
+
+        val child_ptbr = vm_create_process_pt()
+        if child_ptbr == u64(0)
+            processes[child_pid].state = PROC_FREE
+            return -1
+
+        // Initialize the child's VMA tree and clone the parent's.
+        // `vma_clone_for_fork` shares frames, demotes parent PTEs
+        // to RO, and bumps refcounts. On any failure roll back via
+        // the standard reap shape (drops every refcount we bumped
+        // and frees the child's PT).
+        vma_tree_init(&processes[child_pid].vma_tree)
+        if vma_clone_for_fork(&processes[parent_pid].vma_tree,
+                              &processes[child_pid].vma_tree,
+                              parent_ptbr, child_ptbr) != 0
+            vma_unmap_all_pages(&processes[child_pid].vma_tree, child_ptbr)
+            vma_clear_all(&processes[child_pid].vma_tree)
+            vm_free_process_pt(child_ptbr)
+            processes[child_pid].state = PROC_FREE
+            return -1
+
+        // x86 user programs still link at 0xE0000 in the legacy
+        // eager-mapped region (PT[0xCC..0xFF]); copy parent's text
+        // into child's freshly-allocated pages so the child can
+        // resume at the parent's post-syscall PC. No-op on aarch64
+        // — see oskit/arch/*/vm.lsysl::arch_fork_clone_eager.
+        // Master-roadmap migration target: link x86 progs at
+        // 0x60000000 like aarch64 so the legacy region disappears
+        // and this helper becomes universally a no-op.
+        arch_fork_clone_eager(parent_ptbr, child_ptbr)
+
+        // Allocate a fresh kstack for the child's main thread.
+        arch_cli()
+        ensure_queues_init()
+        val kstack_page = kstack_alloc()
+        if kstack_page == u64(0)
+            vma_unmap_all_pages(&processes[child_pid].vma_tree, child_ptbr)
+            vma_clear_all(&processes[child_pid].vma_tree)
+            vm_free_process_pt(child_ptbr)
+            processes[child_pid].state = PROC_FREE
+            arch_sti()
+            return -1
+        val kstack_top_val = i64(kstack_page + u64(4 * PAGE_SIZE))
+
+        // Allocate a thread slot, preferring a recyclable terminated
+        // slot — same scan order as `create_process_suspended` so we
+        // don't grow `thread_count` past `MAX_THREADS` unnecessarily.
+        var idx = -1
+        var ti = 0
+        while ti < thread_count
+            if threads[ti].state == STATE_TERMINATED
+                idx = ti
+                break
+            ti += 1
+        if idx < 0
+            if thread_count >= MAX_THREADS
+                kstack_free(kstack_page)
+                vma_unmap_all_pages(&processes[child_pid].vma_tree, child_ptbr)
+                vma_clear_all(&processes[child_pid].vma_tree)
+                vm_free_process_pt(child_ptbr)
+                processes[child_pid].state = PROC_FREE
+                arch_sti()
+                return -1
+            idx = thread_count
+            thread_count += 1
+
+        // Build the child's saved exception frame from a copy of
+        // the parent's, with the syscall-return register zeroed.
+        threads[idx].ssp = arch_setup_fork_frame(parent_ssp, kstack_top_val)
+        threads[idx].kstack_top = kstack_top_val
+        threads[idx].state = STATE_READY
+        threads[idx].wake_tick = 0
+        // Copy the parent's name (already kernel-owned) into the
+        // child's name buffer so debug output identifies the new
+        // thread; same name is fine for now (PID disambiguates).
+        val pname  = threads[parent_tid].name
+        val pnp    = *byte(pname)
+        var pnlen  = len(pname)
+        if pnlen > 15
+            pnlen = 15
+        var ni = 0
+        while ni < pnlen
+            threads[idx].name_buf[ni] = pnp[ni]
+            ni += 1
+        threads[idx].name_buf[ni] = 0
+        threads[idx].name = string(threads[idx].name_buf[:pnlen])
+        threads[idx].priority      = threads[parent_tid].priority
+        threads[idx].base_priority = threads[parent_tid].priority
+        threads[idx].join_target   = -1
+        threads[idx].quantum       = DEFAULT_QUANTUM
+        threads[idx].next          = QUEUE_EMPTY
+        threads[idx].ctx_switches  = 0
+        threads[idx].cpu_ticks     = 0
+        threads[idx].consec_quanta = 0
+        threads[idx].notify_value  = 0
+        threads[idx].notify_pending = 0
+        threads[idx].blocked_on    = 0
+        threads[idx].ptbr          = child_ptbr
+        threads[idx].pid           = child_pid
+        threads[idx].uid           = threads[parent_tid].uid
+
+        // Set up the child's process slot. parent_tid is the parent's
+        // *main* tid — same convention `create_process_suspended` uses
+        // — so PM's exit notifications, reparenting walks, and the
+        // pm_handle_exit fan-out all see consistent topology.
+        processes[child_pid].ptbr        = child_ptbr
+        processes[child_pid].parent_tid  = processes[parent_pid].main_tid
+        processes[child_pid].exit_code   = 0
+        processes[child_pid].main_tid    = idx
+        processes[child_pid].name        = threads[idx].name
+        // Inherit syscall_allow + ipc_send_mask from the parent so the
+        // child has identical privileges. Kernel-only `0` PIDs keep
+        // their original 0xFFFF mask via the parent's slot.
+        for w in 0..<8
+            processes[child_pid].syscall_allow[w] = processes[parent_pid].syscall_allow[w]
+        processes[child_pid].ipc_send_mask = processes[parent_pid].ipc_send_mask
+
+        // Enqueue at the child's priority. The dispatcher returns
+        // child_pid to the parent next, and `do_schedule` either
+        // picks the child immediately (FIFO sibling at same priority)
+        // or picks it on the next quantum boundary.
+        enqueue(threads[idx].priority, idx)
+        // Slow-path handler convention: stay cli; do_schedule does sti.
+        child_pid
+
+
+SYS_FORK (91): clone the calling process. Returns the child's
+PID to the parent (>0), 0 to the child, -1 on failure (via
+the dispatcher writing the i64 result into the parent's saved
+return register; the child gets 0 from `arch_setup_fork_frame`).
+
+    sys_fork_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        i64(kernel_fork())
+
     reap_process(pid: int)
         grant_revoke_all(pid)
+        // Phase 1 chunk 6: walk the VMA tree and drop the process's
+        // reference on every leaf page it had mapped. Required so a
+        // forked-and-COW'd child returns its share of jointly-held
+        // frames to the page pool when it exits, and so chunk-3's
+        // raw-allocated `vm_copy_to` frames don't leak — both arches'
+        // `vm_free_process_pt` only walks PT *structure*, not user
+        // VMA-mapped leaves outside the legacy 0xCC..0xFF region.
+        // Order matters: VMAs first (read live PTEs to find frames),
+        // then `vm_free_process_pt` (tear down the PT pages
+        // themselves; clears descriptors that the unmap loop above
+        // already left at zero).
+        vma_unmap_all_pages(&processes[pid].vma_tree, processes[pid].ptbr)
         vma_clear_all(&processes[pid].vma_tree)
         // Free per-process kernel stack (2 pages, allocated for ring 3 threads)
         // Guard: only free if the thread slot still belongs to this process.

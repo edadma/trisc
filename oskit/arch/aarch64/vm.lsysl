@@ -642,6 +642,17 @@ grant region L3, the user-region L3 + its code/stack pages, the
 L2 table, the L1 table, and the L0 root. Safe to call on the kernel
 PTBR (no-op) or a null pointer.
 
+Phase 1 chunk 6 — fork's eager-region clone.
+
+aarch64 has no legacy eager-mapping region (user programs link at
+`0x60000000` and `vm_create_process_pt` allocates the user L3
+empty), so this is a no-op shim that lets `kernel_fork` call
+`arch_fork_clone_eager` unconditionally on both arches.
+
+    arch_fork_clone_eager(src_ptbr: u64, dst_ptbr: u64)
+        return
+
+
     vm_free_process_pt(l1_addr: u64)
         if l1_addr == u64(0)
             return

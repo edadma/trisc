@@ -150,3 +150,30 @@ base) the scheduler will use as SP_EL1 on resume.
                              kstack_top_val: i64, ptbr_val: u64) -> i64
         build_user_stack_frame(entry_point, usp, kstack_top_val)
         kstack_top_val - i64(STACK_FRAME_SIZE)
+
+Build a `fork()` continuation frame on the child's kernel stack.
+Mirror of the x86_64 helper: byte-copy the parent's saved 272-byte
+exception frame from `parent_ssp` onto the child's kstack, then
+zero the syscall return register (x0 at offset 0) in the copy so
+the child sees rc=0 from `sys_fork` while the parent sees the
+child's pid (written by the dispatcher into the parent's saved x0
+when `kernel_fork` returns).
+
+ELR_EL1 in the copy points to the parent's post-SVC instruction;
+SP_EL0 is the parent's user SP. Both arches identity-map the kstack
+slab under any PTBR, so the copy succeeds in the kernel context
+without an explicit address-space switch.
+
+Returns the SSP value to store in the child thread (frame base).
+
+    arch_setup_fork_frame(parent_ssp: i64, kstack_top_val: i64) -> i64
+        val frame = kstack_top_val - i64(STACK_FRAME_SIZE)
+        var i = 0
+        while i < STACK_FRAME_SIZE
+            var src: *byte = *byte(parent_ssp + i64(i))
+            var dst: *byte = *byte(frame + i64(i))
+            *dst = *src
+            i += 1
+        var rv: *i64 = *i64(frame + i64(SYSCALL_RETURN_OFFSET))
+        *rv = i64(0)
+        frame

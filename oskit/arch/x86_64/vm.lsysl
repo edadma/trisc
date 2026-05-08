@@ -691,6 +691,44 @@ Copy data from another address space using physical addressing.
             memcpy(dst + copied, *byte(pa), chunk)
             copied += chunk
 
+Phase 1 chunk 6 — fork's eager-region clone.
+
+x86_64 user programs link at `0xE0000` and live in the legacy
+0xCC..0xFF region that `vm_create_process_pt` *eagerly* allocates
+fresh zero pages for. This region is not covered by any VMA (it
+predates the chunk-3 VMA seeding), so `vma_clone_for_fork`
+doesn't see it; the child would inherit a freshly-zeroed code
+region and trap on first instruction fetch.
+
+Bridge that gap by byte-copying parent's contents into the
+child's eager pages, page by page. This drops COW semantics for
+the legacy region (each fork pays a 208 KB copy), but the
+legacy region is static text + small data and forks are rare;
+the proper fix is to migrate x86 user programs to link at
+`0x60000000` like aarch64 (master roadmap invariant 1) so the
+whole region becomes a normal demand-paged VMA. Until then, this
+helper makes fork correct.
+
+aarch64 has its own no-op shim (no eager region exists there)
+so `kernel_fork` can call this unconditionally.
+
+    arch_fork_clone_eager(src_ptbr: u64, dst_ptbr: u64)
+        var i = 0xCC
+        while i < 0x100
+            val va = u64(i) * u64(PAGE_SIZE)
+            val src_pa = vm_v2p(src_ptbr, va)
+            val dst_pa = vm_v2p(dst_ptbr, va)
+            if src_pa != u64(0)
+                if dst_pa != u64(0)
+                    var sp: *byte = *byte(src_pa)
+                    var dp: *byte = *byte(dst_pa)
+                    var k = 0
+                    while k < PAGE_SIZE
+                        dp[k] = sp[k]
+                        k += 1
+            i += 1
+
+
 Copy data between two address spaces via physical addresses.
 
     vm_copy_cross(src_ptbr: u64, src_vaddr: u64, dst_ptbr: u64, dst_vaddr: u64, len: int)

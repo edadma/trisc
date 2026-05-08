@@ -128,6 +128,32 @@ can reach refcount=0 through this path.
         cur == 1
 
 
+Promote a possibly-untracked frame into the refcount domain by
+adding one more sharer. Used by `vma_clone_for_fork` (chunk 6) to
+share a parent's existing leaf with a child:
+
+  * If the frame is currently untracked (refcount==0), set it to
+    2 — one for the parent's pre-existing mapping plus one for
+    the new child. This migrates raw-allocated frames (e.g. the
+    chunk-3 allocate-on-write path in `vm_copy_to`) into the
+    tracked pool at fork time.
+  * If already tracked (refcount>=1), just increment.
+
+The asymmetric init-to-2 keeps the invariant "refcount equals the
+number of mappings" so `kfree_user_page` from either side later
+correctly decrements without underflow or use-after-free.
+
+    page_refcnt_share(pa: u64)
+        val idx = page_refcnt_idx(pa)
+        if idx < 0
+            return
+        val cur = int(page_refcnt[idx]) & 0xff
+        if cur == 0
+            page_refcnt[idx] = byte(2)
+            return
+        page_refcnt_inc(pa)
+
+
 User-data-page allocator. Pulls a zeroed frame from the page pool
 and stamps the refcount bytemap to 1. The bytemap base is
 `PAGE_POOL_BASE` for both arches; lazy-init on the first call is
@@ -143,14 +169,37 @@ pool is exhausted.
         page_refcnt_set(pa, 1)
         pa
 
-User-data-page deallocator. Decrements refcount; if it hits zero,
-returns the frame to the page pool. A frame that's still
-referenced (refcount > 1) stays in service. Out-of-range PAs are
-ignored — defensive: anyone calling kfree_user_page on a non-pool
-PA is buggy.
+User-data-page deallocator. The contract is "release one
+reference"; how the frame entered the refcount domain governs
+what happens:
+
+  * **In refcount range, refcount > 0** — decrement; if it hit
+    zero, return the frame to the page pool.
+  * **In refcount range, refcount == 0** — frame is in the pool
+    span but never went through `kalloc_user_page` (the chunk-3
+    allocate-on-write path in `vm_copy_to`, the legacy 0xCC..0xFF
+    eager region, etc.). Treat it as untracked: free it
+    immediately. Without this fall-through, raw-allocated frames
+    that get into a process's user PT (e.g. via the loader's
+    `vm_copy_to`) would silently leak when chunk-6's
+    `kernel_reap_user_pages` walks the VMA tree on process exit.
+  * **Out of refcount range** — kernel image / MMIO / etc. Never
+    a pool frame; ignore.
+
+The "refcount==0 means untracked" invariant is preserved by
+chunk-5's allocator: `kalloc_user_page` always sets refcount=1
+when handing a frame out, and `page_refcnt_dec` only fires from
+1→0 on the last drop, which is paired with the `page_free` here.
 
     kfree_user_page(pa: u64)
         if pa == u64(0)
+            return
+        val idx = page_refcnt_idx(pa)
+        if idx < 0
+            return
+        val cur = int(page_refcnt[idx]) & 0xff
+        if cur == 0
+            page_free(pa)
             return
         if page_refcnt_dec(pa)
             page_free(pa)

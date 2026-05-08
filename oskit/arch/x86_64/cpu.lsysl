@@ -132,3 +132,37 @@ TSS.RSP0 on ring 3 to ring 0 transitions. Returns the SSP value.
     arch_setup_process_frame(entry_point: i64, usp: i64, ssp: i64, kstack_top_val: i64, ptbr_val: u64) -> i64
         build_user_stack_frame(entry_point, usp, kstack_top_val)
         kstack_top_val - STACK_FRAME_SIZE
+
+Build a `fork()` continuation frame on the child's kernel stack.
+The child must resume at the *same* user-mode PC as the parent's
+post-syscall instruction with all GP regs preserved — except the
+syscall return register (RAX on x86_64), which userspace reads as
+the fork return value. Standard POSIX semantics: child sees 0,
+parent sees the child's pid.
+
+We achieve that by byte-copying the parent's saved exception
+frame from `parent_ssp` onto the child's kstack, then zeroing the
+RAX slot in the copy. The kstacks are identity-mapped under both
+the parent's PT and any kernel-only PTBR, so a plain byte copy
+crosses the address-space boundary cleanly.
+
+The 160-byte layout (15 GP regs at 0..120, then iretq frame
+RIP/CS/RFLAGS/RSP/SS at 120..160) matches `build_stack_frame` and
+`build_user_stack_frame` exactly, which is what `restore_context`
+in `boot.s` expects. After scheduling picks up the child, that
+restore unwinds straight back to ring 3 at the post-syscall RIP
+with RSP = parent's user RSP and RAX = 0.
+
+Returns the SSP value to store in the child thread (frame base).
+
+    arch_setup_fork_frame(parent_ssp: i64, kstack_top_val: i64) -> i64
+        val frame = kstack_top_val - STACK_FRAME_SIZE
+        var i = 0
+        while i < STACK_FRAME_SIZE
+            var src: *byte = *byte(parent_ssp + i64(i))
+            var dst: *byte = *byte(frame + i64(i))
+            *dst = *src
+            i += 1
+        var rv: *i64 = *i64(frame + i64(SYSCALL_RETURN_OFFSET))
+        *rv = i64(0)
+        frame

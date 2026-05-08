@@ -1,0 +1,153 @@
+test_fork — Phase 1 chunk 6 fork() end-to-end
+==============================================
+
+Drives `fork()` (SYS_FORK = 91) through the COW machinery wired
+up in chunk 5: parent mmaps an anonymous page, writes a sentinel
+into it, then forks. The child writes a *different* sentinel
+into the same VA (which COWs into a private frame for the child),
+calls `exit(0)`, and the parent waits on the child via PM and
+verifies the parent's view of the page is still its original
+sentinel — proving the two views were correctly decoupled.
+
+What this test would fail-on if regressed:
+
+  * `vma_clone_for_fork` not bumping refcount → child's COW would
+    free the parent's frame mid-test, triggering page reuse and
+    a spurious sentinel mismatch.
+  * Forgetting to demote the parent's PTE to RO → child's write
+    would silently update the *shared* frame and the parent
+    would see the child's sentinel.
+  * `arch_setup_fork_frame` not zeroing the return register →
+    child would also see rc>0 and execute the parent branch,
+    making both processes call `exit(0)` and the test would
+    accidentally pass via a single-process write+read.
+  * `kernel_reap_user_pages` not running on exit → child's COW'd
+    frame would leak.
+
+Pass criterion: prints `fork: ok`. The fail() helper exits with
+the step number so a regression is greppable.
+
+    module oskit.bin.test_fork
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6, pm_waitpid}
+
+
+    val SYS_FORK = 91
+    val SYS_MMAP = 222
+
+    val PROT_READ  = 1
+    val PROT_WRITE = 2
+
+    val MAP_PRIVATE = 0x02
+    val MAP_ANON    = 0x20
+
+    val PAGE_LEN: i64 = i64(0x1000)
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("fork: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    do_mmap(len: i64) -> u64
+        val rc = syscall6(SYS_MMAP, i64(0), len,
+                          i64(PROT_READ | PROT_WRITE),
+                          i64(MAP_PRIVATE | MAP_ANON),
+                          i64(-1), i64(0))
+        if rc <= i64(0)
+            return u64(0)
+        u64(rc)
+
+
+    do_fork() -> int
+        int(syscall6(SYS_FORK, i64(0), i64(0),
+                     i64(0), i64(0), i64(0), i64(0)))
+
+
+    main(argv: []string)
+
+Step 1 — mmap one anonymous page in the parent's mmap arena. No
+fault yet; the VMA exists but the PTE is non-present.
+
+        val page = do_mmap(PAGE_LEN)
+        if page == u64(0)
+            fail(1)
+            return
+
+Step 2 — write `0xAA` into the page from the parent. This is the
+first touch: `vma_handle_fault` allocates a fresh refcount=1
+zero frame, installs RW, and the store completes.
+
+        var p: *byte = *byte(page)
+        p[0] = byte(0xAA)
+        if int(p[0]) & 0xff != 0xAA
+            fail(2)
+            return
+
+Step 3 — fork. After this point the address space and the value
+of `pid` differ between parent and child:
+  * Parent: `pid > 0`  (the child's PID)
+  * Child:  `pid == 0`
+  * Failure: `pid < 0` — only the parent observes this.
+
+The shared frame at `page` is now refcount=2, mapped RO in both
+PTs.
+
+        val pid = do_fork()
+        if pid < 0
+            fail(3)
+            return
+
+        if pid == 0
+
+Step 4 (child) — write `0xBB` into the same VA. The PTE is RO so
+the store traps; `vma_handle_fault`'s COW branch allocates a
+fresh frame, copies in the parent's `0xAA`, installs RW, and
+drops the child's reference on the original frame (refcount goes
+back to 1). The store re-executes against the fresh frame and
+writes `0xBB`.
+
+            p[0] = byte(0xBB)
+            if int(p[0]) & 0xff != 0xBB
+                exit_with(20)
+                return
+
+Child terminates cleanly so PM's exit notification reaches the
+parent's `pm_waitpid`. exit code 0 = "child saw isolation."
+
+            exit()
+            return
+
+Step 5 (parent) — block on the child via PM. The child's exit
+code is 0 if everything went well in the child branch.
+
+        val rc = pm_waitpid(pid)
+        if rc != 0
+            fail(4)
+            return
+
+Step 6 (parent) — verify the parent's view of `page` is still
+`0xAA`. The child's COW must have decoupled the two PTs; if the
+child's store somehow landed in the original (shared) frame, the
+parent would now read `0xBB` and we'd fail here.
+
+        if int(p[0]) & 0xff != 0xAA
+            fail(5)
+            return
+
+        puts("fork: ok\n")
+        exit()
