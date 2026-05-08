@@ -9,6 +9,7 @@ object OSKitTestData:
   lazy val bootAsm: String = scala.io.Source.fromFile("oskit/arch/trisc/boot.asm").mkString
   lazy val kernelSysl: String = readLsysl("oskit/kernel/kernel.lsysl")
   lazy val kstackSysl: String = readLsysl("oskit/kernel/kstack.lsysl")
+  lazy val pageRefcntSysl: String = readLsysl("oskit/kernel/page_refcnt.lsysl")
   lazy val servicesSysl: String = readLsysl("oskit/services/services.lsysl")
   lazy val semaphoreSysl: String = readLsysl("oskit/sync/semaphore.lsysl")
   lazy val mutexSysl: String = readLsysl("oskit/sync/mutex.lsysl")

@@ -1,0 +1,254 @@
+Page Refcount Table
+===================
+
+Per-physical-frame reference count, used by the COW path in
+`vma_handle_fault` and (chunk 6) `fork()`. A user data page that
+is mapped from N processes' page tables holds refcount=N; the COW
+fault handler bumps refcount on the freshly-allocated copy and
+decrements the shared frame back toward 1, eventually returning
+the frame to the page pool when the last sharer goes away.
+
+Scope: only **user data pages** are refcounted — i.e. pages
+allocated through `kalloc_user_page` and freed through
+`kfree_user_page`. The arch's PT/PD/PDPT/PML4 frames and the
+kstack slab are allocated directly through `page_alloc` /
+`page_free` (raw bump + free-list) and stay outside the
+refcount domain. PT pages don't share across processes so they
+don't need refcounting; kstacks are permanent slab.
+
+Layout: a flat byte-per-frame array indexed by
+`(pa - page_refcnt_base) >> 12`. The base is recorded the first
+time the kernel hands out a user data page, by deriving it from
+`PAGE_POOL_BASE` (config). Pages outside the tracked range —
+kernel image, MMIO, multiboot modules — index out of bounds and
+the helpers no-op, treating those frames as permanently allocated.
+
+Saturation: counts max out at 255. A frame exceeding the bound
+holds at 255 and silently leaks on later free — acceptable since
+255 sharers far exceeds anything a real workload exercises
+(MAX_PROCESSES is 32 today). Linux uses 32-bit refcounts; we trade
+table size for headroom.
+
+This module is part of the kernel (module oskit.kernel) so it
+can be reached from `vma_handle_fault` and the kernel-side mmap
+helpers without crossing the `oskit.kernel ↔ oskit.arch` boundary.
+The arch's `page_alloc` / `page_free` stay refcount-unaware so the
+boundary remains acyclic.
+
+    module oskit.kernel
+
+    import oskit.config.{PAGE_SIZE, PAGE_POOL_BASE}
+    import oskit.arch.{page_alloc_zero, page_free}
+
+The pool spans up to 2 GB on aarch64 (PAGE_POOL_END = 0x80000000)
+and 256 MB on x86_64 (PAGE_POOL_END = 0x10000000), both starting
+at or above `PAGE_POOL_BASE` (0x400000) — x86 pools right there,
+aarch64 pools at `_heap_start` (~0x40100000), well above. A 512 KB
+bytemap covers 0x400000..0x80400000 for both arches. Sysl array
+bounds need a literal, so the `0x80000` is duplicated in the array
+decl below — keep it in sync with `PAGE_REFCNT_LEN`.
+
+    val PAGE_REFCNT_LEN = 0x80000
+
+    var page_refcnt: [0x80000]byte
+    var page_refcnt_base: u64 = 0
+    var page_refcnt_init_done = false
+
+Initialize. Idempotent — a second call is a no-op. Bytemap is
+zero-init (BSS) so no memset needed. `base` is the lowest PA the
+table will index. Lazy-called from `kalloc_user_page` so we never
+have to thread an init call through the boot sequence.
+
+    page_refcnt_init(base: u64)
+        if page_refcnt_init_done
+            return
+        page_refcnt_base = base
+        page_refcnt_init_done = true
+
+Compute the bytemap index for a PA, or -1 if out of range. An
+uninitialized table reports -1 for every PA.
+
+    page_refcnt_idx(pa: u64) -> int
+        if !page_refcnt_init_done
+            return -1
+        if pa < page_refcnt_base
+            return -1
+        val off = pa - page_refcnt_base
+        if off >= u64(PAGE_REFCNT_LEN) * u64(PAGE_SIZE)
+            return -1
+        int(off >> 12)
+
+Read the refcount of a frame. Returns 0 for out-of-range
+(treated as "not tracked").
+
+    page_refcnt_get(pa: u64) -> int
+        val idx = page_refcnt_idx(pa)
+        if idx < 0
+            return 0
+        int(page_refcnt[idx]) & 0xff
+
+Set the refcount of a frame explicitly. Used by `kalloc_user_page`
+when handing a fresh frame to the caller.
+
+    page_refcnt_set(pa: u64, n: int)
+        val idx = page_refcnt_idx(pa)
+        if idx < 0
+            return
+        page_refcnt[idx] = byte(n)
+
+Increment. Saturating at 255 — a 256th sharer would wrap and
+mis-account, so we pin and leak instead.
+
+    page_refcnt_inc(pa: u64)
+        val idx = page_refcnt_idx(pa)
+        if idx < 0
+            return
+        val cur = int(page_refcnt[idx]) & 0xff
+        if cur < 255
+            page_refcnt[idx] = byte(cur + 1)
+
+Decrement. Returns true iff the count hit zero (caller should
+release the frame back to the page pool). Refuses to underflow:
+calling dec on an already-zero count returns false (no double-free
+through this path) and dec on a saturated 255 also returns false
+(we don't know the true count, so leak rather than mis-free).
+Out-of-range PAs return false too — only refcount-tracked frames
+can reach refcount=0 through this path.
+
+    page_refcnt_dec(pa: u64) -> bool
+        val idx = page_refcnt_idx(pa)
+        if idx < 0
+            return false
+        val cur = int(page_refcnt[idx]) & 0xff
+        if cur == 0
+            return false
+        if cur == 255
+            return false
+        page_refcnt[idx] = byte(cur - 1)
+        cur == 1
+
+
+User-data-page allocator. Pulls a zeroed frame from the page pool
+and stamps the refcount bytemap to 1. The bytemap base is
+`PAGE_POOL_BASE` for both arches; lazy-init on the first call is
+just to flip the `page_refcnt_init_done` guard. Returns 0 if the
+pool is exhausted.
+
+    kalloc_user_page() -> u64
+        if !page_refcnt_init_done
+            page_refcnt_init(u64(PAGE_POOL_BASE))
+        val pa = page_alloc_zero()
+        if pa == u64(0)
+            return u64(0)
+        page_refcnt_set(pa, 1)
+        pa
+
+User-data-page deallocator. Decrements refcount; if it hits zero,
+returns the frame to the page pool. A frame that's still
+referenced (refcount > 1) stays in service. Out-of-range PAs are
+ignored — defensive: anyone calling kfree_user_page on a non-pool
+PA is buggy.
+
+    kfree_user_page(pa: u64)
+        if pa == u64(0)
+            return
+        if page_refcnt_dec(pa)
+            page_free(pa)
+
+
+Selftest -- exercises the refcount module without going through
+the page allocator. Used by the chunk-5 test program via a debug
+syscall (independent of the COW fault path).
+
+The test uses a synthetic PA at the top of the bytemap so it's
+guaranteed in-range without colliding with any frame the page
+allocator might hand out. Saves and restores the previous count
+so the test is non-destructive.
+
+Returns 0 on success; 1..N on failure at step N.
+
+    page_refcnt_selftest() -> int
+        if !page_refcnt_init_done
+            page_refcnt_init(u64(PAGE_POOL_BASE))
+        val test_pa = page_refcnt_base + u64(PAGE_REFCNT_LEN - 1) * u64(PAGE_SIZE)
+        val saved = page_refcnt_get(test_pa)
+
+        page_refcnt_set(test_pa, 1)
+        if page_refcnt_get(test_pa) != 1
+            page_refcnt_set(test_pa, saved)
+            return 1
+
+        page_refcnt_inc(test_pa)
+        if page_refcnt_get(test_pa) != 2
+            page_refcnt_set(test_pa, saved)
+            return 2
+
+        if page_refcnt_dec(test_pa)
+            page_refcnt_set(test_pa, saved)
+            return 3
+        if page_refcnt_get(test_pa) != 1
+            page_refcnt_set(test_pa, saved)
+            return 4
+
+        if !page_refcnt_dec(test_pa)
+            page_refcnt_set(test_pa, saved)
+            return 5
+        if page_refcnt_get(test_pa) != 0
+            page_refcnt_set(test_pa, saved)
+            return 6
+
+`dec` on a zero count must report "not freed" (refuses to
+underflow).
+
+        if page_refcnt_dec(test_pa)
+            page_refcnt_set(test_pa, saved)
+            return 7
+
+Out-of-range PA: get returns 0, dec returns false (untracked).
+
+        val oor = page_refcnt_base + u64(PAGE_REFCNT_LEN) * u64(PAGE_SIZE)
+        if page_refcnt_get(oor) != 0
+            page_refcnt_set(test_pa, saved)
+            return 8
+        if page_refcnt_dec(oor)
+            page_refcnt_set(test_pa, saved)
+            return 9
+
+End-to-end through the user-page wrappers: alloc bumps to 1, free
+takes it back to 0 and returns the frame to the pool. We can't
+easily verify the frame is back on the free list without poking
+arch internals, but we can verify the refcount post-conditions.
+
+        val pa = kalloc_user_page()
+        if pa == u64(0)
+            page_refcnt_set(test_pa, saved)
+            return 10
+        if page_refcnt_get(pa) != 1
+            kfree_user_page(pa)
+            page_refcnt_set(test_pa, saved)
+            return 11
+        kfree_user_page(pa)
+        if page_refcnt_get(pa) != 0
+            page_refcnt_set(test_pa, saved)
+            return 12
+
+`kfree_user_page` on a frame held at refcount>1 must NOT actually
+free it — the next sharer will eventually bring it down to 0.
+
+        val pa2 = kalloc_user_page()
+        if pa2 == u64(0)
+            page_refcnt_set(test_pa, saved)
+            return 13
+        page_refcnt_inc(pa2)              // refcount = 2 (synthetic share)
+        kfree_user_page(pa2)              // refcount = 1, frame stays
+        if page_refcnt_get(pa2) != 1
+            kfree_user_page(pa2)
+            page_refcnt_set(test_pa, saved)
+            return 14
+        kfree_user_page(pa2)              // last ref, frame freed
+        if page_refcnt_get(pa2) != 0
+            page_refcnt_set(test_pa, saved)
+            return 15
+
+        page_refcnt_set(test_pa, saved)
+        0

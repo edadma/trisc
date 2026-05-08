@@ -33,8 +33,8 @@ fault handler through `vma_lookup_addr`; chunk 3 makes
 
     module oskit.kernel
 
-    import oskit.config.{MAX_VMAS}
-    import oskit.arch.{page_alloc_zero, vm_install_user_page}
+    import oskit.config.{MAX_VMAS, PAGE_SIZE}
+    import oskit.arch.{vm_install_user_page, vm_v2p}
 
 VMA_NIL serves the same role as rbtree.lsysl's NIL — a sentinel
 "no node" value distinct from any pool index.
@@ -529,9 +529,26 @@ the faulting instruction can retry), -1 if no VMA covers the
 address or the fault couldn't be handled here. The arch code
 falls through to its legacy "kill process" path on -1.
 
-Phase 1 chunk 2 only handles anonymous (MAP_ANON) VMAs by
-installing a fresh zero page. File-backed and COW logic land in
-later chunks (5 + 7).
+Two distinct dispositions, separated by whether the leaf PTE is
+already present:
+
+  - **PTE absent** — first touch of an anonymous page. Allocate a
+    zero frame via `kalloc_user_page` (refcount=1) and install it.
+    Read/exec/write all funnel through this path on first access.
+
+  - **PTE present** (write fault only — RO reads don't trap on
+    either arch) — copy-on-write. The frame is shared (refcount
+    set by some prior path: chunk-6 fork, the chunk-5 selftest's
+    `sys_cow_share_self`, or a future shared-anon mapping). We
+    allocate a fresh frame, copy the old contents into it, install
+    the new frame writable, then drop our reference to the old
+    frame. If we held the last ref the old frame returns to the
+    page pool; otherwise it stays mapped wherever else it lives.
+
+Shared mappings (MAP_SHARED) write-faulting on a RO PTE would
+propagate the change to all sharers; the chunk-5 path doesn't yet
+implement that, so we decline. MAP_PRIVATE is the only flag that
+exists in chunk-5 user-space anyway.
 
     vma_handle_fault(t: *VMATree, vaddr: u64, ptbr: u64, write: int) -> int
         val v = vma_lookup_addr(t, vaddr)
@@ -545,17 +562,52 @@ later chunks (5 + 7).
         else
             if (vma_pool[v].prot & VMA_PROT_READ) == 0
                 return -1
+
         val page_va = vaddr & ~u64(0xFFF)
-        val pa = page_alloc_zero()
-        if pa == u64(0)
-            return -1
         var writable = 0
         if (vma_pool[v].prot & VMA_PROT_WRITE) != 0
             writable = 1
         var executable = 0
         if (vma_pool[v].prot & VMA_PROT_EXEC) != 0
             executable = 1
+
+        val existing_pa = vm_v2p(ptbr, page_va)
+        if existing_pa != u64(0)
+            // PTE present — only reachable through a write fault on a
+            // RO PTE. Defensive: a read fault on a present page should
+            // never trap, but if it does, decline rather than silently
+            // re-zero the page.
+            if write == 0
+                return -1
+            if (vma_pool[v].flags & VMA_MAP_PRIVATE) == 0
+                return -1
+            val new_pa = kalloc_user_page()
+            if new_pa == u64(0)
+                return -1
+            // Copy old frame → new frame. Both PAs sit in the page
+            // pool, which both arches identity-map in kernel context
+            // (x86 boot.s pd[0..511] superpages, aarch64 L1[1] block),
+            // so PA = VA when reading from kernel mode.
+            var src: *byte = *byte(existing_pa)
+            var dst: *byte = *byte(new_pa)
+            var i = 0
+            while i < PAGE_SIZE
+                dst[i] = src[i]
+                i += 1
+            if vm_install_user_page(ptbr, page_va, new_pa, writable, executable) != 0
+                kfree_user_page(new_pa)
+                return -1
+            kfree_user_page(existing_pa)
+            return 0
+
+PTE absent — first-touch anonymous demand-page. `kalloc_user_page`
+returns a zeroed frame at refcount=1.
+
+        val pa = kalloc_user_page()
+        if pa == u64(0)
+            return -1
         if vm_install_user_page(ptbr, page_va, pa, writable, executable) != 0
+            kfree_user_page(pa)
             return -1
         0
 

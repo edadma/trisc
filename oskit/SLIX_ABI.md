@@ -148,6 +148,9 @@ user-mode). Numbers are stable. Definitions live in
 | 85  | SYS_FD_TRANSPLANT     | (fd handoff helper)                  |
 | 86  | SYS_VMA_SELFTEST      | sys_vma_selftest_handler (debug)     |
 | 87  | SYS_VMA_CREATE        | sys_vma_create_handler (debug)       |
+| 88  | SYS_VMA_CREATE_PID    | sys_vma_create_pid_handler (debug)   |
+| 89  | SYS_COW_REFCNT_SELFTEST | sys_cow_refcnt_selftest_handler (debug) |
+| 90  | SYS_COW_SHARE_SELF    | sys_cow_share_self_handler (debug)   |
 
 PHASE 1 NOTE. The VM/process syscalls (44–60, 63, 66, 79) all
 assume the current "fixed-region eager mapping" model. They
@@ -645,3 +648,21 @@ fixed-region state.
   fixed to honour `writable=0` via AP=11 (was silently RW
   regardless of arg) — without this fix `mprotect(PROT_READ)`
   would be a no-op on aarch64.
+- **2026-05-07 / Phase 1 chunk 5** — copy-on-write infrastructure
+  for anonymous mappings. New `oskit/kernel/page_refcnt.lsysl`
+  carries a per-physical-frame byte refcount (256 KB BSS,
+  indexable up to 1 GB above pool base). User-data-page wrappers
+  `kalloc_user_page` / `kfree_user_page` hand out frames at
+  refcount=1 and only release them to the page pool at
+  refcount=0; PT/PD/PDPT/kstack pages remain refcount-unaware to
+  keep the `oskit.kernel` ↔ `oskit.arch` dependency boundary
+  acyclic. `vma_handle_fault` now takes a COW branch when the
+  faulting PTE is already present — write fault on a RO PTE in a
+  MAP_PRIVATE VMA allocates a fresh frame, copies the contents,
+  installs the new frame writable, and decrements the original
+  frame's refcount. Two debug syscalls plumb the test program:
+  SYS_COW_REFCNT_SELFTEST (89) runs the kernel-side refcount
+  invariants and SYS_COW_SHARE_SELF (90) plumbs `va_dst` to the
+  same physical frame as `va_src` (both PTEs RO, refcount += 1)
+  so a userspace test can drive the COW path without yet having
+  `fork()` (chunk 6).

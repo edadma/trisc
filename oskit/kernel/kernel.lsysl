@@ -1001,6 +1001,72 @@ child before resume.
         i64(idx)
 
 
+SYS_COW_REFCNT_SELFTEST (89): kernel-side refcount-table selftest.
+Debug-only — exists so the chunk-5 test program can validate the
+refcount module's invariants independently of the COW fault path.
+Returns 0 on pass, 1..N for failure-step.
+
+    sys_cow_refcnt_selftest_handler(arg: int)
+        val rc = page_refcnt_selftest()
+        syscall_return(i64(rc))
+        kernel_continue_current()
+
+
+SYS_COW_SHARE_SELF (90): debug-only syscall — make `va_dst` map
+the same physical frame as `va_src` in the calling process, with
+both PTEs marked read-only. Bumps the frame's refcount by 1, so
+the page is now refcount=2. A subsequent write to either VA traps
+into `vma_handle_fault`'s COW branch and is satisfied by allocating
+a fresh frame, copying the contents, and dropping the original
+ref. Used by `oskit/bin/test_cow.lsysl` to exercise the COW path
+without yet having `fork()` (chunk 6).
+
+Args: a0 = va_src (must be page-aligned and currently mapped via
+the demand-paging path), a1 = va_dst (page-aligned, in a VMA,
+currently NOT mapped). Returns 0 on success, -1 on any error
+(unmapped src, already-mapped dst, dst not in a VMA, install
+failure). Caller's responsibility to keep both VAs inside legal
+VMAs — the kernel does not extend the VMA tree.
+
+    sys_cow_share_self_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        if current_thread < 0
+            return i64(-1)
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return i64(-1)
+        if pid >= MAX_PROCESSES
+            return i64(-1)
+        val ptbr = threads[current_thread].ptbr
+        val va_src = u64(a0) & ~u64(0xFFF)
+        val va_dst = u64(a1) & ~u64(0xFFF)
+
+        val pa = vm_v2p(ptbr, va_src)
+        if pa == u64(0)
+            return i64(-1)
+        if vm_v2p(ptbr, va_dst) != u64(0)
+            return i64(-1)
+
+        val v_dst = vma_lookup_addr(&processes[pid].vma_tree, va_dst)
+        if v_dst == VMA_NIL
+            return i64(-1)
+        var executable = 0
+        if (vma_pool[v_dst].prot & VMA_PROT_EXEC) != 0
+            executable = 1
+
+        page_refcnt_inc(pa)
+        if vm_install_user_page(ptbr, va_dst, pa, 0, executable) != 0
+            page_refcnt_dec(pa)
+            return i64(-1)
+        if vm_update_user_prot(ptbr, va_src, 0, executable) != 0
+            // Roll back: clear the dst PTE and decrement refcount
+            // back to its pre-call value. Don't free the frame —
+            // va_src still maps it.
+            vm_unmap_user_page(ptbr, va_dst)
+            page_refcnt_dec(pa)
+            return i64(-1)
+        i64(0)
+
+
 Page-fault hook called from the arch fault handlers. Resolves the
 faulting thread's pid + ptbr, then routes to `vma_handle_fault`.
 Returns 0 if the fault was satisfied and the faulting instruction
@@ -1105,7 +1171,7 @@ return 0 — Linux semantics.
         while va < vend
             val pa = vm_unmap_user_page(ptbr, va)
             if pa != u64(0)
-                page_free(pa)
+                kfree_user_page(pa)
             va += u64(PAGE_SIZE)
         var n = vma_lookup_addr(t, vstart)
         while n != VMA_NIL
@@ -1499,6 +1565,8 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall(86, sys_vma_selftest_handler)
         register_syscall6(87, sys_vma_create_handler)
         register_syscall6(88, sys_vma_create_pid_handler)
+        register_syscall(89, sys_cow_refcnt_selftest_handler)
+        register_syscall6(90, sys_cow_share_self_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events

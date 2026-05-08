@@ -2510,6 +2510,19 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "mmap: bad"
   }
 
+  "cow: anon COW end-to-end" in {
+    // Phase 1 chunk 5. test_cow drives the COW infrastructure:
+    // (a) the kernel-side refcount-table selftest via debug syscall
+    //     SYS_COW_REFCNT_SELFTEST (89);
+    // (b) the COW fault path by mmap'ing two pages, sharing one
+    //     frame via SYS_COW_SHARE_SELF (90), and writing through
+    //     each PTE to verify each side gets its own copy. Stands in
+    //     for the chunk-6 fork() path that produces the same shape.
+    val output = qemu.command("test_cow")
+    output should include("cow: ok")
+    output should not include "cow: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

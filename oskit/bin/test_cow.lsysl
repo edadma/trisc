@@ -1,0 +1,169 @@
+test_cow — copy-on-write end-to-end
+====================================
+
+Phase 1 chunk 5: validates the refcount-aware page allocator and
+the COW branch of `vma_handle_fault`. Two debug syscalls drive
+the test:
+
+  - `SYS_COW_REFCNT_SELFTEST` (89): kernel-side refcount-table
+    selftest. Validates invariants without going through any
+    user-page allocation.
+  - `SYS_COW_SHARE_SELF` (90): plumbs `va_dst` through the same
+    physical frame as `va_src`, both RO, refcount += 1. Stands
+    in for the chunk-6 fork() path that produces the same shape.
+
+Steps:
+
+1. Run the refcount kernel selftest. Independent of mmap.
+2. mmap two anonymous pages (`page1`, `page2`).
+3. Write `0xAA` into `page1[0]`. Faults `page1` in fresh,
+   refcount=1, RW.
+4. `sys_cow_share_self(page1, page2)`: `page2` now maps the same
+   physical frame as `page1`. Both PTEs RO. Refcount=2.
+5. Read `page2[0]` → expect `0xAA` (shared frame visible).
+6. Write `0xBB` to `page1[0]` → write fault → COW path allocates
+   a fresh frame, copies, installs RW for `page1`. Original
+   frame now refcount=1 (mapped only via `page2`).
+7. Verify: `page1[0]` reads `0xBB`, `page2[0]` reads `0xAA`. The
+   COW correctly decoupled the two views.
+8. Write `0xCC` to `page2[0]` → second COW. Original frame's
+   last refcount drops to 0 and the frame returns to the page
+   pool. `page2` now maps a fresh writable frame containing
+   `0xCC`.
+9. Verify: `page1[0]` still `0xBB`, `page2[0]` is `0xCC`.
+
+Pass criterion: prints `cow: ok`.
+
+    module oskit.bin.test_cow
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val SYS_MMAP                 = 222
+    val SYS_COW_REFCNT_SELFTEST  = 89
+    val SYS_COW_SHARE_SELF       = 90
+
+    val PROT_READ  = 1
+    val PROT_WRITE = 2
+
+    val MAP_PRIVATE = 0x02
+    val MAP_ANON    = 0x20
+
+    val PAGE_LEN: i64 = i64(0x1000)
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("cow: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    do_mmap(len: i64) -> u64
+        val rc = syscall6(SYS_MMAP, i64(0), len,
+                          i64(PROT_READ | PROT_WRITE),
+                          i64(MAP_PRIVATE | MAP_ANON),
+                          i64(-1), i64(0))
+        if rc <= i64(0)
+            return u64(0)
+        u64(rc)
+
+
+    main(argv: []string)
+
+Step 1 — refcount module selftest. Independent of mmap, so a
+failure here points squarely at the refcount table or its
+out-of-range handling.
+
+        val sft = syscall6(SYS_COW_REFCNT_SELFTEST, i64(0), i64(0),
+                           i64(0), i64(0), i64(0), i64(0))
+        if sft != i64(0)
+            fail(int(sft) + 100)
+            return
+
+Step 2 — mmap two pages. Each `mmap` bump-allocates a fresh VMA
+in the per-process arena (starts at 0x60100000). Neither page is
+faulted in yet.
+
+        val page1 = do_mmap(PAGE_LEN)
+        if page1 == u64(0)
+            fail(2)
+            return
+        val page2 = do_mmap(PAGE_LEN)
+        if page2 == u64(0)
+            fail(3)
+            return
+
+Step 3 — write 0xAA into page1[0]. First touch of page1: fault →
+fresh zero frame at refcount=1, RW.
+
+        var p1: *byte = *byte(page1)
+        p1[0] = byte(0xAA)
+        if int(p1[0]) & 0xff != 0xAA
+            fail(4)
+            return
+
+Step 4 — share page1's frame at page2. Both PTEs become RO,
+refcount=2. The kernel debug syscall handles the PTE walks and
+the refcount bump.
+
+        val rc4 = syscall6(SYS_COW_SHARE_SELF, i64(page1), i64(page2),
+                           i64(0), i64(0), i64(0), i64(0))
+        if rc4 != i64(0)
+            fail(5)
+            return
+
+Step 5 — read page2[0]. The shared frame is now visible at both
+VAs; we should see 0xAA.
+
+        var p2: *byte = *byte(page2)
+        if int(p2[0]) & 0xff != 0xAA
+            fail(6)
+            return
+
+Step 6 — write 0xBB to page1[0]. The PTE is RO so the store
+traps. `vma_handle_fault` sees a present PTE + write fault +
+private writable VMA → COW: alloc fresh frame, copy contents,
+install RW for page1. The original frame stays mapped at page2.
+
+        p1[0] = byte(0xBB)
+
+Step 7 — verify the views are now decoupled.
+
+        if int(p1[0]) & 0xff != 0xBB
+            fail(7)
+            return
+        if int(p2[0]) & 0xff != 0xAA
+            fail(8)
+            return
+
+Step 8 — write 0xCC to page2[0]. Second COW: page2's PTE is
+still RO, the fault handler clones again. The original frame
+hits refcount=0 and goes back to the page pool.
+
+        p2[0] = byte(0xCC)
+
+Step 9 — verify both pages now have their final values and don't
+alias each other.
+
+        if int(p1[0]) & 0xff != 0xBB
+            fail(9)
+            return
+        if int(p2[0]) & 0xff != 0xCC
+            fail(10)
+            return
+
+        puts("cow: ok\n")
+        exit()
