@@ -1239,6 +1239,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "phello: bad"
   }
 
+  // TODO: un-ignore when the inet timer constants are fixed
+  // (TCP_FW2_TICKS / TCP_TW_TICKS assume 10ms-per-tick, but ticks
+  // are per-schedule, ~40/ms; FIN_WAIT_2 dies in ~150 ms before
+  // ch can reach TIME_WAIT). See aarch64 mirror for the full
+  // explanation. Per CLAUDE.md rule 4.
+  "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" ignore {
+    val output = qemu.command("test_tcp_reuse")
+    output should include("tcpreuse:ok")
+    output should not include "tcpreuse:bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

@@ -3701,6 +3701,41 @@ Find a listen socket bound to `local_port`. Returns slot index or -1.
         -1
 
 
+Returns the slot index of any in-use TCP socket currently bound to
+`local_port` and in a post-handshake state (i.e., a *connected* slot
+in ESTABLISHED / FIN_WAIT_* / CLOSE_WAIT / LAST_ACK / CLOSING /
+TIME_WAIT, or a SYN_SENT outbound that bound the local port before
+calling connect). Used by `inet_tcp_begin_listen` to honor RFC 793 /
+1122 §4.2.2.10 — `bind()` (rolled into our `begin_listen`) must
+refuse a port still serving the 2MSL TIME_WAIT for a prior
+connection (or any other in-flight teardown) unless `SO_REUSEADDR`
+was set. Linear scan over `TCP_MAX_SOCKETS` is fine — n = 32 today
+and these slots are short-lived; the bucket walk a hash would buy
+is overkill. If `tcp_sockets[]` ever grows past a few hundred, fold
+into the existing 4-tuple connected-socket hash keyed on
+(local_port, *).
+
+`is_listen != 0` is **excluded** because the existing
+`inet_tcp_find_listen` already covers that case via its dedicated
+hash; SYN_RCVD children of a still-live listener are excluded for
+the same reason. Children inherit the listener's port, so blocking
+SYN_RCVD here would refuse a re-listen against the same port even
+when the listener is being torn down — `do_close LISTEN`'s child-
+sweep handles that case directly.
+
+    inet_tcp_find_port_post_listen(local_port: int) -> int
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use != 0
+                if tcp_sockets[i].is_listen == 0
+                    val st = tcp_sockets[i].state
+                    if st != TCP_STATE_CLOSED && st != TCP_STATE_SYN_RCVD
+                        if tcp_sockets[i].local_port == local_port
+                            return i
+            i += 1
+        -1
+
+
 TCP-private ephemeral port allocator (49152+). Distinct from UDP's
 so a TCP connect and a UDP socket can both hold 49152.
 
@@ -3796,8 +3831,19 @@ so a tiny but positive queue depth is always available.
 
     inet_tcp_begin_listen(owner_tid: int, local_port: int,
                           backlog: int,
-                          sndbuf_override: int, rcvbuf_override: int) -> int
+                          sndbuf_override: int, rcvbuf_override: int,
+                          reuseaddr: int) -> int
         if inet_tcp_find_listen(local_port) >= 0
+            return -1
+        // RFC 793 / 1122 §4.2.2.10 — refuse `bind()` (rolled into
+        // `begin_listen` here) on a port still serving the 2MSL
+        // TIME_WAIT for a prior connection unless `SO_REUSEADDR` is
+        // set. Linux applies the same rule. Without this check
+        // `SO_REUSEADDR` was informational (per shim.lsysl §"slix is
+        // already permissive") and a server restart could silently
+        // accept a stale lingering segment as part of a brand-new
+        // connection.
+        if reuseaddr == 0 && inet_tcp_find_port_post_listen(local_port) >= 0
             return -1
         // Phase 2 quality plan: per-tid cap.  See begin_connect.
         if inet_count_tcp_owner(owner_tid) >= 8
@@ -3975,6 +4021,15 @@ enter after *we* close(), which the caller hasn't done yet.
             if tcp_sockets[c].in_use != 0
                 val cst = tcp_sockets[c].state
                 if cst == TCP_STATE_ESTABLISHED || cst == TCP_STATE_CLOSE_WAIT
+                    // Sever the parent link now that userspace owns the
+                    // child fd. `do_close LISTEN` walks every slot with
+                    // `parent_listen == ls` and force-frees it; without
+                    // this clear, an accepted child whose userspace
+                    // fd later goes through close() (FIN_WAIT_* / LAST_ACK /
+                    // TIME_WAIT) would be torn down when the listener
+                    // closes — wiping out the legitimate TIME_WAIT slot
+                    // that `inet_tcp_find_time_wait` relies on.
+                    tcp_sockets[c].parent_listen = -1
                     return c
         -1
 
@@ -4368,6 +4423,10 @@ Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
             // SYN_RCVD children still mid-handshake. Without this they
             // orphan onto dead parent_listen and leak their slots
             // until peer-driven teardown (which may never arrive).
+            // Note: `inet_tcp_try_accept` clears `parent_listen = -1`
+            // on dequeue, so accepted children survive listener close
+            // (matches Linux semantics) and can outlive the listener
+            // through their own teardown to TIME_WAIT.
             var i = 0
             while i < TCP_MAX_SOCKETS
                 if tcp_sockets[i].in_use != 0
@@ -4385,7 +4444,17 @@ Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
             tcp_sockets[s].state = TCP_STATE_FIN_WAIT_1
             tcp_sockets[s].close_waiter = caller_tid
             inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
-            inet_tcp_arm_rtx(s)
+            // Only arm rtx if our FIN is still unacked. On the
+            // loopback fastpath, `inet_tcp_emit` synchronously drives
+            // cl ESTABLISHED → CLOSE_WAIT with a piggyback ACK, then
+            // ch state_step processes that ACK and `disarm_rtx`s
+            // (line 5020-5021) once snd_una catches up. Without this
+            // gate, we'd re-arm a timer with nothing to retransmit;
+            // the scan would still fire it `TCP_MAX_RETRIES` times
+            // and tear the slot down out of FIN_WAIT_2 instead of
+            // letting it reach TIME_WAIT.
+            if tcp_seq_lt(tcp_sockets[s].snd_una, tcp_sockets[s].snd_nxt) != 0
+                inet_tcp_arm_rtx(s)
             return 0
         if st == TCP_STATE_CLOSE_WAIT
             val seq = tcp_sockets[s].snd_nxt
@@ -4394,7 +4463,11 @@ Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
             tcp_sockets[s].state = TCP_STATE_LAST_ACK
             tcp_sockets[s].close_waiter = caller_tid
             inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
-            inet_tcp_arm_rtx(s)
+            // Same gate as ESTABLISHED above — loopback's synchronous
+            // ACK can carry us past LAST_ACK before we'd ever need a
+            // retransmit timer.
+            if tcp_seq_lt(tcp_sockets[s].snd_una, tcp_sockets[s].snd_nxt) != 0
+                inet_tcp_arm_rtx(s)
             return 0
         if st == TCP_STATE_SYN_SENT
             inet_tcp_close_slot(s, -1)

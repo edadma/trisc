@@ -1841,7 +1841,15 @@ since no FIN handshake happens.
         val backlog = inet_read_u16(buf, 3) & 0xffff
         val sndbuf = inet_read_u16(buf, 5)
         val rcvbuf = inet_read_u16(buf, 7)
-        val s = inet_tcp_begin_listen(sender, port, backlog, sndbuf, rcvbuf)
+        // SO_REUSEADDR pre-armed on the shim fd; passed through so
+        // `inet_tcp_begin_listen` can override the TIME_WAIT
+        // bind-block check. Older shims sent a 9-byte LISTEN
+        // message; sender always pads to MAX_IPC_PAYLOAD so the
+        // byte at offset 9 is well-defined zero (= reuseaddr=0,
+        // strict-bind), preserving the prior permissive behavior
+        // for any pre-bump caller.
+        val reuseaddr = int(buf[9]) & 0xff
+        val s = inet_tcp_begin_listen(sender, port, backlog, sndbuf, rcvbuf, reuseaddr)
         var reply: [2]byte
         if s < 0
             reply[0] = byte(-1)

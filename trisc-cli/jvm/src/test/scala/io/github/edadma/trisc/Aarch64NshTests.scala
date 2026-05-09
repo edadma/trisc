@@ -2602,6 +2602,35 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "phello: bad"
   }
 
+  // TODO: un-ignore when the inet timer constants are fixed.
+  // The test asserts the correct RFC 793 / 1122 §4.2.2.10 behavior
+  // (bind() must refuse a port still in TIME_WAIT unless
+  // SO_REUSEADDR is set). The kernel-side hooks landed in this
+  // chunk: `inet_tcp_find_port_post_listen`,
+  // `inet_tcp_begin_listen`'s reuseaddr param, listen wire bumped
+  // 9→10 bytes, shim forwards `flag_reuseaddr`, accept clears
+  // `parent_listen` so the child survives listener close, do_close
+  // ESTABLISHED/CLOSE_WAIT skips arm_rtx when the loopback fastpath
+  // already drove the FIN-ACK round-trip. Per CLAUDE.md rule 4.
+  //
+  // Why ignored: TCP_FW2_TICKS / TCP_TW_TICKS in inet_proto.lsysl
+  // assume each `uptime()` tick is 10 ms (the comment on
+  // TCP_FW2_TICKS literally claims "Linux's default tcp_fin_timeout
+  // is 60s; we match that"). In reality `ticks` advances once per
+  // call to `kernel.lsysl::schedule()` — a per-context-switch
+  // counter that fires ~40 times per ms in our test harness. So a
+  // 6000-tick FIN_WAIT_2 deadline expires in ~150 ms wall, killing
+  // ch's slot before close(cl) drives it to TIME_WAIT. Fix: rebase
+  // every inet timer constant onto a real wall-clock unit (or
+  // expose a `ticks_per_second` from the kernel and compute).
+  // Until then, no TIME_WAIT slot survives long enough to be
+  // observed by find_port_post_listen.
+  "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" ignore {
+    val output = qemu.command("test_tcp_reuse")
+    output should include("tcpreuse:ok")
+    output should not include "tcpreuse:bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

@@ -1,0 +1,225 @@
+test_tcp_reuse — SO_REUSEADDR overrides TIME_WAIT bind-block
+=============================================================
+
+Drives RFC 793 / 1122 §4.2.2.10 and the matching POSIX rule: a
+fresh `bind()` (rolled into our `listen()` via
+`inet_tcp_begin_listen`) must refuse a port still serving the
+2MSL TIME_WAIT for a prior connection unless the caller has set
+`SO_REUSEADDR`. Before this chunk, slix was permissive and the
+flag was informational; per `shim.lsysl`'s pre-tightening note,
+the new code path forwards the flag to inet so the TIME_WAIT
+scan can be skipped.
+
+Loopback choreography (single guest):
+
+  1. Open a listener on 127.0.0.1:9123, accept a client connect,
+     have the **server** call `close()` first on its accepted
+     child. Server-side active-close drives the child slot
+     through FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT, leaving port
+     9123 still occupied by an in-use TCP slot in
+     `TCP_STATE_TIME_WAIT`.
+
+  2. Close the listener (LISTEN → CLOSED, no TIME_WAIT) and the
+     client (CLOSE_WAIT → LAST_ACK → CLOSED). The TIME_WAIT slot
+     from step 1 persists for `TCP_TW_TICKS = 200` (≈2 s).
+
+  3. Try `bind(127.0.0.1:9123)` + `listen()` on a fresh socket
+     **without** `SO_REUSEADDR`. Expected: `listen()` returns
+     `-EADDRINUSE`. This is the new behaviour — before the
+     chunk landed, the call succeeded silently.
+
+  4. On another fresh socket, `setsockopt(SO_REUSEADDR, 1)` →
+     `bind` → `listen` on 9123. Expected: `listen()` returns 0.
+     Confirms the override path. Then close.
+
+A successful run prints `tcpreuse:ok`. Any step that misbehaves
+prints `tcpreuse:bad <step>` where the code identifies the
+failing assertion (1..15).
+
+    module oskit.bin.test_tcp_reuse
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val NR_WRITE      = 128
+    val NR_READ       = 130
+    val NR_ACCEPT     = 131
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_CONNECT    = 148
+    val NR_LISTEN     = 217
+    val NR_SETSOCKOPT = 326
+    val NR_SOCKET     = 337
+
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+
+    val SOL_SOCKET    = 1
+    val SO_REUSEADDR  = 2
+
+    val LISTEN_PORT   = 9123
+
+
+Decimal printer for small ints in [-99, 99]; the failure codes
+fit easily.
+
+    print_sdec(v: int)
+        if v < 0
+            puts("-")
+            print_sdec(-v)
+            return
+        if v >= 10
+            print_sdec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+Populate a 16-byte sockaddr_in. Port is host-order; we write it
+big-endian into the buffer.
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+Raw POSIX syscall wrappers.
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, addrlen: *int) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+    posix_setsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, vlen: int) -> int
+        int(syscall6(NR_SETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(vlen), 0))
+
+
+    fail_with(code: int)
+        puts("tcpreuse:bad ")
+        print_sdec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+
+Step 1. Stand up a listener on 127.0.0.1:9123 and accept a
+client. Active-close from the **server** side puts the accepted
+child slot into TIME_WAIT.
+
+        val ls = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if ls < 0
+            fail_with(1)
+            return
+        var bind_addr: [16]byte
+        fill_sockaddr(&bind_addr[0], LISTEN_PORT, 0, 0, 0, 0)
+        if posix_bind(ls, &bind_addr[0], 16) != 0
+            fail_with(2)
+            return
+        if posix_listen(ls, 4) != 0
+            fail_with(3)
+            return
+
+        val cl = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if cl < 0
+            fail_with(4)
+            return
+        var conn_addr: [16]byte
+        fill_sockaddr(&conn_addr[0], LISTEN_PORT, 127, 0, 0, 1)
+        if posix_connect(cl, &conn_addr[0], 16) != 0
+            fail_with(5)
+            return
+
+        var peer: [16]byte
+        var peer_len = 16
+        val ch = posix_accept(ls, &peer[0], &peer_len)
+        if ch < 0
+            fail_with(6)
+            return
+
+Server-initiated close: ch (the accepted child) goes
+ESTABLISHED → FIN_WAIT_1, then on peer FIN-ACK → FIN_WAIT_2,
+then on peer FIN → TIME_WAIT. With slix's loopback fastpath the
+whole sequence runs synchronously inside the close() call.
+
+        if posix_close(ch) != 0
+            fail_with(7)
+            return
+
+Then close client and listener. Listener never enters TIME_WAIT
+(LISTEN slots have no in-flight data), so port 9123's TIME_WAIT
+slot is the lingering ch from above.
+
+        if posix_close(cl) != 0
+            fail_with(8)
+            return
+        if posix_close(ls) != 0
+            fail_with(9)
+            return
+
+Step 2. Without SO_REUSEADDR, listen() on 9123 must refuse.
+shim returns -EADDRINUSE which surfaces as a non-zero rc.
+
+        val ls2 = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if ls2 < 0
+            fail_with(10)
+            return
+        if posix_bind(ls2, &bind_addr[0], 16) != 0
+            fail_with(11)
+            return
+        val rc_strict = posix_listen(ls2, 4)
+        if rc_strict == 0
+            // Bug: TIME_WAIT bind-block didn't trigger.
+            fail_with(12)
+            return
+        posix_close(ls2)
+
+Step 3. With SO_REUSEADDR, listen() on 9123 must succeed.
+
+        val ls3 = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if ls3 < 0
+            fail_with(13)
+            return
+        var optval: [4]byte
+        optval[0] = byte(1)
+        optval[1] = byte(0)
+        optval[2] = byte(0)
+        optval[3] = byte(0)
+        if posix_setsockopt(ls3, SOL_SOCKET, SO_REUSEADDR, &optval[0], 4) != 0
+            fail_with(14)
+            return
+        if posix_bind(ls3, &bind_addr[0], 16) != 0
+            fail_with(15)
+            return
+        if posix_listen(ls3, 4) != 0
+            fail_with(16)
+            return
+        posix_close(ls3)
+
+        puts("tcpreuse:ok\n")
+        exit()

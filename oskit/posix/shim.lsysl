@@ -4211,7 +4211,7 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         val port = inet_get_port()
         if port < 0
             return i64(-ENODEV)
-        var msg: [9]byte
+        var msg: [10]byte
         msg[0] = byte(INET_CMD_TCP_LISTEN)
         shim_write_u16(msg, 1, local_port)
         // Pass user's `backlog` through; inet caps at TCP_LISTEN_BACKLOG
@@ -4232,8 +4232,12 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
             rcv_clamped = 0xffff
         shim_write_u16(msg, 5, snd_clamped)
         shim_write_u16(msg, 7, rcv_clamped)
+        // SO_REUSEADDR — needed by `inet_tcp_begin_listen` to skip the
+        // RFC 793 / 1122 TIME_WAIT bind-block. Persisted on the shim
+        // fd by sys_setsockopt; this is the first place inet sees it.
+        msg[9] = byte(posix_fd_table[idx].flag_reuseaddr & 0xff)
         var reply: [2]byte
-        val r = ipc_send(port, msg, 9, reply, 2)
+        val r = ipc_send(port, msg, 10, reply, 2)
         if r < 0
             return i64(-EIO)
         if reply[0] != 0
@@ -4595,17 +4599,21 @@ across the slot teardown.
 
 
 SYS_SETSOCKOPT / SYS_GETSOCKOPT. The inet server tracks
-`SO_SNDBUF` / `SO_RCVBUF` (since Phase E bufsize chunk).  The
-remaining accept-list options (SO_REUSEADDR, SO_BROADCAST,
-SO_KEEPALIVE, SO_REUSEPORT, TCP_NODELAY) are persisted on the
-shim fd so getsockopt echoes the actually-set value (Linux-compat
-introspection) but their behavioural enforcement is a follow-up:
+`SO_SNDBUF` / `SO_RCVBUF` (since Phase E bufsize chunk) and
+`SO_REUSEADDR` (post-tightening: the shim forwards the flag to
+`inet_tcp_begin_listen`, which honors RFC 793 / 1122 by refusing
+a port still in TIME_WAIT unless this flag is set). The remaining
+accept-list options (SO_BROADCAST, SO_KEEPALIVE, SO_REUSEPORT,
+TCP_NODELAY) are persisted on the shim fd so getsockopt echoes
+the actually-set value (Linux-compat introspection) but their
+behavioural enforcement is a follow-up:
 
-- SO_REUSEADDR — slix is already permissive (no strict TIME_WAIT
-  bind-block today), so the flag is informational.
 - SO_BROADCAST — UDP send always allows broadcast destinations.
-- SO_KEEPALIVE — no idle timer wired in inet yet.
-- SO_REUSEPORT — same as REUSEADDR for the no-strict-bind case.
+- SO_KEEPALIVE — wired through to inet via SET_KEEPALIVE; the
+  flag is honored at the socket level when a process turns it on.
+- SO_REUSEPORT — same as REUSEADDR for now (slix's bind only
+  collides on exact-port-match in LISTEN; load balancing across
+  listeners is not implemented).
 - TCP_NODELAY — slix doesn't implement Nagle, so segments already
   go out immediately; the flag is effectively pinned to "on".
 
