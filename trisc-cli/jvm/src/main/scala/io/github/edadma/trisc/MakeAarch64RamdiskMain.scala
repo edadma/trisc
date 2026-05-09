@@ -42,14 +42,40 @@ object MakeAarch64RamdiskMain:
     // archives.
     val tarBytes = TestTar.bytes
     System.err.println(s"  including /test.tar (${tarBytes.length} bytes, synthesized)")
+
+    // Phase 1 chunk 9 fixture: ship the dynamic linker (ld-musl-aarch64.so.1)
+    // for PT_INTERP-driven exec(). musl's libc.so IS the dynamic linker —
+    // it's renamed at install time to /lib/ld-musl-<arch>.so.1. We do the
+    // same here at ramdisk-pack time, sourcing from slix/build-musl/lib/libc.so
+    // (produced by slix/build-musl.sh with --enable-shared). If the file
+    // isn't present, the ramdisk just won't include it; dynamically-linked
+    // tests fail but static binaries are unaffected.
+    val ldMuslPath = Paths.get("slix/build-musl/lib/libc.so")
+    val ldMuslBytes: Option[Array[Byte]] =
+      if Files.exists(ldMuslPath) then
+        val bs = Files.readAllBytes(ldMuslPath)
+        System.err.println(s"  including /lib/ld-musl-aarch64.so.1 (${bs.length} bytes, from $ldMuslPath)")
+        Some(bs)
+      else
+        System.err.println(s"  WARN: $ldMuslPath not found — /lib/ld-musl-aarch64.so.1 omitted")
+        None
+
+    // Ship libc.so under two names: /lib/ld-musl-aarch64.so.1 (the
+    // PT_INTERP target) and /lib/libc.so (the SONAME the loader resolves
+    // when dhello declares DT_NEEDED libc.so). Both are byte-identical
+    // since musl's libc.so IS the dynamic linker.
     val files: Map[String, Array[Byte]] =
-      binFiles + ("/test.tar" -> tarBytes)
+      binFiles
+        + ("/test.tar" -> tarBytes)
+        ++ ldMuslBytes.map("/lib/ld-musl-aarch64.so.1" -> _).toMap
+        ++ ldMuslBytes.map("/lib/libc.so" -> _).toMap
 
     val basePrefill =
       """/dev dir
         |/dev/tty0 char 0 0
         |/dev/null char 0 1
         |/bin dir
+        |/lib dir
         |/etc dir
         |/etc/ttytab file "tty0 login"
         |/etc/passwd file "root:x:0:0:root:/root:/nsh\ned:x:1000:1000:ed:/home/ed:/nsh"

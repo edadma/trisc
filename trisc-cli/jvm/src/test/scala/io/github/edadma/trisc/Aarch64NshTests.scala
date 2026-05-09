@@ -2563,6 +2563,36 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "execve: bad"
   }
 
+  // TODO: un-ignore when compiler-rt builtins ship with libc.so so
+  // ld-musl resolves __addtf3 / __mulsc3 / setjmp / longjmp etc. at
+  // load time. Right now ld-musl bootstraps successfully (proving
+  // the chunk-9 PT_INTERP + INTERP_BASE/MAIN_EXE_BASE rebase + auxv
+  // shape are all correct), it locates /lib/libc.so via SONAME, then
+  // fails partway through self-relocation with a wall of
+  // `Error relocating /lib/ld-musl-aarch64.so.1: <symbol>: symbol not
+  // found` lines. The blocker is purely in slix/build-musl.sh: musl's
+  // configure leaves $LIBCC empty under our cross-compile setup
+  // because Homebrew clang doesn't ship libclang_rt.builtins for
+  // aarch64-linux-musl / x86_64-linux-musl, and the float128 + complex
+  // helpers musl emits go undefined in libc.so. slix/musl-compat/
+  // compiler_rt_stubs.c has stub definitions ready; the next chunk
+  // wires them into the libc.so link via LIBCC=stubs.o.
+  "execve: dynamically-linked hello (PT_INTERP + ld-musl)" ignore {
+    // Phase 1 chunk 9 follow-up. /bin/test_dhello calls
+    // pm_execve("/bin/dhello", ["dhello"]); /bin/dhello is a PIE C
+    // program built against slix-musl with --enable-shared (slix/test/
+    // build-c-dyn.sh). It has a PT_INTERP segment pointing at
+    // /lib/ld-musl-aarch64.so.1, which PM detects in pm_handle_execve
+    // and loads at INTERP_BASE. The auxv carries AT_BASE / AT_PHDR /
+    // AT_ENTRY / AT_RANDOM / etc. so musl's ld-musl bootstrap can find
+    // its program headers, run its relocations, then jump to _start in
+    // the main exe (Scrt1.o), which calls __libc_start_main → main →
+    // write(1, "hello dyn\n", 10).
+    val output = qemu.command("test_dhello")
+    output should include("hello dyn")
+    output should not include "dhello: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

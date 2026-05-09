@@ -36,11 +36,18 @@ if [ ! -f config.mak ]; then
     export CC="$CLANG --target=x86_64-slix-linux-musl -ffreestanding"
     export AR
     export RANLIB
-    export LDFLAGS="-fuse-ld=$LD"
+    # --dynamic-list keeps internal-by-default visibility for non-listed
+    # symbols, so libc.so's intra-library calls bypass the PLT. Without
+    # this, musl's `_dlstart_c` makes PLT-routed calls before its own
+    # JUMP_SLOT relocations are applied — the slots still point at
+    # PLT0 link-time addresses, the call faults at the link-time PLT
+    # base, and ld-musl can't bootstrap. See aarch64 sibling for the
+    # full diagnostic story.
+    export LDFLAGS="-fuse-ld=$LD -Wl,--dynamic-list=$REPO_ROOT/slix/musl/dynamic.list -Wl,--gc-sections -Wl,-soname,libc.so"
     "$REPO_ROOT/slix/musl/configure" \
         --target=x86_64-slix-linux-musl \
         --prefix="$REPO_ROOT/slix/sysroot-x86" \
-        --disable-shared \
+        --enable-shared \
         --enable-static \
         --with-malloc=oldmalloc
 fi

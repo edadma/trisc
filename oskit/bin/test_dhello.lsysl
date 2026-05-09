@@ -1,0 +1,81 @@
+test_dhello — Phase 1 chunk 9 dynamic-linker end-to-end
+========================================================
+
+Drives the chunk-9 PT_INTERP path through `PM_CMD_EXECVE`: this
+program calls `pm_execve("/bin/dhello", ["dhello"])`, which on
+success replaces the current process's image with the dynamically-
+linked `dhello` binary. PM detects the PT_INTERP segment, loads
+`/lib/ld-musl-aarch64.so.1` (or x86_64 sibling) at `INTERP_BASE`,
+builds the rich auxv, and transfers control to ld-musl. ld-musl
+runs its bootstrap, applies relocations, then calls `_start` in
+the main exe which lands in `dhello`'s `main()` and prints
+`hello dyn\n`.
+
+A successful run produces exactly that line; any failure (file
+not found, ELF malformed, ld-musl fails to bootstrap, etc.) falls
+through to this program's tail and prints `dhello: bad <step>`.
+
+What this test would fail on if regressed:
+
+  * `pm_find_pt_interp` returning -1 when PT_INTERP is present →
+    PM treats dhello as a static binary, doesn't load ld-musl, and
+    the saved PC jumps to dhello's entry which doesn't have libc
+    relocations applied.
+  * `MAIN_EXE_BASE` rebasing not applied to a PIE main exe → the
+    PT_LOAD VMAs land at link-time vaddrs (near 0) which fall
+    outside the user-accessible carve-out [0x60000000, 0x60200000).
+  * `INTERP_BASE` colliding with main exe or stack regions →
+    overlapping VMAs or kernel-attribute pages, fault on first
+    fetch in ld-musl.
+  * Auxv missing AT_BASE / AT_PHDR / AT_ENTRY → ld-musl can't
+    find its own program headers or doesn't know where to jump
+    after bootstrap, exits early without running main.
+  * `load_elf64_to_ptbr_at_offset` not adding `load_offset` to
+    p_vaddr → main exe and interp content land at the wrong VAs
+    despite VMAs being correctly placed.
+
+    module oskit.bin.test_dhello
+
+    import oskit.ulib.{puts, exit, exit_with, pm_execve}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("dhello: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+Build the argv as a single-element array and call `pm_execve`. argv[0]
+is the program name per SysV convention; ld-musl reads it for its own
+diagnostics (LD_DEBUG) but `dhello`'s `main()` doesn't introspect argv.
+
+    main(argv: []string)
+        var args: [1]string
+        args[0] = "dhello"
+        val rc = pm_execve("/bin/dhello", &args[0], 1)
+
+Reaching here means execve returned with a non-success code — the
+binary was rejected before the point of no return.
+
+        if rc < 0
+            fail(1)
+            return
+
+Or execve nominally succeeded but the new program let control fall
+through to this code instead of running its own _start, which would
+indicate a frame-rewrite regression.
+
+        fail(2)

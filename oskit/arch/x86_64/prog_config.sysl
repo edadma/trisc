@@ -26,3 +26,10 @@ val PROG_USP = 0x60090000
 val PROG_SSP = 0x60080000
 val SRV_USP  = 0xD4000
 val SRV_SSP  = 0xD3000
+
+// AT_PLATFORM string for the SysV initial stack auxv. ld-musl reads
+// this via `__init_libc` -> `__libc.platform` and uses it to pick
+// HWCAP-gated string routines. Must match what musl was built for —
+// we cross-build x86_64-slix-linux-musl, so the platform name is
+// the unprefixed arch name.
+val PLATFORM_NAME = "x86_64"

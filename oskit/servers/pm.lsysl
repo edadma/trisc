@@ -21,10 +21,10 @@ IPC commands:
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING, PAGE_SIZE}
     import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_get_thread_ptbr, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range, svc_fd_transplant, svc_proc_replace_image_prep, svc_execve_finalize, svc_vma_create, VMA_PROT_READ, VMA_PROT_WRITE, VMA_MAP_ANON, VMA_MAP_PRIVATE}
-    import oskit.loader.{load_tof_to_ptbr, load_elf64_to_ptbr}
-    import oskit.lib.{elf64_validate, elf64_entry, elf64_phnum, elf64_ph_type, elf64_ph_flags, elf64_ph_vaddr, elf64_ph_memsz, elf64_pf_to_vma_prot, elf64_align_down, elf64_align_up, ELF_OK, ELF_PT_LOAD}
-    import oskit.fs.{fs_open, fs_read, fs_close, fs_stat}
-    import oskit.arch.{PROG_USP, PROG_SSP}
+    import oskit.loader.{load_tof_to_ptbr, load_elf64_to_ptbr, load_elf64_to_ptbr_at_offset}
+    import oskit.lib.{elf64_validate, elf64_entry, elf64_phoff, elf64_phentsize, elf64_phnum, elf64_ph_type, elf64_ph_flags, elf64_ph_offset, elf64_ph_vaddr, elf64_ph_filesz, elf64_ph_memsz, elf64_pf_to_vma_prot, elf64_align_down, elf64_align_up, ELF64_EHDR_SIZE, ELF64_PHDR_SIZE, ELF_OK, ELF_PT_LOAD, ELF_PT_INTERP}
+    import oskit.fs.{fs_open, fs_read, fs_seek, fs_close, fs_stat}
+    import oskit.arch.{PROG_USP, PROG_SSP, PLATFORM_NAME}
     import std.alloc.{malloc, free}
 
     val PM_CMD_WAITPID = 1
@@ -37,6 +37,54 @@ IPC commands:
     val PM_CMD_TRANSPLANT_FD = 8
     val PM_CMD_RESUME        = 9
     val PM_CMD_EXECVE        = 10
+
+Both arches' `vm_create_process_pt` carves out a single 2 MiB
+user-accessible region at VA `[0x60000000, 0x60200000)` — the L3
+carve-out under L2[256] of L1[1] on aarch64, mirrored on x86 by
+the matching PD[256] entry. Anything outside this range walks into
+kernel-attribute mappings and faults on EL0 access. For chunk 9
+the dynamic-linker workload has to fit *inside* this 2 MiB window
+along with the main executable and the user stack; we partition it
+explicitly:
+
+```
+0x60000000              main exe (PIE, rebased to MAIN_EXE_BASE)
+0x60080000..0x60090000  user stack (PROG_USP - 64KB .. PROG_USP)
+0x60100000              ld-musl-<arch>.so.1 (rebased to INTERP_BASE)
+0x601FFFFF              end of L3 carve-out
+```
+
+`MAIN_EXE_BASE` is where `pm_handle_execve` rebases a PIE main
+executable's PT_LOAD vaddrs (link-time near 0); the conventional
+0x60000000 keeps the layout aligned with the existing static-binary
+slix-prog.ld convention. `INTERP_BASE` puts the interpreter 1 MiB
+above the main exe — enough room for any reasonable static binary
+or PIE main exe up to 512 KiB, and ld-musl itself is around 900 KiB
+so it just fits in the upper 1 MiB. Phase 1's master roadmap
+invariant 1 (per-process VMA list, dynamic layout) is what allows
+this carving to grow in a later chunk; for now the constants
+match the carve-out exactly.
+
+    const MAIN_EXE_BASE: i64 = 0x60000000
+    const INTERP_BASE:   i64 = 0x60100000
+
+`AT_*` auxv tags. The values are the standard glibc/musl numbers
+(see `bits/auxv.h`); they're ABI to the dynamic linker. PM emits
+the subset musl's `__init_libc` reads on aarch64 + x86_64. The
+rest are intentionally absent — musl tolerates a missing tag and
+falls back to internal defaults / `getenv`.
+
+    const AT_NULL     = 0
+    const AT_PHDR     = 3
+    const AT_PHENT    = 4
+    const AT_PHNUM    = 5
+    const AT_PAGESZ   = 6
+    const AT_BASE     = 7
+    const AT_ENTRY    = 9
+    const AT_PLATFORM = 15
+    const AT_HWCAP    = 16
+    const AT_SECURE   = 23
+    const AT_RANDOM   = 25
 
 Signal numbers (SLIX-native, not POSIX).
 
@@ -390,8 +438,8 @@ thread layout grows).
             ipc_reply(sender, reply, 1)
             return
 
-Read the file into PM's heap, mirroring `load_tof_to_ptbr`'s shape so
-PM and the loader cap user binaries the same way.
+Read the main exe file into PM's heap, mirroring `load_tof_to_ptbr`'s
+shape so PM and the loader cap user binaries the same way.
 
         var st: [7]int
         if fs_stat(path, st) < 0
@@ -429,10 +477,11 @@ PM and the loader cap user binaries the same way.
             ipc_reply(sender, reply, 1)
             return
 
-Validate the ELF before touching the caller's address space. After
-`svc_proc_replace_image_prep` the caller has no resumable old image
-to fall back to, so every check that *could* reject the binary must
-run first.
+Validate the main ELF before touching the caller's address space.
+After `svc_proc_replace_image_prep` the caller has no resumable old
+image to fall back to, so every check that *could* reject the binary
+must run first — and that includes the interpreter load below, since
+the interp's path comes from the main exe's PT_INTERP segment.
 
         if elf64_validate(ebuf, total) != ELF_OK
             free(ebuf)
@@ -440,16 +489,139 @@ run first.
             ipc_reply(sender, reply, 1)
             return
 
+If the binary declares a PT_INTERP segment, validate the interpreter
+ELF and keep its file descriptor open for streaming. Static binaries
+(no PT_INTERP) fall through this block with `ifid_interp == -1` and
+behave exactly as before — same in-PM-heap load, same auxv shape with
+`AT_BASE = 0`.
+
+The interp file (typically `ld-musl-<arch>.so.1`) is too big to fit
+in PM's heap — at ~900 KiB it exceeds the ~430 KiB heap window
+between PM's BSS and its 16-page user-stack region. Streaming the
+load into the target address space is the only path that scales:
+we read only the EHDR + PHT into a 4 KiB stack buffer (`ihdr_buf`)
+for validation + VMA shape, then keep the file open and `fs_seek`
+to each PT_LOAD's offset, copying p_filesz bytes through a small
+bounce buffer directly into `target_ptbr` via `svc_vm_copy_to`.
+The ifid stays open until after VMAs are installed; we close and
+finalize entry below.
+
+`ifid_interp == -1` is the no-PT_INTERP case; static binaries
+follow the existing in-PM-heap path for the main exe and have no
+interp at all.
+
+        var ihdr_buf: [4096]byte
+        var ihdr_read = 0
+        var ifid_interp = -1
+        var interp_base: i64 = i64(0)
+        var main_load_offset: i64 = i64(0)
+
+        val interp_idx = pm_find_pt_interp(ebuf)
+        if interp_idx >= 0
+            val ip_off = int(elf64_ph_offset(ebuf, interp_idx))
+            val ip_fsz = int(elf64_ph_filesz(ebuf, interp_idx))
+            if ip_off + ip_fsz > total
+                free(ebuf)
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            if ip_fsz <= 1
+                free(ebuf)
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+
+The PT_INTERP segment carries a NUL-terminated path — `p_filesz`
+includes the trailing NUL, so the actual string is `ip_fsz - 1`
+bytes long. `string(p, n)` copies into a heap-managed string so the
+path stays valid even after we eventually `free(ebuf)`.
+
+            val interp_path = string(ebuf + ip_off, ip_fsz - 1)
+
+            var ist: [7]int
+            if fs_stat(interp_path, ist) < 0
+                free(ebuf)
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+            val isize = ist[4]
+            if isize <= 0
+                free(ebuf)
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+
+            ifid_interp = fs_open(interp_path)
+            if ifid_interp < 0
+                free(ebuf)
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+
+Read the EHDR + PHT into the stack buffer. 4 KiB covers any
+reasonable ELF64 — EHDR is 64 bytes, each program header is 56
+bytes, and ld-musl + dhello-style binaries have on the order of
+10 PHs. If a binary exceeds this we'd need to enlarge the buffer
+or fall back to a heap allocation; today every musl shipping in
+slix fits well under it.
+
+            var hr = fs_read(ifid_interp, &ihdr_buf[0], 4096)
+            while hr > 0
+                ihdr_read += hr
+                if ihdr_read >= 4096
+                    break
+                hr = fs_read(ifid_interp, &ihdr_buf[0] + ihdr_read, 4096 - ihdr_read)
+
+            if ihdr_read < ELF64_EHDR_SIZE
+                fs_close(ifid_interp)
+                free(ebuf)
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+
+`elf64_validate` checks magic, class, data, and that the PHT fits
+inside `buflen` — which is `ihdr_read` here, the bytes we actually
+read (≤ 4096). Since the entire PHT is in `ihdr_buf`, this is the
+right validation surface even when the rest of the file is
+streamed later.
+
+            if elf64_validate(&ihdr_buf[0], ihdr_read) != ELF_OK
+                fs_close(ifid_interp)
+                free(ebuf)
+                reply[0] = byte(-1)
+                ipc_reply(sender, reply, 1)
+                return
+
+            interp_base = INTERP_BASE
+
+The presence of PT_INTERP marks the main executable as PIE in
+practice — toolchains never emit a PT_INTERP segment for ET_EXEC
+non-relocatable binaries. PIE main exes link with their PT_LOAD
+vaddrs near 0; we rebase them to `MAIN_EXE_BASE` so they land
+inside the user-accessible carve-out. Static binaries (the
+`test_execve` chunk-8 path) leave `main_load_offset = 0` and keep
+their link-time VAs (slix-prog.ld puts those at 0x60000000+).
+
+            main_load_offset = MAIN_EXE_BASE
+
 Build the SysV init stack into a PM-local buffer up front, while the
-caller's old address space is still alive. After image replacement
-we can't synthesize argv strings any more — PM's stack itself is
-fine since PM lives in its own PT, but `pm_build_sysv_stack` only
-runs on the local buffer so this is just a clean separation.
+caller's old address space is still alive. The auxv carries the
+main exe's PHT runtime VA (offset by `main_load_offset` for PIE),
+the interp base (0 if no interp), and the main exe's runtime entry
+— ld-musl jumps to AT_ENTRY once it finishes its own bootstrap.
+
+        val main_entry = i64(elf64_entry(ebuf)) + main_load_offset
+        val main_phnum = elf64_phnum(ebuf)
+        val main_phdr_va = pm_compute_at_phdr(ebuf, main_load_offset)
 
         var stack_buf: [4096]byte
-        val fsz = pm_build_sysv_stack(buf + 5 + path_len, blob_len,
-                                      &stack_buf[0], 4096, PROG_USP)
+        val fsz = pm_build_sysv_stack_v2(buf + 5 + path_len, blob_len,
+                                         &stack_buf[0], 4096, PROG_USP,
+                                         main_phdr_va, main_phnum,
+                                         interp_base, main_entry)
         if fsz < 0
+            if ifid_interp >= 0
+                fs_close(ifid_interp)
             free(ebuf)
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 1)
@@ -477,8 +649,9 @@ shaped to enable.
             if elf64_ph_type(ebuf, i) == ELF_PT_LOAD
                 val pf = elf64_ph_flags(ebuf, i)
                 val prot = elf64_pf_to_vma_prot(pf)
-                val vstart = elf64_align_down(elf64_ph_vaddr(ebuf, i), PAGE_SIZE)
-                val vend_raw = elf64_ph_vaddr(ebuf, i) + u64(elf64_ph_memsz(ebuf, i))
+                val vaddr_rt = elf64_ph_vaddr(ebuf, i) + u64(main_load_offset)
+                val vstart = elf64_align_down(vaddr_rt, PAGE_SIZE)
+                val vend_raw = vaddr_rt + u64(elf64_ph_memsz(ebuf, i))
                 val vend = elf64_align_up(vend_raw, PAGE_SIZE)
                 svc_vma_create(sender_pid, vstart, vend, prot,
                                VMA_MAP_ANON | VMA_MAP_PRIVATE)
@@ -495,14 +668,86 @@ auto-grow VMA is a Phase 2 concern.
                        VMA_PROT_READ | VMA_PROT_WRITE,
                        VMA_MAP_ANON | VMA_MAP_PRIVATE)
 
+Install one VMA per interp PT_LOAD shifted by `INTERP_BASE`. Same
+shape as the main-exe loop above — the interpreter is a PIE built
+to load at vaddr 0, so adding `INTERP_BASE` to every `p_vaddr`
+slides it into the 1 GiB-aligned region that doesn't collide with
+the main exe. The PHT lives in `ihdr_buf` (the streamed-in 4 KiB
+header window) since we never read the full file.
+
+        if ifid_interp >= 0
+            val ip_phnum_v = elf64_phnum(&ihdr_buf[0])
+            var ipi = 0
+            while ipi < ip_phnum_v
+                if elf64_ph_type(&ihdr_buf[0], ipi) == ELF_PT_LOAD
+                    val ipf = elf64_ph_flags(&ihdr_buf[0], ipi)
+                    val iprot = elf64_pf_to_vma_prot(ipf)
+                    val ipvaddr = elf64_ph_vaddr(&ihdr_buf[0], ipi) + u64(INTERP_BASE)
+                    val ipvstart = elf64_align_down(ipvaddr, PAGE_SIZE)
+                    val ipvend_raw = ipvaddr + u64(elf64_ph_memsz(&ihdr_buf[0], ipi))
+                    val ipvend = elf64_align_up(ipvend_raw, PAGE_SIZE)
+                    svc_vma_create(sender_pid, ipvstart, ipvend, iprot,
+                                   VMA_MAP_ANON | VMA_MAP_PRIVATE)
+                ipi += 1
+
 Copy the new ELF content into the target address space. The shared
 loader handles file→memory layout (filesz copy + memsz tail zero-
 fill) one PT_LOAD at a time, exactly as it does in
-`pm_handle_spawn_inner`.
+`pm_handle_spawn_inner`. Then load the interp at `INTERP_BASE` if
+present, and pick the final entry point — main exe entry for
+static binaries, interp entry for dynamic ones.
 
-        val entry = load_elf64_to_ptbr(ebuf, total, i64(target_ptbr))
+        val entry = load_elf64_to_ptbr_at_offset(ebuf, total, i64(target_ptbr), main_load_offset)
         free(ebuf)
-        if entry <= 0
+
+Stream interp PT_LOAD content into the target address space. The
+file is too big to hold in PM's heap (~430 KiB heap vs ~900 KiB
+for ld-musl), so for each PT_LOAD we `fs_seek` to its offset and
+read p_filesz bytes through a 4 KiB bounce buffer, calling
+`svc_vm_copy_to` to land them at `INTERP_BASE + p_vaddr`. Tail
+bytes (p_memsz > p_filesz, the .bss portion) get zero-filled the
+same way `load_elf64_to_ptbr_at_offset` does for in-memory loads.
+
+        var final_entry: i64 = entry
+        if ifid_interp >= 0
+            val ip_phnum2 = elf64_phnum(&ihdr_buf[0])
+            val ip_link_entry = i64(elf64_entry(&ihdr_buf[0]))
+            var ipl = 0
+            while ipl < ip_phnum2
+                if elf64_ph_type(&ihdr_buf[0], ipl) == ELF_PT_LOAD
+                    val p_off = int(elf64_ph_offset(&ihdr_buf[0], ipl))
+                    val p_va  = elf64_ph_vaddr(&ihdr_buf[0], ipl) + u64(INTERP_BASE)
+                    val p_fsz = int(elf64_ph_filesz(&ihdr_buf[0], ipl))
+                    val p_msz = int(elf64_ph_memsz(&ihdr_buf[0], ipl))
+                    if p_fsz > 0
+                        fs_seek(ifid_interp, p_off, 0)
+                        var bounce: [4096]byte
+                        var done = 0
+                        while done < p_fsz
+                            var chunk = p_fsz - done
+                            if chunk > 4096
+                                chunk = 4096
+                            val nr = fs_read(ifid_interp, &bounce[0], chunk)
+                            if nr <= 0
+                                done = p_fsz
+                            else
+                                svc_vm_copy_to(target_ptbr, p_va + u64(done), &bounce[0], nr)
+                                done += nr
+                    if p_msz > p_fsz
+                        var zeros: [4096]byte
+                        var zdone = p_fsz
+                        while zdone < p_msz
+                            var zchunk = p_msz - zdone
+                            if zchunk > 4096
+                                zchunk = 4096
+                            svc_vm_copy_to(target_ptbr, p_va + u64(zdone), &zeros[0], zchunk)
+                            zdone += zchunk
+                ipl += 1
+            fs_close(ifid_interp)
+            if ip_link_entry > i64(0)
+                final_entry = ip_link_entry + INTERP_BASE
+
+        if final_entry <= 0
             // Caller's old image is already gone — there's nothing to
             // resume. Wake them with PC=0 / SP=0 so the very next
             // ring-3 transition #PFs on instruction fetch and the
@@ -521,7 +766,7 @@ the saved PC/USP and wakes the calling thread from
 land in our freshly-built SysV stack). On its next ring-3 transition
 the thread runs the new program from a clean state.
 
-        svc_execve_finalize(sender, entry, child_sp)
+        svc_execve_finalize(sender, final_entry, child_sp)
 
 PM_CMD_RESUME: resume a previously SPAWN_SUSP-ed child.
 Wire: cmd(1) + pid(4) → status(1).
@@ -754,6 +999,236 @@ ulib.build_argv_blob; see that one for the format spec.
             pos = pos + alen + 1
             i += 1
         pos
+
+Little-endian 64-bit writer used by the rich-auxv stack builder
+below. The argc / argv / envp / auxv slots are all 64-bit
+little-endian per System V ABI; `pm_msg_write_i32` is big-endian
+(network order, used for IPC payloads) and `pm_build_sysv_stack`
+inlines its own LE bytes per slot, so a dedicated helper here
+keeps the auxv code readable without a sea of shift-and-mask
+fragments.
+
+    pm_write_i64_le(p: *byte, off: int, v: i64)
+        p[off]     = byte(v & i64(0xFF))
+        p[off + 1] = byte((v >> 8) & i64(0xFF))
+        p[off + 2] = byte((v >> 16) & i64(0xFF))
+        p[off + 3] = byte((v >> 24) & i64(0xFF))
+        p[off + 4] = byte((v >> 32) & i64(0xFF))
+        p[off + 5] = byte((v >> 40) & i64(0xFF))
+        p[off + 6] = byte((v >> 48) & i64(0xFF))
+        p[off + 7] = byte((v >> 56) & i64(0xFF))
+
+Find the index of a PT_INTERP segment in `buf`, or -1 if the
+binary doesn't declare one. Static binaries (everything currently
+built by `oskit/arch/*/build_prog.sh`) return -1 here and PM takes
+the no-interp path. Dynamically-linked binaries — those linked with
+`-dynamic-linker /lib/ld-musl-*.so.1` — return the segment index
+that PM uses to extract the interpreter's path.
+
+    pm_find_pt_interp(buf: *byte) -> int
+        val phnum = elf64_phnum(buf)
+        var i = 0
+        while i < phnum
+            if elf64_ph_type(buf, i) == ELF_PT_INTERP
+                return i
+            i += 1
+        -1
+
+`pm_compute_at_phdr` finds the runtime VA of the program header
+table by walking PT_LOAD segments for the one whose `[p_offset,
+p_offset+p_filesz)` range covers `[e_phoff, e_phoff+phnum*phentsize)`.
+That segment's `p_vaddr + (e_phoff - p_offset)` is where the PHT
+landed in memory; ld-musl reads it as `AT_PHDR` to bootstrap its
+own `dl_phdr_info` walk without re-opening the binary.
+
+`load_offset` mirrors the offset passed to
+`load_elf64_to_ptbr_at_offset`: 0 for the main exe (link-time VAs
+honored), `INTERP_BASE` for the interpreter (PIE slid by 1 GiB).
+Returns 0 when no PT_LOAD covers the PHT — a malformed-but-loadable
+binary; ld-musl falls back to other discovery paths in that case.
+
+    pm_compute_at_phdr(buf: *byte, load_offset: i64) -> i64
+        val phoff = elf64_phoff(buf)
+        val phnum = elf64_phnum(buf)
+        val phentsize = elf64_phentsize(buf)
+        val pht_end = phoff + i64(phnum) * i64(phentsize)
+        var i = 0
+        while i < phnum
+            if elf64_ph_type(buf, i) == ELF_PT_LOAD
+                val p_off = elf64_ph_offset(buf, i)
+                val p_fsz = elf64_ph_filesz(buf, i)
+                if p_off <= phoff
+                    if p_off + p_fsz >= pht_end
+                        return i64(elf64_ph_vaddr(buf, i)) + (phoff - p_off) + load_offset
+            i += 1
+        i64(0)
+
+`pm_build_sysv_stack_v2` is the rich-auxv counterpart to
+`pm_build_sysv_stack`. Identical argv/envp wire-in and frame-shape
+contract, but the auxv now carries the eleven entries musl's
+`__init_libc` reads on aarch64 + x86_64: AT_PHDR, AT_PHENT,
+AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, AT_PLATFORM, AT_HWCAP,
+AT_SECURE, AT_RANDOM, plus the AT_NULL terminator.
+
+`AT_ENTRY` is the **main exe's** e_entry, *not* the interpreter's —
+the interp jumps to it once dynamic relocations finish. `AT_BASE`
+is `interp_base` (i.e. `INTERP_BASE`) when the binary has a
+PT_INTERP and PM loaded ld-musl into that region; 0 otherwise so
+musl knows it's not running under an interpreter and `__libc_start_main`
+goes straight into bootstrap mode. `AT_PHDR` / `AT_PHENT` / `AT_PHNUM`
+describe the *main exe*'s PHT regardless of interp presence —
+ld-musl reads its own headers from `r_brk`-style discovery.
+`AT_PLATFORM` points at a NUL-terminated copy of
+`oskit.arch.PLATFORM_NAME` ("aarch64" or "x86_64"); ld-musl uses
+this to pick HWCAP-gated string routines. `AT_RANDOM` points at
+16 bytes that musl uses for stack-cookie + ASLR-input seeding;
+we currently fill them with `0xA5` (Phase 2 will route real
+randomness through here).
+
+Frame layout:
+
+```
++0                          argc (i64 LE)
++8                          argv[0..argc-1] argv[NULL]
++8 + s_argv                 envp[NULL]
++8 + s_argv + s_envp        auxv (11 pairs * 16 = 176 bytes)
+... + s_auxv                AT_RANDOM bytes (16)
+... + s_random              platform string + NUL (padded to 8)
+... + s_platform            argv string data
+                            aligned to 16
+```
+
+Returns the frame size on success, -1 if the frame doesn't fit
+in `cap` or the source blob is malformed.
+
+    pm_build_sysv_stack_v2(src: *byte, src_len: int, out: *byte, cap: int,
+                           child_sp_top: i64, main_phdr_va: i64,
+                           main_phnum: int, interp_base: i64,
+                           main_entry: i64) -> int
+        var argc = 0
+        if src_len >= 4
+            argc = (int(src[0]) & 0xFF) | ((int(src[1]) & 0xFF) << 8) | ((int(src[2]) & 0xFF) << 16) | ((int(src[3]) & 0xFF) << 24)
+        if argc < 0
+            return -1
+
+        val src_str_off = 8
+
+        var s_total = 0
+        if argc > 0
+            if src_str_off > src_len
+                return -1
+            var k = 0
+            while k < argc
+                var slen = 0
+                while src[src_str_off + s_total + slen] != 0
+                    slen += 1
+                    if src_str_off + s_total + slen >= src_len
+                        return -1
+                s_total += slen + 1
+                k += 1
+
+        val s_argv = (argc + 1) * 8
+        val s_envp = 1 * 8
+        val s_auxv = 11 * 16             // 10 entries + AT_NULL terminator
+        val s_random = 16
+
+        val plat_len = len(PLATFORM_NAME)
+        val s_platform = ((plat_len + 1 + 7) / 8) * 8
+
+        var frame_size = 8 + s_argv + s_envp + s_auxv + s_random + s_platform + s_total
+        frame_size = ((frame_size + 15) / 16) * 16
+
+        if frame_size > cap
+            return -1
+
+        var ci = 0
+        while ci < frame_size
+            out[ci] = 0
+            ci += 1
+
+        val child_sp = child_sp_top - i64(frame_size)
+
+        val argc_off     = 0
+        val argv_off     = 8
+        val envp_off     = argv_off + s_argv
+        val auxv_off     = envp_off + s_envp
+        val random_off   = auxv_off + s_auxv
+        val platform_off = random_off + s_random
+        val str_off      = platform_off + s_platform
+
+        val random_va   = child_sp + i64(random_off)
+        val platform_va = child_sp + i64(platform_off)
+
+        pm_write_i64_le(out, argc_off, i64(argc))
+
+        var buf_sp = 0
+        var dst_sp = str_off
+        var ai = 0
+        while ai < argc
+            var slen = 0
+            while src[src_str_off + buf_sp + slen] != 0
+                slen += 1
+            var j = 0
+            while j <= slen
+                out[dst_sp + j] = src[src_str_off + buf_sp + j]
+                j += 1
+            pm_write_i64_le(out, argv_off + ai * 8, child_sp + i64(dst_sp))
+            dst_sp += slen + 1
+            buf_sp += slen + 1
+            ai += 1
+
+Auxv entries — order doesn't matter to musl, but keep AT_NULL
+last. The buffer was zero-cleared above, so the AT_NULL terminator
+pair (16 bytes after the last entry) doesn't need explicit writes.
+
+        var ax = auxv_off
+        pm_write_i64_le(out, ax,     i64(AT_PHDR))
+        pm_write_i64_le(out, ax + 8, main_phdr_va)
+        ax += 16
+        pm_write_i64_le(out, ax,     i64(AT_PHENT))
+        pm_write_i64_le(out, ax + 8, i64(ELF64_PHDR_SIZE))
+        ax += 16
+        pm_write_i64_le(out, ax,     i64(AT_PHNUM))
+        pm_write_i64_le(out, ax + 8, i64(main_phnum))
+        ax += 16
+        pm_write_i64_le(out, ax,     i64(AT_PAGESZ))
+        pm_write_i64_le(out, ax + 8, i64(4096))
+        ax += 16
+        pm_write_i64_le(out, ax,     i64(AT_BASE))
+        pm_write_i64_le(out, ax + 8, interp_base)
+        ax += 16
+        pm_write_i64_le(out, ax,     i64(AT_ENTRY))
+        pm_write_i64_le(out, ax + 8, main_entry)
+        ax += 16
+        pm_write_i64_le(out, ax,     i64(AT_PLATFORM))
+        pm_write_i64_le(out, ax + 8, platform_va)
+        ax += 16
+        pm_write_i64_le(out, ax,     i64(AT_HWCAP))
+        pm_write_i64_le(out, ax + 8, i64(0))
+        ax += 16
+        pm_write_i64_le(out, ax,     i64(AT_SECURE))
+        pm_write_i64_le(out, ax + 8, i64(0))
+        ax += 16
+        pm_write_i64_le(out, ax,     i64(AT_RANDOM))
+        pm_write_i64_le(out, ax + 8, random_va)
+
+AT_RANDOM payload: 16 bytes of placeholder entropy. musl xors this
+into its stack cookie and uses some bytes for `arc4random` seeding;
+a deterministic value works for bring-up but Phase 2 must wire a
+real RNG through here before any security-sensitive code runs.
+
+        var r = 0
+        while r < 16
+            out[random_off + r] = byte(0xA5)
+            r += 1
+
+        val plat_p = *byte(PLATFORM_NAME)
+        var pi = 0
+        while pi < plat_len
+            out[platform_off + pi] = plat_p[pi]
+            pi += 1
+
+        frame_size
 
 Build a System V Application Binary Interface process initialization
 stack frame in `out`. Layout matches what musl's / NetBSD's / glibc's

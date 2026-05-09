@@ -753,3 +753,59 @@ fixed-region state.
   `SYS_EXECVE = 59` so musl-linked binaries pick up `execve`
   via libc rather than via `pm_execve` — that pairing arrives
   with chunk 9 when the dynamic linker depends on it.
+- **2026-05-09 / Phase 1 chunk 9 (partial — Stages A/B/C)** —
+  PT_INTERP detection, rich auxv, INTERP_BASE / MAIN_EXE_BASE
+  rebasing, streaming interpreter loader, shared-musl build,
+  ramdisk packing of `ld-musl-{aarch64,x86_64}.so.1` + `libc.so`
+  under `/lib/`. Stage D (running a dynamically-linked hello
+  world end to end) is held back by toolchain integration (no
+  compiler-rt builtins shipped with libc.so, missing setjmp /
+  longjmp visibility under `--dynamic-list`); see the chunk-9
+  done memo for the diagnostic trail. The kernel/PM ABI pieces
+  are stable and have a regression test (chunk 8's static execve
+  still passes on both arches).
+
+  New PM constants in `oskit/servers/pm.lsysl`:
+  - `MAIN_EXE_BASE = 0x60000000` — load offset for PIE main exes
+    (i.e. binaries that have a PT_INTERP segment).
+  - `INTERP_BASE   = 0x60100000` — load offset for the dynamic
+    linker. Chosen so [main exe + stack + interp] all fit inside
+    the existing 2 MiB L3 carve-out at [0x60000000, 0x60200000).
+
+  New auxv entries in `pm_build_sysv_stack_v2` (replaces the
+  one-tag `pm_build_sysv_stack` on the execve path; spawn keeps
+  the simple builder unchanged):
+
+  | tag         | value | source |
+  |---|---|---|
+  | AT_PHDR     | 3   | main exe's PHT runtime VA (offset by `main_load_offset`) |
+  | AT_PHENT    | 4   | `ELF64_PHDR_SIZE` (= 56) |
+  | AT_PHNUM    | 5   | main exe's `e_phnum` |
+  | AT_PAGESZ   | 6   | 4096 |
+  | AT_BASE     | 7   | `INTERP_BASE` if PT_INTERP present, else 0 |
+  | AT_ENTRY    | 9   | main exe's `e_entry + main_load_offset` |
+  | AT_PLATFORM | 15  | pointer to `oskit.arch.PLATFORM_NAME` (`"aarch64"` or `"x86_64"`) |
+  | AT_HWCAP    | 16  | 0 (no special features advertised) |
+  | AT_SECURE   | 23  | 0 |
+  | AT_RANDOM   | 25  | pointer to 16 bytes of placeholder entropy (Phase 2 wires real RNG) |
+  | AT_NULL     | 0   | terminator |
+
+  New helper `load_elf64_to_ptbr_at_offset(buf, buflen, dst_ptbr,
+  load_offset)` in `oskit/loader/loader.lsysl` — generalization of
+  `load_elf64_to_ptbr` that adds `load_offset` to every PT_LOAD
+  vaddr. Returns `entry + load_offset`. The original is now a
+  thin wrapper.
+
+  New per-arch const `PLATFORM_NAME` in `oskit/arch/{x86_64,
+  aarch64}/prog_config.sysl` (`"x86_64"` and `"aarch64"`
+  respectively).
+
+  PM IPC and ELF-loader semantics unchanged for static binaries —
+  the no-PT_INTERP branch keeps `main_load_offset = 0`,
+  `interp_base = 0`, and behaves byte-identical to chunk 8's
+  flow. Out of scope this chunk: spawn-side PT_INTERP support
+  (today only `pm_execve` can launch dynamic binaries —
+  `pm_handle_spawn_inner` still treats every binary as static),
+  POSIX shim wiring of `SYS_EXECVE = 59`, and the actual
+  toolchain fix (compiler-rt + dynamic-list interplay) needed
+  to make ld-musl finish self-relocation.

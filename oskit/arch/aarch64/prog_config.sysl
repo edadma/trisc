@@ -24,6 +24,13 @@ val PROG_SSP = 0x60080000
 val SRV_USP  = 0x60090000
 val SRV_SSP  = 0x60080000
 
+// AT_PLATFORM string for the SysV initial stack auxv. ld-musl reads
+// this via `__init_libc` -> `__libc.platform` and uses it to pick
+// HWCAP-gated string routines. Must match what musl was built for —
+// we cross-build aarch64-slix-linux-musl, so the platform name is
+// the unprefixed arch name.
+val PLATFORM_NAME = "aarch64"
+
 // Server-side VA of the MMIO page granted by vm_create_server_pt
 // (L3[256] under the user carve-out). Must match the kernel-side
 // definition in oskit/arch/aarch64/vm.lsysl. Sub-page register
