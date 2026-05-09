@@ -9,13 +9,6 @@
  * the target is available later, drop this file and link the proper
  * builtins archive instead.
  *
- * setjmp / longjmp don't actually live in compiler-rt either —
- * they're musl-internal but on aarch64 the build emits external
- * references to them when --dynamic-list filters them out. We
- * provide weak no-op stubs so libc.so links; real setjmp/longjmp
- * still come from musl's own arch/aarch64/setjmp.s when callers
- * resolve via the dynamic-list-exported names.
- *
  * Every stub aborts if invoked. Only the load-time relocation
  * resolution matters for chunk-9 dyn-hello; if any of these get
  * called at run time it means the test reached a code path that
@@ -68,11 +61,14 @@ STUB(__fixtfdi)
 STUB(__fixunstfsi)
 STUB(__fixunstfdi)
 
-/* Complex multiply / divide (sf = float, dc = double complex,
- * sc = single complex, tc = long double complex). */
+/* Complex multiply / divide (sc = single complex, dc = double complex,
+ * tc = long double complex on aarch64 where long double is binary128,
+ * xc = long double complex on x86_64 where long double is x87 80-bit). */
 STUB(__mulsc3)
 STUB(__muldc3)
 STUB(__multc3)
+STUB(__mulxc3)
 STUB(__divsc3)
 STUB(__divdc3)
 STUB(__divtc3)
+STUB(__divxc3)

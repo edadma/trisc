@@ -29,6 +29,20 @@ for tool in "$CLANG" "$AR" "$RANLIB" "$LD"; do
 done
 
 mkdir -p "$BUILD_DIR"
+mkdir -p "$BUILD_DIR/compat"
+
+# Cross-compile our compiler-rt stubs object that musl will link into
+# libc.so. See slix/build-musl.sh (aarch64 sibling) for the full
+# rationale. Same source file, different --target.
+STUBS_C="$REPO_ROOT/slix/musl-compat/compiler_rt_stubs.c"
+STUBS_O="$BUILD_DIR/compat/stubs.o"
+if [ ! -f "$STUBS_O" ] || [ "$STUBS_C" -nt "$STUBS_O" ]; then
+    echo "=== Cross-compiling compiler-rt stubs (x86_64) ==="
+    "$CLANG" --target=x86_64-slix-linux-musl -ffreestanding \
+        -O2 -fPIC -fvisibility=default -nostdinc \
+        -c -o "$STUBS_O" "$STUBS_C"
+fi
+
 cd "$BUILD_DIR"
 
 if [ ! -f config.mak ]; then
@@ -49,7 +63,8 @@ if [ ! -f config.mak ]; then
         --prefix="$REPO_ROOT/slix/sysroot-x86" \
         --enable-shared \
         --enable-static \
-        --with-malloc=oldmalloc
+        --with-malloc=oldmalloc \
+        LIBCC="$STUBS_O"
 fi
 
 echo "=== Building musl libc.a ==="

@@ -1199,6 +1199,22 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "execve: bad"
   }
 
+  "execve: dynamically-linked hello (PT_INTERP + ld-musl)" in {
+    // Phase 1 chunk 9 follow-up. /bin/test_dhello calls
+    // pm_execve("/bin/dhello", ["dhello"]); /bin/dhello is a PIE C
+    // program built against slix-musl with --enable-shared (slix/test/
+    // build-c-dyn.sh). It has a PT_INTERP segment pointing at
+    // /lib/ld-musl-x86_64.so.1, which PM detects in pm_handle_execve
+    // and loads at INTERP_BASE. The auxv carries AT_BASE / AT_PHDR /
+    // AT_ENTRY / AT_RANDOM / etc. so musl's ld-musl bootstrap can find
+    // its program headers, run its relocations, then jump to _start in
+    // the main exe (Scrt1.o), which calls __libc_start_main → main →
+    // write(1, "hello dyn\n", 10).
+    val output = qemu.command("test_dhello")
+    output should include("hello dyn")
+    output should not include "dhello: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

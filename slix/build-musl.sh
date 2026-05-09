@@ -29,6 +29,24 @@ for tool in "$CLANG" "$AR" "$RANLIB" "$LD"; do
 done
 
 mkdir -p "$BUILD_DIR"
+mkdir -p "$BUILD_DIR/compat"
+
+# Cross-compile our compiler-rt stubs object that musl will link into
+# libc.so. Homebrew clang on darwin doesn't ship a libclang_rt.builtins
+# for aarch64-linux-musl, so libc.so otherwise has unresolved
+# references for ~30 long-double / 128-bit float / complex-multiply
+# helpers. Hello-world dynamic doesn't call any of them; the stub
+# object satisfies the load-time relocations and aborts (brk #0) if
+# any actually fire. See slix/musl-compat/compiler_rt_stubs.c.
+STUBS_C="$REPO_ROOT/slix/musl-compat/compiler_rt_stubs.c"
+STUBS_O="$BUILD_DIR/compat/stubs.o"
+if [ ! -f "$STUBS_O" ] || [ "$STUBS_C" -nt "$STUBS_O" ]; then
+    echo "=== Cross-compiling compiler-rt stubs (aarch64) ==="
+    "$CLANG" --target=aarch64-slix-linux-musl -ffreestanding \
+        -O2 -fPIC -fvisibility=default -nostdinc \
+        -c -o "$STUBS_O" "$STUBS_C"
+fi
+
 cd "$BUILD_DIR"
 
 if [ ! -f config.mak ]; then
@@ -50,7 +68,8 @@ if [ ! -f config.mak ]; then
         --prefix="$REPO_ROOT/slix/sysroot" \
         --enable-shared \
         --enable-static \
-        --with-malloc=oldmalloc
+        --with-malloc=oldmalloc \
+        LIBCC="$STUBS_O"
 fi
 
 echo "=== Building musl libc.a ==="

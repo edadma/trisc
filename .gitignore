@@ -3,7 +3,9 @@
 
 # SLIX musl port build artifacts
 slix/build-musl/
+slix/build-musl-x86/
 slix/sysroot/
+slix/sysroot-x86/
 
 *.tof
 *.trb
