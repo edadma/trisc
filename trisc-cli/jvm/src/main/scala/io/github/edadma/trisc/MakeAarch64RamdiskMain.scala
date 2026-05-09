@@ -60,15 +60,21 @@ object MakeAarch64RamdiskMain:
         System.err.println(s"  WARN: $ldMuslPath not found — /lib/ld-musl-aarch64.so.1 omitted")
         None
 
-    // Ship libc.so under two names: /lib/ld-musl-aarch64.so.1 (the
-    // PT_INTERP target) and /lib/libc.so (the SONAME the loader resolves
-    // when dhello declares DT_NEEDED libc.so). Both are byte-identical
-    // since musl's libc.so IS the dynamic linker.
+    // Phase 1 chunk-9/10 layout. /lib carries only ld-musl-<arch>.so.1
+    // because that path is baked into every PIE binary's PT_INTERP at
+    // link time (-dynamic-linker /lib/ld-musl-aarch64.so.1). Shared
+    // objects (libc.so + libm.so) live in /usr/lib per FHS and are
+    // resolved by SONAME via ld-musl's default search path
+    // (/lib:/usr/local/lib:/usr/lib). musl unifies the math impls
+    // into libc.so, so libm.so is a byte-identical copy whose SONAME
+    // is "libc.so" — ld-musl dedupes by SONAME at runtime, so a
+    // dhello-style link against -lm doesn't double-load libc.
     val files: Map[String, Array[Byte]] =
       binFiles
         + ("/test.tar" -> tarBytes)
         ++ ldMuslBytes.map("/lib/ld-musl-aarch64.so.1" -> _).toMap
-        ++ ldMuslBytes.map("/lib/libc.so" -> _).toMap
+        ++ ldMuslBytes.map("/usr/lib/libc.so" -> _).toMap
+        ++ ldMuslBytes.map("/usr/lib/libm.so" -> _).toMap
 
     val basePrefill =
       """/dev dir
@@ -76,6 +82,8 @@ object MakeAarch64RamdiskMain:
         |/dev/null char 0 1
         |/bin dir
         |/lib dir
+        |/usr dir
+        |/usr/lib dir
         |/etc dir
         |/etc/ttytab file "tty0 login"
         |/etc/passwd file "root:x:0:0:root:/root:/nsh\ned:x:1000:1000:ed:/home/ed:/nsh"

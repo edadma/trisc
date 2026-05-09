@@ -1,0 +1,89 @@
+test_phello — Phase 1 chunk 10 printf-via-libc end-to-end
+=========================================================
+
+Drives the chunk-10 path: `pm_execve("/bin/phello", ["phello"])`
+replaces the current process with a dynamically-linked C binary
+that calls `printf("hello printf, sqrt(2.0)*1e6 = %d\n",
+(int)(sqrt(2.0) * 1000000.0))`.
+
+Compared to chunk-9's `test_dhello` (whose victim used `write(1,
+...)` — a single direct syscall), `phello` exercises:
+
+  * Multi-shared-lib install layout — libc.so now lives in
+    `/usr/lib/libc.so` (FHS) instead of `/lib/libc.so`. ld-musl's
+    default search path (/lib:/usr/local/lib:/usr/lib) finds it
+    via SONAME after the PT_INTERP target loads at INTERP_BASE.
+  * `printf` → vfprintf → malloc (FILE buffer) → __stdio_write
+    → SYS_writev. Far more relocations than dhello's bare write.
+  * `sqrt` resolves from libc.so (musl unifies math into libc).
+
+The integer cast is deliberate. musl's `vfprintf` extends every
+floating-point arg from `double` to `long double` via
+`__extenddftf2`; on aarch64-linux-musl / x86_64-linux-musl that
+soft-float helper isn't shipped by Homebrew clang and our
+compiler_rt-stubs trap (`brk #0` / `ud2`) when invoked. Until real
+compiler-rt builtins land, %f-style printf isn't viable. %d
+sidesteps `fmt_fp` entirely.
+
+A successful run prints `hello printf, sqrt(2.0)*1e6 = 1414213\n`;
+any failure (file not found, ELF malformed, ld-musl fails to
+locate libc.so under /usr/lib, etc.) falls through to this
+program's tail and prints `phello: bad <step>`.
+
+What this test would fail on if regressed:
+
+  * Ramdisk doesn't ship `/usr/lib/libc.so` → ld-musl's needed-
+    list lookup walks default search path and runs out, prints
+    "Error loading shared library libc.so" before relocation.
+  * `printf` reaching libc but stdio buffering broken → may
+    fault inside `vfprintf`'s `malloc(BUFSIZ)` if the heap is
+    misconfigured for the dynamic process.
+  * `sqrt` symbol not resolved → relocation pass in ld-musl
+    aborts before running main.
+
+    module oskit.bin.test_phello
+
+    import oskit.ulib.{puts, exit, exit_with, pm_execve}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("phello: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+Build argv as a single-element array and call `pm_execve`. argv[0]
+is the program name per SysV convention; ld-musl reads it for its
+own diagnostics (LD_DEBUG) but `phello`'s `main()` doesn't
+introspect argv.
+
+    main(argv: []string)
+        var args: [1]string
+        args[0] = "phello"
+        val rc = pm_execve("/bin/phello", &args[0], 1)
+
+Reaching here means execve returned with a non-success code — the
+binary was rejected before the point of no return.
+
+        if rc < 0
+            fail(1)
+            return
+
+Or execve nominally succeeded but the new program let control fall
+through to this code instead of running its own _start, which would
+indicate a frame-rewrite regression.
+
+        fail(2)

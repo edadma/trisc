@@ -1215,6 +1215,30 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "dhello: bad"
   }
 
+  "execve: printf via libc.so under /usr/lib" in {
+    // Phase 1 chunk 10. /bin/test_phello calls
+    // pm_execve("/bin/phello", ["phello"]); /bin/phello is a PIE C
+    // program that calls printf with sqrt(2.0)*1e6 cast to int.
+    // Compared to dhello (chunk 9, single write() syscall), this
+    // exercises:
+    //   - libc.so resolution from /usr/lib (FHS layout) — chunk 10
+    //     reorganizes the ramdisk so /lib carries only ld-musl while
+    //     libc.so + libm.so live in /usr/lib. ld-musl's default search
+    //     path (/lib:/usr/local/lib:/usr/lib) finds libc.so by SONAME.
+    //   - Real stdio: printf → vfprintf → __stdio_write → SYS_writev,
+    //     plus malloc for the FILE buffer.
+    //   - sqrt() resolved from libc.so (musl unifies math into libc).
+    //
+    // Integer cast is deliberate: musl's vfprintf converts every
+    // %a/%e/%f/%g arg from double to long double via __extenddftf2
+    // (aarch64) / __extendxftf2 (x86_64), which our compiler_rt
+    // stubs (chunk 9) trap on. Real builtins are a known follow-up;
+    // %d sidesteps fmt_fp.
+    val output = qemu.command("test_phello")
+    output should include("hello printf, sqrt(2.0)*1e6 = 1414213")
+    output should not include "phello: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no
