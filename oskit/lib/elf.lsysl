@@ -1,0 +1,247 @@
+ELF64 — Minimal parsing for the SLIX loader
+===========================================
+
+The SLIX loader needs to know exactly three things to bring a
+binary into life: where the program wants to be (entry +
+LOAD-segment addresses), how big each segment is in memory
+(`p_memsz` ≥ `p_filesz` — the difference is `.bss`), and what
+protection bits go on each. Everything else in the ELF spec
+(symbol tables, dynamic relocations, hash tables, debug
+sections) is the dynamic linker's problem; the kernel-side
+loader stops at PT_LOAD.
+
+This module is **pure parsing**. It reads `ELF64` headers and
+the program-header table out of an in-memory buffer and exposes
+field accessors. No I/O, no allocation, no kernel imports — so
+it can be reused by anything from a debug syscall (Phase 1
+chunk 7's selftest) to PM's cross-PTBR loader (this chunk's
+caller) to `execve` (chunk 8) without dragging in a dependency
+chain.
+
+The buffer layout follows the ELF64 specification (System V ABI
+gABI 4.1 §5). All multi-byte fields are little-endian; only
+ELFDATA2LSB is supported (we'd reject big-endian binaries at
+`elf64_validate`). The accessors take a buffer pointer plus a
+PHT entry index when applicable; they don't keep state, which
+keeps them callable across page boundaries and from any
+context.
+
+    module oskit.lib
+
+ELF identification bytes. `EI_MAG[0..3]` is the magic; we check
+all four bytes rather than relying on a single u32 read, since
+the magic is byte-oriented in the spec.
+
+    val ELF_MAG0: byte = 0x7F
+    val ELF_MAG1: byte = byte('E')
+    val ELF_MAG2: byte = byte('L')
+    val ELF_MAG3: byte = byte('F')
+
+EI_CLASS = 2 (ELFCLASS64) and EI_DATA = 1 (ELFDATA2LSB) are the
+only combinations this loader accepts. SLIX is x86_64 and
+aarch64 only; both are 64-bit and little-endian.
+
+    val ELF_CLASS64:  byte = 2
+    val ELF_DATA2LSB: byte = 1
+
+Program-header types. We only consume `LOAD`; `INTERP` matters
+for chunk 9's dynamic linker handoff; `TLS` matters for Phase 2.
+The rest are listed for completeness of self-documentation, not
+because the loader does anything with them.
+
+    val ELF_PT_NULL    = 0
+    val ELF_PT_LOAD    = 1
+    val ELF_PT_DYNAMIC = 2
+    val ELF_PT_INTERP  = 3
+    val ELF_PT_NOTE    = 4
+    val ELF_PT_PHDR    = 6
+    val ELF_PT_TLS     = 7
+
+Program-header flags. The bit layout matches POSIX `PROT_*`
+exactly (R=4, W=2, X=1) — but with **different bit numbers**
+than `VMA_PROT_*` (R=1, W=2, X=4). `elf64_pf_to_vma_prot` does
+the per-bit translation.
+
+    val ELF_PF_X = 1
+    val ELF_PF_W = 2
+    val ELF_PF_R = 4
+
+`elf64_validate` return codes. 0 = ok; negatives identify which
+check failed so the caller can distinguish "not an ELF binary"
+(fall through to TRB) from "ELF but malformed" (fail the load).
+
+    val ELF_OK            = 0
+    val ELF_ERR_TRUNCATED = -1
+    val ELF_ERR_NOT_ELF   = -2
+    val ELF_ERR_NOT_64    = -3
+    val ELF_ERR_NOT_LE    = -4
+    val ELF_ERR_BAD_PHT   = -5
+
+Layout sizes. ELF64 fixes both at standard values — anything
+else suggests a malformed (or non-stock-toolchain) binary and
+we reject.
+
+    val ELF64_EHDR_SIZE = 64
+    val ELF64_PHDR_SIZE = 56
+
+Field offsets within `Elf64_Ehdr`. We don't expose accessors for
+fields we don't yet consume (e_type, e_machine, e_flags, e_ehsize,
+e_shoff/shnum/shstrndx); they're listed with offsets here as
+documentation of the layout this module assumes.
+
+    val EHDR_OFF_TYPE      = 16
+    val EHDR_OFF_MACHINE   = 18
+    val EHDR_OFF_VERSION   = 20
+    val EHDR_OFF_ENTRY     = 24
+    val EHDR_OFF_PHOFF     = 32
+    val EHDR_OFF_SHOFF     = 40
+    val EHDR_OFF_FLAGS     = 48
+    val EHDR_OFF_EHSIZE    = 52
+    val EHDR_OFF_PHENTSIZE = 54
+    val EHDR_OFF_PHNUM     = 56
+    val EHDR_OFF_SHENTSIZE = 58
+    val EHDR_OFF_SHNUM     = 60
+    val EHDR_OFF_SHSTRNDX  = 62
+
+Field offsets within `Elf64_Phdr`. Note the layout is *not* the
+same as Elf32_Phdr — `p_flags` precedes the address fields in
+ELF64 (vs. trailing in ELF32). The order here matches §5.2 of
+the System V ABI.
+
+    val PHDR_OFF_TYPE   = 0
+    val PHDR_OFF_FLAGS  = 4
+    val PHDR_OFF_OFFSET = 8
+    val PHDR_OFF_VADDR  = 16
+    val PHDR_OFF_PADDR  = 24
+    val PHDR_OFF_FILESZ = 32
+    val PHDR_OFF_MEMSZ  = 40
+    val PHDR_OFF_ALIGN  = 48
+
+Little-endian byte readers. These are the only place this
+module touches byte-order assumptions; everything above the
+accessors works in host byte order. Returns are `i64` so the
+caller can sign-check unsigned 64-bit values without an extra
+conversion at every comparison.
+
+    elf_read_u16_le(p: *byte) -> int
+        (int(p[0]) & 0xFF) | ((int(p[1]) & 0xFF) << 8)
+
+    elf_read_u32_le(p: *byte) -> i64
+        i64(p[0] & 0xFF) | (i64(p[1] & 0xFF) << 8) | (i64(p[2] & 0xFF) << 16) | (i64(p[3] & 0xFF) << 24)
+
+    elf_read_u64_le(p: *byte) -> i64
+        i64(p[0] & 0xFF) | (i64(p[1] & 0xFF) << 8) | (i64(p[2] & 0xFF) << 16) | (i64(p[3] & 0xFF) << 24) | (i64(p[4] & 0xFF) << 32) | (i64(p[5] & 0xFF) << 40) | (i64(p[6] & 0xFF) << 48) | (i64(p[7] & 0xFF) << 56)
+
+`elf64_validate` is the gatekeeper: it returns `ELF_OK` only
+when the buffer is a well-formed ELF64 LSB image whose program
+header table fits inside the buffer. Callers should run this
+once before invoking any field accessor — the accessors trust
+their inputs and do not bounds-check.
+
+The PHT bound check is `phoff + phnum * phentsize <= buflen`,
+done in `i64` to avoid 32-bit overflow when a malformed header
+claims a huge PHT.
+
+    elf64_validate(buf: *byte, buflen: int) -> int
+        if buflen < ELF64_EHDR_SIZE
+            return ELF_ERR_TRUNCATED
+        if buf[0] != ELF_MAG0
+            return ELF_ERR_NOT_ELF
+        if buf[1] != ELF_MAG1
+            return ELF_ERR_NOT_ELF
+        if buf[2] != ELF_MAG2
+            return ELF_ERR_NOT_ELF
+        if buf[3] != ELF_MAG3
+            return ELF_ERR_NOT_ELF
+        if buf[4] != ELF_CLASS64
+            return ELF_ERR_NOT_64
+        if buf[5] != ELF_DATA2LSB
+            return ELF_ERR_NOT_LE
+        val phoff = elf64_phoff(buf)
+        val phentsize = i64(elf64_phentsize(buf))
+        val phnum = i64(elf64_phnum(buf))
+        if phoff < i64(0)
+            return ELF_ERR_BAD_PHT
+        if phnum > i64(0)
+            if phentsize < i64(ELF64_PHDR_SIZE)
+                return ELF_ERR_BAD_PHT
+            if phoff + phnum * phentsize > i64(buflen)
+                return ELF_ERR_BAD_PHT
+        ELF_OK
+
+Header-field accessors. Caller is expected to have run
+`elf64_validate` first; these don't re-check magic.
+
+    elf64_entry(buf: *byte) -> u64
+        u64(elf_read_u64_le(buf + EHDR_OFF_ENTRY))
+
+    elf64_phoff(buf: *byte) -> i64
+        elf_read_u64_le(buf + EHDR_OFF_PHOFF)
+
+    elf64_phentsize(buf: *byte) -> int
+        elf_read_u16_le(buf + EHDR_OFF_PHENTSIZE)
+
+    elf64_phnum(buf: *byte) -> int
+        elf_read_u16_le(buf + EHDR_OFF_PHNUM)
+
+`elf64_phdr_at` returns a pointer to the i-th program-header
+entry. Used by every PHT-field accessor below; pulled out so the
+arithmetic is computed once per access. The caller must have
+already validated `i < elf64_phnum(buf)`.
+
+    elf64_phdr_at(buf: *byte, i: int) -> *byte
+        buf + int(elf64_phoff(buf)) + i * elf64_phentsize(buf)
+
+PHT-entry field accessors. Names mirror the spec field names so
+a reader who knows ELF can find the right offset by pattern.
+
+    elf64_ph_type(buf: *byte, i: int) -> int
+        int(elf_read_u32_le(elf64_phdr_at(buf, i) + PHDR_OFF_TYPE))
+
+    elf64_ph_flags(buf: *byte, i: int) -> int
+        int(elf_read_u32_le(elf64_phdr_at(buf, i) + PHDR_OFF_FLAGS))
+
+    elf64_ph_offset(buf: *byte, i: int) -> i64
+        elf_read_u64_le(elf64_phdr_at(buf, i) + PHDR_OFF_OFFSET)
+
+    elf64_ph_vaddr(buf: *byte, i: int) -> u64
+        u64(elf_read_u64_le(elf64_phdr_at(buf, i) + PHDR_OFF_VADDR))
+
+    elf64_ph_filesz(buf: *byte, i: int) -> i64
+        elf_read_u64_le(elf64_phdr_at(buf, i) + PHDR_OFF_FILESZ)
+
+    elf64_ph_memsz(buf: *byte, i: int) -> i64
+        elf_read_u64_le(elf64_phdr_at(buf, i) + PHDR_OFF_MEMSZ)
+
+    elf64_ph_align(buf: *byte, i: int) -> i64
+        elf_read_u64_le(elf64_phdr_at(buf, i) + PHDR_OFF_ALIGN)
+
+Translate ELF p_flags (X=1, W=2, R=4) to VMA_PROT_* (R=1, W=2,
+X=4). The numeric coincidence on W=2 hides the fact that the X
+and R bits *do* swap; accidentally aliasing the field would
+give text segments PROT_NONE and bss PROT_X. The bit-by-bit
+translation here is the only correct conversion.
+
+    elf64_pf_to_vma_prot(pf: int) -> int
+        var p = 0
+        if (pf & ELF_PF_R) != 0
+            p = p | 1
+        if (pf & ELF_PF_W) != 0
+            p = p | 2
+        if (pf & ELF_PF_X) != 0
+            p = p | 4
+        p
+
+Page alignment helpers used by the loader to derive VMA bounds
+from an ELF segment. `vstart` is `align_down(p_vaddr)` and `vend`
+is `align_up(p_vaddr + p_memsz)`. We accept the page size as a
+parameter rather than importing `oskit.config.PAGE_SIZE` so this
+module stays dependency-free; the caller already knows its arch's
+page size.
+
+    elf64_align_down(addr: u64, page_size: int) -> u64
+        addr & ~u64(i64(page_size) - i64(1))
+
+    elf64_align_up(addr: u64, page_size: int) -> u64
+        val mask = u64(i64(page_size) - i64(1))
+        (addr + mask) & ~mask

@@ -2538,6 +2538,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "fork: bad"
   }
 
+  "elf: kernel selftest" in {
+    // Phase 1 chunk 7. test_elf invokes SYS_ELF_SELFTEST (92), which
+    // synthesizes a two-LOAD-segment ELF in a kernel buffer and runs
+    // every `oskit.lib.elf` accessor against it. Locks down the
+    // parser before chunk 8's `exec()` starts feeding it real ELFs.
+    val output = qemu.command("test_elf")
+    output should include("elf: ok")
+    output should not include "elf: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

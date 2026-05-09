@@ -271,6 +271,7 @@ build_pm() {
         oskit/servers/pm.lsysl \
         oskit/config/config.sysl \
         oskit/loader/loader.lsysl \
+        oskit/lib/elf.lsysl \
         oskit/fs/client.lsysl \
         oskit/hal/mem_cpu.lsysl
 }
@@ -321,6 +322,7 @@ build_init() {
         oskit/servers/pm.lsysl \
         oskit/config/config.sysl \
         oskit/loader/loader.lsysl \
+        oskit/lib/elf.lsysl \
         oskit/hal/mem_cpu.lsysl
 }
 

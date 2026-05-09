@@ -33,6 +33,7 @@ pressure regardless of file size.
     import std.alloc.{malloc, free}
     import oskit.hal.{memcpy, memset}
     import oskit.services.svc_vm_copy_to
+    import oskit.lib.{elf64_validate, elf64_entry, elf64_phnum, elf64_ph_type, elf64_ph_offset, elf64_ph_vaddr, elf64_ph_filesz, elf64_ph_memsz, ELF_OK, ELF_PT_LOAD}
 
 Error codes returned when loading fails.
 
@@ -420,58 +421,37 @@ load binaries without switching its own PTBR.
         entry
 
 ELF64 cross-address-space loader. Parses ELF program headers
-and copies PT_LOAD segments into the target address space.
+via `oskit.lib.elf` and copies PT_LOAD segments into the target
+address space.
 
-    val ELF_PT_LOAD = 1
-
-    read_u16_le(p: *byte) -> int
-        (int(p[0]) & 0xFF) | ((int(p[1]) & 0xFF) << 8)
-
-    read_u64_le(p: *byte) -> i64
-        i64(p[0] & 0xFF) | (i64(p[1] & 0xFF) << 8) | (i64(p[2] & 0xFF) << 16) | (i64(p[3] & 0xFF) << 24) | (i64(p[4] & 0xFF) << 32) | (i64(p[5] & 0xFF) << 40) | (i64(p[6] & 0xFF) << 48) | (i64(p[7] & 0xFF) << 56)
+The PHT walk has been factored out into `oskit.lib.elf` (Phase 1
+chunk 7); this function is now just the cross-PTBR copy strategy:
+each LOAD segment's `p_filesz` bytes go through `svc_vm_copy_to`
+(which allocate-on-faults the destination frames), and any
+`p_memsz - p_filesz` tail (the .bss portion) is zero-filled in
+4 KiB chunks. Header/PHT parse errors map to `LOAD_ERR_FORMAT`,
+preserving the pre-refactor behavior — callers that distinguish
+"not an ELF" from "ELF but malformed" should call
+`elf64_validate` themselves.
 
     load_elf64_to_ptbr(buf: *byte, buflen: int, dst_ptbr: i64) -> i64
-        // Minimum ELF64 header is 64 bytes
-        if buflen < 64
-            return LOAD_ERR_FORMAT
-        // Verify ELF magic, class (64-bit), endian (little)
-        if buf[0] != 0x7F
-            return LOAD_ERR_FORMAT
-        if buf[1] != byte('E')
-            return LOAD_ERR_FORMAT
-        if buf[2] != byte('L')
-            return LOAD_ERR_FORMAT
-        if buf[3] != byte('F')
-            return LOAD_ERR_FORMAT
-        if buf[4] != 2   // ELFCLASS64
-            return LOAD_ERR_FORMAT
-        if buf[5] != 1   // ELFDATA2LSB (little-endian)
+        if elf64_validate(buf, buflen) != ELF_OK
             return LOAD_ERR_FORMAT
 
-        val entry = read_u64_le(buf + 24)
-        val phoff = int(read_u64_le(buf + 32))
-        val phentsize = read_u16_le(buf + 54)
-        val phnum = read_u16_le(buf + 56)
+        val entry = i64(elf64_entry(buf))
+        val phnum = elf64_phnum(buf)
 
-        if phoff + phnum * phentsize > buflen
-            return LOAD_ERR_FORMAT
-
-        // Process PT_LOAD segments
         var i = 0
         while i < phnum
-            val ph = buf + phoff + i * phentsize
-            val p_type = int(read_u32_le(ph))
-            if p_type == ELF_PT_LOAD
-                val p_offset = int(read_u64_le(ph + 8))
-                val p_vaddr = u64(read_u64_le(ph + 16))
-                val p_filesz = int(read_u64_le(ph + 32))
-                val p_memsz = int(read_u64_le(ph + 40))
-                // Copy file data (PROGBITS)
+            if elf64_ph_type(buf, i) == ELF_PT_LOAD
+                val p_offset = int(elf64_ph_offset(buf, i))
+                val p_vaddr  = elf64_ph_vaddr(buf, i)
+                val p_filesz = int(elf64_ph_filesz(buf, i))
+                val p_memsz  = int(elf64_ph_memsz(buf, i))
                 if p_filesz > 0
                     if p_offset + p_filesz > buflen
                         return LOAD_ERR_FORMAT
                     svc_vm_copy_to(dst_ptbr, p_vaddr, buf + p_offset, p_filesz)
-                // Zero-fill BSS (memsz > filesz)
                 if p_memsz > p_filesz
                     var zeros: [4096]byte
                     var done = p_filesz

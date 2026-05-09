@@ -1,0 +1,60 @@
+test_elf — ELF64 parser selftest
+=================================
+
+Phase 1 chunk 7 stand-in for "load a real ELF and run it." The
+kernel ships an `oskit.lib.elf` parser this chunk; the actual
+"build a sysl program as ELF, ship it in the ramdisk, exec() it"
+path arrives with chunk 8 (`exec`). Until then this test drives
+`SYS_ELF_SELFTEST` (92), which builds a synthetic two-LOAD-segment
+ELF in kernel memory, runs every `oskit.lib.elf` accessor against
+it, and returns 0 on full pass or 1..N for the failing step.
+
+What this test would fail-on if regressed:
+
+  * `elf64_validate` accepting a bad magic or wrong class — caught
+    by step 1 (positive validate) or step 14 (negative magic).
+  * `elf64_pf_to_vma_prot` aliasing PF_X (1) onto PROT_READ (1) —
+    caught by step 8 (R+X expected to map to PROT_READ|PROT_EXEC=5).
+  * Off-by-one in the per-PHT-entry stride (`phoff + i*phentsize`)
+    — caught by steps 9-13 (second PHT entry's fields).
+  * Mis-sized truncation check — caught by step 15.
+
+Pass criterion: prints `elf: ok`. The fail() helper exits with the
+step number so a regression is greppable from the test output.
+
+    module oskit.bin.test_elf
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val SYS_ELF_SELFTEST = 92
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("elf: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        val rc = syscall6(SYS_ELF_SELFTEST, i64(0), i64(0),
+                          i64(0), i64(0), i64(0), i64(0))
+        if rc != i64(0)
+            fail(int(rc))
+            return
+
+        puts("elf: ok\n")
+        exit()

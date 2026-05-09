@@ -152,6 +152,7 @@ user-mode). Numbers are stable. Definitions live in
 | 89  | SYS_COW_REFCNT_SELFTEST | sys_cow_refcnt_selftest_handler (debug) |
 | 90  | SYS_COW_SHARE_SELF    | sys_cow_share_self_handler (debug)   |
 | 91  | SYS_FORK              | sys_fork_handler                     |
+| 92  | SYS_ELF_SELFTEST      | sys_elf_selftest_handler (debug)     |
 
 PHASE 1 NOTE. The VM/process syscalls (44–60, 63, 66, 79) all
 assume the current "fixed-region eager mapping" model. They
@@ -694,3 +695,22 @@ fixed-region state.
   programs to link at `0x60000000` (matching aarch64) is the
   cleaner long-term path — once that lands the helper becomes
   universally a no-op.
+- **2026-05-08 / Phase 1 chunk 7** — ELF parsing infrastructure
+  (`SYS_ELF_SELFTEST` = 92). New `oskit.lib.elf` module exposes
+  ELF64 magic/class validation, header-field accessors
+  (`elf64_entry`, `elf64_phoff`, `elf64_phentsize`, `elf64_phnum`)
+  and PHT-entry accessors (`elf64_ph_type/flags/offset/vaddr/`
+  `filesz/memsz/align`) plus an `elf64_pf_to_vma_prot`
+  bit-translator. Pure parsing — no I/O, no kernel imports —
+  so reusable from a kernel-side selftest, PM's cross-PTBR
+  loader, and chunk 8's `execve()`. The loader's
+  `load_elf64_to_ptbr` was refactored to use the new module
+  (no behavior change). The kernel-side `sys_elf_selftest`
+  handler synthesizes a two-LOAD-segment ELF in BSS, drives
+  every accessor against it, and returns `0` or the failing-
+  step number — locks down the parser before any real ELF flows
+  through it. The chunk explicitly defers actually *installing*
+  per-LOAD-segment VMAs in a target address space; that lives
+  with chunk 8 (`execve`) where pid-by-definition is the calling
+  process and the VMA install is part of dropping/replacing
+  the address space.
