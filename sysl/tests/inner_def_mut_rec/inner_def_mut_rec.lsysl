@@ -1,0 +1,196 @@
+Inner-def mutual recursion — cross-backend tests
+================================================
+
+Closes audit Tier 4 followup #3. `def f` then `def g` with cross-calls
+used to fail at analysis with "g is not in scope" because the inner-def
+arm pre-bound each name only as its own body was about to be analyzed,
+so the earlier sibling never saw the later one.
+
+The analyzer now does a two-pass scope walk in `analyzeBlock`: every
+sibling inner-def name in a block is pre-bound BEFORE any body is
+analyzed, so cross-references type-check. To make the references work
+end-to-end at runtime (capture-by-value snapshot would otherwise read
+garbage on a forward ref), the analyzer detects the connected cluster
+of cross-referencing siblings and lifts each member to a top-level
+synthesized fn — every backend already handles `TIndirectCall` of a
+`TFuncRef` (top-level fn pointer + null env).
+
+These tests pin the runtime behaviour across all four backends; failures
+here would mean a backend-specific regression in the lift path.
+
+    module sysl.tests.inner_def_mut_rec
+
+
+Two-way mutual recursion (is_even / is_odd)
+-------------------------------------------
+
+The canonical mutual-recursion pattern. `is_even` calls `is_odd` on a
+forward reference; `is_odd` calls `is_even` on a backward reference.
+
+    #test
+    test_is_even_zero() -> unit
+        def is_even(n: int) -> bool
+            if n == 0 then true
+            else is_odd(n - 1)
+        def is_odd(n: int) -> bool
+            if n == 0 then false
+            else is_even(n - 1)
+        assert(is_even(0), "0 is even")
+
+    #test
+    test_is_even_ten() -> unit
+        def is_even(n: int) -> bool
+            if n == 0 then true
+            else is_odd(n - 1)
+        def is_odd(n: int) -> bool
+            if n == 0 then false
+            else is_even(n - 1)
+        assert(is_even(10), "10 is even")
+
+    #test
+    test_is_odd_eleven() -> unit
+        def is_even(n: int) -> bool
+            if n == 0 then true
+            else is_odd(n - 1)
+        def is_odd(n: int) -> bool
+            if n == 0 then false
+            else is_even(n - 1)
+        assert(is_odd(11), "11 is odd")
+
+    #test
+    test_seven_not_even() -> unit
+        def is_even(n: int) -> bool
+            if n == 0 then true
+            else is_odd(n - 1)
+        def is_odd(n: int) -> bool
+            if n == 0 then false
+            else is_even(n - 1)
+        assert(!is_even(7), "7 is not even")
+
+    #test
+    test_six_not_odd() -> unit
+        def is_even(n: int) -> bool
+            if n == 0 then true
+            else is_odd(n - 1)
+        def is_odd(n: int) -> bool
+            if n == 0 then false
+            else is_even(n - 1)
+        assert(!is_odd(6), "6 is not odd")
+
+
+Three-way mutual recursion
+--------------------------
+
+`a → b → c → a`. Each predicate decreases by 1 and bottoms out at 0
+returning 1. For n=9 the chain has 9 calls and lands at the leaf.
+
+    #test
+    test_three_way_ring() -> unit
+        def a(n: int) -> int
+            if n == 0 then 1
+            else b(n - 1)
+        def b(n: int) -> int
+            if n == 0 then 1
+            else c(n - 1)
+        def c(n: int) -> int
+            if n == 0 then 1
+            else a(n - 1)
+        assert(a(9) == 1, "a(9) bottoms at 1")
+        assert(b(9) == 1, "b(9) bottoms at 1")
+        assert(c(9) == 1, "c(9) bottoms at 1")
+
+
+Forward-only sibling chain (no back edge)
+-----------------------------------------
+
+`f → g → h → leaf`. Not a cycle — but f and g both forward-reference
+later siblings. The cluster-lift logic still picks this up: g is
+captured by f, h is captured by g; all three end up in the cluster.
+
+    #test
+    test_forward_chain() -> unit
+        def f(n: int) -> int = g(n) + 1
+        def g(n: int) -> int = h(n) + 10
+        def h(n: int) -> int = n + 100
+        assert(f(5) == 116, "5 + 100 + 10 + 1")
+
+
+Self + sibling refs combined
+----------------------------
+
+`is_even` is self-recursive (decreases by 2) AND calls a sibling helper.
+Self-only inner-defs use the existing TClosure path; mixing self with
+a sibling ref pulls the def into the cluster and lifts both to
+top-level fns. The lifted self-call goes through the mangled name.
+
+    #test
+    test_self_plus_sibling() -> unit
+        def is_even(n: int) -> bool
+            if n == 0 then true
+            else if n == 1 then is_zero_helper(0)
+            else is_even(n - 2)
+        def is_zero_helper(n: int) -> bool
+            n == 0
+        assert(is_even(8), "8 is even via self-recursion")
+        assert(is_even(0), "0 is even via base case")
+        assert(is_even(1), "1 is 'even' via the sibling helper (treats 0 as even)")
+
+
+Multiple cluster invocations don't share state
+----------------------------------------------
+
+Calling the same lifted cluster repeatedly works: the lift produces
+a stateless top-level fn, so successive calls don't interfere.
+
+    #test
+    test_repeated_calls() -> unit
+        def is_even(n: int) -> bool
+            if n == 0 then true
+            else is_odd(n - 1)
+        def is_odd(n: int) -> bool
+            if n == 0 then false
+            else is_even(n - 1)
+        var hits = 0
+        if is_even(2) then hits = hits + 1
+        if is_even(4) then hits = hits + 1
+        if is_even(6) then hits = hits + 1
+        if is_odd(3) then hits = hits + 1
+        if is_odd(5) then hits = hits + 1
+        assert(hits == 5, "all five calls landed on the true branch")
+
+
+Single self-recursive inner def still works (no regression)
+-----------------------------------------------------------
+
+Pinning that the cluster-lift doesn't disturb the existing single-self-ref
+TClosure path. `fact` only references itself, so it stays a TClosure.
+
+    #test
+    test_single_self_ref() -> unit
+        def fact(n: int) -> int
+            if n == 0 then return 1
+            n * fact(n - 1)
+        assert(fact(5) == 120, "5! = 120")
+        assert(fact(0) == 1, "0! = 1")
+
+
+Sibling refs through computed args
+----------------------------------
+
+The lifted call site receives a non-trivial arg expression. Pins that
+arg evaluation order is preserved across the lift.
+
+    #test
+    test_arg_eval_through_lift() -> unit
+        def forth(n: int) -> int
+            if n <= 0 then 0
+            else 1 + back(n - 1) + back(n - 2)
+        def back(n: int) -> int
+            if n <= 0 then 0
+            else forth(n - 1)
+        // forth(3): 1 + back(2) + back(1)
+        //         = 1 + forth(1) + forth(0)
+        //         = 1 + (1 + back(0) + back(-1)) + 0
+        //         = 1 + (1 + 0 + 0) + 0
+        //         = 2
+        assert(forth(3) == 2, "forth(3) terminates and returns 2")

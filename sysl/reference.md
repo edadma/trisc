@@ -2273,13 +2273,35 @@ same as an anonymous lambda; the self-cell is only allocated when needed.
 need the binding's type to resolve, and inference would require a two-pass
 analysis. Top-level functions still allow inferred return types.
 
-**Restrictions:** no type parameters, no return-type inference, no mutual
-recursion (`def f` then `def g` calling each other would need both names
-pre-bound before either body is analyzed). Contracts (`require`/`ensure`) on
-an inner def are rejected with a clear diagnostic — the closure-lowering path
-has no contract-emission stage yet, and silently dropping the clauses was a
-known footgun. Promote to a top-level `fn` (where contracts work fully) or
-hand-inline the check via `assert(cond, "msg")`.
+**Restrictions:** no type parameters, no return-type inference. Contracts
+(`require`/`ensure`) on an inner def are rejected with a clear diagnostic —
+the closure-lowering path has no contract-emission stage yet, and silently
+dropping the clauses was a known footgun. Promote to a top-level `fn`
+(where contracts work fully) or hand-inline the check via `assert(cond, "msg")`.
+
+**Mutual recursion is supported** when the cluster of cross-referencing
+inner defs captures no outer-scope variables. The analyzer pre-binds every
+sibling inner-def name in a block before analyzing any body, so forward
+references type-check, then lifts the connected cluster to top-level
+synthesized fns so capture-by-value semantics don't read garbage at runtime:
+
+```sysl
+main() -> int
+    def is_even(n: int) -> bool
+        if n == 0 then true
+        else is_odd(n - 1)
+    def is_odd(n: int) -> bool
+        if n == 0 then false
+        else is_even(n - 1)
+    if is_even(10) then 1 else 0
+```
+
+Two-way, three-way, and forward-only sibling chains all work. A single
+self-recursive inner def with no sibling references is **not** lifted — it
+keeps the existing closure path with self-reference. If a cluster member
+captures any outer-scope variable, the analyzer rejects it with a clear
+"promote to top-level fn" diagnostic; the lift cannot preserve those
+captures, and silently dropping them would be a footgun.
 
 Implemented across all four backends (interpreter, LLVM, SVM, TRISC).
 

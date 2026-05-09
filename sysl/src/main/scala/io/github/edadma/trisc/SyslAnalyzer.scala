@@ -311,6 +311,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   protected val genericTemplates = new mutable.LinkedHashMap[String, FunDeclAST]
   protected val instantiations = new mutable.LinkedHashMap[(String, List[SyslType]), String]
   protected val specializedDecls = mutable.ListBuffer.empty[TDecl]
+  // Per-analyze counter for synthesized top-level fns lifted from cross-referencing
+  // inner-def clusters (mutual recursion). Names look like `_inner_<N>_<defName>`.
+  protected var innerDefLiftCounter: Int = 0
   protected var typeEnv: Map[String, SyslType] = Map.empty
   /** Active impl's associated-type bindings, set during impl-method
    *  monomorphization (Phase A2). Each entry is `(assoc-name, resolved-type)`
@@ -5800,7 +5803,117 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     }
 
   protected def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
-    stmts.map(analyzeStmt)
+    // Two-pass scope walk for inner defs at this block level. Pre-binding all
+    // sibling names with their declared signatures BEFORE analyzing any body
+    // is what lets `def f` and `def g` cross-reference each other regardless
+    // of source order. Without this, an inner-def body referencing a sibling
+    // declared later would see "name is not in scope".
+    //
+    // Defs that fail their own arm checks later (type params, contracts on
+    // an inner def, missing return type) are pre-bound here too; the failing
+    // arm throws when its body runs and the pre-bind has no observable effect.
+    val innerDecls: List[FunDeclAST] = stmts.collect {
+      case InnerFunStmtAST(d) if d.typeParams.isEmpty && d.returnType.nonEmpty => d
+    }
+    val siblingNames: Set[String] = innerDecls.map(_.name).toSet
+    if scopeStack != null && innerDecls.nonEmpty then
+      for d <- innerDecls do
+        val ret = resolveType(d.returnType.get)
+        val pTypes = d.params.map(p => resolveType(p.typ))
+        val ft: SyslType = FuncType(pTypes, ret, escaping = true)
+        currentScope(d.name) = SymInfo(d.name, ft, mutable = false)
+    val tStmts = stmts.map(analyzeStmt)
+    if siblingNames.size <= 1 then tStmts
+    else liftInnerDefClusters(tStmts, siblingNames)
+
+  /** Lift any cluster of cross-referencing sibling inner defs to top-level
+   *  synthesized functions. A cluster is the transitive closure (under the
+   *  "captures sibling" relation) of any inner-def whose body references
+   *  another sibling. Single inner defs that only self-reference are NOT
+   *  lifted — they keep the existing TClosure+selfName path.
+   *
+   *  Captures inside a cluster must be limited to other cluster members; if
+   *  a cluster member also captures an outer-scope variable, the lift would
+   *  silently drop it, so we reject with a clear "promote to top-level fn"
+   *  diagnostic instead.
+   *
+   *  This unblocks the canonical mutual-recursion pattern (e.g. `is_even` /
+   *  `is_odd`) without requiring per-backend support for cross-closure
+   *  forward references — every backend already handles `TIndirectCall` of a
+   *  `TFuncRef` (top-level fn pointer with null env). */
+  protected def liftInnerDefClusters(tStmts: List[TStmt], siblingNames: Set[String]): List[TStmt] =
+    case class Inner(name: String, closure: TClosure, ft: SyslType, vol: Boolean, ghost: Boolean)
+    val innerStmts: List[Inner] = tStmts.collect {
+      case TVarStmt(name, ft, c: TClosure, vol, ghost) if siblingNames.contains(name) =>
+        Inner(name, c, ft, vol, ghost)
+    }
+    if innerStmts.isEmpty then return tStmts
+    // Edges: each sibling → set of OTHER siblings it captures (self-capture
+    // doesn't count — that's handled by the existing selfName mechanism).
+    val crossRefs: Map[String, Set[String]] = innerStmts.map { i =>
+      i.name -> i.closure.captures.iterator.collect {
+        case (capName, _) if siblingNames.contains(capName) && capName != i.name => capName
+      }.toSet
+    }.toMap
+    // Cluster: closure of all siblings reachable from any node with non-empty
+    // cross-refs OR reachable as a target of cross-refs. Catches both ends of
+    // an `f→g` edge.
+    val cluster = scala.collection.mutable.Set.empty[String]
+    val seeds = crossRefs.iterator.flatMap { case (n, refs) =>
+      if refs.nonEmpty then Iterator(n) ++ refs.iterator else Iterator.empty
+    }.toSet
+    val toVisit = scala.collection.mutable.Queue.from(seeds)
+    while toVisit.nonEmpty do
+      val n = toVisit.dequeue()
+      if !cluster.contains(n) then
+        cluster += n
+        toVisit ++= crossRefs.getOrElse(n, Set.empty)
+    if cluster.isEmpty then return tStmts
+    // Validate: cluster members may capture only siblings (incl. self). Any
+    // outer-scope capture would be lost on lift, so we reject up front.
+    for i <- innerStmts; if cluster.contains(i.name) do
+      val outerCaptures = i.closure.captures.iterator.collect {
+        case (capName, _) if !siblingNames.contains(capName) => capName
+      }.toList
+      if outerCaptures.nonEmpty then
+        val others = cluster.iterator.filter(_ != i.name).toList.sorted
+        throw AnalysisError(
+          s"inner def '${i.name}' is part of a cross-referencing cluster (with ${others.mkString(", ")}) " +
+            s"that needs to be lifted to top-level for forward references to work, " +
+            s"but it captures outer-scope variables: ${outerCaptures.mkString(", ")}. " +
+            "The lift cannot preserve these captures — promote the cluster to top-level fns explicitly, " +
+            "or refactor to avoid the captures (e.g. pass the captured value as an extra parameter).",
+        )
+    // Synthesize unique mangled names. Sorted for deterministic output.
+    val mangled: Map[String, String] = cluster.toList.sorted.map { name =>
+      val m = s"_inner_${innerDefLiftCounter}_$name"
+      innerDefLiftCounter += 1
+      name -> m
+    }.toMap
+    // Rewrite cluster body refs: TVarRef(siblingName, ft) → TFuncRef(mangled, ft).
+    // Self-refs are rewritten too — the lifted top-level fn calls itself by its
+    // mangled name. mapTExpr applies `f` to TVarRef nodes and visits subexprs.
+    val rewriter: TExpr => TExpr = {
+      case TVarRef(n, ft) if cluster.contains(n) => TFuncRef(mangled(n), ft)
+      case other                                  => other
+    }
+    for i <- innerStmts; if cluster.contains(i.name) do
+      val rewrittenBody = i.closure.body match
+        case TBlockBody(stmts) => TBlockBody(stmts.map(s => mapTStmt(s)(rewriter)))
+        case TExprBody(e)      => TExprBody(mapTExpr(e)(rewriter))
+      specializedDecls += TFunDecl(
+        mangled(i.name), i.closure.params, i.closure.returnType, rewrittenBody,
+        isPrivate = true, effects = i.closure.effects,
+      )
+    // Replace each cluster TVarStmt's RHS with a TFuncRef to its lifted twin.
+    // The local var still holds a callable value; calls go through TIndirectCall
+    // of TFuncRef, which every backend lowers to a direct (or near-direct) call
+    // with a null env pointer.
+    tStmts.map {
+      case TVarStmt(name, ft, _: TClosure, vol, ghost) if cluster.contains(name) =>
+        TVarStmt(name, ft, TFuncRef(mangled(name), ft), vol, ghost)
+      case other => other
+    }
 
   /** Analyze a function block body together with its `require` / `ensure` contract clauses.
    * Generates require checks at entry, injects a `__result__` local, and rewrites every
