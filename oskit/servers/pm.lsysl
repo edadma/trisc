@@ -19,10 +19,13 @@ IPC commands:
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
-    import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING}
-    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range, svc_fd_transplant}
-    import oskit.loader.load_tof_to_ptbr
+    import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING, PAGE_SIZE}
+    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_get_thread_ptbr, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range, svc_fd_transplant, svc_proc_replace_image_prep, svc_execve_finalize, svc_vma_create, VMA_PROT_READ, VMA_PROT_WRITE, VMA_MAP_ANON, VMA_MAP_PRIVATE}
+    import oskit.loader.{load_tof_to_ptbr, load_elf64_to_ptbr}
+    import oskit.lib.{elf64_validate, elf64_entry, elf64_phnum, elf64_ph_type, elf64_ph_flags, elf64_ph_vaddr, elf64_ph_memsz, elf64_pf_to_vma_prot, elf64_align_down, elf64_align_up, ELF_OK, ELF_PT_LOAD}
+    import oskit.fs.{fs_open, fs_read, fs_close, fs_stat}
     import oskit.arch.{PROG_USP, PROG_SSP}
+    import std.alloc.{malloc, free}
 
     val PM_CMD_WAITPID = 1
     val PM_CMD_KILL    = 2
@@ -33,6 +36,7 @@ IPC commands:
     val PM_CMD_SPAWN_SUSP    = 7
     val PM_CMD_TRANSPLANT_FD = 8
     val PM_CMD_RESUME        = 9
+    val PM_CMD_EXECVE        = 10
 
 Signal numbers (SLIX-native, not POSIX).
 
@@ -330,6 +334,195 @@ the child suspended for follow-up TRANSPLANT_FD/RESUME.
             pm_msg_write_i32(reply, 1, pid)
             ipc_reply(sender, reply, 5)
 
+`PM_CMD_EXECVE` (10) — Phase 1 chunk 8.
+
+Replace the calling thread's entire image with one loaded from a new
+ELF binary. POSIX-style: same pid, same fd table, same parent. The
+old code/data/heap/stack are gone the moment this returns success.
+
+Wire: cmd(1) + path_len(1) + blob_len(2) + pad(1) + path + blob.
+
+Identical to `PM_CMD_SPAWN`'s wire so `pm_build_sysv_stack` can reuse
+the spawn argv blob format unchanged. The pad byte (offset 4) is
+ignored — execve never inherits handles from a `SCM_RIGHTS`-style
+fan-out (POSIX execve preserves the existing fd table by design).
+
+Failure paths reply normally (`reply[0] = -1`, sender resumes at the
+old `ipc_send` site and reads the error byte). The success path
+takes a different exit: after we've dropped the caller's old VMAs
+and pages and rebuilt them around the new image, the old reply
+buffer's VA either falls inside the new SysV init stack (typical, on
+both arches the new SP and old reply slot are within ~hundreds of
+bytes of `PROG_USP`) or onto an unmapped frame. A normal `ipc_reply`
+would then either silently corrupt the new stack or fault — neither
+acceptable. So we use `svc_execve_finalize` instead, which writes
+the new entry PC + new USP into the saved exception frame and wakes
+the caller without copying any reply bytes back. The caller's next
+`iretq` / `ERET` lands at the new entry with the SysV stack live.
+
+Resource ceilings: the ELF must fit inside PM's heap. With PM's heap
+sized around 128 KiB on x86 today, that practically caps user
+binaries at ~80 KiB until PM gets a streaming path or its heap is
+grown. `LOAD_CROSS_BUF_MAX` upstream is 1 MiB; PM's `malloc` is the
+binding constraint here.
+
+    pm_handle_execve(sender: int, buf: *byte)
+        val path_len = int(buf[1])
+        val blob_len = (int(buf[2]) & 0xFF) | ((int(buf[3]) & 0xFF) << 8)
+        val path = string(buf + 5, path_len)
+
+        var reply: [1]byte
+
+Resolve the caller. PM's IPC dispatcher gives us `sender` (the
+calling thread); we need the calling process's pid + ptbr for the
+image-replacement primitives, and the caller's main_tid (which for
+chunk 8 is the same thread, but we route through the API in case the
+thread layout grows).
+
+        val sender_pid = svc_get_thread_pid(sender)
+        if sender_pid <= 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val target_ptbr = svc_get_thread_ptbr(sender)
+        if target_ptbr == u64(0)
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+
+Read the file into PM's heap, mirroring `load_tof_to_ptbr`'s shape so
+PM and the loader cap user binaries the same way.
+
+        var st: [7]int
+        if fs_stat(path, st) < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val size = st[4]
+        if size <= 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+
+        val fid = fs_open(path)
+        if fid < 0
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        val ebuf = malloc(i64(size))
+        if i64(ebuf) <= 0
+            fs_close(fid)
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+        var total = 0
+        var nr = fs_read(fid, ebuf, size)
+        while nr > 0
+            total += nr
+            if total >= size
+                break
+            nr = fs_read(fid, ebuf + total, size - total)
+        fs_close(fid)
+        if total < size
+            free(ebuf)
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+
+Validate the ELF before touching the caller's address space. After
+`svc_proc_replace_image_prep` the caller has no resumable old image
+to fall back to, so every check that *could* reject the binary must
+run first.
+
+        if elf64_validate(ebuf, total) != ELF_OK
+            free(ebuf)
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+
+Build the SysV init stack into a PM-local buffer up front, while the
+caller's old address space is still alive. After image replacement
+we can't synthesize argv strings any more — PM's stack itself is
+fine since PM lives in its own PT, but `pm_build_sysv_stack` only
+runs on the local buffer so this is just a clean separation.
+
+        var stack_buf: [4096]byte
+        val fsz = pm_build_sysv_stack(buf + 5 + path_len, blob_len,
+                                      &stack_buf[0], 4096, PROG_USP)
+        if fsz < 0
+            free(ebuf)
+            reply[0] = byte(-1)
+            ipc_reply(sender, reply, 1)
+            return
+
+Point of no return. Drop the caller's old VMAs + leaf pages. After
+this the page table is empty in the user range; subsequent
+`svc_vm_copy_to` calls will allocate-on-write fresh frames as they
+go. Failures past this point cannot be reported back to the caller —
+the old reply buf is gone — so we simply continue and trust the
+syscall layer.
+
+        svc_proc_replace_image_prep(sender_pid)
+
+Install one VMA per `PT_LOAD` so that future demand-paging faults
+(stack growth, BSS pages we don't pre-touch) route through
+`vma_handle_fault`. Bit-translate ELF p_flags to VMA prot via
+`elf64_pf_to_vma_prot` so an R+X text segment doesn't accidentally
+get write permission — that's exactly what chunk 7's parser was
+shaped to enable.
+
+        val phnum = elf64_phnum(ebuf)
+        var i = 0
+        while i < phnum
+            if elf64_ph_type(ebuf, i) == ELF_PT_LOAD
+                val pf = elf64_ph_flags(ebuf, i)
+                val prot = elf64_pf_to_vma_prot(pf)
+                val vstart = elf64_align_down(elf64_ph_vaddr(ebuf, i), PAGE_SIZE)
+                val vend_raw = elf64_ph_vaddr(ebuf, i) + u64(elf64_ph_memsz(ebuf, i))
+                val vend = elf64_align_up(vend_raw, PAGE_SIZE)
+                svc_vma_create(sender_pid, vstart, vend, prot,
+                               VMA_MAP_ANON | VMA_MAP_PRIVATE)
+            i += 1
+
+Stack VMA: matches `vma_seed_default_layout`'s shape so a stack-grow
+fault at `PROG_USP - n` for any `n` inside this 64 KiB range is
+satisfied by `vma_handle_fault`. Hardcoded to PROG_USP - 64 KiB
+deliberately — Phase 1 stays on the fixed-stack-region pattern; the
+auto-grow VMA is a Phase 2 concern.
+
+        val stack_low = u64(PROG_USP) - u64(0x10000)
+        svc_vma_create(sender_pid, stack_low, u64(PROG_USP),
+                       VMA_PROT_READ | VMA_PROT_WRITE,
+                       VMA_MAP_ANON | VMA_MAP_PRIVATE)
+
+Copy the new ELF content into the target address space. The shared
+loader handles file→memory layout (filesz copy + memsz tail zero-
+fill) one PT_LOAD at a time, exactly as it does in
+`pm_handle_spawn_inner`.
+
+        val entry = load_elf64_to_ptbr(ebuf, total, i64(target_ptbr))
+        free(ebuf)
+        if entry <= 0
+            // Caller's old image is already gone — there's nothing to
+            // resume. Wake them with PC=0 / SP=0 so the very next
+            // ring-3 transition #PFs on instruction fetch and the
+            // fault path kills the process. Better than leaving them
+            // stuck in STATE_SEND_BLOCKED forever waiting for a reply
+            // that will never come.
+            svc_execve_finalize(sender, i64(0), i64(0))
+            return
+
+        val child_sp = i64(PROG_USP) - i64(fsz)
+        svc_vm_copy_to(target_ptbr, u64(child_sp), &stack_buf[0], fsz)
+
+Hand control to the new entry point. `svc_execve_finalize` rewrites
+the saved PC/USP and wakes the calling thread from
+`STATE_SEND_BLOCKED` without writing the reply byte (which would
+land in our freshly-built SysV stack). On its next ring-3 transition
+the thread runs the new program from a clean state.
+
+        svc_execve_finalize(sender, entry, child_sp)
+
 PM_CMD_RESUME: resume a previously SPAWN_SUSP-ed child.
 Wire: cmd(1) + pid(4) → status(1).
 
@@ -507,6 +700,8 @@ IPC messages (waitpid/kill from userspace) or notifications
                     pm_handle_transplant_fd(sender, buf)
                 else if cmd == PM_CMD_RESUME
                     pm_handle_resume(sender, buf)
+                else if cmd == PM_CMD_EXECVE
+                    pm_handle_execve(sender, buf)
                 else
                     // Unknown command
                     var reply: [1]byte

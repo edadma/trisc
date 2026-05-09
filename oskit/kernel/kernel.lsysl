@@ -1570,6 +1570,8 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall6(90, sys_cow_share_self_handler)
         register_syscall6(91, sys_fork_handler)
         register_syscall(92, sys_elf_selftest_handler)
+        register_syscall(93, sys_proc_replace_image_prep_handler)
+        register_syscall6(94, sys_execve_finalize_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events
@@ -2321,6 +2323,88 @@ arrives in chunk 8 with `exec()`).
         val rc = elf64_selftest()
         syscall_return(i64(rc))
         kernel_continue_current()
+
+Phase 1 chunk 8 — `execve` cross-PTBR primitives.
+
+`SYS_PROC_REPLACE_IMAGE_PREP` (93) drops the user pages and the VMA
+tree of a target process, leaving the page table itself intact for
+the caller to seed fresh VMAs and load a new image into. It mirrors
+the first two steps of `reap_process` exactly so a partially-prepped
+target stays consistent with what reap would do at any moment if the
+process is killed mid-execve. The kstack and PT pages are untouched
+— the calling thread of the target is suspended in IPC waiting for
+PM's reply, so its kstack frame is still alive.
+
+Caller is PM, exclusively. Wired through `register_syscall(...)` so
+the privilege bit is set in PM's allow mask the same way every other
+PM-only syscall is granted.
+
+    sys_proc_replace_image_prep_handler(arg: int)
+        val pid = arg
+        if pid <= 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if pid >= MAX_PROCESSES
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if processes[pid].state == PROC_FREE
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        vma_unmap_all_pages(&processes[pid].vma_tree, processes[pid].ptbr)
+        vma_clear_all(&processes[pid].vma_tree)
+        syscall_return(0)
+        kernel_continue_current()
+
+`SYS_EXECVE_FINALIZE` (94) atomically (a) overwrites the saved
+instruction pointer + user stack pointer in a thread's exception
+frame and (b) wakes the thread from `STATE_SEND_BLOCKED` to
+`STATE_READY` without touching its IPC reply buffer. PM calls this as
+the *last* step of an `execve` — at which point the caller's old
+address space is gone and a normal `ipc_reply` would `vm_copy_cross`
+the reply byte into whatever frame now backs the old reply-buf VA
+(typically a page in the new SysV init stack), silently corrupting
+the new image.
+
+By skipping the reply-buf copy entirely we avoid that hazard. The
+new program never needs to read a reply byte: it starts executing at
+`entry` with `RSP = usp`, and the saved syscall return register
+keeps whatever value the IPC dispatcher wrote at send-time (zero or
+the partial transfer count) — which the new image's CRT0 doesn't
+read.
+
+Args: a0=tid, a1=new entry pc, a2=new user stack pointer.
+
+The slot offsets come from arch (`ARCH_FRAME_PC_OFFSET`,
+`ARCH_FRAME_USP_OFFSET`) so this stays one routine across x86_64 and
+aarch64. The kstack slab guarantees PA-contiguous neighbours, so a
+single `vm_v2p` of the SSP plus offset arithmetic reaches both
+slots safely (no per-slot translation needed).
+
+    sys_execve_finalize_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val tid = int(a0)
+        if tid < 0
+            return i64(-1)
+        if tid >= MAX_THREADS
+            return i64(-1)
+        val ssp_va = u64(threads[tid].ssp)
+        // Direct write — kstack pages are reachable as kernel VAs via the
+        // kernel's high-half identity map (TTBR1 on aarch64) and the
+        // 0..0xCB user PT entries on x86. The kstack slab guarantees PA
+        // contiguity so offset arithmetic doesn't escape the 4-page slot.
+        var pc_p: *i64 = *i64(ssp_va + u64(ARCH_FRAME_PC_OFFSET))
+        *pc_p = a1
+        var sp_p: *i64 = *i64(ssp_va + u64(ARCH_FRAME_USP_OFFSET))
+        *sp_p = a2
+        arch_invalidate_icache_all()
+        if threads[tid].state == STATE_SEND_BLOCKED
+            threads[tid].state = STATE_READY
+            threads[tid].quantum = DEFAULT_QUANTUM
+            threads[tid].wake_tick = 0
+            enqueue(threads[tid].priority, tid)
+        i64(0)
 
     reap_process(pid: int)
         grant_revoke_all(pid)

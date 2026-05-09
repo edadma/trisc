@@ -87,6 +87,7 @@ Command bytes for TFS and TTY server protocols.
     val PM_CMD_SPAWN_SUSP    = 7
     val PM_CMD_TRANSPLANT_FD = 8
     val PM_CMD_RESUME        = 9
+    val PM_CMD_EXECVE        = 10
 
 Big-endian message helpers — pack/unpack 32-bit integers
 in IPC message buffers.
@@ -724,6 +725,42 @@ child's fd table before it starts running.
         if reply[0] != 0
             return -1
         msg_read_i32(reply, 1)
+
+Replace the calling process's image with one loaded from `path`.
+Returns -1 on failure (file not found, malformed ELF, ...). On
+success this function never returns: control resumes inside the new
+program at its ELF entry, with `argv` available on the SysV init
+stack. Same wire format as `pm_spawn_susp`; the difference is purely
+in PM's handling — see `pm_handle_execve` for the success-path
+mechanics that bypass the IPC reply path.
+
+    pm_execve(path: string, argv: *string, argc: int) -> int
+        val port = pm_port()
+        if port < 0
+            return -1
+        val plen = len(path)
+        var msg: [512]byte
+        val blob_off = 5 + plen
+        val cap = 512 - blob_off
+        val blob_len = build_argv_blob(argv, argc, &msg[blob_off], cap)
+        if blob_len < 0
+            return -1
+        msg[0] = byte(PM_CMD_EXECVE)
+        msg[1] = byte(plen)
+        msg[2] = byte(blob_len & 0xFF)
+        msg[3] = byte((blob_len >> 8) & 0xFF)
+        msg[4] = 0
+        val pp = *byte(path)
+        var i = 0
+        while i < plen
+            msg[5 + i] = pp[i]
+            i += 1
+        var reply: [1]byte
+        ipc_send(port, msg, blob_off + blob_len, reply, 1)
+        // Only reachable on failure: success doesn't return here, the
+        // kernel's `svc_execve_finalize` reroutes the resume PC into
+        // the new program before this thread runs again.
+        -1
 
 Copy one of the calling process's posix_fd_table slots into
 a destination process's slot. dst_fd must be unused on the

@@ -57,6 +57,59 @@ sync_icache_line:
     isb
     ret
 
+// arch_invalidate_icache_all()
+//   Invalidate the entire instruction cache to PoU and flush the
+//   instruction prefetch pipeline. Used after execve copies a new
+//   ELF image into a process's address space — aarch64's PIPT
+//   I-cache caches by PA, and the freshly-allocated frames may be
+//   the same physical pages a different program's code lived in
+//   moments ago, so without this the next fetch could see stale
+//   bytes. Pairs with dsb ish before/after for store ordering.
+.global arch_invalidate_icache_all
+arch_invalidate_icache_all:
+    dsb  ish
+    ic   iallu
+    dsb  ish
+    isb
+    ret
+
+// arch_sync_icache_range(start: i64, len: int)
+//   Loop `dc cvau` over every 64-byte line in [start, start+len), then
+//   invalidate the whole I-cache and ISB. The loop's lower bound is
+//   start rounded down to the line; upper bound is the highest line
+//   that overlaps the range. A72's PoU line is 64 bytes — hardcoded
+//   here because we ship A72 only and changing it would also require
+//   reworking the kstack slab assertions.
+//
+//   Used by `pm_handle_execve` after copying a new ELF's PT_LOADs
+//   into a target process: the underlying physical frames may have
+//   been pulled from the page pool right after holding a different
+//   program's instruction stream, and aarch64's PIPT I-cache caches
+//   by PA, so the next fetch would see stale bytes without this
+//   flush.
+//
+//   x0 = start, x1 = len.
+.global arch_sync_icache_range
+arch_sync_icache_range:
+    cbz  x1, 2f
+    mov  x2, #64                 // line size (PoU)
+    sub  x3, x2, #1
+    bic  x4, x0, x3              // x4 = start aligned down
+    add  x5, x0, x1              // x5 = end (exclusive)
+    sub  x5, x5, #1              // x5 = end inclusive
+    bic  x5, x5, x3              // x5 = aligned-down highest line
+1:
+    dc   cvau, x4
+    add  x4, x4, x2
+    cmp  x4, x5
+    b.ls 1b
+    dsb  ish
+    ic   iallu
+    dsb  ish
+    isb
+2:
+    ret
+
 // drop_to_el0(entry: i64, sp: i64)
 //   Transition from EL1 to EL0 and start executing at `entry` with
 //   SP_EL0 = `sp`. Does not return. The caller is responsible for

@@ -19,6 +19,18 @@ our 272-byte exception frame stores x0 at offset 0 (`[sp, #0x000]`).
     val SYSCALL_RETURN_OFFSET = 0
     val STACK_FRAME_SIZE = 272        // 0x110 — matches vectors.s save/restore
 
+Frame offsets used by `execve` (and any future exec-shape primitive) to
+overwrite the calling thread's saved program-counter / user-stack slots.
+ELR_EL1 lives at 0x108 and SP_EL0 at 0xF8 inside the 272-byte EL0 frame
+laid down by vectors.s and `build_user_stack_frame` below. Declared as
+`const` so the compiler folds the literal at every use site rather than
+emitting an indirect `ldr` through a global slot — module-level `val`
+ints in sysl reach the .data section and the slot can briefly read 0
+before `kernel_init` writes it; `const` is the deterministic fix.
+
+    const ARCH_FRAME_PC_OFFSET  = 0x108
+    const ARCH_FRAME_USP_OFFSET = 0xF8
+
 Program + server address layout. User programs execute in the
 per-process L3 carve-out at VA 0x60000000..0x6008FFFF (576KB):
   code  0x60000000..0x6007FFFF  (128 pages, 512KB)
@@ -50,6 +62,22 @@ data stores so subsequent instruction fetch sees the new code.
 Short form — fine for a single cache line (64B on A72).
 
     extern sync_icache_line(addr: i64)
+
+Invalidate the entire instruction cache to PoU and flush the prefetch
+pipeline. Used by `sys_execve_finalize_handler` so the calling thread
+fetches the new program's instructions on its next ring-3 transition
+rather than stale bytes the I-cache may still hold from the freed
+predecessor. (PIPT I-cache caches by PA, and the freed frames are
+quite likely to be exactly the ones being recycled.)
+
+    extern arch_invalidate_icache_all()
+
+Loop `dc cvau` over every 64-byte line in `[start, start+len)`, then
+invalidate the whole I-cache and ISB. Reserved for future code-paths
+that need to flush a known sub-range without the cost of touching the
+entire I-cache.
+
+    extern arch_sync_icache_range(start: i64, len: int)
 
 Spinlock acquire/release (LDXR/STXR exclusive monitor). `acquire`
 blocks until it wins the exclusive store and masks async exceptions

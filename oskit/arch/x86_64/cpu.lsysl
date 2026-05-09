@@ -16,6 +16,26 @@ x86_64 layout: R15(0)..RBX(104)..RAX(112)..RIP(120)..
     val SYSCALL_RETURN_OFFSET = 112
     val STACK_FRAME_SIZE = 160       // 20 fields × 8 bytes (15 GP regs + 5 iretq)
 
+Frame offsets used by `execve` (and any future exec-shape primitive) to
+overwrite the calling thread's saved instruction-pointer / user-stack
+slots. RIP and RSP land in the iretq frame at offsets 120 and 144 from
+SSP — see `build_user_stack_frame` above for the full layout. Declared
+as `const` so the compiler folds the literal at every use site (matches
+the aarch64 sibling).
+
+    const ARCH_FRAME_PC_OFFSET  = 120
+    const ARCH_FRAME_USP_OFFSET = 144
+
+No-ops on x86: the architecture guarantees cache coherency between
+data and instruction fetches automatically (a serializing
+instruction such as `iret` or `mov to cr3` flushes the prefetch
+queue when needed). Provided so `sys_execve_finalize_handler` and
+similar can call them unconditionally without arch-specific guards.
+Implemented as bare `ret` C stubs in `stubs.c`.
+
+    extern arch_invalidate_icache_all()
+    extern arch_sync_icache_range(start: i64, len: int)
+
 Disable interrupts (x86 cli instruction).
 
     extern arch_cli()

@@ -9,6 +9,14 @@ typedef unsigned char uint8_t;
 /* uart_putc is provided by Sysl runtime — forward declare */
 extern void oskit_arch_x86_64__uart_putc(int c);
 
+/* Cache management no-ops: x86_64 keeps instruction-fetch coherent
+ * with the data side automatically (iret + mov-to-cr3 serialize),
+ * so `pm_handle_execve` calls these unconditionally and lets the
+ * arch layer decide whether real work is needed. The aarch64 stubs
+ * live in cpu_asm.s and emit dc/ic/dsb/isb sequences. */
+void arch_invalidate_icache_all(void) {}
+void arch_sync_icache_range(long start, int len) { (void)start; (void)len; }
+
 /* sbrk — extend heap for std.alloc's Sysl allocator.
  * Uses a static BSS array to avoid overlapping with the page
  * allocator (which starts at _heap_start after BSS). */

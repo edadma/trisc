@@ -484,3 +484,24 @@ Keep in sync with `oskit/kernel/vma.lsysl`.
     svc_vma_create(pid: int, vstart: u64, vend: u64, prot: int, flags: int) -> int
         int(syscall6(SYS_VMA_CREATE_PID, i64(pid), i64(vstart), i64(vend),
                      i64(prot), i64(flags), 0))
+
+`SYS_PROC_REPLACE_IMAGE_PREP` and `SYS_EXECVE_FINALIZE` are PM-only
+primitives shipped in Phase 1 chunk 8 alongside `execve`. Together
+they let PM (a) drop a target process's user pages + VMA tree without
+touching its page table or kstack and (b) overwrite the saved PC /
+user stack pointer of a thread *and* wake it from `SEND_BLOCKED` so
+it resumes at a new entry on the next ring-3 transition — without
+touching the original IPC reply buffer (which after image replacement
+collides with the new program's stack frame).
+
+Userspace test programs use them indirectly via PM_CMD_EXECVE; only
+PM itself calls these directly.
+
+    const SYS_PROC_REPLACE_IMAGE_PREP = 93
+    const SYS_EXECVE_FINALIZE         = 94
+
+    svc_proc_replace_image_prep(pid: int) -> int
+        int(syscall(SYS_PROC_REPLACE_IMAGE_PREP, pid))
+
+    svc_execve_finalize(tid: int, entry: i64, usp: i64) -> int
+        int(syscall6(SYS_EXECVE_FINALIZE, i64(tid), entry, usp, 0, 0, 0))

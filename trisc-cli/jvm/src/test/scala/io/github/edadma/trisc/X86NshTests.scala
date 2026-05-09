@@ -1184,6 +1184,21 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "elf: bad"
   }
 
+  "execve: replace process image" in {
+    // Phase 1 chunk 8. test_execve calls pm_execve("/bin/test_exectgt",
+    // ["test_exectgt", "ok"]) — PM drops the caller's old VMAs, installs
+    // per-PT_LOAD VMAs from the new ELF, copies the segments via
+    // svc_vm_copy_to, builds a SysV argv/auxv init stack, and rewrites
+    // the saved RIP/RSP via svc_execve_finalize so the calling thread
+    // resumes inside test_exectgt. test_exectgt prints `execve: ok\n`
+    // (the literal "ok" passed as argv[1]) — proves the new image is
+    // running, the saved frame was rewritten, and argv survived the
+    // address-space replacement.
+    val output = qemu.command("test_execve")
+    output should include("execve: ok")
+    output should not include "execve: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

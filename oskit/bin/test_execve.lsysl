@@ -1,0 +1,83 @@
+test_execve — Phase 1 chunk 8 execve() end-to-end
+==================================================
+
+Drives `execve()` through the new `PM_CMD_EXECVE` path: this program
+calls `pm_execve("/bin/test_exectgt", ["test_exectgt", "ok"])`, which
+on success replaces the current process's image with `test_exectgt`
+and never returns to this code. `test_exectgt` prints `execve: ok`
+and exits, so a successful run produces exactly one matching line.
+
+What this test would fail on if regressed:
+
+  * `svc_proc_replace_image_prep` not draining the old user pages →
+    the new ELF's segments would land on top of stale frames whose
+    PTEs were never cleared; `vm_install_user_page` would refuse to
+    overwrite existing leaves and `load_elf64_to_ptbr` would silently
+    fail to write the new code.
+  * Per-PT_LOAD VMAs not installed before the SysV stack build →
+    a stack-grow fault on the first `push` of a function call would
+    miss `vma_handle_fault` (no covering VMA) and trap.
+  * `svc_execve_finalize` not writing both `ARCH_FRAME_PC_OFFSET` and
+    `ARCH_FRAME_USP_OFFSET` → either the thread iret/eret's into the
+    old code (no PC change) or jumps to entry but with the *old* SP
+    pointing at a freed page (sp change missed).
+  * `svc_execve_finalize` calling the old `ipc_reply` path → the
+    1-byte status would `vm_copy_cross` into the new SysV init frame
+    and clobber argc or argv[0]'s string data.
+  * PM's pre-prep failure handlers running `svc_proc_replace_image_prep`
+    before validation finishes → a missing or malformed binary would
+    leave the caller's image gone with no way to report the error.
+
+Pass criterion: `test_exectgt` prints `execve: ok\n`. Failure paths
+fall through into this program's tail, where we print `execve: bad`
+plus the step number we made it to.
+
+    module oskit.bin.test_execve
+
+    import oskit.ulib.{puts, exit, exit_with, pm_execve}
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("execve: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+Build the argv array as a stack-local string slice and hand it to
+`pm_execve`. We pass `argv[0] = "test_exectgt"` (the program name —
+SysV ABI convention) and `argv[1] = "ok"` so `test_exectgt` can
+verify the argv pipeline survived the address-space replacement.
+
+    main(argv: []string)
+        var args: [2]string
+        args[0] = "test_exectgt"
+        args[1] = "ok"
+        val rc = pm_execve("/bin/test_exectgt", &args[0], 2)
+
+If we reach this point execve returned, which means it failed before
+the point of no return. `pm_execve` returns -1 on every error path
+(file not found, malformed ELF, PM heap exhausted, ...).
+
+        if rc < 0
+            fail(1)
+            return
+
+`pm_execve` documents that the success path never returns. If the
+linker/runtime ever lets control fall through here without the
+`exit()` syscall above firing, treat that as a regression: the new
+program may have started but resumed inside this code somehow.
+
+        fail(2)

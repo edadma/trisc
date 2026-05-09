@@ -153,6 +153,8 @@ user-mode). Numbers are stable. Definitions live in
 | 90  | SYS_COW_SHARE_SELF    | sys_cow_share_self_handler (debug)   |
 | 91  | SYS_FORK              | sys_fork_handler                     |
 | 92  | SYS_ELF_SELFTEST      | sys_elf_selftest_handler (debug)     |
+| 93  | SYS_PROC_REPLACE_IMAGE_PREP | sys_proc_replace_image_prep_handler |
+| 94  | SYS_EXECVE_FINALIZE   | sys_execve_finalize_handler          |
 
 PHASE 1 NOTE. The VM/process syscalls (44–60, 63, 66, 79) all
 assume the current "fixed-region eager mapping" model. They
@@ -714,3 +716,40 @@ fixed-region state.
   with chunk 8 (`execve`) where pid-by-definition is the calling
   process and the VMA install is part of dropping/replacing
   the address space.
+
+- **2026-05-08 / Phase 1 chunk 8** — `execve()` (`PM_CMD_EXECVE`
+  = 10, `SYS_PROC_REPLACE_IMAGE_PREP` = 93,
+  `SYS_EXECVE_FINALIZE` = 94). PM gains a new command that
+  replaces the calling thread's image with one loaded from a new
+  ELF binary: same pid, same fd table, same parent. Wire format
+  matches `PM_CMD_SPAWN` so `pm_build_sysv_stack` is reused
+  unchanged for the new argv/auxv init stack. The handler reads
+  the binary into PM's heap, validates with `elf64_validate`,
+  drops the caller's old VMAs + leaf pages via the new
+  `svc_proc_replace_image_prep` syscall, installs one VMA per
+  PT_LOAD with prot bits from `elf64_pf_to_vma_prot` (plus a
+  64 KiB stack VMA), copies content via `svc_vm_copy_to`, builds
+  the SysV stack, copies it to the new USP, and rewires the
+  caller's saved PC + USP via `svc_execve_finalize`. The latter
+  is a deliberate replacement for `ipc_reply` on the success
+  path: a normal reply would `vm_copy_cross` the 1-byte status
+  byte into the old reply-buf VA — typically inside the new SysV
+  init stack — silently corrupting argc or argv[0]. By skipping
+  the reply-buf copy and instead waking the caller from
+  `STATE_SEND_BLOCKED` directly, we avoid that hazard. The
+  caller's next `iretq`/`ERET` lands at the new entry point with
+  the new SP. Failure paths (file not found, malformed ELF,
+  PM heap exhausted) reply normally — they all run before
+  `replace_image_prep`'s point of no return. Userspace surface
+  is `oskit.ulib.pm_execve(path, argv, argc)`; the test program
+  pair is `oskit/bin/test_execve.lsysl` (caller) +
+  `oskit/bin/test_exectgt.lsysl` (target image, prints
+  `execve: ok\n`). Both arches.
+
+  Out of scope this chunk: `PT_INTERP` recursion (chunk 9
+  dynamic linker), `AT_PHDR/AT_PHENT/AT_PHNUM/AT_BASE/AT_ENTRY`
+  auxv entries beyond `AT_PAGESZ`, file-backed VMAs (read-on-
+  fault for the executable image), POSIX shim integration of
+  `SYS_EXECVE = 59` so musl-linked binaries pick up `execve`
+  via libc rather than via `pm_execve` — that pairing arrives
+  with chunk 9 when the dynamic linker depends on it.

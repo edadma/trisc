@@ -111,10 +111,13 @@ created but before it is resumed.
         else if idx == 3
             // pm: needs process management syscalls (44-60, 62),
             // grant_posix_range(79) to enable POSIX shim range for
-            // newly-spawned ELF (musl) processes, and fd_transplant(85)
-            // for PM_CMD_TRANSPLANT_FD's shim-side helper.
+            // newly-spawned ELF (musl) processes, fd_transplant(85)
+            // for PM_CMD_TRANSPLANT_FD's shim-side helper, plus
+            // proc_replace_image_prep(93) and execve_finalize(94)
+            // for PM_CMD_EXECVE (chunk 8). Bits 29 and 30 in `hi`
+            // map to syscalls 93 and 94 (since hi covers 64..95).
             lo = lo | (i64(0x5FFFF) << 44)
-            hi = hi | (i64(1) << 15) | (i64(1) << 21)
+            hi = hi | (i64(1) << 15) | (i64(1) << 21) | (i64(1) << 29) | (i64(1) << 30)
         else if idx == 4
             // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
             hi = hi | i64(0xE00)

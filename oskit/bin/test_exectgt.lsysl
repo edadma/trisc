@@ -1,0 +1,47 @@
+test_exectgt — execve target program
+====================================
+
+The post-execve image that `test_execve` invokes via `pm_execve`. When
+this binary's entry point runs, it means PM's `pm_handle_execve`
+successfully (a) dropped the caller's old VMAs + pages, (b) installed
+per-PT_LOAD VMAs from this ELF, (c) copied this binary's segments
+into the calling process's address space via `svc_vm_copy_to`, (d)
+built the System V argv/auxv init stack, and (e) rewrote the saved
+exception frame so the calling thread's next ring-3 transition lands
+right here.
+
+To prove every step worked, we read `argv[1]` (which `test_execve`
+sets to `"ok"`) and print it out. A bare `execve: ok\n` line means
+the entire pipeline succeeded; anything else is a regression.
+
+    module oskit.bin.test_exectgt
+
+    import oskit.ulib.{puts, exit, exit_with}
+
+
+    main(argv: []string)
+        if len(argv) < 2
+            puts("execve: bad argc=")
+            // Print argc inline rather than pulling in print_idec.
+            var n = len(argv)
+            if n < 10
+                var b: [1]byte
+                b[0] = byte('0' + n)
+                puts(string(&b[0], 1))
+            else
+                puts(">=10")
+            puts("\n")
+            exit_with(1)
+            return
+
+        if argv[0] != "test_exectgt"
+            puts("execve: bad argv0=")
+            puts(argv[0])
+            puts("\n")
+            exit_with(2)
+            return
+
+        puts("execve: ")
+        puts(argv[1])
+        puts("\n")
+        exit()
