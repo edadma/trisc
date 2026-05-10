@@ -1308,11 +1308,73 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     ex.getMessage should include("`?` operator outside top-level")
   }
 
-  "module-level `var` is rejected with a clear message" in {
-    val ex = intercept[RuntimeException](translate(
+  "module-level `var` emits a WhyML ref" in {
+    // γ.2: module-level mutable vars become `val name : ref t = ref init`. Reads
+    // through `!name`, writes through `name := value`. Drivers and kernel state
+    // live here; this gates a large slice of OS verification.
+    val mlw = translate(
       """var counter: int = 0
-        |""".stripMargin))
-    ex.getMessage should include("module-level `var`")
+        |""".stripMargin)
+    mlw should include("val counter : ref int = ref 0")
+  }
+
+  "module-level `var` reads emit deref `!name`" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |def get_counter() -> int
+        |    counter
+        |""".stripMargin)
+    mlw should include("val counter : ref int = ref 0")
+    mlw should include("= !counter")
+  }
+
+  // ====================================================================================
+  // Phase γ.1 — generic structs as parametric WhyML records
+  // ====================================================================================
+
+  "generic struct with one type param emits a parametric record" in {
+    val mlw = translate(
+      """struct Box[T]
+        |    value: T
+        |""".stripMargin)
+    mlw should include("type box 't = { value: 't }")
+  }
+
+  "generic struct with two type params" in {
+    val mlw = translate(
+      """struct Pair[T, U]
+        |    fst: T
+        |    snd: U
+        |""".stripMargin)
+    mlw should include("type pair 't 'u = { fst: 't; snd: 'u }")
+  }
+
+  "generic struct used as field type uses parametric application" in {
+    val mlw = translate(
+      """struct Box[T]
+        |    value: T
+        |
+        |def unbox(b: Box[int]) -> int
+        |    b.value
+        |""".stripMargin)
+    mlw should include("(b: box int)")
+  }
+
+  // ====================================================================================
+  // Phase γ.3 — function without explicit return type lets WhyML infer
+  // ====================================================================================
+
+  "function without return type drops the `: ret` clause" in {
+    // sysl `def` style often omits the return type. Why3 can infer from the body
+    // expression; emit without `: ret` and let WhyML unify.
+    val mlw = translate(
+      """def twice(x: int)
+        |    x * 2
+        |""".stripMargin)
+    // The signature line is `let function twice (x: int)` (no `: ret`).
+    mlw should include("let function twice (x: int)")
+    mlw should not include "twice (x: int) :"
   }
 
   "unsupported expression form yields a clear error naming the gap" in {
