@@ -2919,9 +2919,22 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         if n >= 0 && n <= 255 then
           emit(s"  ldi r1, $n")
         else if n >= Int.MinValue && n <= 0xFFFFFFFFL then
-          // movi handles 0..0xFFFFFFFF; negative i32 values are sign-extended to unsigned
-          val unsigned = if n < 0 then n & 0xFFFFFFFFL else n
-          emit(s"  movi r1, $unsigned")
+          // movi takes a 32-bit unsigned immediate and writes it zero-extended
+          // to the 64-bit register. For NEGATIVE i32 literals we mask to the low
+          // 32 bits to fit movi, then `sew` (sign-extend word) to recover the
+          // full 64-bit signed value. Without the sew, `var x: int = -3` lands
+          // in r1 as `0x00000000FFFFFFFD` instead of `0xFFFFFFFFFFFFFFFD`, and
+          // any 64-bit-wide compare (e.g. `result == x + x` inside an `ensure`,
+          // where `result` was loaded via `ldw` which DOES sign-extend) reads
+          // the two operands as unequal and traps. Non-negative values in
+          // 0..0xFFFFFFFF skip the sew — that range covers both unsigned u32
+          // values up to 0xFFFFFFFF and positive i32 values (high bit clear),
+          // both of which want the zero-extended representation movi gives.
+          if n < 0 then
+            emit(s"  movi r1, ${n & 0xFFFFFFFFL}")
+            emit("  sew r1, r1")
+          else
+            emit(s"  movi r1, $n")
         else
           emit(s"  ldc r1, $n")
 

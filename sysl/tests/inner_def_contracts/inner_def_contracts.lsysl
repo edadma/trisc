@@ -1,0 +1,150 @@
+Inner-def contracts — cross-backend tests
+=========================================
+
+Closes audit Tier 4 followup #2. The original Tier 4 #26 fix made the
+analyzer reject `require`/`ensure` clauses on inner defs with a clear
+"not supported on inner defs yet" diagnostic — silently dropping them
+(the original behaviour) was a footgun.
+
+This commit supports them by generalizing the inner-def cluster-lift:
+any inner def carrying contracts must be lifted to a top-level synth
+fn, where `analyzeBlockWithContracts` emits `require` as a runtime
+precondition check at function entry and `ensure` as a postcondition
+check before each `return`. Every backend already lowers
+`TContractCheck` (it's the same node top-level fns produce), so no
+per-backend changes were needed.
+
+These tests pin the runtime behaviour across all four backends; failures
+here would mean a backend regression in the existing TContractCheck
+lowering, surfaced via the new lift path.
+
+    module sysl.tests.inner_def_contracts
+
+
+Require — precondition holds
+-----------------------------
+
+    #test
+    test_require_holds() -> unit
+        def helper(n: int) -> int
+            require n >= 0
+            n + 1
+        assert(helper(5) == 6, "5 + 1 = 6, precondition n>=0 satisfied")
+        assert(helper(0) == 1, "0 + 1 = 1, boundary precondition satisfied")
+
+
+Ensure — postcondition holds
+----------------------------
+
+    #test
+    test_ensure_holds() -> unit
+        def doubled(x: int) -> int
+            ensure result == x * 2
+            x + x
+        assert(doubled(21) == 42, "21+21 = 42, postcondition holds")
+        assert(doubled(0) == 0, "0+0 = 0, postcondition holds")
+        assert(doubled(-3) == -6, "-3+-3 = -6, postcondition holds")
+
+
+Both fire
+---------
+
+    #test
+    test_both_fire() -> unit
+        def squared(n: int) -> int
+            require n >= 0
+            ensure result >= 0
+            n * n
+        assert(squared(7) == 49, "7^2 = 49")
+        assert(squared(0) == 0, "0^2 = 0")
+        assert(squared(11) == 121, "11^2 = 121")
+
+
+Self-recursion + contracts
+--------------------------
+
+The lift rewrites self-refs to the mangled name; contracts fire on
+each recursive call (require) and each return (ensure).
+
+    #test
+    test_self_recursion_with_contracts() -> unit
+        def fact(n: int) -> int
+            require n >= 0
+            ensure result >= 1
+            if n == 0 then return 1
+            n * fact(n - 1)
+        assert(fact(0) == 1, "0! = 1, base case + ensure")
+        assert(fact(5) == 120, "5! = 120, recursive case + both contracts")
+        assert(fact(7) == 5040, "7! = 5040")
+
+
+Mutual recursion + contracts
+----------------------------
+
+A cluster of cross-referencing inner defs where each member also has
+contracts. The lift handles cluster + contracts together: each member
+becomes a top-level synth fn with its contracts wired in.
+
+    #test
+    test_cluster_with_contracts() -> unit
+        def is_even(n: int) -> bool
+            require n >= 0
+            if n == 0 then true
+            else is_odd(n - 1)
+        def is_odd(n: int) -> bool
+            require n >= 0
+            if n == 0 then false
+            else is_even(n - 1)
+        assert(is_even(8), "8 is even")
+        assert(is_odd(7), "7 is odd")
+        assert(!is_even(5), "5 is not even")
+
+
+Contract uses param via expression
+----------------------------------
+
+A precondition that does arithmetic on the param (not just a bare
+comparison) — pins that the contract's param refs are resolved
+correctly through the lift.
+
+    #test
+    test_contract_with_arithmetic() -> unit
+        def in_range(x: int) -> int
+            require x * 2 < 100
+            x + 1
+        assert(in_range(0) == 1, "0*2 = 0 < 100, precondition holds")
+        assert(in_range(49) == 50, "49*2 = 98 < 100, precondition holds (boundary)")
+
+
+Multiple contract clauses of each kind
+--------------------------------------
+
+Two requires, two ensures — pins that all clauses fire (not just the
+first).
+
+    #test
+    test_multiple_clauses() -> unit
+        def safe_add(a: int, b: int) -> int
+            require a >= 0
+            require b >= 0
+            ensure result >= a
+            ensure result >= b
+            a + b
+        assert(safe_add(3, 4) == 7, "3+4 = 7")
+        assert(safe_add(0, 0) == 0, "0+0 = 0")
+        assert(safe_add(100, 0) == 100, "100+0 = 100")
+
+
+No contracts → no lift, existing path
+--------------------------------------
+
+A regression pin: an inner def WITHOUT contracts and WITH outer-scope
+captures still uses the existing TClosure path. The contract-lift
+codepath only fires when the def actually has contracts.
+
+    #test
+    test_capturing_inner_def_no_contracts() -> unit
+        var bonus = 10
+        def add_bonus(n: int) -> int
+            n + bonus
+        assert(add_bonus(5) == 15, "5+10 = 15, captured bonus visible")

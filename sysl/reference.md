@@ -2273,11 +2273,28 @@ same as an anonymous lambda; the self-cell is only allocated when needed.
 need the binding's type to resolve, and inference would require a two-pass
 analysis. Top-level functions still allow inferred return types.
 
-**Restrictions:** no type parameters, no return-type inference. Contracts
-(`require`/`ensure`) on an inner def are rejected with a clear diagnostic —
-the closure-lowering path has no contract-emission stage yet, and silently
-dropping the clauses was a known footgun. Promote to a top-level `fn`
-(where contracts work fully) or hand-inline the check via `assert(cond, "msg")`.
+**Restrictions:** no type parameters, no return-type inference.
+
+**Contracts on inner defs are supported** when the def captures no
+outer-scope variables. `require`/`ensure` clauses on inner defs are
+syntactically the same as on top-level fns, and are wired through the same
+`TContractCheck` lowering — the analyzer lifts contract-bearing inner defs
+to top-level synthesized fns where the contract-aware analysis path runs:
+
+```sysl
+outer() -> int
+    def squared(n: int) -> int
+        require n >= 0
+        ensure result >= 0
+        n * n
+    squared(7)
+```
+
+If a contract-bearing inner def captures an outer-scope variable, the lift
+cannot preserve those captures and the analyzer rejects with a clear
+"promote to top-level fn" diagnostic. Promote to a top-level `fn` (where
+contracts and captures both work) or refactor to pass the captured value
+as an extra parameter.
 
 **Mutual recursion is supported** when the cluster of cross-referencing
 inner defs captures no outer-scope variables. The analyzer pre-binds every
