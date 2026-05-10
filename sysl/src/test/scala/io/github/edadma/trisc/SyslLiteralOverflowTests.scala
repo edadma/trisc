@@ -356,4 +356,92 @@ class SyslLiteralOverflowTests extends SyslTestHelpers {
     thrown.getMessage should include("-1")
     thrown.getMessage should include("u32")
   }
+
+  // ===== Bitwise NOT on literal const-fold (Phase α.1) =====
+  //
+  // `~0u8` should evaluate to 0xFF at compile time, not be silently dropped
+  // through the TIntLit-only arm. Mirror the unary-minus fix from sysl@d7cf75559:
+  // recognize TUnary("~", TIntLit, _), compute ~value masked to the inner type's
+  // width, then range-check against the target type. The width comes from the
+  // INNER literal's type so `~0u8` flips 8 bits, while `~0i32` flips 32 bits.
+
+  "u8 = ~0u8 folds to 255" in {
+    eval(
+      """main() -> int
+        |    var x: u8 = ~0u8
+        |    int(x)
+        |""".stripMargin) shouldBe 255
+  }
+
+  "u16 = ~0u16 folds to 65535" in {
+    eval(
+      """main() -> int
+        |    var x: u16 = ~0u16
+        |    int(x)
+        |""".stripMargin) shouldBe 65535
+  }
+
+  "u8 = ~0xF0u8 folds to 0x0F" in {
+    eval(
+      """main() -> int
+        |    var x: u8 = ~0xF0u8
+        |    int(x)
+        |""".stripMargin) shouldBe 0x0F
+  }
+
+  "i8 = ~0i8 folds to -1" in {
+    eval(
+      """main() -> int
+        |    var x: i8 = ~0i8
+        |    int(x)
+        |""".stripMargin) shouldBe -1
+  }
+
+  "i32 = ~0 folds to -1" in {
+    eval(
+      """main() -> int
+        |    var x: int = ~0
+        |    x
+        |""".stripMargin) shouldBe -1
+  }
+
+  "u8 = ~0 (i32 inner) is rejected (~0 in i32 = -1, doesn't fit u8)" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """main() -> int
+          |    var x: u8 = ~0
+          |    int(x)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("-1")
+    thrown.getMessage should include("u8")
+  }
+
+  "u8 = ~0u32 is rejected (~0u32 = 0xFFFFFFFF, doesn't fit u8)" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """main() -> int
+          |    var x: u8 = ~0u32
+          |    int(x)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("4294967295")
+    thrown.getMessage should include("u8")
+  }
+
+  "u8(~0) cast still works (bit-pattern truncation)" in {
+    eval(
+      """main() -> int
+        |    var x: u8 = u8(~0)
+        |    int(x)
+        |""".stripMargin) shouldBe 255
+  }
+
+  "const u8 BITS = ~0u8 folds at module level" in {
+    eval(
+      """const BITS: u8 = ~0u8
+        |main() -> int
+        |    int(BITS)
+        |""".stripMargin) shouldBe 255
+  }
 }
