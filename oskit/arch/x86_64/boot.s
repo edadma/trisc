@@ -603,6 +603,11 @@ timer_isr_entry:
     pushq %r14
     pushq %r15
 
+    # Wall-clock advance: PIT fires at 100 Hz, so each interrupt
+    # is 10 ms. Read by `monotonic_ms()` syscall fast path above
+    # and by inet's retransmit/TIME_WAIT/FIN_WAIT_2 deadlines.
+    addq $10, monotonic_ms_count(%rip)
+
     # Send EOI to PIC
     movb $0x20, %al
     outb %al, $PIC1_CMD
@@ -679,6 +684,17 @@ syscall_entry:
     movq %rax, 14*8(%rsp)     # write to saved RAX
     jmp restore_context
 .not_uptime:
+
+    # --- Fast path: monotonic_ms (syscall 95) ---
+    # Wall-clock millisecond counter, updated by timer_isr_entry
+    # (10 ms per PIT tick at 100 Hz). Used by inet for RTO/TIME_WAIT
+    # deadlines that the schedule()-driven `ticks` can't represent.
+    cmpq $95, %rbx
+    jne .not_monotonic_ms
+    movq monotonic_ms_count(%rip), %rax
+    movq %rax, 14*8(%rsp)     # write to saved RAX
+    jmp restore_context
+.not_monotonic_ms:
 
     # --- POSIX shim path: numbers >= 128 route to oskit.posix.posix_dispatch ---
     # SLIX-local syscall numbers from slix/musl/arch/x86_64-slix/bits/syscall.h.in.

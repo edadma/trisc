@@ -30,6 +30,7 @@ Syscall numbers — must match the kernel and IPC modules.
     val SYS_JOIN         = 4
     val SYS_THREAD_ID    = 5
     val SYS_UPTIME       = 6
+    val SYS_MONOTONIC_MS = 95
     val SYS_THREAD_COUNT = 7
     val SYS_THREAD_STATE = 8
     val SYS_THREAD_NAME  = 9
@@ -449,6 +450,13 @@ System queries and control.
 
     uptime() -> int
         syscall(SYS_UPTIME, 0)
+
+`monotonic_ms()` returns wall-clock milliseconds since boot at
+10 ms granularity. See `oskit/services/services.lsysl` for the
+contrast with `uptime()`.
+
+    monotonic_ms() -> i64
+        syscall(SYS_MONOTONIC_MS, 0)
 
     getuid() -> int
         syscall(SYS_GETUID, 0)

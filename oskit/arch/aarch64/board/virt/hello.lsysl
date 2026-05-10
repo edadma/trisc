@@ -37,7 +37,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         virtio_notify_tid,
         kernel_set_system_info,
         kernel_handle_user_fault,
-        current_thread, ticks}
+        current_thread, ticks, monotonic_ms_count}
     import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
         ipc_send, ipc_recv, ipc_reply}
@@ -253,6 +253,11 @@ scheduler pass and the kernel threads themselves produce output.
         val irq = gic_ack()
         if irq == IRQ_TIMER
             tick_count += 1
+            // Wall-clock advance: generic timer is reprogrammed for
+            // 100 Hz below, so each fire is 10 ms. Read by
+            // `monotonic_ms()` syscall fast path and by inet's
+            // retransmit/TIME_WAIT/FIN_WAIT_2 deadlines.
+            monotonic_ms_count = monotonic_ms_count + i64(10)
             if DEMO_MODE == 2
                 uart_puts("[tick ")
                 uart_puthex(u64(tick_count))
@@ -379,6 +384,10 @@ kernel isn't in play.
             return
         if num == 6
             fp[0] = i64(ticks)
+            skip_schedule = true
+            return
+        if num == 95
+            fp[0] = monotonic_ms_count
             skip_schedule = true
             return
 

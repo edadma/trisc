@@ -20,7 +20,7 @@ scheduler ticks at 100 Hz, so we report in ticks and ms.
 
     module oskit.bin.ping
 
-    import oskit.ulib.{puts, sleep, exit, exit_with, uptime}
+    import oskit.ulib.{puts, sleep, exit, exit_with, uptime, monotonic_ms}
     import oskit.net.{icmp_send, icmp_check}
     import std.net.{ipv4, ipv4_octet}
 
@@ -91,17 +91,15 @@ success (reply arrived), 0 on timeout, -1 on send failure. On
 success, prints the "64 bytes from ... time=N ms" line.
 
     ping_once(dst_ip: u32, id: int, seq: int) -> int
-        val start = int(uptime())
+        val start_ms = int(monotonic_ms())
         if icmp_send(dst_ip, id, seq) < 0
             return -1
-        val deadline = start + 100   // 100 ticks ≈ 1 s
+        val deadline_ms = start_ms + 1000   // 1 s
         var src_ip: u32 = u32(0)
-        var rtt_ticks: int = 0
-        while int(uptime()) < deadline
-            val r = icmp_check(id, seq, &src_ip, &rtt_ticks)
+        var rtt_ms: int = 0
+        while int(monotonic_ms()) < deadline_ms
+            val r = icmp_check(id, seq, &src_ip, &rtt_ms)
             if r == 1
-                // RTT in ticks → ms: 10 ms per tick at 100 Hz.
-                val rtt_ms = rtt_ticks * 10
                 puts("reply from ")
                 print_ipv4(src_ip)
                 puts(": icmp_seq=")

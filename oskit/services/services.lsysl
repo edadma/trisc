@@ -56,6 +56,7 @@ Syscall numbers:
     val SYS_EVENT_SET      = 27
     val SYS_EVENT_CLEAR    = 28
     val SYS_SLEEP_OR_NOTIFY = 83
+    val SYS_MONOTONIC_MS   = 95
 
     sleep(ticks: int)
         syscall(SYS_SLEEP, ticks)
@@ -80,6 +81,15 @@ Syscall numbers:
 
     uptime() -> int
         syscall(SYS_UPTIME, 0)
+
+`monotonic_ms()` returns wall-clock milliseconds since boot.
+Driven by the timer ISR at 100 Hz (10 ms granularity). Unlike
+`uptime()`, which counts `schedule()` calls (~40 ticks/ms in
+practice), this advances at a constant rate suitable for timer
+deadlines, RTT sampling, and POSIX timeouts.
+
+    monotonic_ms() -> i64
+        syscall(SYS_MONOTONIC_MS, 0)
 
     get_thread_count() -> int
         syscall(SYS_THREAD_COUNT, 0)

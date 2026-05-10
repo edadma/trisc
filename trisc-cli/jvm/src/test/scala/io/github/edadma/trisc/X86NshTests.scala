@@ -1239,11 +1239,9 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "phello: bad"
   }
 
-  // TODO: un-ignore when the inet timer constants are fixed
-  // (TCP_FW2_TICKS / TCP_TW_TICKS assume 10ms-per-tick, but ticks
-  // are per-schedule, ~40/ms; FIN_WAIT_2 dies in ~150 ms before
-  // ch can reach TIME_WAIT). See aarch64 mirror for the full
-  // explanation. Per CLAUDE.md rule 4.
+  // TODO: un-ignore once inet timer migration ships. Kernel-side
+  // monotonic_ms() syscall infrastructure is in place; inet
+  // surface migration is the remaining work. See aarch64 mirror.
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" ignore {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")

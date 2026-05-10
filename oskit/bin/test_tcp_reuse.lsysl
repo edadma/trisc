@@ -21,7 +21,7 @@ Loopback choreography (single guest):
 
   2. Close the listener (LISTEN → CLOSED, no TIME_WAIT) and the
      client (CLOSE_WAIT → LAST_ACK → CLOSED). The TIME_WAIT slot
-     from step 1 persists for `TCP_TW_TICKS = 200` (≈2 s).
+     from step 1 persists for `TCP_TW_MS = 2000` (2 s).
 
   3. Try `bind(127.0.0.1:9123)` + `listen()` on a fresh socket
      **without** `SO_REUSEADDR`. Expected: `listen()` returns

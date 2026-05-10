@@ -129,6 +129,19 @@ from bit 0.
     var thread_count = 0
     var ticks = 0
 
+`monotonic_ms` is a wall-clock millisecond counter incremented by
+the arch-specific timer ISR (10 ms per PIT tick on x86_64, 10 ms
+per generic-timer tick on aarch64 — both at 100 Hz). Unlike
+`ticks`, which advances per `schedule()` call (~40-50 times per
+ms in our test harness), this advances at exactly 100 Hz and
+gives stable wall-clock timing for inet retransmit deadlines,
+TIME_WAIT, FIN_WAIT_2, RTT sampling, and POSIX timeouts. The
+arch glue writes to it directly: `monotonic_ms_count += 10` in
+the timer IRQ. Granularity is 10 ms; that's coarser than gettimeofday
+but fine for everything inet currently does.
+
+    volatile var monotonic_ms_count: i64 = 0
+
 Process table. A process wraps one or more threads with an
 isolated address space (page table). PID 0 is the kernel;
 all kernel threads implicitly belong to it. External programs
@@ -1375,6 +1388,16 @@ Used by ps and other user programs via ulib.
         syscall_return(i64(ticks))
         kernel_continue_current()
 
+`monotonic_ms` slow-path handler. Both arches also fast-path this
+syscall in their dispatcher (boot.s `syscall_entry` on x86_64,
+`syscall_dispatch` on aarch64) — this slow path is only reached
+if a future caller bypasses the fast path. Returns the wall-clock
+millisecond counter the timer ISR maintains.
+
+    sys_monotonic_ms_handler(arg: int)
+        syscall_return(monotonic_ms_count)
+        kernel_continue_current()
+
     sys_thread_count_handler(arg: int)
         syscall_return(thread_count)
         kernel_continue_current()
@@ -1537,6 +1560,7 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall(63, sys_vm_create_server_pt_handler)
         register_syscall(5, sys_thread_id_handler)
         register_syscall(6, sys_uptime_handler)
+        register_syscall(95, sys_monotonic_ms_handler)
         register_syscall(7, sys_thread_count_handler)
         register_syscall(8, sys_thread_state_handler)
         register_syscall6(9, sys_thread_name_handler)
