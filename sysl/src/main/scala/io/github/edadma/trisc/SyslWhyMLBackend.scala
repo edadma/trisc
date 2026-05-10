@@ -368,7 +368,12 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     // against its contracts; it just isn't usable inside contract expressions of OTHER
     // functions. Pure functions (Phase 1–3) keep `function` so they can be called from
     // contracts as well.
-    val funKw = if isImpure(bodyStmts) then "" else "function "
+    // `let function` is pure (logical-mode); it cannot carry writes/reads clauses
+    // and cannot read or write a `ref`. If the user annotated #writes / #reads, they
+    // are declaring effects — force the impure emit (`let f ...`) so the clauses
+    // can be attached. Otherwise body-shape inference picks the form.
+    val hasFrameAttr = fn.attributes.exists(a => a.name == "writes" || a.name == "reads")
+    val funKw = if isImpure(bodyStmts) || hasFrameAttr then "" else "function "
     // sysl `def` functions often omit the return type and rely on body inference.
     // WhyML's type inference can fill in the gap — emit `let function f x = body`
     // without a `: ret` clause and let Why3 unify. Annotated return types still
@@ -379,6 +384,21 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case Some(t) => s" : ${typeOf(t)}"
     line(s"let $recKw$ghostKw" + funKw + s"$name $params$ret")
     indentLevel += 1
+    // Frame conditions (δ.1). Sysl's `#writes(g1, g2)` / `#reads(g1, g2)` annotate
+    // which module-level mutable vars an impure function may modify / read. They
+    // map directly to Why3's `writes { v1; v2 }` / `reads { v1; v2 }` clauses on
+    // `let`. Only emitted for impure functions (funKw is empty); for pure
+    // `let function` Why3 already enforces no side effects, so writes/reads are
+    // redundant and would actually be rejected.
+    if funKw.isEmpty then
+      for attr <- fn.attributes do attr.name match
+        case "writes" =>
+          val names = attr.args.collect { case AttrPositional(AttrLitIdent(n)) => sanitizeName(n) }
+          if names.nonEmpty then line(s"writes { ${names.mkString("; ")} }")
+        case "reads" =>
+          val names = attr.args.collect { case AttrPositional(AttrLitIdent(n)) => sanitizeName(n) }
+          if names.nonEmpty then line(s"reads { ${names.mkString("; ")} }")
+        case _ =>
     for c <- contracts do emitContract(c)
     line(s"= $bodyStr")
     indentLevel -= 1

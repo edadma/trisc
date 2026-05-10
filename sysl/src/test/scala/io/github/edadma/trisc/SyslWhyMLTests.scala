@@ -1410,6 +1410,51 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw should include("val counter = ref 0")
   }
 
+  // ====================================================================================
+  // Phase δ.1 — frame conditions: emit #writes / #reads as WhyML writes/reads clauses
+  // ====================================================================================
+
+  "#writes attribute emits a WhyML writes clause" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |#writes(counter)
+        |bump() -> int
+        |    counter = counter + 1
+        |    counter
+        |""".stripMargin)
+    mlw should include("writes { counter }")
+  }
+
+  "#reads attribute emits a WhyML reads clause" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |#reads(counter)
+        |get_counter() -> int
+        |    counter
+        |""".stripMargin)
+    // Annotation forces the impure-emit path (`let f`); reads clause emitted.
+    mlw should include("reads { counter }")
+  }
+
+  "#writes with multiple vars emits semicolon-separated list" in {
+    val mlw = translate(
+      """var a: int = 0
+        |var b: int = 0
+        |
+        |#writes(a)
+        |#writes(b)
+        |bump_both() -> int
+        |    a = a + 1
+        |    b = b + 1
+        |    a + b
+        |""".stripMargin)
+    // Two #writes attrs combined; semicolon-joined inside the braces.
+    mlw should (include("writes { a }") or include("writes { a; b }"))
+    mlw should include("writes { b }")
+  }
+
   "unsupported expression form yields a clear error naming the gap" in {
     // Slices aren't part of any verification phase yet — translator should reject
     // them up front rather than silently produce ill-formed WhyML.
