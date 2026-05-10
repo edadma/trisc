@@ -1,0 +1,95 @@
+`.len` field-access sugar — cross-backend tests
+================================================
+
+Closes the `s.len` papercut from `project_sysl_string_dot_len_handoff.md`.
+Before the fix, `s.len` on a string parameter produced `cannot access
+field 'len' on string` and the user had to rewrite to `len(s)`. The same
+papercut applied to slice, array, and ref-slice receivers — none accepted
+`.len` field-access syntax, only the `len(...)` call form.
+
+Fix: in the `FieldAccessAST` analyzer arm, when no struct field matches
+and the receiver type is `string` / slice / array / ref-slice, produce
+the same `TLen` node the `len(...)` call site produces. Symmetric on
+both spellings now.
+
+These tests pin the runtime behaviour across all four backends.
+
+    module sysl.tests.dot_len
+
+
+String receiver
+---------------
+
+    #test
+    test_string_dot_len_basic() -> unit
+        val s = "hello"
+        assert(s.len == 5, "string .len matches byte count")
+
+    #test
+    test_string_dot_len_empty() -> unit
+        val s = ""
+        assert(s.len == 0, "empty string .len is 0")
+
+    #test
+    test_string_dot_len_param() -> unit
+        def width(s: string) -> int = s.len
+        assert(width("abcdefg") == 7, ".len works on a parameter, not just a literal")
+
+
+Slice receiver
+--------------
+
+    #test
+    test_slice_dot_len() -> unit
+        var arr: [3]int
+        arr[0] = 10
+        arr[1] = 20
+        arr[2] = 30
+        val s = arr[:]
+        assert(s.len == 3, "slice .len = 3")
+
+    #test
+    test_slice_dot_len_subslice() -> unit
+        var arr: [5]int
+        val s = arr[1:4]
+        assert(s.len == 3, "subslice .len = high - low")
+
+
+Array receiver
+--------------
+
+    #test
+    test_array_dot_len() -> unit
+        var a: [4]int
+        assert(a.len == 4, "array .len = declared length")
+
+
+Reference-to-slice receiver
+---------------------------
+
+The `&[]T` form (ref-slice) is what `new [n]T` produces and what most
+sysl APIs pass around. `.len` should work the same as on `[]T`.
+
+    #test
+    test_ref_slice_dot_len() -> unit
+        val rs = new [10]int
+        assert(rs.len == 10, "ref-slice .len = declared length")
+
+
+Both spellings agree
+--------------------
+
+Pin that `s.len` and `len(s)` produce the same value for each receiver
+type — both should route through the same TLen lowering.
+
+    #test
+    test_field_access_matches_call_form() -> unit
+        val s = "hello"
+        assert(s.len == len(s), "string: .len == len(...)")
+
+        var arr: [4]int
+        val sl = arr[:]
+        assert(sl.len == len(sl), "slice: .len == len(...)")
+
+        val rs = new [7]int
+        assert(rs.len == len(rs), "ref-slice: .len == len(...)")
