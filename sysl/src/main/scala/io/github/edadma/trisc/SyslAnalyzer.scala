@@ -6134,8 +6134,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val tStmts = analyzeBlock(stmts)
     // Lower the optional `variant` clause: snapshot at entry, wrap every direct recursive
     // call with a runtime check. The snapshot decl is prepended to the final body.
+    //
+    // δ.2: lex-tuple variants (`variant { a, b }` parsed as TupleLitAST) are
+    // verification-only — no runtime decreaser is feasible without lex-comparison
+    // machinery. Why3 verifies lex-order termination statically. Skip the wrap.
     val (variantPrefix, variantBody) = variantClauses.headOption match
-      case Some(vc) if selfMangledName.nonEmpty =>
+      case Some(vc) if selfMangledName.nonEmpty && !vc.expr.isInstanceOf[TupleLitAST] =>
         lowerFunctionVariant(selfMangledName, paramNames, vc, tStmts)
       case _ => (Nil, tStmts)
     val rewritten = rewriteReturnsForEnsure(variantBody, returnType, ensureChecks)

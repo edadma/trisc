@@ -1514,6 +1514,34 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw should not include "requires { module_inv () }"
   }
 
+  // ====================================================================================
+  // Phase δ.2 — lexicographic termination measures: `variant { e1, e2 }`
+  // ====================================================================================
+
+  "single-expr `variant e` keeps the existing single-measure form" in {
+    val mlw = translate(
+      """def fact(n: int) -> int
+        |    variant n
+        |    if n <= 0 then 1
+        |    else n * fact(n - 1)
+        |""".stripMargin)
+    // Single-expression form: `variant  { n }` (existing keyword spacing).
+    mlw should include("variant  { n }")
+    mlw should not include "variant  { n;"
+  }
+
+  "multi-arg `variant { a, b }` emits a lex tuple" in {
+    val mlw = translate(
+      """def ack(m: int, n: int) -> int
+        |    variant { m, n }
+        |    if m <= 0 then n + 1
+        |    else if n <= 0 then ack(m - 1, 1)
+        |    else ack(m - 1, ack(m, n - 1))
+        |""".stripMargin)
+    // Lex tuple — semicolon-joined.
+    mlw should include("variant  { m; n }")
+  }
+
   "module_invariant must be bool — non-bool expression is rejected by analyzer" in {
     // Module invariants live at the spec layer; analyzer validates the expression
     // is bool-typed before the WhyML backend ever sees it.
