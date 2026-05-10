@@ -1377,6 +1377,39 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw should not include "twice (x: int) :"
   }
 
+  // ====================================================================================
+  // Phase γ.4 — `if without else` lowers to `else ()`
+  // ====================================================================================
+
+  "if without else lowers to `else ()`" in {
+    val mlw = translate(
+      """def f(b: bool)
+        |    if b then 0
+        |""".stripMargin)
+    // The else branch is `()` (unit literal). Emitted regardless of body's type;
+    // value-typed bodies hit a Why3 type-mismatch at verification time.
+    mlw should include("else ()")
+  }
+
+  // ====================================================================================
+  // Phase γ.5 — module-level val/var without type annotation lets WhyML infer
+  // ====================================================================================
+
+  "module-level const without type annotation lets WhyML infer" in {
+    val mlw = translate(
+      """const FORTY_TWO = 42
+        |""".stripMargin)
+    // sanitizeName lowercases all-uppercase names to avoid mAX_AGE-style ugliness.
+    mlw should include("let constant forty_two = 42")
+  }
+
+  "module-level var without type annotation emits `val name = ref init`" in {
+    val mlw = translate(
+      """var counter = 0
+        |""".stripMargin)
+    mlw should include("val counter = ref 0")
+  }
+
   "unsupported expression form yields a clear error naming the gap" in {
     // Slices aren't part of any verification phase yet — translator should reject
     // them up front rather than silently produce ill-formed WhyML.
