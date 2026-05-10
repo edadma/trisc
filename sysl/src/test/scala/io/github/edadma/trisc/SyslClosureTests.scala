@@ -183,46 +183,150 @@ class SyslClosureTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 42
   }
 
-  // ===== Inner def: contract clauses rejected (audit item #26) =====
+  // ===== Inner def: contract clauses now supported via lift (Tier 4 followup #2) =====
   //
   // `defDecl` parses the same `funBlockBody` that top-level fns do, so a `require`
-  // or `ensure` clause on an inner def is syntactically accepted. But inner defs
-  // lower to closures, and the closure analyzer has no contract-emission path —
-  // before this fix the clauses were silently dropped, which is a footgun. The
-  // analyzer now rejects them with a clear "not supported on inner defs yet"
-  // diagnostic. Promote to a top-level fn (where contracts work) or hand-inline
-  // the check via `assert(...)`.
+  // or `ensure` clause on an inner def has always been syntactically accepted.
+  // Originally they were silently dropped (the closure analyzer ignored them);
+  // Tier 4 #26 made the analyzer reject them with a clear "not supported on inner
+  // defs yet" diagnostic. This commit (Tier 4 followup #2) supports them by
+  // generalizing the inner-def cluster lift: any inner def with contracts must
+  // be lifted to a top-level synth fn (where `analyzeBlockWithContracts` emits
+  // them as `TContractCheck` nodes). Rejected only when the def captures
+  // outer-scope vars — the lift cannot preserve those.
 
-  "inner def with require clause is rejected" in {
+  "inner def with require clause runs (precondition holds)" in {
+    eval(
+      """outer() -> int
+        |    def helper(n: int) -> int
+        |        require n >= 0
+        |        n + 1
+        |    helper(5)
+        |
+        |main() -> int = outer()
+        |""".stripMargin) shouldBe 6
+  }
+
+  "inner def with require clause traps (precondition violated)" in {
     val thrown = intercept[RuntimeException] {
       eval(
         """outer() -> int
           |    def helper(n: int) -> int
           |        require n >= 0
           |        n + 1
-          |    helper(5)
+          |    helper(-3)
           |
           |main() -> int = outer()
           |""".stripMargin)
     }
-    thrown.getMessage should include("inner def 'helper'")
-    thrown.getMessage should include("require/ensure")
+    thrown.getMessage.toLowerCase should (include("precondition") or include("require"))
   }
 
-  "inner def with ensure clause is rejected" in {
+  "inner def with ensure clause runs (postcondition holds)" in {
+    eval(
+      """outer() -> int
+        |    def doubled(x: int) -> int
+        |        ensure result == x * 2
+        |        x + x
+        |    doubled(21)
+        |
+        |main() -> int = outer()
+        |""".stripMargin) shouldBe 42
+  }
+
+  "inner def with ensure clause traps (postcondition violated)" in {
     val thrown = intercept[RuntimeException] {
       eval(
         """outer() -> int
-          |    def doubled(x: int) -> int
+          |    def buggy(x: int) -> int
           |        ensure result == x * 2
-          |        x + x
-          |    doubled(21)
+          |        x + x + 1     // postcondition violated by +1
+          |    buggy(10)
           |
           |main() -> int = outer()
           |""".stripMargin)
     }
-    thrown.getMessage should include("inner def 'doubled'")
+    thrown.getMessage.toLowerCase should (include("postcondition") or include("ensure"))
+  }
+
+  "inner def with both require and ensure (both fire)" in {
+    eval(
+      """outer() -> int
+        |    def squared(n: int) -> int
+        |        require n >= 0
+        |        ensure result >= 0
+        |        n * n
+        |    squared(7)
+        |
+        |main() -> int = outer()
+        |""".stripMargin) shouldBe 49
+  }
+
+  "inner def with self-recursion + contracts works (lifted with self-call)" in {
+    // The lift rewrites self-refs to the mangled name, so recursion still works
+    // and the contracts fire on each call (require) and each return (ensure).
+    eval(
+      """outer() -> int
+        |    def fact(n: int) -> int
+        |        require n >= 0
+        |        ensure result >= 1
+        |        if n == 0 then return 1
+        |        n * fact(n - 1)
+        |    fact(5)
+        |
+        |main() -> int = outer()
+        |""".stripMargin) shouldBe 120
+  }
+
+  "inner def with contracts inside mutual-recursion cluster works" in {
+    // Both is_even and is_odd are lifted as cluster members; contracts on one
+    // member don't break the cluster mechanic.
+    eval(
+      """main() -> int
+        |    def is_even(n: int) -> bool
+        |        require n >= 0
+        |        if n == 0 then true
+        |        else is_odd(n - 1)
+        |    def is_odd(n: int) -> bool
+        |        require n >= 0
+        |        if n == 0 then false
+        |        else is_even(n - 1)
+        |    if is_even(8) then 1 else 0
+        |""".stripMargin) shouldBe 1
+  }
+
+  "inner def with require + outer-scope capture is rejected" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """outer(threshold: int) -> int
+          |    def check(n: int) -> int
+          |        require n >= threshold     // captures `threshold` from outer
+          |        n + 1
+          |    check(5)
+          |
+          |main() -> int = outer(0)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("inner def 'check'")
     thrown.getMessage should include("require/ensure")
+    thrown.getMessage should include("threshold")
+  }
+
+  "inner def body with outer-scope capture is also rejected when contract present" in {
+    // The body itself captures (not just the contract). Same diagnostic path.
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """outer(bonus: int) -> int
+          |    def add_bonus(n: int) -> int
+          |        require n >= 0
+          |        n + bonus     // captures `bonus`
+          |    add_bonus(7)
+          |
+          |main() -> int = outer(10)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("inner def 'add_bonus'")
+    thrown.getMessage should include("bonus")
   }
 
   // ===== Inner def: mutual recursion (audit Tier 4 followup #3) =====

@@ -5819,9 +5819,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // of source order. Without this, an inner-def body referencing a sibling
     // declared later would see "name is not in scope".
     //
-    // Defs that fail their own arm checks later (type params, contracts on
-    // an inner def, missing return type) are pre-bound here too; the failing
-    // arm throws when its body runs and the pre-bind has no observable effect.
+    // Defs that fail their own arm checks later (type params, missing return
+    // type) are pre-bound here too; the failing arm throws when its body runs
+    // and the pre-bind has no observable effect.
     val innerDecls: List[FunDeclAST] = stmts.collect {
       case InnerFunStmtAST(d) if d.typeParams.isEmpty && d.returnType.nonEmpty => d
     }
@@ -5833,33 +5833,58 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val ft: SyslType = FuncType(pTypes, ret, escaping = true)
         currentScope(d.name) = SymInfo(d.name, ft, mutable = false)
     val tStmts = stmts.map(analyzeStmt)
-    if siblingNames.size <= 1 then tStmts
-    else liftInnerDefClusters(tStmts, siblingNames)
+    // Two reasons to run the lift pass:
+    //   (a) sibling cross-references (mutual recursion) — needs forward-ref support.
+    //   (b) any inner def carries a require/ensure contract — closures have no
+    //       contract-emission stage, so the def must be lifted to a top-level fn
+    //       where `analyzeBlockWithContracts` can wire the checks in.
+    val anyContracts = innerDecls.exists(_.body match
+      case BlockBodyAST(_, cs) => cs.nonEmpty
+      case _                    => false)
+    if siblingNames.size <= 1 && !anyContracts then tStmts
+    else liftInnerDefClusters(tStmts, innerDecls, siblingNames)
 
-  /** Lift any cluster of cross-referencing sibling inner defs to top-level
-   *  synthesized functions. A cluster is the transitive closure (under the
-   *  "captures sibling" relation) of any inner-def whose body references
-   *  another sibling. Single inner defs that only self-reference are NOT
-   *  lifted — they keep the existing TClosure+selfName path.
+  /** Lift inner defs to top-level synthesized functions when they need it.
    *
-   *  Captures inside a cluster must be limited to other cluster members; if
-   *  a cluster member also captures an outer-scope variable, the lift would
-   *  silently drop it, so we reject with a clear "promote to top-level fn"
-   *  diagnostic instead.
+   *  Two reasons trigger a lift:
    *
-   *  This unblocks the canonical mutual-recursion pattern (e.g. `is_even` /
-   *  `is_odd`) without requiring per-backend support for cross-closure
-   *  forward references — every backend already handles `TIndirectCall` of a
-   *  `TFuncRef` (top-level fn pointer with null env). */
-  protected def liftInnerDefClusters(tStmts: List[TStmt], siblingNames: Set[String]): List[TStmt] =
-    case class Inner(name: String, closure: TClosure, ft: SyslType, vol: Boolean, ghost: Boolean)
+   *  1. **Cross-reference cluster.** Any inner def whose body captures a
+   *     sibling other than itself participates in a cluster. The whole cluster
+   *     is the transitive closure under the "captures sibling" relation.
+   *     Lifting them to top-level removes the forward-reference problem
+   *     (capture-by-value would otherwise read garbage).
+   *
+   *  2. **Contracts.** Any inner def with `require`/`ensure` clauses must be
+   *     lifted because the closure analyzer's body path drops contracts on the
+   *     floor — only `analyzeBlockWithContracts` (used by top-level fns) emits
+   *     them as `TContractCheck` nodes. Single self-recursive inner defs with
+   *     no contracts and no sibling refs stay on the existing TClosure path.
+   *
+   *  Captures of outer-scope variables disqualify a lift target — the lift
+   *  cannot preserve the captures, so we reject with a clear diagnostic that
+   *  explains whether the issue is contracts or cross-references.
+   *
+   *  Every backend already handles `TIndirectCall` of a `TFuncRef` (top-level
+   *  fn pointer with null env), so lifting needs no per-backend support. */
+  protected def liftInnerDefClusters(
+      tStmts: List[TStmt],
+      innerDecls: List[FunDeclAST],
+      siblingNames: Set[String],
+  ): List[TStmt] =
+    val declByName: Map[String, FunDeclAST] = innerDecls.map(d => d.name -> d).toMap
+    case class Inner(name: String, closure: TClosure, ft: SyslType, vol: Boolean, ghost: Boolean,
+                     contracts: List[ContractClauseAST])
     val innerStmts: List[Inner] = tStmts.collect {
       case TVarStmt(name, ft, c: TClosure, vol, ghost) if siblingNames.contains(name) =>
-        Inner(name, c, ft, vol, ghost)
+        val cs = declByName.get(name).map(_.body).collect {
+          case BlockBodyAST(_, cs) => cs
+        }.getOrElse(Nil)
+        Inner(name, c, ft, vol, ghost, cs)
     }
     if innerStmts.isEmpty then return tStmts
     // Edges: each sibling → set of OTHER siblings it captures (self-capture
-    // doesn't count — that's handled by the existing selfName mechanism).
+    // doesn't count — that's handled by the existing selfName mechanism for
+    // non-lifted defs, or by the rewriter for lifted ones).
     val crossRefs: Map[String, Set[String]] = innerStmts.map { i =>
       i.name -> i.closure.captures.iterator.collect {
         case (capName, _) if siblingNames.contains(capName) && capName != i.name => capName
@@ -5878,52 +5903,143 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       if !cluster.contains(n) then
         cluster += n
         toVisit ++= crossRefs.getOrElse(n, Set.empty)
-    if cluster.isEmpty then return tStmts
-    // Validate: cluster members may capture only siblings (incl. self). Any
-    // outer-scope capture would be lost on lift, so we reject up front.
-    for i <- innerStmts; if cluster.contains(i.name) do
+    // Lift set: cluster members ∪ any inner def with contracts. The latter need
+    // lifting even when not part of a cluster, because the contract-emission
+    // stage only runs in the top-level fn body path.
+    val contractBearers: Set[String] = innerStmts.iterator.filter(_.contracts.nonEmpty).map(_.name).toSet
+    val liftSet: Set[String] = cluster.toSet ++ contractBearers
+    if liftSet.isEmpty then return tStmts
+    // Validate: every lift target's captures must be siblings (incl. self).
+    // Outer-scope captures are rejected up front with a diagnostic that names
+    // the offenders and steers the user to the right fix.
+    for i <- innerStmts; if liftSet.contains(i.name) do
       val outerCaptures = i.closure.captures.iterator.collect {
         case (capName, _) if !siblingNames.contains(capName) => capName
       }.toList
       if outerCaptures.nonEmpty then
-        val others = cluster.iterator.filter(_ != i.name).toList.sorted
-        throw AnalysisError(
-          s"inner def '${i.name}' is part of a cross-referencing cluster (with ${others.mkString(", ")}) " +
-            s"that needs to be lifted to top-level for forward references to work, " +
-            s"but it captures outer-scope variables: ${outerCaptures.mkString(", ")}. " +
-            "The lift cannot preserve these captures — promote the cluster to top-level fns explicitly, " +
-            "or refactor to avoid the captures (e.g. pass the captured value as an extra parameter).",
-        )
-    // Synthesize unique mangled names. Sorted for deterministic output.
-    val mangled: Map[String, String] = cluster.toList.sorted.map { name =>
+        val msg =
+          if i.contracts.nonEmpty then
+            s"inner def '${i.name}' has require/ensure clauses but captures outer-scope variables: " +
+              s"${outerCaptures.mkString(", ")}. Contracts on inner defs are supported only when the def can be " +
+              "lifted to a top-level fn — promote it explicitly, or refactor to avoid the captures " +
+              "(e.g. pass the captured value as an extra parameter)."
+          else
+            val others = liftSet.iterator.filter(_ != i.name).toList.sorted
+            s"inner def '${i.name}' is part of a cross-referencing cluster (with ${others.mkString(", ")}) " +
+              s"that needs to be lifted to top-level for forward references to work, " +
+              s"but it captures outer-scope variables: ${outerCaptures.mkString(", ")}. " +
+              "The lift cannot preserve these captures — promote the cluster to top-level fns explicitly, " +
+              "or refactor to avoid the captures (e.g. pass the captured value as an extra parameter)."
+        throw AnalysisError(msg)
+    // Synthesize unique mangled names for every lift target. Sorted for
+    // deterministic output.
+    val mangled: Map[String, String] = liftSet.toList.sorted.map { name =>
       val m = s"_inner_${innerDefLiftCounter}_$name"
       innerDefLiftCounter += 1
       name -> m
     }.toMap
-    // Rewrite cluster body refs: TVarRef(siblingName, ft) → TFuncRef(mangled, ft).
+    // Rewrite body refs: TVarRef(liftedSiblingName, ft) → TFuncRef(mangled, ft).
     // Self-refs are rewritten too — the lifted top-level fn calls itself by its
     // mangled name. mapTExpr applies `f` to TVarRef nodes and visits subexprs.
     val rewriter: TExpr => TExpr = {
-      case TVarRef(n, ft) if cluster.contains(n) => TFuncRef(mangled(n), ft)
+      case TVarRef(n, ft) if liftSet.contains(n) => TFuncRef(mangled(n), ft)
       case other                                  => other
     }
-    for i <- innerStmts; if cluster.contains(i.name) do
-      val rewrittenBody = i.closure.body match
-        case TBlockBody(stmts) => TBlockBody(stmts.map(s => mapTStmt(s)(rewriter)))
-        case TExprBody(e)      => TExprBody(mapTExpr(e)(rewriter))
+    for i <- innerStmts; if liftSet.contains(i.name) do
+      val liftedBody: TFunBody =
+        if i.contracts.nonEmpty then
+          // Re-analyze body via the contract-aware path so require/ensure emit
+          // as TContractCheck. The closure body we already have ignored the
+          // contracts (closure analyzer drops them); we read them back from the
+          // original FunDeclAST and analyze fresh, with the lifted fn's params
+          // bound in a new scope.
+          analyzeContractedInnerBody(declByName(i.name), i.closure, mangled(i.name), siblingNames, rewriter)
+        else
+          // No contracts: extract the analyzed closure body and rewrite siblings.
+          i.closure.body match
+            case TBlockBody(stmts) => TBlockBody(stmts.map(s => mapTStmt(s)(rewriter)))
+            case TExprBody(e)      => TExprBody(mapTExpr(e)(rewriter))
       specializedDecls += TFunDecl(
-        mangled(i.name), i.closure.params, i.closure.returnType, rewrittenBody,
+        mangled(i.name), i.closure.params, i.closure.returnType, liftedBody,
         isPrivate = true, effects = i.closure.effects,
       )
-    // Replace each cluster TVarStmt's RHS with a TFuncRef to its lifted twin.
+    // Replace each lift-target TVarStmt's RHS with a TFuncRef to its lifted twin.
     // The local var still holds a callable value; calls go through TIndirectCall
-    // of TFuncRef, which every backend lowers to a direct (or near-direct) call
-    // with a null env pointer.
+    // of TFuncRef, which every backend lowers to a near-direct call with a null
+    // env pointer.
     tStmts.map {
-      case TVarStmt(name, ft, _: TClosure, vol, ghost) if cluster.contains(name) =>
+      case TVarStmt(name, ft, _: TClosure, vol, ghost) if liftSet.contains(name) =>
         TVarStmt(name, ft, TFuncRef(mangled(name), ft), vol, ghost)
       case other => other
     }
+
+  /** Re-analyze a contract-bearing inner-def body in a top-level-fn-like
+   *  context, then rewrite sibling refs. Mirrors the FunDeclAST arm of
+   *  `analyzeDecl`: install a FRESH scope stack (so outer-scope vars are
+   *  invisible — same as a real top-level fn), pre-bind siblings + params,
+   *  set returnType + expected type, call `analyzeBlockWithContracts`,
+   *  restore. The mangled name is passed as `selfMangledName` so a `variant`
+   *  clause (rare on inner defs) resolves recursive calls correctly.
+   *
+   *  Outer-scope captures inside the body or contracts surface as
+   *  "undefined variable" during this re-analysis. We catch and re-throw
+   *  with a wrapper that names the inner def + the offending var, so the
+   *  user sees a clear "promote to top-level fn" diagnostic instead of a
+   *  bare lookup failure. */
+  private def analyzeContractedInnerBody(
+      decl: FunDeclAST,
+      closure: TClosure,
+      mangledName: String,
+      siblingNames: Set[String],
+      rewriter: TExpr => TExpr,
+  ): TFunBody =
+    val (stmts, contracts) = decl.body match
+      case BlockBodyAST(s, cs) => (s, cs)
+      case _                    => (Nil, Nil) // unreachable — only BlockBody carries contracts
+    val savedReturnType = currentReturnType
+    val savedExpected = currentExpected
+    val savedScopeStack = scopeStack
+    // Fresh scope stack: outer-scope vars become invisible. Top-level fns +
+    // globals stay visible via separate maps in `lookup`. Siblings are
+    // pre-bound by copying their SymInfo from the saved stack so cross-refs
+    // still resolve.
+    scopeStack = new mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]]
+    pushScope()
+    try
+      // Pre-bind self + all siblings (incl. self for self-recursive defs).
+      // The rewriter converts the resulting TVarRef → TFuncRef(mangled) after
+      // analysis, so the analysis-time binding only needs the FuncType.
+      for siblingName <- siblingNames do
+        savedScopeStack.iterator.collectFirst {
+          case s if s.contains(siblingName) => s(siblingName)
+        }.foreach(sym => currentScope(siblingName) = sym)
+      for (param, tParam) <- decl.params.zip(closure.params) do
+        currentScope(param.name) = SymInfo(param.name, tParam.typ, mutable = true)
+      currentReturnType = closure.returnType
+      currentExpected = if closure.returnType == UnitType then None else Some(closure.returnType)
+      val analyzed =
+        try
+          analyzeBlockWithContracts(
+            stmts, contracts, closure.returnType,
+            mangledName, decl.params.map(_.name),
+          )
+        catch
+          case e: AnalysisError if e.getMessage.contains("undefined variable") =>
+            val pat = "undefined variable: '([^']+)'".r
+            val outer = pat.findFirstMatchIn(e.getMessage).map(_.group(1)).getOrElse("(unknown)")
+            throw AnalysisError(
+              s"inner def '${decl.name}' has require/ensure clauses but captures outer-scope variable: $outer. " +
+                "Contracts on inner defs are supported only when the def can be lifted to a top-level fn — " +
+                "promote it explicitly, or refactor to avoid the captures (e.g. pass the captured value as " +
+                "an extra parameter).",
+            )
+      analyzed match
+        case TBlockBody(ss) => TBlockBody(ss.map(s => mapTStmt(s)(rewriter)))
+        case other          => other
+    finally
+      scopeStack = savedScopeStack
+      currentReturnType = savedReturnType
+      currentExpected = savedExpected
 
   /** Analyze a function block body together with its `require` / `ensure` contract clauses.
    * Generates require checks at entry, injects a `__result__` local, and rewrites every
@@ -6526,16 +6642,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         // the interpreter can wire a self-cell into the captured env after construction.
         if decl.typeParams.nonEmpty then
           throw AnalysisError(s"inner def '${decl.name}' cannot declare type parameters")
-        // Inner defs lower to closures, and the closure analyzer has no contract-emission
-        // path — so a `require`/`ensure` clause on an inner def would be silently ignored.
-        // Reject explicitly until contract-on-closure support is implemented (audit item #26).
-        decl.body match
-          case BlockBodyAST(_, contracts) if contracts.nonEmpty =>
-            throw AnalysisError(
-              s"inner def '${decl.name}': require/ensure clauses are not supported on inner functions yet — " +
-                "promote to a top-level fn, or hand-inline the check (e.g. `assert(cond, \"msg\")`)."
-            )
-          case _ => ()
+        // Inner defs with `require`/`ensure` contracts are NOT processed via the closure
+        // analyzer (which has no contract-emission stage). They are picked up post-pass
+        // by `liftInnerDefClusters` which re-analyzes the body via the contract-aware
+        // path — see that helper. We still emit a TClosure here so the post-pass has a
+        // uniform shape to operate on; the closure body's contracts are silently
+        // dropped by the closure analyzer, but the lift re-reads them from the
+        // original FunDeclAST. Validation of "no outer-scope captures" also lives in
+        // the post-pass so the error message can reference the captures directly.
         val retTypeAST = decl.returnType.getOrElse(
           throw AnalysisError(s"inner def '${decl.name}' must declare an explicit return type")
         )
