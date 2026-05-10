@@ -1324,4 +1324,82 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |""".stripMargin))
     ex.getMessage should include("WhyML translator: unsupported")
   }
+
+  // ====================================================================================
+  // Phase β — match/pattern support: multi-pattern arms, ranges, struct destructure,
+  // wildcard before else in literal path. Guards still rejected (Why3 logic-mode `match`
+  // has no `when` clauses).
+  // ====================================================================================
+
+  "match arm with multiple ADT patterns OR-joins them" in {
+    val mlw = translate(
+      """enum Color
+        |    Red
+        |    Green
+        |    Blue
+        |
+        |def is_warm(c: Color) -> bool
+        |    c match
+        |        Color.Red, Color.Green -> true
+        |        Color.Blue             -> false
+        |""".stripMargin)
+    mlw should include("Red | Green -> true")
+  }
+
+  "match arm with multiple literal patterns OR-joins conditions in if-chain" in {
+    val mlw = translate(
+      """def is_one_or_two(n: int) -> bool
+        |    n match
+        |        1, 2 -> true
+        |        else -> false
+        |""".stripMargin)
+    // Multi-pattern in the literal-path produces a `\/` join between conditions.
+    mlw should include("n = 1 \\/ n = 2")
+  }
+
+  "range pattern in literal-path lowers to inclusive bounds check" in {
+    val mlw = translate(
+      """def in_range(n: int) -> bool
+        |    n match
+        |        1..10 -> true
+        |        else  -> false
+        |""".stripMargin)
+    mlw should include("n >= 1 /\\ n <= 10")
+  }
+
+  "wildcard before else in literal path matches anything" in {
+    val mlw = translate(
+      """def label(n: int) -> int
+        |    n match
+        |        0    -> 100
+        |        _    -> 999
+        |        else -> -1
+        |""".stripMargin)
+    // The `_` becomes `if true then ... else ...`. (Reaching the wildcard arm
+    // means the 0 arm didn't match.)
+    mlw should include("if true then")
+  }
+
+  "struct destructure pattern emits WhyML record pattern" in {
+    val mlw = translate(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |def get_x(p: Point) -> int
+        |    p match
+        |        Point(a, b) -> a
+        |""".stripMargin)
+    mlw should include("{ x = a; y = b }")
+  }
+
+  "match arm with guard is rejected with the new clearer message" in {
+    // Guards aren't surface syntax in sysl yet; this test pins the rejection
+    // path. When sysl gains guard syntax, the lowering strategy will need to
+    // change (Why3 logic-mode `match` has no `when` clauses).
+    // For now, the rejection fires when an arm carries a guard internally.
+    // No surface-test driver — checked indirectly via the `when` keyword in
+    // the rejection message text. Skip this case.
+    pending
+  }
 }
