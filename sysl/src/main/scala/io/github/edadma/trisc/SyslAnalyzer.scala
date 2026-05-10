@@ -124,6 +124,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
    *  to these are dropped from real-function bodies before codegen). */
   protected val ghostNames = mutable.HashSet[String]()
 
+  /** Set of type names declared `#ghost` — spec-only types that real code may not
+   *  construct or pattern-match. Populated during decl collection from the `#ghost`
+   *  attribute on struct/enum/data-enum/type-alias decls. The discipline is enforced
+   *  at construction sites in `validateGhostDiscipline` (Phase δ.5). */
+  protected val ghostTypes = mutable.HashSet[String]()
+
   /** Type-check each invariant expression at struct declaration time. Invariants are
    *  analyzed in a scope where each field name binds to a local of the field's type, so
    *  type errors (wrong field name, non-bool result) are caught before any mutation site. */
@@ -1835,16 +1841,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val pass0Enums = mutable.HashSet[String]()
     for decl <- program.decls do
       decl match
-        case StructDeclAST(name, _, typeParams, _, _, _, _) if typeParams.isEmpty =>
+        case sd @ StructDeclAST(name, _, typeParams, attrs, _, _, _) if typeParams.isEmpty =>
           if pass0Structs.contains(name) then
             throw AnalysisError(s"duplicate struct: '$name'", decl)
           pass0Structs += name
           structTypes(name) = SyslType.StructType(name, Nil) // placeholder — fields filled below
-        case DataEnumDeclAST(name, _, typeParams, _, _, _) if typeParams.isEmpty =>
+          // δ.5: track ghost-marked struct types so the discipline check (in
+          // validateGhostDiscipline) can reject real-code construction.
+          if attrs.exists(_.name == "ghost") then ghostTypes += name
+        case ed @ DataEnumDeclAST(name, _, typeParams, attrs, _, _) if typeParams.isEmpty =>
           if pass0Enums.contains(name) then
             throw AnalysisError(s"duplicate enum: '$name'", decl)
           pass0Enums += name
           dataEnumTypes(name) = SyslType.EnumType(name, Nil) // placeholder — variants filled below
+          if attrs.exists(_.name == "ghost") then ghostTypes += name
+        case ee @ EnumDeclAST(name, _, attrs) =>
+          if attrs.exists(_.name == "ghost") then ghostTypes += name
         case _ => ()
 
     // Extract module path for name mangling
@@ -3441,7 +3453,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TFieldPreDec(o, _, _)           => checkExpr(o, ghostCtx)
       case TFieldPostInc(o, _, _)          => checkExpr(o, ghostCtx)
       case TFieldPostDec(o, _, _)          => checkExpr(o, ghostCtx)
-      case TStructConstruct(_, args)       => args.foreach(checkExpr(_, ghostCtx))
+      case TStructConstruct(st, args)      =>
+        if !ghostCtx && ghostTypes.contains(st.name) then
+          reject(s"real-code expression constructs ghost type '${st.name}'")
+        args.foreach(checkExpr(_, ghostCtx))
       case TUnary(_, o, _)                 => checkExpr(o, ghostCtx)
       case TBinary(l, _, r, _)             => checkExpr(l, ghostCtx); checkExpr(r, ghostCtx)
       case TCall(callee, args, _) =>
@@ -3464,8 +3479,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           arm.guard.foreach(checkExpr(_, ghostCtx))
           arm.body.foreach(checkStmt(_, ghostCtx))
         dflt.foreach(_.foreach(checkStmt(_, ghostCtx)))
-      case TNew(_, args)                   => args.foreach(checkExpr(_, ghostCtx))
-      case TNewEnum(_, _, args)            => args.foreach(checkExpr(_, ghostCtx))
+      case TNew(st, args)                  =>
+        if !ghostCtx && ghostTypes.contains(st.name) then
+          reject(s"real-code expression constructs ghost type '${st.name}' via new")
+        args.foreach(checkExpr(_, ghostCtx))
+      case TNewEnum(et, _, args)           =>
+        if !ghostCtx && ghostTypes.contains(et.name) then
+          reject(s"real-code expression constructs ghost enum '${et.name}' via new")
+        args.foreach(checkExpr(_, ghostCtx))
       case TNewArray(_, sz)                => checkExpr(sz, ghostCtx)
       case TLen(inner, _)                  => checkExpr(inner, ghostCtx)
       case TCap(inner, _)                  => checkExpr(inner, ghostCtx)

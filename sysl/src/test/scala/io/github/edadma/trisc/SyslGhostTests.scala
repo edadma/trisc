@@ -274,4 +274,56 @@ class SyslGhostTests extends SyslTestHelpers {
       |    return x
       |""".stripMargin) shouldBe 15
   }
+
+  // ===== Phase δ.5: ghost type declarations =====
+  //
+  // `#ghost` on struct/enum/data-enum decls marks the type as spec-only.
+  // Real (non-ghost) code may not construct ghost-typed values
+  // (TStructConstruct/TNew/TNewEnum); the existing ghost-discipline
+  // post-pass enforces. Ghost code (ghost vars, ghost fns, contracts) may
+  // construct freely. The discipline catches the most common footgun:
+  // declaring `#ghost struct` for verification spec, then accidentally
+  // allocating it at runtime.
+
+  "ghost struct used by ghost var compiles fine" in {
+    eval("""
+      |#ghost
+        |struct AbstractState
+      |    contents: int
+      |
+      |#ghost
+      |var spec_state: AbstractState = AbstractState(0)
+      |
+      |main() -> int = 1
+      |""".stripMargin) shouldBe 1
+  }
+
+  "real code constructing ghost struct is rejected" in {
+    val t = intercept[RuntimeException] {
+      eval("""
+        |#ghost
+        |struct AbstractState
+        |    contents: int
+        |
+        |main() -> int
+        |    var x = AbstractState(42)
+        |    1
+        |""".stripMargin)
+    }
+    t.getMessage should include("ghost type 'AbstractState'")
+  }
+
+  "ghost data-enum used by ghost var compiles fine" in {
+    eval("""
+      |#ghost
+      |enum SpecPhase
+      |    Init(n: int)
+      |    Running
+      |
+      |#ghost
+      |var phase: SpecPhase = Init(0)
+      |
+      |main() -> int = 1
+      |""".stripMargin) shouldBe 1
+  }
 }
