@@ -3660,7 +3660,7 @@ val sub: Parser[(int, int) -> int] =
 
 ### `#ghost` — verification-only declarations
 
-A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost. Three places `#ghost` may appear:
+A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost. Four places `#ghost` may appear:
 
 ```
 #ghost
@@ -3672,6 +3672,10 @@ is_sorted(s: &[]int) -> bool     // module-level ghost fn — body free to read 
         if s[i] > s[i+1] then return false
     return true
 
+#ghost
+struct AbstractState              // module-level ghost type — used in contracts only
+    contents: int
+
 sort(s: &[]int)
     require true
     ensure is_sorted(s)
@@ -3680,10 +3684,11 @@ sort(s: &[]int)
     ...
 ```
 
-**The discipline.** The compiler enforces two rules:
+**The discipline.** The compiler enforces three rules:
 
 1. **Real code cannot read ghost state.** Reading a `#ghost` variable, or calling a `#ghost` function, from real (non-ghost, non-contract) code is a static error. Ghost state has no runtime existence to read; the rule prevents accidental dependence.
 2. **Ghost code cannot write real state.** A `#ghost` function may not assign to a non-ghost module-level var (writes to its own locals are fine — they're scoped to the function). This keeps the runtime behaviour independent of whether ghost code is present.
+3. **Real code cannot construct ghost types.** A `#ghost struct` / `#ghost enum` / `#ghost data-enum` exists only for the verifier; instantiating it from real code (`Point(...)`, `new Point(...)`, `Variant(...)`, etc.) is a static error. Ghost vars and ghost fns can construct freely. The discipline catches the canonical footgun: declaring `#ghost struct Spec` for verification, then accidentally allocating it at runtime.
 
 Contract clauses (`require` / `ensure` / `invariant` / `variant` / `assume` / `for all` / `for some` predicates) sit in *contract context* and may freely read both real and ghost state — that's the whole point of ghost code. The same is true for ghost var initializers, ghost-target assignment RHSes, and ghost function bodies.
 
