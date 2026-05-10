@@ -2351,20 +2351,29 @@ true, false           // bool
 
 **Literal overflow is a compile-time error.** A bare integer literal that does
 not fit in the type it's being assigned/coerced to produces a hard error rather
-than a silent truncation:
+than a silent truncation. The check covers both positive and negative
+out-of-range values — a unary minus on a literal is constant-folded before the
+range check fires:
 
 ```sysl
 var x: u8 = 256       // error: literal 256 does not fit in u8 (range 0..255)
 var y: i8 = 200       // error: literal 200 does not fit in i8 (range -128..127)
 var z: int = 0xFFFF_FFFF
                       // error: literal 4294967295 does not fit in int (range -2147483648..2147483647)
+var n: u8 = -1        // error: literal -1 does not fit in u8 (range 0..255)
+var m: i8 = -129      // error: literal -129 does not fit in i8 (range -128..127)
 ```
 
-If truncation is intended, write the cast explicitly:
+If truncation or bit-pattern reinterpretation is intended, write the cast
+explicitly:
 
 ```sysl
 var x: u8 = u8(256)   // ok — wraps to 0; intent is clear
+var n: u8 = u8(-1)    // ok — bit-pattern reinterpretation, yields 255
 ```
+
+Negative literals into signed types within range are accepted as written
+(`var x: i8 = -1`, `var y: int = -2147483648` are both fine).
 
 Float literals (`3.14`, `1e5`) default to `f64`, but coerce to `f32` when the
 context demands it (`var x: f32 = 1.5` works without a cast). Mixed-width float

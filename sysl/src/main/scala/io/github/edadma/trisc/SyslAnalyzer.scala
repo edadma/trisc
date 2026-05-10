@@ -4243,6 +4243,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TIntLit(value, _) if target.isIntegral =>
         literalRangeMsg(value, target).foreach(msg => throw AnalysisError(msg))
         TIntLit(value, target)
+      case TUnary("-", TIntLit(value, _), _) if target.isIntegral =>
+        // Constant-fold negation so the range check applies to the resulting
+        // value. Without this, `var x: u8 = -1` slipped past the TIntLit-only
+        // arm above — the inner `1` fits u8, but the negated -1 does not. Same
+        // for `var x: i8 = -129` (inner 129 already overflows i8 anyway, but
+        // the diagnostic from this arm will name the negated value, which is
+        // what the user wrote in source). i64/u64 unconstrained as before.
+        val negated = -value
+        literalRangeMsg(negated, target).foreach(msg => throw AnalysisError(msg))
+        TIntLit(negated, target)
       case TIntLit(0, _) if target.isInstanceOf[PtrType] => TIntLit(0, target) // null pointer
       // Float literal → narrower float type (untyped float literal coercion)
       case TFloatLit(value, _) if target.isFloat => TFloatLit(value, target)

@@ -216,4 +216,144 @@ class SyslLiteralOverflowTests extends SyslTestHelpers {
     thrown.getMessage should include("70000")
     thrown.getMessage should include("u16")
   }
+
+  // ===== Negative literals into unsigned types (Tier 4 followup #1) =====
+  //
+  // The original Tier 4 #28 check fired only on direct TIntLit. `-1` parses
+  // as TUnary("-", TIntLit(1)), which slipped past the TIntLit-only arm and
+  // silently truncated to 0xFF for u8, 0xFFFF for u16, etc. The analyzer
+  // now constant-folds the unary minus before running the range check, so
+  // `var x: u8 = -1` is rejected — consistent with `var x: u8 = 256` which
+  // is also rejected. `u8(-1)` opts in to bit-pattern reinterpretation.
+
+  "u8 = -1 is rejected (negative into unsigned)" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """main() -> int
+          |    var x: u8 = -1
+          |    int(x)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("-1")
+    thrown.getMessage should include("u8")
+    thrown.getMessage should include("0..255")
+    thrown.getMessage should include("u8(...)")
+  }
+
+  "u16 = -1 is rejected" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """main() -> int
+          |    var x: u16 = -1
+          |    int(x)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("-1")
+    thrown.getMessage should include("u16")
+  }
+
+  "u32 = -1 is rejected" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """main() -> int
+          |    var x: u32 = -1
+          |    i64(x)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("-1")
+    thrown.getMessage should include("u32")
+  }
+
+  "u8(-1) cast still works (bit-pattern reinterpretation)" in {
+    eval(
+      """main() -> int
+        |    var x: u8 = u8(-1)
+        |    int(x)
+        |""".stripMargin) shouldBe 255
+  }
+
+  "u8(-2) truncates correctly" in {
+    eval(
+      """main() -> int
+        |    var x: u8 = u8(-2)
+        |    int(x)
+        |""".stripMargin) shouldBe 254
+  }
+
+  // ===== Negative literals into signed types: in-range still accepted =====
+
+  "i8 = -1 is accepted (in range)" in {
+    eval(
+      """main() -> int
+        |    var x: i8 = -1
+        |    int(x)
+        |""".stripMargin) shouldBe -1
+  }
+
+  "i8 = -128 is accepted (MIN_I8)" in {
+    eval(
+      """main() -> int
+        |    var x: i8 = -128
+        |    int(x)
+        |""".stripMargin) shouldBe -128
+  }
+
+  "i8 = -129 is rejected (one below min)" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """main() -> int
+          |    var x: i8 = -129
+          |    int(x)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("-129")
+    thrown.getMessage should include("i8")
+    thrown.getMessage should include("-128..127")
+  }
+
+  "int = -2147483648 is accepted (MIN_INT)" in {
+    eval(
+      """main() -> int
+        |    var x: int = -2147483648
+        |    x
+        |""".stripMargin) shouldBe -2147483648
+  }
+
+  "int = -2147483649 is rejected (one below min)" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """main() -> int
+          |    var x: int = -2147483649
+          |    int(x)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("-2147483649")
+    thrown.getMessage should include("int")
+  }
+
+  // ===== const + module-level decls also catch negative literals =====
+
+  "const u8 = -5 is rejected" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """const FLAG: u8 = -5
+          |main() -> int
+          |    int(FLAG)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("-5")
+    thrown.getMessage should include("u8")
+  }
+
+  "module-level val u32 = -1 is rejected" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """val LIMIT: u32 = -1
+          |main() -> int
+          |    i64(LIMIT)
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("-1")
+    thrown.getMessage should include("u32")
+  }
 }
