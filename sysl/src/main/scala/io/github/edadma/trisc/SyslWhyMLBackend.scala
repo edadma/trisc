@@ -115,7 +115,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  most proof-relevant module-level data is naturally immutable (limits, sentinels,
    *  shared math constants), so `val` covers the common case. */
   private def emitConstant(v: VarDeclAST): Unit =
-    val t = v.typ.getOrElse(unsupported("module-level val without type annotation", v.name))
+    // Type annotation is optional: when sysl omits it, drop the `: t` clause and
+    // let WhyML's type inference unify against the init expression (mirrors the
+    // function-without-return-type fix in γ.3).
+    val typeStr = v.typ.map(t => s" : ${typeOf(t)}").getOrElse("")
+    val refTypeStr = v.typ.map(t => s" : ref ${typeOf(t)}").getOrElse("")
     val sname = sanitizeName(v.name)
     if v.isMutable then
       // Module-level `var` → WhyML `val name : ref type = ref initial`. Permanently
@@ -123,12 +127,12 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       // `name := value` to assign). Drivers and kernel state live here in real code;
       // this gates a large slice of OS verification.
       refScope += v.name
-      line(s"val $sname : ref ${typeOf(t)} = ref ${formatExpr(v.init)}")
+      line(s"val $sname$refTypeStr = ref ${formatExpr(v.init)}")
     else
       // `let constant` (program-level) — usable from both contracts and code bodies. Without
       // `let`, the constant is logic-only and Why3 reports "logical symbol used in a non-ghost
       // context" when a `let function` body references it.
-      line(s"let constant $sname : ${typeOf(t)} = ${formatExpr(v.init)}")
+      line(s"let constant $sname$typeStr = ${formatExpr(v.init)}")
 
   /** sysl `struct Point { x: int; y: int }` → WhyML `type point = { x: int; y: int }`.
    *  WhyML records are immutable by default; field updates are functional (`{ p with x = 5 }`).
@@ -699,7 +703,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case n if enumNames(n) || structFields.contains(n) || dataEnumNames.contains(n) =>
         // Lowercase the first letter to match the lowered type name (enum, struct, data enum).
         s"${n.head.toLower}${n.tail}"
-      case other  => unsupported("type", other)
+      case other  => unsupported("type",
+        s"'$other' is not a recognized sysl type — supported scalars are int/i8..i64/u8..u64/" +
+          "byte/char/rune/bool/string, plus any struct, enum, or data-enum declared in this " +
+          "module (and type parameters of the enclosing decl). Pointer/slice/array types are " +
+          "out of scope for the current verification surface.")
     case NamedTypeAST(name, args) if dataEnumNames.contains(name) =>
       // Generic data-enum application: `Option[int]` → `option int`. Type args are
       // emitted positionally and parenthesized when complex (multi-token).
@@ -719,7 +727,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         if s.contains(' ') then s"($s)" else s
       }
       s"$typeName ${argStrs.mkString(" ")}"
-    case other => unsupported("type form", other.toString)
+    case other => unsupported("type form",
+      s"non-named type ${other.getClass.getSimpleName} — function types, slice/array types, " +
+        "and pointer types are out of scope for the current verification surface (they map to " +
+        "Phase ε in the finish roadmap; until then, model the data as a plain record/enum)")
 
   /** Build the three pieces needed to desugar a `?` operator: success pattern, success
    *  expression (the value bound), and the failure arm (`pattern -> reconstruct`).
@@ -800,7 +811,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         case "-"   => "- "
         case "not" => "not "
         case "!"   => "not "
-        case other => unsupported("unary operator", other)
+        case other => unsupported("unary operator",
+          s"sysl unary `$other` has no WhyML equivalent in this translator. Bitwise NOT (`~`) " +
+            "would need a bitvector model (`use bv.BV32` etc.) — out of scope for the current " +
+            "verification surface. Pointer ops (`*`, `&`) are similarly out of scope.")
       s"($opStr${formatExpr(x)})"
     case CallAST("old", List(arg)) =>
       s"(old ${formatExpr(arg)})"
@@ -849,10 +863,17 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       val argStr = if args.isEmpty then "" else args.map(formatExpr).mkString(" ", " ", "")
       s"(${sanitizeName(n)}$argStr)"
     case IfExprAST(c, tb, eb) =>
+      // WhyML: `if c then e1 else e2` requires both branches to unify in type.
+      // Sysl `if cond then body` (no else) at expression position is genuinely
+      // ambiguous — for unit-typed body it's fine ("do this if cond, else
+      // nothing"), for value-typed body the missing else has no good answer.
+      // We emit `else ()` to match the unit case; if the body is value-typed
+      // Why3 reports a clear type-mismatch error at verification time (much
+      // better than the translator silently giving up).
       val tExpr = stmtsAsExpr(tb)
       val eExpr = eb match
         case Some(stmts) => stmtsAsExpr(stmts)
-        case None        => unsupported("if without else", "WhyML requires both branches")
+        case None        => "()"
       s"(if ${formatExpr(c)} then $tExpr else $eExpr)"
     case MatchExprAST(scrutinee, arms, default) =>
       // WhyML: `match e with | pat -> body | ... end`. Each arm's body must be a single
@@ -942,7 +963,12 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         case "all"  => s"(forall $v: int. $loS <= $v $cmp $hiS -> $predS)"
         case "some" => s"(exists $v: int. $loS <= $v $cmp $hiS /\\ $predS)"
         case other  => unsupported("quantifier kind", other)
-    case other => unsupported("expression", other.getClass.getSimpleName)
+    case other => unsupported("expression",
+      s"sysl ${other.getClass.getSimpleName} has no WhyML translation in this backend yet. " +
+        "Likely candidates not yet covered: SliceAST, IndexAST, ArrayLitAST (need slice/array " +
+        "model — Phase ε), AddrOfAST/DerefAST (pointer model — Phase ε), TryAST in non-top-" +
+        "level position (needs CPS lowering). If your code hits this in a verification " +
+        "context, the path forward is to model the data without slices/pointers.")
 
   private def stmtsAsExpr(stmts: List[StmtAST]): String = stmts match
     case List(ReturnStmtAST(Some(e))) => formatExpr(e)
@@ -1004,7 +1030,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case "%"   => "mod"
     case "mod" => "mod"
     case "+" | "-" | "*" | "<" | ">" | "<=" | ">=" => op
-    case other => unsupported("binary operator", other)
+    case other => unsupported("binary operator",
+      s"sysl binary `$other` has no WhyML equivalent. Bitwise ops (`& | ^ << >>`) need a " +
+        "bitvector model (`use bv.BV32`); arithmetic on bytes/floats may need width-specific " +
+        "imports. Out of scope for the current verification surface.")
 
   /** Strip module-qualified prefixes; lowercase the first letter (WhyML reserves
    *  uppercase-first identifiers for constructors / modules); map sysl identifiers that
