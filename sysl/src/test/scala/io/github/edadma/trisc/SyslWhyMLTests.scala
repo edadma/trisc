@@ -1455,6 +1455,81 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     mlw should include("writes { b }")
   }
 
+  // ====================================================================================
+  // Phase δ.3 — module invariants: predicate over module state preserved by every
+  // public function. The translator emits `predicate module_inv ()` at module scope
+  // and adds implicit requires/ensures clauses to each non-private fn.
+  // ====================================================================================
+
+  "module_invariant emits a top-level predicate" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |module_invariant counter >= 0
+        |""".stripMargin)
+    mlw should include("predicate module_inv ()")
+    mlw should include("!counter >= 0")
+  }
+
+  "multiple module_invariant decls are conjoined with /\\" in {
+    val mlw = translate(
+      """var lo: int = 0
+        |var hi: int = 100
+        |
+        |module_invariant lo <= hi
+        |module_invariant lo >= 0
+        |""".stripMargin)
+    mlw should include("predicate module_inv ()")
+    // Both clauses joined with formula-AND; deref `!` on the mutable refs.
+    mlw should include("/\\")
+    mlw should include("!lo <= !hi")
+    mlw should include("!lo >= 0")
+  }
+
+  "public fn implicitly carries requires/ensures of module_invariant" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |module_invariant counter >= 0
+        |
+        |#writes(counter)
+        |bump() -> int
+        |    counter = counter + 1
+        |    counter
+        |""".stripMargin)
+    mlw should include("requires { module_inv () }")
+    mlw should include("ensures  { module_inv () }")
+  }
+
+  "private fn does NOT carry the implicit module_inv clauses" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |module_invariant counter >= 0
+        |
+        |private def helper(n: int) -> int
+        |    n + 1
+        |""".stripMargin)
+    // Helper is private; the implicit clauses are skipped.
+    mlw should not include "requires { module_inv () }"
+  }
+
+  "module_invariant must be bool — non-bool expression is rejected by analyzer" in {
+    // Module invariants live at the spec layer; analyzer validates the expression
+    // is bool-typed before the WhyML backend ever sees it.
+    val ex = intercept[RuntimeException] {
+      val src =
+        """var counter: int = 0
+          |
+          |module_invariant counter
+          |""".stripMargin
+      val Right(ast) = (new SyslParser).parseProgram(src): @unchecked
+      (new SyslAnalyzer).analyze(ast)
+    }
+    ex.getMessage should include("module_invariant")
+    ex.getMessage should include("bool")
+  }
+
   "unsupported expression form yields a clear error naming the gap" in {
     // Slices aren't part of any verification phase yet — translator should reject
     // them up front rather than silently produce ill-formed WhyML.

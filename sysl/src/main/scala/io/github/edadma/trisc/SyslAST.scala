@@ -128,6 +128,13 @@ case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Opti
 // `static_assert(cond)` or `static_assert(cond, "message")` at module scope — compile-time check.
 case class StaticAssertDeclAST(cond: ExpressionAST, message: Option[String]) extends DeclAST
 
+// `module_invariant <expr>` at module scope — verification-only predicate over module-level
+// state that every public function must preserve. Spec-only: produces no runtime code.
+// Currently consumed by the WhyML backend (Phase δ.3) to emit a Why3 predicate + implicit
+// requires/ensures clauses on each function. Other backends skip it (analyzer returns no
+// TDecl). The expression is analyzed in module scope to catch undefined refs.
+case class ModuleInvariantDeclAST(expr: ExpressionAST, message: Option[String] = None) extends DeclAST
+
 // Conditional compilation expressions
 sealed trait CondExpr
 case class CondSymbol(name: String) extends CondExpr

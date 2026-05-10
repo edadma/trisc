@@ -726,6 +726,37 @@ The canonical use is locking down on-the-wire and on-disk struct layouts so an
 accidental field reorder or padding shift fails the build instead of corrupting
 packets at runtime.
 
+### `module_invariant <expr> [, "message"]`
+
+Module-scope **verification-only** predicate. Declares a property of module-level
+state (typically the mutable vars) that every public function must preserve. Used
+by the WhyML / Why3 backend (Phase δ.3) — the verifier emits the predicate as a
+WhyML `predicate module_inv ()` and implicitly attaches `requires { module_inv () }`
+and `ensures { module_inv () }` to every public function. Private functions don't
+carry the implicit clauses (they're checked transitively through their callers).
+
+```sysl
+var counter: int = 0
+var max: int = 100
+
+module_invariant counter >= 0
+module_invariant counter <= max
+```
+
+Multiple decls are conjoined; the verifier sees a single predicate equivalent to
+`counter >= 0 /\ counter <= max`. The expression must be `bool`-typed and may
+reference any module-level value or `const` in scope. The analyzer rejects
+non-bool expressions; the WhyML backend rejects untranslatable expressions.
+
+**At runtime:** module invariants are spec-only. They produce no code in any
+backend (interpreter, LLVM, SVM, TRISC). The constraint is verified statically
+via Why3, not enforced dynamically.
+
+**Interaction with `#writes`/`#reads`:** the implicit `requires`/`ensures` clauses
+sit alongside any user-supplied frame conditions and contracts. If the user writes
+a body that doesn't preserve the invariant, Why3 reports a goal failure naming the
+specific clause that breaks.
+
 ---
 
 ## Functions
