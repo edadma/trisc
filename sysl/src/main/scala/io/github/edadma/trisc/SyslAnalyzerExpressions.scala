@@ -701,6 +701,16 @@ trait SyslAnalyzerExpressions:
           case RefType(st: StructType) => Some((TDeref(tObj, latestStruct(st)), st))
           case _                       => None
         if structOpt.isEmpty then
+          // `s.len` on string / slice / array / ref-slice is the field-access
+          // sugar for `len(s)` — produce the same TLen the call-form does.
+          // Symmetric to the `CallAST("len", args)` arm earlier in this match.
+          // Without this, every other indexable type's UX papercut path was
+          // "use len(x)"; with it, both spellings work.
+          if field == "len" then
+            tObj.typ.underlying match
+              case StringType | _: SliceType | _: ArrayType | RefType(_: SliceType) =>
+                return TLen(tObj, I32)
+              case _ =>
           return tryExtensionDispatch(field, tObj, Nil).getOrElse(
             throw AnalysisError(s"cannot access field '$field' on ${tObj.typ}"))
         val (resolvedObj, structType0) = structOpt.get

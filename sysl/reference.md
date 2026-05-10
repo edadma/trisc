@@ -3226,7 +3226,7 @@ s = string(data[:5])      // string from []byte slice
 | `print` | `(n: int)` | Print integer |
 | `println` | `(n: int)` | Print integer with newline |
 | `puts` | `(s: string)` | Print string |
-| `len` | `(x) -> int` | Length of string, array, slice, or `&[]T` |
+| `len` | `(x) -> int` | Length of string, array, slice, or `&[]T`. Also accepts the field-access spelling `x.len` for the same receiver types. |
 | `cap` | `(x) -> int` | Capacity of slice or `&[]T` |
 | `append` | `(s: []T, elem: T) -> []T` | Append to slice (Go semantics) |
 | `str` | `(x) -> string` | Convert int/bool to string representation |
