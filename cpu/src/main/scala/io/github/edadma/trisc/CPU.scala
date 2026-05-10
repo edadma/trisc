@@ -489,147 +489,34 @@ class CPU(mem: Addressable, var tick: Seq[Processor => Unit] = Nil, mpu: Option[
 
     override def write(v: Double): Unit = {}
 
-object Decode:
-  private val instructions = Array.fill[Instruction](0x10000)(IllegalInstruction)
+/** Instruction decoder. The decode table maps every 16-bit encoding to an
+  * `Instruction` (or `IllegalInstruction` for unassigned slots).
+  *
+  * Subclasses (e.g. `Trisc16Decode`) reuse the shared populate chunks via
+  * inheritance and override `buildInstructionTable` to omit TRISC-only
+  * encodings or substitute TRISC16-specific implementations. The class is
+  * instantiated once via `object Decode extends Decode` (the singleton TRISC
+  * decoder) and again as a singleton inside `Trisc16Decode`.
+  */
+class Decode:
+  protected val instructions: Array[Instruction] = Array.fill[Instruction](0x10000)(IllegalInstruction)
 
   buildInstructionTable()
 
   def apply(inst: Int): Instruction = instructions(inst)
 
-  private def populate(pattern: String, inst: Map[Char, Int] => Instruction) =
+  protected def populate(pattern: String, inst: Map[Char, Int] => Instruction): Unit =
     for ((idx, m) <- generate(pattern))
       instructions(idx) = inst(m)
 
-  private def populate(insts: List[(String, Map[Char, Int] => Instruction)]): Unit =
-    for ((p, c) <- insts)
-      populate(p, c)
+  /** Sign-extend a 7-bit immediate to 32 bits (used by RRI branch and addi
+    * decoders). */
+  protected def ext(imm7: Int): Int = if (imm7 & 0x40) != 0 then imm7 | 0xffffff80 else imm7
 
-  def buildInstructionTable(): Unit =
-    populate(
-      List[(String, Map[Char, Int] => Instruction)](
-        "111 rrr 00 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new LDI(operands('r'), operands('i'))),
-        "111 rrr 10 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new SLI(operands('r'), operands('i'))),
-        "111 rrr 11 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new STI(operands('r'), operands('i'))),
-        "111 000 rrr 0011 iii" -> ((operands: Map[Char, Int]) => new TRAP(operands('i'))),
-        "110 aaa bbb 00 00000; b:1-7" -> ((args: Map[Char, Int]) => new JALR(args('a'), args('b'))),
-        "110 000 000 00 00000" -> (_ => HALT),
-        "110 aaa bbb 00 00001" -> ((args: Map[Char, Int]) => new ZEB(args('a'), args('b'))),
-        "110 aaa bbb 00 00010" -> ((args: Map[Char, Int]) => new ZES(args('a'), args('b'))),
-        "110 aaa bbb 00 00011" -> ((args: Map[Char, Int]) => new ZEW(args('a'), args('b'))),
-        "110 aaa bbb 00 00100" -> ((args: Map[Char, Int]) => new SEB(args('a'), args('b'))),
-        "110 aaa bbb 00 00101" -> ((args: Map[Char, Int]) => new SES(args('a'), args('b'))),
-        "110 aaa bbb 00 00110" -> ((args: Map[Char, Int]) => new SEW(args('a'), args('b'))),
-        "110 aaa bbb 00 00111" -> ((args: Map[Char, Int]) => new NEG(args('a'), args('b'))),
-        "110 aaa bbb 00 01000" -> ((args: Map[Char, Int]) => new NOT(args('a'), args('b'))),
-        "110 aaa bbb 00 01010" -> ((args: Map[Char, Int]) => new FNEG(args('a'), args('b'))),
-        "110 aaa bbb 00 01001" -> ((args: Map[Char, Int]) => new CVT(args('a'), args('b'))),
-        "110 aaa bbb 00 01100" -> ((args: Map[Char, Int]) => new FINT(args('a'), args('b'))),
-        "110 aaa bbb 00 01101" -> ((args: Map[Char, Int]) => new FSQRT(args('a'), args('b'))),
-        "110 aaa bbb 00 01110" -> ((args: Map[Char, Int]) => new FABS(args('a'), args('b'))),
-        "110 aaa bbb 00 01111" -> ((args: Map[Char, Int]) => new LL(args('a'), args('b'))),
-        "110 aaa bbb 00 10000" -> ((args: Map[Char, Int]) => new SC(args('a'), args('b'))),
-        "110 aaa bbb 00 10001" -> ((args: Map[Char, Int]) => new CLZ(args('a'), args('b'))),
-        "110 aaa bbb 00 10010" -> ((args: Map[Char, Int]) => new CTZ(args('a'), args('b'))),
-        "110 aaa bbb 00 10011" -> ((args: Map[Char, Int]) => new CHK(args('a'), args('b'))),
-        "110 aaa bbb 00 10100" -> ((args: Map[Char, Int]) => new BTST(args('a'), args('b'))),
-        "110 aaa bbb 00 10101" -> ((args: Map[Char, Int]) => new BSET(args('a'), args('b'))),
-        "110 aaa bbb 00 10110" -> ((args: Map[Char, Int]) => new BCLR(args('a'), args('b'))),
-        "110 aaa bbb 00 10111" -> ((args: Map[Char, Int]) => new ROL(args('a'), args('b'))),
-        "110 aaa bbb 00 11000" -> ((args: Map[Char, Int]) => new ROR(args('a'), args('b'))),
-        "110 aaa bbb 00 11001" -> ((args: Map[Char, Int]) => new CNT(args('a'), args('b'))),
-        "110 aaa bbb 00 11010" -> ((args: Map[Char, Int]) => new REV(args('a'), args('b'))),
-        "110 aaa bbb 00 11011" -> ((args: Map[Char, Int]) => new SEXT(args('a'), args('b'))),
-        "110 aaa bbb 00 11100" -> ((args: Map[Char, Int]) => new MOV(args('a'), args('b'))),
-        "110 aaa bbb 00 11101" -> ((args: Map[Char, Int]) => new MIN(args('a'), args('b'))),
-        "110 aaa bbb 00 11110" -> ((args: Map[Char, Int]) => new MAX(args('a'), args('b'))),
-        "110 aaa bbb 00 11111" -> ((args: Map[Char, Int]) => new EXG(args('a'), args('b'))),
-        // RR 01 sub-format: two-register destructive operations (rd = rd op rb)
-        // Multi-limb multiply high + integer remainder
-        "110 aaa bbb 01 00000" -> ((args: Map[Char, Int]) => new MULH(args('a'), args('b'))),
-        "110 aaa bbb 01 01001" -> ((args: Map[Char, Int]) => new MULHU(args('a'), args('b'))),
-        "110 aaa bbb 01 01010" -> ((args: Map[Char, Int]) => new MULHSU(args('a'), args('b'))),
-        "110 aaa bbb 01 01011" -> ((args: Map[Char, Int]) => new REM(args('a'), args('b'))),
-        "110 aaa bbb 01 01100" -> ((args: Map[Char, Int]) => new REMU(args('a'), args('b'))),
-        // Single/double precision float conversion
-        "110 aaa bbb 01 10010" -> ((args: Map[Char, Int]) => new F32TOF64(args('a'), args('b'))),
-        "110 aaa bbb 01 10011" -> ((args: Map[Char, Int]) => new F64TOF32(args('a'), args('b'))),
-        // MMU instructions
-        "110 aaa bbb 01 00001" -> ((args: Map[Char, Int]) => new TLBI(args('a'), args('b'))),
-        "110 aaa bbb 01 00010" -> ((args: Map[Char, Int]) => new TLBIA(args('a'), args('b'))),
-        "110 aaa bbb 01 00011" -> ((args: Map[Char, Int]) => new SPTBR(args('a'), args('b'))),
-        "110 aaa bbb 01 00100" -> ((args: Map[Char, Int]) => new GPTBR(args('a'), args('b'))),
-        "110 aaa bbb 01 00101" -> ((args: Map[Char, Int]) => new GFAULT(args('a'), args('b'))),
-        "110 aaa bbb 01 00110" -> ((args: Map[Char, Int]) => new SASID(args('a'), args('b'))),
-        "110 aaa bbb 01 00111" -> ((args: Map[Char, Int]) => new GASID(args('a'), args('b'))),
-        "110 aaa bbb 01 01000" -> ((args: Map[Char, Int]) => new GFCAUSE(args('a'), args('b'))),
-        "110 aaa bbb 10 iiiii" -> ((args: Map[Char, Int]) => new LD(args('a'), args('b'), args('i'))),
-        "110 aaa bbb 11 iiiii" -> ((args: Map[Char, Int]) => new ST(args('a'), args('b'), args('i'))),
-        "111 000 rrr 0000000" -> ((operands: Map[Char, Int]) => new PSHB(operands('r'))),
-        "111 000 rrr 0000001" -> ((operands: Map[Char, Int]) => new POPB(operands('r'))),
-        "111 000 rrr 0000010" -> ((operands: Map[Char, Int]) => new PSHS(operands('r'))),
-        "111 000 rrr 0000011" -> ((operands: Map[Char, Int]) => new POPS(operands('r'))),
-        "111 000 rrr 0000100" -> ((operands: Map[Char, Int]) => new PSHW(operands('r'))),
-        "111 000 rrr 0000101" -> ((operands: Map[Char, Int]) => new POPW(operands('r'))),
-        "111 000 rrr 0000110" -> ((operands: Map[Char, Int]) => new PSHD(operands('r'))),
-        "111 000 rrr 0000111" -> ((operands: Map[Char, Int]) => new POPD(operands('r'))),
-        "111 000 rrr 0001000" -> ((operands: Map[Char, Int]) => new SPSR(operands('r'))),
-        "111 000 rrr 0001001" -> ((operands: Map[Char, Int]) => new GPSR(operands('r'))),
-        "111 000 000 0001010" -> (_ => RTE),
-        "111 000 000 0001011" -> (_ => FENCE),
-        "111 000 000 0001100" -> (_ => WFI),
-        "111 000 000 0001111" -> (_ => TRAPV),
-        "111 000 rrr 0001101" -> ((operands: Map[Char, Int]) => new GUSP(operands('r'))),
-        "111 000 rrr 0001110" -> ((operands: Map[Char, Int]) => new SUSP(operands('r'))),
-        "111 000 rrr 0010000; r:1-6" -> ((operands: Map[Char, Int]) => new PSHR(operands('r'))),
-        "111 000 rrr 0010001; r:1-6" -> ((operands: Map[Char, Int]) => new POPR(operands('r'))),
-        "111 000 000 0010010" -> (_ => CLI),
-        "111 000 000 0010011" -> (_ => STI),
-        "111 000 000 0010100" -> (_ => SWSP),
-        "111 000 rrr 0010101" -> ((operands: Map[Char, Int]) => new TSR(operands('r'))),
-        "101 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new ADDI(args('a'), args('b'), ext(args('i')))),
-        "100 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLS(args('a'), args('b'), ext(args('i')))),
-        "011 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BLU(args('a'), args('b'), ext(args('i')))),
-        "010 aaa bbb iiiiiii" -> ((args: Map[Char, Int]) => new BEQ(args('a'), args('b'), ext(args('i')))),
-        // 001 block: shifts, comparisons, carry, unsigned, float
-        "001 ddd aaa bbb 0000" -> ((args: Map[Char, Int]) => new ASR(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 0001" -> ((args: Map[Char, Int]) => new LSR(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 0010" -> ((args: Map[Char, Int]) => new LSL(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 0011" -> ((args: Map[Char, Int]) => new SLT(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 0100" -> ((args: Map[Char, Int]) => new SLTU(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 0101" -> ((args: Map[Char, Int]) => new ADC(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 0110" -> ((args: Map[Char, Int]) => new SBC(args('d'), args('a'), args('b'))),
-        // 001 ... 0111 — reserved
-        "001 ddd aaa bbb 1000" -> ((args: Map[Char, Int]) => new DIVU(args('d'), args('a'), args('b'))),
-        // 001 ... 1001 — reserved
-        "001 ddd aaa bbb 1010" -> ((args: Map[Char, Int]) => new FSLT(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1011" -> ((args: Map[Char, Int]) => new FADD(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new FSUB(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1101" -> ((args: Map[Char, Int]) => new FMUL(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1110" -> ((args: Map[Char, Int]) => new FDIV(args('d'), args('a'), args('b'))),
-        "001 ddd aaa bbb 1111" -> ((args: Map[Char, Int]) => new FSEQ(args('d'), args('a'), args('b'))),
-        "111 rrr 01 iiiiiiii; r:1-7" -> ((operands: Map[Char, Int]) => new AUIPC(operands('r'), operands('i'))),
-        "000 ddd aaa bbb 0000" -> ((args: Map[Char, Int]) => new LDB(args('d'), args('a'), args('b'))),
-        "000 aaa bbb ccc 0001" -> ((args: Map[Char, Int]) => new STB(args('a'), args('b'), args('c'))),
-        "000 ddd aaa bbb 0010" -> ((args: Map[Char, Int]) => new LDS(args('d'), args('a'), args('b'))),
-        "000 aaa bbb ccc 0011" -> ((args: Map[Char, Int]) => new STS(args('a'), args('b'), args('c'))),
-        "000 ddd aaa bbb 0100" -> ((args: Map[Char, Int]) => new LDW(args('d'), args('a'), args('b'))),
-        "000 aaa bbb ccc 0101" -> ((args: Map[Char, Int]) => new STW(args('a'), args('b'), args('c'))),
-        "000 ddd aaa bbb 0110" -> ((args: Map[Char, Int]) => new LDD(args('d'), args('a'), args('b'))),
-        "000 aaa bbb ccc 0111" -> ((args: Map[Char, Int]) => new STD(args('a'), args('b'), args('c'))),
-        "000 ddd aaa bbb 1000" -> ((args: Map[Char, Int]) => new ADD(args('d'), args('a'), args('b'))),
-        "000 ddd aaa bbb 1001" -> ((args: Map[Char, Int]) => new SUB(args('d'), args('a'), args('b'))),
-        "000 ddd aaa bbb 1010" -> ((args: Map[Char, Int]) => new MUL(args('d'), args('a'), args('b'))),
-        "000 ddd aaa bbb 1011" -> ((args: Map[Char, Int]) => new DIV(args('d'), args('a'), args('b'))),
-        "000 ddd aaa bbb 1100" -> ((args: Map[Char, Int]) => new CAS(args('d'), args('a'), args('b'))),
-        "000 ddd aaa bbb 1101" -> ((args: Map[Char, Int]) => new AND(args('d'), args('a'), args('b'))),
-        "000 ddd aaa bbb 1110" -> ((args: Map[Char, Int]) => new OR(args('d'), args('a'), args('b'))),
-        "000 ddd aaa bbb 1111" -> ((args: Map[Char, Int]) => new XOR(args('d'), args('a'), args('b'))),
-      ),
-    )
-
-  def ext(imm7: Int): Int = if (imm7 & 0x40) != 0 then imm7 | 0xffffff80 else imm7
-
-  def generate(pattern: String) =
+  /** Enumerate all (idx, operand-map) pairs matching a bit-pattern string.
+    * Patterns are space-separated bits ("000", "abc", "iiiiiiii") with optional
+    * range constraints ("r:1-7"). See the original generator below for details. */
+  protected def generate(pattern: String): List[(Int, Map[Char, Int])] =
     case class Variable(v: Char, lower: Int, upper: Int, bits: List[Int])
 
     val Range = "([a-zA-Z]):([0-9]+)-([0-9]+)".r
@@ -694,3 +581,239 @@ object Decode:
       Map(),
     )
     enumeration.toList
+
+  /** Build the full TRISC decode table. Override in a subclass to install a
+    * subset (and any subclass-specific overrides). */
+  protected def buildInstructionTable(): Unit =
+    populateRI()
+    populateAuipc()
+    populateBranchesAndAddi()
+    populateRRRBlock0Shared()
+    populateRRRBlock0Wide()
+    populateRRRBlock0Atomic()
+    populateRRRBlock1Shared()
+    populateRRRBlock1Float()
+    populateRRBlock00Shared()
+    populateRRBlock00WideExt()
+    populateRRBlock00Float()
+    populateRRBlock00Atomic()
+    populateRRBlock01Shared()
+    populateRRBlock01FloatConv()
+    populateRRBlock01Mmu()
+    populateRRLoadStore()
+    populateRPushPopShared()
+    populateRPushPopWide()
+    populateRPSRShared()
+    populateRRte()
+    populateRFenceTrapv()
+    populateRWfi()
+    populateRStackSwap()
+    populateRPshrPopr()
+    populateRInterruptCtrl()
+    populateRTimer()
+    populateTraps()
+
+  // ----- Shared chunks (TRISC16 inherits these unchanged) -----------------
+
+  /** RI: ldi, sli, sti — 8-bit immediate ops with identical TRISC/TRISC16 semantics. */
+  protected def populateRI(): Unit =
+    populate("111 rrr 00 iiiiiiii; r:1-7", a => new LDI(a('r'), a('i')))
+    populate("111 rrr 10 iiiiiiii; r:1-7", a => new SLI(a('r'), a('i')))
+    populate("111 rrr 11 iiiiiiii; r:1-7", a => new STI(a('r'), a('i')))
+
+  /** RI auipc — same encoding on both, but the result depends on `cpu.auipcOffset`
+    * (a CPU seam — TRISC scales by 256, TRISC16 by 2). The decoder is shared. */
+  protected def populateAuipc(): Unit =
+    populate("111 rrr 01 iiiiiiii; r:1-7", a => new AUIPC(a('r'), a('i')))
+
+  /** RRI: beq, blu, bls, addi — same on TRISC16. */
+  protected def populateBranchesAndAddi(): Unit =
+    populate("010 aaa bbb iiiiiii", a => new BEQ(a('a'), a('b'), ext(a('i'))))
+    populate("011 aaa bbb iiiiiii", a => new BLU(a('a'), a('b'), ext(a('i'))))
+    populate("100 aaa bbb iiiiiii", a => new BLS(a('a'), a('b'), ext(a('i'))))
+    populate("101 aaa bbb iiiiiii", a => new ADDI(a('a'), a('b'), ext(a('i'))))
+
+  /** RRR Block 0 — load/store/arith shared with TRISC16:
+    * ldb, stb, lds, sts, add, sub, mul, div, and, or, xor. */
+  protected def populateRRRBlock0Shared(): Unit =
+    populate("000 ddd aaa bbb 0000", a => new LDB(a('d'), a('a'), a('b')))
+    populate("000 aaa bbb ccc 0001", a => new STB(a('a'), a('b'), a('c')))
+    populate("000 ddd aaa bbb 0010", a => new LDS(a('d'), a('a'), a('b')))
+    populate("000 aaa bbb ccc 0011", a => new STS(a('a'), a('b'), a('c')))
+    populate("000 ddd aaa bbb 1000", a => new ADD(a('d'), a('a'), a('b')))
+    populate("000 ddd aaa bbb 1001", a => new SUB(a('d'), a('a'), a('b')))
+    populate("000 ddd aaa bbb 1010", a => new MUL(a('d'), a('a'), a('b')))
+    populate("000 ddd aaa bbb 1011", a => new DIV(a('d'), a('a'), a('b')))
+    populate("000 ddd aaa bbb 1101", a => new AND(a('d'), a('a'), a('b')))
+    populate("000 ddd aaa bbb 1110", a => new OR(a('d'), a('a'), a('b')))
+    populate("000 ddd aaa bbb 1111", a => new XOR(a('d'), a('a'), a('b')))
+
+  /** RRR Block 1 shifts/compares shared with TRISC16. */
+  protected def populateRRRBlock1Shared(): Unit =
+    populate("001 ddd aaa bbb 0000", a => new ASR(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 0001", a => new LSR(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 0010", a => new LSL(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 0011", a => new SLT(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 0100", a => new SLTU(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 0101", a => new ADC(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 0110", a => new SBC(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 1000", a => new DIVU(a('d'), a('a'), a('b')))
+
+  /** RR Block 00 unary/binary register ops shared with TRISC16. */
+  protected def populateRRBlock00Shared(): Unit =
+    populate("110 aaa bbb 00 00000; b:1-7", a => new JALR(a('a'), a('b')))
+    populate("110 000 000 00 00000", _ => HALT)
+    populate("110 aaa bbb 00 00001", a => new ZEB(a('a'), a('b')))
+    populate("110 aaa bbb 00 00100", a => new SEB(a('a'), a('b')))
+    populate("110 aaa bbb 00 00111", a => new NEG(a('a'), a('b')))
+    populate("110 aaa bbb 00 01000", a => new NOT(a('a'), a('b')))
+    populate("110 aaa bbb 00 10001", a => new CLZ(a('a'), a('b')))
+    populate("110 aaa bbb 00 10010", a => new CTZ(a('a'), a('b')))
+    populate("110 aaa bbb 00 10011", a => new CHK(a('a'), a('b')))
+    populate("110 aaa bbb 00 10100", a => new BTST(a('a'), a('b')))
+    populate("110 aaa bbb 00 10101", a => new BSET(a('a'), a('b')))
+    populate("110 aaa bbb 00 10110", a => new BCLR(a('a'), a('b')))
+    populate("110 aaa bbb 00 10111", a => new ROL(a('a'), a('b')))
+    populate("110 aaa bbb 00 11000", a => new ROR(a('a'), a('b')))
+    populate("110 aaa bbb 00 11001", a => new CNT(a('a'), a('b')))
+    populate("110 aaa bbb 00 11010", a => new REV(a('a'), a('b')))
+    populate("110 aaa bbb 00 11011", a => new SEXT(a('a'), a('b')))
+    populate("110 aaa bbb 00 11100", a => new MOV(a('a'), a('b')))
+    populate("110 aaa bbb 00 11101", a => new MIN(a('a'), a('b')))
+    populate("110 aaa bbb 00 11110", a => new MAX(a('a'), a('b')))
+    populate("110 aaa bbb 00 11111", a => new EXG(a('a'), a('b')))
+
+  /** RR Block 01 multiply-high + remainder — shared with TRISC16
+    * (16-bit destructive ra = high16(...) etc. via writeMask). */
+  protected def populateRRBlock01Shared(): Unit =
+    populate("110 aaa bbb 01 00000", a => new MULH(a('a'), a('b')))
+    populate("110 aaa bbb 01 01001", a => new MULHU(a('a'), a('b')))
+    populate("110 aaa bbb 01 01010", a => new MULHSU(a('a'), a('b')))
+    populate("110 aaa bbb 01 01011", a => new REM(a('a'), a('b')))
+    populate("110 aaa bbb 01 01100", a => new REMU(a('a'), a('b')))
+
+  /** RR ld/st with 5-bit immediate — same encoding on both; size and scaling
+    * via the `ldRead`/`stWrite`/`auipcOffset` CPU seams. */
+  protected def populateRRLoadStore(): Unit =
+    populate("110 aaa bbb 10 iiiii", a => new LD(a('a'), a('b'), a('i')))
+    populate("110 aaa bbb 11 iiiii", a => new ST(a('a'), a('b'), a('i')))
+
+  /** R format byte/short push/pop — shared. */
+  protected def populateRPushPopShared(): Unit =
+    populate("111 000 rrr 0000000", o => new PSHB(o('r')))
+    populate("111 000 rrr 0000001", o => new POPB(o('r')))
+    populate("111 000 rrr 0000010", o => new PSHS(o('r')))
+    populate("111 000 rrr 0000011", o => new POPS(o('r')))
+
+  /** R format spsr/gpsr — shared. spsr gates on Status.Mode internally,
+    * which TRISC16 keeps set, so the same class works on both. */
+  protected def populateRPSRShared(): Unit =
+    populate("111 000 rrr 0001000", o => new SPSR(o('r')))
+    populate("111 000 rrr 0001001", o => new GPSR(o('r')))
+
+  /** R format fence/trapv — shared. */
+  protected def populateRFenceTrapv(): Unit =
+    populate("111 000 000 0001011", _ => FENCE)
+    populate("111 000 000 0001111", _ => TRAPV)
+
+  /** Software traps — same encoding on both. */
+  protected def populateTraps(): Unit =
+    populate("111 000 rrr 0011 iii", o => new TRAP(o('i')))
+
+  // ----- TRISC-only chunks (Trisc16Decode does not call these) -------------
+
+  /** RRR Block 0 wide load/store: ldw/stw (32-bit), ldd/std (64-bit). */
+  protected def populateRRRBlock0Wide(): Unit =
+    populate("000 ddd aaa bbb 0100", a => new LDW(a('d'), a('a'), a('b')))
+    populate("000 aaa bbb ccc 0101", a => new STW(a('a'), a('b'), a('c')))
+    populate("000 ddd aaa bbb 0110", a => new LDD(a('d'), a('a'), a('b')))
+    populate("000 aaa bbb ccc 0111", a => new STD(a('a'), a('b'), a('c')))
+
+  /** RRR Block 0 atomic compare-and-swap. */
+  protected def populateRRRBlock0Atomic(): Unit =
+    populate("000 ddd aaa bbb 1100", a => new CAS(a('d'), a('a'), a('b')))
+
+  /** RRR Block 1 floating-point arithmetic. */
+  protected def populateRRRBlock1Float(): Unit =
+    populate("001 ddd aaa bbb 1010", a => new FSLT(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 1011", a => new FADD(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 1100", a => new FSUB(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 1101", a => new FMUL(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 1110", a => new FDIV(a('d'), a('a'), a('b')))
+    populate("001 ddd aaa bbb 1111", a => new FSEQ(a('d'), a('a'), a('b')))
+
+  /** RR Block 00 wider zero/sign extends (32/16-bit zes/zew/ses/sew). */
+  protected def populateRRBlock00WideExt(): Unit =
+    populate("110 aaa bbb 00 00010", a => new ZES(a('a'), a('b')))
+    populate("110 aaa bbb 00 00011", a => new ZEW(a('a'), a('b')))
+    populate("110 aaa bbb 00 00101", a => new SES(a('a'), a('b')))
+    populate("110 aaa bbb 00 00110", a => new SEW(a('a'), a('b')))
+
+  /** RR Block 00 floating-point unary ops. */
+  protected def populateRRBlock00Float(): Unit =
+    populate("110 aaa bbb 00 01001", a => new CVT(a('a'), a('b')))
+    populate("110 aaa bbb 00 01010", a => new FNEG(a('a'), a('b')))
+    populate("110 aaa bbb 00 01100", a => new FINT(a('a'), a('b')))
+    populate("110 aaa bbb 00 01101", a => new FSQRT(a('a'), a('b')))
+    populate("110 aaa bbb 00 01110", a => new FABS(a('a'), a('b')))
+
+  /** RR Block 00 LL/SC atomic primitives. */
+  protected def populateRRBlock00Atomic(): Unit =
+    populate("110 aaa bbb 00 01111", a => new LL(a('a'), a('b')))
+    populate("110 aaa bbb 00 10000", a => new SC(a('a'), a('b')))
+
+  /** RR Block 01 single↔double conversion. */
+  protected def populateRRBlock01FloatConv(): Unit =
+    populate("110 aaa bbb 01 10010", a => new F32TOF64(a('a'), a('b')))
+    populate("110 aaa bbb 01 10011", a => new F64TOF32(a('a'), a('b')))
+
+  /** RR Block 01 MMU instructions. */
+  protected def populateRRBlock01Mmu(): Unit =
+    populate("110 aaa bbb 01 00001", a => new TLBI(a('a'), a('b')))
+    populate("110 aaa bbb 01 00010", a => new TLBIA(a('a'), a('b')))
+    populate("110 aaa bbb 01 00011", a => new SPTBR(a('a'), a('b')))
+    populate("110 aaa bbb 01 00100", a => new GPTBR(a('a'), a('b')))
+    populate("110 aaa bbb 01 00101", a => new GFAULT(a('a'), a('b')))
+    populate("110 aaa bbb 01 00110", a => new SASID(a('a'), a('b')))
+    populate("110 aaa bbb 01 00111", a => new GASID(a('a'), a('b')))
+    populate("110 aaa bbb 01 01000", a => new GFCAUSE(a('a'), a('b')))
+
+  /** R format word/double push/pop — TRISC-only (TRISC16 has no 32/64-bit type). */
+  protected def populateRPushPopWide(): Unit =
+    populate("111 000 rrr 0000100", o => new PSHW(o('r')))
+    populate("111 000 rrr 0000101", o => new POPW(o('r')))
+    populate("111 000 rrr 0000110", o => new PSHD(o('r')))
+    populate("111 000 rrr 0000111", o => new POPD(o('r')))
+
+  /** RTE — TRISC's stack-popping version. TRISC16 overrides with `Trisc16RTE`. */
+  protected def populateRRte(): Unit =
+    populate("111 000 000 0001010", _ => RTE)
+
+  /** wfi — supervisor, TRISC-only. TRISC16 reuses this slot for `gepc`. */
+  protected def populateRWfi(): Unit =
+    populate("111 000 000 0001100", _ => WFI)
+
+  /** gusp/susp — TRISC-only USP access. TRISC16 reuses `0001101` for `gcause`. */
+  protected def populateRStackSwap(): Unit =
+    populate("111 000 rrr 0001101", o => new GUSP(o('r')))
+    populate("111 000 rrr 0001110", o => new SUSP(o('r')))
+
+  /** R format pshr/popr — TRISC's 8-byte-per-register variant. TRISC16
+    * overrides with 2-byte versions. */
+  protected def populateRPshrPopr(): Unit =
+    populate("111 000 rrr 0010000; r:1-6", o => new PSHR(o('r')))
+    populate("111 000 rrr 0010001; r:1-6", o => new POPR(o('r')))
+
+  /** cli/sti/swsp — supervisor interrupt + stack-pointer-swap, TRISC-only. */
+  protected def populateRInterruptCtrl(): Unit =
+    populate("111 000 000 0010010", _ => CLI)
+    populate("111 000 000 0010011", _ => STI)
+    populate("111 000 000 0010100", _ => SWSP)
+
+  /** tsr — read cycle counter, TRISC-only. */
+  protected def populateRTimer(): Unit =
+    populate("111 000 rrr 0010101", o => new TSR(o('r')))
+
+/** Singleton TRISC decoder. The full instruction table is built by the parent
+  * `class Decode` constructor. */
+object Decode extends Decode

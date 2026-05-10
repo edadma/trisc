@@ -85,6 +85,11 @@ case class TraitDeclAST(
      *  list is populated and validated, but bounds carry no enforcement yet. */
     assocTypes: List[AssocTypeDeclAST] = Nil,
     typeParamDefaults: Map[String, TypeAST] = Map.empty,
+    /** Trait bounds on the trait's own type parameters, e.g.
+     *  `trait Container[T: Ord + Eq]`. Each bound is a trait name; enforced at
+     *  impl registration time (each impl target type must satisfy the trait's
+     *  declared bounds). */
+    typeBounds: Map[String, List[String]] = Map.empty,
 ) extends DeclAST
 case class TraitMethodAST(
     name: String,
@@ -104,6 +109,11 @@ case class ImplDeclAST(
     /** Associated-type bindings declared inside the impl, e.g. `type Item = i64`. */
     assocBindings: List[AssocTypeBindingAST] = Nil,
     typeParamDefaults: Map[String, TypeAST] = Map.empty,
+    /** Trait bounds on the impl's own type parameters, e.g.
+     *  `impl[T: Ord] Get[Box[T]]`. Each bound is a trait name; enforced at
+     *  `instantiateImpl` time when the impl is selected for a concrete type
+     *  substitution. */
+    typeBounds: Map[String, List[String]] = Map.empty,
 ) extends DeclAST
 /** `type Name = ConcreteType` inside an impl body. */
 case class AssocTypeBindingAST(name: String, target: TypeAST) extends Positional
@@ -111,7 +121,7 @@ case class AssocTypeBindingAST(name: String, target: TypeAST) extends Positional
 // Carries type-params (from the optional `[...]`), the receiver param, and the
 // inner method declarations. Lowering happens in the analyzer, not the parser,
 // so the receiver TypeAST shape stays available for generic dispatch.
-case class ExtensionDeclAST(typeParams: List[String], receiver: ParamAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty) extends DeclAST
+case class ExtensionDeclAST(typeParams: List[String], receiver: ParamAST, methods: List[FunDeclAST], attributes: List[Attribute] = Nil, typeParamDefaults: Map[String, TypeAST] = Map.empty, typeBounds: Map[String, List[String]] = Map.empty) extends DeclAST
 case class InterfaceDeclAST(name: String, methods: List[InterfaceMethodAST], embedded: List[String], attributes: List[Attribute] = Nil) extends DeclAST
 case class InterfaceMethodAST(name: String, params: List[ParamAST], returnType: TypeAST, effects: FuncEffects = FuncEffects.Unknown) extends Positional
 case class CondDeclAST(cond: CondExpr, thenDecls: List[DeclAST], elseDecls: Option[List[DeclAST]]) extends DeclAST

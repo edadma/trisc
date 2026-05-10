@@ -489,6 +489,17 @@ combined with `new` (the `within`/`where` clause is what's
 unsupported). Use a plain (non-generic) type declaration when you
 want a constrained type.
 
+**Bounds and defaults.** Type parameters carry trait bounds and defaults
+exactly like generic functions, structs, and enums:
+
+```sysl
+type Cmp[T: Ord]                  = (T, T) -> int
+type Cache[K: Hash, V = string]   = ...
+```
+
+The bound is enforced at each instantiation site; defaults fill in when
+the argument is missing.
+
 ### Type Attributes (`T::Attr`)
 
 Range-constrained types and simple enums expose their metadata through `::`-suffixed
@@ -1410,6 +1421,10 @@ main() -> int
 - Each `(enum, type-args)` pair produces one monomorphized `EnumType` with a
   mangled name (e.g. `Option_i32`, `Result_i32_string`).
 - Pattern matching uses the scrutinee's concrete enum type to look up variants.
+- Type parameters may carry trait bounds and defaults exactly like generic
+  functions and structs: `enum Box[T: Ord = int]`. The bound is enforced at
+  instantiation; variant field types may use associated-type projections
+  (`Some(v: T::Token)`).
 
 **Type inference:** variant constructors prefer to infer type args from
 argument types (`Some(42)` infers `T=int`). When a variant doesn't pin all
@@ -1519,11 +1534,41 @@ projection resolves via the bound trait's matching impl. Generic struct
 fields may also use projections: `struct Wrap[T: Reader] { x: T::Token }`.
 
 Bounds declared on assoc types (`type Index: Eq + Ord`) are enforced at
-impl-registration time — the impl's binding type must satisfy each bound.
+impl-registration time for concrete impls — the impl's binding type must
+satisfy each bound. For generic impls whose binding target references an
+impl tvar (`impl[T] Reader[Box[T]] { type Token = T }`), the bound check
+defers to dispatch time, when the substitution `T -> ConcreteType` is
+known. The same diagnostic shape is reused; the message reads
+"generic impl … binds 'type Token = …' (under substitution), which does
+not satisfy bound …".
+
 When a generic-fn type parameter has multiple bounds (`T: A + B`) and both
 declare the same assoc name with different resolutions, the projection is
 rejected as ambiguous; identical bindings (same name, same resolved type) are
 allowed.
+
+**Bounds on trait, impl, and extension type-parameters.** The same
+`T: Trait + Trait` syntax that works on generic functions and generic
+struct/enum/type-alias declarations also works on trait, `impl`, and
+`extension` headers:
+
+```sysl
+trait Container[T: Ord]                      // enforced at every impl
+    head(c: T) -> T
+
+impl[T: Ord] Container[Box[T]]               // enforced at dispatch when T pins
+    head(c: Box[T]) -> Box[T] = c
+
+extension[T: Ord] (b: Box[T])                // enforced at every method call
+    def head() -> int = 0
+```
+
+`trait` bounds are checked at impl-registration time: each impl target type
+must satisfy each declared bound. `impl` and `extension` bounds are checked
+at dispatch time, when the impl/extension is selected for a concrete type
+substitution. Bounds on the trait's own params are also checked at dispatch
+when the impl is generic — the resolved target patterns under the impl's
+substitution must satisfy the trait's declared bounds.
 
 ### Operator Overloading via Traits
 
@@ -2228,10 +2273,52 @@ same as an anonymous lambda; the self-cell is only allocated when needed.
 need the binding's type to resolve, and inference would require a two-pass
 analysis. Top-level functions still allow inferred return types.
 
-**Restrictions:** no type parameters, no return-type inference, no mutual
-recursion (`def f` then `def g` calling each other would need both names
-pre-bound before either body is analyzed). Contracts (`require`/`ensure`) parse
-but are currently ignored on inner defs.
+**Restrictions:** no type parameters, no return-type inference.
+
+**Contracts on inner defs are supported** when the def captures no
+outer-scope variables. `require`/`ensure` clauses on inner defs are
+syntactically the same as on top-level fns, and are wired through the same
+`TContractCheck` lowering — the analyzer lifts contract-bearing inner defs
+to top-level synthesized fns where the contract-aware analysis path runs:
+
+```sysl
+outer() -> int
+    def squared(n: int) -> int
+        require n >= 0
+        ensure result >= 0
+        n * n
+    squared(7)
+```
+
+If a contract-bearing inner def captures an outer-scope variable, the lift
+cannot preserve those captures and the analyzer rejects with a clear
+"promote to top-level fn" diagnostic. Promote to a top-level `fn` (where
+contracts and captures both work) or refactor to pass the captured value
+as an extra parameter.
+
+**Mutual recursion is supported** when the cluster of cross-referencing
+inner defs captures no outer-scope variables. The analyzer pre-binds every
+sibling inner-def name in a block before analyzing any body, so forward
+references type-check, then lifts the connected cluster to top-level
+synthesized fns so capture-by-value semantics don't read garbage at runtime:
+
+```sysl
+main() -> int
+    def is_even(n: int) -> bool
+        if n == 0 then true
+        else is_odd(n - 1)
+    def is_odd(n: int) -> bool
+        if n == 0 then false
+        else is_even(n - 1)
+    if is_even(10) then 1 else 0
+```
+
+Two-way, three-way, and forward-only sibling chains all work. A single
+self-recursive inner def with no sibling references is **not** lifted — it
+keeps the existing closure path with self-reference. If a cluster member
+captures any outer-scope variable, the analyzer rejects it with a clear
+"promote to top-level fn" diagnostic; the lift cannot preserve those
+captures, and silently dropping them would be a footgun.
 
 Implemented across all four backends (interpreter, LLVM, SVM, TRISC).
 
@@ -2278,6 +2365,32 @@ true, false           // bool
 100u32                // u32
 0xFFu64               // u64
 ```
+
+**Literal overflow is a compile-time error.** A bare integer literal that does
+not fit in the type it's being assigned/coerced to produces a hard error rather
+than a silent truncation. The check covers both positive and negative
+out-of-range values — a unary minus on a literal is constant-folded before the
+range check fires:
+
+```sysl
+var x: u8 = 256       // error: literal 256 does not fit in u8 (range 0..255)
+var y: i8 = 200       // error: literal 200 does not fit in i8 (range -128..127)
+var z: int = 0xFFFF_FFFF
+                      // error: literal 4294967295 does not fit in int (range -2147483648..2147483647)
+var n: u8 = -1        // error: literal -1 does not fit in u8 (range 0..255)
+var m: i8 = -129      // error: literal -129 does not fit in i8 (range -128..127)
+```
+
+If truncation or bit-pattern reinterpretation is intended, write the cast
+explicitly:
+
+```sysl
+var x: u8 = u8(256)   // ok — wraps to 0; intent is clear
+var n: u8 = u8(-1)    // ok — bit-pattern reinterpretation, yields 255
+```
+
+Negative literals into signed types within range are accepted as written
+(`var x: i8 = -1`, `var y: int = -2147483648` are both fine).
 
 Float literals (`3.14`, `1e5`) default to `f64`, but coerce to `f32` when the
 context demands it (`var x: f32 = 1.5` works without a cast). Mixed-width float
@@ -2467,6 +2580,10 @@ else
 ```
 
 Desugars to `match` at parse time — no new analyzer or runtime machinery.
+A no-`else` `if-is` (`if x is Some(v) then body`) supplies an empty default,
+matching the behaviour of plain `if cond then body` — exhaustiveness is
+satisfied automatically and unmatched values are skipped silently. To
+recover a value from the no-match path, write the `else` arm explicitly.
 
 ---
 

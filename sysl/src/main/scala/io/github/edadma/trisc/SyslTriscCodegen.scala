@@ -14,6 +14,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   private var needsFreeExtern = false // set when codegen emits free references
   private var needsStrInt = false // set when codegen needs __str_int helper
   private var needsStrFloat = false // set when codegen needs __str_float helper
+  private var needsStrFmtI64 = false // set when codegen needs __str_fmt_i64 helper (f"..." on i64)
 
   private def newLabel(prefix: String): String =
     labelCounter += 1
@@ -150,6 +151,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
     needsStrInt = false
     needsStrFloat = false
+    needsStrFmtI64 = false
     globalConstants.clear()
     itables.clear()
 
@@ -249,6 +251,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
     // Emit __str_float helper if needed (float to string conversion)
     if needsStrFloat then emitStrFloatHelper()
+
+    // Emit __str_fmt_i64 helper if needed (formatted integer interpolation, audit #14)
+    if needsStrFmtI64 then emitStrFmtI64Helper()
 
     // Pre-walk dataGlobals to intern any string-literal initializers (scalar or
     // array elements). This must run before rodata emission so the bodies land
@@ -2914,9 +2919,22 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         if n >= 0 && n <= 255 then
           emit(s"  ldi r1, $n")
         else if n >= Int.MinValue && n <= 0xFFFFFFFFL then
-          // movi handles 0..0xFFFFFFFF; negative i32 values are sign-extended to unsigned
-          val unsigned = if n < 0 then n & 0xFFFFFFFFL else n
-          emit(s"  movi r1, $unsigned")
+          // movi takes a 32-bit unsigned immediate and writes it zero-extended
+          // to the 64-bit register. For NEGATIVE i32 literals we mask to the low
+          // 32 bits to fit movi, then `sew` (sign-extend word) to recover the
+          // full 64-bit signed value. Without the sew, `var x: int = -3` lands
+          // in r1 as `0x00000000FFFFFFFD` instead of `0xFFFFFFFFFFFFFFFD`, and
+          // any 64-bit-wide compare (e.g. `result == x + x` inside an `ensure`,
+          // where `result` was loaded via `ldw` which DOES sign-extend) reads
+          // the two operands as unequal and traps. Non-negative values in
+          // 0..0xFFFFFFFF skip the sew — that range covers both unsigned u32
+          // values up to 0xFFFFFFFF and positive i32 values (high bit clear),
+          // both of which want the zero-extended representation movi gives.
+          if n < 0 then
+            emit(s"  movi r1, ${n & 0xFFFFFFFFL}")
+            emit("  sew r1, r1")
+          else
+            emit(s"  movi r1, $n")
         else
           emit(s"  ldc r1, $n")
 
@@ -4667,6 +4685,85 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         stackOffset += 8
         // r1 = address of return slot (which now contains {ptr, len})
         emit("  mov r1, r7")
+
+      case TFmtStr(inner, spec) =>
+        // Lower formatted-string interpolations to a runtime helper. For
+        // integer verbs we route through __str_fmt_i64 with the appropriate
+        // base/width/flag bits — this matches SVM's __svm_str_fmt_i64
+        // (audit item #14). For %s we just pass the string through (padded
+        // string verbs aren't implemented yet on any backend; matches LLVM/SVM
+        // behavior). Anything else degrades to plain TStr semantics.
+        val verb = spec.verb
+        verb match
+          case 'd' | 'x' | 'X' | 'o' | 'b' if inner.typ.isIntegral =>
+            // Allocate 16-byte return slot for the result string struct
+            emitAddImm(7, 7, -16)
+            stackOffset -= 16
+            emit("  std r0, r7, r0")
+            emitAddImm(2, 7, 8)
+            emit("  std r0, r2, r0")
+
+            // Evaluate value into r1
+            genExpr(inner) // r1 = value (integer bits)
+            // Widen narrow ints to i64 for the runtime helper. Mirrors SVM
+            // logic: signed types sext via shl/sar pair, unsigned mask off
+            // the high bits.
+            val t = inner.typ.underlying
+            if t.bitWidth < 64 then
+              if t.isSigned then
+                emit(s"  sext r1, r1") // sign-extend any narrow int up to 64 bits
+              else
+                t.bitWidth match
+                  case 8  => emit("  zeb r1, r1")
+                  case 16 => emit("  zes r1, r1")
+                  case 32 => emit("  zew r1, r1")
+                  case _ => ()
+
+            // Compute flag bits up-front (compile-time constants).
+            var flags = 0
+            if spec.zeroPad then flags |= 0x1
+            if spec.leftAlign then flags |= 0x2
+            if spec.showSign then flags |= 0x4
+            if spec.upperCase || verb == 'X' then flags |= 0x8
+            val base = verb match
+              case 'd'       => 10
+              case 'x' | 'X' => 16
+              case 'o'       => 8
+              case 'b'       => 2
+              case _         => 10
+
+            // Push stack args right-to-left so the callee sees:
+            //   [fp+24] = n, [fp+32] = base, [fp+40] = width, [fp+48] = flags
+            // r1 currently holds n; preserve it while loading the constants
+            // through r2.
+            emitLoadImm(2, flags);      emit("  pshd r2"); stackOffset -= 8 // flags  → [fp+48]
+            emitLoadImm(2, spec.width); emit("  pshd r2"); stackOffset -= 8 // width  → [fp+40]
+            emitLoadImm(2, base);       emit("  pshd r2"); stackOffset -= 8 // base   → [fp+32]
+            emit("  pshd r1");          stackOffset -= 8                    // n      → [fp+24]
+
+            // r1 = address of pre-allocated return slot (which sits at sp+32 — past 4 stack args).
+            emitAddImm(1, 7, 32)
+            val mpf = if modulePrefix.nonEmpty then s"_$modulePrefix" else ""
+            emit(s"  movi r4, __str_fmt_i64$mpf")
+            emit("  jalr r6, r4")
+            // Clean up 4 stack args (32 bytes)
+            emitAddImm(7, 7, 32)
+            stackOffset += 32
+            // r1 = return slot address
+            emit("  mov r1, r7")
+            needsStrFmtI64 = true
+            needsAllocExtern = true
+
+          case 's' if inner.typ.underlying == SyslType.StringType =>
+            // Pass-through. Width/pad on string verbs isn't implemented
+            // anywhere yet — matches SVM/LLVM behavior.
+            genExpr(inner)
+
+          case _ =>
+            // Any other shape (bool with %d, etc.) — fall back to plain TStr
+            // semantics. This is a lossy fallback: width/pad flags get dropped.
+            // Matches SVM precedent.
+            genExpr(TStr(inner))
 
       case TQuantifier(kind, name, nameType, lo, hi, inclusive, pred, _) =>
         // Lower `for all/some x in lo..hi => P(x)` as a short-circuiting counted loop
@@ -6473,6 +6570,292 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     emit("  popd r6")
     emitAddImm(7, 7, 8)            // skip 1 reg param
     emit("  jalr r0, r6")
+
+  /** Emit the `__str_fmt_i64` helper used to lower formatted integer
+   *  interpolations (`f"{n}%d"`, `f"{n}%x"`, etc.) on the TRISC backend.
+   *
+   *  Mirrors SVM's `__svm_str_fmt_i64` (see `SVMRuntime.scala:604–890`).
+   *  Audit item #14 — closes the last gap in the cross-backend f-string
+   *  story. Without this the TRISC `genExpr` would throw on any `TFmtStr`.
+   *
+   *  ABI:
+   *    r1 = hidden return slot ptr (16 bytes for the {ptr, len} struct)
+   *    Stack args (pushed right-to-left at call site):
+   *      [fp+24] = n       (i64; magnitude when base == 10 && n < 0)
+   *      [fp+32] = base    (i64: 2, 8, 10, or 16)
+   *      [fp+40] = width   (i64; 0 means no padding)
+   *      [fp+48] = flags   (i64 bitmask):
+   *                  0x1 = zero-pad   (right-aligned with '0' fill)
+   *                  0x2 = left-align (with space fill — overrides zero-pad)
+   *                  0x4 = show-sign  (always emit '+' for non-negatives, base 10 only)
+   *                  0x8 = upper-case (hex digits A–F instead of a–f)
+   *
+   *  Returns: writes {ptr, len} into the return slot; r1 = return slot.
+   */
+  private def emitStrFmtI64Helper(): Unit =
+    val mp = if modulePrefix.nonEmpty then s"_$modulePrefix" else ""
+    emit(s"# helper: __str_fmt_i64$mp(n: i64, base: i64, width: i64, flags: i64) -> string")
+    emit(s"global __str_fmt_i64$mp, func, 1 i64 i64 i64 i64 i64")
+    emit(s"__str_fmt_i64$mp:")
+    // Pre-prologue: save hidden return ptr (passed in r1)
+    emit("  pshd r1")
+    // Prologue
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // Locals (104 bytes):
+    //   [fp-8]   is_neg     (i64: 0 or 1)
+    //   [fp-16]  digit_count (i64)
+    //   [fp-24]  sign_char  (i64: 0, '-' = 45, or '+' = 43)
+    //   [fp-32]  pad_count  (i64)
+    //   [fp-40]  final_len  (i64; total length including sign + padding)
+    //   [fp-104] digit_buffer[64]  (digits stored LSB-first; i64 in binary needs 64 bytes)
+    emitAddImm(7, 7, -104)
+
+    // Use unique labels per emitStrFmtI64Helper invocation (only invoked once
+    // per program, so plain newLabel is enough; mirrors __str_int).
+    val checkSign = newLabel("fmt_check_sign")
+    val saveNeg   = newLabel("fmt_save_neg")
+    val pos       = newLabel("fmt_pos")
+    val zeroCase  = newLabel("fmt_zero")
+    val loop      = newLabel("fmt_loop")
+    val letter    = newLabel("fmt_letter")
+    val lower     = newLabel("fmt_lower")
+    val store     = newLabel("fmt_store")
+    val done      = newLabel("fmt_done")
+    val signPlus  = newLabel("fmt_sign_check_plus")
+    val signDone  = newLabel("fmt_sign_done")
+    val padOk     = newLabel("fmt_pad_ok")
+    val allocOk   = newLabel("fmt_alloc_ok")
+    val laMode    = newLabel("fmt_la_mode")
+    val zpMode    = newLabel("fmt_zp_mode")
+    val finish    = newLabel("fmt_finish")
+
+    // ── Step 1: compute is_neg = (base == 10) && (n < 0).  For non-decimal
+    //    bases we treat n as unsigned (no sign char).
+    emitAddImm(2, 5, 32); emit("  ldd r2, r2, r0")    // r2 = base
+    emit("  ldi r3, 10")
+    emit(s"  beq r2, r3, $checkSign")
+    emit("  ldi r2, 0")
+    emit(s"  bra $saveNeg")
+    emit(s"$checkSign")
+    emitAddImm(2, 5, 24); emit("  ldd r2, r2, r0")    // r2 = n
+    emit("  slt r2, r2, r0")                          // r2 = 1 if n < 0
+    emit(s"$saveNeg")
+    emitAddImm(3, 5, -8); emit("  std r2, r3, r0")    // is_neg = r2
+
+    // ── Step 2: u = is_neg ? -n : n (in r1).  For non-decimal r1 = n unchanged.
+    emitAddImm(1, 5, 24); emit("  ldd r1, r1, r0")    // r1 = n
+    emit(s"  beq r2, r0, $pos")
+    emit("  neg r1, r1")                              // u = -n
+    emit(s"$pos")
+
+    // ── Step 3: extract digits from u (in r1) into digit_buffer.
+    //    Digits are stored LSB-first; we'll reverse at write time.
+    emit("  ldi r3, 0")                               // r3 = digit_count
+    emit(s"  bne r1, r0, $loop")                      // u != 0 → loop
+    // Special case: u == 0 → store '0', digit_count = 1
+    emitAddImm(4, 5, -104); emit("  ldi r2, 48")
+    emit("  stb r2, r4, r0")
+    emit("  ldi r3, 1")
+    emit(s"  bra $done")
+
+    emit(s"$loop")
+    emit(s"  beq r1, r0, $done")
+    // Save digit_count to [fp-16] across the divmod (clobbers r3)
+    emitAddImm(4, 5, -16); emit("  std r3, r4, r0")
+    emitAddImm(4, 5, 32); emit("  ldd r3, r4, r0")    // r3 = base
+    emit("  mov r2, r1")                              // r2 = u
+    emit("  remu r2, r3")                             // r2 = u % base (digit value 0..base-1)
+    emit("  divu r1, r1, r3")                         // r1 = u / base (unsigned: handles non-decimal)
+    // Convert digit value → ASCII.
+    //   digit < 10 → '0' + digit
+    //   else: subtract 10, add 'A' (uppercase) or 'a' (lowercase)
+    emit("  ldi r3, 10")
+    emit("  slt r3, r2, r3")                          // r3 = 1 if digit < 10
+    emit(s"  beq r3, r0, $letter")
+    emit("  addi r2, r2, 48")                         // '0' + digit
+    emit(s"  bra $store")
+    emit(s"$letter")
+    emit("  addi r2, r2, -10")                        // digit -= 10
+    // Test uppercase flag (bit 0x8) on flags
+    emitAddImm(4, 5, 48); emit("  ldd r3, r4, r0")    // r3 = flags
+    emit("  ldi r4, 8")
+    emit("  and r3, r3, r4")                          // r3 = flags & 0x8
+    emit(s"  beq r3, r0, $lower")
+    // 'A' + digit: 65 doesn't fit in addi's 7-bit signed range, use ldi + add.
+    emit("  ldi r3, 65")
+    emit("  add r2, r2, r3")
+    emit(s"  bra $store")
+    emit(s"$lower")
+    // 'a' + digit: 97 doesn't fit in addi's 7-bit signed range, use ldi + add.
+    emit("  ldi r3, 97")
+    emit("  add r2, r2, r3")
+    emit(s"$store")
+    // Restore digit_count
+    emitAddImm(4, 5, -16); emit("  ldd r3, r4, r0")
+    // Store digit at digit_buffer[count]
+    emitAddImm(4, 5, -104); emit("  add r4, r4, r3")
+    emit("  stb r2, r4, r0")
+    emit("  addi r3, r3, 1")
+    emit(s"  bra $loop")
+
+    emit(s"$done")
+    // Save digit_count
+    emitAddImm(4, 5, -16); emit("  std r3, r4, r0")
+
+    // ── Step 4: compute sign_char.
+    //   is_neg → '-' (45)
+    //   else if (flags & 0x4) && base == 10 → '+' (43)
+    //   else 0 (no sign char)
+    emit("  ldi r2, 0")                               // r2 = sign_char (default 0)
+    emitAddImm(3, 5, -8); emit("  ldd r3, r3, r0")    // r3 = is_neg
+    emit(s"  beq r3, r0, $signPlus")
+    emit("  ldi r2, 45")                              // '-'
+    emit(s"  bra $signDone")
+    emit(s"$signPlus")
+    emitAddImm(3, 5, 48); emit("  ldd r3, r3, r0")    // r3 = flags
+    emit("  ldi r4, 4")
+    emit("  and r3, r3, r4")                          // r3 = flags & 0x4 (showSign)
+    emit(s"  beq r3, r0, $signDone")
+    emitAddImm(3, 5, 32); emit("  ldd r3, r3, r0")    // r3 = base
+    emit("  ldi r4, 10")
+    emit(s"  bne r3, r4, $signDone")
+    emit("  ldi r2, 43")                              // '+'
+    emit(s"$signDone")
+    emitAddImm(3, 5, -24); emit("  std r2, r3, r0")   // sign_char = r2
+
+    // ── Step 5: pad_count = max(0, width - (digit_count + sign?));
+    //          final_len = digit_count + sign? + pad_count.
+    emitAddImm(3, 5, -16); emit("  ldd r3, r3, r0")   // r3 = digit_count
+    emitAddImm(4, 5, -24); emit("  ldd r4, r4, r0")   // r4 = sign_char
+    emit("  slt r4, r0, r4")                          // r4 = 1 if sign_char > 0 (i.e. non-zero)
+    emit("  add r3, r3, r4")                          // r3 = total_len_no_pad
+    emitAddImm(2, 5, 40); emit("  ldd r2, r2, r0")    // r2 = width
+    emit("  sub r2, r2, r3")                          // r2 = width - total_len_no_pad
+    emit("  slt r4, r2, r0")                          // r4 = 1 if r2 < 0
+    emit(s"  beq r4, r0, $padOk")
+    emit("  ldi r2, 0")
+    emit(s"$padOk")
+    // r2 = pad_count, r3 = total_len_no_pad
+    emitAddImm(1, 5, -32); emit("  std r2, r1, r0")   // pad_count
+    emit("  add r4, r2, r3")                          // r4 = final_len = total_len + pad
+    emitAddImm(1, 5, -40); emit("  std r4, r1, r0")   // final_len
+
+    // ── Step 6: malloc(8 + final_len). Trap on null.
+    emit("  addi r1, r4, 8")
+    emit("  movi r4, malloc")
+    emit("  jalr r6, r4")
+    emit(s"  bne r1, r0, $allocOk")
+    emit("  ldi r1, 2")
+    emit("  trap 1")
+    emit(s"$allocOk")
+    // Set refcount = 1 at [base+0]; data_ptr = base + 8.
+    emit("  ldi r2, 1")
+    emit("  std r2, r1, r0")
+    emit("  addi r1, r1, 8")                          // r1 = data_ptr (write cursor)
+    // Save data_ptr base for return-slot write (we'll re-derive after writes).
+    emit("  pshd r1")                                 // save data_ptr_base on stack
+
+    // ── Step 7: dispatch on fill mode and write characters.
+    //   left-align (flags & 0x2): [sign?][digits][spaces]
+    //   else zero-pad (flags & 0x1): [sign?][zeros][digits]
+    //   else (default space-pad):  [spaces][sign?][digits]
+    emitAddImm(2, 5, 48); emit("  ldd r2, r2, r0")    // r2 = flags
+    emit("  ldi r3, 2")
+    emit("  and r3, r2, r3")
+    emit(s"  bne r3, r0, $laMode")
+    emit("  ldi r3, 1")
+    emit("  and r3, r2, r3")
+    emit(s"  bne r3, r0, $zpMode")
+
+    // ── Default (space-pad right-align): [spaces*pad][sign?][digits]
+    // r1 currently = data_ptr (write cursor).
+    // Step A: write pad_count spaces.
+    writePadChars(' ')                                // space = 32
+    // Step B: write sign char if any.
+    writeSignChar()
+    // Step C: write digits in MSB-first order.
+    writeDigitsReverse()
+    emit(s"  bra $finish")
+
+    // ── Zero-pad mode: [sign?][zeros*pad][digits]
+    emit(s"$zpMode")
+    writeSignChar()
+    writePadChars('0')                                // zero = 48
+    writeDigitsReverse()
+    emit(s"  bra $finish")
+
+    // ── Left-align mode: [sign?][digits][spaces*pad]
+    emit(s"$laMode")
+    writeSignChar()
+    writeDigitsReverse()
+    writePadChars(' ')                                // trailing spaces
+
+    // ── Step 8: write {data_ptr_base, final_len} into the return slot.
+    emit(s"$finish")
+    emit("  popd r1")                                 // r1 = data_ptr_base
+    emitAddImm(2, 5, -40); emit("  ldd r2, r2, r0")   // r2 = final_len
+    emitAddImm(3, 5, 16); emit("  ldd r3, r3, r0")    // r3 = return slot address
+    emit("  std r1, r3, r0")                          // [ret+0] = data_ptr_base
+    emit("  addi r3, r3, 8")
+    emit("  std r2, r3, r0")                          // [ret+8] = final_len
+    // Reload return slot address into r1 for ABI return.
+    emitAddImm(1, 5, 16); emit("  ldd r1, r1, r0")
+
+    // Epilogue. Stack-arg cleanup (4 stack args = 32 bytes) is the caller's
+    // responsibility per the existing __str_int convention; we only skip the
+    // hidden return-ptr register slot here.
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emitAddImm(7, 7, 8)                               // skip 1 reg param (hidden return ptr)
+    emit("  jalr r0, r6")
+
+  /** Inline helper used inside `emitStrFmtI64Helper`: write `pad_count`
+   *  copies of `fillChar` to [r1], advancing r1 past them.  Reads pad_count
+   *  from [fp-32]; clobbers r2, r3, r4. */
+  private def writePadChars(fillChar: Char): Unit =
+    val loopL = newLabel("fmt_pad_loop")
+    val doneL = newLabel("fmt_pad_done")
+    emitAddImm(3, 5, -32); emit("  ldd r3, r3, r0")   // r3 = pad_count
+    emit(s"$loopL")
+    emit(s"  beq r3, r0, $doneL")
+    emit(s"  ldi r2, ${fillChar.toInt}")
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $loopL")
+    emit(s"$doneL")
+
+  /** Inline helper used inside `emitStrFmtI64Helper`: if sign_char != 0,
+   *  write it to [r1] and advance r1.  Reads sign_char from [fp-24];
+   *  clobbers r2, r3. */
+  private def writeSignChar(): Unit =
+    val skipL = newLabel("fmt_no_sign")
+    emitAddImm(3, 5, -24); emit("  ldd r2, r3, r0")   // r2 = sign_char
+    emit(s"  beq r2, r0, $skipL")
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit(s"$skipL")
+
+  /** Inline helper used inside `emitStrFmtI64Helper`: copy digits from the
+   *  reverse-order buffer at [fp-104] to [r1] in MSB-first order, advancing
+   *  r1 past the digits.  Reads digit_count from [fp-16]; clobbers r2, r3, r4. */
+  private def writeDigitsReverse(): Unit =
+    val loopL = newLabel("fmt_copy")
+    val doneL = newLabel("fmt_copy_done")
+    emitAddImm(3, 5, -16); emit("  ldd r3, r3, r0")   // r3 = digit_count
+    emitAddImm(4, 5, -104); emit("  add r4, r4, r3")  // r4 = &buffer[count] (one past last)
+    emit(s"$loopL")
+    emit(s"  beq r3, r0, $doneL")
+    emit("  addi r4, r4, -1")
+    emit("  ldb r2, r4, r0")
+    emit("  stb r2, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $loopL")
+    emit(s"$doneL")
 
   /** Push one line of TRISC asm into the output array. The line is parsed into a
    *  structured `TriscPeephole.Line` (Instr / Label / Directive / Comment / Blank)

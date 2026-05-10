@@ -12,6 +12,20 @@ import SyslType.*
 trait SyslAnalyzerExpressions:
   self: SyslAnalyzer =>
 
+  /** Build the diagnostic for a forbidden mixed-signedness binary operation. The
+   *  message names both operand types and suggests the two cast directions
+   *  available — picking either side gives a working uniform-signedness expression.
+   *  `kind` is `"mix"` for arithmetic / bitwise / shift, `"compare"` for relational. */
+  protected def signednessMismatchMsg(op: String, left: SyslType, right: SyslType, kind: String): String =
+    val verb = if kind == "compare" then "compare signed and unsigned" else s"mix signed and unsigned in $op"
+    val (uType, sType) = (left, right) match
+      case (u: SyslType.UIntType, s: SyslType.IntType) => (u.toString, s.toString)
+      case (s: SyslType.IntType, u: SyslType.UIntType) => (u.toString, s.toString)
+      case _ => (right.toString, left.toString)
+    s"cannot $verb: $left $op $right — cast one side explicitly: " +
+      s"`$uType(...)` to make both unsigned, or `$sType(...)` to make both signed " +
+      s"(values larger than the signed type's max will wrap on the unsigned→signed cast)."
+
   protected def analyzeExpr(expr: ExpressionAST): TExpr =
     expr match
       case IntLitAST(n) =>
@@ -832,7 +846,7 @@ trait SyslAnalyzerExpressions:
               case (UIntType(a), IntType(b)) if a < b => IntType(b)   // unsigned fits in signed
               case (IntType(a), UIntType(b)) if b < a => IntType(a)   // unsigned fits in signed
               case (l, r) if l.isIntegral && r.isIntegral =>
-                throw AnalysisError(s"cannot mix signed and unsigned in $op: ${tLeft.typ} $op ${tRight.typ}")
+                throw AnalysisError(signednessMismatchMsg(op, tLeft.typ, tRight.typ, "mix"))
               case _ => tLeft.typ
           case "%" | "&" | "|" | "^" | "<<" | ">>" =>
             if !tLeft.typ.isIntegral || !tRight.typ.isIntegral then
@@ -843,15 +857,15 @@ trait SyslAnalyzerExpressions:
               case (UIntType(a), IntType(b)) if a < b => IntType(b)   // unsigned fits in signed
               case (IntType(a), UIntType(b)) if b < a => IntType(a)   // unsigned fits in signed
               case _ =>
-                throw AnalysisError(s"cannot mix signed and unsigned in $op: ${tLeft.typ} $op ${tRight.typ}")
+                throw AnalysisError(signednessMismatchMsg(op, tLeft.typ, tRight.typ, "mix"))
           case "==" | "!=" | "<" | ">" | "<=" | ">=" =>
             // Disallow mixed signed/unsigned comparisons unless unsigned fits in signed
             if tLeft.typ.isIntegral && tRight.typ.isIntegral then
               (tLeft.typ, tRight.typ) match
                 case (UIntType(a), IntType(b)) if a >= b =>
-                  throw AnalysisError(s"cannot compare signed and unsigned: ${tLeft.typ} $op ${tRight.typ}")
+                  throw AnalysisError(signednessMismatchMsg(op, tLeft.typ, tRight.typ, "compare"))
                 case (IntType(a), UIntType(b)) if b >= a =>
-                  throw AnalysisError(s"cannot compare signed and unsigned: ${tLeft.typ} $op ${tRight.typ}")
+                  throw AnalysisError(signednessMismatchMsg(op, tLeft.typ, tRight.typ, "compare"))
                 case _ => // ok: same signedness, or unsigned fits in signed
             BoolType
           case "&&" | "||" =>

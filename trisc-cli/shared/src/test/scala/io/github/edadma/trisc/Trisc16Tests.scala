@@ -56,6 +56,8 @@ class Trisc16Tests extends AnyFreeSpec with Matchers:
   private def trap(n: Int): Int = 0xE018 | (n & 7)
   private def gepc(r: Int): Int = 0xE000 | (r << 7) | 0x0C        // 111 000 rrr 0001100
   private def gcause(r: Int): Int = 0xE000 | (r << 7) | 0x0D      // 111 000 rrr 0001101
+  private def spsr(r: Int): Int = 0xE000 | (r << 7) | 0x08        // 111 000 rrr 0001000
+  private def gpsr(r: Int): Int = 0xE000 | (r << 7) | 0x09        // 111 000 rrr 0001001
   private def pshr(n: Int): Int = 0xE000 | (n << 7) | 0x10        // 111 000 rrr 0010000
   private def popr(n: Int): Int = 0xE000 | (n << 7) | 0x11        // 111 000 rrr 0010001
   private val RTE_W: Int = 0xE00A                                 // 111 000 000 0001010
@@ -147,7 +149,7 @@ class Trisc16Tests extends AnyFreeSpec with Matchers:
     cpu.run()
     cpu.epc shouldBe 0x10L             // PC at the time of the trap
     cpu.ecause shouldBe 8              // trap0 cause code
-    (cpu.psr & 1) shouldBe 1           // PSR.E set
+    cpu.inHandler shouldBe true        // exception entry set the in-handler flag
     cpu.state shouldBe State.Halt      // handler ran HALT
   }
 
@@ -171,23 +173,26 @@ class Trisc16Tests extends AnyFreeSpec with Matchers:
     cpu.state shouldBe State.Halt
   }
 
-  "rte restores PC from EPC and clears PSR.E" in {
-    // No software path to write EPC, so set it directly. After rte we expect
-    // PC ← 0x40 (the value we pre-loaded into EPC) and PSR.E ← 0.
+  "rte restores PC from EPC and clears inHandler" in {
+    // We need to inject "in-handler with EPC=0x40" state without going through
+    // a real exception, since TRISC16 has no software path to write EPC. The
+    // CPU.reset() boot path clears inHandler, so we let it run first via a
+    // single execute() call, then set our state, then resume.
     val mem = new Memory("Memory", new RAM(0, 0x10000))
     mem.writeShort(0, 0xFF00)
     mem.writeShort(2, 0x10)
-    mem.writeShort(0x10, RTE_W)
+    mem.writeShort(0x10, RTE_W)        // first instruction the body executes
     mem.writeShort(0x40, HALT_W)       // landing pad after rte
     val cpu = new Trisc16CPU(mem)
     cpu.limit = 100
     cpu.quiet = true
     cpu.reset()
+    cpu.execute()                      // run boot path: state=Run, pc=0x10
     cpu.epc = 0x40L
-    cpu.psr = cpu.psr | 1              // pretend we are in a handler
-    cpu.run()
+    cpu.inHandler = true               // pretend we are inside a handler
+    cpu.run()                          // RTE @ 0x10 → pc=0x40, then HALT @ 0x40
     cpu.pc shouldBe 0x42L              // 0x40 + 2 (after fetching halt at 0x40)
-    (cpu.psr & 1) shouldBe 0           // PSR.E cleared by rte
+    cpu.inHandler shouldBe false       // cleared by rte
     cpu.state shouldBe State.Halt
   }
 
@@ -230,9 +235,45 @@ class Trisc16Tests extends AnyFreeSpec with Matchers:
     cpu.r(7).read shouldBe 0xFF00L     // SP back to start (push 6 + pop 6)
   }
 
+  "spsr/gpsr round-trip PSR; spsr requires Status.Mode" in {
+    // The TRISC SPSR class is reused on TRISC16 unchanged. It checks
+    // Status.Mode internally; TRISC16 keeps Mode set after boot, so the
+    // happy path works. We push PSR to r1 with gpsr, modify it in r1, write
+    // it back with spsr, and read it again to confirm. We deliberately set
+    // Status.C (bit 2) and Status.V (bit 5) — the only writable C/V bits
+    // currently — and verify they round-trip.
+    val cpu = freshCPU(Seq(
+      gpsr(1),                         // r1 = PSR
+      ldi(2, 0x24),                    // r2 = 0x24 = bits 2 and 5 (C | V)
+      // r1 = r1 | r2 — encode "or" RRR opcode 1110: 000 ddd aaa bbb 1110
+      (1 << 10) | (1 << 7) | (2 << 4) | 0xE,
+      spsr(1),                         // PSR = r1 (sets C and V)
+      gpsr(3),                         // r3 = PSR
+      HALT_W,
+    ))
+    runUntilHalt(cpu)
+    // C (bit 2) and V (bit 5) should be set in the round-tripped PSR.
+    (cpu.r(3).read & 0x24L) shouldBe 0x24L
+    cpu.state shouldBe State.Halt
+  }
+
+  "spsr that clears Status.Mode prevents the next privileged op" in {
+    // After spsr clears Mode, the following HALT (a privilege-checked op)
+    // should trap as PrivilegeViolation → cause 1, delivered to handler at
+    // 0x4 (where we placed a HALT, ending the run cleanly).
+    val cpu = withHandler(Seq(
+      ldi(1, 0),                       // r1 = 0 (all PSR bits clear → Mode=0)
+      spsr(1),                         // PSR = 0; Mode now cleared
+      HALT_W,                          // would be illegal in user mode
+    ))
+    cpu.run()
+    cpu.ecause shouldBe 1              // privilege violation maps to cause 1
+    cpu.state shouldBe State.Halt      // handler at 0x4 ran HALT
+  }
+
   "fault inside a handler triggers DoubleFault" in {
-    // trap0 at 0x10 → handler at 0x4 issues another trap0 → PSR.E already set,
-    // Trisc16CPU.enterException short-circuits to DoubleFault.
+    // trap0 at 0x10 → handler at 0x4 issues another trap0 → inHandler already
+    // set, Trisc16CPU.enterException short-circuits to DoubleFault.
     val mem = new Memory("Memory", new RAM(0, 0x10000))
     mem.writeShort(0, 0xFF00)
     mem.writeShort(2, 0x10)

@@ -188,7 +188,9 @@ High bits above 16 are masked off.
     #test
     test_pkt_u16_truncates_high_bits() -> unit
         var buf: [2]byte
-        pkt_write_u16(buf, 0, 0xdead1234)
+        // explicit `int(...)` opts into the i32 truncation; without it the analyzer
+        // rejects the over-range literal at compile time (audit item #28).
+        pkt_write_u16(buf, 0, int(0xdead1234u32))
         assert(buf[0] == 0x12, "hi byte truncated")
         assert(buf[1] == 0x34, "lo byte")
 

@@ -312,6 +312,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   protected val genericTemplates = new mutable.LinkedHashMap[String, FunDeclAST]
   protected val instantiations = new mutable.LinkedHashMap[(String, List[SyslType]), String]
   protected val specializedDecls = mutable.ListBuffer.empty[TDecl]
+  // Per-analyze counter for synthesized top-level fns lifted from cross-referencing
+  // inner-def clusters (mutual recursion). Names look like `_inner_<N>_<defName>`.
+  protected var innerDefLiftCounter: Int = 0
   protected var typeEnv: Map[String, SyslType] = Map.empty
   /** Active impl's associated-type bindings, set during impl-method
    *  monomorphization (Phase A2). Each entry is `(assoc-name, resolved-type)`
@@ -533,6 +536,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       typeParams: List[String],
       methods: List[TraitMethodAST],
       assocTypes: List[AssocTypeDeclAST] = Nil,
+      /** Trait bounds on the trait's own type parameters, e.g.
+       *  `trait Container[T: Ord]`. Enforced at impl registration time —
+       *  each impl target type must satisfy the declared bound. */
+      typeBounds: Map[String, List[String]] = Map.empty,
   )
   protected case class ImplMethodInfo(mangled: String, paramTypes: List[(String, SyslType)], retType: SyslType, body: FunBodyAST, isSynthesized: Boolean)
   /** A registered impl block — concrete or generic.
@@ -561,6 +568,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
        *  raw TypeAST per binding so projection resolution (Phase A3) can resolve
        *  them on demand using the dispatch-time substitution map. */
       assocBindings: List[AssocTypeBindingAST] = Nil,
+      /** Trait bounds on this impl's own type parameters (e.g.
+       *  `impl[T: Ord] Get[Box[T]]`). Enforced at `instantiateImpl` time when
+       *  the impl is selected for a concrete type substitution. */
+      typeBounds: Map[String, List[String]] = Map.empty,
   )
   protected val traits = new mutable.LinkedHashMap[String, TraitInfo]
   // traitName -> list of registered impls (templates). Order is registration order.
@@ -640,7 +651,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val module = currentModule.getOrElse("")
     for decl <- decls do
       decl match
-        case ExtensionDeclAST(tparams, recv, methods, _, _) =>
+        case ExtensionDeclAST(tparams, recv, methods, _, _, extTypeBounds) =>
           val key = extensionTypeKey(recv.typ)
           for m <- methods do
             val mangled = s"__ext_${key}__${m.name}"
@@ -648,10 +659,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             // matters for instantiation lookup later — extension tparams come
             // first so a generic receiver's type bindings are stable.
             val mergedTparams = tparams ++ m.typeParams
+            // Forward extension-level type bounds to the synth fn. The fn-level
+            // bounds carrier on FunDeclAST is `typeBounds`; method-level wins
+            // on collision (rare; the method-level set is typically empty here).
+            val mergedTypeBounds = extTypeBounds ++ m.typeBounds
             val synth = m.copy(
               name = mangled,
               params = recv :: m.params,
               typeParams = mergedTparams,
+              typeBounds = mergedTypeBounds,
             )
             out += synth
             entries += ExtensionEntry(m.name, recv.typ, mangled, module)
@@ -707,7 +723,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               // Generic-receiver extensions yield a generic impl whose tparams
               // are the user's extension-level tparams; the receiver pattern
               // (using those tparams) becomes the trait's target type.
-              val implDecl = ImplDeclAST(traitName, tparams, List(recv.typ), List(implMethod))
+              val implDecl = ImplDeclAST(traitName, tparams, List(recv.typ), List(implMethod), Nil, Nil, Map.empty, extTypeBounds)
               out += implDecl
               if tparams.nonEmpty then extensionImplDecls += implDecl
         case other =>
@@ -1096,7 +1112,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         //     impl-decl arity check passes; do trait first.
         for template <- meta.genericTemplates do
           template match
-            case TraitDeclAST(name, tparams, methods, _, _, _) if name.startsWith("__ExtOp_") =>
+            case TraitDeclAST(name, tparams, methods, _, _, _, _) if name.startsWith("__ExtOp_") =>
               if !traits.contains(name) then
                 traits(name) = TraitInfo(name, tparams, methods)
                 importedTraitNames += name
@@ -1104,7 +1120,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             case _ => ()
         for template <- meta.genericTemplates do
           template match
-            case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _)
+            case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _, _)
                 if traitName.startsWith("__ExtOp_") && implTypeParams.nonEmpty =>
               if !implTemplates.getOrElse(traitName, Nil).exists(t =>
                   t.typeParams == implTypeParams && t.targetPatterns == targetTypes) then
@@ -1350,9 +1366,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // Register trait declarations from imported templates
     for template <- meta.genericTemplates do
       template match
-        case TraitDeclAST(name, tparams, methods, _, assocs, _) =>
+        case TraitDeclAST(name, tparams, methods, _, assocs, _, tBounds) =>
           if !traits.contains(name) then
-            traits(name) = TraitInfo(name, tparams, methods, assocs)
+            traits(name) = TraitInfo(name, tparams, methods, assocs, tBounds)
             importedTraitNames += name
             registerTraitOperatorEntries(name, methods, template)
         case _ =>
@@ -1379,7 +1395,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // meta.traitImpls path above, so they're not duplicated here.
     for template <- meta.genericTemplates do
       template match
-        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _) =>
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _, implTBounds) =>
           val alreadyHas = implTemplates.getOrElse(traitName, Nil).exists(t =>
             t.typeParams == implTypeParams && t.targetPatterns == targetTypes)
           if !alreadyHas then
@@ -1394,6 +1410,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 methodASTs = methods,
                 definingModule = "",
                 implDecl = Some(impl),
+                typeBounds = implTBounds,
               )
               importedGenericImplKeys += ((traitName, implTypeParams, targetTypes))
             else
@@ -1645,9 +1662,9 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     registerGenericTemplatesFrom(program)
     for decl <- program.decls do
       decl match
-        case td @ TraitDeclAST(name, tparams, methods, _, assocs, _) =>
+        case td @ TraitDeclAST(name, tparams, methods, _, assocs, _, tBounds) =>
           if !traits.contains(name) then
-            traits(name) = TraitInfo(name, tparams, methods, assocs)
+            traits(name) = TraitInfo(name, tparams, methods, assocs, tBounds)
             importedTraitNames += name
             registerTraitOperatorEntries(name, methods, td)
         case StructDeclAST(name, fields, typeParams, _, _, _, _) if typeParams.isEmpty =>
@@ -1706,7 +1723,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               externalSymbols += name
               importedSiblingFreeFnStubKeys += name
             }
-        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _) =>
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, _, _, implTBounds) =>
           val alreadyHas = implTemplates.getOrElse(traitName, Nil).exists(t =>
             t.typeParams == implTypeParams && t.targetPatterns == targetTypes)
           if !alreadyHas then
@@ -1720,6 +1737,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 methodASTs = methods,
                 definingModule = "",
                 implDecl = Some(impl),
+                typeBounds = implTBounds,
               )
               importedGenericImplKeys += ((traitName, implTypeParams, targetTypes))
             else
@@ -1771,6 +1789,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                   methodASTs = Nil,
                   definingModule = "",
                   implDecl = Some(impl),
+                  typeBounds = implTBounds,
                 )
                 importedConcreteImplKeys += ((traitName, resolvedTargets))
               }
@@ -1847,7 +1866,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           case EnumDeclAST(name, _, _)                => typeDefiningModule(name) = curMod
           case InterfaceDeclAST(name, _, _, _)        => typeDefiningModule(name) = curMod
           case TypeAliasDeclAST(name, _, _, _, _, _, _, _, _) => typeDefiningModule(name) = curMod
-          case TraitDeclAST(name, _, _, _, _, _)         => traitDefiningModule(name) = curMod
+          case TraitDeclAST(name, _, _, _, _, _, _)      => traitDefiningModule(name) = curMod
           case _ => ()
 
     // Pass 0.5: resolve struct and data-enum FIELDS before any function signature.
@@ -2090,7 +2109,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             if bounds.nonEmpty then genericTypeAliasBounds(name) = bounds
           else
             typeAliases(name) = (target, isNew, range, predicate)
-        case TraitDeclAST(name, tparams, methods, _, assocs, _) =>
+        case TraitDeclAST(name, tparams, methods, _, assocs, _, tBounds) =>
           // Tolerate sibling-pre-registered traits (importedTraitNames) — those
           // came from this same trait decl via cross-sibling forward-decl pass
           // and are structurally identical. Without this, two-file modules
@@ -2122,7 +2141,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 throw AnalysisError(s"associated type '${a.name}' shadows method name in trait '$name'", a)
               if SyslAnalyzer.ReservedTypeAttrNames.contains(a.name) then
                 throw AnalysisError(s"associated type '${a.name}' uses a reserved attribute name in trait '$name'; rename to avoid clashing with the built-in T::${a.name} introspection attribute", a)
-            traits(name) = TraitInfo(name, tparams, methods, assocs)
+            // Validate that every name on the LHS of typeBounds is one of the
+            // declared type parameters; flag-but-don't-fail if a bound names an
+            // unknown trait (resolution happens at impl registration to avoid
+            // ordering pitfalls between trait + impl decls).
+            for (bn, _) <- tBounds do
+              if !tparams.contains(bn) then
+                throw AnalysisError(s"trait '$name' declares bound on unknown type parameter '$bn'", decl)
+            traits(name) = TraitInfo(name, tparams, methods, assocs, tBounds)
             registerTraitOperatorEntries(name, methods, decl)
           else
             // Already registered (sibling pre-collect); the trait now owns
@@ -2248,7 +2274,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // Intermediate pass: register impl blocks (traits now known; signatures may reference traits)
     for decl <- program.decls do
       decl match
-        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, assocBindings, _) =>
+        case impl @ ImplDeclAST(traitName, implTypeParams, targetTypes, methods, _, assocBindings, _, implTypeBounds) =>
           val trait_ = traits.getOrElse(traitName,
             throw AnalysisError(s"impl references unknown trait '$traitName'", decl))
           if targetTypes.length != trait_.typeParams.length then
@@ -2300,6 +2326,43 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                   }
                   if !matched then
                     throw AnalysisError(s"impl of '$traitName' binds 'type ${b.name} = $resolvedBindingTarget', which does not satisfy bound '$boundTrait' declared on the associated type", b)
+          // Phase C follow-up — enforce trait bounds declared on the trait's
+          // own type parameters (e.g. `trait Container[T: Ord]`). For each
+          // bounded trait tparam, the corresponding impl target must satisfy
+          // each bound trait. Concrete impls check their resolved targets
+          // directly; generic impls defer to `instantiateImpl` because a
+          // target pattern may reference impl tvars whose substitution isn't
+          // known until dispatch.
+          //
+          // Validate that each bound names a known trait up-front, regardless
+          // of impl-tparam-ness, so a typo on `trait Container[T: Ord]` fails
+          // at the first impl rather than at every dispatch site.
+          for (tp, tBounds) <- trait_.typeBounds do
+            for boundTrait <- tBounds do
+              if !traits.contains(boundTrait) then
+                throw AnalysisError(s"bound '$boundTrait' on trait '$traitName' type parameter '$tp' refers to unknown trait", decl)
+          if implTypeParams.isEmpty then
+            val resolvedTargetsForBoundCheck = targetTypes.map(resolveType)
+            for ((tp, tgt) <- trait_.typeParams.zip(resolvedTargetsForBoundCheck)) do
+              val tBounds = trait_.typeBounds.getOrElse(tp, Nil)
+              for boundTrait <- tBounds do
+                val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                  if t.typeParams.isEmpty then
+                    t.resolvedConcrete.flatMap(_.headOption).contains(tgt)
+                  else
+                    tryUnifyAll(t.targetPatterns.headOption.toList, List(tgt), t.typeParams.toSet).isDefined
+                }
+                if !matched then
+                  throw AnalysisError(s"impl of '$traitName' for $tgt does not satisfy bound '$boundTrait' declared on type parameter '$tp'", decl)
+          // Validate that any impl-level type-bound LHS names a declared impl
+          // tparam, and that each bound names a known trait. Defer the
+          // dispatch-time check itself to `instantiateImpl`.
+          for (bn, bs) <- implTypeBounds do
+            if !implTypeParams.contains(bn) then
+              throw AnalysisError(s"impl declares bound on unknown type parameter '$bn'", decl)
+            for bt <- bs do
+              if !traits.contains(bt) then
+                throw AnalysisError(s"bound '$bt' on impl type parameter '$bn' refers to unknown trait", decl)
           // Built-in prefix-sigil collision: when a trait method carries
           // `#operator(<sigil>)` for one of `-`, `!`, `~`, `*`, `&`, the impl's
           // first target pattern must NOT cover the sigil's natural built-in
@@ -2337,6 +2400,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               definingModule = currentModule.getOrElse(""),
               implDecl = Some(impl),
               assocBindings = assocBindings,
+              typeBounds = implTypeBounds,
             )
             checkOrphanRule(traitName, targetTypes, currentModule.getOrElse(""), decl)
             checkCoherence(traitName, newTemplate, decl)
@@ -2395,6 +2459,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
               definingModule = currentModule.getOrElse(""),
               implDecl = Some(impl),
               assocBindings = assocBindings,
+              typeBounds = implTypeBounds,
             )
             checkOrphanRule(traitName, targetTypes, currentModule.getOrElse(""), decl)
             checkCoherence(traitName, newTemplate, decl)
@@ -4153,13 +4218,42 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case _ => false
 
   // Coerce integer literals to the target type (like Rust's untyped integer literals)
+  /** Audit item #28: catch literal-overflow assignments that would silently
+   *  truncate. Returns Some(error message) if `value` does not fit in the
+   *  bit-width of the target sized-int type, None otherwise. i64/u64 are
+   *  unconstrained — every Long fits. */
+  protected def literalRangeMsg(value: Long, target: SyslType): Option[String] =
+    val (lo, hi, name) = target match
+      case IntType(8)  => (-128L,         127L,        "i8")
+      case IntType(16) => (-32768L,       32767L,      "i16")
+      case IntType(32) => (-2147483648L,  2147483647L, "int")
+      case UIntType(8)  => (0L,           0xFFL,       "u8")
+      case UIntType(16) => (0L,           0xFFFFL,     "u16")
+      case UIntType(32) => (0L,           0xFFFFFFFFL, "u32")
+      case _ => return None
+    if value < lo || value > hi then
+      Some(s"literal $value does not fit in $name (range $lo..$hi); cast explicitly: `$name(...)` if truncation is intended")
+    else None
+
   protected def coerceLiteral(expr: TExpr, target: SyslType): TExpr =
     // Don't auto-promote an untyped literal to a nominal NamedType — a cast is required.
     target match
       case NamedType(_, _, true, _, _) => return expr
       case _ =>
     expr match
-      case TIntLit(value, _) if target.isIntegral => TIntLit(value, target)
+      case TIntLit(value, _) if target.isIntegral =>
+        literalRangeMsg(value, target).foreach(msg => throw AnalysisError(msg))
+        TIntLit(value, target)
+      case TUnary("-", TIntLit(value, _), _) if target.isIntegral =>
+        // Constant-fold negation so the range check applies to the resulting
+        // value. Without this, `var x: u8 = -1` slipped past the TIntLit-only
+        // arm above — the inner `1` fits u8, but the negated -1 does not. Same
+        // for `var x: i8 = -129` (inner 129 already overflows i8 anyway, but
+        // the diagnostic from this arm will name the negated value, which is
+        // what the user wrote in source). i64/u64 unconstrained as before.
+        val negated = -value
+        literalRangeMsg(negated, target).foreach(msg => throw AnalysisError(msg))
+        TIntLit(negated, target)
       case TIntLit(0, _) if target.isInstanceOf[PtrType] => TIntLit(0, target) // null pointer
       // Float literal → narrower float type (untyped float literal coercion)
       case TFloatLit(value, _) if target.isFloat => TFloatLit(value, target)
@@ -5260,6 +5354,76 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         case Some((m, fi)) => (m, fi)
         case None =>
           val trait_ = traits(traitName)
+          // Phase C follow-up — enforce trait bounds on the impl's type
+          // parameters at the moment a concrete substitution is selected. For
+          // each impl tparam with bounds, verify that subst(tparam) is implemented
+          // by some impl of every bound trait. Mirrors `enforceBoundsAndBuildAssocs`
+          // shape but without assoc-binding env construction — those flow through
+          // the impl's own assocBindings.
+          for (tp, bounds) <- template.typeBounds do
+            val concrete = subst.getOrElse(tp,
+              throw AnalysisError(s"impl bound check: type parameter '$tp' has no substitution"))
+            for boundTrait <- bounds do
+              val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                if t.typeParams.isEmpty then
+                  t.resolvedConcrete.flatMap(_.headOption).contains(concrete)
+                else
+                  tryUnifyAll(t.targetPatterns.headOption.toList, List(concrete), t.typeParams.toSet).isDefined
+              }
+              if !matched then
+                throw AnalysisError(s"type $concrete does not satisfy bound '$boundTrait' for impl type parameter '$tp' of trait '$traitName'")
+          // Phase C follow-up — enforce trait bounds on the trait's own type
+          // parameters at the moment the impl is selected. For each trait
+          // tparam with bounds, the corresponding resolved target (under the
+          // impl's substitution) must satisfy each bound. Concrete impls
+          // checked this at registration; generic impls defer here because
+          // their target patterns may reference impl tvars whose substitution
+          // wasn't known until now.
+          if trait_.typeBounds.nonEmpty then
+            val savedEnvForTraitBounds = typeEnv
+            typeEnv = typeEnv ++ subst
+            try
+              for ((tp, pat) <- trait_.typeParams.zip(template.targetPatterns)) do
+                val tBounds = trait_.typeBounds.getOrElse(tp, Nil)
+                if tBounds.nonEmpty then
+                  val resolvedPat = resolveType(pat)
+                  for boundTrait <- tBounds do
+                    val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                      if t.typeParams.isEmpty then
+                        t.resolvedConcrete.flatMap(_.headOption).contains(resolvedPat)
+                      else
+                        tryUnifyAll(t.targetPatterns.headOption.toList, List(resolvedPat), t.typeParams.toSet).isDefined
+                    }
+                    if !matched then
+                      throw AnalysisError(s"impl of '$traitName' for $resolvedPat does not satisfy bound '$boundTrait' declared on type parameter '$tp'")
+            finally typeEnv = savedEnvForTraitBounds
+          // Phase C.2 — enforce trait bounds on associated-type bindings for
+          // generic impls. The concrete-impl path checks at registration; for
+          // generic impls the binding target may reference impl tvars (e.g.
+          // `type Token = T`), so we defer to here where `subst` is known.
+          // Resolve each binding under the substitution and validate against
+          // the trait's declared assoc bounds.
+          if template.assocBindings.nonEmpty && trait_.assocTypes.exists(_.bounds.nonEmpty) then
+            val assocBoundsByName = trait_.assocTypes.map(a => (a.name, a.bounds)).toMap
+            val savedEnvForAssocBounds = typeEnv
+            typeEnv = typeEnv ++ subst
+            try
+              for b <- template.assocBindings do
+                val bounds = assocBoundsByName.getOrElse(b.name, Nil)
+                if bounds.nonEmpty then
+                  val resolvedBindingTarget = resolveType(b.target)
+                  for boundTrait <- bounds do
+                    if !traits.contains(boundTrait) then
+                      throw AnalysisError(s"associated type 'type ${b.name}' on trait '$traitName' references unknown trait '$boundTrait'")
+                    val matched = implTemplates.getOrElse(boundTrait, Nil).exists { t =>
+                      if t.typeParams.isEmpty then
+                        t.resolvedConcrete.flatMap(_.headOption).contains(resolvedBindingTarget)
+                      else
+                        tryUnifyAll(t.targetPatterns.headOption.toList, List(resolvedBindingTarget), t.typeParams.toSet).isDefined
+                    }
+                    if !matched then
+                      throw AnalysisError(s"generic impl of '$traitName' binds 'type ${b.name} = $resolvedBindingTarget' (under substitution), which does not satisfy bound '$boundTrait' declared on the associated type")
+            finally typeEnv = savedEnvForAssocBounds
           // Resolve the trait's targetPatterns under the new substitution to obtain the
           // concrete trait-level types — these become the trait typeParam → concrete map.
           val savedEnv = typeEnv
@@ -5650,7 +5814,233 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     }
 
   protected def analyzeBlock(stmts: List[StmtAST]): List[TStmt] =
-    stmts.map(analyzeStmt)
+    // Two-pass scope walk for inner defs at this block level. Pre-binding all
+    // sibling names with their declared signatures BEFORE analyzing any body
+    // is what lets `def f` and `def g` cross-reference each other regardless
+    // of source order. Without this, an inner-def body referencing a sibling
+    // declared later would see "name is not in scope".
+    //
+    // Defs that fail their own arm checks later (type params, missing return
+    // type) are pre-bound here too; the failing arm throws when its body runs
+    // and the pre-bind has no observable effect.
+    val innerDecls: List[FunDeclAST] = stmts.collect {
+      case InnerFunStmtAST(d) if d.typeParams.isEmpty && d.returnType.nonEmpty => d
+    }
+    val siblingNames: Set[String] = innerDecls.map(_.name).toSet
+    if scopeStack != null && innerDecls.nonEmpty then
+      for d <- innerDecls do
+        val ret = resolveType(d.returnType.get)
+        val pTypes = d.params.map(p => resolveType(p.typ))
+        val ft: SyslType = FuncType(pTypes, ret, escaping = true)
+        currentScope(d.name) = SymInfo(d.name, ft, mutable = false)
+    val tStmts = stmts.map(analyzeStmt)
+    // Two reasons to run the lift pass:
+    //   (a) sibling cross-references (mutual recursion) — needs forward-ref support.
+    //   (b) any inner def carries a require/ensure contract — closures have no
+    //       contract-emission stage, so the def must be lifted to a top-level fn
+    //       where `analyzeBlockWithContracts` can wire the checks in.
+    val anyContracts = innerDecls.exists(_.body match
+      case BlockBodyAST(_, cs) => cs.nonEmpty
+      case _                    => false)
+    if siblingNames.size <= 1 && !anyContracts then tStmts
+    else liftInnerDefClusters(tStmts, innerDecls, siblingNames)
+
+  /** Lift inner defs to top-level synthesized functions when they need it.
+   *
+   *  Two reasons trigger a lift:
+   *
+   *  1. **Cross-reference cluster.** Any inner def whose body captures a
+   *     sibling other than itself participates in a cluster. The whole cluster
+   *     is the transitive closure under the "captures sibling" relation.
+   *     Lifting them to top-level removes the forward-reference problem
+   *     (capture-by-value would otherwise read garbage).
+   *
+   *  2. **Contracts.** Any inner def with `require`/`ensure` clauses must be
+   *     lifted because the closure analyzer's body path drops contracts on the
+   *     floor — only `analyzeBlockWithContracts` (used by top-level fns) emits
+   *     them as `TContractCheck` nodes. Single self-recursive inner defs with
+   *     no contracts and no sibling refs stay on the existing TClosure path.
+   *
+   *  Captures of outer-scope variables disqualify a lift target — the lift
+   *  cannot preserve the captures, so we reject with a clear diagnostic that
+   *  explains whether the issue is contracts or cross-references.
+   *
+   *  Every backend already handles `TIndirectCall` of a `TFuncRef` (top-level
+   *  fn pointer with null env), so lifting needs no per-backend support. */
+  protected def liftInnerDefClusters(
+      tStmts: List[TStmt],
+      innerDecls: List[FunDeclAST],
+      siblingNames: Set[String],
+  ): List[TStmt] =
+    val declByName: Map[String, FunDeclAST] = innerDecls.map(d => d.name -> d).toMap
+    case class Inner(name: String, closure: TClosure, ft: SyslType, vol: Boolean, ghost: Boolean,
+                     contracts: List[ContractClauseAST])
+    val innerStmts: List[Inner] = tStmts.collect {
+      case TVarStmt(name, ft, c: TClosure, vol, ghost) if siblingNames.contains(name) =>
+        val cs = declByName.get(name).map(_.body).collect {
+          case BlockBodyAST(_, cs) => cs
+        }.getOrElse(Nil)
+        Inner(name, c, ft, vol, ghost, cs)
+    }
+    if innerStmts.isEmpty then return tStmts
+    // Edges: each sibling → set of OTHER siblings it captures (self-capture
+    // doesn't count — that's handled by the existing selfName mechanism for
+    // non-lifted defs, or by the rewriter for lifted ones).
+    val crossRefs: Map[String, Set[String]] = innerStmts.map { i =>
+      i.name -> i.closure.captures.iterator.collect {
+        case (capName, _) if siblingNames.contains(capName) && capName != i.name => capName
+      }.toSet
+    }.toMap
+    // Cluster: closure of all siblings reachable from any node with non-empty
+    // cross-refs OR reachable as a target of cross-refs. Catches both ends of
+    // an `f→g` edge.
+    val cluster = scala.collection.mutable.Set.empty[String]
+    val seeds = crossRefs.iterator.flatMap { case (n, refs) =>
+      if refs.nonEmpty then Iterator(n) ++ refs.iterator else Iterator.empty
+    }.toSet
+    val toVisit = scala.collection.mutable.Queue.from(seeds)
+    while toVisit.nonEmpty do
+      val n = toVisit.dequeue()
+      if !cluster.contains(n) then
+        cluster += n
+        toVisit ++= crossRefs.getOrElse(n, Set.empty)
+    // Lift set: cluster members ∪ any inner def with contracts. The latter need
+    // lifting even when not part of a cluster, because the contract-emission
+    // stage only runs in the top-level fn body path.
+    val contractBearers: Set[String] = innerStmts.iterator.filter(_.contracts.nonEmpty).map(_.name).toSet
+    val liftSet: Set[String] = cluster.toSet ++ contractBearers
+    if liftSet.isEmpty then return tStmts
+    // Validate: every lift target's captures must be siblings (incl. self).
+    // Outer-scope captures are rejected up front with a diagnostic that names
+    // the offenders and steers the user to the right fix.
+    for i <- innerStmts; if liftSet.contains(i.name) do
+      val outerCaptures = i.closure.captures.iterator.collect {
+        case (capName, _) if !siblingNames.contains(capName) => capName
+      }.toList
+      if outerCaptures.nonEmpty then
+        val msg =
+          if i.contracts.nonEmpty then
+            s"inner def '${i.name}' has require/ensure clauses but captures outer-scope variables: " +
+              s"${outerCaptures.mkString(", ")}. Contracts on inner defs are supported only when the def can be " +
+              "lifted to a top-level fn — promote it explicitly, or refactor to avoid the captures " +
+              "(e.g. pass the captured value as an extra parameter)."
+          else
+            val others = liftSet.iterator.filter(_ != i.name).toList.sorted
+            s"inner def '${i.name}' is part of a cross-referencing cluster (with ${others.mkString(", ")}) " +
+              s"that needs to be lifted to top-level for forward references to work, " +
+              s"but it captures outer-scope variables: ${outerCaptures.mkString(", ")}. " +
+              "The lift cannot preserve these captures — promote the cluster to top-level fns explicitly, " +
+              "or refactor to avoid the captures (e.g. pass the captured value as an extra parameter)."
+        throw AnalysisError(msg)
+    // Synthesize unique mangled names for every lift target. Sorted for
+    // deterministic output.
+    val mangled: Map[String, String] = liftSet.toList.sorted.map { name =>
+      val m = s"_inner_${innerDefLiftCounter}_$name"
+      innerDefLiftCounter += 1
+      name -> m
+    }.toMap
+    // Rewrite body refs: TVarRef(liftedSiblingName, ft) → TFuncRef(mangled, ft).
+    // Self-refs are rewritten too — the lifted top-level fn calls itself by its
+    // mangled name. mapTExpr applies `f` to TVarRef nodes and visits subexprs.
+    val rewriter: TExpr => TExpr = {
+      case TVarRef(n, ft) if liftSet.contains(n) => TFuncRef(mangled(n), ft)
+      case other                                  => other
+    }
+    for i <- innerStmts; if liftSet.contains(i.name) do
+      val liftedBody: TFunBody =
+        if i.contracts.nonEmpty then
+          // Re-analyze body via the contract-aware path so require/ensure emit
+          // as TContractCheck. The closure body we already have ignored the
+          // contracts (closure analyzer drops them); we read them back from the
+          // original FunDeclAST and analyze fresh, with the lifted fn's params
+          // bound in a new scope.
+          analyzeContractedInnerBody(declByName(i.name), i.closure, mangled(i.name), siblingNames, rewriter)
+        else
+          // No contracts: extract the analyzed closure body and rewrite siblings.
+          i.closure.body match
+            case TBlockBody(stmts) => TBlockBody(stmts.map(s => mapTStmt(s)(rewriter)))
+            case TExprBody(e)      => TExprBody(mapTExpr(e)(rewriter))
+      specializedDecls += TFunDecl(
+        mangled(i.name), i.closure.params, i.closure.returnType, liftedBody,
+        isPrivate = true, effects = i.closure.effects,
+      )
+    // Replace each lift-target TVarStmt's RHS with a TFuncRef to its lifted twin.
+    // The local var still holds a callable value; calls go through TIndirectCall
+    // of TFuncRef, which every backend lowers to a near-direct call with a null
+    // env pointer.
+    tStmts.map {
+      case TVarStmt(name, ft, _: TClosure, vol, ghost) if liftSet.contains(name) =>
+        TVarStmt(name, ft, TFuncRef(mangled(name), ft), vol, ghost)
+      case other => other
+    }
+
+  /** Re-analyze a contract-bearing inner-def body in a top-level-fn-like
+   *  context, then rewrite sibling refs. Mirrors the FunDeclAST arm of
+   *  `analyzeDecl`: install a FRESH scope stack (so outer-scope vars are
+   *  invisible — same as a real top-level fn), pre-bind siblings + params,
+   *  set returnType + expected type, call `analyzeBlockWithContracts`,
+   *  restore. The mangled name is passed as `selfMangledName` so a `variant`
+   *  clause (rare on inner defs) resolves recursive calls correctly.
+   *
+   *  Outer-scope captures inside the body or contracts surface as
+   *  "undefined variable" during this re-analysis. We catch and re-throw
+   *  with a wrapper that names the inner def + the offending var, so the
+   *  user sees a clear "promote to top-level fn" diagnostic instead of a
+   *  bare lookup failure. */
+  private def analyzeContractedInnerBody(
+      decl: FunDeclAST,
+      closure: TClosure,
+      mangledName: String,
+      siblingNames: Set[String],
+      rewriter: TExpr => TExpr,
+  ): TFunBody =
+    val (stmts, contracts) = decl.body match
+      case BlockBodyAST(s, cs) => (s, cs)
+      case _                    => (Nil, Nil) // unreachable — only BlockBody carries contracts
+    val savedReturnType = currentReturnType
+    val savedExpected = currentExpected
+    val savedScopeStack = scopeStack
+    // Fresh scope stack: outer-scope vars become invisible. Top-level fns +
+    // globals stay visible via separate maps in `lookup`. Siblings are
+    // pre-bound by copying their SymInfo from the saved stack so cross-refs
+    // still resolve.
+    scopeStack = new mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]]
+    pushScope()
+    try
+      // Pre-bind self + all siblings (incl. self for self-recursive defs).
+      // The rewriter converts the resulting TVarRef → TFuncRef(mangled) after
+      // analysis, so the analysis-time binding only needs the FuncType.
+      for siblingName <- siblingNames do
+        savedScopeStack.iterator.collectFirst {
+          case s if s.contains(siblingName) => s(siblingName)
+        }.foreach(sym => currentScope(siblingName) = sym)
+      for (param, tParam) <- decl.params.zip(closure.params) do
+        currentScope(param.name) = SymInfo(param.name, tParam.typ, mutable = true)
+      currentReturnType = closure.returnType
+      currentExpected = if closure.returnType == UnitType then None else Some(closure.returnType)
+      val analyzed =
+        try
+          analyzeBlockWithContracts(
+            stmts, contracts, closure.returnType,
+            mangledName, decl.params.map(_.name),
+          )
+        catch
+          case e: AnalysisError if e.getMessage.contains("undefined variable") =>
+            val pat = "undefined variable: '([^']+)'".r
+            val outer = pat.findFirstMatchIn(e.getMessage).map(_.group(1)).getOrElse("(unknown)")
+            throw AnalysisError(
+              s"inner def '${decl.name}' has require/ensure clauses but captures outer-scope variable: $outer. " +
+                "Contracts on inner defs are supported only when the def can be lifted to a top-level fn — " +
+                "promote it explicitly, or refactor to avoid the captures (e.g. pass the captured value as " +
+                "an extra parameter).",
+            )
+      analyzed match
+        case TBlockBody(ss) => TBlockBody(ss.map(s => mapTStmt(s)(rewriter)))
+        case other          => other
+    finally
+      scopeStack = savedScopeStack
+      currentReturnType = savedReturnType
+      currentExpected = savedExpected
 
   /** Analyze a function block body together with its `require` / `ensure` contract clauses.
    * Generates require checks at entry, injects a `__result__` local, and rewrites every
@@ -6253,6 +6643,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         // the interpreter can wire a self-cell into the captured env after construction.
         if decl.typeParams.nonEmpty then
           throw AnalysisError(s"inner def '${decl.name}' cannot declare type parameters")
+        // Inner defs with `require`/`ensure` contracts are NOT processed via the closure
+        // analyzer (which has no contract-emission stage). They are picked up post-pass
+        // by `liftInnerDefClusters` which re-analyzes the body via the contract-aware
+        // path — see that helper. We still emit a TClosure here so the post-pass has a
+        // uniform shape to operate on; the closure body's contracts are silently
+        // dropped by the closure analyzer, but the lift re-reads them from the
+        // original FunDeclAST. Validation of "no outer-scope captures" also lives in
+        // the post-pass so the error message can reference the captures directly.
         val retTypeAST = decl.returnType.getOrElse(
           throw AnalysisError(s"inner def '${decl.name}' must declare an explicit return type")
         )
