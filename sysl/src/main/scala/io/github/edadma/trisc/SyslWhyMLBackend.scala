@@ -115,13 +115,20 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  most proof-relevant module-level data is naturally immutable (limits, sentinels,
    *  shared math constants), so `val` covers the common case. */
   private def emitConstant(v: VarDeclAST): Unit =
-    if v.isMutable then
-      unsupported("module-level `var`", s"${v.name}: only `val` / `const` (immutable) module-level bindings are supported in Phase 3c")
     val t = v.typ.getOrElse(unsupported("module-level val without type annotation", v.name))
-    // `let constant` (program-level) — usable from both contracts and code bodies. Without
-    // `let`, the constant is logic-only and Why3 reports "logical symbol used in a non-ghost
-    // context" when a `let function` body references it.
-    line(s"let constant ${sanitizeName(v.name)} : ${typeOf(t)} = ${formatExpr(v.init)}")
+    val sname = sanitizeName(v.name)
+    if v.isMutable then
+      // Module-level `var` → WhyML `val name : ref type = ref initial`. Permanently
+      // add to refScope so every function body sees it as a ref (`!name` to read,
+      // `name := value` to assign). Drivers and kernel state live here in real code;
+      // this gates a large slice of OS verification.
+      refScope += v.name
+      line(s"val $sname : ref ${typeOf(t)} = ref ${formatExpr(v.init)}")
+    else
+      // `let constant` (program-level) — usable from both contracts and code bodies. Without
+      // `let`, the constant is logic-only and Why3 reports "logical symbol used in a non-ghost
+      // context" when a `let function` body references it.
+      line(s"let constant $sname : ${typeOf(t)} = ${formatExpr(v.init)}")
 
   /** sysl `struct Point { x: int; y: int }` → WhyML `type point = { x: int; y: int }`.
    *  WhyML records are immutable by default; field updates are functional (`{ p with x = 5 }`).
@@ -141,26 +148,48 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  witness works. If a user invariant rejects the all-zeros witness, Why3 will report
    *  the failed witness goal and the user can refactor. */
   private def emitStruct(s: StructDeclAST): Unit =
-    if s.typeParams.nonEmpty then unsupported("generic struct", s.name)
     if s.fields.isEmpty then unsupported("empty struct", s.name)
     val typeName = s"${s.name.head.toLower}${s.name.tail}"
-    val fieldStr = s.fields.map { case (fname, ftyp, _) =>
-      s"$fname: ${typeOf(ftyp)}"
-    }.mkString("; ")
-    if s.invariants.isEmpty then
-      line(s"type $typeName = { $fieldStr }")
-    else
-      val invStr = s.invariants
-        .map(e => stripOuterParens(formatExpr(e)))
-        .mkString(" && ")
-      val witness = s.fields.map { case (fname, ftyp, _) =>
-        s"$fname = ${defaultValue(ftyp, s.name, fname)}"
+    val savedTypeParams = currentTypeParams
+    currentTypeParams = s.typeParams.toSet
+    try
+      // Generic structs emit parametric WhyML records:
+      //   `struct Pair[T] { x: T; y: T }` → `type pair 'a = { x: 'a; y: 'a }`.
+      // Sysl type-param naming convention (single-letter uppercase) maps to WhyML
+      // type variables (lowercase, prefixed with `'`).
+      val typeParamsStr =
+        if s.typeParams.isEmpty then ""
+        else " " + s.typeParams.map(p => s"'${p.toLowerCase}").mkString(" ")
+      val fieldStr = s.fields.map { case (fname, ftyp, _) =>
+        s"$fname: ${typeOf(ftyp)}"
       }.mkString("; ")
-      line(s"type $typeName = { $fieldStr }")
-      indentLevel += 1
-      line(s"invariant { $invStr }")
-      line(s"by { $witness }")
-      indentLevel -= 1
+      if s.invariants.isEmpty then
+        line(s"type $typeName$typeParamsStr = { $fieldStr }")
+      else
+        // Generic structs with invariants: the `by { ... }` witness needs concrete
+        // values for every field, but defaultValue currently only handles int / bool.
+        // For a type-parameterized field, there's no canonical default — reject with
+        // a clear escape-hatch message.
+        if s.typeParams.nonEmpty then
+          unsupported(
+            "generic struct with invariant",
+            s"${s.name} — the `by { ... }` witness needs a concrete value for every " +
+              "type-parameterized field; extract the invariant to a non-generic wrapper " +
+              "(e.g. `struct PairInt { inner: Pair[int]; invariant ... }`) so the witness " +
+              "is well-defined",
+          )
+        val invStr = s.invariants
+          .map(e => stripOuterParens(formatExpr(e)))
+          .mkString(" && ")
+        val witness = s.fields.map { case (fname, ftyp, _) =>
+          s"$fname = ${defaultValue(ftyp, s.name, fname)}"
+        }.mkString("; ")
+        line(s"type $typeName = { $fieldStr }")
+        indentLevel += 1
+        line(s"invariant { $invStr }")
+        line(s"by { $witness }")
+        indentLevel -= 1
+    finally currentTypeParams = savedTypeParams
 
   /** Default value for a field's type, used to synthesize a `by { ... }` witness for
    *  invariant-bearing records. Only the trivially-derivable types are supported; anything
@@ -336,10 +365,15 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     // functions. Pure functions (Phase 1–3) keep `function` so they can be called from
     // contracts as well.
     val funKw = if isImpure(bodyStmts) then "" else "function "
+    // sysl `def` functions often omit the return type and rely on body inference.
+    // WhyML's type inference can fill in the gap — emit `let function f x = body`
+    // without a `: ret` clause and let Why3 unify. Annotated return types still
+    // emit explicitly (they document intent + give Why3 a fixed point for
+    // contract-side `result` typing).
     val ret = fn.returnType match
-      case None    => unsupported("function without explicit return type", fn.name)
-      case Some(t) => typeOf(t)
-    line(s"let $recKw$ghostKw" + funKw + s"$name $params : $ret")
+      case None    => ""
+      case Some(t) => s" : ${typeOf(t)}"
+    line(s"let $recKw$ghostKw" + funKw + s"$name $params$ret")
     indentLevel += 1
     for c <- contracts do emitContract(c)
     line(s"= $bodyStr")
@@ -669,6 +703,16 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case NamedTypeAST(name, args) if dataEnumNames.contains(name) =>
       // Generic data-enum application: `Option[int]` → `option int`. Type args are
       // emitted positionally and parenthesized when complex (multi-token).
+      val typeName = s"${name.head.toLower}${name.tail}"
+      val argStrs = args.map { a =>
+        val s = typeOf(a)
+        if s.contains(' ') then s"($s)" else s
+      }
+      s"$typeName ${argStrs.mkString(" ")}"
+    case NamedTypeAST(name, args) if structFields.contains(name) =>
+      // Generic struct application: `Pair[int]` → `pair int`. Mirrors the data-enum
+      // path — positional type args, parenthesized when multi-token. The struct's
+      // type-parameter declaration is rendered by emitStruct via currentTypeParams.
       val typeName = s"${name.head.toLower}${name.tail}"
       val argStrs = args.map { a =>
         val s = typeOf(a)
