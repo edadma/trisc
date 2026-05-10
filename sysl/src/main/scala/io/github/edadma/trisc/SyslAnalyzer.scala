@@ -2477,6 +2477,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case sa: StaticAssertDeclAST =>
         evalStaticAssert(sa)
         Nil
+      case mi: ModuleInvariantDeclAST =>
+        // Spec-only: validate that the expression is a bool reference over module-level
+        // state, then drop. The WhyML backend reads the original AST directly. Other
+        // backends never see this decl (analyzer returns no TDecl).
+        scopeStack = new mutable.ArrayBuffer
+        pushScope()
+        try
+          val tExpr = analyzeExpr(mi.expr)
+          if tExpr.typ != BoolType then
+            throw AnalysisError(s"module_invariant must be a bool expression, got ${tExpr.typ}")
+        finally
+          scopeStack = null
+        Nil
       case d => List(analyzeDecl(d))
     }
     val allDecls = tDecls ++ specializedDecls.toList

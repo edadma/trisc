@@ -44,6 +44,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  be reassigned later in the same scope; popped on the way out. Phase 4a does not handle
    *  shadowing — a function with two same-named locals in disjoint scopes would conflate them. */
   private val refScope: scala.collection.mutable.Set[String] = scala.collection.mutable.Set.empty
+  /** Module-invariant decls collected per `generate(program)`. The WhyML backend
+   *  emits them as a single `predicate module_inv ()` whose body conjoins every
+   *  invariant, then implicitly attaches `requires { module_inv () }` /
+   *  `ensures { module_inv () }` to every public function. Phase δ.3. */
+  private var moduleInvariants: List[ModuleInvariantDeclAST] = Nil
 
   private def indent: String = "  " * indentLevel
   private def line(s: String): Unit =
@@ -69,6 +74,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     dataEnumVariantOf = (for d <- dataEnums; v <- d.variants yield v.name -> d.name).toMap
     val constants = program.decls.collect { case v: VarDeclAST => v }
     val fns = program.decls.collect { case f: FunDeclAST => f }
+    moduleInvariants = program.decls.collect { case mi: ModuleInvariantDeclAST => mi }
     line(s"module $moduleName")
     indentLevel += 1
     line("use int.Int")
@@ -102,6 +108,14 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       if !first then blank()
       first = false
       emitConstant(c)
+    // Phase δ.3: emit a `predicate module_inv ()` after constants/refs are in scope so
+    // the body can reference them. Each `module_invariant` decl contributes one
+    // conjunct; `module_inv ()` evaluates to `true` when the program has none, which
+    // is harmless to include in requires/ensures.
+    if moduleInvariants.nonEmpty then
+      if !first then blank()
+      first = false
+      emitModuleInvariantPredicate()
     for fn <- fns do
       if !first then blank()
       first = false
@@ -114,6 +128,16 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  `constant`. Mutable `var` at module scope would need WhyML refs and is deferred —
    *  most proof-relevant module-level data is naturally immutable (limits, sentinels,
    *  shared math constants), so `val` covers the common case. */
+  /** Emit `predicate module_inv () = c1 /\ c2 /\ ...` where each `cN` is one of the
+   *  collected module_invariant clauses. The `()` parameter list is empty because the
+   *  predicate closes over module-level state via Why3's normal scoping rules — refs
+   *  read via `!name` etc. The predicate is logic-mode (formula); we emit the clauses
+   *  joined with `/\` (formula AND), not `&&` (program-bool AND), because Why3 expects
+   *  predicate bodies to be formulas. */
+  private def emitModuleInvariantPredicate(): Unit =
+    val clauses = moduleInvariants.map(mi => stripOuterParens(formatExpr(mi.expr)))
+    line(s"predicate module_inv () = ${clauses.mkString(" /\\ ")}")
+
   private def emitConstant(v: VarDeclAST): Unit =
     // Type annotation is optional: when sysl omits it, drop the `: t` clause and
     // let WhyML's type inference unify against the init expression (mirrors the
@@ -399,6 +423,14 @@ class SyslWhyMLBackend(moduleName: String = "M"):
           val names = attr.args.collect { case AttrPositional(AttrLitIdent(n)) => sanitizeName(n) }
           if names.nonEmpty then line(s"reads { ${names.mkString("; ")} }")
         case _ =>
+    // Phase δ.3: implicit module-invariant clauses on every public, non-ghost
+    // function. Public/external entry points must preserve invariants; private
+    // helpers can rely on them too but are checked transitively. Ghost fns are
+    // proof-only and don't need to carry the invariant. The `module_inv ()`
+    // predicate is in scope (emitted before all functions).
+    if moduleInvariants.nonEmpty && !fn.isPrivate && !isGhost then
+      line("requires { module_inv () }")
+      line("ensures  { module_inv () }")
     for c <- contracts do emitContract(c)
     line(s"= $bodyStr")
     indentLevel -= 1

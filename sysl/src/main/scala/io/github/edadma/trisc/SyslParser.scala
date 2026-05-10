@@ -42,11 +42,19 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val declBare: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | extensionDecl | interfaceDecl | typeAliasDecl | staticAssertDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | extensionDecl | interfaceDecl | typeAliasDecl | staticAssertDecl | moduleInvariantDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
 
   lazy val staticAssertDecl: Parser[StaticAssertDeclAST] =
     "static_assert" ~> "(" ~> expr ~ opt("," ~> stringLit) <~ ")" ^^ {
       case cond ~ msg => StaticAssertDeclAST(cond, msg)
+    }
+
+  /** `module_invariant <expr>` (or `module_invariant <expr>, "message"`) — declares a
+   *  verification-only predicate over module-level state. Spec-only: stripped from runtime
+   *  output, consumed by the WhyML backend (Phase δ.3). */
+  lazy val moduleInvariantDecl: Parser[ModuleInvariantDeclAST] =
+    "module_invariant" ~> expr ~ opt("," ~> stringLit) ^^ {
+      case e ~ msg => ModuleInvariantDeclAST(e, msg)
     }
 
   // --- Attributes ---
