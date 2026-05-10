@@ -812,53 +812,76 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       s"(if ${formatExpr(c)} then $tExpr else $eExpr)"
     case MatchExprAST(scrutinee, arms, default) =>
       // WhyML: `match e with | pat -> body | ... end`. Each arm's body must be a single
-      // expression in Phase 3a — multi-statement arm bodies (let-bindings, sequencing) come
-      // with the broader multi-stmt support in a later piece. Guards and multi-pattern arms
-      // are also deferred. The default arm (sysl `else`) becomes a wildcard `_ -> ...`.
+      // expression — multi-statement arm bodies (let-bindings, sequencing) come with the
+      // broader multi-stmt support in a later piece. The default arm (sysl `else`)
+      // becomes a wildcard `_ -> ...`.
       //
-      // WhyML restricts match patterns to ADT constructors and `_`/variables — integer and
-      // bool literal patterns are NOT allowed. Sysl `n match { 0 -> a; 1 -> b; else -> c }`
-      // therefore lowers to an if-chain `(if n = 0 then a else if n = 1 then b else c)`
-      // when the scrutinee is not an enum value. Detection is syntactic: if every non-default
-      // arm's pattern is an ADT constructor, emit `match`; otherwise lower to if-chain.
-      if arms.exists(_.guard.isDefined) then unsupported("match arm with guard", "Phase 3a")
-      if arms.exists(_.patterns.size > 1) then unsupported("match arm with multiple patterns", "Phase 3a")
+      // WhyML restricts match patterns to ADT constructors and `_`/variables — integer
+      // and bool literal patterns are NOT allowed. Sysl `n match { 0 -> a; 1 -> b;
+      // else -> c }` therefore lowers to an if-chain `(if n = 0 then a else if n = 1
+      // then b else c)` when the scrutinee is not an enum value. Detection is
+      // syntactic: if every non-default arm's pattern is an ADT constructor, emit
+      // `match`; otherwise lower to if-chain.
+      //
+      // Phase β supports:
+      //   - Multi-pattern arms (`| A | B -> body`) in both ADT and literal paths.
+      //   - Range patterns (`1..10`) in the literal path (lower to a guard).
+      //   - Wildcard patterns before the default in the literal path (`true`).
+      //   - Struct destructure patterns (`Point { x, y }`) in the ADT path.
+      //
+      // WhyML logic-mode `match` does NOT have `when` guards — guards on individual
+      // arms still error out, with a clearer message pointing at the workaround
+      // (rewrite as if-chain manually, or push the guard into the arm body when
+      // there's a clean fall-through).
+      if arms.exists(_.guard.isDefined) then unsupported(
+        "match arm with `when` guard",
+        "Why3 logic-mode `match` has no native guards — rewrite as an if-chain " +
+          "(`if pat-matches /\\ guard then body else next`) or move the condition into " +
+          "the arm body when there's a single fall-through path",
+      )
       val allCtorArms = arms.forall { a =>
-        a.patterns.head match
+        a.patterns.forall {
           case ValuePatternAST(FieldAccessAST(VarRefAST(t), _)) if enumNames(t) => true
-          // Bare reference to a no-payload data-enum variant: `None`.
           case ValuePatternAST(VarRefAST(n)) if dataEnumVariantOf.contains(n) => true
-          // Destructured payload-bearing variant: `Some(v)` / `Some(_)`.
           case DestructurePatternAST(n, _) if dataEnumVariantOf.contains(n) => true
+          case DestructurePatternAST(n, _) if structFields.contains(n)      => true
           case WildcardPatternAST => true
           case _                  => false
+        }
       }
       if allCtorArms then
         val sb = new StringBuilder
         sb.append(s"(match ${formatExpr(scrutinee)} with")
         for arm <- arms do
-          sb.append(s" | ${formatPattern(arm.patterns.head)} -> ${stmtsAsExpr(arm.body)}")
+          val patStr = arm.patterns.map(formatPattern).mkString(" | ")
+          sb.append(s" | $patStr -> ${stmtsAsExpr(arm.body)}")
         default match
           case Some(stmts) => sb.append(s" | _ -> ${stmtsAsExpr(stmts)}")
           case None        =>
         sb.append(" end)")
         sb.toString
       else
-        // Lower literal-pattern match to an if-chain. The scrutinee is evaluated once and
-        // each pattern becomes an `=` test against it. Default → final `else`.
+        // Literal-pattern path — lower to a chain of `if` tests. The scrutinee is
+        // evaluated once and each pattern becomes a condition against it. Multi-pattern
+        // arms OR-join their conditions; range patterns become `lo <= x /\ x <= hi`;
+        // wildcards become unconditional `true` (matches anything).
         val scr = formatExpr(scrutinee)
         val defaultExpr = default match
           case Some(stmts) => stmtsAsExpr(stmts)
           case None        => unsupported("literal-pattern match without `else` default",
                                           "WhyML cannot pattern-match int/bool literals — needs an exhaustive else")
+        def patternCond(p: MatchPatternAST): String = p match
+          case ValuePatternAST(e)         => s"$scr = ${formatExpr(e)}"
+          case RangePatternAST(lo, hi)    =>
+            // Sysl ranges in match are inclusive: `1..10` matches 1..=10.
+            s"($scr >= ${formatExpr(lo)} /\\ $scr <= ${formatExpr(hi)})"
+          case WildcardPatternAST         => "true"
+          case other                      => unsupported("literal-pattern shape", other.getClass.getSimpleName)
         val sb = new StringBuilder
         sb.append("(")
         for arm <- arms do
-          val key = arm.patterns.head match
-            case ValuePatternAST(e)   => formatExpr(e)
-            case WildcardPatternAST   => unsupported("wildcard before else in literal match", "Phase 3a")
-            case other                => unsupported("literal-pattern shape", other.getClass.getSimpleName)
-          sb.append(s"if $scr = $key then ${stmtsAsExpr(arm.body)} else ")
+          val cond = arm.patterns.map(patternCond).mkString(" \\/ ")
+          sb.append(s"if $cond then ${stmtsAsExpr(arm.body)} else ")
         sb.append(s"$defaultExpr)")
         sb.toString
     case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>
@@ -887,8 +910,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
 
   /** Format a sysl match pattern as a WhyML pattern. Covers the wildcard, integer
    *  literal patterns, simple enum constructor patterns, bare no-payload data-enum
-   *  variant references (`None`), and destructured data-enum variant patterns
-   *  (`Some(v)`, `Some(_)`). Range patterns remain deferred. */
+   *  variant references (`None`), destructured data-enum variant patterns
+   *  (`Some(v)`, `Some(_)`), and struct destructure patterns (`Point { x, y }`).
+   *
+   *  Range patterns are NOT formatted here — WhyML `match` has no range syntax;
+   *  ranges only appear in the literal-if-chain path (handled in MatchExprAST emit). */
   private def formatPattern(p: MatchPatternAST): String = p match
     case WildcardPatternAST => "_"
     case ValuePatternAST(IntLitAST(v))   => if v < 0 then s"(- ${-v})" else v.toString
@@ -897,13 +923,27 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case ValuePatternAST(VarRefAST(n)) if dataEnumVariantOf.contains(n) => n
     case ValuePatternAST(VarRefAST(name)) => sanitizeName(name)
     case ValuePatternAST(other) => unsupported("match value pattern", other.getClass.getSimpleName)
-    case _: RangePatternAST     => unsupported("range match pattern", "Phase 3a")
+    case _: RangePatternAST     => unsupported("range match pattern in ADT context",
+      "WhyML `match` has no range syntax — ranges work only in the literal-if-chain " +
+        "path (when the scrutinee is a number, not an ADT)")
     case DestructurePatternAST(n, fields) if dataEnumVariantOf.contains(n) =>
       // `Some(v)` → `Some v`, `Some(_)` → `Some _`. Each sub-pattern formats recursively
       // (today only wildcards and bare names; nested destructuring works the same way).
       if fields.isEmpty then n
       else s"$n " + fields.map(formatPattern).mkString(" ")
-    case _: DestructurePatternAST => unsupported("destructuring match pattern", "Phase 3a")
+    case DestructurePatternAST(n, fields) if structFields.contains(n) =>
+      // Struct destructure → WhyML record pattern `{ field1 = pat; field2 = pat; ... }`.
+      // Sysl positional destructure (`Point(x, y)`) zips with the struct's field
+      // declaration order; named destructure (parser-side syntax) would arrive with the
+      // same shape since the pattern is positional in the AST.
+      val fieldNames = structFields(n)
+      if fields.length != fieldNames.length then
+        unsupported("struct destructure arity mismatch",
+          s"$n expects ${fieldNames.length} field${if fieldNames.length == 1 then "" else "s"}, got ${fields.length}")
+      val parts = fieldNames.zip(fields).map { (fname, fpat) => s"$fname = ${formatPattern(fpat)}" }
+      s"{ ${parts.mkString("; ")} }"
+    case _: DestructurePatternAST => unsupported("destructuring match pattern",
+      "name not recognized as a data-enum variant or struct in scope")
 
   private def mapBinaryOp(op: String): String = op match
     case "==" => "="
