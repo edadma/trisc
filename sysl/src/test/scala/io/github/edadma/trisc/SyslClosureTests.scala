@@ -295,37 +295,104 @@ class SyslClosureTests extends SyslTestHelpers {
         |""".stripMargin) shouldBe 1
   }
 
-  "inner def with require + outer-scope capture is rejected" in {
+  // ===== Phase α.2: contracts on capturing closures =====
+  //
+  // Tier 4 followup #2 added contracts on inner defs via lift-to-top-level.
+  // That handled the no-capture case but rejected captures because the
+  // closure-lowering path didn't process contracts. Phase α.2 routes the
+  // closure analyzer's BlockBody case through analyzeBlockWithContracts so
+  // require/ensure clauses become TContractCheck nodes baked into the
+  // closure body itself. The closure capture scanner picks up vars
+  // referenced from inside the contract expressions.
+  //
+  // Result: inner defs with contracts AND captures now compile and run.
+  // Lifted (no-capture) and closure-resident (capture) paths coexist.
+
+  "capturing inner def with require captures the outer var (compiles + runs)" in {
+    eval(
+      """outer(threshold: int) -> int
+        |    def check(n: int) -> int
+        |        require n >= threshold
+        |        n + 1
+        |    check(5)
+        |
+        |main() -> int = outer(0)
+        |""".stripMargin) shouldBe 6
+  }
+
+  "capturing inner def with require — precondition violated traps" in {
     val thrown = intercept[RuntimeException] {
       eval(
         """outer(threshold: int) -> int
           |    def check(n: int) -> int
-          |        require n >= threshold     // captures `threshold` from outer
+          |        require n >= threshold
           |        n + 1
           |    check(5)
-          |
-          |main() -> int = outer(0)
-          |""".stripMargin)
-    }
-    thrown.getMessage should include("inner def 'check'")
-    thrown.getMessage should include("require/ensure")
-    thrown.getMessage should include("threshold")
-  }
-
-  "inner def body with outer-scope capture is also rejected when contract present" in {
-    // The body itself captures (not just the contract). Same diagnostic path.
-    val thrown = intercept[RuntimeException] {
-      eval(
-        """outer(bonus: int) -> int
-          |    def add_bonus(n: int) -> int
-          |        require n >= 0
-          |        n + bonus     // captures `bonus`
-          |    add_bonus(7)
           |
           |main() -> int = outer(10)
           |""".stripMargin)
     }
-    thrown.getMessage should include("inner def 'add_bonus'")
+    thrown.getMessage.toLowerCase should (include("precondition") or include("require"))
+  }
+
+  "capturing inner def with body capture + contract works" in {
+    // Both body AND contract reference outer-scope vars. Capture detection
+    // picks up both refs (contract refs via the new TContractCheck arm in
+    // scanStmtInSeq).
+    eval(
+      """outer(bonus: int, threshold: int) -> int
+        |    def add_bonus(n: int) -> int
+        |        require n >= threshold
+        |        n + bonus
+        |    add_bonus(7)
+        |
+        |main() -> int = outer(10, 0)
+        |""".stripMargin) shouldBe 17
+  }
+
+  "capturing inner def with ensure that references captured var works" in {
+    eval(
+      """outer(target: int) -> int
+        |    def at_least(n: int) -> int
+        |        ensure result >= target
+        |        if n < target then target else n
+        |    at_least(5)
+        |
+        |main() -> int = outer(10)
+        |""".stripMargin) shouldBe 10
+  }
+
+  "capturing inner def with both clauses works" in {
+    eval(
+      """outer(lo: int, hi: int) -> int
+        |    def clamped(n: int) -> int
+        |        require lo <= hi
+        |        ensure result >= lo
+        |        ensure result <= hi
+        |        if n < lo then lo
+        |        else if n > hi then hi
+        |        else n
+        |    clamped(50)
+        |
+        |main() -> int = outer(0, 100)
+        |""".stripMargin) shouldBe 50
+  }
+
+  "cluster member with outer capture is still rejected (lift can't preserve captures)" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """main() -> int
+          |    val bonus = 10
+          |    def is_even(n: int) -> bool
+          |        if n == 0 then true
+          |        else is_odd(n - 1 + bonus - bonus)
+          |    def is_odd(n: int) -> bool
+          |        if n == 0 then false
+          |        else is_even(n - 1)
+          |    if is_even(10) then 1 else 0
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("cluster")
     thrown.getMessage should include("bonus")
   }
 

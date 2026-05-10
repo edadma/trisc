@@ -2275,26 +2275,43 @@ analysis. Top-level functions still allow inferred return types.
 
 **Restrictions:** no type parameters, no return-type inference.
 
-**Contracts on inner defs are supported** when the def captures no
-outer-scope variables. `require`/`ensure` clauses on inner defs are
-syntactically the same as on top-level fns, and are wired through the same
-`TContractCheck` lowering — the analyzer lifts contract-bearing inner defs
-to top-level synthesized fns where the contract-aware analysis path runs:
+**Contracts on inner defs are fully supported**, including on inner defs
+that capture outer-scope variables. `require`/`ensure` clauses on inner
+defs are syntactically the same as on top-level fns and are wired through
+the same `TContractCheck` lowering. Two paths:
 
-```sysl
-outer() -> int
-    def squared(n: int) -> int
-        require n >= 0
-        ensure result >= 0
-        n * n
-    squared(7)
-```
+1. **No outer-scope captures** — the analyzer lifts the def to a
+   top-level synthesized fn, where the contract-aware analysis runs
+   exactly as for top-level fns:
 
-If a contract-bearing inner def captures an outer-scope variable, the lift
-cannot preserve those captures and the analyzer rejects with a clear
-"promote to top-level fn" diagnostic. Promote to a top-level `fn` (where
-contracts and captures both work) or refactor to pass the captured value
-as an extra parameter.
+   ```sysl
+   outer() -> int
+       def squared(n: int) -> int
+           require n >= 0
+           ensure result >= 0
+           n * n
+       squared(7)
+   ```
+
+2. **Captures outer-scope state** — the def stays as a closure; the
+   closure analyzer routes its body through the contract-aware path so
+   `require`/`ensure` become `TContractCheck` nodes baked into the closure
+   body. The capture scanner picks up any vars referenced in the contracts:
+
+   ```sysl
+   outer(threshold: int) -> int
+       def check(n: int) -> int
+           require n >= threshold       // captures threshold
+           n + 1
+       check(5)
+   ```
+
+The only remaining restriction is **cluster members with outer captures**
+(mutual-recursion siblings that ALSO capture outer state). The lift can't
+preserve those captures, so the analyzer rejects with a clear "promote to
+top-level fn" diagnostic. Refactor by passing captured state as extra
+parameters, or promote the cluster to top-level fns (where both contracts
+and captures work fully).
 
 **Mutual recursion is supported** when the cluster of cross-referencing
 inner defs captures no outer-scope variables. The analyzer pre-binds every
@@ -2369,8 +2386,9 @@ true, false           // bool
 **Literal overflow is a compile-time error.** A bare integer literal that does
 not fit in the type it's being assigned/coerced to produces a hard error rather
 than a silent truncation. The check covers both positive and negative
-out-of-range values — a unary minus on a literal is constant-folded before the
-range check fires:
+out-of-range values — unary minus and bitwise NOT on a literal are
+constant-folded before the range check fires, with NOT's bit-flip width
+determined by the inner literal's type:
 
 ```sysl
 var x: u8 = 256       // error: literal 256 does not fit in u8 (range 0..255)
@@ -2379,6 +2397,10 @@ var z: int = 0xFFFF_FFFF
                       // error: literal 4294967295 does not fit in int (range -2147483648..2147483647)
 var n: u8 = -1        // error: literal -1 does not fit in u8 (range 0..255)
 var m: i8 = -129      // error: literal -129 does not fit in i8 (range -128..127)
+var p: u8 = ~0        // error: literal -1 does not fit in u8
+                      //   (`~0` is i32 → -1; the i32 width applies to NOT)
+var q: u8 = ~0u32     // error: literal 4294967295 does not fit in u8
+                      //   (`~0u32` is u32 → 0xFFFFFFFF, width = u32)
 ```
 
 If truncation or bit-pattern reinterpretation is intended, write the cast
@@ -2387,10 +2409,13 @@ explicitly:
 ```sysl
 var x: u8 = u8(256)   // ok — wraps to 0; intent is clear
 var n: u8 = u8(-1)    // ok — bit-pattern reinterpretation, yields 255
+var p: u8 = ~0u8      // ok — width matches target, folds to 0xFF
+var q: u8 = u8(~0)    // ok — explicit truncation cast, yields 255
 ```
 
 Negative literals into signed types within range are accepted as written
-(`var x: i8 = -1`, `var y: int = -2147483648` are both fine).
+(`var x: i8 = -1`, `var y: int = -2147483648`, `var z: int = ~0` (= -1) are
+all fine).
 
 Float literals (`3.14`, `1e5`) default to `f64`, but coerce to `f32` when the
 context demands it (`var x: f32 = 1.5` works without a cast). Mixed-width float
