@@ -1019,6 +1019,24 @@ asserts the decrease, and then performs the actual call. Because TIfExpr's last 
 is its value, the wrapper is transparent to the surrounding expression — `n * fact(n - 1)`
 keeps its meaning.
 
+**Lexicographic variants.** For mutual recursion or nested loops, a single integer measure
+isn't enough. `variant { e1, e2, ... }` declares a lex-tuple measure: the recursive call
+must decrease the tuple in lexicographic order (e1 strictly decreases, OR e1 stays equal
+and e2 strictly decreases, OR ...). The classic example is Ackermann:
+
+```sysl
+def ack(m: int, n: int) -> int
+    variant { m, n }
+    if m <= 0 then return n + 1
+    if n <= 0 then return ack(m - 1, 1)
+    return ack(m - 1, ack(m, n - 1))
+```
+
+Runtime behaviour: lex variants are **verification-only**. The lex-comparison runtime check
+isn't emitted (would require lex-tuple machinery in the codegen path). Why3 / WhyML verifies
+the lex-order termination statically via the emitted `variant { e1; e2; ... }` clause. The
+single-arg form `variant <expr>` keeps its existing runtime decreaser check.
+
 ### Default Parameter Values
 
 Parameters can have default values, given with `= expr` after the type. Any

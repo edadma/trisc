@@ -718,7 +718,14 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case ContractRequire => "requires"
       case ContractEnsure  => "ensures "
       case ContractVariant => "variant "
-    line(s"$keyword { ${stripOuterParens(formatExpr(c.expr))} }")
+    // δ.2: lex-tuple variant — `variant { e1, e2 }` parsed as TupleLitAST. Why3
+    // supports lexicographic measures via `variant { e1; e2; ... }` natively.
+    c.expr match
+      case TupleLitAST(es) if c.kind == ContractVariant =>
+        val parts = es.map(e => stripOuterParens(formatExpr(e))).mkString("; ")
+        line(s"$keyword { $parts }")
+      case _ =>
+        line(s"$keyword { ${stripOuterParens(formatExpr(c.expr))} }")
 
   /** Strip one matched outer paren pair if it wraps the entire string. The formatter
    *  conservatively wraps every binary expression in parens; outermost wrapping inside a
