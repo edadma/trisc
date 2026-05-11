@@ -4169,10 +4169,10 @@ something other than AF_INET / AF_UNSPEC.
         // replay the per-option IPC here.
         if posix_fd_table[idx].keep_idle_secs > 0
             shim_inet_set_keepopt(inet_fd, 0,
-                posix_fd_table[idx].keep_idle_secs * 100)
+                posix_fd_table[idx].keep_idle_secs * 1000)
         if posix_fd_table[idx].keep_intvl_secs > 0
             shim_inet_set_keepopt(inet_fd, 1,
-                posix_fd_table[idx].keep_intvl_secs * 100)
+                posix_fd_table[idx].keep_intvl_secs * 1000)
         if posix_fd_table[idx].keep_cnt > 0
             shim_inet_set_keepopt(inet_fd, 2,
                 posix_fd_table[idx].keep_cnt)
@@ -4254,16 +4254,16 @@ inet uses a fixed `TCP_LISTEN_BACKLOG` internally.
         // inet_tcp_handle_passive_syn.
         if posix_fd_table[idx].keep_idle_secs > 0
             shim_inet_set_keepopt(listen_fd, 0,
-                posix_fd_table[idx].keep_idle_secs * 100)
+                posix_fd_table[idx].keep_idle_secs * 1000)
         if posix_fd_table[idx].keep_intvl_secs > 0
             shim_inet_set_keepopt(listen_fd, 1,
-                posix_fd_table[idx].keep_intvl_secs * 100)
+                posix_fd_table[idx].keep_intvl_secs * 1000)
         if posix_fd_table[idx].keep_cnt > 0
             shim_inet_set_keepopt(listen_fd, 2,
                 posix_fd_table[idx].keep_cnt)
         // Apply pending TCP_USER_TIMEOUT.  The listener slot itself
         // never enters ESTABLISHED so the timer never fires on it,
-        // but accepted children inherit `user_timeout_ticks` from
+        // but accepted children inherit `user_timeout_ms` from
         // the listener via `inet_tcp_handle_passive_syn`.
         if posix_fd_table[idx].tcp_user_timeout_ms > 0
             shim_inet_set_userto(listen_fd,
@@ -4799,10 +4799,10 @@ no resurrection on this test surface.
                         kind = 1
                     else if optname == 6
                         kind = 2
-                    var ticks = v
+                    var ms = v
                     if optname != 6
-                        ticks = v * 100        // sec → tick @ 100 Hz
-                    val rc = shim_inet_set_keepopt(ko_inet_fd, kind, ticks)
+                        ms = v * 1000          // sec → ms (monotonic_ms clock)
+                    val rc = shim_inet_set_keepopt(ko_inet_fd, kind, ms)
                     if rc != 0
                         return i64(rc)
                 return i64(0)
@@ -5098,8 +5098,8 @@ into the user buffer.
         // TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT.  Always answer
         // from the shim's persisted value — that's the source of
         // truth for what the user set, and round-tripping through
-        // the inet ticks representation would lose the original
-        // seconds (60 sec → 6000 ticks → 60 sec is fine, but small
+        // the inet ms representation would lose the original
+        // seconds (60 sec → 60000 ms → 60 sec is fine, but small
         // values can drift if the user passes 0 / 1 in seconds and
         // we'd return the default rather than the persisted 0).
         if level == 6

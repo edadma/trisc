@@ -2054,10 +2054,10 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
         send_waiter_len: int
         send_deadline: int
 
-`send_deadline` is the SO_SNDTIMEO deadline in `uptime()` ticks. 0
-means "park forever" (Linux default). Set when a TCP_SEND arrives
-carrying a non-zero `timeout_ms` and parks; the timer scan replies
-`(status=2, n=0)` when `now >= deadline`.
+`send_deadline` is the SO_SNDTIMEO deadline in `monotonic_ms`
+milliseconds.  0 means "park forever" (Linux default). Set when a
+TCP_SEND arrives carrying a non-zero `timeout_ms` and parks; the
+timer scan replies `(status=2, n=0)` when `now >= deadline`.
 
 `user_timeout_ms` and `earliest_unack_tick` together drive
 RFC 5482 TCP_USER_TIMEOUT — a per-connection cap on how long the
@@ -2066,11 +2066,11 @@ SO_SNDTIMEO: USER_TIMEOUT survives an unblocked send and governs
 the connection itself; SNDTIMEO governs only the current send
 call's blocking window.
 
-  - `user_timeout_ms` is the configured cap (in 10-ms ticks).
+  - `user_timeout_ms` is the configured cap, in milliseconds.
     0 disables — slix has no sysctl for the system default, so 0
     means "no cap".
-  - `earliest_unack_tick` is the absolute tick at which the
-    *current* unacked run started.  Set in `inet_tcp_do_send` when
+  - `earliest_unack_tick` is the absolute `monotonic_ms` timestamp
+    at which the *current* unacked run started.  Set in `inet_tcp_do_send` when
     `send_len` transitions 0 → >0; reset to 0 in the ACK path when
     `snd_una` reaches `snd_nxt` (everything drained); restarted on
     partial cumulative ACKs so the countdown is anchored on the
@@ -2150,20 +2150,21 @@ TCP_USER_TIMEOUT verification. Set via `INET_CMD_TCP_BLACKHOLE_ACKS_TEST`
         ts_offset: u32
         // SO_KEEPALIVE state.  `keepalive_on != 0` activates the
         // probe/giveup cycle.  `last_recv_tick` is the absolute
-        // tick of the most recent inbound segment — the idle-
-        // timer baseline.  `keepalive_probes` counts unanswered
-        // probes; `keepalive_next_probe` is the absolute tick at
-        // which the next probe (or first probe after idle) fires
-        // (0 = none scheduled, recomputed lazily in scan_timers).
+        // `monotonic_ms` timestamp of the most recent inbound
+        // segment — the idle-timer baseline.  `keepalive_probes`
+        // counts unanswered probes; `keepalive_next_probe` is the
+        // absolute `monotonic_ms` timestamp at which the next probe
+        // (or first probe after idle) fires (0 = none scheduled,
+        // recomputed lazily in scan_timers).
         keepalive_on: int
         last_recv_tick: int
         keepalive_probes: int
         keepalive_next_probe: int
         // Per-socket keepalive overrides (TCP_KEEPIDLE / TCP_KEEPINTVL
         // / TCP_KEEPCNT). 0 = use the global TCP_KEEPALIVE_* default.
-        // Idle/intvl are stored as ticks (already converted from
-        // seconds at the shim boundary); cnt is the probe-giveup
-        // threshold.
+        // Idle/intvl are stored as ms (already converted from
+        // seconds at the shim boundary, `secs * 1000`); cnt is the
+        // probe-giveup threshold.
         keepalive_idle: int
         keepalive_intvl: int
         keepalive_cnt: int
@@ -3423,7 +3424,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].rcv_wscale = 0
                 tcp_sockets[i].ts_ok = 0
                 tcp_sockets[i].ts_recent = u32(0)
-                // Mix slot index, alloc seq, and uptime so two
+                // Mix slot index, alloc seq, and monotonic_ms so two
                 // back-to-back connections from the same socket
                 // pool don't share an offset.
                 tcp_sockets[i].ts_offset = u32(monotonic_ms()) ^ u32(i * 1000003) ^ tcp_iss_counter
@@ -3555,10 +3556,10 @@ Idempotent (no-op for same-state calls).  Returns 0 on success,
         0
 
 
-setsockopt(TCP_USER_TIMEOUT) — write the per-socket cap in ticks
-(shim has already converted from milliseconds at the boundary,
-rounding up at the same 10-ms granularity as SO_SNDTIMEO).  0
-disables (Linux's "system default" semantics — slix has no
+setsockopt(TCP_USER_TIMEOUT) — write the per-socket cap in
+milliseconds (the unit the user already passed at the POSIX
+boundary; RFC 5482 §3 is in ms, the man page is misleading).
+0 disables (Linux's "system default" semantics — slix has no
 sysctl for this, so 0 means "no cap").
 
 Returns 0 on success, -1 on bad fd.
@@ -3599,8 +3600,8 @@ Returns 0 on success, -1 on bad fd.
 setsockopt(TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT) — write a
 per-socket override that scan_timers consults instead of the
 global default. `kind` selects which option (0 = idle, 1 = intvl,
-2 = cnt). Idle/intvl arrive in *ticks* (the shim has already
-converted from seconds at 100 Hz); cnt is a raw probe count.
+2 = cnt). Idle/intvl arrive in *milliseconds* (the shim has already
+converted from seconds via `secs * 1000`); cnt is a raw probe count.
 Clamp to a non-zero positive — 0 is reserved internally to mean
 "use default", so a caller passing 0 still routes to the global
 constant. Resets the probe schedule so the new cadence takes
@@ -3633,8 +3634,8 @@ Returns 0 on success, -1 on bad fd / unknown kind.
 
 
 getsockopt(TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT) — read the
-persisted per-socket override. Returns the *ticks* / count. The
-caller (typically the shim) is responsible for converting back
+persisted per-socket override. Returns the *milliseconds* / count.
+The caller (typically the shim) is responsible for converting back
 to seconds. Returns -1 on bad fd / unknown kind. A 0 reply means
 "using the global default" — distinct from a real 0, which is
 forbidden by the setter clamp.

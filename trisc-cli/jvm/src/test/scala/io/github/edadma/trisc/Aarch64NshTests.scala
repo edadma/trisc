@@ -2608,6 +2608,22 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "tcpreuse:bad"
   }
 
+  "tcp: keepalive idle/intvl fire on the right wall-clock cadence" in {
+    // Regression for the keepalive unit bug: the shim used to convert
+    // TCP_KEEPIDLE / TCP_KEEPINTVL seconds → 10-ms-ticks (`secs * 100`)
+    // before forwarding to inet, but inet stores those fields in
+    // `monotonic_ms` milliseconds. So setting KEEPIDLE=2s effectively
+    // landed as 200 ms — ~10× too fast a fire.
+    //
+    // test_tkeep arms the slix-only ACK blackhole on the server-child
+    // slot, then sets KEEPIDLE=2s / KEEPINTVL=1s / KEEPCNT=2 on the
+    // client. Expected abort time ≈ 4 s. Pre-fix it was ~400 ms.
+    // QEMU timeout is 60 s; this test runs in ~5–6 s wall.
+    val output = qemu.command("test_tkeep")
+    output should include("tkeep: ok elapsed=")
+    output should not include "tkeep: bad"
+  }
+
   "unix: AF_UNSPEC connect dissolves DGRAM peer" in {
     // Linux's `connect(fd, sin_family=AF_UNSPEC, ...)` clears
     // the DGRAM socket's default peer; subsequent send() (no

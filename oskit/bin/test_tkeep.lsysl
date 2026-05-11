@@ -1,0 +1,244 @@
+test_tkeep — TCP keepalive idle/intvl unit regression
+======================================================
+
+Single-process loopback test that forces keepalive to fire on a
+quiescent connection by arming the slix-only ACK blackhole on
+the *server child* slot. Without the blackhole, slix's loopback
+fastpath would ACK every keepalive probe immediately and the
+probe count would never grow.
+
+The bug this test catches: the POSIX shim used to convert
+TCP_KEEPIDLE / TCP_KEEPINTVL seconds → 10-ms-ticks (`secs * 100`)
+before forwarding to inet, but inet stores those values in
+`monotonic_ms` milliseconds. So a `setsockopt(TCP_KEEPIDLE = 2s)`
+landed on inet as 200 ms — an order-of-magnitude faster fire.
+Pre-fix this test would close at ~400 ms; post-fix at ~4000 ms.
+
+Wire-up:
+  - Server listens on 127.0.0.1:9197.
+  - Client connects, server accepts → child fd.
+  - SOL_SLIX_TEST (0x534c) optname=1 arms the ACK blackhole on
+    the *child* fd, so the child's outbound pure-ACKs are
+    silently dropped while SYN/FIN/RST still flow.
+  - SO_KEEPALIVE=1 + TCP_KEEPIDLE=2 + TCP_KEEPINTVL=1 +
+    TCP_KEEPCNT=2 on the *client* fd. Total time to abort
+    ≈ idle + cnt * intvl = 2s + 2 * 1s = 4s.
+  - Blocking read on the client returns once `inet_tcp_scan_timers`
+    closes the slot.  Either r=0 (EOF — shim's sys_read TCP path
+    doesn't consult `pending_error`, separate gap) or r=-110
+    (ETIMEDOUT, if/when that gap is closed) counts as "closed by
+    keepalive"; the wall-clock is the actual regression canary.
+  - Wall-clock elapsed must fall in [2500 ms, 6500 ms]. The wide
+    window absorbs scheduler-jitter / scan-period rounding;
+    pre-fix elapsed (~400 ms) sits well outside.
+
+Prints `tkeep: ok elapsed=<ms>` on pass, `tkeep: bad <step>` on
+failure.
+
+    module oskit.bin.test_tkeep
+
+    import oskit.ulib.{puts, putint, exit, exit_with, syscall6, monotonic_ms, sleep}
+
+
+    val NR_READ       = 130
+    val NR_ACCEPT     = 131
+    val NR_BIND       = 135
+    val NR_CLOSE      = 147
+    val NR_CONNECT    = 148
+    val NR_LISTEN     = 217
+    val NR_SOCKET     = 337
+    val NR_SETSOCKOPT = 326
+
+    val AF_INET_V     = 2
+    val SOCK_STREAM_V = 1
+
+    val SOL_SOCKET    = 1
+    val SO_KEEPALIVE  = 9
+
+    val IPPROTO_TCP   = 6
+    val TCP_KEEPIDLE  = 4
+    val TCP_KEEPINTVL = 5
+    val TCP_KEEPCNT   = 6
+
+    // Slix-only test channel — see oskit/posix/shim.lsysl
+    // sys_setsockopt level == 0x534c branch (matches the
+    // SOL_SLIX_TEST / SLIX_TEST_BLACKHOLE_ACKS pair already in use
+    // by slix/test/musrto.c).
+    val SOL_SLIX_TEST         = 0x534c
+    val SLIX_TEST_BLACKHOLE   = 1
+
+
+    print_udec(v: int)
+        if v >= 10
+            print_udec(v / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (v % 10))
+        puts(string(&b[0], 1))
+
+
+    fail_with(code: int)
+        puts("tkeep: bad ")
+        print_udec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    fill_sockaddr(a: *byte, port: int, b0: int, b1: int, b2: int, b3: int)
+        a[0] = byte(AF_INET_V & 0xff)
+        a[1] = byte(0)
+        a[2] = byte((port >> 8) & 0xff)
+        a[3] = byte(port & 0xff)
+        a[4] = byte(b0 & 0xff)
+        a[5] = byte(b1 & 0xff)
+        a[6] = byte(b2 & 0xff)
+        a[7] = byte(b3 & 0xff)
+        var i = 8
+        while i < 16
+            a[i] = byte(0)
+            i += 1
+
+
+    write_i32_le(a: *byte, off: int, v: int)
+        a[off + 0] = byte(v & 0xff)
+        a[off + 1] = byte((v >> 8) & 0xff)
+        a[off + 2] = byte((v >> 16) & 0xff)
+        a[off + 3] = byte((v >> 24) & 0xff)
+
+
+    posix_socket(family: int, stype: int, proto: int) -> int
+        int(syscall6(NR_SOCKET, i64(family), i64(stype), i64(proto), 0, 0, 0))
+
+    posix_bind(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_BIND, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_listen(fd: int, backlog: int) -> int
+        int(syscall6(NR_LISTEN, i64(fd), i64(backlog), 0, 0, 0, 0))
+
+    posix_accept(fd: int, addr: *byte, addrlen: *int) -> int
+        int(syscall6(NR_ACCEPT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_connect(fd: int, addr: *byte, addrlen: int) -> int
+        int(syscall6(NR_CONNECT, i64(fd), i64(addr), i64(addrlen), 0, 0, 0))
+
+    posix_setsockopt(fd: int, level: int, optname: int,
+                     optval: *byte, optlen: int) -> int
+        int(syscall6(NR_SETSOCKOPT, i64(fd), i64(level), i64(optname),
+            i64(optval), i64(optlen), 0))
+
+    posix_read(fd: int, buf: *byte, blen: int) -> int
+        int(syscall6(NR_READ, i64(fd), i64(buf), i64(blen), 0, 0, 0))
+
+    posix_close(fd: int) -> int
+        int(syscall6(NR_CLOSE, i64(fd), 0, 0, 0, 0, 0))
+
+
+Tiny helper: write a 4-byte int into a setsockopt buffer and
+forward via the posix syscall. Returns the syscall result so the
+caller can short-circuit on failure.
+
+    set_int_opt(fd: int, level: int, optname: int, value: int) -> int
+        var buf: [4]byte
+        write_i32_le(&buf[0], 0, value)
+        posix_setsockopt(fd, level, optname, &buf[0], 4)
+
+
+    main(argv: []string)
+        val ls = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if ls < 0
+            fail_with(1)
+            return
+        var bind_addr: [16]byte
+        fill_sockaddr(&bind_addr[0], 9197, 0, 0, 0, 0)
+        if posix_bind(ls, &bind_addr[0], 16) != 0
+            fail_with(2)
+            return
+        if posix_listen(ls, 4) != 0
+            fail_with(3)
+            return
+
+        val cl = posix_socket(AF_INET_V, SOCK_STREAM_V, 0)
+        if cl < 0
+            fail_with(4)
+            return
+        var conn_addr: [16]byte
+        fill_sockaddr(&conn_addr[0], 9197, 127, 0, 0, 1)
+        if posix_connect(cl, &conn_addr[0], 16) != 0
+            fail_with(5)
+            return
+
+        var peer: [16]byte
+        var peer_len = 16
+        val ch = posix_accept(ls, &peer[0], &peer_len)
+        if ch < 0
+            fail_with(6)
+            return
+
+        // Arm the ACK blackhole on the server-child slot. From now
+        // on the child silently drops pure-ACK segments, so any
+        // keepalive probe the client sends never sees its
+        // acknowledgement.
+        if set_int_opt(ch, SOL_SLIX_TEST, SLIX_TEST_BLACKHOLE, 1) != 0
+            fail_with(7)
+            return
+
+        // Enable keepalive on the client with a tight idle/intvl/cnt
+        // schedule.  idle=2 s, intvl=1 s, cnt=2  ⇒  abort ≈ 4 s.
+        if set_int_opt(cl, SOL_SOCKET, SO_KEEPALIVE, 1) != 0
+            fail_with(8)
+            return
+        if set_int_opt(cl, IPPROTO_TCP, TCP_KEEPIDLE, 2) != 0
+            fail_with(9)
+            return
+        if set_int_opt(cl, IPPROTO_TCP, TCP_KEEPINTVL, 1) != 0
+            fail_with(10)
+            return
+        if set_int_opt(cl, IPPROTO_TCP, TCP_KEEPCNT, 2) != 0
+            fail_with(11)
+            return
+
+        // Blocking read on the client.  No data ever arrives, so
+        // the only way back is keepalive deciding the peer is dead.
+        // Accept either r=0 (EOF) or r=-110 (ETIMEDOUT) — both
+        // mean "connection closed by something other than the
+        // peer's data path", and the wall-clock-elapsed assertion
+        // below is the actual regression check.
+        val t0 = monotonic_ms()
+        var rbuf: [4]byte
+        val r = posix_read(cl, &rbuf[0], 4)
+        val t1 = monotonic_ms()
+        val elapsed = int(t1 - t0)
+
+        if r != 0 && r != -110
+            puts("tkeep: bad 12 r=")
+            print_udec(if r < 0 then -r else r)
+            puts(" elapsed=")
+            print_udec(elapsed)
+            puts("\n")
+            exit_with(12)
+            return
+
+        // Pre-fix elapsed ≈ 400 ms (idle/intvl interpreted as ms
+        // rather than as 10-ms ticks → 10× faster). Post-fix
+        // elapsed ≈ 4000 ms.  The 2500–6500 ms window absorbs
+        // scheduler-jitter and scan-period rounding while leaving
+        // a wide margin from the pre-fix value.
+        if elapsed < 2500
+            puts("tkeep: bad 13 elapsed=")
+            print_udec(elapsed)
+            puts(" (too early — KEEPIDLE/INTVL unit regression?)\n")
+            exit_with(13)
+            return
+        if elapsed > 6500
+            puts("tkeep: bad 14 elapsed=")
+            print_udec(elapsed)
+            puts(" (too late)\n")
+            exit_with(14)
+            return
+
+        posix_close(ch)
+        posix_close(cl)
+        posix_close(ls)
+        puts("tkeep: ok elapsed=")
+        print_udec(elapsed)
+        puts("\n")
+        exit()
