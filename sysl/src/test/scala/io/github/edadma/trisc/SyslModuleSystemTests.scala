@@ -550,4 +550,44 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     try driver.compile(sources) catch
       case e: Throwable => fail(s"compile failed: ${e.getMessage}", e)
   }
+
+  // ===== Pre-collection cascade-error masking =====
+  // Regression for the bug where a real user error in one sibling file
+  // (say file A's `cannot access field 'len' on string`) was silently
+  // swallowed during pre-collection, then the package meta for A's module
+  // was published without A's contributions, and a different sibling B
+  // that referenced one of A's vals failed with a misleading
+  // `undefined variable: '<A's val>'` error during final-compile.
+  //
+  // The fix: after pre-collection iteration converges, if any file
+  // persistently fails with a non-`undefined variable` error (i.e. an
+  // actual user error rather than a cascade symptom), surface that error
+  // so the user sees the root cause.
+
+  "real user error in one sibling surfaces instead of cascade error in another" in {
+    // File A has a real user error (`s.len` on a string is not a valid
+    // field access — there's no extension `len` on string). File B is a
+    // sibling that uses a forward-referenced val from A. Without the fix,
+    // the user-visible error is "undefined variable: 'OWNERS_MAX'" in
+    // file B — completely misleading because OWNERS_MAX is fine; A's
+    // pre-collection just failed silently and so its meta was empty.
+    val sources = Map(
+      "mymod/proto" ->
+        """module mymod
+          |probe(s: string) -> int = s.len
+          |val OWNERS_MAX = 4
+          |use_max() -> int = OWNERS_MAX
+          |""".stripMargin,
+      "mymod/main" ->
+        """module mymod
+          |consume() -> int = OWNERS_MAX
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val ex = the[driver.DriverError] thrownBy driver.compile(sources)
+    // The error should be from `mymod/proto` (the real bug) — not from
+    // `mymod/main` (which references a perfectly-valid val).
+    ex.getMessage should include("mymod/proto")
+    ex.getMessage should include("cannot access field 'len' on string")
+  }
 }

@@ -180,6 +180,14 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
       var meta = new ModuleMeta(Nil)
       var remaining = sourceNames.toList
       var changed = true
+      // Per-file error from the last iteration that attempted it. Used after the
+      // iteration converges to surface real user errors that would otherwise be
+      // swallowed by `Try {…}` and surface as misleading cascade errors in
+      // sibling files (e.g. file A's `cannot access field 'len' on string`
+      // silently swallowed → file B's `undefined variable: <A's val>`, where
+      // the val is fine; only A's pre-collection failed and so A's symbols
+      // weren't published to packageMetaCache).
+      val preCollectErrors = new mutable.LinkedHashMap[String, Throwable]
       while changed && remaining.nonEmpty do
         changed = false
         val stillFailing = new mutable.ListBuffer[String]
@@ -286,9 +294,32 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               meta = meta.merge(fileMeta)
               perFileMetaCache(name) = fileMeta
               changed = true
-            case scala.util.Failure(_) =>
+              preCollectErrors.remove(name)
+            case scala.util.Failure(ex) =>
               stillFailing += name
+              preCollectErrors(name) = ex
         remaining = stillFailing.toList
+      // After convergence, distinguish real user errors from benign cascades.
+      // A file that persistently fails with `undefined variable: X` is almost
+      // always a cascade — X is defined in a sibling whose pre-collection also
+      // failed, or in a standalone module that hasn't been compiled yet (legit
+      // case handled by Step 5's topological order). Real user errors —
+      // `cannot access field`, type errors, parse-stage errors that escape — are
+      // worth surfacing now so the user sees the root cause instead of a
+      // misleading cascade error from another sibling that final-compile will
+      // eventually throw. We only throw if a non-`undefined variable` error is
+      // present; otherwise we leave the legacy behavior (let final-compile
+      // surface whatever error remains).
+      if remaining.nonEmpty then
+        val rootCause = remaining.iterator
+          .flatMap(n => preCollectErrors.get(n).map((n, _)))
+          .find { case (_, ex) =>
+            val m = ex.getMessage
+            m != null && !m.startsWith("undefined variable")
+          }
+        rootCause.foreach { case (file, ex) =>
+          throw DriverError(s"$file: ${ex.getMessage}")
+        }
       packageMetaCache(modPath) = meta
 
     // Step 5: Compile in order
