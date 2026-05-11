@@ -1671,13 +1671,29 @@ handles read from the TTY driver.
                         return i64(raw - 256)
                     return i64(raw)
             if reply[0] != 0
-                return i64(-EIO)
+                // Reply-side error.  Consult inet's pending_error
+                // first so async failures (keepalive-giveup, post-
+                // handshake RST, TCP_USER_TIMEOUT) surface as the
+                // right errno (ETIMEDOUT / ECONNRESET / …) on the
+                // next read — mirrors the sys_write pattern at
+                // shim.lsysl:1513.  Fall back to -EIO if no
+                // pending error is recorded.
+                return shim_tcp_recv_err_or(inet_fd, -EIO)
             val rlen = shim_read_u16(reply, 1)
             val ubuf: *byte = *byte(buf)
             var i = 0
             while i < rlen
                 ubuf[i] = reply[3 + i]
                 i += 1
+            // rlen==0 from a successful reply means "no data and
+            // the slot has been closed" (the blocking recv was
+            // woken by inet_tcp_close_slot, or the NB recv saw an
+            // empty queue post-close).  Linux delivers the recorded
+            // sk_err once on this read and clears it; subsequent
+            // reads return real EOF.  Consult pending_error first;
+            // fall back to 0 (clean EOF) if none recorded.
+            if rlen == 0
+                return shim_tcp_recv_err_or(inet_fd, 0)
             return i64(rlen)
         if k == POSIX_FD_FILE
             return shim_vfs_read(posix_fd_target(fd), buf, len)
@@ -3694,7 +3710,10 @@ peer call `getpeername`.
                     return i64(raw - 256)
                 return i64(raw)
         if reply[0] != 0
-            return i64(-EIO)
+            // Same pending_error consultation as sys_read — keeps
+            // recvfrom() and read() on the same TCP fd agree on
+            // how async failures surface.
+            return shim_tcp_recv_err_or(inet_fd, -EIO)
         val rlen = shim_read_u16(reply, 1)
         val ubuf: *byte = *byte(buf)
         var i = 0
@@ -3712,6 +3731,8 @@ peer call `getpeername`.
             zero[3] = byte(0)
             shim_write_sockaddr(addr_ptr, 0, &zero[0])
             shim_write_addrlen(addrlen_ptr, 16)
+        if rlen == 0
+            return shim_tcp_recv_err_or(inet_fd, 0)
         i64(rlen)
 
 
@@ -4596,6 +4617,25 @@ across the slot teardown.
             return 0
         err = int(reply[1]) & 0xff
         0
+
+
+Helper used by `sys_read` and `sys_recvfrom_tcp` to surface async
+TCP failures (keepalive-giveup, post-handshake RST, TCP_USER_TIMEOUT)
+as the recorded errno instead of a generic EOF / EIO.  Queries inet's
+read-and-clear `pending_error` channel and returns `-perr` as an i64
+if a pending error is recorded; otherwise returns the caller-supplied
+`default_err` (0 for "looked like EOF", -EIO for "looked like reply
+error").  Mirrors the inline pattern at shim.lsysl:1513-1525 in
+`sys_write` so the read and write sides of the same TCP fd agree on
+which errno surfaces first after an async close.
+
+    shim_tcp_recv_err_or(inet_fd: int, default_err: int) -> i64
+        var perr = 0
+        val ger = shim_inet_get_tcp_err(inet_fd, perr)
+        if ger == 0
+            if perr != 0
+                return i64(-perr)
+        i64(default_err)
 
 
 SYS_SETSOCKOPT / SYS_GETSOCKOPT. The inet server tracks

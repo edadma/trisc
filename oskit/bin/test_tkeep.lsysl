@@ -23,11 +23,12 @@ Wire-up:
   - SO_KEEPALIVE=1 + TCP_KEEPIDLE=2 + TCP_KEEPINTVL=1 +
     TCP_KEEPCNT=2 on the *client* fd. Total time to abort
     ≈ idle + cnt * intvl = 2s + 2 * 1s = 4s.
-  - Blocking read on the client returns once `inet_tcp_scan_timers`
-    closes the slot.  Either r=0 (EOF — shim's sys_read TCP path
-    doesn't consult `pending_error`, separate gap) or r=-110
-    (ETIMEDOUT, if/when that gap is closed) counts as "closed by
-    keepalive"; the wall-clock is the actual regression canary.
+  - Blocking read on the client must return -ETIMEDOUT (-110)
+    once `inet_tcp_scan_timers` closes the slot.  sys_read's TCP
+    path now consults inet's `pending_error` channel (via
+    `shim_tcp_recv_err_or`) on both reply-error and zero-rlen
+    paths, so the keepalive-giveup errno surfaces correctly on
+    the first read after close.
   - Wall-clock elapsed must fall in [2500 ms, 6500 ms]. The wide
     window absorbs scheduler-jitter / scan-period rounding;
     pre-fix elapsed (~400 ms) sits well outside.
@@ -197,18 +198,18 @@ caller can short-circuit on failure.
             return
 
         // Blocking read on the client.  No data ever arrives, so
-        // the only way back is keepalive deciding the peer is dead.
-        // Accept either r=0 (EOF) or r=-110 (ETIMEDOUT) — both
-        // mean "connection closed by something other than the
-        // peer's data path", and the wall-clock-elapsed assertion
-        // below is the actual regression check.
+        // the only way back is keepalive deciding the peer is dead
+        // and surfacing pending_error = ETIMEDOUT (110).  sys_read's
+        // TCP path consults `shim_tcp_recv_err_or` on both the
+        // reply-error and zero-rlen branches, so the recorded
+        // ETIMEDOUT comes through on the first read after close.
         val t0 = monotonic_ms()
         var rbuf: [4]byte
         val r = posix_read(cl, &rbuf[0], 4)
         val t1 = monotonic_ms()
         val elapsed = int(t1 - t0)
 
-        if r != 0 && r != -110
+        if r != -110
             puts("tkeep: bad 12 r=")
             print_udec(if r < 0 then -r else r)
             puts(" elapsed=")
