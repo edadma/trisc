@@ -36,7 +36,7 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
     module oskit.posix
 
     import oskit.ipc.{port_lookup, ipc_send}
-    import oskit.services.{sleep, notify_wait, notify_read_self, sleep_or_notify, uptime}
+    import oskit.services.{sleep, notify_wait, notify_read_self, sleep_or_notify, monotonic_ms}
     import oskit.kernel.{current_thread, terminate_current,
         kernel_grant_create_inline, kernel_grant_revoke_inline,
         kernel_get_thread_pid, kernel_get_process_main_tid,
@@ -1704,7 +1704,7 @@ handles read from the TTY driver.
                         // Slix has no concurrent settime path yet, so
                         // EAGAIN here matches the practical behaviour.
                         return i64(-EAGAIN)
-                    val now_b = int(uptime())
+                    val now_b = int(monotonic_ms() / i64(10))
                     val wait_ticks = posix_fd_table[tidx].timerfd_next_tick - now_b
                     if wait_ticks > 0
                         sleep_or_notify(wait_ticks)
@@ -6504,7 +6504,7 @@ state is always coherent at the moment the user observes it.
     timerfd_advance(idx: int)
         if posix_fd_table[idx].timerfd_next_tick == 0
             return
-        val now = int(uptime())
+        val now = int(monotonic_ms() / i64(10))
         if now < posix_fd_table[idx].timerfd_next_tick
             return
         val interval = posix_fd_table[idx].timerfd_interval_ticks
@@ -6558,7 +6558,7 @@ state is always coherent at the moment the user observes it.
                 posix_fd_table[tidx].timerfd_interval_ticks)
             var remaining = 0
             if posix_fd_table[tidx].timerfd_next_tick > 0
-                remaining = posix_fd_table[tidx].timerfd_next_tick - int(uptime())
+                remaining = posix_fd_table[tidx].timerfd_next_tick - int(monotonic_ms() / i64(10))
                 if remaining < 0
                     remaining = 0
             shim_ticks_to_itimerspec(oldp, 16, remaining)
@@ -6578,7 +6578,7 @@ state is always coherent at the moment the user observes it.
         if (flags & POSIX_TFD_TIMER_ABSTIME) != 0
             posix_fd_table[tidx].timerfd_next_tick = it_value_ticks
         else
-            posix_fd_table[tidx].timerfd_next_tick = int(uptime()) + it_value_ticks
+            posix_fd_table[tidx].timerfd_next_tick = int(monotonic_ms() / i64(10)) + it_value_ticks
         posix_fd_table[tidx].timerfd_interval_ticks = it_interval_ticks
         // Reset expirations to 0 on rearm (Linux: setttime starts
         // fresh; the read counter is wiped).
@@ -6600,7 +6600,7 @@ state is always coherent at the moment the user observes it.
             posix_fd_table[tidx].timerfd_interval_ticks)
         var remaining = 0
         if posix_fd_table[tidx].timerfd_next_tick > 0
-            remaining = posix_fd_table[tidx].timerfd_next_tick - int(uptime())
+            remaining = posix_fd_table[tidx].timerfd_next_tick - int(monotonic_ms() / i64(10))
             if remaining < 0
                 remaining = 0
         shim_ticks_to_itimerspec(cp, 16, remaining)
@@ -6649,7 +6649,7 @@ also rejected since they need signal delivery.
         if tp == i64(0)
             return i64(-EFAULT)
         val p: *byte = *byte(tp)
-        shim_ticks_to_itimerspec(p, 0, int(uptime()))
+        shim_ticks_to_itimerspec(p, 0, int(monotonic_ms() / i64(10)))
         i64(0)
 
     sys_clock_getres(clockid: int, tp: i64) -> i64
@@ -6672,7 +6672,7 @@ it but accepts the pointer. We do the same.
         if tv == i64(0)
             return i64(-EFAULT)
         val p: *byte = *byte(tv)
-        val ticks = int(uptime())
+        val ticks = int(monotonic_ms() / i64(10))
         val sec = i64(ticks / 100)
         val usec = i64((ticks % 100) * 10000)
         var bi = 0
@@ -6842,7 +6842,7 @@ without a real CSPRNG. Returns the byte count on success,
 
     rng_step() -> i64
         if rng_state == i64(0)
-            rng_state = i64(uptime()) | i64(0x9E3779B97F4A7C15)
+            rng_state = monotonic_ms() / i64(10) | i64(0x9E3779B97F4A7C15)
         var x = rng_state
         x = x ^ (x << i64(13))
         x = x ^ (i64(u64(x) >> u64(7)))
@@ -6875,7 +6875,7 @@ without a real CSPRNG. Returns the byte count on success,
         // TIMER_ABSTIME = 1: req is an absolute time. Convert to
         // relative by subtracting current uptime.
         if (flags & 1) != 0
-            val now_t = int(uptime())
+            val now_t = int(monotonic_ms() / i64(10))
             ticks = ticks - now_t
             if ticks < 0
                 ticks = 0
@@ -7544,10 +7544,10 @@ and `notify_wait()` can block again on the next iteration.
                 // pass; we record uptime() before/after to charge the
                 // actual elapsed ticks to ticks_left so a chain of
                 // spurious wakes still respects the deadline.
-                val before = uptime()
+                val before = monotonic_ms() / i64(10)
                 sleep_or_notify(ticks_left)
-                val after = uptime()
-                val elapsed = after - before
+                val after = monotonic_ms() / i64(10)
+                val elapsed = int(after - before)
                 if elapsed >= ticks_left
                     ticks_left = 0
                 else
@@ -7599,7 +7599,7 @@ ignored — slix has no signals.
         // budget while only 1.26 s of wall time had passed).
         var deadline_tick = i64(0)
         if timeout_ms > 0
-            deadline_tick = i64(uptime()) + i64((timeout_ms + 9) / 10)
+            deadline_tick = monotonic_ms() / i64(10) + i64((timeout_ms + 9) / 10)
         var iter = 0
         while iter < 1000000
             iter += 1
@@ -7628,7 +7628,7 @@ ignored — slix has no signals.
             if timeout_ms == 0
                 return i64(0)
             if timeout_ms > 0
-                if i64(uptime()) >= deadline_tick
+                if monotonic_ms() / i64(10) >= deadline_tick
                     return i64(0)
             // Re-poll every tick (10 ms). For waits ≥ ~50 ms this is
             // imperceptible; the resolver case typically lands within

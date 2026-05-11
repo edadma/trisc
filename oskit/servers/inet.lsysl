@@ -41,7 +41,7 @@ process B's sockets.
     module oskit.servers
 
     import oskit.ipc.{port_create, port_register, ipc_recv_notify, ipc_reply}
-    import oskit.services.{rs_ready, notify_read_self, svc_timer_subscribe, uptime}
+    import oskit.services.{rs_ready, notify_read_self, svc_timer_subscribe, monotonic_ms}
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY, INADDR_LOOPBACK, ipv4, ipv4_octet,
         ETHERTYPE_IPV4, ETHERTYPE_ARP, ARP_OP_REQUEST, ARP_OP_REPLY,
         IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP, ICMP_ECHO_REQ, ICMP_ECHO_REP,
@@ -912,11 +912,10 @@ possibly firing immediately.
             tr[0] = byte(1)
             ipc_reply(sender, tr, 10)
             return
-        val ticks = (timeout_ms + 9) / 10
         inet_sockets[fd].pending_tid = sender
         inet_sockets[fd].pending_maxlen = maxlen
         inet_sockets[fd].pending_peek = peek
-        inet_sockets[fd].recv_deadline = int(uptime()) + ticks
+        inet_sockets[fd].recv_deadline = int(monotonic_ms()) + timeout_ms
         // No reply — deferred until a dgram arrives, timeout
         // expires, or close.
 
@@ -1044,7 +1043,7 @@ CHECK reply:   status(1) + src_ip(4) + rtt(4)        = 9 bytes
         val seq = (int(buf[7]) & 0xff) << 8 | (int(buf[8]) & 0xff)
         var reply: [1]byte
         reply[0] = 0
-        if inet_ping_register(sender, id, seq, int(uptime())) < 0
+        if inet_ping_register(sender, id, seq, int(monotonic_ms())) < 0
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 1)
             return
@@ -1094,7 +1093,7 @@ inet_server), so worst-case overshoot on an idle port is one
 tick period. Good enough for DHCP-scale retransmits.
 
     inet_udp_scan_timeouts()
-        val now = int(uptime())
+        val now = int(monotonic_ms())
         var i = 0
         while i < INET_MAX_SOCKETS
             if inet_sockets[i].in_use != 0
@@ -1258,7 +1257,7 @@ existing `inet_epoll_fire(2, s)` at SYN_SENT → ESTABLISHED.
             // 10 ms tick rounding-up — same convention as
             // INET_CMD_RECVFROM_TIMEOUT.  0 disables the deadline.
             if timeout_ms > 0
-                tcp_sockets[fd].send_deadline = int(uptime()) + ((timeout_ms + 9) / 10)
+                tcp_sockets[fd].send_deadline = int(monotonic_ms()) + timeout_ms
             else
                 tcp_sockets[fd].send_deadline = 0
             return
@@ -1667,9 +1666,9 @@ struct = 105 bytes. Status -1 if fd out of range or not owned.
         // u32 fields. Inline little-endian writes — both arches
         // we target are LE and Linux's struct tcp_info is host-
         // endian, so this matches what real Linux apps expect.
-        // tcpi_rto @ 8: our rto is in ticks; Linux uses
-        // microseconds.  10ms/tick → 10000us/tick.
-        val rto_us = tcp_sockets[fd].rto * 10000
+        // tcpi_rto @ 8: our rto is in milliseconds; Linux uses
+        // microseconds.  1ms = 1000us.
+        val rto_us = tcp_sockets[fd].rto * 1000
         reply[1 +  8] = byte(rto_us & 0xff)
         reply[1 +  9] = byte((rto_us >> 8) & 0xff)
         reply[1 + 10] = byte((rto_us >> 16) & 0xff)
@@ -1755,9 +1754,9 @@ struct = 105 bytes. Status -1 if fd out of range or not owned.
 
 setsockopt(IPPROTO_TCP, TCP_USER_TIMEOUT) — write the per-socket
 cap.  Wire: `cmd(1) + fd(u16 BE) + timeout_ms(u32 BE) = 7` bytes
-in; reply: 1-byte status.  Inet rounds milliseconds up to the
-nearest 10-ms tick (matching the SO_SNDTIMEO convention) before
-storing — a 0 timeout means "disable" and is preserved as 0.
+in; reply: 1-byte status.  Inet stores milliseconds directly in
+the `monotonic_ms` clock domain — a 0 timeout means "disable"
+and is preserved as 0.
 
     inet_handle_tcp_set_userto(sender: int, buf: *byte)
         val fd = inet_read_u16(buf, 1) & 0xffff
@@ -1769,10 +1768,7 @@ storing — a 0 timeout means "disable" and is preserved as 0.
             reply[0] = byte(-1)
             ipc_reply(sender, reply, 1)
             return
-        var ticks = 0
-        if timeout_ms > 0
-            ticks = (timeout_ms + 9) / 10
-        val rc = inet_tcp_set_userto(fd, ticks)
+        val rc = inet_tcp_set_userto(fd, timeout_ms)
         reply[0] = byte(rc & 0xff)
         ipc_reply(sender, reply, 1)
 
@@ -2961,7 +2957,7 @@ UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
                         int(frame[14 + 13]) & 0xff,
                         int(frame[14 + 14]) & 0xff,
                         int(frame[14 + 15]) & 0xff)
-                    inet_ping_deliver(rep_src, rep_id, rep_seq, int(uptime()))
+                    inet_ping_deliver(rep_src, rep_id, rep_seq, int(monotonic_ms()))
                     return 1
                 if itype == ICMP_DEST_UNREACH
                     inet_handle_icmp_dest_unreach(frame, len, icmp_off)

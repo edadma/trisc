@@ -1787,13 +1787,18 @@ would monotonically bump thread_count and walk off the end of threads[].
 
     sleep_current(nticks: int)
         threads[current_thread].state = STATE_BLOCKED
-        threads[current_thread].wake_tick = ticks + nticks
+        // `wake_tick` is in `monotonic_ms_count` units (wall-clock
+        // ms since boot). `nticks` is the legacy 10-ms-tick unit
+        // (shim's `shim_timespec_to_ticks` converts ns → 10ms ticks),
+        // so multiply by 10 to land on the same scale.
+        threads[current_thread].wake_tick = int(monotonic_ms_count) + nticks * 10
         threads[current_thread].consec_quanta = 0
         sleepq_insert(current_thread)
 
     sleep_until_current(target_tick: int)
         threads[current_thread].state = STATE_BLOCKED
-        threads[current_thread].wake_tick = target_tick
+        // `target_tick` is also in 10-ms-tick units; convert to ms.
+        threads[current_thread].wake_tick = target_tick * 10
         threads[current_thread].consec_quanta = 0
         sleepq_insert(current_thread)
 
@@ -2573,9 +2578,13 @@ Steps:
 
         // Wake threads whose sleep/timeout has expired (heap-based, O(log n))
         // Uses lazy deletion: threads woken early (e.g., by IPC) are skipped on pop
+        // wake_tick is in `monotonic_ms_count` units (wall-clock ms),
+        // not the schedule-call counter `ticks` — see sleep_current.
+        // Cache the wall-clock now once per scheduler entry.
+        val wall_now = int(monotonic_ms_count)
         while _sq_len > 0
             val tid = _sq_peek()
-            if threads[tid].wake_tick > ticks
+            if threads[tid].wake_tick > wall_now
                 break  // earliest deadline not yet reached
             val _ = _sq_pop()
             // Lazy deletion: skip if thread was already woken by another path
@@ -2772,7 +2781,8 @@ shim doesn't have to check both before calling). Caller checks
         if nticks <= 0
             return
         threads[current_thread].state = STATE_SLEEP_OR_NOTIFY
-        threads[current_thread].wake_tick = ticks + nticks
+        // `wake_tick` in monotonic_ms units; nticks is 10-ms ticks.
+        threads[current_thread].wake_tick = int(monotonic_ms_count) + nticks * 10
         threads[current_thread].consec_quanta = 0
         sleepq_insert(current_thread)
 

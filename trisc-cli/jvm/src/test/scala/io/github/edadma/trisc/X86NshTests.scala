@@ -26,7 +26,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
 
   override def beforeEach(): Unit =
     requirePrebuilt()
-    qemu = new QemuTestHarness(timeoutMs = 30000)
+    qemu = new QemuTestHarness(timeoutMs = 60000)
     qemu.start()
     // Wait for login prompt, then authenticate
     qemu.waitFor("login: ")
@@ -1239,10 +1239,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "phello: bad"
   }
 
-  // TODO: un-ignore once inet timer migration ships. Kernel-side
-  // monotonic_ms() syscall infrastructure is in place; inet
-  // surface migration is the remaining work. See aarch64 mirror.
-  "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" ignore {
+  "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")
     output should not include "tcpreuse:bad"

@@ -21,7 +21,7 @@ live in kernel-thread space and call `virtio_net_send` directly.
     module oskit.servers
 
     import oskit.ipc.{ipc_send, port_lookup, ipc_reply}
-    import oskit.services.{uptime, notify_send_to}
+    import oskit.services.{monotonic_ms, notify_send_to}
     import std.alloc.{malloc, free}
     import std.net.{ETHERTYPE_IPV4, ETHERTYPE_ARP,
         ARP_OP_REQUEST, ARP_OP_REPLY,
@@ -434,14 +434,14 @@ checksum.
 
 We support fragments up to `IP_REASM_MAX_DATA` bytes of L4 payload
 total — 8 KB, enough for jumbo UDP. Four concurrent datagram
-assemblies are tracked; each times out after `IP_REASM_TIMEOUT`
-ticks (RFC 791 says 30 s; 3000 ticks @ 100 Hz). Timed-out slots
+assemblies are tracked; each times out after `IP_REASM_TIMEOUT_MS`
+milliseconds (RFC 791 says 30 s = 30000 ms). Timed-out slots
 are silently dropped — ICMP Time Exceeded emit is a follow-up.
 
-    val IP_REASM_SLOTS    = 4
-    val IP_REASM_MAX_DATA = 8192
-    val IP_REASM_TIMEOUT  = 3000
-    val IP_REASM_HDR_MAX  = 60
+    val IP_REASM_SLOTS      = 4
+    val IP_REASM_MAX_DATA   = 8192
+    val IP_REASM_TIMEOUT_MS = 30000
+    val IP_REASM_HDR_MAX    = 60
 
     struct IpReasmSlot
         in_use: int
@@ -544,7 +544,7 @@ can clone the original ETH+IP header from the first fragment.
             inet_ip_reasm_table[s].ident = ident
             inet_ip_reasm_table[s].proto = proto
 
-        inet_ip_reasm_table[s].deadline = int(uptime()) + IP_REASM_TIMEOUT
+        inet_ip_reasm_table[s].deadline = int(monotonic_ms()) + IP_REASM_TIMEOUT_MS
 
 RFC 5722 §4: a fragment that overlaps any previously received
 range MUST cause the entire datagram to be dropped. We mark the
@@ -700,7 +700,7 @@ saw the first fragment — without it we don't have an IP header
 to embed and skipping the emit is mandatory.
 
     inet_ip_reasm_scan_timeouts()
-        val now = int(uptime())
+        val now = int(monotonic_ms())
         var i = 0
         while i < IP_REASM_SLOTS
             if inet_ip_reasm_table[i].in_use != 0
@@ -1298,7 +1298,7 @@ periodic so the caller can just re-send.
         // `127.0.0.x`, our_ip round-trips as our_ip.
         if inet_is_loopback_ip(dst_ip) != 0
             inet_pings_sent += 1
-            inet_ping_deliver(dst_ip, id, seq, int(uptime()))
+            inet_ping_deliver(dst_ip, id, seq, int(monotonic_ms()))
             return 0
         var next_hop_mac: [6]byte
         if inet_resolve_mac(dst_ip, next_hop_mac) == 0
@@ -1917,23 +1917,25 @@ Tick budget assumes a ~100 Hz scheduler timer (10 ms per tick).
     // -EMFILE, resize_buf silently clamps. Companion to
     // `inet_count_tcp_owner` for the slot-count cap.
     val TCP_PER_TID_BUF_MAX  = 65536
-    // SO_KEEPALIVE timing (ticks at the inet ~10ms timer base).
-    // Linux defaults are 7200/75/9 ticks (in seconds) which would
-    // be 720000/7500 ticks at slix's resolution — useless for
-    // testing.  Slix uses tighter defaults so test cases see the
-    // probe/giveup cycle in seconds rather than hours.  Real
+    // SO_KEEPALIVE timing in milliseconds (`monotonic_ms` clock).
+    // Linux defaults are 7200/75/9 (seconds) — too long to exercise
+    // in tests.  Slix picks tighter defaults so the probe/giveup
+    // cycle is observable in seconds rather than hours.  Real
     // workloads can tune later via setsockopt(TCP_KEEPIDLE / etc.)
     // once those options are wired (deferred follow-up).
-    val TCP_KEEPALIVE_IDLE       = 1000   // ~10s of silence before first probe
-    val TCP_KEEPALIVE_INTVL      = 500    // ~5s between probes
+    val TCP_KEEPALIVE_IDLE_MS    = 10000  // 10s of silence before first probe
+    val TCP_KEEPALIVE_INTVL_MS   = 5000   // 5s between probes
     val TCP_KEEPALIVE_MAX_PROBES = 3      // close after this many unanswered
     val TCP_MSS_ADV         = 1460
     val TCP_MAX_SEG         = 480
-    val TCP_RTO_INITIAL     = 100
-    val TCP_RTO_MIN         = 20
-    val TCP_RTO_MAX         = 6000
-    val TCP_TW_TICKS        = 200
-    val TCP_FW2_TICKS       = 6000
+    // RTO bounds + initial value, all in `monotonic_ms` milliseconds.
+    val TCP_RTO_MS_INITIAL  = 1000
+    val TCP_RTO_MS_MIN      = 200
+    val TCP_RTO_MS_MAX      = 60000
+    // 2*MSL ≈ 2s on slix (RFC 793 leaves MSL implementation-defined).
+    val TCP_TW_MS           = 2000
+    // FIN_WAIT_2 idle close — Linux's default tcp_fin_timeout is 60s.
+    val TCP_FW2_MS          = 60000
     val TCP_MAX_RETRIES     = 5
     val TCP_REORDER_SLOTS   = 4
 
@@ -2057,14 +2059,14 @@ means "park forever" (Linux default). Set when a TCP_SEND arrives
 carrying a non-zero `timeout_ms` and parks; the timer scan replies
 `(status=2, n=0)` when `now >= deadline`.
 
-`user_timeout_ticks` and `earliest_unack_tick` together drive
+`user_timeout_ms` and `earliest_unack_tick` together drive
 RFC 5482 TCP_USER_TIMEOUT — a per-connection cap on how long the
 socket may remain unable to drain its unacked window. Distinct from
 SO_SNDTIMEO: USER_TIMEOUT survives an unblocked send and governs
 the connection itself; SNDTIMEO governs only the current send
 call's blocking window.
 
-  - `user_timeout_ticks` is the configured cap (in 10-ms ticks).
+  - `user_timeout_ms` is the configured cap (in 10-ms ticks).
     0 disables — slix has no sysctl for the system default, so 0
     means "no cap".
   - `earliest_unack_tick` is the absolute tick at which the
@@ -2075,7 +2077,7 @@ call's blocking window.
     most recent cumulative-ACK boundary (RFC 5482 §3, "any progress
     restarts the timer").
 
-        user_timeout_ticks: int
+        user_timeout_ms: int
         earliest_unack_tick: int
 
 `ack_blackholed` is a test-only override: when nonzero,
@@ -2472,7 +2474,7 @@ per-tid `TCP_PER_TID_BUF_MAX`.
             tcp_sockets[i].connect_waiter = -1
             tcp_sockets[i].send_waiter = -1
             tcp_sockets[i].send_deadline = 0
-            tcp_sockets[i].user_timeout_ticks = 0
+            tcp_sockets[i].user_timeout_ms = 0
             tcp_sockets[i].earliest_unack_tick = 0
             tcp_sockets[i].ack_blackholed = 0
             tcp_sockets[i].recv_waiter = -1
@@ -2487,7 +2489,7 @@ per-tid `TCP_PER_TID_BUF_MAX`.
             tcp_sockets[i].fin_pending = 0
             tcp_sockets[i].srtt = 0
             tcp_sockets[i].rttvar = 0
-            tcp_sockets[i].rto = TCP_RTO_INITIAL
+            tcp_sockets[i].rto = TCP_RTO_MS_INITIAL
             tcp_sockets[i].rtt_measured = 0
             tcp_sockets[i].rtt_sample_valid = 0
             tcp_sockets[i].snd_cwnd = TCP_INIT_CWND
@@ -2983,7 +2985,7 @@ TCP options attached:
         // the host kernel's tick count doesn't leak; tsecr
         // mirrors `ts_recent`, which is 0 on the initial active
         // SYN (peer hasn't advertised yet).
-        val tsval = u32(uptime()) + tcp_sockets[s].ts_offset
+        val tsval = u32(monotonic_ms()) + tcp_sockets[s].ts_offset
         val tsecr = tcp_sockets[s].ts_recent
         if is_syn
             // MSS (RFC 793): kind=2 len=4 value=TCP_MSS_ADV
@@ -3094,7 +3096,7 @@ TCP options attached:
 
 
     inet_tcp_arm_rtx(s: int)
-        tcp_sockets[s].rtx_deadline = int(uptime()) + tcp_sockets[s].rto
+        tcp_sockets[s].rtx_deadline = int(monotonic_ms()) + tcp_sockets[s].rto
 
     inet_tcp_disarm_rtx(s: int)
         tcp_sockets[s].rtx_deadline = 0
@@ -3109,7 +3111,7 @@ Subsequent:        RTTVAR += (|SRTT - R| - RTTVAR) >> 2
                    SRTT   += (R - SRTT) >> 3
                    RTO    =  SRTT + 4*RTTVAR
 
-RTO is clamped to [TCP_RTO_MIN, TCP_RTO_MAX].
+RTO is clamped to [TCP_RTO_MS_MIN, TCP_RTO_MS_MAX].
 
     inet_tcp_rtt_update(s: int, r: int)
         var rr = r
@@ -3130,10 +3132,10 @@ RTO is clamped to [TCP_RTO_MIN, TCP_RTO_MAX].
             if tcp_sockets[s].srtt < 1
                 tcp_sockets[s].srtt = 1
         var new_rto = tcp_sockets[s].srtt + (tcp_sockets[s].rttvar << 2)
-        if new_rto < TCP_RTO_MIN
-            new_rto = TCP_RTO_MIN
-        if new_rto > TCP_RTO_MAX
-            new_rto = TCP_RTO_MAX
+        if new_rto < TCP_RTO_MS_MIN
+            new_rto = TCP_RTO_MS_MIN
+        if new_rto > TCP_RTO_MS_MAX
+            new_rto = TCP_RTO_MS_MAX
         tcp_sockets[s].rto = new_rto
 
 Karn's rule: after a retransmit the original segment's timing is
@@ -3143,8 +3145,8 @@ with cap.
     inet_tcp_rto_backoff(s: int)
         tcp_sockets[s].rtt_sample_valid = 0
         var doubled = tcp_sockets[s].rto << 1
-        if doubled > TCP_RTO_MAX
-            doubled = TCP_RTO_MAX
+        if doubled > TCP_RTO_MS_MAX
+            doubled = TCP_RTO_MS_MAX
         tcp_sockets[s].rto = doubled
 
 Start an RTT sample for the next ACK covering `expected_ack`. If a
@@ -3156,7 +3158,7 @@ sufficient per RFC 6298.
             return
         tcp_sockets[s].rtt_sample_valid = 1
         tcp_sockets[s].rtt_sample_seq = expected_ack
-        tcp_sockets[s].rtt_sample_time = int(uptime())
+        tcp_sockets[s].rtt_sample_time = int(monotonic_ms())
 
 If the incoming ACK covers our sample seq (ack >= sample_seq),
 take the RTT measurement and clear the sample.
@@ -3167,7 +3169,7 @@ take the RTT measurement and clear the sample.
         val target = tcp_sockets[s].rtt_sample_seq
         if tcp_seq_lt(ack, target) != 0
             return
-        val r = int(uptime()) - tcp_sockets[s].rtt_sample_time
+        val r = int(monotonic_ms()) - tcp_sockets[s].rtt_sample_time
         tcp_sockets[s].rtt_sample_valid = 0
         inet_tcp_rtt_update(s, r)
 
@@ -3255,7 +3257,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
             tcp_sockets[s].close_waiter = -1
         tcp_sockets[s].state = TCP_STATE_TIME_WAIT
         tcp_sockets[s].rtx_deadline = 0
-        tcp_sockets[s].tw_deadline = int(uptime()) + TCP_TW_TICKS
+        tcp_sockets[s].tw_deadline = int(monotonic_ms()) + TCP_TW_MS
 
 
     inet_tcp_close_slot(s: int, status: int)
@@ -3285,7 +3287,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
             inet_tcp_reply_send(tcp_sockets[s].send_waiter, status, 0)
             tcp_sockets[s].send_waiter = -1
             tcp_sockets[s].send_deadline = 0
-        tcp_sockets[s].user_timeout_ticks = 0
+        tcp_sockets[s].user_timeout_ms = 0
         tcp_sockets[s].earliest_unack_tick = 0
         tcp_sockets[s].ack_blackholed = 0
         if tcp_sockets[s].close_waiter >= 0
@@ -3311,7 +3313,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].fin_pending = 0
         tcp_sockets[s].srtt = 0
         tcp_sockets[s].rttvar = 0
-        tcp_sockets[s].rto = TCP_RTO_INITIAL
+        tcp_sockets[s].rto = TCP_RTO_MS_INITIAL
         tcp_sockets[s].rtt_measured = 0
         tcp_sockets[s].rtt_sample_valid = 0
         var k = 0
@@ -3389,7 +3391,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].connect_waiter = -1
                 tcp_sockets[i].send_waiter = -1
                 tcp_sockets[i].send_deadline = 0
-                tcp_sockets[i].user_timeout_ticks = 0
+                tcp_sockets[i].user_timeout_ms = 0
                 tcp_sockets[i].earliest_unack_tick = 0
                 tcp_sockets[i].ack_blackholed = 0
                 tcp_sockets[i].recv_waiter = -1
@@ -3405,7 +3407,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].fin_pending = 0
                 tcp_sockets[i].srtt = 0
                 tcp_sockets[i].rttvar = 0
-                tcp_sockets[i].rto = TCP_RTO_INITIAL
+                tcp_sockets[i].rto = TCP_RTO_MS_INITIAL
                 tcp_sockets[i].rtt_measured = 0
                 tcp_sockets[i].rtt_sample_valid = 0
                 tcp_sockets[i].snd_cwnd = TCP_INIT_CWND
@@ -3424,9 +3426,9 @@ success, -1 when the slot is already closed (idempotent).
                 // Mix slot index, alloc seq, and uptime so two
                 // back-to-back connections from the same socket
                 // pool don't share an offset.
-                tcp_sockets[i].ts_offset = u32(uptime()) ^ u32(i * 1000003) ^ tcp_iss_counter
+                tcp_sockets[i].ts_offset = u32(monotonic_ms()) ^ u32(i * 1000003) ^ tcp_iss_counter
                 tcp_sockets[i].keepalive_on = 0
-                tcp_sockets[i].last_recv_tick = int(uptime())
+                tcp_sockets[i].last_recv_tick = int(monotonic_ms())
                 tcp_sockets[i].keepalive_probes = 0
                 tcp_sockets[i].keepalive_next_probe = 0
                 tcp_sockets[i].keepalive_idle = 0
@@ -3530,7 +3532,7 @@ out-of-range kind.
 setsockopt(SO_KEEPALIVE) — flips the per-socket keepalive flag.
 Turning it on baselines `last_recv_tick` to now and clears any
 in-flight probe count, so a freshly-enabled socket waits a full
-`TCP_KEEPALIVE_IDLE` from this point before the first probe.
+`TCP_KEEPALIVE_IDLE_MS` from this point before the first probe.
 Turning it off zeroes the schedule.
 
 Idempotent (no-op for same-state calls).  Returns 0 on success,
@@ -3543,7 +3545,7 @@ Idempotent (no-op for same-state calls).  Returns 0 on success,
             return -1
         if on != 0
             tcp_sockets[s].keepalive_on = 1
-            tcp_sockets[s].last_recv_tick = int(uptime())
+            tcp_sockets[s].last_recv_tick = int(monotonic_ms())
             tcp_sockets[s].keepalive_probes = 0
             tcp_sockets[s].keepalive_next_probe = 0
         else
@@ -3561,15 +3563,15 @@ sysctl for this, so 0 means "no cap").
 
 Returns 0 on success, -1 on bad fd.
 
-    inet_tcp_set_userto(s: int, ticks: int) -> int
+    inet_tcp_set_userto(s: int, timeout_ms: int) -> int
         if s < 0 || s >= TCP_MAX_SOCKETS
             return -1
         if tcp_sockets[s].in_use == 0
             return -1
-        var t = ticks
+        var t = timeout_ms
         if t < 0
             t = 0
-        tcp_sockets[s].user_timeout_ticks = t
+        tcp_sockets[s].user_timeout_ms = t
         0
 
 
@@ -3661,8 +3663,8 @@ times in scan_timers.
         val raw_idle = tcp_sockets[s].keepalive_idle
         val raw_intvl = tcp_sockets[s].keepalive_intvl
         val raw_cnt = tcp_sockets[s].keepalive_cnt
-        idle = if raw_idle != 0 then raw_idle else TCP_KEEPALIVE_IDLE
-        intvl = if raw_intvl != 0 then raw_intvl else TCP_KEEPALIVE_INTVL
+        idle = if raw_idle != 0 then raw_idle else TCP_KEEPALIVE_IDLE_MS
+        intvl = if raw_intvl != 0 then raw_intvl else TCP_KEEPALIVE_INTVL_MS
         cnt = if raw_cnt != 0 then raw_cnt else TCP_KEEPALIVE_MAX_PROBES
 
 
@@ -3942,7 +3944,7 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
         // listener's timeout to passive opens just like the keepalive
         // options; copying 0 through is a no-op (the listener never
         // tuned it, so the child stays uncapped).
-        tcp_sockets[s].user_timeout_ticks = tcp_sockets[ls].user_timeout_ticks
+        tcp_sockets[s].user_timeout_ms = tcp_sockets[ls].user_timeout_ms
         val iss = tcp_next_iss()
         tcp_sockets[s].local_port = tcp_sockets[ls].local_port
         tcp_sockets[s].remote_ip = remote_ip
@@ -4402,7 +4404,7 @@ ACK and retry.
         // an already-unacked run inherit the original anchor so a
         // steady stream of small writes can't reset the timer.
         if start_off == 0
-            tcp_sockets[s].earliest_unack_tick = int(uptime())
+            tcp_sockets[s].earliest_unack_tick = int(monotonic_ms())
         tcp_sockets[s].send_len += n
         inet_tcp_drain_send(s)
         n
@@ -4442,7 +4444,12 @@ Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
             tcp_sockets[s].snd_nxt = seq + u32(1)
             tcp_sockets[s].our_fin_sent = 1
             tcp_sockets[s].state = TCP_STATE_FIN_WAIT_1
-            tcp_sockets[s].close_waiter = caller_tid
+            // Linux semantics: close() returns to userspace immediately;
+            // the kernel drives FIN/FIN-ACK and TIME_WAIT in the
+            // background. SO_LINGER (l_onoff=1, l_linger>0) would park
+            // the caller here on close_waiter and arm a linger deadline
+            // — not yet wired; SO_LINGER l_onoff=1 + l_linger=0 already
+            // takes the abort-close path via INET_CMD_TCP_ABORT_CLOSE.
             inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
             // Only arm rtx if our FIN is still unacked. On the
             // loopback fastpath, `inet_tcp_emit` synchronously drives
@@ -4455,20 +4462,21 @@ Returns 0 if FIN is in-flight (caller blocks), 1 if already done,
             // letting it reach TIME_WAIT.
             if tcp_seq_lt(tcp_sockets[s].snd_una, tcp_sockets[s].snd_nxt) != 0
                 inet_tcp_arm_rtx(s)
-            return 0
+            return 1
         if st == TCP_STATE_CLOSE_WAIT
             val seq = tcp_sockets[s].snd_nxt
             tcp_sockets[s].snd_nxt = seq + u32(1)
             tcp_sockets[s].our_fin_sent = 1
             tcp_sockets[s].state = TCP_STATE_LAST_ACK
-            tcp_sockets[s].close_waiter = caller_tid
+            // Linux semantics: same as ESTABLISHED above — return
+            // immediately, drain async via state_step and scan_timers.
             inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN, seq, seq, 0)
             // Same gate as ESTABLISHED above — loopback's synchronous
             // ACK can carry us past LAST_ACK before we'd ever need a
             // retransmit timer.
             if tcp_seq_lt(tcp_sockets[s].snd_una, tcp_sockets[s].snd_nxt) != 0
                 inet_tcp_arm_rtx(s)
-            return 0
+            return 1
         if st == TCP_STATE_SYN_SENT
             inet_tcp_close_slot(s, -1)
             return 1
@@ -4671,7 +4679,7 @@ checksum, locates the matching socket, and delegates.
         // resets the idle clock, so an active flow never trips the
         // probe path.  Bumping unconditionally (not just on data) is
         // what Linux does — a peer ACK on idle counts as liveness.
-        tcp_sockets[s].last_recv_tick = int(uptime())
+        tcp_sockets[s].last_recv_tick = int(monotonic_ms())
         tcp_sockets[s].keepalive_probes = 0
         tcp_sockets[s].keepalive_next_probe = 0
         inet_tcp_state_step(s, flags, seq, ack, wnd, payload,
@@ -4868,7 +4876,7 @@ the listen path picks it up.
                 return
             if (flags & TCP_F_FIN) != 0
                 inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
-                tcp_sockets[s].tw_deadline = int(uptime()) + TCP_TW_TICKS
+                tcp_sockets[s].tw_deadline = int(monotonic_ms()) + TCP_TW_MS
             return
 
 RFC 7323 §5.3 PAWS: a stale duplicate's TSval will be older than
@@ -4932,7 +4940,7 @@ the connection down.
                     if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
                         tcp_sockets[s].earliest_unack_tick = 0
                     else
-                        tcp_sockets[s].earliest_unack_tick = int(uptime())
+                        tcp_sockets[s].earliest_unack_tick = int(monotonic_ms())
                     // RFC 7323 §2.3: shift the raw header field by
                     // the negotiated peer scale.  Defaults to 0
                     // (no-op) when WS wasn't agreed on.
@@ -4955,8 +4963,8 @@ the connection down.
                     // measurements even after loss.  Falls back to
                     // Karn's algorithm when TS isn't negotiated.
                     if tcp_sockets[s].ts_ok != 0 && peer_has_ts != 0 && ts_ecr != u32(0)
-                        val r = int(uptime()) - int(i32(ts_ecr - tcp_sockets[s].ts_offset))
-                        if r >= 0 && r <= TCP_RTO_MAX
+                        val r = int(monotonic_ms()) - int(i32(ts_ecr - tcp_sockets[s].ts_offset))
+                        if r >= 0 && r <= TCP_RTO_MS_MAX
                             tcp_sockets[s].rtt_sample_valid = 0
                             inet_tcp_rtt_update(s, r)
                     else
@@ -5108,7 +5116,7 @@ the connection down.
                     // even if the peer never FINs. Linux's default
                     // tcp_fin_timeout is 60s; we match that.
                     tcp_sockets[s].state = TCP_STATE_FIN_WAIT_2
-                    tcp_sockets[s].tw_deadline = int(uptime()) + TCP_FW2_TICKS
+                    tcp_sockets[s].tw_deadline = int(monotonic_ms()) + TCP_FW2_MS
         else if st2 == TCP_STATE_FIN_WAIT_2
             if did_fin != 0
                 // Peer FIN after our FIN-ACK — enter TIME_WAIT.
@@ -5122,7 +5130,7 @@ Called from inet main loop on every wake. Scans every active
 socket for retransmit and TIME_WAIT deadlines.
 
     inet_tcp_scan_timers()
-        val now = int(uptime())
+        val now = int(monotonic_ms())
         var i = 0
         while i < TCP_MAX_SOCKETS
             if tcp_sockets[i].in_use != 0
@@ -5154,7 +5162,7 @@ socket for retransmit and TIME_WAIT deadlines.
                             inet_tcp_reply_send(w, 2, 0)
                 // TCP_USER_TIMEOUT (RFC 5482) — abort the connection
                 // when no progress has been made on unacked data for
-                // `user_timeout_ticks`.  Distinct from SO_SNDTIMEO:
+                // `user_timeout_ms`.  Distinct from SO_SNDTIMEO:
                 // SNDTIMEO returns EAGAIN to the caller and leaves
                 // the connection alive; USER_TIMEOUT records a
                 // pending ETIMEDOUT and tears the slot down so the
@@ -5163,7 +5171,7 @@ socket for retransmit and TIME_WAIT deadlines.
                 // ensures we don't fire on idle connections that have
                 // simply gone quiet.
                 if tcp_sockets[i].in_use != 0
-                    val ut = tcp_sockets[i].user_timeout_ticks
+                    val ut = tcp_sockets[i].user_timeout_ms
                     val eu = tcp_sockets[i].earliest_unack_tick
                     if ut > 0 && eu > 0
                         if (now - eu) >= ut
@@ -5357,40 +5365,44 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         // the RTT state first.
         tcp_sockets[s].srtt = 0
         tcp_sockets[s].rttvar = 0
-        tcp_sockets[s].rto = TCP_RTO_INITIAL
+        tcp_sockets[s].rto = TCP_RTO_MS_INITIAL
         tcp_sockets[s].rtt_measured = 0
         tcp_sockets[s].rtt_sample_valid = 0
 
-        // First measurement R=50 → SRTT=50, RTTVAR=25, RTO=150.
-        inet_tcp_rtt_update(s, 50)
-        if tcp_sockets[s].srtt != 50
+        // First measurement R=500 ms → SRTT=500, RTTVAR=250, RTO=1500.
+        // Above TCP_RTO_MS_MIN (200) and well below TCP_RTO_MS_MAX (60000),
+        // so no clamping fires.
+        inet_tcp_rtt_update(s, 500)
+        if tcp_sockets[s].srtt != 500
             inet_tcp_close_slot(s, 0)
             return 6
-        if tcp_sockets[s].rttvar != 25
+        if tcp_sockets[s].rttvar != 250
             inet_tcp_close_slot(s, 0)
             return 7
-        if tcp_sockets[s].rto != 150
+        if tcp_sockets[s].rto != 1500
             inet_tcp_close_slot(s, 0)
             return 8
 
-        // Second measurement R=40.
-        //   RTTVAR = 25 + (|50-40| - 25) >> 2 = 25 + (-15 >> 2) = 25 + (-4) = 21
-        //   SRTT   = 50 + (40-50) >> 3         = 50 + (-10 >> 3) = 50 + (-2) = 48
-        //   RTO    = 48 + 4*21 = 48 + 84 = 132
-        inet_tcp_rtt_update(s, 40)
-        if tcp_sockets[s].srtt != 48
+        // Second measurement R=400.
+        //   RTTVAR = 250 + (|500-400| - 250) >> 2 = 250 + (-150 >> 2)
+        //          = 250 + (-38) = 212
+        //   SRTT   = 500 + (400-500) >> 3         = 500 + (-100 >> 3)
+        //          = 500 + (-13) = 487
+        //   RTO    = 487 + 4*212 = 487 + 848 = 1335
+        inet_tcp_rtt_update(s, 400)
+        if tcp_sockets[s].srtt != 487
             inet_tcp_close_slot(s, 0)
             return 9
-        if tcp_sockets[s].rttvar != 21
+        if tcp_sockets[s].rttvar != 212
             inet_tcp_close_slot(s, 0)
             return 10
-        if tcp_sockets[s].rto != 132
+        if tcp_sockets[s].rto != 1335
             inet_tcp_close_slot(s, 0)
             return 11
 
-        // Backoff doubles RTO: 132 → 264 (still below MAX=6000).
+        // Backoff doubles RTO: 1335 → 2670 (still below MAX=60000).
         inet_tcp_rto_backoff(s)
-        if tcp_sockets[s].rto != 264
+        if tcp_sockets[s].rto != 2670
             inet_tcp_close_slot(s, 0)
             return 12
 

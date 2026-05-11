@@ -6,10 +6,11 @@ port, calls `recvfrom_timeout` with a 1-second timeout and no
 sender. Expected behaviour:
 
   - return value == 0 (timeout, not error, not data)
-  - elapsed time between ~90 and ~200 scheduler ticks
-    (1000 ms ≈ 100 ticks at 100 Hz — but with one-tick
-    rounding overhead plus wake granularity, the spread is
-    realistic)
+  - elapsed time between ~800 ms and ~1500 ms (1000 ms ± wake
+    granularity slack). Inet now keeps deadlines in
+    `monotonic_ms` (wall-clock ms), so we measure on the same
+    clock to make the assertion architecture-agnostic — uptime()
+    ticks at the scheduler's whim, monotonic_ms is honest wall.
 
 If either condition fails the test exits non-zero. If
 recvfrom_timeout had been a straight pass-through of the old
@@ -19,7 +20,7 @@ the deadline scan is driving the reply.
 
     module oskit.bin.test_udp_tmo
 
-    import oskit.ulib.{puts, putint, exit, exit_with, uptime}
+    import oskit.ulib.{puts, putint, exit, exit_with, monotonic_ms}
     import oskit.net.{socket, bind, recvfrom_timeout, close_socket}
     import std.net.{AF_INET, SOCK_DGRAM, INADDR_ANY}
 
@@ -40,12 +41,12 @@ the deadline scan is driving the reply.
         var rbuf: [64]byte
         var sip: u32 = 0u32
         var sport: int = 0
-        val t0 = uptime()
+        val t0 = monotonic_ms()
         val got = recvfrom_timeout(fd, &rbuf[0], 64, &sip, &sport, 1000)
-        val t1 = uptime()
+        val t1 = monotonic_ms()
         close_socket(fd)
 
-        val elapsed = t1 - t0
+        val elapsed = int(t1 - t0)
         if got < 0
             puts("test_udp_tmo: recvfrom_timeout error\n")
             exit_with(3)
@@ -59,12 +60,12 @@ the deadline scan is driving the reply.
         // got == 0 → timeout fired. Report elapsed and sanity-check.
         puts("test_udp_tmo: timeout elapsed=")
         putint(elapsed)
-        puts(" ticks\n")
-        if elapsed < 80
+        puts(" ms\n")
+        if elapsed < 800
             puts("test_udp_tmo: too early\n")
             exit_with(5)
             return
-        if elapsed > 300
+        if elapsed > 1500
             puts("test_udp_tmo: too late\n")
             exit_with(6)
             return

@@ -534,16 +534,19 @@ a5=timeout_ticks. Returns 0 on success, -1 on error, -2 on timeout.
         val owner = port_owner[port]
         if ipc_server_waiting(owner, port) == 1
             ipc_deliver_and_wake(owner, me, msg_ptr, msg_len)
-            // Block sender with timeout (waiting for reply)
+            // Block sender with timeout (waiting for reply). `wake_tick`
+            // is in `monotonic_ms_count` units (wall-clock ms); the
+            // shim passes `timeout` as 10-ms ticks, so multiply by 10
+            // to land on the same scale.
             threads[me].state = STATE_SEND_BLOCKED
-            threads[me].wake_tick = ticks + timeout
+            threads[me].wake_tick = int(monotonic_ms_count) + timeout * 10
             sleepq_insert(me)
             return i64(0)
 
         // Server not waiting — enqueue with timeout
         ipc_queue_push(port, me)
         threads[me].state = STATE_SEND_BLOCKED
-        threads[me].wake_tick = ticks + timeout
+        threads[me].wake_tick = int(monotonic_ms_count) + timeout * 10
         sleepq_insert(me)
         i64(0)
 
