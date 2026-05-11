@@ -1357,7 +1357,7 @@ existing boot-demo ARP-then-ping code keeps working.
 
 Small table of outstanding ping requests so `ping`-style programs
 can wait for the matching ECHO_REP. When the inet RX path sees an
-ECHO_REP, it looks up (id, seq) here and stamps reply_tick +
+ECHO_REP, it looks up (id, seq) here and stamps reply_ms +
 src_ip. The client polls via INET_CMD_ICMP_CHECK.
 
     val INET_PING_MAX = 4
@@ -1367,19 +1367,19 @@ src_ip. The client polls via INET_CMD_ICMP_CHECK.
         owner_tid: int
         id: int
         seq: int
-        send_tick: int
+        send_ms: int
         src_ip: u32
-        reply_tick: int
+        reply_ms: int
         received: int
 
     var inet_ping_table: [4]InetPingSlot
 
 
-Allocate a slot and record (id, seq, send_tick). Returns slot
+Allocate a slot and record (id, seq, send_ms). Returns slot
 index on success, -1 if the table is full. Duplicate (id, seq)
 from a previous un-checked slot just overwrites that slot.
 
-    inet_ping_register(owner_tid: int, id: int, seq: int, send_tick: int) -> int
+    inet_ping_register(owner_tid: int, id: int, seq: int, send_ms: int) -> int
         var found = -1
         var i = 0
         while i < INET_PING_MAX
@@ -1402,9 +1402,9 @@ from a previous un-checked slot just overwrites that slot.
         inet_ping_table[found].owner_tid = owner_tid
         inet_ping_table[found].id = id
         inet_ping_table[found].seq = seq
-        inet_ping_table[found].send_tick = send_tick
+        inet_ping_table[found].send_ms = send_ms
         inet_ping_table[found].src_ip = u32(0)
-        inet_ping_table[found].reply_tick = 0
+        inet_ping_table[found].reply_ms = 0
         inet_ping_table[found].received = 0
         found
 
@@ -1458,10 +1458,10 @@ above and from the selftest harness.
 
 
 Called from `inet_handle_frame` on ICMP_ECHO_REP. Updates the
-matching slot with src_ip and reply_tick so the client's CHECK
+matching slot with src_ip and reply_ms so the client's CHECK
 returns a completed entry.
 
-    inet_ping_deliver(src_ip: u32, id: int, seq: int, now_tick: int)
+    inet_ping_deliver(src_ip: u32, id: int, seq: int, now_ms: int)
         var i = 0
         while i < INET_PING_MAX
             if inet_ping_table[i].in_use != 0
@@ -1469,7 +1469,7 @@ returns a completed entry.
                     if inet_ping_table[i].id == id
                         if inet_ping_table[i].seq == seq
                             inet_ping_table[i].src_ip = src_ip
-                            inet_ping_table[i].reply_tick = now_tick
+                            inet_ping_table[i].reply_ms = now_ms
                             inet_ping_table[i].received = 1
                             return
             i += 1
@@ -1487,7 +1487,7 @@ waiting, -1 on no such slot.
                     if inet_ping_table[i].seq == seq
                         if inet_ping_table[i].received != 0
                             *out_src_ip = inet_ping_table[i].src_ip
-                            *out_rtt = inet_ping_table[i].reply_tick - inet_ping_table[i].send_tick
+                            *out_rtt = inet_ping_table[i].reply_ms - inet_ping_table[i].send_ms
                             inet_ping_table[i].in_use = 0
                             return 1
                         return 0
@@ -2059,7 +2059,7 @@ milliseconds.  0 means "park forever" (Linux default). Set when a
 TCP_SEND arrives carrying a non-zero `timeout_ms` and parks; the
 timer scan replies `(status=2, n=0)` when `now >= deadline`.
 
-`user_timeout_ms` and `earliest_unack_tick` together drive
+`user_timeout_ms` and `earliest_unack_ms` together drive
 RFC 5482 TCP_USER_TIMEOUT — a per-connection cap on how long the
 socket may remain unable to drain its unacked window. Distinct from
 SO_SNDTIMEO: USER_TIMEOUT survives an unblocked send and governs
@@ -2069,7 +2069,7 @@ call's blocking window.
   - `user_timeout_ms` is the configured cap, in milliseconds.
     0 disables — slix has no sysctl for the system default, so 0
     means "no cap".
-  - `earliest_unack_tick` is the absolute `monotonic_ms` timestamp
+  - `earliest_unack_ms` is the absolute `monotonic_ms` timestamp
     at which the *current* unacked run started.  Set in `inet_tcp_do_send` when
     `send_len` transitions 0 → >0; reset to 0 in the ACK path when
     `snd_una` reaches `snd_nxt` (everything drained); restarted on
@@ -2078,7 +2078,7 @@ call's blocking window.
     restarts the timer").
 
         user_timeout_ms: int
-        earliest_unack_tick: int
+        earliest_unack_ms: int
 
 `ack_blackholed` is a test-only override: when nonzero,
 `inet_tcp_emit` suppresses pure-ACK segments (ACK-only, no payload,
@@ -2149,7 +2149,7 @@ TCP_USER_TIMEOUT verification. Set via `INET_CMD_TCP_BLACKHOLE_ACKS_TEST`
         ts_recent: u32
         ts_offset: u32
         // SO_KEEPALIVE state.  `keepalive_on != 0` activates the
-        // probe/giveup cycle.  `last_recv_tick` is the absolute
+        // probe/giveup cycle.  `last_recv_ms` is the absolute
         // `monotonic_ms` timestamp of the most recent inbound
         // segment — the idle-timer baseline.  `keepalive_probes`
         // counts unanswered probes; `keepalive_next_probe` is the
@@ -2157,7 +2157,7 @@ TCP_USER_TIMEOUT verification. Set via `INET_CMD_TCP_BLACKHOLE_ACKS_TEST`
         // (or first probe after idle) fires (0 = none scheduled,
         // recomputed lazily in scan_timers).
         keepalive_on: int
-        last_recv_tick: int
+        last_recv_ms: int
         keepalive_probes: int
         keepalive_next_probe: int
         // Per-socket keepalive overrides (TCP_KEEPIDLE / TCP_KEEPINTVL
@@ -2476,7 +2476,7 @@ per-tid `TCP_PER_TID_BUF_MAX`.
             tcp_sockets[i].send_waiter = -1
             tcp_sockets[i].send_deadline = 0
             tcp_sockets[i].user_timeout_ms = 0
-            tcp_sockets[i].earliest_unack_tick = 0
+            tcp_sockets[i].earliest_unack_ms = 0
             tcp_sockets[i].ack_blackholed = 0
             tcp_sockets[i].recv_waiter = -1
             tcp_sockets[i].close_waiter = -1
@@ -3289,7 +3289,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
             tcp_sockets[s].send_waiter = -1
             tcp_sockets[s].send_deadline = 0
         tcp_sockets[s].user_timeout_ms = 0
-        tcp_sockets[s].earliest_unack_tick = 0
+        tcp_sockets[s].earliest_unack_ms = 0
         tcp_sockets[s].ack_blackholed = 0
         if tcp_sockets[s].close_waiter >= 0
             inet_tcp_reply_status(tcp_sockets[s].close_waiter, 0)
@@ -3327,7 +3327,7 @@ stack can absorb a retransmitted peer FIN and stale duplicates.
         tcp_sockets[s].ts_ok = 0
         tcp_sockets[s].ts_recent = u32(0)
         tcp_sockets[s].keepalive_on = 0
-        tcp_sockets[s].last_recv_tick = 0
+        tcp_sockets[s].last_recv_ms = 0
         tcp_sockets[s].keepalive_probes = 0
         tcp_sockets[s].keepalive_next_probe = 0
         tcp_sockets[s].keepalive_idle = 0
@@ -3393,7 +3393,7 @@ success, -1 when the slot is already closed (idempotent).
                 tcp_sockets[i].send_waiter = -1
                 tcp_sockets[i].send_deadline = 0
                 tcp_sockets[i].user_timeout_ms = 0
-                tcp_sockets[i].earliest_unack_tick = 0
+                tcp_sockets[i].earliest_unack_ms = 0
                 tcp_sockets[i].ack_blackholed = 0
                 tcp_sockets[i].recv_waiter = -1
                 tcp_sockets[i].close_waiter = -1
@@ -3429,7 +3429,7 @@ success, -1 when the slot is already closed (idempotent).
                 // pool don't share an offset.
                 tcp_sockets[i].ts_offset = u32(monotonic_ms()) ^ u32(i * 1000003) ^ tcp_iss_counter
                 tcp_sockets[i].keepalive_on = 0
-                tcp_sockets[i].last_recv_tick = int(monotonic_ms())
+                tcp_sockets[i].last_recv_ms = int(monotonic_ms())
                 tcp_sockets[i].keepalive_probes = 0
                 tcp_sockets[i].keepalive_next_probe = 0
                 tcp_sockets[i].keepalive_idle = 0
@@ -3531,7 +3531,7 @@ out-of-range kind.
 
 
 setsockopt(SO_KEEPALIVE) — flips the per-socket keepalive flag.
-Turning it on baselines `last_recv_tick` to now and clears any
+Turning it on baselines `last_recv_ms` to now and clears any
 in-flight probe count, so a freshly-enabled socket waits a full
 `TCP_KEEPALIVE_IDLE_MS` from this point before the first probe.
 Turning it off zeroes the schedule.
@@ -3546,7 +3546,7 @@ Idempotent (no-op for same-state calls).  Returns 0 on success,
             return -1
         if on != 0
             tcp_sockets[s].keepalive_on = 1
-            tcp_sockets[s].last_recv_tick = int(monotonic_ms())
+            tcp_sockets[s].last_recv_ms = int(monotonic_ms())
             tcp_sockets[s].keepalive_probes = 0
             tcp_sockets[s].keepalive_next_probe = 0
         else
@@ -3930,7 +3930,7 @@ accept() until its SYN_RCVD → ESTABLISHED transition.
             inet_tcp_resize_buf(s, 1, parent_rcvbuf)
         // Inherit SO_KEEPALIVE — Linux semantics: accepted child
         // carries the listening socket's keepalive flag.  The
-        // probe schedule starts fresh from accept (last_recv_tick
+        // probe schedule starts fresh from accept (last_recv_ms
         // already points at "now" via alloc).
         if tcp_sockets[ls].keepalive_on != 0
             inet_tcp_set_keepalive(s, 1)
@@ -4405,7 +4405,7 @@ ACK and retry.
         // an already-unacked run inherit the original anchor so a
         // steady stream of small writes can't reset the timer.
         if start_off == 0
-            tcp_sockets[s].earliest_unack_tick = int(monotonic_ms())
+            tcp_sockets[s].earliest_unack_ms = int(monotonic_ms())
         tcp_sockets[s].send_len += n
         inet_tcp_drain_send(s)
         n
@@ -4680,7 +4680,7 @@ checksum, locates the matching socket, and delegates.
         // resets the idle clock, so an active flow never trips the
         // probe path.  Bumping unconditionally (not just on data) is
         // what Linux does — a peer ACK on idle counts as liveness.
-        tcp_sockets[s].last_recv_tick = int(monotonic_ms())
+        tcp_sockets[s].last_recv_ms = int(monotonic_ms())
         tcp_sockets[s].keepalive_probes = 0
         tcp_sockets[s].keepalive_next_probe = 0
         inet_tcp_state_step(s, flags, seq, ack, wnd, payload,
@@ -4939,9 +4939,9 @@ the connection down.
                     // it so the timer doesn't fire on an idle
                     // connection waiting for the next write.
                     if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
-                        tcp_sockets[s].earliest_unack_tick = 0
+                        tcp_sockets[s].earliest_unack_ms = 0
                     else
-                        tcp_sockets[s].earliest_unack_tick = int(monotonic_ms())
+                        tcp_sockets[s].earliest_unack_ms = int(monotonic_ms())
                     // RFC 7323 §2.3: shift the raw header field by
                     // the negotiated peer scale.  Defaults to 0
                     // (no-op) when WS wasn't agreed on.
@@ -5168,12 +5168,12 @@ socket for retransmit and TIME_WAIT deadlines.
                 // the connection alive; USER_TIMEOUT records a
                 // pending ETIMEDOUT and tears the slot down so the
                 // *next* read/write/getsockopt(SO_ERROR) surfaces 110
-                // (Linux semantics).  The earliest_unack_tick gate
+                // (Linux semantics).  The earliest_unack_ms gate
                 // ensures we don't fire on idle connections that have
                 // simply gone quiet.
                 if tcp_sockets[i].in_use != 0
                     val ut = tcp_sockets[i].user_timeout_ms
-                    val eu = tcp_sockets[i].earliest_unack_tick
+                    val eu = tcp_sockets[i].earliest_unack_ms
                     if ut > 0 && eu > 0
                         if (now - eu) >= ut
                             tcp_sockets[i].pending_error = 110  // ETIMEDOUT
@@ -5197,7 +5197,7 @@ socket for retransmit and TIME_WAIT deadlines.
                             if tcp_sockets[i].keepalive_next_probe == 0
                                 // Idle timer just (re)started — schedule
                                 // first probe `idle_eff` ticks after last recv.
-                                val first_probe = tcp_sockets[i].last_recv_tick + idle_eff
+                                val first_probe = tcp_sockets[i].last_recv_ms + idle_eff
                                 tcp_sockets[i].keepalive_next_probe = first_probe
                             if now >= tcp_sockets[i].keepalive_next_probe
                                 if tcp_sockets[i].keepalive_probes >= cnt_eff

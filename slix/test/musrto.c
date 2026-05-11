@@ -9,9 +9,9 @@
  * inet_tcp_emit silently drops pure-ACK segments from the child,
  * while SYN/FIN/RST handshake bytes still flow.  The client then
  * sends a payload, the data segment is received but never ACK'd,
- * earliest_unack_tick stays anchored, and inet_tcp_scan_timers
- * aborts the client slot once now - earliest_unack_tick exceeds
- * user_timeout_ticks.  The aborted slot records pending_error =
+ * earliest_unack_ms stays anchored, and inet_tcp_scan_timers
+ * aborts the client slot once now - earliest_unack_ms exceeds
+ * user_timeout_ms.  The aborted slot records pending_error =
  * ETIMEDOUT (110); the next syscall on the fd surfaces it.
  *
  * Wire-up:

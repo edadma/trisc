@@ -853,16 +853,16 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     // 0x534c, optname=1, &on).  The blackhole drops pure-ACK segments
     // emitted from the child while letting SYN/FIN/RST through, so
     // the loopback fastpath delivers the data segment normally but
-    // the server's ACK is silently lost.  earliest_unack_tick stays
+    // the server's ACK is silently lost.  earliest_unack_ms stays
     // anchored on the client; after ~250 ms inet_tcp_scan_timers
-    // sees (now - earliest_unack_tick) >= user_timeout_ticks and
+    // sees (now - earliest_unack_ms) >= user_timeout_ms and
     // aborts the slot with pending_error=ETIMEDOUT (110).  The
     // shim's send path consults INET_CMD_TCP_GET_ERR on the
     // post-abort slot and surfaces -ETIMEDOUT to userspace.
     //
     // Pinned: new IPC commands INET_CMD_TCP_SET_USERTO (52) and
     // INET_CMD_TCP_BLACKHOLE_ACKS_TEST (53); per-socket fields
-    // user_timeout_ticks, earliest_unack_tick, ack_blackholed.
+    // user_timeout_ms, earliest_unack_ms, ack_blackholed.
     qemu.send("musrto\n")
     val output = qemu.waitFor("musrto: done")
     output should include("musrto: bind=0")
