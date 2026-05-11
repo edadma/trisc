@@ -565,16 +565,17 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
   // so the user sees the root cause.
 
   "real user error in one sibling surfaces instead of cascade error in another" in {
-    // File A has a real user error (`s.len` on a string is not a valid
-    // field access — there's no extension `len` on string). File B is a
-    // sibling that uses a forward-referenced val from A. Without the fix,
-    // the user-visible error is "undefined variable: 'OWNERS_MAX'" in
-    // file B — completely misleading because OWNERS_MAX is fine; A's
-    // pre-collection just failed silently and so its meta was empty.
+    // File A has a real user error — a field access against a name that
+    // is not a struct field, not a method, and not a registered extension.
+    // File B is a sibling that uses a forward-referenced val from A.
+    // Without the fix, the user-visible error is "undefined variable:
+    // 'OWNERS_MAX'" in file B — completely misleading because OWNERS_MAX
+    // is fine; A's pre-collection just failed silently and so its meta
+    // was empty.
     val sources = Map(
       "mymod/proto" ->
         """module mymod
-          |probe(s: string) -> int = s.len
+          |probe(s: string) -> int = s.fnordfield
           |val OWNERS_MAX = 4
           |use_max() -> int = OWNERS_MAX
           |""".stripMargin,
@@ -588,6 +589,6 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     // The error should be from `mymod/proto` (the real bug) — not from
     // `mymod/main` (which references a perfectly-valid val).
     ex.getMessage should include("mymod/proto")
-    ex.getMessage should include("cannot access field 'len' on string")
+    ex.getMessage should include("cannot access field 'fnordfield' on string")
   }
 }
