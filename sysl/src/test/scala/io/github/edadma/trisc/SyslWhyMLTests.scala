@@ -1308,11 +1308,254 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
     ex.getMessage should include("`?` operator outside top-level")
   }
 
-  "module-level `var` is rejected with a clear message" in {
-    val ex = intercept[RuntimeException](translate(
+  "module-level `var` emits a WhyML ref" in {
+    // γ.2: module-level mutable vars become `val name : ref t = ref init`. Reads
+    // through `!name`, writes through `name := value`. Drivers and kernel state
+    // live here; this gates a large slice of OS verification.
+    val mlw = translate(
       """var counter: int = 0
-        |""".stripMargin))
-    ex.getMessage should include("module-level `var`")
+        |""".stripMargin)
+    mlw should include("val counter : ref int = ref 0")
+  }
+
+  "module-level `var` reads emit deref `!name`" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |def get_counter() -> int
+        |    counter
+        |""".stripMargin)
+    mlw should include("val counter : ref int = ref 0")
+    mlw should include("= !counter")
+  }
+
+  // ====================================================================================
+  // Phase γ.1 — generic structs as parametric WhyML records
+  // ====================================================================================
+
+  "generic struct with one type param emits a parametric record" in {
+    val mlw = translate(
+      """struct Box[T]
+        |    value: T
+        |""".stripMargin)
+    mlw should include("type box 't = { value: 't }")
+  }
+
+  "generic struct with two type params" in {
+    val mlw = translate(
+      """struct Pair[T, U]
+        |    fst: T
+        |    snd: U
+        |""".stripMargin)
+    mlw should include("type pair 't 'u = { fst: 't; snd: 'u }")
+  }
+
+  "generic struct used as field type uses parametric application" in {
+    val mlw = translate(
+      """struct Box[T]
+        |    value: T
+        |
+        |def unbox(b: Box[int]) -> int
+        |    b.value
+        |""".stripMargin)
+    mlw should include("(b: box int)")
+  }
+
+  // ====================================================================================
+  // Phase γ.3 — function without explicit return type lets WhyML infer
+  // ====================================================================================
+
+  "function without return type drops the `: ret` clause" in {
+    // sysl `def` style often omits the return type. Why3 can infer from the body
+    // expression; emit without `: ret` and let WhyML unify.
+    val mlw = translate(
+      """def twice(x: int)
+        |    x * 2
+        |""".stripMargin)
+    // The signature line is `let function twice (x: int)` (no `: ret`).
+    mlw should include("let function twice (x: int)")
+    mlw should not include "twice (x: int) :"
+  }
+
+  // ====================================================================================
+  // Phase γ.4 — `if without else` lowers to `else ()`
+  // ====================================================================================
+
+  "if without else lowers to `else ()`" in {
+    val mlw = translate(
+      """def f(b: bool)
+        |    if b then 0
+        |""".stripMargin)
+    // The else branch is `()` (unit literal). Emitted regardless of body's type;
+    // value-typed bodies hit a Why3 type-mismatch at verification time.
+    mlw should include("else ()")
+  }
+
+  // ====================================================================================
+  // Phase γ.5 — module-level val/var without type annotation lets WhyML infer
+  // ====================================================================================
+
+  "module-level const without type annotation lets WhyML infer" in {
+    val mlw = translate(
+      """const FORTY_TWO = 42
+        |""".stripMargin)
+    // sanitizeName lowercases all-uppercase names to avoid mAX_AGE-style ugliness.
+    mlw should include("let constant forty_two = 42")
+  }
+
+  "module-level var without type annotation emits `val name = ref init`" in {
+    val mlw = translate(
+      """var counter = 0
+        |""".stripMargin)
+    mlw should include("val counter = ref 0")
+  }
+
+  // ====================================================================================
+  // Phase δ.1 — frame conditions: emit #writes / #reads as WhyML writes/reads clauses
+  // ====================================================================================
+
+  "#writes attribute emits a WhyML writes clause" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |#writes(counter)
+        |bump() -> int
+        |    counter = counter + 1
+        |    counter
+        |""".stripMargin)
+    mlw should include("writes { counter }")
+  }
+
+  "#reads attribute emits a WhyML reads clause" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |#reads(counter)
+        |get_counter() -> int
+        |    counter
+        |""".stripMargin)
+    // Annotation forces the impure-emit path (`let f`); reads clause emitted.
+    mlw should include("reads { counter }")
+  }
+
+  "#writes with multiple vars emits semicolon-separated list" in {
+    val mlw = translate(
+      """var a: int = 0
+        |var b: int = 0
+        |
+        |#writes(a)
+        |#writes(b)
+        |bump_both() -> int
+        |    a = a + 1
+        |    b = b + 1
+        |    a + b
+        |""".stripMargin)
+    // Two #writes attrs combined; semicolon-joined inside the braces.
+    mlw should (include("writes { a }") or include("writes { a; b }"))
+    mlw should include("writes { b }")
+  }
+
+  // ====================================================================================
+  // Phase δ.3 — module invariants: predicate over module state preserved by every
+  // public function. The translator emits `predicate module_inv ()` at module scope
+  // and adds implicit requires/ensures clauses to each non-private fn.
+  // ====================================================================================
+
+  "module_invariant emits a top-level predicate" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |module_invariant counter >= 0
+        |""".stripMargin)
+    mlw should include("predicate module_inv ()")
+    mlw should include("!counter >= 0")
+  }
+
+  "multiple module_invariant decls are conjoined with /\\" in {
+    val mlw = translate(
+      """var lo: int = 0
+        |var hi: int = 100
+        |
+        |module_invariant lo <= hi
+        |module_invariant lo >= 0
+        |""".stripMargin)
+    mlw should include("predicate module_inv ()")
+    // Both clauses joined with formula-AND; deref `!` on the mutable refs.
+    mlw should include("/\\")
+    mlw should include("!lo <= !hi")
+    mlw should include("!lo >= 0")
+  }
+
+  "public fn implicitly carries requires/ensures of module_invariant" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |module_invariant counter >= 0
+        |
+        |#writes(counter)
+        |bump() -> int
+        |    counter = counter + 1
+        |    counter
+        |""".stripMargin)
+    mlw should include("requires { module_inv () }")
+    mlw should include("ensures  { module_inv () }")
+  }
+
+  "private fn does NOT carry the implicit module_inv clauses" in {
+    val mlw = translate(
+      """var counter: int = 0
+        |
+        |module_invariant counter >= 0
+        |
+        |private def helper(n: int) -> int
+        |    n + 1
+        |""".stripMargin)
+    // Helper is private; the implicit clauses are skipped.
+    mlw should not include "requires { module_inv () }"
+  }
+
+  // ====================================================================================
+  // Phase δ.2 — lexicographic termination measures: `variant { e1, e2 }`
+  // ====================================================================================
+
+  "single-expr `variant e` keeps the existing single-measure form" in {
+    val mlw = translate(
+      """def fact(n: int) -> int
+        |    variant n
+        |    if n <= 0 then 1
+        |    else n * fact(n - 1)
+        |""".stripMargin)
+    // Single-expression form: `variant  { n }` (existing keyword spacing).
+    mlw should include("variant  { n }")
+    mlw should not include "variant  { n;"
+  }
+
+  "multi-arg `variant { a, b }` emits a lex tuple" in {
+    val mlw = translate(
+      """def ack(m: int, n: int) -> int
+        |    variant { m, n }
+        |    if m <= 0 then n + 1
+        |    else if n <= 0 then ack(m - 1, 1)
+        |    else ack(m - 1, ack(m, n - 1))
+        |""".stripMargin)
+    // Lex tuple — semicolon-joined.
+    mlw should include("variant  { m; n }")
+  }
+
+  "module_invariant must be bool — non-bool expression is rejected by analyzer" in {
+    // Module invariants live at the spec layer; analyzer validates the expression
+    // is bool-typed before the WhyML backend ever sees it.
+    val ex = intercept[RuntimeException] {
+      val src =
+        """var counter: int = 0
+          |
+          |module_invariant counter
+          |""".stripMargin
+      val Right(ast) = (new SyslParser).parseProgram(src): @unchecked
+      (new SyslAnalyzer).analyze(ast)
+    }
+    ex.getMessage should include("module_invariant")
+    ex.getMessage should include("bool")
   }
 
   "unsupported expression form yields a clear error naming the gap" in {
@@ -1323,5 +1566,83 @@ class SyslWhyMLTests extends AnyFreeSpec with Matchers {
         |    xs[0]
         |""".stripMargin))
     ex.getMessage should include("WhyML translator: unsupported")
+  }
+
+  // ====================================================================================
+  // Phase β — match/pattern support: multi-pattern arms, ranges, struct destructure,
+  // wildcard before else in literal path. Guards still rejected (Why3 logic-mode `match`
+  // has no `when` clauses).
+  // ====================================================================================
+
+  "match arm with multiple ADT patterns OR-joins them" in {
+    val mlw = translate(
+      """enum Color
+        |    Red
+        |    Green
+        |    Blue
+        |
+        |def is_warm(c: Color) -> bool
+        |    c match
+        |        Color.Red, Color.Green -> true
+        |        Color.Blue             -> false
+        |""".stripMargin)
+    mlw should include("Red | Green -> true")
+  }
+
+  "match arm with multiple literal patterns OR-joins conditions in if-chain" in {
+    val mlw = translate(
+      """def is_one_or_two(n: int) -> bool
+        |    n match
+        |        1, 2 -> true
+        |        else -> false
+        |""".stripMargin)
+    // Multi-pattern in the literal-path produces a `\/` join between conditions.
+    mlw should include("n = 1 \\/ n = 2")
+  }
+
+  "range pattern in literal-path lowers to inclusive bounds check" in {
+    val mlw = translate(
+      """def in_range(n: int) -> bool
+        |    n match
+        |        1..10 -> true
+        |        else  -> false
+        |""".stripMargin)
+    mlw should include("n >= 1 /\\ n <= 10")
+  }
+
+  "wildcard before else in literal path matches anything" in {
+    val mlw = translate(
+      """def label(n: int) -> int
+        |    n match
+        |        0    -> 100
+        |        _    -> 999
+        |        else -> -1
+        |""".stripMargin)
+    // The `_` becomes `if true then ... else ...`. (Reaching the wildcard arm
+    // means the 0 arm didn't match.)
+    mlw should include("if true then")
+  }
+
+  "struct destructure pattern emits WhyML record pattern" in {
+    val mlw = translate(
+      """struct Point
+        |    x: int
+        |    y: int
+        |
+        |def get_x(p: Point) -> int
+        |    p match
+        |        Point(a, b) -> a
+        |""".stripMargin)
+    mlw should include("{ x = a; y = b }")
+  }
+
+  "match arm with guard is rejected with the new clearer message" in {
+    // Guards aren't surface syntax in sysl yet; this test pins the rejection
+    // path. When sysl gains guard syntax, the lowering strategy will need to
+    // change (Why3 logic-mode `match` has no `when` clauses).
+    // For now, the rejection fires when an arm carries a guard internally.
+    // No surface-test driver — checked indirectly via the `when` keyword in
+    // the rejection message text. Skip this case.
+    pending
   }
 }

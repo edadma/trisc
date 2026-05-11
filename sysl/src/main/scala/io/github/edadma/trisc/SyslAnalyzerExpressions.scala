@@ -173,7 +173,22 @@ trait SyslAnalyzerExpressions:
         currentExpected = if expectedRet == UnitType then None else Some(expectedRet)
         val tBody = try body match
           case ExprBodyAST(expr) => TExprBody(analyzeExpr(expr))
-          case BlockBodyAST(stmts, _) => TBlockBody(analyzeBlock(stmts))
+          case BlockBodyAST(stmts, contracts) =>
+            // Route through the contract-aware analysis path so require/ensure
+            // clauses become TContractCheck nodes baked into the body. Closures
+            // can therefore carry contracts even when they capture outer-scope
+            // state — the inner-def lift (in liftInnerDefClusters) is still
+            // preferred for the no-capture case (avoids closure-construction
+            // overhead), but capturing closures with contracts now compile
+            // straight to TClosure with TContractCheck nodes.
+            //
+            // selfMangledName="" — variant clauses on a closure are not yet
+            // supported (would need to know the synthesized name at runtime).
+            // The capture scanner below picks up any vars referenced by the
+            // contract expressions and adds them to the closure's captures,
+            // so a `require x >= base` inside a closure correctly captures
+            // `base` from outer scope.
+            analyzeBlockWithContracts(stmts, contracts, expectedRet)
         finally currentExpected = savedExp
         popScope()
         // Detect captures: variables referenced from enclosing scope (not globals, not params).
@@ -316,17 +331,36 @@ trait SyslAnalyzerExpressions:
             locals
           case TAsmStmt(_) => locals
           case _: TBreakStmt | _: TContinueStmt => locals
+          // analyzeBlockWithContracts (now used by the closure-body path so
+          // require/ensure on capturing inner defs work) emits TContractCheck
+          // nodes whose conditions may reference outer-scope state — without
+          // this arm those references are silently dropped from the capture
+          // list and the closure runs with a stale env. Same for TMultiStmt
+          // which the contract path uses to wrap snapshot decls + checks.
+          case TContractCheck(_, e, _) =>
+            scanCaptures(e, locals)
+            locals
+          case TMultiStmt(xs) =>
+            scanStmtSeq(xs, locals)
+            locals
           case _ => locals
         tBody match
           case TExprBody(e) => scanCaptures(e, paramNames)
           case TBlockBody(stmts) => scanStmtSeq(stmts, paramNames)
-        // Determine actual return type from body
-        val actualRet = tBody match
-          case TExprBody(e) => e.typ
-          case TBlockBody(stmts) =>
-            stmts.lastOption match
-              case Some(TExprStmt(e)) => e.typ
-              case _ => UnitType
+        // Determine actual return type. When the call-site context supplied an
+        // expected FuncType (e.g. inner defs always pin one, or a callback
+        // arg's parameter type), use it directly — body inspection would lose
+        // the type when the body has been rewritten by analyzeBlockWithContracts
+        // (the trailing TExprStmt gets wrapped into TMultiStmt + return). Only
+        // anonymous closures with no context fall back to last-stmt inference.
+        val actualRet = expectedFunc match
+          case Some(ft) => ft.returnType
+          case None => tBody match
+            case TExprBody(e) => e.typ
+            case TBlockBody(stmts) =>
+              stmts.lastOption match
+                case Some(TExprStmt(e)) => e.typ
+                case _ => UnitType
         // Determine if this closure escapes — it does if the expected type is @escaping,
         // or if there is no expected type (e.g. assigned to a local with no annotation).
         val escapesFlag = expectedFunc match
@@ -667,6 +701,16 @@ trait SyslAnalyzerExpressions:
           case RefType(st: StructType) => Some((TDeref(tObj, latestStruct(st)), st))
           case _                       => None
         if structOpt.isEmpty then
+          // `s.len` on string / slice / array / ref-slice is the field-access
+          // sugar for `len(s)` — produce the same TLen the call-form does.
+          // Symmetric to the `CallAST("len", args)` arm earlier in this match.
+          // Without this, every other indexable type's UX papercut path was
+          // "use len(x)"; with it, both spellings work.
+          if field == "len" then
+            tObj.typ.underlying match
+              case StringType | _: SliceType | _: ArrayType | RefType(_: SliceType) =>
+                return TLen(tObj, I32)
+              case _ =>
           return tryExtensionDispatch(field, tObj, Nil).getOrElse(
             throw AnalysisError(s"cannot access field '$field' on ${tObj.typ}"))
         val (resolvedObj, structType0) = structOpt.get

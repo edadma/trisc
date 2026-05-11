@@ -42,11 +42,19 @@ class SyslParser extends StandardTokenParsers {
     }
 
   lazy val declBare: Parser[DeclAST] =
-    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | extensionDecl | interfaceDecl | typeAliasDecl | staticAssertDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
+    condDecl | importDecl | externDecl | structDecl | enumDecl | traitDecl | implDecl | extensionDecl | interfaceDecl | typeAliasDecl | staticAssertDecl | moduleInvariantDecl | "private" ~> "def" ~> defDecl(true) | "private" ~> declBody(true) | "def" ~> defDecl(false) | declBody(false)
 
   lazy val staticAssertDecl: Parser[StaticAssertDeclAST] =
     "static_assert" ~> "(" ~> expr ~ opt("," ~> stringLit) <~ ")" ^^ {
       case cond ~ msg => StaticAssertDeclAST(cond, msg)
+    }
+
+  /** `module_invariant <expr>` (or `module_invariant <expr>, "message"`) — declares a
+   *  verification-only predicate over module-level state. Spec-only: stripped from runtime
+   *  output, consumed by the WhyML backend (Phase δ.3). */
+  lazy val moduleInvariantDecl: Parser[ModuleInvariantDeclAST] =
+    "module_invariant" ~> expr ~ opt("," ~> stringLit) ^^ {
+      case e ~ msg => ModuleInvariantDeclAST(e, msg)
     }
 
   // --- Attributes ---
@@ -430,6 +438,15 @@ class SyslParser extends StandardTokenParsers {
     ensureCasesBlock |
     "require" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => List(ContractClauseAST(ContractRequire, e, msg)) } |
     "ensure" ~> expr ~ opt("," ~> stringLit) ^^ { case e ~ msg => List(ContractClauseAST(ContractEnsure, e, msg)) } |
+    // δ.2: `variant { e1, e2, ... }` is a lexicographic termination measure for
+    // mutual-recursion / nested-loop termination proofs. Encoded as a single
+    // ContractVariant clause whose expr is a TupleLitAST — detected by the
+    // analyzer (skips the runtime decreaser wrap; Why3 does the lex check
+    // statically) and by the WhyML backend (emits `variant { e1; e2; ... }`).
+    "variant" ~> "{" ~> rep1sep(expr, ",") <~ "}" ^^ {
+      case List(e) => List(ContractClauseAST(ContractVariant, e, None))
+      case es      => List(ContractClauseAST(ContractVariant, TupleLitAST(es), None))
+    } |
     "variant" ~> expr ^^ { case e => List(ContractClauseAST(ContractVariant, e, None)) }
 
   /** `ensure cases` block: `guard => postcondition [, "msg"]`, one per line, at least one case.

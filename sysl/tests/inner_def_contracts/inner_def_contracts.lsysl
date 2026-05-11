@@ -148,3 +148,59 @@ codepath only fires when the def actually has contracts.
         def add_bonus(n: int) -> int
             n + bonus
         assert(add_bonus(5) == 15, "5+10 = 15, captured bonus visible")
+
+
+Capturing inner defs with contracts (Phase α.2)
+-----------------------------------------------
+
+Tier 4 followup #2 added contracts on inner defs via lift-to-top-level.
+That handled the no-capture case but rejected captures because the
+closure-lowering path didn't process contracts. Phase α.2 routes the
+closure analyzer's BlockBody case through analyzeBlockWithContracts so
+require/ensure clauses become TContractCheck nodes baked into the
+closure body itself.
+
+These tests pin that capturing inner defs with contracts work at runtime
+across all four backends. The contract conditions reference outer-scope
+variables that the closure captures.
+
+    #test
+    test_capturing_require() -> unit
+        var threshold = 0
+        def check(n: int) -> int
+            require n >= threshold
+            n + 1
+        assert(check(5) == 6, "passes precondition with captured threshold=0")
+
+    #test
+    test_capturing_ensure() -> unit
+        var target = 10
+        def at_least(n: int) -> int
+            ensure result >= target
+            if n < target then target else n
+        assert(at_least(5) == 10, "5 < 10, returns target")
+        assert(at_least(20) == 20, "20 >= 10, returns n")
+
+    #test
+    test_capturing_both_clauses() -> unit
+        var lo = 0
+        var hi = 100
+        def clamped(n: int) -> int
+            require lo <= hi
+            ensure result >= lo
+            ensure result <= hi
+            if n < lo then lo
+            else if n > hi then hi
+            else n
+        assert(clamped(50) == 50, "in range")
+        assert(clamped(-5) == 0, "below lo, clamped up")
+        assert(clamped(200) == 100, "above hi, clamped down")
+
+    #test
+    test_capturing_body_and_contract() -> unit
+        var bonus = 10
+        var threshold = 0
+        def add_bonus(n: int) -> int
+            require n >= threshold
+            n + bonus
+        assert(add_bonus(7) == 17, "passes require, applies bonus")

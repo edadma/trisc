@@ -218,4 +218,80 @@ class SyslDefPurityTests extends SyslTestHelpers {
         |    tick()
         |""".stripMargin) shouldBe 2
   }
+
+  // ===== Phase δ.6 — transitive `def`-purity enforcement =====
+  //
+  // `def` functions cannot call impure helpers (extern, regular impure fn,
+  // ghost fn, or any fn that itself fails the pure check). Transitivity is
+  // enforced: every `def` / `#pure` fn must individually pass validatePureFn,
+  // and isPureCallee uses each fn's stored isPure flag — so `def f` calling
+  // `def g` is only accepted if `g`'s body is also pure (which validatePureFn
+  // for `g` independently verifies). The chain breaks at whichever link first
+  // calls something genuinely impure.
+
+  "def calling extern function is rejected" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """extern putchar(ch: int)
+          |
+          |def caller() -> int
+          |    putchar(65)
+          |    return 1
+          |main() -> int = caller()
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("def function 'caller'")
+    thrown.getMessage should include("cannot call impure function 'putchar'")
+  }
+
+  "def calling regular (impure) sysl function is rejected" in {
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """var counter: int = 0
+          |bump()
+          |    counter = counter + 1
+          |
+          |def caller() -> int
+          |    bump()
+          |    return 1
+          |main() -> int = caller()
+          |""".stripMargin)
+    }
+    thrown.getMessage should include("def function 'caller'")
+    thrown.getMessage should include("cannot call impure function 'bump'")
+  }
+
+  "def transitively calling impure (via #pure helper that calls extern) — chain breaks at the helper" in {
+    // The chain: caller (def, pure) → helper (#pure) → putchar (extern, impure).
+    // The chain breaks at helper: validatePureFn for helper rejects it because
+    // it calls putchar from a #pure context. Caller never sees a pure helper
+    // exists. Each link is independently validated, which is what makes the
+    // transitivity sound.
+    val thrown = intercept[RuntimeException] {
+      eval(
+        """extern putchar(ch: int)
+          |
+          |#pure
+          |helper() -> int
+          |    putchar(65)
+          |    return 1
+          |
+          |def caller() -> int = helper()
+          |
+          |main() -> int = caller()
+          |""".stripMargin)
+    }
+    // The first failure is on `helper`. It uses the prefix `#pure function`
+    // since helper is annotated `#pure` rather than declared with `def`.
+    thrown.getMessage should include("function 'helper'")
+    thrown.getMessage should include("putchar")
+  }
+
+  "def calling another def function is allowed (transitively pure)" in {
+    eval(
+      """def add(a: int, b: int) -> int = a + b
+        |def quad(x: int) -> int = add(add(x, x), add(x, x))
+        |main() -> int = quad(10)
+        |""".stripMargin) shouldBe 40
+  }
 }

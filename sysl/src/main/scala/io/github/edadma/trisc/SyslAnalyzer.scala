@@ -124,6 +124,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
    *  to these are dropped from real-function bodies before codegen). */
   protected val ghostNames = mutable.HashSet[String]()
 
+  /** Set of type names declared `#ghost` — spec-only types that real code may not
+   *  construct or pattern-match. Populated during decl collection from the `#ghost`
+   *  attribute on struct/enum/data-enum/type-alias decls. The discipline is enforced
+   *  at construction sites in `validateGhostDiscipline` (Phase δ.5). */
+  protected val ghostTypes = mutable.HashSet[String]()
+
   /** Type-check each invariant expression at struct declaration time. Invariants are
    *  analyzed in a scope where each field name binds to a local of the field's type, so
    *  type errors (wrong field name, non-bool result) are caught before any mutation site. */
@@ -1836,16 +1842,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val pass0Enums = mutable.HashSet[String]()
     for decl <- program.decls do
       decl match
-        case StructDeclAST(name, _, typeParams, _, _, _, _) if typeParams.isEmpty =>
+        case sd @ StructDeclAST(name, _, typeParams, attrs, _, _, _) if typeParams.isEmpty =>
           if pass0Structs.contains(name) then
             throw AnalysisError(s"duplicate struct: '$name'", decl)
           pass0Structs += name
           structTypes(name) = SyslType.StructType(name, Nil) // placeholder — fields filled below
-        case DataEnumDeclAST(name, _, typeParams, _, _, _) if typeParams.isEmpty =>
+          // δ.5: track ghost-marked struct types so the discipline check (in
+          // validateGhostDiscipline) can reject real-code construction.
+          if attrs.exists(_.name == "ghost") then ghostTypes += name
+        case ed @ DataEnumDeclAST(name, _, typeParams, attrs, _, _) if typeParams.isEmpty =>
           if pass0Enums.contains(name) then
             throw AnalysisError(s"duplicate enum: '$name'", decl)
           pass0Enums += name
           dataEnumTypes(name) = SyslType.EnumType(name, Nil) // placeholder — variants filled below
+          if attrs.exists(_.name == "ghost") then ghostTypes += name
+        case ee @ EnumDeclAST(name, _, attrs) =>
+          if attrs.exists(_.name == "ghost") then ghostTypes += name
         case _ => ()
 
     // Extract module path for name mangling
@@ -2477,6 +2489,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case impl: ImplDeclAST   => analyzeImplMethods(impl)
       case sa: StaticAssertDeclAST =>
         evalStaticAssert(sa)
+        Nil
+      case mi: ModuleInvariantDeclAST =>
+        // Spec-only: validate that the expression is a bool reference over module-level
+        // state, then drop. The WhyML backend reads the original AST directly. Other
+        // backends never see this decl (analyzer returns no TDecl).
+        scopeStack = new mutable.ArrayBuffer
+        pushScope()
+        try
+          val tExpr = analyzeExpr(mi.expr)
+          if tExpr.typ != BoolType then
+            throw AnalysisError(s"module_invariant must be a bool expression, got ${tExpr.typ}")
+        finally
+          scopeStack = null
         Nil
       case d => List(analyzeDecl(d))
     }
@@ -3429,7 +3454,10 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TFieldPreDec(o, _, _)           => checkExpr(o, ghostCtx)
       case TFieldPostInc(o, _, _)          => checkExpr(o, ghostCtx)
       case TFieldPostDec(o, _, _)          => checkExpr(o, ghostCtx)
-      case TStructConstruct(_, args)       => args.foreach(checkExpr(_, ghostCtx))
+      case TStructConstruct(st, args)      =>
+        if !ghostCtx && ghostTypes.contains(st.name) then
+          reject(s"real-code expression constructs ghost type '${st.name}'")
+        args.foreach(checkExpr(_, ghostCtx))
       case TUnary(_, o, _)                 => checkExpr(o, ghostCtx)
       case TBinary(l, _, r, _)             => checkExpr(l, ghostCtx); checkExpr(r, ghostCtx)
       case TCall(callee, args, _) =>
@@ -3452,8 +3480,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           arm.guard.foreach(checkExpr(_, ghostCtx))
           arm.body.foreach(checkStmt(_, ghostCtx))
         dflt.foreach(_.foreach(checkStmt(_, ghostCtx)))
-      case TNew(_, args)                   => args.foreach(checkExpr(_, ghostCtx))
-      case TNewEnum(_, _, args)            => args.foreach(checkExpr(_, ghostCtx))
+      case TNew(st, args)                  =>
+        if !ghostCtx && ghostTypes.contains(st.name) then
+          reject(s"real-code expression constructs ghost type '${st.name}' via new")
+        args.foreach(checkExpr(_, ghostCtx))
+      case TNewEnum(et, _, args)           =>
+        if !ghostCtx && ghostTypes.contains(et.name) then
+          reject(s"real-code expression constructs ghost enum '${et.name}' via new")
+        args.foreach(checkExpr(_, ghostCtx))
       case TNewArray(_, sz)                => checkExpr(sz, ghostCtx)
       case TLen(inner, _)                  => checkExpr(inner, ghostCtx)
       case TCap(inner, _)                  => checkExpr(inner, ghostCtx)
@@ -4254,6 +4288,31 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val negated = -value
         literalRangeMsg(negated, target).foreach(msg => throw AnalysisError(msg))
         TIntLit(negated, target)
+      case TUnary("~", TIntLit(value, innerType), _) if target.isIntegral =>
+        // Constant-fold bitwise NOT. The width of the bit-flip is determined by
+        // the *inner* literal's type — `~0u8` flips 8 bits → 0xFF, while `~0i32`
+        // flips 32 bits → -1 (sign-extended). Result is then range-checked
+        // against the target so `var x: u8 = ~0` (where the bare `~0` is i32 →
+        // -1) lands on the same "literal -1 does not fit in u8" diagnostic
+        // shape as `var x: u8 = -1`. To get u8(0xFF) the user writes `~0u8`.
+        val maskAndSign: Option[(Long, Boolean)] = innerType.underlying match
+          case IntType(8)   => Some((0xFFL,         true))
+          case IntType(16)  => Some((0xFFFFL,       true))
+          case IntType(32)  => Some((0xFFFFFFFFL,   true))
+          case IntType(64)  => Some((-1L,           true))
+          case UIntType(8)  => Some((0xFFL,         false))
+          case UIntType(16) => Some((0xFFFFL,       false))
+          case UIntType(32) => Some((0xFFFFFFFFL,   false))
+          case UIntType(64) => Some((-1L,           false))
+          case _            => None
+        maskAndSign match
+          case None => expr
+          case Some((mask, signed)) =>
+            val raw = (~value) & mask
+            val highBit = mask - (mask >>> 1)         // 0x80 / 0x8000 / 0x80000000 / 0x8000…
+            val computed = if signed && (raw & highBit) != 0 then raw | ~mask else raw
+            literalRangeMsg(computed, target).foreach(msg => throw AnalysisError(msg))
+            TIntLit(computed, target)
       case TIntLit(0, _) if target.isInstanceOf[PtrType] => TIntLit(0, target) // null pointer
       // Float literal → narrower float type (untyped float literal coercion)
       case TFloatLit(value, _) if target.isFloat => TFloatLit(value, target)
@@ -5904,34 +5963,41 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       if !cluster.contains(n) then
         cluster += n
         toVisit ++= crossRefs.getOrElse(n, Set.empty)
-    // Lift set: cluster members ∪ any inner def with contracts. The latter need
-    // lifting even when not part of a cluster, because the contract-emission
-    // stage only runs in the top-level fn body path.
-    val contractBearers: Set[String] = innerStmts.iterator.filter(_.contracts.nonEmpty).map(_.name).toSet
-    val liftSet: Set[String] = cluster.toSet ++ contractBearers
+    // Lift set:
+    //   - Every cluster member (forward-ref support).
+    //   - Contract-bearing inner defs WITHOUT outer-scope captures (lifting
+    //     gives a slightly faster direct call vs. closure indirection, and
+    //     the existing top-level contract path was the original support).
+    // Contract-bearing inner defs WITH outer-scope captures stay as
+    // TClosures; the closure analyzer routes their bodies through
+    // `analyzeBlockWithContracts`, baking TContractCheck nodes into the
+    // closure body. The closure's capture scanner (with TContractCheck +
+    // TMultiStmt arms) picks up any contract-only capture refs.
+    def hasOuterCapture(i: Inner): Boolean =
+      i.closure.captures.exists((c, _) => !siblingNames.contains(c))
+    val contractBearersLiftable: Set[String] = innerStmts.iterator.collect {
+      case i if i.contracts.nonEmpty && !hasOuterCapture(i) => i.name
+    }.toSet
+    val liftSet: Set[String] = cluster.toSet ++ contractBearersLiftable
     if liftSet.isEmpty then return tStmts
     // Validate: every lift target's captures must be siblings (incl. self).
-    // Outer-scope captures are rejected up front with a diagnostic that names
-    // the offenders and steers the user to the right fix.
+    // The only remaining rejection case is a CLUSTER member with outer
+    // captures — the lift can't preserve them and dropping silently would
+    // break the program. Contract-bearers with outer captures are excluded
+    // from `liftSet` above, so they don't reach this check.
     for i <- innerStmts; if liftSet.contains(i.name) do
       val outerCaptures = i.closure.captures.iterator.collect {
         case (capName, _) if !siblingNames.contains(capName) => capName
       }.toList
       if outerCaptures.nonEmpty then
-        val msg =
-          if i.contracts.nonEmpty then
-            s"inner def '${i.name}' has require/ensure clauses but captures outer-scope variables: " +
-              s"${outerCaptures.mkString(", ")}. Contracts on inner defs are supported only when the def can be " +
-              "lifted to a top-level fn — promote it explicitly, or refactor to avoid the captures " +
-              "(e.g. pass the captured value as an extra parameter)."
-          else
-            val others = liftSet.iterator.filter(_ != i.name).toList.sorted
-            s"inner def '${i.name}' is part of a cross-referencing cluster (with ${others.mkString(", ")}) " +
-              s"that needs to be lifted to top-level for forward references to work, " +
-              s"but it captures outer-scope variables: ${outerCaptures.mkString(", ")}. " +
-              "The lift cannot preserve these captures — promote the cluster to top-level fns explicitly, " +
-              "or refactor to avoid the captures (e.g. pass the captured value as an extra parameter)."
-        throw AnalysisError(msg)
+        val others = liftSet.iterator.filter(_ != i.name).toList.sorted
+        throw AnalysisError(
+          s"inner def '${i.name}' is part of a cross-referencing cluster (with ${others.mkString(", ")}) " +
+            s"that needs to be lifted to top-level for forward references to work, " +
+            s"but it captures outer-scope variables: ${outerCaptures.mkString(", ")}. " +
+            "The lift cannot preserve these captures — promote the cluster to top-level fns explicitly, " +
+            "or refactor to avoid the captures (e.g. pass the captured value as an extra parameter).",
+        )
     // Synthesize unique mangled names for every lift target. Sorted for
     // deterministic output.
     val mangled: Map[String, String] = liftSet.toList.sorted.map { name =>
@@ -6090,8 +6156,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     val tStmts = analyzeBlock(stmts)
     // Lower the optional `variant` clause: snapshot at entry, wrap every direct recursive
     // call with a runtime check. The snapshot decl is prepended to the final body.
+    //
+    // δ.2: lex-tuple variants (`variant { a, b }` parsed as TupleLitAST) are
+    // verification-only — no runtime decreaser is feasible without lex-comparison
+    // machinery. Why3 verifies lex-order termination statically. Skip the wrap.
     val (variantPrefix, variantBody) = variantClauses.headOption match
-      case Some(vc) if selfMangledName.nonEmpty =>
+      case Some(vc) if selfMangledName.nonEmpty && !vc.expr.isInstanceOf[TupleLitAST] =>
         lowerFunctionVariant(selfMangledName, paramNames, vc, tStmts)
       case _ => (Nil, tStmts)
     val rewritten = rewriteReturnsForEnsure(variantBody, returnType, ensureChecks)

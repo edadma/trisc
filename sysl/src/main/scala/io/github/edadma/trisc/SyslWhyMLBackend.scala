@@ -44,6 +44,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  be reassigned later in the same scope; popped on the way out. Phase 4a does not handle
    *  shadowing — a function with two same-named locals in disjoint scopes would conflate them. */
   private val refScope: scala.collection.mutable.Set[String] = scala.collection.mutable.Set.empty
+  /** Module-invariant decls collected per `generate(program)`. The WhyML backend
+   *  emits them as a single `predicate module_inv ()` whose body conjoins every
+   *  invariant, then implicitly attaches `requires { module_inv () }` /
+   *  `ensures { module_inv () }` to every public function. Phase δ.3. */
+  private var moduleInvariants: List[ModuleInvariantDeclAST] = Nil
 
   private def indent: String = "  " * indentLevel
   private def line(s: String): Unit =
@@ -69,6 +74,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     dataEnumVariantOf = (for d <- dataEnums; v <- d.variants yield v.name -> d.name).toMap
     val constants = program.decls.collect { case v: VarDeclAST => v }
     val fns = program.decls.collect { case f: FunDeclAST => f }
+    moduleInvariants = program.decls.collect { case mi: ModuleInvariantDeclAST => mi }
     line(s"module $moduleName")
     indentLevel += 1
     line("use int.Int")
@@ -102,6 +108,14 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       if !first then blank()
       first = false
       emitConstant(c)
+    // Phase δ.3: emit a `predicate module_inv ()` after constants/refs are in scope so
+    // the body can reference them. Each `module_invariant` decl contributes one
+    // conjunct; `module_inv ()` evaluates to `true` when the program has none, which
+    // is harmless to include in requires/ensures.
+    if moduleInvariants.nonEmpty then
+      if !first then blank()
+      first = false
+      emitModuleInvariantPredicate()
     for fn <- fns do
       if !first then blank()
       first = false
@@ -114,14 +128,35 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  `constant`. Mutable `var` at module scope would need WhyML refs and is deferred —
    *  most proof-relevant module-level data is naturally immutable (limits, sentinels,
    *  shared math constants), so `val` covers the common case. */
+  /** Emit `predicate module_inv () = c1 /\ c2 /\ ...` where each `cN` is one of the
+   *  collected module_invariant clauses. The `()` parameter list is empty because the
+   *  predicate closes over module-level state via Why3's normal scoping rules — refs
+   *  read via `!name` etc. The predicate is logic-mode (formula); we emit the clauses
+   *  joined with `/\` (formula AND), not `&&` (program-bool AND), because Why3 expects
+   *  predicate bodies to be formulas. */
+  private def emitModuleInvariantPredicate(): Unit =
+    val clauses = moduleInvariants.map(mi => stripOuterParens(formatExpr(mi.expr)))
+    line(s"predicate module_inv () = ${clauses.mkString(" /\\ ")}")
+
   private def emitConstant(v: VarDeclAST): Unit =
+    // Type annotation is optional: when sysl omits it, drop the `: t` clause and
+    // let WhyML's type inference unify against the init expression (mirrors the
+    // function-without-return-type fix in γ.3).
+    val typeStr = v.typ.map(t => s" : ${typeOf(t)}").getOrElse("")
+    val refTypeStr = v.typ.map(t => s" : ref ${typeOf(t)}").getOrElse("")
+    val sname = sanitizeName(v.name)
     if v.isMutable then
-      unsupported("module-level `var`", s"${v.name}: only `val` / `const` (immutable) module-level bindings are supported in Phase 3c")
-    val t = v.typ.getOrElse(unsupported("module-level val without type annotation", v.name))
-    // `let constant` (program-level) — usable from both contracts and code bodies. Without
-    // `let`, the constant is logic-only and Why3 reports "logical symbol used in a non-ghost
-    // context" when a `let function` body references it.
-    line(s"let constant ${sanitizeName(v.name)} : ${typeOf(t)} = ${formatExpr(v.init)}")
+      // Module-level `var` → WhyML `val name : ref type = ref initial`. Permanently
+      // add to refScope so every function body sees it as a ref (`!name` to read,
+      // `name := value` to assign). Drivers and kernel state live here in real code;
+      // this gates a large slice of OS verification.
+      refScope += v.name
+      line(s"val $sname$refTypeStr = ref ${formatExpr(v.init)}")
+    else
+      // `let constant` (program-level) — usable from both contracts and code bodies. Without
+      // `let`, the constant is logic-only and Why3 reports "logical symbol used in a non-ghost
+      // context" when a `let function` body references it.
+      line(s"let constant $sname$typeStr = ${formatExpr(v.init)}")
 
   /** sysl `struct Point { x: int; y: int }` → WhyML `type point = { x: int; y: int }`.
    *  WhyML records are immutable by default; field updates are functional (`{ p with x = 5 }`).
@@ -141,26 +176,48 @@ class SyslWhyMLBackend(moduleName: String = "M"):
    *  witness works. If a user invariant rejects the all-zeros witness, Why3 will report
    *  the failed witness goal and the user can refactor. */
   private def emitStruct(s: StructDeclAST): Unit =
-    if s.typeParams.nonEmpty then unsupported("generic struct", s.name)
     if s.fields.isEmpty then unsupported("empty struct", s.name)
     val typeName = s"${s.name.head.toLower}${s.name.tail}"
-    val fieldStr = s.fields.map { case (fname, ftyp, _) =>
-      s"$fname: ${typeOf(ftyp)}"
-    }.mkString("; ")
-    if s.invariants.isEmpty then
-      line(s"type $typeName = { $fieldStr }")
-    else
-      val invStr = s.invariants
-        .map(e => stripOuterParens(formatExpr(e)))
-        .mkString(" && ")
-      val witness = s.fields.map { case (fname, ftyp, _) =>
-        s"$fname = ${defaultValue(ftyp, s.name, fname)}"
+    val savedTypeParams = currentTypeParams
+    currentTypeParams = s.typeParams.toSet
+    try
+      // Generic structs emit parametric WhyML records:
+      //   `struct Pair[T] { x: T; y: T }` → `type pair 'a = { x: 'a; y: 'a }`.
+      // Sysl type-param naming convention (single-letter uppercase) maps to WhyML
+      // type variables (lowercase, prefixed with `'`).
+      val typeParamsStr =
+        if s.typeParams.isEmpty then ""
+        else " " + s.typeParams.map(p => s"'${p.toLowerCase}").mkString(" ")
+      val fieldStr = s.fields.map { case (fname, ftyp, _) =>
+        s"$fname: ${typeOf(ftyp)}"
       }.mkString("; ")
-      line(s"type $typeName = { $fieldStr }")
-      indentLevel += 1
-      line(s"invariant { $invStr }")
-      line(s"by { $witness }")
-      indentLevel -= 1
+      if s.invariants.isEmpty then
+        line(s"type $typeName$typeParamsStr = { $fieldStr }")
+      else
+        // Generic structs with invariants: the `by { ... }` witness needs concrete
+        // values for every field, but defaultValue currently only handles int / bool.
+        // For a type-parameterized field, there's no canonical default — reject with
+        // a clear escape-hatch message.
+        if s.typeParams.nonEmpty then
+          unsupported(
+            "generic struct with invariant",
+            s"${s.name} — the `by { ... }` witness needs a concrete value for every " +
+              "type-parameterized field; extract the invariant to a non-generic wrapper " +
+              "(e.g. `struct PairInt { inner: Pair[int]; invariant ... }`) so the witness " +
+              "is well-defined",
+          )
+        val invStr = s.invariants
+          .map(e => stripOuterParens(formatExpr(e)))
+          .mkString(" && ")
+        val witness = s.fields.map { case (fname, ftyp, _) =>
+          s"$fname = ${defaultValue(ftyp, s.name, fname)}"
+        }.mkString("; ")
+        line(s"type $typeName = { $fieldStr }")
+        indentLevel += 1
+        line(s"invariant { $invStr }")
+        line(s"by { $witness }")
+        indentLevel -= 1
+    finally currentTypeParams = savedTypeParams
 
   /** Default value for a field's type, used to synthesize a `by { ... }` witness for
    *  invariant-bearing records. Only the trivially-derivable types are supported; anything
@@ -335,12 +392,45 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     // against its contracts; it just isn't usable inside contract expressions of OTHER
     // functions. Pure functions (Phase 1–3) keep `function` so they can be called from
     // contracts as well.
-    val funKw = if isImpure(bodyStmts) then "" else "function "
+    // `let function` is pure (logical-mode); it cannot carry writes/reads clauses
+    // and cannot read or write a `ref`. If the user annotated #writes / #reads, they
+    // are declaring effects — force the impure emit (`let f ...`) so the clauses
+    // can be attached. Otherwise body-shape inference picks the form.
+    val hasFrameAttr = fn.attributes.exists(a => a.name == "writes" || a.name == "reads")
+    val funKw = if isImpure(bodyStmts) || hasFrameAttr then "" else "function "
+    // sysl `def` functions often omit the return type and rely on body inference.
+    // WhyML's type inference can fill in the gap — emit `let function f x = body`
+    // without a `: ret` clause and let Why3 unify. Annotated return types still
+    // emit explicitly (they document intent + give Why3 a fixed point for
+    // contract-side `result` typing).
     val ret = fn.returnType match
-      case None    => unsupported("function without explicit return type", fn.name)
-      case Some(t) => typeOf(t)
-    line(s"let $recKw$ghostKw" + funKw + s"$name $params : $ret")
+      case None    => ""
+      case Some(t) => s" : ${typeOf(t)}"
+    line(s"let $recKw$ghostKw" + funKw + s"$name $params$ret")
     indentLevel += 1
+    // Frame conditions (δ.1). Sysl's `#writes(g1, g2)` / `#reads(g1, g2)` annotate
+    // which module-level mutable vars an impure function may modify / read. They
+    // map directly to Why3's `writes { v1; v2 }` / `reads { v1; v2 }` clauses on
+    // `let`. Only emitted for impure functions (funKw is empty); for pure
+    // `let function` Why3 already enforces no side effects, so writes/reads are
+    // redundant and would actually be rejected.
+    if funKw.isEmpty then
+      for attr <- fn.attributes do attr.name match
+        case "writes" =>
+          val names = attr.args.collect { case AttrPositional(AttrLitIdent(n)) => sanitizeName(n) }
+          if names.nonEmpty then line(s"writes { ${names.mkString("; ")} }")
+        case "reads" =>
+          val names = attr.args.collect { case AttrPositional(AttrLitIdent(n)) => sanitizeName(n) }
+          if names.nonEmpty then line(s"reads { ${names.mkString("; ")} }")
+        case _ =>
+    // Phase δ.3: implicit module-invariant clauses on every public, non-ghost
+    // function. Public/external entry points must preserve invariants; private
+    // helpers can rely on them too but are checked transitively. Ghost fns are
+    // proof-only and don't need to carry the invariant. The `module_inv ()`
+    // predicate is in scope (emitted before all functions).
+    if moduleInvariants.nonEmpty && !fn.isPrivate && !isGhost then
+      line("requires { module_inv () }")
+      line("ensures  { module_inv () }")
     for c <- contracts do emitContract(c)
     line(s"= $bodyStr")
     indentLevel -= 1
@@ -628,7 +718,14 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case ContractRequire => "requires"
       case ContractEnsure  => "ensures "
       case ContractVariant => "variant "
-    line(s"$keyword { ${stripOuterParens(formatExpr(c.expr))} }")
+    // δ.2: lex-tuple variant — `variant { e1, e2 }` parsed as TupleLitAST. Why3
+    // supports lexicographic measures via `variant { e1; e2; ... }` natively.
+    c.expr match
+      case TupleLitAST(es) if c.kind == ContractVariant =>
+        val parts = es.map(e => stripOuterParens(formatExpr(e))).mkString("; ")
+        line(s"$keyword { $parts }")
+      case _ =>
+        line(s"$keyword { ${stripOuterParens(formatExpr(c.expr))} }")
 
   /** Strip one matched outer paren pair if it wraps the entire string. The formatter
    *  conservatively wraps every binary expression in parens; outermost wrapping inside a
@@ -665,7 +762,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       case n if enumNames(n) || structFields.contains(n) || dataEnumNames.contains(n) =>
         // Lowercase the first letter to match the lowered type name (enum, struct, data enum).
         s"${n.head.toLower}${n.tail}"
-      case other  => unsupported("type", other)
+      case other  => unsupported("type",
+        s"'$other' is not a recognized sysl type — supported scalars are int/i8..i64/u8..u64/" +
+          "byte/char/rune/bool/string, plus any struct, enum, or data-enum declared in this " +
+          "module (and type parameters of the enclosing decl). Pointer/slice/array types are " +
+          "out of scope for the current verification surface.")
     case NamedTypeAST(name, args) if dataEnumNames.contains(name) =>
       // Generic data-enum application: `Option[int]` → `option int`. Type args are
       // emitted positionally and parenthesized when complex (multi-token).
@@ -675,7 +776,20 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         if s.contains(' ') then s"($s)" else s
       }
       s"$typeName ${argStrs.mkString(" ")}"
-    case other => unsupported("type form", other.toString)
+    case NamedTypeAST(name, args) if structFields.contains(name) =>
+      // Generic struct application: `Pair[int]` → `pair int`. Mirrors the data-enum
+      // path — positional type args, parenthesized when multi-token. The struct's
+      // type-parameter declaration is rendered by emitStruct via currentTypeParams.
+      val typeName = s"${name.head.toLower}${name.tail}"
+      val argStrs = args.map { a =>
+        val s = typeOf(a)
+        if s.contains(' ') then s"($s)" else s
+      }
+      s"$typeName ${argStrs.mkString(" ")}"
+    case other => unsupported("type form",
+      s"non-named type ${other.getClass.getSimpleName} — function types, slice/array types, " +
+        "and pointer types are out of scope for the current verification surface (they map to " +
+        "Phase ε in the finish roadmap; until then, model the data as a plain record/enum)")
 
   /** Build the three pieces needed to desugar a `?` operator: success pattern, success
    *  expression (the value bound), and the failure arm (`pattern -> reconstruct`).
@@ -756,7 +870,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         case "-"   => "- "
         case "not" => "not "
         case "!"   => "not "
-        case other => unsupported("unary operator", other)
+        case other => unsupported("unary operator",
+          s"sysl unary `$other` has no WhyML equivalent in this translator. Bitwise NOT (`~`) " +
+            "would need a bitvector model (`use bv.BV32` etc.) — out of scope for the current " +
+            "verification surface. Pointer ops (`*`, `&`) are similarly out of scope.")
       s"($opStr${formatExpr(x)})"
     case CallAST("old", List(arg)) =>
       s"(old ${formatExpr(arg)})"
@@ -805,60 +922,90 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       val argStr = if args.isEmpty then "" else args.map(formatExpr).mkString(" ", " ", "")
       s"(${sanitizeName(n)}$argStr)"
     case IfExprAST(c, tb, eb) =>
+      // WhyML: `if c then e1 else e2` requires both branches to unify in type.
+      // Sysl `if cond then body` (no else) at expression position is genuinely
+      // ambiguous — for unit-typed body it's fine ("do this if cond, else
+      // nothing"), for value-typed body the missing else has no good answer.
+      // We emit `else ()` to match the unit case; if the body is value-typed
+      // Why3 reports a clear type-mismatch error at verification time (much
+      // better than the translator silently giving up).
       val tExpr = stmtsAsExpr(tb)
       val eExpr = eb match
         case Some(stmts) => stmtsAsExpr(stmts)
-        case None        => unsupported("if without else", "WhyML requires both branches")
+        case None        => "()"
       s"(if ${formatExpr(c)} then $tExpr else $eExpr)"
     case MatchExprAST(scrutinee, arms, default) =>
       // WhyML: `match e with | pat -> body | ... end`. Each arm's body must be a single
-      // expression in Phase 3a — multi-statement arm bodies (let-bindings, sequencing) come
-      // with the broader multi-stmt support in a later piece. Guards and multi-pattern arms
-      // are also deferred. The default arm (sysl `else`) becomes a wildcard `_ -> ...`.
+      // expression — multi-statement arm bodies (let-bindings, sequencing) come with the
+      // broader multi-stmt support in a later piece. The default arm (sysl `else`)
+      // becomes a wildcard `_ -> ...`.
       //
-      // WhyML restricts match patterns to ADT constructors and `_`/variables — integer and
-      // bool literal patterns are NOT allowed. Sysl `n match { 0 -> a; 1 -> b; else -> c }`
-      // therefore lowers to an if-chain `(if n = 0 then a else if n = 1 then b else c)`
-      // when the scrutinee is not an enum value. Detection is syntactic: if every non-default
-      // arm's pattern is an ADT constructor, emit `match`; otherwise lower to if-chain.
-      if arms.exists(_.guard.isDefined) then unsupported("match arm with guard", "Phase 3a")
-      if arms.exists(_.patterns.size > 1) then unsupported("match arm with multiple patterns", "Phase 3a")
+      // WhyML restricts match patterns to ADT constructors and `_`/variables — integer
+      // and bool literal patterns are NOT allowed. Sysl `n match { 0 -> a; 1 -> b;
+      // else -> c }` therefore lowers to an if-chain `(if n = 0 then a else if n = 1
+      // then b else c)` when the scrutinee is not an enum value. Detection is
+      // syntactic: if every non-default arm's pattern is an ADT constructor, emit
+      // `match`; otherwise lower to if-chain.
+      //
+      // Phase β supports:
+      //   - Multi-pattern arms (`| A | B -> body`) in both ADT and literal paths.
+      //   - Range patterns (`1..10`) in the literal path (lower to a guard).
+      //   - Wildcard patterns before the default in the literal path (`true`).
+      //   - Struct destructure patterns (`Point { x, y }`) in the ADT path.
+      //
+      // WhyML logic-mode `match` does NOT have `when` guards — guards on individual
+      // arms still error out, with a clearer message pointing at the workaround
+      // (rewrite as if-chain manually, or push the guard into the arm body when
+      // there's a clean fall-through).
+      if arms.exists(_.guard.isDefined) then unsupported(
+        "match arm with `when` guard",
+        "Why3 logic-mode `match` has no native guards — rewrite as an if-chain " +
+          "(`if pat-matches /\\ guard then body else next`) or move the condition into " +
+          "the arm body when there's a single fall-through path",
+      )
       val allCtorArms = arms.forall { a =>
-        a.patterns.head match
+        a.patterns.forall {
           case ValuePatternAST(FieldAccessAST(VarRefAST(t), _)) if enumNames(t) => true
-          // Bare reference to a no-payload data-enum variant: `None`.
           case ValuePatternAST(VarRefAST(n)) if dataEnumVariantOf.contains(n) => true
-          // Destructured payload-bearing variant: `Some(v)` / `Some(_)`.
           case DestructurePatternAST(n, _) if dataEnumVariantOf.contains(n) => true
+          case DestructurePatternAST(n, _) if structFields.contains(n)      => true
           case WildcardPatternAST => true
           case _                  => false
+        }
       }
       if allCtorArms then
         val sb = new StringBuilder
         sb.append(s"(match ${formatExpr(scrutinee)} with")
         for arm <- arms do
-          sb.append(s" | ${formatPattern(arm.patterns.head)} -> ${stmtsAsExpr(arm.body)}")
+          val patStr = arm.patterns.map(formatPattern).mkString(" | ")
+          sb.append(s" | $patStr -> ${stmtsAsExpr(arm.body)}")
         default match
           case Some(stmts) => sb.append(s" | _ -> ${stmtsAsExpr(stmts)}")
           case None        =>
         sb.append(" end)")
         sb.toString
       else
-        // Lower literal-pattern match to an if-chain. The scrutinee is evaluated once and
-        // each pattern becomes an `=` test against it. Default → final `else`.
+        // Literal-pattern path — lower to a chain of `if` tests. The scrutinee is
+        // evaluated once and each pattern becomes a condition against it. Multi-pattern
+        // arms OR-join their conditions; range patterns become `lo <= x /\ x <= hi`;
+        // wildcards become unconditional `true` (matches anything).
         val scr = formatExpr(scrutinee)
         val defaultExpr = default match
           case Some(stmts) => stmtsAsExpr(stmts)
           case None        => unsupported("literal-pattern match without `else` default",
                                           "WhyML cannot pattern-match int/bool literals — needs an exhaustive else")
+        def patternCond(p: MatchPatternAST): String = p match
+          case ValuePatternAST(e)         => s"$scr = ${formatExpr(e)}"
+          case RangePatternAST(lo, hi)    =>
+            // Sysl ranges in match are inclusive: `1..10` matches 1..=10.
+            s"($scr >= ${formatExpr(lo)} /\\ $scr <= ${formatExpr(hi)})"
+          case WildcardPatternAST         => "true"
+          case other                      => unsupported("literal-pattern shape", other.getClass.getSimpleName)
         val sb = new StringBuilder
         sb.append("(")
         for arm <- arms do
-          val key = arm.patterns.head match
-            case ValuePatternAST(e)   => formatExpr(e)
-            case WildcardPatternAST   => unsupported("wildcard before else in literal match", "Phase 3a")
-            case other                => unsupported("literal-pattern shape", other.getClass.getSimpleName)
-          sb.append(s"if $scr = $key then ${stmtsAsExpr(arm.body)} else ")
+          val cond = arm.patterns.map(patternCond).mkString(" \\/ ")
+          sb.append(s"if $cond then ${stmtsAsExpr(arm.body)} else ")
         sb.append(s"$defaultExpr)")
         sb.toString
     case QuantifierAST(kind, name, lo, hi, inclusive, pred) =>
@@ -875,7 +1022,12 @@ class SyslWhyMLBackend(moduleName: String = "M"):
         case "all"  => s"(forall $v: int. $loS <= $v $cmp $hiS -> $predS)"
         case "some" => s"(exists $v: int. $loS <= $v $cmp $hiS /\\ $predS)"
         case other  => unsupported("quantifier kind", other)
-    case other => unsupported("expression", other.getClass.getSimpleName)
+    case other => unsupported("expression",
+      s"sysl ${other.getClass.getSimpleName} has no WhyML translation in this backend yet. " +
+        "Likely candidates not yet covered: SliceAST, IndexAST, ArrayLitAST (need slice/array " +
+        "model — Phase ε), AddrOfAST/DerefAST (pointer model — Phase ε), TryAST in non-top-" +
+        "level position (needs CPS lowering). If your code hits this in a verification " +
+        "context, the path forward is to model the data without slices/pointers.")
 
   private def stmtsAsExpr(stmts: List[StmtAST]): String = stmts match
     case List(ReturnStmtAST(Some(e))) => formatExpr(e)
@@ -887,8 +1039,11 @@ class SyslWhyMLBackend(moduleName: String = "M"):
 
   /** Format a sysl match pattern as a WhyML pattern. Covers the wildcard, integer
    *  literal patterns, simple enum constructor patterns, bare no-payload data-enum
-   *  variant references (`None`), and destructured data-enum variant patterns
-   *  (`Some(v)`, `Some(_)`). Range patterns remain deferred. */
+   *  variant references (`None`), destructured data-enum variant patterns
+   *  (`Some(v)`, `Some(_)`), and struct destructure patterns (`Point { x, y }`).
+   *
+   *  Range patterns are NOT formatted here — WhyML `match` has no range syntax;
+   *  ranges only appear in the literal-if-chain path (handled in MatchExprAST emit). */
   private def formatPattern(p: MatchPatternAST): String = p match
     case WildcardPatternAST => "_"
     case ValuePatternAST(IntLitAST(v))   => if v < 0 then s"(- ${-v})" else v.toString
@@ -897,13 +1052,27 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case ValuePatternAST(VarRefAST(n)) if dataEnumVariantOf.contains(n) => n
     case ValuePatternAST(VarRefAST(name)) => sanitizeName(name)
     case ValuePatternAST(other) => unsupported("match value pattern", other.getClass.getSimpleName)
-    case _: RangePatternAST     => unsupported("range match pattern", "Phase 3a")
+    case _: RangePatternAST     => unsupported("range match pattern in ADT context",
+      "WhyML `match` has no range syntax — ranges work only in the literal-if-chain " +
+        "path (when the scrutinee is a number, not an ADT)")
     case DestructurePatternAST(n, fields) if dataEnumVariantOf.contains(n) =>
       // `Some(v)` → `Some v`, `Some(_)` → `Some _`. Each sub-pattern formats recursively
       // (today only wildcards and bare names; nested destructuring works the same way).
       if fields.isEmpty then n
       else s"$n " + fields.map(formatPattern).mkString(" ")
-    case _: DestructurePatternAST => unsupported("destructuring match pattern", "Phase 3a")
+    case DestructurePatternAST(n, fields) if structFields.contains(n) =>
+      // Struct destructure → WhyML record pattern `{ field1 = pat; field2 = pat; ... }`.
+      // Sysl positional destructure (`Point(x, y)`) zips with the struct's field
+      // declaration order; named destructure (parser-side syntax) would arrive with the
+      // same shape since the pattern is positional in the AST.
+      val fieldNames = structFields(n)
+      if fields.length != fieldNames.length then
+        unsupported("struct destructure arity mismatch",
+          s"$n expects ${fieldNames.length} field${if fieldNames.length == 1 then "" else "s"}, got ${fields.length}")
+      val parts = fieldNames.zip(fields).map { (fname, fpat) => s"$fname = ${formatPattern(fpat)}" }
+      s"{ ${parts.mkString("; ")} }"
+    case _: DestructurePatternAST => unsupported("destructuring match pattern",
+      "name not recognized as a data-enum variant or struct in scope")
 
   private def mapBinaryOp(op: String): String = op match
     case "==" => "="
@@ -920,7 +1089,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case "%"   => "mod"
     case "mod" => "mod"
     case "+" | "-" | "*" | "<" | ">" | "<=" | ">=" => op
-    case other => unsupported("binary operator", other)
+    case other => unsupported("binary operator",
+      s"sysl binary `$other` has no WhyML equivalent. Bitwise ops (`& | ^ << >>`) need a " +
+        "bitvector model (`use bv.BV32`); arithmetic on bytes/floats may need width-specific " +
+        "imports. Out of scope for the current verification surface.")
 
   /** Strip module-qualified prefixes; lowercase the first letter (WhyML reserves
    *  uppercase-first identifiers for constructors / modules); map sysl identifiers that
