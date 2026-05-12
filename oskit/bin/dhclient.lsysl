@@ -36,7 +36,7 @@ skip.
 
     module oskit.bin.dhclient
 
-    import oskit.ulib.{puts, exit, exit_with, uptime,
+    import oskit.ulib.{puts, exit, exit_with, uptime, monotonic_ms,
         create, open, close, unlink, write_handle}
     import oskit.net.{socket, bind, sendto, recvfrom, recvfrom_timeout,
         close_socket, inet_set_ip_config, nic_get_mac,
@@ -455,13 +455,12 @@ packet) and keep waiting. Short-circuits on non-positive ms.
     dhclient_sleep_ms(fd: int, ms: int)
         if ms <= 0
             return
-        val start = uptime()
-        val deadline_ticks = start + (ms + 9) / 10
+        val deadline_ms = monotonic_ms() + i64(ms)
         while 1 == 1
-            val now = uptime()
-            if now >= deadline_ticks
+            val now = monotonic_ms()
+            if now >= deadline_ms
                 return
-            val remain_ms = (deadline_ticks - now) * 10
+            val remain_ms = int(deadline_ms - now)
             var rbuf: [16]byte
             var sip: u32 = u32(0)
             var sport: int = 0
@@ -611,17 +610,15 @@ Returns:
                         timeout_ms: int, out_msg: *DhcpMessage) -> int
         if timeout_ms <= 0
             return 0
-        val t0 = uptime()
-        val deadline = t0 + (timeout_ms + 9) / 10
+        val deadline_ms = monotonic_ms() + i64(timeout_ms)
         var rbuf: [512]byte
         var sip: u32 = u32(0)
         var sport: int = 0
         while 1 == 1
-            val now = uptime()
-            if now >= deadline
+            val now = monotonic_ms()
+            if now >= deadline_ms
                 return 0
-            val remain_ticks = deadline - now
-            val remain_ms = remain_ticks * 10
+            val remain_ms = int(deadline_ms - now)
             val n = recvfrom_timeout(fd, &rbuf[0], 512,
                 &sip, &sport, remain_ms)
             if n < 0
@@ -812,9 +809,9 @@ until T1, then try unicast RENEWING to the server. If that
 fails past T2, try broadcast REBINDING. If that fails past the
 lease expiry, return 0 so the caller can restart from INIT.
 
-Times in the ACK are seconds; we convert to 100 Hz scheduler
-ticks. If the server didn't emit T1/T2, we default to T1 = 0.5
-lease and T2 = 0.875 lease per RFC 2131 §4.4.5.
+Times in the ACK are seconds; we convert to wall-clock ms via
+`monotonic_ms()`. If the server didn't emit T1/T2, we default to
+T1 = 0.5 lease and T2 = 0.875 lease per RFC 2131 §4.4.5.
 
 This function never returns on a persistent success path —
 only on expiry (return 0) or a hard error (return -1). The
@@ -835,7 +832,7 @@ return.
         ack.valid = initial.valid
 
         while 1 == 1
-            val t_bound = uptime()
+            val t_bound = monotonic_ms()
             var t1_s = ack.t1
             var t2_s = ack.t2
             val lease_s = ack.lease
@@ -846,18 +843,18 @@ return.
                 t1_s = lease_s / 2
             if t2_s <= 0
                 t2_s = (lease_s * 7) / 8
-            val lease_deadline = t_bound + lease_s * 100
-            val t1_deadline = t_bound + t1_s * 100
-            val t2_deadline = t_bound + t2_s * 100
+            val lease_deadline_ms = t_bound + i64(lease_s) * i64(1000)
+            val t1_deadline_ms = t_bound + i64(t1_s) * i64(1000)
+            val t2_deadline_ms = t_bound + i64(t2_s) * i64(1000)
 
 Sleep until T1 via a dummy recvfrom_timeout. Any unexpected
 packets that arrive during this window are ignored — we check
 xid later, and the server has no reason to speak to us
 unsolicited while our lease is valid.
 
-            val t_now = uptime()
-            if t1_deadline > t_now
-                val sleep_ms = (t1_deadline - t_now) * 10
+            val t_now = monotonic_ms()
+            if t1_deadline_ms > t_now
+                val sleep_ms = int(t1_deadline_ms - t_now)
                 var rbuf: [8]byte
                 var sip: u32 = u32(0)
                 var sport: int = 0
@@ -869,10 +866,10 @@ half of (T2 - T1), per RFC 2131 §4.4.5 recommendation.
 
             val renew_xid = u32(uptime()) | u32(0x2000)
             val unicast_dst = ack.server_id
-            val now1 = uptime()
+            val now1 = monotonic_ms()
             var renew_budget_ms = 0
-            if t2_deadline > now1
-                renew_budget_ms = (t2_deadline - now1) * 10 / 2
+            if t2_deadline_ms > now1
+                renew_budget_ms = int((t2_deadline_ms - now1) / i64(2))
             if renew_budget_ms < DHCP_RTO_INITIAL_MS
                 renew_budget_ms = DHCP_RTO_INITIAL_MS
 
@@ -912,10 +909,10 @@ REBINDING: broadcast REQUEST. Budget = half of (expiry - T2).
 
             val rebind_xid = u32(uptime()) | u32(0x3000)
             val bcast = ipv4(255, 255, 255, 255)
-            val now2 = uptime()
+            val now2 = monotonic_ms()
             var rebind_budget_ms = 0
-            if lease_deadline > now2
-                rebind_budget_ms = (lease_deadline - now2) * 10 / 2
+            if lease_deadline_ms > now2
+                rebind_budget_ms = int((lease_deadline_ms - now2) / i64(2))
             if rebind_budget_ms < DHCP_RTO_INITIAL_MS
                 rebind_budget_ms = DHCP_RTO_INITIAL_MS
 
@@ -961,8 +958,7 @@ burn through the budget with one backoff chain.
                         budget_ms: int, out_msg: *DhcpMessage) -> int
         var pkt: [512]byte
         var timeout_ms = DHCP_RTO_INITIAL_MS
-        val t0 = uptime()
-        val deadline = t0 + (budget_ms + 9) / 10
+        val deadline_ms = monotonic_ms() + i64(budget_ms)
         while 1 == 1
             val plen = build_dhcp_packet(&pkt[0], DHCP_MSG_REQUEST,
                 xid, our_mac, our_ip, server_id)
@@ -977,12 +973,11 @@ zeroes yiaddr/ciaddr, so poke our_ip into offset 12.
             pkt[15] = byte(ipv4_octet(our_ip, 3))
             if sendto(fd, &pkt[0], plen, dst_ip, DHCP_PORT_SERVER) < 0
                 return -1
-            val now = uptime()
-            if now >= deadline
+            val now = monotonic_ms()
+            if now >= deadline_ms
                 return -1
-            val remain_ticks = deadline - now
+            val remain_ms = int(deadline_ms - now)
             var this_wait_ms = timeout_ms
-            val remain_ms = remain_ticks * 10
             if this_wait_ms > remain_ms
                 this_wait_ms = remain_ms
             val r = dhclient_wait_match(fd, xid, DHCP_MSG_ACK,
