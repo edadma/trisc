@@ -182,8 +182,8 @@ reader can scan by errno number.
         eventfd_semaphore: int
         // POSIX_FD_TIMERFD state. `interval_ticks` is the periodic
         // re-arm in scheduler ticks (100 Hz); 0 means one-shot.
-        // `next_tick` is the absolute uptime() tick at which the
-        // next expiration is due; 0 means disarmed. `expirations`
+        // `next_tick` is the absolute monotonic_ms/10 tick at which
+        // the next expiration is due; 0 means disarmed. `expirations`
         // accumulates fires that haven't been consumed via read()
         // yet; the next read returns the count and resets it.
         timerfd_interval_ticks: int
@@ -6467,10 +6467,11 @@ when expirations > 0.
 
 Slix runs the scheduler at 100 Hz, so sub-10 ms precision rounds
 down to whole ticks. `CLOCK_REALTIME` and `CLOCK_MONOTONIC` are
-both backed by `uptime()` here — slix has no wall-clock-vs-
-monotonic distinction, so the two clockids resolve to the same
-tick stream.  Programs that depend on a real wall clock (e.g.
-DST handling) won't get one until a real RTC bridge lands.
+both backed by `monotonic_ms() / 10` here — slix has no
+wall-clock-vs-monotonic distinction, so the two clockids resolve
+to the same tick stream.  Programs that depend on a real wall
+clock (e.g.  DST handling) won't get one until a real RTC bridge
+lands.
 
 Time conversion: 1 tick = 10 ms = 10_000_000 ns. We round down
 on the nsec → tick conversion, which means a `tv_nsec=5_000_000`
@@ -6535,11 +6536,12 @@ tv_nsec(8)} + it_value{tv_sec(8), tv_nsec(8)}.
             bi += 1
 
 
-Catch up `expirations` to current uptime: every full `interval`
-between `next_tick` and now becomes one expiration. Returns
-without doing anything if the timer is disarmed or hasn't fired
-yet. Called lazily from sys_read / epoll_query_ready so the timer
-state is always coherent at the moment the user observes it.
+Catch up `expirations` to the current monotonic_ms/10 tick: every
+full `interval` between `next_tick` and now becomes one
+expiration. Returns without doing anything if the timer is
+disarmed or hasn't fired yet. Called lazily from sys_read /
+epoll_query_ready so the timer state is always coherent at the
+moment the user observes it.
 
     timerfd_advance(idx: int)
         if posix_fd_table[idx].timerfd_next_tick == 0
@@ -6613,8 +6615,8 @@ state is always coherent at the moment the user observes it.
         // TFD_TIMER_ABSTIME: it_value is an absolute tick (treating
         // tv_sec*100+tv_nsec/1e7 as ticks-since-boot).  Otherwise
         // it_value is relative to now.  Slix collapses both clocks
-        // to uptime() so the meaning of "absolute" matches whatever
-        // the caller expects from CLOCK_MONOTONIC.
+        // to monotonic_ms/10 so the meaning of "absolute" matches
+        // whatever the caller expects from CLOCK_MONOTONIC.
         if (flags & POSIX_TFD_TIMER_ABSTIME) != 0
             posix_fd_table[tidx].timerfd_next_tick = it_value_ticks
         else
@@ -6651,16 +6653,16 @@ state is always coherent at the moment the user observes it.
 
 `clock_gettime` / `gettimeofday` / `clock_getres` / `nanosleep` /
 `clock_nanosleep`. All clocks (REALTIME, MONOTONIC, BOOTTIME,
-PROCESS_CPUTIME, THREAD_CPUTIME, *_RAW, *_COARSE) collapse to
-the kernel's `uptime()` tick counter at 100 Hz — slix has no
-wallclock or per-thread CPU accounting yet, but apps that
-just need a monotonic timestamp (the overwhelming majority)
-keep working. timerfd already takes the same shortcut.
+PROCESS_CPUTIME, THREAD_CPUTIME, *_RAW, *_COARSE) collapse to the
+kernel's `monotonic_ms() / 10` tick counter at 100 Hz — slix has
+no wallclock or per-thread CPU accounting yet, but apps that just
+need a monotonic timestamp (the overwhelming majority) keep
+working. timerfd already takes the same shortcut.
 
 Whitelist the clock IDs that are meaningful in slix today.
 We have no wallclock, no NTP slewing, no suspend, no leap-second
 handling, no per-thread/per-process CPU accounting — every
-"different" Linux clock here just maps onto uptime. The clocks
+"different" Linux clock here just maps onto monotonic_ms. The clocks
 that *would* require real accounting (CPUTIME_ID variants) are
 rejected so programs that probe them learn the truth instead of
 silently getting wrong numbers. The realtime-alarm variants are
@@ -6824,7 +6826,7 @@ duration, rounded up to the next 10ms tick. We don't have
 signals so the call always completes — `rem` (if non-null) is
 zeroed to indicate "no time left". TIMER_ABSTIME (clock_nanosleep
 flag = 1) means the request is an absolute deadline — convert
-to relative by subtracting `uptime()`.
+to relative by subtracting current `monotonic_ms() / 10`.
 
     shim_timespec_to_ticks(p: *byte) -> int
         // Read tv_sec (i64) + tv_nsec (i64), convert to a
@@ -6865,8 +6867,8 @@ to relative by subtracting `uptime()`.
 
 ### getrandom
 
-Non-cryptographic xorshift64* PRNG seeded from `uptime()` plus
-a per-call counter. Real `getrandom(2)` taps the kernel CSPRNG;
+Non-cryptographic xorshift64* PRNG seeded from `monotonic_ms()`
+plus a per-call counter. Real `getrandom(2)` taps the kernel CSPRNG;
 slix has no entropy source today, so this is best-effort
 "different bytes every call" useful for non-crypto consumers
 (libuv buffer cookies, malloc-debug salts, etc.). Crypto code
@@ -6913,7 +6915,7 @@ without a real CSPRNG. Returns the byte count on success,
         val rp: *byte = *byte(req)
         var ticks = shim_timespec_to_ticks(rp)
         // TIMER_ABSTIME = 1: req is an absolute time. Convert to
-        // relative by subtracting current uptime.
+        // relative by subtracting current monotonic_ms/10.
         if (flags & 1) != 0
             val now_t = int(monotonic_ms() / i64(10))
             ticks = ticks - now_t
@@ -7581,9 +7583,9 @@ and `notify_wait()` can block again on the next iteration.
             else
                 // sleep_or_notify(ticks_left) wakes on either deadline
                 // or notify. Spurious wakes lose at most one extra
-                // pass; we record uptime() before/after to charge the
-                // actual elapsed ticks to ticks_left so a chain of
-                // spurious wakes still respects the deadline.
+                // pass; we record monotonic_ms/10 before/after to
+                // charge the actual elapsed ticks to ticks_left so a
+                // chain of spurious wakes still respects the deadline.
                 val before = monotonic_ms() / i64(10)
                 sleep_or_notify(ticks_left)
                 val after = monotonic_ms() / i64(10)
