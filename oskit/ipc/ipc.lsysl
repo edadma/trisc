@@ -245,7 +245,7 @@ Returns 0 on success, -1 on error (invalid port, port closed).
         if ipc_server_waiting(owner, port) == 1
             ipc_deliver_and_wake(owner, me, msg_ptr, msg_len)
             threads[me].state = STATE_SEND_BLOCKED
-            threads[me].wake_tick = 0
+            threads[me].wake_ms = 0
             return i64(0)
 
         // Server not waiting — enqueue sender in port's FIFO
@@ -253,7 +253,7 @@ Returns 0 on success, -1 on error (invalid port, port closed).
 
         // Block the sender (waits for reply, no timeout)
         threads[me].state = STATE_SEND_BLOCKED
-        threads[me].wake_tick = 0
+        threads[me].wake_ms = 0
         i64(0)
 
 Check if a server is waiting for a message on a given port.
@@ -393,7 +393,7 @@ The server continues running (no block).
         ipc_write_saved_r1(caller, 0)
         threads[caller].state = STATE_READY
         threads[caller].quantum = DEFAULT_QUANTUM
-        threads[caller].wake_tick = 0
+        threads[caller].wake_ms = 0
         enqueue(threads[caller].priority, caller)
 
         // Server re-enqueues itself
@@ -534,19 +534,19 @@ a5=timeout_ticks. Returns 0 on success, -1 on error, -2 on timeout.
         val owner = port_owner[port]
         if ipc_server_waiting(owner, port) == 1
             ipc_deliver_and_wake(owner, me, msg_ptr, msg_len)
-            // Block sender with timeout (waiting for reply). `wake_tick`
+            // Block sender with timeout (waiting for reply). `wake_ms`
             // is in `monotonic_ms_count` units (wall-clock ms); the
             // shim passes `timeout` as 10-ms ticks, so multiply by 10
             // to land on the same scale.
             threads[me].state = STATE_SEND_BLOCKED
-            threads[me].wake_tick = int(monotonic_ms_count) + timeout * 10
+            threads[me].wake_ms = int(monotonic_ms_count) + timeout * 10
             sleepq_insert(me)
             return i64(0)
 
         // Server not waiting — enqueue with timeout
         ipc_queue_push(port, me)
         threads[me].state = STATE_SEND_BLOCKED
-        threads[me].wake_tick = int(monotonic_ms_count) + timeout * 10
+        threads[me].wake_ms = int(monotonic_ms_count) + timeout * 10
         sleepq_insert(me)
         i64(0)
 

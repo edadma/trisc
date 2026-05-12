@@ -92,7 +92,7 @@ Statistics fields track per-thread performance:
     struct Thread
         ssp: i64
         state: int
-        wake_tick: int
+        wake_ms: int
         name: string
         name_buf: [16]byte
         priority: int
@@ -208,7 +208,7 @@ tick_hook is called on every timer tick. Set to 0 to disable.
     var tick_hook = 0
 
 Sleep queue: a fixed-size min-heap of thread indices ordered
-by wake_tick. Replaces the O(n) scan in schedule() with O(log n)
+by wake_ms. Replaces the O(n) scan in schedule() with O(log n)
 insert and O(1) peek. Uses lazy deletion — when a thread is
 popped but is no longer blocked, it's discarded.
 
@@ -226,7 +226,7 @@ No allocator dependency: uses a static array sized to MAX_THREADS.
         var pos = i
         while pos > 0
             val parent = (pos - 1) / 2
-            if threads[_sq_data[pos]].wake_tick < threads[_sq_data[parent]].wake_tick
+            if threads[_sq_data[pos]].wake_ms < threads[_sq_data[parent]].wake_ms
                 _sq_swap(pos, parent)
                 pos = parent
             else
@@ -239,10 +239,10 @@ No allocator dependency: uses a static array sized to MAX_THREADS.
             val right = 2 * pos + 2
             var smallest = pos
             if left < _sq_len
-                if threads[_sq_data[left]].wake_tick < threads[_sq_data[smallest]].wake_tick
+                if threads[_sq_data[left]].wake_ms < threads[_sq_data[smallest]].wake_ms
                     smallest = left
             if right < _sq_len
-                if threads[_sq_data[right]].wake_tick < threads[_sq_data[smallest]].wake_tick
+                if threads[_sq_data[right]].wake_ms < threads[_sq_data[smallest]].wake_ms
                     smallest = right
             if smallest == pos
                 return
@@ -250,7 +250,7 @@ No allocator dependency: uses a static array sized to MAX_THREADS.
             pos = smallest
 
 Insert a thread into the sleep queue. Called when a thread
-blocks with a wake_tick deadline (sleep, IPC timeout).
+blocks with a wake_ms deadline (sleep, IPC timeout).
 
     sleepq_insert(tid: int)
         _sq_data[_sq_len] = tid
@@ -270,7 +270,7 @@ blocks with a wake_tick deadline (sleep, IPC timeout).
     val STATE_NOTIFY_WAIT = 10
     val STATE_MUTEX_WAIT = 11
     // STATE_SLEEP_OR_NOTIFY: thread sits in the sleep heap with
-    // wake_tick set, but ALSO wakes on notify_send. Used by
+    // wake_ms set, but ALSO wakes on notify_send. Used by
     // sys_epoll_pwait's finite-timeout path so the shim doesn't
     // have to spin-poll between sleeps when waiting for an inet/
     // VFS edge that may arrive before the deadline.
@@ -1744,7 +1744,7 @@ would monotonically bump thread_count and walk off the end of threads[].
         val sp = build_stack_frame(entry_point, usp, ssp)
         threads[idx].ssp = sp
         threads[idx].state = STATE_READY
-        threads[idx].wake_tick = 0
+        threads[idx].wake_ms = 0
         // Copy name into kernel-owned buffer (caller's pointer may be
         // in an isolated server's address space and become invalid)
         val np = *byte(name)
@@ -1787,18 +1787,18 @@ would monotonically bump thread_count and walk off the end of threads[].
 
     sleep_current(nticks: int)
         threads[current_thread].state = STATE_BLOCKED
-        // `wake_tick` is in `monotonic_ms_count` units (wall-clock
+        // `wake_ms` is in `monotonic_ms_count` units (wall-clock
         // ms since boot). `nticks` is the legacy 10-ms-tick unit
         // (shim's `shim_timespec_to_ticks` converts ns → 10ms ticks),
         // so multiply by 10 to land on the same scale.
-        threads[current_thread].wake_tick = int(monotonic_ms_count) + nticks * 10
+        threads[current_thread].wake_ms = int(monotonic_ms_count) + nticks * 10
         threads[current_thread].consec_quanta = 0
         sleepq_insert(current_thread)
 
     sleep_until_current(target_tick: int)
         threads[current_thread].state = STATE_BLOCKED
         // `target_tick` is also in 10-ms-tick units; convert to ms.
-        threads[current_thread].wake_tick = target_tick * 10
+        threads[current_thread].wake_ms = target_tick * 10
         threads[current_thread].consec_quanta = 0
         sleepq_insert(current_thread)
 
@@ -1964,7 +1964,7 @@ Unlike create_process, the thread is never enqueued — no race.
         var exit_addr: i64 = i64(&thread_exit)
         vm_copy_to(ptbr_val, u64(usp - i64(8)), *byte(&exit_addr), 8)
         threads[idx].state = STATE_SUSPENDED
-        threads[idx].wake_tick = 0
+        threads[idx].wake_ms = 0
         val np2 = *byte(name)
         var nlen2 = len(name)
         if nlen2 > 15
@@ -2151,7 +2151,7 @@ fault`'s COW path relies on. No PTBR switch is needed.
         threads[idx].ssp = arch_setup_fork_frame(parent_ssp, kstack_top_val)
         threads[idx].kstack_top = kstack_top_val
         threads[idx].state = STATE_READY
-        threads[idx].wake_tick = 0
+        threads[idx].wake_ms = 0
         // Copy the parent's name (already kernel-owned) into the
         // child's name buffer so debug output identifies the new
         // thread; same name is fine for now (PID disambiguates).
@@ -2431,7 +2431,7 @@ slots safely (no per-slot translation needed).
         if threads[tid].state == STATE_SEND_BLOCKED
             threads[tid].state = STATE_READY
             threads[tid].quantum = DEFAULT_QUANTUM
-            threads[tid].wake_tick = 0
+            threads[tid].wake_ms = 0
             enqueue(threads[tid].priority, tid)
         i64(0)
 
@@ -2578,13 +2578,13 @@ Steps:
 
         // Wake threads whose sleep/timeout has expired (heap-based, O(log n))
         // Uses lazy deletion: threads woken early (e.g., by IPC) are skipped on pop
-        // wake_tick is in `monotonic_ms_count` units (wall-clock ms),
+        // wake_ms is in `monotonic_ms_count` units (wall-clock ms),
         // not the schedule-call counter `ticks` — see sleep_current.
         // Cache the wall-clock now once per scheduler entry.
         val wall_now = int(monotonic_ms_count)
         while _sq_len > 0
             val tid = _sq_peek()
-            if threads[tid].wake_tick > wall_now
+            if threads[tid].wake_ms > wall_now
                 break  // earliest deadline not yet reached
             val _ = _sq_pop()
             // Lazy deletion: skip if thread was already woken by another path
@@ -2601,12 +2601,12 @@ Steps:
                 threads[tid].quantum = DEFAULT_QUANTUM
                 enqueue(threads[tid].priority, tid)
             else if threads[tid].state == STATE_SEND_BLOCKED
-                if threads[tid].wake_tick > 0
+                if threads[tid].wake_ms > 0
                     // IPC send timeout expired — wake with -2 in saved r1
                     syscall_return_for(tid, -2)
                     threads[tid].state = STATE_READY
                     threads[tid].quantum = DEFAULT_QUANTUM
-                    threads[tid].wake_tick = 0
+                    threads[tid].wake_ms = 0
                     enqueue(threads[tid].priority, tid)
 
         // Find highest-priority non-empty queue (lowest number)
@@ -2753,7 +2753,7 @@ it is woken and re-enqueued.
         else if st == STATE_SLEEP_OR_NOTIFY
             // Thread is in the sleep heap; lazy deletion in the
             // tick-wake path will skip it once it's STATE_READY.
-            // wake_tick stays set — the heap pop sees state != BLOCKED
+            // wake_ms stays set — the heap pop sees state != BLOCKED
             // and ignores the stale entry.
             threads[target_id].state = STATE_READY
             threads[target_id].quantum = DEFAULT_QUANTUM
@@ -2781,8 +2781,8 @@ shim doesn't have to check both before calling). Caller checks
         if nticks <= 0
             return
         threads[current_thread].state = STATE_SLEEP_OR_NOTIFY
-        // `wake_tick` in monotonic_ms units; nticks is 10-ms ticks.
-        threads[current_thread].wake_tick = int(monotonic_ms_count) + nticks * 10
+        // `wake_ms` in monotonic_ms units; nticks is 10-ms ticks.
+        threads[current_thread].wake_ms = int(monotonic_ms_count) + nticks * 10
         threads[current_thread].consec_quanta = 0
         sleepq_insert(current_thread)
 
