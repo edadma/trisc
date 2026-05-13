@@ -155,6 +155,8 @@ user-mode). Numbers are stable. Definitions live in
 | 92  | SYS_ELF_SELFTEST      | sys_elf_selftest_handler (debug)     |
 | 93  | SYS_PROC_REPLACE_IMAGE_PREP | sys_proc_replace_image_prep_handler |
 | 94  | SYS_EXECVE_FINALIZE   | sys_execve_finalize_handler          |
+| 96  | SYS_VMA_DEFAULT_INITIAL_SP | sys_vma_default_initial_sp_handler |
+| 97  | SYS_VMA_DEFAULT_STACK_LOW  | sys_vma_default_stack_low_handler  |
 
 PHASE 1 NOTE. The VM/process syscalls (44–60, 63, 66, 79) all
 assume the current "fixed-region eager mapping" model. They

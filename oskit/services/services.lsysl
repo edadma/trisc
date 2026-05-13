@@ -515,3 +515,22 @@ PM itself calls these directly.
 
     svc_execve_finalize(tid: int, entry: i64, usp: i64) -> int
         int(syscall6(SYS_EXECVE_FINALIZE, i64(tid), entry, usp, 0, 0, 0))
+
+`SYS_VMA_DEFAULT_INITIAL_SP` (96) / `SYS_VMA_DEFAULT_STACK_LOW`
+(97): query the canonical initial-SP / stack-base values that
+`vma_seed_default_layout` will install in a fresh process. PM
+uses these in `pm_handle_spawn_inner` / `pm_handle_execve` to
+compute the child's initial SP *before* the child's VMA tree
+exists (the seed runs inside `create_process_suspended`). The
+two helpers replace direct reads of arch-named `PROG_USP` /
+`PROG_SSP` constants — same values today, different source of
+truth (the VMA module owns the policy).
+
+    const SYS_VMA_DEFAULT_INITIAL_SP = 96
+    const SYS_VMA_DEFAULT_STACK_LOW  = 97
+
+    svc_vma_default_initial_sp() -> u64
+        u64(syscall(SYS_VMA_DEFAULT_INITIAL_SP, 0))
+
+    svc_vma_default_stack_low() -> u64
+        u64(syscall(SYS_VMA_DEFAULT_STACK_LOW, 0))

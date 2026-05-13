@@ -719,6 +719,77 @@ loop is correct regardless of how the leaf got into the PT.
             n = vma_next(n)
 
 
+Default user-space layout — single source of truth
+--------------------------------------------------
+
+The four constants below describe the layout that
+`vma_seed_default_layout` (kernel.lsysl) installs in every new
+process. They live here rather than in `oskit/arch/*/prog_config.sysl`
+so that the VMA module owns the policy and downstream callers
+(PM, RS, hello.lsysl) read it through `vma_default_initial_sp` /
+`vma_default_stack_low` instead of arch-named PROG_USP / PROG_SSP
+constants. The values are unchanged from the bring-up shape; only
+the source-of-truth moves.
+
+Phase B of the Phase 1 invariant-#1 rollout deletes the
+`prog_config.sysl` duplicates and points consumers (POSIX
+`brk` ceiling, etc.) at these instead.
+
+    const VMA_DEFAULT_CODE_BOT  = 0x60000000
+    const VMA_DEFAULT_CODE_TOP  = 0x60080000
+    const VMA_DEFAULT_STACK_BOT = 0x60080000
+    const VMA_DEFAULT_STACK_TOP = 0x60090000
+
+`vma_default_initial_sp` / `vma_default_stack_low` are the
+arg-less queries PM and RS use to compute a child's initial SP
+*before* the child's VMA tree exists — the seed runs inside
+`create_process_suspended`, so there is no per-process tree to
+walk at the moment the caller picks an SP. The values match what
+`vma_seed_default_layout` would have written for that process, so
+PM/RS computing the SP from these constants and the kernel
+seeding the stack VMA agree by construction.
+
+    vma_default_initial_sp() -> u64
+        u64(VMA_DEFAULT_STACK_TOP)
+
+    vma_default_stack_low() -> u64
+        u64(VMA_DEFAULT_STACK_BOT)
+
+`vma_initial_sp` / `vma_stack_low` walk an existing process's VMA
+tree to find the canonical stack region — the highest-vend
+anonymous VMA whose protection is exactly `READ|WRITE` (the seed
+function writes the stack VMA RW with no EXEC bit; the code VMA
+is RWX). Returns 0 if no stack VMA is found. Used by future
+callers that need to read a child's stack range *after* the
+child exists (e.g. signal delivery picking an SP).
+
+    vma_initial_sp(t: *VMATree) -> u64
+        val rw = VMA_PROT_READ | VMA_PROT_WRITE
+        var best: u64 = u64(0)
+        var n = vma_first(t)
+        while n != VMA_NIL
+            if vma_pool[n].prot == rw
+                if (vma_pool[n].flags & VMA_MAP_ANON) != 0
+                    if vma_pool[n].vend > best
+                        best = vma_pool[n].vend
+            n = vma_next(n)
+        best
+
+    vma_stack_low(t: *VMATree) -> u64
+        val rw = VMA_PROT_READ | VMA_PROT_WRITE
+        var best_end: u64 = u64(0)
+        var best_start: u64 = u64(0)
+        var n = vma_first(t)
+        while n != VMA_NIL
+            if vma_pool[n].prot == rw
+                if (vma_pool[n].flags & VMA_MAP_ANON) != 0
+                    if vma_pool[n].vend > best_end
+                        best_end = vma_pool[n].vend
+                        best_start = vma_pool[n].vstart
+            n = vma_next(n)
+        best_start
+
+
 Selftest -- exercises the public surface and validates invariants
 without going through any kernel state. Used by the chunk-1
 test program via a debug syscall.
@@ -847,5 +918,37 @@ Returns 0 on success; 1..N on failure at step N.
             prev = vma_pool[n2].vstart
             n2 = vma_next(n2)
         vma_clear_all(&t)
+
+        // Step 10 — default-layout helpers return the same values the
+        // seed function would have written into the stack VMA.
+        if vma_default_initial_sp() != u64(VMA_DEFAULT_STACK_TOP)
+            return 10
+        if vma_default_stack_low() != u64(VMA_DEFAULT_STACK_BOT)
+            return 10
+
+        // Step 11 — vma_initial_sp / vma_stack_low pick the highest-vend
+        // RW anon VMA out of a mixed-prot tree. Set up: one RWX code
+        // VMA (mimicking the seed's code carve-out) plus two RW anon
+        // VMAs at different addresses; the higher-vend one wins.
+        val rwx_step11 = VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC
+        val rw_step11  = VMA_PROT_READ | VMA_PROT_WRITE
+        val anon_priv  = VMA_MAP_ANON | VMA_MAP_PRIVATE
+        if vma_create(&t, u64(0x60000000), u64(0x60080000), rwx_step11, anon_priv, -1, u64(0)) == VMA_NIL
+            return 11
+        if vma_create(&t, u64(0x60080000), u64(0x60090000), rw_step11, anon_priv, -1, u64(0)) == VMA_NIL
+            return 11
+        if vma_create(&t, u64(0x70000000), u64(0x70001000), rw_step11, anon_priv, -1, u64(0)) == VMA_NIL
+            return 11
+        if vma_initial_sp(&t) != u64(0x70001000)
+            return 11
+        if vma_stack_low(&t) != u64(0x70000000)
+            return 11
+        vma_clear_all(&t)
+
+        // Step 12 — empty tree returns 0 from both helpers (no stack VMA).
+        if vma_initial_sp(&t) != u64(0)
+            return 12
+        if vma_stack_low(&t) != u64(0)
+            return 12
 
         0

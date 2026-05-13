@@ -25,8 +25,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         vm_install_user_page,
         cntfrq_el0, cntp_tval_set, cntp_ctl_set,
         build_stack_frame, arch_resume_process,
-        STACK_FRAME_SIZE, arch_cli, arch_sti,
-        PROG_USP, PROG_SSP}
+        STACK_FRAME_SIZE, arch_cli, arch_sti}
     import oskit.kernel.{kernel_init, create_thread, create_thread_pri,
         first_thread_ssp,
         kernel_stack_usp, kernel_stack_ssp, schedule,
@@ -37,6 +36,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         virtio_notify_tid,
         kernel_set_system_info,
         kernel_handle_user_fault,
+        vma_default_initial_sp, vma_default_stack_low,
         current_thread, ticks, monotonic_ms_count}
     import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
     import oskit.ipc.{ipc_init, port_create, port_register, port_lookup,
@@ -745,14 +745,14 @@ line per 64 bytes of code.
         // Build a minimal argc=0 System V init stack (40 bytes →
         // 48 for 16-byte alignment, all zeros) so the user program's
         // `_start` (which reads argc from [sp]) sees a valid empty
-        // frame instead of whatever lives at PROG_USP.
+        // frame instead of whatever lives at the canonical stack top.
         var user_stack_buf: [48]byte
         memset(&user_stack_buf[0], 0, 48)
-        val user_sp = i64(PROG_USP) - 48
+        val user_sp = i64(vma_default_initial_sp()) - 48
         vm_copy_to(new_pt, u64(user_sp), user_stack_buf, 48)
 
         val pid = create_process_suspended(
-            i64(0x60000000), user_sp, i64(PROG_SSP),
+            i64(0x60000000), user_sp, i64(vma_default_stack_low()),
             "user1", new_pt)
         if pid <= 0
             uart_puts("[user] create_process_suspended failed pid=")
@@ -820,11 +820,11 @@ ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
         // kernel_main_user_process above.
         var uipc_stack_buf: [48]byte
         memset(&uipc_stack_buf[0], 0, 48)
-        val uipc_sp = i64(PROG_USP) - 48
+        val uipc_sp = i64(vma_default_initial_sp()) - 48
         vm_copy_to(new_pt, u64(uipc_sp), uipc_stack_buf, 48)
 
         val pid = create_process_suspended(
-            i64(0x60000000), uipc_sp, i64(PROG_SSP),
+            i64(0x60000000), uipc_sp, i64(vma_default_stack_low()),
             "user1", new_pt)
         if pid <= 0
             uart_puts("[uipc] create_process_suspended failed\n")
@@ -905,7 +905,7 @@ which is the baseline we want for this commit).
         // startup — no per-process info page to build or copy.
 
         val pid = create_process_suspended(
-            i64(0x60000000), i64(PROG_USP), i64(PROG_SSP),
+            i64(0x60000000), i64(vma_default_initial_sp()), i64(vma_default_stack_low()),
             "rs", new_pt)
         if pid <= 0
             uart_puts("[rs] create_process_suspended failed\n")

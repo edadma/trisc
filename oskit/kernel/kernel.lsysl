@@ -963,10 +963,10 @@ logic. Chunk 8's `exec()` will replace this with PHT-driven layout.
         val rw  = VMA_PROT_READ | VMA_PROT_WRITE
         val anon_priv = VMA_MAP_ANON | VMA_MAP_PRIVATE
         vma_create(&processes[pid].vma_tree,
-                   u64(0x60000000), u64(0x60080000),
+                   u64(VMA_DEFAULT_CODE_BOT), u64(VMA_DEFAULT_CODE_TOP),
                    rwx, anon_priv, -1, u64(0))
         vma_create(&processes[pid].vma_tree,
-                   u64(0x60080000), u64(0x60090000),
+                   u64(VMA_DEFAULT_STACK_BOT), u64(VMA_DEFAULT_STACK_TOP),
                    rw, anon_priv, -1, u64(0))
 
 SYS_VMA_CREATE (87): debug-only syscall — register an anonymous
@@ -1013,6 +1013,22 @@ child before resume.
                              u64(a1), u64(a2),
                              int(a3), int(a4), -1, u64(0))
         i64(idx)
+
+SYS_VMA_DEFAULT_INITIAL_SP (96) / SYS_VMA_DEFAULT_STACK_LOW (97):
+arg-less queries used by PM (and future RS, post-Phase-D) to
+compute a child process's initial user SP and stack-base address
+*before* the child exists. Returns the canonical value the
+`vma_seed_default_layout` writes into the stack VMA, so the
+spawning caller and the kernel-side seed agree on the layout
+without referencing arch-named PROG_USP/PROG_SSP constants.
+
+    sys_vma_default_initial_sp_handler(arg: int)
+        syscall_return(i64(vma_default_initial_sp()))
+        kernel_continue_current()
+
+    sys_vma_default_stack_low_handler(arg: int)
+        syscall_return(i64(vma_default_stack_low()))
+        kernel_continue_current()
 
 
 SYS_COW_REFCNT_SELFTEST (89): kernel-side refcount-table selftest.
@@ -1596,6 +1612,8 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall(92, sys_elf_selftest_handler)
         register_syscall(93, sys_proc_replace_image_prep_handler)
         register_syscall6(94, sys_execve_finalize_handler)
+        register_syscall(96, sys_vma_default_initial_sp_handler)
+        register_syscall(97, sys_vma_default_stack_low_handler)
 
 Keyboard buffer. The keyboard ISR (in kbd module) writes events
 here via kernel-exported functions. The TTY server reads events

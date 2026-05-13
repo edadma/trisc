@@ -20,11 +20,11 @@ IPC commands:
 
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING, PAGE_SIZE}
-    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_get_thread_ptbr, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range, svc_fd_transplant, svc_proc_replace_image_prep, svc_execve_finalize, svc_vma_create, VMA_PROT_READ, VMA_PROT_WRITE, VMA_MAP_ANON, VMA_MAP_PRIVATE}
+    import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_get_thread_ptbr, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range, svc_fd_transplant, svc_proc_replace_image_prep, svc_execve_finalize, svc_vma_create, svc_vma_default_initial_sp, svc_vma_default_stack_low, VMA_PROT_READ, VMA_PROT_WRITE, VMA_MAP_ANON, VMA_MAP_PRIVATE}
     import oskit.loader.{load_tof_to_ptbr, load_elf64_to_ptbr, load_elf64_to_ptbr_at_offset}
     import oskit.lib.{elf64_validate, elf64_entry, elf64_phoff, elf64_phentsize, elf64_phnum, elf64_ph_type, elf64_ph_flags, elf64_ph_offset, elf64_ph_vaddr, elf64_ph_filesz, elf64_ph_memsz, elf64_pf_to_vma_prot, elf64_align_down, elf64_align_up, ELF64_EHDR_SIZE, ELF64_PHDR_SIZE, ELF_OK, ELF_PT_LOAD, ELF_PT_INTERP}
     import oskit.fs.{fs_open, fs_read, fs_seek, fs_close, fs_stat}
-    import oskit.arch.{PROG_USP, PROG_SSP, PLATFORM_NAME}
+    import oskit.arch.PLATFORM_NAME
     import std.alloc.{malloc, free}
 
     val PM_CMD_WAITPID = 1
@@ -354,18 +354,21 @@ the child suspended for follow-up TRANSPLANT_FD/RESUME.
             ipc_reply(sender, reply, 1)
             return
 
+        val initial_sp_top = i64(svc_vma_default_initial_sp())
+        val stack_low_va   = i64(svc_vma_default_stack_low())
+
         var stack_buf: [4096]byte
         val fsz = pm_build_sysv_stack(buf + 5 + path_len, blob_len,
-                                      &stack_buf[0], 4096, PROG_USP)
+                                      &stack_buf[0], 4096, initial_sp_top)
         if fsz < 0
             var reply: [1]byte
             reply[0] = -1
             ipc_reply(sender, reply, 1)
             return
-        val child_sp = PROG_USP - i64(fsz)
+        val child_sp = initial_sp_top - i64(fsz)
         svc_vm_copy_to(proc_pt, u64(child_sp), &stack_buf[0], fsz)
 
-        val pid = svc_create_proc_susp(entry, child_sp, PROG_SSP, path, proc_pt)
+        val pid = svc_create_proc_susp(entry, child_sp, stack_low_va, path, proc_pt)
 
         var reply: [5]byte
         if pid < 0
@@ -418,6 +421,8 @@ binding constraint here.
         val path_len = int(buf[1])
         val blob_len = (int(buf[2]) & 0xFF) | ((int(buf[3]) & 0xFF) << 8)
         val path = string(buf + 5, path_len)
+
+        val initial_sp_top = svc_vma_default_initial_sp()
 
         var reply: [1]byte
 
@@ -616,7 +621,7 @@ the interp base (0 if no interp), and the main exe's runtime entry
 
         var stack_buf: [4096]byte
         val fsz = pm_build_sysv_stack_v2(buf + 5 + path_len, blob_len,
-                                         &stack_buf[0], 4096, PROG_USP,
+                                         &stack_buf[0], 4096, i64(initial_sp_top),
                                          main_phdr_va, main_phnum,
                                          interp_base, main_entry)
         if fsz < 0
@@ -658,13 +663,13 @@ shaped to enable.
             i += 1
 
 Stack VMA: matches `vma_seed_default_layout`'s shape so a stack-grow
-fault at `PROG_USP - n` for any `n` inside this 64 KiB range is
-satisfied by `vma_handle_fault`. Hardcoded to PROG_USP - 64 KiB
-deliberately — Phase 1 stays on the fixed-stack-region pattern; the
-auto-grow VMA is a Phase 2 concern.
+fault at `initial_sp_top - n` for any `n` inside this 64 KiB range
+is satisfied by `vma_handle_fault`. Hardcoded to a 64 KiB region
+below the canonical stack top deliberately — Phase 1 stays on the
+fixed-stack-region pattern; the auto-grow VMA is a Phase 2 concern.
 
-        val stack_low = u64(PROG_USP) - u64(0x10000)
-        svc_vma_create(sender_pid, stack_low, u64(PROG_USP),
+        val stack_low = initial_sp_top - u64(0x10000)
+        svc_vma_create(sender_pid, stack_low, initial_sp_top,
                        VMA_PROT_READ | VMA_PROT_WRITE,
                        VMA_MAP_ANON | VMA_MAP_PRIVATE)
 
@@ -757,7 +762,7 @@ same way `load_elf64_to_ptbr_at_offset` does for in-memory loads.
             svc_execve_finalize(sender, i64(0), i64(0))
             return
 
-        val child_sp = i64(PROG_USP) - i64(fsz)
+        val child_sp = i64(initial_sp_top) - i64(fsz)
         svc_vm_copy_to(target_ptbr, u64(child_sp), &stack_buf[0], fsz)
 
 Hand control to the new entry point. `svc_execve_finalize` rewrites
