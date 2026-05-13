@@ -291,6 +291,7 @@ commands ++= Seq(
     """set Test / testOptions in ThisBuild -= Tests.Argument(TestFrameworks.ScalaTest, "-l", "io.github.edadma.trisc.Slow")""" ::
     """triscCliJVM/testOnly * -- -n io.github.edadma.trisc.Slow""" ::
     """syslJVM/testOnly * -- -n io.github.edadma.trisc.Slow""" ::
+    """syslCliJVM/testOnly * -- -n io.github.edadma.trisc.Slow""" ::
     """set Test / testOptions in ThisBuild += Tests.Argument(TestFrameworks.ScalaTest, "-l", "io.github.edadma.trisc.Slow")""" :: state
   },
   // Run all tests including Slow ones.
