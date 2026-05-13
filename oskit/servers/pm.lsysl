@@ -49,7 +49,7 @@ explicitly:
 
 ```
 0x60000000              main exe (PIE, rebased to MAIN_EXE_BASE)
-0x60080000..0x60090000  user stack (PROG_USP - 64KB .. PROG_USP)
+0x60080000..0x60090000  user stack (VMA_DEFAULT_STACK_BOT..STACK_TOP)
 0x60100000              ld-musl-<arch>.so.1 (rebased to INTERP_BASE)
 0x601FFFFF              end of L3 carve-out
 ```
@@ -404,7 +404,7 @@ takes a different exit: after we've dropped the caller's old VMAs
 and pages and rebuilt them around the new image, the old reply
 buffer's VA either falls inside the new SysV init stack (typical, on
 both arches the new SP and old reply slot are within ~hundreds of
-bytes of `PROG_USP`) or onto an unmapped frame. A normal `ipc_reply`
+bytes of `VMA_DEFAULT_STACK_TOP`) or onto an unmapped frame. A normal `ipc_reply`
 would then either silently corrupt the new stack or fault — neither
 acceptable. So we use `svc_execve_finalize` instead, which writes
 the new entry PC + new USP into the saved exception frame and wakes
@@ -1248,7 +1248,8 @@ the initial SP_EL0 / RSP / r7.
 `build_argv_blob`): `[argc(4) pad(4) arg0\0 arg1\0 ...]`.
 
 `child_sp_top` is the top of the new process's user stack region
-(PROG_USP). `frame_size` is rounded up to a 16-byte boundary and
+(VMA_DEFAULT_STACK_TOP, fetched at call site via
+`svc_vma_default_initial_sp`). `frame_size` is rounded up to a 16-byte boundary and
 returned; the initial SP the caller passes to create_proc_susp
 is `child_sp_top - frame_size`.
 

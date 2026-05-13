@@ -35,10 +35,13 @@ Program + server address layout. User programs execute in the
 per-process L3 carve-out at VA 0x60000000..0x6008FFFF (576KB):
   code  0x60000000..0x6007FFFF  (128 pages, 512KB)
   stack 0x60080000..0x6008FFFF  (16 pages, 64KB)
-The layout constants (PROG_USP, PROG_SSP, SRV_USP, SRV_SSP) live in
-`prog_config.sysl` so both kernel and standalone user-program builds
-can share a single source of truth without dragging cpu.lsysl's
-kernel-only externs into the prog build.
+The default per-process VMA layout (`VMA_DEFAULT_*` in
+`oskit/kernel/vma.lsysl`) is the single source of truth for these
+ranges; PM and RS query the initial-SP / stack-low via the
+`svc_vma_default_*` helpers (syscalls 96/97). `prog_config.sysl`
+keeps only the bits a standalone user-program build needs —
+PLATFORM_NAME, SRV_USP/SRV_SSP (until Phase D), MMIO grants —
+without dragging cpu.lsysl's kernel externs into the prog build.
 
 Mask async exceptions (IRQ, FIQ, SError). Runs one instruction
 plus the return; safe to call with interrupts already masked.

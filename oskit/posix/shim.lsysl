@@ -41,7 +41,8 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
         kernel_grant_create_inline, kernel_grant_revoke_inline,
         kernel_get_thread_pid, kernel_get_process_main_tid,
         kernel_continue_current,
-        kernel_mmap_anon, kernel_munmap, kernel_mprotect}
+        kernel_mmap_anon, kernel_munmap, kernel_mprotect,
+        VMA_DEFAULT_STACK_BOT}
     import oskit.arch.{pack_kstat, KSTAT_SIZE}
 
     extern shim_uart_putc(c: int)
@@ -7075,8 +7076,13 @@ on failure (out of range) it returns the OLD break unchanged.
 Musl's lite_malloc relies on the equality check
 `__syscall(SYS_brk, brk+req) == brk+req` to detect success.
 
+The ceiling tracks `VMA_DEFAULT_STACK_BOT` (oskit.kernel.vma) —
+the brk arena ends where the default stack VMA begins. Single
+source of truth: if `vma_seed_default_layout` ever moves the stack
+VMA, this ceiling moves with it.
+
     val POSIX_BRK_BASE: i64  = i64(0x60040000)
-    val POSIX_BRK_LIMIT: i64 = i64(0x60080000)
+    val POSIX_BRK_LIMIT: i64 = i64(VMA_DEFAULT_STACK_BOT)
 
     var posix_break_addr: [16]i64
     var posix_break_last_gen: [16]int

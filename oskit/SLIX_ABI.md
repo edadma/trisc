@@ -551,29 +551,44 @@ From `oskit/config/config.sysl`:
 
 ### 4.2 Per-arch program layout
 
-Source: `oskit/arch/<arch>/prog_config.sysl`.
+Per-process **program** layout is no longer arch-specific —
+`VMA_DEFAULT_*` in `oskit/kernel/vma.lsysl` is the single source
+of truth, and PM / RS / boot paths read initial-SP / stack-low
+through `svc_vma_default_initial_sp` / `svc_vma_default_stack_low`
+(syscalls 96 / 97). The seeded VMAs are:
 
-| Arch     | PROG_USP    | PROG_SSP    | SRV_USP    | SRV_SSP    |
-| -------- | ----------- | ----------- | ---------- | ---------- |
-| x86_64   | 0x60090000  | 0x60080000  | 0xD4000    | 0xD3000    |
-| aarch64  | 0x60090000  | 0x60080000  | 0x60090000 | 0x60080000 |
-| trisc    | 0xD0000     | 0xCF000     | 0xD0000    | 0xCF000    |
+| VMA                    | range                                   | prot |
+| ---------------------- | --------------------------------------- | ---- |
+| code (anon)            | 0x60000000..0x60080000  (128 pages)     | RWX  |
+| stack (anon)           | 0x60080000..0x60090000  ( 16 pages)     | RW   |
 
-PHASE 1 NOTE. **All four columns disappear in Phase 1**. The
-per-process VMA list will allocate stack VMAs from a free range
-and return the initial SP from the kernel's exec path. Server
-pages remain identity-mapped in the meantime, but their layout
-moves into a generic device-process model in Phase 5 (master-
-roadmap invariant 11).
+**Server** layout is still arch-specific, in
+`oskit/arch/<arch>/prog_config.sysl::SRV_USP/SRV_SSP`:
+
+| Arch     | SRV_USP    | SRV_SSP    |
+| -------- | ---------- | ---------- |
+| x86_64   | 0xD4000    | 0xD3000    |
+| aarch64  | 0x60090000 | 0x60080000 |
+| trisc    | 0xD0000    | 0xCF000    | (sidelined — not first-class)
+
+PHASE 1 NOTE. **SRV_USP/SRV_SSP also disappear in Phase D** of the
+VMA-list handoff — servers move into the same `0x60000000` carve-out
+as programs and get demand-paged via the VMA tree. Server pages
+remain identity-mapped on x86 in the meantime; their layout moves
+into a generic device-process model in Phase 5 (master-roadmap
+invariant 11).
 
 ### 4.3 Cross-arch invariants
 
 - **Guard page (x86_64 only).** Page `0xCB` is left non-present
   in every process PT. Stack overflow past the bottom of the
-  legacy stack region (`PROG_SSP=0xCC000`-era) faults instead of
-  silently corrupting low memory. TRISC has no guard because its
-  kernel loads at `0x0` and BSS extends into low pages. aarch64's
-  high carve-out makes a guard unnecessary.
+  legacy `[0xCC000, 0x100000)` carve-out (still used by x86
+  native-sysl programs and servers) faults instead of silently
+  corrupting low memory. TRISC has no guard because its kernel
+  loads at `0x0` and BSS extends into low pages. aarch64's high
+  `0x60000000` carve-out makes a guard unnecessary. Phase D of
+  the VMA-list handoff folds this into a PROT_NONE VMA below
+  `VMA_DEFAULT_CODE_BOT`.
 - **Kernel thread stacks.** `kernel_stacks: [32][16384]byte` lives
   in BSS. Static. Tied to MAX_THREADS × THREAD_STACK_SIZE.
   Replacement = "alloc_stack(size)" API in Phase 1.
@@ -592,15 +607,22 @@ These items are PHASE 1 REPLACEMENT TARGETS. The numbers stay,
 the semantics change. Do not extend them; do not add new
 fixed-region state.
 
-- `oskit/arch/x86_64/prog_config.sysl::PROG_USP/PROG_SSP`
-- `oskit/arch/aarch64/prog_config.sysl::PROG_USP/PROG_SSP`
-- `oskit/arch/trisc/prog_config.sysl::PROG_USP/PROG_SSP`
-- `oskit/arch/x86_64/vm.lsysl::vm_create_process_pt` (eager mapping)
+- `oskit/arch/x86_64/prog_config.sysl::SRV_USP/SRV_SSP` (Phase D)
+- `oskit/arch/aarch64/prog_config.sysl::SRV_USP/SRV_SSP` (Phase D)
+- `oskit/arch/trisc/prog_config.sysl::PROG_USP/PROG_SSP` (sidelined)
+- `oskit/arch/x86_64/vm.lsysl::vm_create_process_pt` (eager mapping
+  of legacy `[0xCC000, 0x100000)` carve-out — Phase D)
 - `oskit/arch/aarch64/vm.lsysl::vm_create_process_pt` (eager mapping
   + `USER_CODE_PAGES` / `USER_STACK_PAGES` / `USER_STACK_L3_START`)
 - `oskit/arch/trisc/vm.lsysl::vm_create_process_pt` (eager mapping)
-- `oskit/kernel/kernel.lsysl::kernel_stacks` (static BSS array)
-- `PM_CMD_SPAWN` semantics — TOF loader → ELF + PT_INTERP
+- `oskit/kernel/kernel.lsysl::kernel_stacks` (static BSS array —
+  out of scope until a real driver needs variable-size stacks)
+- `PM_CMD_SPAWN` semantics — TOF loader → ELF + PT_INTERP (done at
+  chunk 8; the entry stays as a historical landmark)
+
+Recently retired (Phase B of the VMA-list handoff):
+- `oskit/arch/x86_64/prog_config.sysl::PROG_USP/PROG_SSP` — gone
+- `oskit/arch/aarch64/prog_config.sysl::PROG_USP/PROG_SSP` — gone
 
 ## 6. Procedure for adding to the ABI
 
