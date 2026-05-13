@@ -2869,35 +2869,21 @@ class SyslLLVMCodegen(target: String = "host"):
               emit(s"  $r = or i1 $a, $b")
               r
           }
-          // Check guard if present
-          val guardedCond = arm.guard match
-            case Some(guardExpr) if finalCond != "true" =>
-              // Only eval guard if pattern matched
-              val guardLabel = newLabel("match_guard")
-              val afterGuard = newLabel("match_after_guard")
-              emit(s"  br i1 $finalCond, label %$guardLabel, label %${if i + 1 < arms.length then nextLabels(i + 1) else defaultLabel}")
-              emitLabel(guardLabel)
-              val g = genExpr(guardExpr)
-              val gBool = newReg()
-              emit(s"  $gBool = icmp ne ${exprType(guardExpr)} $g, 0")
-              gBool
-            case Some(guardExpr) =>
-              val g = genExpr(guardExpr)
-              val gBool = newReg()
-              emit(s"  $gBool = icmp ne ${exprType(guardExpr)} $g, 0")
-              gBool
-            case None => finalCond
-          // Branch
-          if guardedCond == "true" then
-            emit(s"  br label %${armLabels(i)}")
-          else
-            emit(s"  br i1 $guardedCond, label %${armLabels(i)}, label %${if i + 1 < arms.length then nextLabels(i + 1) else defaultLabel}")
-          // Arm body
-          emitLabel(armLabels(i))
+          // Pattern check produced `finalCond`. We must now bind variant/destructure
+          // fields BEFORE evaluating any guard — guards may reference the bindings.
+          // The bindings IR is gated by `finalCond` so it only runs at runtime when
+          // the pattern actually matched. Compile-time `locals` mutations are reverted
+          // at the end of arm processing regardless of which runtime path was taken.
+          val nextArmLbl = if i + 1 < arms.length then nextLabels(i + 1) else defaultLabel
+          val needPatternGate = finalCond != "true"
+          if needPatternGate then
+            val bindLbl = newLabel("match_bind")
+            emit(s"  br i1 $finalCond, label %$bindLbl, label %$nextArmLbl")
+            emitLabel(bindLbl)
           // Snapshot pre-arm locals BEFORE binding variant fields, so the bindings
           // are treated as arm-scoped and removed when the arm exits.
           val preArmLocals = locals.keySet.toSet
-          // Bind variant/destructure fields if this is a binding pattern
+          // Bind variant/destructure fields if this is a binding pattern.
           arm.patterns.headOption match
             case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes, nested)) =>
               val dataOffset = et.dataOffset
@@ -2956,6 +2942,18 @@ class SyslLLVMCodegen(target: String = "host"):
                   emitNestedPatternBindingsLLVM(sub, fAddr)
                 }
             case _ => // no bindings needed
+          // Check guard if present — bindings are now in `locals` so they resolve
+          // correctly inside the guard expression.
+          arm.guard match
+            case Some(guardExpr) =>
+              val g = genExpr(guardExpr)
+              val gBool = newReg()
+              emit(s"  $gBool = icmp ne ${exprType(guardExpr)} $g, 0")
+              emit(s"  br i1 $gBool, label %${armLabels(i)}, label %$nextArmLbl")
+            case None =>
+              emit(s"  br label %${armLabels(i)}")
+          // Arm body
+          emitLabel(armLabels(i))
           val savedHR = hasReturned
           hasReturned = false
           if arm.body.nonEmpty then
