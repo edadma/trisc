@@ -86,7 +86,7 @@ object SyslCli:
               )
             ),
           opt[String]("target")
-            .text("Target: host (default), x86_64-elf, x86_64-linux, aarch64-elf, aarch64-linux")
+            .text("Target: host (default), x86_64-elf, x86_64-linux, aarch64-elf, aarch64-linux, riscv64-elf, riscv32-elf")
             .action((v, c) =>
               c.copy(command = c.command match
                 case cc: CompileCommand => cc.copy(target = v)
