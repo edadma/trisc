@@ -316,6 +316,15 @@ class SyslLLVMCodegen(target: String = "host"):
       case "aarch64-linux" =>
         emit("""target datalayout = "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128"""")
         emit("""target triple = "aarch64-unknown-linux-gnu"""")
+      // RISC-V bare-metal targets. Datalayouts are the canonical LLVM strings for
+      // rv64/rv32 from clang's TargetInfo. Bare-metal runtime is freestanding —
+      // expected to be linked against the OpenSBI-based stub in sysl/runtime/rv/.
+      case "riscv64" | "riscv64-elf" =>
+        emit("""target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"""")
+        emit("""target triple = "riscv64-unknown-elf"""")
+      case "riscv32" | "riscv32-elf" =>
+        emit("""target datalayout = "e-m:e-p:32:32-i64:64-n32-S128"""")
+        emit("""target triple = "riscv32-unknown-elf"""")
       case _ => // no target declarations for unknown targets
     emit("")
 
