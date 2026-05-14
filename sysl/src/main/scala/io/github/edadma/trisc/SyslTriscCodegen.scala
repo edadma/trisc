@@ -2830,15 +2830,35 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emit("  popd r2")          // r2 = value
           emitStore(2, 1, fieldType)
         else
-          // Compute field address; save in a scratch slot that survives the
-          // genExpr below (which may push its result descriptor onto the stack —
-          // breaking pshd/popd LIFO ordering, so we use fp-relative addressing).
+          // Refcounted assignment must evaluate RHS *before* decrementing the
+          // old field. When the RHS reads the field (e.g. `t.s = t.s + "x"`),
+          // a free()'d old buffer would leave the read pointing at freed memory
+          // — silent on the rv/wasm bump-allocator runtimes (free is a no-op),
+          // but wrong on llvm-host and corrupts state on trisc when malloc
+          // recycles the block before the strcpy runs. Mirrors the fix in
+          // SyslLLVMCodegen.TFieldAssignStmt.
+          //
+          // We reserve TWO fp-relative scratch slots up front so they survive
+          // genExpr's own stack churn (a string-concat RHS pushes a 16-byte
+          // descriptor whose pointer it returns in r1; we must capture that
+          // pointer before any subsequent codegen perturbs r7).
+          emit("  addi r7, r7, -16")
+          stackOffset -= 16
+          val saveOff   = stackOffset      // [r5+saveOff]   = field address
+          val newValOff = stackOffset + 8  // [r5+newValOff] = new-value pointer
+          // Slot 1: field address
           emitStructAddr(obj)
           if off != 0 then emitAddImm(1, 1, off)
-          emit("  pshd r1")
-          stackOffset -= 8
-          val saveOff = stackOffset
-          // Decrement the old field value (r1 still = field address)
+          emitAddImm(2, 5, saveOff)
+          emit("  std r1, r2, r0")
+          // Slot 2: result of evaluating the RHS (read this before any other
+          // codegen — RHS for a string concat leaves a descriptor at r7+0).
+          genExpr(value)
+          emitAddImm(2, 5, newValOff)
+          emit("  std r1, r2, r0")
+          // Now decrement the old field value
+          emitAddImm(1, 5, saveOff)
+          emit("  ldd r1, r1, r0")    // r1 = field address
           fieldType match
             case SyslType.StringType =>
               emit("  ldd r1, r1, r0")  // r1 = old ptr
@@ -2852,9 +2872,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
               // r1 = field address — descriptor is at [r1+0]; decr its env_ptr.
               emitClosureDescrDecr(1, 0)
             case _ =>
-          // Compute new value (clobbers everything; may push its descriptor)
-          genExpr(value)              // r1 = new value
-          // Reload field address from the saved fp-relative slot
+          // Reload new value (r1) and field address (r2); store
+          emitAddImm(1, 5, newValOff)
+          emit("  ldd r1, r1, r0")    // r1 = new-value pointer
           emitAddImm(2, 5, saveOff)
           emit("  ldd r2, r2, r0")    // r2 = field address
           emitStore(1, 2, fieldType)
