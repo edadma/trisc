@@ -117,10 +117,17 @@ created but before it is resumed.
             // for PM_CMD_EXECVE (chunk 8), plus
             // vma_default_initial_sp(96) / vma_default_stack_low(97)
             // to compute child initial SP from VMA-module policy
-            // (Phase 1 invariant #1 / Phase A). Bits 29, 30, 32, 33
-            // in `hi` map to syscalls 93, 94, 96, 97 (hi covers 64..127).
+            // (Phase 1 invariant #1 / Phase A), plus vma_create_pid(88)
+            // so PM's execve flow can install the new image's PT_LOAD +
+            // stack VMAs into the target's tree (required from Phase D.1
+            // onward; before strict VMA enforcement landed,
+            // `kernel_vm_copy_to`'s allocate-on-write fell through to
+            // the legacy carve-out gate and worked even when these
+            // calls silently denied — that hid the missing privilege).
+            // Bits 24, 29, 30, 32, 33 in `hi` map to syscalls 88, 93,
+            // 94, 96, 97 (hi covers 64..127).
             lo = lo | (i64(0x5FFFF) << 44)
-            hi = hi | (i64(1) << 15) | (i64(1) << 21) | (i64(1) << 29) | (i64(1) << 30) | (i64(1) << 32) | (i64(1) << 33)
+            hi = hi | (i64(1) << 15) | (i64(1) << 21) | (i64(1) << 24) | (i64(1) << 29) | (i64(1) << 30) | (i64(1) << 32) | (i64(1) << 33)
         else if idx == 4
             // vfs: needs grant_copy(73), grant_map(74), grant_unmap(75)
             hi = hi | i64(0xE00)

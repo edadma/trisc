@@ -27,6 +27,9 @@ Hardware page-table operations (vm_asm.s).
     extern vm_get_ptbr() -> u64
     extern read_sctlr_el1() -> u64
     extern abort()
+    extern debug_char(c: int)
+    extern debug_hex4(v: int)
+    extern debug_hex8(v: int)
     extern arch_irq_save() -> u64
     extern arch_irq_restore(prev: u64)
     extern cntfrq_el0() -> u64

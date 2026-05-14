@@ -35,6 +35,29 @@ __attribute__((noreturn)) void abort(void) {
         __asm__ volatile("wfi");
 }
 
+/* Debug output for kernel tracing — matches the x86_64 plumbing in
+ * oskit/arch/x86_64/stubs.c so cross-arch kernel code in oskit.kernel
+ * can call debug_char / debug_hex8 without arch-specific imports. */
+void debug_char(int c) { uart_putc(c); }
+void debug_hex4(int v) {
+    const char *h = "0123456789ABCDEF";
+    debug_char(h[(v >> 12) & 0xF]);
+    debug_char(h[(v >>  8) & 0xF]);
+    debug_char(h[(v >>  4) & 0xF]);
+    debug_char(h[ v        & 0xF]);
+}
+void debug_hex8(int v) {
+    const char *h = "0123456789ABCDEF";
+    debug_char(h[(v >> 28) & 0xF]);
+    debug_char(h[(v >> 24) & 0xF]);
+    debug_char(h[(v >> 20) & 0xF]);
+    debug_char(h[(v >> 16) & 0xF]);
+    debug_char(h[(v >> 12) & 0xF]);
+    debug_char(h[(v >>  8) & 0xF]);
+    debug_char(h[(v >>  4) & 0xF]);
+    debug_char(h[ v        & 0xF]);
+}
+
 /* sbrk — extend heap for std.alloc's Sysl allocator.
  * Static BSS array keeps the heap safely inside the linked kernel
  * image and out of the page allocator's way (page_alloc starts at

@@ -23,16 +23,22 @@ Two probes:
     `vm_install_user_page`, then memcpys.  Expect rc=0 and the
     payload bytes readable back.
 
-  * **Out-of-VMA destination** — `0x100000000` (4 GiB) lies
+  * **Out-of-VMA destination, in carve-out** — `0x60150000`
+    lies inside the user carve-out `[0x60000000, 0x60200000)`
+    but past both seeded VMAs `[0x60000000, 0x60080000)` +
+    `[0x60080000, 0x60090000)`, and this test never `mmap`s.
+    Phase D.1's strict in-carve-out check fires: pid is the
+    test process (known, has VMA tree); `vma_lookup_addr`
+    returns `VMA_NIL`; `kernel_vm_copy_to` returns -1.
+
+  * **Unmappable destination** — `0x100000000` (4 GiB) lies
     above the top-level page-table entry that
     `vm_create_process_pt` installs (PML4[0] on x86_64, L0[0]
-    on aarch64).  `kernel_vm_copy_to`'s allocate-on-write path
-    calls `vm_install_user_page` which returns -1 immediately
-    because the intermediate level is missing — the page can't
-    be installed.  The syscall returns -1.  This destination is
-    portable across both arches: kernel-identity 2 MiB blocks
-    don't cover above-PML4[0]/L0[0], so `vm_v2p` returns 0 and
-    the allocate path is entered (and rejected).
+    on aarch64).  Outside the strict-check range, but
+    `vm_install_user_page` returns -1 because the intermediate
+    level is missing.  `kernel_vm_copy_to` returns -1.  Covers
+    the same "no install possible" rejection that protected
+    out-of-VMA writes before Phase D.1 added strict-check.
 
 Pass criterion: prints `vma4: ok`.
 
@@ -90,15 +96,25 @@ Pass criterion: prints `vma4: ok`.
                 return
             j += 1
 
-        // Probe 2 — out-of-VMA destination at 4 GiB.  Above
-        // PML4[0] / L0[0]'s reach; vm_install_user_page returns
-        // -1 because the intermediate level is missing, so
-        // kernel_vm_copy_to rejects with -1.
-        val out_vma_dst: i64 = i64(0x100000000)
-        val rc_out = int(syscall6(SYS_VMA_TRY_COPY, out_vma_dst,
-                                  i64(&payload[0]), i64(16), 0, 0, 0))
-        if rc_out != -1
+        // Probe 2 — out-of-VMA inside the carve-out at 0x60150000.
+        // Phase D.1's strict in-carve-out check rejects this: no
+        // seeded or mmap'd VMA covers it.
+        val in_carveout_no_vma: i64 = i64(0x60150000)
+        val rc_carveout = int(syscall6(SYS_VMA_TRY_COPY, in_carveout_no_vma,
+                                       i64(&payload[0]), i64(16), 0, 0, 0))
+        if rc_carveout != -1
             fail(3)
+            return
+
+        // Probe 3 — unmappable destination at 4 GiB.  Above PML4[0]
+        // / L0[0], so `vm_install_user_page` returns -1 (no
+        // intermediate level).  Different rejection path than
+        // probe 2, same observable outcome.
+        val unmappable_dst: i64 = i64(0x100000000)
+        val rc_unmap = int(syscall6(SYS_VMA_TRY_COPY, unmappable_dst,
+                                    i64(&payload[0]), i64(16), 0, 0, 0))
+        if rc_unmap != -1
+            fail(4)
             return
 
         puts("vma4: ok\n")
