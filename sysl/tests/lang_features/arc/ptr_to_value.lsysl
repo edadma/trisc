@@ -1,0 +1,79 @@
+Raw pointers to value types
+===========================
+
+`*T` is the raw, unmanaged pointer mode — no refcount, no
+auto-free. `&v` takes the address of a value (struct or
+scalar). `*p` dereferences. Through `*p`, the caller's
+backing storage is shared: mutating `p.field` (with implicit
+deref for `*Struct`) mutates the original. This is the
+explicit aliasing mode — the opposite of value semantics.
+
+Used heavily in kernel and OS code (`oskit/`) where ARC
+overhead is unacceptable. Must round-trip cleanly across
+all backends.
+
+    module sysl.tests.lang_features
+
+    struct Point
+        x: int
+        y: int
+
+Address-of and dereference round-trip
+-------------------------------------
+
+`&v` produces `*T` pointing at v. `*p` dereferences. Writing
+through the pointer is visible at the source.
+
+    #test
+    test_ptr_to_struct_aliases() -> unit
+        var v = Point(3, 4)
+        var p: *Point = &v
+        p.x = 99                 // through-pointer write, implicit deref on *Point
+        assert(v.x == 99, s"v.x should be 99 after p.x=99, got ${v.x}")
+        assert(v.y == 4,  s"v.y should still be 4, got ${v.y}")
+
+    #test
+    test_ptr_round_trip_scalar() -> unit
+        var n: int = 42
+        var p: *int = &n
+        *p = 100                 // explicit deref-assign for scalars
+        assert(n == 100, s"n should be 100 through *p, got $n")
+        n = 7
+        assert(*p == 7,  s"*p should read 7 after n=7, got ${*p}")
+
+Pointer parameter mutates caller's value
+----------------------------------------
+
+A `*T` parameter is the explicit "callee modifies caller's
+data" pattern. Distinct from `f(v: T)` (which gets a local
+copy per the value-struct rules).
+
+    #test
+    test_ptr_param_mutates_caller() -> unit
+        var v = Point(1, 2)
+        bump_through_ptr(&v)
+        assert(v.x == 101, s"v.x should be 101 after bump_through_ptr, got ${v.x}")
+        assert(v.y == 102, s"v.y should be 102 after bump_through_ptr, got ${v.y}")
+
+    bump_through_ptr(p: *Point) -> unit
+        p.x = p.x + 100
+        p.y = p.y + 100
+
+Pointer reassignment
+--------------------
+
+A `*T` variable can be retargeted to a different value. The
+old target is unaffected by the retarget (no refcount, no
+free).
+
+    #test
+    test_ptr_retarget() -> unit
+        var a = Point(1, 1)
+        var b = Point(2, 2)
+        var p: *Point = &a
+        assert(p.x == 1, s"p.x should be 1 (pointing at a), got ${p.x}")
+        p = &b
+        assert(p.x == 2, s"p.x should be 2 (pointing at b), got ${p.x}")
+        p.x = 99
+        assert(b.x == 99, s"b.x should be 99 (mutated through retargeted p), got ${b.x}")
+        assert(a.x == 1,  s"a.x should still be 1 (p no longer points at a), got ${a.x}")

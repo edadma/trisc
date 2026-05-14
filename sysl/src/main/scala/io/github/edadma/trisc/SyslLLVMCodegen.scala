@@ -911,61 +911,65 @@ class SyslLLVMCodegen(target: String = "host"):
           if locals.contains(target) then
             val local = locals(target)
             val lt = llvmType(local.typ)
-            // Reassignment of ref: decrement old, increment new
+            // Release/acquire pattern for refcounted reassignment: INCR NEW
+            // *before* DECR OLD. For self-assign (`r = r`, `s = s`, etc.),
+            // RHS and LHS share a buffer; the dec would otherwise drop the
+            // refcount to zero and free the buffer before the increment runs.
+            // Incrementing first keeps the shared buffer alive across the dec.
+            // We operate on the SOURCE address (`v` for aggregates, the loaded
+            // value for scalars) so the incr happens before any store has
+            // overwritten the destination.
+            val vtPre = exprType(value)
+            val finalValPre =
+              if !isAggregate(local.typ) then emitSextIfNeeded(v, vtPre, lt, value.typ.isSigned)
+              else v
+            if !isAggregate(local.typ) && isRef(local.typ) && !isOwnedNew(value) then
+              emitRefIncr(finalValPre, refHeaderOffset(local.typ))
+            if isAggregate(local.typ) then
+              if isSliceType(local.typ) && !isSliceOwned(value) then
+                emitSliceBackrefIncr(v)
+              if isStringType(local.typ) && !isOwnedString(value) then
+                emitStringDescrIncr(v)
+              local.typ match
+                case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(value) =>
+                  emitStructStringFieldsIncr(v, st)
+                case et: SyslType.EnumType if structHasStringFields(et) && !isOwnedStruct(value) =>
+                  emitEnumStringFieldsIncr(v, et)
+                case _ =>
+              if local.typ.isInstanceOf[SyslType.FuncType] then
+                val rhsKind = funcKindOfExpr(value)
+                value match
+                  case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                    emitClosureDescrIncr(v)
+                  case _ =>
+            // DECR OLD
             if isRef(local.typ) then
               val oldVal = newReg()
               emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
               emitRefDecr(oldVal, refHeaderOffset(local.typ), deinitFor(local.typ))
-            // Slice reassignment: decrement old backref before overwrite
             if isSliceType(local.typ) then
               emitSliceBackrefDecr(local.reg, local.typ)
-            // String reassignment: decrement old buffer refcount before overwrite
             if isStringType(local.typ) then
               emitStringDescrDecr(local.reg)
-            // Value-struct/enum reassignment: decrement old's string fields before overwrite
             local.typ match
               case st: SyslType.StructType if structHasStringFields(st) =>
                 emitStructStringFieldsDecr(local.reg, st)
               case et: SyslType.EnumType if structHasStringFields(et) =>
                 emitEnumStringFieldsDecr(local.reg, et)
               case _ =>
-            // Closure descriptor reassignment: decr old env before overwrite
             if local.typ.isInstanceOf[SyslType.FuncType]
               && closureLocalKind.get(target).contains(FuncKind.HeapEnv) then
               emitClosureDescrDecr(local.reg)
+            // STORE NEW. Incr was already done above; only kind-tracking remains.
             if isAggregate(local.typ) then
-              // Aggregate reassignment: load value from source, store to target
               val loaded = newReg()
               emit(s"  $loaded = load $lt, $lt* $v")
               emit(s"  store $lt $loaded, $lt* ${local.reg}")
-              // Slice reassignment: increment new backref if not owned
-              if isSliceType(local.typ) && !isSliceOwned(value) then
-                emitSliceBackrefIncr(local.reg)
-              // String reassignment: increment new buffer refcount if not owned
-              if isStringType(local.typ) && !isOwnedString(value) then
-                emitStringDescrIncr(local.reg)
-              // Value-struct/enum reassignment: increment new aggregate's string fields if borrowed
-              local.typ match
-                case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(value) =>
-                  emitStructStringFieldsIncr(local.reg, st)
-                case et: SyslType.EnumType if structHasStringFields(et) && !isOwnedStruct(value) =>
-                  emitEnumStringFieldsIncr(local.reg, et)
-                case _ =>
-              // Closure descriptor reassignment: track new kind, incr if borrowed copy
               if local.typ.isInstanceOf[SyslType.FuncType] then
-                val rhsKind = funcKindOfExpr(value)
-                closureLocalKind(target) = rhsKind
-                value match
-                  case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
-                    emitClosureDescrIncr(local.reg)
-                  case _ =>
+                closureLocalKind(target) = funcKindOfExpr(value)
             else
-              val vt = exprType(value)
-              val finalVal = emitSextIfNeeded(v, vt, lt, value.typ.isSigned)
               val vol = if local.isVolatile then " volatile" else ""
-              emit(s"  store$vol $lt $finalVal, $lt* ${local.reg}")
-              if isRef(local.typ) && !isOwnedNew(value) then
-                emitRefIncr(finalVal, refHeaderOffset(local.typ))
+              emit(s"  store$vol $lt $finalValPre, $lt* ${local.reg}")
           else if globalVarTypes.contains(target) then
             // Assignment to a module-level global variable
             val gt = globalVarTypes(target)

@@ -1,0 +1,99 @@
+Reference reassignment refcount semantics
+=========================================
+
+When a `&T` variable is reassigned, the refcount of the old
+target must decrement (potentially triggering free) and the
+refcount of the new target must increment. Two patterns to
+pin:
+
+  - **Reassign to a fresh allocation:** `r = new T(...)`. The
+    new target is owned (refcount 1), so the implementation
+    must *not* extra-incr it. The old target's refcount must
+    drop. If the bug is symmetric (no incr on new + no decr
+    on old), both targets leak; if the bug is asymmetric
+    (decr on old but incr on new is wrong), the old target
+    double-frees.
+
+  - **Reassign to a borrowed reference:** `r = s` where
+    `s: &T` already exists. The new target's refcount must
+    incr (now two bindings); the old target's must decr.
+    Without the incr, when one binding goes out of scope
+    the other becomes dangling.
+
+  - **Self-assign:** `r = r` is a no-op semantically but
+    must still be inc-then-dec to avoid use-after-free.
+    A naive decr-then-incr drops r to 0 first and frees
+    it before the incr runs.
+
+These tests observe the behaviour through field reads
+after the reassignment chain. If refcounting is wrong, the
+reads land on freed memory and either trap or return
+garbage.
+
+    module sysl.tests.lang_features
+
+    struct Box
+        v: int
+
+Reassign to fresh allocation
+----------------------------
+
+    #test
+    test_reassign_to_fresh() -> unit
+        var r: &Box = new Box(1)
+        r = new Box(2)
+        r = new Box(3)
+        // Each assignment drops the previous target. We can only observe
+        // the *final* binding, but if any prior dec-then-free corrupted
+        // the heap, the read here would trap.
+        assert(r.v == 3, s"r.v should be 3 after three fresh allocations, got ${r.v}")
+
+Reassign to a borrowed reference
+--------------------------------
+
+    #test
+    test_reassign_to_borrowed() -> unit
+        val owner: &Box = new Box(42)
+        var alias: &Box = new Box(7)
+        // alias's old target (Box(7)) should be decr'd to 0 and freed;
+        // owner's target (Box(42)) should be incr'd to 2 (owner + alias).
+        alias = owner
+        assert(alias.v == 42, s"alias.v should be 42 (= owner.v), got ${alias.v}")
+        assert(owner.v == 42, s"owner.v should still be 42, got ${owner.v}")
+        // Mutating through alias is visible through owner — they share storage.
+        alias.v = 99
+        assert(owner.v == 99, s"owner.v should be 99 after alias.v=99, got ${owner.v}")
+
+Self-assign is safe
+-------------------
+
+If the implementation does decr-then-incr (instead of incr-then-decr or
+"detect self and skip"), the refcount briefly drops to 0 and the buffer
+is freed before being "kept alive" again. The post-assign read would
+then read freed memory.
+
+    #test
+    test_self_assign_no_free() -> unit
+        var r: &Box = new Box(123)
+        r = r
+        assert(r.v == 123, s"r.v should still be 123 after r=r, got ${r.v}")
+        r.v = 456
+        assert(r.v == 456, s"r.v should be 456 after mutation, got ${r.v}")
+
+Chained reassignment through a helper
+-------------------------------------
+
+`bump(r: &Box) -> &Box = new Box(r.v + 1)` returns a fresh ref. The
+caller's reassignment must inc the new (it's already owned from `new`)
+and dec the old. Repeated chaining stresses the inc/dec balance.
+
+    bump(r: &Box) -> &Box = new Box(r.v + 1)
+
+    #test
+    test_chained_fresh_assignments() -> unit
+        var r: &Box = new Box(0)
+        var i = 0
+        while i < 50
+            r = bump(r)
+            i = i + 1
+        assert(r.v == 50, s"r.v should be 50 after 50 bumps, got ${r.v}")

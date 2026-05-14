@@ -1,0 +1,87 @@
+Heap-allocated reference type — basic refcount semantics
+========================================================
+
+`new T(...)` allocates a `T` on the heap and yields a
+ref-counted reference `&T`. The reference starts with
+refcount = 1 (the binding that "owns" the new allocation).
+When the binding goes out of scope, the refcount drops; at
+zero, the struct's deinit (if any) fires, then the memory
+is freed.
+
+Field access through `&T` looks identical to value-struct
+field access — the `&` is implicit at the use site. The
+underlying compiler emits an extra refcount-touch around
+the binding's lifetime.
+
+These tests don't observe the refcount directly (the user
+ABI doesn't expose it). Instead they verify the *visible*
+contract:
+
+  - construction and field read,
+  - field assignment through the ref,
+  - that the struct is alive across calls,
+  - that we can allocate many refs without crashing
+    (smoke-tests the allocator path).
+
+The lifecycle (deinit, free at zero) is pinned separately
+in `deinit_basic.lsysl`.
+
+    module sysl.tests.lang_features
+
+    struct Node
+        v: int
+
+Basic construction and field read
+---------------------------------
+
+    #test
+    test_new_ref_construction() -> unit
+        val n: &Node = new Node(42)
+        assert(n.v == 42, s"n.v should be 42, got ${n.v}")
+
+Field assignment through a ref
+------------------------------
+
+    #test
+    test_new_ref_field_assign() -> unit
+        val n: &Node = new Node(0)
+        n.v = 100
+        assert(n.v == 100, s"n.v should be 100 after assignment, got ${n.v}")
+        n.v = n.v + 7
+        assert(n.v == 107, s"n.v should be 107 after compound-style update, got ${n.v}")
+
+Ref survives across function calls
+----------------------------------
+
+If the refcount accounting is wrong (missing inc on argument
+pass, or extra dec on return), `n` would be freed mid-test
+and subsequent reads would land on freed memory or trap.
+
+    bump_node(r: &Node) -> unit
+        r.v = r.v + 1
+
+    #test
+    test_ref_survives_calls() -> unit
+        val n: &Node = new Node(10)
+        bump_node(n)
+        bump_node(n)
+        bump_node(n)
+        assert(n.v == 13, s"n.v should be 13 after three bumps, got ${n.v}")
+
+Many allocations don't crash
+----------------------------
+
+Smoke test for the allocator path. If `new` leaks or
+double-frees, the allocator state corrupts and somewhere
+in this loop we trap.
+
+    #test
+    test_many_allocations() -> unit
+        var i = 0
+        var sum = 0
+        while i < 100
+            val n: &Node = new Node(i)
+            sum = sum + n.v
+            i = i + 1
+        // Σ 0..99 = 99*100/2 = 4950
+        assert(sum == 4950, s"sum 0..99 should be 4950, got $sum")
