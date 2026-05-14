@@ -1,24 +1,19 @@
 // Address layout for aarch64 user programs and servers.
 //
-// Programs and servers both live in the L3 carve-out at VA
-// 0x60000000..0x60080000 (128 pages of code/data/bss/heap), stack
-// at 0x60080000..0x6008FFFF (16 pages). Per-process VMA layout is
-// the single source of truth — see `oskit/kernel/vma.lsysl::
-// VMA_DEFAULT_*`. Initial-SP / stack-low values are surfaced to PM
-// and RS via `svc_vma_default_initial_sp` / `svc_vma_default_stack_low`
-// (syscalls 96/97) — no fixed PROG_USP/PROG_SSP constants here.
+// Phase D.3 closed Invariant #1: programs and servers both live in
+// the L3 carve-out at VA 0x60000000..0x60080000 (128 pages of
+// code/data/bss/heap), stack at 0x60080000..0x6008FFFF (16 pages).
+// Per-process VMA layout is the single source of truth — see
+// `oskit/kernel/vma.lsysl::VMA_DEFAULT_*`. Initial-SP / stack-low
+// values flow through `svc_vma_default_initial_sp` /
+// `svc_vma_default_stack_low` (syscalls 96/97). No fixed
+// PROG_USP/PROG_SSP/SRV_USP/SRV_SSP constants remain.
 //
 // Mirrors the structure of oskit/arch/x86_64/prog_config.sysl: just
 // the cross-target constants a standalone user program needs, none
 // of the kernel-side externs that live in cpu.lsysl/vm.lsysl/exc.lsysl.
-//
-// SRV_USP/SRV_SSP are PHASE 1 REPLACEMENT TARGETS — Phase D folds
-// server stack provisioning into the same VMA-driven path as programs.
 
 module oskit.arch
-
-val SRV_USP  = 0x60090000
-val SRV_SSP  = 0x60080000
 
 // AT_PLATFORM string for the SysV initial stack auxv. ld-musl reads
 // this via `__init_libc` -> `__libc.platform` and uses it to pick

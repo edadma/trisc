@@ -29,10 +29,9 @@ starts the next server.
 
     module oskit.servers
 
-    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask, svc_set_rs_tid_self, svc_get_ramdisk_base, svc_get_ramdisk_size, svc_getinfo, GETINFO_BOOT_INFO}
+    import oskit.services.{thread_id, putc, putstr, notify_send_to, notify_read_self, rs_set_tid, svc_vm_create_server_pt, svc_vm_copy_to, svc_create_proc_susp, svc_resume_proc, svc_phys_read, svc_port_transfer, svc_proc_main_tid, svc_set_priv, svc_set_ipc_mask, svc_set_rs_tid_self, svc_get_ramdisk_base, svc_get_ramdisk_size, svc_getinfo, svc_vma_default_initial_sp, svc_vma_default_stack_low, GETINFO_BOOT_INFO}
     import oskit.ipc.{ipc_recv_notify, port_create, port_lookup}
     import oskit.hal.memset
-    import oskit.arch.{SRV_USP, SRV_SSP}
 
 Server tracking. PIDs and MMIO page grants for each server
 in boot order (0=disk, 1=tfs, 2=tty, 3=pm, 4=vfs, 5=ds,
@@ -467,10 +466,9 @@ Load a flat binary boot module (no header) into a process address
 space. Used on aarch64 where servers are built as raw .bin files
 via `aarch64-elf-objcopy -O binary` (see
 `oskit/arch/aarch64/build_servers.sh`). The binary's load address
-matches the arch's server VA — for aarch64 the linker script puts
-.text + .rodata + .data at SRV_USP's carve-out base, so the entry
-point is just that base (we use SRV_SSP as a proxy that sits at
-the same arch-specific low end of the user carve-out on aarch64).
+matches the arch's server VA — both arches now link servers at
+`VMA_DEFAULT_CODE_BOT = 0x60000000` (Phase D.2), so the entry
+point is just that base.
 
 On x86/TRISC this path isn't reached because ELF/TRB magic matches
 first — flat is the final fallback.
@@ -538,22 +536,29 @@ Returns the PID on success, 0 on failure.
         // bottom of the new process's user stack. Required so that
         // programs using the prog_start.s convention (which does
         // `ldr w0, [sp]` to read argc) see a valid argc=0 instead
-        // of whatever happens to live at SRV_USP. Servers using
-        // srv_start.s (which just `bl main`) don't read the frame
-        // but it's harmless sitting there.
+        // of whatever happens to live at the stack top. Servers
+        // using srv_start.s (which just `bl main`) don't read the
+        // frame but it's harmless sitting there.
         //
         // Frame: argc(8) + argv NULL(8) + envp NULL(8) + AT_NULL
         // pair(16) = 40 bytes, rounded up to 48 for 16-byte SP
-        // alignment. All bytes are zero.
+        // alignment. All bytes are zero. Initial SP / stack low
+        // come from `svc_vma_default_initial_sp` /
+        // `svc_vma_default_stack_low` (the cross-arch
+        // `VMA_DEFAULT_STACK_TOP/_BOT` constants in
+        // `oskit/kernel/vma.lsysl`) — Phase 1 Invariant #1's
+        // single source of truth.
         var rs_stack_buf: [48]byte
         memset(&rs_stack_buf[0], 0, 48)
-        val child_sp = SRV_USP - 48
+        val initial_sp_top = i64(svc_vma_default_initial_sp())
+        val stack_low_va   = i64(svc_vma_default_stack_low())
+        val child_sp = initial_sp_top - 48
         svc_vm_copy_to(ptbr, u64(child_sp), &rs_stack_buf[0], 48)
 
         // Create process suspended — no PTBR switch needed;
         // create_process_suspended uses vm_copy_to for the stack frame
         val sname = string(name, nlen)
-        val pid = svc_create_proc_susp(entry, child_sp, SRV_SSP, sname, ptbr)
+        val pid = svc_create_proc_susp(entry, child_sp, stack_low_va, sname, ptbr)
         if pid < 0
             return 0
 

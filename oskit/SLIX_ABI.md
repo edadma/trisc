@@ -617,23 +617,14 @@ through `svc_vma_default_initial_sp` / `svc_vma_default_stack_low`
 | code (anon)            | 0x60000000..0x60080000  (128 pages)     | RWX  |
 | stack (anon)           | 0x60080000..0x60090000  ( 16 pages)     | RW   |
 
-**Server** layout matches programs after Phase D.2:
-
-| Arch     | SRV_USP    | SRV_SSP    |
-| -------- | ---------- | ---------- |
-| x86_64   | 0x60090000 | 0x60080000 |
-| aarch64  | 0x60090000 | 0x60080000 |
-| trisc    | 0xD0000    | 0xCF000    | (sidelined — not first-class)
-
-PHASE 1 NOTE. Both x86 and aarch64 servers now live in the
-`VMA_DEFAULT_*` carve-out — same code/data/heap VMA at
-`[0x60000000, 0x60080000)` and stack VMA at
-`[0x60080000, 0x60090000)` as user programs. The `SRV_USP/SRV_SSP`
-constants in `oskit/arch/<arch>/prog_config.sysl` are now equal
-to `VMA_DEFAULT_STACK_TOP/_BOT`; they remain as a compatibility
-alias for RS's startup-stack arithmetic that hasn't yet moved to
-`svc_vma_default_initial_sp` directly. Phase 5's generic
-device-process model retires them (master-roadmap invariant 11).
+**Server** layout matches programs after Phase D.2: both link
+at `0x60000000`, both use the `[0x60080000, 0x60090000)` stack
+VMA. RS's startup-stack arithmetic now reads
+`svc_vma_default_initial_sp` / `svc_vma_default_stack_low`
+directly (Phase D.3 cleanup) — the `SRV_USP/SRV_SSP` aliases
+that briefly lived in `oskit/arch/{x86_64,aarch64}/prog_config.
+sysl` after Phase D.2 are gone. Only trisc (`PROG_USP=0xD0000 /
+PROG_SSP=0xCF000`, sidelined) keeps the legacy pattern.
 
 ### 4.3 Cross-arch invariants
 
@@ -666,15 +657,21 @@ These items are PHASE 1 REPLACEMENT TARGETS. The numbers stay,
 the semantics change. Do not extend them; do not add new
 fixed-region state.
 
-- `oskit/arch/{x86_64,aarch64}/prog_config.sysl::SRV_USP/SRV_SSP`
-  — equal to `VMA_DEFAULT_STACK_TOP/_BOT` after Phase D.2;
-  compatibility alias for RS's startup arithmetic. Phase 5
-  retires them.
 - `oskit/arch/trisc/prog_config.sysl::PROG_USP/PROG_SSP` (sidelined)
 - `oskit/arch/trisc/vm.lsysl::vm_create_process_pt` (eager mapping —
   sidelined)
 - `oskit/kernel/kernel.lsysl::kernel_stacks` (static BSS array —
   out of scope until a real driver needs variable-size stacks)
+
+### Recently retired (Phase D.3)
+
+- `oskit/arch/{x86_64,aarch64}/prog_config.sysl::SRV_USP/SRV_SSP`
+  — RS now reads `svc_vma_default_initial_sp` / `svc_vma_default_
+  stack_low` directly.
+- `oskit/kernel/kernel.lsysl::kernel_handle_user_fault`'s "halt
+  kernel on unhandled user fault" semantics. Replaced by an
+  inline `kernel_kill_process` call so the rest of the system
+  keeps running when a user program faults on an out-of-VMA VA.
 
 ### Recently retired (Phase D.2)
 

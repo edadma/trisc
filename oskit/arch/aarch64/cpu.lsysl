@@ -40,8 +40,8 @@ The default per-process VMA layout (`VMA_DEFAULT_*` in
 ranges; PM and RS query the initial-SP / stack-low via the
 `svc_vma_default_*` helpers (syscalls 96/97). `prog_config.sysl`
 keeps only the bits a standalone user-program build needs —
-PLATFORM_NAME, SRV_USP/SRV_SSP (until Phase D), MMIO grants —
-without dragging cpu.lsysl's kernel externs into the prog build.
+PLATFORM_NAME + MMIO grant constants — without dragging
+cpu.lsysl's kernel externs into the prog build.
 
 Mask async exceptions (IRQ, FIQ, SError). Runs one instruction
 plus the return; safe to call with interrupts already masked.
