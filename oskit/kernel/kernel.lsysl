@@ -855,30 +855,34 @@ non-present pages that need fresh frames — the arch-level
 `vm_copy_to` is now a stride+memcpy primitive that returns
 early on a missed translation.
 
-Phase 1 chunk 3.7 (Phase C of the per-process VMA-list
-invariant): the allocate-on-write side of `vm_copy_to` used to
-live in arch code and was gated on the literal user carve-out
-`[0x60000000, 0x60200000)`. This consolidates the policy into
-the kernel layer so it has one obvious place to extend (strict
-VMA-tree consultation lands in Phase D once the legacy x86
-region retires and PT-as-cache becomes unambiguous). The
-present semantics:
+Phase 1 chunk 3.7 (Phase C consolidated; Phase D.1 added
+strict VMA-as-authority): the allocate-on-write side of
+`vm_copy_to` used to live in arch code and was gated on the
+literal user carve-out `[0x60000000, 0x60200000)`. This
+consolidates the policy into the kernel layer:
 
   * **Pages below `0x60000000`** — if unmapped, reject with -1.
     The kernel-identity 2 MiB blocks make `vm_v2p` return
     non-zero for those VAs in practice, so this rejection only
     fires on the (rare) intermediate-table-missing edge.
-  * **Pages in `[0x60000000, 0x60200000)`** — orphan ptbrs
-    (transient during PM spawn) allocate-on-write
-    unconditionally; known processes allocate-on-write when
-    `vm_install_user_page` succeeds (the L3 carve-out exists
-    on both arches). Strict "must be in a registered VMA"
-    enforcement is deferred — Phase C centralises, Phase D
-    enforces.
+  * **Pages in `[0x60000000, 0x60200000)`** — the user
+    carve-out, strict VMA enforcement is on. For known
+    processes (`pid > 0`), the destination VMA tree must
+    cover `cur_va`; otherwise reject with -1. Orphan ptbrs
+    (transient during PM spawn, before the Process slot is
+    populated) allocate-on-write unconditionally. The strict
+    branch closes the PT-as-cache soft-spot the handoff
+    identified: a kernel-identity-mapped PA can no longer
+    sneak past the allocator gate just because `vm_v2p`
+    returns non-zero.
   * **Pages at or above `0x60200000`** — `vm_install_user_page`
     decides: aarch64 L0[0]/L1/L2 only cover the carve-out, so
     installs above 4 GiB fail; x86_64 kernel-identity 2 MiB
     blocks make `vm_v2p` non-zero so the install isn't entered.
+    The aarch64 grant-map region at `[0x62000000, 0x62200000)`
+    (kernel-managed IPC plumbing, see `GRANT_REGION_BASE` in
+    `oskit/arch/aarch64/vm.lsysl`) is in this band by design —
+    strict-checking it would reject every grant write.
 
 Returns 0 on success, -1 if any destination page can't be
 installed.

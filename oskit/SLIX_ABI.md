@@ -169,38 +169,48 @@ when VMA lists land:
 - `SYS_VM_COPY_TO` / `SYS_VM_COPY_FROM` still work, but will fault
   in pages on access via the destination VMA.
 
-PHASE 1 CHUNK 3.7 NOTE (Phase C of the per-process VMA-list
-invariant). `SYS_VM_COPY_TO` (54) is now wired through the
-kernel-side `kernel_vm_copy_to`, which centralizes
-allocate-on-write into the kernel layer. The arch-level
-`vm_copy_to` is demoted to a stride+memcpy primitive that
-returns early on any unmapped page — every caller that needs
-allocate-on-write semantics must go through `kernel_vm_copy_to`.
+PHASE 1 CHUNK 3.7 NOTE (Phase C consolidated; Phase D.1
+strict-enforced). `SYS_VM_COPY_TO` (54) is wired through the
+kernel-side `kernel_vm_copy_to`, which owns allocate-on-write
+policy. The arch-level `vm_copy_to` is a stride+memcpy
+primitive that returns early on any unmapped page — every
+caller that needs allocate-on-write semantics must go through
+`kernel_vm_copy_to`.
 
 `kernel_vm_copy_to`'s policy by destination class:
 
   * **Below `0x60000000`** — if the page is unmapped, reject with
     -1 (no allocate-on-write into kernel-identity territory).
-  * **`[0x60000000, 0x60200000)`** — the user carve-out. Orphan
-    ptbrs (transient during PM spawn, before
-    `create_process_suspended` populates the Process slot)
-    allocate-on-write here unconditionally; known processes
-    allocate-on-write if `vm_install_user_page` succeeds.
+  * **`[0x60000000, 0x60200000)`** — the user carve-out, strict
+    VMA-as-authority **on**. For known processes (`pid > 0`),
+    the destination VMA tree must cover `cur_va`; otherwise
+    reject with -1 *even if* `vm_v2p` returns a non-zero PA
+    (the kernel-identity blocks at low PD slots would otherwise
+    surface as "mapped"). Orphan ptbrs (transient during PM
+    spawn, before `create_process_suspended` populates the
+    Process slot) allocate-on-write unconditionally.
   * **At or above `0x60200000`** — `vm_install_user_page`
-    decides: aarch64 L0[0]/L1/L2 tables exist only in the
-    carve-out, so installs above 4 GiB fail; x86_64 PDPT[2..3]
-    are kernel-identity-mapped, so `vm_v2p` returns non-zero
-    and the install path isn't entered — the existing PT is
-    trusted (this is the Phase C "soft spot" Phase D retires
-    when the legacy x86 region goes).
+    decides: aarch64 L0[0]/L1/L2 tables only cover the carve-
+    out, so installs above 4 GiB fail; x86_64 PDPT[2..3] are
+    kernel-identity-mapped, so `vm_v2p` returns non-zero and
+    the install path isn't entered. The aarch64 grant-map
+    region at `[0x62000000, 0x62200000)` (kernel-managed IPC
+    plumbing, see `GRANT_REGION_BASE` in
+    `oskit/arch/aarch64/vm.lsysl`) lives in this band by
+    design — strict-checking it would reject every grant write.
 
-Strict VMA-tree consultation (rejecting writes to known-process
-VAs that fall outside every registered VMA) is **deferred to
-Phase D** — the present allocator-level migration centralises
-the policy without yet enforcing it across every legacy
-caller. The boot-time PT-as-cache invariant the handoff calls
-out as "soft" remains soft for in-carve-out non-VMA pages, but
-the kernel now has one obvious place to extend the check.
+**Phase D.1 surfaced a latent privilege gap:** PM's
+`rs_set_server_priv` mask didn't include bit 24 of `hi`
+(= syscall 88, `SYS_VMA_CREATE_PID`). Before strict
+enforcement this was harmless — `kernel_vm_copy_to` fell
+through to the legacy carve-out gate and allocated frames even
+when PM's `svc_vma_create` silently returned -1 (the new
+image's VMAs were never installed in the target's tree). With
+strict-check active, PM must actually create the VMAs;
+otherwise every `execve` would reject at the SysV-stack-frame
+write. The bit is now set; see
+[[feedback_rs_allow_mask_for_new_syscalls]] for the recurring
+pattern.
 
 `SYS_VMA_TRY_COPY` (98, debug-only) routes a kernel-side copy
 through `kernel_vm_copy_to` using the calling thread's own ptbr,
