@@ -5,15 +5,20 @@ import scala.compiletime.uninitialized
 
 class SyslLLVMCodegen(target: String = "host"):
   /** True for targets whose `size_t` / `ssize_t` / `ptrdiff_t` is 32 bits,
-    * not 64. Currently only `riscv32`-elf qualifies (rv32 ilp32d). Every
-    * external libc function the codegen declares uses C's natural `size_t`
-    * width for length/size params: matching that here is essential for the
-    * RISC-V varargs/calling-convention to line up. On rv32, calling
+    * not 64. `riscv32`-elf (rv32 ilp32d) and `wasm32`-wasi (wasm32 ilp32)
+    * both qualify. Every external libc function the codegen declares uses
+    * C's natural `size_t` width for length/size params: matching that here
+    * is essential for the calling convention to line up. On rv32, calling
     * `snprintf(buf, n, fmt, ...)` with `i64 n` desyncs every later argument
     * register (8-byte aligned register pair eaten by `n`, fmt ends up in
-    * the wrong slot, ...). */
+    * the wrong slot, ...); on wasm32 the symptom is similar — varargs are
+    * laid out as a stack buffer and a width mismatch corrupts every later
+    * read. The 32-bit flag also drives `ptrSize` (4 bytes) so composite
+    * struct sizes for `string`/`slice`/`func`/`iface` match LLVM's actual
+    * layout per the target datalayout. */
   private val is32Bit: Boolean = target match
     case "riscv32" | "riscv32-elf" => true
+    case "wasm32" | "wasm32-wasi"  => true
     case _                         => false
 
   /** LLVM IR type used for C `size_t` / `ssize_t` / `ptrdiff_t` on this
@@ -357,6 +362,14 @@ class SyslLLVMCodegen(target: String = "host"):
       case "riscv32" | "riscv32-elf" =>
         emit("""target datalayout = "e-m:e-p:32:32-i64:64-n32-S128"""")
         emit("""target triple = "riscv32-unknown-elf"""")
+      // wasm32-wasi: bare-metal-ish wasm bytecode with WASI imports for I/O.
+      // Datalayout matches clang's `-target wasm32-wasi` output (TargetInfo
+      // for wasm32). `p10:8:8` / `p20:8:8` are the wasm-specific funcref/
+      // externref address spaces — referenced even if the IR doesn't use
+      // them, since LLVM's wasm backend assumes their presence.
+      case "wasm32" | "wasm32-wasi" =>
+        emit("""target datalayout = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128"""")
+        emit("""target triple = "wasm32-unknown-wasi"""")
       case _ => // no target declarations for unknown targets
     emit("")
 
