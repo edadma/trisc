@@ -171,10 +171,10 @@ object SyslCli:
               )
             ),
           opt[String]("backend")
-            .text("Backend: interpreter (default) | llvm-host | svm-host | trisc | riscv64 | riscv32 | all")
+            .text("Backend: interpreter (default) | llvm-host | svm-host | trisc | riscv64 | riscv32 | wasm32 | all")
             .validate(v =>
-              if Seq("interpreter", "llvm-host", "svm-host", "trisc", "riscv64", "riscv32", "all").contains(v) then success
-              else failure(s"Unknown backend: $v (expected interpreter, llvm-host, svm-host, trisc, riscv64, riscv32, all)")
+              if Seq("interpreter", "llvm-host", "svm-host", "trisc", "riscv64", "riscv32", "wasm32", "all").contains(v) then success
+              else failure(s"Unknown backend: $v (expected interpreter, llvm-host, svm-host, trisc, riscv64, riscv32, wasm32, all)")
             )
             .action((v, c) =>
               c.copy(command = c.command match
@@ -1404,7 +1404,7 @@ object SyslCli:
 
   private def executeTest(cmd: TestCommand, lockMode: LockMode): Unit =
     if cmd.backend == "all" then
-      System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', 'trisc', 'riscv64', or 'riscv32')")
+      System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', 'trisc', 'riscv64', 'riscv32', or 'wasm32')")
       throw CliError("unsupported backend")
 
     val resolved = resolveDeps(cmd.inputs, ignoreLockPins = false, lockMode) match
@@ -1560,6 +1560,7 @@ object SyslCli:
         case "trisc"     => runOneTRISC(programFor(t.unitName), t)
         case "riscv64"   => runOneRiscV(64, programFor(t.unitName), t, rvProgramObjCache, rvRuntimeCache)
         case "riscv32"   => runOneRiscV(32, programFor(t.unitName), t, rvProgramObjCache, rvRuntimeCache)
+        case "wasm32"    => Fail("wasm32 test runner not yet implemented (chunk 2/3 of project_sysl_wasm_backend_roadmap) — codegen wiring is in place")
         case _           => runOneInterpreter(programFor(t.unitName), stdlibImports, t)
       val elapsedMs = (System.nanoTime() - start) / 1e6
       outcome match
