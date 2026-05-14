@@ -1390,6 +1390,37 @@ object SyslCli:
   private val wasmtimePath: String = Option(System.getenv("SYSL_WASMTIME"))
     .getOrElse("/opt/homebrew/bin/wasmtime")
 
+  /** Resolve a configuration name from either a Java system property OR a
+    * shell env var, preferring the system property when both are set.
+    *
+    * Both surfaces are equivalent in intent, but the system property is
+    * the only one in-process tests can flip per-test (the JVM's env-var
+    * map is unmodifiable). Production users almost always set the env
+    * var; the system-property path exists so the runner tests for
+    * [[runOneWasm]]'s host fork can exercise `SYSL_WASM_HOST=scala-interp`
+    * mid-suite without spawning a subprocess. */
+  private def wasmConfig(name: String): Option[String] =
+    Option(System.getProperty(name)).orElse(Option(System.getenv(name)))
+
+  /** Optional path to a launcher executable that runs a `.wasm` under the
+    * user's scala wasm interpreter (worktree at `/Users/ed/dev/wasm-stable/`,
+    * on the `stable` branch). The launcher must accept a single positional
+    * argument — the path to the `.wasm` file — and behave like wasmtime:
+    *
+    *   - exit 0 on clean completion, propagate `proc_exit(N)` as exit N
+    *   - route fd 1 to stdout, fd 2 to stderr (or fold both — our
+    *     panicMarker substring search handles either)
+    *   - auto-detect `_start` (the wasm-stable CLI at wasm@0294979 does this)
+    *
+    * The wasm-stable CLI is invoked, for example, as:
+    *
+    *   /Users/ed/dev/wasm-stable/cli/native/target/scala-3.8.3/cli-out
+    *
+    * after `sbt cliNative/nativeLink`, or as a `java -jar wasm-cli.jar`
+    * wrapper script after `sbt cliJVM/assembly`. The dispatcher doesn't
+    * care which strategy is used — it just shells out. */
+  private def wasmScalaInterpPath: Option[String] = wasmConfig("SYSL_WASM_SCALA_INTERP")
+
   /** Build the freestanding wasm runtime objects once per session. Each
     * compile is ~150ms; std/ has hundreds of tests so caching is worth
     * it even though wasm is faster than RV. clang+wasm-ld pick the right
@@ -1461,17 +1492,29 @@ object SyslCli:
     if exit != 0 then Left(s"clang failed (exit $exit): ${log.toString.trim}")
     else Right(objPath)
 
-  /** Compile + run one test on the wasm32 LLVM backend under wasmtime.
+  /** Compile + run one test on the wasm32 LLVM backend.
     *
     * Mirrors `runOneRiscV` step for step: cache the runtime objects and
     * the per-unit program obj, write a tiny C shim that calls the named
-    * test function, link to a `.wasm`, run under wasmtime, capture
-    * stdout+stderr (we merge — see the pitfalls note in the roadmap
-    * memo), parse the exit code and panic marker.
+    * test function, link to a `.wasm`, run it under the configured host,
+    * capture stdout+stderr (we merge — see the pitfalls note in the
+    * roadmap memo), parse the exit code and panic marker.
     *
-    * `WASM_DUMP_IR=1` saves the IR + wasm in
-    * /tmp/sysl_wasm_<unit>/ for inspection. `WASM_TRACE=1` prints a
-    * one-line per-test summary plus the raw wasmtime output to stderr.
+    * == Host selection — `SYSL_WASM_HOST` env var ==
+    *
+    *   - `wasmtime` (default) — fast, robust, fully spec-compliant.
+    *     The default for std/ sweeps and for `--backend wasm32` users
+    *     who just want their tests to run.
+    *   - `scala-interp` — shells out to the launcher at
+    *     `SYSL_WASM_SCALA_INTERP`, which must run our `.wasm` files
+    *     under the user's scala wasm interpreter (chunk-5 dogfood).
+    *     The launcher's job is "given a `.wasm` path, run `_start`,
+    *     route fd 1/2 to stdout/stderr, propagate `proc_exit(N)` to
+    *     its own exit code" — the wasm-stable CLI does exactly this.
+    *
+    * `WASM_DUMP_IR=1` saves the IR + wasm in /tmp/sysl_wasm_<unit>/
+    * for inspection. `WASM_TRACE=1` prints a one-line per-test summary
+    * plus the raw host output to stderr.
     */
   private def runOneWasm(
       program: TProgram,
@@ -1526,22 +1569,39 @@ object SyslCli:
         keepDir.resolve(s"test_${t.fn.name}.wasm"),
         java.nio.file.StandardCopyOption.REPLACE_EXISTING)
 
-    // Run under wasmtime. Our libc routes write(2, ...) through the same
-    // putchar path as fd=1 (see chunk-2 roadmap pitfalls), so panic text
-    // can land on either stream depending on host buffering. Merge both
-    // captures into one blob — `panicMarker` is a substring search so
-    // order doesn't matter, and the rv runner does the same thing
-    // (`stripped` already contains everything that arrived on serial).
+    // Run under the selected host. Our libc routes write(2, ...) through
+    // the same putchar path as fd=1 (see chunk-2 roadmap pitfalls), so
+    // panic text can land on either stream depending on host buffering.
+    // Merge both captures into one blob — `panicMarker` is a substring
+    // search so order doesn't matter, and the rv runner does the same
+    // thing (`stripped` already contains everything that arrived on
+    // serial).
+    val host = wasmConfig("SYSL_WASM_HOST").getOrElse("wasmtime")
+    val (hostLabel, wmArgs): (String, Seq[String]) = host match
+      case "wasmtime" =>
+        ("wasmtime", Seq(wasmtimePath, "run", wasmOut))
+      case "scala-interp" =>
+        // Launcher mandatory. Without it we can't fail open to wasmtime —
+        // the user explicitly asked for the scala interp, so fail clearly.
+        wasmScalaInterpPath match
+          case None =>
+            return Fail("SYSL_WASM_HOST=scala-interp but SYSL_WASM_SCALA_INTERP not set")
+          case Some(p) =>
+            if !java.nio.file.Files.exists(java.nio.file.Paths.get(p)) then
+              return Fail(s"SYSL_WASM_SCALA_INTERP launcher not found: $p")
+            ("scala-interp", Seq(p, wasmOut))
+      case other =>
+        return Fail(s"unknown SYSL_WASM_HOST: '$other' (expected wasmtime or scala-interp)")
+
     val outBuf = new StringBuilder
     val errBuf = new StringBuilder
     val wmLogger = scala.sys.process.ProcessLogger(
       line => outBuf.append(line).append('\n'),
       line => errBuf.append(line).append('\n'),
     )
-    val wmArgs = Seq(wasmtimePath, "run", wasmOut)
     val wmProc =
       try scala.sys.process.Process(wmArgs).run(wmLogger)
-      catch case e: Throwable => return Fail(s"wasmtime spawn failed: ${e.getMessage}")
+      catch case e: Throwable => return Fail(s"$hostLabel spawn failed: ${e.getMessage}")
     val wmExit: Int =
       val deadline = System.currentTimeMillis() + 15000L
       var done = false
@@ -1555,12 +1615,12 @@ object SyslCli:
         wmProc.destroy()
         Thread.sleep(100)
         if wmProc.isAlive() then wmProc.destroy()
-        return Fail(s"wasmtime timed out after 15s", outBuf.toString + errBuf.toString)
+        return Fail(s"$hostLabel timed out after 15s", outBuf.toString + errBuf.toString)
       code
 
     val captured = outBuf.toString + errBuf.toString
     if System.getenv("WASM_TRACE") != null then
-      System.err.println(s"WASM_TRACE: ${t.fn.name} exit=$wmExit")
+      System.err.println(s"WASM_TRACE: ${t.fn.name} host=$hostLabel exit=$wmExit")
       System.err.println(s"WASM_TRACE: stdout:\n${outBuf.toString}")
       System.err.println(s"WASM_TRACE: stderr:\n${errBuf.toString}")
 
@@ -1575,11 +1635,11 @@ object SyslCli:
     else if wmExit == 0 then
       if t.shouldPanic then Fail("expected panic, got normal return", captured) else Pass
     else
-      // No panic prefix found but wasmtime exited nonzero — usually a
+      // No panic prefix found but the host exited nonzero — usually a
       // wasm trap (unreachable, OOB memory access) caught by the host.
       // Surface both the exit code and the captured streams so the user
-      // can grep for the trap reason wasmtime printed.
-      Fail(s"wasmtime exited $wmExit with no panic marker", captured)
+      // can grep for the trap reason the host printed.
+      Fail(s"$hostLabel exited $wmExit with no panic marker", captured)
 
   /** Strip the OpenSBI v1.x banner from a captured stdout. The banner ends
     * with a "Domain0 Next Boot HART" / footer block followed by a blank line

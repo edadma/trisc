@@ -170,6 +170,90 @@ class SyslCliWasmRunnerTests extends AnyFreeSpec with Matchers {
       out should include("Unknown backend")
     }
   }
+
+  // === SYSL_WASM_HOST fork (chunk-5 plumbing) ===========================
+  //
+  // The dispatcher in `runOneWasm` reads `SYSL_WASM_HOST` /
+  // `SYSL_WASM_SCALA_INTERP` via the shared `wasmConfig` helper, which
+  // prefers a Java system property over an env var. That gives these
+  // in-process tests a way to flip host configuration per-test without
+  // mutating the JVM env map (which is unmodifiable). Production users
+  // set env vars; tests set sys-props.
+
+  /** Wrap a body in a temporary system-property override. Restores the
+    * prior state (set / unset) on exit so a failing test can't leak
+    * state into the next case. */
+  private def withSysProp[A](name: String, value: String)(body: => A): A =
+    val prior = Option(System.getProperty(name))
+    System.setProperty(name, value)
+    try body
+    finally prior match
+      case Some(v) => System.setProperty(name, v)
+      case None    => System.clearProperty(name)
+
+  /** Resolve the scala-interp launcher once. Cancels the test when the
+    * env var isn't set or points at a missing file — same shape as
+    * `requireToolchain` so CI without a built launcher reports
+    * "cancelled" rather than "failed". Set `SYSL_WASM_SCALA_INTERP` to
+    * either the wasm-stable scala-native binary
+    * (`/Users/ed/dev/wasm-stable/cli/native/target/scala-3.8.3/cli-out`
+    * after `sbt cliNative/nativeLink`) or a `java -jar wasm-cli.jar`
+    * wrapper script after sbt-assembly. */
+  private def requireScalaInterpLauncher(): String =
+    sys.env.get("SYSL_WASM_SCALA_INTERP")
+      .filter(p => java.nio.file.Files.exists(java.nio.file.Paths.get(p)))
+      .getOrElse(cancel("SYSL_WASM_SCALA_INTERP not set or launcher file missing — point it at the wasm-stable CLI binary or fat-jar wrapper"))
+
+  "SYSL_WASM_HOST=scala-interp routes the smoke corpus through the configured launcher" taggedAs Slow in {
+    requireToolchain()
+    val launcher = requireScalaInterpLauncher()
+    val (code, out) =
+      withSysProp("SYSL_WASM_HOST", "scala-interp") {
+        withSysProp("SYSL_WASM_SCALA_INTERP", launcher) {
+          runCli("test", "--backend", "wasm32", corpus)
+        }
+      }
+    withClue(out) {
+      code shouldBe 0
+      out should include("running 7 tests (backend: wasm32)")
+      out should include("7 passed, 0 failed")
+    }
+  }
+
+  "SYSL_WASM_HOST=scala-interp without SYSL_WASM_SCALA_INTERP fails clearly" taggedAs Slow in {
+    requireToolchain()
+    val (_, out) =
+      withSysProp("SYSL_WASM_HOST", "scala-interp") {
+        // Deliberately do NOT set SYSL_WASM_SCALA_INTERP — and clear it
+        // if it leaked in from the env (avoid resolving the real
+        // launcher and accidentally passing). Saving/restoring is
+        // sys-prop-only; the test trusts that no concurrent test has
+        // a stale sys-prop bound to the same name.
+        val prior = Option(System.getProperty("SYSL_WASM_SCALA_INTERP"))
+        System.clearProperty("SYSL_WASM_SCALA_INTERP")
+        try runCli("test", "--backend", "wasm32", corpus)
+        finally prior match
+          case Some(v) => System.setProperty("SYSL_WASM_SCALA_INTERP", v)
+          case None    => System.clearProperty("SYSL_WASM_SCALA_INTERP")
+      }
+    withClue(out) {
+      // The dispatcher returns Fail for each test (rather than aborting
+      // the suite), so the runner output names the missing env var on
+      // every failing test row.
+      out should include("SYSL_WASM_SCALA_INTERP not set")
+    }
+  }
+
+  "unknown SYSL_WASM_HOST value is rejected per-test with a clear message" taggedAs Slow in {
+    requireToolchain()
+    val (_, out) =
+      withSysProp("SYSL_WASM_HOST", "bogus") {
+        runCli("test", "--backend", "wasm32", corpus)
+      }
+    withClue(out) {
+      out should include("unknown SYSL_WASM_HOST: 'bogus'")
+    }
+  }
 }
 
 object SyslCliWasmRunnerTests:
