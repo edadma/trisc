@@ -1,26 +1,29 @@
 // Address layout for x86_64 user programs and servers.
 //
-// Programs (musl-linked, also native sysl) load into the high user
-// carve-out at VA 0x60000000 (matches aarch64 — same `slix-prog.ld`
-// script). Per-process VMA layout (code + stack VMAs) is the single
-// source of truth — see `oskit/kernel/vma.lsysl::VMA_DEFAULT_*`.
-// Initial-SP / stack-low values are surfaced to PM and RS via
+// Phase D.2: both programs (musl-linked, also native sysl) and
+// servers load into the high user carve-out at VA 0x60000000 (same
+// `prog.ld` / `server.ld` shape as aarch64). Per-process VMA
+// layout (code + stack VMAs) is the single source of truth — see
+// `oskit/kernel/vma.lsysl::VMA_DEFAULT_*`. Initial-SP / stack-low
+// values are surfaced to PM and RS via
 // `svc_vma_default_initial_sp` / `svc_vma_default_stack_low`
-// (syscalls 96/97) — no fixed PROG_USP/PROG_SSP constants here.
-//
-// Servers: code at 0xD4000, 32KB stack. Servers have large BSS
-// (RS ~128KB) and need ~176KB to 0x100000. The legacy `[0xCC000,
-// 0x100000)` carve-out backing SRV_USP/SRV_SSP is a PHASE 1
-// REPLACEMENT TARGET (Phase D of the VMA-list handoff retires it,
-// migrating servers to the same 0x60000000 carve-out as programs).
+// (syscalls 96/97). The legacy `[0xCC000, 0x100000)` carve-out
+// that used to back `SRV_USP/SRV_SSP = 0xD4000/0xD3000` is gone —
+// servers now use the same `VMA_DEFAULT_STACK_TOP/_BOT` constants
+// as everything else.
 //
 // PLATFORM_NAME (below) is the auxv `AT_PLATFORM` value — kept here
 // because the prog build can't drag in cpu.lsysl's kernel externs.
 
 module oskit.arch
 
-val SRV_USP  = 0xD4000
-val SRV_SSP  = 0xD3000
+// Legacy x86 server-stack constants. Equal to the cross-arch
+// `VMA_DEFAULT_STACK_TOP/BOT` so RS's startup path can compute
+// `child_sp = SRV_USP - 48` without importing the kernel VMA
+// module. Deleted at the same time RS migrates to
+// `svc_vma_default_initial_sp` directly.
+val SRV_USP  = 0x60090000
+val SRV_SSP  = 0x60080000
 
 // AT_PLATFORM string for the SysV initial stack auxv. ld-musl reads
 // this via `__init_libc` -> `__libc.platform` and uses it to pick

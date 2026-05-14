@@ -667,25 +667,35 @@ rolling back would require an extra walk of the PT.
                           pv_flags, pv_fd, pv_offset) == VMA_NIL
                 return -1
 
-            var executable = 0
-            if (pv_prot & VMA_PROT_EXEC) != 0
-                executable = 1
-            var parent_writable = 0
-            if (pv_prot & VMA_PROT_WRITE) != 0
-                parent_writable = 1
+PROT_NONE VMAs (e.g. the cross-arch guard region at
+`[0x5FFFF000, 0x60000000)`) have no leaf pages to share — they
+exist only to make any access fault into `vma_handle_fault` and
+get rejected. `vm_v2p` on those VAs may return non-zero because
+the kernel-identity 2 MiB superpage covers them at the PD level,
+but `vm_install_user_page` would refuse anyway (the PD slot is
+a block descriptor, not a table). Skip the per-page walk for
+prot==0 VMAs — the cloned VMA struct is enough.
 
-            var va = pv_start
-            while va < pv_end
-                val ppa = vm_v2p(parent_ptbr, va)
-                if ppa != u64(0)
-                    page_refcnt_share(ppa)
-                    if vm_install_user_page(child_ptbr, va, ppa, 0, executable) != 0
-                        kfree_user_page(ppa)
-                        return -1
-                    if parent_writable != 0
-                        if vm_update_user_prot(parent_ptbr, va, 0, executable) != 0
+            if pv_prot != VMA_PROT_NONE
+                var executable = 0
+                if (pv_prot & VMA_PROT_EXEC) != 0
+                    executable = 1
+                var parent_writable = 0
+                if (pv_prot & VMA_PROT_WRITE) != 0
+                    parent_writable = 1
+
+                var va = pv_start
+                while va < pv_end
+                    val ppa = vm_v2p(parent_ptbr, va)
+                    if ppa != u64(0)
+                        page_refcnt_share(ppa)
+                        if vm_install_user_page(child_ptbr, va, ppa, 0, executable) != 0
+                            kfree_user_page(ppa)
                             return -1
-                va += u64(PAGE_SIZE)
+                        if parent_writable != 0
+                            if vm_update_user_prot(parent_ptbr, va, 0, executable) != 0
+                                return -1
+                    va += u64(PAGE_SIZE)
 
             n = vma_next(n)
         0

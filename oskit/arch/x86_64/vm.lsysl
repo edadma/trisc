@@ -260,27 +260,19 @@ policy goes.
             vm_write_pte64(pdpt + u64(pi) * 8, k_pdpte)
             pi += 1
 
-        // PT[0x00..0xCB]: kernel region, identity-mapped (present + writable)
-        // Exception:
-        //   0xCB: guard page — left non-present so stack overflow past the
-        //        bottom of the program stack region (0xCC000) traps instead
-        //        of silently corrupting low memory. Safe to drop here since
-        //        x86 kernel loads at 0x100000 and doesn't use this area.
+        // PT[0x00..0xFF]: kernel region, identity-mapped
+        // (present + writable, supervisor-only). Phase D.2 retires the
+        // legacy user carve-out at [0xCC000, 0x100000) — both
+        // programs and servers now live at 0x60000000+ (see
+        // `prog.ld` / `server.ld`), so the eager 0xCC..0xFF
+        // allocate-and-mark-user loop is gone. The cross-arch
+        // PROT_NONE guard VMA at `[0x5FFFF000, 0x60000000)`
+        // (`vma_seed_default_layout`) replaces the page-0xCB
+        // guard's role of trapping stack-overflow past the
+        // bottom of the user range.
         var i = 0
-        while i < 0xCC
-            if i == 0xCB
-                // Guard page: non-present (PTE = 0)
-                vm_write_pte64(pt + u64(i) * 8, i64(0))
-            else
-                vm_write_pte64(pt + u64(i) * 8, i64(u64(i) * u64(PAGE_SIZE)) | PTE_P | PTE_W)
-            i += 1
-
-        // PT[0xCC..0xFF]: program region, fresh physical pages (present + writable + user)
         while i < 0x100
-            val page = page_alloc()
-            if page == 0
-                return 0
-            vm_write_pte64(pt + u64(i) * 8, i64(page) | PTE_P | PTE_W | PTE_U)
+            vm_write_pte64(pt + u64(i) * 8, i64(u64(i) * u64(PAGE_SIZE)) | PTE_P | PTE_W)
             i += 1
 
         // PT[0x100..0x1FF]: kernel code/data/BSS region, identity-mapped
@@ -319,23 +311,13 @@ today (other servers pass 0 and skip the MMIO grant entirely).
         if pml4 == 0
             return 0
         val pdpt = u64(vm_read_pte64(pml4) & PTE_ADDR_MASK)
-        val pd = u64(vm_read_pte64(pdpt) & PTE_ADDR_MASK)
-        val pt = u64(vm_read_pte64(pd) & PTE_ADDR_MASK)
 
-        // Expand server user region downward: replace kernel-identity
-        // mappings at PT[0x40..0xCA] with fresh user pages. The server
-        // binary loads at 0x40000 with _heap_end = 0xCB000 (guard),
-        // giving ~555KB for code+BSS. Needed because inet grew past
-        // the old 0xD4000..0x100000 slot (~176KB) and its zero-fill
-        // was corrupting the kernel's identity-mapped code at 1MB+.
-        var si = 0x40
-        while si <= 0xCA
-            val npage = page_alloc()
-            if npage == 0
-                return 0
-            vm_write_pte64(pt + u64(si) * 8,
-                i64(npage) | PTE_P | PTE_W | PTE_U)
-            si += 1
+        // Phase D.2: the "expand server user region downward" loop
+        // (PT[0x40..0xCA] with fresh user pages so server code+BSS at
+        // 0x40000..0xCB000 had backing) is gone. Servers now link at
+        // 0x60000000 like programs and demand-page through the same
+        // L3 carve-out under PDPT[1] / PD[256] / user_pt that
+        // `vm_create_process_pt` already allocates.
 
         if io_page != 0
             // Build a fresh PD for 3-4GB with PTE_U=1 on every 2MB
@@ -459,14 +441,13 @@ Free all pages allocated for a process page table.
         if pt == 0
             return
 
-        // Free program pages (PT entries 0xCC-0xFF)
-        var i = 0xCC
-        while i < 0x100
-            val pte = vm_read_pte64(pt + u64(i) * 8)
-            if (pte & PTE_P) != 0
-                val phys = u64(pte & PTE_ADDR_MASK)
-                page_free(phys)
-            i += 1
+        // Phase D.2: the legacy PT[0xCC..0xFF] page-freeing walk is
+        // gone — `vm_create_process_pt` no longer eager-maps user
+        // pages there. Leaf pages installed lazily by
+        // `vma_handle_fault` / `kernel_vm_copy_to` are released by
+        // `reap_process` → `vma_unmap_all_pages` *before* this
+        // function runs, so the PT-structure free below is all
+        // that's left to do here.
 
         // Free the page table structures
         page_free(pt)
@@ -689,44 +670,6 @@ Copy data from another address space using physical addressing.
                 chunk = len - copied
             memcpy(dst + copied, *byte(pa), chunk)
             copied += chunk
-
-Phase 1 chunk 6 — fork's eager-region clone.
-
-x86_64 user programs link at `0xE0000` and live in the legacy
-0xCC..0xFF region that `vm_create_process_pt` *eagerly* allocates
-fresh zero pages for. This region is not covered by any VMA (it
-predates the chunk-3 VMA seeding), so `vma_clone_for_fork`
-doesn't see it; the child would inherit a freshly-zeroed code
-region and trap on first instruction fetch.
-
-Bridge that gap by byte-copying parent's contents into the
-child's eager pages, page by page. This drops COW semantics for
-the legacy region (each fork pays a 208 KB copy), but the
-legacy region is static text + small data and forks are rare;
-the proper fix is to migrate x86 user programs to link at
-`0x60000000` like aarch64 (master roadmap invariant 1) so the
-whole region becomes a normal demand-paged VMA. Until then, this
-helper makes fork correct.
-
-aarch64 has its own no-op shim (no eager region exists there)
-so `kernel_fork` can call this unconditionally.
-
-    arch_fork_clone_eager(src_ptbr: u64, dst_ptbr: u64)
-        var i = 0xCC
-        while i < 0x100
-            val va = u64(i) * u64(PAGE_SIZE)
-            val src_pa = vm_v2p(src_ptbr, va)
-            val dst_pa = vm_v2p(dst_ptbr, va)
-            if src_pa != u64(0)
-                if dst_pa != u64(0)
-                    var sp: *byte = *byte(src_pa)
-                    var dp: *byte = *byte(dst_pa)
-                    var k = 0
-                    while k < PAGE_SIZE
-                        dp[k] = sp[k]
-                        k += 1
-            i += 1
-
 
 Copy data between two address spaces via physical addresses.
 

@@ -1082,9 +1082,14 @@ Phase 1 chunk 3 — seed the default per-process VMA layout.
 
 Both `create_process` and `create_process_suspended` call this
 right after `vma_tree_init` so every process starts with the same
-two anonymous VMAs covering the user carve-out:
-  - `[0x60000000, 0x60080000)` RWX — code/data/heap
-  - `[0x60080000, 0x60090000)` RW  — stack (no-exec)
+three anonymous VMAs:
+  - `[0x5FFFF000, 0x60000000)` PROT_NONE — stack-overflow / wild-
+    pointer guard, one page below the user range. Any access
+    routes to `vma_handle_fault`, which sees `prot==0` and
+    rejects, killing the process. Phase D.2 replaces the x86
+    `PT[0xCB]` literal-guard with this cross-arch VMA.
+  - `[0x60000000, 0x60080000)` RWX — code/data/heap.
+  - `[0x60080000, 0x60090000)` RW  — stack (no-exec).
 The eager 144-page mapping in `vm_create_process_pt` is gone, so
 runtime accesses to any unmapped page in either VMA route through
 `vma_handle_fault` and lazily get a fresh zero frame.
@@ -1102,6 +1107,9 @@ logic. Chunk 8's `exec()` will replace this with PHT-driven layout.
         val rwx = VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC
         val rw  = VMA_PROT_READ | VMA_PROT_WRITE
         val anon_priv = VMA_MAP_ANON | VMA_MAP_PRIVATE
+        vma_create(&processes[pid].vma_tree,
+                   u64(VMA_DEFAULT_CODE_BOT) - u64(PAGE_SIZE), u64(VMA_DEFAULT_CODE_BOT),
+                   VMA_PROT_NONE, anon_priv, -1, u64(0))
         vma_create(&processes[pid].vma_tree,
                    u64(VMA_DEFAULT_CODE_BOT), u64(VMA_DEFAULT_CODE_TOP),
                    rwx, anon_priv, -1, u64(0))
@@ -2290,15 +2298,14 @@ fault`'s COW path relies on. No PTBR switch is needed.
             processes[child_pid].state = PROC_FREE
             return -1
 
-        // x86 user programs still link at 0xE0000 in the legacy
-        // eager-mapped region (PT[0xCC..0xFF]); copy parent's text
-        // into child's freshly-allocated pages so the child can
-        // resume at the parent's post-syscall PC. No-op on aarch64
-        // — see oskit/arch/*/vm.lsysl::arch_fork_clone_eager.
-        // Master-roadmap migration target: link x86 progs at
-        // 0x60000000 like aarch64 so the legacy region disappears
-        // and this helper becomes universally a no-op.
-        arch_fork_clone_eager(parent_ptbr, child_ptbr)
+        // Phase D.2 retired the x86 legacy `[0xCC000, 0x100000)`
+        // eager-mapped region; both arches now use the
+        // 0x60000000 user carve-out with full COW fork driven by
+        // `vma_clone_for_fork`. The `arch_fork_clone_eager` shim
+        // that used to copy parent's text into the child's
+        // freshly-allocated eager pages is gone — there are no
+        // eager pages to copy, and COW handles everything inside
+        // the VMA-tracked range.
 
         // Allocate a fresh kstack for the child's main thread.
         arch_cli()

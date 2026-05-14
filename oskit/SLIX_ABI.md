@@ -617,33 +617,37 @@ through `svc_vma_default_initial_sp` / `svc_vma_default_stack_low`
 | code (anon)            | 0x60000000..0x60080000  (128 pages)     | RWX  |
 | stack (anon)           | 0x60080000..0x60090000  ( 16 pages)     | RW   |
 
-**Server** layout is still arch-specific, in
-`oskit/arch/<arch>/prog_config.sysl::SRV_USP/SRV_SSP`:
+**Server** layout matches programs after Phase D.2:
 
 | Arch     | SRV_USP    | SRV_SSP    |
 | -------- | ---------- | ---------- |
-| x86_64   | 0xD4000    | 0xD3000    |
+| x86_64   | 0x60090000 | 0x60080000 |
 | aarch64  | 0x60090000 | 0x60080000 |
 | trisc    | 0xD0000    | 0xCF000    | (sidelined — not first-class)
 
-PHASE 1 NOTE. **SRV_USP/SRV_SSP also disappear in Phase D** of the
-VMA-list handoff — servers move into the same `0x60000000` carve-out
-as programs and get demand-paged via the VMA tree. Server pages
-remain identity-mapped on x86 in the meantime; their layout moves
-into a generic device-process model in Phase 5 (master-roadmap
-invariant 11).
+PHASE 1 NOTE. Both x86 and aarch64 servers now live in the
+`VMA_DEFAULT_*` carve-out — same code/data/heap VMA at
+`[0x60000000, 0x60080000)` and stack VMA at
+`[0x60080000, 0x60090000)` as user programs. The `SRV_USP/SRV_SSP`
+constants in `oskit/arch/<arch>/prog_config.sysl` are now equal
+to `VMA_DEFAULT_STACK_TOP/_BOT`; they remain as a compatibility
+alias for RS's startup-stack arithmetic that hasn't yet moved to
+`svc_vma_default_initial_sp` directly. Phase 5's generic
+device-process model retires them (master-roadmap invariant 11).
 
 ### 4.3 Cross-arch invariants
 
-- **Guard page (x86_64 only).** Page `0xCB` is left non-present
-  in every process PT. Stack overflow past the bottom of the
-  legacy `[0xCC000, 0x100000)` carve-out (still used by x86
-  native-sysl programs and servers) faults instead of silently
-  corrupting low memory. TRISC has no guard because its kernel
-  loads at `0x0` and BSS extends into low pages. aarch64's high
-  `0x60000000` carve-out makes a guard unnecessary. Phase D of
-  the VMA-list handoff folds this into a PROT_NONE VMA below
-  `VMA_DEFAULT_CODE_BOT`.
+- **Guard VMA at `[0x5FFFF000, 0x60000000)` (cross-arch).** Phase
+  D.2 retired the x86 page-0xCB literal guard. `vma_seed_default_
+  layout` now seeds a PROT_NONE VMA one page below
+  `VMA_DEFAULT_CODE_BOT` in every process's tree. Any access
+  routes to `vma_handle_fault`, which sees `prot==0` and rejects;
+  the process dies. Works on both arches because the kernel's
+  L2[255] (aarch64) / PD[0xFF] (x86) 2 MiB superpages are
+  supervisor-only, so user-mode access permission-faults into
+  the handler regardless of how `vm_v2p` resolves the address.
+  TRISC has no guard because its kernel loads at `0x0` and BSS
+  extends into low pages.
 - **Kernel thread stacks.** `kernel_stacks: [32][16384]byte` lives
   in BSS. Static. Tied to MAX_THREADS × THREAD_STACK_SIZE.
   Replacement = "alloc_stack(size)" API in Phase 1.
@@ -662,16 +666,31 @@ These items are PHASE 1 REPLACEMENT TARGETS. The numbers stay,
 the semantics change. Do not extend them; do not add new
 fixed-region state.
 
-- `oskit/arch/x86_64/prog_config.sysl::SRV_USP/SRV_SSP` (Phase D)
-- `oskit/arch/aarch64/prog_config.sysl::SRV_USP/SRV_SSP` (Phase D)
+- `oskit/arch/{x86_64,aarch64}/prog_config.sysl::SRV_USP/SRV_SSP`
+  — equal to `VMA_DEFAULT_STACK_TOP/_BOT` after Phase D.2;
+  compatibility alias for RS's startup arithmetic. Phase 5
+  retires them.
 - `oskit/arch/trisc/prog_config.sysl::PROG_USP/PROG_SSP` (sidelined)
-- `oskit/arch/x86_64/vm.lsysl::vm_create_process_pt` (eager mapping
-  of legacy `[0xCC000, 0x100000)` carve-out — Phase D)
-- `oskit/arch/aarch64/vm.lsysl::vm_create_process_pt` (eager mapping
-  + `USER_CODE_PAGES` / `USER_STACK_PAGES` / `USER_STACK_L3_START`)
-- `oskit/arch/trisc/vm.lsysl::vm_create_process_pt` (eager mapping)
+- `oskit/arch/trisc/vm.lsysl::vm_create_process_pt` (eager mapping —
+  sidelined)
 - `oskit/kernel/kernel.lsysl::kernel_stacks` (static BSS array —
   out of scope until a real driver needs variable-size stacks)
+
+### Recently retired (Phase D.2)
+
+- `oskit/arch/x86_64/vm.lsysl::vm_create_process_pt`'s eager
+  `PT[0xCC..0xFF]` allocate-and-mark-user loop. Programs and
+  servers now demand-page through PDPT[1]/PD[256]/user_pt like
+  aarch64.
+- `oskit/arch/x86_64/vm.lsysl::vm_create_server_pt`'s
+  "expand server user region downward" loop at `PT[0x40..0xCA]`.
+- `oskit/arch/x86_64/vm.lsysl::vm_free_process_pt`'s legacy
+  `PT[0xCC..0xFF]` page-freeing walk.
+- `oskit/arch/{x86_64,aarch64}/vm.lsysl::arch_fork_clone_eager`
+  (x86 byte-copy + aarch64 no-op shim). `kernel_fork` is now
+  pure-COW via `vma_clone_for_fork`.
+- `oskit/arch/x86_64/{prog,server}.ld` load address `0xE0000` /
+  `0x40000` — both now `0x60000000`, matching aarch64.
 - `PM_CMD_SPAWN` semantics — TOF loader → ELF + PT_INTERP (done at
   chunk 8; the entry stays as a historical landmark)
 
@@ -768,14 +787,12 @@ Recently retired (Phase B of the VMA-list handoff):
   from `reap_process` before `vm_free_process_pt`) walks every
   VMA range, clears each leaf PTE, and drops the process's
   refcount on each frame — fixes a pre-existing leak of mmap'd
-  pages on process exit; (3) new `arch_fork_clone_eager` byte-
-  copies the parent's legacy 0xCC..0xFF code region into the
-  child on x86 (no-op on aarch64) so forked children resume at
-  parent's post-syscall PC instead of trapping on the freshly-
-  allocated zero pages of the eager region. Migrating x86 user
-  programs to link at `0x60000000` (matching aarch64) is the
-  cleaner long-term path — once that lands the helper becomes
-  universally a no-op.
+  pages on process exit; (3) `arch_fork_clone_eager` byte-
+  copied the parent's legacy 0xCC..0xFF code region into the
+  child on x86 (no-op on aarch64). Phase D.2 retired both shims
+  — x86 programs and servers now link at `0x60000000` like
+  aarch64, the legacy region is gone, and `kernel_fork` is
+  pure COW via `vma_clone_for_fork`.
 - **2026-05-08 / Phase 1 chunk 7** — ELF parsing infrastructure
   (`SYS_ELF_SELFTEST` = 92). New `oskit.lib.elf` module exposes
   ELF64 magic/class validation, header-field accessors

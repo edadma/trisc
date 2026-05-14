@@ -140,8 +140,12 @@ kernel_main() -> i64
         uart_puts("[kernel_main] ERROR: failed to load RS\n")
         return -1
 
-    // Create RS process (suspended) and resume it
-    val rs_pid = create_process_suspended(rs_entry_pt, 0xD4000, 0xD3000, "rs", rs_ptbr)
+    // Create RS process (suspended) and resume it. Phase D.2:
+    // RS lives at 0x60000000+ with its stack VMA at
+    // [0x60080000, 0x60090000) — same as aarch64 and user
+    // programs. The old 0xD4000 / 0xD3000 legacy-region literals
+    // are gone with the carve-out.
+    val rs_pid = create_process_suspended(rs_entry_pt, 0x60090000, 0x60080000, "rs", rs_ptbr)
     if rs_pid < 0
         return -1
     resume_process(rs_pid)
