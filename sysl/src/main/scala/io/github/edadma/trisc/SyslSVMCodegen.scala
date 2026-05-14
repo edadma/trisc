@@ -653,6 +653,24 @@ class SyslSVMCodegen:
         emitStore(p.typ)
         emit(s"  local_set $i")
 
+    // Value-struct (and array / data-enum) params are pass-by-value per the
+    // language reference. The caller hands us the source's address; we must
+    // allocate a fresh defensive local copy so writes inside the body don't
+    // leak back to the caller. Skips refs/slices/strings/closures — those
+    // carry their own sharing semantics and the caller intends sharing.
+    for i <- 0 until nParams do
+      val p = fun.params(i)
+      p.typ match
+        case _: SyslType.StructType | _: SyslType.ArrayType | _: SyslType.EnumType =>
+          val size = p.typ.sizeOf
+          emitMemAlloc(size)         // ( new )
+          emit("  dup")              // ( new, new )
+          emit(s"  local_get $i")    // ( new, new, src )
+          emit("  swap")             // ( new, src, new )  -- (src, dest) on top
+          emitStore(p.typ)           // emitStore-aggregate consumes BOTH src and dest → ( new )
+          emit(s"  local_set $i")    // local[i] = new
+        case _ => // scalars/refs/slices/strings/closures: keep caller's value/share
+
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr)
