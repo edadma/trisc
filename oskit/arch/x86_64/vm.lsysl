@@ -649,26 +649,25 @@ PTE range and re-flag any pages already faulted in.
 
 Copy data into another address space using physical addressing.
 
-Phase 1 chunk 3 introduces allocate-on-write: when the target VA
-falls inside the user carve-out [0x60000000, 0x60200000) and the
-PTE is non-present, allocate a fresh zero frame and install it
-via `vm_install_user_page` before memcpy. Lets the spawn pipeline
-write segments + stack into a process whose `vm_create_process_pt`
-no longer pre-allocates the 144 user pages.
+Phase 1 chunk 3.7 (Phase C of the VMA-list invariant): this is a
+low-level primitive now — stride one page at a time, translate
+VA→PA, memcpy. **No allocate-on-write here.** Pages that are
+non-present cause the function to return early; the caller is
+responsible for ensuring every destination page is mapped.
+
+The allocate-on-write logic that used to live here (gated on the
+literal `[0x60000000, 0x60200000)` carve-out) has moved up into
+`oskit.kernel.kernel_vm_copy_to`, which consults the target
+process's VMA tree as the authority. Callers that want
+allocate-on-write must go through `kernel_vm_copy_to` instead of
+calling `vm_copy_to` directly. The syscall dispatcher and every
+existing in-tree caller has been migrated.
 
     vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int)
         var copied = 0
         while copied < len
             val cur_va = dst_vaddr + u64(copied)
-            var pa = vm_v2p(dst_ptbr, cur_va)
-            if pa == u64(0)
-                if cur_va >= u64(0x60000000)
-                    if cur_va < u64(0x60200000)
-                        val frame = page_alloc_zero()
-                        if frame != u64(0)
-                            val page_va = cur_va & ~u64(0xFFF)
-                            if vm_install_user_page(dst_ptbr, page_va, frame, 1, 1) == 0
-                                pa = vm_v2p(dst_ptbr, cur_va)
+            val pa = vm_v2p(dst_ptbr, cur_va)
             if pa == u64(0)
                 return
             val page_off = int(cur_va & u64(0xFFF))

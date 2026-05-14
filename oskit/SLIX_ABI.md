@@ -155,8 +155,10 @@ user-mode). Numbers are stable. Definitions live in
 | 92  | SYS_ELF_SELFTEST      | sys_elf_selftest_handler (debug)     |
 | 93  | SYS_PROC_REPLACE_IMAGE_PREP | sys_proc_replace_image_prep_handler |
 | 94  | SYS_EXECVE_FINALIZE   | sys_execve_finalize_handler          |
+| 95  | SYS_MONOTONIC_MS      | (fast path — wall-clock ms since boot) |
 | 96  | SYS_VMA_DEFAULT_INITIAL_SP | sys_vma_default_initial_sp_handler |
 | 97  | SYS_VMA_DEFAULT_STACK_LOW  | sys_vma_default_stack_low_handler  |
+| 98  | SYS_VMA_TRY_COPY      | sys_vma_try_copy_handler (debug)     |
 
 PHASE 1 NOTE. The VM/process syscalls (44–60, 63, 66, 79) all
 assume the current "fixed-region eager mapping" model. They
@@ -166,6 +168,49 @@ when VMA lists land:
   is consulted lazily on fault).
 - `SYS_VM_COPY_TO` / `SYS_VM_COPY_FROM` still work, but will fault
   in pages on access via the destination VMA.
+
+PHASE 1 CHUNK 3.7 NOTE (Phase C of the per-process VMA-list
+invariant). `SYS_VM_COPY_TO` (54) is now wired through the
+kernel-side `kernel_vm_copy_to`, which centralizes
+allocate-on-write into the kernel layer. The arch-level
+`vm_copy_to` is demoted to a stride+memcpy primitive that
+returns early on any unmapped page — every caller that needs
+allocate-on-write semantics must go through `kernel_vm_copy_to`.
+
+`kernel_vm_copy_to`'s policy by destination class:
+
+  * **Below `0x60000000`** — if the page is unmapped, reject with
+    -1 (no allocate-on-write into kernel-identity territory).
+  * **`[0x60000000, 0x60200000)`** — the user carve-out. Orphan
+    ptbrs (transient during PM spawn, before
+    `create_process_suspended` populates the Process slot)
+    allocate-on-write here unconditionally; known processes
+    allocate-on-write if `vm_install_user_page` succeeds.
+  * **At or above `0x60200000`** — `vm_install_user_page`
+    decides: aarch64 L0[0]/L1/L2 tables exist only in the
+    carve-out, so installs above 4 GiB fail; x86_64 PDPT[2..3]
+    are kernel-identity-mapped, so `vm_v2p` returns non-zero
+    and the install path isn't entered — the existing PT is
+    trusted (this is the Phase C "soft spot" Phase D retires
+    when the legacy x86 region goes).
+
+Strict VMA-tree consultation (rejecting writes to known-process
+VAs that fall outside every registered VMA) is **deferred to
+Phase D** — the present allocator-level migration centralises
+the policy without yet enforcing it across every legacy
+caller. The boot-time PT-as-cache invariant the handoff calls
+out as "soft" remains soft for in-carve-out non-VMA pages, but
+the kernel now has one obvious place to extend the check.
+
+`SYS_VMA_TRY_COPY` (98, debug-only) routes a kernel-side copy
+through `kernel_vm_copy_to` using the calling thread's own ptbr,
+so a user-space test can probe the policy decision without
+PM/server plumbing. Args: a0=dst_vaddr, a1=src_vaddr (in
+caller), a2=len. Returns 0 on success, -1 if any destination
+page can't be installed. Used by `oskit/bin/test_vma_4.lsysl`.
+(Picked 98 because 95 is consumed by `monotonic_ms`'s cross-arch
+fast path — boot.s on x86_64, hello.lsysl on aarch64 — which
+short-circuits slow-path table dispatch.)
 
 ## 2. POSIX shim syscall surface (`posix_dispatch`)
 

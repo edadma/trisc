@@ -21,7 +21,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
     import oskit.arch.{page_alloc_zero, kernel_ptbr, vm_flush_tlb,
         vm_create_process_pt, vm_set_ptbr, read_sctlr_el1,
         read_esr_el1, abort, drop_to_el0,
-        sync_icache_line, vm_v2p, vm_copy_to, vm_copy_from,
+        sync_icache_line, vm_v2p, vm_copy_from,
         vm_install_user_page,
         cntfrq_el0, cntp_tval_set, cntp_ctl_set,
         build_stack_frame, arch_resume_process,
@@ -36,6 +36,7 @@ implementations of `arch_dispatch_sync`, `arch_dispatch_irq`, and
         virtio_notify_tid,
         kernel_set_system_info,
         kernel_handle_user_fault,
+        kernel_vm_copy_to,
         vma_default_initial_sp, vma_default_stack_low,
         current_thread, ticks, monotonic_ms_count}
     import oskit.config.{NUM_PRIORITIES, MAX_SYSCALLS}
@@ -692,13 +693,15 @@ copy-in needed.
         syscall_return(i64(0))
 
 Load `len` bytes from `src` into the process's user code region.
-Phase 1 chunk 3: forwards to `vm_copy_to`, which is now allocate-on-
-write for unmapped pages in the user carve-out. The byte-by-byte
-walker that was here before chunk 3 used eager-mapped pages; with
-demand paging it would have aborted on the first VA it saw.
+Phase 1 chunk 3.7 (Phase C of the VMA-list invariant): forwards
+to `kernel_vm_copy_to`, the VMA-authorized variant. The boot-time
+demo paths here run against an orphan ptbr (the Process slot
+for the test program hasn't been wired up yet), so this falls
+through to the legacy carve-out gate and the existing
+demand-paging behaviour is preserved.
 
     user_load_program(ptbr: u64, src_va: i64, len: int)
-        vm_copy_to(ptbr, u64(0x60000000), *byte(src_va), len)
+        kernel_vm_copy_to(ptbr, u64(0x60000000), *byte(src_va), len)
 
 Flush the I-cache for every line covering `len` bytes starting at
 the user code region's first physical page. We walk the L3 entries
@@ -749,7 +752,7 @@ line per 64 bytes of code.
         var user_stack_buf: [48]byte
         memset(&user_stack_buf[0], 0, 48)
         val user_sp = i64(vma_default_initial_sp()) - 48
-        vm_copy_to(new_pt, u64(user_sp), user_stack_buf, 48)
+        kernel_vm_copy_to(new_pt, u64(user_sp), user_stack_buf, 48)
 
         val pid = create_process_suspended(
             i64(0x60000000), user_sp, i64(vma_default_stack_low()),
@@ -821,7 +824,7 @@ ipc_write_saved_r1 / syscall_return_for PTBR-awareness.
         var uipc_stack_buf: [48]byte
         memset(&uipc_stack_buf[0], 0, 48)
         val uipc_sp = i64(vma_default_initial_sp()) - 48
-        vm_copy_to(new_pt, u64(uipc_sp), uipc_stack_buf, 48)
+        kernel_vm_copy_to(new_pt, u64(uipc_sp), uipc_stack_buf, 48)
 
         val pid = create_process_suspended(
             i64(0x60000000), uipc_sp, i64(vma_default_stack_low()),

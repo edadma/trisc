@@ -1134,6 +1134,21 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "vma3: bad"
   }
 
+  "vma4: vm_copy_to refuses writes outside VMA list" in {
+    // Phase 1 chunk 3.7 (Phase C of the VMA-list invariant): arch
+    // vm_copy_to is now a stride+memcpy primitive — no allocate-
+    // on-write. The new kernel_vm_copy_to wrapper consults the
+    // destination process's VMA tree to decide whether a missing
+    // page may be allocate-on-write installed. test_vma_4 drives
+    // the path through the SYS_VMA_TRY_COPY (95) debug syscall:
+    // an in-VMA destination (0x60050000) succeeds with rc=0 and the
+    // payload bytes are readable back; an out-of-VMA destination
+    // (0x70000000) is rejected with rc=-1.
+    val output = qemu.command("test_vma_4")
+    output should include("vma4: ok")
+    output should not include "vma4: bad"
+  }
+
   "mmap: anon mmap/munmap/mprotect end-to-end" in {
     // Phase 1 chunk 4. test_mmap calls Linux ARM64 syscalls 222
     // (mmap), 226 (mprotect), and 215 (munmap) via the POSIX shim.

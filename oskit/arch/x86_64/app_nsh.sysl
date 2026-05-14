@@ -2,8 +2,8 @@
 // Kernel bootstraps RS from boot info. RS starts all servers
 // (disk, tfs, tty, pm, vfs) then init which runs nsh.
 
-import oskit.kernel.{create_process_suspended, resume_process, first_thread_ssp, kernel_set_system_info, register_syscall, register_syscall6}
-import oskit.arch.{vm_create_server_pt, vm_copy_to}
+import oskit.kernel.{create_process_suspended, resume_process, first_thread_ssp, kernel_set_system_info, register_syscall, register_syscall6, kernel_vm_copy_to}
+import oskit.arch.{vm_create_server_pt}
 import oskit.arch.x86_64.{uart_puts, sys_puts_handler}
 import oskit.posix.sys_fd_transplant_handler
 import oskit.drivers.virtio.virtio_net_bringup
@@ -50,7 +50,7 @@ k_load_elf64(buf: *byte, buflen: int, ptbr: u64) -> i64
             if offset + filesz > buflen
                 return -1
             if filesz > 0
-                vm_copy_to(ptbr, vaddr, buf + offset, filesz)
+                kernel_vm_copy_to(ptbr, vaddr, buf + offset, filesz)
             if memsz > filesz
                 var zero_buf: [1024]byte
                 memset(zero_buf, 0, 1024)
@@ -60,7 +60,7 @@ k_load_elf64(buf: *byte, buflen: int, ptbr: u64) -> i64
                     var chunk = rem
                     if chunk > 1024
                         chunk = 1024
-                    vm_copy_to(ptbr, dst, zero_buf, chunk)
+                    kernel_vm_copy_to(ptbr, dst, zero_buf, chunk)
                     rem -= chunk
                     dst += u64(chunk)
         i += 1

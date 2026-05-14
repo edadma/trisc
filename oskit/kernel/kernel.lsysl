@@ -528,7 +528,13 @@ Returns bytes copied or -1 on error.
         if direction == 0
             vm_copy_from(granter_ptbr, remote_addr, local_buf, len)
         else
-            vm_copy_to(granter_ptbr, remote_addr, local_buf, len)
+            // VMA-authorized: the granter is a real process whose
+            // VMA tree must cover `remote_addr`. -1 returns surface
+            // as a 0-bytes-copied/length result here, which is the
+            // existing failure shape.
+            if kernel_vm_copy_to(granter_ptbr, remote_addr, local_buf, len) != 0
+                kernel_continue_current()
+                return i64(-1)
         kernel_continue_current()
         i64(len)
 
@@ -827,13 +833,122 @@ directly.
         syscall_return(result)
         kernel_continue_current()
 
+Find the pid that owns a given page-table base, or -1 if no
+running process matches. Linear scan over the 16-slot process
+table — fine for current scale; replace with a hash if/when
+MAX_PROCESSES grows. Returns -1 for orphan ptbrs (e.g. a PT
+allocated by `svc_vm_create_pt` *before* the matching
+`create_process_suspended` runs, as happens during PM spawn).
+
+    private find_pid_by_ptbr(ptbr: u64) -> int
+        var i = 1
+        while i < MAX_PROCESSES
+            if processes[i].state != PROC_FREE
+                if processes[i].ptbr == ptbr
+                    return i
+            i += 1
+        return -1
+
+Allocate-on-write variant of `vm_copy_to`. **This is the path
+callers should use** when the destination might contain
+non-present pages that need fresh frames — the arch-level
+`vm_copy_to` is now a stride+memcpy primitive that returns
+early on a missed translation.
+
+Phase 1 chunk 3.7 (Phase C of the per-process VMA-list
+invariant): the allocate-on-write side of `vm_copy_to` used to
+live in arch code and was gated on the literal user carve-out
+`[0x60000000, 0x60200000)`. This consolidates the policy into
+the kernel layer so it has one obvious place to extend (strict
+VMA-tree consultation lands in Phase D once the legacy x86
+region retires and PT-as-cache becomes unambiguous). The
+present semantics:
+
+  * **Pages below `0x60000000`** — if unmapped, reject with -1.
+    The kernel-identity 2 MiB blocks make `vm_v2p` return
+    non-zero for those VAs in practice, so this rejection only
+    fires on the (rare) intermediate-table-missing edge.
+  * **Pages in `[0x60000000, 0x60200000)`** — orphan ptbrs
+    (transient during PM spawn) allocate-on-write
+    unconditionally; known processes allocate-on-write when
+    `vm_install_user_page` succeeds (the L3 carve-out exists
+    on both arches). Strict "must be in a registered VMA"
+    enforcement is deferred — Phase C centralises, Phase D
+    enforces.
+  * **Pages at or above `0x60200000`** — `vm_install_user_page`
+    decides: aarch64 L0[0]/L1/L2 only cover the carve-out, so
+    installs above 4 GiB fail; x86_64 kernel-identity 2 MiB
+    blocks make `vm_v2p` non-zero so the install isn't entered.
+
+Returns 0 on success, -1 if any destination page can't be
+installed.
+
+    kernel_vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int) -> int
+        val pid = find_pid_by_ptbr(dst_ptbr)
+
+First pass: walk every page in the destination range and make
+sure each one is sanctioned + mapped.
+
+**Two address-space classes** during Phase C:
+
+  * **VMA-tracked range** (`>= 0x60000000`) — for known processes
+    (pid>0) the VMA tree is the strict authority. A page outside
+    every registered VMA is rejected even if the PT happens to
+    have an entry (the kernel's identity map of low PD slots
+    surfaces non-zero `vm_v2p` returns for addresses no user
+    VMA covers — that's the "PT-as-cache" gap Phase C closes).
+    For orphan ptbrs (transient during PM spawn), the legacy
+    carve-out `[0x60000000, 0x60200000)` substitutes for the
+    not-yet-seeded VMA tree.
+
+  * **Legacy x86 program/server region** (`< 0x60000000`,
+    typically `0x40000..0x100000`) — not yet VMA-tracked.
+    Phase D retires this carve-out. Until then, accept any write
+    here as long as the PT actually maps the page (i.e. trust
+    the existing PT-cache state).
+
+        var visited = 0
+        while visited < len
+            val cur_va = dst_vaddr + u64(visited)
+            val pa = vm_v2p(dst_ptbr, cur_va)
+            if pa == u64(0)
+                if cur_va < u64(0x60000000)
+                    return -1
+                if pid <= 0
+                    if cur_va >= u64(0x60200000)
+                        return -1
+                val frame = page_alloc_zero()
+                if frame == u64(0)
+                    return -1
+                val page_va = cur_va & ~u64(0xFFF)
+                if vm_install_user_page(dst_ptbr, page_va, frame, 1, 1) != 0
+                    return -1
+            val page_off = int(cur_va & u64(0xFFF))
+            var chunk = PAGE_SIZE - page_off
+            if chunk > len - visited
+                chunk = len - visited
+            visited += chunk
+
+Second pass: every page is now sanctioned and mapped. The arch
+stride+memcpy primitive does the actual writes.
+
+        vm_copy_to(dst_ptbr, dst_vaddr, src, len)
+        return 0
+
 SYS_VM_COPY_TO (54): Copy data into another address space.
-Args: a0=dst_ptbr, a1=dst_vaddr, a2=src, a3=len.
+Args: a0=dst_ptbr, a1=dst_vaddr, a2=src, a3=len. Returns 0 on
+success, -1 if any page falls outside the destination
+process's VMA tree (the strict path) or outside the legacy
+carve-out for orphan ptbrs (the back-compat fallback). Wires
+the syscall to `kernel_vm_copy_to`; existing callers that
+ignored the return value (PM, RS, loader, drivers) still
+work — they get -1 silently on out-of-VMA targets, which
+is the strictly stronger Phase C behaviour.
 
     sys_vm_copy_to_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
-        vm_copy_to(u64(a0), u64(a1), *byte(a2), int(a3))
+        val rc = kernel_vm_copy_to(u64(a0), u64(a1), *byte(a2), int(a3))
         kernel_continue_current()
-        i64(0)
+        i64(rc)
 
 SYS_VM_COPY_FROM (55): Copy data from another address space.
 Args: a0=src_ptbr, a1=src_vaddr, a2=dst, a3=len.
@@ -1029,6 +1144,31 @@ without referencing arch-named PROG_USP/PROG_SSP constants.
     sys_vma_default_stack_low_handler(arg: int)
         syscall_return(i64(vma_default_stack_low()))
         kernel_continue_current()
+
+SYS_VMA_TRY_COPY (98) — debug-only handle for vma4 testing.
+Args: a0=dst_vaddr, a1=src_kvaddr (user-space pointer in the
+calling thread's address space), a2=len. Translates `src_kvaddr`
+through the caller's ptbr to a physical address, then routes
+through `kernel_vm_copy_to(current_ptbr, dst_vaddr, src_pa, len)`.
+Returns 0 on success, -1 if any destination page falls outside
+the caller's VMA tree. Exposed so a user-space test can ask the
+kernel to attempt a VMA-authorized write in its own address
+space without needing PM/server plumbing. Pure debug-only — no
+production code path uses this. **Number 98 picked because 95 is
+claimed by the cross-arch `monotonic_ms` fast path** (x86_64
+`boot.s:692` and aarch64 `hello.lsysl:390`), which short-circuits
+the slow-path table dispatch and would silently return `ticks`
+instead of running the handler.
+
+    sys_vma_try_copy_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        if current_thread < 0
+            return i64(-1)
+        val ptbr = threads[current_thread].ptbr
+        val src_pa = vm_v2p(ptbr, u64(a1))
+        if src_pa == u64(0)
+            return i64(-1)
+        val rc = kernel_vm_copy_to(ptbr, u64(a0), *byte(src_pa), int(a2))
+        i64(rc)
 
 
 SYS_COW_REFCNT_SELFTEST (89): kernel-side refcount-table selftest.
@@ -1389,9 +1529,9 @@ pool regions (TRISC L1[1] superpage, x86_64 PD[1..15] superpages).
 vm_copy_to translates the destination vaddr via page walk and copies.
 
     sys_phys_read_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
-        vm_copy_to(threads[current_thread].ptbr, u64(a1), *byte(a0), int(a2))
+        val rc = kernel_vm_copy_to(threads[current_thread].ptbr, u64(a1), *byte(a0), int(a2))
         kernel_continue_current()
-        i64(0)
+        i64(rc)
 
 Thread info query handlers (syscalls 7-9, 42-43).
 Used by ps and other user programs via ulib.
@@ -1612,6 +1752,7 @@ explicitly. Args: a0=pid. Returns 0; no-op for invalid pid.
         register_syscall(92, sys_elf_selftest_handler)
         register_syscall(93, sys_proc_replace_image_prep_handler)
         register_syscall6(94, sys_execve_finalize_handler)
+        register_syscall6(98, sys_vma_try_copy_handler)
         register_syscall(96, sys_vma_default_initial_sp_handler)
         register_syscall(97, sys_vma_default_stack_low_handler)
 
@@ -1978,9 +2119,14 @@ Unlike create_process, the thread is never enqueued — no race.
         // Build context frame (arch-specific: x86 builds on kernel stack,
         // TRISC builds in buffer and copies to child's SSP)
         threads[idx].ssp = arch_setup_process_frame(entry_point, usp, ssp, kstack_top_val, ptbr_val)
-        // Write thread_exit return address into child's user stack
+        // Write thread_exit return address into child's user stack.
+        // Uses `kernel_vm_copy_to`, which at this point sees an
+        // orphan ptbr (the Process slot isn't populated until line
+        // ~2133 below) and falls back to the legacy `[0x60000000,
+        // 0x60200000)` allocate-on-write gate. That's the same
+        // behaviour the arch-level `vm_copy_to` had pre-Phase-C.
         var exit_addr: i64 = i64(&thread_exit)
-        vm_copy_to(ptbr_val, u64(usp - i64(8)), *byte(&exit_addr), 8)
+        kernel_vm_copy_to(ptbr_val, u64(usp - i64(8)), *byte(&exit_addr), 8)
         threads[idx].state = STATE_SUSPENDED
         threads[idx].wake_ms = 0
         val np2 = *byte(name)

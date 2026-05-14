@@ -403,19 +403,19 @@ page, then memcpy the chunk that fits inside that page. The memcpy
 call is the HAL's `oskit.hal.memcpy`, which on boards with a DMA
 engine (e.g. rp2040) is free to route through it.
 
+Phase 1 chunk 3.7 (Phase C of the VMA-list invariant): this is a
+low-level primitive — no allocate-on-write. Pages that are
+non-present cause the function to return early. The
+allocate-on-write logic moved up to
+`oskit.kernel.kernel_vm_copy_to`, which consults the target
+process's VMA tree as the authority. Callers that need
+allocate-on-write must go through `kernel_vm_copy_to`.
+
     vm_copy_to(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int)
         var copied = 0
         while copied < len
             val cur_va = dst_vaddr + u64(copied)
-            var pa = vm_v2p(dst_ptbr, cur_va)
-            if pa == u64(0)
-                if cur_va >= u64(0x60000000)
-                    if cur_va < u64(0x60200000)
-                        val frame = page_alloc_zero()
-                        if frame != u64(0)
-                            val page_va = cur_va & ~u64(0xFFF)
-                            if vm_install_user_page(dst_ptbr, page_va, frame, 1, 1) == 0
-                                pa = vm_v2p(dst_ptbr, cur_va)
+            val pa = vm_v2p(dst_ptbr, cur_va)
             if pa == u64(0)
                 return
             val page_off = int(cur_va & u64(0xFFF))

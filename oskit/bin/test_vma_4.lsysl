@@ -1,0 +1,105 @@
+test_vma_4 — vm_copy_to refuses writes outside the VMA list
+============================================================
+
+Phase 1 chunk 3.7 (Phase C of the per-process VMA-list invariant):
+the kernel-side `kernel_vm_copy_to` now consults the destination
+process's VMA tree as the authority for whether an unmapped
+destination page may be allocate-on-write installed. The arch-
+level `vm_copy_to` is a stride+memcpy primitive that no longer
+implements allocate-on-write; the legacy `[0x60000000,
+0x60200000)` literal-range gate is gone.
+
+This test drives the new path through a debug syscall
+`SYS_VMA_TRY_COPY` (98) that routes a kernel-side copy via the
+calling thread's own ptbr + VMA tree.
+
+Two probes:
+
+  * **In-VMA destination** — `0x60050000` is inside the default
+    seeded code/data/heap VMA `[0x60000000, 0x60080000)` but
+    past every test binary's segments + BSS, so the destination
+    page starts non-present. `kernel_vm_copy_to` looks up the
+    VMA, allocates a fresh zero frame via
+    `vm_install_user_page`, then memcpys.  Expect rc=0 and the
+    payload bytes readable back.
+
+  * **Out-of-VMA destination** — `0x100000000` (4 GiB) lies
+    above the top-level page-table entry that
+    `vm_create_process_pt` installs (PML4[0] on x86_64, L0[0]
+    on aarch64).  `kernel_vm_copy_to`'s allocate-on-write path
+    calls `vm_install_user_page` which returns -1 immediately
+    because the intermediate level is missing — the page can't
+    be installed.  The syscall returns -1.  This destination is
+    portable across both arches: kernel-identity 2 MiB blocks
+    don't cover above-PML4[0]/L0[0], so `vm_v2p` returns 0 and
+    the allocate path is entered (and rejected).
+
+Pass criterion: prints `vma4: ok`.
+
+    module oskit.bin.test_vma_4
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6}
+
+
+    val SYS_VMA_TRY_COPY = 98
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("vma4: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    main(argv: []string)
+        var payload: [16]byte
+        var i = 0
+        while i < 16
+            payload[i] = byte(0xA0 + i)
+            i += 1
+
+        // Probe 1 — in-VMA destination.  Touches an unmapped page
+        // inside the seeded heap VMA; the kernel must allocate-on-
+        // write and copy.  Expect rc=0.
+        val in_vma_dst: i64 = i64(0x60050000)
+        val rc_in = int(syscall6(SYS_VMA_TRY_COPY, in_vma_dst,
+                                 i64(&payload[0]), i64(16), 0, 0, 0))
+        if rc_in != 0
+            fail(1)
+            return
+
+        // Verify the payload actually landed (the page was allocated
+        // and memcpy completed end-to-end).
+        var rp: *byte = *byte(u64(in_vma_dst))
+        var j = 0
+        while j < 16
+            if rp[j] != byte(0xA0 + j)
+                fail(2)
+                return
+            j += 1
+
+        // Probe 2 — out-of-VMA destination at 4 GiB.  Above
+        // PML4[0] / L0[0]'s reach; vm_install_user_page returns
+        // -1 because the intermediate level is missing, so
+        // kernel_vm_copy_to rejects with -1.
+        val out_vma_dst: i64 = i64(0x100000000)
+        val rc_out = int(syscall6(SYS_VMA_TRY_COPY, out_vma_dst,
+                                  i64(&payload[0]), i64(16), 0, 0, 0))
+        if rc_out != -1
+            fail(3)
+            return
+
+        puts("vma4: ok\n")
+        exit()
