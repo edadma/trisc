@@ -4,6 +4,38 @@ import scala.collection.mutable
 import scala.compiletime.uninitialized
 
 class SyslLLVMCodegen(target: String = "host"):
+  /** True for targets whose `size_t` / `ssize_t` / `ptrdiff_t` is 32 bits,
+    * not 64. Currently only `riscv32`-elf qualifies (rv32 ilp32d). Every
+    * external libc function the codegen declares uses C's natural `size_t`
+    * width for length/size params: matching that here is essential for the
+    * RISC-V varargs/calling-convention to line up. On rv32, calling
+    * `snprintf(buf, n, fmt, ...)` with `i64 n` desyncs every later argument
+    * register (8-byte aligned register pair eaten by `n`, fmt ends up in
+    * the wrong slot, ...). */
+  private val is32Bit: Boolean = target match
+    case "riscv32" | "riscv32-elf" => true
+    case _                         => false
+
+  /** LLVM IR type used for C `size_t` / `ssize_t` / `ptrdiff_t` on this
+    * target. The codegen uses this for the width of every libc length/size
+    * parameter and for the polymorphic length width on `llvm.memset.p0i8`. */
+  private val sizeT: String = if is32Bit then "i32" else "i64"
+
+  /** LLVM intrinsic name suffix for the `llvm.memset.p0i8` intrinsic on this
+    * target. The mangled name encodes the length-argument width. */
+  private val memsetIntrinsic: String = if is32Bit then "llvm.memset.p0i8.i32" else "llvm.memset.p0i8.i64"
+
+  /** Byte width of a pointer on this target (4 on ilp32 rv32, 8 elsewhere).
+    * Used by `llvmSizeOf` / `llvmAlignOf` so composite struct strides for
+    * `string`, `slice`, `closure` and `iface` (each contains pointers) come
+    * out matching what LLVM actually lays out per the target datalayout —
+    * essential for correct slice-index strides and struct field offsets
+    * on rv32. */
+  private val ptrSize: Long = if is32Bit then 4L else 8L
+
+  /** Natural alignment of a pointer on this target — same as `ptrSize`. */
+  private val ptrAlign: Long = ptrSize
+
   private val out = new StringBuilder
   private var activeOut: StringBuilder = out // emit writes here; switches between out and bodyBuf
   private val bodyBuf = new StringBuilder // body code buffer during function generation
@@ -335,14 +367,14 @@ class SyslLLVMCodegen(target: String = "host"):
       if !definedNames.contains(name) then emit(decl)
     declareIfNotDefined("declare i32 @putchar(i32)", "putchar")
     declareIfNotDefined("declare i32 @printf(i8*, ...)", "printf")
-    declareIfNotDefined("declare i32 @snprintf(i8*, i64, i8*, ...)", "snprintf")
-    declareIfNotDefined("declare i8* @malloc(i64)", "malloc")
-    declareIfNotDefined("declare i64 @strlen(i8*)", "strlen")
-    declareIfNotDefined("declare i8* @memcpy(i8*, i8*, i64)", "memcpy")
-    declareIfNotDefined("declare i32 @memcmp(i8*, i8*, i64)", "memcmp")
-    declareIfNotDefined("declare i8* @memset(i8*, i32, i64)", "memset")
+    declareIfNotDefined(s"declare i32 @snprintf(i8*, $sizeT, i8*, ...)", "snprintf")
+    declareIfNotDefined(s"declare i8* @malloc($sizeT)", "malloc")
+    declareIfNotDefined(s"declare $sizeT @strlen(i8*)", "strlen")
+    declareIfNotDefined(s"declare i8* @memcpy(i8*, i8*, $sizeT)", "memcpy")
+    declareIfNotDefined(s"declare i32 @memcmp(i8*, i8*, $sizeT)", "memcmp")
+    declareIfNotDefined(s"declare i8* @memset(i8*, i32, $sizeT)", "memset")
     declareIfNotDefined("declare void @free(i8*)", "free")
-    emit("declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)")
+    emit(s"declare void @$memsetIntrinsic(i8*, i8, $sizeT, i1)")
     // Saturating arithmetic intrinsics for wrapping_*/saturating_* builtins.
     for w <- Seq(8, 16, 32, 64) do
       emit(s"declare i$w @llvm.sadd.sat.i$w(i$w, i$w)")
@@ -351,7 +383,7 @@ class SyslLLVMCodegen(target: String = "host"):
       emit(s"declare i$w @llvm.usub.sat.i$w(i$w, i$w)")
       emit(s"declare {i$w, i1} @llvm.smul.with.overflow.i$w(i$w, i$w)")
       emit(s"declare {i$w, i1} @llvm.umul.with.overflow.i$w(i$w, i$w)")
-    declareIfNotDefined("declare i64 @write(i32, i8*, i64)", "write")
+    declareIfNotDefined(s"declare $sizeT @write(i32, i8*, $sizeT)", "write")
     declareIfNotDefined("declare i32 @fflush(i8*)", "fflush")
     declareIfNotDefined("declare void @abort()", "abort")
     declareIfNotDefined("declare void @exit(i32)", "exit")
@@ -407,19 +439,27 @@ class SyslLLVMCodegen(target: String = "host"):
       emit(s"""$label = private unnamed_addr constant <{ i64, [$byteLen x i8] }> <{ i64 -1, [$byteLen x i8] c"${escapeForLlvm(s)}\\00" }>""")
     if stringConstants.nonEmpty then emit("")
 
-    // Built-in panic function: write message to stderr and abort
+    // Built-in panic function: write message to stderr and abort.
+    // The size-typed args (third argument to `write`, plus the casts for
+    // string lengths) all use the target's `sizeT` so the libc-side
+    // declaration matches on rv32 too. The string struct's length field
+    // is always i32 in the IR, so we sext/zext to sizeT before the call.
     emit("@.str.panic_prefix = private unnamed_addr constant [8 x i8] c\"panic: \\00\"")
     emit("")
     emit("define void @panic(%struct.string %msg) {")
     emit("entry:")
     emit("  %prefix = getelementptr [8 x i8], [8 x i8]* @.str.panic_prefix, i32 0, i32 0")
-    emit("  %w1 = call i64 @write(i32 2, i8* %prefix, i64 7)")
+    emit(s"  %w1 = call $sizeT @write(i32 2, i8* %prefix, $sizeT 7)")
     emit("  %ptr = extractvalue %struct.string %msg, 0")
     emit("  %len = extractvalue %struct.string %msg, 1")
-    emit("  %len64 = sext i32 %len to i64")
-    emit("  %w2 = call i64 @write(i32 2, i8* %ptr, i64 %len64)")
+    if is32Bit then
+      // len is already i32 = sizeT on rv32, no extension.
+      emit(s"  %w2 = call $sizeT @write(i32 2, i8* %ptr, $sizeT %len)")
+    else
+      emit(s"  %lenST = sext i32 %len to $sizeT")
+      emit(s"  %w2 = call $sizeT @write(i32 2, i8* %ptr, $sizeT %lenST)")
     emit("  %nl = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
-    emit("  %w3 = call i64 @write(i32 2, i8* %nl, i64 1)")
+    emit(s"  %w3 = call $sizeT @write(i32 2, i8* %nl, $sizeT 1)")
     emit("  call void @abort()")
     emit("  unreachable")
     emit("}")
@@ -428,13 +468,13 @@ class SyslLLVMCodegen(target: String = "host"):
     // Built-in range-check failure helper: write "range check failed: <alias>\n" to stderr, abort.
     emit("@.str.range_prefix = private unnamed_addr constant [21 x i8] c\"range check failed: \\00\"")
     emit("")
-    emit("define void @__range_fail(i8* %name, i64 %len) {")
+    emit(s"define void @__range_fail(i8* %name, $sizeT %len) {")
     emit("entry:")
     emit("  %prefix = getelementptr [21 x i8], [21 x i8]* @.str.range_prefix, i32 0, i32 0")
-    emit("  %w1 = call i64 @write(i32 2, i8* %prefix, i64 20)")
-    emit("  %w2 = call i64 @write(i32 2, i8* %name, i64 %len)")
+    emit(s"  %w1 = call $sizeT @write(i32 2, i8* %prefix, $sizeT 20)")
+    emit(s"  %w2 = call $sizeT @write(i32 2, i8* %name, $sizeT %len)")
     emit("  %nl = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
-    emit("  %w3 = call i64 @write(i32 2, i8* %nl, i64 1)")
+    emit(s"  %w3 = call $sizeT @write(i32 2, i8* %nl, $sizeT 1)")
     emit("  call void @abort()")
     emit("  unreachable")
     emit("}")
@@ -451,13 +491,16 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("  ret void")
     emit("fail:")
     emit("  %prefix = getelementptr [19 x i8], [19 x i8]* @.str.assert_prefix, i32 0, i32 0")
-    emit("  %w1 = call i64 @write(i32 2, i8* %prefix, i64 18)")
+    emit(s"  %w1 = call $sizeT @write(i32 2, i8* %prefix, $sizeT 18)")
     emit("  %ptr = extractvalue %struct.string %msg, 0")
     emit("  %len = extractvalue %struct.string %msg, 1")
-    emit("  %len64 = sext i32 %len to i64")
-    emit("  %w2 = call i64 @write(i32 2, i8* %ptr, i64 %len64)")
+    if is32Bit then
+      emit(s"  %w2 = call $sizeT @write(i32 2, i8* %ptr, $sizeT %len)")
+    else
+      emit(s"  %lenST = sext i32 %len to $sizeT")
+      emit(s"  %w2 = call $sizeT @write(i32 2, i8* %ptr, $sizeT %lenST)")
     emit("  %nl = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
-    emit("  %w3 = call i64 @write(i32 2, i8* %nl, i64 1)")
+    emit(s"  %w3 = call $sizeT @write(i32 2, i8* %nl, $sizeT 1)")
     emit("  call void @abort()")
     emit("  unreachable")
     emit("}")
@@ -1126,9 +1169,11 @@ class SyslLLVMCodegen(target: String = "host"):
             emit(s"  $gep = getelementptr $elt, $elt* $base, i64 $idx64")
             gep
           case _ =>
-            // Slice or ref-slice: use byte arithmetic on data pointer
+            // Slice or ref-slice: use byte arithmetic on data pointer.
+            // For RefType(SliceType) the inline slice descriptor is the
+            // element — let llvmSizeOf compute its target-aware width.
             val elemSize = elemType match
-              case SyslType.RefType(_: SyslType.SliceType) => 24L
+              case SyslType.RefType(_: SyslType.SliceType) => llvmSizeOf(elemType)
               case _ => llvmSizeOf(elemType)
             val dataPtr = array.typ match
               case SyslType.SliceType(_) =>
@@ -1451,13 +1496,13 @@ class SyslLLVMCodegen(target: String = "host"):
         val lLen64 = newReg()
         emit(s"  $lLen64 = sext i32 $lLen to i64")
         val cp1 = newReg()
-        emit(s"  $cp1 = call i8* @memcpy(i8* $buf, i8* $lPtr, i64 $lLen64)")
+        emit(s"  $cp1 = call i8* @memcpy(i8* $buf, i8* $lPtr, $sizeT ${narrowI64ToSizeT(lLen64)})")
         val dest = newReg()
         emit(s"  $dest = getelementptr i8, i8* $buf, i64 $lLen64")
         val rLen64 = newReg()
         emit(s"  $rLen64 = sext i32 $rLen to i64")
         val cp2 = newReg()
-        emit(s"  $cp2 = call i8* @memcpy(i8* $dest, i8* $rPtr, i64 $rLen64)")
+        emit(s"  $cp2 = call i8* @memcpy(i8* $dest, i8* $rPtr, $sizeT ${narrowI64ToSizeT(rLen64)})")
         emitMakeString(buf, totalLen)
 
       case TBinary(left, op @ ("==" | "!="), right, _) if left.typ == SyslType.StringType =>
@@ -1492,7 +1537,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val len64 = newReg()
         emit(s"  $len64 = sext i32 $lLen to i64")
         val cmpResult = newReg()
-        emit(s"  $cmpResult = call i32 @memcmp(i8* $lPtr, i8* $rPtr, i64 $len64)")
+        emit(s"  $cmpResult = call i32 @memcmp(i8* $lPtr, i8* $rPtr, $sizeT ${narrowI64ToSizeT(len64)})")
         val bytesEq = newReg()
         emit(s"  $bytesEq = icmp eq i32 $cmpResult, 0")
         val lenMatchExit = currentBlock
@@ -1701,7 +1746,7 @@ class SyslLLVMCodegen(target: String = "host"):
             val nlPtr = newReg()
             emit(s"  $nlPtr = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
             val ignored = newReg()
-            emit(s"  $ignored = call i64 @write(i32 1, i8* $nlPtr, i64 1)")
+            emit(s"  $ignored = call $sizeT @write(i32 1, i8* $nlPtr, $sizeT 1)")
             "0"
           case _ =>
             val v0 = genExpr(arg)
@@ -1725,7 +1770,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val nlPtr = newReg()
         emit(s"  $nlPtr = getelementptr [1 x i8], [1 x i8]* @.str.newline, i32 0, i32 0")
         val ignored = newReg()
-        emit(s"  $ignored = call i64 @write(i32 1, i8* $nlPtr, i64 1)")
+        emit(s"  $ignored = call $sizeT @write(i32 1, i8* $nlPtr, $sizeT 1)")
         "0"
 
       case TCall("write_str", List(fdArg, strArg), _) =>
@@ -1750,8 +1795,17 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $len32 = load i32, i32* $lenGep")
         val len64 = newReg()
         emit(s"  $len64 = sext i32 $len32 to i64")
-        val written = newReg()
-        emit(s"  $written = call i64 @write(i32 $fd32, i8* $ptr, i64 $len64)")
+        val writtenST = newReg()
+        emit(s"  $writtenST = call $sizeT @write(i32 $fd32, i8* $ptr, $sizeT ${narrowI64ToSizeT(len64)})")
+        // write's return is sizeT; widen back to i64 for downstream consumers
+        // that expect a uniform i64 (matches the pre-fix codegen contract). On
+        // lp64 sizeT == i64 so emitSextIfNeeded is a no-op.
+        val written =
+          if is32Bit then
+            val w = newReg()
+            emit(s"  $w = sext $sizeT $writtenST to i64")
+            w
+          else writtenST
         emitSextIfNeeded(written, "i64", t)
 
       case TCall(name, args, _) =>
@@ -2051,7 +2105,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val cast = newReg()
         emit(s"  $cast = bitcast $arrType* $alloca to i8*")
         val byteSize = llvmSizeOf(elemType) * size
-        emit(s"  call void @llvm.memset.p0i8.i64(i8* $cast, i8 0, i64 $byteSize, i1 false)")
+        emit(s"  call void @$memsetIntrinsic(i8* $cast, i8 0, $sizeT $byteSize, i1 false)")
         // Store each element
         for (elem, i) <- elements.zipWithIndex do
           val v = genExpr(elem)
@@ -2072,7 +2126,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val cast = newReg()
         emit(s"  $cast = bitcast $arrType* $alloca to i8*")
         val byteSize = llvmSizeOf(elemType) * size
-        emit(s"  call void @llvm.memset.p0i8.i64(i8* $cast, i8 0, i64 $byteSize, i1 false)")
+        emit(s"  call void @$memsetIntrinsic(i8* $cast, i8 0, $sizeT $byteSize, i1 false)")
         alloca
 
       case TIndex(array, index, elemType) =>
@@ -2114,9 +2168,10 @@ class SyslLLVMCodegen(target: String = "host"):
                 ptr
               case _ =>
                 emitSliceDataPtr(base, array.typ)
-            // For RefType(SliceType(_)) elements, treat as inline %struct.slice (24 bytes)
+            // For RefType(SliceType(_)) elements, treat as inline %struct.slice.
+            // The descriptor size is target-aware via llvmSizeOf (16 on rv32, 24 on lp64).
             val (elt, eSize, asAggregate) = elemType match
-              case SyslType.RefType(_: SyslType.SliceType) => ("%struct.slice", 24L, true)
+              case SyslType.RefType(_: SyslType.SliceType) => ("%struct.slice", llvmSizeOf(elemType), true)
               case _ => (llvmType(elemType), llvmSizeOf(elemType), isAggregate(elemType))
             val idx64 = newReg()
             emit(s"  $idx64 = sext i32 $idx to i64")
@@ -2402,7 +2457,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val srcStart = newReg()
         emit(s"  $srcStart = getelementptr i8, i8* $srcPtr, i64 $lo64")
         val cp = newReg()
-        emit(s"  $cp = call i8* @memcpy(i8* $dataPtr, i8* $srcStart, i64 $newLen64)")
+        emit(s"  $cp = call i8* @memcpy(i8* $dataPtr, i8* $srcStart, $sizeT ${narrowI64ToSizeT(newLen64)})")
         emitMakeString(dataPtr, newLen)
 
       case TSliceExpr(array, low, high, SyslType.SliceType(elemType)) =>
@@ -2530,14 +2585,14 @@ class SyslLLVMCodegen(target: String = "host"):
         val allocSize = newReg()
         emit(s"  $allocSize = mul i64 $newCap64, $elemSize")
         val newBuf = newReg()
-        emit(s"  $newBuf = call i8* @malloc(i64 $allocSize)")
+        emit(s"  $newBuf = call i8* @malloc($sizeT ${narrowI64ToSizeT(allocSize)})")
         // Copy old data
         val curLen64 = newReg()
         emit(s"  $curLen64 = sext i32 $curLen to i64")
         val copySize = newReg()
         emit(s"  $copySize = mul i64 $curLen64, $elemSize")
         val ignored = newReg()
-        emit(s"  $ignored = call i8* @memcpy(i8* $newBuf, i8* $curPtr, i64 $copySize)")
+        emit(s"  $ignored = call i8* @memcpy(i8* $newBuf, i8* $curPtr, $sizeT ${narrowI64ToSizeT(copySize)})")
         emit(s"  br label %$contLabel")
         // No-grow path
         emitLabel(noGrowLabel)
@@ -2604,10 +2659,10 @@ class SyslLLVMCodegen(target: String = "host"):
 
       case TNew(structType, args) =>
         val st = structType
-        val dataSize = st.sizeOf
+        val dataSize = llvmSizeOf(st)
         val totalSize = dataSize + 8 // 8-byte refcount header
         val buf = newReg()
-        emit(s"  $buf = call i8* @malloc(i64 $totalSize)")
+        emit(s"  $buf = call i8* @malloc($sizeT $totalSize)")
         // Init refcount = 1
         val rcPtr = newReg()
         emit(s"  $rcPtr = bitcast i8* $buf to i64*")
@@ -2616,7 +2671,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val dataPtr = newReg()
         emit(s"  $dataPtr = getelementptr i8, i8* $buf, i64 8")
         // Zero-init data
-        emit(s"  call void @llvm.memset.p0i8.i64(i8* $dataPtr, i8 0, i64 $dataSize, i1 false)")
+        emit(s"  call void @$memsetIntrinsic(i8* $dataPtr, i8 0, $sizeT $dataSize, i1 false)")
         // Store constructor args
         val structLt = llvmType(st)
         val typedData = newReg()
@@ -2657,9 +2712,9 @@ class SyslLLVMCodegen(target: String = "host"):
         val totalSize = newReg()
         emit(s"  $totalSize = add i64 $dataBytes, 16")
         val buf = newReg()
-        emit(s"  $buf = call i8* @malloc(i64 $totalSize)")
+        emit(s"  $buf = call i8* @malloc($sizeT ${narrowI64ToSizeT(totalSize)})")
         // Zero the whole thing
-        emit(s"  call void @llvm.memset.p0i8.i64(i8* $buf, i8 0, i64 $totalSize, i1 false)")
+        emit(s"  call void @$memsetIntrinsic(i8* $buf, i8 0, $sizeT ${narrowI64ToSizeT(totalSize)}, i1 false)")
         // Refcount = 1 at offset 0
         val rcPtr = newReg()
         emit(s"  $rcPtr = bitcast i8* $buf to i64*")
@@ -2688,28 +2743,28 @@ class SyslLLVMCodegen(target: String = "host"):
         // Layout matches TEnumConstruct's value form, but in malloc'd memory with an
         // 8-byte rc header. Returns a data pointer (past the rc header) — same convention
         // as TNew. RefType(EnumType) deinit walks the active variant before free.
-        val dataSize = et.sizeOf
+        val dataSize = llvmSizeOf(et)
         val totalSize = dataSize + 8
         val buf = newReg()
-        emit(s"  $buf = call i8* @malloc(i64 $totalSize)")
+        emit(s"  $buf = call i8* @malloc($sizeT $totalSize)")
         val rcPtr = newReg()
         emit(s"  $rcPtr = bitcast i8* $buf to i64*")
         emit(s"  store i64 1, i64* $rcPtr")
         val dataPtr = newReg()
         emit(s"  $dataPtr = getelementptr i8, i8* $buf, i64 8")
-        emit(s"  call void @llvm.memset.p0i8.i64(i8* $dataPtr, i8 0, i64 $dataSize, i1 false)")
+        emit(s"  call void @$memsetIntrinsic(i8* $dataPtr, i8 0, $sizeT $dataSize, i1 false)")
         // Store tag at data offset 0
         val tagPtr = newReg()
         emit(s"  $tagPtr = bitcast i8* $dataPtr to i32*")
         emit(s"  store i32 $variantIndex, i32* $tagPtr")
         // Store variant fields at data + dataOffset
         if args.nonEmpty then
-          val dataOffset = et.dataOffset
+          val dataOffset = llvmEnumDataOffset(et)
           val variantFields = et.variants(variantIndex)._2
           var fieldOffset = 0L
           for (arg, i) <- args.zipWithIndex do
             val (_, fieldType) = variantFields(i)
-            val align = fieldType.alignOf
+            val align = llvmAlignOf(fieldType)
             fieldOffset = ((fieldOffset + align - 1) / align) * align
             val v = genExpr(arg)
             val ft = llvmType(fieldType)
@@ -2734,29 +2789,29 @@ class SyslLLVMCodegen(target: String = "host"):
               case _: SyslType.FuncType if !isOwnedClosure(arg) =>
                 emitClosureDescrIncr(typedAddr)
               case _ =>
-            fieldOffset += fieldType.sizeOf
+            fieldOffset += llvmSizeOf(fieldType)
         dataPtr // return ptr to data (past rc header) — same convention as TNew
 
       case TEnumConstruct(et, variantIndex, args) =>
-        val totalSize = et.sizeOf
+        val totalSize = llvmSizeOf(et)
         val lt = llvmType(et)
         val alloca = deferAlloca(lt)
         // Zero-init
         val cast = newReg()
         emit(s"  $cast = bitcast $lt* $alloca to i8*")
-        emit(s"  call void @llvm.memset.p0i8.i64(i8* $cast, i8 0, i64 $totalSize, i1 false)")
+        emit(s"  call void @$memsetIntrinsic(i8* $cast, i8 0, $sizeT $totalSize, i1 false)")
         // Store tag at offset 0
         val tagPtr = newReg()
         emit(s"  $tagPtr = bitcast i8* $cast to i32*")
         emit(s"  store i32 $variantIndex, i32* $tagPtr")
         // Store variant fields at data offset
         if args.nonEmpty then
-          val dataOffset = et.dataOffset
+          val dataOffset = llvmEnumDataOffset(et)
           val variantFields = et.variants(variantIndex)._2
           var fieldOffset = 0L
           for (arg, i) <- args.zipWithIndex do
             val (_, fieldType) = variantFields(i)
-            val align = fieldType.alignOf
+            val align = llvmAlignOf(fieldType)
             fieldOffset = ((fieldOffset + align - 1) / align) * align
             val v = genExpr(arg)
             val ft = llvmType(fieldType)
@@ -2782,7 +2837,7 @@ class SyslLLVMCodegen(target: String = "host"):
               case _: SyslType.FuncType if !isOwnedClosure(arg) =>
                 emitClosureDescrIncr(typedAddr)
               case _ =>
-            fieldOffset += fieldType.sizeOf
+            fieldOffset += llvmSizeOf(fieldType)
         alloca
 
       case TMatchExpr(scrutinee, arms, default, typ) =>
@@ -2837,7 +2892,7 @@ class SyslLLVMCodegen(target: String = "host"):
                   val len64 = newReg()
                   emit(s"  $len64 = sext i32 $lLen to i64")
                   val cmpResult = newReg()
-                  emit(s"  $cmpResult = call i32 @memcmp(i8* $lPtr, i8* $rPtr, i64 $len64)")
+                  emit(s"  $cmpResult = call i32 @memcmp(i8* $lPtr, i8* $rPtr, $sizeT ${narrowI64ToSizeT(len64)})")
                   val bytesEq = newReg()
                   emit(s"  $bytesEq = icmp eq i32 $cmpResult, 0")
                   val matchBlock = currentBlock
@@ -2895,13 +2950,13 @@ class SyslLLVMCodegen(target: String = "host"):
           // Bind variant/destructure fields if this is a binding pattern.
           arm.patterns.headOption match
             case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes, nested)) =>
-              val dataOffset = et.dataOffset
+              val dataOffset = llvmEnumDataOffset(et)
               val scrutCast2 = newReg()
               emit(s"  $scrutCast2 = bitcast ${exprType(scrutinee)}* $scrut to i8*")
               var fOffset = 0L
               for (binding, j) <- bindings.zipWithIndex do
                 val ft = fieldTypes(j)
-                val align = ft.alignOf
+                val align = llvmAlignOf(ft)
                 fOffset = ((fOffset + align - 1) / align) * align
                 binding.foreach { bName =>
                   val flt = llvmType(ft)
@@ -2926,7 +2981,7 @@ class SyslLLVMCodegen(target: String = "host"):
                   emit(s"  $typedFAddr = bitcast i8* $fAddr to $flt*")
                   emitNestedPatternBindingsLLVM(sub, typedFAddr)
                 }
-                fOffset += ft.sizeOf
+                fOffset += llvmSizeOf(ft)
             case Some(TDestructurePattern(st, bindings, fieldTypes, nested)) =>
               val cst = canonicalStruct(st)
               val structLt = llvmType(cst)
@@ -3120,7 +3175,7 @@ class SyslLLVMCodegen(target: String = "host"):
             val deinitOpt = closureEnvDeinitFor(closureName, c)
             // malloc(totalSize); base = result
             val base = newReg()
-            emit(s"  $base = call i8* @malloc(i64 $totalSize)")
+            emit(s"  $base = call i8* @malloc($sizeT $totalSize)")
             // Write rc=1 at base+0
             val rcPtr = newReg()
             emit(s"  $rcPtr = bitcast i8* $base to i64*")
@@ -3578,7 +3633,7 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $len64 = sext i32 $len to i64")
         val dataPtr = emitStringBufferAlloc(len64)
         val cp = newReg()
-        emit(s"  $cp = call i8* @memcpy(i8* $dataPtr, i8* $srcPtr, i64 $len64)")
+        emit(s"  $cp = call i8* @memcpy(i8* $dataPtr, i8* $srcPtr, $sizeT ${narrowI64ToSizeT(len64)})")
         emitMakeString(dataPtr, len)
 
       case TStringFromPtr(ptrExpr, lenExpr, _) =>
@@ -3599,7 +3654,7 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $len64 = sext i32 $len to i64")
         val dataPtr = emitStringBufferAlloc(len64)
         val cp = newReg()
-        emit(s"  $cp = call i8* @memcpy(i8* $dataPtr, i8* $srcPtr, i64 $len64)")
+        emit(s"  $cp = call i8* @memcpy(i8* $dataPtr, i8* $srcPtr, $sizeT ${narrowI64ToSizeT(len64)})")
         emitMakeString(dataPtr, len)
 
       case TAsmExpr(code, typ) =>
@@ -3750,14 +3805,14 @@ class SyslLLVMCodegen(target: String = "host"):
       if nested.forall(_.isEmpty) then outerCmp
       else
         val variantFields = et.variants(variantIdx)._2
-        val dataOff = et.dataOffset
+        val dataOff = llvmEnumDataOffset(et)
         val byteCast = newReg()
         emit(s"  $byteCast = bitcast ${llvmType(et)}* $valueAddr to i8*")
         var fOffset = 0L
         var combined = outerCmp
         for ((subOpt, i) <- nested.zipWithIndex) do
           val (_, ft) = variantFields(i)
-          val align = ft.alignOf
+          val align = llvmAlignOf(ft)
           fOffset = ((fOffset + align - 1) / align) * align
           subOpt.foreach { sub =>
             val flt = llvmType(ft)
@@ -3770,7 +3825,7 @@ class SyslLLVMCodegen(target: String = "host"):
             emit(s"  $anded = and i1 $combined, $subMatch")
             combined = anded
           }
-          fOffset += ft.sizeOf
+          fOffset += llvmSizeOf(ft)
         combined
     case TDestructurePattern(st, _, _, nested) =>
       if nested.forall(_.isEmpty) then "true"
@@ -3802,12 +3857,12 @@ class SyslLLVMCodegen(target: String = "host"):
   private def emitNestedPatternBindingsLLVM(pat: TMatchPattern, valueAddr: String): Unit = pat match
     case TVariantPattern(et, variantIdx, bindings, fieldTypes, nested) =>
       val variantFields = et.variants(variantIdx)._2
-      val dataOff = et.dataOffset
+      val dataOff = llvmEnumDataOffset(et)
       val byteCast = newReg()
       emit(s"  $byteCast = bitcast ${llvmType(et)}* $valueAddr to i8*")
       var fOffset = 0L
       for (((binding, ft), i) <- bindings.zip(fieldTypes).zipWithIndex) do
-        val align = ft.alignOf
+        val align = llvmAlignOf(ft)
         fOffset = ((fOffset + align - 1) / align) * align
         binding.foreach { bName =>
           val flt = llvmType(ft)
@@ -3832,7 +3887,7 @@ class SyslLLVMCodegen(target: String = "host"):
           emit(s"  $typedFAddr = bitcast i8* $fAddr to $flt*")
           emitNestedPatternBindingsLLVM(sub, typedFAddr)
         }
-        fOffset += ft.sizeOf
+        fOffset += llvmSizeOf(ft)
     case TDestructurePattern(st, bindings, fieldTypes, nested) =>
       val cst = canonicalStruct(st)
       val structLt = llvmType(cst)
@@ -3918,7 +3973,7 @@ class SyslLLVMCodegen(target: String = "host"):
     val len64 = newReg()
     emit(s"  $len64 = sext i32 $len32 to i64")
     val ignored = newReg()
-    emit(s"  $ignored = call i64 @write(i32 1, i8* $ptr, i64 $len64)")
+    emit(s"  $ignored = call $sizeT @write(i32 1, i8* $ptr, $sizeT ${narrowI64ToSizeT(len64)})")
 
   /** Build a %struct.string from an i8* pointer and i32 length. Returns alloca pointer. */
   private def emitMakeString(ptr: String, len: String): String =
@@ -3936,7 +3991,7 @@ class SyslLLVMCodegen(target: String = "host"):
     val fmtPtr = newReg()
     emit(s"  $fmtPtr = getelementptr [$fmtLen x i8], [$fmtLen x i8]* $fmtName, i32 0, i32 0")
     val len = newReg()
-    emit(s"  $len = call i32 (i8*, i64, i8*, ...) @snprintf(i8* null, i64 0, i8* $fmtPtr, $typedArg)")
+    emit(s"  $len = call i32 (i8*, $sizeT, i8*, ...) @snprintf(i8* null, $sizeT 0, i8* $fmtPtr, $typedArg)")
     val len64 = newReg()
     emit(s"  $len64 = sext i32 $len to i64")
     // Allocate header + data + 1 (for snprintf's required null terminator slot)
@@ -3946,7 +4001,7 @@ class SyslLLVMCodegen(target: String = "host"):
     val snprintfSize = newReg()
     emit(s"  $snprintfSize = add i64 $len64, 1")
     val ignored = newReg()
-    emit(s"  $ignored = call i32 (i8*, i64, i8*, ...) @snprintf(i8* $buf, i64 $snprintfSize, i8* $fmtPtr, $typedArg)")
+    emit(s"  $ignored = call i32 (i8*, $sizeT, i8*, ...) @snprintf(i8* $buf, $sizeT ${narrowI64ToSizeT(snprintfSize)}, i8* $fmtPtr, $typedArg)")
     emitMakeString(buf, len)
 
   // Emit widening/narrowing cast when fromType != toType; return the (possibly cast) register.
@@ -3996,7 +4051,7 @@ class SyslLLVMCodegen(target: String = "host"):
         structTypes(name) = SyslType.StructType(name, fields)
       s"%struct.$name"
     case SyslType.ArrayType(elem, size) => s"[$size x ${llvmType(elem)}]"
-    case et: SyslType.EnumType => s"[${et.sizeOf} x i8]" // opaque byte array for tagged union
+    case et: SyslType.EnumType => s"[${llvmSizeOf(et)} x i8]" // opaque byte array for tagged union
     case SyslType.SliceType(_) => "%struct.slice"
     case SyslType.PtrType(_) => "i8*"
     case SyslType.RefType(_) => "i8*"
@@ -4005,16 +4060,25 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.NamedType(_, base, _, _, _) => llvmType(base)
     case null => "i64"
 
-  // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings)
+  // LLVM-side size in bytes (may differ from Sysl's sizeOf for types like strings).
+  // Composite struct sizes that include pointers are computed from `ptrSize` so they
+  // match what LLVM lays out per the target datalayout on rv32 (4-byte pointers)
+  // and lp64 targets (8-byte pointers) alike.
   private def llvmSizeOf(t: SyslType): Long = t match
-    case SyslType.StringType => 16  // {i8*, i32} — matches Sysl's sizeOf
-    case _: SyslType.InterfaceType => 16  // {i8* itable, i8* data}
-    case SyslType.PtrType(_) => 8
-    case SyslType.RefType(_: SyslType.SliceType) => 24  // inline %struct.slice
-    case SyslType.RefType(_) => 8
-    case _: SyslType.FuncType => 16  // {i8*, i8*}
+    case SyslType.StringType => // {i8*, i32} — ptr then i32, aligned to ptrAlign
+      val raw = ptrSize + 4
+      ((raw + ptrAlign - 1) / ptrAlign) * ptrAlign
+    case _: SyslType.InterfaceType => 2 * ptrSize // {i8* itable, i8* data}
+    case SyslType.PtrType(_) => ptrSize
+    case SyslType.RefType(_: SyslType.SliceType) => // inline %struct.slice = {ptr, i32, i32, ptr}
+      val raw = ptrSize + 4 + 4 + ptrSize
+      ((raw + ptrAlign - 1) / ptrAlign) * ptrAlign
+    case SyslType.RefType(_) => ptrSize
+    case _: SyslType.FuncType => 2 * ptrSize // {i8*, i8*}
     case SyslType.BoolType => 1
-    case SyslType.SliceType(_) => 24  // {i8*, i32, i32, i8*}
+    case SyslType.SliceType(_) => // {i8*, i32, i32, i8*}
+      val raw = ptrSize + 4 + 4 + ptrSize
+      ((raw + ptrAlign - 1) / ptrAlign) * ptrAlign
     case SyslType.StructType(name, fields, _) =>
       // Use LLVM's struct layout rules: each field aligned to its natural alignment,
       // and the struct's total size rounded up to its alignment (max of all field alignments).
@@ -4031,23 +4095,57 @@ class SyslLLVMCodegen(target: String = "host"):
       if maxAlign > 1 then offset = (offset + maxAlign - 1) / maxAlign * maxAlign
       offset
     case SyslType.ArrayType(elem, size) => llvmSizeOf(elem) * size
+    case et @ SyslType.EnumType(_, variants) =>
+      // Layout: {tag: i32, padding, data: union of variant fields}. The data
+      // offset and the size of each variant depend on field alignment/size,
+      // which on rv32 differs from the Sysl-level `sizeOf`/`alignOf` for
+      // pointer-bearing types — compute them with the LLVM-aware helpers.
+      val tagSize = 4L
+      val dataAlign = llvmEnumDataAlignOf(et)
+      val dataOffset = if dataAlign > 4 then dataAlign else 4L
+      val maxDataSize = if variants.isEmpty then 0L else variants.map { (_, fields) =>
+        if fields.isEmpty then 0L else llvmSizeOf(SyslType.StructType("", fields))
+      }.max
+      val totalAlign = llvmAlignOf(et)
+      val raw = dataOffset + maxDataSize
+      ((raw + totalAlign - 1) / totalAlign) * totalAlign
+    case SyslType.NamedType(_, base, _, _, _) => llvmSizeOf(base)
     case other => other.sizeOf
 
-  /** Alignment of a type in bytes, matching LLVM's natural alignment rules. */
+  /** Data-area alignment for an enum's tagged-union body (excludes tag),
+    * using LLVM-aware field alignments. Matches `SyslType.dataAlignOf`'s
+    * shape but computes pointer-bearing fields at the target width. */
+  private def llvmEnumDataAlignOf(et: SyslType.EnumType): Long =
+    val fieldAligns = et.variants.flatMap(_._2.map((_, ft) => llvmAlignOf(ft)))
+    if fieldAligns.isEmpty then 1L else fieldAligns.max
+
+  /** Byte offset where an enum's variant data starts (tag + padding). The
+    * tag is always i32; padding pushes the data to its own alignment when
+    * that alignment exceeds 4. */
+  private def llvmEnumDataOffset(et: SyslType.EnumType): Long =
+    val da = llvmEnumDataAlignOf(et)
+    if da > 4 then da else 4L
+
+  /** Alignment of a type in bytes, matching LLVM's natural alignment rules.
+    * Pointer-bearing types use `ptrAlign` so rv32 (4-aligned pointers) and
+    * lp64 (8-aligned pointers) get layouts matching the target datalayout. */
   private def llvmAlignOf(t: SyslType): Long = t match
-    case SyslType.PtrType(_) | SyslType.RefType(_) => 8
+    case SyslType.PtrType(_) | SyslType.RefType(_) => ptrAlign
     case SyslType.IntType(w) => math.min(w / 8, 8).toLong
     case SyslType.UIntType(w) => math.min(w / 8, 8).toLong
     case SyslType.BoolType => 1
     case SyslType.FloatType(w) => math.min(w / 8, 8).toLong
-    case SyslType.StringType => 8  // contains pointer
-    case SyslType.SliceType(_) => 8  // contains pointer
-    case _: SyslType.FuncType => 8  // contains pointer
-    case _: SyslType.InterfaceType => 8  // contains pointer
+    case SyslType.StringType => ptrAlign  // contains pointer
+    case SyslType.SliceType(_) => ptrAlign  // contains pointer
+    case _: SyslType.FuncType => ptrAlign  // contains pointer
+    case _: SyslType.InterfaceType => ptrAlign  // contains pointer
     case SyslType.StructType(name, fields, _) =>
       val resolved = canonicalStruct(SyslType.StructType(name, fields))
       if resolved.fields.isEmpty then 1 else resolved.fields.map((_, ft) => llvmAlignOf(ft)).max
     case SyslType.ArrayType(elem, _) => llvmAlignOf(elem)
+    case SyslType.EnumType(_, variants) =>
+      val fieldAligns = variants.flatMap(_._2.map((_, ft) => llvmAlignOf(ft)))
+      if fieldAligns.isEmpty then 4L else fieldAligns.max.max(4L) // at least 4 for tag
     case SyslType.NamedType(_, base, _, _, _) => llvmAlignOf(base)
     case _ => 8
 
@@ -4299,7 +4397,7 @@ class SyslLLVMCodegen(target: String = "host"):
     val tag = newReg()
     emit(s"  $tag = load i32, i32* $tagPtr")
     val endLabel = newLabel("enum_rc_end")
-    val dataOff = et.dataOffset
+    val dataOff = llvmEnumDataOffset(et)
     for (fields, idx) <- variantsWithStrings do
       val matchLbl = newLabel("enum_rc_match")
       val nextLbl = newLabel("enum_rc_next")
@@ -4309,7 +4407,7 @@ class SyslLLVMCodegen(target: String = "host"):
       emitLabel(matchLbl)
       var fieldOffset = 0L
       for (_, ft) <- fields do
-        val align = ft.alignOf
+        val align = llvmAlignOf(ft)
         fieldOffset = ((fieldOffset + align - 1) / align) * align
         if structHasStringFields(ft) then
           val fieldByteAddr = newReg()
@@ -4321,7 +4419,7 @@ class SyslLLVMCodegen(target: String = "host"):
             case "decr" => emitValueRC(fieldTypedAddr, ft, incr = false)
             case "incr" => emitValueRC(fieldTypedAddr, ft, incr = true)
             case "null" => emitValueNull(fieldTypedAddr, ft)
-        fieldOffset += ft.sizeOf
+        fieldOffset += llvmSizeOf(ft)
       emit(s"  br label %$endLabel")
       emitLabel(nextLbl)
     emit(s"  br label %$endLabel")
@@ -4402,6 +4500,21 @@ class SyslLLVMCodegen(target: String = "host"):
     case SyslType.StringType => 8                        // i64 refcount
     case _ => 8
 
+  /** Narrow an i64 register or numeric literal to the target's `sizeT`
+    * width at a libc-call boundary. No-op on lp64 (returns the input).
+    * On ilp32 rv32 it emits a `trunc i64 ... to i32` for SSA registers
+    * and returns the numeric literal unchanged otherwise. The codegen
+    * keeps its internal size arithmetic in i64 for simplicity; this
+    * helper is the bridge to libc function signatures whose C `size_t`
+    * is the platform-natural width. */
+  private def narrowI64ToSizeT(i64Val: String): String =
+    if !is32Bit then i64Val
+    else if i64Val.startsWith("%") || i64Val.startsWith("@") then
+      val r = newReg()
+      emit(s"  $r = trunc i64 $i64Val to $sizeT")
+      r
+    else i64Val
+
   /** Allocate a string buffer with i64 refcount header initialized to 1.
     * dataLen64 is an i64 register/literal for the data byte length.
     * Returns the data pointer (i8*) past the header. */
@@ -4409,7 +4522,7 @@ class SyslLLVMCodegen(target: String = "host"):
     val totalSize = newReg()
     emit(s"  $totalSize = add i64 $dataLen64, 8")
     val base = newReg()
-    emit(s"  $base = call i8* @malloc(i64 $totalSize)")
+    emit(s"  $base = call i8* @malloc($sizeT ${narrowI64ToSizeT(totalSize)})")
     val rcPtr = newReg()
     emit(s"  $rcPtr = bitcast i8* $base to i64*")
     emit(s"  store i64 1, i64* $rcPtr")

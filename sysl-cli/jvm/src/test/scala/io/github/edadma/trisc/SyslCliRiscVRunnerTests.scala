@@ -135,6 +135,32 @@ class SyslCliRiscVRunnerTests extends AnyFreeSpec with Matchers {
     }
   }
 
+  /** Regression for the std/testing/testing panic-detection miss surfaced
+    *  during the chunk-4 rv64 sweep. The test's `assert_eq` helper prints
+    *  the values it got/wanted via `print` (no newline) immediately before
+    *  panicking, so the SBI console emits `12panic: mismatch: got 1, want 2`
+    *  on one line. The earlier `panicMarker` used `startsWith("panic: ")` —
+    *  which misses that layout — and the runner reported "expected panic,
+    *  got normal return". `panicMarker` now searches anywhere in the line. */
+  "should_panic test that prints values without newline before panicking is recognized as a panic on rv64" taggedAs Slow in {
+    requireToolchain()
+    val (abs, rel, modBase) = stage("neg_no_nl")
+    writeFile(abs, "neg_no_nl.lsysl",
+      s"""    module $modBase
+         |
+         |    #test(should_panic: "mismatch")
+         |    test_print_then_panic() -> unit
+         |        print("1")
+         |        print("2")
+         |        panic("mismatch: got 1, want 2")
+         |""".stripMargin)
+    val (code, out) = runCli("test", "--backend", "riscv64", rel)
+    withClue(out) {
+      code shouldBe 0
+      out should include("1 passed, 0 failed")
+    }
+  }
+
   "unknown --backend is rejected before any qemu/clang invocation" taggedAs Slow in {
     val (code, out) = runCli("test", "--backend", "bogus", corpus)
     withClue(out) {

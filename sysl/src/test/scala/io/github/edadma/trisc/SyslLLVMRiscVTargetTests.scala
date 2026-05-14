@@ -99,4 +99,53 @@ class SyslLLVMRiscVTargetTests extends SyslLLVMTestHelpers {
     ir should include("define i32 @main()")
     ir should include("@add")
   }
+
+  // -- libc declarations use the target's `size_t` width --
+  //
+  // These pin the chunk-4 codegen fix where size-shaped arguments to libc
+  // functions must use i32 on rv32 (ilp32 size_t) and i64 elsewhere (lp64
+  // size_t). The earlier hardcoded i64 desynced the calling convention on
+  // rv32 — varargs in a register pair ate the next slot, snprintf+memcpy
+  // saw garbage. A regression at this layer manifests as silent miscompile
+  // of every test that builds a sysl string via interpolation.
+
+  "rv32 declares snprintf with i32 size param" in {
+    compileFor("riscv32-elf", trivial) should include("declare i32 @snprintf(i8*, i32, i8*, ...)")
+  }
+
+  "rv64 declares snprintf with i64 size param" in {
+    compileFor("riscv64-elf", trivial) should include("declare i32 @snprintf(i8*, i64, i8*, ...)")
+  }
+
+  "rv32 declares malloc with i32 size param" in {
+    compileFor("riscv32-elf", trivial) should include("declare i8* @malloc(i32)")
+  }
+
+  "rv64 declares malloc with i64 size param" in {
+    compileFor("riscv64-elf", trivial) should include("declare i8* @malloc(i64)")
+  }
+
+  "rv32 declares memcpy with i32 size param" in {
+    compileFor("riscv32-elf", trivial) should include("declare i8* @memcpy(i8*, i8*, i32)")
+  }
+
+  "rv64 declares memcpy with i64 size param" in {
+    compileFor("riscv64-elf", trivial) should include("declare i8* @memcpy(i8*, i8*, i64)")
+  }
+
+  "rv32 uses the i32-suffixed memset intrinsic" in {
+    compileFor("riscv32-elf", trivial) should include("declare void @llvm.memset.p0i8.i32")
+  }
+
+  "rv64 uses the i64-suffixed memset intrinsic" in {
+    compileFor("riscv64-elf", trivial) should include("declare void @llvm.memset.p0i8.i64")
+  }
+
+  "rv32 declares write with i32 length param and return" in {
+    compileFor("riscv32-elf", trivial) should include("declare i32 @write(i32, i8*, i32)")
+  }
+
+  "rv64 declares write with i64 length param and return" in {
+    compileFor("riscv64-elf", trivial) should include("declare i64 @write(i32, i8*, i64)")
+  }
 }

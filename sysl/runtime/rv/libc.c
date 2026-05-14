@@ -33,6 +33,11 @@
 #include <stddef.h>
 #include <stdarg.h>
 
+/* `ssize_t` is a POSIX typedef (sys/types.h) that freestanding stddef.h
+ * doesn't provide. It's `long` on both rv32 ilp32 and rv64 lp64 — same
+ * width as `size_t`, just signed. */
+typedef long ssize_t;
+
 extern void sbi_console_putchar(int c);
 __attribute__((noreturn)) extern void sbi_system_reset(uint32_t type, uint32_t reason);
 
@@ -46,12 +51,15 @@ int putchar(int c) {
     return c;
 }
 
-/* write(fd, buf, len) — ignore fd, just dump to console. */
-long write(int fd, const void *buf, unsigned long len) {
+/* write(fd, buf, len) — ignore fd, just dump to console.
+ * `ssize_t` / `size_t` are the platform's natural widths (i32 on rv32,
+ * i64 on rv64); the codegen targets the same widths via its `sizeT`
+ * machinery so the IR-declared signature matches this one on both arches. */
+ssize_t write(int fd, const void *buf, size_t len) {
     (void)fd;
     const unsigned char *p = (const unsigned char *)buf;
-    for (unsigned long i = 0; i < len; i++) sbi_console_putchar(p[i]);
-    return (long)len;
+    for (size_t i = 0; i < len; i++) sbi_console_putchar(p[i]);
+    return (ssize_t)len;
 }
 
 int puts(const char *s) {
@@ -67,40 +75,46 @@ int fflush(void *f) {
 
 /* ---------------- mem ---------------- */
 
-void *memcpy(void *dst, const void *src, unsigned long n) {
+void *memcpy(void *dst, const void *src, size_t n) {
     unsigned char *d = (unsigned char *)dst;
     const unsigned char *s = (const unsigned char *)src;
-    for (unsigned long i = 0; i < n; i++) d[i] = s[i];
+    for (size_t i = 0; i < n; i++) d[i] = s[i];
     return dst;
 }
 
-void *memset(void *dst, int c, unsigned long n) {
+void *memset(void *dst, int c, size_t n) {
     unsigned char *d = (unsigned char *)dst;
     unsigned char v = (unsigned char)c;
-    for (unsigned long i = 0; i < n; i++) d[i] = v;
+    for (size_t i = 0; i < n; i++) d[i] = v;
     return dst;
 }
 
-int memcmp(const void *a, const void *b, unsigned long n) {
+int memcmp(const void *a, const void *b, size_t n) {
     const unsigned char *pa = (const unsigned char *)a;
     const unsigned char *pb = (const unsigned char *)b;
-    for (unsigned long i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; i++) {
         if (pa[i] != pb[i]) return (int)pa[i] - (int)pb[i];
     }
     return 0;
 }
 
-unsigned long strlen(const char *s) {
-    unsigned long n = 0;
+size_t strlen(const char *s) {
+    size_t n = 0;
     while (*s++) n++;
     return n;
 }
 
 /* LLVM byte-memset intrinsic. Codegen emits a direct call to this even
  * though clang would normally lower it inline; freestanding builds may
- * need the explicit definition. */
-void __llvm_memset_p0i8_i64(void *dst, char c, unsigned long n, int volatile_) __asm__("llvm.memset.p0i8.i64");
-void __llvm_memset_p0i8_i64(void *dst, char c, unsigned long n, int volatile_) {
+ * need the explicit definition. The intrinsic's mangled name encodes the
+ * length type width — `i64` on lp64 (rv64) and `i32` on ilp32 (rv32) —
+ * matched by the codegen's `sizeT` machinery. */
+#if __SIZEOF_LONG__ == 8
+void __llvm_memset_p0i8(void *dst, char c, size_t n, int volatile_) __asm__("llvm.memset.p0i8.i64");
+#else
+void __llvm_memset_p0i8(void *dst, char c, size_t n, int volatile_) __asm__("llvm.memset.p0i8.i32");
+#endif
+void __llvm_memset_p0i8(void *dst, char c, size_t n, int volatile_) {
     (void)volatile_;
     memset(dst, (unsigned char)c, n);
 }
@@ -113,11 +127,11 @@ static void heap_init(void) {
     if (heap_ptr == 0) heap_ptr = __heap_start;
 }
 
-void *malloc(unsigned long n) {
+void *malloc(size_t n) {
     heap_init();
     /* 16-byte alignment for everything — matches rv64 ABI's max alignment and
      * is safe for rv32 too. */
-    unsigned long aligned = (n + 15) & ~15UL;
+    size_t aligned = (n + 15) & ~(size_t)15;
     if (heap_ptr + aligned > __heap_end) return 0;
     void *p = heap_ptr;
     heap_ptr += aligned;
@@ -128,14 +142,14 @@ void free(void *p) {
     (void)p; /* no-op */
 }
 
-void *calloc(unsigned long count, unsigned long size) {
-    unsigned long total = count * size;
+void *calloc(size_t count, size_t size) {
+    size_t total = count * size;
     void *p = malloc(total);
     if (p) memset(p, 0, total);
     return p;
 }
 
-void *realloc(void *old, unsigned long n) {
+void *realloc(void *old, size_t n) {
     /* Bump allocator can't shrink in place. Always allocate a fresh slot and
      * memcpy. We don't know the old size — over-copy is unsafe near end of
      * heap, so cap by the distance to heap_end. This is fine for the realloc
@@ -152,9 +166,9 @@ void *realloc(void *old, unsigned long n) {
 
 /* Output sink: either to a buffer (snprintf) or to the console (printf). */
 struct out_sink {
-    char *buf;          /* null for direct-console mode */
-    unsigned long cap;  /* capacity of buf (including null terminator slot) */
-    unsigned long len;  /* bytes already written */
+    char *buf;     /* null for direct-console mode */
+    size_t cap;    /* capacity of buf (including null terminator slot) */
+    size_t len;    /* bytes already written */
 };
 
 static void sink_putc(struct out_sink *s, char c) {
@@ -388,7 +402,7 @@ static int vformat(struct out_sink *s, const char *fmt, va_list ap) {
     }
     /* Null-terminate if writing to a buffer. */
     if (s->buf && s->cap > 0) {
-        unsigned long nti = s->len < s->cap ? s->len : s->cap - 1;
+        size_t nti = s->len < s->cap ? s->len : s->cap - 1;
         s->buf[nti] = 0;
     }
     return (int)s->len;
@@ -403,7 +417,7 @@ int printf(const char *fmt, ...) {
     return n;
 }
 
-int snprintf(char *buf, unsigned long cap, const char *fmt, ...) {
+int snprintf(char *buf, size_t cap, const char *fmt, ...) {
     struct out_sink s = { buf, cap, 0 };
     va_list ap;
     va_start(ap, fmt);
