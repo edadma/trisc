@@ -1277,6 +1277,13 @@ class SyslLLVMCodegen(target: String = "host"):
         // addr already resolved above
         val gep = newReg()
         emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        // Evaluate RHS *before* decrementing the old field. The RHS may read
+        // the field's current value (e.g., `t.s = t.s + "x"`), and freeing the
+        // old buffer first leaves the read pointing at freed memory — a
+        // use-after-free that's silent on the bump-allocator runtimes
+        // (rv64/rv32/wasm32 leave free() as a no-op) but corrupts output on
+        // any real allocator (llvm-host). Mirrors TAssignStmt's order.
+        val v = genExpr(value)
         // Slice field: decrement old backref before overwrite
         if isSliceType(ft) then emitSliceBackrefDecr(gep, ft)
         // String field: decrement old buffer refcount before overwrite
@@ -1285,7 +1292,6 @@ class SyslLLVMCodegen(target: String = "host"):
         ft match
           case _: SyslType.FuncType => emitClosureDescrDecr(gep)
           case _ =>
-        val v = genExpr(value)
         val vol = if st.volatileFields.contains(fieldIndex) then " volatile" else ""
         if isAggregate(ft) then
           val loaded = newReg()
