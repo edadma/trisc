@@ -1381,14 +1381,26 @@ object SyslCli:
 
   /** Look for any of the panic-message prefixes emitted by the LLVM prelude
     * before its `abort()` call. Returns the extracted message body if any
-    * marker is found, else None. All three markers terminate with a newline
-    * but the linesIterator already strips that. */
+    * marker is found, else None.
+    *
+    * **Why substring, not line-prefix:** on hosted backends panic goes to
+    * stderr while user prints go to stdout, so the runner sees the panic
+    * line cleanly. Under qemu-system-riscv* the SBI console is one stream,
+    * so a test that prints args via `print(x)` (no newline) immediately
+    * before panicking ends up with the panic message glued onto the previous
+    * line — e.g. `12panic: mismatch: got 1, want 2`. The markers are
+    * distinctive enough that substring search has no realistic false-positive
+    * risk and matches both layouts. All three markers terminate with a
+    * newline but `linesIterator` already strips that. */
   private def panicMarker(out: String): Option[String] =
-    out.linesIterator.collectFirst {
-      case l if l.startsWith("panic: ")             => l.stripPrefix("panic: ")
-      case l if l.startsWith("assertion failed: ")  => l.stripPrefix("assertion failed: ")
-      case l if l.startsWith("range check failed: ") => l.stripPrefix("range check failed: ")
-    }
+    val markers = List("panic: ", "assertion failed: ", "range check failed: ")
+    out.linesIterator
+      .flatMap { l =>
+        markers.iterator
+          .map(m => (m, l.indexOf(m)))
+          .collectFirst { case (m, i) if i >= 0 => l.substring(i + m.length) }
+      }
+      .nextOption()
 
   private def executeTest(cmd: TestCommand, lockMode: LockMode): Unit =
     if cmd.backend == "all" then
