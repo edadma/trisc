@@ -855,26 +855,23 @@ non-present pages that need fresh frames — the arch-level
 `vm_copy_to` is now a stride+memcpy primitive that returns
 early on a missed translation.
 
-Phase 1 chunk 3.7 (Phase C consolidated; Phase D.1 added
-strict VMA-as-authority): the allocate-on-write side of
-`vm_copy_to` used to live in arch code and was gated on the
-literal user carve-out `[0x60000000, 0x60200000)`. This
-consolidates the policy into the kernel layer:
+The policy is uniform across both arches:
 
-  * **Pages below `0x60000000`** — if unmapped, reject with -1.
-    The kernel-identity 2 MiB blocks make `vm_v2p` return
-    non-zero for those VAs in practice, so this rejection only
-    fires on the (rare) intermediate-table-missing edge.
-  * **Pages in `[0x60000000, 0x60200000)`** — the user
-    carve-out, strict VMA enforcement is on. For known
-    processes (`pid > 0`), the destination VMA tree must
-    cover `cur_va`; otherwise reject with -1. Orphan ptbrs
+  * **Pages in `[0x60000000, 0x60200000)` — the user carve-out.**
+    For known processes (`pid > 0`), the destination VMA tree is
+    the sole authority: a VA outside every registered VMA is
+    rejected, even if the PT happens to map the page (the
+    kernel-identity 2 MiB blocks otherwise make `vm_v2p` return
+    non-zero and slip past the allocator gate). Orphan ptbrs
     (transient during PM spawn, before the Process slot is
-    populated) allocate-on-write unconditionally. The strict
-    branch closes the PT-as-cache soft-spot the handoff
-    identified: a kernel-identity-mapped PA can no longer
-    sneak past the allocator gate just because `vm_v2p`
-    returns non-zero.
+    populated) allocate-on-write unconditionally inside the
+    carve-out.
+  * **Pages below `0x60000000`** — if unmapped, reject with -1.
+    No legitimate caller targets this band post-Phase-D.2 (the
+    legacy x86 program region at `[0xCC000, 0x100000)` is gone);
+    the rejection is defense-in-depth. The PROT_NONE guard VMA
+    at `[0x5FFFF000, 0x60000000)` reaches this branch via the
+    `vm_v2p == 0` path and is rejected here.
   * **Pages at or above `0x60200000`** — `vm_install_user_page`
     decides: aarch64 L0[0]/L1/L2 only cover the carve-out, so
     installs above 4 GiB fail; x86_64 kernel-identity 2 MiB
@@ -891,44 +888,14 @@ installed.
         val pid = find_pid_by_ptbr(dst_ptbr)
 
 First pass: walk every page in the destination range and make
-sure each one is sanctioned + mapped.
-
-**Two address-space classes** during Phase C:
-
-  * **VMA-tracked range** (`>= 0x60000000`) — for known processes
-    (pid>0) the VMA tree is the strict authority. A page outside
-    every registered VMA is rejected even if the PT happens to
-    have an entry (the kernel's identity map of low PD slots
-    surfaces non-zero `vm_v2p` returns for addresses no user
-    VMA covers — that's the "PT-as-cache" gap Phase C closes).
-    For orphan ptbrs (transient during PM spawn), the legacy
-    carve-out `[0x60000000, 0x60200000)` substitutes for the
-    not-yet-seeded VMA tree.
-
-  * **Legacy x86 program/server region** (`< 0x60000000`,
-    typically `0x40000..0x100000`) — not yet VMA-tracked.
-    Phase D retires this carve-out. Until then, accept any write
-    here as long as the PT actually maps the page (i.e. trust
-    the existing PT-cache state).
+sure each one is sanctioned + mapped. For known processes
+(`pid > 0`), the VMA tree is the strict authority inside the
+user carve-out — see the function preamble for the three-band
+policy.
 
         var visited = 0
         while visited < len
             val cur_va = dst_vaddr + u64(visited)
-
-Phase D.1 — strict VMA check for known processes inside the
-user carve-out `[0x60000000, 0x60200000)`. The PT-as-cache
-invariant says the VMA tree is the authority within the user
-address range; an out-of-VMA write here is rejected even
-when the PT happens to map the VA (kernel-identity 2 MiB
-blocks would otherwise make `vm_v2p` non-zero and slip past
-the allocator gate). Above the carve-out we deliberately
-**do not** strict-check: the aarch64 grant-map region lives
-at `[0x62000000, 0x62200000)` (kernel-managed IPC plumbing —
-see `GRANT_REGION_BASE` in `oskit/arch/aarch64/vm.lsysl`),
-the x86 kernel-identity 2 MiB blocks fill 0x80000000-up, and
-Phase D's PROT_NONE guard VMA will extend the carve-out's
-authoritative range from the bottom — none of those are
-VMA-tracked today.
 
             if cur_va >= u64(0x60000000)
                 if cur_va < u64(0x60200000)
@@ -962,13 +929,12 @@ stride+memcpy primitive does the actual writes.
 
 SYS_VM_COPY_TO (54): Copy data into another address space.
 Args: a0=dst_ptbr, a1=dst_vaddr, a2=src, a3=len. Returns 0 on
-success, -1 if any page falls outside the destination
-process's VMA tree (the strict path) or outside the legacy
-carve-out for orphan ptbrs (the back-compat fallback). Wires
-the syscall to `kernel_vm_copy_to`; existing callers that
-ignored the return value (PM, RS, loader, drivers) still
-work — they get -1 silently on out-of-VMA targets, which
-is the strictly stronger Phase C behaviour.
+success, -1 if any destination page falls outside the
+process's VMA tree (or, for orphan ptbrs transient during
+PM spawn, outside the user carve-out). Wires the syscall to
+`kernel_vm_copy_to`; callers that ignore the return value
+(PM, RS, loader, drivers) get -1 silently on out-of-VMA
+targets — strictly stronger than the pre-D.1 behaviour.
 
     sys_vm_copy_to_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
         val rc = kernel_vm_copy_to(u64(a0), u64(a1), *byte(a2), int(a3))
