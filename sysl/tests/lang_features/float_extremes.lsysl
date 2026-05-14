@@ -1,0 +1,67 @@
+Float extremes
+==============
+
+std.math.float exercises positive-finite paths heavily but
+rarely the IEEE 754 corners: NaN identity, signed
+infinities, signed zeros. These tests pin those corners
+across backends.
+
+`0.0 / 0.0` is the cheapest NaN constant; `1.0e308 * 10.0`
+overflows to `+∞`. Negation of `+∞` gives `-∞`.
+
+Float-to-int truncation at out-of-range / NaN inputs is
+**deliberately not pinned here.** The trunc_sat opcodes
+that wasm32 uses define saturating semantics
+(NaN → 0, +∞ → INT_MAX, -∞ → INT_MIN), but the sysl
+language spec doesn't currently pin a portable semantics
+for `int(NaN)` across backends — running a single such
+cast on the interpreter today returns a different value
+than wasm32. A test that asserts one answer would
+mis-pin the spec. We test only the in-range path here;
+the divergence is documented in
+`project_sysl_wasm_chunk5_prereq_trunc_sat.md`.
+
+    module sysl.tests.lang_features
+
+    #test
+    test_nan_is_not_equal_to_itself() -> unit
+        val nan = 0.0 / 0.0
+        // The defining property of NaN: x != x is true iff x is NaN.
+        assert(nan != nan, "NaN != NaN")
+        assert(!(nan == nan), "!(NaN == NaN)")
+
+    #test
+    test_infinity_ordering() -> unit
+        val pos_inf = 1.0e308 * 10.0
+        val neg_inf = -(1.0e308 * 10.0)
+        assert(pos_inf > 1.0e308, "+inf > any finite")
+        assert(neg_inf < -1.0e308, "-inf < any finite")
+        assert(neg_inf < pos_inf, "-inf < +inf")
+
+    #test
+    test_infinity_arithmetic_stays_infinite() -> unit
+        val pos_inf = 1.0e308 * 10.0
+        val pos_inf_plus = pos_inf + 1.0
+        // arithmetic on +inf stays +inf (it doesn't suddenly become finite)
+        assert(pos_inf_plus > 1.0e308, "+inf + finite is still +inf")
+
+    #test
+    test_zero_sign_arithmetic() -> unit
+        val pos_zero = 0.0
+        val neg_zero = -0.0
+        // Both +0 and -0 compare equal to 0 (IEEE 754)
+        assert(pos_zero == neg_zero, "+0 == -0")
+        // But their reciprocals are signed infinities
+        val r_pos = 1.0 / pos_zero
+        val r_neg = 1.0 / neg_zero
+        assert(r_pos > 1.0e308, "1/+0 = +inf")
+        assert(r_neg < -1.0e308, "1/-0 = -inf")
+
+    #test
+    test_in_range_truncation() -> unit
+        // In-range cases — these *are* portable across backends.
+        // The trunc_sat divergence applies only at NaN/±inf.
+        assert(int(3.7)  == 3,   "3.7 -> 3")
+        assert(int(-3.7) == -3,  "-3.7 -> -3 (trunc toward zero)")
+        assert(int(0.0)  == 0,   "0.0 -> 0")
+        assert(int(127.99) == 127, "127.99 -> 127")

@@ -1,0 +1,49 @@
+`out` and `inout` parameter modes
+=================================
+
+These modes pass caller lvalues by reference without the
+syntactic noise of `*T` parameters. The body uses plain
+assignment (`x = expr`); the caller passes a name. `out`
+declares the slot is write-only — the body must assign
+before the parameter is read. `inout` is read-write.
+
+For codegen, both modes cross the function boundary as a
+hidden pointer, but at the source level the body and call
+look like value semantics. A backend that drops the
+mutation (treats `out`/`inout` as by-value) silently passes
+the un-mutated original back.
+
+    module sysl.tests.lang_features
+
+    swap(inout a: int, inout b: int) -> unit
+        val t = a
+        a = b
+        b = t
+
+    produce_seven(out x: int) -> unit
+        x = 7
+
+    accumulate(inout sum: int, addend: int) -> unit
+        sum = sum + addend
+
+    #test
+    test_inout_swap() -> unit
+        var a = 1
+        var b = 2
+        swap(a, b)
+        assert(a == 2, s"a expected 2, got ${a}")
+        assert(b == 1, s"b expected 1, got ${b}")
+
+    #test
+    test_out_produces_value() -> unit
+        var x = 0
+        produce_seven(x)
+        assert(x == 7, s"x expected 7, got ${x}")
+
+    #test
+    test_inout_repeated_accumulation() -> unit
+        var sum = 0
+        accumulate(sum, 1)
+        accumulate(sum, 2)
+        accumulate(sum, 3)
+        assert(sum == 6, s"sum expected 6, got ${sum}")

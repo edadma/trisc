@@ -1,0 +1,49 @@
+Closures captured, passed, stored
+=================================
+
+A closure is a function value that captures bindings from
+the surrounding scope. This test exercises three patterns
+the std/ corpus touches only lightly:
+
+  1. A closure capturing a local variable, passed to a
+     higher-order function that calls it.
+  2. A closure stored in a struct field, invoked through
+     the field.
+  3. A closure that captures and reads a pointer to a
+     mutable local, with the higher-order function
+     advancing the local across calls.
+
+On wasm32, every closure-as-function-value crosses the
+indirect function table. Mismatched signatures trap at
+runtime. On any backend, a miscompiled closure environment
+prints (or asserts) the wrong value.
+
+    module sysl.tests.lang_features
+
+    apply(f: (int) -> int, x: int) -> int = f(x)
+
+    struct Times
+        factor: int
+        scale: (int) -> int
+
+    #test
+    test_closure_capture() -> unit
+        val k = 10
+        val add_k = (n: int) -> n + k
+        val r = apply(add_k, 5)
+        assert(r == 15, s"add_k(5) expected 15, got ${r}")
+
+    #test
+    test_closure_in_struct_field() -> unit
+        val doubler = (n: int) -> n * 2
+        val t = Times(3, doubler)
+        val r = (t.scale)(t.factor)
+        assert(r == 6, s"doubler(3) expected 6, got ${r}")
+
+    #test
+    test_closure_repeated_invocation() -> unit
+        val k = 7
+        val mul_k = (n: int) -> n * k
+        assert(mul_k(0) == 0, "0*k")
+        assert(mul_k(1) == 7, "1*k")
+        assert(mul_k(6) == 42, "6*k")

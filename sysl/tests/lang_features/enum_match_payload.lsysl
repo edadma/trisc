@@ -1,0 +1,62 @@
+Enum data variants with exhaustive match
+========================================
+
+`enum Name / Variant(field: T) / OtherVariant` lets a single
+type carry several shapes of payload. `match` extracts the
+payload by pattern.
+
+This test exercises:
+
+  - A three-variant enum where two variants carry payloads
+    (one int, one string) and one is a tag-only constructor.
+  - Match arms that extract typed payloads.
+  - A nested match: match on an outer enum, then on its
+    payload's own enum value.
+
+Payload extraction needs the codegen to lay variants out
+identically across call boundaries — if a backend uses a
+different tag size or a different field offset on the call
+side vs the match side, the payload reads wrong. wasm32 and
+the i32-pointer ABI is a likely place for that to diverge.
+
+    module sysl.tests.lang_features
+
+    enum Shape
+        Circle(radius: int)
+        Square(side: int)
+        Point
+
+    describe(s: Shape) -> string =
+        s match
+            Circle(r) -> "circle r=" + str(r)
+            Square(d) -> "square d=" + str(d)
+            Point     -> "point"
+
+    enum Outer
+        Wrap(s: Shape)
+        Empty
+
+    describe_outer(o: Outer) -> string =
+        o match
+            Wrap(s) -> "wrap(" + describe(s) + ")"
+            Empty   -> "empty"
+
+    #test
+    test_match_int_payload() -> unit
+        assert(describe(Circle(5)) == "circle r=5", "circle")
+
+    #test
+    test_match_tag_only() -> unit
+        assert(describe(Point) == "point", "point")
+
+    #test
+    test_match_all_variants() -> unit
+        assert(describe(Circle(3)) == "circle r=3", "circle")
+        assert(describe(Square(4)) == "square d=4", "square")
+        assert(describe(Point)     == "point",      "point")
+
+    #test
+    test_match_nested() -> unit
+        assert(describe_outer(Wrap(Circle(7)))  == "wrap(circle r=7)", "wrap circle")
+        assert(describe_outer(Wrap(Square(11))) == "wrap(square d=11)", "wrap square")
+        assert(describe_outer(Empty)            == "empty", "empty")
