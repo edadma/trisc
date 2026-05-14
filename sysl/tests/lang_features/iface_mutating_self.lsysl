@@ -1,0 +1,57 @@
+Mutating method through an interface
+====================================
+
+When a method takes `&self` and mutates struct state, the
+method must see the same backing memory the caller sees —
+otherwise the mutation appears to "leak" into a copy and
+the caller observes nothing. Interface dispatch makes this
+non-trivial: the call goes through a vtable, the receiver
+is boxed, and the codegen has to pass the *original*
+address into the impl, not a clone.
+
+This regression has bitten the TRISC backend before
+(sysl@8de63d40f at the audit): an early `TInterfaceBox`
+heap-copied struct receivers, so mutating methods through
+the iface were no-ops as far as the caller was concerned.
+This test pins the contract on every backend.
+
+    module sysl.tests.lang_features
+
+    interface Counter
+        tick() -> unit
+        get() -> int
+
+    struct IntCounter
+        n: int
+
+    IntCounter.tick() -> unit
+        self.n = self.n + 1
+
+    IntCounter.get() -> int = self.n
+
+    bump_three_times(c: Counter) -> unit
+        c.tick()
+        c.tick()
+        c.tick()
+
+    #test
+    test_iface_dispatch_compiles() -> unit
+        // anchor test — keeps suite non-empty even if the harder
+        // cases below uncover something. trivially passes when the
+        // file at least parses + lowers.
+        assert(1 == 1, "trivial")
+
+    #test
+    test_iface_mutating_self() -> unit
+        var c = IntCounter(0)
+        bump_three_times(c)
+        assert(c.n == 3, s"expected n=3 after 3 steps, got ${c.n}")
+
+    #test
+    test_iface_get_through_dispatch() -> unit
+        var c = IntCounter(10)
+        bump_three_times(c)
+        // calling .get() through the iface dispatch should return
+        // the post-mutation value, not a stale 10.
+        val v: Counter = c
+        assert(v.get() == 13, s"expected 13, got ${v.get()}")
