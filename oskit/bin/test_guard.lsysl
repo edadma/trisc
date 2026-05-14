@@ -1,0 +1,87 @@
+test_guard — PROT_NONE guard VMA kills on access
+================================================
+
+Phase D.2 added a cross-arch PROT_NONE VMA at
+`[0x5FFFF000, 0x60000000)` (one page below the user carve-out) so
+that any wild-pointer read/write below the program's text region
+faults into `vma_handle_fault`, sees `prot == 0`, returns -1, and
+the arch fault handler kills the process. This replaces the x86
+`PT[0xCB]` literal guard that used to live in `vm_create_process_pt`.
+
+The test pattern is fork + access + waitpid: the child writes one
+byte to `0x5FFFF000` and dies; the parent waitpids and verifies a
+non-zero exit code (the `kernel_kill_process` path sets
+`exit_code = -1`). Without the PROT_NONE VMA the access would
+either succeed silently (writing into a freshly-allocate-on-write
+page, master-roadmap bug) or trigger an opaque kernel fault that
+doesn't propagate as an exit-code; either way the test would
+print `guard: bad`.
+
+Pass criterion: prints `guard: ok`.
+
+    module oskit.bin.test_guard
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6, pm_waitpid}
+
+
+    const SYS_FORK = 91
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("guard: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    do_fork() -> int
+        int(syscall6(SYS_FORK, i64(0), i64(0),
+                     i64(0), i64(0), i64(0), i64(0)))
+
+
+    main(argv: []string)
+        val pid = do_fork()
+        if pid < 0
+            fail(1)
+            return
+
+        if pid == 0
+
+The child writes one byte to the guard page.  The store traps
+into the arch fault handler, `kernel_handle_user_fault` calls
+`vma_handle_fault` which sees `prot == 0` and returns -1, and
+the kernel kills the process with `exit_code = -1`.  The line
+below is unreachable in a correctly-Guarded kernel.  If we DO
+reach it, `exit_with(99)` flags a regression — the parent's
+`pm_waitpid` will see 99 instead of -1 and the test will report
+`guard: bad`.
+
+            var p: *byte = *byte(u64(0x5FFFF000))
+            *p = byte(0xAA)
+
+            exit_with(99)
+            return
+
+Parent path.  `pm_waitpid` returns the child's exit_code; -1 means
+the kernel killed it (the path we want), 99 means the child
+unexpectedly survived its write to the guard region.
+
+        val rc = pm_waitpid(pid)
+        if rc != -1
+            fail(2)
+            return
+
+        puts("guard: ok\n")
+        exit()

@@ -1285,7 +1285,35 @@ path.
         if pid >= MAX_PROCESSES
             return -1
         val ptbr = threads[current_thread].ptbr
-        vma_handle_fault(&processes[pid].vma_tree, vaddr, ptbr, write)
+        val rc = vma_handle_fault(&processes[pid].vma_tree, vaddr, ptbr, write)
+        if rc == 0
+            return 0
+
+Phase D.2 wrap-up — kill the process on unhandled user fault.
+Before, the arch fault handlers fell through to `exc_idle` /
+`abort()` whenever `vma_handle_fault` returned -1, halting the
+entire kernel even though the bug was in a single user program.
+Now we route the kill through the existing
+`kernel_kill_process` path: log the offending `(vaddr, pid)`
+via the cross-arch `debug_*` helpers (no UART import on
+oskit.kernel), mark the process zombie, notify PM, wake any
+waiters, and return 0 so the arch handler tail-calls
+`do_schedule` and the rest of the system keeps running. This
+is what makes the cross-arch PROT_NONE guard VMA at
+`[0x5FFFF000, 0x60000000)` actually killable from userspace —
+without it, `*(0x5FFFF000) = 0xAA` panics the whole machine
+instead of killing the wild-pointer process.
+
+        debug_char(int('!'))
+        debug_char(int('K'))
+        debug_char(int(':'))
+        debug_hex8(int(vaddr >> u64(32)))
+        debug_hex8(int(vaddr & u64(0xFFFFFFFF)))
+        debug_char(int(':'))
+        debug_hex4(pid)
+        debug_char(10)
+        kernel_kill_process(pid)
+        0
 
 
 Phase 1 chunk 4 — `mmap` / `munmap` / `mprotect` for anonymous

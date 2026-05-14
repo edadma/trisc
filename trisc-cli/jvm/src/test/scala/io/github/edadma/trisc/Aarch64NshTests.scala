@@ -2513,6 +2513,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "vma4: bad"
   }
 
+  "guard: PROT_NONE VMA below user range kills on access" in {
+    // Phase D.2 of the VMA-list invariant: cross-arch PROT_NONE
+    // guard VMA at [0x5FFFF000, 0x60000000) replaces the x86
+    // PT[0xCB] literal guard. test_guard forks; child writes to
+    // 0x5FFFF000; vma_handle_fault sees prot==0 and rejects;
+    // kernel kills the child with exit_code=-1; parent waitpids
+    // and verifies the non-zero exit.
+    val output = qemu.command("test_guard")
+    output should include("guard: ok")
+    output should not include "guard: bad"
+  }
+
   "mmap: anon mmap/munmap/mprotect end-to-end" in {
     // Phase 1 chunk 4. test_mmap calls Linux ARM64 syscalls 222
     // (mmap), 226 (mprotect), and 215 (munmap) via the POSIX shim.
