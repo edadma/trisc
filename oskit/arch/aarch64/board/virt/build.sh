@@ -112,6 +112,22 @@ for app in "${APPS[@]}"; do
     fi
 done
 
+echo "=== Build ramdisk apps (C) ==="
+# Pick up every oskit/bin_c/*.c via the per-arch build_prog_c.sh.
+# Currently just test_c, but the loop future-proofs the omnibus
+# against new C-source programs being added.
+if [ -d "$REPO_ROOT/oskit/bin_c" ]; then
+    for src in "$REPO_ROOT"/oskit/bin_c/*.c; do
+        [ -f "$src" ] || continue
+        cname=$(basename "$src" .c)
+        bash "$ARCH_DIR/build_prog_c.sh" "$cname" > "$OUT/build-$cname.log" 2>&1
+        if [ ! -f "$OUT/bin/$cname.bin" ]; then
+            echo "  WARN: $cname (C) build failed; tail of log:" >&2
+            tail -5 "$OUT/build-$cname.log" >&2
+        fi
+    done
+fi
+
 echo "=== Build servers ==="
 for srv in rs disk tfs tty pm vfs ds nic inet unix init; do
     bash "$ARCH_DIR/build_servers.sh" "$srv" > "$OUT/build-$srv.log" 2>&1

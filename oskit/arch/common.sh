@@ -142,6 +142,10 @@ build_program() {
 }
 
 # Convenience: dispatch `./build_prog.sh <name|all>` to build_program.
+# The "all" variant also walks oskit/bin_c/*.c via the per-arch
+# build_prog_c.sh so C-source standalone programs (currently just
+# test_c) ride along on the omnibus build instead of needing a
+# manual repack step before the NshTests sweep.
 dispatch_program_arg() {
     if [ "$1" = "all" ]; then
         for src in "$REPO_ROOT"/oskit/bin/*.lsysl; do
@@ -149,6 +153,15 @@ dispatch_program_arg() {
             name=$(basename "$src" .lsysl)
             build_program "$name" || echo "  FAILED: $name" >&2
         done
+        if [ -d "$REPO_ROOT/oskit/bin_c" ]; then
+            for src in "$REPO_ROOT"/oskit/bin_c/*.c; do
+                [ -f "$src" ] || continue
+                local cname
+                cname=$(basename "$src" .c)
+                bash "$ARCH_DIR/build_prog_c.sh" "$cname" \
+                    || echo "  FAILED: $cname (C)" >&2
+            done
+        fi
     elif [ -n "$1" ]; then
         build_program "$1"
     else
