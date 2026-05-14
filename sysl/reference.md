@@ -581,6 +581,23 @@ The same struct definition supports three usage modes at the use site:
 - `value -> ptr`: `&v` (address-of)
 - `ptr -> value`: `*p` (dereference); implicit for struct function arguments
 
+### Backend Implementation Latitude
+
+Backends may implement value-struct passing and assignment as pass-by-pointer
+plus a defensive local copy. The observable semantics are pure value: writes
+through one binding never affect another. In particular:
+
+- `var b = a` where `a: Point` gives `b` an independent copy of the bytes.
+  Mutating `b.field` does not change `a.field`.
+- `f(p: Point)` (the default `in p: Point`) gives the body a local copy.
+  Writes to `p` inside the body are not visible to the caller.
+- A backend is free to skip the byte copy when it can prove the source isn't
+  used again, or to defer the copy until the first mutation, as long as the
+  observable semantics above hold.
+
+When you want sharing, use `&T` (refcounted) or `*T` (raw) — that's what they're
+for. The value mode is *for* independent copies.
+
 ---
 
 ## Variables

@@ -1,0 +1,113 @@
+Value struct copy semantics
+===========================
+
+A `var v = Point(...)` value struct is stack-allocated and
+copied bitwise on assignment, on call (when passed by value),
+and on return (when returned by value). No reference count
+is associated with the struct itself.
+
+For *scalar-only* value structs that gives clean
+copy-on-assign semantics — mutating one copy doesn't touch
+the other, no aliasing, no heap traffic.
+
+For value structs that hold *refcounted* fields (string,
+slice, `&T`), the struct copy is still bitwise but the
+field's refcount must be incremented to reflect that two
+descriptors now point at the same backing buffer. The reverse
+applies on drop — when one of the copies goes out of scope,
+its contribution to the field's refcount must be decremented.
+
+These tests pin both shapes. Miscompiles in the increment
+path leak buffers (refcount stays high after both copies
+drop) or double-free them (refcount drops twice for one
+copy's lifetime).
+
+    module sysl.tests.lang_features
+
+    struct Point
+        x: int
+        y: int
+
+Plain scalar value struct
+-------------------------
+
+Copy semantics are pure: `b = a` makes `b` independent.
+
+    #test
+    test_scalar_struct_copy_independent() -> unit
+        var a = Point(3, 4)
+        var b = a
+        b.x = 99
+        // a is untouched — bitwise copy, no aliasing
+        assert(a.x == 3, s"a.x should still be 3, got ${a.x}")
+        assert(b.x == 99, s"b.x should be 99, got ${b.x}")
+
+    #test
+    test_scalar_struct_pass_by_value() -> unit
+        var a = Point(1, 2)
+        bump_point_x(a)              // takes Point by value — internal copy
+        // caller's a untouched: pass-by-value
+        assert(a.x == 1, s"a.x should be 1 after by-value call, got ${a.x}")
+
+    bump_point_x(p: Point) -> unit
+        p.x = p.x + 100                // mutates the local copy only
+
+    #test
+    test_scalar_struct_return_by_value() -> unit
+        val p = make_point(7, 11)
+        assert(p.x == 7 && p.y == 11, s"expected (7,11), got (${p.x},${p.y})")
+
+    make_point(x: int, y: int) -> Point = Point(x, y)
+
+Value struct with a string field
+--------------------------------
+
+Bitwise copy of the struct shares the string buffer between
+the copies; refcount handling must keep the buffer alive
+exactly as long as either copy.
+
+    struct Named
+        name: string
+        age: int
+
+    #test
+    test_struct_with_string_copy() -> unit
+        var a = Named("alice", 30)
+        var b = a
+        // Both copies see the same content; the buffer is shared.
+        assert(a.name == "alice", s"a.name should be 'alice', got '${a.name}'")
+        assert(b.name == "alice", s"b.name should be 'alice', got '${b.name}'")
+        // Reassigning one copy's field doesn't affect the other.
+        b.name = "bob"
+        assert(a.name == "alice", s"a.name should still be 'alice' after b.name change, got '${a.name}'")
+        assert(b.name == "bob",   s"b.name should be 'bob', got '${b.name}'")
+
+    #test
+    test_struct_with_string_pass_by_value() -> unit
+        var a = Named("carol", 25)
+        // Helper takes Named by value; mutating the copy's string field must
+        // not affect the caller's. If the field's refcount is mishandled the
+        // helper either crashes on its own drop or leaves the caller's view
+        // corrupted.
+        rename_named_copy(a)
+        assert(a.name == "carol", s"caller's a.name should still be 'carol', got '${a.name}'")
+
+    rename_named_copy(n: Named) -> unit
+        n.name = "renamed"
+        // n drops at end of fn — buffer used by "renamed" should be freed;
+        // buffer used by caller's a.name ("carol") must NOT be freed because
+        // the caller still references it.
+
+    #test
+    test_many_assignments_dont_leak() -> unit
+        // A sequence of struct-with-string assignments stress-tests the
+        // inc-then-dec pairing. The interpreter doesn't visibly track
+        // refcounts at the source level, but a backend mismatch (one
+        // extra inc, or one missing dec) shows up as a crash on drop or
+        // as wrong content under a recycling allocator.
+        var slots: Named = Named("zero", 0)
+        slots = Named("one",   1)
+        slots = Named("two",   2)
+        slots = Named("three", 3)
+        assert(slots.name == "three", s"final name should be 'three', got '${slots.name}'")
+        assert(slots.age  == 3,       s"final age should be 3, got ${slots.age}")

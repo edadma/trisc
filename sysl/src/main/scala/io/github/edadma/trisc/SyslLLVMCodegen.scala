@@ -816,15 +816,20 @@ class SyslLLVMCodegen(target: String = "host"):
           if !isOwnedString(init) then emitStringDescrIncr(alloca)
         else if isAggregate(typ) then
           typ match
-            case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(init) =>
-              // Borrowed value struct: copy bytes into a fresh alloca, then incr string fields
+            case st: SyslType.StructType if !isOwnedStruct(init) =>
+              // Borrowed value struct: copy bytes into a fresh alloca so `var b = a`
+              // gives an independent copy (the source is an existing alloca; using it
+              // directly would make `b` alias `a`, violating the reference's
+              // "bitwise copy, no aliasing" promise for value structs). If any field
+              // is refcounted, incr the shared backing buffers — both copies now
+              // reference them.
               val src = genExpr(init)
               val alloca = deferAlloca(lt)
               val loaded = newReg()
               emit(s"  $loaded = load $lt, $lt* $src")
               emit(s"  store $lt $loaded, $lt* $alloca")
               locals(name) = LocalVar(name, alloca, typ, isVolatile)
-              emitStructStringFieldsIncr(alloca, st)
+              if structHasStringFields(st) then emitStructStringFieldsIncr(alloca, st)
             case _: SyslType.FuncType =>
               // Closure descriptor: copy bytes into a fresh alloca so `var g = f`
               // doesn't alias f's storage (which would cause double-decr at scope
@@ -879,11 +884,28 @@ class SyslLLVMCodegen(target: String = "host"):
           locals(target) = LocalVar(target, alloca, value.typ)
           if !isOwnedString(value) then emitStringDescrIncr(alloca)
         else if !locals.contains(target) && !globalVarTypes.contains(target) && isAggregate(value.typ) then
-          // New aggregate variable: genExpr returns an alloca pointer — use it directly
-          val ptr = genExpr(value)
-          locals(target) = LocalVar(target, ptr, value.typ)
-          if isSliceType(value.typ) && !isSliceOwned(value) then
-            emitSliceBackrefIncr(ptr)
+          // New aggregate variable. For *owned* aggregates (constructors, call
+          // results) the source's alloca is fresh and exclusive — use it
+          // directly. For *borrowed* structs (TVarRef, TFieldAccess, …) we
+          // must copy into a fresh alloca; aliasing the source would make
+          // `b = a` (where `a` is a value struct) share storage and violate
+          // the reference's "bitwise copy, no aliasing" promise. Mirrors
+          // TVarStmt's aggregate branch above.
+          value.typ match
+            case st: SyslType.StructType if !isOwnedStruct(value) =>
+              val lt = llvmType(value.typ)
+              val src = genExpr(value)
+              val alloca = deferAlloca(lt)
+              val loaded = newReg()
+              emit(s"  $loaded = load $lt, $lt* $src")
+              emit(s"  store $lt $loaded, $lt* $alloca")
+              locals(target) = LocalVar(target, alloca, value.typ)
+              if structHasStringFields(st) then emitStructStringFieldsIncr(alloca, st)
+            case _ =>
+              val ptr = genExpr(value)
+              locals(target) = LocalVar(target, ptr, value.typ)
+              if isSliceType(value.typ) && !isSliceOwned(value) then
+                emitSliceBackrefIncr(ptr)
         else
           val v = genExpr(value)
           if locals.contains(target) then
