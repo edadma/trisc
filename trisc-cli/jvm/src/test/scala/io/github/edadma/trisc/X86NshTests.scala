@@ -1299,12 +1299,14 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "!K:"
   }
 
-  "busybox: ls /etc" ignore {
-    // TODO: un-ignore when sys_getdents64 (syscall 61) lands and
-    // POSIX_FD_DIR fd kind tracks an opendir cursor through VFS_CMD_READDIR.
+  "busybox: ls /etc" in {
+    // v1 applet — directory enumeration via syscall-186
+    // (getdents64) → VFS_CMD_READDIR_H. Per-fd cursor in
+    // `posix_fd_table[].pos`.
     val output = qemu.command("/bin/busybox ls /etc")
-    output should include("hostname")
+    output should include("hosts")
     output should include("passwd")
+    output should include("shadow")
     output should include("ttytab")
     output should not include "!K:"
   }

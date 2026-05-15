@@ -1024,6 +1024,15 @@ the way out so it doesn't leak.
     val VFS_CMD_FSTAT_C   = 24
     val VFS_CMD_TRUNCATE_C = 29
 
+    // Handle-based readdir — drives `sys_getdents64`'s loop. The
+    // path-based VFS_CMD_READDIR re-resolves the path on every
+    // call which would make `opendir → readdir(n times)` quadratic
+    // in directory size; the handle variant reuses the OFT-stored
+    // inode set at open() time. Cursor (entry index) is kept on
+    // the shim side (per-fd `pos`) since VFS is stateless across
+    // calls.
+    val VFS_CMD_READDIR_H_C = 32
+
 `GRANT_READ` / `GRANT_WRITE` mirror the values in `oskit.kernel`'s
 private grant table (1 = read by mapper, 2 = write by mapper).
 
@@ -1285,6 +1294,8 @@ Returns 0 on success, negative errno on failure.
             return sys_ftruncate(int(a0), a1)
         if num == 256
             return sys_pipe2(a0, int(a1))
+        if num == 186
+            return sys_getdents64(int(a0), a1, a2)
         if num == 153
             return sys_epoll_create1(int(a0))
         if num == 154
@@ -5722,6 +5733,126 @@ Returns 0 on success, -ENOENT on miss.
             var trep: [1]byte
             ipc_send(port, tm, 9, trep, 1)
         i64(pfd)
+
+SYS_GETDENTS64. Loops `VFS_CMD_READDIR_H` (handle-based)
+starting at the cursor stored in this fd's `pos` field,
+packing Linux `struct linux_dirent64` records into the user
+buffer until either the buffer is full or VFS reports
+end-of-dir. Returns the total byte count written; 0 means
+end-of-directory.
+
+The dirent64 layout (Linux ABI, 8-byte aligned):
+
+```
+offset  size  field
+0       8     d_ino     (inode number)
+8       8     d_off     (cookie to seek back to next entry)
+16      2     d_reclen  (size of this record)
+18      1     d_type    (DT_REG/DT_DIR/...; we report DT_UNKNOWN)
+19      N+1   d_name    (null-terminated, padded to 8-byte boundary)
+```
+
+`d_off` carries the next-entry cursor; `lseek`/`telldir` would
+use it to revisit. We hand back the next cursor index since
+tfs_readdir is index-keyed. `d_type=DT_UNKNOWN` keeps the
+implementation simple — userspace falls back to a separate
+`lstat` for the type when it cares (ls, etc.).
+
+Validation matches Linux: fd must be open (-EBADF if free),
+must be POSIX_FD_FILE (-ENOTDIR for sockets/etc — Linux
+returns -ENOTDIR; we approximate with -EBADF since the OFT
+will refuse a non-directory inode anyway). `len` is bounded
+to `INT_MAX` by musl already; we just truncate at the user's
+ask.
+
+    sys_getdents64(fd: int, buf_ptr: i64, len_i64: i64) -> i64
+        val k = posix_fd_kind(fd)
+        if k == POSIX_FD_FREE
+            return i64(-EBADF)
+        if k != POSIX_FD_FILE
+            return i64(-EBADF)
+        if buf_ptr == i64(0)
+            return i64(-EFAULT)
+        if len_i64 <= i64(0)
+            return i64(0)
+        val len = int(len_i64)
+        val port = vfs_get_port()
+        if port < 0
+            return i64(-ENODEV)
+        val handle = posix_fd_target(fd)
+        val pid = posix_fd_current_pid()
+        val cidx = pid * POSIX_FDS_PER_PROC + fd
+        var cursor = int(posix_fd_table[cidx].pos)
+        val out: *byte = *byte(buf_ptr)
+        var written = 0
+
+        while written < len
+            var req: [9]byte
+            req[0] = byte(VFS_CMD_READDIR_H_C)
+            shim_write_be_i32(req, 1, handle)
+            shim_write_be_i32(req, 5, cursor)
+            var rep: [65]byte
+            val r = ipc_send(port, req, 9, rep, 65)
+            if r < 0
+                if written > 0
+                    posix_fd_table[cidx].pos = i64(cursor)
+                    return i64(written)
+                return i64(-EIO)
+            if rep[0] != 0
+                // Status != 0 from VFS_CMD_READDIR_H means either
+                // end-of-dir (TFS index past last entry) or
+                // not-a-directory. Stop and return what we have.
+                break
+            val ino = shim_read_be_i32(rep, 1)
+            var name_len = 0
+            while name_len < 60
+                if rep[5 + name_len] == byte(0)
+                    break
+                name_len += 1
+            val reclen = (20 + name_len + 7) & ~7
+            if written + reclen > len
+                // No room for this entry. Linux returns -EINVAL
+                // only when the FIRST entry doesn't fit; we mirror
+                // that. Cursor is NOT advanced — next call retries.
+                if written == 0
+                    return i64(-EINVAL)
+                break
+            // d_ino (8 bytes little-endian, zero-extended from i32)
+            out[written +  0] = byte(ino & 0xFF)
+            out[written +  1] = byte((ino >> 8) & 0xFF)
+            out[written +  2] = byte((ino >> 16) & 0xFF)
+            out[written +  3] = byte((ino >> 24) & 0xFF)
+            out[written +  4] = byte(0)
+            out[written +  5] = byte(0)
+            out[written +  6] = byte(0)
+            out[written +  7] = byte(0)
+            // d_off — cookie to seek back. We hand back the next
+            // cursor index; musl's readdir uses d_reclen to walk
+            // forward and only consults d_off for telldir/seekdir.
+            val next_cursor = cursor + 1
+            out[written +  8] = byte(next_cursor & 0xFF)
+            out[written +  9] = byte((next_cursor >> 8) & 0xFF)
+            out[written + 10] = byte((next_cursor >> 16) & 0xFF)
+            out[written + 11] = byte((next_cursor >> 24) & 0xFF)
+            out[written + 12] = byte(0)
+            out[written + 13] = byte(0)
+            out[written + 14] = byte(0)
+            out[written + 15] = byte(0)
+            out[written + 16] = byte(reclen & 0xFF)
+            out[written + 17] = byte((reclen >> 8) & 0xFF)
+            out[written + 18] = byte(0)         // DT_UNKNOWN
+            var j = 0
+            while j < name_len
+                out[written + 19 + j] = rep[5 + j]
+                j += 1
+            while 19 + j < reclen
+                out[written + 19 + j] = byte(0)
+                j += 1
+            written += reclen
+            cursor += 1
+
+        posix_fd_table[cidx].pos = i64(cursor)
+        i64(written)
 
 SYS_FTRUNCATE. Sets the file referred to by `fd` to exactly
 `length` bytes. Shrinks free unused blocks; extension creates a

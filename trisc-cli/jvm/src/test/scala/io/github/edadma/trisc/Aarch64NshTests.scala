@@ -2672,14 +2672,15 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "!K:"
   }
 
-  "busybox: ls /etc" ignore {
-    // TODO: un-ignore when sys_getdents64 (syscall 61) lands and
-    // POSIX_FD_DIR fd kind tracks an opendir cursor through VFS_CMD_READDIR.
-    // Currently: opendir succeeds (heap VMA fault fixed), readdir returns
-    // NULL with errno=ENOSYS, ls prints nothing and exits silently.
+  "busybox: ls /etc" in {
+    // v1 applet — directory enumeration. Exercises the
+    // syscall-186 (getdents64) path through the new
+    // VFS_CMD_READDIR_H handle-based readdir, with the per-fd
+    // cursor stored in `posix_fd_table[].pos`.
     val output = qemu.command("/bin/busybox ls /etc")
-    output should include("hostname")
+    output should include("hosts")
     output should include("passwd")
+    output should include("shadow")
     output should include("ttytab")
     output should not include "!K:"
   }

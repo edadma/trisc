@@ -806,6 +806,16 @@ reply is always 1 byte. On success, length depends on command.
     val VFS_CMD_SYMLINK  = 30
     val VFS_CMD_READLINK = 31
 
+    // Phase 1 chunk — getdents64 enablement. Handle-based READDIR
+    // for `opendir → readdir → readdir → ...` loops. The path-based
+    // VFS_CMD_READDIR exists as the lower-level primitive but
+    // re-resolving the path on every entry would be O(n²) for a
+    // directory of n entries. The handle variant reuses the OFT's
+    // stored inode (set at open() time) so each call is a single
+    // TFS_CMD_READDIR lookup. Cursor (index) is kept by the shim
+    // per-fd, not by VFS — VFS is stateless across calls.
+    val VFS_CMD_READDIR_H = 32
+
     vfs_reply_len(cmd: int, status: int) -> int
         if status != 0
             return 1
@@ -2317,6 +2327,41 @@ Reply: [status(1), ino(4), name(60)]
         else
             ipc_reply(sender, reply, 65)
 
+Handle-based READDIR: [cmd(1), handle(4), index(4)]
+Reply: [status(1), ino(4), name(60)]
+
+The handle was returned by `open()` on the directory; the OFT
+already knows its inode. Skips the path resolve that
+`vfs_path_readdir` does — important when a `readdir` loop walks
+N entries one at a time. Used by the shim's `sys_getdents64`.
+
+    vfs_handle_readdir(sender: int, buf: *byte, backend: int)
+        val handle = vfs_msg_read_i32(buf, 1)
+        val index  = vfs_msg_read_i32(buf, 5)
+        val pid = svc_get_thread_pid(sender)
+        val fid = vfs_handle_lookup(pid, handle)
+        if fid < 0
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        if oft_type[fid] != OFT_TYPE_FILE
+            var err: [1]byte
+            err[0] = -1
+            ipc_reply(sender, err, 1)
+            return
+        val dir_ino = oft_ino[fid]
+        var tfs_msg: [9]byte
+        tfs_msg[0] = 9  // TFS_CMD_READDIR
+        vfs_msg_write_i32(tfs_msg, 1, dir_ino)
+        vfs_msg_write_i32(tfs_msg, 5, index)
+        var reply: [65]byte
+        ipc_send(backend, tfs_msg, 9, reply, 65)
+        if reply[0] != 0
+            ipc_reply(sender, reply, 1)
+        else
+            ipc_reply(sender, reply, 65)
+
 Path-based CHMOD: [cmd(1), mode_hi(1), mode_lo(1), path(N)]
 Reply: [status(1)]
 
@@ -2570,6 +2615,8 @@ the appropriate backend.
                     vfs_path_rmdir(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_READDIR
                     vfs_path_readdir(sender, buf, msg_len, backend)
+                else if cmd == VFS_CMD_READDIR_H
+                    vfs_handle_readdir(sender, buf, backend)
                 else if cmd == VFS_CMD_CHMOD
                     vfs_path_chmod(sender, buf, msg_len, backend)
                 else if cmd == VFS_CMD_RENAME
