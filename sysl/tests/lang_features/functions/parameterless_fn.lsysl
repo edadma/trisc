@@ -1,0 +1,225 @@
+Parameterless Function Declarations
+===================================
+
+Per reference §"Parameterless Function Declarations":
+
+> Sysl distinguishes a **parameterless** function (`f -> T = body`,
+> no parens on the decl, called as `f`) from a **zero-argument**
+> function (`f() -> T = body`, called as `f()`). Mirrors Scala's
+> `def foo` vs `def bar()`.
+
+Bare-name use auto-calls. The body has no purity restriction — it
+may mutate global state, call any function, etc. The two forms
+cannot share a name in the same scope. Internally both lower to
+the same `() -> T` mangling; the only difference is at the use site.
+
+> A parameterless function cannot be passed as a function value:
+> bare `f` always auto-calls.
+
+This file pins:
+- Expression-body and block-body forms.
+- Bare-name auto-call at use site.
+- Mutable global side-effects across multiple references.
+- Use in expressions (operand, condition, return).
+- Coexistence with zero-arg `f()` siblings (different name).
+- Use in nested scopes (test bodies).
+- Calling from another parameterless function (composition).
+- Returning a string (non-trivial type).
+
+File-local prefix `Spf` (Sysl Parameterless Fn).
+
+    module sysl.tests.lang_features
+
+    var counter = 0
+
+Expression-body, immutable
+---------------------------
+
+### Constant int return
+
+    seven -> int = 7
+
+    #test
+    test_spf_constant_int() -> unit
+        assert(seven == 7, s"got $seven")
+
+### Two references to the same parameterless yield the same value
+
+    #test
+    test_spf_two_references_same() -> unit
+        val a = seven
+        val b = seven
+        assert(a == b, "two refs equal")
+        assert(a == 7, "value")
+
+### Use in arithmetic
+
+    #test
+    test_spf_in_arith() -> unit
+        val v = seven * 2 + 1
+        assert(v == 15, s"got $v")
+
+### Use as `if`-condition operand
+
+    five -> int = 5
+
+    #test
+    test_spf_in_condition() -> unit
+        var r = 0
+        if seven > five then r = 1
+        else r = 2
+        assert(r == 1, "seven > five")
+
+Expression-body, returns a string
+---------------------------------
+
+    greeting -> string = "hello"
+
+    #test
+    test_spf_returns_string() -> unit
+        assert(greeting == "hello", s"got '$greeting'")
+
+    #test
+    test_spf_string_in_concat() -> unit
+        val r = greeting + ", world"
+        assert(r == "hello, world", s"got '$r'")
+
+Block-body with mutable global side-effect
+-------------------------------------------
+
+### Each call increments
+
+    next_id -> int
+        counter = counter + 1
+        return counter
+
+    #test
+    test_spf_block_body_mutates() -> unit
+        counter = 0
+        val a = next_id
+        val b = next_id
+        val c = next_id
+        assert(a == 1, s"a; got $a")
+        assert(b == 2, s"b; got $b")
+        assert(c == 3, s"c; got $c")
+        assert(counter == 3, "final counter")
+
+### Reference in an expression triggers the side effect
+
+    #test
+    test_spf_side_effect_in_expr() -> unit
+        counter = 0
+        val sum = next_id + next_id + next_id
+        // 1 + 2 + 3 = 6
+        assert(sum == 6, s"got $sum")
+        assert(counter == 3, "three side effects")
+
+### Reference inside a loop body — N invocations
+
+    #test
+    test_spf_in_loop() -> unit
+        counter = 0
+        var sum = 0
+        var i = 0
+        while i < 5
+            sum = sum + next_id
+            i = i + 1
+        // 1+2+3+4+5 = 15
+        assert(sum == 15, s"got $sum")
+        assert(counter == 5, s"counter; got $counter")
+
+Composition — one parameterless calls another
+----------------------------------------------
+
+### `quintuple_seven -> int = seven * 5`
+
+    quintuple_seven -> int = seven * 5
+
+    #test
+    test_spf_composition_const() -> unit
+        assert(quintuple_seven == 35, s"got $quintuple_seven")
+
+### Block body that reads two other parameterless
+
+    sum_seven_five -> int
+        return seven + five
+
+    #test
+    test_spf_block_reads_two_paramless() -> unit
+        assert(sum_seven_five == 12, s"got $sum_seven_five")
+
+### One parameterless with side effect chained through another
+
+    two_ids -> int = next_id + next_id
+
+    #test
+    test_spf_chained_side_effect() -> unit
+        counter = 0
+        val pair = two_ids
+        // two calls -> counter=2, sum=1+2=3
+        assert(pair == 3, s"got $pair")
+        assert(counter == 2, s"counter; got $counter")
+
+Coexistence with zero-arg siblings (different name)
+----------------------------------------------------
+
+A parameterless and a zero-arg function cannot share a name, but
+sibling decls with different names can both exist in the same
+module.
+
+    twelve_p -> int = 12
+    twelve_z() -> int = 12
+
+    #test
+    test_spf_paramless_called_bare() -> unit
+        assert(twelve_p == 12, s"got $twelve_p")
+
+    #test
+    test_spf_zero_arg_called_with_parens() -> unit
+        assert(twelve_z() == 12, s"got ${twelve_z()}")
+
+    #test
+    test_spf_both_produce_same_value() -> unit
+        assert(twelve_p == twelve_z(), "same value")
+
+Return value flows through assignment / let
+--------------------------------------------
+
+### Bound to a `val`
+
+    #test
+    test_spf_bound_to_val() -> unit
+        val v = seven
+        assert(v == 7, "val-bound")
+
+### Re-bound after side effect
+
+    #test
+    test_spf_rebound_after_side_effect() -> unit
+        counter = 0
+        var v = next_id   // counter=1, v=1
+        v = next_id        // counter=2, v=2
+        assert(v == 2, s"got $v")
+        assert(counter == 2, "two evals")
+
+Parameterless as final-expression result
+-----------------------------------------
+
+A parameterless reference can be the trailing expression of a
+function body.
+
+    wrap_seven() -> int = seven
+
+    #test
+    test_spf_as_trailing_expr() -> unit
+        assert(wrap_seven() == 7, "wrap returns 7")
+
+    wrap_next() -> int = next_id
+
+    #test
+    test_spf_paramless_inside_zeroarg() -> unit
+        counter = 0
+        val a = wrap_next()
+        val b = wrap_next()
+        assert(a == 1, s"a; got $a")
+        assert(b == 2, s"b; got $b")
