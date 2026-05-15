@@ -251,7 +251,7 @@ Existing: `format_strings.lsysl` → `strings/format_strings.lsysl`.
 | `default_args_basic.lsysl` 🟢 | trailing default; mid-call omission (23 tests) |
 | `default_args_complex_expr.lsysl` 🟢 | default value is a non-trivial expression (22 tests) |
 | `named_args.lsysl` 🟢 | calling with `name = value` form; mixing positional + named (23 tests) |
-| `call_by_name.lsysl` 🟡 | `=> T` parameters; lazy evaluation; short-circuit-like patterns (13 tests; TRISC forwarding crash) |
+| `call_by_name.lsysl` 🟢 | `=> T` parameters; lazy evaluation; short-circuit-like patterns; forwarding to another by-name slot (16 tests) |
 | `extern_decl_call.lsysl` 🟢 | `extern fn ...` declaration; call into a C runtime symbol (8 tests; putchar happy path) |
 | `parameterless_fn.lsysl` 🟢 | declaration without `()` parens; usage (19 tests) |
 

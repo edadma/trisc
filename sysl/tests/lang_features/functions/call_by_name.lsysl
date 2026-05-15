@@ -22,15 +22,6 @@ argument plus auto-calls each body reference. This file pins:
 
 File-local prefix `Scbn` (Sysl Call-By-Name).
 
-**TODO — TRISC bug found 2026-05-15, one test dropped:**
-
-  - `outer(b: => int) -> int = inner(b)` (the reference's
-    "forwarding" example, §"By-Name … Forwarding to another
-    by-name slot composes naturally") crashes on TRISC with
-    `DoubleFault at PC=0x468`. Other 6 backends produce the
-    expected `42` for `outer(41)`. See
-    `feedback_sysl_trisc_byname_forwarding.md`.
-
     module sysl.tests.lang_features
 
     var bump_count = 0
@@ -207,3 +198,50 @@ pin the value.
     test_scbn_literal_two_refs_same_value() -> unit
         val r = use_lazy_twice(7)
         assert(r == 14, s"7+7; got $r")
+
+Forwarding to another by-name slot
+-----------------------------------
+
+Per reference §"Call-by-Name … Forwarding to another by-name slot
+composes naturally": one function's by-name parameter can be the
+argument at another function's by-name slot. The outer thunk wraps
+the inner-by-name reference, and each outer evaluation re-enters
+the original thunk.
+
+### Forward a literal — `outer(41)` → `inner(41)` → 42
+
+    outer_fwd(b: => int) -> int = inner_fwd(b)
+    inner_fwd(c: => int) -> int = c + 1
+
+    #test
+    test_scbn_forward_literal() -> unit
+        val r = outer_fwd(41)
+        assert(r == 42, s"got $r")
+
+### Forward a side-effecting argument — outer's body refers to `b`
+once when calling `inner`; `inner` refers to its by-name `c` once.
+Combined, the thunk evaluates once.
+
+    var fwd_count = 0
+
+    fwd_bump() -> int
+        fwd_count = fwd_count + 1
+        return fwd_count
+
+    #test
+    test_scbn_forward_side_effect() -> unit
+        fwd_count = 0
+        // inner_fwd references c once: c + 1 = 1 + 1 = 2
+        val r = outer_fwd(fwd_bump())
+        assert(r == 2, s"got $r")
+        assert(fwd_count == 1, s"one eval; got $fwd_count")
+
+### Forward through two levels — outer → middle → inner
+
+    middle_fwd(m: => int) -> int = inner_fwd(m)
+    outer2_fwd(b: => int) -> int = middle_fwd(b)
+
+    #test
+    test_scbn_forward_two_levels() -> unit
+        val r = outer2_fwd(99)
+        assert(r == 100, s"got $r")

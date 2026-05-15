@@ -605,7 +605,14 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // pointer between iterations (e.g. `addi r4, r4, i; ldw r4, r4, r0`
     // computes from the previously-loaded VALUE instead of the source ADDR).
     // Same for addrReg in {3, 4}. Copy any conflicting reg to r2 / r1 first.
-    val srcBase = if srcReg == 3 || srcReg == 4 then 2 else srcReg
+    // When picking srcBase, avoid the register that addrReg occupies — a naive
+    // "always pick r2 when srcReg conflicts" caused a use-after-free for the
+    // by-name forwarding case (srcReg=r3, addrReg=r2) where srcBase=2
+    // overwrote env_ptr with &src and the whole copy became src→src.
+    val srcBase =
+      if srcReg == 3 || srcReg == 4 then
+        if addrReg == 1 then 2 else 1
+      else srcReg
     if srcBase != srcReg then emit(s"  mov r$srcBase, r$srcReg")
     val destBase =
       if addrReg == 3 || addrReg == 4 then
