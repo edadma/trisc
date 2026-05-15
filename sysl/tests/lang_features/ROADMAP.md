@@ -229,7 +229,7 @@ Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.ls
 | `format_strings.lsysl` 🟢 | `s"..."` interpolation shapes *(move from top level)* |
 | `field_self_concat.lsysl` 🟢 | field-string-assign-with-self-read *(move; cross-listed in `arc/`)* |
 | `string_concat_basic.lsysl` 🟢 | two-word concat; with-separator; empty-left / empty-right / both-empty; order matters; operand-mutation invariance; len math; UTF-8 byte length; self-concat (10 tests) |
-| `string_concat_chain.lsysl` 🔴 | `a + b + c + d`; intermediate buffer lifetimes |
+| `string_concat_chain.lsysl` 🟢 | 4-operand chain; 5-operand with separators; left-assoc step-by-step via `var`; empty in the middle; all-empty; same operand aliased ×3; mixed literal+var sources; chain returned from fn; sources not mutated (9 tests) |
 | `string_escape_seqs.lsysl` 🔴 | `\n`, `\t`, `\"`, `\\`, `\x41`, `\u{...}` |
 | `string_index_slice.lsysl` 🔴 | `s[i]` (byte/char?), `s[i:j]` (sub-slice) |
 | `string_len_empty.lsysl` 🟢 | `len("")` is 0; len of single char; len five chars; two empty literals equal; len stable across reads; len of returned string; len of returned ""; len after rebind; len(a+b)=len(a)+len(b) for ASCII (9 tests) |
