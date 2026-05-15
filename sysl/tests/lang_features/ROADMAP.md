@@ -93,27 +93,27 @@ where noted.
 
 ---
 
-### `slices/` — Fixed arrays, dynamic arrays, slice descriptors, append — 🔴 P0
+### `slices/` — Fixed arrays, dynamic arrays, slice descriptors, append — 🟡 P0
 
 Reference §"Arrays, Slices, and Pointers", §"Append". `std/` uses slices
-constantly but rarely pins boundary conditions. Slice-descriptor mishandling
-caused multiple TRISC audit-era bugs.
+constantly but rarely pins boundary conditions. Now substantially covered;
+two real gaps surfaced (bounds-check trapping inconsistent across backends;
+TRISC's `for x in slice` codegen broken).
 
 | File | Tests pinned |
 |---|---|
-| `array_literal_fixed.lsysl` 🔴 | `[1, 2, 3]` literal types as `[3]int`; index, length, bounds-check trap |
-| `array_explicit_size.lsysl` 🔴 | `[3]int{1,2,3}` typed construction; zero-init `[3]int{}` |
-| `array_of_struct.lsysl` 🔴 | array of value structs — element mutation, copy semantics |
-| `array_decay.lsysl` 🔴 | `[3]int` passed to `*int` parameter (array-decay) |
-| `dynamic_array_new.lsysl` 🔴 | `new [n]int` heap-allocates, zero-init, refcounted via descriptor |
-| `dynamic_array_bounds.lsysl` 🔴 | OOB index traps; OOB store traps; negative index rejected |
-| `slice_from_array.lsysl` 🔴 | `arr[i:j]` yields a slice with the same backing; mutations visible to the source |
-| `slice_full_subslice.lsysl` 🔴 | `s[:]`, `s[i:]`, `s[:j]` (omitted bounds) |
-| `slice_descriptor_passing.lsysl` 🔴 | slice arg passed by value carries `{ptr, len, cap}`; callee mutations visible |
-| `slice_append_inplace.lsysl` 🔴 | append within capacity reuses backing array |
-| `slice_append_growth.lsysl` 🔴 | append beyond capacity allocates new backing; old backing eligible for free |
-| `slice_iter_for_in.lsysl` 🔴 | `for x in s` iterates by value; `for i, x in s` enumerated form (if supported) |
-| `string_as_byte_slice.lsysl` 🔴 | `string` ↔ `[]byte` conversion paths |
+| `array_literal_fixed.lsysl` 🟢 | `[1, 2, 3]` literal types as `[3]int`; index, length, iteration (5 tests) |
+| `array_explicit_size.lsysl` 🟢 | `var a: [N]T` declaration; zero-init (3 tests) |
+| `array_of_struct.lsysl` 🟢 | array of value structs — element read/write, whole-element assignment (4 tests) |
+| `array_decay.lsysl` 🟢 | `[3]int` passed to `*int` parameter (array-decay); `&arr[0]` explicit form (3 tests) |
+| `dynamic_array_new.lsysl` 🟢 | `new [n]int` allocates, zero-init, runtime n; many-alloc smoke (4 tests) |
+| `dynamic_array_bounds.lsysl` 🟡 | in-bounds happy path (2 tests). TODO: re-enable OOB-trap tests once uniform bounds checking lands — currently only the interpreter (and partially TRISC) trap on OOB index/store; the other 5 silently succeed. **Real cross-backend soundness gap.** |
+| `slice_from_array.lsysl` 🟢 | `arr[i:j]` shares backing; mutations visible through either side; empty slice (5 tests) |
+| `slice_full_subslice.lsysl` 🟢 | `s[:]`, `s[i:]`, `s[:j]` omitted-bound forms (4 tests) |
+| `slice_descriptor_passing.lsysl` 🟢 | slice param shares backing with caller; `len()` works inside callee; sub-slice through param (4 tests) |
+| `slice_append.lsysl` 🟢 | append single, append many, append preserves predecessors, append on pre-filled slice (4 tests). NB SVM exhausts memory at large append counts (bump-allocator + no free); test uses 100 elements not 1000 |
+| `slice_iter_for_in.lsysl` 🟡 | `for x in [literal array]` works (4 tests). TODO entries for `for x in slice` and `for x in dynamic[:]` once TRISC's slice-iter codegen lands; today TRISC traps on those forms while the other 6 backends work |
+| `string_as_byte_slice.lsysl` 🟢 | string indexing yields bytes; len = byte count; UTF-8 multi-byte (4 tests) |
 
 ---
 

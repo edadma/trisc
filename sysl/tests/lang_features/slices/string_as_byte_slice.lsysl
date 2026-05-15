@@ -1,0 +1,61 @@
+String ↔ []byte conversions
+============================
+
+Sysl strings are UTF-8 byte sequences. Reading bytes from a
+string by indexing `s[i]` yields a `byte` (== `u8`). The
+length `len(s)` returns the byte count, not the rune count.
+
+For `[]byte` ↔ `string` conversion: per the reference's
+"Strings" / "String Construction from Bytes" section,
+strings can be constructed from byte slices via the
+documented builtin or a helper from std.
+
+    module sysl.tests.lang_features
+
+Index a string — bytes are u8
+-----------------------------
+
+    #test
+    test_string_byte_index() -> unit
+        val s = "abc"
+        assert(s[0] == byte('a'), s"s[0] should be 'a', got ${int(s[0])}")
+        assert(s[1] == byte('b'), s"s[1] should be 'b', got ${int(s[1])}")
+        assert(s[2] == byte('c'), s"s[2] should be 'c', got ${int(s[2])}")
+
+Length of a string is byte count
+--------------------------------
+
+    #test
+    test_string_len_byte_count() -> unit
+        val ascii = "hello"
+        assert(len(ascii) == 5, s"len('hello') should be 5, got ${len(ascii)}")
+        val empty = ""
+        assert(len(empty) == 0, s"len('') should be 0, got ${len(empty)}")
+
+Iterate a string by index, accumulating byte values
+---------------------------------------------------
+
+    #test
+    test_string_iter_bytes() -> unit
+        val s = "ABC"
+        var sum = 0
+        var i = 0
+        while i < len(s)
+            sum = sum + int(s[i])
+            i = i + 1
+        // 'A' + 'B' + 'C' = 65 + 66 + 67 = 198
+        assert(sum == 198, s"sum of bytes should be 198, got $sum")
+
+UTF-8 multi-byte sequence — byte count > rune count
+---------------------------------------------------
+
+A non-ASCII character takes multiple bytes. The string `"ñ"`
+encodes as `0xC3 0xB1` — 2 bytes. The byte length is 2, not 1.
+
+    #test
+    test_utf8_byte_length() -> unit
+        val n = "ñ"
+        assert(len(n) == 2, s"len('ñ') should be 2 bytes, got ${len(n)}")
+        // First byte is 0xC3 = 195
+        assert(int(n[0]) == 195, s"n[0] should be 0xC3 (195), got ${int(n[0])}")
+        assert(int(n[1]) == 177, s"n[1] should be 0xB1 (177), got ${int(n[1])}")

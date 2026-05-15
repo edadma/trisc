@@ -1,0 +1,84 @@
+Dynamic-array allocation — `new [n]T`
+======================================
+
+`new [n]T` heap-allocates a contiguous array of `n` elements
+of type `T`, returning a refcounted slice `&[]T`. The
+elements are zero-initialized.
+
+The result behaves like a slice: indexable, has a length,
+can be passed to functions. The underlying buffer is managed
+by the ARC machinery — when the last binding drops, the
+backing is freed.
+
+These tests pin:
+
+  - Construction: `new [n]T` produces an `&[]T` with len n.
+  - Zero-init: all elements start at 0 (or T's zero value).
+  - Read/write through indexing.
+  - Length is the runtime n, not a compile-time constant.
+  - Heavy allocation pattern doesn't leak or crash.
+
+    module sysl.tests.lang_features
+
+Basic construction and zero-init
+--------------------------------
+
+    #test
+    test_new_array_zero_init() -> unit
+        val a: &[]int = new [5]int
+        assert(len(a) == 5, s"len should be 5, got ${len(a)}")
+        var i = 0
+        while i < len(a)
+            assert(a[i] == 0, s"a[$i] should be 0, got ${a[i]}")
+            i = i + 1
+
+Write then read
+---------------
+
+    #test
+    test_new_array_write_read() -> unit
+        val a: &[]int = new [10]int
+        var i = 0
+        while i < len(a)
+            a[i] = i * i
+            i = i + 1
+        // Read back; check squares
+        var ok = true
+        i = 0
+        while i < len(a)
+            if a[i] != i * i then ok = false
+            i = i + 1
+        assert(ok, s"a should contain squares of 0..9, got a[5]=${a[5]}")
+
+Length is runtime, not compile-time
+-----------------------------------
+
+    make_array(n: int) -> &[]int = new [n]int
+
+    #test
+    test_dynamic_length() -> unit
+        val a3: &[]int = make_array(3)
+        val a7: &[]int = make_array(7)
+        val a100: &[]int = make_array(100)
+        assert(len(a3)   == 3,   s"len(a3) should be 3, got ${len(a3)}")
+        assert(len(a7)   == 7,   s"len(a7) should be 7, got ${len(a7)}")
+        assert(len(a100) == 100, s"len(a100) should be 100, got ${len(a100)}")
+
+Many allocations don't leak/crash
+---------------------------------
+
+A loop that allocates and drops should be stable — no allocator
+state corruption, no crash.
+
+    #test
+    test_many_dynamic_allocations() -> unit
+        var total = 0
+        var i = 0
+        while i < 100
+            val a: &[]int = new [10]int
+            a[0] = i
+            a[9] = i * 2
+            total = total + a[0] + a[9]
+            i = i + 1
+        // Σ (i + 2i) for i=0..99 = 3 * Σ i = 3 * 4950 = 14850
+        assert(total == 14850, s"total should be 14850, got $total")

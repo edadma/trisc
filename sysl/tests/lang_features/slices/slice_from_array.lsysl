@@ -1,0 +1,67 @@
+Slice from a fixed array — sub-slicing and shared backing
+=========================================================
+
+`arr[i:j]` produces a slice `[]T` that views elements
+`i..<j` of `arr`. The slice and the source share the same
+backing storage: mutating an element through the slice is
+visible at the original array index `i + offset`, and vice
+versa.
+
+    module sysl.tests.lang_features
+
+Basic sub-slice — length matches the range
+------------------------------------------
+
+    #test
+    test_slice_length() -> unit
+        var a = [10, 20, 30, 40, 50]
+        val s = a[1:4]
+        assert(len(s) == 3, s"len(a[1:4]) should be 3, got ${len(s)}")
+
+Read through the slice mirrors source
+-------------------------------------
+
+    #test
+    test_slice_read_mirrors_source() -> unit
+        var a = [10, 20, 30, 40, 50]
+        val s = a[1:4]
+        // s[0] is a[1], s[1] is a[2], s[2] is a[3]
+        assert(s[0] == 20, s"s[0] should be 20, got ${s[0]}")
+        assert(s[1] == 30, s"s[1] should be 30, got ${s[1]}")
+        assert(s[2] == 40, s"s[2] should be 40, got ${s[2]}")
+
+Write through slice updates source
+----------------------------------
+
+    #test
+    test_slice_write_visible_in_source() -> unit
+        var a = [1, 2, 3, 4, 5]
+        var s = a[1:4]
+        s[0] = 99
+        s[2] = 100
+        // Source array sees the mutations at indices 1 and 3
+        assert(a[1] == 99, s"a[1] should be 99 (via slice), got ${a[1]}")
+        assert(a[3] == 100, s"a[3] should be 100 (via slice), got ${a[3]}")
+        // a[0], a[2], a[4] untouched
+        assert(a[0] == 1 && a[2] == 3 && a[4] == 5,
+            s"a[0,2,4] = (${a[0]},${a[2]},${a[4]}), expected (1,3,5)")
+
+Source mutation visible through pre-existing slice
+--------------------------------------------------
+
+    #test
+    test_source_write_visible_in_slice() -> unit
+        var a = [1, 2, 3, 4, 5]
+        val s = a[1:4]
+        a[2] = 888
+        // s[1] is a[2]
+        assert(s[1] == 888, s"s[1] should be 888 after a[2]=888, got ${s[1]}")
+
+Empty slice — start equals end
+------------------------------
+
+    #test
+    test_empty_slice() -> unit
+        var a = [10, 20, 30, 40, 50]
+        val s = a[2:2]
+        assert(len(s) == 0, s"len(a[2:2]) should be 0, got ${len(s)}")
