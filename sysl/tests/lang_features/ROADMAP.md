@@ -228,7 +228,7 @@ Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.ls
 |---|---|
 | `format_strings.lsysl` 🟢 | `s"..."` interpolation shapes *(move from top level)* |
 | `field_self_concat.lsysl` 🟢 | field-string-assign-with-self-read *(move; cross-listed in `arc/`)* |
-| `string_concat_basic.lsysl` 🔴 | `a + b` produces an owned new buffer; lengths, empties |
+| `string_concat_basic.lsysl` 🟢 | two-word concat; with-separator; empty-left / empty-right / both-empty; order matters; operand-mutation invariance; len math; UTF-8 byte length; self-concat (10 tests) |
 | `string_concat_chain.lsysl` 🔴 | `a + b + c + d`; intermediate buffer lifetimes |
 | `string_escape_seqs.lsysl` 🔴 | `\n`, `\t`, `\"`, `\\`, `\x41`, `\u{...}` |
 | `string_index_slice.lsysl` 🔴 | `s[i]` (byte/char?), `s[i:j]` (sub-slice) |
