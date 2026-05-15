@@ -200,7 +200,7 @@ Existing: `defer_lifo.lsysl` → `defer/defer_lifo.lsysl`.
 | `closure_recursive_inner_def.lsysl` 🔴 | `def fact(n) -> ...` recursive named local closure |
 | `closure_in_closure.lsysl` 🔴 | closure declared inside another closure's body *(blocked on sysl bug — see feedback_sysl_closure_in_closure.md)* |
 | `function_pointer_call.lsysl` 🔴 | bare fn pointer call `fp(x)`; storing a fn pointer in a var |
-| `closure_underscore_placeholder.lsysl` 🔴 | `_ + 1` underscore-placeholder syntax sugar |
+| `closure_underscore_placeholder.lsysl` 🟢 | `_ + 1`; `_ * 7`; two-arg `_ - _` order-sensitive; `_ * 2 + 1` bubble-up through arithmetic; paren-narrowed `(_ + 1)`; `_ * _` same arg twice (7 tests) |
 
 Existing: `closures_hof.lsysl` → `closures/closures_hof.lsysl`.
 

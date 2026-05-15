@@ -1,0 +1,88 @@
+Placeholder closures — `_` syntactic sugar
+==========================================
+
+A `_` in expression position introduces an anonymous
+single-parameter closure. The body is the *smallest
+enclosing expression* that contains the underscore.
+Multiple `_`s in the same enclosing expression become
+distinct parameters in left-to-right order.
+
+Examples from the reference: `_ + 1` is `x -> x + 1`,
+`_ + _` is `(x, y) -> x + y`, `(_ + 1) * 2` is
+`x -> (x + 1) * 2`.
+
+    module sysl.tests.lang_features
+
+    cup_apply(f: (int) -> int, x: int) -> int = f(x)
+
+    cup_apply2(f: (int, int) -> int, x: int, y: int) -> int = f(x, y)
+
+Single placeholder
+------------------
+
+`_ + 1` lowers to `x -> x + 1`. The body is the smallest
+enclosing arithmetic expression containing `_`.
+
+    #test
+    test_single_placeholder_add() -> unit
+        val r = cup_apply(_ + 1, 41)
+        assert(r == 42, s"_+1 applied to 41 should be 42, got $r")
+
+    #test
+    test_single_placeholder_mul() -> unit
+        val r = cup_apply(_ * 7, 6)
+        assert(r == 42, s"_*7 applied to 6 should be 42, got $r")
+
+Two placeholders bind left-to-right
+-----------------------------------
+
+`_ + _` lowers to `(a, b) -> a + b`. The *first* underscore
+is the first parameter; the second is the second.
+
+    #test
+    test_two_placeholders_subtract() -> unit
+        val r = cup_apply2(_ - _, 50, 8)
+        assert(r == 42, s"_-_ applied to (50, 8) should be 42, got $r")
+
+    #test
+    test_two_placeholders_order_matters() -> unit
+        val r = cup_apply2(_ - _, 8, 50)
+        assert(r == -42, s"_-_ applied to (8, 50) should be -42, got $r")
+
+Placeholder bubbles up through arithmetic
+-----------------------------------------
+
+Without surrounding parens, the placeholder body bubbles up
+through arithmetic until it hits a call-arg boundary. So
+`_ * 2 + 1` (no parens) lowers to `x -> x * 2 + 1` — the
+whole arg-position arithmetic becomes the body.
+
+    #test
+    test_placeholder_bubbles_through_arith() -> unit
+        val r = cup_apply(_ * 2 + 1, 20)
+        assert(r == 41, s"_*2+1 applied to 20 should be 41, got $r")
+
+Parens around the placeholder narrow the body
+---------------------------------------------
+
+Per the reference, `(_ + 1)` parens-delimited means the
+closure body is just `_ + 1`. The result of that closure
+applied at the call site is fine — but writing `(_ + 1) * 2`
+as the arg would mean *multiplying a closure by 2*, which is
+a type error. So we keep it simple: write the closure as the
+whole call arg with no surrounding multiplication.
+
+    #test
+    test_placeholder_paren_narrowed() -> unit
+        val r = cup_apply((_ + 1), 41)
+        assert(r == 42, s"(_+1) applied to 41 should be 42, got $r")
+
+Placeholder via `_ * _` then identity
+-------------------------------------
+
+`_ * _` doubles when called with the same arg twice.
+
+    #test
+    test_two_placeholders_same_arg() -> unit
+        val r = cup_apply2(_ * _, 7, 7)
+        assert(r == 49, s"_*_ applied to (7, 7) should be 49, got $r")
