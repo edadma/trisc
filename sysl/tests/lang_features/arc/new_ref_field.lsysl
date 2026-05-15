@@ -1,0 +1,112 @@
+Reference-typed struct fields
+=============================
+
+When a struct has a `&NrfInner` field, the field itself is a
+reference. Assigning a new value to that field must:
+
+  - decrement the old ref's buffer (potentially freeing it),
+  - increment the new ref's buffer (unless ownership is being
+    transferred from a fresh `new`).
+
+Construction of a struct that contains a `&NrfInner` field also
+participates: the constructor argument transfers ownership
+in (if fresh) or borrows (if it's an existing ref).
+
+These tests pin the contract through the *visible* behaviour
+of field reads after a sequence of mutations. If the field's
+refcount handling is wrong, reads land on freed memory.
+
+    module sysl.tests.lang_features
+
+    struct NrfInner
+        v: int
+
+    struct NrfOuter
+        child: &NrfInner
+
+Construction with a fresh inner ref
+-----------------------------------
+
+    #test
+    test_construct_with_fresh_inner() -> unit
+        val o: NrfOuter = NrfOuter(new NrfInner(42))
+        assert(o.child.v == 42, s"o.child.v should be 42, got ${o.child.v}")
+
+Construction with a borrowed inner ref
+--------------------------------------
+
+The inner is referenced from two places: the local `i` and
+the outer struct's `child` field. Refcount needs to reflect
+two owners.
+
+    #test
+    test_construct_with_borrowed_inner() -> unit
+        val i: &NrfInner = new NrfInner(7)
+        val o: NrfOuter = NrfOuter(i)
+        // Both bindings see the same buffer
+        assert(o.child.v == 7, s"o.child.v should be 7, got ${o.child.v}")
+        assert(i.v == 7, s"i.v should be 7, got ${i.v}")
+        // Mutation visible through both
+        o.child.v = 99
+        assert(i.v == 99, s"i.v should be 99 after o.child mutation, got ${i.v}")
+
+Field reassignment to a fresh ref
+---------------------------------
+
+    #test
+    test_field_reassign_to_fresh() -> unit
+        var o: NrfOuter = NrfOuter(new NrfInner(1))
+        o.child = new NrfInner(2)
+        o.child = new NrfInner(3)
+        assert(o.child.v == 3, s"o.child.v should be 3 after reassignments, got ${o.child.v}")
+
+Field reassignment to a borrowed ref
+------------------------------------
+
+After `o.child = other`, both `o.child` and `other` should
+share the buffer. The old `o.child` buffer should be freed
+(refcount drops). The new buffer's refcount should now
+reflect two owners.
+
+    #test
+    test_field_reassign_to_borrowed() -> unit
+        var o: NrfOuter = NrfOuter(new NrfInner(10))
+        val other: &NrfInner = new NrfInner(20)
+        o.child = other
+        assert(o.child.v == 20, s"o.child.v should be 20 (= other.v), got ${o.child.v}")
+        // Mutation visible through both
+        o.child.v = 30
+        assert(other.v == 30, s"other.v should be 30, got ${other.v}")
+
+Self-assign field
+-----------------
+
+If `o.child = o.child` is decr-then-incr, the inner buffer
+frees and then increments freed memory.
+
+    #test
+    test_field_self_assign() -> unit
+        var o: NrfOuter = NrfOuter(new NrfInner(123))
+        o.child = o.child
+        assert(o.child.v == 123, s"o.child.v should still be 123 after self-assign, got ${o.child.v}")
+        // After self-assign, mutation still works (buffer not freed)
+        o.child.v = 456
+        assert(o.child.v == 456, s"o.child.v should be 456 after mutation, got ${o.child.v}")
+
+NrfOuter drops -> inner field is dropped
+-------------------------------------
+
+When the outer struct's binding goes out of scope (or is
+reassigned to a fresh NrfOuter), the inner field's ref must
+drop. We can't observe the drop directly (no leak counter at
+the language level), but we *can* observe that the new outer
+contains the right inner, and that nothing crashes.
+
+    #test
+    test_outer_reassign_drops_old_inner() -> unit
+        var o: NrfOuter = NrfOuter(new NrfInner(1))
+        o = NrfOuter(new NrfInner(2))
+        o = NrfOuter(new NrfInner(3))
+        // The old NrfInner(1) and NrfInner(2) should have been freed. We can
+        // only check the final state.
+        assert(o.child.v == 3, s"final o.child.v should be 3, got ${o.child.v}")

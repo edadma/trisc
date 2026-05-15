@@ -1,0 +1,136 @@
+Reference passing across function calls
+=======================================
+
+Passing a `&T` to a function temporarily shares ownership:
+the callee's parameter holds the reference for the duration
+of the call. The compiler must increment the refcount on
+the way in (so the callee's binding is balanced by the
+release at function exit), and the caller's binding stays
+alive across the call.
+
+Subtle cases:
+
+  - **Passing the only ref to a function:** if the caller
+    has the only reference and passes it, the refcount goes
+    from 1 to 2 on entry and back to 1 on exit. If the
+    increment is missing, the caller's view appears to be
+    freed mid-call when the callee's "drop" runs.
+
+  - **Returning a freshly-allocated ref:** the callee's
+    `new T(...)` produces refcount=1 (owned). On return,
+    no extra increment is needed — ownership transfers to
+    the caller.
+
+  - **Returning a borrowed ref:** the callee got the ref
+    from an argument or some other source it doesn't own.
+    The return path must increment so the caller's binding
+    has its own share.
+
+  - **Nested calls:** A call chain `f -> g -> h` passing
+    the same ref must maintain a consistent count. If `g`
+    drops too aggressively, `h` sees freed memory; if `g`
+    fails to drop, the ref leaks.
+
+    module sysl.tests.lang_features
+
+    struct NrpBox
+        v: int
+
+Simple pass — caller still sees the ref after the call
+-------------------------------------------------------
+
+    inspect_box(b: &NrpBox) -> int = b.v
+
+    #test
+    test_pass_then_read() -> unit
+        val b: &NrpBox = new NrpBox(42)
+        val n = inspect_box(b)
+        assert(n == 42, s"inspect_box should return 42, got $n")
+        // Caller's b must still be alive
+        assert(b.v == 42, s"b.v should still be 42 after the call, got ${b.v}")
+
+Pass to a mutating callee
+-------------------------
+
+    increment_box(b: &NrpBox) -> unit
+        b.v = b.v + 1
+
+    #test
+    test_pass_to_mutator() -> unit
+        val b: &NrpBox = new NrpBox(10)
+        increment_box(b)
+        increment_box(b)
+        increment_box(b)
+        assert(b.v == 13, s"b.v should be 13 after 3 increments, got ${b.v}")
+
+Nested call chain
+-----------------
+
+If any link in the chain mis-handles the refcount, by the time
+we reach `read_box` the buffer is either freed or has the wrong
+shared count.
+
+    read_box(b: &NrpBox) -> int = b.v
+
+    pass_through(b: &NrpBox) -> int = read_box(b)
+
+    pass_through_2(b: &NrpBox) -> int = pass_through(b)
+
+    #test
+    test_nested_call_chain() -> unit
+        val b: &NrpBox = new NrpBox(77)
+        val n = pass_through_2(b)
+        assert(n == 77, s"chained pass-through should return 77, got $n")
+        assert(b.v == 77, s"b.v should still be 77 after nested calls, got ${b.v}")
+
+Callee returns a fresh ref — ownership transfers
+------------------------------------------------
+
+`new NrpBox(...)` is owned; the return must NOT add an extra incr.
+A double-incr would prevent the buffer from ever being freed (leak);
+a missing decr at caller's scope-exit would do the same.
+
+    make_box(v: int) -> &NrpBox = new NrpBox(v)
+
+    #test
+    test_returns_fresh_ref() -> unit
+        val b: &NrpBox = make_box(99)
+        assert(b.v == 99, s"b.v from make_box should be 99, got ${b.v}")
+        b.v = 100
+        assert(b.v == 100, s"b.v should be 100 after mutation, got ${b.v}")
+
+Callee returns a borrowed ref — caller takes a new share
+--------------------------------------------------------
+
+The returned ref isn't `new`, so the return path must increment for
+the caller's binding. Without that increment, the callee's drop
+(the function-local share decr) frees the buffer before the caller
+can read it.
+
+    pass_through_ref(b: &NrpBox) -> &NrpBox = b
+
+    #test
+    test_returns_borrowed_ref() -> unit
+        val orig: &NrpBox = new NrpBox(55)
+        val borrowed: &NrpBox = pass_through_ref(orig)
+        assert(borrowed.v == 55, s"borrowed.v should be 55, got ${borrowed.v}")
+        // orig and borrowed share the buffer — mutate through one, see through the other
+        borrowed.v = 66
+        assert(orig.v == 66, s"orig.v should be 66 after borrowed.v=66, got ${orig.v}")
+
+Many calls in a row don't leak
+------------------------------
+
+If the per-call balance is off by even one (extra inc, missing dec),
+1000 calls produce 1000 extra references on the buffer. Final read
+should still work, but the test exercises the allocator path under
+repeated traffic.
+
+    #test
+    test_many_pass_throughs() -> unit
+        val b: &NrpBox = new NrpBox(0)
+        var i = 0
+        while i < 1000
+            increment_box(b)
+            i = i + 1
+        assert(b.v == 1000, s"b.v should be 1000 after 1000 increments, got ${b.v}")

@@ -32,7 +32,7 @@ garbage.
 
     module sysl.tests.lang_features
 
-    struct Box
+    struct NraBox
         v: int
 
 Reassign to fresh allocation
@@ -40,9 +40,9 @@ Reassign to fresh allocation
 
     #test
     test_reassign_to_fresh() -> unit
-        var r: &Box = new Box(1)
-        r = new Box(2)
-        r = new Box(3)
+        var r: &NraBox = new NraBox(1)
+        r = new NraBox(2)
+        r = new NraBox(3)
         // Each assignment drops the previous target. We can only observe
         // the *final* binding, but if any prior dec-then-free corrupted
         // the heap, the read here would trap.
@@ -53,10 +53,10 @@ Reassign to a borrowed reference
 
     #test
     test_reassign_to_borrowed() -> unit
-        val owner: &Box = new Box(42)
-        var alias: &Box = new Box(7)
-        // alias's old target (Box(7)) should be decr'd to 0 and freed;
-        // owner's target (Box(42)) should be incr'd to 2 (owner + alias).
+        val owner: &NraBox = new NraBox(42)
+        var alias: &NraBox = new NraBox(7)
+        // alias's old target (NraBox(7)) should be decr'd to 0 and freed;
+        // owner's target (NraBox(42)) should be incr'd to 2 (owner + alias).
         alias = owner
         assert(alias.v == 42, s"alias.v should be 42 (= owner.v), got ${alias.v}")
         assert(owner.v == 42, s"owner.v should still be 42, got ${owner.v}")
@@ -74,7 +74,7 @@ then read freed memory.
 
     #test
     test_self_assign_no_free() -> unit
-        var r: &Box = new Box(123)
+        var r: &NraBox = new NraBox(123)
         r = r
         assert(r.v == 123, s"r.v should still be 123 after r=r, got ${r.v}")
         r.v = 456
@@ -83,15 +83,15 @@ then read freed memory.
 Chained reassignment through a helper
 -------------------------------------
 
-`bump(r: &Box) -> &Box = new Box(r.v + 1)` returns a fresh ref. The
+`bump(r: &NraBox) -> &NraBox = new NraBox(r.v + 1)` returns a fresh ref. The
 caller's reassignment must inc the new (it's already owned from `new`)
 and dec the old. Repeated chaining stresses the inc/dec balance.
 
-    bump(r: &Box) -> &Box = new Box(r.v + 1)
+    bump(r: &NraBox) -> &NraBox = new NraBox(r.v + 1)
 
     #test
     test_chained_fresh_assignments() -> unit
-        var r: &Box = new Box(0)
+        var r: &NraBox = new NraBox(0)
         var i = 0
         while i < 50
             r = bump(r)

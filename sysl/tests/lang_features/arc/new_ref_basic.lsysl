@@ -28,7 +28,7 @@ in `deinit_basic.lsysl`.
 
     module sysl.tests.lang_features
 
-    struct Node
+    struct NrbNode
         v: int
 
 Basic construction and field read
@@ -36,7 +36,7 @@ Basic construction and field read
 
     #test
     test_new_ref_construction() -> unit
-        val n: &Node = new Node(42)
+        val n: &NrbNode = new NrbNode(42)
         assert(n.v == 42, s"n.v should be 42, got ${n.v}")
 
 Field assignment through a ref
@@ -44,7 +44,7 @@ Field assignment through a ref
 
     #test
     test_new_ref_field_assign() -> unit
-        val n: &Node = new Node(0)
+        val n: &NrbNode = new NrbNode(0)
         n.v = 100
         assert(n.v == 100, s"n.v should be 100 after assignment, got ${n.v}")
         n.v = n.v + 7
@@ -57,12 +57,12 @@ If the refcount accounting is wrong (missing inc on argument
 pass, or extra dec on return), `n` would be freed mid-test
 and subsequent reads would land on freed memory or trap.
 
-    bump_node(r: &Node) -> unit
+    bump_node(r: &NrbNode) -> unit
         r.v = r.v + 1
 
     #test
     test_ref_survives_calls() -> unit
-        val n: &Node = new Node(10)
+        val n: &NrbNode = new NrbNode(10)
         bump_node(n)
         bump_node(n)
         bump_node(n)
@@ -80,7 +80,7 @@ in this loop we trap.
         var i = 0
         var sum = 0
         while i < 100
-            val n: &Node = new Node(i)
+            val n: &NrbNode = new NrbNode(i)
             sum = sum + n.v
             i = i + 1
         // Σ 0..99 = 99*100/2 = 4950

@@ -1,0 +1,117 @@
+Deinit blocks — fired at refcount=0
+====================================
+
+A `Struct.deinit()` method runs exactly once, when the refcount
+of the underlying allocation transitions from 1 to 0, just before
+the memory is freed. Value structs (no heap allocation, no
+refcount) don't call deinit at all — there's no transition to
+fire on.
+
+We can't observe "memory was freed" directly in user code, but
+we *can* observe deinit firing — by having deinit write to a
+module-level counter or list. The tests check the counter's
+final value.
+
+    module sysl.tests.lang_features
+
+Module-level counter that deinit increments. Reset at the start
+of each test by overwriting with 0.
+
+    var deinit_count: int = 0
+
+    struct DbNode
+        v: int
+
+    DbNode.deinit() -> unit
+        deinit_count = deinit_count + 1
+
+Deinit fires when the last reference drops
+------------------------------------------
+
+The reference is bound inside a helper function; when the
+helper returns, the binding goes out of scope, refcount drops
+to zero, deinit fires.
+
+    drop_local_ref() -> unit
+        val n: &DbNode = new DbNode(1)
+        // n goes out of scope here; deinit should fire.
+
+    #test
+    test_deinit_fires_on_scope_exit() -> unit
+        deinit_count = 0
+        drop_local_ref()
+        assert(deinit_count == 1, s"deinit_count should be 1 after drop_local_ref, got $deinit_count")
+
+Deinit fires exactly once
+-------------------------
+
+Even with multiple borrows, exactly one deinit fires for the
+underlying allocation (when its refcount goes to zero).
+
+    multi_borrow() -> unit
+        val a: &DbNode = new DbNode(1)
+        val b: &DbNode = a          // a and b share the buffer; refcount 2
+        val c: &DbNode = b          // refcount 3
+        // All three drop at scope exit -> refcount 3 -> 2 -> 1 -> 0,
+        // exactly one deinit fires.
+
+    #test
+    test_deinit_fires_once_per_allocation() -> unit
+        deinit_count = 0
+        multi_borrow()
+        assert(deinit_count == 1, s"deinit_count should be 1 after multi_borrow, got $deinit_count")
+
+Deinit fires for every distinct allocation
+------------------------------------------
+
+Three separate allocations should fire deinit three times.
+
+    three_allocations() -> unit
+        val a: &DbNode = new DbNode(1)
+        val b: &DbNode = new DbNode(2)
+        val c: &DbNode = new DbNode(3)
+
+    #test
+    test_deinit_per_allocation() -> unit
+        deinit_count = 0
+        three_allocations()
+        assert(deinit_count == 3, s"deinit_count should be 3 after three allocations, got $deinit_count")
+
+Deinit doesn't fire on reassignment-to-borrowed
+-----------------------------------------------
+
+`b = a` keeps the underlying buffer alive (now two owners).
+When the function exits, both drop, but the buffer was
+allocated once -> one deinit.
+
+    reassign_to_borrowed() -> unit
+        var b: &DbNode = new DbNode(1)   // alloc 1
+        val a: &DbNode = new DbNode(2)   // alloc 2
+        b = a                         // alloc 1 deinit fires here (refcount 1 -> 0);
+                                      // b and a now share alloc 2
+
+    #test
+    test_deinit_on_reassignment() -> unit
+        deinit_count = 0
+        reassign_to_borrowed()
+        // Two distinct allocations, both reach refcount 0 by function exit:
+        //   - alloc 1: freed when b was reassigned
+        //   - alloc 2: freed when b and a both drop at scope exit
+        assert(deinit_count == 2, s"deinit_count should be 2 after reassign_to_borrowed, got $deinit_count")
+
+Value structs don't trigger deinit
+----------------------------------
+
+A `var v = DbNode(...)` is a value struct: no heap, no refcount,
+no deinit fires.
+
+    use_value_struct() -> unit
+        var v = DbNode(1)
+        v.v = 2
+        // v drops at scope exit, but it's a value — no deinit
+
+    #test
+    test_no_deinit_for_value_struct() -> unit
+        deinit_count = 0
+        use_value_struct()
+        assert(deinit_count == 0, s"deinit_count should be 0 for value struct, got $deinit_count")

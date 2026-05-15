@@ -1,0 +1,120 @@
+Reference return-path refcount semantics
+========================================
+
+When a function returns a `&T`, the refcount accounting at
+the return must hand exactly one share to the caller and
+release any function-local shares. Cases:
+
+  - **Fresh allocation:** `return new T(...)` — refcount 1
+    is already correct; just hand off.
+
+  - **Returning a parameter:** `return r` where `r: &T` is a
+    parameter — the parameter had its own share (incremented
+    on the way in). On return, the caller's binding needs a
+    share; the function-local share must be released. The
+    simplest correct lowering is "do nothing extra" — the
+    function-local incr at entry survives as the caller's
+    share, and the param's "scope-exit decr" is elided
+    because ownership transferred.
+
+  - **Returning a field of another ref:** `return p.field`
+    where `p: &Outer` and `Outer.field: &Inner`. The returned
+    ref isn't owned by the function; the caller needs a fresh
+    share, so the return path must increment.
+
+  - **Early return through a branch:** ensures both branches
+    do the same accounting; a bug that only fires on one path
+    leaks or double-frees.
+
+  - **Recursive return:** stresses the return-path increments
+    across multiple call frames.
+
+    module sysl.tests.lang_features
+
+    struct NrrBox
+        v: int
+
+Fresh allocation in return position
+-----------------------------------
+
+    make_box_return(v: int) -> &NrrBox = new NrrBox(v)
+
+    #test
+    test_return_fresh() -> unit
+        val b1: &NrrBox = make_box_return(1)
+        val b2: &NrrBox = make_box_return(2)
+        val b3: &NrrBox = make_box_return(3)
+        assert(b1.v == 1 && b2.v == 2 && b3.v == 3,
+            s"b1=${b1.v} b2=${b2.v} b3=${b3.v}, expected 1 2 3")
+
+Return a borrowed parameter
+---------------------------
+
+    identity_ref(b: &NrrBox) -> &NrrBox = b
+
+    #test
+    test_return_borrowed_param() -> unit
+        val orig: &NrrBox = new NrrBox(50)
+        val same: &NrrBox = identity_ref(orig)
+        assert(same.v == 50, s"same.v should be 50, got ${same.v}")
+        // After identity_ref returns, both bindings still alive
+        same.v = 60
+        assert(orig.v == 60, s"orig.v should be 60 after same.v=60, got ${orig.v}")
+
+Conditional return: same accounting on every branch
+---------------------------------------------------
+
+If the early-return path's refcount accounting differs from the late-
+return path, one of them leaks or frees prematurely. Both branches
+must hand the caller exactly one share.
+
+    select_box(use_a: bool, a: &NrrBox, b: &NrrBox) -> &NrrBox
+        if use_a then return a
+        return b
+
+    #test
+    test_conditional_return_branches() -> unit
+        val a: &NrrBox = new NrrBox(1)
+        val b: &NrrBox = new NrrBox(2)
+        val pick_a: &NrrBox = select_box(true,  a, b)
+        val pick_b: &NrrBox = select_box(false, a, b)
+        assert(pick_a.v == 1, s"pick_a should be 1, got ${pick_a.v}")
+        assert(pick_b.v == 2, s"pick_b should be 2, got ${pick_b.v}")
+        // After both calls, originals must still be live
+        assert(a.v == 1, s"a.v should still be 1, got ${a.v}")
+        assert(b.v == 2, s"b.v should still be 2, got ${b.v}")
+
+Recursive return
+----------------
+
+`build_chain(n)` returns a fresh `&NrrBox` with value `n` by recursing
+through the chain. Each recursive call returns a fresh ref; each
+parent call drops the child's ref and returns its own. Heavy
+allocator + return-path stress.
+
+    build_chain(n: int) -> &NrrBox
+        if n == 0 then return new NrrBox(0)
+        val _ = build_chain(n - 1)
+        return new NrrBox(n)
+
+    #test
+    test_recursive_return() -> unit
+        val top: &NrrBox = build_chain(20)
+        assert(top.v == 20, s"top.v should be 20 after build_chain(20), got ${top.v}")
+
+Discard-then-return doesn't free what we return
+-----------------------------------------------
+
+A common pattern: allocate temporaries, throw them away, return the
+"real" result. The temporaries' refcounts go to 0 and free; the
+returned one must stay alive.
+
+    make_with_scratch() -> &NrrBox
+        val _scratch1: &NrrBox = new NrrBox(100)
+        val _scratch2: &NrrBox = new NrrBox(200)
+        return new NrrBox(300)
+
+    #test
+    test_discard_scratch_keep_return() -> unit
+        val b: &NrrBox = make_with_scratch()
+        assert(b.v == 300, s"b.v should be 300, got ${b.v}")
