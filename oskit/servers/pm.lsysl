@@ -21,7 +21,7 @@ IPC commands:
     import oskit.ipc.{port_create, port_register, port_lookup, ipc_recv_notify, ipc_reply, ipc_send, ipc_last_msg_len}
     import oskit.config.{MAX_PROCESSES, MAX_WAITERS, PROC_ZOMBIE, PROC_FREE, PROC_RUNNING, PAGE_SIZE}
     import oskit.services.{putc, notify_read_self, notify_send_to, thread_id, rs_ready, rs_tid, svc_reap_proc, svc_kill_proc, svc_register_pm, svc_get_thread_pid, svc_get_thread_ptbr, svc_create_proc_susp, svc_resume_proc, svc_vm_create_pt, svc_vm_copy_to, svc_proc_state, svc_proc_exit_code, svc_proc_main_tid, svc_proc_parent_tid, svc_proc_set_parent_tid, svc_grant_posix_range, svc_fd_transplant, svc_proc_replace_image_prep, svc_execve_finalize, svc_vma_create, svc_vma_default_initial_sp, svc_vma_default_stack_low, VMA_PROT_READ, VMA_PROT_WRITE, VMA_MAP_ANON, VMA_MAP_PRIVATE}
-    import oskit.loader.{load_tof_to_ptbr, load_elf64_to_ptbr, load_elf64_to_ptbr_at_offset}
+    import oskit.loader.load_elf64_to_ptbr_at_offset
     import oskit.lib.{elf64_validate, elf64_entry, elf64_phoff, elf64_phentsize, elf64_phnum, elf64_ph_type, elf64_ph_flags, elf64_ph_offset, elf64_ph_vaddr, elf64_ph_filesz, elf64_ph_memsz, elf64_pf_to_vma_prot, elf64_align_down, elf64_align_up, ELF64_EHDR_SIZE, ELF64_PHDR_SIZE, ELF_OK, ELF_PT_LOAD, ELF_PT_INTERP}
     import oskit.fs.{fs_open, fs_read, fs_seek, fs_close, fs_stat}
     import oskit.arch.PLATFORM_NAME
@@ -333,12 +333,22 @@ Shared spawn body. `resume_after != 0` resumes the child
 before replying (the original SPAWN behaviour); `0` leaves
 the child suspended for follow-up TRANSPLANT_FD/RESUME.
 
+The flow mirrors `pm_handle_execve` so PIE + PT_INTERP binaries
+work through the shell-launch path too. We create the child
+suspended with placeholder entry/USP, drop the seeded default
+VMAs (the helper installs its own), run the shared
+`pm_load_image_pie`, patch the saved frame's PC/USP via
+`svc_execve_finalize` (the handler also handles non-SEND_BLOCKED
+threads — for a SUSPENDED thread it just writes the frame and
+returns; the subsequent `svc_resume_proc` is what schedules it).
+
     pm_handle_spawn_inner(sender: int, buf: *byte, resume_after: int)
         val path_len = int(buf[1])
         val blob_len = (int(buf[2]) & 0xFF) | ((int(buf[3]) & 0xFF) << 8)
         val num_handles = int(buf[4])
-
         val path = string(buf + 5, path_len)
+        val initial_sp_top = svc_vma_default_initial_sp()
+        val stack_low_va   = i64(svc_vma_default_stack_low())
 
         val proc_pt = svc_vm_create_pt()
         if proc_pt == 0
@@ -347,43 +357,40 @@ the child suspended for follow-up TRANSPLANT_FD/RESUME.
             ipc_reply(sender, reply, 1)
             return
 
-        val entry = load_tof_to_ptbr(path, proc_pt)
-        if entry < 0
-            var reply: [1]byte
-            reply[0] = -1
-            ipc_reply(sender, reply, 1)
-            return
-
-        val initial_sp_top = i64(svc_vma_default_initial_sp())
-        val stack_low_va   = i64(svc_vma_default_stack_low())
-
-        var stack_buf: [4096]byte
-        val fsz = pm_build_sysv_stack(buf + 5 + path_len, blob_len,
-                                      &stack_buf[0], 4096, initial_sp_top)
-        if fsz < 0
-            var reply: [1]byte
-            reply[0] = -1
-            ipc_reply(sender, reply, 1)
-            return
-        val child_sp = initial_sp_top - i64(fsz)
-        svc_vm_copy_to(proc_pt, u64(child_sp), &stack_buf[0], fsz)
-
-        val pid = svc_create_proc_susp(entry, child_sp, stack_low_va, path, proc_pt)
-
-        var reply: [5]byte
+        val pid = svc_create_proc_susp(i64(0), i64(initial_sp_top), stack_low_va, path, proc_pt)
         if pid < 0
+            var reply: [1]byte
             reply[0] = -1
             ipc_reply(sender, reply, 1)
-        else
-            svc_grant_posix_range(pid)
-            if num_handles > 0
-                val sender_pid = svc_get_thread_pid(sender)
-                pm_inherit_handles(sender_pid, pid, buf, path_len, blob_len, num_handles)
-            if resume_after != 0
-                svc_resume_proc(pid)
-            reply[0] = 0
-            pm_msg_write_i32(reply, 1, pid)
-            ipc_reply(sender, reply, 5)
+            return
+
+        svc_proc_replace_image_prep(pid)
+
+        var entry: i64 = i64(0)
+        var child_sp: i64 = i64(0)
+        val rc = pm_load_image_pie(pid, proc_pt, path,
+                                   buf + 5 + path_len, blob_len, initial_sp_top,
+                                   &entry, &child_sp)
+        if rc < 0
+            svc_kill_proc(pid)
+            var reply: [1]byte
+            reply[0] = -1
+            ipc_reply(sender, reply, 1)
+            return
+
+        val main_tid = svc_proc_main_tid(pid)
+        svc_execve_finalize(main_tid, entry, child_sp)
+
+        svc_grant_posix_range(pid)
+        if num_handles > 0
+            val sender_pid = svc_get_thread_pid(sender)
+            pm_inherit_handles(sender_pid, pid, buf, path_len, blob_len, num_handles)
+        if resume_after != 0
+            svc_resume_proc(pid)
+        var reply: [5]byte
+        reply[0] = 0
+        pm_msg_write_i32(reply, 1, pid)
+        ipc_reply(sender, reply, 5)
 
 `PM_CMD_EXECVE` (10) — Phase 1 chunk 8.
 
@@ -398,39 +405,29 @@ the spawn argv blob format unchanged. The pad byte (offset 4) is
 ignored — execve never inherits handles from a `SCM_RIGHTS`-style
 fan-out (POSIX execve preserves the existing fd table by design).
 
-Failure paths reply normally (`reply[0] = -1`, sender resumes at the
-old `ipc_send` site and reads the error byte). The success path
-takes a different exit: after we've dropped the caller's old VMAs
-and pages and rebuilt them around the new image, the old reply
-buffer's VA either falls inside the new SysV init stack (typical, on
-both arches the new SP and old reply slot are within ~hundreds of
-bytes of `VMA_DEFAULT_STACK_TOP`) or onto an unmapped frame. A normal `ipc_reply`
-would then either silently corrupt the new stack or fault — neither
-acceptable. So we use `svc_execve_finalize` instead, which writes
-the new entry PC + new USP into the saved exception frame and wakes
-the caller without copying any reply bytes back. The caller's next
-`iretq` / `ERET` lands at the new entry with the SysV stack live.
+The handler is a thin wrapper around `pm_load_image_pie`. We resolve
+the caller's pid + ptbr, drop the old image with
+`svc_proc_replace_image_prep`, hand off to the shared loader, and
+finalize with `svc_execve_finalize` (which patches the saved PC/USP
+and wakes the thread from `STATE_SEND_BLOCKED` without writing a
+reply byte into what is now new-stack memory). If the load fails
+after replace_image_prep, the caller has no resumable image; we
+finalize with PC=0/SP=0 so the next ring-3 transition #PFs and the
+fault path kills it. The error reply on the no-recovery path
+preserves the original execve contract of replying normally for
+*pre-replace_image_prep* failures only.
 
 Resource ceilings: the ELF must fit inside PM's heap. With PM's heap
 sized around 128 KiB on x86 today, that practically caps user
 binaries at ~80 KiB until PM gets a streaming path or its heap is
-grown. `LOAD_CROSS_BUF_MAX` upstream is 1 MiB; PM's `malloc` is the
-binding constraint here.
+grown.
 
     pm_handle_execve(sender: int, buf: *byte)
         val path_len = int(buf[1])
         val blob_len = (int(buf[2]) & 0xFF) | ((int(buf[3]) & 0xFF) << 8)
         val path = string(buf + 5, path_len)
-
         val initial_sp_top = svc_vma_default_initial_sp()
-
         var reply: [1]byte
-
-Resolve the caller. PM's IPC dispatcher gives us `sender` (the
-calling thread); we need the calling process's pid + ptbr for the
-image-replacement primitives, and the caller's main_tid (which for
-chunk 8 is the same thread, but we route through the API in case the
-thread layout grows).
 
         val sender_pid = svc_get_thread_pid(sender)
         if sender_pid <= 0
@@ -443,335 +440,24 @@ thread layout grows).
             ipc_reply(sender, reply, 1)
             return
 
-Read the main exe file into PM's heap, mirroring `load_tof_to_ptbr`'s
-shape so PM and the loader cap user binaries the same way.
-
-        var st: [7]int
-        if fs_stat(path, st) < 0
-            reply[0] = byte(-1)
-            ipc_reply(sender, reply, 1)
-            return
-        val size = st[4]
-        if size <= 0
-            reply[0] = byte(-1)
-            ipc_reply(sender, reply, 1)
-            return
-
-        val fid = fs_open(path)
-        if fid < 0
-            reply[0] = byte(-1)
-            ipc_reply(sender, reply, 1)
-            return
-        val ebuf = malloc(i64(size))
-        if i64(ebuf) <= 0
-            fs_close(fid)
-            reply[0] = byte(-1)
-            ipc_reply(sender, reply, 1)
-            return
-        var total = 0
-        var nr = fs_read(fid, ebuf, size)
-        while nr > 0
-            total += nr
-            if total >= size
-                break
-            nr = fs_read(fid, ebuf + total, size - total)
-        fs_close(fid)
-        if total < size
-            free(ebuf)
-            reply[0] = byte(-1)
-            ipc_reply(sender, reply, 1)
-            return
-
-Validate the main ELF before touching the caller's address space.
-After `svc_proc_replace_image_prep` the caller has no resumable old
-image to fall back to, so every check that *could* reject the binary
-must run first — and that includes the interpreter load below, since
-the interp's path comes from the main exe's PT_INTERP segment.
-
-        if elf64_validate(ebuf, total) != ELF_OK
-            free(ebuf)
-            reply[0] = byte(-1)
-            ipc_reply(sender, reply, 1)
-            return
-
-If the binary declares a PT_INTERP segment, validate the interpreter
-ELF and keep its file descriptor open for streaming. Static binaries
-(no PT_INTERP) fall through this block with `ifid_interp == -1` and
-behave exactly as before — same in-PM-heap load, same auxv shape with
-`AT_BASE = 0`.
-
-The interp file (typically `ld-musl-<arch>.so.1`) is too big to fit
-in PM's heap — at ~900 KiB it exceeds the ~430 KiB heap window
-between PM's BSS and its 16-page user-stack region. Streaming the
-load into the target address space is the only path that scales:
-we read only the EHDR + PHT into a 4 KiB stack buffer (`ihdr_buf`)
-for validation + VMA shape, then keep the file open and `fs_seek`
-to each PT_LOAD's offset, copying p_filesz bytes through a small
-bounce buffer directly into `target_ptbr` via `svc_vm_copy_to`.
-The ifid stays open until after VMAs are installed; we close and
-finalize entry below.
-
-`ifid_interp == -1` is the no-PT_INTERP case; static binaries
-follow the existing in-PM-heap path for the main exe and have no
-interp at all.
-
-        var ihdr_buf: [4096]byte
-        var ihdr_read = 0
-        var ifid_interp = -1
-        var interp_base: i64 = i64(0)
-        var main_load_offset: i64 = i64(0)
-
-        val interp_idx = pm_find_pt_interp(ebuf)
-        if interp_idx >= 0
-            val ip_off = int(elf64_ph_offset(ebuf, interp_idx))
-            val ip_fsz = int(elf64_ph_filesz(ebuf, interp_idx))
-            if ip_off + ip_fsz > total
-                free(ebuf)
-                reply[0] = byte(-1)
-                ipc_reply(sender, reply, 1)
-                return
-            if ip_fsz <= 1
-                free(ebuf)
-                reply[0] = byte(-1)
-                ipc_reply(sender, reply, 1)
-                return
-
-The PT_INTERP segment carries a NUL-terminated path — `p_filesz`
-includes the trailing NUL, so the actual string is `ip_fsz - 1`
-bytes long. `string(p, n)` copies into a heap-managed string so the
-path stays valid even after we eventually `free(ebuf)`.
-
-            val interp_path = string(ebuf + ip_off, ip_fsz - 1)
-
-            var ist: [7]int
-            if fs_stat(interp_path, ist) < 0
-                free(ebuf)
-                reply[0] = byte(-1)
-                ipc_reply(sender, reply, 1)
-                return
-            val isize = ist[4]
-            if isize <= 0
-                free(ebuf)
-                reply[0] = byte(-1)
-                ipc_reply(sender, reply, 1)
-                return
-
-            ifid_interp = fs_open(interp_path)
-            if ifid_interp < 0
-                free(ebuf)
-                reply[0] = byte(-1)
-                ipc_reply(sender, reply, 1)
-                return
-
-Read the EHDR + PHT into the stack buffer. 4 KiB covers any
-reasonable ELF64 — EHDR is 64 bytes, each program header is 56
-bytes, and ld-musl + dhello-style binaries have on the order of
-10 PHs. If a binary exceeds this we'd need to enlarge the buffer
-or fall back to a heap allocation; today every musl shipping in
-slix fits well under it.
-
-            var hr = fs_read(ifid_interp, &ihdr_buf[0], 4096)
-            while hr > 0
-                ihdr_read += hr
-                if ihdr_read >= 4096
-                    break
-                hr = fs_read(ifid_interp, &ihdr_buf[0] + ihdr_read, 4096 - ihdr_read)
-
-            if ihdr_read < ELF64_EHDR_SIZE
-                fs_close(ifid_interp)
-                free(ebuf)
-                reply[0] = byte(-1)
-                ipc_reply(sender, reply, 1)
-                return
-
-`elf64_validate` checks magic, class, data, and that the PHT fits
-inside `buflen` — which is `ihdr_read` here, the bytes we actually
-read (≤ 4096). Since the entire PHT is in `ihdr_buf`, this is the
-right validation surface even when the rest of the file is
-streamed later.
-
-            if elf64_validate(&ihdr_buf[0], ihdr_read) != ELF_OK
-                fs_close(ifid_interp)
-                free(ebuf)
-                reply[0] = byte(-1)
-                ipc_reply(sender, reply, 1)
-                return
-
-            interp_base = INTERP_BASE
-
-The presence of PT_INTERP marks the main executable as PIE in
-practice — toolchains never emit a PT_INTERP segment for ET_EXEC
-non-relocatable binaries. PIE main exes link with their PT_LOAD
-vaddrs near 0; we rebase them to `MAIN_EXE_BASE` so they land
-inside the user-accessible carve-out. Static binaries (the
-`test_execve` chunk-8 path) leave `main_load_offset = 0` and keep
-their link-time VAs (slix-prog.ld puts those at 0x60000000+).
-
-            main_load_offset = MAIN_EXE_BASE
-
-Build the SysV init stack into a PM-local buffer up front, while the
-caller's old address space is still alive. The auxv carries the
-main exe's PHT runtime VA (offset by `main_load_offset` for PIE),
-the interp base (0 if no interp), and the main exe's runtime entry
-— ld-musl jumps to AT_ENTRY once it finishes its own bootstrap.
-
-        val main_entry = i64(elf64_entry(ebuf)) + main_load_offset
-        val main_phnum = elf64_phnum(ebuf)
-        val main_phdr_va = pm_compute_at_phdr(ebuf, main_load_offset)
-
-        var stack_buf: [4096]byte
-        val fsz = pm_build_sysv_stack_v2(buf + 5 + path_len, blob_len,
-                                         &stack_buf[0], 4096, i64(initial_sp_top),
-                                         main_phdr_va, main_phnum,
-                                         interp_base, main_entry)
-        if fsz < 0
-            if ifid_interp >= 0
-                fs_close(ifid_interp)
-            free(ebuf)
-            reply[0] = byte(-1)
-            ipc_reply(sender, reply, 1)
-            return
-
-Point of no return. Drop the caller's old VMAs + leaf pages. After
-this the page table is empty in the user range; subsequent
-`svc_vm_copy_to` calls will allocate-on-write fresh frames as they
-go. Failures past this point cannot be reported back to the caller —
-the old reply buf is gone — so we simply continue and trust the
-syscall layer.
+Drop the old image, then hand off to the shared loader. The
+helper assumes the VMA tree has been cleared — it installs its
+own VMAs as part of the new layout. From this call onward the
+caller is unrecoverable; any failure inside the helper means we
+finalize with PC=0/SP=0 so the next ring-3 transition #PFs.
 
         svc_proc_replace_image_prep(sender_pid)
 
-Install one VMA per `PT_LOAD` so that future demand-paging faults
-(stack growth, BSS pages we don't pre-touch) route through
-`vma_handle_fault`. Bit-translate ELF p_flags to VMA prot via
-`elf64_pf_to_vma_prot` so an R+X text segment doesn't accidentally
-get write permission — that's exactly what chunk 7's parser was
-shaped to enable.
-
-        val phnum = elf64_phnum(ebuf)
-        var i = 0
-        while i < phnum
-            if elf64_ph_type(ebuf, i) == ELF_PT_LOAD
-                val pf = elf64_ph_flags(ebuf, i)
-                val prot = elf64_pf_to_vma_prot(pf)
-                val vaddr_rt = elf64_ph_vaddr(ebuf, i) + u64(main_load_offset)
-                val vstart = elf64_align_down(vaddr_rt, PAGE_SIZE)
-                val vend_raw = vaddr_rt + u64(elf64_ph_memsz(ebuf, i))
-                val vend = elf64_align_up(vend_raw, PAGE_SIZE)
-                svc_vma_create(sender_pid, vstart, vend, prot,
-                               VMA_MAP_ANON | VMA_MAP_PRIVATE)
-            i += 1
-
-Stack VMA: matches `vma_seed_default_layout`'s shape so a stack-grow
-fault at `initial_sp_top - n` for any `n` inside this 64 KiB range
-is satisfied by `vma_handle_fault`. Hardcoded to a 64 KiB region
-below the canonical stack top deliberately — Phase 1 stays on the
-fixed-stack-region pattern; the auto-grow VMA is a Phase 2 concern.
-
-        val stack_low = initial_sp_top - u64(0x10000)
-        svc_vma_create(sender_pid, stack_low, initial_sp_top,
-                       VMA_PROT_READ | VMA_PROT_WRITE,
-                       VMA_MAP_ANON | VMA_MAP_PRIVATE)
-
-Install one VMA per interp PT_LOAD shifted by `INTERP_BASE`. Same
-shape as the main-exe loop above — the interpreter is a PIE built
-to load at vaddr 0, so adding `INTERP_BASE` to every `p_vaddr`
-slides it into the 1 GiB-aligned region that doesn't collide with
-the main exe. The PHT lives in `ihdr_buf` (the streamed-in 4 KiB
-header window) since we never read the full file.
-
-        if ifid_interp >= 0
-            val ip_phnum_v = elf64_phnum(&ihdr_buf[0])
-            var ipi = 0
-            while ipi < ip_phnum_v
-                if elf64_ph_type(&ihdr_buf[0], ipi) == ELF_PT_LOAD
-                    val ipf = elf64_ph_flags(&ihdr_buf[0], ipi)
-                    val iprot = elf64_pf_to_vma_prot(ipf)
-                    val ipvaddr = elf64_ph_vaddr(&ihdr_buf[0], ipi) + u64(INTERP_BASE)
-                    val ipvstart = elf64_align_down(ipvaddr, PAGE_SIZE)
-                    val ipvend_raw = ipvaddr + u64(elf64_ph_memsz(&ihdr_buf[0], ipi))
-                    val ipvend = elf64_align_up(ipvend_raw, PAGE_SIZE)
-                    svc_vma_create(sender_pid, ipvstart, ipvend, iprot,
-                                   VMA_MAP_ANON | VMA_MAP_PRIVATE)
-                ipi += 1
-
-Copy the new ELF content into the target address space. The shared
-loader handles file→memory layout (filesz copy + memsz tail zero-
-fill) one PT_LOAD at a time, exactly as it does in
-`pm_handle_spawn_inner`. Then load the interp at `INTERP_BASE` if
-present, and pick the final entry point — main exe entry for
-static binaries, interp entry for dynamic ones.
-
-        val entry = load_elf64_to_ptbr_at_offset(ebuf, total, i64(target_ptbr), main_load_offset)
-        free(ebuf)
-
-Stream interp PT_LOAD content into the target address space. The
-file is too big to hold in PM's heap (~430 KiB heap vs ~900 KiB
-for ld-musl), so for each PT_LOAD we `fs_seek` to its offset and
-read p_filesz bytes through a 4 KiB bounce buffer, calling
-`svc_vm_copy_to` to land them at `INTERP_BASE + p_vaddr`. Tail
-bytes (p_memsz > p_filesz, the .bss portion) get zero-filled the
-same way `load_elf64_to_ptbr_at_offset` does for in-memory loads.
-
-        var final_entry: i64 = entry
-        if ifid_interp >= 0
-            val ip_phnum2 = elf64_phnum(&ihdr_buf[0])
-            val ip_link_entry = i64(elf64_entry(&ihdr_buf[0]))
-            var ipl = 0
-            while ipl < ip_phnum2
-                if elf64_ph_type(&ihdr_buf[0], ipl) == ELF_PT_LOAD
-                    val p_off = int(elf64_ph_offset(&ihdr_buf[0], ipl))
-                    val p_va  = elf64_ph_vaddr(&ihdr_buf[0], ipl) + u64(INTERP_BASE)
-                    val p_fsz = int(elf64_ph_filesz(&ihdr_buf[0], ipl))
-                    val p_msz = int(elf64_ph_memsz(&ihdr_buf[0], ipl))
-                    if p_fsz > 0
-                        fs_seek(ifid_interp, p_off, 0)
-                        var bounce: [4096]byte
-                        var done = 0
-                        while done < p_fsz
-                            var chunk = p_fsz - done
-                            if chunk > 4096
-                                chunk = 4096
-                            val nr = fs_read(ifid_interp, &bounce[0], chunk)
-                            if nr <= 0
-                                done = p_fsz
-                            else
-                                svc_vm_copy_to(target_ptbr, p_va + u64(done), &bounce[0], nr)
-                                done += nr
-                    if p_msz > p_fsz
-                        var zeros: [4096]byte
-                        var zdone = p_fsz
-                        while zdone < p_msz
-                            var zchunk = p_msz - zdone
-                            if zchunk > 4096
-                                zchunk = 4096
-                            svc_vm_copy_to(target_ptbr, p_va + u64(zdone), &zeros[0], zchunk)
-                            zdone += zchunk
-                ipl += 1
-            fs_close(ifid_interp)
-            if ip_link_entry > i64(0)
-                final_entry = ip_link_entry + INTERP_BASE
-
-        if final_entry <= 0
-            // Caller's old image is already gone — there's nothing to
-            // resume. Wake them with PC=0 / SP=0 so the very next
-            // ring-3 transition #PFs on instruction fetch and the
-            // fault path kills the process. Better than leaving them
-            // stuck in STATE_SEND_BLOCKED forever waiting for a reply
-            // that will never come.
+        var entry: i64 = i64(0)
+        var child_sp: i64 = i64(0)
+        val rc = pm_load_image_pie(sender_pid, target_ptbr, path,
+                                   buf + 5 + path_len, blob_len, initial_sp_top,
+                                   &entry, &child_sp)
+        if rc < 0
             svc_execve_finalize(sender, i64(0), i64(0))
             return
 
-        val child_sp = i64(initial_sp_top) - i64(fsz)
-        svc_vm_copy_to(target_ptbr, u64(child_sp), &stack_buf[0], fsz)
-
-Hand control to the new entry point. `svc_execve_finalize` rewrites
-the saved PC/USP and wakes the calling thread from
-`STATE_SEND_BLOCKED` without writing the reply byte (which would
-land in our freshly-built SysV stack). On its next ring-3 transition
-the thread runs the new program from a clean state.
-
-        svc_execve_finalize(sender, final_entry, child_sp)
+        svc_execve_finalize(sender, entry, child_sp)
 
 PM_CMD_RESUME: resume a previously SPAWN_SUSP-ed child.
 Wire: cmd(1) + pid(4) → status(1).
@@ -1364,6 +1050,276 @@ in `cap` or the blob is malformed.
         // bytes auxv_off+10..15 are zero (high bytes of i64 value)
 
         frame_size
+
+Shared image-load helper used by both `pm_handle_spawn_inner` and
+`pm_handle_execve`. Reads an ELF from disk, validates it, detects
+PT_INTERP, streams the interpreter file's PT_LOADs in alongside
+the main exe, installs VMAs, and writes the rich-auxv SysV init
+stack — i.e. everything between "PM has a pid+ptbr ready" and
+"thread can run the new image."
+
+Pre-conditions the caller must satisfy:
+
+  - `target_pid` is a live `PROC_RUNNING` process whose `ptbr`
+    matches `target_ptbr`.
+  - The target's VMA tree is empty: the caller has already
+    invoked `svc_proc_replace_image_prep(target_pid)` to drop the
+    old image (or, for a freshly-created spawn child, the seeded
+    default VMAs).
+
+Post-conditions on success (`return 0`):
+
+  - `*out_entry` is the new PC. For PIE+PT_INTERP binaries this
+    is the interpreter's entry rebased to `INTERP_BASE`; for
+    static binaries it's the main exe's link-time entry.
+  - `*out_child_sp` is the new initial USP, pointing at argc.
+  - VMAs for every main-exe PT_LOAD, the user stack, and every
+    interp PT_LOAD are installed in the target's VMA tree.
+  - All PT_LOAD bytes are in target_ptbr; sysv stack frame is
+    written at `*out_child_sp`.
+
+Failure (`return -1`) is unrecoverable from the target's
+standpoint: the helper may have installed some VMAs / written
+some pages before failing. The caller must either (a) kill the
+target process (spawn) or (b) finalize with PC=0/SP=0 so the next
+ring-3 transition #PFs and the fault path kills it (execve).
+The helper itself releases every transient resource it acquired
+(ebuf heap allocation, open file descriptors) on every path.
+
+Static binaries (no `PT_INTERP`) reuse the same path with
+`interp_base = 0`, `main_load_offset = 0`. AT_BASE is 0 in the
+rich auxv, telling musl it's running without an interpreter.
+
+    pm_load_image_pie(target_pid: int, target_ptbr: u64,
+                      path: string,
+                      argv_blob: *byte, blob_len: int,
+                      initial_sp_top: u64,
+                      out_entry: *i64, out_child_sp: *i64) -> int
+        var st: [7]int
+        if fs_stat(path, st) < 0
+            return -1
+        val size = st[4]
+        if size <= 0
+            return -1
+
+        val fid = fs_open(path)
+        if fid < 0
+            return -1
+        val ebuf = malloc(i64(size))
+        if i64(ebuf) <= 0
+            fs_close(fid)
+            return -1
+
+        var total = 0
+        var nr = fs_read(fid, ebuf, size)
+        while nr > 0
+            total += nr
+            if total >= size
+                break
+            nr = fs_read(fid, ebuf + total, size - total)
+        fs_close(fid)
+        if total < size
+            free(ebuf)
+            return -1
+
+        if elf64_validate(ebuf, total) != ELF_OK
+            free(ebuf)
+            return -1
+
+If the binary declares a `PT_INTERP` segment, stat + open the
+interpreter file and read its EHDR+PHT into `ihdr_buf`. The
+interp's bulk content is streamed in later (the file is too big
+to fit in PM's ~430 KiB heap), but the 4 KiB header window
+covers any reasonable ELF64's program-header table.
+
+        var ihdr_buf: [4096]byte
+        var ihdr_read = 0
+        var ifid_interp = -1
+        var interp_base: i64 = i64(0)
+        var main_load_offset: i64 = i64(0)
+
+        val interp_idx = pm_find_pt_interp(ebuf)
+        if interp_idx >= 0
+            val ip_off = int(elf64_ph_offset(ebuf, interp_idx))
+            val ip_fsz = int(elf64_ph_filesz(ebuf, interp_idx))
+            if ip_off + ip_fsz > total
+                free(ebuf)
+                return -1
+            if ip_fsz <= 1
+                free(ebuf)
+                return -1
+
+            val interp_path = string(ebuf + ip_off, ip_fsz - 1)
+
+            var ist: [7]int
+            if fs_stat(interp_path, ist) < 0
+                free(ebuf)
+                return -1
+            val isize = ist[4]
+            if isize <= 0
+                free(ebuf)
+                return -1
+
+            ifid_interp = fs_open(interp_path)
+            if ifid_interp < 0
+                free(ebuf)
+                return -1
+
+            var hr = fs_read(ifid_interp, &ihdr_buf[0], 4096)
+            while hr > 0
+                ihdr_read += hr
+                if ihdr_read >= 4096
+                    break
+                hr = fs_read(ifid_interp, &ihdr_buf[0] + ihdr_read, 4096 - ihdr_read)
+
+            if ihdr_read < ELF64_EHDR_SIZE
+                fs_close(ifid_interp)
+                free(ebuf)
+                return -1
+
+            if elf64_validate(&ihdr_buf[0], ihdr_read) != ELF_OK
+                fs_close(ifid_interp)
+                free(ebuf)
+                return -1
+
+            interp_base = INTERP_BASE
+            main_load_offset = MAIN_EXE_BASE
+
+Build the SysV init stack into a PM-local buffer up front, while
+we still have the validated main ELF in heap. The auxv carries
+the main exe's runtime PHT VA (offset by `main_load_offset` for
+PIE), the interp base (0 when no interp), and the main exe's
+runtime entry — ld-musl jumps to AT_ENTRY once it finishes its
+bootstrap.
+
+        val main_entry = i64(elf64_entry(ebuf)) + main_load_offset
+        val main_phnum = elf64_phnum(ebuf)
+        val main_phdr_va = pm_compute_at_phdr(ebuf, main_load_offset)
+
+        var stack_buf: [4096]byte
+        val fsz = pm_build_sysv_stack_v2(argv_blob, blob_len,
+                                         &stack_buf[0], 4096, i64(initial_sp_top),
+                                         main_phdr_va, main_phnum,
+                                         interp_base, main_entry)
+        if fsz < 0
+            if ifid_interp >= 0
+                fs_close(ifid_interp)
+            free(ebuf)
+            return -1
+
+Install one VMA per main-exe PT_LOAD so future demand-paging
+faults (stack growth, BSS pages we don't pre-touch) route through
+`vma_handle_fault`. Bit-translate ELF p_flags to VMA prot via
+`elf64_pf_to_vma_prot` so an R+X text segment doesn't accidentally
+get write permission.
+
+        val phnum = elf64_phnum(ebuf)
+        var i = 0
+        while i < phnum
+            if elf64_ph_type(ebuf, i) == ELF_PT_LOAD
+                val pf = elf64_ph_flags(ebuf, i)
+                val prot = elf64_pf_to_vma_prot(pf)
+                val vaddr_rt = elf64_ph_vaddr(ebuf, i) + u64(main_load_offset)
+                val vstart = elf64_align_down(vaddr_rt, PAGE_SIZE)
+                val vend_raw = vaddr_rt + u64(elf64_ph_memsz(ebuf, i))
+                val vend = elf64_align_up(vend_raw, PAGE_SIZE)
+                svc_vma_create(target_pid, vstart, vend, prot,
+                               VMA_MAP_ANON | VMA_MAP_PRIVATE)
+            i += 1
+
+Stack VMA: matches `vma_seed_default_layout`'s shape so a
+stack-grow fault at `initial_sp_top - n` for any `n` inside this
+64 KiB range is satisfied by `vma_handle_fault`. Hardcoded to a
+64 KiB region below the canonical stack top — Phase 1 stays on
+the fixed-stack-region pattern; auto-grow is Phase 2.
+
+        val stack_low = initial_sp_top - u64(0x10000)
+        svc_vma_create(target_pid, stack_low, initial_sp_top,
+                       VMA_PROT_READ | VMA_PROT_WRITE,
+                       VMA_MAP_ANON | VMA_MAP_PRIVATE)
+
+Install one VMA per interp PT_LOAD shifted by `INTERP_BASE`. Same
+shape as the main-exe loop above — the interpreter is a PIE built
+to load at vaddr 0, so adding `INTERP_BASE` to every `p_vaddr`
+slides it into a region that doesn't collide with the main exe.
+
+        if ifid_interp >= 0
+            val ip_phnum_v = elf64_phnum(&ihdr_buf[0])
+            var ipi = 0
+            while ipi < ip_phnum_v
+                if elf64_ph_type(&ihdr_buf[0], ipi) == ELF_PT_LOAD
+                    val ipf = elf64_ph_flags(&ihdr_buf[0], ipi)
+                    val iprot = elf64_pf_to_vma_prot(ipf)
+                    val ipvaddr = elf64_ph_vaddr(&ihdr_buf[0], ipi) + u64(INTERP_BASE)
+                    val ipvstart = elf64_align_down(ipvaddr, PAGE_SIZE)
+                    val ipvend_raw = ipvaddr + u64(elf64_ph_memsz(&ihdr_buf[0], ipi))
+                    val ipvend = elf64_align_up(ipvend_raw, PAGE_SIZE)
+                    svc_vma_create(target_pid, ipvstart, ipvend, iprot,
+                                   VMA_MAP_ANON | VMA_MAP_PRIVATE)
+                ipi += 1
+
+Copy the main ELF content into the target address space. The
+shared loader handles file→memory layout (filesz copy + memsz
+tail zero-fill) one PT_LOAD at a time.
+
+        val entry = load_elf64_to_ptbr_at_offset(ebuf, total, i64(target_ptbr), main_load_offset)
+        free(ebuf)
+
+Stream interp PT_LOAD content into the target address space. The
+file is too big to hold in PM's heap, so we `fs_seek` to each
+PT_LOAD's offset and read p_filesz bytes through a 4 KiB bounce
+buffer, landing them at `INTERP_BASE + p_vaddr`. Tail bytes
+(`p_memsz > p_filesz`, the .bss portion) get zero-filled the same
+way `load_elf64_to_ptbr_at_offset` does for in-memory loads.
+
+        var final_entry: i64 = entry
+        if ifid_interp >= 0
+            val ip_phnum2 = elf64_phnum(&ihdr_buf[0])
+            val ip_link_entry = i64(elf64_entry(&ihdr_buf[0]))
+            var ipl = 0
+            while ipl < ip_phnum2
+                if elf64_ph_type(&ihdr_buf[0], ipl) == ELF_PT_LOAD
+                    val p_off = int(elf64_ph_offset(&ihdr_buf[0], ipl))
+                    val p_va  = elf64_ph_vaddr(&ihdr_buf[0], ipl) + u64(INTERP_BASE)
+                    val p_fsz = int(elf64_ph_filesz(&ihdr_buf[0], ipl))
+                    val p_msz = int(elf64_ph_memsz(&ihdr_buf[0], ipl))
+                    if p_fsz > 0
+                        fs_seek(ifid_interp, p_off, 0)
+                        var bounce: [4096]byte
+                        var done = 0
+                        while done < p_fsz
+                            var chunk = p_fsz - done
+                            if chunk > 4096
+                                chunk = 4096
+                            val nr2 = fs_read(ifid_interp, &bounce[0], chunk)
+                            if nr2 <= 0
+                                done = p_fsz
+                            else
+                                svc_vm_copy_to(target_ptbr, p_va + u64(done), &bounce[0], nr2)
+                                done += nr2
+                    if p_msz > p_fsz
+                        var zeros: [4096]byte
+                        var zdone = p_fsz
+                        while zdone < p_msz
+                            var zchunk = p_msz - zdone
+                            if zchunk > 4096
+                                zchunk = 4096
+                            svc_vm_copy_to(target_ptbr, p_va + u64(zdone), &zeros[0], zchunk)
+                            zdone += zchunk
+                ipl += 1
+            fs_close(ifid_interp)
+            if ip_link_entry > i64(0)
+                final_entry = ip_link_entry + INTERP_BASE
+
+        if final_entry <= 0
+            return -1
+
+        val child_sp = i64(initial_sp_top) - i64(fsz)
+        svc_vm_copy_to(target_ptbr, u64(child_sp), &stack_buf[0], fsz)
+
+        *out_entry = final_entry
+        *out_child_sp = child_sp
+        0
 
     pm_spawn(path: string, argv: *string, argc: int) -> int
         pm_spawn_handles_inner(path, argv, argc, *byte(0), 0, byte(PM_CMD_SPAWN))

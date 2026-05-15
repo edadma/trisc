@@ -2629,37 +2629,20 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "phello: bad"
   }
 
-  // TODO: un-ignore when nsh→spawn supports PT_INTERP/PIE.
-  //
-  // Phase 1 close-out target: a dynamically-linked busybox running
-  // shell pipelines (master-roadmap acceptance bar). v0 surfaced
-  // that `pm_handle_spawn_inner` calls the OLD `load_tof_to_ptbr`
-  // path — no PT_INTERP detection, no PIE rebase (load_offset=0),
-  // and the v1 sysv-stack builder doesn't populate AT_PHDR /
-  // AT_BASE / AT_ENTRY for ld-musl. nsh → pm_spawn_handles
-  // → pm_handle_spawn_inner is what every shell-launched command
-  // takes today; execve's PIE-aware loader (chunk 8) is reachable
-  // only from test_dhello / test_phello / test_execve which call
-  // `pm_execve` directly. Result: every dynamic PIE binary
-  // (busybox, dhello, phello) faults with `!K:<entry-offset>:<pid>`
-  // — an instruction abort at the link-time entry VA because no
-  // page is mapped there (PT_LOAD vaddrs of a PIE near 0, never
-  // rebased; the LOAD VAs *are* mapped but with the wrong
-  // permission flags, and ld-musl was never loaded to perform
-  // dynamic relocations).
-  //
-  // The earlier v0 commit "passed" because the assertion
-  // `output should include("hello busybox")` matched the typed
-  // command echoed back by the TTY — busybox itself never ran.
-  // Reproduced cleanly: `/bin/dhello` (a PIE that works via
-  // execve) faults the same way under nsh spawn.
-  //
-  // Fix path: hoist the PT_INTERP/PIE/auxv loader logic out of
-  // `pm_handle_execve` (oskit/servers/pm.lsysl:420+) into a
-  // shared helper and call it from `pm_handle_spawn_inner` too.
-  // This is bigger than one applet — it's the Phase 1 close-out
-  // unblocker, tracked in the project_slix_busybox_port memo.
-  "busybox: echo applet (Phase 1 close-out)" ignore {
+  "nsh: spawn /bin/dhello (PIE through pm_handle_spawn_inner)" in {
+    // Regression test for the PIE+PT_INTERP-via-spawn unification.
+    // /bin/dhello is the same PIE binary test_dhello execve's into;
+    // running it from nsh exercises pm_handle_spawn_inner → the
+    // shared pm_load_image_pie helper. If this faults `!K:` at an
+    // entry-offset address, the spawn path lost the PIE rebase /
+    // PT_INTERP / rich-auxv shape that execve uses.
+    val output = qemu.command("/bin/dhello")
+    val cleaned = output.replaceFirst("/bin/dhello\\r?\\n", "")
+    cleaned should include("hello dyn")
+    cleaned should not include "!K:"
+  }
+
+  "busybox: echo applet (Phase 1 close-out)" in {
     val output = qemu.command("/bin/busybox echo hello busybox")
     // Strip the typed command (echoed by TTY) before asserting;
     // otherwise the test trivially passes on the echo of input.
@@ -2668,11 +2651,10 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     cleaned should not include "!K:"
   }
 
-  "busybox: cat /etc/passwd" ignore {
+  "busybox: cat /etc/passwd" in {
     // v1 applet — exercises open()+read()+write() against TFS via the
     // musl→shim→vfs pipeline. /etc/passwd is two lines, both ending
-    // with /nsh. Blocked behind the same PT_INTERP-via-spawn gap as
-    // the echo test above; un-ignore in tandem.
+    // with /nsh.
     val output = qemu.command("/bin/busybox cat /etc/passwd")
     output should include("root:x:0:0:root:/root:/nsh")
     output should include("ed:x:1000:1000:ed:/home/ed:/nsh")

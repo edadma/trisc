@@ -189,11 +189,56 @@ if [ ! -f "$BUILD_DIR/.config" ]; then
     echo "=== Generating .config (allnoconfig + slix overlay) ==="
     make O="$BUILD_DIR" allnoconfig HOSTCC="$HOSTCC"
     if [ -f "$CONFIG_TRIM" ]; then
-        cat "$CONFIG_TRIM" >> "$BUILD_DIR/.config"
-        # busybox 1.37 kconfig has neither `olddefconfig` nor a fully
-        # silent merge mode. `yes "" | oldconfig` is the idiom that
-        # accepts every default — including choice-block selections
-        # — without the build going interactive.
+        # busybox 1.37 kconfig has neither `olddefconfig` nor a
+        # silent fragment merge. APPENDING our overlay does not work
+        # — kconfig reads the first occurrence of each symbol and
+        # warns "trying to reassign symbol X" on the duplicate,
+        # silently dropping the override. Patch the .config in place
+        # instead: for each CONFIG_X=y in the overlay, flip the
+        # corresponding `# CONFIG_X is not set` line. Pure-bash, no
+        # sed (CLAUDE.md rule).
+        python3 - "$CONFIG_TRIM" "$BUILD_DIR/.config" <<'PY'
+import re, sys
+overlay_path, config_path = sys.argv[1], sys.argv[2]
+overrides = {}
+for raw in open(overlay_path):
+    line = raw.rstrip('\n')
+    s = line.strip()
+    if not s or s.startswith('#'):
+        continue
+    m = re.match(r'(CONFIG_[A-Z0-9_]+)=(.*)$', s)
+    if m:
+        overrides[m.group(1)] = line
+config_lines = open(config_path).read().splitlines()
+seen = set()
+out = []
+for ln in config_lines:
+    matched = False
+    m = re.match(r'# (CONFIG_[A-Z0-9_]+) is not set', ln)
+    if m and m.group(1) in overrides:
+        out.append(overrides[m.group(1)])
+        seen.add(m.group(1))
+        matched = True
+        continue
+    m = re.match(r'(CONFIG_[A-Z0-9_]+)=', ln)
+    if m and m.group(1) in overrides:
+        out.append(overrides[m.group(1)])
+        seen.add(m.group(1))
+        matched = True
+        continue
+    out.append(ln)
+# Append any overrides that didn't match an existing line (new symbols).
+for name, line in overrides.items():
+    if name not in seen:
+        out.append(line)
+open(config_path, 'w').write('\n'.join(out) + '\n')
+print(f'merged {len(overrides)} overrides into .config ({len(seen)} matched existing lines)')
+PY
+        # `yes "" | oldconfig` resolves any dependencies pulled in by
+        # the overlay (e.g. enabling CONFIG_CAT may auto-enable some
+        # FEATURE_* options). Accepts kconfig defaults for every new
+        # symbol — including choice-block selections — without going
+        # interactive.
         yes "" | make O="$BUILD_DIR" oldconfig HOSTCC="$HOSTCC" > "$BUILD_DIR/oldconfig.log" 2>&1
     fi
 fi

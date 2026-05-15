@@ -1266,9 +1266,16 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "phello: bad"
   }
 
-  // TODO: un-ignore when nsh→spawn supports PT_INTERP/PIE.
-  // See Aarch64NshTests for the full bug write-up.
-  "busybox: echo applet (Phase 1 close-out)" ignore {
+  "nsh: spawn /bin/dhello (PIE through pm_handle_spawn_inner)" in {
+    // Regression test for the PIE+PT_INTERP-via-spawn unification —
+    // see Aarch64NshTests for the full motivation.
+    val output = qemu.command("/bin/dhello")
+    val cleaned = output.replaceFirst("/bin/dhello\\r?\\n", "")
+    cleaned should include("hello dyn")
+    cleaned should not include "!K:"
+  }
+
+  "busybox: echo applet (Phase 1 close-out)" in {
     val output = qemu.command("/bin/busybox echo hello busybox")
     // Strip the typed command (echoed by TTY) before asserting;
     // otherwise the test trivially passes on the echo of input.
@@ -1277,9 +1284,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     cleaned should not include "!K:"
   }
 
-  "busybox: cat /etc/passwd" ignore {
-    // v1 applet — blocked behind the same PT_INTERP-via-spawn gap as
-    // the echo test above; un-ignore in tandem.
+  "busybox: cat /etc/passwd" in {
     val output = qemu.command("/bin/busybox cat /etc/passwd")
     output should include("root:x:0:0:root:/root:/nsh")
     output should include("ed:x:1000:1000:ed:/home/ed:/nsh")
