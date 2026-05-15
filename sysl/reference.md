@@ -3121,10 +3121,23 @@ s[0]                      // 104 ('h' as byte value)
 t = s + " world"          // concatenation → new string
 s == t                    // structural equality
 s != t                    // structural inequality
+s <  t                    // lexicographic ordering (byte-wise)
+s <= t                    //   ...
+s >  t
+s >= t
 
 // String decays to *u8 / *i8
 puts(s: *byte)            // can pass string directly
 ```
+
+Equality (`==` / `!=`) and ordering (`<` / `<=` / `>` / `>=`) on
+strings are **byte-wise**. The compare walks the bytes of both
+operands and returns at the first differing position; if one
+operand is a prefix of the other, the shorter operand is less.
+There is no locale, no Unicode normalisation, no case folding —
+two strings with the same UTF-8 bytes are equal; two strings with
+different UTF-8 bytes are not. The semantics is equivalent to C's
+`memcmp` extended with a "shorter is less" tiebreaker.
 
 ### String Interpolation
 

@@ -1,0 +1,51 @@
+Array → pointer decay
+=====================
+
+When a fixed array `[N]T` is passed to a `*T` parameter, the
+compiler implicitly takes the address of the first element
+("array decay"). The callee receives a raw pointer and can
+read/write through it; from there it sees the same backing
+as the caller.
+
+This is the kernel/OS-friendly pattern: zero-overhead access
+to a stack-allocated buffer through a `*T` parameter.
+
+    module sysl.tests.lang_features
+
+Pass [3]int to a *int parameter (no &arr[0])
+--------------------------------------------
+
+The implicit decay lets the call site write `f(arr)` instead
+of `f(&arr[0])`. (The latter still works, but is more verbose
+and was the old required form.)
+
+    sum_three(p: *int) -> int = p[0] + p[1] + p[2]
+
+    #test
+    test_decay_to_ptr_int() -> unit
+        var arr = [10, 20, 30]
+        assert(sum_three(arr) == 60, s"sum_three(arr) should be 60, got ${sum_three(arr)}")
+
+Mutate through decayed pointer
+------------------------------
+
+    zero_three(p: *int) -> unit
+        p[0] = 0
+        p[1] = 0
+        p[2] = 0
+
+    #test
+    test_decay_mutates_caller() -> unit
+        var arr = [1, 2, 3]
+        zero_three(arr)
+        assert(arr[0] == 0 && arr[1] == 0 && arr[2] == 0,
+            s"after zero_three: arr=[${arr[0]},${arr[1]},${arr[2]}], want [0,0,0]")
+
+Explicit `&arr[0]` form still works
+-----------------------------------
+
+    #test
+    test_decay_explicit_addr_of_first() -> unit
+        var arr = [100, 200, 300]
+        assert(sum_three(&arr[0]) == 600,
+            s"sum_three(&arr[0]) should be 600, got ${sum_three(&arr[0])}")

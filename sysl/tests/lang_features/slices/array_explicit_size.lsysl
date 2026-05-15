@@ -1,0 +1,49 @@
+Fixed array with explicit size type annotation
+==============================================
+
+A `var a: [N]T` declares a fixed array of length `N` and
+element type `T`. With no initializer, every element is
+zero-initialized (or `T`'s zero value).
+
+    module sysl.tests.lang_features
+
+Zero-initialized declaration
+----------------------------
+
+    #test
+    test_zero_init_int_array() -> unit
+        var a: [4]int
+        // All elements zero-initialized
+        var sum = 0
+        var i = 0
+        while i < len(a)
+            sum = sum + a[i]
+            i = i + 1
+        assert(sum == 0, s"sum of zero-init [4]int should be 0, got $sum")
+        assert(len(a) == 4, s"len should be 4, got ${len(a)}")
+
+Write all elements
+------------------
+
+    #test
+    test_write_zero_init_array() -> unit
+        var a: [5]int
+        var i = 0
+        while i < len(a)
+            a[i] = i * 100
+            i = i + 1
+        assert(a[0] == 0 && a[1] == 100 && a[4] == 400,
+            s"a[0,1,4] = (${a[0]},${a[1]},${a[4]}), want (0,100,400)")
+
+Bool array zero-inits to false
+------------------------------
+
+    #test
+    test_zero_init_bool_array() -> unit
+        var b: [3]bool
+        var any_true = false
+        var i = 0
+        while i < len(b)
+            if b[i] then any_true = true
+            i = i + 1
+        assert(!any_true, "no element should be true in zero-init bool array")

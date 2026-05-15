@@ -59,6 +59,7 @@ class SyslSVMCodegen:
   private var needsSpExtern: Boolean = false
   private var needsStrConcat: Boolean = false
   private var needsStrEq: Boolean = false
+  private var needsStrCmp: Boolean = false
   private var needsNewSlice: Boolean = false
   private var needsStrFromI64: Boolean = false
   private var needsStrFromBool: Boolean = false
@@ -66,6 +67,35 @@ class SyslSVMCodegen:
 
   // Map: function name → parameter types (for arg-coercion at call sites).
   private val funcParamTypes = new mutable.HashMap[String, List[SyslType]]
+
+  // Map: canonical struct name → user-defined deinit function name. Populated
+  // by scanning all TFunDecls whose name ends in "_deinit". When a `&T` ref's
+  // refcount drops to zero, emitRefDecr calls this fn (if present) with the
+  // struct address.
+  private val deinitFunctions = new mutable.HashMap[String, String]
+
+  // Per-function list of &T local indexes paired with their struct types.
+  // Populated as `var v: &T = ...` / `val v: &T = ...` are lowered. At every
+  // return (and the implicit end-of-function), emitFunctionExitRefDecrs
+  // decrements each so that scope-exit fires deinit when the refcount hits
+  // zero. Cleared at the start of every function.
+  private val refLocals = new mutable.ListBuffer[(Int, SyslType.StructType)]
+  /** True for `&T` where T is a struct — the SVM-deinit machinery handles
+    * exactly this shape today. Slice/closure refs use their own paths. */
+  private def isStructRef(t: SyslType): Option[SyslType.StructType] = t.underlying match
+    case SyslType.RefType(inner) => inner.underlying match
+      case st: SyslType.StructType => Some(canonicalStruct(st))
+      case _ => None
+    case _ => None
+
+  /** Mirror of LLVM's isOwnedStruct: true when the expression produces a
+    * freshly-owned ref (refcount already 1 from `new`/call). Other expressions
+    * (TVarRef, TFieldAccess) are borrowed — caller needs an incr. */
+  private def isOwnedRefExpr(e: TExpr): Boolean = e match
+    case _: TNew | _: TNewArray => true
+    case _: TCall | _: TIndirectCall => true
+    case _: TIfExpr | _: TMatchExpr => true
+    case _ => false
 
   // Closures: hoisted bodies generated alongside regular functions. The hoisted
   // function's first param is a hidden env_ptr (stored in local 0).
@@ -215,6 +245,109 @@ class SyslSVMCodegen:
     emit("  store64")         // write new_sp to __sp; ( new_sp ) remains
     needsSpExtern = true
 
+  // ============================================================================
+  // Refcount machinery for `&T` references
+  // ============================================================================
+  // A `&T` allocation has an 8-byte refcount header immediately before the data:
+  //
+  //     | rc: i64 |    ...struct data...    |
+  //     ^         ^
+  //     header    data pointer (= what the user code holds)
+  //
+  // The header is initialized to 1 by emitNewRefAlloc. emitRefIncr increments
+  // the rc; emitRefDecr decrements it and, when it hits zero, calls the user-
+  // defined deinit (if any) — passing the data pointer as the first arg.
+  //
+  // SVM's memory stack is one-way (no individual free), so a refcount-zero
+  // event still leaves the memory in place. That's a known SVM trade-off; the
+  // *observable* deinit semantics (deinit body runs exactly once at rc=0) are
+  // preserved, which is what user code can detect.
+
+  /** Allocate (header + size) bytes; init header to refcount=1; leave the
+    * DATA pointer (header + 8) on TOS. */
+  private def emitNewRefAlloc(size: Long): Unit =
+    val total = size + 8
+    emitMemAlloc(total)         // ( base )           base is the start of the allocation
+    emit("  dup")                // ( base, base )
+    emit("  push_1")             // ( base, base, 1 )
+    emit("  swap")               // ( base, 1, base )
+    emit("  store64")            // *base = 1 (refcount); ( base )
+    emit("  push_i8 8")
+    emit("  add")                // ( data )         data = base + 8
+
+  /** Stack ( ptr ) → ( ptr ). Increment refcount at ptr-8 unless the header
+    * holds the immortal sentinel (-1, used by static string literals). */
+  private def emitRefIncr(): Unit =
+    val skipLabel = newLabel("rc_incr_skip")
+    val doIncrLabel = newLabel("rc_incr_do")
+    emit("  dup")                       // ( ptr, ptr )
+    emit("  push_i8 -8")
+    emit("  add")                       // ( ptr, ptr-8 )
+    emit("  dup")                       // ( ptr, hdr, hdr )
+    emit("  load64")                    // ( ptr, hdr, rc )
+    emit("  push_m1")
+    emit("  neq")                       // ( ptr, hdr, rc != -1 )
+    emit(s"  jumpz $skipLabel")         // if rc == -1, skip
+    // ( ptr, hdr )
+    emit("  dup")                       // ( ptr, hdr, hdr )
+    emit("  load64")                    // ( ptr, hdr, rc )
+    emit("  inc")                       // ( ptr, hdr, rc+1 )
+    emit("  swap")                      // ( ptr, rc+1, hdr )
+    emit("  store64")                   // ( ptr )
+    emit(s"  jump ${skipLabel}_end")
+    emit(s"$skipLabel:")
+    emit("  drop")                      // drop hdr, leave ptr
+    emit(s"${skipLabel}_end:")
+
+  /** Stack ( ptr ) → ( ). Decrement refcount at ptr-8 unless the header
+    * holds the immortal sentinel. When rc drops to zero, call the type's
+    * deinit fn (if any) passing ptr. SVM can't release the memory itself,
+    * but the deinit's observable side effects fire — that's the user-visible
+    * contract. */
+  private def emitRefDecr(st: SyslType.StructType): Unit =
+    val immortal = newLabel("rc_decr_immortal")
+    val nonzero  = newLabel("rc_decr_nonzero")
+    val endLabel = newLabel("rc_decr_end")
+    val deinitName = deinitFunctions.get(canonicalStruct(st).name)
+    emit("  dup")                       // ( ptr, ptr )
+    emit("  push_i8 -8")
+    emit("  add")                       // ( ptr, hdr )
+    emit("  dup")                       // ( ptr, hdr, hdr )
+    emit("  load64")                    // ( ptr, hdr, rc )
+    emit("  push_m1")
+    emit("  neq")                       // ( ptr, hdr, rc != -1 )
+    emit(s"  jumpz $immortal")          // rc == -1 → immortal path
+    // Not immortal: ( ptr, hdr )
+    emit("  dup")                       // ( ptr, hdr, hdr )
+    emit("  load64")                    // ( ptr, hdr, rc )
+    emit("  dec")                       // ( ptr, hdr, new_rc )
+    emit("  dup")                       // ( ptr, hdr, new_rc, new_rc )
+    emit("  rot")                       // ( ptr, new_rc, new_rc, hdr )
+    emit("  store64")                   // store new_rc at hdr → ( ptr, new_rc )
+    emit("  eqz")                       // ( ptr, new_rc == 0 )
+    emit(s"  jumpz $nonzero")           // non-zero → skip deinit, drop ptr
+    // rc == 0: ( ptr ) — call deinit if defined, else just drop ptr.
+    deinitName match
+      case Some(fn) =>
+        emit(s"  call $fn")             // consumes ptr; unit return leaves nothing
+      case None =>
+        emit("  drop")                  // ( )
+    emit(s"  jump $endLabel")
+    emit(s"$nonzero:")
+    emit("  drop")                      // drop ptr → ( )
+    emit(s"  jump $endLabel")
+    emit(s"$immortal:")
+    emit("  drop")                      // drop hdr → ( ptr )
+    emit("  drop")                      // drop ptr → ( )
+    emit(s"$endLabel:")
+
+  /** Emit refcount decr for each tracked &T local. Called at every return
+    * site and at the implicit end-of-function. */
+  private def emitFunctionExitRefDecrs(): Unit =
+    for (idx, st) <- refLocals do
+      emit(s"  local_get $idx")
+      emitRefDecr(st)
+
   // Materialize a fixed [N]T array as a slice struct {ptr, len, cap, backref}
   // on the memory stack. Leaves the struct address on TOS.
   private def emitArrayToSlice(arg: TExpr, size: Long): Unit =
@@ -286,10 +419,12 @@ class SyslSVMCodegen:
     needsSpExtern = false
     needsStrConcat = false
     needsStrEq = false
+    needsStrCmp = false
     needsNewSlice = false
     needsStrFromI64 = false
     needsStrFromBool = false
     needsStrFmtI64 = false
+    deinitFunctions.clear()
 
     // Register canonical struct types so stale placeholder StructType(_, Nil)
     // values in expression types can be resolved back to their real fields.
@@ -306,6 +441,16 @@ class SyslSVMCodegen:
         f.params.foreach(p => registerType(p.typ))
         registerType(f.returnType)
         funcParamTypes(f.name) = f.params.map(_.typ).toList
+        // Register user-defined deinit fn for its struct type. The analyzer
+        // lowers `Node.deinit() -> unit` to a TFunDecl whose name ends in
+        // "_deinit" and whose first/only param is `*Node` (the implicit self).
+        if f.name.endsWith("_deinit") then
+          f.params.headOption.flatMap(p => p.typ.underlying match
+            case SyslType.PtrType(inner) => inner.underlying match
+              case st: SyslType.StructType => Some(canonicalStruct(st).name)
+              case _ => None
+            case _ => None
+          ).foreach { structName => deinitFunctions(structName) = f.name }
       case _ =>
 
     modulePrefix = program.decls.collectFirst { case TModuleDecl(path) => path.mkString("_") }.getOrElse("")
@@ -536,6 +681,8 @@ class SyslSVMCodegen:
       emit("extern __svm_str_concat")
     if needsStrEq && !definedSymbols.contains("__svm_str_eq") then
       emit("extern __svm_str_eq")
+    if needsStrCmp && !definedSymbols.contains("__svm_str_cmp") then
+      emit("extern __svm_str_cmp")
     if needsStrFromI64 && !definedSymbols.contains("__svm_str_from_i64") then
       emit("extern __svm_str_from_i64")
     if needsStrFromBool && !definedSymbols.contains("__svm_str_from_bool") then
@@ -629,6 +776,9 @@ class SyslSVMCodegen:
     // than the caller's. Even 0-local functions need it.
     emit(s"  frame $totalLocals")
 
+    // Reset per-function refcount tracking.
+    refLocals.clear()
+
     // Pop args from stack into locals.
     // Caller pushes args left-to-right, so TOS = last arg pushed.
     // We need to pop in reverse param order.
@@ -638,6 +788,24 @@ class SyslSVMCodegen:
     for i <- (nParams - 1) to 0 by -1 do
       emit(s"  local_set $i")
     nextLocalIndex = nParams
+
+    // For each &T struct-ref param: incr at entry (caller's share + callee's
+    // share, both balanced at exit) and track for scope-exit decr.
+    for i <- 0 until nParams do
+      val p = fun.params(i)
+      isStructRef(p.typ) match
+        case Some(st) =>
+          emit(s"  local_get $i")
+          emitRefIncr()                // incr at ptr-8; leaves ptr on stack
+          emit("  drop")
+          refLocals += ((i, st))
+        case None =>
+    // The function whose name is `*_deinit` is itself the deinit fn — its
+    // self param shouldn't be tracked or incremented, because (a) the
+    // caller already decremented to zero before calling it, and (b)
+    // re-incrementing inside the deinit would prevent it from completing.
+    if fun.name.endsWith("_deinit") then
+      refLocals.clear()
 
     // For any scalar param whose address is taken, promote it to a memory-
     // stack cell and replace the local's value (raw value) with the cell's
@@ -675,19 +843,23 @@ class SyslSVMCodegen:
       case TExprBody(expr) =>
         genExpr(expr)
         emitDefers()
+        emitFunctionExitRefDecrs()
         emit("  ret")
       case TBlockBody(stmts) =>
         if stmts.isEmpty then
           emitDefers()
+          emitFunctionExitRefDecrs()
           emit("  ret")
         else if fun.returnType != SyslType.UnitType then
           genStmtsAsExpr(stmts)
           emitDefers()
+          emitFunctionExitRefDecrs()
           emit("  ret")
         else
           genStmts(stmts)
           if !stmts.lastOption.exists(_.isInstanceOf[TReturnStmt]) then
             emitDefers()
+            emitFunctionExitRefDecrs()
             emit("  ret")
 
   // ========================================================================
@@ -915,7 +1087,7 @@ class SyslSVMCodegen:
         case TExprStmt(expr) =>
           genExpr(expr)
           if expr.typ == SyslType.UnitType then emitPushInt(0)
-        case TReturnStmt(Some(expr)) => genExpr(expr); emitDefers(); emit("  ret")
+        case TReturnStmt(Some(expr)) => genExpr(expr); emitDefers(); emitFunctionExitRefDecrs(); emit("  ret")
         case other => genStmt(other); emitPushInt(0)
 
   private def genStmt(stmt: TStmt): Unit = stmt match
@@ -1005,24 +1177,59 @@ class SyslSVMCodegen:
             emit("  drop") // drop src_addr
       else
         genExpr(init)
-        emit(s"  local_set $idx")
+        // For &T refs to a struct: incr the buffer's refcount if the source is
+        // borrowed (TVarRef etc.); track the local for scope-exit decr.
+        isStructRef(typ) match
+          case Some(st) =>
+            if !isOwnedRefExpr(init) then
+              emitRefIncr()  // ( ptr ) → ( ptr ) — incr at ptr-8
+            emit(s"  local_set $idx")
+            refLocals += ((idx, st))
+          case None =>
+            emit(s"  local_set $idx")
 
     case TAssignStmt(target, value) =>
-      genExpr(value)
+      // For an existing `&T` local being reassigned, apply the release/acquire
+      // refcount protocol: INCR NEW first (so self-assign `r = r` keeps the
+      // buffer alive across the decr) → DECR OLD → STORE NEW.
       locals.get(target) match
-        case Some(LocalInfo(idx, typ)) if addressedLocals.contains(target) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
-          // Addressed scalar: write through the cell's pointer.
-          emit(s"  local_get $idx")
-          emitStore(typ)
-        case Some(LocalInfo(idx, _)) => emit(s"  local_set $idx")
-        case None if globals.contains(target) =>
-          emit(s"  push_i64 $target")
-          emit("  store64")
-        case None =>
-          // Implicit local declaration (e.g. `v = expr?` sugar lowered by the
-          // analyzer into `TAssignStmt` with a fresh target).
-          val idx = allocLocal(target, value.typ)
-          emit(s"  local_set $idx")
+        case Some(LocalInfo(idx, typ)) if isStructRef(typ).isDefined =>
+          val st = isStructRef(typ).get
+          genExpr(value)                  // ( new_ptr )
+          if !isOwnedRefExpr(value) then
+            emitRefIncr()                 // incr new_ptr, leave ( new_ptr )
+          // Save new_ptr to local first so we can read OLD via local_get
+          // ... but local_set overwrites OLD before decr fires. So:
+          // ( new_ptr ) — DUP, then decr OLD via local_get, then store NEW.
+          emit("  dup")                   // ( new_ptr, new_ptr )
+          emit(s"  local_get $idx")       // ( new_ptr, new_ptr, old_ptr )
+          emitRefDecr(st)                 // consumes old_ptr → ( new_ptr, new_ptr )
+          emit(s"  local_set $idx")       // ( new_ptr )
+          emit("  drop")                  // ( )
+        case _ =>
+          genExpr(value)
+          locals.get(target) match
+            case Some(LocalInfo(idx, typ)) if addressedLocals.contains(target) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
+              // Addressed scalar: write through the cell's pointer.
+              emit(s"  local_get $idx")
+              emitStore(typ)
+            case Some(LocalInfo(idx, _)) => emit(s"  local_set $idx")
+            case None if globals.contains(target) =>
+              // Scalars are 8-byte cells (matches load64 in TVarRef); aggregates
+              // (strings, structs, slices, ...) are address-represented, and
+              // assignment is a sizeof-bytes copy via emitStore-aggregate.
+              emit(s"  push_i64 $target")
+              globals(target).underlying match
+                case _: SyslType.StructType | _: SyslType.EnumType
+                   | SyslType.StringType | _: SyslType.SliceType
+                   | _: SyslType.ArrayType | _: SyslType.FuncType =>
+                  emitStore(globals(target))
+                case _ => emit("  store64")
+            case None =>
+              // Implicit local declaration (e.g. `v = expr?` sugar lowered by
+              // the analyzer into `TAssignStmt` with a fresh target).
+              val idx = allocLocal(target, value.typ)
+              emit(s"  local_set $idx")
 
     case TCompoundAssignStmt(target, op, value) =>
       locals.get(target) match
@@ -1089,10 +1296,12 @@ class SyslSVMCodegen:
     case TReturnStmt(Some(expr)) =>
       genExpr(expr)
       emitDefers()
+      emitFunctionExitRefDecrs()
       emit("  ret")
 
     case TReturnStmt(None) =>
       emitDefers()
+      emitFunctionExitRefDecrs()
       emit("  ret")
 
     case TWhileStmt(cond, body, _) =>
@@ -1441,6 +1650,20 @@ class SyslSVMCodegen:
       emit("  call __svm_str_eq")
       if op == "!=" then emit("  eqz")
       needsStrEq = true
+
+    case TBinary(left, op @ ("<" | "<=" | ">" | ">="), right, _) if left.typ == SyslType.StringType =>
+      // Lexicographic byte-wise compare via __svm_str_cmp (returns signed
+      // 3-way: negative / zero / positive). Reduce to bool with the matching
+      // zero-relative predicate.
+      genExpr(left)
+      genExpr(right)
+      emit("  call __svm_str_cmp")
+      op match
+        case "<"  => emit("  ltz")
+        case "<=" => emit("  lez")
+        case ">"  => emit("  gtz")
+        case ">=" => emit("  gez")
+      needsStrCmp = true
 
     case TBinary(left, op, right, typ) =>
       genExpr(left)
@@ -2213,10 +2436,13 @@ class SyslSVMCodegen:
 
     case TNew(structType, args) =>
       // Allocate on memory stack (no real heap in SVM); behaves like
-      // TStructConstruct but the type is RefType(StructType) rather than
-      // the struct itself. Resulting TOS is the struct's base address.
+      // TStructConstruct but with an 8-byte refcount header before the data,
+      // and the type is RefType(StructType). Returned TOS is the DATA address
+      // (= header + 8); user code holds this. emitRefIncr/Decr reach the
+      // header via ptr-8.
       val size = structType.sizeOf
-      emitMemAlloc(size)
+      emitNewRefAlloc(size)
+      // Zero-init the data area
       val aligned = ((size + 7) / 8 * 8).toInt
       for i <- 0 until aligned by 8 do
         emit("  dup")
@@ -2232,6 +2458,50 @@ class SyslSVMCodegen:
         genExpr(arg)
         emit("  swap")
         emitStore(fieldType)
+
+    case TSliceExpr(array, lowOpt, highOpt, resultTyp)
+        if array.typ == SyslType.StringType && resultTyp == SyslType.StringType =>
+      // String sub-slice — result is a fresh 16-byte string descriptor
+      // {ptr, len(i64)}, NOT the 24-byte slice struct used for []T. Mixing
+      // the two layouts corrupts every downstream string consumer (concat,
+      // interp, equality) because they all read len at offset 8 as i64.
+      val baseIdx = nextLocalIndex; nextLocalIndex += 1
+      val srcLenIdx = nextLocalIndex; nextLocalIndex += 1
+      genExpr(array)
+      emit("  dup")
+      emit("  load64")          // ptr
+      emit(s"  local_set $baseIdx")
+      emitPushInt(8)
+      emit("  add")
+      emit("  load64")          // len (i64, string layout)
+      emit(s"  local_set $srcLenIdx")
+      val loIdx = nextLocalIndex; nextLocalIndex += 1
+      lowOpt match
+        case Some(e) => genExpr(e); emit(s"  local_set $loIdx")
+        case None    => emitPushInt(0); emit(s"  local_set $loIdx")
+      val hiIdx = nextLocalIndex; nextLocalIndex += 1
+      highOpt match
+        case Some(e) => genExpr(e); emit(s"  local_set $hiIdx")
+        case None    => emit(s"  local_get $srcLenIdx"); emit(s"  local_set $hiIdx")
+      emitMemAlloc(16)
+      val descIdx = nextLocalIndex; nextLocalIndex += 1
+      emit("  dup")
+      emit(s"  local_set $descIdx")
+      // desc.ptr = base + lo   (byte advance — element size is 1)
+      emit(s"  local_get $baseIdx")
+      emit(s"  local_get $loIdx")
+      emit("  add")
+      emit("  swap")
+      emit("  store64")
+      // desc.len = hi - lo   (i64)
+      emit(s"  local_get $hiIdx")
+      emit(s"  local_get $loIdx")
+      emit("  sub")
+      emit(s"  local_get $descIdx")
+      emitPushInt(8)
+      emit("  add")
+      emit("  store64")
+      emit(s"  local_get $descIdx")
 
     case TSliceExpr(array, lowOpt, highOpt, resultTyp) =>
       // Allocate a 24-byte slice struct on memory stack, fill with
@@ -2505,7 +2775,7 @@ class SyslSVMCodegen:
     case SyslType.IntType(16) | SyslType.UIntType(16) => emit("  store16")
     case SyslType.IntType(32) | SyslType.UIntType(32) => emit("  store32")
     case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType
-       | _: SyslType.FuncType =>
+       | _: SyslType.FuncType | _: SyslType.ArrayType =>
       // Inline aggregate: stack has ( src_addr dest_addr ). Copy EXACTLY sizeOf
       // bytes — never round up. Rounding up to 8 would overwrite the slot after
       // the dst element (e.g. for 12-byte structs in a tight slice, clobbering

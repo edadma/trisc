@@ -1,0 +1,71 @@
+Pointer deref — explicit, no auto-deref
+=======================================
+
+Per the reference's "Pointer Dereference Is Explicit": `*p`
+is required to read or write through a pointer. The one
+exception is `self` in methods (the implicit deref is part of
+the method calling convention).
+
+For pointers to structs, field access through a pointer is
+written `p.field` (implicit deref-then-field, sugar for
+`(*p).field`). For scalars, explicit `*p` is used.
+
+    module sysl.tests.lang_features
+
+    struct PdbBox
+        v: int
+
+Scalar deref read
+-----------------
+
+    #test
+    test_scalar_deref_read() -> unit
+        var x: int = 42
+        var p: *int = &x
+        assert(*p == 42, s"*p should be 42, got ${*p}")
+
+Scalar deref write
+------------------
+
+    #test
+    test_scalar_deref_write() -> unit
+        var x: int = 0
+        var p: *int = &x
+        *p = 99
+        assert(x == 99, s"x should be 99 after *p=99, got $x")
+
+Struct field through pointer (implicit deref)
+---------------------------------------------
+
+    #test
+    test_struct_field_through_ptr() -> unit
+        var b = PdbBox(0)
+        var p: *PdbBox = &b
+        p.v = 7
+        assert(b.v == 7, s"b.v should be 7 (mutated via p.v), got ${b.v}")
+        // Equivalent (*p).v form
+        assert((*p).v == 7, s"(*p).v should also read 7, got ${(*p).v}")
+
+Pointer through a parameter
+---------------------------
+
+    set_int(p: *int, v: int) -> unit
+        *p = v
+
+    #test
+    test_set_int_through_ptr() -> unit
+        var x: int = 0
+        set_int(&x, 123)
+        assert(x == 123, s"x should be 123 after set_int, got $x")
+
+Pointer compare to deref-write
+------------------------------
+
+    #test
+    test_two_ptrs_same_target() -> unit
+        var x: int = 10
+        var p: *int = &x
+        var q: *int = &x
+        // Two pointers, one target — write through one, read through the other
+        *p = 99
+        assert(*q == 99, s"*q should be 99 after *p=99, got ${*q}")

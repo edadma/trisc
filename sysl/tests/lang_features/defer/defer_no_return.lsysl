@@ -1,0 +1,107 @@
+Defer fires at end of a unit fn with implicit return
+====================================================
+
+When a `-> unit` function falls off the end of its body
+(no explicit `return`), every `defer stmt` queued during the
+function still runs in LIFO order before the function returns
+to its caller. This pins that the defer-cleanup epilogue is
+wired into the implicit-exit path, not only the explicit-
+`return` path.
+
+Sibling file `defer_lifo.lsysl` pins LIFO ordering with three
+defers; this file focuses specifically on the implicit-exit
+surface: zero defers, one defer, and one defer reached via a
+conditional path that *doesn't* `return`.
+
+Defers fire LIFO on the same `*Trace` helper used elsewhere in
+this directory: bodies write into a string field through a
+pointer, the test asserts the assembled order after the
+helper returns. The helper itself is `-> unit` to dodge the
+TRISC defer-with-value-return bug (see
+feedback_sysl_trisc_defer_nonunit_return.md).
+
+    module sysl.tests.lang_features
+
+    struct DnrTrace
+        s: string
+
+Single defer, no explicit return
+--------------------------------
+
+The body has one `defer` and no statements after it. The fn
+falls off the end implicitly. The defer must fire before
+control returns to the caller.
+
+    dnr_one_defer(t: *DnrTrace) -> unit
+        defer t.s = t.s + "A"
+
+    #test
+    test_one_defer_implicit_exit() -> unit
+        var t = DnrTrace("")
+        dnr_one_defer(&t)
+        assert(t.s == "A", s"expected 'A', got '${t.s}'")
+
+Multiple statements after defer
+-------------------------------
+
+The defer is queued early; the body then does more work that
+also mutates the trace; the fn falls off the end. The
+non-deferred statements run in order, then the deferred body
+runs last.
+
+    dnr_defer_then_work(t: *DnrTrace) -> unit
+        defer t.s = t.s + "D"
+        t.s = t.s + "1"
+        t.s = t.s + "2"
+
+    #test
+    test_defer_runs_after_body() -> unit
+        var t = DnrTrace("")
+        dnr_defer_then_work(&t)
+        assert(t.s == "12D", s"expected '12D' (body then defer), got '${t.s}'")
+
+Defer queued inside a taken if-branch, no return
+------------------------------------------------
+
+The defer is reached only inside a conditional that *is* taken
+here. Defer scope is the **enclosing function**, not the
+enclosing block — so a defer queued inside an `if` body still
+fires at function exit, after all post-branch statements.
+
+(The companion case — branch *not* taken, so the defer was
+never dynamically queued — is currently a 6-of-7 codegen bug:
+every codegen backend fires the defer anyway, only the
+interpreter honours dynamic queuing. See
+feedback_sysl_codegen_defer_in_skipped_branch.md for repro and
+suspect codegen sites. The branch-skipped test was authored
+but withheld pending a codegen fix.)
+
+    dnr_defer_in_branch(t: *DnrTrace) -> unit
+        if true
+            defer t.s = t.s + "B"
+            t.s = t.s + "x"
+        t.s = t.s + "y"
+
+    #test
+    test_defer_in_taken_branch_fires_at_fn_exit() -> unit
+        var t = DnrTrace("")
+        dnr_defer_in_branch(&t)
+        // Branch writes "x", post-branch writes "y", then defer "B" fires
+        // at function exit (defer scope = function, not block).
+        assert(t.s == "xyB", s"expected 'xyB', got '${t.s}'")
+
+Zero defers — sanity baseline
+-----------------------------
+
+A `-> unit` fn with no defers at all and an implicit exit
+should run normally and observably return; the trace just
+contains whatever the body wrote.
+
+    dnr_no_defers(t: *DnrTrace) -> unit
+        t.s = t.s + "plain"
+
+    #test
+    test_no_defers_implicit_exit() -> unit
+        var t = DnrTrace("")
+        dnr_no_defers(&t)
+        assert(t.s == "plain", s"expected 'plain', got '${t.s}'")

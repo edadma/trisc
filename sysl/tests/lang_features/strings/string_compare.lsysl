@@ -1,0 +1,223 @@
+String comparison — `==`, `!=`, `<`, `<=`, `>`, `>=`
+=====================================================
+
+Sysl's string comparison operators yield bool. `==` and
+`!=` test byte-for-byte equality (length + content). The
+ordering operators `<`, `<=`, `>`, `>=` are
+**lexicographic** over the UTF-8 bytes — equivalent to
+`memcmp` extended with a "shorter is less" tiebreaker:
+walk both strings byte-for-byte (each byte treated as
+unsigned 0..255); at the first differing position, the
+operand with the smaller byte is less. If one operand is a
+prefix of the other, the shorter operand is less.
+
+The comparison is **case sensitive**, never depends on
+locale, and never re-decodes UTF-8.
+
+This file pins:
+
+  - Equality (`==`, `!=`) on literals, vars, fn-results,
+    and fresh concat buffers.
+  - The empty string is the minimum: `"" < x` for all
+    non-empty `x`; `"" == ""`.
+  - Lexicographic `<` / `<=` / `>` / `>=` on first-byte-
+    differs, equal-prefix-then-extension, identical
+    operands, and case-sensitivity.
+  - UTF-8 byte equality and inequality.
+  - Length-mismatch is enough for `==` to be false.
+  - The result is a plain `bool` that round-trips through
+    `val`, `if`, and a fn that returns bool.
+
+File-local prefix `Sco` (string-compare-ops) keeps names
+out of the module-flat namespace.
+
+    module sysl.tests.lang_features
+
+Equality between literals
+-------------------------
+
+Two identical literals compare equal; two different ones
+don't. The negation appears under both `!(x == y)` and
+`x != y` shapes — they must agree.
+
+    #test
+    test_sco_eq_literal_same() -> unit
+        assert("hello" == "hello", "identical literals are equal")
+
+    #test
+    test_sco_eq_literal_diff() -> unit
+        assert(!("hello" == "world"), "different literals are not equal under ==")
+        assert("hello" != "world", "and != yields true on the same pair")
+
+Equality across var / fn-result / concat
+----------------------------------------
+
+`==` looks at content, not at where the bytes came from.
+The concat case exercises the codegen path where one side
+is a fresh buffer.
+
+    sco_make() -> string = "hello"
+
+    #test
+    test_sco_eq_var_vs_literal() -> unit
+        val s = sco_make()
+        assert(s == "hello", "var == literal")
+        assert("hello" == s, "literal == var (symmetry)")
+
+    #test
+    test_sco_eq_concat_vs_literal() -> unit
+        assert("hel" + "lo" == "hello", "concat == literal")
+        assert("hello" == "hel" + "lo", "literal == concat (symmetry)")
+
+    #test
+    test_sco_eq_concat_vs_concat() -> unit
+        assert("ab" + "cd" == "abc" + "d", "two concats with same total bytes")
+
+`!=` is the negation of `==`
+----------------------------
+
+    #test
+    test_sco_neq_basic() -> unit
+        assert("a" != "b", "different one-char strings")
+        assert(!("a" != "a"), "same one-char strings — != is false")
+        assert("" != "x", "empty vs non-empty under !=")
+        assert(!("" != ""), "two empties under != — false")
+
+Lexicographic ordering — first byte differs
+-------------------------------------------
+
+When the first differing byte position has different
+bytes, the strict-less and strict-greater results follow
+the byte values directly. Equal operands fail strict `<`
+and `>`.
+
+    #test
+    test_sco_lt_first_byte_differs() -> unit
+        assert("a" < "b", "'a' < 'b'")
+        assert(!("b" < "a"), "'b' < 'a' is false")
+
+    #test
+    test_sco_lt_strict_on_equal() -> unit
+        assert(!("ab" < "ab"), "'ab' < 'ab' is false (strict)")
+        assert(!("ab" > "ab"), "'ab' > 'ab' is false (strict)")
+
+Lexicographic ordering — prefix tiebreak
+----------------------------------------
+
+If one operand is a proper prefix of the other (all bytes
+match through the shorter length), the shorter operand is
+less. The codegen's tiebreak is `len(l) - len(r)`.
+
+    #test
+    test_sco_lt_prefix_extends() -> unit
+        assert("ab" < "abc", "shorter prefix < longer extension")
+        assert(!("abc" < "ab"), "longer extension < shorter prefix is false")
+        assert("abc" > "ab", "longer extension > shorter prefix")
+
+`<=` and `>=` collapse to `==` on equal operands
+------------------------------------------------
+
+    #test
+    test_sco_le_equal_inputs() -> unit
+        assert("ab" <= "ab", "'ab' <= 'ab' (equal)")
+        assert("ab" >= "ab", "'ab' >= 'ab' (equal)")
+
+    #test
+    test_sco_le_extends() -> unit
+        assert("ab" <= "abc", "'ab' <= 'abc'")
+        assert(!("abc" <= "ab"), "'abc' <= 'ab' is false")
+
+    #test
+    test_sco_ge_extends() -> unit
+        assert("abc" >= "ab", "'abc' >= 'ab'")
+        assert(!("ab" >= "abc"), "'ab' >= 'abc' is false")
+
+The empty string is the minimum
+-------------------------------
+
+`""` is less than every non-empty string and equal to
+itself.
+
+    #test
+    test_sco_empty_lt_nonempty() -> unit
+        assert("" < "a", "empty < single char")
+        assert("" < "anything", "empty < longer string")
+        assert(!("a" < ""), "non-empty < empty is false")
+
+    #test
+    test_sco_empty_le_anything() -> unit
+        assert("" <= "", "empty <= empty")
+        assert("" <= "a", "empty <= non-empty")
+
+    #test
+    test_sco_empty_self_eq() -> unit
+        assert("" == "", "empty == empty")
+        assert(!("" != ""), "empty != empty is false")
+
+Case sensitivity
+----------------
+
+`==` and ordering both work on raw bytes. ASCII upper-case
+letters precede lower-case letters in the byte table
+(`'A'` = 0x41, `'a'` = 0x61), so `"ABC" < "abc"`.
+
+    #test
+    test_sco_eq_case_sensitive() -> unit
+        assert(!("abc" == "ABC"), "lower != upper under ==")
+        assert("abc" != "ABC", "lower != upper under !=")
+        assert("ABC" < "abc", "upper < lower (byte 0x41 < byte 0x61)")
+        assert("abc" > "ABC", "lower > upper (mirror)")
+
+Length mismatch
+---------------
+
+If the lengths differ, equality short-circuits to false.
+
+    #test
+    test_sco_eq_diff_lengths() -> unit
+        assert(!("a" == "ab"), "'a' == 'ab' is false (length mismatch)")
+        assert("a" != "ab", "'a' != 'ab' is true")
+        assert(!("abc" == "ab"), "longer == shorter is false")
+
+UTF-8 byte equality
+-------------------
+
+Multi-byte UTF-8 sequences compare byte for byte. Two
+identical literals containing non-ASCII code points must
+compare equal; two literals with the same character count
+but different code points must not.
+
+    #test
+    test_sco_eq_utf8_same() -> unit
+        assert("héllo" == "héllo", "identical UTF-8 literals")
+
+    #test
+    test_sco_eq_utf8_diff() -> unit
+        assert("héllo" != "hello", "UTF-8 'é' (2 bytes) != ASCII 'e' (1 byte)")
+
+Result is a plain `bool` — flows through `var`, `if`, fn
+--------------------------------------------------------
+
+The result of any compare op is a normal `bool`. It must
+round-trip through a `val`, through an `if`-expression
+condition, and through a fn that takes string args and
+returns bool.
+
+    sco_first_le(a: string, b: string) -> bool = a <= b
+
+    #test
+    test_sco_result_in_var() -> unit
+        val eq = "x" == "x"
+        val lt = "a" < "b"
+        assert(eq, "eq var")
+        assert(lt, "lt var")
+
+    #test
+    test_sco_result_in_if() -> unit
+        val tag = if "abc" < "abd" then "lt" else "ge"
+        assert(tag == "lt", s"branch on string compare; got '$tag'")
+
+    #test
+    test_sco_through_fn() -> unit
+        assert(sco_first_le("aa", "ab"), "fn returning bool from <=")
+        assert(!sco_first_le("ab", "aa"), "and the negative case")

@@ -911,61 +911,65 @@ class SyslLLVMCodegen(target: String = "host"):
           if locals.contains(target) then
             val local = locals(target)
             val lt = llvmType(local.typ)
-            // Reassignment of ref: decrement old, increment new
+            // Release/acquire pattern for refcounted reassignment: INCR NEW
+            // *before* DECR OLD. For self-assign (`r = r`, `s = s`, etc.),
+            // RHS and LHS share a buffer; the dec would otherwise drop the
+            // refcount to zero and free the buffer before the increment runs.
+            // Incrementing first keeps the shared buffer alive across the dec.
+            // We operate on the SOURCE address (`v` for aggregates, the loaded
+            // value for scalars) so the incr happens before any store has
+            // overwritten the destination.
+            val vtPre = exprType(value)
+            val finalValPre =
+              if !isAggregate(local.typ) then emitSextIfNeeded(v, vtPre, lt, value.typ.isSigned)
+              else v
+            if !isAggregate(local.typ) && isRef(local.typ) && !isOwnedNew(value) then
+              emitRefIncr(finalValPre, refHeaderOffset(local.typ))
+            if isAggregate(local.typ) then
+              if isSliceType(local.typ) && !isSliceOwned(value) then
+                emitSliceBackrefIncr(v)
+              if isStringType(local.typ) && !isOwnedString(value) then
+                emitStringDescrIncr(v)
+              local.typ match
+                case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(value) =>
+                  emitStructStringFieldsIncr(v, st)
+                case et: SyslType.EnumType if structHasStringFields(et) && !isOwnedStruct(value) =>
+                  emitEnumStringFieldsIncr(v, et)
+                case _ =>
+              if local.typ.isInstanceOf[SyslType.FuncType] then
+                val rhsKind = funcKindOfExpr(value)
+                value match
+                  case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
+                    emitClosureDescrIncr(v)
+                  case _ =>
+            // DECR OLD
             if isRef(local.typ) then
               val oldVal = newReg()
               emit(s"  $oldVal = load $lt, $lt* ${local.reg}")
               emitRefDecr(oldVal, refHeaderOffset(local.typ), deinitFor(local.typ))
-            // Slice reassignment: decrement old backref before overwrite
             if isSliceType(local.typ) then
               emitSliceBackrefDecr(local.reg, local.typ)
-            // String reassignment: decrement old buffer refcount before overwrite
             if isStringType(local.typ) then
               emitStringDescrDecr(local.reg)
-            // Value-struct/enum reassignment: decrement old's string fields before overwrite
             local.typ match
               case st: SyslType.StructType if structHasStringFields(st) =>
                 emitStructStringFieldsDecr(local.reg, st)
               case et: SyslType.EnumType if structHasStringFields(et) =>
                 emitEnumStringFieldsDecr(local.reg, et)
               case _ =>
-            // Closure descriptor reassignment: decr old env before overwrite
             if local.typ.isInstanceOf[SyslType.FuncType]
               && closureLocalKind.get(target).contains(FuncKind.HeapEnv) then
               emitClosureDescrDecr(local.reg)
+            // STORE NEW. Incr was already done above; only kind-tracking remains.
             if isAggregate(local.typ) then
-              // Aggregate reassignment: load value from source, store to target
               val loaded = newReg()
               emit(s"  $loaded = load $lt, $lt* $v")
               emit(s"  store $lt $loaded, $lt* ${local.reg}")
-              // Slice reassignment: increment new backref if not owned
-              if isSliceType(local.typ) && !isSliceOwned(value) then
-                emitSliceBackrefIncr(local.reg)
-              // String reassignment: increment new buffer refcount if not owned
-              if isStringType(local.typ) && !isOwnedString(value) then
-                emitStringDescrIncr(local.reg)
-              // Value-struct/enum reassignment: increment new aggregate's string fields if borrowed
-              local.typ match
-                case st: SyslType.StructType if structHasStringFields(st) && !isOwnedStruct(value) =>
-                  emitStructStringFieldsIncr(local.reg, st)
-                case et: SyslType.EnumType if structHasStringFields(et) && !isOwnedStruct(value) =>
-                  emitEnumStringFieldsIncr(local.reg, et)
-                case _ =>
-              // Closure descriptor reassignment: track new kind, incr if borrowed copy
               if local.typ.isInstanceOf[SyslType.FuncType] then
-                val rhsKind = funcKindOfExpr(value)
-                closureLocalKind(target) = rhsKind
-                value match
-                  case _: TVarRef if rhsKind == FuncKind.HeapEnv =>
-                    emitClosureDescrIncr(local.reg)
-                  case _ =>
+                closureLocalKind(target) = funcKindOfExpr(value)
             else
-              val vt = exprType(value)
-              val finalVal = emitSextIfNeeded(v, vt, lt, value.typ.isSigned)
               val vol = if local.isVolatile then " volatile" else ""
-              emit(s"  store$vol $lt $finalVal, $lt* ${local.reg}")
-              if isRef(local.typ) && !isOwnedNew(value) then
-                emitRefIncr(finalVal, refHeaderOffset(local.typ))
+              emit(s"  store$vol $lt $finalValPre, $lt* ${local.reg}")
           else if globalVarTypes.contains(target) then
             // Assignment to a module-level global variable
             val gt = globalVarTypes(target)
@@ -1546,10 +1550,13 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $cp2 = call i8* @memcpy(i8* $dest, i8* $rPtr, $sizeT ${narrowI64ToSizeT(rLen64)})")
         emitMakeString(buf, totalLen)
 
-      case TBinary(left, op @ ("==" | "!="), right, _) if left.typ == SyslType.StringType =>
+      case TBinary(left, op @ ("==" | "!=" | "<" | "<=" | ">" | ">="), right, _)
+          if left.typ == SyslType.StringType =>
+        // Lexicographic byte-wise compare: memcmp on min(lLen, rLen); if equal,
+        // tiebreak by lLen - rLen. Then reduce the i32 three-way to a bool by
+        // comparing against zero with the matching predicate.
         val lp = genExpr(left)
         val rp = genExpr(right)
-        // Extract len from both
         val lLenGep = newReg()
         emit(s"  $lLenGep = getelementptr %struct.string, %struct.string* $lp, i32 0, i32 1")
         val lLen = newReg()
@@ -1558,15 +1565,6 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $rLenGep = getelementptr %struct.string, %struct.string* $rp, i32 0, i32 1")
         val rLen = newReg()
         emit(s"  $rLen = load i32, i32* $rLenGep")
-        // Compare lengths
-        val lenEq = newReg()
-        emit(s"  $lenEq = icmp eq i32 $lLen, $rLen")
-        val lenCheckBlock = currentBlock
-        val lenMatchLabel = newLabel("str_len_match")
-        val strCmpDone = newLabel("str_cmp_done")
-        emit(s"  br i1 $lenEq, label %$lenMatchLabel, label %$strCmpDone")
-        // Lengths match — compare bytes
-        emitLabel(lenMatchLabel)
         val lPtrGep = newReg()
         emit(s"  $lPtrGep = getelementptr %struct.string, %struct.string* $lp, i32 0, i32 0")
         val lPtr = newReg()
@@ -1575,26 +1573,32 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $rPtrGep = getelementptr %struct.string, %struct.string* $rp, i32 0, i32 0")
         val rPtr = newReg()
         emit(s"  $rPtr = load i8*, i8** $rPtrGep")
-        val len64 = newReg()
-        emit(s"  $len64 = sext i32 $lLen to i64")
-        val cmpResult = newReg()
-        emit(s"  $cmpResult = call i32 @memcmp(i8* $lPtr, i8* $rPtr, $sizeT ${narrowI64ToSizeT(len64)})")
-        val bytesEq = newReg()
-        emit(s"  $bytesEq = icmp eq i32 $cmpResult, 0")
-        val lenMatchExit = currentBlock
-        emit(s"  br label %$strCmpDone")
-        // Merge
-        emitLabel(strCmpDone)
-        val eq = newReg()
-        emit(s"  $eq = phi i1 [ false, %$lenCheckBlock ], [ $bytesEq, %$lenMatchExit ]")
+        val lLeR = newReg()
+        emit(s"  $lLeR = icmp sle i32 $lLen, $rLen")
+        val minLen = newReg()
+        emit(s"  $minLen = select i1 $lLeR, i32 $lLen, i32 $rLen")
+        val minLen64 = newReg()
+        emit(s"  $minLen64 = sext i32 $minLen to i64")
+        val cmpBytes = newReg()
+        emit(s"  $cmpBytes = call i32 @memcmp(i8* $lPtr, i8* $rPtr, $sizeT ${narrowI64ToSizeT(minLen64)})")
+        val bytesZero = newReg()
+        emit(s"  $bytesZero = icmp eq i32 $cmpBytes, 0")
+        val lenDiff = newReg()
+        emit(s"  $lenDiff = sub i32 $lLen, $rLen")
+        val threeWay = newReg()
+        emit(s"  $threeWay = select i1 $bytesZero, i32 $lenDiff, i32 $cmpBytes")
+        val cmpPred = op match
+          case "==" => "eq"
+          case "!=" => "ne"
+          case "<"  => "slt"
+          case "<=" => "sle"
+          case ">"  => "sgt"
+          case ">=" => "sge"
+        val cmp = newReg()
+        emit(s"  $cmp = icmp $cmpPred i32 $threeWay, 0")
         val result = newReg()
         val t = llvmType(SyslType.BoolType)
-        if op == "==" then
-          emit(s"  $result = zext i1 $eq to $t")
-        else
-          val neq = newReg()
-          emit(s"  $neq = xor i1 $eq, true")
-          emit(s"  $result = zext i1 $neq to $t")
+        emit(s"  $result = zext i1 $cmp to $t")
         result
 
       case TBinary(left, op, right, _) if (op == "+" || op == "-") && (left.typ.isInstanceOf[SyslType.PtrType] || right.typ.isInstanceOf[SyslType.PtrType] || left.typ.isInstanceOf[SyslType.ArrayType] || right.typ.isInstanceOf[SyslType.ArrayType]) =>

@@ -1,0 +1,63 @@
+Operator-RHS expected-type inference for generic calls
+======================================================
+
+When a generic function `f[T](x: T, g: (T,T)->T)` is called as
+`f(7, _ + _)`, the placeholder closure `_ + _` is analyzed
+*after* its preceding arg has bound `T = int`. The analyzer
+must thread `T = int` into the closure's expected type
+*before* placeholder inference fires; otherwise the closure
+sees `T` still free and the call fails with `cannot infer
+type for closure parameter '_phN'`.
+
+Three commits closed this gap on three surfaces (explicit
+type-args, operator-dispatch RHS, bare generic calls).
+Sysl@eb3fa5673 was the last piece. This file pins all three
+shapes so they cannot quietly regress on any backend.
+
+    module sysl.tests.lang_features
+
+Bare generic call — placeholder closure as second arg
+-----------------------------------------------------
+
+The bare call shape `apply2(7, _ + _)` needs `T` bound from
+the first arg's value `7` before `_ + _` is analyzed. With
+the fix, the placeholder both knows it's `(int,int) -> int`.
+
+    apply2[T](x: T, f: (T, T) -> T) -> T = f(x, x)
+
+    #test
+    test_bare_call_placeholder_rhs() -> unit
+        val r = apply2(7, _ + _)
+        assert(r == 14, s"7 + 7 should be 14, got $r")
+
+Explicit type-args still work
+-----------------------------
+
+Providing `[int]` was always the manual workaround; it
+must continue working unchanged.
+
+    #test
+    test_explicit_type_args() -> unit
+        val r = apply2[int](5, _ * _)
+        assert(r == 25, s"5 * 5 should be 25, got $r")
+
+Two-arity inference — both args pin `T` consistently
+----------------------------------------------------
+
+    pair_apply[T](a: T, b: T, f: (T, T) -> T) -> T = f(a, b)
+
+    #test
+    test_two_arg_inference() -> unit
+        val r = pair_apply(3, 4, _ + _)
+        assert(r == 7, s"3 + 4 should be 7, got $r")
+
+Closure literal in the slot (not a placeholder)
+-----------------------------------------------
+
+A full closure literal `(a, b) -> a - b` also needs its
+parameter types pinned by inference from the prior arg.
+
+    #test
+    test_closure_literal_rhs() -> unit
+        val r = pair_apply(10, 3, (a, b) -> a - b)
+        assert(r == 7, s"10 - 3 should be 7, got $r")

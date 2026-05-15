@@ -1,0 +1,56 @@
+Generic structs
+===============
+
+A generic struct `Box[T] { v: T }` is monomorphized per
+instantiation: `Box[int]` and `Box[bool]` are distinct types.
+Construction, field access, and method calls all work on the
+monomorphized types.
+
+    module sysl.tests.lang_features
+
+    struct GsBox[T]
+        v: T
+
+Construction and field read
+---------------------------
+
+    #test
+    test_generic_construct_and_read() -> unit
+        val bi = GsBox[int](42)
+        val bb = GsBox[bool](true)
+        assert(bi.v == 42, s"bi.v should be 42, got ${bi.v}")
+        assert(bb.v, "bb.v should be true")
+
+Inference at construction site
+------------------------------
+
+    #test
+    test_inferred_construct() -> unit
+        var b = GsBox(99)
+        assert(b.v == 99, s"b.v should be 99, got ${b.v}")
+        // The inferred T is int.
+        b.v = 100
+        assert(b.v == 100, s"b.v should be 100 after mutation, got ${b.v}")
+
+Generic struct passed to fn
+---------------------------
+
+    read_box[T](b: GsBox[T]) -> T = b.v
+
+    #test
+    test_pass_generic_struct() -> unit
+        val bi = GsBox[int](7)
+        assert(read_box(bi) == 7, s"read_box(bi) should be 7, got ${read_box(bi)}")
+
+Generic struct with nested generic field
+----------------------------------------
+
+    struct GsPair[A, B]
+        a: A
+        b: B
+
+    #test
+    test_two_param_struct() -> unit
+        val p = GsPair[int, bool](42, true)
+        assert(p.a == 42, s"p.a should be 42, got ${p.a}")
+        assert(p.b, "p.b should be true")

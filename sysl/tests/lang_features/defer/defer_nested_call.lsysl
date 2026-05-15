@@ -1,0 +1,159 @@
+Defers compose across nested calls
+==================================
+
+`defer` is function-scoped: every queued defer fires at the
+enclosing function's exit, in LIFO order, before control
+returns to the caller. When a function `outer` calls
+`inner`, `inner`'s defers fire at `inner`'s exit — before
+`outer` resumes — and `outer`'s defers fire at `outer`'s
+exit, after `inner` has fully returned (including after
+its defers ran).
+
+This file pins the composition across the call boundary:
+
+  - `inner` defers complete before control returns to
+    `outer`, so traces look like `<inner-body><inner-defer>`
+    by the time `outer` resumes.
+  - `outer`'s defers fire after the call to `inner`
+    finishes (and after `inner`'s defers ran).
+  - Multiple defers compose LIFO **within** each frame, but
+    do not interleave across frames.
+
+All helpers here return `unit` to dodge the TRISC defer-
+with-value-return bug (see
+feedback_sysl_trisc_defer_nonunit_return.md). Trace strings
+are accumulated through a pointer-to-struct.
+
+    module sysl.tests.lang_features
+
+    struct DncTrace
+        s: string
+
+`inner` defers fire before `outer` resumes
+------------------------------------------
+
+`inner` writes "I" to the trace and queues a defer that
+writes "i". The defer fires at `inner`'s exit, so by the
+time `outer` resumes after the call, the trace reads "Ii".
+`outer` then writes "O", giving final "IiO".
+
+    dnc_inner_one(t: *DncTrace) -> unit
+        defer t.s = t.s + "i"
+        t.s = t.s + "I"
+
+    dnc_outer_one(t: *DncTrace) -> unit
+        dnc_inner_one(t)
+        t.s = t.s + "O"
+
+    #test
+    test_inner_defers_complete_before_outer_resumes() -> unit
+        var t = DncTrace("")
+        dnc_outer_one(&t)
+        assert(t.s == "IiO", s"expected 'IiO', got '${t.s}'")
+
+`outer`'s defers fire after `inner` is fully gone
+-------------------------------------------------
+
+`outer` has its own defer (writes "o") plus a call to
+`inner`. Sequence:
+
+  1. `outer` queues "o".
+  2. `outer` calls `inner` which writes "I" and queues "i".
+  3. `inner` exits, firing "i". Trace = "Ii".
+  4. `outer` writes "O". Trace = "IiO".
+  5. `outer` exits, firing "o". Trace = "IiOo".
+
+    dnc_outer_with_own_defer(t: *DncTrace) -> unit
+        defer t.s = t.s + "o"
+        dnc_inner_one(t)
+        t.s = t.s + "O"
+
+    #test
+    test_outer_defer_fires_after_inner_fully_returns() -> unit
+        var t = DncTrace("")
+        dnc_outer_with_own_defer(&t)
+        assert(t.s == "IiOo", s"expected 'IiOo', got '${t.s}'")
+
+LIFO within each frame, no interleave
+-------------------------------------
+
+Two defers in `inner` ("i2", "i1") and two in `outer`
+("o2", "o1"). Each frame fires its defers in LIFO order
+**at its own exit**; the two frames don't interleave.
+Sequence:
+
+  1. `outer` queues "o1".
+  2. `outer` writes "O-pre".
+  3. `outer` queues "o2".
+  4. `outer` calls `inner`.
+  5. `inner` queues "i1".
+  6. `inner` writes "I-pre".
+  7. `inner` queues "i2".
+  8. `inner` writes "I-post".
+  9. `inner` exits, firing "i2" then "i1".
+ 10. `outer` writes "O-post".
+ 11. `outer` exits, firing "o2" then "o1".
+
+Final trace: "O-preI-preI-posti2i1O-posto2o1".
+
+    dnc_inner_two(t: *DncTrace) -> unit
+        defer t.s = t.s + "i1"
+        t.s = t.s + "I-pre"
+        defer t.s = t.s + "i2"
+        t.s = t.s + "I-post"
+
+    dnc_outer_two(t: *DncTrace) -> unit
+        defer t.s = t.s + "o1"
+        t.s = t.s + "O-pre"
+        defer t.s = t.s + "o2"
+        dnc_inner_two(t)
+        t.s = t.s + "O-post"
+
+    #test
+    test_two_defers_per_frame_no_interleave() -> unit
+        var t = DncTrace("")
+        dnc_outer_two(&t)
+        assert(t.s == "O-preI-preI-posti2i1O-posto2o1",
+               s"expected 'O-preI-preI-posti2i1O-posto2o1', got '${t.s}'")
+
+Three-deep nesting
+------------------
+
+A → B → C with one defer in each frame. Sequence:
+
+  1. A writes "A-pre".
+  2. A queues "a".
+  3. A calls B.
+  4. B writes "B-pre".
+  5. B queues "b".
+  6. B calls C.
+  7. C writes "C".
+  8. C queues "c".
+  9. C exits, firing "c". Trace = "A-preB-preCc".
+ 10. B writes "B-post". Trace = "A-preB-preCcB-post".
+ 11. B exits, firing "b". Trace = "A-preB-preCcB-postb".
+ 12. A writes "A-post". Trace = "A-preB-preCcB-postbA-post".
+ 13. A exits, firing "a". Trace = "A-preB-preCcB-postbA-posta".
+
+    dnc_c(t: *DncTrace) -> unit
+        t.s = t.s + "C"
+        defer t.s = t.s + "c"
+
+    dnc_b(t: *DncTrace) -> unit
+        t.s = t.s + "B-pre"
+        defer t.s = t.s + "b"
+        dnc_c(t)
+        t.s = t.s + "B-post"
+
+    dnc_a(t: *DncTrace) -> unit
+        t.s = t.s + "A-pre"
+        defer t.s = t.s + "a"
+        dnc_b(t)
+        t.s = t.s + "A-post"
+
+    #test
+    test_three_deep_nested_defers() -> unit
+        var t = DncTrace("")
+        dnc_a(&t)
+        assert(t.s == "A-preB-preCcB-postbA-posta",
+               s"expected 'A-preB-preCcB-postbA-posta', got '${t.s}'")

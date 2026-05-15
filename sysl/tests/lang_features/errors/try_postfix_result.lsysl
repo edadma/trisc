@@ -1,0 +1,87 @@
+`?` postfix on `Result[T, E]`
+=============================
+
+The postfix `?` operator on a `Result[T, E]` value either
+unwraps the `Ok(v)` payload, or early-returns the `Err(e)`
+unchanged. Unlike `Option`, the error carries a payload — so
+the early-return preserves the error value bit-for-bit.
+
+    module sysl.tests.lang_features
+
+    enum TprResult[T, E]
+        Ok(value: T)
+        Err(error: E)
+
+Happy path — chained `?` on `Ok(_)`
+-----------------------------------
+
+When every step succeeds, each `?` peels off the `Ok` and
+the final `Ok` carries the post-arithmetic value.
+
+    parse_both(a: TprResult[int, string], b: TprResult[int, string]) -> TprResult[int, string]
+        val x = a?
+        val y = b?
+        return Ok(x + y)
+
+    #test
+    test_try_ok_ok() -> unit
+        val r = parse_both(Ok(10), Ok(32))
+        val v = r match
+            Ok(n)  -> n
+            Err(_) -> -1
+        assert(v == 42, s"10 + 32 should be 42, got $v")
+
+Error preserved — first `Err` short-circuits
+--------------------------------------------
+
+When the first arg is `Err("a"`), the entire function
+returns `Err("a"`) — the error payload is preserved
+bit-for-bit (not mapped, wrapped, or rebuilt).
+
+    #test
+    test_try_err_preserves_payload() -> unit
+        val r = parse_both(Err("bad-a"), Ok(5))
+        val msg = r match
+            Ok(_)    -> "ok"
+            Err(e)   -> e
+        assert(msg == "bad-a", s"err should be 'bad-a', got '$msg'")
+
+Second-position error
+---------------------
+
+When the first succeeds but the second is `Err`, the second
+`?` is what early-returns. The error payload from `b` is the
+function's result.
+
+    #test
+    test_try_second_err() -> unit
+        val r = parse_both(Ok(7), Err("bad-b"))
+        val msg = r match
+            Ok(_)    -> "ok"
+            Err(e)   -> e
+        assert(msg == "bad-b", s"err should be 'bad-b', got '$msg'")
+
+Three-step chain
+----------------
+
+    sum_three_results(a: TprResult[int, string], b: TprResult[int, string], c: TprResult[int, string]) -> TprResult[int, string]
+        val x = a?
+        val y = b?
+        val z = c?
+        return Ok(x + y + z)
+
+    #test
+    test_try_three_ok() -> unit
+        val r = sum_three_results(Ok(1), Ok(2), Ok(3))
+        val v = r match
+            Ok(n)  -> n
+            Err(_) -> -1
+        assert(v == 6, s"1+2+3 should be 6, got $v")
+
+    #test
+    test_try_three_middle_err() -> unit
+        val r = sum_three_results(Ok(1), Err("middle"), Ok(3))
+        val msg = r match
+            Ok(_)    -> "ok"
+            Err(e)   -> e
+        assert(msg == "middle", s"middle err should propagate, got '$msg'")

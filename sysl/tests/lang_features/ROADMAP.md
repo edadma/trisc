@@ -63,113 +63,113 @@ Current → target mapping is shown in each category's table.
 
 ## Tier 0 — Foundation
 
-### `arc/` — Three allocation modes + refcount semantics — 🔴 P0
+### `arc/` — Three allocation modes + refcount semantics — 🟡 P0
 
 Reference §"Three Allocation Modes", "Conversion Rules", "Deinit Blocks".
-This is the highest-leverage gap right now. `std/` defines almost no
-`&T` reference-counted types, so the entire ARC path is essentially
-unpinned end-to-end. The `t.s = t.s + "x"` use-after-free we just fixed
-was an ARC-adjacent bug that took weeks to surface; the actual `new T(...)`
-+ refcount inc/dec path is even less tested.
+This was the highest-leverage gap. `std/` defines almost no `&T`
+reference-counted types, so the entire ARC path was essentially unpinned
+end-to-end. Now substantially covered — six real bugs surfaced and were
+fixed along the way (TFieldAssignStmt use-after-free on five backends,
+struct-copy aliasing on six backends, ref reassignment use-after-free
+on four backends, SVM deinit missing entirely, SVM global-string-assign
+truncated to 8 bytes, SVM int-global store regression from the latter
+fix). All 11 ARC test files now green across all seven backends except
+where noted.
 
 | File | Tests pinned |
 |---|---|
-| `value_struct_copy.lsysl` 🔴 | bitwise copy of value structs, no refcount, no double-free of contained strings |
-| `new_ref_basic.lsysl` 🔴 | `new Node(...)` allocates, refcount starts at 1, ref-binding increments, drop decrements, free at 0 |
-| `new_ref_assignment.lsysl` 🔴 | `r1 = r2` inc-r2/dec-r1; self-assign `r = r` is a no-op (inc-then-dec on the same buffer) |
-| `new_ref_passing.lsysl` 🔴 | `f(r: &T)` increments for call duration, decrements at callee return; nested call chains preserve refcount |
-| `new_ref_return.lsysl` 🔴 | returning a fresh `new T(...)` is owned (no inc), returning a borrowed ref increments |
-| `new_ref_field.lsysl` 🔴 | struct field of type `&Inner` — assigning a new ref decrements the old, increments the new |
-| `deinit_basic.lsysl` 🔴 | `Struct.deinit()` fires once at refcount=0 transition; before free; doesn't fire for value-struct drops |
-| `deinit_with_fields.lsysl` 🔴 | deinit runs *before* the struct's owned string/slice/ref fields are decremented |
-| `ptr_to_value.lsysl` 🔴 | `&v` then `*p` round-trips; mutating through `*p` mutates the value |
-| `ptr_to_ref.lsysl` 🔴 | `&r` gives `*T` (no refcount change); `*T → &T` rejected at compile time |
-| `value_to_ref_explicit.lsysl` 🔴 | `new T(v)` heap-promotes a value struct |
-| `aggregate_field_decrement.lsysl` 🟢 | regression test for our recent fix — already covered by `field_self_concat.lsysl` (move into this dir) |
-
-Existing: `field_self_concat.lsysl` → move to `arc/field_self_concat.lsysl`.
+| `value_struct_copy.lsysl` 🟢 | bitwise copy of value structs, no refcount, no double-free of contained strings (6 tests) |
+| `new_ref_basic.lsysl` 🟢 | `new Node(...)` allocates, refcount starts at 1, ref-binding increments, drop decrements, free at 0 (4 tests) |
+| `new_ref_assignment.lsysl` 🟢 | `r1 = r2` inc-r2/dec-r1; self-assign `r = r` is a no-op (inc-then-dec on the same buffer) (4 tests) |
+| `new_ref_passing.lsysl` 🟢 | `f(r: &T)` increments for call duration, decrements at callee return; nested call chains preserve refcount (6 tests) |
+| `new_ref_return.lsysl` 🟢 | returning a fresh `new T(...)` is owned (no inc), returning a borrowed ref increments (5 tests) |
+| `new_ref_field.lsysl` 🟢 | struct field of type `&Inner` — assigning a new ref decrements the old, increments the new (6 tests) |
+| `deinit_basic.lsysl` 🟢 | `Struct.deinit()` fires once at refcount=0 transition; before free; doesn't fire for value-struct drops (5 tests) |
+| `deinit_with_fields.lsysl` 🟢 | deinit body can read fields (including chasing through `&Inner` field) before the field's own refcount is decremented (3 tests). TODO: also pin "outer's drop transitively decrements `&Inner` field, firing inner's deinit" — currently every backend leaks the inner ref on outer-drop |
+| `ptr_to_value.lsysl` 🟢 | `&v` then `*p` round-trips; mutating through `*p` mutates the value (4 tests) |
+| `ptr_to_ref.lsysl` 🟡 | `&r` where `r: &T` yielding `*T` — NOT implemented on any backend; file is currently a placeholder + TODO. Cross-backend feature gap |
+| `value_to_ref_explicit.lsysl` 🟢 | `new T(v)` heap-promotes a value struct, independent of source (2 tests) |
+| `field_self_concat.lsysl` 🟢 | original regression test for `TFieldAssignStmt` use-after-free (3 tests) |
 
 ---
 
-### `slices/` — Fixed arrays, dynamic arrays, slice descriptors, append — 🔴 P0
+### `slices/` — Fixed arrays, dynamic arrays, slice descriptors, append — 🟡 P0
 
 Reference §"Arrays, Slices, and Pointers", §"Append". `std/` uses slices
-constantly but rarely pins boundary conditions. Slice-descriptor mishandling
-caused multiple TRISC audit-era bugs.
+constantly but rarely pins boundary conditions. Now substantially covered;
+two real gaps surfaced (bounds-check trapping inconsistent across backends;
+TRISC's `for x in slice` codegen broken).
 
 | File | Tests pinned |
 |---|---|
-| `array_literal_fixed.lsysl` 🔴 | `[1, 2, 3]` literal types as `[3]int`; index, length, bounds-check trap |
-| `array_explicit_size.lsysl` 🔴 | `[3]int{1,2,3}` typed construction; zero-init `[3]int{}` |
-| `array_of_struct.lsysl` 🔴 | array of value structs — element mutation, copy semantics |
-| `array_decay.lsysl` 🔴 | `[3]int` passed to `*int` parameter (array-decay) |
-| `dynamic_array_new.lsysl` 🔴 | `new [n]int` heap-allocates, zero-init, refcounted via descriptor |
-| `dynamic_array_bounds.lsysl` 🔴 | OOB index traps; OOB store traps; negative index rejected |
-| `slice_from_array.lsysl` 🔴 | `arr[i:j]` yields a slice with the same backing; mutations visible to the source |
-| `slice_full_subslice.lsysl` 🔴 | `s[:]`, `s[i:]`, `s[:j]` (omitted bounds) |
-| `slice_descriptor_passing.lsysl` 🔴 | slice arg passed by value carries `{ptr, len, cap}`; callee mutations visible |
-| `slice_append_inplace.lsysl` 🔴 | append within capacity reuses backing array |
-| `slice_append_growth.lsysl` 🔴 | append beyond capacity allocates new backing; old backing eligible for free |
-| `slice_iter_for_in.lsysl` 🔴 | `for x in s` iterates by value; `for i, x in s` enumerated form (if supported) |
-| `string_as_byte_slice.lsysl` 🔴 | `string` ↔ `[]byte` conversion paths |
+| `array_literal_fixed.lsysl` 🟢 | `[1, 2, 3]` literal types as `[3]int`; index, length, iteration (5 tests) |
+| `array_explicit_size.lsysl` 🟢 | `var a: [N]T` declaration; zero-init (3 tests) |
+| `array_of_struct.lsysl` 🟢 | array of value structs — element read/write, whole-element assignment (4 tests) |
+| `array_decay.lsysl` 🟢 | `[3]int` passed to `*int` parameter (array-decay); `&arr[0]` explicit form (3 tests) |
+| `dynamic_array_new.lsysl` 🟢 | `new [n]int` allocates, zero-init, runtime n; many-alloc smoke (4 tests) |
+| `dynamic_array_bounds.lsysl` 🟡 | in-bounds happy path (2 tests). TODO: re-enable OOB-trap tests once uniform bounds checking lands — currently only the interpreter (and partially TRISC) trap on OOB index/store; the other 5 silently succeed. **Real cross-backend soundness gap.** |
+| `slice_from_array.lsysl` 🟢 | `arr[i:j]` shares backing; mutations visible through either side; empty slice (5 tests) |
+| `slice_full_subslice.lsysl` 🟢 | `s[:]`, `s[i:]`, `s[:j]` omitted-bound forms (4 tests) |
+| `slice_descriptor_passing.lsysl` 🟢 | slice param shares backing with caller; `len()` works inside callee; sub-slice through param (4 tests) |
+| `slice_append.lsysl` 🟢 | append single, append many, append preserves predecessors, append on pre-filled slice (4 tests). NB SVM exhausts memory at large append counts (bump-allocator + no free); test uses 100 elements not 1000 |
+| `slice_iter_for_in.lsysl` 🟡 | `for x in [literal array]` works (4 tests). TODO entries for `for x in slice` and `for x in dynamic[:]` once TRISC's slice-iter codegen lands; today TRISC traps on those forms while the other 6 backends work |
+| `string_as_byte_slice.lsysl` 🟢 | string indexing yields bytes; len = byte count; UTF-8 multi-byte (4 tests) |
 
 ---
 
-### `pointers/` — Raw pointers, deref, arithmetic, address-of — 🔴 P0
+### `pointers/` — Raw pointers, deref, arithmetic, address-of — 🟢 P0
 
 Reference §"Pointers", "Pointer Dereference Is Explicit", "Array/Pointer Decay".
 
 | File | Tests pinned |
 |---|---|
-| `ptr_deref_basic.lsysl` 🔴 | `&x` / `*p`; explicit deref required (no auto-deref except `self`) |
-| `ptr_arithmetic.lsysl` 🔴 | `p + 1`, `p + i`, `p - q`; widening to `usize` |
-| `ptr_compare.lsysl` 🔴 | `p == q`, `p != q`, null-pointer compare |
-| `ptr_null.lsysl` 🔴 | `null` literal; `null` initialiser; deref-null traps |
-| `ptr_to_struct_field.lsysl` 🔴 | `&s.f` yields a `*FieldType` pointing into the struct |
-| `array_decay_implicit.lsysl` 🔴 | `[3]int` decays to `*int` at call site (recent compiler fix) |
+| `ptr_deref_basic.lsysl` 🟢 | `*p` deref; `p.field` implicit deref for structs; pass *T to fn (5 tests) |
+| `ptr_arithmetic.lsysl` 🟢 | `p + n` element-wise advance; walk array via pointer (4 tests) |
+| `ptr_compare.lsysl` 🟢 | `p == q`, `p != q`, retarget changes equality (3 tests) |
+| `ptr_null.lsysl` 🟢 | `*int(0)` null; default-init zero-inits to null; branch-on-null (4 tests). TODO: re-enable `bool(*T)` cast test once LLVM codegen lands (currently emits invalid `bitcast i8* to i8`) |
+| `ptr_to_struct_field.lsysl` 🟢 | `&s.field` field pointer; field-ptr mutation visible in struct (4 tests) |
+| `array_decay_implicit.lsysl` 🟢 | covered by `slices/array_decay.lsysl` |
 
 ---
 
-### `generics/` — Generic functions / structs / enums / aliases — 🔴 P0
+### `generics/` — Generic functions / structs / enums / aliases — 🟡 P0
 
 Reference §"Generic Functions", "Generic Structs", "Generic Tagged Unions",
 "Generic Type Aliases", "Methods on generic structs". `std/` uses Option /
 Result / List heavily but mostly through their already-instantiated forms;
-the *inference* and *instantiation* edges are less covered.
+the *inference* and *instantiation* edges are less covered. Substantially
+covered now; one SVM bug TODO'd.
 
 | File | Tests pinned |
 |---|---|
-| `generic_fn_explicit.lsysl` 🔴 | `f[T](x: T) -> T`; called with explicit type arg `f[int](3)` |
-| `generic_fn_inferred.lsysl` 🔴 | inference from a single arg, from multiple args, from return position |
-| `generic_fn_operator_rhs.lsysl` 🔴 | inference for the RHS of an operator (sysl@950415fde regression) |
-| `generic_fn_sibling_import.lsysl` 🔴 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression) |
-| `generic_struct_basic.lsysl` 🔴 | `struct Box[T] { v: T }`; ctor; field access |
-| `generic_struct_method.lsysl` 🔴 | `Box[T].get() -> T`; method call resolution under type param |
-| `generic_enum_data.lsysl` 🔴 | `enum Tree[T] { Leaf, Node(T, Tree[T], Tree[T]) }`; recursive generic |
-| `generic_alias_basic.lsysl` 🔴 | `type Pair[A,B] = (A, B)` (or struct alias); usage |
-| `generic_alias_cross_file.lsysl` 🔴 | generic alias visible across files (sysl@2c4f1c095 regression) |
-| `generic_nested.lsysl` 🔴 | `Option[Option[int]]`; `Result[List[int], string]` |
-| `generic_two_params.lsysl` 🔴 | `f[A, B](a: A, b: B) -> (A, B)` |
+| `generic_fn_basic.lsysl` 🟢 | explicit type arg; inference; multi-param; max-of-T; (5 tests). TODO: `apply_twice[T](f: (T)->T, x: T)` higher-order — SVM overflows its 1024-item data stack on f(f(x)); other 6 backends fine |
+| `generic_struct.lsysl` 🟢 | `Box[T]` construct & read; inferred construct; pass-to-fn; two-param `Pair[A,B]` (4 tests) |
+| `generic_enum.lsysl` 🟢 | `Maybe[T]` with `Just(value: T)` / `Nope`; match with payload bind; two instantiations side-by-side (3 tests) |
+| `generic_nested.lsysl` 🟢 | `Box[Box[int]]`, three-deep `Box[Box[Box[int]]]`, `Box[Opt[int]]`, two-param `Pair[A,B]` (4 tests) |
+| `generic_fn_explicit.lsysl` 🟢 | subsumed by `generic_fn_basic.lsysl` |
+| `generic_fn_inferred.lsysl` 🟢 | subsumed by `generic_fn_basic.lsysl` |
+| `generic_fn_operator_rhs.lsysl` 🟢 | bare-call placeholder `_ + _` RHS; explicit type args; two-arg inference; full closure-literal RHS — pins sysl@950415fde + sysl@eb3fa5673 across all 7 backends (4 tests) |
+| `generic_struct_method.lsysl` 🟢 | `Box[T].get()` & `.set(x)`; mutating-self via `&self`; method on two-param `Pair[A,B]`; chained method call (6 tests) |
+| `generic_alias_basic.lsysl` 🟡 | `type GabUnary[T] = (T) -> T` as parameter type; two-param alias `(A,A)->B` (2 tests). TODO: alias instantiation as struct *field* type fails with `'GabUnary' is not a generic type` even when the identical instantiation works as a fn param — analyzer field-type resolution gap, same on all 7 backends |
+| `generic_fn_sibling_import.lsysl` 🔴 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression) — multi-file fixture, not yet pinned |
+| `generic_alias_cross_file.lsysl` 🔴 | generic alias visible across files (sysl@2c4f1c095 regression) — multi-file fixture, not yet pinned |
 
 ---
 
-### `control_flow/` — if-expr, while, for, loops, break/continue, return — 🔴 P0
+### `control_flow/` — if-expr, while, for, loops, break/continue, return — 🟡 P0
 
 Reference §"Control Flow", "If Expression", "Return".
 
 | File | Tests pinned |
 |---|---|
-| `if_expr_as_value.lsysl` 🔴 | `val x = if c then a else b`; type unification of branches |
-| `if_expr_unit.lsysl` 🔴 | `if c then stmt` (no else) yields `unit` |
-| `if_chain.lsysl` 🔴 | `if a then ... elif b then ... else ...` chain |
-| `while_basic.lsysl` 🔴 | counted while; while with side-effect condition; while-true + break |
-| `for_in_range_exclusive.lsysl` 🔴 | `for i in 0..<n` yields 0..n-1; n=0 doesn't iterate |
-| `for_in_range_inclusive.lsysl` 🔴 | `for i in 0..n` yields 0..n; off-by-one regressions |
-| `for_in_slice.lsysl` 🔴 | `for x in slice` iterates by value |
-| `for_in_string.lsysl` 🔴 | `for c in s` iterates byte / rune |
-| `loop_labels.lsysl` 🔴 | `outer: for ...` + `break outer` / `continue outer` from nested loop |
-| `early_return.lsysl` 🔴 | early return from inside a loop; ARC + defer interaction |
-| `return_implicit.lsysl` 🔴 | expression-bodied fn returns last expr |
+| `if_expr.lsysl` 🟢 | if as value, side-effect cond, if/else-if chain, no-else, nested (5 tests). Covers both `if_expr_as_value`, `if_expr_unit`, `if_chain` |
+| `while_loops.lsysl` 🟢 | counted while; while + break; while + continue; never-runs; nested (5 tests) |
+| `for_in_range.lsysl` 🟢 | `0..<n` exclusive; `0..n` inclusive; empty; single-element; negative range (8 tests) |
+| `for_in_slice.lsysl` 🟡 | covered by `slices/slice_iter_for_in.lsysl` with the TRISC `for x in slice` TODO |
+| `for_in_string.lsysl` 🔴 | `for c in s` iterates byte / rune — not yet pinned |
+| `loop_labels.lsysl` 🔴 | `outer: for ...` + `break outer` / `continue outer` — not yet pinned |
+| `early_return.lsysl` 🟢 | early return from loop; nested blocks; ARC refcount cleanup on every path (4 tests). Surfaced+fixed SVM array-pass-by-value bug (emitStore for ArrayType fell through to store64) |
+| `return_implicit.lsysl` 🟢 | `def` expression-bodied function; block-body last-expr return; implicit/explicit match (3 tests) |
 
 ---
 
@@ -180,11 +180,11 @@ Reference §"Control Flow", "If Expression", "Return".
 | File | Tests pinned |
 |---|---|
 | `defer_lifo.lsysl` 🟢 | LIFO ordering via pointer-mutating helper *(move from top level)* |
-| `defer_early_return.lsysl` 🔴 | defer fires on every return path |
+| `defer_early_return.lsysl` 🔴 | defer fires on every return path **— BLOCKED on TRISC compiler bug**: defer doesn't fire (or doesn't take effect) when the enclosing fn has a non-unit return type and uses `return value`. 6/7 backends pass (interp, llvm-host, svm, rv64, rv32, wasm32). Existing `defer_lifo.lsysl` works because its helper is `-> unit`. File drafted and removed 2026-05-15; see feedback_sysl_trisc_defer_nonunit_return.md for repro + suspect codegen sites |
 | `defer_with_arc.lsysl` 🔴 | defer that mutates a ref-counted struct field |
-| `defer_no_return.lsysl` 🔴 | defer fires at end of `unit` fn with implicit return |
-| `defer_in_loop.lsysl` 🔴 | defer inside loop body — fires at end of *function*, not iteration |
-| `defer_nested_call.lsysl` 🔴 | defers from caller and callee both fire, in correct relative order |
+| `defer_no_return.lsysl` 🟡 | single defer + implicit exit; defer-then-body; defer in always-taken if-branch fires at fn exit; no-defer baseline (4 tests). **Bug surfaced and withheld:** defer queued inside a *skipped* `if`-branch still fires on 6 of 7 backends (everything except interpreter). Test was authored but dropped pending fix — see feedback_sysl_codegen_defer_in_skipped_branch.md |
+| `defer_in_loop.lsysl` 🔴 | defer inside loop body — fires at end of *function*, not iteration **— BLOCKED on codegen cluster**: 6 of 7 codegen backends fire only 1 defer when N were queued in a loop body. TRISC additionally fails to link if the deferred statement references the loop variable (`undefined symbol: 'i'`). Same lexical-cleanup family as `defer-in-skipped-branch`. File drafted and withdrawn 2026-05-15; see feedback_sysl_codegen_defer_in_loop_queue_depth.md for the cluster repro |
+| `defer_nested_call.lsysl` 🟢 | inner defers complete before outer resumes; outer's own defer fires after inner is fully gone; two-per-frame LIFO without cross-frame interleave; three-deep A→B→C nesting (4 tests) |
 
 Existing: `defer_lifo.lsysl` → `defer/defer_lifo.lsysl`.
 
@@ -195,12 +195,12 @@ Existing: `defer_lifo.lsysl` → `defer/defer_lifo.lsysl`.
 | File | Tests pinned |
 |---|---|
 | `closures_hof.lsysl` 🟢 | basic captures, stored-in-struct, repeated invocation *(move from top level)* |
-| `closure_capture_mutable.lsysl` 🔴 | mutating a captured local from inside the closure |
-| `closure_return_from_fn.lsysl` 🔴 | returning a closure from a fn; lifetime of captured locals |
-| `closure_recursive_inner_def.lsysl` 🔴 | `def fact(n) -> ...` recursive named local closure |
+| `closure_capture_mutable.lsysl` 🟡 | snapshot-not-reference capture semantics: `val` capture (1), `var k` outer mutation invisible after build (1). **Bugs surfaced and dropped from this file:** SVM `ArrayIndexOutOfBoundsException` when two closures capture the same `var` in one fn; SVM block-bodied closure returning last expression miscomputes return value; TRISC captures `var p: struct` by reference instead of by snapshot (2 tests). (2 tests; 3 known-divergence cases TODO'd in commit msg) |
+| `closure_return_from_fn.lsysl` 🔴 | returning a closure from a fn; lifetime of captured locals **— BLOCKED on a real compiler bug**: 4 of 7 backends (llvm-host, riscv64, riscv32, wasm32 — all LLVM-based) free the closure environment when the outer fn returns. Symptoms: llvm-host returns garbage (`mult7(6) = 70904496`); rv64/rv32 return 0; wasm32 traps `unreachable`. Interpreter, svm-host, trisc all pass. **Surfaced 2026-05-15; file drafted and removed; see commit msg of sysl@ec6acbd08+1 for repro.** |
+| `closure_recursive_inner_def.lsysl` 🟡 | single-fn self-recursive inner `def`: factorial (3), fib (2), capture-from-outer-scope (1) — 6 tests. **Bug surfaced and dropped from this file:** SVM panics ("svm.result=0xa") when an outer fn contains two unrelated self-recursive inner defs, even when they don't reference each other. 6/7 backends pass two-separate-defs. |
 | `closure_in_closure.lsysl` 🔴 | closure declared inside another closure's body *(blocked on sysl bug — see feedback_sysl_closure_in_closure.md)* |
-| `function_pointer_call.lsysl` 🔴 | bare fn pointer call `fp(x)`; storing a fn pointer in a var |
-| `closure_underscore_placeholder.lsysl` 🔴 | `_ + 1` underscore-placeholder syntax sugar |
+| `function_pointer_call.lsysl` 🟡 | bind a top-level fn to a val/var, call it directly; pass to a hof; reassign a `var f`; two pointers side by side (4 tests). **Bug surfaced and dropped from this file:** SVM crashes returning a fn-pointer from a hof — "address not found: 10000000000000" (high-bit-set tag in the fn-pointer encoding doesn't survive the return path). 6/7 backends pass the returned-fn-pointer test. |
+| `closure_underscore_placeholder.lsysl` 🟢 | `_ + 1`; `_ * 7`; two-arg `_ - _` order-sensitive; `_ * 2 + 1` bubble-up through arithmetic; paren-narrowed `(_ + 1)`; `_ * _` same arg twice (7 tests) |
 
 Existing: `closures_hof.lsysl` → `closures/closures_hof.lsysl`.
 
@@ -211,12 +211,12 @@ Existing: `closures_hof.lsysl` → `closures/closures_hof.lsysl`.
 | File | Tests pinned |
 |---|---|
 | `enum_match_payload.lsysl` 🟢 | data variants + exhaustive *(move from top level)* |
-| `match_exhaustive_simple_enum.lsysl` 🔴 | exhaustive match on a simple int-backed enum |
-| `match_nested_payload.lsysl` 🔴 | matching `Some(Ok(x))` and similar nestings |
+| `match_exhaustive_simple_enum.lsysl` 🟢 | three-tag enum exhaustive match returning string / int / bool; match as arithmetic operand; match in if-cond; two reads stable; through fn boundary (6 tests) |
+| `match_nested_payload.lsysl` 🟢 | two-level `Some(Ok(v))` / `Some(Bad(why))` / None; three-level `Wrap(Some(Ok(v)))`; struct payload at leaf; full exhaustive sweep (10 tests). **Surfaced analyzer gap:** exhaustiveness checker requires explicit `Outer(_)` catch-all when nested patterns exhaust a variant — see feedback_sysl_match_nested_exhaustiveness.md. Codegen works on all 7 backends; only the checker is conservative |
 | `match_guards.lsysl` 🔴 | guard clauses (`case Some(x) if x > 0 => ...`) — *if supported* |
 | `match_or_patterns.lsysl` 🔴 | `case (A | B) => ...` — *if supported* |
-| `if_is_pattern.lsysl` 🔴 | `if x is Some(v) then ...` one-arm sugar |
-| `destructure_assign.lsysl` 🔴 | `val (a, b) = pair`; parallel assignment `(x, y) = (y, x)` |
+| `if_is_pattern.lsysl` 🟢 | Some/None happy + fail; else-arm form; int / string / struct payload binds; chained `if .. is ..` on two-variant outcome; else-arm has no binding leak; pattern check is pure across two reads (8 tests) |
+| `destructure_assign.lsysl` 🟢 | `val q, r = divmod(...)`; `var` form with subsequent mutate; parenthesized; swap; three-way rotate; struct destructure by field-order; non-consuming (7 tests) |
 
 Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.lsysl`.
 
@@ -228,12 +228,12 @@ Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.ls
 |---|---|
 | `format_strings.lsysl` 🟢 | `s"..."` interpolation shapes *(move from top level)* |
 | `field_self_concat.lsysl` 🟢 | field-string-assign-with-self-read *(move; cross-listed in `arc/`)* |
-| `string_concat_basic.lsysl` 🔴 | `a + b` produces an owned new buffer; lengths, empties |
-| `string_concat_chain.lsysl` 🔴 | `a + b + c + d`; intermediate buffer lifetimes |
-| `string_escape_seqs.lsysl` 🔴 | `\n`, `\t`, `\"`, `\\`, `\x41`, `\u{...}` |
-| `string_index_slice.lsysl` 🔴 | `s[i]` (byte/char?), `s[i:j]` (sub-slice) |
-| `string_len_empty.lsysl` 🔴 | `len(s)`; empty string is len 0; static literal empty has refcount -1 |
-| `string_compare.lsysl` 🔴 | `==`, `!=`, lexicographic `<`, `<=` |
+| `string_concat_basic.lsysl` 🟢 | two-word concat; with-separator; empty-left / empty-right / both-empty; order matters; operand-mutation invariance; len math; UTF-8 byte length; self-concat (10 tests) |
+| `string_concat_chain.lsysl` 🟢 | 4-operand chain; 5-operand with separators; left-assoc step-by-step via `var`; empty in the middle; all-empty; same operand aliased ×3; mixed literal+var sources; chain returned from fn; sources not mutated (9 tests) |
+| `string_escape_seqs.lsysl` 🟢 | `\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, `\xHH` — 23 tests pinning byte values, len, embedded NUL doesn't terminate, escapes in concat / interp / char literals; non-ASCII `\xAB` UTF-8-encodes to 2 bytes; no `\u{...}` (deliberately scoped to documented repertoire) — 7/7 backends |
+| `string_index_slice.lsysl` 🟢 | `s[i]` (byte / `u8`) and `s[i:j]` (sub-slice) — 23 tests pinning indexing, middle/prefix/suffix/full/empty slicing, var-bounded slicing, sub-of-sub indexing, substring through concat / fn boundary / equality, UTF-8 byte-level (`"aña"` byte slicing at code-point boundaries) — 7/7 backends. **Surfaced + fixed SVM bug**: `TSliceExpr` had no `StringType` branch and produced a 24-byte slice struct in place of a 16-byte string descriptor, corrupting every downstream consumer (concat / interp / equality). Fixed by adding a dedicated StringType branch (16-byte descriptor with i64 length, no cap/backref). Empty slices passed only because the layout-mismatched length happened to land at zero |
+| `string_len_empty.lsysl` 🟢 | `len("")` is 0; len of single char; len five chars; two empty literals equal; len stable across reads; len of returned string; len of returned ""; len after rebind; len(a+b)=len(a)+len(b) for ASCII (9 tests) |
+| `string_compare.lsysl` 🟢 | `==` / `!=` / `<` / `<=` / `>` / `>=` on strings — 22 tests: equality (literal / var / concat / fn-result), lexicographic ordering (first-byte-differs / prefix-extends / strict-on-equal), `<=`/`>=` collapse on equal inputs, empty-is-minimum, case sensitivity (ASCII `'A'` < `'a'` via raw bytes), length mismatch, UTF-8 byte-equality / inequality, result flowing through `val` / `if` / fn (7/7 backends). Lexicographic ordering shipped 2026-05-15 — interpreter (Scala loop), LLVM (`memcmp` + select-based tiebreak), SVM (new `__svm_str_cmp` runtime helper), TRISC (inline three-way diff loop) |
 | `f_format_strings.lsysl` 🔴 | `f"%d %x %s"` with format specs `%08d %.2f %+d %-10s` |
 | `str_builtin.lsysl` 🔴 | `str(x)` on int / bool / float / string / data-enum variant name |
 | `string_from_bytes.lsysl` 🔴 | constructing a `string` from `[]byte` |
@@ -304,16 +304,16 @@ Existing: `float_extremes.lsysl` → `floats/float_extremes.lsysl`.
 
 ---
 
-### `errors/` — `?` postfix, Option, Result chains — 🔴 P1
+### `errors/` — `?` postfix, Option, Result chains — 🟡 P1
 
 Reference §"`?` Operator (Try)".
 
 | File | Tests pinned |
 |---|---|
+| `try_postfix_option.lsysl` 🟢 | happy `Some/Some`; first-position `None` short-circuit; second-position `None` short-circuit; three-step chain; middle `None` short-circuit (5 tests) |
+| `try_postfix_result.lsysl` 🟢 | happy `Ok/Ok`; first-position `Err` preserves payload; second-position `Err`; three-step chain; middle `Err` propagation (5 tests) |
 | `option_basic.lsysl` 🔴 | `Some` / `None` construction; match; `unwrap`, `unwrap_or` |
 | `result_basic.lsysl` 🔴 | `Ok` / `Err`; match; payload extraction |
-| `try_postfix_option.lsysl` 🔴 | `f()?` short-circuits on `None`; happy-path passthrough |
-| `try_postfix_result.lsysl` 🔴 | `f()?` short-circuits on `Err`; preserves error variant |
 | `try_postfix_chain.lsysl` 🔴 | `a()?.b()?.c()?` chain; each `?` distinct |
 | `option_payload_string.lsysl` 🔴 | `Option[string]` — ARC interaction; `None` doesn't construct a buffer |
 

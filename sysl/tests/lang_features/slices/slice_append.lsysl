@@ -1,0 +1,86 @@
+Slice append — growth and capacity
+==================================
+
+`append(s, v)` returns a new slice with `v` added at the end.
+
+  - When the slice has remaining capacity (`cap > len`), the
+    new slice can reuse the same backing array — the value
+    is written at offset `len`, the descriptor's length is
+    incremented.
+  - When `cap == len`, a fresh backing array (typically
+    larger) is allocated, existing elements are copied in,
+    the new value appended, and the new descriptor points at
+    the new backing.
+
+The caller observes both shapes through the same `append`
+call site — the differentiation is internal.
+
+    module sysl.tests.lang_features
+
+Append a single element
+-----------------------
+
+    #test
+    test_append_one() -> unit
+        var s: []int = (new [16]int)[:0]
+        s = append(s, 7)
+        assert(len(s) == 1, s"len should be 1 after append, got ${len(s)}")
+        assert(s[0] == 7, s"s[0] should be 7, got ${s[0]}")
+
+Append many elements
+--------------------
+
+A growth-driven test — repeatedly append until the slice has
+100 elements. The implementation may grow the backing
+multiple times; the public result must match.
+
+    #test
+    test_append_many() -> unit
+        var s: []int = (new [16]int)[:0]
+        var i = 0
+        while i < 100
+            s = append(s, i)
+            i = i + 1
+        assert(len(s) == 100, s"len should be 100, got ${len(s)}")
+        // Check a few specific elements
+        assert(s[0] == 0,    s"s[0] should be 0, got ${s[0]}")
+        assert(s[50] == 50, s"s[50] should be 50, got ${s[50]}")
+        assert(s[99] == 99, s"s[99] should be 99, got ${s[99]}")
+
+Append doesn't modify the source past its length
+------------------------------------------------
+
+When append fits in capacity, the new value sits at the
+old `len` index of the same backing. Anything past the new
+`len` is not part of either slice.
+
+    #test
+    test_append_preserves_predecessors() -> unit
+        var s: []int = (new [16]int)[:0]
+        s = append(s, 10)
+        s = append(s, 20)
+        s = append(s, 30)
+        // Earlier appends survive
+        assert(s[0] == 10 && s[1] == 20 && s[2] == 30,
+            s"s = [${s[0]},${s[1]},${s[2]}], expected [10,20,30]")
+        assert(len(s) == 3, s"len should be 3, got ${len(s)}")
+
+Append on a slice with prior elements
+-------------------------------------
+
+    #test
+    test_append_extends_existing() -> unit
+        val d: &[]int = new [3]int
+        d[0] = 1
+        d[1] = 2
+        d[2] = 3
+        var s: []int = d[:]
+        s = append(s, 4)
+        s = append(s, 5)
+        assert(len(s) == 5, s"len should be 5, got ${len(s)}")
+        var i = 0
+        var ok = true
+        while i < 5
+            if s[i] != i + 1 then ok = false
+            i = i + 1
+        assert(ok, s"s should be [1,2,3,4,5], got s[4]=${s[4]}")

@@ -1,0 +1,163 @@
+String concatenation chains — `a + b + c + d`
+==============================================
+
+Sysl's string `+` is left-associative, so `a + b + c + d`
+parses as `((a + b) + c) + d`. Each step allocates a fresh
+intermediate buffer; only the final result needs to outlive
+the expression. Pinning this surface guards against:
+
+  - Wrong associativity (right-associative would still give
+    the same final bytes for `+`, but observable through
+    operand order if a backend ever miscompiled).
+  - Refcount mishandling of intermediate temporaries — a
+    too-early free of the `(a+b)` intermediate would corrupt
+    the `(a+b) + c` step.
+  - Off-by-one on chained length math.
+  - Aliasing of the same operand multiple times (`a + a + a`).
+
+`string_concat_basic.lsysl` pins the two-operand surface;
+this file specifically exercises the multi-step path.
+
+    module sysl.tests.lang_features
+
+Four-operand chain
+------------------
+
+The canonical case: four ASCII operands joined by three `+`
+operations. The result is the bytewise join in left-to-right
+order; total length is the sum.
+
+    #test
+    test_concat_chain_four() -> unit
+        val a = "ab"
+        val b = "cd"
+        val c = "ef"
+        val d = "gh"
+        val r = a + b + c + d
+        assert(r == "abcdefgh", s"got '$r'")
+        assert(len(r) == 8, s"len should be 8, got ${len(r)}")
+
+Five-operand chain with separators
+----------------------------------
+
+A common real-world pattern: word-space-word-space-word.
+Five operands, four `+` operations. The intermediates are
+`"hello"`, `"hello "`, `"hello world"`, `"hello world "`,
+and the final `"hello world foo"`.
+
+    #test
+    test_concat_chain_with_separators() -> unit
+        val r = "hello" + " " + "world" + " " + "foo"
+        assert(r == "hello world foo", s"got '$r'")
+        assert(len(r) == 15, s"len should be 15, got ${len(r)}")
+
+Left-associativity is observable through prefixing
+--------------------------------------------------
+
+`a + b + c` is `((a + b) + c)`, not `(a + (b + c))`. The
+final byte sequence is the same for `+`, but we can pin
+left-associativity by storing the partial through a `var`
+and watching the bytes accumulate prefix-first.
+
+    #test
+    test_concat_chain_left_assoc_prefix() -> unit
+        var r = "p1"
+        r = r + "p2"
+        assert(r == "p1p2", s"after step 1, got '$r'")
+        r = r + "p3"
+        assert(r == "p1p2p3", s"after step 2, got '$r'")
+        r = r + "p4"
+        assert(r == "p1p2p3p4", s"after step 3, got '$r'")
+        assert(len(r) == 8, s"final len should be 8, got ${len(r)}")
+
+Empty operand in the middle of a chain
+--------------------------------------
+
+`"a" + "" + "b" + "" + "c"` — interleaved empties must not
+shift the surrounding bytes, drop content, or trip an
+edge-case in the intermediate-buffer allocator.
+
+    #test
+    test_concat_chain_empty_in_middle() -> unit
+        val r = "a" + "" + "b" + "" + "c"
+        assert(r == "abc", s"got '$r'")
+        assert(len(r) == 3, s"len should be 3, got ${len(r)}")
+
+All-empty chain
+---------------
+
+`"" + "" + "" + ""` is `""`. Length 0. Pins that no
+intermediate allocator step injects spurious bytes.
+
+    #test
+    test_concat_chain_all_empty() -> unit
+        val r = "" + "" + "" + ""
+        assert(r == "", s"got '$r'")
+        assert(len(r) == 0, s"len should be 0, got ${len(r)}")
+
+Same operand repeated three times
+---------------------------------
+
+`a + a + a` aliases the same source three times. The
+intermediate `a + a` must be safely consumed by the next
+`+ a` without corrupting `a` itself.
+
+    #test
+    test_concat_chain_same_aliased() -> unit
+        val a = "xy"
+        val r = a + a + a
+        assert(r == "xyxyxy", s"got '$r'")
+        assert(len(r) == 6, s"len should be 6, got ${len(r)}")
+        assert(a == "xy", s"a should still be 'xy', got '$a'")
+
+Chain mixing literals and variables
+-----------------------------------
+
+The intermediate-buffer-lifetime path needs to handle mixed
+operand sources (literal + var + literal + var). Pins that
+the literal and var lowering paths cooperate correctly in
+a multi-step chain.
+
+    #test
+    test_concat_chain_mixed_sources() -> unit
+        val a = "foo"
+        val b = "bar"
+        val r = "<" + a + "," + b + ">"
+        assert(r == "<foo,bar>", s"got '$r'")
+        assert(len(r) == 9, s"len should be 9, got ${len(r)}")
+
+Chain inside a function returning the result
+--------------------------------------------
+
+A chain built inside a fn and returned as the fn's result.
+The returned buffer must survive past the fn boundary even
+though all intermediates were allocated inside.
+
+    scc_build_path(a: string, b: string, c: string) -> string =
+        a + "/" + b + "/" + c
+
+    #test
+    test_concat_chain_returned_from_fn() -> unit
+        val r = scc_build_path("usr", "local", "bin")
+        assert(r == "usr/local/bin", s"got '$r'")
+        assert(len(r) == 13, s"len should be 13, got ${len(r)}")
+
+Original operands survive the chain
+-----------------------------------
+
+After `r = a + b + c + d`, none of `a`, `b`, `c`, `d` are
+mutated. This pins that the intermediate-buffer machinery
+doesn't recycle source bytes into the result in place.
+
+    #test
+    test_concat_chain_does_not_mutate_sources() -> unit
+        val a = "AA"
+        val b = "BB"
+        val c = "CC"
+        val d = "DD"
+        val r = a + b + c + d
+        assert(r == "AABBCCDD", s"r got '$r'")
+        assert(a == "AA", s"a got '$a'")
+        assert(b == "BB", s"b got '$b'")
+        assert(c == "CC", s"c got '$c'")
+        assert(d == "DD", s"d got '$d'")
