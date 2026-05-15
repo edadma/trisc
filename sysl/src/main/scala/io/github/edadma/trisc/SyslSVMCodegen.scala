@@ -1211,8 +1211,16 @@ class SyslSVMCodegen:
               emitStore(typ)
             case Some(LocalInfo(idx, _)) => emit(s"  local_set $idx")
             case None if globals.contains(target) =>
+              // Scalars are 8-byte cells (matches load64 in TVarRef); aggregates
+              // (strings, structs, slices, ...) are address-represented, and
+              // assignment is a sizeof-bytes copy via emitStore-aggregate.
               emit(s"  push_i64 $target")
-              emit("  store64")
+              globals(target).underlying match
+                case _: SyslType.StructType | _: SyslType.EnumType
+                   | SyslType.StringType | _: SyslType.SliceType
+                   | _: SyslType.ArrayType | _: SyslType.FuncType =>
+                  emitStore(globals(target))
+                case _ => emit("  store64")
             case None =>
               // Implicit local declaration (e.g. `v = expr?` sugar lowered by
               // the analyzer into `TAssignStmt` with a fresh target).

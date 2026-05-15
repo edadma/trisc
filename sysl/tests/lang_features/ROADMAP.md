@@ -63,31 +63,33 @@ Current → target mapping is shown in each category's table.
 
 ## Tier 0 — Foundation
 
-### `arc/` — Three allocation modes + refcount semantics — 🔴 P0
+### `arc/` — Three allocation modes + refcount semantics — 🟡 P0
 
 Reference §"Three Allocation Modes", "Conversion Rules", "Deinit Blocks".
-This is the highest-leverage gap right now. `std/` defines almost no
-`&T` reference-counted types, so the entire ARC path is essentially
-unpinned end-to-end. The `t.s = t.s + "x"` use-after-free we just fixed
-was an ARC-adjacent bug that took weeks to surface; the actual `new T(...)`
-+ refcount inc/dec path is even less tested.
+This was the highest-leverage gap. `std/` defines almost no `&T`
+reference-counted types, so the entire ARC path was essentially unpinned
+end-to-end. Now substantially covered — six real bugs surfaced and were
+fixed along the way (TFieldAssignStmt use-after-free on five backends,
+struct-copy aliasing on six backends, ref reassignment use-after-free
+on four backends, SVM deinit missing entirely, SVM global-string-assign
+truncated to 8 bytes, SVM int-global store regression from the latter
+fix). All 11 ARC test files now green across all seven backends except
+where noted.
 
 | File | Tests pinned |
 |---|---|
-| `value_struct_copy.lsysl` 🔴 | bitwise copy of value structs, no refcount, no double-free of contained strings |
-| `new_ref_basic.lsysl` 🔴 | `new Node(...)` allocates, refcount starts at 1, ref-binding increments, drop decrements, free at 0 |
-| `new_ref_assignment.lsysl` 🔴 | `r1 = r2` inc-r2/dec-r1; self-assign `r = r` is a no-op (inc-then-dec on the same buffer) |
-| `new_ref_passing.lsysl` 🔴 | `f(r: &T)` increments for call duration, decrements at callee return; nested call chains preserve refcount |
-| `new_ref_return.lsysl` 🔴 | returning a fresh `new T(...)` is owned (no inc), returning a borrowed ref increments |
-| `new_ref_field.lsysl` 🔴 | struct field of type `&Inner` — assigning a new ref decrements the old, increments the new |
-| `deinit_basic.lsysl` 🔴 | `Struct.deinit()` fires once at refcount=0 transition; before free; doesn't fire for value-struct drops |
-| `deinit_with_fields.lsysl` 🔴 | deinit runs *before* the struct's owned string/slice/ref fields are decremented |
-| `ptr_to_value.lsysl` 🔴 | `&v` then `*p` round-trips; mutating through `*p` mutates the value |
-| `ptr_to_ref.lsysl` 🔴 | `&r` gives `*T` (no refcount change); `*T → &T` rejected at compile time |
-| `value_to_ref_explicit.lsysl` 🔴 | `new T(v)` heap-promotes a value struct |
-| `aggregate_field_decrement.lsysl` 🟢 | regression test for our recent fix — already covered by `field_self_concat.lsysl` (move into this dir) |
-
-Existing: `field_self_concat.lsysl` → move to `arc/field_self_concat.lsysl`.
+| `value_struct_copy.lsysl` 🟢 | bitwise copy of value structs, no refcount, no double-free of contained strings (6 tests) |
+| `new_ref_basic.lsysl` 🟢 | `new Node(...)` allocates, refcount starts at 1, ref-binding increments, drop decrements, free at 0 (4 tests) |
+| `new_ref_assignment.lsysl` 🟢 | `r1 = r2` inc-r2/dec-r1; self-assign `r = r` is a no-op (inc-then-dec on the same buffer) (4 tests) |
+| `new_ref_passing.lsysl` 🟢 | `f(r: &T)` increments for call duration, decrements at callee return; nested call chains preserve refcount (6 tests) |
+| `new_ref_return.lsysl` 🟢 | returning a fresh `new T(...)` is owned (no inc), returning a borrowed ref increments (5 tests) |
+| `new_ref_field.lsysl` 🟢 | struct field of type `&Inner` — assigning a new ref decrements the old, increments the new (6 tests) |
+| `deinit_basic.lsysl` 🟢 | `Struct.deinit()` fires once at refcount=0 transition; before free; doesn't fire for value-struct drops (5 tests) |
+| `deinit_with_fields.lsysl` 🟢 | deinit body can read fields (including chasing through `&Inner` field) before the field's own refcount is decremented (3 tests). TODO: also pin "outer's drop transitively decrements `&Inner` field, firing inner's deinit" — currently every backend leaks the inner ref on outer-drop |
+| `ptr_to_value.lsysl` 🟢 | `&v` then `*p` round-trips; mutating through `*p` mutates the value (4 tests) |
+| `ptr_to_ref.lsysl` 🟡 | `&r` where `r: &T` yielding `*T` — NOT implemented on any backend; file is currently a placeholder + TODO. Cross-backend feature gap |
+| `value_to_ref_explicit.lsysl` 🟢 | `new T(v)` heap-promotes a value struct, independent of source (2 tests) |
+| `field_self_concat.lsysl` 🟢 | original regression test for `TFieldAssignStmt` use-after-free (3 tests) |
 
 ---
 

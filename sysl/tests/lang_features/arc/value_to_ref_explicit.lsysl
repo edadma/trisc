@@ -1,0 +1,47 @@
+Heap-promote a value struct via `new T(v)`
+==========================================
+
+Per the reference's "Conversion Rules": `value -> ref` is
+performed with `new Point(v)`.
+
+You can construct a heap ref from an existing value struct by
+passing it to `new`. The resulting ref holds an independent
+copy of the bytes (value-struct copy semantics; the source
+isn't aliased).
+
+    module sysl.tests.lang_features
+
+    struct VtrPoint
+        x: int
+        y: int
+
+Promote a value struct into a heap ref
+--------------------------------------
+
+    #test
+    test_value_to_ref_independence() -> unit
+        var v = VtrPoint(3, 4)
+        val r: &VtrPoint = new VtrPoint(v.x, v.y)
+        // Mutate the value; the ref isn't affected.
+        v.x = 99
+        assert(r.x == 3, s"r.x should be 3 (independent of v), got ${r.x}")
+        assert(v.x == 99, s"v.x should be 99 (independent of r), got ${v.x}")
+        // Mutate the ref; the value isn't affected.
+        r.y = 100
+        assert(v.y == 4,  s"v.y should still be 4, got ${v.y}")
+        assert(r.y == 100, s"r.y should be 100, got ${r.y}")
+
+Promote via field-by-field copy works
+-------------------------------------
+
+When `new T(...)` doesn't take a struct directly but takes the
+individual fields, the result is still independent.
+
+    #test
+    test_field_by_field_promotion() -> unit
+        var v = VtrPoint(7, 11)
+        val r: &VtrPoint = new VtrPoint(v.x + 1, v.y + 1)
+        assert(r.x == 8 && r.y == 12, s"r=(${r.x},${r.y}), expected (8,12)")
+        // Mutating either side doesn't affect the other
+        v.x = 0
+        assert(r.x == 8, s"r.x should still be 8 after v.x=0, got ${r.x}")
