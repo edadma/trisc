@@ -7,17 +7,17 @@ to chain the variant-tag check on the outer enum with the
 variant-tag check on the inner enum, and bind the
 innermost payload exactly once.
 
-**Analyzer note.** The exhaustiveness checker is currently
-conservative on nested patterns. Even when the nested arms
-mathematically cover every shape of the outer variant
-(e.g. `MnpSome(MnpOk(v))` plus `MnpSome(MnpBad(why))`
-exhausts `MnpSome` because the inner `MnpOutcome[T]` only
-has two variants), the checker still reports the outer
-variant as missing. Workaround: add an `MnpSome(_)`
-wildcard arm that's unreachable at runtime. The codegen
-itself works correctly across all seven backends; only the
-analyzer's exhaustiveness reasoning is incomplete. See
-`feedback_sysl_match_nested_exhaustiveness.md`.
+**Analyzer note.** The exhaustiveness checker reasons
+through nested variant patterns when every arm targeting a
+given outer variant decomposes the same single field
+position and the sub-patterns at that position together
+exhaust the inner enum (e.g. `MnpSome(MnpOk(v))` plus
+`MnpSome(MnpBad(why))` cover all of `MnpSome` because
+`MnpOutcome[T]` only has two variants). When this single-
+axis condition can't be proven (multi-axis decomposition,
+non-enum field, value-pattern sub-arms), the checker falls
+back to the legacy "named without active sub-pattern"
+rule, and the user supplies an `Outer(_)` catch-all arm.
 
 The patterns exercised in this file:
 
@@ -56,15 +56,14 @@ surfaces; this file is the multi-level pattern matcher.
 
 The deepest binding `v` is reached by descending through
 two variant tags. The match arm produces a string using `v`.
-The trailing `MnpSome(_)` arm is the analyzer-required
-catch-all; it is unreachable at runtime because the inner
-enum has exactly two variants.
+No `MnpSome(_)` catch-all is needed — the analyzer accepts
+`MnpSome(MnpOk(v))` plus `MnpSome(MnpBad(why))` as covering
+`MnpSome` because together they exhaust the inner enum.
 
     mnp_describe(o: MnpMaybe[MnpOutcome[int]]) -> string =
         o match
             MnpSome(MnpOk(v))     -> "ok=" + str(v)
             MnpSome(MnpBad(why))  -> "bad=" + why
-            MnpSome(_)            -> "unreachable"
             MnpNone               -> "none"
 
     #test
@@ -108,9 +107,7 @@ overhead.
         w match
             MnpW(MnpSome(MnpOk(v)))    -> "ok=" + str(v)
             MnpW(MnpSome(MnpBad(why))) -> "bad=" + why
-            MnpW(MnpSome(_))           -> "unreachable-inner"
             MnpW(MnpNone)              -> "wrap-none"
-            MnpW(_)                    -> "unreachable-outer"
             MnpEmpty                   -> "empty"
 
     #test
@@ -145,7 +142,6 @@ correct relative to the inner payload start.
         o match
             MnpSome(MnpOk(p))    -> "p=" + str(p.x) + "," + str(p.y)
             MnpSome(MnpBad(why)) -> "bad=" + why
-            MnpSome(_)           -> "unreachable"
             MnpNone              -> "none"
 
     #test
