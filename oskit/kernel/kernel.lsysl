@@ -857,22 +857,22 @@ early on a missed translation.
 
 The policy is uniform across both arches:
 
-  * **Pages in `[0x60000000, 0x60200000)` — the user carve-out.**
-    For known processes (`pid > 0`), the destination VMA tree is
-    the sole authority: a VA outside every registered VMA is
-    rejected, even if the PT happens to map the page (the
+  * **Pages in `[VMA_USER_VA_BOT, VMA_USER_VA_TOP)` — the user
+    carve-out.** For known processes (`pid > 0`), the destination
+    VMA tree is the sole authority: a VA outside every registered
+    VMA is rejected, even if the PT happens to map the page (the
     kernel-identity 2 MiB blocks otherwise make `vm_v2p` return
     non-zero and slip past the allocator gate). Orphan ptbrs
     (transient during PM spawn, before the Process slot is
     populated) allocate-on-write unconditionally inside the
     carve-out.
-  * **Pages below `0x60000000`** — if unmapped, reject with -1.
-    No legitimate caller targets this band post-Phase-D.2 (the
-    legacy x86 program region at `[0xCC000, 0x100000)` is gone);
-    the rejection is defense-in-depth. The PROT_NONE guard VMA
-    at `[0x5FFFF000, 0x60000000)` reaches this branch via the
-    `vm_v2p == 0` path and is rejected here.
-  * **Pages at or above `0x60200000`** — `vm_install_user_page`
+  * **Pages below `VMA_USER_VA_BOT`** — if unmapped, reject with
+    -1. No legitimate caller targets this band post-Phase-D.2
+    (the legacy x86 program region at `[0xCC000, 0x100000)` is
+    gone); the rejection is defense-in-depth. The PROT_NONE
+    guard VMA at `[0x5FFFF000, 0x60000000)` reaches this branch
+    via the `vm_v2p == 0` path and is rejected here.
+  * **Pages at or above `VMA_USER_VA_TOP`** — `vm_install_user_page`
     decides: aarch64 L0[0]/L1/L2 only cover the carve-out, so
     installs above 4 GiB fail; x86_64 kernel-identity 2 MiB
     blocks make `vm_v2p` non-zero so the install isn't entered.
@@ -897,17 +897,17 @@ policy.
         while visited < len
             val cur_va = dst_vaddr + u64(visited)
 
-            if cur_va >= u64(0x60000000)
-                if cur_va < u64(0x60200000)
+            if cur_va >= u64(VMA_USER_VA_BOT)
+                if cur_va < u64(VMA_USER_VA_TOP)
                     if pid > 0
                         if vma_lookup_addr(&processes[pid].vma_tree, cur_va) == VMA_NIL
                             return -1
             val pa = vm_v2p(dst_ptbr, cur_va)
             if pa == u64(0)
-                if cur_va < u64(0x60000000)
+                if cur_va < u64(VMA_USER_VA_BOT)
                     return -1
                 if pid <= 0
-                    if cur_va >= u64(0x60200000)
+                    if cur_va >= u64(VMA_USER_VA_TOP)
                         return -1
                 val frame = page_alloc_zero()
                 if frame == u64(0)
@@ -1291,9 +1291,10 @@ so no caller can target another process.
 
 `kernel_mmap_anon` registers a fresh anonymous VMA over `[vstart,
 vend)`. Returns 0 on success, -1 on overlap with an existing VMA
-or pool exhaustion. The shim is responsible for the address-
-allocation policy (bump pointer, range-check against the user
-mmap arena); this layer just enforces "no two VMAs overlap".
+or pool exhaustion. The shim's `sys_mmap` is responsible for the
+address-allocation policy (it consults `kernel_find_mmap_range`
+or `kernel_range_check_free` first depending on MAP_FIXED); this
+layer just enforces "no two VMAs overlap" as a final guard.
 
     kernel_mmap_anon(vstart: u64, vend: u64, prot: int) -> int
         if current_thread < 0
@@ -1319,6 +1320,45 @@ mmap arena); this layer just enforces "no two VMAs overlap".
         if idx == VMA_NIL
             return -1
         0
+
+
+`kernel_find_mmap_range` runs `vma_find_free_range` over the
+calling thread's VMA tree across the full user-VA window. Returns
+the chosen base, or `u64(0)` on no-fit / invalid state. This is
+the address-allocation oracle that replaced `sys_mmap`'s legacy
+per-process bump pointer when the fixed `[POSIX_MMAP_BASE,
+POSIX_MMAP_LIMIT)` arena was retired — `[VMA_USER_VA_BOT,
+VMA_USER_VA_TOP)` is now the single source of truth for where
+user mappings may live, and the VMA tree decides which sub-ranges
+are free.
+
+    kernel_find_mmap_range(len: u64, align: u64) -> u64
+        if current_thread < 0
+            return u64(0)
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return u64(0)
+        if pid >= MAX_PROCESSES
+            return u64(0)
+        vma_find_free_range(&processes[pid].vma_tree, len, align,
+                            u64(VMA_USER_VA_BOT), u64(VMA_USER_VA_TOP))
+
+
+`kernel_range_check_free` tells the shim whether a MAP_FIXED
+range is entirely free in the calling process's VMA tree. Returns
+1 if free, 0 if any VMA overlaps `[vstart, vend)` (or the call
+is malformed). The shim uses this to decide whether to accept or
+reject a MAP_FIXED request before it reaches `kernel_mmap_anon`.
+
+    kernel_range_check_free(vstart: u64, vend: u64) -> int
+        if current_thread < 0
+            return 0
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return 0
+        if pid >= MAX_PROCESSES
+            return 0
+        vma_range_free(&processes[pid].vma_tree, vstart, vend)
 
 
 Boundary-split helper used by both munmap and mprotect: ensures

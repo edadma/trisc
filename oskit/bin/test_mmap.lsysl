@@ -1,17 +1,18 @@
 test_mmap — `mmap` / `munmap` / `mprotect` end-to-end
 =====================================================
 
-Phase 1 chunk 4: validates the userspace mmap surface (Linux ARM64
-generic ABI numbers 222 / 215 / 226). All three are routed by the
-shim layer (`oskit.posix.posix_dispatch`) into kernel-side helpers
-that live alongside the existing seed-VMA code in
-`oskit.kernel.kernel`.
+Phase 1 chunk 4 + invariant-#1 close-out: validates the userspace
+mmap surface (Linux ARM64 generic ABI numbers 222 / 215 / 226).
+All three are routed by the shim layer (`oskit.posix.posix_dispatch`)
+into kernel-side helpers; address allocation goes through the
+per-process VMA tree via `vma_find_free_range`, replacing the
+chunk-4 fixed-arena bump pointer.
 
 Steps:
 
-1. `mmap(NULL, 64KB, RW, ANON|PRIVATE)` — bump-allocates a fresh
-   VMA at the per-process mmap arena (starts at 0x60100000). The
-   pages aren't faulted in until the first access.
+1. `mmap(NULL, 64KB, RW, ANON|PRIVATE)` — VMA-tree-allocated; we
+   only require the result to be page-aligned and inside the user
+   VA window. The pages aren't faulted in until the first access.
 2. Write a stride-pattern across the region; first touch of each
    page faults via `vma_handle_fault` and gets a fresh zero frame
    installed.
@@ -24,6 +25,10 @@ Steps:
    read still succeeds.
 5. `munmap(p, 64KB)` — splits/removes the VMA and frees the
    physical frames back to the page pool.
+6. **Reuse check.** A fresh `mmap` of the same size must land at
+   the same base — the old bump-pointer would have advanced
+   past it; first-fit `vma_find_free_range` reuses it. This is
+   the invariant-#1-close-out regression test.
 
 Pass criterion: prints `mmap: ok`.
 
@@ -74,10 +79,18 @@ Pass criterion: prints `mmap: ok`.
             return
         val base = u64(rc)
 
-The arena starts at 0x60100000 (per shim's `POSIX_MMAP_BASE`),
-so the first allocation must land there.
+The address comes from the VMA tree's first-fit search — we
+don't pin it to a specific number any more (that's what the
+shim's chunk-4 bump pointer did). Just check it's page-aligned
+and inside the user-VA window.
 
-        if base != u64(0x60100000)
+        if (base & u64(0xFFF)) != u64(0)
+            fail(2)
+            return
+        if base < u64(0x60000000)
+            fail(2)
+            return
+        if base + u64(LEN) > u64(0x60200000)
             fail(2)
             return
 
@@ -125,6 +138,26 @@ acceptance bar is just "mmap: ok".
                           i64(0), i64(0))
         if um != i64(0)
             fail(6)
+            return
+
+Step 6 — reuse. A fresh allocation of the same size should find
+the just-freed gap and land at the same base. This is the
+visible win over the legacy bump pointer.
+
+        val rc2 = syscall6(SYS_MMAP, i64(0), LEN,
+                           i64(PROT_READ | PROT_WRITE),
+                           i64(MAP_PRIVATE | MAP_ANON),
+                           i64(-1), i64(0))
+        if rc2 <= i64(0)
+            fail(7)
+            return
+        if u64(rc2) != base
+            fail(8)
+            return
+        val um2 = syscall6(SYS_MUNMAP, rc2, LEN, i64(0), i64(0),
+                           i64(0), i64(0))
+        if um2 != i64(0)
+            fail(9)
             return
 
         puts("mmap: ok\n")

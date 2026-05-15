@@ -42,7 +42,8 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
         kernel_get_thread_pid, kernel_get_process_main_tid,
         kernel_continue_current,
         kernel_mmap_anon, kernel_munmap, kernel_mprotect,
-        VMA_DEFAULT_STACK_BOT}
+        kernel_find_mmap_range, kernel_range_check_free,
+        VMA_DEFAULT_STACK_BOT, VMA_USER_VA_BOT, VMA_USER_VA_TOP}
     import oskit.arch.{pack_kstat, KSTAT_SIZE}
 
     extern shim_uart_putc(c: int)
@@ -7112,21 +7113,19 @@ VMA, this ceiling moves with it.
 
 
 Phase 1 chunk 4 — `mmap` / `munmap` / `mprotect` for anonymous
-mappings. The user mmap arena lives at `[POSIX_MMAP_BASE,
-POSIX_MMAP_LIMIT)` — just above the brk heap, stack, and a 64KB
-guard gap, but still inside the single 2MB user PT created by
-`vm_create_process_pt`. Lazy intermediate-PT allocation lands in
-chunk 7 (ELF loader); until then any allocation that would extend
-past `POSIX_MMAP_LIMIT` returns -ENOMEM.
+mappings. Address allocation is now delegated to the per-process
+VMA tree via `kernel_find_mmap_range`; the legacy fixed
+`[POSIX_MMAP_BASE, POSIX_MMAP_LIMIT)` arena with a per-process
+bump pointer is gone. `[VMA_USER_VA_BOT, VMA_USER_VA_TOP)` is the
+search window the kernel uses (single source of truth, shared
+with `kernel_vm_copy_to`'s strict-VMA band). Under the current
+2 MiB user-PT shape that's still ~2 MiB of headroom; the master-
+roadmap 4 MiB demo waits on a separate user-PT enlargement pass.
 
-The address-allocation policy is a per-process bump pointer. We
-never reuse a vaddr after munmap — Linux's address-space allocator
-is more sophisticated, but for chunk-4-scale workloads (a few
-small allocations, no long-running mmap-heavy programs) the
-1MB-of-headroom budget covers it.
-
-    val POSIX_MMAP_BASE:  i64 = i64(0x60100000)
-    val POSIX_MMAP_LIMIT: i64 = i64(0x60200000)
+`vma_find_free_range` is first-fit bottom-up, so it picks the
+lowest gap above the seeded code/stack VMAs (typically right
+above the stack VMA at `VMA_DEFAULT_STACK_TOP`) and reuses
+addresses freed by `munmap` — the bump pointer never did either.
 
     val POSIX_PROT_READ  = 1
     val POSIX_PROT_WRITE = 2
@@ -7136,15 +7135,6 @@ small allocations, no long-running mmap-heavy programs) the
     val POSIX_MAP_PRIVATE = 0x02
     val POSIX_MAP_FIXED   = 0x10
     val POSIX_MAP_ANON    = 0x20
-
-    var posix_mmap_next: [16]i64
-    var posix_mmap_last_gen: [16]int
-
-    posix_mmap_ensure_init(pid: int)
-        val gen = kernel_get_process_main_tid(pid)
-        if posix_mmap_last_gen[pid] != gen
-            posix_mmap_next[pid] = POSIX_MMAP_BASE
-            posix_mmap_last_gen[pid] = gen
 
 
 Round `len` up to the page size. `mmap`/`munmap`/`mprotect` all
@@ -7163,9 +7153,11 @@ overflows or `len <= 0`.
 
 `mmap(addr, len, prot, flags, fd, offset)` — anonymous-only.
 `MAP_FIXED` is honored when `addr` is page-aligned and falls
-inside the user mmap arena; the request fails (-ENOMEM) on any
-overlap with an existing VMA. Otherwise `addr` is a hint we
-ignore in favour of the per-process bump pointer.
+entirely inside the user-VA window; the request fails (-ENOMEM)
+on any overlap with an existing VMA, matching Linux's
+"MAP_FIXED requires the range to be unmapped" non-replace
+semantics. Otherwise `addr` is a hint we ignore in favour of
+`kernel_find_mmap_range`.
 
 `prot` accepts any combination of POSIX_PROT_{READ,WRITE,EXEC};
 the bits are passed straight through to the VMA layer (the
@@ -7185,25 +7177,24 @@ ELF loader chunk lands the file-mmap path.
         val rounded = posix_mmap_round_len(len)
         if rounded == i64(0)
             return i64(-EINVAL)
-        var base = i64(0)
+        var base: u64 = u64(0)
         if (flags & POSIX_MAP_FIXED) != 0
             if (addr & i64(0xFFF)) != i64(0)
                 return i64(-EINVAL)
-            if addr < POSIX_MMAP_BASE
+            if addr < i64(VMA_USER_VA_BOT)
                 return i64(-EINVAL)
-            if addr + rounded > POSIX_MMAP_LIMIT
+            if addr + rounded > i64(VMA_USER_VA_TOP)
                 return i64(-ENOMEM)
-            base = addr
+            if kernel_range_check_free(u64(addr), u64(addr + rounded)) == 0
+                return i64(-ENOMEM)
+            base = u64(addr)
         else
-            posix_mmap_ensure_init(pid)
-            val cur = posix_mmap_next[pid]
-            if cur + rounded > POSIX_MMAP_LIMIT
+            base = kernel_find_mmap_range(u64(rounded), u64(0x1000))
+            if base == u64(0)
                 return i64(-ENOMEM)
-            base = cur
-            posix_mmap_next[pid] = cur + rounded
-        if kernel_mmap_anon(u64(base), u64(base + rounded), prot) != 0
+        if kernel_mmap_anon(base, base + u64(rounded), prot) != 0
             return i64(-ENOMEM)
-        base
+        i64(base)
 
 
 `munmap(addr, len)` — drops every VMA covering `[addr, addr+len)`

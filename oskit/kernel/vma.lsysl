@@ -750,6 +750,20 @@ Phase B of the Phase 1 invariant-#1 rollout deletes the
     const VMA_DEFAULT_STACK_BOT = 0x60080000
     const VMA_DEFAULT_STACK_TOP = 0x60090000
 
+`VMA_USER_VA_BOT` / `VMA_USER_VA_TOP` describe the full user
+virtual-address window — the range every per-process user mapping
+(code, stack, heap, mmap, ELF interp) lives inside. The kernel
+helper `kernel_vm_copy_to` uses these as the strict-VMA-authority
+band; `sys_mmap` uses them as the search window for
+`vma_find_free_range`. Today both arches' `vm_create_process_pt`
+build a single 4 KB-page leaf table covering this 2 MiB span; if
+that ever grows (Phase 1 close-out: 4 MiB demo, eventually
+musl-style large arenas), bumping `VMA_USER_VA_TOP` keeps the
+two callers in sync automatically.
+
+    const VMA_USER_VA_BOT = 0x60000000
+    const VMA_USER_VA_TOP = 0x60200000
+
 `vma_default_initial_sp` / `vma_default_stack_low` are the
 arg-less queries PM and RS use to compute a child's initial SP
 *before* the child's VMA tree exists — the seed runs inside
@@ -798,6 +812,75 @@ child exists (e.g. signal delivery picking an SP).
                         best_start = vma_pool[n].vstart
             n = vma_next(n)
         best_start
+
+
+Address allocation helpers
+--------------------------
+
+`vma_find_free_range` walks the tree in order and returns the
+lowest aligned vaddr `>= low` where a `len`-byte run fits without
+overlapping any existing VMA, capped at `high`. Returns `u64(0)`
+on no-fit. This is the policy `sys_mmap` uses now that the
+old POSIX_MMAP_BASE/LIMIT bump-pointer arena is gone — the VMA
+tree is the sole authority over user-space layout.
+
+Bottom-up first-fit. Linux's `arch_get_unmapped_area_topdown` is
+top-down, which avoids growing the heap and the mmap arena into
+each other on long-running processes; with our small per-process
+window and short-lived test processes, bottom-up is simpler and
+the difference is academic.
+
+    vma_find_free_range(t: *VMATree, len: u64, align: u64, low: u64, high: u64) -> u64
+        if len == u64(0)
+            return u64(0)
+        if align == u64(0)
+            return u64(0)
+        if low >= high
+            return u64(0)
+        val mask = align - u64(1)
+        var cur = (low + mask) & ~mask
+        var n = vma_first(t)
+        while n != VMA_NIL
+            val vstart = vma_pool[n].vstart
+            val vend   = vma_pool[n].vend
+            if vend <= cur
+                n = vma_next(n)
+                continue
+            if vstart >= cur + len
+                if cur + len > high
+                    return u64(0)
+                return cur
+            val after = (vend + mask) & ~mask
+            if after > cur
+                cur = after
+            n = vma_next(n)
+        if cur + len > high
+            return u64(0)
+        cur
+
+
+`vma_range_free` answers "is `[start, end)` entirely free in the
+tree?". O(log n) — point-lookup at `start`, then a forward walk
+until we either pass `end` (free) or trip over a VMA whose start
+falls inside the range (overlap). Used by `MAP_FIXED` to reject
+overlap, matching Linux's "MAP_FIXED requires the range to be
+unmapped or the call fails" semantics that musl tolerates here
+(we never auto-replace, the way `MAP_FIXED_NOREPLACE` would).
+
+    vma_range_free(t: *VMATree, range_start: u64, range_end: u64) -> int
+        if range_end <= range_start
+            return 0
+        if vma_lookup_addr(t, range_start) != VMA_NIL
+            return 0
+        var n = vma_first(t)
+        while n != VMA_NIL
+            val vstart = vma_pool[n].vstart
+            if vstart >= range_end
+                return 1
+            if vstart >= range_start
+                return 0
+            n = vma_next(n)
+        1
 
 
 Selftest -- exercises the public surface and validates invariants
@@ -960,5 +1043,49 @@ Returns 0 on success; 1..N on failure at step N.
             return 12
         if vma_stack_low(&t) != u64(0)
             return 12
+
+        // Step 13 — vma_find_free_range first-fit. Lay out two VMAs
+        // leaving a 0x10000 gap between them, then ask for 0x4000;
+        // expect the lowest address inside the gap.
+        val rw_step13 = VMA_PROT_READ | VMA_PROT_WRITE
+        val anon_step13 = VMA_MAP_ANON | VMA_MAP_PRIVATE
+        if vma_create(&t, u64(0x60000000), u64(0x60010000), rw_step13, anon_step13, -1, u64(0)) == VMA_NIL
+            return 13
+        if vma_create(&t, u64(0x60020000), u64(0x60030000), rw_step13, anon_step13, -1, u64(0)) == VMA_NIL
+            return 13
+        val fit = vma_find_free_range(&t, u64(0x4000), u64(0x1000), u64(0x60000000), u64(0x60200000))
+        if fit != u64(0x60010000)
+            return 13
+        // A request that doesn't fit in any gap walks past the last VMA
+        // and lands at the post-last position (aligned).
+        val fit2 = vma_find_free_range(&t, u64(0x100000), u64(0x1000), u64(0x60000000), u64(0x60200000))
+        if fit2 != u64(0x60030000)
+            return 13
+        // A request that exceeds `high` returns 0.
+        val nope = vma_find_free_range(&t, u64(0x200000), u64(0x1000), u64(0x60000000), u64(0x60200000))
+        if nope != u64(0)
+            return 13
+        // Alignment: 1 MiB align skips past the existing VMA to 0x60100000.
+        val aligned = vma_find_free_range(&t, u64(0x4000), u64(0x100000), u64(0x60000000), u64(0x60200000))
+        if aligned != u64(0x60100000)
+            return 13
+
+        // Step 14 — vma_range_free recognises free and occupied
+        // ranges in the same tree.
+        if vma_range_free(&t, u64(0x60010000), u64(0x60020000)) != 1
+            return 14
+        if vma_range_free(&t, u64(0x60005000), u64(0x60008000)) != 0
+            return 14
+        if vma_range_free(&t, u64(0x6000F000), u64(0x60011000)) != 0
+            return 14
+        if vma_range_free(&t, u64(0x60100000), u64(0x60110000)) != 1
+            return 14
+        vma_clear_all(&t)
+
+        // Step 15 — empty tree: the entire [low, high) window is free.
+        if vma_find_free_range(&t, u64(0x10000), u64(0x1000), u64(0x60000000), u64(0x60200000)) != u64(0x60000000)
+            return 15
+        if vma_range_free(&t, u64(0x60000000), u64(0x60200000)) != 1
+            return 15
 
         0
