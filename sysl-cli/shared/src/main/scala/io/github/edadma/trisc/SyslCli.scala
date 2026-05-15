@@ -86,7 +86,7 @@ object SyslCli:
               )
             ),
           opt[String]("target")
-            .text("Target: host (default), x86_64-elf, x86_64-linux, aarch64-elf, aarch64-linux")
+            .text("Target: host (default), x86_64-elf, x86_64-linux, aarch64-elf, aarch64-linux, riscv64-elf, riscv32-elf")
             .action((v, c) =>
               c.copy(command = c.command match
                 case cc: CompileCommand => cc.copy(target = v)
@@ -171,10 +171,10 @@ object SyslCli:
               )
             ),
           opt[String]("backend")
-            .text("Backend: interpreter (default) | llvm-host | svm-host | trisc | all")
+            .text("Backend: interpreter (default) | llvm-host | svm-host | trisc | riscv64 | riscv32 | wasm32 | all")
             .validate(v =>
-              if Seq("interpreter", "llvm-host", "svm-host", "trisc", "all").contains(v) then success
-              else failure(s"Unknown backend: $v (expected interpreter, llvm-host, svm-host, trisc, all)")
+              if Seq("interpreter", "llvm-host", "svm-host", "trisc", "riscv64", "riscv32", "wasm32", "all").contains(v) then success
+              else failure(s"Unknown backend: $v (expected interpreter, llvm-host, svm-host, trisc, riscv64, riscv32, wasm32, all)")
             )
             .action((v, c) =>
               c.copy(command = c.command match
@@ -1095,9 +1095,596 @@ object SyslCli:
       case other =>
         Fail(s"unexpected CPU state: $other at PC=0x${cpu.pc.toHexString}", captured)
 
+  /** Pre-built freestanding RV runtime objects for one xlen. Caches the paths
+    * to start.o, sbi.o, libc.o, llvm_intrinsics.o (rv32 only) and the linker
+    * script, all under one tmp dir owned for the lifetime of this CLI run. */
+  private case class RiscVRuntime(
+      xlen: Int,
+      objs: Seq[String],   // absolute paths to .o files, in link order
+      linkScript: String,  // absolute path to link.ld
+      workDir: String,     // tmp dir for build artifacts (reused for elfs)
+  )
+
+  /** Defaults match the chunk-2 toolchain pin on macOS+Homebrew. Each is
+    * overridable via env var so a Linux host or non-standard install can run
+    * the same tests without code changes. */
+  private val rvClang: String = Option(System.getenv("SYSL_RV_CLANG"))
+    .getOrElse("/opt/homebrew/opt/llvm/bin/clang")
+  private val rvRuntimeDir: String = Option(System.getenv("SYSL_RV_RUNTIME"))
+    .getOrElse("sysl/runtime/rv")
+  private def rvQemu(xlen: Int): String =
+    val envKey = if xlen == 64 then "SYSL_RV_QEMU64" else "SYSL_RV_QEMU32"
+    Option(System.getenv(envKey)).getOrElse(s"/opt/homebrew/bin/qemu-system-riscv$xlen")
+
+  /** Build the freestanding RV runtime objects once per (session, xlen). The
+    * compile is small (~0.5s/file), but std/ has hundreds of tests — caching
+    * eliminates a per-test 2s setup cost. Returns the linker script's path
+    * and a sequence of .o paths in deterministic link order. */
+  private def buildRiscVRuntime(xlen: Int): Either[String, RiscVRuntime] =
+    val (target, march, mabi, linkLd) = xlen match
+      case 64 => ("riscv64-unknown-elf", "rv64gc", "lp64d", "link64.ld")
+      case 32 => ("riscv32-unknown-elf", "rv32gc", "ilp32d", "link32.ld")
+      case _  => return Left(s"unsupported xlen $xlen (only 32/64)")
+    val runtimeDir = java.nio.file.Paths.get(rvRuntimeDir).toAbsolutePath
+    if !java.nio.file.Files.exists(runtimeDir) then
+      return Left(s"runtime dir $runtimeDir not found (set SYSL_RV_RUNTIME or run from repo root)")
+    val sources = Seq("start.S", "sbi.c", "libc.c") ++
+      (if xlen == 32 then Seq("llvm_intrinsics.c") else Seq.empty)
+    val linkScriptPath = runtimeDir.resolve(linkLd).toString
+    if !java.nio.file.Files.exists(java.nio.file.Paths.get(linkScriptPath)) then
+      return Left(s"missing linker script $linkScriptPath")
+    val workDir = java.nio.file.Files.createTempDirectory(s"sysl-rv${xlen}-rt-")
+    val baseClangArgs = Seq(
+      rvClang,
+      "-target", target,
+      s"-march=$march", s"-mabi=$mabi",
+      "-mcmodel=medany",
+      "-ffreestanding", "-nostdlib", "-static",
+      "-c", "-O2",
+    )
+    val objs = scala.collection.mutable.ArrayBuffer.empty[String]
+    // Compile each runtime source. The inner `?` short-circuits on the first
+    // failure; we avoid non-local return-from-loop, which Scala 3 deprecates.
+    def compileOne(src: String): Either[String, String] =
+      val srcPath = runtimeDir.resolve(src).toString
+      if !java.nio.file.Files.exists(java.nio.file.Paths.get(srcPath)) then
+        Left(s"missing runtime source $srcPath")
+      else
+        val objPath = workDir.resolve(src.replace(".c", ".o").replace(".S", ".o")).toString
+        val log = new StringBuilder
+        val plog = scala.sys.process.ProcessLogger(
+          line => log.append(line).append('\n'),
+          line => log.append(line).append('\n'),
+        )
+        try
+          val exit = scala.sys.process.Process(baseClangArgs ++ Seq(srcPath, "-o", objPath)).!(plog)
+          if exit != 0 then Left(s"clang failed on $src (exit $exit): ${log.toString.trim}")
+          else Right(objPath)
+        catch case e: Throwable => Left(s"clang invoke failed on $src: ${e.getMessage}")
+    val firstFailure = sources.iterator
+      .map(src => (src, compileOne(src)))
+      .find(_._2.isLeft)
+    firstFailure match
+      case Some((_, Left(err))) => Left(err)
+      case _ =>
+        for src <- sources do
+          objs += workDir.resolve(src.replace(".c", ".o").replace(".S", ".o")).toString
+        Right(RiscVRuntime(xlen, objs.toSeq, linkScriptPath, workDir.toString))
+
+  /** Compile a unit's scoped TProgram to an LLVM IR file targeted for the
+    * given xlen, then `clang -c` it into a `program.o`. The .o is cached per
+    * (xlen, unitName); the per-test cost is then just shim + link + qemu. */
+  private def compileUnitToRiscVProgramObj(xlen: Int, program: TProgram, unitName: String): Either[String, String] =
+    val (target, march, mabi) = xlen match
+      case 64 => ("riscv64-unknown-elf", "rv64gc", "lp64d")
+      case 32 => ("riscv32-unknown-elf", "rv32gc", "ilp32d")
+      case _  => return Left(s"unsupported xlen $xlen")
+    val codegen = new SyslLLVMCodegen(s"riscv$xlen-elf")
+    val ir = try codegen.generate(program)
+             catch case e: Throwable => return Left(s"IR codegen failed: ${e.getMessage}")
+    val workDir = java.nio.file.Files.createTempDirectory(s"sysl-rv${xlen}-unit-")
+    val unitKey = unitName.replace("/", "_").replace(".", "_")
+    val irPath = workDir.resolve(s"$unitKey.ll")
+    java.nio.file.Files.writeString(irPath, ir)
+    val objPath = workDir.resolve(s"$unitKey.o").toString
+    val log = new StringBuilder
+    val plog = scala.sys.process.ProcessLogger(
+      line => log.append(line).append('\n'),
+      line => log.append(line).append('\n'),
+    )
+    val args = Seq(
+      rvClang,
+      "-target", target,
+      s"-march=$march", s"-mabi=$mabi",
+      "-mcmodel=medany",
+      "-ffreestanding", "-nostdlib", "-static",
+      "-c", "-O2", "-w",
+      irPath.toString, "-o", objPath,
+    )
+    val exit =
+      try scala.sys.process.Process(args).!(plog)
+      catch case e: Throwable => return Left(s"clang invoke failed: ${e.getMessage}")
+    if exit != 0 then Left(s"clang failed (exit $exit): ${log.toString.trim}")
+    else Right(objPath)
+
+  /** Compile + run one test on the RV LLVM backend under qemu-system-riscv*.
+    *
+    * Strategy: cache a pre-built freestanding RV runtime (start/sbi/libc, and
+    * llvm_intrinsics on rv32) plus the per-unit `program.o`. Per test we only
+    * write a tiny C shim that calls the named test function, link, and boot
+    * the ELF under qemu with stdio serial. The shim's `main` returns 0 if the
+    * test returned cleanly — `_start` then calls SBI SystemReset(0,0).
+    *
+    * The pass/fail signal: sysl panic/assert/range_fail all `write(2, ...)` a
+    * marked prefix to stdout (the RV runtime routes every fd to the SBI
+    * console, so stderr lands in our capture) before calling `abort()`. We
+    * detect any of those prefixes to conclude a panic regardless of the qemu
+    * exit code — SBI SystemReset's "reason" field is not reliably surfaced
+    * across qemu versions, but the captured serial output is.
+    *
+    * QEMU's `-machine virt -bios default` boots OpenSBI which prints a banner
+    * before jumping to our kernel; we strip everything up to and including
+    * the OpenSBI footer line so the captured "user" output matches what other
+    * backends report.
+    *
+    * `RV_DUMP_IR=1` saves the IR + ELF in /tmp/sysl_rv{xlen}_<unit>/ for
+    * inspection. `RV_TRACE=1` prints a one-line per-test summary plus the raw
+    * qemu output (banner included) to stderr.
+    */
+  private def runOneRiscV(
+      xlen: Int,
+      program: TProgram,
+      t: DiscoveredTest,
+      objCache: scala.collection.mutable.Map[(Int, String), Either[String, String]],
+      runtimeCache: scala.collection.mutable.Map[Int, Either[String, RiscVRuntime]],
+  ): TestOutcome =
+    val runtime = runtimeCache.getOrElseUpdate(xlen, buildRiscVRuntime(xlen)) match
+      case Right(r)  => r
+      case Left(err) => return Fail(s"RV runtime build failed: $err")
+    val programObj = objCache.getOrElseUpdate((xlen, t.unitName),
+      compileUnitToRiscVProgramObj(xlen, program, t.unitName)) match
+      case Right(p)  => p
+      case Left(err) => return Fail(s"RV unit compile failed: $err")
+
+    // Per-test shim: call the target test fn, return 0. Linker drags only the
+    // exported test fn out of program.o thanks to -nostdlib + entry resolution.
+    val workDir = java.nio.file.Paths.get(runtime.workDir)
+    val shim =
+      s"""|extern void ${t.fn.name}(void);
+          |int main(void) {
+          |    ${t.fn.name}();
+          |    return 0;
+          |}
+          |""".stripMargin
+    val shimC = workDir.resolve(s"shim_${t.fn.name}.c").toString
+    java.nio.file.Files.writeString(java.nio.file.Paths.get(shimC), shim)
+    val elf = workDir.resolve(s"test_${t.fn.name}.elf").toString
+    val (target, march, mabi) = xlen match
+      case 64 => ("riscv64-unknown-elf", "rv64gc", "lp64d")
+      case _  => ("riscv32-unknown-elf", "rv32gc", "ilp32d")
+    val linkArgs = Seq(
+      rvClang,
+      "-target", target,
+      s"-march=$march", s"-mabi=$mabi",
+      "-mcmodel=medany",
+      "-ffreestanding", "-nostdlib", "-static",
+      "-fuse-ld=lld",
+      "-T", runtime.linkScript,
+      "-O2", "-w",
+    ) ++ runtime.objs ++ Seq(programObj, shimC, "-o", elf)
+    val linkLog = new StringBuilder
+    val linkLogger = scala.sys.process.ProcessLogger(
+      line => linkLog.append(line).append('\n'),
+      line => linkLog.append(line).append('\n'),
+    )
+    val linkExit =
+      try scala.sys.process.Process(linkArgs).!(linkLogger)
+      catch case e: Throwable => return Fail(s"RV link invoke failed: ${e.getMessage}")
+    if linkExit != 0 then
+      return Fail(s"RV link failed (exit $linkExit): ${linkLog.toString.trim}")
+
+    if System.getenv("RV_DUMP_IR") != null then
+      val keepDir = java.nio.file.Paths.get(s"/tmp/sysl_rv${xlen}_${t.unitName.replace("/", "_")}")
+      java.nio.file.Files.createDirectories(keepDir)
+      java.nio.file.Files.copy(java.nio.file.Paths.get(programObj),
+        keepDir.resolve(s"${t.unitName.replace("/", "_")}.o"),
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+      java.nio.file.Files.copy(java.nio.file.Paths.get(elf),
+        keepDir.resolve(s"test_${t.fn.name}.elf"),
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+
+    // Boot under qemu. `-bios default` runs OpenSBI which then enters our ELF
+    // in S-mode. `-no-reboot` makes SystemReset.SHUTDOWN actually exit. The
+    // timeout cap prevents a runaway test from hanging the suite — std/ tests
+    // routinely finish in <100ms wall, so 15s is a generous ceiling.
+    val outBuf = new StringBuilder
+    val errBuf = new StringBuilder
+    val qemuLogger = scala.sys.process.ProcessLogger(
+      line => outBuf.append(line).append('\n'),
+      line => errBuf.append(line).append('\n'),
+    )
+    val qemuArgs = Seq(
+      rvQemu(xlen),
+      "-machine", "virt",
+      "-bios", "default",
+      "-kernel", elf,
+      "-nographic",
+      "-serial", "mon:stdio",
+      "-no-reboot",
+      "-display", "none",
+    )
+    val qemuProc =
+      try scala.sys.process.Process(qemuArgs).run(qemuLogger)
+      catch case e: Throwable => return Fail(s"RV qemu spawn failed: ${e.getMessage}")
+    val qemuExit: Int =
+      val deadline = System.currentTimeMillis() + 15000L
+      var done = false
+      var code = -1
+      while !done && System.currentTimeMillis() < deadline do
+        if !qemuProc.isAlive() then
+          code = qemuProc.exitValue()
+          done = true
+        else Thread.sleep(20)
+      if !done then
+        qemuProc.destroy()
+        Thread.sleep(100)
+        if qemuProc.isAlive() then qemuProc.destroy()
+        return Fail(s"RV qemu timed out after 15s", outBuf.toString)
+      code
+
+    val rawStdout = outBuf.toString
+    // Strip OpenSBI banner: everything up to and including the last banner line
+    // (a row of `=` separators ends each banner section, with the final block
+    // being the boot HART summary). Match the empirically observed footer.
+    val stripped = stripOpenSbiBanner(rawStdout)
+    if System.getenv("RV_TRACE") != null then
+      System.err.println(s"RV_TRACE: ${t.fn.name} xlen=$xlen exit=$qemuExit")
+      System.err.println(s"RV_TRACE: raw stdout:\n$rawStdout")
+      System.err.println(s"RV_TRACE: stripped:\n$stripped")
+
+    val panicMsg = panicMarker(stripped)
+    if panicMsg.isDefined then
+      if t.shouldPanic then
+        t.expectedMsg match
+          case Some(substr) if !panicMsg.get.contains(substr) =>
+            Fail(s"panic message did not contain '$substr' (got: ${panicMsg.get})", stripped)
+          case _ => Pass
+      else Fail(s"panic: ${panicMsg.get}", stripped)
+    else if qemuExit == 0 then
+      if t.shouldPanic then Fail("expected panic, got normal return", stripped) else Pass
+    else
+      // No panic prefix found but qemu exited nonzero — typically a CPU fault
+      // (illegal instruction, page fault) that bypassed our panic ISR. Report
+      // both the exit code and any qemu stderr so the user has something to
+      // grep on.
+      val errTail = errBuf.toString.trim
+      val errPart = if errTail.isEmpty then "" else s" (qemu stderr: $errTail)"
+      Fail(s"RV qemu exited $qemuExit with no panic marker$errPart", stripped)
+
+  // ------------------------------------------------------------------
+  // wasm32-wasi backend — mirror of the RV runner with the qemu/SBI bits
+  // swapped for wasmtime/WASI. Reuses the chunk-1 codegen (target
+  // "wasm32") and the chunk-2 freestanding runtime under
+  // sysl/runtime/wasm/. No linker script; no banner-stripping (wasmtime
+  // stdout is clean). The shape — runtime build + per-unit obj cache +
+  // per-test shim/link/run — is intentionally identical to the RV path
+  // so the same expectations (panicMarker, exit-code rules) carry over.
+  // ------------------------------------------------------------------
+
+  /** Pre-built freestanding wasm32 runtime objects. Caches the paths to
+    * imports.o, libc.o, llvm_intrinsics.o under one tmp dir owned for
+    * the lifetime of this CLI run. No linker script (wasm-ld lays out
+    * linear memory itself), no xlen (wasm32 is the only target). */
+  private case class WasmRuntime(
+      objs: Seq[String],   // absolute paths to .o files, in link order
+      workDir: String,     // tmp dir for build artifacts (reused for wasms)
+  )
+
+  /** Defaults match the chunk-2 toolchain pin on macOS+Homebrew. Each is
+    * overridable via env var so a Linux host or non-standard install can
+    * run the same tests without code changes. */
+  private val wasmClang: String = Option(System.getenv("SYSL_WASM_CLANG"))
+    .getOrElse("/opt/homebrew/opt/llvm/bin/clang")
+  private val wasmRuntimeDir: String = Option(System.getenv("SYSL_WASM_RUNTIME"))
+    .getOrElse("sysl/runtime/wasm")
+  private val wasmtimePath: String = Option(System.getenv("SYSL_WASMTIME"))
+    .getOrElse("/opt/homebrew/bin/wasmtime")
+
+  /** Resolve a configuration name from either a Java system property OR a
+    * shell env var, preferring the system property when both are set.
+    *
+    * Both surfaces are equivalent in intent, but the system property is
+    * the only one in-process tests can flip per-test (the JVM's env-var
+    * map is unmodifiable). Production users almost always set the env
+    * var; the system-property path exists so the runner tests for
+    * [[runOneWasm]]'s host fork can exercise `SYSL_WASM_HOST=scala-interp`
+    * mid-suite without spawning a subprocess. */
+  private def wasmConfig(name: String): Option[String] =
+    Option(System.getProperty(name)).orElse(Option(System.getenv(name)))
+
+  /** Optional path to a launcher executable that runs a `.wasm` under the
+    * user's scala wasm interpreter (worktree at `/Users/ed/dev/wasm-stable/`,
+    * on the `stable` branch). The launcher must accept a single positional
+    * argument — the path to the `.wasm` file — and behave like wasmtime:
+    *
+    *   - exit 0 on clean completion, propagate `proc_exit(N)` as exit N
+    *   - route fd 1 to stdout, fd 2 to stderr (or fold both — our
+    *     panicMarker substring search handles either)
+    *   - auto-detect `_start` (the wasm-stable CLI at wasm@0294979 does this)
+    *
+    * The wasm-stable CLI is invoked, for example, as:
+    *
+    *   /Users/ed/dev/wasm-stable/cli/native/target/scala-3.8.3/cli-out
+    *
+    * after `sbt cliNative/nativeLink`, or as a `java -jar wasm-cli.jar`
+    * wrapper script after `sbt cliJVM/assembly`. The dispatcher doesn't
+    * care which strategy is used — it just shells out. */
+  private def wasmScalaInterpPath: Option[String] = wasmConfig("SYSL_WASM_SCALA_INTERP")
+
+  /** Build the freestanding wasm runtime objects once per session. Each
+    * compile is ~150ms; std/ has hundreds of tests so caching is worth
+    * it even though wasm is faster than RV. clang+wasm-ld pick the right
+    * driver automatically from `--target=wasm32-unknown-wasi`. */
+  private def buildWasmRuntime(): Either[String, WasmRuntime] =
+    val runtimeDir = java.nio.file.Paths.get(wasmRuntimeDir).toAbsolutePath
+    if !java.nio.file.Files.exists(runtimeDir) then
+      return Left(s"runtime dir $runtimeDir not found (set SYSL_WASM_RUNTIME or run from repo root)")
+    val sources = Seq("imports.c", "libc.c", "llvm_intrinsics.c")
+    val workDir = java.nio.file.Files.createTempDirectory("sysl-wasm-rt-")
+    val baseClangArgs = Seq(
+      wasmClang,
+      "--target=wasm32-unknown-wasi",
+      "-ffreestanding", "-nostdlib",
+      "-c", "-O2",
+    )
+    def compileOne(src: String): Either[String, String] =
+      val srcPath = runtimeDir.resolve(src).toString
+      if !java.nio.file.Files.exists(java.nio.file.Paths.get(srcPath)) then
+        Left(s"missing runtime source $srcPath")
+      else
+        val objPath = workDir.resolve(src.replace(".c", ".o")).toString
+        val log = new StringBuilder
+        val plog = scala.sys.process.ProcessLogger(
+          line => log.append(line).append('\n'),
+          line => log.append(line).append('\n'),
+        )
+        try
+          val exit = scala.sys.process.Process(baseClangArgs ++ Seq(srcPath, "-o", objPath)).!(plog)
+          if exit != 0 then Left(s"clang failed on $src (exit $exit): ${log.toString.trim}")
+          else Right(objPath)
+        catch case e: Throwable => Left(s"clang invoke failed on $src: ${e.getMessage}")
+    val firstFailure = sources.iterator
+      .map(src => (src, compileOne(src)))
+      .find(_._2.isLeft)
+    firstFailure match
+      case Some((_, Left(err))) => Left(err)
+      case _ =>
+        val objs = sources.map(src => workDir.resolve(src.replace(".c", ".o")).toString)
+        Right(WasmRuntime(objs, workDir.toString))
+
+  /** Compile a unit's scoped TProgram to wasm32 LLVM IR, then `clang -c`
+    * it to a `program.o`. Cached per unit name; per-test cost is then
+    * just shim + link + wasmtime. */
+  private def compileUnitToWasmProgramObj(program: TProgram, unitName: String): Either[String, String] =
+    val codegen = new SyslLLVMCodegen("wasm32")
+    val ir = try codegen.generate(program)
+             catch case e: Throwable => return Left(s"IR codegen failed: ${e.getMessage}")
+    val workDir = java.nio.file.Files.createTempDirectory("sysl-wasm-unit-")
+    val unitKey = unitName.replace("/", "_").replace(".", "_")
+    val irPath = workDir.resolve(s"$unitKey.ll")
+    java.nio.file.Files.writeString(irPath, ir)
+    val objPath = workDir.resolve(s"$unitKey.o").toString
+    val log = new StringBuilder
+    val plog = scala.sys.process.ProcessLogger(
+      line => log.append(line).append('\n'),
+      line => log.append(line).append('\n'),
+    )
+    val args = Seq(
+      wasmClang,
+      "--target=wasm32-unknown-wasi",
+      "-ffreestanding", "-nostdlib",
+      "-c", "-O2", "-w",
+      irPath.toString, "-o", objPath,
+    )
+    val exit =
+      try scala.sys.process.Process(args).!(plog)
+      catch case e: Throwable => return Left(s"clang invoke failed: ${e.getMessage}")
+    if exit != 0 then Left(s"clang failed (exit $exit): ${log.toString.trim}")
+    else Right(objPath)
+
+  /** Compile + run one test on the wasm32 LLVM backend.
+    *
+    * Mirrors `runOneRiscV` step for step: cache the runtime objects and
+    * the per-unit program obj, write a tiny C shim that calls the named
+    * test function, link to a `.wasm`, run it under the configured host,
+    * capture stdout+stderr (we merge — see the pitfalls note in the
+    * roadmap memo), parse the exit code and panic marker.
+    *
+    * == Host selection — `SYSL_WASM_HOST` env var ==
+    *
+    *   - `wasmtime` (default) — fast, robust, fully spec-compliant.
+    *     The default for std/ sweeps and for `--backend wasm32` users
+    *     who just want their tests to run.
+    *   - `scala-interp` — shells out to the launcher at
+    *     `SYSL_WASM_SCALA_INTERP`, which must run our `.wasm` files
+    *     under the user's scala wasm interpreter (chunk-5 dogfood).
+    *     The launcher's job is "given a `.wasm` path, run `_start`,
+    *     route fd 1/2 to stdout/stderr, propagate `proc_exit(N)` to
+    *     its own exit code" — the wasm-stable CLI does exactly this.
+    *
+    * `WASM_DUMP_IR=1` saves the IR + wasm in /tmp/sysl_wasm_<unit>/
+    * for inspection. `WASM_TRACE=1` prints a one-line per-test summary
+    * plus the raw host output to stderr.
+    */
+  private def runOneWasm(
+      program: TProgram,
+      t: DiscoveredTest,
+      objCache: scala.collection.mutable.Map[String, Either[String, String]],
+      runtimeCache: scala.collection.mutable.Map[Unit, Either[String, WasmRuntime]],
+  ): TestOutcome =
+    val runtime = runtimeCache.getOrElseUpdate((), buildWasmRuntime()) match
+      case Right(r)  => r
+      case Left(err) => return Fail(s"wasm runtime build failed: $err")
+    val programObj = objCache.getOrElseUpdate(t.unitName,
+      compileUnitToWasmProgramObj(program, t.unitName)) match
+      case Right(p)  => p
+      case Left(err) => return Fail(s"wasm unit compile failed: $err")
+
+    val workDir = java.nio.file.Paths.get(runtime.workDir)
+    val shim =
+      s"""|extern void ${t.fn.name}(void);
+          |int main(void) {
+          |    ${t.fn.name}();
+          |    return 0;
+          |}
+          |""".stripMargin
+    val shimC = workDir.resolve(s"shim_${t.fn.name}.c").toString
+    java.nio.file.Files.writeString(java.nio.file.Paths.get(shimC), shim)
+    val wasmOut = workDir.resolve(s"test_${t.fn.name}.wasm").toString
+    val linkArgs = Seq(
+      wasmClang,
+      "--target=wasm32-unknown-wasi",
+      "-ffreestanding", "-nostdlib",
+      "-Wl,--no-entry", "-Wl,--export=_start", "-Wl,--allow-undefined",
+      "-O2", "-w",
+    ) ++ runtime.objs ++ Seq(programObj, shimC, "-o", wasmOut)
+    val linkLog = new StringBuilder
+    val linkLogger = scala.sys.process.ProcessLogger(
+      line => linkLog.append(line).append('\n'),
+      line => linkLog.append(line).append('\n'),
+    )
+    val linkExit =
+      try scala.sys.process.Process(linkArgs).!(linkLogger)
+      catch case e: Throwable => return Fail(s"wasm link invoke failed: ${e.getMessage}")
+    if linkExit != 0 then
+      return Fail(s"wasm link failed (exit $linkExit): ${linkLog.toString.trim}")
+
+    if System.getenv("WASM_DUMP_IR") != null then
+      val keepDir = java.nio.file.Paths.get(s"/tmp/sysl_wasm_${t.unitName.replace("/", "_")}")
+      java.nio.file.Files.createDirectories(keepDir)
+      java.nio.file.Files.copy(java.nio.file.Paths.get(programObj),
+        keepDir.resolve(s"${t.unitName.replace("/", "_")}.o"),
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+      java.nio.file.Files.copy(java.nio.file.Paths.get(wasmOut),
+        keepDir.resolve(s"test_${t.fn.name}.wasm"),
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+
+    // Run under the selected host. Our libc routes write(2, ...) through
+    // the same putchar path as fd=1 (see chunk-2 roadmap pitfalls), so
+    // panic text can land on either stream depending on host buffering.
+    // Merge both captures into one blob — `panicMarker` is a substring
+    // search so order doesn't matter, and the rv runner does the same
+    // thing (`stripped` already contains everything that arrived on
+    // serial).
+    val host = wasmConfig("SYSL_WASM_HOST").getOrElse("wasmtime")
+    val (hostLabel, wmArgs): (String, Seq[String]) = host match
+      case "wasmtime" =>
+        ("wasmtime", Seq(wasmtimePath, "run", wasmOut))
+      case "scala-interp" =>
+        // Launcher mandatory. Without it we can't fail open to wasmtime —
+        // the user explicitly asked for the scala interp, so fail clearly.
+        wasmScalaInterpPath match
+          case None =>
+            return Fail("SYSL_WASM_HOST=scala-interp but SYSL_WASM_SCALA_INTERP not set")
+          case Some(p) =>
+            if !java.nio.file.Files.exists(java.nio.file.Paths.get(p)) then
+              return Fail(s"SYSL_WASM_SCALA_INTERP launcher not found: $p")
+            ("scala-interp", Seq(p, wasmOut))
+      case other =>
+        return Fail(s"unknown SYSL_WASM_HOST: '$other' (expected wasmtime or scala-interp)")
+
+    val outBuf = new StringBuilder
+    val errBuf = new StringBuilder
+    val wmLogger = scala.sys.process.ProcessLogger(
+      line => outBuf.append(line).append('\n'),
+      line => errBuf.append(line).append('\n'),
+    )
+    val wmProc =
+      try scala.sys.process.Process(wmArgs).run(wmLogger)
+      catch case e: Throwable => return Fail(s"$hostLabel spawn failed: ${e.getMessage}")
+    val wmExit: Int =
+      val deadline = System.currentTimeMillis() + 15000L
+      var done = false
+      var code = -1
+      while !done && System.currentTimeMillis() < deadline do
+        if !wmProc.isAlive() then
+          code = wmProc.exitValue()
+          done = true
+        else Thread.sleep(20)
+      if !done then
+        wmProc.destroy()
+        Thread.sleep(100)
+        if wmProc.isAlive() then wmProc.destroy()
+        return Fail(s"$hostLabel timed out after 15s", outBuf.toString + errBuf.toString)
+      code
+
+    val captured = outBuf.toString + errBuf.toString
+    if System.getenv("WASM_TRACE") != null then
+      System.err.println(s"WASM_TRACE: ${t.fn.name} host=$hostLabel exit=$wmExit")
+      System.err.println(s"WASM_TRACE: stdout:\n${outBuf.toString}")
+      System.err.println(s"WASM_TRACE: stderr:\n${errBuf.toString}")
+
+    val panicMsg = panicMarker(captured)
+    if panicMsg.isDefined then
+      if t.shouldPanic then
+        t.expectedMsg match
+          case Some(substr) if !panicMsg.get.contains(substr) =>
+            Fail(s"panic message did not contain '$substr' (got: ${panicMsg.get})", captured)
+          case _ => Pass
+      else Fail(s"panic: ${panicMsg.get}", captured)
+    else if wmExit == 0 then
+      if t.shouldPanic then Fail("expected panic, got normal return", captured) else Pass
+    else
+      // No panic prefix found but the host exited nonzero — usually a
+      // wasm trap (unreachable, OOB memory access) caught by the host.
+      // Surface both the exit code and the captured streams so the user
+      // can grep for the trap reason the host printed.
+      Fail(s"$hostLabel exited $wmExit with no panic marker", captured)
+
+  /** Strip the OpenSBI v1.x banner from a captured stdout. The banner ends
+    * with a "Domain0 Next Boot HART" / footer block followed by a blank line
+    * before the kernel's first write. We split on the last empty line that
+    * follows an OpenSBI line — robust against version skew in line wording. */
+  private def stripOpenSbiBanner(raw: String): String =
+    val lines = raw.linesIterator.toVector
+    // Find the highest index of any OpenSBI banner line; anything after it
+    // (skipping its trailing blank) is kernel output.
+    val sbiIdx = lines.lastIndexWhere(l =>
+      l.startsWith("OpenSBI") || l.contains("OpenSBI") ||
+      l.startsWith("Domain") || l.startsWith("Boot HART") ||
+      l.startsWith("Platform Name") || l.startsWith("Firmware") ||
+      l.matches("^\\s*_+\\s*$") || l.matches("^\\s*\\|.*\\|\\s*$"))
+    if sbiIdx < 0 then raw
+    else
+      val tail = lines.drop(sbiIdx + 1).dropWhile(_.trim.isEmpty)
+      tail.mkString("\n") + (if tail.nonEmpty then "\n" else "")
+
+  /** Look for any of the panic-message prefixes emitted by the LLVM prelude
+    * before its `abort()` call. Returns the extracted message body if any
+    * marker is found, else None.
+    *
+    * **Why substring, not line-prefix:** on hosted backends panic goes to
+    * stderr while user prints go to stdout, so the runner sees the panic
+    * line cleanly. Under qemu-system-riscv* the SBI console is one stream,
+    * so a test that prints args via `print(x)` (no newline) immediately
+    * before panicking ends up with the panic message glued onto the previous
+    * line — e.g. `12panic: mismatch: got 1, want 2`. The markers are
+    * distinctive enough that substring search has no realistic false-positive
+    * risk and matches both layouts. All three markers terminate with a
+    * newline but `linesIterator` already strips that. */
+  private def panicMarker(out: String): Option[String] =
+    val markers = List("panic: ", "assertion failed: ", "range check failed: ")
+    out.linesIterator
+      .flatMap { l =>
+        markers.iterator
+          .map(m => (m, l.indexOf(m)))
+          .collectFirst { case (m, i) if i >= 0 => l.substring(i + m.length) }
+      }
+      .nextOption()
+
   private def executeTest(cmd: TestCommand, lockMode: LockMode): Unit =
     if cmd.backend == "all" then
-      System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', or 'trisc')")
+      System.err.println(s"error: backend 'all' not yet implemented (use 'interpreter', 'llvm-host', 'svm-host', 'trisc', 'riscv64', 'riscv32', or 'wasm32')")
       throw CliError("unsupported backend")
 
     val resolved = resolveDeps(cmd.inputs, ignoreLockPins = false, lockMode) match
@@ -1235,6 +1822,15 @@ object SyslCli:
     // clang invocation. Stored as Either so a failed unit compile is
     // reported once and then propagated as a per-test Fail.
     val llvmBinCache = scala.collection.mutable.Map[String, Either[String, String]]()
+    // The RV path needs two caches: pre-built runtime object files (per xlen,
+    // built once per session) and per-unit `program.o` files (the IR compiled
+    // for the right target, re-linked per test against a tiny shim). Lazy so
+    // the runtime build only fires when at least one RV test runs.
+    val rvRuntimeCache = scala.collection.mutable.Map[Int, Either[String, RiscVRuntime]]()
+    val rvProgramObjCache = scala.collection.mutable.Map[(Int, String), Either[String, String]]()
+    // wasm32: single runtime (no xlen variant) and per-unit obj cache.
+    val wasmRuntimeCache = scala.collection.mutable.Map[Unit, Either[String, WasmRuntime]]()
+    val wasmProgramObjCache = scala.collection.mutable.Map[String, Either[String, String]]()
 
     for t <- filtered if !stop do
       if t.unitName != currentUnit then
@@ -1245,6 +1841,9 @@ object SyslCli:
         case "llvm-host" => runOneLLVM(programFor(t.unitName), t, llvmBinCache)
         case "svm-host"  => runOneSVM(programFor(t.unitName), t)
         case "trisc"     => runOneTRISC(programFor(t.unitName), t)
+        case "riscv64"   => runOneRiscV(64, programFor(t.unitName), t, rvProgramObjCache, rvRuntimeCache)
+        case "riscv32"   => runOneRiscV(32, programFor(t.unitName), t, rvProgramObjCache, rvRuntimeCache)
+        case "wasm32"    => runOneWasm(programFor(t.unitName), t, wasmProgramObjCache, wasmRuntimeCache)
         case _           => runOneInterpreter(programFor(t.unitName), stdlibImports, t)
       val elapsedMs = (System.nanoTime() - start) / 1e6
       outcome match

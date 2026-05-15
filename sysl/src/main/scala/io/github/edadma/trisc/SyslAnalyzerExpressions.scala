@@ -1775,21 +1775,27 @@ trait SyslAnalyzerExpressions:
         }
         // Exhaustiveness check for matches on enum types. A guarded arm does not cover
         // its variant (the guard could be false). Wildcard or default provides full coverage.
+        //
+        // The check reasons recursively about nested variant patterns: when the active
+        // arms for a variant all decompose the same single field position and the
+        // sub-patterns at that position together exhaust the field's enum type, the
+        // outer variant is considered covered. Cartesian-product coverage across
+        // multiple active field positions is intentionally not attempted — that case
+        // falls through to the missing-variant error and the user adds a catch-all.
         tScrutinee.typ.underlying match
           case et: EnumType if tDefault.isEmpty =>
-            val coveredVariants = mutable.Set.empty[Int]
             var wildcardCovers = false
+            val variantEntries = mutable.ListBuffer.empty[(Int, List[Option[TMatchPattern]])]
             for arm <- tArms; pat <- arm.patterns do
               if arm.guard.isEmpty then pat match
                 case TWildcard => wildcardCovers = true
-                case TVariantPattern(_, idx, _, _, nested) if nested.forall(_.isEmpty) =>
-                  // Nested sub-patterns may fail to match — only an arm with NO
-                  // active nested pattern fully covers its variant.
-                  coveredVariants += idx
+                case TVariantPattern(_, idx, _, _, nested) =>
+                  variantEntries += ((idx, nested))
                 case _ =>
             if !wildcardCovers then
+              val entries = variantEntries.toList
               val missing = et.variants.zipWithIndex.collect {
-                case ((vname, _), idx) if !coveredVariants.contains(idx) => vname
+                case ((vname, _), idx) if !variantCoveredByEntries(et, idx, entries) => vname
               }
               if missing.nonEmpty then
                 throw AnalysisError(
@@ -1802,6 +1808,50 @@ trait SyslAnalyzerExpressions:
           tDefault.toList.flatMap(_.lastOption).collect { case TExprStmt(e) => e.typ }
         val resultType = armLastTypes.find(_ != UnitType).orElse(armLastTypes.headOption).getOrElse(UnitType)
         TMatchExpr(tScrutinee, tArms, tDefault, resultType)
+
+  /** Is variant `variantIdx` of `et` covered by the supplied `(idx, nested)` arm
+   *  entries? An entry covers its variant fully when its nested list is empty
+   *  or every position is passive (None or a wildcard). Otherwise, when all
+   *  arms targeting `variantIdx` decompose the same single field position and
+   *  that field is itself an enum, recurse on the inner variants. Multi-axis
+   *  decomposition isn't attempted — the user supplies an explicit catch-all.
+   *  See `feedback_sysl_match_nested_exhaustiveness.md`. */
+  protected def variantCoveredByEntries(
+      et: EnumType,
+      variantIdx: Int,
+      entries: List[(Int, List[Option[TMatchPattern]])],
+  ): Boolean =
+    def isPassive(p: Option[TMatchPattern]): Boolean = p match
+      case None              => true
+      case Some(TWildcard)   => true
+      case _                 => false
+    val (_, fields) = et.variants(variantIdx)
+    val targeted = entries.collect { case (i, n) if i == variantIdx => n }
+    if targeted.isEmpty then false
+    else if targeted.exists(n => n.isEmpty || n.forall(isPassive)) then true
+    else
+      val activePositions = targeted.map(n =>
+        n.zipWithIndex.collect { case (p, i) if !isPassive(p) => i }.toSet
+      )
+      if !activePositions.forall(_.size == 1) then false
+      else
+        val singletons = activePositions.flatten.toSet
+        if singletons.size != 1 then false
+        else
+          val pos = singletons.head
+          if pos >= fields.length then false
+          else
+            fields(pos)._2.underlying match
+              case innerEt: EnumType =>
+                val innerEntries = targeted.flatMap { n =>
+                  n(pos) match
+                    case Some(TVariantPattern(_, idx, _, _, nested)) => Some((idx, nested))
+                    case _                                           => None
+                }
+                innerEt.variants.indices.forall(vIdx =>
+                  variantCoveredByEntries(innerEt, vIdx, innerEntries)
+                )
+              case _ => false
 
   protected def analyzeInterpolatedString(s: String): TExpr =
     // Parse $name, ${expr}, $$ patterns in Scala-style interpolated string

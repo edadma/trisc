@@ -1,0 +1,111 @@
+Deinit ordering with refcounted fields
+======================================
+
+When a struct with a deinit *also* holds refcounted fields
+(strings, `&T` references), the order at refcount=0 matters:
+
+  1. **deinit body runs first.** While it runs, the struct's
+     fields are still readable — including any refcounted
+     buffers. The deinit can read them, copy them, log them,
+     etc.
+
+  2. **Refcounted fields are decremented after deinit returns.**
+     If a string-field's refcount drops to zero, its buffer is
+     freed at that point — but only *after* the deinit has had
+     its chance to look at the data.
+
+Reversing the order (decrement fields, then call deinit) would
+mean the deinit reads dangling pointers. Several test scenarios:
+
+  - A `Doc` struct with a `name: string` field; the deinit
+    records the name into a module-level log. After scope exit,
+    the log should contain the name.
+
+  - A `Pair` struct holding two `&Inner` references with deinit
+    counters of their own; the outer's deinit should be able to
+    read the inner field values *before* the inner's deinit
+    fires.
+
+    module sysl.tests.lang_features
+
+Module-level log used by deinits to record what they saw at
+deinit-time. Reset at the start of each test.
+
+    var dwf_log: string = ""
+
+Doc has a string field. Its deinit appends the name to the log.
+
+    struct Doc
+        name: string
+
+    Doc.deinit() -> unit
+        dwf_log = dwf_log + self.name
+
+    drop_doc() -> unit
+        val d: &Doc = new Doc("alice")
+        // d goes out of scope here. deinit fires while name is still
+        // a readable buffer; only afterward is the buffer's refcount
+        // decremented.
+
+    #test
+    test_deinit_reads_string_field() -> unit
+        dwf_log = ""
+        drop_doc()
+        assert(dwf_log == "alice", s"dwf_log should be 'alice', got '${dwf_log}'")
+
+Multiple drops in sequence, each contributing to the log:
+
+    drop_three_docs() -> unit
+        val d1: &Doc = new Doc("a")
+        val d2: &Doc = new Doc("b")
+        val d3: &Doc = new Doc("c")
+
+    #test
+    test_multiple_deinits_each_read_their_field() -> unit
+        dwf_log = ""
+        drop_three_docs()
+        // Order isn't pinned by the language (scope-exit drop order is
+        // implementation-defined), but every name must appear exactly once.
+        assert(len(dwf_log) == 3, s"dwf_log should have length 3, got ${len(dwf_log)}")
+        // Check each character appears
+        var has_a = false
+        var has_b = false
+        var has_c = false
+        var i = 0
+        while i < len(dwf_log)
+            if dwf_log[i] == byte('a') then has_a = true
+            if dwf_log[i] == byte('b') then has_b = true
+            if dwf_log[i] == byte('c') then has_c = true
+            i = i + 1
+        assert(has_a && has_b && has_c, s"each of a/b/c should appear in '$dwf_log'")
+
+Nested deinits — outer's deinit reads through a `&Inner` field
+--------------------------------------------------------------
+
+The outer's deinit fires while inner is still alive. The deinit
+body can read fields through the still-valid struct, including
+chasing through a `&Inner` reference field.
+
+    struct DwfInner
+        v: int
+
+    struct DwfOuter
+        child: &DwfInner
+
+    DwfOuter.deinit() -> unit
+        dwf_log = dwf_log + str(self.child.v)
+
+    drop_outer() -> unit
+        val o: &DwfOuter = new DwfOuter(new DwfInner(42))
+
+    #test
+    test_outer_deinit_reads_inner_through_ref_field() -> unit
+        dwf_log = ""
+        drop_outer()
+        assert(dwf_log == "42", s"dwf_log should be '42', got '${dwf_log}'")
+
+    // TODO: also pin "outer's drop transitively decrements its &Inner field
+    // (firing inner's deinit)" once recursive ref-field-decr-on-struct-drop
+    // is implemented across all seven backends. Today no backend does it
+    // (the inner ref leaks on outer drop), so the test would fail uniformly
+    // — it's a separate language-implementation TODO, not a per-backend bug.

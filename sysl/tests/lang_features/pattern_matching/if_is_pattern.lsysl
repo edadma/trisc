@@ -1,0 +1,178 @@
+`if x is Pattern then ...` — one-arm match sugar
+================================================
+
+`if expr is Pattern then ...` is one-arm `match` sugar. It
+evaluates `expr` once, tests it against the pattern, and if
+the pattern matches, binds the pattern's variables for the
+duration of the `then` body. The `else` branch sees no
+bindings.
+
+This is the canonical "early-narrow" idiom for `Option` and
+`Result` — instead of writing a full `match` when you only
+care about one variant, write `if r is Ok(v) then use(v)`.
+
+This file pins the surface across all seven backends:
+
+  - Basic `Some(v)` / `None` discrimination, both branches.
+  - The bound variable's type is the pattern's payload type
+    (int, string, struct).
+  - The bound variable is visible only in the `then` arm,
+    not the `else` arm or after the `if`.
+  - The pattern can appear in an `if`/`else if` chain and
+    one-arm patterns can be stacked.
+
+    module sysl.tests.lang_features
+
+    enum IipMaybe[T]
+        IipSome(value: T)
+        IipNone
+
+    enum IipOutcome[T]
+        IipOk(value: T)
+        IipBad(reason: string)
+
+    struct IipPair
+        a: int
+        b: int
+
+`if x is Some(v)` — happy path
+------------------------------
+
+`x` is `Some(42)`. The pattern matches, `v` is bound to 42
+in the `then` body, and the body reads `v` to produce the
+result.
+
+    iip_unwrap_or(x: IipMaybe[int], dflt: int) -> int
+        if x is IipSome(v) then
+            return v
+        return dflt
+
+    #test
+    test_some_path_binds_payload() -> unit
+        val r = iip_unwrap_or(IipSome(42), -1)
+        assert(r == 42, s"Some-path should bind v=42, got $r")
+
+`if x is Some(v)` — failure path
+--------------------------------
+
+`x` is `None`. The pattern fails, the `then` body is
+skipped, the default is returned.
+
+    #test
+    test_none_path_returns_default() -> unit
+        val r = iip_unwrap_or(IipNone, -1)
+        assert(r == -1, s"None-path should return default, got $r")
+
+`if x is Pattern then ... else ...`
+-----------------------------------
+
+The else-arm form. The pattern bind is visible in the
+`then` arm only; the `else` arm cannot see the binding.
+
+    iip_label(x: IipMaybe[int]) -> string =
+        if x is IipSome(v) then
+            "got " + str(v)
+        else
+            "none"
+
+    #test
+    test_else_arm() -> unit
+        assert(iip_label(IipSome(7)) == "got 7",  "some 7")
+        assert(iip_label(IipSome(0)) == "got 0",  "some 0")
+        assert(iip_label(IipNone)    == "none",   "none")
+
+String payload bind
+-------------------
+
+The bound payload type follows the pattern. A `Some(string)`
+gives a `string` binding inside the `then` arm; concat works
+on it directly.
+
+    iip_describe_str(x: IipMaybe[string]) -> string =
+        if x is IipSome(s) then
+            "[" + s + "]"
+        else
+            "<empty>"
+
+    #test
+    test_string_payload_bind() -> unit
+        assert(iip_describe_str(IipSome("hi"))  == "[hi]",   "hi")
+        assert(iip_describe_str(IipSome(""))    == "[]",     "empty payload")
+        assert(iip_describe_str(IipNone)        == "<empty>", "none")
+
+Struct payload bind
+-------------------
+
+The pattern can carry a struct payload. The binding inside
+the `then` arm has the struct type and supports field
+access.
+
+    iip_pair_sum(x: IipMaybe[IipPair]) -> int =
+        if x is IipSome(p) then
+            p.a + p.b
+        else
+            0
+
+    #test
+    test_struct_payload_bind() -> unit
+        assert(iip_pair_sum(IipSome(IipPair(3, 4))) == 7,  "3+4")
+        assert(iip_pair_sum(IipSome(IipPair(0, 0))) == 0,  "0+0")
+        assert(iip_pair_sum(IipNone)                == 0,  "none")
+
+Two-variant data enum — chained `if .. is ..`
+---------------------------------------------
+
+A two-payload-variant enum `Outcome[T]` is `Ok(value)` or
+`Bad(reason)`. Two stacked `if .. is ..` patterns
+distinguish the two; the order of the checks doesn't matter
+because each variant is matched independently.
+
+    iip_format_outcome(o: IipOutcome[int]) -> string
+        if o is IipOk(v) then
+            return "ok=" + str(v)
+        if o is IipBad(why) then
+            return "bad=" + why
+        return "??"
+
+    #test
+    test_chained_one_arm_patterns() -> unit
+        assert(iip_format_outcome(IipOk(99))        == "ok=99",       "ok")
+        assert(iip_format_outcome(IipBad("oops"))   == "bad=oops",    "bad")
+
+Pattern doesn't bind in the else arm
+------------------------------------
+
+After `if x is Some(v) then ...`, the binding `v` is not
+visible in the else arm. We test this indirectly: the else
+arm reads only outer-scope names and `dflt`, and produces
+the expected default, which would not work if the binding
+leaked through.
+
+    iip_unwrap_or_string(x: IipMaybe[int], dflt: string) -> string =
+        if x is IipSome(v) then
+            "val=" + str(v)
+        else
+            "default=" + dflt
+
+    #test
+    test_else_arm_does_not_see_binding() -> unit
+        val none_path = iip_unwrap_or_string(IipNone, "missing")
+        assert(none_path == "default=missing", s"got '$none_path'")
+        val some_path = iip_unwrap_or_string(IipSome(5), "missing")
+        assert(some_path == "val=5", s"got '$some_path'")
+
+Pattern check called twice on the same value
+--------------------------------------------
+
+The same value passed through two distinct `if .. is ..`
+calls returns consistent results. Pins that the pattern
+check is a pure read — no side-effect on the value being
+matched, no buffer corruption after a first inspection.
+
+    #test
+    test_pattern_check_is_pure() -> unit
+        val x = IipSome(123)
+        val a = iip_unwrap_or(x, 0)
+        val b = iip_unwrap_or(x, 0)
+        assert(a == b, s"two checks should match: $a vs $b")
+        assert(a == 123, s"got $a")

@@ -1,0 +1,163 @@
+String concatenation — `a + b`
+==============================
+
+`a + b` where both operands are `string` produces an owned new
+buffer containing the concatenation. Operands aren't mutated;
+each call to `+` allocates a fresh result. The length of the
+result is the sum of the two operand lengths.
+
+This file pins the basic-concat surface: length math, empty-
+operand edge cases, ASCII vs multi-byte content, and order
+matters (`a + b ≠ b + a` when the operands differ).
+
+The intermediate-buffer-lifetime case (long `a + b + c + d`
+chain) is in a separate file — `string_concat_chain.lsysl`.
+
+    module sysl.tests.lang_features
+
+Two non-empty ASCII strings
+---------------------------
+
+The simplest case: concatenate two non-empty ASCII strings.
+The result is the byte-wise join.
+
+    #test
+    test_concat_two_words() -> unit
+        val a = "hello"
+        val b = "world"
+        val c = a + b
+        assert(c == "helloworld", s"got '$c'")
+        assert(len(c) == 10, s"len should be 10, got ${len(c)}")
+
+With a separator literal
+------------------------
+
+A common case: concat with a space (or other separator) in the
+middle, expressed as `a + " " + b`. Two `+` operations, two
+intermediate allocations, one final value.
+
+    #test
+    test_concat_with_space() -> unit
+        val a = "hello"
+        val b = "world"
+        val c = a + " " + b
+        assert(c == "hello world", s"got '$c'")
+        assert(len(c) == 11, s"len should be 11, got ${len(c)}")
+
+Empty-operand on each side
+--------------------------
+
+Concatenating with `""` is a no-op modulo allocation — the
+result equals the other operand. Both the left-empty and
+right-empty cases must be exact byte-equal to the non-empty
+operand.
+
+    #test
+    test_concat_empty_left() -> unit
+        val a = ""
+        val b = "tail"
+        val c = a + b
+        assert(c == "tail", s"left-empty: got '$c'")
+        assert(len(c) == 4, "left-empty length")
+
+    #test
+    test_concat_empty_right() -> unit
+        val a = "head"
+        val b = ""
+        val c = a + b
+        assert(c == "head", s"right-empty: got '$c'")
+        assert(len(c) == 4, "right-empty length")
+
+Both empty
+----------
+
+`"" + ""` is an empty string. Length 0, equal to `""`.
+
+    #test
+    test_concat_both_empty() -> unit
+        val c = "" + ""
+        assert(c == "", "both empty")
+        assert(len(c) == 0, "both empty length")
+
+Order matters
+-------------
+
+String `+` is not commutative — `a + b` and `b + a` produce
+different buffers (unless operands happen to be equal). This
+test pins that the codegen preserves operand order; a swap-
+operands bug would flip both lhs/rhs into the result.
+
+    #test
+    test_concat_order_matters() -> unit
+        val a = "foo"
+        val b = "bar"
+        assert(a + b == "foobar", "ab order")
+        assert(b + a == "barfoo", "ba order")
+        assert(a + b != b + a, "ab != ba")
+
+Original operands not mutated
+-----------------------------
+
+Concatenation produces a new buffer; the source operands keep
+their original contents. After `c = a + b`, `a` and `b` must
+still equal their literal initialisers.
+
+    #test
+    test_concat_does_not_mutate_operands() -> unit
+        val a = "alpha"
+        val b = "beta"
+        val c = a + b
+        assert(a == "alpha", s"a should still be 'alpha', got '$a'")
+        assert(b == "beta", s"b should still be 'beta', got '$b'")
+        assert(c == "alphabeta", s"c should be 'alphabeta', got '$c'")
+
+Length is the sum of operand lengths
+------------------------------------
+
+For ASCII content, `len(a + b) == len(a) + len(b)`. The
+codegen must size the result buffer correctly — a one-off-by-
+one would surface here.
+
+    #test
+    test_concat_length_is_sum() -> unit
+        val a = "abc"
+        val b = "defgh"
+        val c = a + b
+        assert(len(a) == 3, "len a")
+        assert(len(b) == 5, "len b")
+        assert(len(c) == 8, s"len c should be 8, got ${len(c)}")
+        assert(c == "abcdefgh", s"got '$c'")
+
+Multi-byte UTF-8 content
+------------------------
+
+Byte length is what `len` reports. A two-byte UTF-8 char
+appended to a one-byte ASCII char produces a 3-byte string.
+This pins that concat operates on bytes (no UTF-8-aware fast
+path that might miscount).
+
+    #test
+    test_concat_utf8_bytes() -> unit
+        val a = "a"
+        val b = "ñ"      // U+00F1, encoded as 0xC3 0xB1 — 2 bytes
+        val c = a + b
+        assert(len(a) == 1, "ASCII 'a' is 1 byte")
+        assert(len(b) == 2, "ñ is 2 bytes")
+        assert(len(c) == 3, s"a + ñ is 3 bytes, got ${len(c)}")
+        assert(c == "añ", "byte-equal to literal")
+
+Self-concat
+-----------
+
+`a + a` where `a` is the same variable — the source must not
+be aliased into the destination during the byte copy. A naive
+in-place implementation would corrupt mid-copy; this test
+pins that the result is the literal two-of-a concatenation.
+
+    #test
+    test_concat_self() -> unit
+        val a = "xyz"
+        val c = a + a
+        assert(c == "xyzxyz", s"a + a should be 'xyzxyz', got '$c'")
+        assert(len(c) == 6, "len 6")
+        assert(a == "xyz", s"a should still be 'xyz', got '$a'")

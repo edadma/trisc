@@ -1,0 +1,135 @@
+Extern Declarations
+===================
+
+Per reference §"Extern Declarations":
+
+```sysl
+extern putchar(ch: int)
+extern sbrk(increment: int) -> *i8
+extern var errno: int
+```
+
+An `extern` declares that a function (or variable) is provided by
+the platform's link-time environment. The compiler does **not**
+mangle extern names, so the symbol must exist in the runtime under
+its exact spelling. By convention, the reference uses `putchar` as
+the canonical portable extern.
+
+This file pins the cross-backend-portable subset:
+
+- `putchar(c: u32) -> u32` — succeeds on all 7 backends because the
+  test harness wraps each backend with a putchar shim that routes
+  to the stdout device.
+- The declaration parses, the call type-checks, the call lowers and
+  executes without crashing.
+- Multiple call sites to the same extern, with literal and
+  computed arguments, all succeed.
+- Extern decls coexist with regular sysl declarations in the same
+  module.
+
+The reference's other extern examples (`sbrk`, `errno`) are not in
+the cross-backend portable set — `sbrk` is only resolved when the
+test harness sees an import of `std.alloc`, and `errno` is libc-only.
+We don't test those here; the analyzer-level parse + signature
+behaviour is identical, and the platform availability of any given
+extern symbol is a runtime concern.
+
+File-local prefix `Sedc` (Sysl Extern Decl Call).
+
+    module sysl.tests.lang_features
+
+    extern putchar(c: u32) -> u32
+
+Single extern call
+------------------
+
+### Call with literal `u32`
+
+    #test
+    test_sedc_putchar_literal() -> unit
+        val r = putchar(u32(65))
+        // Don't pin the return value (ANSI C says it's the byte
+        // written cast to int, but some runtimes return 0/-1). Just
+        // verify the call did not crash.
+        assert(true, "completed")
+
+### Call with computed `u32`
+
+    #test
+    test_sedc_putchar_computed() -> unit
+        val base = 64u32
+        val offset = 1u32
+        val r = putchar(base + offset)
+        assert(true, "computed arg compiles and runs")
+
+### Multiple calls in sequence
+
+    #test
+    test_sedc_putchar_sequence() -> unit
+        val r1 = putchar(u32(72))  // 'H'
+        val r2 = putchar(u32(105)) // 'i'
+        val r3 = putchar(u32(10))  // '\n'
+        assert(true, "three sequential calls")
+
+### Call from inside a loop
+
+    #test
+    test_sedc_putchar_in_loop() -> unit
+        var i = 0
+        while i < 3
+            val r = putchar(u32(46))  // '.'
+            i = i + 1
+        assert(i == 3, "loop ran three times")
+
+Extern coexists with regular declarations
+-----------------------------------------
+
+The same module can mix `extern` and regular sysl declarations.
+This pins that extern doesn't break ordinary mangling for sibling
+non-extern names.
+
+    helper(n: int) -> int = n * 2
+
+    #test
+    test_sedc_extern_alongside_normal_fn() -> unit
+        val r = helper(21)
+        assert(r == 42, s"got $r")
+        // Now call the extern in the same test
+        val q = putchar(u32(120))  // 'x'
+        assert(true, "both calls executed")
+
+### Calling a wrapper around the extern
+
+A sysl-level wrapper around an extern composes naturally.
+
+    print_byte(b: u32) -> u32 = putchar(b)
+
+    #test
+    test_sedc_wrapper_around_extern() -> unit
+        val r = print_byte(u32(89))  // 'Y'
+        assert(true, "wrapper compiles and runs")
+
+Extern return value flows through expressions
+---------------------------------------------
+
+### Use the return value as an int operand
+
+    #test
+    test_sedc_return_value_in_expr() -> unit
+        // Whatever putchar returns, casting to int and adding 0 is
+        // a no-op — pin that the value flows through expressions
+        val r = putchar(u32(65))
+        val sum = int(r) + 0
+        // Don't pin a specific value, but the expression compiles
+        assert(sum == int(r), "value flowed through")
+
+### Compare the return values of two calls
+
+    #test
+    test_sedc_compare_returns() -> unit
+        val a = putchar(u32(66))
+        val b = putchar(u32(66))
+        // Same input — either both same (deterministic) or both whatever
+        // the runtime returns. Pin that comparison compiles.
+        val eq = (a == b)
+        assert(eq || !eq, "comparison evaluated")

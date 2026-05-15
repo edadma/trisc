@@ -1,0 +1,63 @@
+Field self-concat through a pointer
+===================================
+
+When a function holds a `*Struct` parameter and assigns a
+new value to one of its string fields where the RHS reads
+the same field, the codegen must evaluate the RHS *before*
+decrementing the old buffer's refcount. The two operations
+in the wrong order produce a textbook use-after-free: the
+old buffer is freed, then the RHS reads from it for the
+concat.
+
+The failure was silent on the bare-metal runtimes — they
+ship a bump allocator whose `free()` is a no-op, so the
+old buffer's bytes survive. On any real allocator
+(llvm-host, trisc's bump+recycle) the freed memory is
+either zeroed out or immediately reused by the next
+malloc — and the concat reads garbage.
+
+This test pins the contract directly, without involving
+`defer`. The earlier `defer_lifo` test exercised the same
+codegen path because each deferred body lowers to a
+field-assign of the same shape, but the surface is broader
+than defer — *any* `t.field = t.field op ...` through a
+pointer triggers it.
+
+    module sysl.tests.lang_features
+
+    struct Bag
+        s: string
+
+    append_to_bag(b: *Bag, suffix: string) -> unit
+        b.s = b.s + suffix
+
+    #test
+    test_three_appends_through_pointer() -> unit
+        var b = Bag("a")
+        append_to_bag(&b, "b")
+        append_to_bag(&b, "c")
+        append_to_bag(&b, "d")
+        assert(b.s == "abcd", s"expected 'abcd', got '${b.s}'")
+
+    #test
+    test_concat_with_long_strings() -> unit
+        // Longer strings make malloc-recycle more likely to scribble: each
+        // concat allocates a new buffer and frees the previous one. If the
+        // RHS reads the freed buffer for memcpy, content is corrupted.
+        var b = Bag("hello")
+        append_to_bag(&b, ", ")
+        append_to_bag(&b, "world")
+        append_to_bag(&b, "!")
+        assert(b.s == "hello, world!", s"expected 'hello, world!', got '${b.s}'")
+
+    #test
+    test_inline_self_concat() -> unit
+        // Same pattern but with the assignment inline (no helper). Pins the
+        // codegen path for `t.s = t.s + lit` directly.
+        var b = Bag("")
+        // Use a local pointer so the assignment goes through `*Bag` semantics.
+        var p: *Bag = &b
+        p.s = p.s + "x"
+        p.s = p.s + "y"
+        p.s = p.s + "z"
+        assert(b.s == "xyz", s"expected 'xyz', got '${b.s}'")

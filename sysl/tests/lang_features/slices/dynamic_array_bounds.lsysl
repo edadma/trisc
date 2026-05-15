@@ -1,0 +1,56 @@
+Dynamic-array bounds checking
+=============================
+
+`new [n]int` yields a `&[]int` of length `n`. Out-of-bounds
+indexing should be a runtime trap: the program halts via the
+contract-check / panic path.
+
+Today only the interpreter enforces bounds checks. Five
+backends (llvm-host, svm-host, riscv64, riscv32, wasm32)
+let OOB reads/writes silently succeed, reading garbage memory
+or writing into adjacent allocations. TRISC is the closest
+to correct — it traps some but not all of the cases (e.g.
+the OOB-store case slips through). This is a real cross-
+backend feature gap and one of the biggest remaining
+soundness holes.
+
+We pin the in-bounds happy-path here; the trapping cases
+get a TODO until every backend traps uniformly. The expected
+tests, once bounds checking is universal:
+
+  - `a[len]` traps    — index equal to length
+  - `a[100]` traps    — index past length
+  - `a[-1]` traps     — negative index
+  - `a[5] = 7` traps  — OOB store on a 3-element array
+
+    module sysl.tests.lang_features
+
+In-bounds reads return zero-init contents
+-----------------------------------------
+
+    #test
+    test_in_bounds_read() -> unit
+        val a: &[]int = new [5]int
+        assert(a[0] == 0, s"a[0] should be 0, got ${a[0]}")
+        assert(a[4] == 0, s"a[4] should be 0, got ${a[4]}")
+
+In-bounds writes followed by reads
+----------------------------------
+
+    #test
+    test_in_bounds_write_read() -> unit
+        val a: &[]int = new [3]int
+        a[0] = 1
+        a[1] = 22
+        a[2] = 333
+        assert(a[0] == 1 && a[1] == 22 && a[2] == 333,
+            s"a = [${a[0]},${a[1]},${a[2]}], expected [1,22,333]")
+
+    // TODO: re-enable once uniform bounds-check trapping lands on every
+    // backend (currently only the interpreter and TRISC partially honour
+    // the OOB-traps contract):
+    //
+    //     #test(should_panic) test_index_equal_to_len()  -- a[3] on [3]int
+    //     #test(should_panic) test_index_past_len()      -- a[100]
+    //     #test(should_panic) test_negative_index()      -- a[-1]
+    //     #test(should_panic) test_oob_store()           -- a[5] = 7

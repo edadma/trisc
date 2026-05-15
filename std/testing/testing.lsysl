@@ -140,3 +140,45 @@ Tests
     #test(should_panic)
     test_assert_in_range_panics_below() -> unit
         assert_in_range(0, 1, 10, "below")
+
+
+Language-feature smoke tests
+============================
+
+A testing framework relies on the host language working
+correctly. These tests pin the few language features the
+framework itself uses (or wants to use) but that don't
+otherwise appear in `std.testing`'s own assertion helpers.
+A miscompile here flags an incompatibility between the
+backend and any test suite that ever writes a `defer`
+block — which the framework should report as cleanly as
+any other failure.
+
+### defer LIFO ordering
+
+`defer stmt` queues a statement to run when the enclosing
+function exits; multiple defers run in last-in-first-out
+order and the deferred bodies are re-evaluated at exit
+time (not eagerly at the defer site). To observe the order
+from a `#test` whose own scope is what fires the defers,
+we drive them through a helper function that mutates state
+behind a pointer. The test then asserts the assembled
+state after the helper returns.
+
+If a backend swallows defers, fires them eagerly, or
+inverts their order, the assembled string diverges from
+the expected `"321"`.
+
+    struct DeferTrace
+        s: string
+
+    fill_defer_trace(t: *DeferTrace) -> unit
+        defer t.s = t.s + "1"
+        defer t.s = t.s + "2"
+        defer t.s = t.s + "3"
+
+    #test
+    test_defer_lifo_ordering() -> unit
+        var t = DeferTrace("")
+        fill_defer_trace(&t)
+        assert_eq_str(t.s, "321", "defer LIFO")

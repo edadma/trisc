@@ -1,0 +1,250 @@
+Default Parameter Values — Complex Expressions
+==============================================
+
+Per reference §"Default Parameter Values":
+
+> Default expressions are evaluated at each call site (re-evaluated
+> per call, not cached). They can reference module-level vals and
+> constants, but not other parameters or local variables. Constant
+> defaults are folded by the analyzer.
+
+This file pins defaults that aren't just literals: arithmetic over
+module-level `val`/`const`, function calls, boolean predicates,
+ternary-like patterns via `if`-expressions, nested concat over
+string `val`s, struct-construction defaults, and per-call
+re-evaluation against a `val` whose semantics are well-defined.
+
+The basics (single literal default, multiple trailing defaults,
+overriding) live in `default_args_basic.lsysl` — see that file
+for the happy-path pins.
+
+File-local prefix `Sdace` (Sysl Default Args Complex Expr).
+
+    module sysl.tests.lang_features
+
+    val A = 10
+    val B = 20
+    val NAME_PREFIX = "user:"
+    val SUFFIX = "!"
+    const SHIFT: int = 4
+    const ZERO: int = 0
+
+Default that is an arithmetic expression
+----------------------------------------
+
+### `val + val * literal - const`
+
+    f_arith(x: int, k: int = A + B * 2 - SHIFT) -> int = x + k
+
+    #test
+    test_sdace_arith_default_omitted() -> unit
+        // 10 + 40 - 4 = 46
+        val v = f_arith(0)
+        assert(v == 46, s"got $v")
+
+    #test
+    test_sdace_arith_default_overridden() -> unit
+        val v = f_arith(0, 1)
+        assert(v == 1, s"override; got $v")
+
+### Default referencing two different `val`s
+
+    f_two_vals(x: int, k: int = A + B) -> int = x + k
+
+    #test
+    test_sdace_two_vals_default() -> unit
+        val v = f_two_vals(5)
+        assert(v == 35, s"5 + 10 + 20; got $v")
+
+### Default referencing `const`-only — analyzer folds
+
+    f_const_only(x: int, k: int = SHIFT * 2 + ZERO) -> int = x + k
+
+    #test
+    test_sdace_const_folded_default() -> unit
+        val v = f_const_only(1)
+        assert(v == 9, s"1 + (4*2+0); got $v")
+
+Default that is a function call
+-------------------------------
+
+### Default = pure function applied to a `val`
+
+    dbl(n: int) -> int = n * 2
+
+    f_fn_call(x: int, k: int = dbl(A) + 1) -> int = x + k
+
+    #test
+    test_sdace_fn_call_default() -> unit
+        // dbl(10) + 1 = 21
+        val v = f_fn_call(100)
+        assert(v == 121, s"got $v")
+
+### Default = nested function call
+
+    quad(n: int) -> int = dbl(dbl(n))
+
+    f_nested_fn(x: int, k: int = quad(A)) -> int = x + k
+
+    #test
+    test_sdace_nested_fn_call_default() -> unit
+        val v = f_nested_fn(0)
+        assert(v == 40, s"dbl(dbl(10)); got $v")
+
+Default that is a boolean expression
+------------------------------------
+
+### Default = comparison
+
+    f_bool_cmp(x: int, on: bool = A > 5) -> int
+        if on then return x + 1
+        return x
+
+    #test
+    test_sdace_bool_cmp_default() -> unit
+        val v = f_bool_cmp(10)
+        assert(v == 11, s"10>5 -> true -> +1; got $v")
+
+    #test
+    test_sdace_bool_cmp_overridden() -> unit
+        val v = f_bool_cmp(10, false)
+        assert(v == 10, s"override false; got $v")
+
+### Default = `&&` combination
+
+    f_bool_and(x: int, on: bool = A > 0 && B > 0) -> int
+        if on then return x + 1
+        return x
+
+    #test
+    test_sdace_bool_and_default() -> unit
+        val v = f_bool_and(0)
+        assert(v == 1, s"both positive; got $v")
+
+Default that is an `if`-expression
+----------------------------------
+
+### Default = `if cond then a else b` over `val`s
+
+    f_if_expr(x: int, k: int = if A > B then A else B) -> int = x + k
+
+    #test
+    test_sdace_if_expr_default_picks_else() -> unit
+        // A=10, B=20 — A>B false, k = B = 20
+        val v = f_if_expr(0)
+        assert(v == 20, s"got $v")
+
+    #test
+    test_sdace_if_expr_default_overridden() -> unit
+        val v = f_if_expr(0, 99)
+        assert(v == 99, s"override; got $v")
+
+Default that is a string concat
+-------------------------------
+
+### `val + literal`
+
+    f_str_default(s: string, sep: string = NAME_PREFIX + SUFFIX) -> string = s + sep
+
+    #test
+    test_sdace_str_concat_default() -> unit
+        val r = f_str_default("ok ")
+        assert(r == "ok user:!", s"got '$r'")
+
+### Multi-piece concat with literals
+
+    f_str_concat(name: string, prefix: string = "[" + "DBG" + "] ") -> string = prefix + name
+
+    #test
+    test_sdace_str_multi_concat_default() -> unit
+        val r = f_str_concat("hi")
+        assert(r == "[DBG] hi", s"got '$r'")
+
+    #test
+    test_sdace_str_multi_concat_overridden() -> unit
+        val r = f_str_concat("hi", "*")
+        assert(r == "*hi", s"got '$r'")
+
+Per-call re-evaluation
+----------------------
+
+Per the reference, default expressions are evaluated **at each call
+site** (re-evaluated per call). With pure expressions over a `val`,
+two calls produce the same value — but each call must still evaluate
+the expression. We exercise this by calling the same function multiple
+times in a row; if the default were cached as a stale captured value,
+mutation between calls (when it's allowed) would surface. With
+module-level `val` the result is necessarily equal between calls; we
+pin equality rather than mutation here.
+
+    f_reeval(x: int, k: int = A + B) -> int = x + k
+
+    #test
+    test_sdace_per_call_consistency() -> unit
+        val v1 = f_reeval(1)
+        val v2 = f_reeval(2)
+        val v3 = f_reeval(3)
+        assert(v1 == 31, s"v1; got $v1")
+        assert(v2 == 32, s"v2; got $v2")
+        assert(v3 == 33, s"v3; got $v3")
+
+Multiple complex-expression defaults in one fn
+----------------------------------------------
+
+    f_two_complex(
+        x: int,
+        a: int = A + B,
+        b: int = dbl(SHIFT)
+    ) -> int = x + a + b
+
+    #test
+    test_sdace_two_complex_both_omitted() -> unit
+        // x=0 + (10+20) + dbl(4)=8 = 38
+        val v = f_two_complex(0)
+        assert(v == 38, s"got $v")
+
+    #test
+    test_sdace_two_complex_first_supplied() -> unit
+        val v = f_two_complex(0, 100)
+        assert(v == 108, s"100 + dbl(4); got $v")
+
+    #test
+    test_sdace_two_complex_both_supplied() -> unit
+        val v = f_two_complex(0, 100, 200)
+        assert(v == 300, s"override both; got $v")
+
+Mixed type defaults — int + bool + string
+-----------------------------------------
+
+    f_mixed(
+        x: int,
+        k: int = A * 3,
+        on: bool = B > 0,
+        tag: string = NAME_PREFIX + "tag"
+    ) -> string
+        var n = x + k
+        if on then n = n + 1
+        return tag + " " + str(n)
+
+    #test
+    test_sdace_mixed_all_defaults() -> unit
+        // k=30, on=true so +1, tag="user:tag"; n=0+30+1=31
+        val r = f_mixed(0)
+        assert(r == "user:tag 31", s"got '$r'")
+
+    #test
+    test_sdace_mixed_one_override() -> unit
+        val r = f_mixed(0, 5)
+        // k=5, on=true so +1; n=0+5+1=6
+        assert(r == "user:tag 6", s"got '$r'")
+
+    #test
+    test_sdace_mixed_two_overrides() -> unit
+        val r = f_mixed(0, 5, false)
+        // k=5, on=false, no +1; n=5
+        assert(r == "user:tag 5", s"got '$r'")
+
+    #test
+    test_sdace_mixed_three_overrides() -> unit
+        val r = f_mixed(0, 5, false, "X")
+        assert(r == "X 5", s"got '$r'")

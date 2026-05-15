@@ -1,0 +1,226 @@
+Default Parameter Values — Basics
+==================================
+
+Per reference §"Default Parameter Values", parameters can have
+default values via `= expr` after the type. Defaults must be
+**trailing** — once a parameter has a default, all later params
+must too. At a call site, trailing args may be omitted and the
+default expression is evaluated then.
+
+This file pins the basic happy paths: trailing default, multiple
+trailing defaults, mid-omission, default referencing a module-
+level `val`, default with a non-trivial constant expression.
+
+Re-evaluation per call is exercised, but only against an
+immutable module-level `val` — mutable globals as default
+sources are out of scope for the "basic" file.
+
+File-local prefix `Sdab` (Sysl Default Args Basic).
+
+    module sysl.tests.lang_features
+
+    val BASE = 100
+    const SHIFT: int = 4
+
+Trailing default — single
+--------------------------
+
+### `greet(x, y = 10)` — y omitted
+
+    greet(x: int, y: int = 10) -> int = x + y
+
+    #test
+    test_sdab_single_default_omitted() -> unit
+        assert(greet(32) == 42, s"greet(32); got ${greet(32)}")
+
+### `greet(x, y = 10)` — y supplied
+
+    #test
+    test_sdab_single_default_overridden() -> unit
+        assert(greet(32, 100) == 132, s"greet(32,100); got ${greet(32,100)}")
+
+### Default still used when supplied value equals it
+
+    #test
+    test_sdab_single_default_supplied_equals_default() -> unit
+        assert(greet(5, 10) == 15, "explicit 10 same as default")
+
+### Default with the same expression at different call sites
+
+Two call sites with the default each see the same value because
+the default expression is a literal — no observable difference.
+
+    #test
+    test_sdab_single_default_two_call_sites() -> unit
+        assert(greet(1) + greet(2) == 23, "1+10 + 2+10 = 23")
+
+Trailing defaults — multiple
+-----------------------------
+
+### Two trailing defaults, both omitted
+
+    add3(a: int, b: int = 2, c: int = 3) -> int = a + b + c
+
+    #test
+    test_sdab_two_defaults_both_omitted() -> unit
+        assert(add3(10) == 15, s"10+2+3; got ${add3(10)}")
+
+### Two trailing defaults, one supplied, one omitted
+
+    #test
+    test_sdab_two_defaults_one_supplied() -> unit
+        assert(add3(10, 20) == 33, s"10+20+3; got ${add3(10,20)}")
+
+### Two trailing defaults, both supplied
+
+    #test
+    test_sdab_two_defaults_both_supplied() -> unit
+        assert(add3(10, 20, 30) == 60, s"10+20+30; got ${add3(10,20,30)}")
+
+Default referencing a module-level `val`
+-----------------------------------------
+
+### `val BASE = 100`, used as default
+
+    base_plus(x: int, k: int = BASE) -> int = x + k
+
+    #test
+    test_sdab_default_from_val() -> unit
+        assert(base_plus(5) == 105, s"5+BASE; got ${base_plus(5)}")
+        assert(base_plus(5, 7) == 12, s"explicit; got ${base_plus(5,7)}")
+
+### Default is `BASE * 2` — non-trivial constant expression
+
+    compute(x: int, k: int = BASE * 2) -> int = x + k
+
+    #test
+    test_sdab_default_from_val_expr() -> unit
+        assert(compute(42) == 242, s"42+200; got ${compute(42)}")
+        assert(compute(42, 1) == 43, s"explicit; got ${compute(42,1)}")
+
+### Default references a `const`
+
+    shift_by(x: int, k: int = SHIFT) -> int = x + k
+
+    #test
+    test_sdab_default_from_const() -> unit
+        assert(shift_by(10) == 14, s"10+SHIFT; got ${shift_by(10)}")
+        assert(shift_by(10, 0) == 10, "explicit zero overrides const default")
+
+Defaults of different types
+----------------------------
+
+### String default — omitted
+
+    sep_join(s: string, sep: string = "-") -> string = s + sep + s
+
+    #test
+    test_sdab_string_default_omitted() -> unit
+        val r = sep_join("ab")
+        assert(r == "ab-ab", s"got '$r'")
+
+### String default — overridden
+
+    #test
+    test_sdab_string_default_overridden() -> unit
+        val r = sep_join("ab", "::")
+        assert(r == "ab::ab", s"got '$r'")
+
+### Empty-string default
+
+    suffix(s: string, ext: string = "") -> string = s + ext
+
+    #test
+    test_sdab_default_empty_string() -> unit
+        assert(suffix("file") == "file", "empty default")
+        assert(suffix("file", ".txt") == "file.txt", "explicit")
+
+### Bool default
+
+    flag(n: int, on: bool = true) -> int
+        if on then return n + 1
+        return n
+
+    #test
+    test_sdab_default_bool_true_omitted() -> unit
+        assert(flag(10) == 11, "default on=true")
+
+    #test
+    test_sdab_default_bool_false_explicit() -> unit
+        assert(flag(10, false) == 10, "explicit false overrides default true")
+
+### Negative integer literal default
+
+    bias(x: int, b: int = -5) -> int = x + b
+
+    #test
+    test_sdab_default_negative_literal() -> unit
+        assert(bias(20) == 15, s"20-5; got ${bias(20)}")
+        assert(bias(20, 5) == 25, "explicit positive overrides")
+
+Mixed required + multiple-default pattern
+------------------------------------------
+
+### `pad(s, ch = "-", n = 3)` — both defaults omitted
+
+    pad(s: string, ch: string = "-", n: int = 3) -> string
+        var out = s
+        var i = 0
+        while i < n
+            out = out + ch
+            i = i + 1
+        return out
+
+    #test
+    test_sdab_pad_both_defaults() -> unit
+        val r = pad("hi")
+        assert(r == "hi---", s"got '$r'")
+
+### `pad` — one default supplied, one omitted
+
+    #test
+    test_sdab_pad_one_default() -> unit
+        val r = pad("hi", "x")
+        assert(r == "hixxx", s"got '$r'")
+
+### `pad` — both defaults supplied
+
+    #test
+    test_sdab_pad_no_defaults() -> unit
+        val r = pad("hi", "z", 5)
+        assert(r == "hizzzzz", s"got '$r'")
+
+### `pad` with zero count — default `ch` not consumed
+
+    #test
+    test_sdab_pad_zero_count() -> unit
+        assert(pad("hi", "-", 0) == "hi", "n=0 yields input unchanged")
+
+Defaults vs. expressions at call site
+--------------------------------------
+
+### Caller passes an expression, not a literal
+
+    #test
+    test_sdab_default_with_expr_arg() -> unit
+        val n = 3 * 7
+        assert(greet(n) == 31, s"greet(21); got ${greet(n)}")
+
+### Default in a return-value context
+
+    #test
+    test_sdab_default_in_return_chain() -> unit
+        val v = greet(10) + greet(20)
+        assert(v == 50, s"10+10 + 20+10; got $v")
+
+### Default function called inside another default's call
+
+A function whose default is itself a `val` can be the body of
+another function. No nesting of default *expressions* — just
+nested calls.
+
+    wrap(x: int, k: int = BASE) -> int = compute(x + k)
+
+    #test
+    test_sdab_nested_default_call() -> unit
+        assert(wrap(0) == 300, s"compute(BASE) = BASE+200 = 300; got ${wrap(0)}")

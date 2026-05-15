@@ -1,0 +1,84 @@
+Slice descriptor — passing across calls
+========================================
+
+A slice's runtime representation is a fat-pointer descriptor:
+`{ptr, len, cap}` (plus an opaque backref field for ARC). When
+passed to a function, the descriptor's BYTES are passed by
+value — but the backing array is shared, since both sides hold
+the same `ptr`. Writes through the callee's slice are visible
+to the caller's slice (and to the source array, if any).
+
+These tests pin:
+
+  - Element mutation through a slice parameter is visible to
+    the caller.
+  - `len(slice)` works inside the callee (descriptor carries
+    len).
+  - A slice over a sub-range still points at the original
+    backing — mutations through the slice still hit the
+    underlying source.
+
+    module sysl.tests.lang_features
+
+Pass slice, mutate elements, caller sees changes
+------------------------------------------------
+
+    fill_slice(s: []int, v: int) -> unit
+        var i = 0
+        while i < len(s)
+            s[i] = v
+            i = i + 1
+
+    #test
+    test_slice_param_writes_visible() -> unit
+        var a = [0, 0, 0, 0, 0]
+        fill_slice(a[:], 42)
+        // Every element of a should now be 42
+        var ok = true
+        var i = 0
+        while i < len(a)
+            if a[i] != 42 then ok = false
+            i = i + 1
+        assert(ok, s"a should be filled with 42, got a[0]=${a[0]} a[4]=${a[4]}")
+
+Callee can read length
+----------------------
+
+    sum_slice(s: []int) -> int
+        var total = 0
+        var i = 0
+        while i < len(s)
+            total = total + s[i]
+            i = i + 1
+        return total
+
+    #test
+    test_callee_reads_length() -> unit
+        var a = [1, 2, 3, 4, 5]
+        assert(sum_slice(a[:]) == 15, s"sum_slice should be 15, got ${sum_slice(a[:])}")
+        // Sub-slice: just middle three
+        assert(sum_slice(a[1:4]) == 9, s"sum_slice(a[1:4]) should be 9, got ${sum_slice(a[1:4])}")
+
+Mutations through a sub-slice still hit source
+----------------------------------------------
+
+    #test
+    test_subslice_param_writes_back() -> unit
+        var a = [10, 20, 30, 40, 50]
+        fill_slice(a[1:4], 99)
+        // a[1..<4] should now be 99, edges unchanged
+        assert(a[0] == 10 && a[4] == 50, s"edges: a[0]=${a[0]} a[4]=${a[4]}, expected 10 50")
+        assert(a[1] == 99 && a[2] == 99 && a[3] == 99,
+            s"middle: a[1..3] = (${a[1]},${a[2]},${a[3]}), expected (99,99,99)")
+
+Slice over a dynamic-array, passed to callee
+--------------------------------------------
+
+    #test
+    test_dynamic_array_passed_as_slice() -> unit
+        val d: &[]int = new [4]int
+        var i = 0
+        while i < len(d)
+            d[i] = i + 1
+            i = i + 1
+        assert(sum_slice(d[:]) == 10, s"sum 1..4 should be 10, got ${sum_slice(d[:])}")

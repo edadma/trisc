@@ -1,0 +1,194 @@
+`str()` builtin — converting values to their printed form
+=========================================================
+
+`str(x)` returns the canonical string representation of a
+value. Per the reference, it works on:
+
+  - signed integer types — decimal, with a leading `-` on
+    negative values;
+  - `string` — identity, returns the argument unchanged;
+  - data-enum (tagged union) values — the variant name as a
+    string, regardless of payload contents;
+  - boolean and float (**partial coverage — see TODO**).
+
+`str()` is **not** yet supported on simple integer enums or
+struct values; the reference explicitly calls these out as
+gaps.
+
+File-local prefix `Sbi` (str-builtin).
+
+**TODO — cross-backend divergence found 2026-05-15, dropped
+from this file pending fixes:**
+
+  - `str(bool)` diverges three ways across the seven
+    backends:
+      * "1" / "0" — interpreter, trisc, riscv64, riscv32
+      * "true" / "false" — svm-host
+      * crash (LLVM `unreachable` / SIGBUS) — llvm-host,
+        wasm32
+    A language-design decision is needed (which output form
+    is canonical) before pinning. See
+    `feedback_sysl_str_bool_divergence.md`.
+
+  - `str(float)` on svm-host emits the placeholder string
+    `"???"` (unimplemented). The other six backends agree on
+    either `"3.14"` (interpreter / LLVM-host / RV / wasm32)
+    or `"3.140000"` (TRISC). See
+    `feedback_sysl_svm_str_float_unimplemented.md`.
+
+This file pins the four surfaces that *do* agree across all
+seven backends — `str()` on int / string / data-enum / fn-
+boundary / interpolation slot.
+
+    module sysl.tests.lang_features
+
+Integers
+--------
+
+`str()` on an integer produces its base-10 decimal
+representation. Negative integers gain a leading `-`. Zero
+is `"0"` (not `"-0"` or empty). The result is identical
+across calls and across the seven backends.
+
+    #test
+    test_sbi_int_positive() -> unit
+        val s = str(42)
+        assert(s == "42", s"str(42); got '$s'")
+
+    #test
+    test_sbi_int_zero() -> unit
+        val s = str(0)
+        assert(s == "0", s"str(0); got '$s'")
+
+    #test
+    test_sbi_int_negative() -> unit
+        val s = str(-7)
+        assert(s == "-7", s"str(-7); got '$s'")
+        val t = str(-1)
+        assert(t == "-1", s"str(-1); got '$t'")
+
+    #test
+    test_sbi_int_large() -> unit
+        val s = str(1000000)
+        assert(s == "1000000", s"str(1000000); got '$s'")
+
+    #test
+    test_sbi_int_via_var() -> unit
+        val n = 17
+        val s = str(n)
+        assert(s == "17", s"str(var=17); got '$s'")
+
+    #test
+    test_sbi_int_via_expr() -> unit
+        val s = str(2 + 3)
+        assert(s == "5", s"str(2+3); got '$s'")
+
+    sbi_double(n: int) -> int = n + n
+
+    #test
+    test_sbi_int_through_fn() -> unit
+        val s = str(sbi_double(5))
+        assert(s == "10", s"str(double(5)); got '$s'")
+
+Strings — identity
+------------------
+
+`str()` on a string is the identity — it returns a string
+equal to its argument. The result is comparable with `==`
+and has the same `len(...)`.
+
+    #test
+    test_sbi_string_identity_basic() -> unit
+        val s = str("hello")
+        assert(s == "hello", s"str('hello'); got '$s'")
+        assert(len(s) == 5, "length preserved")
+
+    #test
+    test_sbi_string_identity_empty() -> unit
+        val s = str("")
+        assert(s == "", s"str(''); got '$s'")
+        assert(len(s) == 0, "empty length 0")
+
+    #test
+    test_sbi_string_identity_utf8() -> unit
+        val s = str("héllo")
+        assert(s == "héllo", s"str('héllo'); got '$s'")
+        assert(len(s) == 6, "byte length preserved (é is 2 bytes)")
+
+    #test
+    test_sbi_string_identity_via_var() -> unit
+        val src = "abc"
+        val s = str(src)
+        assert(s == src, "str(var) preserves bytes")
+        assert(s == "abc", "and matches the literal")
+
+Data enums — variant name
+-------------------------
+
+`str()` on a tagged-union value returns its variant name,
+regardless of the payload. Nullary variants and variants
+with int / string / multi-field payloads all yield the
+same bare name.
+
+    enum SbiShape
+        SbiCircle(radius: int)
+        SbiSquare
+        SbiText(label: string)
+        SbiPair(a: int, b: int)
+
+    #test
+    test_sbi_enum_payload_int() -> unit
+        val s = str(SbiCircle(5))
+        assert(s == "SbiCircle", s"str(SbiCircle(5)); got '$s'")
+
+    #test
+    test_sbi_enum_nullary() -> unit
+        val s = str(SbiSquare)
+        assert(s == "SbiSquare", s"str(SbiSquare); got '$s'")
+
+    #test
+    test_sbi_enum_payload_string() -> unit
+        val s = str(SbiText("hi"))
+        assert(s == "SbiText", s"str(SbiText('hi')); got '$s'")
+
+    #test
+    test_sbi_enum_multi_field() -> unit
+        val s = str(SbiPair(1, 2))
+        assert(s == "SbiPair", s"str(SbiPair(1,2)); got '$s'")
+
+    #test
+    test_sbi_enum_var() -> unit
+        val v = SbiCircle(99)
+        assert(str(v) == "SbiCircle", "via var")
+
+`str()` round-trips through other surfaces
+------------------------------------------
+
+The result of `str()` is a normal `string` — it concatenates
+with other strings, indexes by byte, returns from / passes
+to functions, and can itself be the argument of another
+`str(...)` call (string identity is idempotent).
+
+    #test
+    test_sbi_concat() -> unit
+        val s = "n=" + str(42)
+        assert(s == "n=42", s"concat with str(int); got '$s'")
+
+    #test
+    test_sbi_byte_index() -> unit
+        val s = str(123)
+        assert(s[0] == byte('1'), "first byte of '123' is '1'")
+        assert(s[2] == byte('3'), "last byte of '123' is '3'")
+
+    #test
+    test_sbi_idempotent_on_string() -> unit
+        val once = str("hello")
+        val twice = str(once)
+        assert(twice == once, "str(str(s)) == str(s)")
+        assert(twice == "hello", "and equals the source")
+
+    #test
+    test_sbi_in_interp_slot() -> unit
+        val n = 7
+        val out = s"x=${str(n)}"
+        assert(out == "x=7", s"str() inside s'...'; got '$out'")

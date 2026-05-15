@@ -1,0 +1,65 @@
+Array of value structs
+======================
+
+An `[N]Struct` array stores `N` value structs inline. Each
+element is a value: indexing yields the struct's bytes,
+field-assignment writes through to the underlying storage,
+and the whole array follows value-struct copy semantics on
+assignment / by-value pass.
+
+    module sysl.tests.lang_features
+
+    struct AosCell
+        x: int
+        y: int
+
+Read field of array element
+---------------------------
+
+    #test
+    test_aos_read_field() -> unit
+        var arr = [AosCell(1, 2), AosCell(3, 4), AosCell(5, 6)]
+        assert(arr[0].x == 1, s"arr[0].x should be 1, got ${arr[0].x}")
+        assert(arr[1].y == 4, s"arr[1].y should be 4, got ${arr[1].y}")
+        assert(arr[2].x == 5 && arr[2].y == 6, s"arr[2] = (${arr[2].x},${arr[2].y}), want (5,6)")
+
+Write field of array element through indexing
+---------------------------------------------
+
+    #test
+    test_aos_write_field() -> unit
+        var arr = [AosCell(0, 0), AosCell(0, 0), AosCell(0, 0)]
+        arr[0].x = 10
+        arr[1].y = 20
+        arr[2].x = 30
+        arr[2].y = 40
+        assert(arr[0].x == 10, s"arr[0].x should be 10, got ${arr[0].x}")
+        assert(arr[1].y == 20, s"arr[1].y should be 20, got ${arr[1].y}")
+        assert(arr[2].x == 30 && arr[2].y == 40,
+            s"arr[2] = (${arr[2].x},${arr[2].y}), want (30,40)")
+
+Write whole element through indexing
+------------------------------------
+
+    #test
+    test_aos_write_element() -> unit
+        var arr = [AosCell(1, 1), AosCell(2, 2)]
+        arr[0] = AosCell(99, 100)
+        assert(arr[0].x == 99 && arr[0].y == 100,
+            s"arr[0] = (${arr[0].x},${arr[0].y}), want (99,100)")
+        // Other elements untouched
+        assert(arr[1].x == 2 && arr[1].y == 2,
+            s"arr[1] should still be (2,2), got (${arr[1].x},${arr[1].y})")
+
+Iterate and accumulate fields
+-----------------------------
+
+    #test
+    test_aos_iter_sum_x() -> unit
+        var arr = [AosCell(1, 0), AosCell(2, 0), AosCell(3, 0), AosCell(4, 0)]
+        var sum = 0
+        var i = 0
+        while i < len(arr)
+            sum = sum + arr[i].x
+            i = i + 1
+        assert(sum == 10, s"sum of x-fields should be 10, got $sum")

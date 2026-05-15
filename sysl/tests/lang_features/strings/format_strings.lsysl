@@ -1,0 +1,49 @@
+String interpolation (`s"..."`)
+===============================
+
+The `s"prefix ${expr} suffix"` form is sugar for a string-
+build sequence — each `${expr}` lowers to a `str(...)` call
+plus concatenation. std/io uses this in assertion messages
+but the std/ tests rarely look at the interpolated *output*
+directly — they only fire the path when an assertion fails.
+
+These tests pin the interpolation shape for a known input
+across backends:
+
+  - bare `s"...${int}..."` with one substitution
+  - multiple substitutions in one literal
+  - substitution surrounded by literal text on both sides
+  - leading and trailing substitutions
+
+A backend that miscompiles the lowered concat sequence
+(wrong order, wrong str() target, lost characters between
+substitutions) flips an `assert(... == "expected")` to
+false.
+
+    module sysl.tests.lang_features
+
+    #test
+    test_interp_single_substitution() -> unit
+        val n = 42
+        assert(s"n=${n}" == "n=42", "single sub")
+
+    #test
+    test_interp_two_substitutions() -> unit
+        val a = 3
+        val b = 4
+        assert(s"${a}+${b}=${a + b}" == "3+4=7", "two subs")
+
+    #test
+    test_interp_leading_substitution() -> unit
+        val k = 7
+        assert(s"${k} is k" == "7 is k", "leading")
+
+    #test
+    test_interp_trailing_substitution() -> unit
+        val k = 7
+        assert(s"k is ${k}" == "k is 7", "trailing")
+
+    #test
+    test_interp_no_substitutions() -> unit
+        // s"..." with no ${...} should be a plain string
+        assert(s"plain text" == "plain text", "plain")

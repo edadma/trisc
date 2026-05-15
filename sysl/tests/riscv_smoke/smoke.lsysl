@@ -1,0 +1,105 @@
+RISC-V backend smoke tests
+==========================
+
+A minimal cross-backend corpus that exercises the boot path, stdout via
+SBI console, basic arithmetic on `int` and `i64`, a deliberate panic,
+and a deliberate assertion failure. The point is to wire chunk 3
+end-to-end before turning on the std/ sweep: any failure here means the
+test runner itself (qemu-launch, output capture, panic-marker parsing)
+is broken — *not* a backend codegen issue.
+
+Run with:
+
+```
+sbt 'syslCliJVM/run test --backend riscv64 sysl/tests/riscv_smoke/'
+sbt 'syslCliJVM/run test --backend riscv32 sysl/tests/riscv_smoke/'
+```
+
+These are deliberately small (one-shot calls, no heap) so a failure is
+easy to bisect by hand against the chunk-2 runtime.
+
+    module sysl.tests.riscv_smoke
+
+
+### Clean return — exit code 0 with no stdout marker
+
+The simplest possible test: do nothing, return. The runner sees qemu
+exit 0 with empty output and no panic marker — `Pass`. If this fails,
+something is wrong with the runtime's `_start` / `main` /
+`_sysl_rv_exit` chain, not with the user program.
+
+    #test
+    test_empty() -> unit
+        ()
+
+
+### Basic int arithmetic survives codegen + link
+
+i32 arithmetic uses native instructions on both rv32 and rv64. A failure
+here means our IR is wrong or the linker is dropping the program object.
+
+    #test
+    test_int_math() -> unit
+        val a = 7
+        val b = 6
+        assert(a * b == 42, "7 * 6 == 42")
+
+
+### i64 arithmetic — soft helpers on rv32, native on rv64
+
+On rv32 this exercises the `__muldi3` codepath (or whatever clang emits
+for 64-bit multiply on rv32imac); on rv64 it's a single `mul`. Same
+test, two implementations — that's the whole point of running both.
+
+    #test
+    test_i64_math() -> unit
+        val a = 1_000_000i64
+        val b = 1_000i64
+        assert(a * b == 1_000_000_000i64, "i64 multiply")
+
+
+### String puts via SBI console
+
+`puts(s)` lowers to a write(1, ptr, len) + write(1, "\n", 1). On RV
+both calls funnel through `sbi_console_putchar` from libc.c. If we see
+"hello rv\n" on the captured stdout, the entire stdout path is sound.
+
+    #test
+    test_puts() -> unit
+        puts("hello rv")
+
+
+### println — exercises printf-engine integer formatting
+
+`println(42)` triggers the codegen's `%d\n` snprintf path, which on RV
+goes through our hand-rolled vformat. If integer width / padding / sign
+handling is off, this prints garbage and the test still passes — but
+manual inspection with `RV_TRACE=1` will catch it.
+
+    #test
+    test_println_int() -> unit
+        val x = 42
+        println(x)
+
+
+### Deliberate panic — marker-based failure detection
+
+`panic` lowers to the LLVM prelude's `@panic` which writes
+`panic: <msg>\n` to fd=2 (routed to console on RV) then calls
+`abort()`. The runner's marker parser sees "panic: " in stdout and
+classifies as a panic; with `#test(should_panic: "boom")` the
+substring check makes the panic the success case.
+
+    #test(should_panic: "boom")
+    test_panic_marker() -> unit
+        panic("boom")
+
+
+### Deliberate assertion failure — separate marker
+
+`assert(false, msg)` writes `assertion failed: <msg>\n` and aborts.
+Different prefix than `panic:` — the runner recognises both.
+
+    #test(should_panic: "five")
+    test_assert_marker() -> unit
+        assert(2 + 2 == 5, "five")

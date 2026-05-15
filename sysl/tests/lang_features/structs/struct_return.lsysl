@@ -1,0 +1,47 @@
+Struct return + chained method calls
+====================================
+
+A function that returns a struct by value forces the
+caller to materialize a return slot. The codegen then has
+to either:
+
+  - Pass a hidden pointer (sret-style) to the callee, or
+  - Return the struct in registers / a typed return slot.
+
+When the result is immediately read (`make_pair().first`)
+or chained into another struct-returning call, the
+temporary lifetime has to be correct or the read goes off
+into freed / clobbered memory.
+
+This test covers:
+
+  - returning a small struct and reading a field directly,
+  - chaining two struct-returning calls,
+  - storing a returned struct in a local and reading it.
+
+    module sysl.tests.lang_features
+
+    struct Pair
+        first: int
+        second: int
+
+    make_pair(a: int, b: int) -> Pair = Pair(a, b)
+
+    add_to(p: Pair, n: int) -> Pair = Pair(p.first + n, p.second + n)
+
+    #test
+    test_direct_field_read() -> unit
+        assert(make_pair(3, 4).first == 3, "first")
+        assert(make_pair(3, 4).second == 4, "second")
+
+    #test
+    test_struct_in_local() -> unit
+        val p = make_pair(10, 20)
+        assert(p.first == 10, "local.first")
+        assert(p.second == 20, "local.second")
+
+    #test
+    test_chained_struct_return() -> unit
+        val p = add_to(make_pair(1, 2), 100)
+        assert(p.first == 101,  s"chained first expected 101, got ${p.first}")
+        assert(p.second == 102, s"chained second expected 102, got ${p.second}")

@@ -1,0 +1,239 @@
+Named Arguments
+===============
+
+Per reference §"Named Arguments", function call arguments can be
+passed by name using `name = expr`. Named arguments can appear in
+any order, can be mixed with positional arguments (positional must
+come first), and work with default values — including skipping
+middle defaults.
+
+> Named arguments are currently supported for regular function
+> calls, struct constructors, and builtins — not yet for generic
+> function instantiation, method calls, or trait methods.
+
+This file pins each supported surface: all-named, mixed-positional,
+any-order, middle-skip via named, struct-constructor by name,
+struct-constructor reordered, builtin calls by name where
+applicable.
+
+File-local prefix `Sna` (Sysl Named Args).
+
+    module sysl.tests.lang_features
+
+    greet(x: int, y: int, z: int = 0) -> int = x * 100 + y * 10 + z
+
+All-named — every parameter passed by name
+-------------------------------------------
+
+### In source order
+
+    #test
+    test_sna_all_named_in_order() -> unit
+        val v = greet(x = 1, y = 2, z = 3)
+        assert(v == 123, s"got $v")
+
+### Reordered — y first then x then z
+
+    #test
+    test_sna_all_named_yxz() -> unit
+        val v = greet(y = 2, x = 1, z = 3)
+        assert(v == 123, s"got $v")
+
+### Reordered — z first
+
+    #test
+    test_sna_all_named_zyx() -> unit
+        val v = greet(z = 3, y = 2, x = 1)
+        assert(v == 123, s"got $v")
+
+### Reordered — z, x, y
+
+    #test
+    test_sna_all_named_zxy() -> unit
+        val v = greet(z = 3, x = 1, y = 2)
+        assert(v == 123, s"got $v")
+
+Mixed positional + named
+------------------------
+
+### One positional, rest named in order
+
+    #test
+    test_sna_mixed_one_pos_then_named() -> unit
+        val v = greet(1, y = 2, z = 3)
+        assert(v == 123, s"got $v")
+
+### One positional, rest named reordered
+
+    #test
+    test_sna_mixed_one_pos_named_reordered() -> unit
+        val v = greet(1, z = 3, y = 2)
+        assert(v == 123, s"got $v")
+
+### Two positional, last named
+
+    #test
+    test_sna_mixed_two_pos_then_named() -> unit
+        val v = greet(1, 2, z = 3)
+        assert(v == 123, s"got $v")
+
+Named arg skips a middle default
+---------------------------------
+
+When all positional + named together cover every required parameter,
+defaulted parameters that no one named or positional argument
+addresses fall back to their default.
+
+    f3(x: int = 1, y: int = 2, z: int = 3) -> int = x * 100 + y * 10 + z
+
+### Skip middle (y) — supply only x and z by name
+
+    #test
+    test_sna_skip_middle() -> unit
+        val v = f3(x = 5, z = 9)
+        assert(v == 529, s"got $v")
+
+### Skip first (x) — supply only y and z by name
+
+    #test
+    test_sna_skip_first_named() -> unit
+        val v = f3(y = 7, z = 9)
+        assert(v == 179, s"got $v")
+
+### Skip last (z) — supply only x and y by name (z falls to default 3)
+
+    #test
+    test_sna_skip_last_named() -> unit
+        val v = f3(x = 5, y = 7)
+        assert(v == 573, s"got $v")
+
+### Skip first and middle — supply only z by name
+
+    #test
+    test_sna_only_one_named() -> unit
+        val v = f3(z = 9)
+        assert(v == 129, s"x=1,y=2,z=9 -> 129; got $v")
+
+Named with mid-call default
+---------------------------
+
+`greet(x: int, y: int, z: int = 0)` — z defaults to 0.
+
+### Positional + named skipping z
+
+    #test
+    test_sna_default_z_via_named() -> unit
+        val v = greet(x = 4, y = 5)
+        assert(v == 450, s"z defaults to 0; got $v")
+
+### One positional, one named, z defaults
+
+    #test
+    test_sna_default_z_pos_named() -> unit
+        val v = greet(4, y = 5)
+        assert(v == 450, s"got $v")
+
+Different parameter types — string + int
+-----------------------------------------
+
+    label(name: string, n: int, sep: string = "=") -> string = name + sep + str(n)
+
+### Positional
+
+    #test
+    test_sna_string_int_all_pos() -> unit
+        val r = label("x", 42)
+        assert(r == "x=42", s"got '$r'")
+
+### All-named in source order
+
+    #test
+    test_sna_string_int_all_named() -> unit
+        val r = label(name = "x", n = 42, sep = ":")
+        assert(r == "x:42", s"got '$r'")
+
+### All-named reordered
+
+    #test
+    test_sna_string_int_named_reordered() -> unit
+        val r = label(sep = ":", n = 42, name = "x")
+        assert(r == "x:42", s"got '$r'")
+
+### Positional + named skip sep
+
+    #test
+    test_sna_string_int_mixed() -> unit
+        val r = label("x", n = 42)
+        assert(r == "x=42", s"sep defaults to '='; got '$r'")
+
+Struct constructor — by name
+----------------------------
+
+Reference says named arguments work for struct constructors too.
+
+    struct Pt
+        x: int
+        y: int
+
+### All-named in declaration order
+
+    #test
+    test_sna_struct_all_named_in_order() -> unit
+        val p = Pt(x = 10, y = 20)
+        assert(p.x == 10, "x")
+        assert(p.y == 20, "y")
+
+### All-named reordered
+
+    #test
+    test_sna_struct_all_named_reordered() -> unit
+        val p = Pt(y = 20, x = 10)
+        assert(p.x == 10, "x reordered")
+        assert(p.y == 20, "y reordered")
+
+### Positional first then named
+
+    #test
+    test_sna_struct_mixed() -> unit
+        val p = Pt(10, y = 20)
+        assert(p.x == 10, "x")
+        assert(p.y == 20, "y")
+
+Struct with three fields — mixed
+--------------------------------
+
+    struct Color
+        r: int
+        g: int
+        b: int
+
+### Positional + named skipping middle
+
+    #test
+    test_sna_struct_three_mixed_skip_middle() -> unit
+        val c = Color(255, b = 64, g = 128)
+        assert(c.r == 255, "r")
+        assert(c.g == 128, "g")
+        assert(c.b == 64, "b")
+
+### All-named reordered (b, r, g)
+
+    #test
+    test_sna_struct_three_all_named_reordered() -> unit
+        val c = Color(b = 64, r = 255, g = 128)
+        assert(c.r == 255, "r")
+        assert(c.g == 128, "g")
+        assert(c.b == 64, "b")
+
+Repeated calls with named args — no shared state
+-------------------------------------------------
+
+### Two calls produce different results with different named values
+
+    #test
+    test_sna_repeated_calls_independent() -> unit
+        val a = greet(x = 1, y = 0, z = 0)
+        val b = greet(x = 9, y = 0, z = 0)
+        assert(a == 100, s"first; got $a")
+        assert(b == 900, s"second; got $b")
+        assert(a != b, "distinct")

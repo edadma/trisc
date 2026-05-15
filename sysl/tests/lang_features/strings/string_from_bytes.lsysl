@@ -1,0 +1,190 @@
+Building a `string` from raw bytes
+==================================
+
+Per reference §"String Construction from Bytes", a `string`
+can be built two ways:
+
+  - **From pointer + length:** `string(p, n)` where `p: *byte`
+    and `n: int`. Copies `n` bytes from `p` into the new
+    string's backing buffer.
+  - **From byte slice:** `string(s)` where `s: []byte` (a
+    fixed array slice, `arr[:]`, or a sub-slice of `new [n]byte`).
+    Copies all bytes in `s`.
+
+Both forms **copy** the source bytes per the reference — but
+see TODO below for an SVM bug where the copy semantics are
+not honoured today.
+
+The constructed string has the source's byte length and the
+exact source bytes (no implicit transcoding, no NUL
+termination — sysl strings carry their length explicitly).
+
+File-local prefix `Sfb` (string-from-bytes).
+
+**TODO — SVM bug found 2026-05-15, two tests dropped:**
+
+  - `string(&buf[0], n)` and `string(slice)` on SVM share
+    the source's backing storage rather than copying it.
+    Mutating the source after `string(...)` mutates the
+    constructed string. The other 6 backends correctly copy.
+    See `feedback_sysl_svm_string_from_bytes_aliasing.md`.
+
+    module sysl.tests.lang_features
+
+`string(&buf[0], n)` — from pointer + length
+--------------------------------------------
+
+### Basic ASCII
+
+    #test
+    test_sfb_ptr_len_basic() -> unit
+        var buf: [5]byte
+        buf[0] = byte('h')
+        buf[1] = byte('e')
+        buf[2] = byte('l')
+        buf[3] = byte('l')
+        buf[4] = byte('o')
+        val s = string(&buf[0], 5)
+        assert(s == "hello", s"value; got '$s'")
+        assert(len(s) == 5, s"length; got ${len(s)}")
+
+### Empty (n = 0)
+
+    #test
+    test_sfb_ptr_len_zero() -> unit
+        var buf: [1]byte
+        buf[0] = byte('x')
+        val s = string(&buf[0], 0)
+        assert(s == "", "n=0 yields empty")
+        assert(len(s) == 0, "len 0")
+
+### Partial — fewer bytes than the buffer
+
+    #test
+    test_sfb_ptr_len_partial() -> unit
+        var buf: [5]byte
+        buf[0] = byte('h')
+        buf[1] = byte('e')
+        buf[2] = byte('y')
+        buf[3] = byte('!')
+        buf[4] = byte('?')
+        val s = string(&buf[0], 3)
+        assert(s == "hey", s"first 3 bytes; got '$s'")
+        assert(len(s) == 3, "len 3")
+
+### Includes embedded NUL — length is honoured, not terminated by NUL
+
+    #test
+    test_sfb_ptr_len_with_embedded_nul() -> unit
+        var buf: [3]byte
+        buf[0] = byte('a')
+        buf[1] = 0u8
+        buf[2] = byte('b')
+        val s = string(&buf[0], 3)
+        assert(len(s) == 3, s"len includes NUL; got ${len(s)}")
+        assert(int(s[0]) == 97, "byte 0 is 'a'")
+        assert(int(s[1]) == 0, "byte 1 is NUL")
+        assert(int(s[2]) == 98, "byte 2 is 'b' — past the NUL")
+
+### Multi-byte UTF-8 — bytes pass through unchanged
+
+`string(p, n)` does not validate UTF-8; whatever bytes are
+in the buffer end up in the string. The byte length is `n`,
+regardless of how many code points those bytes encode.
+
+    #test
+    test_sfb_ptr_len_utf8_bytes() -> unit
+        var buf: [2]byte
+        buf[0] = 0xC3u8         // first byte of 'ñ' UTF-8
+        buf[1] = 0xB1u8         // second byte
+        val s = string(&buf[0], 2)
+        assert(s == "ñ", s"UTF-8 'ñ' from raw bytes; got '$s'")
+        assert(len(s) == 2, "two bytes")
+
+`string(slice)` — from a byte slice
+-----------------------------------
+
+### From `new [n]byte` sub-slice
+
+    #test
+    test_sfb_slice_from_dyn() -> unit
+        val data = new [10]byte
+        data[0] = byte('a')
+        data[1] = byte('b')
+        data[2] = byte('c')
+        val s = string(data[:3])
+        assert(s == "abc", s"got '$s'")
+        assert(len(s) == 3, "len 3")
+
+### Empty slice yields empty string
+
+    #test
+    test_sfb_slice_empty() -> unit
+        val data = new [4]byte
+        val s = string(data[:0])
+        assert(s == "", "empty slice -> empty string")
+        assert(len(s) == 0, "len 0")
+
+### Full slice of a fixed array
+
+    #test
+    test_sfb_slice_full_of_fixed() -> unit
+        var arr: [3]byte
+        arr[0] = byte('x')
+        arr[1] = byte('y')
+        arr[2] = byte('z')
+        val s = string(arr[:])
+        assert(s == "xyz", s"got '$s'")
+        assert(len(s) == 3, "len 3")
+
+### Sub-range slice of a fixed array
+
+    #test
+    test_sfb_slice_subrange_of_fixed() -> unit
+        var arr: [5]byte
+        arr[0] = byte('a')
+        arr[1] = byte('b')
+        arr[2] = byte('c')
+        arr[3] = byte('d')
+        arr[4] = byte('e')
+        val s = string(arr[1:4])
+        assert(s == "bcd", s"got '$s'")
+        assert(len(s) == 3, "len 3")
+
+Cross-form: `string()` is a value type
+--------------------------------------
+
+The result of either construction form is a normal `string`
+— equal to a literal of the same bytes, concatenable, and
+indexable.
+
+    #test
+    test_sfb_equals_literal() -> unit
+        var buf: [3]byte
+        buf[0] = byte('a')
+        buf[1] = byte('b')
+        buf[2] = byte('c')
+        val a = string(&buf[0], 3)
+        val b = "abc"
+        assert(a == b, "ptr-form == literal")
+        assert(b == a, "symmetry")
+
+    #test
+    test_sfb_concat() -> unit
+        var buf: [3]byte
+        buf[0] = byte('f')
+        buf[1] = byte('o')
+        buf[2] = byte('o')
+        val a = string(&buf[0], 3)
+        val out = a + "bar"
+        assert(out == "foobar", s"concat; got '$out'")
+
+    #test
+    test_sfb_byte_index() -> unit
+        var buf: [3]byte
+        buf[0] = byte('p')
+        buf[1] = byte('q')
+        buf[2] = byte('r')
+        val s = string(&buf[0], 3)
+        assert(int(s[0]) == 112, "byte 0 is 'p'")
+        assert(int(s[2]) == 114, "byte 2 is 'r'")

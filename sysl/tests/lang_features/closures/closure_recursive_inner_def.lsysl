@@ -1,0 +1,79 @@
+Recursive inner `def` functions
+===============================
+
+A `def name(...) -> T = ...` inside another function body is
+a local named function. The body can refer to its own name —
+direct self-recursion just works, because the analyzer
+pre-binds the name before walking the body.
+
+This file pins the single-fn recursive cases. Mutual recursion
+between two inner `def`s is exercised more thoroughly in
+`sysl/tests/inner_def_mut_rec/`; here we focus on the simple
+self-recursive forms that an end-user is most likely to write.
+
+    module sysl.tests.lang_features
+
+Factorial — direct self-recursion
+---------------------------------
+
+The canonical self-recursive inner-def. The base case returns
+1, the recursive case calls `fact(n-1)` by name.
+
+    #test
+    test_fact_5() -> unit
+        def fact(n: int) -> int =
+            if n <= 1 then 1
+            else n * fact(n - 1)
+        assert(fact(5) == 120, s"fact(5) should be 120, got ${fact(5)}")
+
+    #test
+    test_fact_0() -> unit
+        def fact(n: int) -> int =
+            if n <= 1 then 1
+            else n * fact(n - 1)
+        assert(fact(0) == 1, s"fact(0) should be 1, got ${fact(0)}")
+
+    #test
+    test_fact_10() -> unit
+        def fact(n: int) -> int =
+            if n <= 1 then 1
+            else n * fact(n - 1)
+        assert(fact(10) == 3628800, s"fact(10) should be 3628800, got ${fact(10)}")
+
+Fibonacci — exponentially-branching recursion
+---------------------------------------------
+
+Each call splits into two; tree-shaped recursion. A miscompile
+that lost the recursive name would crash on the first inner
+call rather than at depth.
+
+    #test
+    test_fib_0() -> unit
+        def fib(n: int) -> int =
+            if n < 2 then n
+            else fib(n - 1) + fib(n - 2)
+        assert(fib(0) == 0, s"fib(0) should be 0, got ${fib(0)}")
+
+    #test
+    test_fib_10() -> unit
+        def fib(n: int) -> int =
+            if n < 2 then n
+            else fib(n - 1) + fib(n - 2)
+        assert(fib(10) == 55, s"fib(10) should be 55, got ${fib(10)}")
+
+Inner def calling outer-fn locals
+---------------------------------
+
+The inner def can read locals from the enclosing function
+(captured by snapshot, same rules as closure capture). The
+recursion still composes with the captured environment.
+
+    #test
+    test_sum_to_n_with_stride() -> unit
+        val stride = 2
+        def sum_to(n: int) -> int =
+            if n <= 0 then 0
+            else stride * n + sum_to(n - 1)
+        // 2*(5+4+3+2+1) = 30
+        assert(sum_to(5) == 30, s"sum_to(5) with stride=2 should be 30, got ${sum_to(5)}")
+

@@ -383,13 +383,34 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         try evalBlock(stmts, closureEnv)
         catch case ReturnException(v) => v
 
+  /** Deep-copy a value when its declared type is a value struct, so that
+    * `var b = a` and `f(p: Point)` (pass-by-value) produce truly independent
+    * copies — writes through one binding never affect another, per the
+    * language reference's "Three Allocation Modes" / "Backend Implementation
+    * Latitude" section. Recurses through nested struct fields. Scalars,
+    * refs, slices, and strings are returned as-is — those carry their own
+    * sharing semantics (refcount, immutable, etc.). */
+  private def deepCopyValue(typ: SyslType, value: Value): Value = typ match
+    case SyslType.NamedType(_, base, _, _, _) => deepCopyValue(base, value)
+    case st: SyslType.StructType =>
+      value match
+        case ArrVal(cells, off) =>
+          val newCells = st.fields.zipWithIndex.map { case ((_, fieldType), i) =>
+            new Cell(deepCopyValue(fieldType, cells(off + i).value))
+          }.toArray
+          ArrVal(newCells, 0)
+        case other => other
+    case _ => value
+
   private def call(fun: TFunDecl, args: List[Value]): Value =
     val env: Env = new mutable.LinkedHashMap
     val savedSize = deferStack.size
 
     for (param, arg) <- fun.params.zip(args) do
-      refIncr(arg)
-      env(param.name) = new Cell(arg)
+      // Value-struct params are pass-by-value: the body sees a local copy.
+      val bound = deepCopyValue(param.typ, arg)
+      refIncr(bound)
+      env(param.name) = new Cell(bound)
 
     try
       val result = fun.body match
@@ -508,7 +529,9 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def exec(stmt: TStmt, env: Env): Unit =
     stmt match
       case TVarStmt(name, _, init, _, _) =>
-        val v = evalAny(init, env)
+        val raw = evalAny(init, env)
+        // Value-struct binding: deep-copy so `var b = a` doesn't alias.
+        val v = deepCopyValue(init.typ, raw)
         // Increment refcount for copies only — TNew/TNewArray already set refcount=1
         init match
           case _: TNew | _: TNewArray => // owned, no incr
@@ -534,7 +557,10 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           lookupCell(name, env).value = v
 
       case TAssignStmt(target, value) =>
-        val v = evalAny(value, env)
+        val raw = evalAny(value, env)
+        // Value-struct binding: deep-copy so reassignment from another struct
+        // var doesn't alias.
+        val v = deepCopyValue(value.typ, raw)
         // Increment refcount for copies only
         value match
           case _: TNew | _: TNewArray => // owned, no incr
@@ -1025,7 +1051,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
         val rv = evalAny(right, env)
 
-        // String path: concatenation and comparison
+        // String path: concatenation and comparison (lexicographic, byte-wise unsigned).
         (lv, rv) match
           case (StringVal(lb), StringVal(rb)) =>
             return (op match
@@ -1036,6 +1062,20 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
                 StringVal(newBytes)
               case "==" => IntVal(if java.util.Arrays.equals(lb, rb) then 1L else 0L)
               case "!=" => IntVal(if !java.util.Arrays.equals(lb, rb) then 1L else 0L)
+              case "<" | "<=" | ">" | ">=" =>
+                val n = math.min(lb.length, rb.length)
+                var i = 0
+                var diff = 0
+                while i < n && diff == 0 do
+                  diff = (lb(i) & 0xFF) - (rb(i) & 0xFF)
+                  i += 1
+                if diff == 0 then diff = lb.length - rb.length
+                val ok = op match
+                  case "<"  => diff < 0
+                  case "<=" => diff <= 0
+                  case ">"  => diff > 0
+                  case ">=" => diff >= 0
+                IntVal(if ok then 1L else 0L)
               case _ => throw RuntimeError(s"unsupported string operator: $op")
             )
           case _ =>

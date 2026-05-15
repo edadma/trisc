@@ -1,0 +1,63 @@
+Generic functions — explicit type args + inference
+==================================================
+
+A generic function `fn name[T](x: T) -> T` is monomorphized
+per call site. The type parameter may be supplied explicitly
+(`name[int](3)`) or inferred from arg types.
+
+    module sysl.tests.lang_features
+
+Explicit type arg
+-----------------
+
+    identity[T](x: T) -> T = x
+
+    #test
+    test_identity_explicit_int() -> unit
+        assert(identity[int](42) == 42, s"identity[int](42) should be 42, got ${identity[int](42)}")
+
+    #test
+    test_identity_explicit_bool() -> unit
+        assert(identity[bool](true), "identity[bool](true) should be true")
+        assert(!identity[bool](false), "identity[bool](false) should be false")
+
+Inference from single arg
+-------------------------
+
+    #test
+    test_identity_inferred() -> unit
+        assert(identity(7) == 7, s"identity(7) should be 7, got ${identity(7)}")
+        // The inferred T is int.
+
+Multiple type parameters
+------------------------
+
+    first[A, B](a: A, b: B) -> A = a
+    second[A, B](a: A, b: B) -> B = b
+
+    #test
+    test_two_params() -> unit
+        assert(first(10, 20) == 10, s"first(10,20) should be 10, got ${first(10, 20)}")
+        assert(second(10, 20) == 20, s"second(10,20) should be 20, got ${second(10, 20)}")
+
+Generic function in different contexts
+--------------------------------------
+
+    max_t[T](a: T, b: T) -> T
+        if a > b then return a
+        return b
+
+    #test
+    test_max_int() -> unit
+        assert(max_t(3, 7) == 7, s"max_t(3,7) should be 7, got ${max_t(3, 7)}")
+        assert(max_t(10, 2) == 10, s"max_t(10,2) should be 10, got ${max_t(10, 2)}")
+
+    // TODO: re-enable once SVM's higher-order-generic call path is stable.
+    // Currently overflows SVM's 1024-item data stack at apply_twice's call site:
+    //
+    //     apply_twice[T](f: (T) -> T, x: T) -> T = f(f(x))
+    //     inc(n: int) -> int = n + 1
+    //
+    //     #test
+    //     test_apply_twice() -> unit
+    //         assert(apply_twice(inc, 5) == 7, "")

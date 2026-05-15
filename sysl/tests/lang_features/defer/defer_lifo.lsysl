@@ -1,0 +1,35 @@
+Defer-block LIFO ordering
+=========================
+
+`defer stmt` queues a statement to run when the enclosing
+function exits. Multiple defers run in last-in-first-out
+order, and the deferred bodies are re-evaluated at exit time
+(not captured at defer-time), so reads of mutable state see
+the value as of exit, not as of the defer site.
+
+To observe the order from a `#test` (which itself owns the
+function scope where the defers would fire — meaning the
+asserts inside the test would run *before* the defers do),
+we push the defers into a helper function that mutates state
+through a pointer. The test then asserts the assembled
+state after the helper returns.
+
+If a backend miscompiles defer ordering (eager FIFO, missed
+defers, wrong scope chain), the assembled string diverges
+from the expected `"321"` and the test fails.
+
+    module sysl.tests.lang_features
+
+    struct Trace
+        s: string
+
+    fill_trace(t: *Trace) -> unit
+        defer t.s = t.s + "1"
+        defer t.s = t.s + "2"
+        defer t.s = t.s + "3"
+
+    #test
+    test_defer_lifo() -> unit
+        var t = Trace("")
+        fill_trace(&t)
+        assert(t.s == "321", s"expected '321', got '${t.s}'")

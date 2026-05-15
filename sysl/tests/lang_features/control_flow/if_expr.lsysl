@@ -1,0 +1,79 @@
+`if` as expression — branch value + chains + unit fall-through
+==============================================================
+
+`if cond then a else b` is an expression — both branches
+contribute to the result. The types unify (both branches must
+have the same type, or one must be a subtype of the other).
+
+A bare `if cond then stmt` (no else) yields `unit`. Useful as
+a statement.
+
+`elif` chains are sugar for nested if/else; the result is
+the value of the first branch whose condition is true.
+
+    module sysl.tests.lang_features
+
+If as value with both branches
+------------------------------
+
+    #test
+    test_if_as_value() -> unit
+        val a = if true  then 10 else 20
+        val b = if false then 10 else 20
+        assert(a == 10, s"a should be 10, got $a")
+        assert(b == 20, s"b should be 20, got $b")
+
+If as value with side-effect cond
+---------------------------------
+
+    flag_seen() -> bool
+        return true
+
+    #test
+    test_if_with_side_effect_cond() -> unit
+        val x = if flag_seen() then 100 else 200
+        assert(x == 100, s"x should be 100, got $x")
+
+If/else-if chain
+----------------
+
+    classify(n: int) -> int
+        if n < 0 then return -1
+        elif n == 0 then return 0
+        elif n < 10 then return 1
+        else return 2
+
+    #test
+    test_classify_branches() -> unit
+        assert(classify(-5) == -1, s"classify(-5) should be -1, got ${classify(-5)}")
+        assert(classify(0)  == 0,  s"classify(0) should be 0, got ${classify(0)}")
+        assert(classify(7)  == 1,  s"classify(7) should be 1, got ${classify(7)}")
+        assert(classify(99) == 2,  s"classify(99) should be 2, got ${classify(99)}")
+
+If statement with no else
+-------------------------
+
+    #test
+    test_if_no_else() -> unit
+        var x = 0
+        if true then
+            x = 100
+        // No else; falls through with x = 100.
+        assert(x == 100, s"x should be 100, got $x")
+        // Inverse: condition false, body doesn't run.
+        if false then
+            x = 200
+        assert(x == 100, s"x should still be 100 (false branch didn't run), got $x")
+
+Nested if as expressions
+------------------------
+
+    #test
+    test_nested_if() -> unit
+        val flag1 = true
+        val flag2 = false
+        val v = if flag1 then
+                    if flag2 then 1 else 2
+                else
+                    3
+        assert(v == 2, s"v should be 2, got $v")
