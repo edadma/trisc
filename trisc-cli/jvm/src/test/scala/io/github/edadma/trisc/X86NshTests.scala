@@ -1376,6 +1376,27 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "!K:"
   }
 
+  "busybox: sh -c 'echo' (ash, no fork/exec)" in {
+    val output = qemu.command("/bin/busybox sh -c 'echo hello-ash'")
+    output should include("hello-ash")
+    output should not include "!K:"
+  }
+
+  "busybox: sh -c runs external applet (fork+exec)" in {
+    val output = qemu.command("/bin/busybox sh -c '/bin/busybox echo hi-fork'")
+    output should include("hi-fork")
+    output should not include "!K:"
+  }
+
+  "busybox: sh /etc/pipetest.sh (Phase-1 acceptance)" in {
+    // Master-roadmap Phase-1 acceptance bar:
+    //   cat /etc/passwd | grep root | wc -l  ->  "1"
+    // Script-file form because nsh splits `|` even inside quotes.
+    val output = qemu.command("/bin/busybox sh /etc/pipetest.sh")
+    output should include("1")
+    output should not include "!K:"
+  }
+
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")

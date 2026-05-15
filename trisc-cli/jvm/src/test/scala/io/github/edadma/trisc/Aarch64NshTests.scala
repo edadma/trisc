@@ -2778,6 +2778,39 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "!K:"
   }
 
+  "busybox: sh -c 'echo' (ash, no fork/exec)" in {
+    // First ash test — `sh -c` runs the script string inline. echo
+    // is the ASH_BUILTIN_ECHO path (no fork). This proves ash starts,
+    // parses, and runs builtins.
+    val output = qemu.command("/bin/busybox sh -c 'echo hello-ash'")
+    output should include("hello-ash")
+    output should not include "!K:"
+  }
+
+  "busybox: sh -c runs external applet (fork+exec)" in {
+    // Forces ash to fork+exec rather than dispatch as a builtin.
+    // `/bin/busybox` is an explicit absolute path so ash can't
+    // shortcut it.
+    val output = qemu.command("/bin/busybox sh -c '/bin/busybox echo hi-fork'")
+    output should include("hi-fork")
+    output should not include "!K:"
+  }
+
+  "busybox: sh /etc/pipetest.sh (Phase-1 acceptance)" in {
+    // The master-roadmap Phase-1 acceptance bar:
+    //   cat /etc/passwd | grep root | wc -l  ->  "1"
+    // The pipeline lives in /etc/pipetest.sh because nsh's tokenizer
+    // splits on `|` even inside single-quoted strings — passing the
+    // pipeline as `sh -c '...'` would break apart on nsh's command
+    // line. Putting it in a script bypasses nsh entirely; ash reads
+    // and parses the script itself.
+    //
+    // Exercises pipe(2) across two fork(2)s + wait(2) for the chain.
+    val output = qemu.command("/bin/busybox sh /etc/pipetest.sh")
+    output should include("1")
+    output should not include "!K:"
+  }
+
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")

@@ -40,7 +40,7 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
     import oskit.kernel.{current_thread, terminate_current,
         kernel_grant_create_inline, kernel_grant_revoke_inline,
         kernel_get_thread_pid, kernel_get_process_main_tid,
-        kernel_continue_current,
+        kernel_continue_current, kernel_fork,
         kernel_mmap_anon, kernel_munmap, kernel_mprotect,
         kernel_find_mmap_range, kernel_range_check_free,
         VMA_DEFAULT_STACK_BOT, VMA_USER_VA_BOT, VMA_USER_VA_TOP}
@@ -316,6 +316,17 @@ the keepalive options).
         posix_fd_table[pid * POSIX_FDS_PER_PROC + fd].flags = flags
 
     posix_fd_alloc(kind: int, target: int) -> int
+        posix_fd_alloc_from(kind, target, 3)
+
+`posix_fd_alloc_from` is the workhorse — finds the lowest free
+fd >= `start` in the calling process's table and initialises it.
+`posix_fd_alloc` is the standard "lowest free fd ≥ 3" entry
+point used by open/socket/etc. `start > 3` is used by
+`fcntl(F_DUPFD, arg)` to relocate a dup'd fd above some
+script-visible range (busybox ash does this to park redirect-save
+fds at >= 10).
+
+    posix_fd_alloc_from(kind: int, target: int, start: int) -> int
         val pid = posix_fd_current_pid()
         if pid <= 0
             return -1
@@ -323,7 +334,7 @@ the keepalive options).
             return -1
         posix_fd_ensure_init(pid)
         val base = pid * POSIX_FDS_PER_PROC
-        var i = 3
+        var i = start
         while i < POSIX_FDS_PER_PROC
             if posix_fd_table[base + i].kind == POSIX_FD_FREE
                 posix_fd_table[base + i].kind = kind
@@ -761,13 +772,14 @@ by send.
 
 fcntl command codes (`<fcntl.h>` in musl arch).
 
-    val POSIX_F_DUPFD        = 0
-    val POSIX_F_GETFD        = 1
-    val POSIX_F_SETFD        = 2
-    val POSIX_F_GETFL        = 3
-    val POSIX_F_SETFL        = 4
-    val POSIX_F_SETPIPE_SZ   = 1031
-    val POSIX_F_GETPIPE_SZ   = 1032
+    val POSIX_F_DUPFD          = 0
+    val POSIX_F_GETFD          = 1
+    val POSIX_F_SETFD          = 2
+    val POSIX_F_GETFL          = 3
+    val POSIX_F_SETFL          = 4
+    val POSIX_F_DUPFD_CLOEXEC  = 1030
+    val POSIX_F_SETPIPE_SZ     = 1031
+    val POSIX_F_GETPIPE_SZ     = 1032
 
     var inet_port_cached = -1
 
@@ -1296,6 +1308,19 @@ Returns 0 on success, negative errno on failure.
             return sys_pipe2(a0, int(a1))
         if num == 186
             return sys_getdents64(int(a0), a1, a2)
+        if num == 146
+            // SYS_clone — slix-musl's _Fork unconditionally calls
+            // `clone(SIGCHLD, 0)` because SYS_fork isn't defined for
+            // the slix arch variants. We treat any clone with stack=0
+            // as a fork (ignoring flags — SIGCHLD is the only one
+            // ash and busybox-sh use). Real CLONE_THREAD / CLONE_VM
+            // is a pthread_create surface that lands later.
+            //
+            // a0 = flags, a1 = child_stack, a2/a3/a4 = tls/ctid/ptid
+            // For fork semantics we expect a1 == 0.
+            if a1 != i64(0)
+                return i64(-ENOSYS)
+            return i64(kernel_fork())
         if num == 153
             return sys_epoll_create1(int(a0))
         if num == 154
@@ -5518,8 +5543,13 @@ actually exercise before doing I/O:
   FD_CLOEXEC). SLIX has no `exec` yet, so CLOEXEC is a no-op.
   GETFD returns 0; SETFD accepts any value and returns 0. The
   day an exec path lands, this is the place to start tracking.
-- `F_DUPFD` (0): not implemented — socket dup requires a separate
-  fd-aliasing design (see POSIX-fd-bridge memory). Returns -EINVAL.
+- `F_DUPFD` (0) / `F_DUPFD_CLOEXEC` (1030): allocate the lowest
+  free fd >= `arg` and make it a copy of `fd`. Source's kind /
+  target / flags carry over. Used by busybox ash to relocate
+  redirect-saved fds above the script-visible range; also used
+  by libc routines wanting a "spare" fd. CLOEXEC bit isn't
+  tracked because the shim has no exec-fd-close path yet —
+  treat it as a no-op tag.
 - `F_GETPIPE_SZ` (1032): return slix's pipe buffer size (512 — the
   fixed `PIPE_BUF_SIZE` in `oskit/servers/vfs.lsysl`). Linux
   rejects this on non-pipe fds, but the shim doesn't track
@@ -5546,8 +5576,16 @@ Unknown command → -EINVAL so real misuse surfaces.
             return i64(0)
         if cmd == POSIX_F_SETFD
             return i64(0)
-        if cmd == POSIX_F_DUPFD
-            return i64(-EINVAL)             // no dup yet
+        if cmd == POSIX_F_DUPFD || cmd == POSIX_F_DUPFD_CLOEXEC
+            if arg < 0 || arg >= POSIX_FDS_PER_PROC
+                return i64(-EINVAL)
+            val target = posix_fd_target(fd)
+            val src_flags = posix_fd_flags(fd)
+            val newfd = posix_fd_alloc_from(k, target, arg)
+            if newfd < 0
+                return i64(-EMFILE)
+            posix_fd_set_flags(newfd, src_flags)
+            return i64(newfd)
         if cmd == POSIX_F_GETPIPE_SZ
             if k == POSIX_FD_FILE
                 return i64(512)
