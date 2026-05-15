@@ -304,16 +304,16 @@ Existing: `float_extremes.lsysl` → `floats/float_extremes.lsysl`.
 
 ---
 
-### `errors/` — `?` postfix, Option, Result chains — 🔴 P1
+### `errors/` — `?` postfix, Option, Result chains — 🟡 P1
 
 Reference §"`?` Operator (Try)".
 
 | File | Tests pinned |
 |---|---|
+| `try_postfix_option.lsysl` 🟢 | happy `Some/Some`; first-position `None` short-circuit; second-position `None` short-circuit; three-step chain; middle `None` short-circuit (5 tests) |
+| `try_postfix_result.lsysl` 🟢 | happy `Ok/Ok`; first-position `Err` preserves payload; second-position `Err`; three-step chain; middle `Err` propagation (5 tests) |
 | `option_basic.lsysl` 🔴 | `Some` / `None` construction; match; `unwrap`, `unwrap_or` |
 | `result_basic.lsysl` 🔴 | `Ok` / `Err`; match; payload extraction |
-| `try_postfix_option.lsysl` 🔴 | `f()?` short-circuits on `None`; happy-path passthrough |
-| `try_postfix_result.lsysl` 🔴 | `f()?` short-circuits on `Err`; preserves error variant |
 | `try_postfix_chain.lsysl` 🔴 | `a()?.b()?.c()?` chain; each `?` distinct |
 | `option_payload_string.lsysl` 🔴 | `Option[string]` — ARC interaction; `None` doesn't construct a buffer |
 

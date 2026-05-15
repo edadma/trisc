@@ -1,0 +1,96 @@
+`?` postfix on `Option[T]`
+==========================
+
+The postfix `?` operator on an `Option[T]` value either
+unwraps the `Some(v)` payload as the expression's result, or
+early-returns `None` from the enclosing function. The
+desugaring is `expr?` ≡ `match expr { Some(v) -> v; None ->
+return None }`.
+
+This file pins the happy-path unwrap and the early-return
+exit on the simplest carrier shape.
+
+    module sysl.tests.lang_features
+
+    enum TpoOpt[T]
+        Some(value: T)
+        None
+
+Happy path — `?` unwraps `Some`
+-------------------------------
+
+When every step succeeds, the chained `?` unwraps each
+payload and the function returns the post-arithmetic `Some`.
+
+    parse_pair_sum(a: TpoOpt[int], b: TpoOpt[int]) -> TpoOpt[int]
+        val x = a?
+        val y = b?
+        return Some(x + y)
+
+    #test
+    test_try_some_some() -> unit
+        val r = parse_pair_sum(Some(10), Some(32))
+        val v = r match
+            Some(n) -> n
+            None    -> -1
+        assert(v == 42, s"10 + 32 should be 42, got $v")
+
+Early return — first `None` short-circuits
+------------------------------------------
+
+When the first arg is `None`, the `a?` early-returns `None`
+before `b` is even read. The second arg's value is
+irrelevant — even a `Some(b)` wouldn't be looked at because
+control left the function before the `b?` line.
+
+    #test
+    test_try_none_short_circuits() -> unit
+        val r = parse_pair_sum(None, Some(5))
+        val ok = r match
+            Some(_) -> false
+            None    -> true
+        assert(ok, "first-arg None should short-circuit to None")
+
+Second-position early return
+----------------------------
+
+When the first arg succeeds but the second is `None`, the
+second `?` is what early-returns. The first `?`'s effect
+(binding `x = 7`) is observable until then, but the function
+still ends with `None`.
+
+    #test
+    test_try_some_none() -> unit
+        val r = parse_pair_sum(Some(7), None)
+        val ok = r match
+            Some(_) -> false
+            None    -> true
+        assert(ok, "second-arg None should short-circuit to None")
+
+`?` in a longer chain
+---------------------
+
+Three `?` operators in sequence — confirms the desugaring is
+purely local and composes.
+
+    sum_three(a: TpoOpt[int], b: TpoOpt[int], c: TpoOpt[int]) -> TpoOpt[int]
+        val x = a?
+        val y = b?
+        val z = c?
+        return Some(x + y + z)
+
+    #test
+    test_try_three_all_some() -> unit
+        val r = sum_three(Some(1), Some(2), Some(3))
+        val v = r match
+            Some(n) -> n
+            None    -> -1
+        assert(v == 6, s"1+2+3 should be 6, got $v")
+
+    #test
+    test_try_three_middle_none() -> unit
+        val r = sum_three(Some(1), None, Some(3))
+        val ok = r match
+            Some(_) -> false
+            None    -> true
+        assert(ok, "middle-arg None should short-circuit")
