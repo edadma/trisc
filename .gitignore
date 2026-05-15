@@ -7,6 +7,13 @@ slix/build-musl-x86/
 slix/sysroot/
 slix/sysroot-x86/
 
+# SLIX busybox port — pristine upstream source (download via slix/build-busybox.sh)
+# and build trees (one per arch). Patches + config live in slix/busybox-patches/
+# and slix/busybox-config/ which ARE committed.
+slix/busybox/
+slix/build-busybox/
+slix/build-busybox-x86/
+
 *.tof
 *.trb
 !trisc-cli/shared/src/main/resources/ramdisk/bin/*.trb
