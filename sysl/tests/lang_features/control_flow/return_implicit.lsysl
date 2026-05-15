@@ -1,0 +1,46 @@
+Implicit returns and expression-bodied functions
+================================================
+
+A function body's last expression is its return value
+(implicit return). For `def name() = expr` (expression
+function), the expression IS the body — no explicit return
+needed. For block bodies, the last expression — whether
+direct or after a sequence of statements — is the result
+when the function's return type isn't `unit`.
+
+    module sysl.tests.lang_features
+
+Expression-bodied `def` function
+--------------------------------
+
+    def twice(x: int) -> int = x * 2
+
+    #test
+    test_expr_bodied() -> unit
+        assert(twice(3) == 6, s"twice(3) should be 6, got ${twice(3)}")
+        assert(twice(0) == 0, s"twice(0) should be 0, got ${twice(0)}")
+        assert(twice(-5) == -10, s"twice(-5) should be -10, got ${twice(-5)}")
+
+Block body where the last expression is the result
+--------------------------------------------------
+
+    triple(x: int) -> int
+        val a = x + x
+        val b = a + x
+        b
+
+    #test
+    test_block_body_last_expr() -> unit
+        assert(triple(3) == 9, s"triple(3) should be 9, got ${triple(3)}")
+        assert(triple(7) == 21, s"triple(7) should be 21, got ${triple(7)}")
+
+Implicit return matches explicit `return` semantics
+---------------------------------------------------
+
+    explicit_twice(x: int) -> int
+        return x * 2
+
+    #test
+    test_implicit_matches_explicit() -> unit
+        assert(twice(5) == explicit_twice(5),
+            s"implicit/explicit twice should match: ${twice(5)} vs ${explicit_twice(5)}")

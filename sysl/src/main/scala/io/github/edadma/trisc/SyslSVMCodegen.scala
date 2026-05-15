@@ -2713,7 +2713,7 @@ class SyslSVMCodegen:
     case SyslType.IntType(16) | SyslType.UIntType(16) => emit("  store16")
     case SyslType.IntType(32) | SyslType.UIntType(32) => emit("  store32")
     case _: SyslType.StructType | _: SyslType.EnumType | SyslType.StringType | _: SyslType.SliceType
-       | _: SyslType.FuncType =>
+       | _: SyslType.FuncType | _: SyslType.ArrayType =>
       // Inline aggregate: stack has ( src_addr dest_addr ). Copy EXACTLY sizeOf
       // bytes — never round up. Rounding up to 8 would overwrite the slot after
       // the dst element (e.g. for 12-byte structs in a tight slice, clobbering

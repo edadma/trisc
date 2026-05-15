@@ -155,23 +155,20 @@ the *inference* and *instantiation* edges are less covered.
 
 ---
 
-### `control_flow/` — if-expr, while, for, loops, break/continue, return — 🔴 P0
+### `control_flow/` — if-expr, while, for, loops, break/continue, return — 🟡 P0
 
 Reference §"Control Flow", "If Expression", "Return".
 
 | File | Tests pinned |
 |---|---|
-| `if_expr_as_value.lsysl` 🔴 | `val x = if c then a else b`; type unification of branches |
-| `if_expr_unit.lsysl` 🔴 | `if c then stmt` (no else) yields `unit` |
-| `if_chain.lsysl` 🔴 | `if a then ... elif b then ... else ...` chain |
-| `while_basic.lsysl` 🔴 | counted while; while with side-effect condition; while-true + break |
-| `for_in_range_exclusive.lsysl` 🔴 | `for i in 0..<n` yields 0..n-1; n=0 doesn't iterate |
-| `for_in_range_inclusive.lsysl` 🔴 | `for i in 0..n` yields 0..n; off-by-one regressions |
-| `for_in_slice.lsysl` 🔴 | `for x in slice` iterates by value |
-| `for_in_string.lsysl` 🔴 | `for c in s` iterates byte / rune |
-| `loop_labels.lsysl` 🔴 | `outer: for ...` + `break outer` / `continue outer` from nested loop |
-| `early_return.lsysl` 🔴 | early return from inside a loop; ARC + defer interaction |
-| `return_implicit.lsysl` 🔴 | expression-bodied fn returns last expr |
+| `if_expr.lsysl` 🟢 | if as value, side-effect cond, if/else-if chain, no-else, nested (5 tests). Covers both `if_expr_as_value`, `if_expr_unit`, `if_chain` |
+| `while_loops.lsysl` 🟢 | counted while; while + break; while + continue; never-runs; nested (5 tests) |
+| `for_in_range.lsysl` 🟢 | `0..<n` exclusive; `0..n` inclusive; empty; single-element; negative range (8 tests) |
+| `for_in_slice.lsysl` 🟡 | covered by `slices/slice_iter_for_in.lsysl` with the TRISC `for x in slice` TODO |
+| `for_in_string.lsysl` 🔴 | `for c in s` iterates byte / rune — not yet pinned |
+| `loop_labels.lsysl` 🔴 | `outer: for ...` + `break outer` / `continue outer` — not yet pinned |
+| `early_return.lsysl` 🟢 | early return from loop; nested blocks; ARC refcount cleanup on every path (4 tests). Surfaced+fixed SVM array-pass-by-value bug (emitStore for ArrayType fell through to store64) |
+| `return_implicit.lsysl` 🟢 | `def` expression-bodied function; block-body last-expr return; implicit/explicit match (3 tests) |
 
 ---
 

@@ -1,0 +1,97 @@
+For-in over ranges
+==================
+
+`for i in 0..<n` iterates `0, 1, ..., n-1` (exclusive upper).
+`for i in 0..n`  iterates `0, 1, ..., n`   (inclusive upper).
+The difference is one off-by-one trap waiting to happen.
+
+    module sysl.tests.lang_features
+
+Exclusive range — 0..<n iterates n times
+----------------------------------------
+
+    #test
+    test_exclusive_range_count() -> unit
+        var count = 0
+        for i in 0..<5
+            count = count + 1
+        assert(count == 5, s"0..<5 should iterate 5 times, got $count")
+
+Exclusive range — last value is n-1
+-----------------------------------
+
+    #test
+    test_exclusive_last_value() -> unit
+        var last = -1
+        for i in 0..<10
+            last = i
+        assert(last == 9, s"last of 0..<10 should be 9, got $last")
+
+Inclusive range — last value is n
+---------------------------------
+
+    #test
+    test_inclusive_last_value() -> unit
+        var last = -1
+        for i in 0..10
+            last = i
+        assert(last == 10, s"last of 0..10 should be 10, got $last")
+
+Inclusive range count is n+1
+----------------------------
+
+    #test
+    test_inclusive_count() -> unit
+        var count = 0
+        for i in 0..5
+            count = count + 1
+        assert(count == 6, s"0..5 should iterate 6 times, got $count")
+
+Sum a range
+-----------
+
+    #test
+    test_range_sum() -> unit
+        var sum = 0
+        for i in 1..10
+            sum = sum + i
+        // 1+2+...+10 = 55
+        assert(sum == 55, s"1..10 sum should be 55, got $sum")
+
+Empty exclusive range
+---------------------
+
+`0..<0` should not iterate.
+
+    #test
+    test_empty_exclusive() -> unit
+        var hits = 0
+        for i in 0..<0
+            hits = hits + 1
+        assert(hits == 0, s"0..<0 should not iterate, got $hits")
+
+Single-element inclusive range
+------------------------------
+
+`5..5` iterates once with i=5.
+
+    #test
+    test_single_inclusive() -> unit
+        var hits = 0
+        var seen = -1
+        for i in 5..5
+            hits = hits + 1
+            seen = i
+        assert(hits == 1, s"5..5 should iterate once, got $hits")
+        assert(seen == 5, s"i should be 5, got $seen")
+
+Negative ranges
+---------------
+
+    #test
+    test_negative_range() -> unit
+        var sum = 0
+        for i in -3..<3
+            sum = sum + i
+        // -3 + -2 + -1 + 0 + 1 + 2 = -3
+        assert(sum == -3, s"sum of -3..<3 should be -3, got $sum")
