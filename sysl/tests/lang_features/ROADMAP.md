@@ -215,7 +215,7 @@ Existing: `closures_hof.lsysl` → `closures/closures_hof.lsysl`.
 | `match_nested_payload.lsysl` 🔴 | matching `Some(Ok(x))` and similar nestings |
 | `match_guards.lsysl` 🔴 | guard clauses (`case Some(x) if x > 0 => ...`) — *if supported* |
 | `match_or_patterns.lsysl` 🔴 | `case (A | B) => ...` — *if supported* |
-| `if_is_pattern.lsysl` 🔴 | `if x is Some(v) then ...` one-arm sugar |
+| `if_is_pattern.lsysl` 🟢 | Some/None happy + fail; else-arm form; int / string / struct payload binds; chained `if .. is ..` on two-variant outcome; else-arm has no binding leak; pattern check is pure across two reads (8 tests) |
 | `destructure_assign.lsysl` 🟢 | `val q, r = divmod(...)`; `var` form with subsequent mutate; parenthesized; swap; three-way rotate; struct destructure by field-order; non-consuming (7 tests) |
 
 Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.lsysl`.
