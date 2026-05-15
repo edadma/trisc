@@ -2459,6 +2459,50 @@ class SyslSVMCodegen:
         emit("  swap")
         emitStore(fieldType)
 
+    case TSliceExpr(array, lowOpt, highOpt, resultTyp)
+        if array.typ == SyslType.StringType && resultTyp == SyslType.StringType =>
+      // String sub-slice — result is a fresh 16-byte string descriptor
+      // {ptr, len(i64)}, NOT the 24-byte slice struct used for []T. Mixing
+      // the two layouts corrupts every downstream string consumer (concat,
+      // interp, equality) because they all read len at offset 8 as i64.
+      val baseIdx = nextLocalIndex; nextLocalIndex += 1
+      val srcLenIdx = nextLocalIndex; nextLocalIndex += 1
+      genExpr(array)
+      emit("  dup")
+      emit("  load64")          // ptr
+      emit(s"  local_set $baseIdx")
+      emitPushInt(8)
+      emit("  add")
+      emit("  load64")          // len (i64, string layout)
+      emit(s"  local_set $srcLenIdx")
+      val loIdx = nextLocalIndex; nextLocalIndex += 1
+      lowOpt match
+        case Some(e) => genExpr(e); emit(s"  local_set $loIdx")
+        case None    => emitPushInt(0); emit(s"  local_set $loIdx")
+      val hiIdx = nextLocalIndex; nextLocalIndex += 1
+      highOpt match
+        case Some(e) => genExpr(e); emit(s"  local_set $hiIdx")
+        case None    => emit(s"  local_get $srcLenIdx"); emit(s"  local_set $hiIdx")
+      emitMemAlloc(16)
+      val descIdx = nextLocalIndex; nextLocalIndex += 1
+      emit("  dup")
+      emit(s"  local_set $descIdx")
+      // desc.ptr = base + lo   (byte advance — element size is 1)
+      emit(s"  local_get $baseIdx")
+      emit(s"  local_get $loIdx")
+      emit("  add")
+      emit("  swap")
+      emit("  store64")
+      // desc.len = hi - lo   (i64)
+      emit(s"  local_get $hiIdx")
+      emit(s"  local_get $loIdx")
+      emit("  sub")
+      emit(s"  local_get $descIdx")
+      emitPushInt(8)
+      emit("  add")
+      emit("  store64")
+      emit(s"  local_get $descIdx")
+
     case TSliceExpr(array, lowOpt, highOpt, resultTyp) =>
       // Allocate a 24-byte slice struct on memory stack, fill with
       //   ptr = base + lo * elemSize
