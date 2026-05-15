@@ -184,7 +184,7 @@ Reference §"Control Flow", "If Expression", "Return".
 | `defer_with_arc.lsysl` 🔴 | defer that mutates a ref-counted struct field |
 | `defer_no_return.lsysl` 🟡 | single defer + implicit exit; defer-then-body; defer in always-taken if-branch fires at fn exit; no-defer baseline (4 tests). **Bug surfaced and withheld:** defer queued inside a *skipped* `if`-branch still fires on 6 of 7 backends (everything except interpreter). Test was authored but dropped pending fix — see feedback_sysl_codegen_defer_in_skipped_branch.md |
 | `defer_in_loop.lsysl` 🔴 | defer inside loop body — fires at end of *function*, not iteration |
-| `defer_nested_call.lsysl` 🔴 | defers from caller and callee both fire, in correct relative order |
+| `defer_nested_call.lsysl` 🟢 | inner defers complete before outer resumes; outer's own defer fires after inner is fully gone; two-per-frame LIFO without cross-frame interleave; three-deep A→B→C nesting (4 tests) |
 
 Existing: `defer_lifo.lsysl` → `defer/defer_lifo.lsysl`.
 
