@@ -68,6 +68,18 @@ match the carve-out exactly.
     const MAIN_EXE_BASE: i64 = 0x60000000
     const INTERP_BASE:   i64 = 0x60100000
 
+The brk-arena bounds the PIE loader installs as the per-process
+heap VMA. Must stay in lockstep with `VMA_DEFAULT_HEAP_BOT/TOP`
+in `oskit.kernel.vma` and with `POSIX_BRK_BASE/LIMIT` in
+`oskit.posix.shim` — those are the canonical brk-bounds the
+shim uses for `sys_brk` bookkeeping. The PIE loader installs
+this as a VMA so that lite_malloc's first brk-driven write
+demand-faults a page in instead of crashing on an unmapped
+heap.
+
+    const VMA_DEFAULT_HEAP_BOT: i64 = 0x60040000
+    const VMA_DEFAULT_HEAP_TOP: i64 = 0x60080000
+
 `AT_*` auxv tags. The values are the standard glibc/musl numbers
 (see `bits/auxv.h`); they're ABI to the dynamic linker. PM emits
 the subset musl's `__init_libc` reads on aarch64 + x86_64. The
@@ -1235,6 +1247,20 @@ the fixed-stack-region pattern; auto-grow is Phase 2.
 
         val stack_low = initial_sp_top - u64(0x10000)
         svc_vma_create(target_pid, stack_low, initial_sp_top,
+                       VMA_PROT_READ | VMA_PROT_WRITE,
+                       VMA_MAP_ANON | VMA_MAP_PRIVATE)
+
+Heap VMA: covers `[VMA_DEFAULT_HEAP_BOT, VMA_DEFAULT_HEAP_TOP)`,
+the same span the POSIX shim uses as its brk arena. Without this,
+the first `brk()`-driven write past `POSIX_BRK_BASE` (musl's
+lite_malloc on its very first allocation) finds no VMA and the
+process dies on `kernel_handle_user_fault`. The seeded default
+layout covers this range with its single big RWX code VMA, so
+static-binary users never hit this — but `pm_load_image_pie`
+calls `replace_image_prep` first and installs tight per-PT_LOAD
+VMAs that exclude the brk window.
+
+        svc_vma_create(target_pid, u64(VMA_DEFAULT_HEAP_BOT), u64(VMA_DEFAULT_HEAP_TOP),
                        VMA_PROT_READ | VMA_PROT_WRITE,
                        VMA_MAP_ANON | VMA_MAP_PRIVATE)
 

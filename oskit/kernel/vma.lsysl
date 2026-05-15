@@ -750,6 +750,18 @@ Phase B of the Phase 1 invariant-#1 rollout deletes the
     const VMA_DEFAULT_STACK_BOT = 0x60080000
     const VMA_DEFAULT_STACK_TOP = 0x60090000
 
+The brk-arena bounds. Matches the `POSIX_BRK_BASE` / `POSIX_BRK_LIMIT`
+that `oskit.posix.shim` uses to bookkeep `sys_brk`, so the
+brk pointer is always inside this VMA. The seeded default
+layout covers the same span as part of its single big code VMA;
+the VMA-based PIE loader (`pm_load_image_pie`) installs this as
+a separate anonymous RW VMA so musl's first malloc-via-brk
+demand-faults a page in instead of crashing on an unmapped
+heap.
+
+    const VMA_DEFAULT_HEAP_BOT  = 0x60040000
+    const VMA_DEFAULT_HEAP_TOP  = 0x60080000
+
 `VMA_USER_VA_BOT` / `VMA_USER_VA_TOP` describe the full user
 virtual-address window — the range every per-process user mapping
 (code, stack, heap, mmap, ELF interp) lives inside. The kernel

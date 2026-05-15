@@ -1291,6 +1291,24 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "!K:"
   }
 
+  "busybox: applet help (no args)" in {
+    // `busybox` with no args prints its applet table — also
+    // exercises the heap-VMA install in pm_load_image_pie.
+    val output = qemu.command("/bin/busybox")
+    output should include("BusyBox")
+    output should not include "!K:"
+  }
+
+  "busybox: ls /etc" ignore {
+    // TODO: un-ignore when sys_getdents64 (syscall 61) lands and
+    // POSIX_FD_DIR fd kind tracks an opendir cursor through VFS_CMD_READDIR.
+    val output = qemu.command("/bin/busybox ls /etc")
+    output should include("hostname")
+    output should include("passwd")
+    output should include("ttytab")
+    output should not include "!K:"
+  }
+
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")
