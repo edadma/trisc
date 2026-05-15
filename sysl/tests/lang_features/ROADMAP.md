@@ -196,7 +196,7 @@ Existing: `defer_lifo.lsysl` → `defer/defer_lifo.lsysl`.
 |---|---|
 | `closures_hof.lsysl` 🟢 | basic captures, stored-in-struct, repeated invocation *(move from top level)* |
 | `closure_capture_mutable.lsysl` 🟡 | snapshot-not-reference capture semantics: `val` capture (1), `var k` outer mutation invisible after build (1). **Bugs surfaced and dropped from this file:** SVM `ArrayIndexOutOfBoundsException` when two closures capture the same `var` in one fn; SVM block-bodied closure returning last expression miscomputes return value; TRISC captures `var p: struct` by reference instead of by snapshot (2 tests). (2 tests; 3 known-divergence cases TODO'd in commit msg) |
-| `closure_return_from_fn.lsysl` 🔴 | returning a closure from a fn; lifetime of captured locals |
+| `closure_return_from_fn.lsysl` 🔴 | returning a closure from a fn; lifetime of captured locals **— BLOCKED on a real compiler bug**: 4 of 7 backends (llvm-host, riscv64, riscv32, wasm32 — all LLVM-based) free the closure environment when the outer fn returns. Symptoms: llvm-host returns garbage (`mult7(6) = 70904496`); rv64/rv32 return 0; wasm32 traps `unreachable`. Interpreter, svm-host, trisc all pass. **Surfaced 2026-05-15; file drafted and removed; see commit msg of sysl@ec6acbd08+1 for repro.** |
 | `closure_recursive_inner_def.lsysl` 🔴 | `def fact(n) -> ...` recursive named local closure |
 | `closure_in_closure.lsysl` 🔴 | closure declared inside another closure's body *(blocked on sysl bug — see feedback_sysl_closure_in_closure.md)* |
 | `function_pointer_call.lsysl` 🔴 | bare fn pointer call `fp(x)`; storing a fn pointer in a var |
