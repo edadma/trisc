@@ -249,7 +249,7 @@ Existing: `format_strings.lsysl` → `strings/format_strings.lsysl`.
 |---|---|
 | `out_inout_params.lsysl` 🟢 | swap / produce / accumulate *(move from top level)* |
 | `default_args_basic.lsysl` 🟢 | trailing default; mid-call omission (23 tests) |
-| `default_args_complex_expr.lsysl` 🔴 | default value is a non-trivial expression (sysl@2026-05-01 fix) |
+| `default_args_complex_expr.lsysl` 🟢 | default value is a non-trivial expression (22 tests) |
 | `named_args.lsysl` 🔴 | calling with `name = value` form; mixing positional + named |
 | `call_by_name.lsysl` 🔴 | `=> T` parameters; lazy evaluation; short-circuit-like patterns |
 | `extern_decl_call.lsysl` 🔴 | `extern fn ...` declaration; call into a C runtime symbol |
