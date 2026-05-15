@@ -59,6 +59,7 @@ class SyslSVMCodegen:
   private var needsSpExtern: Boolean = false
   private var needsStrConcat: Boolean = false
   private var needsStrEq: Boolean = false
+  private var needsStrCmp: Boolean = false
   private var needsNewSlice: Boolean = false
   private var needsStrFromI64: Boolean = false
   private var needsStrFromBool: Boolean = false
@@ -418,6 +419,7 @@ class SyslSVMCodegen:
     needsSpExtern = false
     needsStrConcat = false
     needsStrEq = false
+    needsStrCmp = false
     needsNewSlice = false
     needsStrFromI64 = false
     needsStrFromBool = false
@@ -679,6 +681,8 @@ class SyslSVMCodegen:
       emit("extern __svm_str_concat")
     if needsStrEq && !definedSymbols.contains("__svm_str_eq") then
       emit("extern __svm_str_eq")
+    if needsStrCmp && !definedSymbols.contains("__svm_str_cmp") then
+      emit("extern __svm_str_cmp")
     if needsStrFromI64 && !definedSymbols.contains("__svm_str_from_i64") then
       emit("extern __svm_str_from_i64")
     if needsStrFromBool && !definedSymbols.contains("__svm_str_from_bool") then
@@ -1646,6 +1650,20 @@ class SyslSVMCodegen:
       emit("  call __svm_str_eq")
       if op == "!=" then emit("  eqz")
       needsStrEq = true
+
+    case TBinary(left, op @ ("<" | "<=" | ">" | ">="), right, _) if left.typ == SyslType.StringType =>
+      // Lexicographic byte-wise compare via __svm_str_cmp (returns signed
+      // 3-way: negative / zero / positive). Reduce to bool with the matching
+      // zero-relative predicate.
+      genExpr(left)
+      genExpr(right)
+      emit("  call __svm_str_cmp")
+      op match
+        case "<"  => emit("  ltz")
+        case "<=" => emit("  lez")
+        case ">"  => emit("  gtz")
+        case ">=" => emit("  gez")
+      needsStrCmp = true
 
     case TBinary(left, op, right, typ) =>
       genExpr(left)

@@ -1,34 +1,32 @@
-String comparison — `==` and `!=`
-==================================
+String comparison — `==`, `!=`, `<`, `<=`, `>`, `>=`
+=====================================================
 
-Sysl supports byte-for-byte equality on strings via `==`
-and `!=`. The comparison checks length plus content; two
-strings are equal iff they have the same length and the
-same bytes at every position. Equality is **case
-sensitive** and operates on the UTF-8 bytes — there is no
-locale, no normalisation, no special treatment of multi-
-byte sequences beyond "compare them byte for byte."
+Sysl's string comparison operators yield bool. `==` and
+`!=` test byte-for-byte equality (length + content). The
+ordering operators `<`, `<=`, `>`, `>=` are
+**lexicographic** over the UTF-8 bytes — equivalent to
+`memcmp` extended with a "shorter is less" tiebreaker:
+walk both strings byte-for-byte (each byte treated as
+unsigned 0..255); at the first differing position, the
+operand with the smaller byte is less. If one operand is a
+prefix of the other, the shorter operand is less.
 
-**Ordering operators (`<`, `<=`, `>`, `>=`) are not
-implemented on strings.** Calling them runtime-panics with
-"unsupported string operator: <". When ordering lands, add
-the lexicographic cases here. Until then this file pins
-only the equality surface.
+The comparison is **case sensitive**, never depends on
+locale, and never re-decodes UTF-8.
 
-This file exercises:
+This file pins:
 
-  - Equality between two identical literals and between
-    two different literals.
-  - Equality across a `var`, a returned fn result, and a
-    fresh concat buffer.
-  - `!=` is the negation of `==` on every shape.
-  - The empty string equals itself but not any non-empty
-    string.
-  - Equality is case-sensitive at the byte level.
-  - Length mismatch is enough to disequal — no need to
-    actually look at content.
-  - The result is a plain `bool` usable in `var`, `if`,
-    and through a fn boundary.
+  - Equality (`==`, `!=`) on literals, vars, fn-results,
+    and fresh concat buffers.
+  - The empty string is the minimum: `"" < x` for all
+    non-empty `x`; `"" == ""`.
+  - Lexicographic `<` / `<=` / `>` / `>=` on first-byte-
+    differs, equal-prefix-then-extension, identical
+    operands, and case-sensitivity.
+  - UTF-8 byte equality and inequality.
+  - Length-mismatch is enough for `==` to be false.
+  - The result is a plain `bool` that round-trips through
+    `val`, `if`, and a fn that returns bool.
 
 File-local prefix `Sco` (string-compare-ops) keeps names
 out of the module-flat namespace.
@@ -55,10 +53,8 @@ Equality across var / fn-result / concat
 ----------------------------------------
 
 `==` looks at content, not at where the bytes came from.
-The third case is the most codegen-sensitive: the LHS is a
-fresh buffer (concat result) whose content happens to
-match a literal. The compare must reach into both
-buffers, not compare their pointers.
+The concat case exercises the codegen path where one side
+is a fresh buffer.
 
     sco_make() -> string = "hello"
 
@@ -87,52 +83,101 @@ buffers, not compare their pointers.
         assert("" != "x", "empty vs non-empty under !=")
         assert(!("" != ""), "two empties under != — false")
 
-Empty string
-------------
+Lexicographic ordering — first byte differs
+-------------------------------------------
 
-`""` equals itself but no non-empty string. The empty-
-vs-empty equality is its own pinned case because that's
-the codegen path where len is 0 on both sides and there's
-no content to compare.
+When the first differing byte position has different
+bytes, the strict-less and strict-greater results follow
+the byte values directly. Equal operands fail strict `<`
+and `>`.
 
     #test
-    test_sco_eq_empty_self() -> unit
+    test_sco_lt_first_byte_differs() -> unit
+        assert("a" < "b", "'a' < 'b'")
+        assert(!("b" < "a"), "'b' < 'a' is false")
+
+    #test
+    test_sco_lt_strict_on_equal() -> unit
+        assert(!("ab" < "ab"), "'ab' < 'ab' is false (strict)")
+        assert(!("ab" > "ab"), "'ab' > 'ab' is false (strict)")
+
+Lexicographic ordering — prefix tiebreak
+----------------------------------------
+
+If one operand is a proper prefix of the other (all bytes
+match through the shorter length), the shorter operand is
+less. The codegen's tiebreak is `len(l) - len(r)`.
+
+    #test
+    test_sco_lt_prefix_extends() -> unit
+        assert("ab" < "abc", "shorter prefix < longer extension")
+        assert(!("abc" < "ab"), "longer extension < shorter prefix is false")
+        assert("abc" > "ab", "longer extension > shorter prefix")
+
+`<=` and `>=` collapse to `==` on equal operands
+------------------------------------------------
+
+    #test
+    test_sco_le_equal_inputs() -> unit
+        assert("ab" <= "ab", "'ab' <= 'ab' (equal)")
+        assert("ab" >= "ab", "'ab' >= 'ab' (equal)")
+
+    #test
+    test_sco_le_extends() -> unit
+        assert("ab" <= "abc", "'ab' <= 'abc'")
+        assert(!("abc" <= "ab"), "'abc' <= 'ab' is false")
+
+    #test
+    test_sco_ge_extends() -> unit
+        assert("abc" >= "ab", "'abc' >= 'ab'")
+        assert(!("ab" >= "abc"), "'ab' >= 'abc' is false")
+
+The empty string is the minimum
+-------------------------------
+
+`""` is less than every non-empty string and equal to
+itself.
+
+    #test
+    test_sco_empty_lt_nonempty() -> unit
+        assert("" < "a", "empty < single char")
+        assert("" < "anything", "empty < longer string")
+        assert(!("a" < ""), "non-empty < empty is false")
+
+    #test
+    test_sco_empty_le_anything() -> unit
+        assert("" <= "", "empty <= empty")
+        assert("" <= "a", "empty <= non-empty")
+
+    #test
+    test_sco_empty_self_eq() -> unit
         assert("" == "", "empty == empty")
-
-    #test
-    test_sco_eq_empty_vs_nonempty() -> unit
-        assert(!("" == "a"), "empty == 'a' is false")
-        assert("" != "a", "empty != 'a'")
-        assert(!("a" == ""), "'a' == empty is false (symmetry)")
-        assert("a" != "", "'a' != empty (symmetry)")
+        assert(!("" != ""), "empty != empty is false")
 
 Case sensitivity
 ----------------
 
-`==` is **case sensitive**. Upper- and lower-case
-characters with the same ASCII letter are distinct
-strings; the comparison sees different bytes.
+`==` and ordering both work on raw bytes. ASCII upper-case
+letters precede lower-case letters in the byte table
+(`'A'` = 0x41, `'a'` = 0x61), so `"ABC" < "abc"`.
 
     #test
     test_sco_eq_case_sensitive() -> unit
         assert(!("abc" == "ABC"), "lower != upper under ==")
         assert("abc" != "ABC", "lower != upper under !=")
-        assert(!("Hello" == "hello"), "mixed case != lower")
+        assert("ABC" < "abc", "upper < lower (byte 0x41 < byte 0x61)")
+        assert("abc" > "ABC", "lower > upper (mirror)")
 
 Length mismatch
 ---------------
 
 If the lengths differ, equality short-circuits to false.
-Pinned here as a separate case — the codegen path is
-"check lengths first, return false if mismatch" and we
-want it exercised.
 
     #test
     test_sco_eq_diff_lengths() -> unit
         assert(!("a" == "ab"), "'a' == 'ab' is false (length mismatch)")
         assert("a" != "ab", "'a' != 'ab' is true")
         assert(!("abc" == "ab"), "longer == shorter is false")
-        assert(!("ab" == "abc"), "shorter == longer is false")
 
 UTF-8 byte equality
 -------------------
@@ -153,26 +198,26 @@ but different code points must not.
 Result is a plain `bool` — flows through `var`, `if`, fn
 --------------------------------------------------------
 
-The result of `==` / `!=` is a normal `bool`. It must
+The result of any compare op is a normal `bool`. It must
 round-trip through a `val`, through an `if`-expression
 condition, and through a fn that takes string args and
 returns bool.
 
-    sco_first_eq(a: string, b: string) -> bool = a == b
+    sco_first_le(a: string, b: string) -> bool = a <= b
 
     #test
     test_sco_result_in_var() -> unit
         val eq = "x" == "x"
-        val ne = "x" != "y"
+        val lt = "a" < "b"
         assert(eq, "eq var")
-        assert(ne, "ne var")
+        assert(lt, "lt var")
 
     #test
     test_sco_result_in_if() -> unit
-        val tag = if "abc" == "abc" then "match" else "miss"
-        assert(tag == "match", s"branch on string ==; got '$tag'")
+        val tag = if "abc" < "abd" then "lt" else "ge"
+        assert(tag == "lt", s"branch on string compare; got '$tag'")
 
     #test
     test_sco_through_fn() -> unit
-        assert(sco_first_eq("aa", "aa"), "fn returning bool from ==")
-        assert(!sco_first_eq("aa", "ab"), "and the negative case")
+        assert(sco_first_le("aa", "ab"), "fn returning bool from <=")
+        assert(!sco_first_le("ab", "aa"), "and the negative case")

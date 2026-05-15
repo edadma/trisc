@@ -3107,9 +3107,20 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  std r2, r3, r0")          // store len at offset 8
         emit("  mov r1, r7")              // r1 = address of result string struct
 
-      case TBinary(left, op @ ("==" | "!="), right, _) if left.typ == SyslType.StringType =>
-        // String comparison: compare lengths first, then bytes
-        // Eval left: extract ptr/len, reclaim temps, push
+      case TBinary(left, op, right, _)
+          if left.typ == SyslType.StringType
+            && Set("==", "!=", "<", "<=", ">", ">=").contains(op) =>
+        // Lexicographic byte-wise compare. Computes a signed three-way diff in
+        // r1 (negative / zero / positive) by walking min(len1, len2) bytes; if
+        // every byte matches, the tiebreak is len1 - len2. The diff is then
+        // reduced to a 0/1 boolean via the matching zero-relative branch.
+        //
+        // Stack layout after setup (40 bytes total, sp+0 at the top):
+        //   sp+0  : minlen (running counter)
+        //   sp+8  : len2
+        //   sp+16 : ptr2
+        //   sp+24 : len1
+        //   sp+32 : ptr1
         val preLeft = stackOffset
         genExpr(left)                      // r1 = addr of {ptr1, len1}
         emit("  ldd r2, r1, r0")          // r2 = ptr1
@@ -3122,7 +3133,6 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  pshd r2")                 // push ptr1
         emit("  pshd r3")                 // push len1
         stackOffset -= 16
-        // Eval right: extract ptr/len, reclaim temps, push
         val preRight = stackOffset
         genExpr(right)                     // r1 = addr of {ptr2, len2}
         emit("  ldd r2, r1, r0")          // r2 = ptr2
@@ -3135,46 +3145,74 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  pshd r2")                 // push ptr2
         emit("  pshd r3")                 // push len2
         stackOffset -= 16
-        // Stack: sp+0=len2, sp+8=ptr2, sp+16=len1, sp+24=ptr1
-        val notEqual = newLabel("str_ne")
-        val equal = newLabel("str_eq")
-        val strEnd = newLabel("str_cmp_end")
-        // Compare lengths
-        emitAddImm(1, 7, 16)
+        // Reserve the minlen slot (placeholder 0; rewritten below).
+        emit("  pshd r0")
+        stackOffset -= 8
+
+        // Compute minlen = min(len1, len2) and store at sp+0.
+        emitAddImm(1, 7, 24)
         emit("  ldd r1, r1, r0")          // r1 = len1
-        emit("  ldd r2, r7, r0")          // r2 = len2
-        emit(s"  bne r1, r2, $notEqual")  // lengths differ → not equal
-        // Lengths match — compare bytes
-        emitAddImm(2, 7, 24)
-        emit("  ldd r2, r2, r0")          // r2 = ptr1
-        emitAddImm(3, 7, 8)
-        emit("  ldd r3, r3, r0")          // r3 = ptr2
-        // r1 = len (loop counter)
-        val cmpLoop = newLabel("str_cmp_loop")
-        val cmpMismatch = newLabel("str_cmp_mismatch")
-        emit(s"$cmpLoop")
-        emit(s"  beq r1, r0, $equal")
-        emit("  ldb r4, r2, r0")
-        emit("  pshd r1")
-        emit("  ldb r1, r3, r0")
-        emit(s"  bne r4, r1, $cmpMismatch")
-        emit("  popd r1")
+        emitAddImm(2, 7, 8)
+        emit("  ldd r2, r2, r0")          // r2 = len2
+        val useLeftLbl = newLabel("str_cmp_use_l")
+        val minDoneLbl = newLabel("str_cmp_min_done")
+        emit(s"  bls r1, r2, $useLeftLbl") // len1 < len2 → use len1
+        emit("  std r2, r7, r0")          // minlen = len2
+        emit(s"  bra $minDoneLbl")
+        emit(s"$useLeftLbl")
+        emit("  std r1, r7, r0")          // minlen = len1
+        emit(s"$minDoneLbl")
+
+        // r2 = lp (ptr1), r3 = rp (ptr2); both walk forward through the loop.
+        emitAddImm(2, 7, 32)
+        emit("  ldd r2, r2, r0")
+        emitAddImm(3, 7, 16)
+        emit("  ldd r3, r3, r0")
+
+        val loopLbl = newLabel("str_cmp_loop")
+        val lensTieLbl = newLabel("str_cmp_lens")
+        val haveResLbl = newLabel("str_cmp_have")
+        emit(s"$loopLbl")
+        emit("  ldd r4, r7, r0")          // r4 = minlen
+        emit(s"  beq r4, r0, $lensTieLbl")
+        emit("  ldb r1, r2, r0")          // r1 = lb (unsigned 0..255)
+        emit("  ldb r4, r3, r0")          // r4 = rb (clobbers counter — reloaded below)
+        emit("  sub r1, r1, r4")          // r1 = lb - rb (three-way diff at this byte)
+        emit(s"  bne r1, r0, $haveResLbl") // mismatch → r1 carries the diff
         emit("  addi r2, r2, 1")
         emit("  addi r3, r3, 1")
-        emit("  addi r1, r1, -1")
-        emit(s"  bra $cmpLoop")
-        emit(s"$cmpMismatch")
-        emit("  popd r1")                 // clean saved counter
-        emit(s"  bra $notEqual")
-        emit(s"$equal")
-        emit(s"  ldi r1, ${if op == "==" then 1 else 0}")
-        emit(s"  bra $strEnd")
-        emit(s"$notEqual")
-        emit(s"  ldi r1, ${if op == "==" then 0 else 1}")
-        emit(s"$strEnd")
-        // Clean up: 32 bytes of saved values
-        emitAddImm(7, 7, 32)
-        stackOffset += 32
+        emit("  ldd r4, r7, r0")
+        emit("  addi r4, r4, -1")
+        emit("  std r4, r7, r0")
+        emit(s"  bra $loopLbl")
+
+        emit(s"$lensTieLbl")
+        emitAddImm(1, 7, 24)
+        emit("  ldd r1, r1, r0")          // r1 = len1
+        emitAddImm(4, 7, 8)
+        emit("  ldd r4, r4, r0")          // r4 = len2
+        emit("  sub r1, r1, r4")          // r1 = len1 - len2
+
+        emit(s"$haveResLbl")
+        // Reduce the three-way diff in r1 to a 0/1 boolean for the requested op.
+        val yesLbl = newLabel("str_cmp_yes")
+        val endLbl = newLabel("str_cmp_end")
+        op match
+          case "==" => emit(s"  beq r1, r0, $yesLbl")
+          case "!=" => emit(s"  bne r1, r0, $yesLbl")
+          case "<"  => emit(s"  bls r1, r0, $yesLbl")
+          case "<=" => emit(s"  ble r1, r0, $yesLbl")
+          case ">"  => emit(s"  bls r0, r1, $yesLbl") // 0 < r1
+          case ">=" => emit(s"  bge r1, r0, $yesLbl")
+        emit("  ldi r1, 0")
+        emit(s"  bra $endLbl")
+        emit(s"$yesLbl")
+        emit("  ldi r1, 1")
+        emit(s"$endLbl")
+
+        // Reclaim 40 bytes (32 for the two descriptors + 8 for the minlen slot).
+        emitAddImm(7, 7, 40)
+        stackOffset += 40
 
       case TBinary(left, op @ ("+" | "-"), right, _) if left.typ.isPointerLike =>
         // Pointer arithmetic: ptr + int → ptr (scale by element size)

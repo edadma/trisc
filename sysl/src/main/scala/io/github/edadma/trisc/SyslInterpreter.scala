@@ -1051,7 +1051,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
         val rv = evalAny(right, env)
 
-        // String path: concatenation and comparison
+        // String path: concatenation and comparison (lexicographic, byte-wise unsigned).
         (lv, rv) match
           case (StringVal(lb), StringVal(rb)) =>
             return (op match
@@ -1062,6 +1062,20 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
                 StringVal(newBytes)
               case "==" => IntVal(if java.util.Arrays.equals(lb, rb) then 1L else 0L)
               case "!=" => IntVal(if !java.util.Arrays.equals(lb, rb) then 1L else 0L)
+              case "<" | "<=" | ">" | ">=" =>
+                val n = math.min(lb.length, rb.length)
+                var i = 0
+                var diff = 0
+                while i < n && diff == 0 do
+                  diff = (lb(i) & 0xFF) - (rb(i) & 0xFF)
+                  i += 1
+                if diff == 0 then diff = lb.length - rb.length
+                val ok = op match
+                  case "<"  => diff < 0
+                  case "<=" => diff <= 0
+                  case ">"  => diff > 0
+                  case ">=" => diff >= 0
+                IntVal(if ok then 1L else 0L)
               case _ => throw RuntimeError(s"unsupported string operator: $op")
             )
           case _ =>

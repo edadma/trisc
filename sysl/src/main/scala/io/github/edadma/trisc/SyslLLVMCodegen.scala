@@ -1550,10 +1550,13 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $cp2 = call i8* @memcpy(i8* $dest, i8* $rPtr, $sizeT ${narrowI64ToSizeT(rLen64)})")
         emitMakeString(buf, totalLen)
 
-      case TBinary(left, op @ ("==" | "!="), right, _) if left.typ == SyslType.StringType =>
+      case TBinary(left, op @ ("==" | "!=" | "<" | "<=" | ">" | ">="), right, _)
+          if left.typ == SyslType.StringType =>
+        // Lexicographic byte-wise compare: memcmp on min(lLen, rLen); if equal,
+        // tiebreak by lLen - rLen. Then reduce the i32 three-way to a bool by
+        // comparing against zero with the matching predicate.
         val lp = genExpr(left)
         val rp = genExpr(right)
-        // Extract len from both
         val lLenGep = newReg()
         emit(s"  $lLenGep = getelementptr %struct.string, %struct.string* $lp, i32 0, i32 1")
         val lLen = newReg()
@@ -1562,15 +1565,6 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $rLenGep = getelementptr %struct.string, %struct.string* $rp, i32 0, i32 1")
         val rLen = newReg()
         emit(s"  $rLen = load i32, i32* $rLenGep")
-        // Compare lengths
-        val lenEq = newReg()
-        emit(s"  $lenEq = icmp eq i32 $lLen, $rLen")
-        val lenCheckBlock = currentBlock
-        val lenMatchLabel = newLabel("str_len_match")
-        val strCmpDone = newLabel("str_cmp_done")
-        emit(s"  br i1 $lenEq, label %$lenMatchLabel, label %$strCmpDone")
-        // Lengths match — compare bytes
-        emitLabel(lenMatchLabel)
         val lPtrGep = newReg()
         emit(s"  $lPtrGep = getelementptr %struct.string, %struct.string* $lp, i32 0, i32 0")
         val lPtr = newReg()
@@ -1579,26 +1573,32 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $rPtrGep = getelementptr %struct.string, %struct.string* $rp, i32 0, i32 0")
         val rPtr = newReg()
         emit(s"  $rPtr = load i8*, i8** $rPtrGep")
-        val len64 = newReg()
-        emit(s"  $len64 = sext i32 $lLen to i64")
-        val cmpResult = newReg()
-        emit(s"  $cmpResult = call i32 @memcmp(i8* $lPtr, i8* $rPtr, $sizeT ${narrowI64ToSizeT(len64)})")
-        val bytesEq = newReg()
-        emit(s"  $bytesEq = icmp eq i32 $cmpResult, 0")
-        val lenMatchExit = currentBlock
-        emit(s"  br label %$strCmpDone")
-        // Merge
-        emitLabel(strCmpDone)
-        val eq = newReg()
-        emit(s"  $eq = phi i1 [ false, %$lenCheckBlock ], [ $bytesEq, %$lenMatchExit ]")
+        val lLeR = newReg()
+        emit(s"  $lLeR = icmp sle i32 $lLen, $rLen")
+        val minLen = newReg()
+        emit(s"  $minLen = select i1 $lLeR, i32 $lLen, i32 $rLen")
+        val minLen64 = newReg()
+        emit(s"  $minLen64 = sext i32 $minLen to i64")
+        val cmpBytes = newReg()
+        emit(s"  $cmpBytes = call i32 @memcmp(i8* $lPtr, i8* $rPtr, $sizeT ${narrowI64ToSizeT(minLen64)})")
+        val bytesZero = newReg()
+        emit(s"  $bytesZero = icmp eq i32 $cmpBytes, 0")
+        val lenDiff = newReg()
+        emit(s"  $lenDiff = sub i32 $lLen, $rLen")
+        val threeWay = newReg()
+        emit(s"  $threeWay = select i1 $bytesZero, i32 $lenDiff, i32 $cmpBytes")
+        val cmpPred = op match
+          case "==" => "eq"
+          case "!=" => "ne"
+          case "<"  => "slt"
+          case "<=" => "sle"
+          case ">"  => "sgt"
+          case ">=" => "sge"
+        val cmp = newReg()
+        emit(s"  $cmp = icmp $cmpPred i32 $threeWay, 0")
         val result = newReg()
         val t = llvmType(SyslType.BoolType)
-        if op == "==" then
-          emit(s"  $result = zext i1 $eq to $t")
-        else
-          val neq = newReg()
-          emit(s"  $neq = xor i1 $eq, true")
-          emit(s"  $result = zext i1 $neq to $t")
+        emit(s"  $result = zext i1 $cmp to $t")
         result
 
       case TBinary(left, op, right, _) if (op == "+" || op == "-") && (left.typ.isInstanceOf[SyslType.PtrType] || right.typ.isInstanceOf[SyslType.PtrType] || left.typ.isInstanceOf[SyslType.ArrayType] || right.typ.isInstanceOf[SyslType.ArrayType]) =>

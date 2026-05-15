@@ -395,6 +395,74 @@ object SVMRuntime:
        |  push_0
        |  ret
        |
+       |; __svm_str_cmp(l: *string, r: *string) -> i64
+       |; Three-way lexicographic compare. Returns negative if l < r,
+       |; zero if l == r, positive if l > r. Bytes compare unsigned;
+       |; if one operand is a prefix of the other, the shorter is less
+       |; (final tiebreak is l.len - r.len).
+       |global __svm_str_cmp, func
+       |__svm_str_cmp:
+       |  frame 5
+       |  local_set 1        ; r (string desc pointer)
+       |  local_set 0        ; l
+       |  ; load lens
+       |  local_get 0
+       |  push_i8 8
+       |  add
+       |  load64
+       |  local_set 2        ; llen
+       |  local_get 1
+       |  push_i8 8
+       |  add
+       |  load64
+       |  local_set 3        ; rlen
+       |  ; minlen = min(llen, rlen)
+       |  local_get 2
+       |  local_get 3
+       |  lt                 ; llen < rlen ?
+       |  jumpz .strcmp_use_rlen
+       |  local_get 2
+       |  jump .strcmp_minlen_done
+       |.strcmp_use_rlen:
+       |  local_get 3
+       |.strcmp_minlen_done:
+       |  local_set 4        ; minlen (remaining)
+       |  ; lp = l.ptr, rp = r.ptr
+       |  local_get 0
+       |  load64
+       |  local_set 0        ; reuse slot 0 as lp
+       |  local_get 1
+       |  load64
+       |  local_set 1        ; reuse slot 1 as rp
+       |.strcmp_loop:
+       |  local_get 4
+       |  eqz
+       |  jumpnz .strcmp_lens
+       |  local_get 0
+       |  load8              ; unsigned byte
+       |  local_get 1
+       |  load8
+       |  sub                ; lb - rb on 64-bit signed (bytes are u8 0..255)
+       |  dup
+       |  jumpnz .strcmp_ret ; mismatch — return diff
+       |  drop
+       |  local_get 0
+       |  inc
+       |  local_set 0
+       |  local_get 1
+       |  inc
+       |  local_set 1
+       |  local_get 4
+       |  dec
+       |  local_set 4
+       |  jump .strcmp_loop
+       |.strcmp_lens:
+       |  local_get 2
+       |  local_get 3
+       |  sub                ; llen - rlen
+       |.strcmp_ret:
+       |  ret
+       |
        |; __svm_new_slice(byteSize: i64, elemCount: i64) -> *slice_struct
        |; Allocates a 24-byte slice struct + `byteSize` bytes of data on
        |; the memory stack, zero-fills the data region, and fills the
