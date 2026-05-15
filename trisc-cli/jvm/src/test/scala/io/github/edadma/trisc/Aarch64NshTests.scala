@@ -2811,6 +2811,18 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "!K:"
   }
 
+  "busybox: /bin/ls works via symlink farm" in {
+    // /bin/ls is a symlink to /bin/busybox in the ramdisk; TFS's
+    // `tfs_lookup_follow` chases it at OPEN-time so execve loads
+    // the busybox binary, and busybox dispatches by argv[0]'s
+    // basename ("ls") to the ls applet. This is the user-visible
+    // payoff of the symlink-farm + tfs_lookup_follow work.
+    val output = qemu.command("/bin/ls /etc")
+    output should include("passwd")
+    output should include("shadow")
+    output should not include "!K:"
+  }
+
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")

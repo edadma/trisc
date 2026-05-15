@@ -1099,3 +1099,38 @@ the inode isn't a symlink.
         if nread <= 0
             return 0
         tfs_read(ino, buf, 0, nread)
+
+tfs_lookup_follow(path, path_len) -> int
+Like `tfs_lookup`, but if the terminal component is an `S_IFLNK`
+symlink, the target is read and re-resolved, looping until a non-
+symlink inode is reached or 40 hops are exhausted (MAXSYMLINKS).
+
+Only absolute targets (those that begin with `/`) are followed for
+now. Relative-target symlinks are out of scope for the Phase-1
+`/bin/<applet> -> /bin/busybox` use case — supporting them would
+require splitting the link's parent directory off the original
+path, which we'd rather build once a real user surfaces the need.
+
+Returns the final inode number, or `-1` on lookup failure / cycle /
+unsupported relative target.
+
+    tfs_lookup_follow(path: *byte, path_len: int) -> int
+        var ino = tfs_lookup(path, path_len)
+        var hops = 0
+        var ibuf: [32]byte
+        var target_buf: [256]byte
+        while ino != -1
+            tfs_read_inode(ino, ibuf)
+            if ino_type(ibuf) != S_IFLNK
+                return ino
+            if hops >= 40
+                return -1
+            val n = tfs_readlink(ino, target_buf, 256)
+            if n <= 0
+                return -1
+            // 47 = '/'. Absolute targets only.
+            if target_buf[0] != 47
+                return -1
+            ino = tfs_lookup(target_buf, n)
+            hops += 1
+        -1

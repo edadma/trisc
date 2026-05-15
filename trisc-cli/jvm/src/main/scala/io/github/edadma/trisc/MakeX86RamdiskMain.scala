@@ -93,7 +93,28 @@ object MakeX86RamdiskMain:
 
     // Add file entries for each binary (TFS.format needs "path file" lines)
     val fileLines = files.keys.map(path => s"$path file").mkString("\n")
-    val prefill = if fileLines.nonEmpty then s"$basePrefill\n$fileLines" else basePrefill
+
+    // Phase-1 close-out — applet symlink farm.
+    // busybox dispatches by argv[0]'s basename. Without these symlinks
+    // users have to spell out `/bin/busybox <applet>`; with them, plain
+    // `ls`, `cat`, `sh`, etc. work because nsh's PATH search resolves to
+    // /bin/<applet> which TFS now follows to /bin/busybox at OPEN-time
+    // (see `tfs_lookup_follow` in oskit/fs/tfs.lsysl). The symlinks are
+    // only created when busybox itself is present, so a build that
+    // omits /bin/busybox doesn't ship dangling links.
+    val applets = List(
+      "ls", "cat", "echo", "true", "false",
+      "head", "tail", "wc", "grep",
+      "mkdir", "rmdir", "rm", "cp", "mv",
+      "sh", "ash",
+    )
+    val appletLines =
+      if files.contains("/bin/busybox") then
+        applets.map(a => s"/bin/$a symlink /bin/busybox").mkString("\n")
+      else ""
+
+    val tail = List(fileLines, appletLines).filter(_.nonEmpty).mkString("\n")
+    val prefill = if tail.nonEmpty then s"$basePrefill\n$tail" else basePrefill
 
     val disk = TFS.format(
       blockSize = 4096,

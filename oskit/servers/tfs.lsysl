@@ -30,7 +30,7 @@ Commands:
 
     module oskit.servers
 
-    import oskit.fs.{tfs_init, tfs_lookup, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, tfs_truncate, tfs_symlink, tfs_readlink, sync_superblock}
+    import oskit.fs.{tfs_init, tfs_lookup, tfs_lookup_follow, tfs_read, tfs_write, tfs_create, tfs_unlink, tfs_stat, tfs_readdir, tfs_rmdir, tfs_chmod, tfs_rename, tfs_truncate, tfs_symlink, tfs_readlink, sync_superblock}
     import oskit.ipc.{port_create, port_register, ipc_recv, ipc_reply, ipc_last_msg_len}
     import oskit.drivers.disk.{disk_read, disk_write}
     import oskit.services.{rs_ready, svc_grant_map, svc_grant_unmap}
@@ -83,7 +83,7 @@ Reply:   [status(1), ino(4)]
     tfs_handle_open(sender: int, buf: *byte, msg_len: int)
         val path: *byte = buf + 1
         val path_len = msg_len - 1
-        val ino = tfs_lookup(path, path_len)
+        val ino = tfs_lookup_follow(path, path_len)
         var reply: [5]byte
         if ino == -1
             reply[0] = -1
