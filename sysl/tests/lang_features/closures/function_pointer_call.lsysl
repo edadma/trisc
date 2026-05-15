@@ -1,0 +1,80 @@
+Function-pointer values and bare-name calls
+===========================================
+
+A bare top-level function name in expression position is a
+first-class function value — a function pointer. It can be
+stored in a `val`, passed as an argument, and called directly
+with `fp(args)`. Unlike a closure literal, a top-level fn has
+no captured environment; the function value is just the code
+address.
+
+This file pins the function-pointer round-trip on all seven
+backends: bind, pass, call, store-and-recall.
+
+    module sysl.tests.lang_features
+
+    fpc_double(x: int) -> int = x * 2
+
+    fpc_square(x: int) -> int = x * x
+
+    fpc_apply(f: (int) -> int, x: int) -> int = f(x)
+
+Bare-name fn in val, called directly
+------------------------------------
+
+The top-level fn is bound to a local. The local has a fn-value
+type and can be called with `f(x)` exactly like the original.
+
+    #test
+    test_bind_and_call() -> unit
+        val f = fpc_double
+        assert(f(7) == 14, s"f(7) should be 14, got ${f(7)}")
+        assert(f(0) == 0, s"f(0) should be 0, got ${f(0)}")
+        assert(f(-3) == -6, s"f(-3) should be -6, got ${f(-3)}")
+
+Fn-pointer passed to a hof
+--------------------------
+
+A bare top-level name in arg position passes the fn value to
+the hof. The hof's parameter is a fn type and calling it
+dispatches to the original fn.
+
+    #test
+    test_pass_to_hof() -> unit
+        val r1 = fpc_apply(fpc_double, 9)
+        val r2 = fpc_apply(fpc_square, 9)
+        assert(r1 == 18, s"apply(double, 9) should be 18, got $r1")
+        assert(r2 == 81, s"apply(square, 9) should be 81, got $r2")
+
+Reassigning the fn-pointer var
+------------------------------
+
+A `var` of fn-pointer type can be reassigned to a different
+top-level fn. Each call goes through whichever fn is currently
+bound.
+
+    #test
+    test_reassign_fn_pointer() -> unit
+        var f = fpc_double
+        assert(f(10) == 20, "double(10) is 20")
+        f = fpc_square
+        assert(f(10) == 100, "square(10) is 100")
+        f = fpc_double
+        assert(f(5) == 10, "back to double, 10")
+
+Two fn pointers used side by side
+---------------------------------
+
+Two distinct fn-pointer vals coexist without aliasing. Calling
+one doesn't change the other.
+
+    #test
+    test_two_pointers_independent() -> unit
+        val a = fpc_double
+        val b = fpc_square
+        // Interleave calls — neither should disturb the other
+        assert(a(3) == 6, "a(3)=6")
+        assert(b(3) == 9, "b(3)=9")
+        assert(a(4) == 8, "a(4)=8")
+        assert(b(4) == 16, "b(4)=16")
+
