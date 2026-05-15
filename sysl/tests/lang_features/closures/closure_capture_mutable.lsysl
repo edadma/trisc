@@ -1,0 +1,60 @@
+Closures capture by snapshot, not by reference
+==============================================
+
+Sysl closures capture their environment **by value at closure-
+construction time**. A closure that captures a local `var x`
+binds to the *value* `x` had when the closure literal was
+evaluated — it does **not** hold a reference to the outer
+storage. Two consequences:
+
+  1. Mutating the outer `x` after the closure is built is
+     invisible to the closure body — every invocation still
+     reads the snapshotted value.
+
+  2. The closure body cannot reach back and mutate the outer
+     `x`; it has its own local copy of the captured binding.
+
+This is a deliberate semantic choice — it makes closures pure
+under capture and avoids the "spooky action" of Python/JS-style
+late binding. The tests below pin both consequences across
+all seven backends.
+
+If you genuinely need a shared mutable cell, allocate one
+(`new Cell` or similar) and capture the *reference* — that
+follows the usual ARC rules and is a different feature.
+
+    module sysl.tests.lang_features
+
+    ccm_apply(f: () -> int) -> int = f()
+
+`val` capture is the simplest case — value frozen forever
+---------------------------------------------------------
+
+A `val` cannot be reassigned in the outer scope, so the
+captured value never changes regardless of capture semantics.
+This is the baseline that every backend must get right.
+
+    #test
+    test_val_capture_basic() -> unit
+        val k = 10
+        val read_k = () -> k
+        assert(ccm_apply(read_k) == 10, "val capture reads 10")
+        assert(ccm_apply(read_k) == 10, "val capture still reads 10 on repeat")
+
+Snapshot semantics — outer mutation invisible to the closure
+------------------------------------------------------------
+
+After the closure literal is evaluated, the outer scope's
+`var k` is updated. The closure body still reads the
+snapshotted value `10`, not the updated `25`.
+
+    #test
+    test_var_capture_is_snapshot() -> unit
+        var k = 10
+        val read_k = () -> k
+        assert(ccm_apply(read_k) == 10, "snapshot at build time = 10")
+        k = 25
+        assert(ccm_apply(read_k) == 10, "outer mutation invisible — still 10")
+        k = -3
+        assert(ccm_apply(read_k) == 10, "second outer mutation still invisible")
+
