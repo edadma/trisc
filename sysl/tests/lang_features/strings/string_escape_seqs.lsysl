@@ -1,0 +1,245 @@
+String escape sequences
+=======================
+
+Sysl's lexer recognises a fixed set of backslash escapes
+inside `"..."` (and inside character literals `'.'`):
+
+| Escape | Byte | Meaning                |
+|--------|------|------------------------|
+| `\n`   | 0x0A | newline                |
+| `\t`   | 0x09 | tab                    |
+| `\r`   | 0x0D | carriage return        |
+| `\0`   | 0x00 | NUL (embeds in string) |
+| `\\`   | 0x5C | literal backslash      |
+| `\'`   | 0x27 | single quote           |
+| `\"`   | 0x22 | double quote           |
+| `\xHH` | 0xHH | one byte by two hex digits |
+
+There is **no** `\u{...}` Unicode escape — multi-byte
+sequences are written as their literal UTF-8 bytes in source
+(or assembled via repeated `\xHH`).
+
+This file pins, for each documented escape:
+
+  - The byte value (via `int(s[i])`).
+  - The string length (escape contributes exactly one byte,
+    even when the source spelling is two characters).
+  - That the escape works inside concatenation and inside
+    interpolation literals.
+
+File-local prefix `Ses` (string-escape-sequences).
+
+    module sysl.tests.lang_features
+
+`\n` is the byte 0x0A
+---------------------
+
+The newline escape produces a single byte regardless of host
+platform — sysl does not do any CR/LF translation on string
+literals.
+
+    #test
+    test_ses_newline_byte() -> unit
+        val s = "\n"
+        assert(len(s) == 1, s"'\\n' is one byte; got len=${len(s)}")
+        assert(int(s[0]) == 10, s"'\\n' is 0x0A; got ${int(s[0])}")
+
+    #test
+    test_ses_newline_in_middle() -> unit
+        val s = "a\nb"
+        assert(len(s) == 3, s"'a\\nb' is three bytes; got ${len(s)}")
+        assert(int(s[0]) == 97, "byte 0 is 'a'")
+        assert(int(s[1]) == 10, "byte 1 is 0x0A")
+        assert(int(s[2]) == 98, "byte 2 is 'b'")
+
+`\t` is the byte 0x09
+---------------------
+
+    #test
+    test_ses_tab_byte() -> unit
+        val s = "\t"
+        assert(len(s) == 1, "single tab is one byte")
+        assert(int(s[0]) == 9, s"'\\t' is 0x09; got ${int(s[0])}")
+
+    #test
+    test_ses_tab_between_words() -> unit
+        val s = "a\tb"
+        assert(len(s) == 3, "a-tab-b is three bytes")
+        assert(int(s[1]) == 9, "middle byte is 0x09")
+
+`\r` is the byte 0x0D
+---------------------
+
+    #test
+    test_ses_cr_byte() -> unit
+        val s = "\r"
+        assert(len(s) == 1, "single CR is one byte")
+        assert(int(s[0]) == 13, s"'\\r' is 0x0D; got ${int(s[0])}")
+
+    #test
+    test_ses_crlf_pair() -> unit
+        val s = "\r\n"
+        assert(len(s) == 2, "CRLF is two bytes")
+        assert(int(s[0]) == 13, "byte 0 is CR")
+        assert(int(s[1]) == 10, "byte 1 is LF")
+
+`\0` is the byte 0x00 (embedded NUL — strings are length-prefixed)
+-----------------------------------------------------------------
+
+Sysl strings carry an explicit length, so an embedded NUL
+byte is just another byte — it does **not** terminate the
+string. `len(s)` counts it; `s[i]` reads it; bytes after it
+are still reachable.
+
+    #test
+    test_ses_nul_byte() -> unit
+        val s = "\0"
+        assert(len(s) == 1, s"'\\0' is one byte; got ${len(s)}")
+        assert(int(s[0]) == 0, "the byte is 0x00")
+
+    #test
+    test_ses_nul_does_not_terminate() -> unit
+        val s = "a\0b"
+        assert(len(s) == 3, s"'a\\0b' is three bytes; got ${len(s)}")
+        assert(int(s[0]) == 97, "byte 0 is 'a'")
+        assert(int(s[1]) == 0, "byte 1 is NUL")
+        assert(int(s[2]) == 98, "byte 2 is 'b' — reachable past the NUL")
+
+`\\` is the byte 0x5C
+---------------------
+
+    #test
+    test_ses_backslash_byte() -> unit
+        val s = "\\"
+        assert(len(s) == 1, "a single literal backslash is one byte")
+        assert(int(s[0]) == 92, s"'\\\\' is 0x5C; got ${int(s[0])}")
+
+    #test
+    test_ses_double_backslash() -> unit
+        val s = "\\\\"
+        assert(len(s) == 2, "two literal backslashes are two bytes")
+        assert(int(s[0]) == 92, "byte 0 is 0x5C")
+        assert(int(s[1]) == 92, "byte 1 is 0x5C")
+
+`\"` is the byte 0x22 (lets a `"` appear inside `"..."`)
+--------------------------------------------------------
+
+    #test
+    test_ses_dquote_byte() -> unit
+        val s = "\""
+        assert(len(s) == 1, "a single escaped double-quote is one byte")
+        assert(int(s[0]) == 34, s"'\\\"' is 0x22; got ${int(s[0])}")
+
+    #test
+    test_ses_dquote_inside() -> unit
+        val s = "a\"b"
+        assert(len(s) == 3, "a-quote-b is three bytes")
+        assert(int(s[1]) == 34, "middle byte is 0x22")
+
+`\'` is the byte 0x27 (legal but unnecessary inside `"..."`)
+------------------------------------------------------------
+
+The single-quote escape is supported inside double-quoted
+strings for consistency with character literals; the byte
+value is 0x27 either way.
+
+    #test
+    test_ses_squote_byte_in_dquote() -> unit
+        val s = "\'"
+        assert(len(s) == 1, "an escaped single-quote is one byte")
+        assert(int(s[0]) == 39, s"'\\'' is 0x27; got ${int(s[0])}")
+
+`\xHH` produces the byte 0xHH directly
+--------------------------------------
+
+The hex-byte escape takes exactly two hex digits and emits
+one byte. ASCII range bytes survive UTF-8 encoding as
+themselves (one byte in, one byte out).
+
+    #test
+    test_ses_hex_ascii_letter() -> unit
+        val s = "\x41"
+        assert(len(s) == 1, "'\\x41' is one byte")
+        assert(int(s[0]) == 65, s"'\\x41' is 0x41 ('A'); got ${int(s[0])}")
+        assert(s == "A", "'\\x41' equals \"A\"")
+
+    #test
+    test_ses_hex_lowercase_letter() -> unit
+        val s = "\x61"
+        assert(int(s[0]) == 97, "'\\x61' is 0x61 ('a')")
+
+    #test
+    test_ses_hex_control_byte() -> unit
+        val s = "\x09"
+        assert(len(s) == 1, "'\\x09' is one byte")
+        assert(int(s[0]) == 9, s"'\\x09' equals '\\t' (0x09); got ${int(s[0])}")
+        assert(s == "\t", "'\\x09' equals \"\\t\"")
+
+    #test
+    test_ses_hex_uppercase_digits() -> unit
+        val s = "\xAB"
+        assert(int(s[0]) == 0xC2, "0xAB UTF-8 encodes to leading byte 0xC2")
+        assert(int(s[1]) == 0xAB, "and continuation byte 0xAB")
+        assert(len(s) == 2, "non-ASCII byte 0xAB takes two UTF-8 bytes")
+
+    #test
+    test_ses_hex_zero_byte() -> unit
+        val s = "\x00"
+        assert(len(s) == 1, "'\\x00' is one byte")
+        assert(int(s[0]) == 0, "and the byte is 0x00")
+        assert(s == "\0", "'\\x00' equals '\\0'")
+
+Escapes work inside concatenation
+---------------------------------
+
+    #test
+    test_ses_escape_in_concat() -> unit
+        val s = "foo" + "\n" + "bar"
+        assert(len(s) == 7, s"'foo\\nbar' is seven bytes; got ${len(s)}")
+        assert(int(s[3]) == 10, "byte 3 is the newline")
+        assert(int(s[0]) == 102, "byte 0 is 'f'")
+        assert(int(s[6]) == 114, "byte 6 is 'r'")
+
+    #test
+    test_ses_two_escapes_in_concat() -> unit
+        val s = "\t" + "\n"
+        assert(len(s) == 2, "tab+newline is two bytes")
+        assert(int(s[0]) == 9, "byte 0 is tab")
+        assert(int(s[1]) == 10, "byte 1 is newline")
+
+Escapes work inside `s"..."` interpolation
+------------------------------------------
+
+The interpolated-string form shares the same escape rules as
+plain `"..."`. The escape is processed at lex time; the
+interpolated expression slots are independent.
+
+    #test
+    test_ses_escape_in_interp_literal_only() -> unit
+        val s = s"a\nb"
+        assert(len(s) == 3, s"interp 'a\\nb' is three bytes; got ${len(s)}")
+        assert(int(s[1]) == 10, "byte 1 is the newline")
+
+    #test
+    test_ses_escape_in_interp_with_slot() -> unit
+        val n = 7
+        val s = s"line $n\n"
+        assert(len(s) == 7, s"interp 'line 7\\n' is seven bytes; got ${len(s)}")
+        assert(int(s[5]) == 55, "byte 5 is '7' (from the slot)")
+        assert(int(s[6]) == 10, "byte 6 is the trailing newline")
+
+Character literal: `'\n'` is the integer 10
+-------------------------------------------
+
+Character literals use the same escape table; the result is
+a numeric value (the byte / code point), not a one-byte
+string.
+
+    #test
+    test_ses_char_literal_newline() -> unit
+        assert('\n' == 10, "'\\n' as a char literal is 10")
+        assert('\t' == 9, "'\\t' as a char literal is 9")
+        assert('\\' == 92, "'\\\\' as a char literal is 92")
+        assert('\'' == 39, "'\\'' as a char literal is 39")
+        assert('\"' == 34, "'\\\"' as a char literal is 34")
+        assert('\x41' == 65, "'\\x41' as a char literal is 65")
