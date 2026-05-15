@@ -1,0 +1,52 @@
+Generic type aliases — same-file
+================================
+
+A generic type alias `type Pair[A, B] = ...` is a pure
+type-level abbreviation: it has no codegen of its own; each
+use site substitutes the arguments and the body is treated
+as if written inline.
+
+This file pins the same-file form. Cross-file generic
+aliases live in `generic_alias_cross_file.lsysl`.
+
+    module sysl.tests.lang_features
+
+Alias to a function type — fully instantiated at use site
+---------------------------------------------------------
+
+A `(T) -> T` alias names a closure shape. Functions taking
+this alias at a concrete instantiation accept any closure of
+the right shape — there is no nominal newtype, so no cast is
+required.
+
+    type GabUnary[T] = (T) -> T
+
+    apply_unary_int(f: GabUnary[int], x: int) -> int = f(x)
+
+    #test
+    test_alias_function_type() -> unit
+        val r = apply_unary_int(x -> x + 1, 41)
+        assert(r == 42, s"42 should be 42, got $r")
+
+Two-parameter alias
+-------------------
+
+    type GabBin[A, B] = (A, A) -> B
+
+    use_bin(f: GabBin[int, int], a: int, b: int) -> int = f(a, b)
+
+    #test
+    test_alias_two_params() -> unit
+        val r = use_bin(_ + _, 10, 20)
+        assert(r == 30, s"10+20 should be 30, got $r")
+
+    // TODO: re-enable once the analyzer accepts a generic-alias instantiation
+    // in a struct field-type position. Currently:
+    //
+    //     struct GabPipeline
+    //         f: GabUnary[int]
+    //
+    // fails with "'GabUnary' is not a generic type" while the *exact same*
+    // instantiation as a function parameter type (above) succeeds. The bug is
+    // therefore a field-type resolution gap, not an alias gap. Filed in the
+    // ROADMAP under the "known gaps" section.

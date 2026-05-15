@@ -148,11 +148,11 @@ covered now; one SVM bug TODO'd.
 | `generic_nested.lsysl` 🟢 | `Box[Box[int]]`, three-deep `Box[Box[Box[int]]]`, `Box[Opt[int]]`, two-param `Pair[A,B]` (4 tests) |
 | `generic_fn_explicit.lsysl` 🟢 | subsumed by `generic_fn_basic.lsysl` |
 | `generic_fn_inferred.lsysl` 🟢 | subsumed by `generic_fn_basic.lsysl` |
-| `generic_fn_operator_rhs.lsysl` 🔴 | inference for the RHS of an operator (sysl@950415fde regression) — not yet pinned |
-| `generic_fn_sibling_import.lsysl` 🔴 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression) — not yet pinned |
-| `generic_struct_method.lsysl` 🔴 | `Box[T].get() -> T`; method call resolution under type param — not yet pinned |
-| `generic_alias_basic.lsysl` 🔴 | `type Pair[A,B] = (A, B)` (or struct alias); usage — not yet pinned |
-| `generic_alias_cross_file.lsysl` 🔴 | generic alias visible across files (sysl@2c4f1c095 regression) — not yet pinned |
+| `generic_fn_operator_rhs.lsysl` 🟢 | bare-call placeholder `_ + _` RHS; explicit type args; two-arg inference; full closure-literal RHS — pins sysl@950415fde + sysl@eb3fa5673 across all 7 backends (4 tests) |
+| `generic_struct_method.lsysl` 🟢 | `Box[T].get()` & `.set(x)`; mutating-self via `&self`; method on two-param `Pair[A,B]`; chained method call (6 tests) |
+| `generic_alias_basic.lsysl` 🟡 | `type GabUnary[T] = (T) -> T` as parameter type; two-param alias `(A,A)->B` (2 tests). TODO: alias instantiation as struct *field* type fails with `'GabUnary' is not a generic type` even when the identical instantiation works as a fn param — analyzer field-type resolution gap, same on all 7 backends |
+| `generic_fn_sibling_import.lsysl` 🔴 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression) — multi-file fixture, not yet pinned |
+| `generic_alias_cross_file.lsysl` 🔴 | generic alias visible across files (sysl@2c4f1c095 regression) — multi-file fixture, not yet pinned |
 
 ---
 

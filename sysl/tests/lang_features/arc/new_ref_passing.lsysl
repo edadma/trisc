@@ -67,12 +67,12 @@ Nested call chain
 -----------------
 
 If any link in the chain mis-handles the refcount, by the time
-we reach `read_box` the buffer is either freed or has the wrong
+we reach `nrp_read_box` the buffer is either freed or has the wrong
 shared count.
 
-    read_box(b: &NrpBox) -> int = b.v
+    nrp_read_box(b: &NrpBox) -> int = b.v
 
-    pass_through(b: &NrpBox) -> int = read_box(b)
+    pass_through(b: &NrpBox) -> int = nrp_read_box(b)
 
     pass_through_2(b: &NrpBox) -> int = pass_through(b)
 

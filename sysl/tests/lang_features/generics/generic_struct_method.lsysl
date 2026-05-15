@@ -1,0 +1,77 @@
+Methods on generic structs
+==========================
+
+A generic struct may declare methods that reference its type
+parameter. Each monomorphization gets its own method body
+keyed by the concrete `T`; `self` typing flows through
+unchanged.
+
+    module sysl.tests.lang_features
+
+    struct GsmBox[T]
+        v: T
+
+Basic getter method
+-------------------
+
+    GsmBox[T].get() -> T = self.v
+
+    #test
+    test_method_get_int() -> unit
+        val b = GsmBox[int](42)
+        assert(b.get() == 42, s"b.get() should be 42, got ${b.get()}")
+
+    #test
+    test_method_get_bool() -> unit
+        val b = GsmBox[bool](true)
+        assert(b.get(), "b.get() should be true")
+
+Mutating method — `self` is `&self`
+-----------------------------------
+
+The method body assigns through `self.v`, which is shorthand
+for `(&self).v`. The caller must observe the mutation;
+otherwise the method ran on a copy.
+
+    GsmBox[T].set(x: T) -> unit
+        self.v = x
+
+    #test
+    test_method_set_int() -> unit
+        var b = GsmBox[int](0)
+        b.set(99)
+        assert(b.v == 99, s"after set(99), b.v should be 99, got ${b.v}")
+
+    #test
+    test_method_set_then_get() -> unit
+        var b = GsmBox[int](0)
+        b.set(7)
+        assert(b.get() == 7, s"after set(7), b.get() should be 7, got ${b.get()}")
+
+Method on a two-parameter generic
+---------------------------------
+
+    struct GsmPair[A, B]
+        a: A
+        b: B
+
+    GsmPair[A, B].swap() -> GsmPair[B, A] = GsmPair[B, A](self.b, self.a)
+
+    #test
+    test_method_swap() -> unit
+        val p = GsmPair[int, bool](42, true)
+        val q = p.swap()
+        assert(q.a, "swapped.a should be true")
+        assert(q.b == 42, s"swapped.b should be 42, got ${q.b}")
+
+Chained method call
+-------------------
+
+    GsmBox[T].set_then_get(x: T) -> T
+        self.set(x)
+        return self.get()
+
+    #test
+    test_chained_method() -> unit
+        var b = GsmBox[int](0)
+        assert(b.set_then_get(123) == 123, s"chained should be 123, got ${b.set_then_get(0)}")

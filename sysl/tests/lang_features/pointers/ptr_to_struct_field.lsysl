@@ -37,14 +37,14 @@ Write through field pointer is visible in struct
 Pass field pointer to a fn
 --------------------------
 
-    set_int(p: *int, v: int) -> unit
+    psf_set_int(p: *int, v: int) -> unit
         *p = v
 
     #test
     test_pass_field_ptr() -> unit
         var n = PsfNode(0, 0)
-        set_int(&n.x, 100)
-        set_int(&n.y, 200)
+        psf_set_int(&n.x, 100)
+        psf_set_int(&n.y, 200)
         assert(n.x == 100 && n.y == 200,
             s"n = (${n.x}, ${n.y}), expected (100, 200)")
 
