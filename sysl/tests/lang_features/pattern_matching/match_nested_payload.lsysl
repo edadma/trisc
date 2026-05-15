@@ -1,0 +1,173 @@
+Nested match patterns — `Some(Ok(x))` and friends
+=================================================
+
+`match` can decompose nested data variants in one pattern:
+`o match  MnpSome(MnpOk(v)) -> use(v)  ...`. The codegen has
+to chain the variant-tag check on the outer enum with the
+variant-tag check on the inner enum, and bind the
+innermost payload exactly once.
+
+**Analyzer note.** The exhaustiveness checker is currently
+conservative on nested patterns. Even when the nested arms
+mathematically cover every shape of the outer variant
+(e.g. `MnpSome(MnpOk(v))` plus `MnpSome(MnpBad(why))`
+exhausts `MnpSome` because the inner `MnpOutcome[T]` only
+has two variants), the checker still reports the outer
+variant as missing. Workaround: add an `MnpSome(_)`
+wildcard arm that's unreachable at runtime. The codegen
+itself works correctly across all seven backends; only the
+analyzer's exhaustiveness reasoning is incomplete. See
+`feedback_sysl_match_nested_exhaustiveness.md`.
+
+The patterns exercised in this file:
+
+  - Two-level `Some(Ok(v))` / `Some(Bad(reason))` / `None`.
+  - Three-level `Wrap(Some(Ok(v)))` for cases where the
+    inner payload is itself a wrapped optional.
+  - Struct payload at the leaf (`Some(Ok(point))` where
+    `point` is a two-field value struct).
+  - Mixed exhaustive coverage: all variants of both layers
+    in a single `match`.
+
+`enum_match_payload.lsysl` (one-level) and
+`if_is_pattern.lsysl` (one-arm sugar) pin the simpler
+surfaces; this file is the multi-level pattern matcher.
+
+    module sysl.tests.lang_features
+
+    enum MnpMaybe[T]
+        MnpSome(value: T)
+        MnpNone
+
+    enum MnpOutcome[T]
+        MnpOk(value: T)
+        MnpBad(reason: string)
+
+    enum MnpWrap[T]
+        MnpW(inner: T)
+        MnpEmpty
+
+    struct MnpPoint
+        x: int
+        y: int
+
+`Some(Ok(v))` — happy path, two levels
+--------------------------------------
+
+The deepest binding `v` is reached by descending through
+two variant tags. The match arm produces a string using `v`.
+The trailing `MnpSome(_)` arm is the analyzer-required
+catch-all; it is unreachable at runtime because the inner
+enum has exactly two variants.
+
+    mnp_describe(o: MnpMaybe[MnpOutcome[int]]) -> string =
+        o match
+            MnpSome(MnpOk(v))     -> "ok=" + str(v)
+            MnpSome(MnpBad(why))  -> "bad=" + why
+            MnpSome(_)            -> "unreachable"
+            MnpNone               -> "none"
+
+    #test
+    test_some_ok_payload() -> unit
+        val s = mnp_describe(MnpSome(MnpOk(42)))
+        assert(s == "ok=42", s"got '$s'")
+
+`Some(Bad(reason))` — string payload at the leaf
+------------------------------------------------
+
+Same shape, but the innermost payload is a string. Pins
+that the variant-tag chain works for non-int leaf payloads
+(string-descriptor extraction in the codegen).
+
+    #test
+    test_some_bad_payload() -> unit
+        val s = mnp_describe(MnpSome(MnpBad("oops")))
+        assert(s == "bad=oops", s"got '$s'")
+
+`None` at the outer layer
+-------------------------
+
+The outer enum's tag-only variant short-circuits the chain;
+the inner variants are never inspected.
+
+    #test
+    test_none_outer() -> unit
+        val s = mnp_describe(MnpNone)
+        assert(s == "none", s"got '$s'")
+
+Three-level nest — `Wrap(Some(Ok(v)))`
+--------------------------------------
+
+Three layers: `Wrap[Maybe[Outcome[int]]]`. The deepest
+binding `v` survives across three variant tags. This is
+the pattern shape that exercises the codegen most because
+the bind position is offset by three layers of variant
+overhead.
+
+    mnp_describe3(w: MnpWrap[MnpMaybe[MnpOutcome[int]]]) -> string =
+        w match
+            MnpW(MnpSome(MnpOk(v)))    -> "ok=" + str(v)
+            MnpW(MnpSome(MnpBad(why))) -> "bad=" + why
+            MnpW(MnpSome(_))           -> "unreachable-inner"
+            MnpW(MnpNone)              -> "wrap-none"
+            MnpW(_)                    -> "unreachable-outer"
+            MnpEmpty                   -> "empty"
+
+    #test
+    test_three_level_ok() -> unit
+        val s = mnp_describe3(MnpW(MnpSome(MnpOk(7))))
+        assert(s == "ok=7", s"got '$s'")
+
+    #test
+    test_three_level_bad() -> unit
+        val s = mnp_describe3(MnpW(MnpSome(MnpBad("xx"))))
+        assert(s == "bad=xx", s"got '$s'")
+
+    #test
+    test_three_level_inner_none() -> unit
+        val s = mnp_describe3(MnpW(MnpNone))
+        assert(s == "wrap-none", s"got '$s'")
+
+    #test
+    test_three_level_outer_empty() -> unit
+        val s = mnp_describe3(MnpEmpty)
+        assert(s == "empty", s"got '$s'")
+
+Struct payload at the leaf — `Some(Ok(point))`
+----------------------------------------------
+
+The innermost payload is a two-field value struct. The
+pattern binds the struct; the arm reads two of its fields.
+Pins that the variant-tag chain leaves the field offsets
+correct relative to the inner payload start.
+
+    mnp_describe_pt(o: MnpMaybe[MnpOutcome[MnpPoint]]) -> string =
+        o match
+            MnpSome(MnpOk(p))    -> "p=" + str(p.x) + "," + str(p.y)
+            MnpSome(MnpBad(why)) -> "bad=" + why
+            MnpSome(_)           -> "unreachable"
+            MnpNone              -> "none"
+
+    #test
+    test_struct_payload_at_leaf() -> unit
+        val s = mnp_describe_pt(MnpSome(MnpOk(MnpPoint(3, 4))))
+        assert(s == "p=3,4", s"got '$s'")
+
+    #test
+    test_struct_payload_bad_branch() -> unit
+        val s = mnp_describe_pt(MnpSome(MnpBad("err")))
+        assert(s == "bad=err", s"got '$s'")
+
+Exhaustive coverage — all five arms of two-level shape
+------------------------------------------------------
+
+Mixed call sites: one of every variant the outer/inner
+enum can produce. Each must dispatch to the matching arm.
+
+    #test
+    test_exhaustive_two_level() -> unit
+        assert(mnp_describe(MnpSome(MnpOk(0)))       == "ok=0",       "ok 0")
+        assert(mnp_describe(MnpSome(MnpOk(99)))      == "ok=99",      "ok 99")
+        assert(mnp_describe(MnpSome(MnpBad("e1")))   == "bad=e1",     "bad e1")
+        assert(mnp_describe(MnpSome(MnpBad("")))     == "bad=",       "bad empty")
+        assert(mnp_describe(MnpNone)                 == "none",       "none")

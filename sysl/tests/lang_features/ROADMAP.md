@@ -212,7 +212,7 @@ Existing: `closures_hof.lsysl` → `closures/closures_hof.lsysl`.
 |---|---|
 | `enum_match_payload.lsysl` 🟢 | data variants + exhaustive *(move from top level)* |
 | `match_exhaustive_simple_enum.lsysl` 🟢 | three-tag enum exhaustive match returning string / int / bool; match as arithmetic operand; match in if-cond; two reads stable; through fn boundary (6 tests) |
-| `match_nested_payload.lsysl` 🔴 | matching `Some(Ok(x))` and similar nestings |
+| `match_nested_payload.lsysl` 🟢 | two-level `Some(Ok(v))` / `Some(Bad(why))` / None; three-level `Wrap(Some(Ok(v)))`; struct payload at leaf; full exhaustive sweep (10 tests). **Surfaced analyzer gap:** exhaustiveness checker requires explicit `Outer(_)` catch-all when nested patterns exhaust a variant — see feedback_sysl_match_nested_exhaustiveness.md. Codegen works on all 7 backends; only the checker is conservative |
 | `match_guards.lsysl` 🔴 | guard clauses (`case Some(x) if x > 0 => ...`) — *if supported* |
 | `match_or_patterns.lsysl` 🔴 | `case (A | B) => ...` — *if supported* |
 | `if_is_pattern.lsysl` 🟢 | Some/None happy + fail; else-arm form; int / string / struct payload binds; chained `if .. is ..` on two-variant outcome; else-arm has no binding leak; pattern check is pure across two reads (8 tests) |
