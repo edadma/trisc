@@ -2189,8 +2189,9 @@ Unlike create_process, the thread is never enqueued — no race.
         // Write thread_exit return address into child's user stack.
         // Uses `kernel_vm_copy_to`, which at this point sees an
         // orphan ptbr (the Process slot isn't populated until line
-        // ~2133 below) and falls back to the legacy `[0x60000000,
-        // 0x60200000)` allocate-on-write gate. That's the same
+        // ~2133 below) and falls back to the unconditional
+        // allocate-on-write path for any vaddr inside
+        // `[VMA_USER_VA_BOT, VMA_USER_VA_TOP)`. That's the same
         // behaviour the arch-level `vm_copy_to` had pre-Phase-C.
         var exit_addr: i64 = i64(&thread_exit)
         kernel_vm_copy_to(ptbr_val, u64(usp - i64(8)), *byte(&exit_addr), 8)

@@ -143,22 +143,31 @@ small sub-region to AP=01/UXN=0 for EL0 user code later (without
 breaking kernel execute, which the implicit-PXN rule would do if
 we flipped AP on the 1GB block itself).
 
-User region layout (1 MB visible, 256 leaf slots in L3[0..255] of
-L2[256]):
-  VA 0x60000000..0x6007FFFF — code/data/heap, anonymous (PM seeds
-                              VMA on spawn). AP=01 / UXN=0 once a
-                              page is installed.
-  VA 0x60080000..0x6008FFFF — stack region. AP=01 / UXN=1. USP
-                              grows down from 0x60090000.
+User region layout — 8 × 2 MiB = 16 MiB span covered by 8 L3 tables
+wired under L2[256..263] (VA 0x60000000..0x60FFFFFF). The default
+VMA seed (code/data/heap/stack at 0x60000000..0x60090000) lives in
+the first L3; subsequent L3s are empty until `mmap` or future PM
+arrangements grow into them. PM uses AP=01 / UXN=0 for code and
+AP=01 / UXN=1 for stack on install.
+
 Implicit-PXN forces PXN=1 on all user pages, which is what we want
 (EL1 never fetches from them). AP=01 means EL1 can still read/write.
 
+USER_L3_COUNT must stay in lockstep with `VMA_USER_VA_TOP` in
+`oskit/kernel/vma.lsysl` (TOP = BOT + COUNT * 2 MiB) — the VMA
+allocator only searches the [BOT, TOP) window, so widening one
+without the other either wastes table space or risks faulting in
+unmapped L2 entries.
+
 Returns the physical address of the new L0 table, or 0 on failure.
 
-Phase 1 chunk 3: the 144-page eager loop is gone. The L3 table is
-allocated empty; leaf pages land lazily via `vm_install_user_page`
-(allocate-on-write spawn-pipeline `vm_copy_to`) or `vma_handle_fault`
-(runtime page fault routed through the per-process VMA tree).
+Phase 1 chunk 3: the eager leaf-installation loop is gone. The L3
+tables are allocated empty; leaf pages land lazily via
+`vm_install_user_page` (allocate-on-write spawn-pipeline
+`vm_copy_to`) or `vma_handle_fault` (runtime page fault routed
+through the per-process VMA tree).
+
+    const USER_L3_COUNT = 8
 
     extern l1_table: byte
 
@@ -203,19 +212,29 @@ allocated empty; leaf pages land lazily via `vm_install_user_page`
             addr += u64(8)
             i += 1
 
-        // L3 carve-out: replace L2[256] (VA 0x60000000..0x601FFFFF)
-        // with a table descriptor pointing at a fresh empty L3.
-        // Leaf pages are installed lazily by vm_install_user_page.
-        val new_l3 = page_alloc_zero()
-        if new_l3 == 0
-            page_free(new_l2)
-            page_free(new_l1)
-            page_free(new_l0)
-            return 0
-
-        // L2[256] -> new_l3 table
-        vm_write_pte64(new_l2 + u64(256 * 8),
-            i64(new_l3) | PTE_VALID | PTE_TABLE)
+        // L3 carve-out: replace L2[256..256+USER_L3_COUNT-1] (VA
+        // 0x60000000..0x60000000 + USER_L3_COUNT * 2 MiB) with N
+        // table descriptors pointing at fresh empty L3s. Leaf pages
+        // are installed lazily by vm_install_user_page.
+        var k = 0
+        while k < USER_L3_COUNT
+            val new_l3 = page_alloc_zero()
+            if new_l3 == 0
+                // Unwind: walk back through L2[256..256+k-1] freeing
+                // each L3 we allocated, then free the upper-level
+                // tables.
+                var u = 0
+                while u < k
+                    val ent = vm_read_pte64(new_l2 + u64((256 + u) * 8))
+                    page_free(u64(ent & PTE_ADDR_MASK))
+                    u += 1
+                page_free(new_l2)
+                page_free(new_l1)
+                page_free(new_l0)
+                return 0
+            vm_write_pte64(new_l2 + u64((256 + k) * 8),
+                i64(new_l3) | PTE_VALID | PTE_TABLE)
+            k += 1
 
         new_l0
 
@@ -658,17 +677,24 @@ PTBR (no-op) or a null pointer.
         if l2 == u64(0)
             return
 
-        // User region L3 at L2[256]
-        val user_l3_entry = vm_read_pte64(l2 + u64(256 * 8))
-        if (user_l3_entry & i64(3)) == i64(3)
-            val user_l3 = u64(user_l3_entry & PTE_ADDR_MASK)
-            var i = 0
-            while i < 512
-                val pte = vm_read_pte64(user_l3 + u64(i * 8))
-                if (pte & i64(3)) == i64(3)
-                    page_free(u64(pte & PTE_ADDR_MASK))
-                i += 1
-            page_free(user_l3)
+        // User region L3s at L2[256..256+USER_L3_COUNT-1]. Each L3 may
+        // hold up to 512 leaf pages installed via demand-paging; release
+        // every present leaf, then the L3 table itself. Most processes
+        // won't have populated L3s past the first — the lazy fault path
+        // never allocates a leaf in an L3 nothing touched.
+        var slot = 0
+        while slot < USER_L3_COUNT
+            val l3_entry = vm_read_pte64(l2 + u64((256 + slot) * 8))
+            if (l3_entry & i64(3)) == i64(3)
+                val user_l3 = u64(l3_entry & PTE_ADDR_MASK)
+                var i = 0
+                while i < 512
+                    val pte = vm_read_pte64(user_l3 + u64(i * 8))
+                    if (pte & i64(3)) == i64(3)
+                        page_free(u64(pte & PTE_ADDR_MASK))
+                    i += 1
+                page_free(user_l3)
+            slot += 1
 
         // Grant region L3 at L2[GRANT_L2_IDX] — don't free the mapped
         // pages (they belong to other address spaces); just free the

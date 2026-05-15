@@ -174,6 +174,8 @@ fixed-region eager allocation should remain. The 64-bit address
 plumbing (PML4 / PDPT / PD / PT) stays; only the eager-mapping
 policy goes.
 
+    const USER_PT_COUNT = 8
+
     vm_create_process_pt() -> u64
         val pml4 = page_alloc_zero()
         if pml4 == 0
@@ -222,33 +224,42 @@ policy goes.
 
         // PDPT[1]: per-process PD covering 1-2GB. Mirrors the kernel's
         // pd_hi1 entries byte-for-byte (so ring 0 ISRs still reach
-        // MMIO at 1-2GB), but with PD[256] replaced by a 4KB-page PT
-        // for the musl user carve-out at VA 0x60000000-0x601FFFFF.
-        // Mirrors aarch64's vm_create_process_pt (L3[0..143] under
-        // L2[256]); same VA so the musl link script `slix-prog.ld`
-        // stays arch-neutral.
+        // MMIO at 1-2GB), but with PD[256..256+USER_PT_COUNT-1] replaced
+        // by 4KB-page PTs for the musl user carve-out at VA
+        // 0x60000000..0x60000000 + USER_PT_COUNT * 2 MiB. Mirrors
+        // aarch64's vm_create_process_pt (N L3 tables under
+        // L2[256..256+N-1]); same VA so the musl link script
+        // `slix-prog.ld` stays arch-neutral.
         //
-        // 144 user pages = 128 code/data/heap (USER_CODE_PAGES) + 16
-        // stack (USER_STACK_PAGES). Stack grows down from 0x60090000.
+        // USER_PT_COUNT must stay in lockstep with `VMA_USER_VA_TOP` in
+        // `oskit/kernel/vma.lsysl` (TOP = BOT + COUNT * 2 MiB). The VMA
+        // allocator only searches that window, so widening one without
+        // the other either wastes table space or risks faulting in
+        // unmapped PD entries.
         val pd1 = page_alloc_zero()
         if pd1 == 0
             return 0
         val k_pd1 = u64(vm_read_pte64(k_pdpt + u64(8)) & PTE_ADDR_MASK)
         var i1 = 0
         while i1 < 512
-            if i1 != 256
+            // Skip the user carve-out slots; we install fresh PTs there.
+            if i1 < 256 || i1 >= 256 + USER_PT_COUNT
                 val pde = vm_read_pte64(k_pd1 + u64(i1) * 8)
                 vm_write_pte64(pd1 + u64(i1) * 8, pde)
             i1 += 1
-        // Phase 1 chunk 3: PT allocated empty (zeroed). Leaf user
-        // pages land lazily — either via `vm_install_user_page` from
-        // a kernel-side `vm_copy_to` (allocate-on-write spawn-pipeline
-        // path) or via `vma_handle_fault` from a runtime page fault.
-        val user_pt = page_alloc_zero()
-        if user_pt == 0
-            return 0
-        vm_write_pte64(pd1 + u64(256) * 8,
-            i64(user_pt) | PTE_P | PTE_W | PTE_U)
+        // Phase 1 chunk 3: each user PT allocated empty (zeroed). Leaf
+        // user pages land lazily — either via `vm_install_user_page`
+        // from a kernel-side `vm_copy_to` (allocate-on-write
+        // spawn-pipeline path) or via `vma_handle_fault` from a runtime
+        // page fault.
+        var pti = 0
+        while pti < USER_PT_COUNT
+            val user_pt = page_alloc_zero()
+            if user_pt == 0
+                return 0
+            vm_write_pte64(pd1 + u64(256 + pti) * 8,
+                i64(user_pt) | PTE_P | PTE_W | PTE_U)
+            pti += 1
         vm_write_pte64(pdpt + u64(8), i64(pd1) | PTE_P | PTE_W | PTE_U)
 
         // PDPT[2..3]: still share kernel pd_hi2/pd_hi3 byte-for-byte
@@ -449,10 +460,28 @@ Free all pages allocated for a process page table.
         // function runs, so the PT-structure free below is all
         // that's left to do here.
 
-        // Free the page table structures
+        // Free the kernel-region table structures.
         page_free(pt)
         page_free(pd)
         page_free(pdpt)
+
+        // Walk PDPT[1] → pd1 → user_pt[256..256+USER_PT_COUNT-1].
+        // The leaf PTEs themselves have already been cleared by
+        // vma_unmap_all_pages (reap_process drains the VMA tree
+        // before this function runs), so we only need to release
+        // the table pages themselves. Without this loop, every
+        // process exit leaks pd1 plus N user PTs to the page pool.
+        val pdpte1 = vm_read_pte64(pdpt + u64(8))
+        if (pdpte1 & PTE_P) != 0
+            val pd1 = u64(pdpte1 & PTE_ADDR_MASK)
+            var slot = 0
+            while slot < USER_PT_COUNT
+                val pde = vm_read_pte64(pd1 + u64(256 + slot) * 8)
+                if (pde & PTE_P) != 0
+                    page_free(u64(pde & PTE_ADDR_MASK))
+                slot += 1
+            page_free(pd1)
+
         page_free(l1_addr)
 
 

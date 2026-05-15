@@ -24,7 +24,7 @@ Two probes:
     payload bytes readable back.
 
   * **Out-of-VMA destination, in carve-out** — `0x60150000`
-    lies inside the user carve-out `[0x60000000, 0x60200000)`
+    lies inside the user carve-out `[0x60000000, 0x61000000)`
     but past both seeded VMAs `[0x60000000, 0x60080000)` +
     `[0x60080000, 0x60090000)`, and this test never `mmap`s.
     Phase D.1's strict in-carve-out check fires: pid is the

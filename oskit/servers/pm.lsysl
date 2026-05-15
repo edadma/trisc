@@ -38,20 +38,20 @@ IPC commands:
     val PM_CMD_RESUME        = 9
     val PM_CMD_EXECVE        = 10
 
-Both arches' `vm_create_process_pt` carves out a single 2 MiB
-user-accessible region at VA `[0x60000000, 0x60200000)` — the L3
-carve-out under L2[256] of L1[1] on aarch64, mirrored on x86 by
-the matching PD[256] entry. Anything outside this range walks into
-kernel-attribute mappings and faults on EL0 access. For chunk 9
-the dynamic-linker workload has to fit *inside* this 2 MiB window
-along with the main executable and the user stack; we partition it
-explicitly:
+Both arches' `vm_create_process_pt` carves out a 16 MiB
+user-accessible region at VA `[0x60000000, 0x61000000)` — 8 L3
+tables under L2[256..263] of L1[1] on aarch64, mirrored on x86 by
+the matching PD[256..263] entries. Anything outside this range
+walks into kernel-attribute mappings and faults on EL0 access.
+The dynamic-linker workload partitions the low 2 MiB of this
+window for the main exe + interpreter + stack:
 
 ```
 0x60000000              main exe (PIE, rebased to MAIN_EXE_BASE)
 0x60080000..0x60090000  user stack (VMA_DEFAULT_STACK_BOT..STACK_TOP)
 0x60100000              ld-musl-<arch>.so.1 (rebased to INTERP_BASE)
-0x601FFFFF              end of L3 carve-out
+0x60200000              start of the spare slots (mmap headroom)
+0x60FFFFFF              end of L3 carve-out
 ```
 
 `MAIN_EXE_BASE` is where `pm_handle_execve` rebases a PIE main

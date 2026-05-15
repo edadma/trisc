@@ -181,15 +181,19 @@ caller that needs allocate-on-write semantics must go through
 
   * **Below `0x60000000`** — if the page is unmapped, reject with
     -1 (no allocate-on-write into kernel-identity territory).
-  * **`[0x60000000, 0x60200000)`** — the user carve-out, strict
+  * **`[0x60000000, 0x61000000)`** — the user carve-out, strict
     VMA-as-authority **on**. For known processes (`pid > 0`),
     the destination VMA tree must cover `cur_va`; otherwise
     reject with -1 *even if* `vm_v2p` returns a non-zero PA
     (the kernel-identity blocks at low PD slots would otherwise
     surface as "mapped"). Orphan ptbrs (transient during PM
     spawn, before `create_process_suspended` populates the
-    Process slot) allocate-on-write unconditionally.
-  * **At or above `0x60200000`** — `vm_install_user_page`
+    Process slot) allocate-on-write unconditionally. The
+    window's width (16 MiB) is set by `USER_L3_COUNT`
+    (aarch64) / `USER_PT_COUNT` (x86) in each arch's
+    `vm.lsysl`, kept in lockstep with `VMA_USER_VA_TOP` in
+    `oskit/kernel/vma.lsysl`.
+  * **At or above `0x61000000`** — `vm_install_user_page`
     decides: aarch64 L0[0]/L1/L2 tables only cover the carve-
     out, so installs above 4 GiB fail; x86_64 PDPT[2..3] are
     kernel-identity-mapped, so `vm_v2p` returns non-zero and
@@ -863,7 +867,10 @@ Recently retired (Phase B of the VMA-list handoff):
     (i.e. binaries that have a PT_INTERP segment).
   - `INTERP_BASE   = 0x60100000` — load offset for the dynamic
     linker. Chosen so [main exe + stack + interp] all fit inside
-    the existing 2 MiB L3 carve-out at [0x60000000, 0x60200000).
+    the low 2 MiB of the user carve-out at [0x60000000, 0x61000000),
+    leaving the remaining 14 MiB for `mmap` / heap growth. (Stage B
+    of the mmap-arena retirement widened the carve-out from 2 MiB
+    → 16 MiB on both arches.)
 
   New auxv entries in `pm_build_sysv_stack_v2` (replaces the
   one-tag `pm_build_sysv_stack` on the execve path; spawn keeps

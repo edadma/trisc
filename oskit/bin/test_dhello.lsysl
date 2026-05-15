@@ -23,7 +23,7 @@ What this test would fail on if regressed:
     relocations applied.
   * `MAIN_EXE_BASE` rebasing not applied to a PIE main exe → the
     PT_LOAD VMAs land at link-time vaddrs (near 0) which fall
-    outside the user-accessible carve-out [0x60000000, 0x60200000).
+    outside the user-accessible carve-out [0x60000000, 0x61000000).
   * `INTERP_BASE` colliding with main exe or stack regions →
     overlapping VMAs or kernel-attribute pages, fault on first
     fetch in ld-musl.

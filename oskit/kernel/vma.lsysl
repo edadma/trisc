@@ -755,14 +755,17 @@ virtual-address window — the range every per-process user mapping
 (code, stack, heap, mmap, ELF interp) lives inside. The kernel
 helper `kernel_vm_copy_to` uses these as the strict-VMA-authority
 band; `sys_mmap` uses them as the search window for
-`vma_find_free_range`. Today both arches' `vm_create_process_pt`
-build a single 4 KB-page leaf table covering this 2 MiB span; if
-that ever grows (Phase 1 close-out: 4 MiB demo, eventually
-musl-style large arenas), bumping `VMA_USER_VA_TOP` keeps the
-two callers in sync automatically.
+`vma_find_free_range`. Both arches' `vm_create_process_pt` build
+**8 × 2 MiB = 16 MiB** of 4 KB-page leaf coverage for this window
+(aarch64: 8 L3 tables under L2[256..263]; x86: 8 PTs under
+pd1[256..263]). If the window ever grows further, bump
+`VMA_USER_VA_TOP` *and* extend the leaf-table count in both
+`vm_create_process_pt` / `vm_free_process_pt` in lockstep —
+allocating a VMA above the leaf coverage would fault on first
+touch with no leaf table to install into.
 
     const VMA_USER_VA_BOT = 0x60000000
-    const VMA_USER_VA_TOP = 0x60200000
+    const VMA_USER_VA_TOP = 0x61000000
 
 `vma_default_initial_sp` / `vma_default_stack_low` are the
 arg-less queries PM and RS use to compute a child's initial SP
