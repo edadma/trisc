@@ -180,7 +180,7 @@ Reference §"Control Flow", "If Expression", "Return".
 | File | Tests pinned |
 |---|---|
 | `defer_lifo.lsysl` 🟢 | LIFO ordering via pointer-mutating helper *(move from top level)* |
-| `defer_early_return.lsysl` 🔴 | defer fires on every return path |
+| `defer_early_return.lsysl` 🔴 | defer fires on every return path **— BLOCKED on TRISC compiler bug**: defer doesn't fire (or doesn't take effect) when the enclosing fn has a non-unit return type and uses `return value`. 6/7 backends pass (interp, llvm-host, svm, rv64, rv32, wasm32). Existing `defer_lifo.lsysl` works because its helper is `-> unit`. File drafted and removed 2026-05-15; see feedback_sysl_trisc_defer_nonunit_return.md for repro + suspect codegen sites |
 | `defer_with_arc.lsysl` 🔴 | defer that mutates a ref-counted struct field |
 | `defer_no_return.lsysl` 🔴 | defer fires at end of `unit` fn with implicit return |
 | `defer_in_loop.lsysl` 🔴 | defer inside loop body — fires at end of *function*, not iteration |
