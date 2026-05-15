@@ -1,0 +1,118 @@
+Exhaustive match on a tag-only simple enum
+==========================================
+
+A simple enum has no payload variants — every constructor is a
+bare tag. `match` on such an enum dispatches on the tag value
+alone, and an exhaustive match (one arm per variant, no
+wildcard) is the canonical form: the analyzer verifies every
+variant is covered, and the codegen lowers it to a tag-equality
+table.
+
+This file pins the simple-enum match path on every backend: an
+exhaustive match used as an expression, each arm returning a
+distinct value, with every variant exercised.
+
+    module sysl.tests.lang_features
+
+A three-tag enum with no payloads. The variant names use a
+file-local prefix to dodge the module-flat namespace.
+
+    enum MescTrafficLight
+        MescRed
+        MescYellow
+        MescGreen
+
+Match as expression returning a string
+--------------------------------------
+
+The match form `expr match arm... arm...` is an expression. The
+analyzer requires every variant be covered when there is no
+wildcard. Each arm returns the same type (`string` here), and
+the whole match evaluates to that type.
+
+    mesc_label(t: MescTrafficLight) -> string =
+        t match
+            MescRed    -> "stop"
+            MescYellow -> "slow"
+            MescGreen  -> "go"
+
+    #test
+    test_label_each_variant() -> unit
+        assert(mesc_label(MescRed) == "stop", s"red label, got '${mesc_label(MescRed)}'")
+        assert(mesc_label(MescYellow) == "slow", s"yellow label, got '${mesc_label(MescYellow)}'")
+        assert(mesc_label(MescGreen) == "go", s"green label, got '${mesc_label(MescGreen)}'")
+
+Match as expression returning an int
+------------------------------------
+
+Same exhaustive shape but the arm bodies return an int. The
+codegen for simple-enum match is independent of the arm result
+type — both string and int arms should lower identically except
+for the result-type slot.
+
+    mesc_duration_ms(t: MescTrafficLight) -> int =
+        t match
+            MescRed    -> 30000
+            MescYellow -> 3000
+            MescGreen  -> 25000
+
+    #test
+    test_duration_each_variant() -> unit
+        assert(mesc_duration_ms(MescRed) == 30000, "red duration")
+        assert(mesc_duration_ms(MescYellow) == 3000, "yellow duration")
+        assert(mesc_duration_ms(MescGreen) == 25000, "green duration")
+
+Match used in a control-flow context
+------------------------------------
+
+A match expression can sit anywhere an expression can — inside
+arithmetic, inside an if condition, etc. The arm bodies are
+plain expressions; nothing about the match form forces a
+statement context.
+
+    #test
+    test_match_inside_arithmetic() -> unit
+        val t1 = MescRed
+        val t2 = MescGreen
+        val total = mesc_duration_ms(t1) + mesc_duration_ms(t2)
+        assert(total == 55000, s"sum of red+green durations should be 55000, got $total")
+
+    #test
+    test_match_in_if_condition() -> unit
+        val t = MescYellow
+        val s = if mesc_label(t) == "slow" then "matched" else "missed"
+        assert(s == "matched", s"if-on-match should pick the matched arm, got '$s'")
+
+Multiple matches on the same value
+----------------------------------
+
+Two consecutive matches on the same enum value should yield
+consistent results — no hidden side effect, no consume-on-match
+semantics.
+
+    #test
+    test_two_matches_same_value() -> unit
+        val t = MescGreen
+        val a = mesc_label(t)
+        val b = mesc_label(t)
+        assert(a == b, "two reads of the same enum should be equal")
+        assert(a == "go", "second read still 'go'")
+
+Match through a function boundary
+---------------------------------
+
+The enum value crosses a function boundary, is matched on the
+callee side, and the result is returned. This exercises the
+calling convention's handling of a tag-only enum value.
+
+    mesc_is_warning(t: MescTrafficLight) -> bool =
+        t match
+            MescRed    -> false
+            MescYellow -> true
+            MescGreen  -> false
+
+    #test
+    test_match_returns_bool() -> unit
+        assert(!mesc_is_warning(MescRed), "red not warning")
+        assert(mesc_is_warning(MescYellow), "yellow is warning")
+        assert(!mesc_is_warning(MescGreen), "green not warning")
