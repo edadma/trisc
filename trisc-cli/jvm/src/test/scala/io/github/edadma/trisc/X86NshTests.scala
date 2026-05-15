@@ -1338,6 +1338,44 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "!K:"
   }
 
+  "busybox: mkdir creates a directory in /tmp" in {
+    qemu.command("/bin/busybox mkdir /tmp/bbmk1")
+    val output = qemu.command("/bin/busybox ls /tmp")
+    output should include("bbmk1")
+    output should not include "!K:"
+  }
+
+  "busybox: cp /etc/passwd to /tmp" in {
+    qemu.command("/bin/busybox cp /etc/passwd /tmp/cppasswd")
+    val output = qemu.command("/bin/busybox cat /tmp/cppasswd")
+    output should include("root:x:0:0")
+    output should not include "!K:"
+  }
+
+  "busybox: rm removes a file" in {
+    qemu.command("/bin/busybox cp /etc/passwd /tmp/bbrm1")
+    qemu.command("/bin/busybox rm /tmp/bbrm1")
+    val output = qemu.command("/bin/busybox cat /tmp/bbrm1")
+    output should include("No such file")
+    output should not include "!K:"
+  }
+
+  "busybox: mv renames a file" in {
+    qemu.command("/bin/busybox cp /etc/passwd /tmp/mvsrc")
+    qemu.command("/bin/busybox mv /tmp/mvsrc /tmp/mvdst")
+    val output = qemu.command("/bin/busybox cat /tmp/mvdst")
+    output should include("root:x:0:0")
+    output should not include "!K:"
+  }
+
+  "busybox: rmdir removes empty directory" in {
+    qemu.command("/bin/busybox mkdir /tmp/bbrd1")
+    qemu.command("/bin/busybox rmdir /tmp/bbrd1")
+    val output = qemu.command("/bin/busybox rmdir /tmp/bbrd1")
+    output should include("No such file")
+    output should not include "!K:"
+  }
+
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")

@@ -2726,6 +2726,58 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "!K:"
   }
 
+  "busybox: mkdir creates a directory in /tmp" in {
+    // First write-side applet — exercises sys_mkdirat (227) and
+    // VFS_CMD_MKDIR_C. test_mkdir already covers the syscall layer;
+    // this confirms busybox + musl wire through correctly.
+    qemu.command("/bin/busybox mkdir /tmp/bbmk1")
+    val output = qemu.command("/bin/busybox ls /tmp")
+    output should include("bbmk1")
+    output should not include "!K:"
+  }
+
+  "busybox: cp /etc/passwd to /tmp" in {
+    // cp = open(src,RDONLY) + open(dst,CREAT|WRONLY) + read/write
+    // loop + close. No new syscall surface, but first applet that
+    // creates a fresh file inside a writable VFS mount.
+    qemu.command("/bin/busybox cp /etc/passwd /tmp/cppasswd")
+    val output = qemu.command("/bin/busybox cat /tmp/cppasswd")
+    output should include("root:x:0:0")
+    output should not include "!K:"
+  }
+
+  "busybox: rm removes a file" in {
+    // rm = sys_unlinkat (365) → VFS_CMD_UNLINK_C. Verify by trying
+    // to cat the file after — busybox cat prints "No such file" to
+    // stderr/stdout when the file is gone.
+    qemu.command("/bin/busybox cp /etc/passwd /tmp/bbrm1")
+    qemu.command("/bin/busybox rm /tmp/bbrm1")
+    val output = qemu.command("/bin/busybox cat /tmp/bbrm1")
+    output should include("No such file")
+    output should not include "!K:"
+  }
+
+  "busybox: mv renames a file" in {
+    // mv same-FS = sys_renameat (281). VFS_CMD_RENAME_C already
+    // exists; this is the first applet to exercise it.
+    qemu.command("/bin/busybox cp /etc/passwd /tmp/mvsrc")
+    qemu.command("/bin/busybox mv /tmp/mvsrc /tmp/mvdst")
+    val output = qemu.command("/bin/busybox cat /tmp/mvdst")
+    output should include("root:x:0:0")
+    output should not include "!K:"
+  }
+
+  "busybox: rmdir removes empty directory" in {
+    // rmdir = sys_unlinkat with AT_REMOVEDIR flag → VFS_CMD_RMDIR_C.
+    // Verify by attempting rmdir twice — second call should fail
+    // with ENOENT (busybox prints "No such file or directory").
+    qemu.command("/bin/busybox mkdir /tmp/bbrd1")
+    qemu.command("/bin/busybox rmdir /tmp/bbrd1")
+    val output = qemu.command("/bin/busybox rmdir /tmp/bbrd1")
+    output should include("No such file")
+    output should not include "!K:"
+  }
+
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")
