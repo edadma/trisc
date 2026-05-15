@@ -1,0 +1,46 @@
+Pointer comparison — equality and inequality
+============================================
+
+Pointers compare by address: `p == q` is true iff they point
+at the same memory location. Comparing pointers to different
+allocations yields false, even if the contents are equal.
+
+    module sysl.tests.lang_features
+
+Two pointers to the same target compare equal
+---------------------------------------------
+
+    #test
+    test_same_target_equal() -> unit
+        var x: int = 42
+        var p: *int = &x
+        var q: *int = &x
+        assert(p == q, "two pointers to the same x should compare equal")
+        assert(!(p != q), "p != q should be false when they point to the same target")
+
+Pointers to different targets compare unequal
+---------------------------------------------
+
+    #test
+    test_different_targets_unequal() -> unit
+        var x: int = 1
+        var y: int = 1   // same value, different storage
+        var p: *int = &x
+        var q: *int = &y
+        assert(p != q, "pointers to different variables should be unequal")
+        assert(!(p == q), "p == q should be false even when *p == *q")
+
+Retarget changes equality
+-------------------------
+
+    #test
+    test_retarget_changes_equality() -> unit
+        var x: int = 1
+        var y: int = 2
+        var p: *int = &x
+        var q: *int = &x
+        assert(p == q, "before retarget: equal")
+        p = &y
+        assert(p != q, "after p = &y: p and q point to different variables")
+        q = &y
+        assert(p == q, "after q = &y also: equal again")

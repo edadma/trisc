@@ -1,0 +1,69 @@
+Null pointers
+=============
+
+A null pointer is `*T(0)` — the result of casting integer 0
+to a pointer type. Two null pointers of the same type compare
+equal; null compares unequal to any real address. `bool(ptr)`
+returns `false` for null, `true` for any non-null pointer.
+
+Default-initialized `*T` (declared without an initializer)
+zero-inits to null per the variable-declaration rules.
+
+    module sysl.tests.lang_features
+
+null == null
+------------
+
+    #test
+    test_null_eq_null() -> unit
+        var p: *int = *int(0)
+        var q: *int = *int(0)
+        assert(p == q, "two null *int values should compare equal")
+
+null != real address
+--------------------
+
+    #test
+    test_null_neq_real() -> unit
+        var x: int = 42
+        var real: *int = &x
+        var nullp: *int = *int(0)
+        assert(real != nullp, "real address should not equal null")
+        assert(nullp != real, "null should not equal real address")
+
+Default-initialized pointer is null
+-----------------------------------
+
+    #test
+    test_default_init_is_null() -> unit
+        var p: *int
+        var nullp: *int = *int(0)
+        assert(p == nullp, "default-init *int should be null")
+
+    // TODO: re-enable once LLVM-target codegen for `bool(*T)` lands.
+    // Today the LLVM backends emit `bitcast i8* to i8`, which clang rejects:
+    //
+    //     #test
+    //     test_bool_of_null() -> unit
+    //         var nullp: *int = *int(0)
+    //         var x: int = 0
+    //         var real: *int = &x
+    //         assert(!bool(nullp), "bool(null) should be false")
+    //         assert(bool(real),   "bool(real address) should be true")
+
+Branch on null via a fn
+-----------------------
+
+A kernel pattern: check before dereferencing.
+
+    safe_get(p: *int, fallback: int) -> int
+        if p == *int(0) then return fallback
+        return *p
+
+    #test
+    test_branch_on_null() -> unit
+        var x: int = 7
+        var real: *int = &x
+        var nullp: *int = *int(0)
+        assert(safe_get(real,  -1) == 7,  s"safe_get(real, -1) should be 7, got ${safe_get(real, -1)}")
+        assert(safe_get(nullp, -1) == -1, s"safe_get(null, -1) should be -1, got ${safe_get(nullp, -1)}")

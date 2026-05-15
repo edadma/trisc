@@ -1,0 +1,59 @@
+Pointer to a struct field — `&s.field`
+======================================
+
+Taking the address of a struct field yields a pointer of the
+field's type, pointing into the struct's storage. Writes
+through the field pointer are visible at the struct's field.
+
+    module sysl.tests.lang_features
+
+    struct PsfNode
+        x: int
+        y: int
+
+Read field through &s.field
+---------------------------
+
+    #test
+    test_field_ptr_read() -> unit
+        var n = PsfNode(10, 20)
+        var px: *int = &n.x
+        var py: *int = &n.y
+        assert(*px == 10, s"*px should be 10, got ${*px}")
+        assert(*py == 20, s"*py should be 20, got ${*py}")
+
+Write through field pointer is visible in struct
+------------------------------------------------
+
+    #test
+    test_field_ptr_write_visible() -> unit
+        var n = PsfNode(0, 0)
+        var px: *int = &n.x
+        *px = 99
+        assert(n.x == 99, s"n.x should be 99 (mutated via &n.x), got ${n.x}")
+        // Other field untouched
+        assert(n.y == 0, s"n.y should still be 0, got ${n.y}")
+
+Pass field pointer to a fn
+--------------------------
+
+    set_int(p: *int, v: int) -> unit
+        *p = v
+
+    #test
+    test_pass_field_ptr() -> unit
+        var n = PsfNode(0, 0)
+        set_int(&n.x, 100)
+        set_int(&n.y, 200)
+        assert(n.x == 100 && n.y == 200,
+            s"n = (${n.x}, ${n.y}), expected (100, 200)")
+
+Pointers to different fields of the same struct compare unequal
+---------------------------------------------------------------
+
+    #test
+    test_different_field_ptrs_unequal() -> unit
+        var n = PsfNode(1, 2)
+        var px: *int = &n.x
+        var py: *int = &n.y
+        assert(px != py, "&n.x and &n.y should be different pointers")

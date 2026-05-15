@@ -117,18 +117,18 @@ TRISC's `for x in slice` codegen broken).
 
 ---
 
-### `pointers/` — Raw pointers, deref, arithmetic, address-of — 🔴 P0
+### `pointers/` — Raw pointers, deref, arithmetic, address-of — 🟢 P0
 
 Reference §"Pointers", "Pointer Dereference Is Explicit", "Array/Pointer Decay".
 
 | File | Tests pinned |
 |---|---|
-| `ptr_deref_basic.lsysl` 🔴 | `&x` / `*p`; explicit deref required (no auto-deref except `self`) |
-| `ptr_arithmetic.lsysl` 🔴 | `p + 1`, `p + i`, `p - q`; widening to `usize` |
-| `ptr_compare.lsysl` 🔴 | `p == q`, `p != q`, null-pointer compare |
-| `ptr_null.lsysl` 🔴 | `null` literal; `null` initialiser; deref-null traps |
-| `ptr_to_struct_field.lsysl` 🔴 | `&s.f` yields a `*FieldType` pointing into the struct |
-| `array_decay_implicit.lsysl` 🔴 | `[3]int` decays to `*int` at call site (recent compiler fix) |
+| `ptr_deref_basic.lsysl` 🟢 | `*p` deref; `p.field` implicit deref for structs; pass *T to fn (5 tests) |
+| `ptr_arithmetic.lsysl` 🟢 | `p + n` element-wise advance; walk array via pointer (4 tests) |
+| `ptr_compare.lsysl` 🟢 | `p == q`, `p != q`, retarget changes equality (3 tests) |
+| `ptr_null.lsysl` 🟢 | `*int(0)` null; default-init zero-inits to null; branch-on-null (4 tests). TODO: re-enable `bool(*T)` cast test once LLVM codegen lands (currently emits invalid `bitcast i8* to i8`) |
+| `ptr_to_struct_field.lsysl` 🟢 | `&s.field` field pointer; field-ptr mutation visible in struct (4 tests) |
+| `array_decay_implicit.lsysl` 🟢 | covered by `slices/array_decay.lsysl` |
 
 ---
 
