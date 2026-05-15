@@ -1,0 +1,48 @@
+Generic tagged unions (data enums)
+==================================
+
+A generic data enum like `Option[T] { Some(value: T), None }`
+is monomorphized per type. The variants carry payloads of the
+type parameter; `match` destructures and binds.
+
+    module sysl.tests.lang_features
+
+    enum GeMaybe[T]
+        Just(value: T)
+        Nope
+
+Construct and match — int payload
+---------------------------------
+
+    extract_int(m: GeMaybe[int]) -> int =
+        m match
+            Just(x) -> x
+            Nope    -> -1
+
+    #test
+    test_just_int() -> unit
+        val m: GeMaybe[int] = Just(42)
+        assert(extract_int(m) == 42, s"extract_int(Just(42)) should be 42, got ${extract_int(m)}")
+
+Construct nope variant
+----------------------
+
+    #test
+    test_nope_returns_fallback() -> unit
+        val m: GeMaybe[int] = Nope
+        assert(extract_int(m) == -1, s"extract_int(Nope) should be -1, got ${extract_int(m)}")
+
+Two distinct instantiations
+---------------------------
+
+    extract_bool(m: GeMaybe[bool]) -> bool =
+        m match
+            Just(b) -> b
+            Nope    -> false
+
+    #test
+    test_two_instantiations() -> unit
+        val mi: GeMaybe[int] = Just(7)
+        val mb: GeMaybe[bool] = Just(true)
+        assert(extract_int(mi) == 7, s"int payload should be 7, got ${extract_int(mi)}")
+        assert(extract_bool(mb),     "bool payload should be true")

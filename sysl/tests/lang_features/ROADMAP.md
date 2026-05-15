@@ -132,26 +132,27 @@ Reference §"Pointers", "Pointer Dereference Is Explicit", "Array/Pointer Decay"
 
 ---
 
-### `generics/` — Generic functions / structs / enums / aliases — 🔴 P0
+### `generics/` — Generic functions / structs / enums / aliases — 🟡 P0
 
 Reference §"Generic Functions", "Generic Structs", "Generic Tagged Unions",
 "Generic Type Aliases", "Methods on generic structs". `std/` uses Option /
 Result / List heavily but mostly through their already-instantiated forms;
-the *inference* and *instantiation* edges are less covered.
+the *inference* and *instantiation* edges are less covered. Substantially
+covered now; one SVM bug TODO'd.
 
 | File | Tests pinned |
 |---|---|
-| `generic_fn_explicit.lsysl` 🔴 | `f[T](x: T) -> T`; called with explicit type arg `f[int](3)` |
-| `generic_fn_inferred.lsysl` 🔴 | inference from a single arg, from multiple args, from return position |
-| `generic_fn_operator_rhs.lsysl` 🔴 | inference for the RHS of an operator (sysl@950415fde regression) |
-| `generic_fn_sibling_import.lsysl` 🔴 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression) |
-| `generic_struct_basic.lsysl` 🔴 | `struct Box[T] { v: T }`; ctor; field access |
-| `generic_struct_method.lsysl` 🔴 | `Box[T].get() -> T`; method call resolution under type param |
-| `generic_enum_data.lsysl` 🔴 | `enum Tree[T] { Leaf, Node(T, Tree[T], Tree[T]) }`; recursive generic |
-| `generic_alias_basic.lsysl` 🔴 | `type Pair[A,B] = (A, B)` (or struct alias); usage |
-| `generic_alias_cross_file.lsysl` 🔴 | generic alias visible across files (sysl@2c4f1c095 regression) |
-| `generic_nested.lsysl` 🔴 | `Option[Option[int]]`; `Result[List[int], string]` |
-| `generic_two_params.lsysl` 🔴 | `f[A, B](a: A, b: B) -> (A, B)` |
+| `generic_fn_basic.lsysl` 🟢 | explicit type arg; inference; multi-param; max-of-T; (5 tests). TODO: `apply_twice[T](f: (T)->T, x: T)` higher-order — SVM overflows its 1024-item data stack on f(f(x)); other 6 backends fine |
+| `generic_struct.lsysl` 🟢 | `Box[T]` construct & read; inferred construct; pass-to-fn; two-param `Pair[A,B]` (4 tests) |
+| `generic_enum.lsysl` 🟢 | `Maybe[T]` with `Just(value: T)` / `Nope`; match with payload bind; two instantiations side-by-side (3 tests) |
+| `generic_nested.lsysl` 🟢 | `Box[Box[int]]`, three-deep `Box[Box[Box[int]]]`, `Box[Opt[int]]`, two-param `Pair[A,B]` (4 tests) |
+| `generic_fn_explicit.lsysl` 🟢 | subsumed by `generic_fn_basic.lsysl` |
+| `generic_fn_inferred.lsysl` 🟢 | subsumed by `generic_fn_basic.lsysl` |
+| `generic_fn_operator_rhs.lsysl` 🔴 | inference for the RHS of an operator (sysl@950415fde regression) — not yet pinned |
+| `generic_fn_sibling_import.lsysl` 🔴 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression) — not yet pinned |
+| `generic_struct_method.lsysl` 🔴 | `Box[T].get() -> T`; method call resolution under type param — not yet pinned |
+| `generic_alias_basic.lsysl` 🔴 | `type Pair[A,B] = (A, B)` (or struct alias); usage — not yet pinned |
+| `generic_alias_cross_file.lsysl` 🔴 | generic alias visible across files (sysl@2c4f1c095 regression) — not yet pinned |
 
 ---
 

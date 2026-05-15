@@ -1,0 +1,57 @@
+Nested generic instantiations
+=============================
+
+Generic types compose: `Box[Box[int]]`, `Box[Opt[int]]`, etc.
+Each layer of nesting should monomorphize independently.
+
+    module sysl.tests.lang_features
+
+    enum GnOpt[T]
+        Some(value: T)
+        None
+
+    struct GnBox[T]
+        v: T
+
+`Box[Box[int]]` — nested generic struct
+---------------------------------------
+
+    #test
+    test_box_box_int() -> unit
+        val inner = GnBox[int](7)
+        val outer = GnBox[GnBox[int]](inner)
+        assert(outer.v.v == 7, s"outer.v.v should be 7, got ${outer.v.v}")
+
+`Box[Box[Box[int]]]` — three deep
+---------------------------------
+
+    #test
+    test_box_three_deep() -> unit
+        val l1 = GnBox[int](42)
+        val l2 = GnBox[GnBox[int]](l1)
+        val l3 = GnBox[GnBox[GnBox[int]]](l2)
+        assert(l3.v.v.v == 42, s"l3.v.v.v should be 42, got ${l3.v.v.v}")
+
+Box holding a Some(int)
+-----------------------
+
+    #test
+    test_box_some_int() -> unit
+        val b: GnBox[GnOpt[int]] = GnBox[GnOpt[int]](Some(42))
+        val v = b.v match
+            Some(x) -> x
+            None    -> -1
+        assert(v == 42, s"v should be 42, got $v")
+
+Multiple struct fields with generic types
+-----------------------------------------
+
+    struct GnPair[A, B]
+        left: A
+        right: B
+
+    #test
+    test_pair_two_types() -> unit
+        val p = GnPair[int, bool](42, true)
+        assert(p.left == 42, s"p.left should be 42, got ${p.left}")
+        assert(p.right, "p.right should be true")
