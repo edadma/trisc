@@ -2685,6 +2685,47 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should not include "!K:"
   }
 
+  "busybox: wc /etc/passwd" in {
+    // /etc/passwd has 2 lines: "root:..." and "ed:...". `wc` reports
+    // line/word/byte counts via the same read-side path as cat. New
+    // surface here is bb_full_read into a fixed buffer + counters, no
+    // new syscalls.
+    val output = qemu.command("/bin/busybox wc /etc/passwd")
+    output should include("2")
+    output should include("/etc/passwd")
+    output should not include "!K:"
+  }
+
+  "busybox: head /etc/passwd" in {
+    // head -n 1: emit first newline-delimited record. Exercises
+    // line-by-line read via fgets; surfaces any gap in line buffering
+    // / unbuffered stdio that cat (block-mode) doesn't cover.
+    val output = qemu.command("/bin/busybox head -n 1 /etc/passwd")
+    output should include("root:x:0:0")
+    output should not include "ed:x:1000"
+    output should not include "!K:"
+  }
+
+  "busybox: tail /etc/passwd" in {
+    // tail -n 1: emit last newline-delimited record. Reads from front
+    // (small file fits in buffer) then prints last line; no seek-back
+    // dance for files this small.
+    val output = qemu.command("/bin/busybox tail -n 1 /etc/passwd")
+    output should include("ed:x:1000:1000")
+    output should not include "!K:"
+  }
+
+  "busybox: grep root /etc/passwd" in {
+    // grep: bb regex.h + fgets. busybox uses its bundled libbb regex
+    // when compiled with FEATURE_GREP_REGEX_BIG; with our config it
+    // falls through to musl's POSIX regex. First applet to exercise
+    // the regex path.
+    val output = qemu.command("/bin/busybox grep root /etc/passwd")
+    output should include("root:x:0:0")
+    output should not include "ed:x:1000"
+    output should not include "!K:"
+  }
+
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")

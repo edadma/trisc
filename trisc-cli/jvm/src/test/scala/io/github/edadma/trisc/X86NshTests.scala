@@ -1311,6 +1311,33 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "!K:"
   }
 
+  "busybox: wc /etc/passwd" in {
+    val output = qemu.command("/bin/busybox wc /etc/passwd")
+    output should include("2")
+    output should include("/etc/passwd")
+    output should not include "!K:"
+  }
+
+  "busybox: head /etc/passwd" in {
+    val output = qemu.command("/bin/busybox head -n 1 /etc/passwd")
+    output should include("root:x:0:0")
+    output should not include "ed:x:1000"
+    output should not include "!K:"
+  }
+
+  "busybox: tail /etc/passwd" in {
+    val output = qemu.command("/bin/busybox tail -n 1 /etc/passwd")
+    output should include("ed:x:1000:1000")
+    output should not include "!K:"
+  }
+
+  "busybox: grep root /etc/passwd" in {
+    val output = qemu.command("/bin/busybox grep root /etc/passwd")
+    output should include("root:x:0:0")
+    output should not include "ed:x:1000"
+    output should not include "!K:"
+  }
+
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
     val output = qemu.command("test_tcp_reuse")
     output should include("tcpreuse:ok")
