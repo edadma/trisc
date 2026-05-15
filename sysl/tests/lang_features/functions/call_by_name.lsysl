@@ -1,0 +1,209 @@
+Call-by-Name Parameters — `=> T`
+=================================
+
+Per reference §"Call-by-Name Parameters", a parameter type prefixed
+with `=>` declares **call-by-name** semantics:
+
+> the argument is not evaluated at the call site. Instead it is
+> implicitly wrapped as a zero-arg thunk; every body reference to the
+> parameter re-enters the thunk (no memoization — Scala-style, not
+> lazy val).
+
+The user-visible type of a by-name param is `T`; internally the
+storage type is `() -> T` and the analyzer auto-wraps each call-site
+argument plus auto-calls each body reference. This file pins:
+
+- Each body reference re-evaluates (visible side-effect count).
+- An unreferenced by-name argument never evaluates (visible
+  side-effect count stays at zero).
+- Short-circuit-like patterns through `if` work correctly: only
+  one branch of the body references the by-name param.
+- Call-by-name with `bool`, `string` payloads, not just `int`.
+
+File-local prefix `Scbn` (Sysl Call-By-Name).
+
+**TODO — TRISC bug found 2026-05-15, one test dropped:**
+
+  - `outer(b: => int) -> int = inner(b)` (the reference's
+    "forwarding" example, §"By-Name … Forwarding to another
+    by-name slot composes naturally") crashes on TRISC with
+    `DoubleFault at PC=0x468`. Other 6 backends produce the
+    expected `42` for `outer(41)`. See
+    `feedback_sysl_trisc_byname_forwarding.md`.
+
+    module sysl.tests.lang_features
+
+    var bump_count = 0
+
+    bump() -> int
+        bump_count = bump_count + 1
+        return bump_count
+
+Each body reference re-evaluates
+---------------------------------
+
+### Two references → two evaluations
+
+    use_lazy_twice(b: => int) -> int = b + b
+
+    #test
+    test_scbn_two_refs_two_evals() -> unit
+        bump_count = 0
+        val r = use_lazy_twice(bump())
+        // bump() runs twice: returns 1 then 2; r = 1 + 2 = 3
+        assert(r == 3, s"value; got $r")
+        assert(bump_count == 2, s"count; got $bump_count")
+
+### Three references → three evaluations
+
+    use_lazy_thrice(b: => int) -> int = b + b + b
+
+    #test
+    test_scbn_three_refs_three_evals() -> unit
+        bump_count = 0
+        val r = use_lazy_thrice(bump())
+        // 1 + 2 + 3 = 6
+        assert(r == 6, s"value; got $r")
+        assert(bump_count == 3, s"count; got $bump_count")
+
+Zero references → zero evaluations
+-----------------------------------
+
+### Unused by-name param — argument never runs
+
+    ignore(b: => int) -> int = 0
+
+    #test
+    test_scbn_unreferenced_never_evals() -> unit
+        bump_count = 0
+        val r = ignore(bump())
+        assert(r == 0, "ignored arg")
+        assert(bump_count == 0, s"count stays zero; got $bump_count")
+
+### Argument with side effect, body never references it
+
+    only_eager(eager: int, b: => int) -> int = eager + 1
+
+    #test
+    test_scbn_only_eager_evaluated() -> unit
+        bump_count = 0
+        val r = only_eager(10, bump())
+        assert(r == 11, "eager + 1")
+        assert(bump_count == 0, s"by-name not eval'd; got $bump_count")
+
+Conditional reference — short-circuit-like
+------------------------------------------
+
+### Body picks via `if` — only chosen branch evaluates the param
+
+    pick(cond: bool, b: => int) -> int
+        if cond then return b + 100
+        return 999
+
+    #test
+    test_scbn_branch_taken_evals_once() -> unit
+        bump_count = 0
+        val r = pick(true, bump())
+        assert(r == 101, s"branch taken; got $r")
+        assert(bump_count == 1, s"one eval; got $bump_count")
+
+    #test
+    test_scbn_branch_not_taken_zero_evals() -> unit
+        bump_count = 0
+        val r = pick(false, bump())
+        assert(r == 999, "default branch")
+        assert(bump_count == 0, s"zero evals; got $bump_count")
+
+### Two references, only one in a loop body
+
+    sum_n_times(n: int, b: => int) -> int
+        var s = 0
+        var i = 0
+        while i < n
+            s = s + b
+            i = i + 1
+        return s
+
+    #test
+    test_scbn_loop_evaluates_n_times() -> unit
+        bump_count = 0
+        // bump returns 1,2,3 — s = 1+2+3 = 6
+        val r = sum_n_times(3, bump())
+        assert(r == 6, s"got $r")
+        assert(bump_count == 3, s"three evals; got $bump_count")
+
+    #test
+    test_scbn_loop_zero_count_zero_evals() -> unit
+        bump_count = 0
+        val r = sum_n_times(0, bump())
+        assert(r == 0, "zero loop iterations")
+        assert(bump_count == 0, s"zero evals; got $bump_count")
+
+By-name with non-int payload
+-----------------------------
+
+### Bool — pick by another bool
+
+    chooseb(cond: bool, b: => bool) -> bool
+        if cond then return b
+        return false
+
+    var bool_count = 0
+
+    flip() -> bool
+        bool_count = bool_count + 1
+        return true
+
+    #test
+    test_scbn_bool_payload_evaluated() -> unit
+        bool_count = 0
+        val r = chooseb(true, flip())
+        assert(r, "true result")
+        assert(bool_count == 1, s"one eval; got $bool_count")
+
+    #test
+    test_scbn_bool_payload_skipped() -> unit
+        bool_count = 0
+        val r = chooseb(false, flip())
+        assert(!r, "false result, b skipped")
+        assert(bool_count == 0, s"zero evals; got $bool_count")
+
+### String — pick by-name string, concat twice
+
+    var str_count = 0
+
+    gen_str() -> string
+        str_count = str_count + 1
+        return "x"
+
+    twice(b: => string) -> string = b + b
+
+    #test
+    test_scbn_string_payload_two_refs() -> unit
+        str_count = 0
+        val r = twice(gen_str())
+        assert(r == "xx", s"got '$r'")
+        assert(str_count == 2, s"two evals; got $str_count")
+
+Eagerness — literal argument still re-runs the thunk
+-----------------------------------------------------
+
+A literal `42` is wrapped as a thunk `() -> 42` and called each
+time the body references the parameter. Side-effect-free, so just
+pin the value.
+
+### Literal argument, single body reference
+
+    pass(b: => int) -> int = b
+
+    #test
+    test_scbn_literal_passes_through() -> unit
+        val r = pass(42)
+        assert(r == 42, s"got $r")
+
+### Literal argument, two body references (no side effect)
+
+    #test
+    test_scbn_literal_two_refs_same_value() -> unit
+        val r = use_lazy_twice(7)
+        assert(r == 14, s"7+7; got $r")
