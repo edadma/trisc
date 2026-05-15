@@ -1,0 +1,178 @@
+String comparison — `==` and `!=`
+==================================
+
+Sysl supports byte-for-byte equality on strings via `==`
+and `!=`. The comparison checks length plus content; two
+strings are equal iff they have the same length and the
+same bytes at every position. Equality is **case
+sensitive** and operates on the UTF-8 bytes — there is no
+locale, no normalisation, no special treatment of multi-
+byte sequences beyond "compare them byte for byte."
+
+**Ordering operators (`<`, `<=`, `>`, `>=`) are not
+implemented on strings.** Calling them runtime-panics with
+"unsupported string operator: <". When ordering lands, add
+the lexicographic cases here. Until then this file pins
+only the equality surface.
+
+This file exercises:
+
+  - Equality between two identical literals and between
+    two different literals.
+  - Equality across a `var`, a returned fn result, and a
+    fresh concat buffer.
+  - `!=` is the negation of `==` on every shape.
+  - The empty string equals itself but not any non-empty
+    string.
+  - Equality is case-sensitive at the byte level.
+  - Length mismatch is enough to disequal — no need to
+    actually look at content.
+  - The result is a plain `bool` usable in `var`, `if`,
+    and through a fn boundary.
+
+File-local prefix `Sco` (string-compare-ops) keeps names
+out of the module-flat namespace.
+
+    module sysl.tests.lang_features
+
+Equality between literals
+-------------------------
+
+Two identical literals compare equal; two different ones
+don't. The negation appears under both `!(x == y)` and
+`x != y` shapes — they must agree.
+
+    #test
+    test_sco_eq_literal_same() -> unit
+        assert("hello" == "hello", "identical literals are equal")
+
+    #test
+    test_sco_eq_literal_diff() -> unit
+        assert(!("hello" == "world"), "different literals are not equal under ==")
+        assert("hello" != "world", "and != yields true on the same pair")
+
+Equality across var / fn-result / concat
+----------------------------------------
+
+`==` looks at content, not at where the bytes came from.
+The third case is the most codegen-sensitive: the LHS is a
+fresh buffer (concat result) whose content happens to
+match a literal. The compare must reach into both
+buffers, not compare their pointers.
+
+    sco_make() -> string = "hello"
+
+    #test
+    test_sco_eq_var_vs_literal() -> unit
+        val s = sco_make()
+        assert(s == "hello", "var == literal")
+        assert("hello" == s, "literal == var (symmetry)")
+
+    #test
+    test_sco_eq_concat_vs_literal() -> unit
+        assert("hel" + "lo" == "hello", "concat == literal")
+        assert("hello" == "hel" + "lo", "literal == concat (symmetry)")
+
+    #test
+    test_sco_eq_concat_vs_concat() -> unit
+        assert("ab" + "cd" == "abc" + "d", "two concats with same total bytes")
+
+`!=` is the negation of `==`
+----------------------------
+
+    #test
+    test_sco_neq_basic() -> unit
+        assert("a" != "b", "different one-char strings")
+        assert(!("a" != "a"), "same one-char strings — != is false")
+        assert("" != "x", "empty vs non-empty under !=")
+        assert(!("" != ""), "two empties under != — false")
+
+Empty string
+------------
+
+`""` equals itself but no non-empty string. The empty-
+vs-empty equality is its own pinned case because that's
+the codegen path where len is 0 on both sides and there's
+no content to compare.
+
+    #test
+    test_sco_eq_empty_self() -> unit
+        assert("" == "", "empty == empty")
+
+    #test
+    test_sco_eq_empty_vs_nonempty() -> unit
+        assert(!("" == "a"), "empty == 'a' is false")
+        assert("" != "a", "empty != 'a'")
+        assert(!("a" == ""), "'a' == empty is false (symmetry)")
+        assert("a" != "", "'a' != empty (symmetry)")
+
+Case sensitivity
+----------------
+
+`==` is **case sensitive**. Upper- and lower-case
+characters with the same ASCII letter are distinct
+strings; the comparison sees different bytes.
+
+    #test
+    test_sco_eq_case_sensitive() -> unit
+        assert(!("abc" == "ABC"), "lower != upper under ==")
+        assert("abc" != "ABC", "lower != upper under !=")
+        assert(!("Hello" == "hello"), "mixed case != lower")
+
+Length mismatch
+---------------
+
+If the lengths differ, equality short-circuits to false.
+Pinned here as a separate case — the codegen path is
+"check lengths first, return false if mismatch" and we
+want it exercised.
+
+    #test
+    test_sco_eq_diff_lengths() -> unit
+        assert(!("a" == "ab"), "'a' == 'ab' is false (length mismatch)")
+        assert("a" != "ab", "'a' != 'ab' is true")
+        assert(!("abc" == "ab"), "longer == shorter is false")
+        assert(!("ab" == "abc"), "shorter == longer is false")
+
+UTF-8 byte equality
+-------------------
+
+Multi-byte UTF-8 sequences compare byte for byte. Two
+identical literals containing non-ASCII code points must
+compare equal; two literals with the same character count
+but different code points must not.
+
+    #test
+    test_sco_eq_utf8_same() -> unit
+        assert("héllo" == "héllo", "identical UTF-8 literals")
+
+    #test
+    test_sco_eq_utf8_diff() -> unit
+        assert("héllo" != "hello", "UTF-8 'é' (2 bytes) != ASCII 'e' (1 byte)")
+
+Result is a plain `bool` — flows through `var`, `if`, fn
+--------------------------------------------------------
+
+The result of `==` / `!=` is a normal `bool`. It must
+round-trip through a `val`, through an `if`-expression
+condition, and through a fn that takes string args and
+returns bool.
+
+    sco_first_eq(a: string, b: string) -> bool = a == b
+
+    #test
+    test_sco_result_in_var() -> unit
+        val eq = "x" == "x"
+        val ne = "x" != "y"
+        assert(eq, "eq var")
+        assert(ne, "ne var")
+
+    #test
+    test_sco_result_in_if() -> unit
+        val tag = if "abc" == "abc" then "match" else "miss"
+        assert(tag == "match", s"branch on string ==; got '$tag'")
+
+    #test
+    test_sco_through_fn() -> unit
+        assert(sco_first_eq("aa", "aa"), "fn returning bool from ==")
+        assert(!sco_first_eq("aa", "ab"), "and the negative case")

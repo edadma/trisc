@@ -233,7 +233,7 @@ Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.ls
 | `string_escape_seqs.lsysl` 🔴 | `\n`, `\t`, `\"`, `\\`, `\x41`, `\u{...}` |
 | `string_index_slice.lsysl` 🔴 | `s[i]` (byte/char?), `s[i:j]` (sub-slice) |
 | `string_len_empty.lsysl` 🟢 | `len("")` is 0; len of single char; len five chars; two empty literals equal; len stable across reads; len of returned string; len of returned ""; len after rebind; len(a+b)=len(a)+len(b) for ASCII (9 tests) |
-| `string_compare.lsysl` 🔴 | `==`, `!=`, lexicographic `<`, `<=` |
+| `string_compare.lsysl` 🟡 | `==` / `!=` equality on strings — 15 tests: literal-vs-literal, var/concat/fn-result, empty-self, empty-vs-nonempty, case sensitivity, length mismatch, UTF-8 byte-equality, result through var/if/fn (15 tests; 7/7 backends). TODO: ordering ops (`<`, `<=`, `>`, `>=`) — **not implemented**; calling any of them runtime-panics with `unsupported string operator: <`. Add the lexicographic cases here when those operators land |
 | `f_format_strings.lsysl` 🔴 | `f"%d %x %s"` with format specs `%08d %.2f %+d %-10s` |
 | `str_builtin.lsysl` 🔴 | `str(x)` on int / bool / float / string / data-enum variant name |
 | `string_from_bytes.lsysl` 🔴 | constructing a `string` from `[]byte` |
