@@ -1,0 +1,128 @@
+Destructuring and parallel assignment
+=====================================
+
+Sysl supports tuple destructure on declaration and parallel
+assignment between existing variables, in three shapes
+(reference §"Destructuring and Parallel Assignment"):
+
+  - `val q, r = divmod(17, 5)` — declares q, r from a tuple
+    return; immutable.
+  - `q, r = divmod(17, 5)` — bare form, declares as `var` when
+    both names are new.
+  - `a, b = b, a` — parallel assignment to two existing
+    `var`s; RHS evaluated fully before either store.
+  - `x, y = p` — destructure a named struct by field order.
+
+This file pins each shape across all seven backends.
+
+    module sysl.tests.lang_features
+
+A tuple-returning helper: divmod. Use a file-local prefix
+(`Da` for "destructure-assign") on the fn name to avoid the
+module-flat namespace pinch.
+
+    da_divmod(a: int, b: int) -> (int, int) = a / b, a % b
+
+A two-field point struct used for struct destructure.
+
+    struct DaPoint
+        x: int
+        y: int
+
+`val` destructure from a tuple return
+--------------------------------------
+
+The simplest case: two `val` bindings receive the two-tuple
+result of a function call.
+
+    #test
+    test_val_destructure_tuple() -> unit
+        val q, r = da_divmod(17, 5)
+        assert(q == 3, s"q should be 3, got $q")
+        assert(r == 2, s"r should be 2, got $r")
+
+`var` destructure from a tuple return
+-------------------------------------
+
+`var q, r = ...` declares mutable bindings. The two results
+must be independently mutable afterwards.
+
+    #test
+    test_var_destructure_tuple_then_mutate() -> unit
+        var q, r = da_divmod(20, 6)
+        assert(q == 3, "q before mutate")
+        assert(r == 2, "r before mutate")
+        q = q + 100
+        r = r + 200
+        assert(q == 103, s"q after mutate, got $q")
+        assert(r == 202, s"r after mutate, got $r")
+
+Parenthesized form
+------------------
+
+`(q, r) = ...` is equivalent to the bare form. Pin that the
+parens don't change semantics or binding.
+
+    #test
+    test_parenthesized_destructure() -> unit
+        val (q, r) = da_divmod(100, 7)
+        assert(q == 14, s"q should be 14, got $q")
+        assert(r == 2, s"r should be 2, got $r")
+
+Parallel assignment — swap
+--------------------------
+
+`a, b = b, a` with two existing `var`s. The RHS is fully
+evaluated before either store, so the swap is atomic from the
+two-variable perspective.
+
+    #test
+    test_parallel_assign_swap() -> unit
+        var a = 10
+        var b = 20
+        a, b = b, a
+        assert(a == 20, s"a should be 20 after swap, got $a")
+        assert(b == 10, s"b should be 10 after swap, got $b")
+
+Parallel assignment — three-way rotation
+----------------------------------------
+
+`a, b, c = c, a, b` rotates three values. RHS evaluated fully
+before any store, so the rotation is atomic.
+
+    #test
+    test_parallel_assign_rotate() -> unit
+        var a = 1
+        var b = 2
+        var c = 3
+        a, b, c = c, a, b
+        assert(a == 3, s"a should be 3, got $a")
+        assert(b == 1, s"b should be 1, got $b")
+        assert(c == 2, s"c should be 2, got $c")
+
+Struct destructure by field order
+---------------------------------
+
+`x, y = p` extracts the two fields of a named struct in
+declaration order — `x` gets `p.x`, `y` gets `p.y`.
+
+    #test
+    test_struct_destructure_val() -> unit
+        val p = DaPoint(11, 22)
+        val x, y = p
+        assert(x == 11, s"x should be 11 (p.x), got $x")
+        assert(y == 22, s"y should be 22 (p.y), got $y")
+
+Destructure does not mutate source
+----------------------------------
+
+After `val x, y = p`, the source struct `p` still holds its
+original field values. The destructure copies, it doesn't
+move/consume.
+
+    #test
+    test_destructure_does_not_consume_source() -> unit
+        val p = DaPoint(7, 8)
+        val x, y = p
+        assert(x == 7 && y == 8, "destructure values")
+        assert(p.x == 7 && p.y == 8, "source still intact")

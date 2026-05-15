@@ -216,7 +216,7 @@ Existing: `closures_hof.lsysl` → `closures/closures_hof.lsysl`.
 | `match_guards.lsysl` 🔴 | guard clauses (`case Some(x) if x > 0 => ...`) — *if supported* |
 | `match_or_patterns.lsysl` 🔴 | `case (A | B) => ...` — *if supported* |
 | `if_is_pattern.lsysl` 🔴 | `if x is Some(v) then ...` one-arm sugar |
-| `destructure_assign.lsysl` 🔴 | `val (a, b) = pair`; parallel assignment `(x, y) = (y, x)` |
+| `destructure_assign.lsysl` 🟢 | `val q, r = divmod(...)`; `var` form with subsequent mutate; parenthesized; swap; three-way rotate; struct destructure by field-order; non-consuming (7 tests) |
 
 Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.lsysl`.
 
