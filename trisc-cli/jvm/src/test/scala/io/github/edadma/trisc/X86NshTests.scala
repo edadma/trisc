@@ -1266,21 +1266,24 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "phello: bad"
   }
 
-  "busybox: echo applet (Phase 1 close-out)" in {
-    // Phase 1 close-out. /bin/busybox is a dynamically-linked PIE
-    // built from upstream busybox 1.37.0 via slix/build-busybox.sh
-    // against the SLIX musl fork (libc.so resolves from /usr/lib,
-    // PT_INTERP = /lib/ld-musl-x86_64.so.1). This is the master-
-    // roadmap's Phase-1 acceptance bar: a real program from outside
-    // the bring-up corpus runs end-to-end through ld-musl, libc.so,
-    // fork+exec, and the syscall surface.
-    //
-    // The applet set is incremental — v0 has only `echo`, `true`,
-    // `false`, plus the busybox dispatcher. Each new applet that
-    // surfaces a missing libc or kernel syscall is its own debug
-    // round; this test pins the first one.
+  // TODO: un-ignore when nsh→spawn supports PT_INTERP/PIE.
+  // See Aarch64NshTests for the full bug write-up.
+  "busybox: echo applet (Phase 1 close-out)" ignore {
     val output = qemu.command("/bin/busybox echo hello busybox")
-    output should include("hello busybox")
+    // Strip the typed command (echoed by TTY) before asserting;
+    // otherwise the test trivially passes on the echo of input.
+    val cleaned = output.replaceFirst("/bin/busybox echo hello busybox\\r?\\n", "")
+    cleaned should include("hello busybox")
+    cleaned should not include "!K:"
+  }
+
+  "busybox: cat /etc/passwd" ignore {
+    // v1 applet — blocked behind the same PT_INTERP-via-spawn gap as
+    // the echo test above; un-ignore in tandem.
+    val output = qemu.command("/bin/busybox cat /etc/passwd")
+    output should include("root:x:0:0:root:/root:/nsh")
+    output should include("ed:x:1000:1000:ed:/home/ed:/nsh")
+    output should not include "!K:"
   }
 
   "tcp: SO_REUSEADDR overrides TIME_WAIT bind-block" in {
