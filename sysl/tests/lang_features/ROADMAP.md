@@ -232,7 +232,7 @@ Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.ls
 | `string_concat_chain.lsysl` 🔴 | `a + b + c + d`; intermediate buffer lifetimes |
 | `string_escape_seqs.lsysl` 🔴 | `\n`, `\t`, `\"`, `\\`, `\x41`, `\u{...}` |
 | `string_index_slice.lsysl` 🔴 | `s[i]` (byte/char?), `s[i:j]` (sub-slice) |
-| `string_len_empty.lsysl` 🔴 | `len(s)`; empty string is len 0; static literal empty has refcount -1 |
+| `string_len_empty.lsysl` 🟢 | `len("")` is 0; len of single char; len five chars; two empty literals equal; len stable across reads; len of returned string; len of returned ""; len after rebind; len(a+b)=len(a)+len(b) for ASCII (9 tests) |
 | `string_compare.lsysl` 🔴 | `==`, `!=`, lexicographic `<`, `<=` |
 | `f_format_strings.lsysl` 🔴 | `f"%d %x %s"` with format specs `%08d %.2f %+d %-10s` |
 | `str_builtin.lsysl` 🔴 | `str(x)` on int / bool / float / string / data-enum variant name |
