@@ -100,7 +100,7 @@ Module-level pool. `MAX_VMAS` is set in `sysl.toml`/`oskit.config`
 so the limit is visible everywhere it matters. Static array; no
 allocator dependency.
 
-    var vma_pool: [256]VMA
+    var vma_pool: [4096]VMA
     var vma_free_head: int = 0
     var vma_pool_init = false
 
@@ -1090,5 +1090,29 @@ Returns 0 on success; 1..N on failure at step N.
             return 15
         if vma_range_free(&t, u64(0x60000000), u64(0x60200000)) != 1
             return 15
+
+        // Step 16 — large fan-out beyond the legacy 256-slot cap. Inserts
+        // 500 disjoint 1-page VMAs with a 2-page stride, walks them in
+        // ascending order, and clears. Fails if the pool can't grow past
+        // 256 (regression-pin for the MAX_VMAS bump).
+        var j = 0
+        while j < 500
+            val s = u64(0x40000000) + u64(j) * u64(0x2000)
+            val e = s + u64(0x1000)
+            if vma_create(&t, s, e, VMA_PROT_READ, VMA_MAP_ANON | VMA_MAP_PRIVATE, -1, u64(0)) == VMA_NIL
+                return 16
+            j += 1
+        if vma_count(&t) != 500
+            return 16
+        var prev3: u64 = 0
+        var n3 = vma_first(&t)
+        while n3 != VMA_NIL
+            if vma_pool[n3].vstart < prev3
+                return 16
+            prev3 = vma_pool[n3].vstart
+            n3 = vma_next(n3)
+        vma_clear_all(&t)
+        if vma_count(&t) != 0
+            return 16
 
         0
