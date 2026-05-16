@@ -1740,6 +1740,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr) // result in r1
+        maybeCoerceReturnToEnum(expr.typ)
         emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
@@ -1956,6 +1957,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr)
+        maybeCoerceReturnToEnum(expr.typ)
         emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
@@ -2023,6 +2025,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       stmts.last match
         case TExprStmt(expr) =>
           genExpr(expr) // result in r1
+          maybeCoerceReturnToEnum(expr.typ)
           if sr then emitStructReturn()
           emitDefers()
           emitRefCleanup()
@@ -2070,6 +2073,46 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case "^"  => emit("  xor r1, r1, r3")
       case "<<" => emit("  lsl r1, r1, r3")
       case ">>" => emit("  asr r1, r1, r3")
+
+  /** If the function returns an EnumType but the value currently in r1 is a
+   *  scalar (because the body was lowered from `Color.Variant` to a bare i32),
+   *  materialize an enum-shaped buffer on the stack, write the scalar as the
+   *  i32 tag at offset 0, zero-fill the rest, and leave r1 pointing at the
+   *  buffer. emitStructReturn then copies the buffer to _ret_ptr like any
+   *  other aggregate return. Mirror of the LLVM `coerceScalarToEnumReturn`
+   *  fix (sysl@99c79bfcb) and the SVM helper of the same name.
+   *
+   *  Implementation note: an earlier version saved r1 via `pshd r1`, then
+   *  allocated the buffer with `addi r7, r7, -aligned`. The `pshd` lowered SP
+   *  by 8 without updating `stackOffset`, so the buffer was addressed at
+   *  FP+baseOff but actually lived at FP+baseOff-8; the zero-fill clobbered
+   *  the saved tag and the buffer contained garbage on read-back. The current
+   *  form moves r1 to r2 before allocating — caller-saved scratch only, no
+   *  data-stack imbalance with `stackOffset`.
+   */
+  private def maybeCoerceReturnToEnum(exprTyp: SyslType): Unit =
+    if currentFunction == null then return
+    (currentFunction.returnType.underlying, exprTyp.underlying) match
+      case (et: SyslType.EnumType, t) if t.isIntegral =>
+        // Stash the scalar tag in r2 — caller-saved scratch register; nothing
+        // below depends on r2's prior content.
+        emit("  mov r2, r1")
+        // Allocate enum-shaped buffer on the call stack.
+        val totalSize = stackSize(et)
+        val aligned = (totalSize + 7) & ~7
+        emitAddImm(7, 7, -aligned)
+        stackOffset -= aligned
+        val baseOff = stackOffset
+        // Zero-initialize 8 bytes at a time using r3 (also caller-saved scratch).
+        for i <- 0 until aligned by 8 do
+          emitAddImm(3, 5, baseOff + i)
+          emit("  std r0, r3, r0")
+        // Write the saved tag as i32 at offset 0.
+        emitAddImm(3, 5, baseOff)
+        emit("  stw r2, r3, r0")
+        // r1 = enum buffer address.
+        emitAddImm(1, 5, baseOff)
+      case _ => ()
 
   // Copy multi-word value from src address (r1) to _ret_ptr, then set r1 = _ret_ptr
   // Works for both StructType and StringType (16 bytes)
@@ -2561,6 +2604,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
+        maybeCoerceReturnToEnum(value.typ)
         emitFuncReturnIncrIfBorrowed(value)
         if currentFunction != null && returnsViaPointer(currentFunction.returnType) then
           emitStructReturn()
@@ -3702,6 +3746,14 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case TCast(inner, target) =>
         genExpr(inner)
         import SyslType.*
+        // Enum → integral: r1 holds the enum-struct address; the tag (variant
+        // ordinal) lives as i32 at offset 0. Load it so the consumer sees the
+        // scalar rather than the address. Synthesised by the analyzer at
+        // `Type::Image(c)` / `Type::Pos(c)` / pattern-match scrutinee coercions
+        // whenever the static type is EnumType but the consumer expects i32.
+        // Without this case the address itself reached the consumer.
+        if inner.typ.underlying.isInstanceOf[EnumType] && target.isIntegral then
+          emit("  ldw r1, r1, r0")
         val srcIsFloat = inner.typ.isFloat
         val tgtIsFloat = target.isFloat
         // Float → int: convert float bits to integer value first

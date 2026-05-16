@@ -277,3 +277,62 @@ Two distinct enums coexist
         // SeiDir::Last = 3 (West's value, auto-increment from 0)
         assert(SeiColor::Last == 11, "Color last")
         assert(SeiDir::Last == 3, "Dir last")
+
+Functions returning simple enums
+---------------------------------
+
+Pins the simple-enum function-return codegen across all 7 backends. The
+analyzer lowers `Color.Variant` to a bare i32 even when the function's
+declared return type is `EnumType`. The backends must coerce that
+scalar back into an enum-shaped value at the return site (LLVM
+`coerceScalarToEnumReturn`; SVM / TRISC mirrors at sysl@99c79bfcb and
+the follow-on enum-return work).
+
+    sei_fn_make_red() -> SeiColor = SeiColor.SeiRed
+    sei_fn_make_green() -> SeiColor = SeiColor.SeiGreen
+    sei_fn_make_blue() -> SeiColor = SeiColor.SeiBlue
+    sei_fn_make_yellow() -> SeiColor = SeiColor.SeiYellow
+
+### Inline-consumed simple-enum return: ::Image round-trip
+
+    #test
+    test_sei_fnret_inline_image() -> unit
+        assert(SeiColor::Image(sei_fn_make_red()) == "SeiRed",
+               s"got '${SeiColor::Image(sei_fn_make_red())}'")
+        assert(SeiColor::Image(sei_fn_make_green()) == "SeiGreen", "green")
+        assert(SeiColor::Image(sei_fn_make_blue()) == "SeiBlue", "blue")
+        assert(SeiColor::Image(sei_fn_make_yellow()) == "SeiYellow", "yellow")
+
+### val-bound simple-enum return: result survives into a local
+
+The val-bound form is the one that previously broke on SVM / TRISC even
+when the inline-consumed form happened to compile. Both forms must work
+identically after the fix.
+
+    #test
+    test_sei_fnret_val_image() -> unit
+        val r = sei_fn_make_red()
+        val g = sei_fn_make_green()
+        val b = sei_fn_make_blue()
+        val y = sei_fn_make_yellow()
+        assert(SeiColor::Image(r) == "SeiRed", s"r=${SeiColor::Image(r)}")
+        assert(SeiColor::Image(g) == "SeiGreen", "g")
+        assert(SeiColor::Image(b) == "SeiBlue", "b")
+        assert(SeiColor::Image(y) == "SeiYellow", "y")
+
+### ::Pos on a simple-enum fn-return
+
+    #test
+    test_sei_fnret_pos() -> unit
+        assert(SeiColor::Pos(sei_fn_make_red()) == 0, "pos red")
+        assert(SeiColor::Pos(sei_fn_make_green()) == 1, "pos green")
+        assert(SeiColor::Pos(sei_fn_make_blue()) == 2, "pos blue")
+        assert(SeiColor::Pos(sei_fn_make_yellow()) == 3, "pos yellow")
+
+### Round-trip — ::Image of a val-bound fn-return matches the literal
+
+    #test
+    test_sei_fnret_eq_literal() -> unit
+        val c = sei_fn_make_blue()
+        assert(SeiColor::Image(c) == SeiColor::Image(SeiColor.SeiBlue),
+               s"got ${SeiColor::Image(c)}")

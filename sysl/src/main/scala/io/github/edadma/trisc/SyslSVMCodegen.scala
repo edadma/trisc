@@ -252,6 +252,41 @@ class SyslSVMCodegen:
     case _: SyslType.FuncType => true     // 16-byte {func_ptr, env_ptr} closure descriptor
     case _ => false
 
+  /** Wrap a scalar on TOS into an EnumType-shaped buffer on the memory stack.
+   *
+   *  Background: a function declared `f() -> SimpleEnum = SimpleEnum.Variant`
+   *  has its body lowered to `TIntLit(variantOrdinal, I32)`. Without this
+   *  wrap, the return site emits a bare scalar that the caller dereferences
+   *  as an enum address — garbage. Mirror of `coerceScalarToEnumReturn` in
+   *  the LLVM backend (fixed 2026-05-16 at sysl@99c79bfcb).
+   *
+   *  Stack in : ( ..., scalar )
+   *  Stack out: ( ..., enum-buf-addr )
+   */
+  private def coerceScalarToEnumReturn(et: SyslType.EnumType): Unit =
+    val size = et.sizeOf
+    emitMemAlloc(size)                                       // ( scalar, addr )
+    val aligned = ((size + 7) / 8 * 8).toInt
+    for i <- 0 until aligned by 8 do
+      emit("  dup")                                          // ( scalar, addr, addr )
+      if i > 0 then { emitPushInt(i); emit("  add") }
+      emit("  push_0")
+      emit("  swap")
+      emit("  store64")                                      // ( scalar, addr )
+    emit("  swap")                                           // ( addr, scalar )
+    emit("  over")                                           // ( addr, scalar, addr )
+    emit("  store32")                                        // ( addr )
+
+  /** If the current function's declared return type is an `EnumType` but the
+   *  expression being returned was lowered to a scalar, wrap it. No-op otherwise.
+   */
+  private def maybeCoerceReturnToEnum(exprTyp: SyslType): Unit =
+    if currentFunction != null then
+      (currentFunction.returnType, exprTyp) match
+        case (et: SyslType.EnumType, t) if !needsMemAlloc(t) && t != SyslType.StringType && !t.isInstanceOf[SyslType.SliceType] =>
+          coerceScalarToEnumReturn(et)
+        case _ => ()
+
   /** Emit code to allocate `size` bytes on the memory stack. Leaves address on data stack. */
   private def emitMemAlloc(size: Long): Unit =
     // __sp -= size (aligned to 8); push __sp
@@ -921,6 +956,7 @@ class SyslSVMCodegen:
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr)
+        maybeCoerceReturnToEnum(expr.typ)
         emitDefers()
         emitFunctionExitRefDecrs()
         emit("  ret")
@@ -1166,7 +1202,7 @@ class SyslSVMCodegen:
         case TExprStmt(expr) =>
           genExpr(expr)
           if expr.typ == SyslType.UnitType then emitPushInt(0)
-        case TReturnStmt(Some(expr)) => genExpr(expr); emitDefers(); emitFunctionExitRefDecrs(); emit("  ret")
+        case TReturnStmt(Some(expr)) => genExpr(expr); maybeCoerceReturnToEnum(expr.typ); emitDefers(); emitFunctionExitRefDecrs(); emit("  ret")
         case other => genStmt(other); emitPushInt(0)
 
   private def genStmt(stmt: TStmt): Unit = stmt match
@@ -1374,6 +1410,7 @@ class SyslSVMCodegen:
 
     case TReturnStmt(Some(expr)) =>
       genExpr(expr)
+      maybeCoerceReturnToEnum(expr.typ)
       emitDefers()
       emitFunctionExitRefDecrs()
       emit("  ret")
@@ -2994,6 +3031,16 @@ class SyslSVMCodegen:
       // (Arrays are already data-addressed, so array→ptr is a no-op.)
       case (StringType | _: SliceType, _: PtrType) =>
         emit("  load64")
+      // Enum → integral: the enum value on the stack is an address pointing at
+      // the enum buffer; the tag (variant ordinal) lives as i32 at offset 0.
+      // Synthesised by the analyzer at `Type::Image(c)` / `Type::Pos(c)` /
+      // pattern-match scrutinee coercions whenever the static type is
+      // EnumType but the consumer expects i32. Without this case the address
+      // itself was reaching the consumer (giant random ordinal → "?" in Image
+      // lookups), which combined with the broken return-site lowering to
+      // produce the surface bug catalogued in feedback_sysl_simple_enum_fn_return.
+      case (_: EnumType, t) if t.isIntegral =>
+        emit("  load32s")
       case _ => to match
         case IntType(8) =>
           emitPushInt(56); emit("  shl"); emitPushInt(56); emit("  sar")
