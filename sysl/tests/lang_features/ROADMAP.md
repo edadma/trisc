@@ -404,7 +404,7 @@ lands.
 
 ---
 
-### `type_attrs/` — T::Range / T::Image / T::Valid / T::Succ / T::Pred — 🔴 P2
+### `type_attrs/` — T::Range / T::Image / T::Valid / T::Succ / T::Pred — 🟢 P2
 
 Reference §"Type Attributes (`T::Attr`)".
 
@@ -413,7 +413,12 @@ Reference §"Type Attributes (`T::Attr`)".
 | `type_range.lsysl` 🟢 | `T::Range` forward + reverse over within-int + enum; exclusive bound; nested |
 | `type_image.lsysl` 🟢 | `T::Image(x)` variant name string on enum; dynamic dispatch; range-loop |
 | `type_value_valid.lsysl` 🟢 | `T::Value(s)` enum parse; `T::Valid(x)` bool guard on int + enum |
-| `type_succ_pred.lsysl` 🔴 | `T::Succ` / `T::Pred` on enums (boundary behaviour) |
+| `type_succ_pred.lsysl` 🟢 | `T::Succ` / `T::Pred` on enums; walk, round-trip, multi-size enums |
+
+`::Succ`/`::Pred` on within-int already covered in
+`integers/int_within_succ_pred.lsysl` (session 8). Boundary-trap
+tests (driving past Last/First) deferred to the future uniform
+runtime-trap harness.
 
 ---
 
