@@ -360,7 +360,7 @@ Reference §"Design by Contract".
 | `ensure_basic.lsysl` 🟢 | `ensure cond, "msg"` postcondition; `result` in cond (happy path) |
 | `ensure_old_expr.lsysl` 🟢 | `old(x)` captures pre-state for postcondition (happy path) |
 | `invariant_loop.lsysl` 🟢 | `invariant cond` at top of loop body (happy path; `loop_entry` covered) |
-| `variant_decreasing.lsysl` 🔴 | `variant expr` decrease witness; violation traps |
+| `variant_decreasing.lsysl` 🟢 | `variant expr` decrease witness (happy path; single-expr form, lex-tuple is verification-only) |
 | `contracts_off_flag.lsysl` 🔴 | with `--no-contracts`, violations no longer trap |
 
 ---
