@@ -327,7 +327,7 @@ Reference §"Integer Overflow", "Overflow Intrinsics".
 
 | File | Tests pinned |
 |---|---|
-| `int_widths_cast.lsysl` 🔴 | `i8`/`i16`/`i32`/`i64`/`u*` cast round-trips; truncation; sign-extension |
+| `int_widths_cast.lsysl` 🟢 | `sizeof` for every signed/unsigned width (i8/i16/i32/i64/u8/u16/u32/u64 = 1/2/4/8 each); `int` = 4-byte (i32-shaped); truncation modulo 2^N on narrowing (u8(0x1FF)=0xFF, i8(256)=0, i8(128)=-128, u16(0x12345)=0x2345, i32(0x123456789i64)=0x23456789); sign-extension widening (i8(-1)→i32=-1, i64=-1; i16(-1)→i64; i32(-1)→i64; i8(-128)→i64); zero-extension widening (u8(0xFF)→i32=255, i64=255; u16(0xFFFF)→i64=65535; u32(0xFFFFFFFF)→i64=4294967295); cross-signedness reinterpretation (i8(-1)↔u8(255); i32(-1)↔u32(0xFFFFFFFF); u32(0x80000000)→i32 MIN); narrow-then-widen round-trips (low-byte sign vs zero extension diverges); boundary identity casts (i32 MAX/MIN, i64 MAX/MIN, u64 MAX as bit pattern) (32 tests) |
 | `int_overflow_wrap.lsysl` 🔴 | unsigned wrap is defined; signed overflow per language spec |
 | `overflow_intrinsics.lsysl` 🔴 | `add_overflow`, `mul_overflow` etc. (whatever sysl exposes) |
 | `int_within_constraint.lsysl` 🔴 | `type Idx = within 0..n int`; assignment outside range traps |
