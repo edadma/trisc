@@ -433,7 +433,7 @@ this dir adds simple-enum coverage and edge cases.
 | `enum_simple_succ_pred.lsysl` 🔴 | `T::Succ` / `T::Pred` boundary on simple enum |
 | `enum_data_recursive.lsysl` 🔴 | `Tree { Leaf, Node(int, Tree, Tree) }` recursive data enum |
 | `enum_data_slice_field.lsysl` 🔴 | data enum with `[]T` field (sysl@9ee727db regression) |
-| `enum_str_variant_name.lsysl` 🔴 | `str(SomeVariant)` returns the variant's name |
+| `enum_str_variant_name.lsysl` 🟢 | `str(data_enum_variant)` returns the constructor name — Circle / Rect / Triangle / Empty; payload-independence; in concat + `s"..."` interpolation; two data enums coexist. Note: `str(simple_enum)` returns the int value (not the name) — use `EnumType::Image` for simple enums (12 tests) |
 
 ---
 
