@@ -284,7 +284,7 @@ Existing: `iface_mutating_self.lsysl` → `interfaces/iface_mutating_self.lsysl`
 | `struct_method_ptr.lsysl` 🟢 | mutating methods — set / inc / read-modify-write / multi-field assign / swap-fields / inc-and-return / nested struct mutation via outer field / mutation on array element (14 tests) |
 | `struct_method_ref.lsysl` 🟢 | methods on `&Struct` (heap, ref-counted) receivers — read / mutate / aliased-ref mutation / pass-as-arg / returned ref / method on iface-typed struct field (11 tests) |
 | `struct_nested.lsysl` 🟢 | two- and three-level nesting; field-of-field read / assign / partial / whole-inner replace; returning nested by value; passing nested by value; methods reading + mutating inner fields; method returning fresh nested (14 tests) |
-| `struct_tuple_return.lsysl` 🔴 | returning a tuple-shaped struct from a fn |
+| `struct_tuple_return.lsysl` 🟢 | tuple-return + destructuring — 2/3-tuples; mixed int/string/bool types; `val a, b =` / `val (a, b) =` / `var a, b =` forms; tuple chained through wrapper fns; computed-tuple returns (minmax, divmod); destructured-in-arith; tuple-in-local-then-destructure (14 tests) |
 
 Existing: `struct_return.lsysl` → `structs/struct_return.lsysl`.
 

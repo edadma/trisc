@@ -1,0 +1,191 @@
+Tuple Returns
+=============
+
+Per reference §"Types Section", `(T1, T2, ...)` is a tuple
+type that desugars to an anonymous struct. A function can
+return a tuple; the caller destructures it. Sysl supports
+several destructuring forms, mirroring Go / Python style:
+
+- `val a, b = f()` — declare two new vals.
+- `val (a, b) = f()` — parenthesized form.
+- `var a, b = f()` — declare two new vars.
+- `a, b = f()` — parallel assign to existing vars (all
+  pre-declared).
+
+This file pins:
+
+- Returning a 2-tuple of ints.
+- Returning a 3-tuple of mixed types (int, string, bool).
+- Destructuring with `val a, b = f()`.
+- Destructuring with `val (a, b) = f()`.
+- Destructuring with `var ... = f()` then mutating.
+- Tuple return through a function that wraps another.
+- Tuple of struct fields.
+- Calling a tuple-returning fn inside an expression.
+- Two destructurings of the same call produce same values.
+
+File-local prefix `Sstr` (Sysl Struct Tuple Return).
+
+    module sysl.tests.lang_features
+
+Two-tuple of ints
+------------------
+
+    make_pair() -> (int, int) = (3, 4)
+
+### Basic destructure `val a, b`
+
+    #test
+    test_sstr_destructure_val() -> unit
+        val a, b = make_pair()
+        assert(a == 3, "a")
+        assert(b == 4, "b")
+
+### Parenthesized form `val (a, b)`
+
+    #test
+    test_sstr_destructure_val_parens() -> unit
+        val (a, b) = make_pair()
+        assert(a == 3, "a")
+        assert(b == 4, "b")
+
+### `var` form
+
+    #test
+    test_sstr_destructure_var() -> unit
+        var a, b = make_pair()
+        a = a + 100
+        b = b + 200
+        assert(a == 103, "a")
+        assert(b == 204, "b")
+
+Tuple of mixed types
+---------------------
+
+    make_record() -> (int, string, bool) = (42, "hello", true)
+
+### Destructure mixed-type tuple
+
+    #test
+    test_sstr_mixed_types() -> unit
+        val n, name, active = make_record()
+        assert(n == 42, "n")
+        assert(name == "hello", "name")
+        assert(active, "active")
+
+### Parenthesized mixed-type destructure
+
+    #test
+    test_sstr_mixed_types_parens() -> unit
+        val (n, name, active) = make_record()
+        assert(n == 42, "n")
+        assert(name == "hello", "name")
+        assert(active, "active")
+
+Tuple return chained through another function
+----------------------------------------------
+
+    forward_pair() -> (int, int) = make_pair()
+
+### Forwarded tuple still destructures correctly
+
+    #test
+    test_sstr_forwarded_tuple() -> unit
+        val a, b = forward_pair()
+        assert(a == 3, "a")
+        assert(b == 4, "b")
+
+### Forwarding via wrapper that re-tuples
+
+    swap_pair() -> (int, int)
+        val a, b = make_pair()
+        return (b, a)
+
+    #test
+    test_sstr_swap_pair() -> unit
+        val a, b = swap_pair()
+        assert(a == 4, "a")
+        assert(b == 3, "b")
+
+Tuple with computed values
+---------------------------
+
+    minmax(a: int, b: int) -> (int, int)
+        if a < b then return (a, b)
+        return (b, a)
+
+### Pre-sorted input
+
+    #test
+    test_sstr_minmax_already_sorted() -> unit
+        val lo, hi = minmax(3, 7)
+        assert(lo == 3, "lo")
+        assert(hi == 7, "hi")
+
+### Reversed input
+
+    #test
+    test_sstr_minmax_reversed() -> unit
+        val lo, hi = minmax(7, 3)
+        assert(lo == 3, "lo")
+        assert(hi == 7, "hi")
+
+### Equal values
+
+    #test
+    test_sstr_minmax_equal() -> unit
+        val lo, hi = minmax(5, 5)
+        assert(lo == 5, "lo")
+        assert(hi == 5, "hi")
+
+Tuple with three ints — divmod-like
+------------------------------------
+
+    divmod_remainder(n: int, d: int) -> (int, int, int)
+        val q = n / d
+        val r = n - q * d
+        return (q, r, d)
+
+### Divmod returns quotient, remainder, divisor
+
+    #test
+    test_sstr_divmod_triple() -> unit
+        val q, r, d = divmod_remainder(17, 5)
+        assert(q == 3, "q")
+        assert(r == 2, "r")
+        assert(d == 5, "d")
+
+Tuple in an arithmetic expression context
+------------------------------------------
+
+### Using destructured values in arithmetic
+
+    #test
+    test_sstr_destructured_in_arith() -> unit
+        val a, b = make_pair()
+        val sum = a + b
+        val product = a * b
+        assert(sum == 7, "sum")
+        assert(product == 12, "product")
+
+### Re-destructuring same call yields same values
+
+    #test
+    test_sstr_repeated_calls_same_values() -> unit
+        val a, b = make_pair()
+        val c, d = make_pair()
+        assert(a == c, "a==c")
+        assert(b == d, "b==d")
+
+Tuple stored in a single binding
+---------------------------------
+
+A tuple can be bound to a single name (as an anonymous-struct
+value) before destructuring.
+
+    #test
+    test_sstr_tuple_in_local_then_destructure() -> unit
+        val p = make_pair()
+        val a, b = p
+        assert(a == 3, "a")
+        assert(b == 4, "b")
