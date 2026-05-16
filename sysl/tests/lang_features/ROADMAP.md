@@ -375,7 +375,7 @@ Reference §"Traits and `impl` blocks", "Operator Overloading via Traits".
 
 | File | Tests pinned |
 |---|---|
-| `trait_decl_impl.lsysl` 🔴 | trait declaration; impl for a user struct; method call dispatched correctly |
+| `trait_decl_impl.lsysl` 🟢 | trait declaration; impl for a user struct; method call dispatched correctly |
 | `operator_overload_infix.lsysl` 🔴 | user `+` on a user struct via trait |
 | `operator_overload_prefix.lsysl` 🔴 | user prefix op (e.g. `<>x`) via single-param trait |
 | `operator_overload_user_symbols.lsysl` 🔴 | user-defined operator symbols (whatever's documented) |
