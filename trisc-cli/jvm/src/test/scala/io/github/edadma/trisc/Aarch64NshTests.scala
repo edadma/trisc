@@ -688,6 +688,31 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("meventfd: done")
   }
 
+  "musl: rt_sigaction / sigprocmask / sigpending + kill / tkill (Phase 2 chunks 1+2)" in {
+    // sigact (slix/test/sigact.c) exercises 283 (rt_sigaction), 285
+    // (rt_sigprocmask), 284 (rt_sigpending) from chunk 1 and 214
+    // (kill), 360 (tkill, via libc raise) from chunk 2. Delivery
+    // does not exist yet — the test only verifies that state is
+    // stored, queried back, and that a raise()-while-blocked sets
+    // the pending bit. Default disposition is SIG_DFL, an installed
+    // handler reads back identically, SIGKILL refuses installation,
+    // sigprocmask block/unblock round-trips, sigpending starts
+    // empty, raise() on a blocked signal sets pending, kill(pid, 0)
+    // succeeds as the POSIX existence probe, kill(pid, 999) fails
+    // with EINVAL.
+    val output = qemu.command("/bin/sigact")
+    output should include("sigact: step1 handler=0")
+    output should include("sigact: step2 installed")
+    output should include("sigact: step3 readback_matches=1")
+    output should include("sigact: step4 kill_rc=-1 errno=22")
+    output should include("sigact: step5 USR1_blocked=1")
+    output should include("sigact: step6 pending_USR1=0")
+    output should include("sigact: step7 raised_pending_USR1=1")
+    output should include("sigact: step8 kill0_rc=0")
+    output should include("sigact: step9 bad_rc=-1 errno=22")
+    output should include("sigact: done")
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose
