@@ -1,0 +1,191 @@
+`T::Range` — Syntactic Sugar for `for i in T::First..T::Last`
+===============================================================
+
+Per reference §"Type Attributes":
+
+```sysl
+type Age = int within 0..150
+enum Day { Mon; Tue; Wed; Thu; Fri; Sat; Sun }
+
+Age::Range     // used only in `for i in Age::Range` — iterates 0..150 inclusive
+```
+
+`::Range` is syntactic sugar:
+- `for i in T::Range body` parses as `for i in T::First..T::Last body`
+- `for i in reverse T::Range` parses as `for i in T::Last downTo T::First`
+- Using `::Range` outside a for-loop is a compile error.
+
+This file pins:
+
+- `T::Range` over a `within`-constrained int type — forward iteration
+- `T::Range` over a simple enum — iterates every variant
+- `reverse T::Range` — descending iteration
+- Inclusive bounds (matches `..` semantics)
+- Range over an exclusive-upper `..<` within type (loop sees up to ::Last)
+- Range over a negative-low `within` (spans across zero)
+
+File-local prefix `Trg` (Type-RanGe).
+
+    module sysl.tests.lang_features
+
+
+A `within`-constrained int type
+--------------------------------
+
+    type TrgLevel = int within 0..4
+
+### Forward `for i in T::Range` covers every value in the range
+
+    #test
+    test_trg_within_forward() -> unit
+        var count: int = 0
+        var sum: int = 0
+        for i in TrgLevel::Range
+            count = count + 1
+            sum = sum + i
+        // 0..4 inclusive = 5 values, sum 0+1+2+3+4 = 10
+        assert(count == 5, s"count=$count")
+        assert(sum == 10, s"sum=$sum")
+
+### `reverse T::Range` iterates in descending order
+
+    #test
+    test_trg_within_reverse() -> unit
+        var first: int = 0 - 1
+        var last: int = 0 - 1
+        var count: int = 0
+        for i in reverse TrgLevel::Range
+            if count == 0 then first = i
+            last = i
+            count = count + 1
+        assert(count == 5, s"count=$count")
+        assert(first == 4, s"first iter sees Last=4, got $first")
+        assert(last == 0, s"last iter sees First=0, got $last")
+
+
+A simple enum
+--------------
+
+    enum TrgDay
+        Mon
+        Tue
+        Wed
+        Thu
+        Fri
+        Sat
+        Sun
+
+### `for i in T::Range` over an enum iterates every variant in declaration order
+
+    #test
+    test_trg_enum_forward() -> unit
+        var count: int = 0
+        var first: int = 0 - 1
+        for d in TrgDay::Range
+            if count == 0 then first = int(d)
+            count = count + 1
+        assert(count == 7, s"7 days, got $count")
+        assert(first == 0, s"first variant = Mon (0), got $first")
+
+### `reverse T::Range` over an enum iterates Last → First
+
+    #test
+    test_trg_enum_reverse() -> unit
+        var first: int = 0 - 1
+        var last: int = 0 - 1
+        var count: int = 0
+        for d in reverse TrgDay::Range
+            if count == 0 then first = int(d)
+            last = int(d)
+            count = count + 1
+        assert(count == 7, s"got $count")
+        assert(first == 6, s"first iter = Sun (6), got $first")
+        assert(last == 0, s"last iter = Mon (0), got $last")
+
+
+Exclusive-upper `..<` within type
+----------------------------------
+
+For `int within 0..<5`, `::Last` is 4. `::Range` should iterate
+0..4 inclusive.
+
+    type TrgHalf = int within 0..<5
+
+### Range over `..<5` covers 0..4 (five values)
+
+    #test
+    test_trg_within_exclusive() -> unit
+        var count: int = 0
+        var max_seen: int = 0
+        for i in TrgHalf::Range
+            count = count + 1
+            if i > max_seen then max_seen = i
+        assert(count == 5, s"count=$count")
+        assert(max_seen == 4, s"max=4 (::Last of ..<5), got $max_seen")
+
+
+Negative-low range — spans across zero
+---------------------------------------
+
+    type TrgSigned = int within -2..2
+
+### Range covers -2, -1, 0, 1, 2
+
+    #test
+    test_trg_within_negative_low() -> unit
+        var count: int = 0
+        var sum: int = 0
+        for i in TrgSigned::Range
+            count = count + 1
+            sum = sum + i
+        // 5 values; sum = -2 + -1 + 0 + 1 + 2 = 0
+        assert(count == 5, s"count=$count")
+        assert(sum == 0, s"sum should be 0, got $sum")
+
+
+Nested loops — both use `::Range`
+----------------------------------
+
+    type TrgSmall = int within 0..2
+
+### Outer + inner both iterate over the same type's range
+
+    #test
+    test_trg_nested_range() -> unit
+        var product_sum: int = 0
+        for i in TrgSmall::Range
+            for j in TrgSmall::Range
+                product_sum = product_sum + i * j
+        // sum_{i=0..2} sum_{j=0..2} i*j = (0+1+2)^2 = 9
+        assert(product_sum == 9, s"got $product_sum")
+
+
+Range over a single-variant enum
+---------------------------------
+
+    enum TrgOnly
+        OnlyOne
+
+### Single variant — loop runs exactly once
+
+    #test
+    test_trg_single_variant() -> unit
+        var count: int = 0
+        for d in TrgOnly::Range
+            count = count + 1
+        assert(count == 1, s"got $count")
+
+
+Range used to accumulate into a sum
+------------------------------------
+
+    type TrgSpan = int within 1..10
+
+### Sum of 1..10 = 55
+
+    #test
+    test_trg_sum_one_to_ten() -> unit
+        var sum: int = 0
+        for i in TrgSpan::Range
+            sum = sum + i
+        assert(sum == 55, s"1+...+10 = 55, got $sum")
