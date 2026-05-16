@@ -475,14 +475,14 @@ byte-array construction to work around this.
 
 ## Tier 3 — Diagnostics & tooling
 
-### `test_framework/` — `#test` variants — 🔴 P3
+### `test_framework/` — `#test` variants — 🟢 P3
 
 | File | Tests pinned |
 |---|---|
-| `test_named.lsysl` 🔴 | `#test("custom name shown in output")` |
-| `test_should_panic.lsysl` 🔴 | `#test(should_panic)` succeeds when body panics |
-| `test_should_panic_with_msg.lsysl` 🔴 | `#test(should_panic = "expected text")` matches substring |
-| `test_attribute_combinations.lsysl` 🔴 | order of attributes; multiple attributes on one fn |
+| `test_named.lsysl` 🟢 | `#test("custom name shown in output")` (6 tests) |
+| `test_should_panic.lsysl` 🟢 | `#test(should_panic)` succeeds when body panics (4 tests) |
+| `test_should_panic_with_msg.lsysl` 🟢 | `#test(should_panic: "expected text")` matches substring (7 tests) |
+| `test_attribute_combinations.lsysl` 🟢 | order of attributes; multiple attributes on one fn (9 tests) |
 
 ---
 
