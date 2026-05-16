@@ -1,0 +1,238 @@
+`#reads(...)` / `#writes(...)` — Module-Level Effect Annotations
+=================================================================
+
+Per reference §`#reads(...)` / `#writes(...)` — declare module-level effects:
+
+> A looser sibling of `#pure`. The two attributes declare which
+> module-level (file-scope or imported) mutable variables a function
+> may read or write.
+
+This file pins the **runtime-observable** half:
+
+- An annotated function actually reads / writes / read-modify-writes
+  the declared module-level variables.
+- `#reads()` / `#writes()` (both empty — no module state) is a valid
+  annotation; the function still runs and computes from parameters.
+- Annotated→annotated call chains execute correctly.
+- Compound assignment (`+= -= *=`) inside `#writes(counter)` works
+  per the rule "the implicit read is permitted whenever counter is
+  in #reads ∪ #writes, so declaring #writes(counter) alone is
+  sufficient."
+
+What this file does NOT pin (out of reach of the test runner):
+
+- Compile-time *rejection* of un-declared reads / writes — those
+  negative cases live in JVM-side analyzer tests.
+- Cross-module `.smeta` propagation of effects.
+
+File-local prefix `Rw` (Reads/Writes).
+
+    module sysl.tests.lang_features
+
+
+### `#reads(var)` — function reads a module-level var
+
+A function annotated `#reads(rw_counter_a)` must be able to read
+the var and return the value.
+
+    var rw_counter_a: int = 17
+
+    #reads(rw_counter_a)
+    rw_get_a() -> int = rw_counter_a
+
+    #test
+    test_rw_reads_returns_value() -> unit
+        assert(rw_get_a() == 17, s"got ${rw_get_a()}")
+
+
+### `#writes(var)` — function writes a module-level var
+
+A function annotated `#writes(rw_counter_b)` must actually mutate
+the var so the value is observable to later reads.
+
+    var rw_counter_b: int = 0
+
+    #writes(rw_counter_b)
+    rw_set_b(v: int) -> unit
+        rw_counter_b = v
+
+    #reads(rw_counter_b)
+    rw_get_b() -> int = rw_counter_b
+
+    #test
+    test_rw_writes_visible_to_reads() -> unit
+        rw_set_b(100)
+        assert(rw_get_b() == 100, s"got ${rw_get_b()}")
+        rw_set_b(-42)
+        assert(rw_get_b() == -42, s"got ${rw_get_b()}")
+
+
+### `#writes(var)` with compound assignment
+
+Per the reference: "`counter += n` is a read-then-write of counter…
+declaring `#writes(counter)` alone is sufficient." Pin that `+=`,
+`-=`, `*=` all behave correctly under a bare `#writes`.
+
+    var rw_counter_c: int = 0
+
+    #writes(rw_counter_c)
+    rw_add_to_c(n: int) -> unit
+        rw_counter_c += n
+
+    #writes(rw_counter_c)
+    rw_sub_from_c(n: int) -> unit
+        rw_counter_c -= n
+
+    #writes(rw_counter_c)
+    rw_mul_c_by(n: int) -> unit
+        rw_counter_c *= n
+
+    #reads(rw_counter_c)
+    rw_get_c() -> int = rw_counter_c
+
+    #test
+    test_rw_compound_assignments() -> unit
+        rw_add_to_c(10)
+        assert(rw_get_c() == 10, "+=10 → 10")
+        rw_add_to_c(5)
+        assert(rw_get_c() == 15, "+=5 → 15")
+        rw_sub_from_c(3)
+        assert(rw_get_c() == 12, "-=3 → 12")
+        rw_mul_c_by(2)
+        assert(rw_get_c() == 24, "*=2 → 24")
+
+
+### `#reads(a) #writes(b)` — both attributes stacked
+
+A function may declare both. Reads of `a` and writes of `b` both
+flow through their declared effects.
+
+    var rw_src_d: int = 5
+    var rw_dst_d: int = 0
+
+    #reads(rw_src_d)
+    #writes(rw_dst_d)
+    rw_copy_d() -> unit
+        rw_dst_d = rw_src_d
+
+    #reads(rw_dst_d)
+    rw_peek_dst_d() -> int = rw_dst_d
+
+    #test
+    test_rw_reads_and_writes_stacked() -> unit
+        rw_copy_d()
+        assert(rw_peek_dst_d() == 5, "src 5 → dst 5")
+
+
+### `#reads(var1, var2, ...)` — multiple reads
+
+Multiple variables in one attribute, comma-separated.
+
+    var rw_x_e: int = 3
+    var rw_y_e: int = 4
+
+    #reads(rw_x_e, rw_y_e)
+    rw_dot_e() -> int = rw_x_e * rw_x_e + rw_y_e * rw_y_e
+
+    #test
+    test_rw_multiple_reads() -> unit
+        // 3² + 4² = 25 — the Pythagorean check
+        assert(rw_dot_e() == 25, s"got ${rw_dot_e()}")
+
+
+### `#reads() #writes()` — empty effects, just operates on params
+
+The "strictest annotation short of `#pure`" — no module state at all.
+The reference notes: "allocation/IO still allowed" — but we don't
+exercise that path here; we just pin that empty-effect annotations
+parse and run.
+
+    #reads()
+    #writes()
+    rw_no_globals_f(x: int, y: int) -> int = x + y * 2
+
+    #test
+    test_rw_empty_effects() -> unit
+        assert(rw_no_globals_f(1, 2) == 5, "1 + 2*2 = 5")
+        assert(rw_no_globals_f(10, 0) == 10, "no contribution")
+
+
+### Annotated → annotated call chain
+
+`rw_outer_g` writes through `rw_inner_g`. Both are annotated and the
+outer's `#writes` set covers the inner's `#writes` set, as the rule
+"call-site subset" demands.
+
+    var rw_counter_g: int = 0
+
+    #writes(rw_counter_g)
+    rw_inner_g(n: int) -> unit
+        rw_counter_g += n
+
+    #writes(rw_counter_g)
+    rw_outer_g(times: int, by: int) -> unit
+        var i: int = 0
+        while i < times
+            rw_inner_g(by)
+            i = i + 1
+
+    #reads(rw_counter_g)
+    rw_get_g() -> int = rw_counter_g
+
+    #test
+    test_rw_annotated_calls_annotated() -> unit
+        rw_outer_g(4, 3)
+        assert(rw_get_g() == 12, "4×3 = 12")
+        rw_outer_g(0, 100)
+        assert(rw_get_g() == 12, "0 iterations leaves counter unchanged")
+
+
+### `#pure` function callable from `#reads`/`#writes` function
+
+The reference says: "(or `#pure` functions, which count as `#reads()`
+`#writes()`)". Pin runtime success of a pure call from inside an
+annotated function.
+
+    var rw_counter_h: int = 0
+
+    #pure
+    rw_double_h(x: int) -> int = x * 2
+
+    #writes(rw_counter_h)
+    rw_add_doubled_h(x: int) -> unit
+        rw_counter_h += rw_double_h(x)
+
+    #reads(rw_counter_h)
+    rw_get_h() -> int = rw_counter_h
+
+    #test
+    test_rw_pure_call_from_annotated() -> unit
+        rw_add_doubled_h(5)
+        assert(rw_get_h() == 10, "double(5)=10")
+        rw_add_doubled_h(7)
+        assert(rw_get_h() == 24, "10 + double(7) = 24")
+
+
+### `#writes(var)` with control flow
+
+Conditional writes — the var may or may not be modified depending
+on the value. Pin both branches.
+
+    var rw_counter_i: int = 0
+
+    #writes(rw_counter_i)
+    rw_clamp_i(n: int) -> unit
+        if n > 0 then
+            rw_counter_i = n
+        else
+            rw_counter_i = 0
+
+    #reads(rw_counter_i)
+    rw_get_i() -> int = rw_counter_i
+
+    #test
+    test_rw_conditional_writes() -> unit
+        rw_clamp_i(7)
+        assert(rw_get_i() == 7, "positive clamps to itself")
+        rw_clamp_i(-5)
+        assert(rw_get_i() == 0, "negative clamps to 0")
