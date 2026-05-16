@@ -1828,10 +1828,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 val mangledName = if shouldMangle(name) then mangleName(name) else name
                 globalScope(name) = SymInfo(mangledName, resolvedType, mutable = isMutable, isConst = isConst)
                 externalSymbols += name
-                foldedOpt.foreach { v =>
-                  compileTimeConstants(name) = v
-                  compileTimeConstants(mangledName) = v
-                }
+                // Only register a compile-time constant for immutable bindings
+                // (val/const). Mutable vars must always go through a runtime
+                // load — otherwise siblings reading the var get const-folded
+                // to its initializer value (typically 0), silently bypassing
+                // any cross-file writes. Surfaced 2026-05-16 when split
+                // inet_proto.lsysl::inet_ip_reasm_timeouts_sent reads in
+                // inet.lsysl were folded to 0.
+                if !isMutable then
+                  foldedOpt.foreach { v =>
+                    compileTimeConstants(name) = v
+                    compileTimeConstants(mangledName) = v
+                  }
               }
             }
         case _ => ()
