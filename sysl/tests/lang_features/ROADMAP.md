@@ -267,8 +267,8 @@ Existing: `out_inout_params.lsysl` → `functions/out_inout_params.lsysl`.
 | `iface_basic_dispatch.lsysl` 🟢 | non-mutating method through iface; correct impl chosen (16 tests) |
 | `iface_composed.lsysl` 🟢 | embedded interfaces; method dispatch picks right impl (10 tests) |
 | `iface_generic_method.lsysl` 🟡 | iface methods with parametric built-in types — slice, slice-of-struct, returning slice (8 tests). Generic-struct-implements-iface is unsupported (analyzer + iface-dispatch naming mismatch) |
-| `iface_default_methods.lsysl` 🔴 | trait/iface default method body — *if supported* |
-| `iface_box_lifetime.lsysl` 🔴 | iface receiver lifetime; ARC interaction (TInterfaceBox path) |
+| ~~`iface_default_methods.lsysl`~~ | ✖ **Not applicable** — sysl interface methods cannot have default bodies (parser rejects `=` after signature; verified 2026-05-15). Default-method semantics live in **traits** instead (see reference §"Traits and `impl` blocks") — covered separately when a `traits/` category opens. |
+| `iface_box_lifetime.lsysl` 🟡 | iface receiver lifetime through call frames + local bindings + mutating dispatch (8 tests). Two gaps deferred: iface-as-struct-field (analyzer rejects `struct S { f: Iface }`) and returning iface from a function constructing source as local (UAF) |
 
 Existing: `iface_mutating_self.lsysl` → `interfaces/iface_mutating_self.lsysl`.
 
