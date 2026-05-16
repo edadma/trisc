@@ -100,15 +100,32 @@ The output has no leading `0x`.
 `%b` — binary
 -------------
 
-Only the zero case is pinned cross-backend (the formatter
-short-circuits 0 before reaching the divergent base-conversion
-path). See file-header TODO for `%b` on non-zero values.
+Outputs the value's base-2 representation with no leading zeros
+(MSB-first). Zero formats as the single character `"0"`.
 
     #test
     test_ffs_b_zero() -> unit
         val n = 0
         val out = f"$n%b"
         assert(out == "0", s"%b 0; got '$out'")
+
+    #test
+    test_ffs_b_basic() -> unit
+        val n = 26
+        val out = f"$n%b"
+        assert(out == "11010", s"%b 26; got '$out'")
+
+    #test
+    test_ffs_b_one() -> unit
+        val n = 1
+        val out = f"$n%b"
+        assert(out == "1", s"%b 1; got '$out'")
+
+    #test
+    test_ffs_b_power_of_two() -> unit
+        val n = 256
+        val out = f"$n%b"
+        assert(out == "100000000", s"%b 256; got '$out'")
 
 `%o` — octal
 ------------
@@ -175,6 +192,50 @@ length is `N`. Same overflow semantics as the right-aligned form.
         val e = ""
         val out = f"[$e%-4s]"
         assert(out == "[    ]", s"%-4s empty; got '$out'")
+
+`%08d` — width when value exceeds it
+------------------------------------
+
+When the digit count meets or exceeds the field width, the helper
+must emit the value unchanged (no truncation, no padding) — printf
+semantics. This used to be TRISC-broken: the narrow-int widening
+emitted `sext r1, r1`, but `sext rA, rB` reads its width from `rB`,
+so `sext r1, r1` interpreted the *value* as the width and silently
+corrupted the result for i32/i16/i8 inputs. The fix replaced the
+`sext` with the fixed-width `seb`/`ses`/`sew` variants.
+
+    #test
+    test_ffs_zero_pad_width_exact() -> unit
+        val n = 12345678
+        val out = f"$n%08d"
+        assert(out == "12345678", s"%08d 8-digit; got '$out'")
+
+    #test
+    test_ffs_zero_pad_width_exceeded() -> unit
+        val n = 1234567890
+        val out = f"$n%08d"
+        assert(out == "1234567890", s"%08d 10-digit; got '$out'")
+
+    #test
+    test_ffs_zero_pad_width_exceeded_9d() -> unit
+        val n = 123456789
+        val out = f"$n%08d"
+        assert(out == "123456789", s"%08d 9-digit; got '$out'")
+
+`mixed_basic` — combined verbs (reference's headline example)
+-------------------------------------------------------------
+
+Combines `%04X`, `%d`, and `%s` in one f-string. This pinned the
+same TRISC sext bug as the `%08d` cluster because `%04X` of `0x41`
+needed narrow-int sign-extension to format correctly.
+
+    #test
+    test_ffs_mixed_basic() -> unit
+        val cp = 0x41
+        val count = 3
+        val name = "LATIN"
+        val out = f"U+$cp%04X count=$count%d name=$name%s"
+        assert(out == "U+0041 count=3 name=LATIN", s"mixed; got '$out'")
 
 `%+d` — explicit sign
 ---------------------

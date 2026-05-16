@@ -397,6 +397,7 @@ class SyslLLVMCodegen(target: String = "host"):
       emit(s"declare {i$w, i1} @llvm.smul.with.overflow.i$w(i$w, i$w)")
       emit(s"declare {i$w, i1} @llvm.umul.with.overflow.i$w(i$w, i$w)")
     declareIfNotDefined(s"declare $sizeT @write(i32, i8*, $sizeT)", "write")
+    emit("declare i64 @llvm.ctlz.i64(i64, i1)")
     declareIfNotDefined("declare i32 @fflush(i8*)", "fflush")
     declareIfNotDefined("declare void @abort()", "abort")
     declareIfNotDefined("declare void @exit(i32)", "exit")
@@ -3397,6 +3398,90 @@ class SyslLLVMCodegen(target: String = "host"):
         if spec.showSign then fmt += '+'
         if spec.width > 0 then fmt ++= spec.width.toString
         inner.typ match
+          case t if t.isIntegral && spec.verb == 'b' =>
+            // %b is sysl-specific (not standard printf). Lower to an inline
+            // binary-digit conversion: widen the value to i64, find the
+            // highest set bit via llvm.ctlz, then write `bit_count`
+            // characters '0'/'1' MSB-first into a malloc'd buffer. Zero
+            // formats as the single character "0". Width/leftAlign/zeroPad
+            // are ignored on this path (matches the interpreter's behavior
+            // pre-fix); the dropped-test column in the bug catalogue notes
+            // only the un-padded case as the canonical %b shape.
+            val vt = llvmType(inner.typ)
+            val v64 = if vt == "i64" then v
+              else
+                val ext = newReg()
+                if t.isSigned then emit(s"  $ext = sext $vt $v to i64")
+                else emit(s"  $ext = zext $vt $v to i64")
+                ext
+
+            val zeroLbl    = newLabel("fmt_b_zero")
+            val nonzeroLbl = newLabel("fmt_b_nz")
+            val loopLbl    = newLabel("fmt_b_loop")
+            val doneLbl    = newLabel("fmt_b_done")
+
+            val isZero = newReg()
+            emit(s"  $isZero = icmp eq i64 $v64, 0")
+            emit(s"  br i1 $isZero, label %$zeroLbl, label %$nonzeroLbl")
+
+            // Zero path: write "0" directly.
+            emit(s"$zeroLbl:")
+            val zeroBuf = emitStringBufferAlloc("1")
+            emit(s"  store i8 48, i8* $zeroBuf")
+            val zeroStr = emitMakeString(zeroBuf, "1")
+            emit(s"  br label %$doneLbl")
+
+            // Non-zero path: count bits, allocate buffer, write MSB→LSB.
+            emit(s"$nonzeroLbl:")
+            val clz = newReg()
+            emit(s"  $clz = call i64 @llvm.ctlz.i64(i64 $v64, i1 false)")
+            val bits = newReg()
+            emit(s"  $bits = sub i64 64, $clz")
+            val bitsI32 = newReg()
+            emit(s"  $bitsI32 = trunc i64 $bits to i32")
+            val nzBuf = emitStringBufferAlloc(bits)
+            val iAlloc = deferAlloca("i32")
+            emit(s"  store i32 0, i32* $iAlloc")
+            emit(s"  br label %$loopLbl")
+            emit(s"$loopLbl:")
+            val iLoad = newReg()
+            emit(s"  $iLoad = load i32, i32* $iAlloc")
+            val iCmp = newReg()
+            emit(s"  $iCmp = icmp slt i32 $iLoad, $bitsI32")
+            val bodyLbl = newLabel("fmt_b_body")
+            val exitLbl = newLabel("fmt_b_exit")
+            emit(s"  br i1 $iCmp, label %$bodyLbl, label %$exitLbl")
+            emit(s"$bodyLbl:")
+            val iLoad64 = newReg()
+            emit(s"  $iLoad64 = sext i32 $iLoad to i64")
+            val shift = newReg()
+            emit(s"  $shift = sub i64 $bits, 1")
+            val shiftFinal = newReg()
+            emit(s"  $shiftFinal = sub i64 $shift, $iLoad64")
+            val shifted = newReg()
+            emit(s"  $shifted = lshr i64 $v64, $shiftFinal")
+            val bit = newReg()
+            emit(s"  $bit = and i64 $shifted, 1")
+            val bitI8 = newReg()
+            emit(s"  $bitI8 = trunc i64 $bit to i8")
+            val ch = newReg()
+            emit(s"  $ch = add i8 48, $bitI8")
+            val dst = newReg()
+            emit(s"  $dst = getelementptr i8, i8* $nzBuf, i32 $iLoad")
+            emit(s"  store i8 $ch, i8* $dst")
+            val iNext = newReg()
+            emit(s"  $iNext = add i32 $iLoad, 1")
+            emit(s"  store i32 $iNext, i32* $iAlloc")
+            emit(s"  br label %$loopLbl")
+            emit(s"$exitLbl:")
+            val nzStr = emitMakeString(nzBuf, bitsI32)
+            emit(s"  br label %$doneLbl")
+
+            emit(s"$doneLbl:")
+            val phi = newReg()
+            emit(s"  $phi = phi %struct.string* [ $zeroStr, %$zeroLbl ], [ $nzStr, %$exitLbl ]")
+            phi
+
           case t if t.isIntegral =>
             val verb = if spec.upperCase then spec.verb.toUpper else spec.verb
             verb match

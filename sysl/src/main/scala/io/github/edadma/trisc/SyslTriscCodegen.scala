@@ -4773,13 +4773,20 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
             // Evaluate value into r1
             genExpr(inner) // r1 = value (integer bits)
-            // Widen narrow ints to i64 for the runtime helper. Mirrors SVM
-            // logic: signed types sext via shl/sar pair, unsigned mask off
-            // the high bits.
+            // Widen narrow ints to i64 for the runtime helper. The CPU's
+            // `sext rA, rB` takes its width from `rB` (`rB & 63`), so
+            // `sext r1, r1` reads the *value* as the width and corrupts
+            // the result for anything that doesn't accidentally encode
+            // its own bit count in the low six bits. Use the fixed-width
+            // `seb` / `ses` / `sew` instructions instead.
             val t = inner.typ.underlying
             if t.bitWidth < 64 then
               if t.isSigned then
-                emit(s"  sext r1, r1") // sign-extend any narrow int up to 64 bits
+                t.bitWidth match
+                  case 8  => emit("  seb r1, r1")
+                  case 16 => emit("  ses r1, r1")
+                  case 32 => emit("  sew r1, r1")
+                  case _  => ()
               else
                 t.bitWidth match
                   case 8  => emit("  zeb r1, r1")
