@@ -1,0 +1,163 @@
+Methods on `&T` (Ref-Counted) Receivers
+========================================
+
+Per reference §"Methods" and CLAUDE.md's three-mode model:
+
+```
+var v = Node(...)     // Node (value) — stack, bitwise copy
+val r = new Node(...) // &Node (ref) — heap, ref-counted
+var p: *Node = &v     // *Node (pointer) — raw, unmanaged
+```
+
+- Methods are declared `StructName.methodName(...)`. Inside the
+  body `self` has type `*StructName`.
+- When the receiver is a `&T` (ref-counted), the method call is
+  resolved to the same monomorphized function as for a value or
+  pointer receiver: the ref's underlying pointer is passed as the
+  hidden `*StructName` arg.
+- The ref's lifetime is preserved across the call: the ref's
+  refcount must remain intact, so the caller's `&T` is still valid
+  after the call returns.
+
+This file pins the **ref-counted-receiver** dispatch shape across
+all seven backends:
+
+- A method called on a `&T` reads / writes the underlying instance.
+- After the call, the ref is still usable (no premature drop).
+- Mutating methods on `&T` mutate the heap instance.
+- Returning a `&T` from a function does not invalidate the ref.
+
+File-local prefix `Mra` (Method-Ref-Arc).
+
+    module sysl.tests.lang_features
+
+
+A heap-allocated counter
+-------------------------
+
+    struct MraCounter
+        count: int
+
+    MraCounter.mra_bump()
+        self.count = self.count + 1
+
+    MraCounter.mra_value() -> int = self.count
+
+
+### Method on a `&T` reads underlying state
+
+    #test
+    test_mra_ref_read() -> unit
+        val r = new MraCounter(7)
+        val v = r.mra_value()
+        assert(v == 7, s"got $v")
+
+### Method on a `&T` mutates underlying state
+
+    #test
+    test_mra_ref_mutate() -> unit
+        val r = new MraCounter(0)
+        r.mra_bump()
+        r.mra_bump()
+        r.mra_bump()
+        assert(r.mra_value() == 3, s"got ${r.mra_value()}")
+
+
+Ref stays usable after a method call
+-------------------------------------
+
+If the ref were dropped during the call, a follow-up method on the
+same ref would fault. Pin that successive calls on the same ref
+work.
+
+    #test
+    test_mra_ref_repeated_use() -> unit
+        val r = new MraCounter(10)
+        r.mra_bump()
+        val v1 = r.mra_value()
+        r.mra_bump()
+        val v2 = r.mra_value()
+        r.mra_bump()
+        val v3 = r.mra_value()
+        assert(v1 == 11, s"v1=$v1")
+        assert(v2 == 12, s"v2=$v2")
+        assert(v3 == 13, s"v3=$v3")
+
+
+Method on a `&T` returned by a function
+----------------------------------------
+
+The function returns a fresh `&MraCounter`; the caller can call
+methods on it and the underlying instance behaves as expected.
+
+    mra_make(n: int) -> &MraCounter = new MraCounter(n)
+
+    #test
+    test_mra_method_on_returned_ref() -> unit
+        val r = mra_make(100)
+        r.mra_bump()
+        r.mra_bump()
+        assert(r.mra_value() == 102, s"got ${r.mra_value()}")
+
+
+Method on `&T` that returns a derived value
+--------------------------------------------
+
+A method that does arithmetic on `self.field` and returns the
+result, observed via the ref.
+
+    MraCounter.mra_doubled() -> int = self.count * 2
+
+    #test
+    test_mra_method_returns_derived() -> unit
+        val r = new MraCounter(21)
+        assert(r.mra_doubled() == 42, s"got ${r.mra_doubled()}")
+
+
+Two refs to different heap instances dispatch independently
+------------------------------------------------------------
+
+Distinct `&T` values point at distinct heap allocations; mutating
+one does not affect the other.
+
+    #test
+    test_mra_independent_refs() -> unit
+        val a = new MraCounter(0)
+        val b = new MraCounter(100)
+        a.mra_bump()
+        a.mra_bump()
+        b.mra_bump()
+        assert(a.mra_value() == 2, s"a=${a.mra_value()}")
+        assert(b.mra_value() == 101, s"b=${b.mra_value()}")
+
+
+Method on `&T` that takes an extra arg
+---------------------------------------
+
+    MraCounter.mra_add(k: int)
+        self.count = self.count + k
+
+    #test
+    test_mra_method_with_arg() -> unit
+        val r = new MraCounter(5)
+        r.mra_add(10)
+        r.mra_add(3)
+        assert(r.mra_value() == 18, s"got ${r.mra_value()}")
+
+
+Mutating method on `&T` referenced from a function
+---------------------------------------------------
+
+A function takes the `&T` by value (which keeps the refcount intact
+for the duration of the call), calls a mutating method, returns.
+
+    mra_double_caller(c: &MraCounter)
+        c.mra_bump()
+        c.mra_bump()
+
+    #test
+    test_mra_method_in_called_fn() -> unit
+        val r = new MraCounter(40)
+        mra_double_caller(r)
+        // bumped twice by the helper → 42
+        assert(r.mra_value() == 42, s"got ${r.mra_value()}")

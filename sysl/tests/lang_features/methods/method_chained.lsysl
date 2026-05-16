@@ -1,0 +1,140 @@
+Chained Method Calls — `obj.a().b().c()`
+=========================================
+
+A chained method call like `obj.a().b().c()` is a sequence of method
+calls where each method's return value becomes the receiver of the
+next. For a value-returning method, the returned value lives in a
+fresh temporary; the next method-call's receiver is the address of
+that temporary.
+
+Per CLAUDE.md's notes on the existing TRISC codegen, the
+method-on-temporary path was historically a source of bugs
+(commits 23cf566a4, 9b18daac6, c0af61df6) — temporaries' stack
+slots were being reclaimed before being dereferenced. Those fixes
+landed; this file pins the user-visible behaviour.
+
+This file pins the **chained-call** dispatch shape across all
+seven backends:
+
+- A two-level chain `p.foo().bar()` works.
+- A three-level chain `p.foo().bar().baz()` works.
+- Each intermediate temporary is held alive long enough for the
+  subsequent method to read its fields.
+- Chained calls work where intermediates are different struct types.
+- Chained calls with extra args don't perturb the chain.
+
+File-local prefix `Mch` (Method-CHained).
+
+    module sysl.tests.lang_features
+
+
+A struct with self-returning methods
+-------------------------------------
+
+    struct MchBox
+        v: int
+
+    MchBox.mch_inc() -> MchBox = MchBox(self.v + 1)
+    MchBox.mch_double() -> MchBox = MchBox(self.v * 2)
+    MchBox.mch_get() -> int = self.v
+
+
+### Two-level chain
+
+    #test
+    test_mch_two_level() -> unit
+        val b = MchBox(5)
+        val r = b.mch_inc().mch_get()
+        assert(r == 6, s"got $r")
+
+### Three-level chain
+
+    #test
+    test_mch_three_level() -> unit
+        val b = MchBox(5)
+        val r = b.mch_inc().mch_double().mch_get()
+        // (5 + 1) * 2 = 12
+        assert(r == 12, s"got $r")
+
+### Four-level chain
+
+    #test
+    test_mch_four_level() -> unit
+        val b = MchBox(2)
+        val r = b.mch_inc().mch_inc().mch_double().mch_get()
+        // ((2 + 1) + 1) * 2 = 8
+        assert(r == 8, s"got $r")
+
+
+Chain starts from a temp constructor
+-------------------------------------
+
+The first link is itself a temporary. The codegen has to
+materialize the constructor's result and pass its address to the
+first method.
+
+    #test
+    test_mch_starts_with_temp() -> unit
+        val r = MchBox(10).mch_inc().mch_get()
+        assert(r == 11, s"got $r")
+
+    #test
+    test_mch_starts_with_temp_three() -> unit
+        val r = MchBox(0).mch_inc().mch_double().mch_inc().mch_get()
+        // ((0 + 1) * 2) + 1 = 3
+        assert(r == 3, s"got $r")
+
+
+Chained calls with extra args
+------------------------------
+
+    MchBox.mch_add(k: int) -> MchBox = MchBox(self.v + k)
+    MchBox.mch_mul(k: int) -> MchBox = MchBox(self.v * k)
+
+    #test
+    test_mch_with_args() -> unit
+        val r = MchBox(3).mch_add(4).mch_mul(2).mch_get()
+        // (3 + 4) * 2 = 14
+        assert(r == 14, s"got $r")
+
+    #test
+    test_mch_longer_with_args() -> unit
+        val r = MchBox(1).mch_add(2).mch_add(3).mch_mul(2).mch_get()
+        // ((1 + 2 + 3) * 2) = 12
+        assert(r == 12, s"got $r")
+
+
+Chain across different struct types
+------------------------------------
+
+A method on one struct returns another struct; a method on the
+second returns yet another. The chain crosses type boundaries.
+
+    struct MchPair
+        a: int
+        b: int
+
+    MchBox.mch_to_pair() -> MchPair = MchPair(self.v, self.v + 1)
+    MchPair.mch_pair_sum() -> int = self.a + self.b
+
+    #test
+    test_mch_cross_type_chain() -> unit
+        val r = MchBox(10).mch_to_pair().mch_pair_sum()
+        // pair = (10, 11), sum = 21
+        assert(r == 21, s"got $r")
+
+
+Chained call result used in larger expression
+----------------------------------------------
+
+    #test
+    test_mch_chain_in_arith() -> unit
+        val r = MchBox(5).mch_inc().mch_get() + 10
+        // (5+1) + 10 = 16
+        assert(r == 16, s"got $r")
+
+    #test
+    test_mch_two_chains_combined() -> unit
+        val a = MchBox(3).mch_inc().mch_get()
+        val b = MchBox(7).mch_double().mch_get()
+        assert(a + b == 18, s"a+b = 4+14 = 18, got ${a + b}")

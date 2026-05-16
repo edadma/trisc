@@ -389,18 +389,18 @@ lands.
 
 ---
 
-### `methods/` — dispatch on Struct vs *Struct vs &Struct — 🔴 P2
+### `methods/` — dispatch on Struct vs *Struct vs &Struct — 🟢 P2
 
 (Some overlap with `structs/` and `interfaces/`; this dir focuses on
 *how the receiver type changes dispatch and ARC*.)
 
 | File | Tests pinned |
 |---|---|
-| `method_self_value_copy.lsysl` 🔴 | `T.m()` with implicit value `self` — caller's value isn't mutated |
-| `method_self_ptr_mutates.lsysl` 🔴 | `T.m()` whose body mutates `self.f` — caller sees the mutation |
-| `method_self_ref_arc.lsysl` 🔴 | `T.m()` on `&T` — refcount preserved across the call |
-| `method_chained.lsysl` 🔴 | `obj.a().b().c()` chained call lifetime |
-| `method_on_generic_struct.lsysl` 🔴 | `Box[T].get()` after instantiation |
+| `method_self_value_copy.lsysl` 🟢 | `T.m()` with implicit value `self` — read-only path, caller value preserved |
+| `method_self_ptr_mutates.lsysl` 🟢 | `T.m()` whose body mutates `self.f` — caller sees the mutation |
+| `method_self_ref_arc.lsysl` 🟢 | `T.m()` on `&T` — refcount preserved across the call |
+| `method_chained.lsysl` 🟢 | `obj.a().b().c()` chained call lifetime; with args; cross-type |
+| `method_on_generic_struct.lsysl` 🟢 | `Box[T].method()` after instantiation; mutating, returning T, distinct insts |
 
 ---
 

@@ -1,0 +1,153 @@
+Methods on Generic Structs — `Box[T].get()`
+=============================================
+
+Per reference §"Methods on generic structs":
+
+```sysl
+struct MinHeap[T]
+    data: []T
+    less: (T, T) -> bool
+
+MinHeap[T].len() -> int = len(self.data)
+
+MinHeap[T].push(v: T)
+    self.data = append(self.data, v)
+```
+
+- Generic struct methods declare the type parameters after the
+  struct name (`Box[T].method(...)`).
+- The parser desugars `Box[T].method(v: T)` into a generic function
+  `Box_method[T](__self__: *Box[T], v: T)`.
+- The call site `b.method(42)` on a `Box[int]` instantiates
+  `Box_int_method` with `T = int` — the same monomorphization
+  applied to any generic function.
+
+This file pins the **generic-struct-method** dispatch shape across
+all seven backends:
+
+- A method on `Box[T]` works for several concrete `T`.
+- Method body uses `self.field` of generic-parameter type.
+- A mutating method on `Box[T]` mutates the underlying instance.
+- A method that takes `T` as an extra arg dispatches correctly.
+- A method that returns `T` returns the right value.
+
+File-local prefix `Mgs` (Method-Generic-Struct).
+
+    module sysl.tests.lang_features
+
+
+A generic box struct
+---------------------
+
+    struct MgsBox[T]
+        v: T
+
+    MgsBox[T].mgs_get() -> T = self.v
+
+
+### Generic method on `MgsBox[int]`
+
+    #test
+    test_mgs_get_int() -> unit
+        val b = MgsBox[int](42)
+        val r = b.mgs_get()
+        assert(r == 42, s"got $r")
+
+### Same method on `MgsBox[bool]`
+
+    #test
+    test_mgs_get_bool() -> unit
+        val b = MgsBox[bool](true)
+        assert(b.mgs_get(), "true")
+        val c = MgsBox[bool](false)
+        assert(!c.mgs_get(), "false")
+
+
+Mutating method on `MgsBox[T]`
+-------------------------------
+
+The method body uses `T` arithmetic; for non-numeric `T` an
+instantiation that compiles wouldn't typecheck on `+`, but
+instantiations with a numeric T are fine.
+
+    MgsBox[T].mgs_inc()
+        self.v = self.v + 1
+
+    #test
+    test_mgs_inc_int() -> unit
+        var b = MgsBox[int](10)
+        b.mgs_inc()
+        b.mgs_inc()
+        b.mgs_inc()
+        assert(b.v == 13, s"got ${b.v}")
+
+
+Method that takes T as extra param
+-----------------------------------
+
+    MgsBox[T].mgs_set(v: T)
+        self.v = v
+
+    #test
+    test_mgs_set_int() -> unit
+        var b = MgsBox[int](0)
+        b.mgs_set(99)
+        assert(b.v == 99, s"got ${b.v}")
+
+    #test
+    test_mgs_set_bool() -> unit
+        var b = MgsBox[bool](false)
+        b.mgs_set(true)
+        assert(b.v, "set to true")
+
+
+Method that returns T after a transformation
+---------------------------------------------
+
+    MgsBox[T].mgs_doubled() -> T = self.v * 2
+
+    #test
+    test_mgs_doubled() -> unit
+        val b = MgsBox[int](21)
+        assert(b.mgs_doubled() == 42, s"got ${b.mgs_doubled()}")
+
+
+Method on `MgsBox[T]` returning a new `MgsBox[T]`
+--------------------------------------------------
+
+    MgsBox[T].mgs_bumped() -> MgsBox[T] = MgsBox[T](self.v + 1)
+
+    #test
+    test_mgs_method_returns_generic() -> unit
+        val b = MgsBox[int](5)
+        val c = b.mgs_bumped()
+        assert(c.v == 6, s"got ${c.v}")
+
+
+Distinct concrete instantiations of the same generic struct
+------------------------------------------------------------
+
+`MgsBox[int]` and `MgsBox[bool]` produce two distinct
+monomorphizations; their methods don't collide.
+
+    #test
+    test_mgs_distinct_instantiations() -> unit
+        var bi = MgsBox[int](100)
+        var bb = MgsBox[bool](true)
+        bi.mgs_inc()
+        bb.mgs_set(false)
+        assert(bi.v == 101, s"int v = 101, got ${bi.v}")
+        assert(!bb.v, "bool v = false")
+
+
+Method on a generic-struct instance used in a regular function
+---------------------------------------------------------------
+
+    mgs_use_int_box(b: MgsBox[int]) -> int
+        b.mgs_get() + b.mgs_doubled()
+
+    #test
+    test_mgs_in_fn() -> unit
+        val b = MgsBox[int](7)
+        // get + doubled = 7 + 14 = 21
+        assert(mgs_use_int_box(b) == 21, "7 + 14 = 21")
