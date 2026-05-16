@@ -159,7 +159,15 @@ class SyslSVMCodegen:
       case TStringFromPtr(p, l, _) => count += 3; scanExpr(p); scanExpr(l)
       case TCall(_, args, _) => args.foreach(scanExpr)
       case TTempAddr(e, _) => scanExpr(e)
-      case TIndirectCall(c, args, _) => scanExpr(c); args.foreach(scanExpr)
+      case TIndirectCall(c, args, _) =>
+        // The FuncType branch of TIndirectCall's codegen allocates one
+        // anonymous local (descrIdx) to hold the 16-byte closure-descriptor
+        // address across arg evaluation. countLocals must reserve a slot,
+        // or nested calls (g(f(x))) trip an out-of-bounds local access at
+        // runtime when the second TIndirectCall's local_set lands past the
+        // declared frame size.
+        if c.typ.isInstanceOf[SyslType.FuncType] then count += 1
+        scanExpr(c); args.foreach(scanExpr)
       case TIndex(a, i, _) => scanExpr(a); scanExpr(i)
       case TFieldAccess(o, _, _) => scanExpr(o)
       case TDeref(p, _) => scanExpr(p)

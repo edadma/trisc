@@ -426,7 +426,7 @@ runtime-trap harness.
 
 | File | Tests pinned |
 |---|---|
-| `type_alias_basic.lsysl` 🔴 | `type Idx = int` (and generic form) |
+| `type_alias_basic.lsysl` 🟡 | plain + generic + chained alias; fn-type alias; pointer alias; re-param of generic enum. Composition test deferred — TRISC fnptr-fnptr-scalar call-site bug |
 | `type_alias_struct.lsysl` 🔴 | `type Point = struct { x: int, y: int }` (if supported as decl) |
 | `static_assert_pass.lsysl` 🔴 | `static_assert(sizeof(T) == 16, "msg")` passes silently |
 | `static_assert_fail.lsysl` 🔴 | `should_panic` form — compile fails with message |
