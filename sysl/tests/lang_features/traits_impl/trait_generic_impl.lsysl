@@ -1,0 +1,157 @@
+Generic `impl` Blocks — `impl[T] Trait[Box[T]]`
+================================================
+
+Per reference §"Traits and `impl` blocks" — generic impl blocks:
+
+```sysl
+trait Reader[I]
+    type Token
+    head(i: I) -> Self::Token
+
+impl[T] Reader[Box[T]]
+    type Token = T
+    head(b: Box[T]) -> T = b.value
+```
+
+- An `impl` may itself be generic. The `impl[T1, T2, ...]` clause
+  introduces tvars that appear in the trait's target type pattern.
+- Each concrete substitution of the tvars produces a distinct
+  monomorphized method.
+- Trait calls infer the concrete substitution from argument types
+  and dispatch to the matching generic impl.
+- Bounds on impl tvars (`impl[T: Ord] Container[Box[T]]`) are
+  checked at dispatch time when T is pinned.
+
+This file pins:
+
+- `impl[T] Trait[Box[T]]` over a generic struct
+- Dispatching the same generic impl with multiple concrete T
+- Multi-tvar generic impl (`impl[A, B] Trait[Pair[A, B]]`)
+- Generic impl coexisting with a concrete impl on a different
+  target shape
+
+File-local prefix `Tgi` (Trait-Generic-Impl).
+
+    module sysl.tests.lang_features
+
+
+A generic wrapper struct
+-------------------------
+
+    struct TgiBox[T]
+        v: T
+
+
+### Generic impl over `TgiBox[T]`
+
+    trait TgiUnbox[T]
+        tgi_unbox(b: T) -> int
+
+    impl[T] TgiUnbox[TgiBox[T]]
+        tgi_unbox(b: TgiBox[T]) -> int = 1
+
+### Dispatch with concrete instantiations
+
+    #test
+    test_tgi_concrete_dispatch() -> unit
+        val b1 = TgiBox[int](42)
+        val r = TgiUnbox.tgi_unbox(b1)
+        assert(r == 1, s"got $r")
+
+
+A trait that returns the element via the box
+---------------------------------------------
+
+    trait TgiPeek[T, R]
+        tgi_peek(b: T) -> R
+
+    impl[T] TgiPeek[TgiBox[T], T]
+        tgi_peek(b: TgiBox[T]) -> T = b.v
+
+### Generic impl returns the right element across concrete Ts
+
+    #test
+    test_tgi_peek_int() -> unit
+        val b = TgiBox[int](42)
+        val r = TgiPeek.tgi_peek(b)
+        assert(r == 42, s"got $r")
+
+    #test
+    test_tgi_peek_bool() -> unit
+        val b = TgiBox[bool](true)
+        val r = TgiPeek.tgi_peek(b)
+        assert(r, "got true")
+
+
+Multi-tvar generic impl: `impl[A, B] Trait[Pair[A, B]]`
+--------------------------------------------------------
+
+    struct TgiPair[A, B]
+        first: A
+        second: B
+
+    trait TgiFirst[T, R]
+        tgi_first(p: T) -> R
+
+    impl[A, B] TgiFirst[TgiPair[A, B], A]
+        tgi_first(p: TgiPair[A, B]) -> A = p.first
+
+    #test
+    test_tgi_multi_tvar() -> unit
+        val p = TgiPair[int, bool](7, true)
+        val r = TgiFirst.tgi_first(p)
+        assert(r == 7, s"got $r")
+
+
+Generic impl coexisting with a concrete impl
+---------------------------------------------
+
+`TgiUnbox[TgiBox[T]]` (the generic impl above) handles any box;
+adding `TgiUnbox[int]` (a concrete impl on a non-box type) tests
+that the dispatcher picks the right one by operand-type shape.
+
+    impl TgiUnbox[int]
+        tgi_unbox(x: int) -> int = 999
+
+    #test
+    test_tgi_generic_with_concrete() -> unit
+        val b = TgiBox[int](10)
+        assert(TgiUnbox.tgi_unbox(b) == 1, "generic-impl path: 1")
+        assert(TgiUnbox.tgi_unbox(42) == 999, "concrete-impl path: 999")
+
+
+Generic impl method called from a regular function
+---------------------------------------------------
+
+The function takes a concrete `TgiBox[int]` and routes through the
+generic impl.
+
+    tgi_use_box(b: TgiBox[int]) -> int
+        TgiPeek.tgi_peek(b) + 1
+
+    #test
+    test_tgi_called_from_function() -> unit
+        val b = TgiBox[int](100)
+        assert(tgi_use_box(b) == 101, "100+1=101")
+
+
+Generic impl returning a constructed `TgiBox[T]`
+-------------------------------------------------
+
+    trait TgiBump[T]
+        tgi_bump(b: T) -> T
+
+    impl[T] TgiBump[TgiBox[T]]
+        tgi_bump(b: TgiBox[T]) -> TgiBox[T] = TgiBox[T](b.v)
+
+    #test
+    test_tgi_bump_int() -> unit
+        val b = TgiBox[int](7)
+        val r = TgiBump.tgi_bump(b)
+        assert(r.v == 7, s"got ${r.v}")
+
+    #test
+    test_tgi_bump_bool() -> unit
+        val b = TgiBox[bool](false)
+        val r = TgiBump.tgi_bump(b)
+        assert(!r.v, "got false")
