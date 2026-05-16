@@ -429,7 +429,7 @@ this dir adds simple-enum coverage and edge cases.
 
 | File | Tests pinned |
 |---|---|
-| `enum_simple_int.lsysl` 🔴 | int-backed enum; cast to/from int; explicit values |
+| `enum_simple_int.lsysl` 🟡 | ::First / ::Last / ::Pos / ::Val / ::Image / ::Succ / ::Pred; pattern match (via local-bound scrutinee); two distinct enums coexist (26 tests). Two ::Value(string) tests dropped — SVM `::Value` runtime helper panics. Match-on-param fails analyzer (separate gap). |
 | `enum_simple_succ_pred.lsysl` 🔴 | `T::Succ` / `T::Pred` boundary on simple enum |
 | `enum_data_recursive.lsysl` 🔴 | `Tree { Leaf, Node(int, Tree, Tree) }` recursive data enum |
 | `enum_data_slice_field.lsysl` 🔴 | data enum with `[]T` field (sysl@9ee727db regression) |
