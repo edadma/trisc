@@ -1,0 +1,190 @@
+Operator Precedence — Arithmetic
+=================================
+
+Per reference §"Operators (by precedence, high to low)":
+
+- Unary: `-x`, `~x`, `!x`
+- `*`, `/`, `%`
+- `+`, `-`
+- Bitwise shifts: `<<`, `>>`
+- Comparisons: `<`, `<=`, `>`, `>=`
+- Equality: `==`, `!=`
+- Bitwise: `&`, then `^`, then `|`
+- Logical: `&&`, then `||`
+
+This file pins arithmetic precedence — that `a + b * c` parses
+as `a + (b * c)`, that `-a * b` is `(-a) * b`, and so on.
+
+Pins use exact-result expressions over small literal integers
+so the answer is independent of overflow / signedness concerns.
+
+File-local prefix `Spa` (Sysl Precedence Arithmetic).
+
+    module sysl.tests.lang_features
+
+`* /` bind tighter than `+ -`
+------------------------------
+
+### `2 + 3 * 4` = 14, not 20
+
+    #test
+    test_spa_add_then_mul() -> unit
+        val r = 2 + 3 * 4
+        assert(r == 14, s"got $r")
+
+### `3 * 4 + 2` = 14 (mul first regardless of order)
+
+    #test
+    test_spa_mul_then_add() -> unit
+        val r = 3 * 4 + 2
+        assert(r == 14, s"got $r")
+
+### `10 - 2 * 3` = 4
+
+    #test
+    test_spa_sub_then_mul() -> unit
+        val r = 10 - 2 * 3
+        assert(r == 4, s"got $r")
+
+### `10 - 6 / 2` = 7
+
+    #test
+    test_spa_sub_then_div() -> unit
+        val r = 10 - 6 / 2
+        assert(r == 7, s"got $r")
+
+### `100 / 5 % 3` = (100 / 5) % 3 = 20 % 3 = 2 (left-assoc same level)
+
+    #test
+    test_spa_div_then_mod() -> unit
+        val r = 100 / 5 % 3
+        assert(r == 2, s"got $r")
+
+### `7 % 3 + 1` = 2
+
+    #test
+    test_spa_mod_then_add() -> unit
+        val r = 7 % 3 + 1
+        assert(r == 2, s"got $r")
+
+Parens override precedence
+---------------------------
+
+### `(2 + 3) * 4` = 20
+
+    #test
+    test_spa_parens_add_then_mul() -> unit
+        val r = (2 + 3) * 4
+        assert(r == 20, s"got $r")
+
+### `2 * (3 + 4)` = 14
+
+    #test
+    test_spa_parens_around_add() -> unit
+        val r = 2 * (3 + 4)
+        assert(r == 14, s"got $r")
+
+### `(10 - 6) / 2` = 2 (vs unparenthesized = 7)
+
+    #test
+    test_spa_parens_around_sub() -> unit
+        val r = (10 - 6) / 2
+        assert(r == 2, s"got $r")
+
+Left-associativity at the same level
+-------------------------------------
+
+### `100 - 30 - 20 - 10` = 40 (left-to-right)
+
+    #test
+    test_spa_sub_left_assoc() -> unit
+        val r = 100 - 30 - 20 - 10
+        assert(r == 40, s"got $r")
+
+### `100 / 5 / 2` = 10 (NOT 100 / (5 / 2) = 50)
+
+    #test
+    test_spa_div_left_assoc() -> unit
+        val r = 100 / 5 / 2
+        assert(r == 10, s"got $r")
+
+### `100 - 5 + 3` = 98 (left-to-right; not 100 - (5+3) = 92)
+
+    #test
+    test_spa_mixed_same_level() -> unit
+        val r = 100 - 5 + 3
+        assert(r == 98, s"got $r")
+
+Unary minus binds tighter than binary ops
+------------------------------------------
+
+### `-3 * 4` = -12 (unary first)
+
+    #test
+    test_spa_unary_neg_then_mul() -> unit
+        val r = -3 * 4
+        assert(r == -12, s"got $r")
+
+### `5 + -3` = 2
+
+    #test
+    test_spa_add_with_unary_neg() -> unit
+        val r = 5 + -3
+        assert(r == 2, s"got $r")
+
+### `-(3 + 4)` = -7
+
+    #test
+    test_spa_unary_around_parenthesized() -> unit
+        val r = -(3 + 4)
+        assert(r == -7, s"got $r")
+
+### `-(-5)` = 5
+
+    #test
+    test_spa_double_negation() -> unit
+        val r = -(-5)
+        assert(r == 5, s"got $r")
+
+Mixed multi-op expressions
+---------------------------
+
+### `1 + 2 + 3 * 4 - 5` = 1 + 2 + 12 - 5 = 10
+
+    #test
+    test_spa_mixed_4_ops() -> unit
+        val r = 1 + 2 + 3 * 4 - 5
+        assert(r == 10, s"got $r")
+
+### `2 * 3 + 4 * 5` = 6 + 20 = 26
+
+    #test
+    test_spa_two_muls_then_add() -> unit
+        val r = 2 * 3 + 4 * 5
+        assert(r == 26, s"got $r")
+
+### `10 - 2 * 3 + 6 / 2` = 10 - 6 + 3 = 7
+
+    #test
+    test_spa_full_mix() -> unit
+        val r = 10 - 2 * 3 + 6 / 2
+        assert(r == 7, s"got $r")
+
+### Quadratic-like: `a * a + 2 * a + 1` for a = 3
+
+    #test
+    test_spa_quadratic_form() -> unit
+        val a = 3
+        val r = a * a + 2 * a + 1
+        // 9 + 6 + 1 = 16
+        assert(r == 16, s"got $r")
+
+### `(a + b) * (a - b)` for a = 7, b = 3
+
+    #test
+    test_spa_diff_of_squares() -> unit
+        val a = 7
+        val b = 3
+        val r = (a + b) * (a - b)
+        // 10 * 4 = 40
+        assert(r == 40, s"got $r")

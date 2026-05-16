@@ -341,7 +341,7 @@ Reference §"Operators (by precedence...)", "Chained Comparisons", "Compound Ass
 
 | File | Tests pinned |
 |---|---|
-| `precedence_arithmetic.lsysl` 🔴 | `a + b * c` parses as `a + (b * c)`; unary / binary mix |
+| `precedence_arithmetic.lsysl` 🟢 | * / bind tighter than + -; parens override; left-assoc at same level (sub, div, mixed); unary minus binds tighter than binary; full mix (quadratic, diff-of-squares) (21 tests) |
 | `precedence_logical.lsysl` 🔴 | `&&` / `||` / `!`; short-circuit semantics |
 | `precedence_bitwise.lsysl` 🔴 | `&`, `|`, `^`, `<<`, `>>`; precedence vs comparison |
 | `chained_comparisons.lsysl` 🔴 | `a < b < c`; evaluation order; mid-chain false short-circuit |
