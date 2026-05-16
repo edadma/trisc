@@ -350,7 +350,7 @@ Reference §"Operators (by precedence...)", "Chained Comparisons", "Compound Ass
 
 ---
 
-### `contracts/` — require/ensure/old/result/invariant/variant — 🔴 P2
+### `contracts/` — require/ensure/old/result/invariant/variant — 🟢 P2
 
 Reference §"Design by Contract".
 
@@ -361,7 +361,11 @@ Reference §"Design by Contract".
 | `ensure_old_expr.lsysl` 🟢 | `old(x)` captures pre-state for postcondition (happy path) |
 | `invariant_loop.lsysl` 🟢 | `invariant cond` at top of loop body (happy path; `loop_entry` covered) |
 | `variant_decreasing.lsysl` 🟢 | `variant expr` decrease witness (happy path; single-expr form, lex-tuple is verification-only) |
-| `contracts_off_flag.lsysl` 🔴 | with `--no-contracts`, violations no longer trap |
+
+`--no-contracts` flag behaviour requires runner-side support
+(`TestCommand` in `sysl-cli/.../SyslCli.scala` doesn't yet accept the
+flag) and is out of scope for this category — add when the runner
+gains the toggle.
 
 ---
 
