@@ -18,13 +18,14 @@ Iterate a literal array
             sum = sum + x
         assert(sum == 15, s"sum of [1..5] should be 15, got $sum")
 
-Iterate a sub-slice (via while — TRISC's `for x in slice` is broken)
---------------------------------------------------------------------
+Iterate a sub-slice
+-------------------
 
-The natural `for x in a[1:4]` form fails on the TRISC backend
-(the other six backends are fine). Until trisc's `for-in` codegen
-for slice-typed iterables is fixed, we test the same shape via
-the equivalent while-loop, which works everywhere.
+Now uniform on all 7 backends after the parser-level for-each
+desugar (sysl@<chunk1-cluster-A>) — the source slice expression
+`a[1:4]` is captured into a fresh local before the loop, so the
+backend sees a stable slice descriptor instead of re-evaluating
+the sub-slice on every iteration.
 
     #test
     test_iter_subslice_via_while() -> unit
@@ -37,27 +38,25 @@ the equivalent while-loop, which works everywhere.
             i = i + 1
         assert(sum == 90, s"sum of a[1:4] should be 90, got $sum")
 
-    // TODO: un-comment once trisc supports `for x in slice` end-to-end.
-    //
-    //     #test
-    //     test_iter_subslice_for_in() -> unit
-    //         var a = [10, 20, 30, 40, 50]
-    //         var sum = 0
-    //         for x in a[1:4]
-    //             sum = sum + x
-    //         assert(sum == 90, "")
-    //
-    //     #test
-    //     test_iter_dynamic_array() -> unit
-    //         val d: &[]int = new [5]int
-    //         var i = 0
-    //         while i < len(d)
-    //             d[i] = (i + 1) * 10
-    //             i = i + 1
-    //         var sum = 0
-    //         for x in d[:]
-    //             sum = sum + x
-    //         assert(sum == 150, "")
+    #test
+    test_iter_subslice_for_in() -> unit
+        var a = [10, 20, 30, 40, 50]
+        var sum = 0
+        for x in a[1:4]
+            sum = sum + x
+        assert(sum == 90, s"sum of a[1:4] via for-in; got $sum")
+
+    #test
+    test_iter_dynamic_array() -> unit
+        val d: &[]int = new [5]int
+        var i = 0
+        while i < len(d)
+            d[i] = (i + 1) * 10
+            i = i + 1
+        var sum = 0
+        for x in d[:]
+            sum = sum + x
+        assert(sum == 150, s"dynamic array via for-in; got $sum")
 
 Loop variable is a copy
 -----------------------

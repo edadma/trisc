@@ -278,6 +278,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case ForStmtAST(init, c, u, body, _) =>
       containsStringLitStmt(init) || containsStringLitExpr(c) ||
         containsStringLitStmt(u) || body.exists(containsStringLitStmt)
+    case BlockStmtAST(inner) => inner.exists(containsStringLitStmt)
     case _ => false
 
   /** sysl `enum Color { Red, Green, Blue }` → WhyML `type color = Red | Green | Blue`.
@@ -337,6 +338,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
     case ReturnStmtAST(None)    => false
     case ExprStmtAST(e)         => callsName(e, name)
     case VarStmtAST(_, _, init, _, _, _, _) => callsName(init, name)
+    case BlockStmtAST(inner)    => inner.exists(stmtCallsName(_, name))
     case _                      => false
 
   private def emitFunction(fn: FunDeclAST): Unit =
@@ -460,6 +462,10 @@ class SyslWhyMLBackend(moduleName: String = "M"):
   private def formatBlockBody(stmts: List[StmtAST]): String =
     stmts match
       case Nil => unsupported("empty function body", "must have a trailing expression or return")
+      // Flatten BlockStmtAST in any position into the surrounding sequence.
+      // The parser's for-each desugar generates `BlockStmtAST(captureVar :: ForStmt :: Nil)`
+      // and the captured local must be in the enclosing scope so the for-loop sees it.
+      case BlockStmtAST(inner) :: rest => formatBlockBody(inner ::: rest)
       case List(s) => stmtAsTrailingExpr(s)
       case head :: rest =>
         head match
@@ -680,6 +686,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       stmtAssignsTo(name, init) || stmtAssignsTo(name, update) || isReassigned(name, body)
     case DoWhileStmtAST(_, body, _)                 => isReassigned(name, body)
     case LoopStmtAST(body, _)                       => isReassigned(name, body)
+    case BlockStmtAST(inner)                        => inner.exists(stmtAssignsTo(name, _))
     case ExprStmtAST(IfExprAST(_, t, e)) =>
       isReassigned(name, t) || e.exists(isReassigned(name, _))
     case ExprStmtAST(MatchExprAST(_, arms, default)) =>
@@ -699,6 +706,7 @@ class SyslWhyMLBackend(moduleName: String = "M"):
       isImpure(t) || e.exists(isImpure)
     case ExprStmtAST(MatchExprAST(_, arms, default)) =>
       arms.exists(a => isImpure(a.body)) || default.exists(isImpure)
+    case BlockStmtAST(inner) => inner.exists(stmtIsImpure)
     case _ => false
 
   private def isReturn(s: StmtAST): Boolean = s match

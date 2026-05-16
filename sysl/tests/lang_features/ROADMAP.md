@@ -112,7 +112,7 @@ TRISC's `for x in slice` codegen broken).
 | `slice_full_subslice.lsysl` 🟢 | `s[:]`, `s[i:]`, `s[:j]` omitted-bound forms (4 tests) |
 | `slice_descriptor_passing.lsysl` 🟢 | slice param shares backing with caller; `len()` works inside callee; sub-slice through param (4 tests) |
 | `slice_append.lsysl` 🟢 | append single, append many, append preserves predecessors, append on pre-filled slice (4 tests). NB SVM exhausts memory at large append counts (bump-allocator + no free); test uses 100 elements not 1000 |
-| `slice_iter_for_in.lsysl` 🟡 | `for x in [literal array]` works (4 tests). TODO entries for `for x in slice` and `for x in dynamic[:]` once TRISC's slice-iter codegen lands; today TRISC traps on those forms while the other 6 backends work |
+| `slice_iter_for_in.lsysl` 🟢 | `for x in [literal array]`, `for x in a[i:j]` (sub-slice), `for x in d[:]` (dynamic-array full slice) all uniform on 7 backends. TRISC was the lone holdout (it dereferenced the re-evaluated sub-slice descriptor each iteration, hitting a stale temp); closed by the parser-level once-eval for-each desugar (sysl@<chunk1-cluster-A>) (6 tests) |
 | `string_as_byte_slice.lsysl` 🟢 | string indexing yields bytes; len = byte count; UTF-8 multi-byte (4 tests) |
 
 ---
@@ -156,7 +156,7 @@ covered now; one SVM bug TODO'd.
 
 ---
 
-### `control_flow/` — if-expr, while, for, loops, break/continue, return — 🟡 P0
+### `control_flow/` — if-expr, while, for, loops, break/continue, return — 🟢 P0
 
 Reference §"Control Flow", "If Expression", "Return".
 
@@ -165,8 +165,8 @@ Reference §"Control Flow", "If Expression", "Return".
 | `if_expr.lsysl` 🟢 | if as value, side-effect cond, if/else-if chain, no-else, nested (5 tests). Covers both `if_expr_as_value`, `if_expr_unit`, `if_chain` |
 | `while_loops.lsysl` 🟢 | counted while; while + break; while + continue; never-runs; nested (5 tests) |
 | `for_in_range.lsysl` 🟢 | `0..<n` exclusive; `0..n` inclusive; empty; single-element; negative range (8 tests) |
-| `for_in_slice.lsysl` 🟡 | covered by `slices/slice_iter_for_in.lsysl` with the TRISC `for x in slice` TODO |
-| `for_in_string.lsysl` 🟢 | `for c in s` iterates **bytes** (one iteration per UTF-8 byte): sum / count / empty / single-byte / multi-byte UTF-8 / left-to-right order / temporary-source via val workaround / single-line `= for` form (10 tests). TRISC TODO commented in-file: iterating a fresh `fn_call()` / concat result fails on TRISC because the parser-level for-each desugar re-evaluates the source per iteration; same shape as the documented TRISC `for x in slice` over a sub-slice gap. Workaround: bind to a `val` first. See `feedback_sysl_trisc_for_in_temporary.md` |
+| `for_in_slice.lsysl` 🟢 | covered by `slices/slice_iter_for_in.lsysl` — uniform on all 7 backends after the parser-level once-eval for-each desugar |
+| `for_in_string.lsysl` 🟢 | `for c in s` iterates **bytes** (one iteration per UTF-8 byte): sum / count / empty / single-byte / multi-byte UTF-8 / left-to-right order / temporary-source via val workaround / single-line `= for` form / fn-returned string / concatenation / source-evaluated-once-via-counter (13 tests). Parser-level once-eval for-each desugar (sysl@<chunk1-cluster-A>) hoists the source expression into a fresh local before the loop, so side-effecting sources fire exactly once per for-each on every backend — closed the TRISC for-in-temporary gap |
 | `loop_labels.lsysl` 🟢 | `outer: for ...` / `outer: while ...` + `break outer` / `continue outer`: nested for-in-for; visit-count pin; continue-outer skip-to-update; plain `break` still innermost inside labeled outer; labeled while broken from nested for; labeled for broken from nested while; three-deep nesting break-outer + continue-outer; label on innermost (semantically plain) (9 tests). **Surfaced + fixed SVM bug**: `TBreakStmt(lbl)` / `TContinueStmt(lbl)` always jumped to innermost — `breakLabels.top` / `continueLabels.top` ignoring the label. Mirror TRISC's `loopNameStack` + `resolveLoopIdx` pattern; std/ svm 974/974 after fix. |
 | `early_return.lsysl` 🟢 | early return from loop; nested blocks; ARC refcount cleanup on every path (4 tests). Surfaced+fixed SVM array-pass-by-value bug (emitStore for ArrayType fell through to store64) |
 | `return_implicit.lsysl` 🟢 | `def` expression-bodied function; block-body last-expr return; implicit/explicit match (3 tests) |

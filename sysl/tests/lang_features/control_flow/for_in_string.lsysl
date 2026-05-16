@@ -164,43 +164,56 @@ final array must equal the source's byte sequence.
 Iteration of a temporary string (fn-return / concat)
 -----------------------------------------------------
 
-**TRISC TODO — un-comment when the parser-level for-each
-desugar evaluates the source expression once.** The current
-parser desugars `for c in <expr>` to a C-style for whose cond
-re-evaluates `len(expr)` and whose body re-evaluates
-`expr[idx]` — so when `expr` is a temporary like
-`fis_make_str()` or `"AB" + "C"`, the source is re-allocated
-or re-called on every iteration. Six of seven backends absorb
-this (string-literal interning + permissive ARC), but TRISC
-fails. Same shape as the documented `for x in slice` over a
-sub-slice gap in `slices/slice_iter_for_in.lsysl`.
-
-The proper fix is parser-level: hoist `arr` into a fresh
-local so it's evaluated once. Will need either a new
-`BlockStmtAST` node or returning `List[StmtAST]` from
-`buildForEach`.
+The parser-level for-each desugar hoists the source expression
+into a fresh `__foreach_src_<name>_<n>` local before the for-loop
+emits its cond / body, so side-effecting sources (fn calls,
+concats, etc.) evaluate exactly once per for-each — not once per
+iteration. Without this hoist, TRISC fails on temporary sources
+(a stale value-tracked address from the previous iteration's
+allocation gets reused after the temp is reclaimed); six of
+seven backends absorbed it via interning + permissive ARC.
 
     fis_make_str() -> string = "xyz"
 
-    // TODO: un-comment once TRISC handles `for c in <temporary>` —
-    // either by parser-level once-eval desugar or by TRISC-side hoist.
-    //
-    //     #test
-    //     test_fis_iter_fn_returned_string() -> unit
-    //         var total = 0
-    //         for c in fis_make_str()
-    //             total = total + int(c)
-    //         // 'x'=120, 'y'=121, 'z'=122 → 363
-    //         assert(total == 363, s"xyz=363; got $total")
-    //
-    //     #test
-    //     test_fis_iter_concat() -> unit
-    //         var total = 0
-    //         for c in "AB" + "C"
-    //             total = total + int(c)
-    //         assert(total == 198, s"ABC; got $total")
-    //
-    // Workaround pattern for now: bind the temporary to a `val` first.
+### Iterate a string returned by a function
+
+    #test
+    test_fis_iter_fn_returned_string() -> unit
+        var total = 0
+        for c in fis_make_str()
+            total = total + int(c)
+        // 'x'=120, 'y'=121, 'z'=122 → 363
+        assert(total == 363, s"xyz=363; got $total")
+
+### Iterate a string produced by concatenation
+
+    #test
+    test_fis_iter_concat() -> unit
+        var total = 0
+        for c in "AB" + "C"
+            total = total + int(c)
+        assert(total == 198, s"ABC; got $total")
+
+### The source is evaluated exactly once
+
+`fis_count_calls()` bumps a module-level counter on every call
+and returns a constant 3-byte string. Iterating it should fire
+the counter once per for-each, regardless of length.
+
+    var fis_call_count: int = 0
+
+    fis_count_calls() -> string
+        fis_call_count = fis_call_count + 1
+        return "xyz"
+
+    #test
+    test_fis_source_eval_once() -> unit
+        fis_call_count = 0
+        var total = 0
+        for c in fis_count_calls()
+            total = total + int(c)
+        assert(fis_call_count == 1, s"once; got ${fis_call_count}")
+        assert(total == 363, s"xyz total; got ${total}")
 
 ### Workaround: bind temporary to a val before iterating
 

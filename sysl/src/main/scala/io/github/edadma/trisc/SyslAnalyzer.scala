@@ -6793,6 +6793,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case AsmStmtAST(code) =>
         TAsmStmt(code)
 
+      case BlockStmtAST(stmts) =>
+        // Synthetic group node from parser desugars. Lowers as a flat
+        // sequence in the enclosing scope; the existing TMultiStmt is the
+        // equivalent typed shape and is handled by every backend. No new
+        // lexical scope — captured locals must remain visible to following
+        // statements in the same block (e.g. the for-each desugar's
+        // `__foreach_src_v_N` is the loop-source binding for the ForStmt
+        // that comes next in the block).
+        TMultiStmt(stmts.map(analyzeStmt))
+
       case InvariantStmtAST(_, _) =>
         throw AnalysisError("invariant statement must appear at the top of a loop body, before any other statement")
 

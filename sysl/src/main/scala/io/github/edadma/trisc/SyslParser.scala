@@ -668,6 +668,13 @@ class SyslParser extends StandardTokenParsers {
     case w: WhileStmtAST   => w.copy(label = Some(name))
     case d: DoWhileStmtAST => d.copy(label = Some(name))
     case l: LoopStmtAST    => l.copy(label = Some(name))
+    // for-each desugar wraps its capture + ForStmtAST in a BlockStmtAST —
+    // the label still belongs to the inner ForStmtAST.
+    case BlockStmtAST(stmts) =>
+      BlockStmtAST(stmts.map {
+        case f: ForStmtAST => f.copy(label = Some(name))
+        case other => other
+      })
     case other             => other
 
   lazy val deferStmt: Parser[DeferStmtAST] =
@@ -799,7 +806,12 @@ class SyslParser extends StandardTokenParsers {
 
   lazy val rangeOp: Parser[String] = "..<" | ".." | "downTo"
 
-  lazy val forStmt: Parser[ForStmtAST] =
+  // Per-parser counter so nested `for v in ...` loops sharing a value name
+  // produce distinct `__foreach_src_<valName>_<n>` captures and don't trip
+  // duplicate-name analysis. Reset implicitly per `new SyslParser` instance.
+  private var foreachCounter: Int = 0
+
+  lazy val forStmt: Parser[StmtAST] =
     ("for" ~> identStmt ~ (";" ~> expr) ~ (";" ~> forUpdate) ~ ("do" ~> (block | inlineStmt ^^ (s => List(s)))) ^^ {
       case init ~ cond ~ update ~ body => ForStmtAST(init, cond, update, body)
     } |
@@ -838,7 +850,7 @@ class SyslParser extends StandardTokenParsers {
       body,
     )
 
-  private def buildForEach(valName: String, arr: ExpressionAST, body: List[StmtAST], reverse: Boolean = false): ForStmtAST =
+  private def buildForEach(valName: String, arr: ExpressionAST, body: List[StmtAST], reverse: Boolean = false): StmtAST =
     arr match
       // `for i in T::Range` desugars to `for i in T::First..T::Last` (or `T::Last downTo T::First`).
       case TypeAttrAST(typeName, "Range", None) =>
@@ -846,31 +858,56 @@ class SyslParser extends StandardTokenParsers {
         val hi = TypeAttrAST(typeName, "Last", None)
         if reverse then buildForRange(valName, hi, "downTo", lo, None, body)
         else buildForRange(valName, lo, "..", hi, None, body)
-      case _ if reverse =>
-        // `for v in reverse arr` — iterate backward from len-1 to 0.
-        val idxName = s"__foreach_idx_${valName}"
-        ForStmtAST(
-          VarStmtAST(idxName, None, BinaryAST(CallAST("len", List(arr)), "-", IntLitAST(1))),
-          BinaryAST(VarRefAST(idxName), ">=", IntLitAST(0)),
-          ExprStmtAST(PostDecAST(idxName)),
-          VarStmtAST(valName, None, IndexAST(arr, VarRefAST(idxName))) :: body,
-        )
       case _ =>
-        val idxName = s"__foreach_idx_${valName}"
-        ForStmtAST(
-          VarStmtAST(idxName, None, IntLitAST(0)),
-          BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(arr))),
-          ExprStmtAST(PostIncAST(idxName)),
-          VarStmtAST(valName, None, IndexAST(arr, VarRefAST(idxName))) :: body,
-        )
+        // Evaluate the source expression ONCE into a fresh local before the
+        // loop, then have the cond / body / update refer to that local. Two
+        // motivations:
+        //   1. Side-effecting sources (fn calls, allocations, ARC-bearing
+        //      concats) must only fire once per for-each, not per iteration.
+        //   2. TRISC's prior re-eval-on-each-iteration shape held a value-
+        //      tracked address from a string-concat / sub-slice / fn-return
+        //      across an iteration boundary, where the compiler had already
+        //      reclaimed the temp. The interp / LLVM / SVM backends absorbed
+        //      this via interning + permissive ARC; TRISC didn't. Hoisting
+        //      to a stable local removes the re-eval entirely.
+        // The `BlockStmtAST` is a no-new-scope grouping — the captured local
+        // leaks into the enclosing block, exactly so the cond/body can see it.
+        foreachCounter += 1
+        val n = foreachCounter
+        val srcName = s"__foreach_src_${valName}_$n"
+        val idxName = s"__foreach_idx_${valName}_$n"
+        val capture = VarStmtAST(srcName, None, arr, isMutable = false)
+        val srcRef: ExpressionAST = VarRefAST(srcName)
+        val forStmt =
+          if reverse then
+            ForStmtAST(
+              VarStmtAST(idxName, None, BinaryAST(CallAST("len", List(srcRef)), "-", IntLitAST(1))),
+              BinaryAST(VarRefAST(idxName), ">=", IntLitAST(0)),
+              ExprStmtAST(PostDecAST(idxName)),
+              VarStmtAST(valName, None, IndexAST(srcRef, VarRefAST(idxName))) :: body,
+            )
+          else
+            ForStmtAST(
+              VarStmtAST(idxName, None, IntLitAST(0)),
+              BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(srcRef))),
+              ExprStmtAST(PostIncAST(idxName)),
+              VarStmtAST(valName, None, IndexAST(srcRef, VarRefAST(idxName))) :: body,
+            )
+        BlockStmtAST(List(capture, forStmt))
 
-  private def buildForIndexValue(idxName: String, valName: String, arr: ExpressionAST, body: List[StmtAST]): ForStmtAST =
-    ForStmtAST(
+  private def buildForIndexValue(idxName: String, valName: String, arr: ExpressionAST, body: List[StmtAST]): StmtAST =
+    // Mirror of buildForEach's once-eval rationale.
+    foreachCounter += 1
+    val srcName = s"__foreach_src_${valName}_$foreachCounter"
+    val srcRef: ExpressionAST = VarRefAST(srcName)
+    val capture = VarStmtAST(srcName, None, arr, isMutable = false)
+    val forStmt = ForStmtAST(
       VarStmtAST(idxName, None, IntLitAST(0)),
-      BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(arr))),
+      BinaryAST(VarRefAST(idxName), "<", CallAST("len", List(srcRef))),
       ExprStmtAST(PostIncAST(idxName)),
-      VarStmtAST(valName, None, IndexAST(arr, VarRefAST(idxName))) :: body,
+      VarStmtAST(valName, None, IndexAST(srcRef, VarRefAST(idxName))) :: body,
     )
+    BlockStmtAST(List(capture, forStmt))
 
   lazy val forUpdate: Parser[StmtAST] =
     identStmt | expr ^^ ExprStmtAST.apply
