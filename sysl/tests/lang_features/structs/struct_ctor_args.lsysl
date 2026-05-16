@@ -1,0 +1,264 @@
+Struct Construction — Positional and Named
+===========================================
+
+A struct constructor `MyStruct(...)` accepts positional
+arguments in field-declaration order, or named arguments
+of the form `field_name = expr` (per the reference's "Named
+Arguments" section). Named struct construction is the same
+mechanism as named-arg function calls, just specialized
+to a struct's field list.
+
+This file pins:
+
+- Positional construction of single- / multi-field structs.
+- Named construction with all-named in declaration order.
+- Named construction reordered.
+- Mixed positional + named (positional first).
+- Construction in different contexts (val, var, arg, return).
+- Construction with diverse field types (int, string,
+  bool, byte, nested struct, slice).
+
+Sysl does NOT support struct field defaults (`field: int = 0`
+is a parse error). Defaults are a function-parameter feature
+only — see `functions/default_args_basic.lsysl`. So
+"partial init with defaults" from the roadmap doesn't apply
+to struct constructors; every field must be supplied.
+
+File-local prefix `Ssca` (Sysl Struct Ctor Args).
+
+The struct-construction-by-name surface is also covered in
+`functions/named_args.lsysl` (where `Color` and `Pt` exercise
+the same mechanism through the named-arg lens). This file
+keeps the perspective on the struct's contract.
+
+    module sysl.tests.lang_features
+
+Single-field struct
+-------------------
+
+    struct Single
+        v: int
+
+### Positional construction
+
+    #test
+    test_ssca_single_positional() -> unit
+        val s = Single(42)
+        assert(s.v == 42, s"got ${s.v}")
+
+### Named construction
+
+    #test
+    test_ssca_single_named() -> unit
+        val s = Single(v = 42)
+        assert(s.v == 42, s"got ${s.v}")
+
+Multi-field struct — int fields
+--------------------------------
+
+    struct Triple
+        x: int
+        y: int
+        z: int
+
+### Positional
+
+    #test
+    test_ssca_triple_positional() -> unit
+        val t = Triple(1, 2, 3)
+        assert(t.x == 1, "x")
+        assert(t.y == 2, "y")
+        assert(t.z == 3, "z")
+
+### All-named in declaration order
+
+    #test
+    test_ssca_triple_all_named_in_order() -> unit
+        val t = Triple(x = 1, y = 2, z = 3)
+        assert(t.x == 1, "x")
+        assert(t.y == 2, "y")
+        assert(t.z == 3, "z")
+
+### All-named reversed
+
+    #test
+    test_ssca_triple_all_named_reversed() -> unit
+        val t = Triple(z = 3, y = 2, x = 1)
+        assert(t.x == 1, "x")
+        assert(t.y == 2, "y")
+        assert(t.z == 3, "z")
+
+### All-named arbitrary order
+
+    #test
+    test_ssca_triple_all_named_arbitrary() -> unit
+        val t = Triple(y = 2, z = 3, x = 1)
+        assert(t.x == 1, "x")
+        assert(t.y == 2, "y")
+        assert(t.z == 3, "z")
+
+### Mixed: one positional then named
+
+    #test
+    test_ssca_triple_mixed_one_pos() -> unit
+        val t = Triple(1, y = 2, z = 3)
+        assert(t.x == 1, "x")
+        assert(t.y == 2, "y")
+        assert(t.z == 3, "z")
+
+### Mixed: two positional then named
+
+    #test
+    test_ssca_triple_mixed_two_pos() -> unit
+        val t = Triple(1, 2, z = 3)
+        assert(t.x == 1, "x")
+        assert(t.y == 2, "y")
+        assert(t.z == 3, "z")
+
+### Mixed positional + named reordered
+
+    #test
+    test_ssca_triple_mixed_pos_named_reordered() -> unit
+        val t = Triple(1, z = 3, y = 2)
+        assert(t.x == 1, "x")
+        assert(t.y == 2, "y")
+        assert(t.z == 3, "z")
+
+Multi-type fields
+------------------
+
+A struct with int + string + bool exercises that named
+construction works for non-int fields too.
+
+    struct Mixed
+        n: int
+        name: string
+        active: bool
+
+### Positional
+
+    #test
+    test_ssca_mixed_positional() -> unit
+        val m = Mixed(42, "hello", true)
+        assert(m.n == 42, "n")
+        assert(m.name == "hello", "name")
+        assert(m.active, "active")
+
+### All-named
+
+    #test
+    test_ssca_mixed_all_named() -> unit
+        val m = Mixed(n = 7, name = "world", active = false)
+        assert(m.n == 7, "n")
+        assert(m.name == "world", "name")
+        assert(!m.active, "active")
+
+### Named reordered
+
+    #test
+    test_ssca_mixed_named_reordered() -> unit
+        val m = Mixed(active = true, name = "x", n = 99)
+        assert(m.n == 99, "n")
+        assert(m.name == "x", "name")
+        assert(m.active, "active")
+
+Construction contexts
+----------------------
+
+### As a `val`
+
+    #test
+    test_ssca_in_val() -> unit
+        val t = Triple(1, 2, 3)
+        assert(t.x == 1, "got x")
+
+### As a `var`, then mutate
+
+    #test
+    test_ssca_in_var() -> unit
+        var t = Triple(1, 2, 3)
+        t.x = 10
+        assert(t.x == 10, "after mutation")
+        assert(t.y == 2, "y unchanged")
+
+### As a function argument
+
+    sum3(t: Triple) -> int = t.x + t.y + t.z
+
+    #test
+    test_ssca_as_fn_arg_positional() -> unit
+        val s = sum3(Triple(1, 2, 3))
+        assert(s == 6, s"got $s")
+
+### As a function return value
+
+    make_triple(a: int, b: int, c: int) -> Triple = Triple(a, b, c)
+
+    #test
+    test_ssca_as_fn_return() -> unit
+        val t = make_triple(4, 5, 6)
+        assert(t.x == 4 && t.y == 5 && t.z == 6, "fields")
+
+### As a named arg in a function call
+
+    use_triple(t: Triple) -> int = t.x * 100 + t.y * 10 + t.z
+
+    #test
+    test_ssca_as_named_fn_arg() -> unit
+        val v = use_triple(t = Triple(z = 9, x = 1, y = 2))
+        assert(v == 129, s"got $v")
+
+Nested struct field
+--------------------
+
+    struct Origin
+        center: Triple
+        bias: int
+
+### Construct outer with inner literal — positional
+
+    #test
+    test_ssca_nested_positional() -> unit
+        val o = Origin(Triple(1, 2, 3), 100)
+        assert(o.center.x == 1, "inner.x")
+        assert(o.center.y == 2, "inner.y")
+        assert(o.bias == 100, "bias")
+
+### Construct outer with named inner
+
+    #test
+    test_ssca_nested_named_inner() -> unit
+        val o = Origin(center = Triple(x = 1, y = 2, z = 3), bias = 100)
+        assert(o.center.z == 3, "inner.z")
+        assert(o.bias == 100, "bias")
+
+### Reordered outer + named inner
+
+    #test
+    test_ssca_nested_outer_reordered() -> unit
+        val o = Origin(bias = 50, center = Triple(7, 8, 9))
+        assert(o.center.x == 7, "inner.x")
+        assert(o.bias == 50, "bias")
+
+Empty-field-pattern: byte struct
+---------------------------------
+
+    struct ByteBag
+        first: byte
+        second: byte
+
+### Positional with byte casts
+
+    #test
+    test_ssca_byte_positional() -> unit
+        val b = ByteBag(byte('A'), byte('Z'))
+        assert(int(b.first) == 65, "first")
+        assert(int(b.second) == 90, "second")
+
+### Named with byte casts
+
+    #test
+    test_ssca_byte_named() -> unit
+        val b = ByteBag(second = byte('Z'), first = byte('A'))
+        assert(int(b.first) == 65, "first")
+        assert(int(b.second) == 90, "second")

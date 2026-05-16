@@ -279,7 +279,7 @@ Existing: `iface_mutating_self.lsysl` → `interfaces/iface_mutating_self.lsysl`
 | File | Tests pinned |
 |---|---|
 | `struct_return.lsysl` 🟢 | direct field, local, chained *(move from top level)* |
-| `struct_ctor_args.lsysl` 🔴 | positional vs named field init; partial init with defaults |
+| `struct_ctor_args.lsysl` 🟢 | positional / all-named / reordered / mixed pos+named struct construction; multi-type fields; nested struct fields; byte fields; in val/var/fn-arg/fn-return contexts (22 tests). Note: sysl does not support struct field defaults (parse error) — defaults are a function-parameter feature only |
 | `struct_method_value.lsysl` 🔴 | `Struct.method()` on value receiver; self is a copy |
 | `struct_method_ptr.lsysl` 🔴 | `Struct.method()` where method takes `*Self` (mutating) |
 | `struct_method_ref.lsysl` 🔴 | method on `&Struct` ref receiver |
