@@ -2053,9 +2053,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             if fd.isParameterless && fd.typeParams.nonEmpty then
               throw AnalysisError(s"parameterless function '$name' cannot be generic", decl)
             functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet, isGhost, if anyByName then byNameFlags else Nil, fd.isParameterless)
-            // Record #deprecated info
+            // Record #deprecated info. The lexer's StringLit carrier is
+            // byte-form (each Char is one UTF-8 byte); decode for the host
+            // diagnostic so Unicode reasons render correctly when printed.
             for attr <- fd.attributes if attr.name == "deprecated" do
-              val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
+              val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) =>
+                new String(s.getBytes("ISO-8859-1"), "UTF-8")
+              }
               deprecations(name) = reason
             // Register as method if name matches StructName_methodName pattern
             val underscoreIdx = name.indexOf('_')
@@ -4321,7 +4325,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val ArrayType(elemType, size) = target: @unchecked
         if elemType != U8 && elemType != I8 then
           throw AnalysisError(s"cannot initialize [$size]$elemType from string literal (element type must be byte or i8)")
-        val bytes = s.getBytes("UTF-8")
+        val bytes = s.getBytes("ISO-8859-1")
         if bytes.length > size then
           throw AnalysisError(s"string literal has ${bytes.length} bytes but array has only $size elements")
         val elems = bytes.map(b => TIntLit((b & 0xff).toLong, elemType)).toList ++

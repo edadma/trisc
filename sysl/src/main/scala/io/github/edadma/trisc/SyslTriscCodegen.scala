@@ -294,11 +294,11 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // String literals with immortal refcount headers
     if stringLiterals.nonEmpty then
       for (label, value) <- stringLiterals do
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         // Total: 8 (refcount) + bytes + 1 (null terminator)
         emit(s"global $label, data, ${bytes.length + 9}")
       for (label, value) <- stringLiterals do
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         emit(s"  dl -1") // immortal refcount header (assembler auto-aligns dl)
         emit(s"$label:")
         for b <- bytes do emit(s"  db ${b & 0xff}")
@@ -3662,7 +3662,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
       case TCast(TStringLit(value, _), target) if target.isInstanceOf[SyslType.PtrType] =>
         // String literal → *i8 decay: emit data pointer directly, no fat pointer needed
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         labelCounter += 1
         val strLabel = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
         stringLiterals += ((strLabel, value))
@@ -4759,7 +4759,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
       case TStringLit(value, _) =>
         // Allocate 16-byte {ptr, len} fat pointer on stack
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         labelCounter += 1
         val strLabel = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
         stringLiterals += ((strLabel, value))
@@ -6316,7 +6316,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     labelCounter += 1
     val label = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
     stringLiterals += ((label, value))
-    (label, value.getBytes("UTF-8").length)
+    (label, value.getBytes("ISO-8859-1").length)
 
   // Data directive for a type: db (1 byte), ds (2), dw (4), dl (8)
   private def emitDataDirective(typ: SyslType): String = typ match

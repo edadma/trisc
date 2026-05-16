@@ -538,12 +538,12 @@ class SyslSVMCodegen:
     if stringLiterals.nonEmpty || itables.nonEmpty then
       emit("segment rodata")
       for (label, value) <- stringLiterals do
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         emit(s"global $label, data, ${bytes.length + 9}")
       for (iname, (iface, _)) <- itables do
         emit(s"global $iname, data, ${iface.methods.length * 8}")
       for (label, value) <- stringLiterals do
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         emit(s"  dl -1") // immortal refcount header
         emit(s"$label:")
         for b <- bytes do emit(s"  db ${b & 0xff}")
@@ -576,7 +576,7 @@ class SyslSVMCodegen:
               // pre-registered before rodata emission.
               init match
                 case TStringLit(s, _) =>
-                  val bytes = s.getBytes("UTF-8")
+                  val bytes = s.getBytes("ISO-8859-1")
                   emit(s"  dl ${stringGlobalLabels(name)}")
                   emit(s"  dl ${bytes.length}")
                 case _ =>
@@ -587,7 +587,7 @@ class SyslSVMCodegen:
                 case TArrayLit(elements, _) =>
                   for (e, idx) <- elements.zipWithIndex do e match
                     case TStringLit(s, _) =>
-                      val bytes = s.getBytes("UTF-8")
+                      val bytes = s.getBytes("ISO-8859-1")
                       emit(s"  dl ${stringArrayElemLabels((name, idx))}")
                       emit(s"  dl ${bytes.length}")
                     case _ =>
@@ -601,7 +601,7 @@ class SyslSVMCodegen:
               // Byte array with string-literal / array-literal init.
               init match
                 case TStringLit(s, _) =>
-                  val bytes = s.getBytes("UTF-8")
+                  val bytes = s.getBytes("ISO-8859-1")
                   for b <- bytes do emit(s"  db ${b & 0xff}")
                   for _ <- bytes.length until arrSize.toInt do emit("  db 0")
                 case TArrayLit(elements, _) =>
@@ -1901,7 +1901,7 @@ class SyslSVMCodegen:
       labelCounter += 1
       val label = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
       stringLiterals += ((label, value))
-      val bytes = value.getBytes("UTF-8")
+      val bytes = value.getBytes("ISO-8859-1")
       // String is a 16-byte fat pointer {ptr, len} allocated on memory stack.
       // The label points past the refcount header to the byte data.
       emitMemAlloc(16)

@@ -22,12 +22,11 @@ standard library's job. The point is to pin the *language-level*
 guarantees: string literals are bytes, indexing yields bytes, and
 source-level non-ASCII characters encode as UTF-8.
 
-> **Lexer note.** `\xNN` for `N >= 0x80` is currently interpreted as
-> a 16-bit codepoint (via `Char.toChar`) and re-encoded as UTF-8
-> downstream, NOT as a raw byte as the reference describes. Until
-> the lexer is fixed (see `feedback_sysl_high_byte_x_escape.md`),
-> this file uses source-level Unicode characters instead of `\xNN`
-> escapes for non-ASCII bytes.
+> **Lexer note.** `\xNN` now emits a single raw byte for any `N`,
+> matching the reference. Tests at the bottom of this file pin the
+> high-byte forms (`\xC3`, `\xC3\xB1`, `\xF0\x9F\x98\x80`) so a future
+> regression caught early. See `feedback_sysl_high_byte_x_escape.md`
+> for the original bug history.
 
 File-local prefix `Ud` (Utf8-Decode).
 
@@ -217,3 +216,70 @@ class, including the "I can't lead" case for continuation bytes.
         assert(ud_lead_len(0x00) == 1, "NUL")
         assert(ud_lead_len(0x41) == 1, "A")
         assert(ud_lead_len(0x7F) == 1, "DEL")
+
+
+High-byte `\xNN` escapes — single raw bytes
+--------------------------------------------
+
+The lexer treats `\xNN` for any `N` as exactly one byte. For
+`N >= 0x80` this used to silently emit two UTF-8 bytes (the `0xNN`
+codepoint, re-encoded). These tests pin the corrected behaviour and
+guard against regression.
+
+### Single high byte — `\xC3` is one byte
+
+    #test
+    test_ud_xescape_high_byte() -> unit
+        val s = "\xC3"
+        assert(len(s) == 1, s"len=${len(s)}")
+        assert(int(s[0]) == 0xC3, s"byte=${int(s[0])}")
+
+### Multi-byte sequence — `\xC3\xB1` decodes as `ñ`
+
+The two-byte escape sequence must produce the same byte string as the
+source-level `"ñ"` character, and decode to the same codepoint U+00F1.
+
+    #test
+    test_ud_xescape_two_byte() -> unit
+        val s = "\xC3\xB1"
+        assert(len(s) == 2, s"len=${len(s)}")
+        assert(int(s[0]) == 0xC3, "lead")
+        assert(int(s[1]) == 0xB1, "cont")
+        assert(ud_decode_at(s, 0) == 0xF1, "decodes as ñ")
+
+### Four-byte sequence — `\xF0\x9F\x98\x80` decodes as `😀`
+
+    #test
+    test_ud_xescape_four_byte() -> unit
+        val s = "\xF0\x9F\x98\x80"
+        assert(len(s) == 4, s"len=${len(s)}")
+        assert(int(s[0]) == 0xF0, "lead")
+        assert(int(s[3]) == 0x80, "cont3")
+        assert(ud_decode_at(s, 0) == 0x1F600, "decodes as 😀")
+
+### Source-character vs `\xNN`-escape parity
+
+The character `ñ` written directly in source must produce the same
+byte sequence as the explicit `\xC3\xB1` escape. (If the lexer
+encodes them differently, every UTF-8 invariant downstream falls
+apart silently.)
+
+    #test
+    test_ud_xescape_source_parity() -> unit
+        val a = "ñ"
+        val b = "\xC3\xB1"
+        assert(len(a) == len(b), "same length")
+        assert(int(a[0]) == int(b[0]), "byte 0")
+        assert(int(a[1]) == int(b[1]), "byte 1")
+
+### Boundary byte 0x80 — first continuation-byte value
+
+A raw 0x80 is not a valid UTF-8 lead, but the lexer must still emit
+exactly one byte. Validation lives at use sites (decoders), not at
+the string-literal lexer.
+
+    #test
+    test_ud_xescape_boundary_80() -> unit
+        val s = "\x80"
+        assert(len(s) == 1, s"len=${len(s)}")
+        assert(int(s[0]) == 0x80, s"byte=${int(s[0])}")

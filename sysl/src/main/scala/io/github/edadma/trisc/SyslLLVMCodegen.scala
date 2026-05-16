@@ -154,22 +154,27 @@ class SyslLLVMCodegen(target: String = "host"):
 
   /** Intern a sysl string literal — emits a global with an immortal refcount header.
     * The label refers to the WRAPPING `<{ i64, [byteLen x i8] }>` constant, NOT the data ptr.
-    * Use `gepStringDataConst(label, byteLen)` to get a constant data-ptr expression. */
+    * Use `gepStringDataConst(label, byteLen)` to get a constant data-ptr expression.
+    * `s` is the lexer's byte-form String (each Char = one UTF-8 byte) — ISO-8859-1
+    * round-trips Char<->byte. */
   private def internString(s: String): (String, Int) =
     stringConstants.getOrElseUpdate(s, {
       stringCounter += 1
       val label = s"@.sstr.$stringCounter"
-      val byteLen = s.getBytes("UTF-8").length + 1 // +1 for null terminator
+      val byteLen = s.getBytes("ISO-8859-1").length + 1 // +1 for null terminator
       (label, byteLen)
     })
 
   /** Intern a raw C-style string (e.g. printf format string) — no refcount header.
-    * Returns (label, byteLen) where label refers to a `[byteLen x i8]` global. */
+    * Returns (label, byteLen) where label refers to a `[byteLen x i8]` global.
+    * Accepts both lexer byte-form strings and compiler-internal Java Strings;
+    * for the latter, every Char is ASCII (format strings) so the encoding is
+    * identical under either charset. */
   private def internCString(s: String): (String, Int) =
     cStringConstants.getOrElseUpdate(s, {
       stringCounter += 1
       val label = s"@.cstr.$stringCounter"
-      val byteLen = s.getBytes("UTF-8").length + 1
+      val byteLen = s.getBytes("ISO-8859-1").length + 1
       (label, byteLen)
     })
 
@@ -432,16 +437,24 @@ class SyslLLVMCodegen(target: String = "host"):
       emit(s"%struct.$name = type { $fieldTypes }")
     if structTypes.nonEmpty then emit("")
 
-    // Helper: escape a string for LLVM c"..." form
-    def escapeForLlvm(s: String): String = s.flatMap {
-      case '\n' => "\\0A"
-      case '\r' => "\\0D"
-      case '\t' => "\\09"
-      case '\\' => "\\5C"
-      case '"'  => "\\22"
-      case '\u0000' => "\\00"
-      case c    => c.toString
+    // Helper: escape a byte-form string for LLVM c"..." form. Input is
+    // ISO-8859-1 carrier where each Char in 0..0xFF is one byte. High bytes
+    // must emit `\NN` escapes — emitting them as raw Chars would let the .ll
+    // writer UTF-8-encode them into 2-byte sequences, which would both break
+    // the byteLen we computed and corrupt the runtime string contents.
+    def escapeForLlvm(s: String): String = s.flatMap { c =>
+      val b = c.toInt & 0xFF
+      b match
+        case 0x0A => "\\0A"
+        case 0x0D => "\\0D"
+        case 0x09 => "\\09"
+        case 0x5C => "\\5C"
+        case 0x22 => "\\22"
+        case 0x00 => "\\00"
+        case n if n < 0x20 || n >= 0x7F => f"\\$n%02X"
+        case _    => c.toString
     }
+//done\u0000' => "\\00"
     // Emit raw C-string constants (no refcount header) — used for printf format strings, etc.
     for (s, (label, byteLen)) <- cStringConstants do
       emit(s"""$label = private unnamed_addr constant [$byteLen x i8] c"${escapeForLlvm(s)}\\00"""")
