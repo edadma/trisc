@@ -1,0 +1,176 @@
+Struct Methods on Value-Bound Locals (Read-Only Patterns)
+==========================================================
+
+Per reference §"Three-Mode Model", sysl methods always
+receive self as `*Self` (pointer) — there is no separate
+"value receiver" that would make `self` a copy inside the
+method. Every method has the **ability** to mutate the
+caller's struct; whether it does is up to the body.
+
+This file pins the read-only / non-mutating subset of
+calling methods on **value-bound** struct locals
+(`var s = MyStruct(...)`). Mutating-method behavior lives
+in `struct_method_ptr.lsysl`; ref-receiver behavior lives
+in `struct_method_ref.lsysl`.
+
+This file pins:
+
+- Pure read methods return derived values without altering
+  the receiver's state.
+- Repeated read methods on the same `val`/`var` see the
+  same state (no aliasing surprises).
+- A read method can return a field directly, or a computed
+  expression over multiple fields.
+- A read method can return another struct constructed from
+  self's fields (value-returns work through method dispatch).
+- A read method can return a string field.
+- Reading from a method's chain of `self.field.method()`
+  works for nested struct fields.
+
+File-local prefix `Ssmv` (Sysl Struct Method Value-bound).
+
+    module sysl.tests.lang_features
+
+Pure-read int methods
+----------------------
+
+    struct Point
+        x: int
+        y: int
+
+    Point.get_x() -> int = self.x
+
+    Point.get_y() -> int = self.y
+
+    Point.sum() -> int = self.x + self.y
+
+    Point.dist_sq() -> int = self.x * self.x + self.y * self.y
+
+### Field-only read
+
+    #test
+    test_ssmv_field_read() -> unit
+        val p = Point(3, 4)
+        assert(p.get_x() == 3, "x")
+        assert(p.get_y() == 4, "y")
+
+### Computed-value read across multiple fields
+
+    #test
+    test_ssmv_sum() -> unit
+        val p = Point(7, 8)
+        assert(p.sum() == 15, s"got ${p.sum()}")
+
+### Squaring read
+
+    #test
+    test_ssmv_dist_sq() -> unit
+        val p = Point(3, 4)
+        assert(p.dist_sq() == 25, s"got ${p.dist_sq()}")
+
+Receiver state is unchanged by read methods
+--------------------------------------------
+
+A read method that doesn't mutate `self.*` leaves the
+caller's value untouched.
+
+### After call, original field values are preserved
+
+    #test
+    test_ssmv_state_preserved_after_read() -> unit
+        var p = Point(10, 20)
+        val _x = p.get_x()
+        val _y = p.get_y()
+        val _s = p.sum()
+        assert(p.x == 10, "x unchanged")
+        assert(p.y == 20, "y unchanged")
+
+### Multiple sequential reads return the same value
+
+    #test
+    test_ssmv_repeated_read_same_value() -> unit
+        var p = Point(5, 7)
+        val a = p.sum()
+        val b = p.sum()
+        val c = p.sum()
+        assert(a == 12, "first")
+        assert(a == b, "1==2")
+        assert(b == c, "2==3")
+
+Read method that returns a struct
+----------------------------------
+
+### `Point.swap() -> Point` returns a new Point
+
+    Point.swap() -> Point = Point(self.y, self.x)
+
+    #test
+    test_ssmv_returns_struct() -> unit
+        val p = Point(1, 9)
+        val q = p.swap()
+        assert(q.x == 9, "q.x")
+        assert(q.y == 1, "q.y")
+        // Original unchanged
+        assert(p.x == 1, "p.x")
+        assert(p.y == 9, "p.y")
+
+### Chained: `p.swap().swap()` returns the original
+
+    #test
+    test_ssmv_chained_swap_swap() -> unit
+        val p = Point(2, 3)
+        val q = p.swap().swap()
+        assert(q.x == 2, "x")
+        assert(q.y == 3, "y")
+
+Read method that returns a string
+----------------------------------
+
+    struct Labelled
+        name: string
+        n: int
+
+    Labelled.get_name() -> string = self.name
+
+    Labelled.tagged() -> string = self.name + ":" + str(self.n)
+
+### Returning a string field by value
+
+    #test
+    test_ssmv_string_field_returned() -> unit
+        val a = Labelled("alpha", 1)
+        val s = a.get_name()
+        assert(s == "alpha", s"got '$s'")
+
+### Returning a computed string
+
+    #test
+    test_ssmv_computed_string() -> unit
+        val a = Labelled("beta", 7)
+        val s = a.tagged()
+        assert(s == "beta:7", s"got '$s'")
+
+Nested struct field — method on inner via outer
+------------------------------------------------
+
+    struct Region
+        center: Point
+        radius: int
+
+    Region.center_x() -> int = self.center.x
+
+    Region.center_dist() -> int = self.center.dist_sq()
+
+### Direct nested-field read
+
+    #test
+    test_ssmv_nested_field_via_method() -> unit
+        val r = Region(Point(3, 4), 10)
+        assert(r.center_x() == 3, "x")
+
+### Calling a nested struct's method through outer's method
+
+    #test
+    test_ssmv_inner_method_via_outer() -> unit
+        val r = Region(Point(3, 4), 10)
+        assert(r.center_dist() == 25, "3²+4²")

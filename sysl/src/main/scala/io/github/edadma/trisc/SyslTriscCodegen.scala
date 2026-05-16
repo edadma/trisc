@@ -1460,6 +1460,18 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  ldd r3, r3, r0")
         emitAddImm(4, 7, off)
         emit("  std r3, r4, r0")
+    else if isStructLikeTempAddr(arg) then
+      // Method-on-temporary receiver passed as a stack arg (e.g. `outer(inner())`
+      // where `inner()` returns a struct by value, and the outer takes the
+      // struct's address). genExpr leaves r1 pointing INTO the inner call's
+      // hidden return slot (which lives on the stack just above us). The
+      // generic rewind below would reclaim the inner ret slot before the pshd,
+      // and pshd would then write the pointer value INTO the freed slot it
+      // points to — corrupting the struct data. Leak the inner ret slot until
+      // the outer's final cleanup; the post-call `argsAllocated = cleanupTo -
+      // stackOffset` reclaims it then.
+      emit("  pshd r1")
+      stackOffset -= 8
     else
       val extra = preOffset - stackOffset
       if extra > 0 then
