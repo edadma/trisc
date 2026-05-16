@@ -409,8 +409,12 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("""@.fmt_f = private unnamed_addr constant [3 x i8] c"%g\00"""")
     emit("""@.fmt_fn = private unnamed_addr constant [4 x i8] c"%g\0A\00"""")
     emit("""@.fmt_ld = private unnamed_addr constant [4 x i8] c"%ld\00"""")
-    emit("""@.str.true = private unnamed_addr constant [5 x i8] c"true\00"""")
-    emit("""@.str.false = private unnamed_addr constant [6 x i8] c"false\00"""")
+    // Prefix bool literals with an i64 -1 refcount header (immortal sentinel)
+    // so the rc-incr/decr machinery in str() consumers leaves them alone.
+    // Without the header `str(true)`'s buffer pointer would land 8 bytes
+    // *after* an unrelated global and the rc-incr load would SIGBUS.
+    emit("""@.str.true = private unnamed_addr constant <{ i64, [5 x i8] }> <{ i64 -1, [5 x i8] c"true\00" }>""")
+    emit("""@.str.false = private unnamed_addr constant <{ i64, [6 x i8] }> <{ i64 -1, [6 x i8] c"false\00" }>""")
     emit("""@.str.newline = private unnamed_addr constant [1 x i8] c"\0A"""")
     emit("")
 
@@ -3352,13 +3356,14 @@ class SyslLLVMCodegen(target: String = "host"):
             genExpr(inner)
           case SyslType.BoolType =>
             val v = genExpr(inner)
-            // bool → "true" or "false" via select
+            // bool → "true" or "false". Step past the i64 -1 refcount header
+            // into the data byte array before selecting.
             val cmp = newReg()
             emit(s"  $cmp = icmp ne i8 $v, 0")
             val truePtr = newReg()
             val falsePtr = newReg()
-            emit(s"  $truePtr = getelementptr [5 x i8], [5 x i8]* @.str.true, i32 0, i32 0")
-            emit(s"  $falsePtr = getelementptr [6 x i8], [6 x i8]* @.str.false, i32 0, i32 0")
+            emit(s"  $truePtr = getelementptr <{ i64, [5 x i8] }>, <{ i64, [5 x i8] }>* @.str.true, i32 0, i32 1, i32 0")
+            emit(s"  $falsePtr = getelementptr <{ i64, [6 x i8] }>, <{ i64, [6 x i8] }>* @.str.false, i32 0, i32 1, i32 0")
             val selPtr = newReg()
             emit(s"  $selPtr = select i1 $cmp, i8* $truePtr, i8* $falsePtr")
             val selLen = newReg()

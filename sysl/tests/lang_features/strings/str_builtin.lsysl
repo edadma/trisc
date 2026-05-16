@@ -17,13 +17,10 @@ gaps.
 
 File-local prefix `Sbi` (str-builtin).
 
-**TODO — `str(bool)` still diverges three ways across the seven
-backends; a language-design decision is needed (which output form
-is canonical) before pinning. See
-`feedback_sysl_str_bool_divergence.md`. The float divergence has
-been fixed: all seven backends now produce the trimmed `"3.14"`
-form, with whole numbers rendering as bare integers (`"42"`, not
-`"42.0"`).**
+Bool and float coverage is now pinned. `str(bool)` produces
+`"true"` / `"false"` on every backend, and `str(f64)` produces the
+trimmed `"3.14"` form, with whole numbers rendering as bare
+integers (`"42"`, not `"42.0"`).
 
     module sysl.tests.lang_features
 
@@ -107,6 +104,34 @@ values therefore render as bare integers without a `.0` suffix.
     test_sbi_float_sub_one() -> unit
         val x: f64 = 0.5
         assert(str(x) == "0.5", s"str(0.5); got '${str(x)}'")
+
+Booleans — `"true"` / `"false"`
+-------------------------------
+
+`str(bool)` is canonical across all seven backends as the word
+`"true"` or `"false"` (not the numeric `"1"`/`"0"` form used by
+some C-like languages).
+
+    #test
+    test_sbi_bool_true() -> unit
+        val b = true
+        assert(str(b) == "true", s"str(true); got '${str(b)}'")
+
+    #test
+    test_sbi_bool_false() -> unit
+        val b = false
+        assert(str(b) == "false", s"str(false); got '${str(b)}'")
+
+    #test
+    test_sbi_bool_negated() -> unit
+        val b = true
+        val n = !b
+        assert(str(n) == "false", s"str(!true); got '${str(n)}'")
+
+    #test
+    test_sbi_bool_comparison() -> unit
+        val b = (1 < 2)
+        assert(str(b) == "true", s"str(1<2); got '${str(b)}'")
 
 Strings — identity
 ------------------

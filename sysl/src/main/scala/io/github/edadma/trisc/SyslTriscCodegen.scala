@@ -4725,32 +4725,62 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
       case TStr(inner) =>
         // Convert value to string — dispatch on type.
-        // __str_int handles integers/bool (bits interpreted as signed i64);
-        // __str_float handles f64 values.
+        // BoolType writes a {ptr, len} pair pointing at one of two immortal
+        // rodata literals ("true" / "false"). FloatType uses __str_float;
+        // everything else (including narrow ints) goes through __str_int.
         val isFloat = inner.typ.isFloat
-        genExpr(inner) // r1 = value (integer bits or f64 bits)
-        if isFloat then needsStrFloat = true
-        else needsStrInt = true
-        needsAllocExtern = true
-        // Allocate 16-byte return slot for the result string
-        emitAddImm(7, 7, -16)
-        stackOffset -= 16
-        emit("  std r0, r7, r0")
-        emitAddImm(2, 7, 8)
-        emit("  std r0, r2, r0")
-        // Push value as stack arg
-        emit("  pshd r1")
-        stackOffset -= 8
-        // r1 = hidden return slot ptr (just above the pushed value)
-        emitAddImm(1, 7, 8)
-        // Call helper
-        val mp = if modulePrefix.nonEmpty then s"_$modulePrefix" else ""
-        if isFloat then emit(s"  movi r4, __str_float$mp")
-        else emit(s"  movi r4, __str_int$mp")
-        emit("  jalr r6, r4")
-        // Clean value arg
-        emitAddImm(7, 7, 8)
-        stackOffset += 8
+        val isBool  = inner.typ.underlying == SyslType.BoolType
+        if isBool then
+          // Allocate 16-byte return slot.
+          emitAddImm(7, 7, -16)
+          stackOffset -= 16
+          emit("  std r0, r7, r0")
+          emitAddImm(2, 7, 8)
+          emit("  std r0, r2, r0")
+          // Intern the two rodata literals (immortal refcount header + bytes).
+          val (trueLbl, _)  = internStringLiteral("true")
+          val (falseLbl, _) = internStringLiteral("false")
+          genExpr(inner)                          // r1 = bool value (0 or 1)
+          val falseBranch = newLabel("strb_false")
+          val endLbl      = newLabel("strb_end")
+          emit(s"  beq r1, r0, $falseBranch")
+          emit(s"  movi r1, $trueLbl")
+          emit("  ldi r2, 4")
+          emit(s"  bra $endLbl")
+          emit(s"$falseBranch")
+          emit(s"  movi r1, $falseLbl")
+          emit("  ldi r2, 5")
+          emit(s"$endLbl")
+          // Write {ptr=r1, len=r2} into the return slot at sp.
+          emit("  std r1, r7, r0")
+          emitAddImm(3, 7, 8)
+          emit("  std r2, r3, r0")
+          // Return slot address in r1 (ABI for string-typed expressions).
+          emit("  mov r1, r7")
+        else
+          genExpr(inner) // r1 = value (integer bits or f64 bits)
+          if isFloat then needsStrFloat = true
+          else needsStrInt = true
+          needsAllocExtern = true
+          // Allocate 16-byte return slot for the result string
+          emitAddImm(7, 7, -16)
+          stackOffset -= 16
+          emit("  std r0, r7, r0")
+          emitAddImm(2, 7, 8)
+          emit("  std r0, r2, r0")
+          // Push value as stack arg
+          emit("  pshd r1")
+          stackOffset -= 8
+          // r1 = hidden return slot ptr (just above the pushed value)
+          emitAddImm(1, 7, 8)
+          // Call helper
+          val mp = if modulePrefix.nonEmpty then s"_$modulePrefix" else ""
+          if isFloat then emit(s"  movi r4, __str_float$mp")
+          else emit(s"  movi r4, __str_int$mp")
+          emit("  jalr r6, r4")
+          // Clean value arg
+          emitAddImm(7, 7, 8)
+          stackOffset += 8
         // r1 = address of return slot (which now contains {ptr, len})
         emit("  mov r1, r7")
 

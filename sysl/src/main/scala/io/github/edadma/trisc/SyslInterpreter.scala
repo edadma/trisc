@@ -914,10 +914,21 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TStr(inner) =>
         val v = evalAny(inner, env)
-        val s = v match
-          case IntVal(n) => n.toString
-          case FloatVal(d) => formatDouble(d)
-          case _ => throw RuntimeError(s"str(): unsupported value $v")
+        val s = inner.typ.underlying match
+          case SyslType.BoolType =>
+            // bool → "true" / "false" — canonical across all seven backends.
+            // The numeric "1"/"0" form predates a deliberate choice; aligning
+            // here also fixes the prior interpreter divergence flagged in
+            // feedback_sysl_str_bool_divergence.md.
+            v match
+              case IntVal(0) => "false"
+              case IntVal(_) => "true"
+              case _ => throw RuntimeError(s"str(bool): unexpected non-int value $v")
+          case _ =>
+            v match
+              case IntVal(n) => n.toString
+              case FloatVal(d) => formatDouble(d)
+              case _ => throw RuntimeError(s"str(): unsupported value $v")
         StringVal(s.getBytes("UTF-8"))
 
       case TFmtStr(inner, spec) =>
