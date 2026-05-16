@@ -1799,7 +1799,81 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 )
                 importedConcreteImplKeys += ((traitName, resolvedTargets))
               }
+        case VarDeclAST(name, typOpt, init, _, isMutable, attrs, _, isConst) =>
+          // Module-level `val` / `const`: register a forward stub in globalScope
+          // so cross-sibling `VarRefAST(name)` lookups don't throw during
+          // pre-collection. Without this, two siblings that each define a const
+          // (or `val literal`) the other references form an unbreakable mutual-
+          // undefined cycle in Step 4b's fix-point loop — convergence stalls,
+          // both files miss the packageMetaCache, and Step 5 surfaces a
+          // misleading `undefined variable` from a third file that depends on
+          // the cascade victim.
+          //
+          // Type is computed conservatively: explicit annotation wins; otherwise
+          // we inspect the initializer and only register if we can pin the type
+          // exactly (literal int → I32/I64 by the same rule as IntLitAST in
+          // analyzeExpr; literal bool → BoolType; const-fold over already-known
+          // forward consts). Anything else is left for the own-file pass — a
+          // wrong stub type poisons type-checking far away (e.g. an int param
+          // mistakenly fed an i64 forward-stub fails with "expects int, got i64").
+          if !globalScope.contains(name) && !attrs.exists(_.name == "address") then
+            scala.util.Try {
+              val stubInfo: Option[(SyslType, Option[Long])] = typOpt match
+                case Some(t) =>
+                  val rt = resolveType(t)
+                  Some((rt, tryConstEvalInit(init)))
+                case None =>
+                  initStubType(init).map(t => (t, tryConstEvalInit(init)))
+              stubInfo.foreach { case (resolvedType, foldedOpt) =>
+                val mangledName = if shouldMangle(name) then mangleName(name) else name
+                globalScope(name) = SymInfo(mangledName, resolvedType, mutable = isMutable, isConst = isConst)
+                externalSymbols += name
+                foldedOpt.foreach { v =>
+                  compileTimeConstants(name) = v
+                  compileTimeConstants(mangledName) = v
+                }
+              }
+            }
         case _ => ()
+
+  /** Type stub for sibling forward-decl: only return a type when we can pin it
+   *  exactly from the AST. Returns None for anything we'd have to guess at. */
+  private def initStubType(init: ExpressionAST): Option[SyslType] =
+    init match
+      case IntLitAST(n) =>
+        Some(if n > 0xFFFFFFFFL || n < -0x80000000L then IntType(64) else IntType(32))
+      case TypedIntLitAST(_, typeName) =>
+        scala.util.Try(resolveType(NamedTypeAST(typeName))).toOption
+      case BoolLitAST(_) => Some(BoolType)
+      case UnaryAST("-", inner) => initStubType(inner)
+      case BinaryAST(l, _, r) =>
+        // Conservative: only return a type when both sides agree.
+        (initStubType(l), initStubType(r)) match
+          case (Some(lt), Some(rt)) if lt == rt => Some(lt)
+          case _ => None
+      case _ => None
+
+  /** Best-effort literal evaluation for sibling forward-decl pre-registration. */
+  private def tryConstEvalInit(init: ExpressionAST): Option[Long] =
+    init match
+      case IntLitAST(n) => Some(n)
+      case BoolLitAST(b) => Some(if b then 1L else 0L)
+      case UnaryAST("-", IntLitAST(n)) => Some(-n)
+      case BinaryAST(l, op, r) =>
+        for li <- tryConstEvalInit(l); ri <- tryConstEvalInit(r) yield op match
+          case "+" => li + ri
+          case "-" => li - ri
+          case "*" => li * ri
+          case "/" => if ri != 0 then li / ri else 0L
+          case "%" => if ri != 0 then li % ri else 0L
+          case "<<" => li << ri
+          case ">>" => li >> ri
+          case "&" => li & ri
+          case "|" => li | ri
+          case "^" => li ^ ri
+          case _ => 0L
+      case VarRefAST(n) if compileTimeConstants.contains(n) => Some(compileTimeConstants(n))
+      case _ => None
 
   def analyze(programIn: ProgramAST): TProgram =
     // Pre-pass 0: extract module name, then lower extension blocks. Module

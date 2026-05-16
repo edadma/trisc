@@ -591,4 +591,54 @@ class SyslModuleSystemTests extends AnyFreeSpec with Matchers {
     ex.getMessage should include("mymod/proto")
     ex.getMessage should include("cannot access field 'fnordfield' on string")
   }
+
+  // Regression for the sibling val/const mutual-reference cycle. Without
+  // forward registration of module-level `val`/`const`, two siblings that
+  // each reference a val defined in the other dead-lock Step 4b's fix-point
+  // loop: file A fails iteration 1 (B's val undefined), file B fails iteration
+  // 1 (A's val undefined). No file succeeds; `changed = false`; the loop exits
+  // with both files unpublished; Step 5 then surfaces a misleading `undefined
+  // variable` from a third sibling. Surfaced when splitting oskit/posix/shim.lsysl
+  // into oskit/posix/{shim,epoll}.lsysl — both files defined consts the other
+  // referenced.
+  "siblings with mutually-referenced module-level vals compile cleanly" in {
+    val sources = Map(
+      "twoval/a" ->
+        """module twoval
+          |val FROM_A = 7
+          |use_b() -> int = FROM_B
+          |""".stripMargin,
+      "twoval/b" ->
+        """module twoval
+          |val FROM_B = 11
+          |use_a() -> int = FROM_A
+          |""".stripMargin,
+      "twoval/main" ->
+        """module twoval
+          |main() -> int = use_a() + use_b()
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    // Compile should succeed; result.units carries the typed AST.
+    result.units.map(_.name).toSet should contain allOf ("twoval/a", "twoval/b", "twoval/main")
+  }
+
+  "siblings with mutually-referenced consts compile cleanly" in {
+    val sources = Map(
+      "twoconst/a" ->
+        """module twoconst
+          |const FROM_A: i32 = 7
+          |use_b() -> i32 = FROM_B
+          |""".stripMargin,
+      "twoconst/b" ->
+        """module twoconst
+          |const FROM_B: i32 = 11
+          |use_a() -> i32 = FROM_A
+          |""".stripMargin,
+    )
+    val driver = new SyslDriver
+    val result = driver.compile(sources)
+    result.units.map(_.name).toSet should contain allOf ("twoconst/a", "twoconst/b")
+  }
 }
