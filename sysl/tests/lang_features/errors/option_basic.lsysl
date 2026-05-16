@@ -1,0 +1,214 @@
+Option[T] — Construction, Match, Unwrap
+========================================
+
+Per reference §"Generic Enums (Tagged Unions)", `Option[T]` is
+the canonical sysl sum type for "value or absent":
+
+```
+enum Option[T]
+    Some(value: T)
+    None
+```
+
+This file pins the basic `Option`-style surfaces on a
+file-local `Sob` enum (avoiding collision with `std.option`'s
+`Option`):
+
+- Constructing `Some(v)` and inferring `T` from `v`.
+- Constructing `None` (requires an expected type since it
+  has no payload to infer from).
+- Pattern matching with both variants covered.
+- `Some`-payload binding inside `match`.
+- A simple `unwrap`-like helper: pattern-match and trap on
+  None.
+- A simple `unwrap_or`-like helper: return default on None.
+- Round-tripping through a function (Option in and Option out).
+- Option carrying string payload.
+- Option carrying struct payload.
+
+File-local prefix `Sob` (Sysl Option Basic).
+
+    module sysl.tests.lang_features
+
+    enum SobOpt[T]
+        SobSome(value: T)
+        SobNone
+
+Construction and matching
+--------------------------
+
+### Construct Some(int) — type inferred from argument
+
+    #test
+    test_sob_construct_some_int() -> unit
+        val o = SobSome(42)
+        // match to extract
+        var r = 0
+        o match
+            SobSome(v) -> r = v
+            SobNone -> r = -1
+        assert(r == 42, s"got $r")
+
+### Construct None with explicit type
+
+    #test
+    test_sob_construct_none_explicit_type() -> unit
+        val o: SobOpt[int] = SobNone
+        var r = 0
+        o match
+            SobSome(v) -> r = v
+            SobNone -> r = -1
+        assert(r == -1, "none arm fired")
+
+### Some / None distinguished by match
+
+    #test
+    test_sob_some_none_distinct() -> unit
+        val a = SobSome(7)
+        val b: SobOpt[int] = SobNone
+        var ar = 0
+        var br = 0
+        a match
+            SobSome(v) -> ar = v
+            SobNone -> ar = -99
+        b match
+            SobSome(v) -> br = v
+            SobNone -> br = -99
+        assert(ar == 7, "a unwraps to 7")
+        assert(br == -99, "b is none")
+
+### Match binds the payload as new local
+
+    #test
+    test_sob_match_binds_payload() -> unit
+        val o = SobSome(99)
+        var sum = 0
+        o match
+            SobSome(v) ->
+                sum = v + v
+            SobNone -> sum = 0
+        assert(sum == 198, s"got $sum")
+
+`unwrap`-like helper (trap on None)
+------------------------------------
+
+    sob_unwrap(o: SobOpt[int]) -> int
+        o match
+            SobSome(v) -> v
+            SobNone -> panic("unwrap on None")
+
+### Successful unwrap
+
+    #test
+    test_sob_unwrap_some() -> unit
+        val o = SobSome(123)
+        assert(sob_unwrap(o) == 123, "got value")
+
+### Unwrap twice on different Somes
+
+    #test
+    test_sob_unwrap_two_somes() -> unit
+        val a = SobSome(10)
+        val b = SobSome(20)
+        assert(sob_unwrap(a) + sob_unwrap(b) == 30, "sum")
+
+`unwrap_or`-like helper (default on None)
+------------------------------------------
+
+    sob_unwrap_or(o: SobOpt[int], default: int) -> int
+        o match
+            SobSome(v) -> v
+            SobNone -> default
+
+### unwrap_or on Some returns the value
+
+    #test
+    test_sob_unwrap_or_some() -> unit
+        val o = SobSome(42)
+        assert(sob_unwrap_or(o, 999) == 42, "uses value")
+
+### unwrap_or on None returns the default
+
+    #test
+    test_sob_unwrap_or_none() -> unit
+        val o: SobOpt[int] = SobNone
+        assert(sob_unwrap_or(o, 999) == 999, "uses default")
+
+Option through a function boundary
+-----------------------------------
+
+A function that takes Option and returns Option — round-trips
+the value across a call.
+
+    sob_map_double(o: SobOpt[int]) -> SobOpt[int]
+        o match
+            SobSome(v) -> SobSome(v * 2)
+            SobNone -> SobNone
+
+### Some flows through, value transformed
+
+    #test
+    test_sob_map_double_some() -> unit
+        val o = SobSome(21)
+        val r = sob_map_double(o)
+        assert(sob_unwrap(r) == 42, "doubled")
+
+### None flows through unchanged
+
+    #test
+    test_sob_map_double_none() -> unit
+        val o: SobOpt[int] = SobNone
+        val r = sob_map_double(o)
+        assert(sob_unwrap_or(r, -1) == -1, "still none")
+
+Option with string payload
+---------------------------
+
+    sob_unwrap_str(o: SobOpt[string]) -> string
+        o match
+            SobSome(s) -> s
+            SobNone -> "(none)"
+
+### Some(string)
+
+    #test
+    test_sob_string_some() -> unit
+        val o = SobSome("hello")
+        assert(sob_unwrap_str(o) == "hello", "got string")
+
+### None — fallback string
+
+    #test
+    test_sob_string_none() -> unit
+        val o: SobOpt[string] = SobNone
+        assert(sob_unwrap_str(o) == "(none)", "fallback")
+
+Option with struct payload
+---------------------------
+
+    struct SobPoint
+        x: int
+        y: int
+
+    sob_unwrap_pt(o: SobOpt[SobPoint], default: SobPoint) -> SobPoint
+        o match
+            SobSome(p) -> p
+            SobNone -> default
+
+### Some(struct) — struct value preserved through match
+
+    #test
+    test_sob_struct_some() -> unit
+        val o = SobSome(SobPoint(3, 4))
+        val p = sob_unwrap_pt(o, SobPoint(0, 0))
+        assert(p.x == 3, "x")
+        assert(p.y == 4, "y")
+
+### None — default struct returned
+
+    #test
+    test_sob_struct_none() -> unit
+        val o: SobOpt[SobPoint] = SobNone
+        val p = sob_unwrap_pt(o, SobPoint(-1, -1))
+        assert(p.x == -1, "default x")
+        assert(p.y == -1, "default y")
