@@ -1,0 +1,118 @@
+Selective Imports — `import M.{a, b}`
+======================================
+
+Per reference §Imports:
+
+> An import with an explicit selector list — `import M.{a, b}` —
+> brings exactly those names from `M` into the importing unit's
+> namespace. Other names from `M` remain inaccessible without
+> additional imports.
+
+This file pins the **positive** half of selective import:
+
+- A name brought in by `{name}` is callable, indistinguishable from
+  the function as defined in its home module.
+- Multiple names in one selector list each appear bound.
+- Selectors don't collide with locals or with other imports.
+- A selective import can sit alongside a qualified import — the same
+  module imported twice supplies both the qualified-access form and
+  the bare-name form.
+
+What this file does NOT pin:
+
+- Compile-time *rejection* of references to non-selected names —
+  those negative tests need a compile-error mechanism we don't have
+  in the runtime test runner. They live in JVM-side analyzer tests.
+
+File-local prefix `Is` (Import-Selective).
+
+    module sysl.tests.lang_features.modules.import_selective
+
+    import std.strings.{trim, split}
+
+
+### A single selectively-imported name is callable
+
+`trim(s, cutset)` is brought in by the selector list and used by its
+bare name. The return value matches `std.strings.trim`'s contract.
+
+    #test
+    test_is_trim_callable() -> unit
+        val s = trim("xxhelloxx", "x")
+        assert(s == "hello", s"got '$s'")
+
+
+### Multiple selectively-imported names each appear bound
+
+Both `trim` and `split` were named in the same `{...}` group; both
+must resolve.
+
+    #test
+    test_is_both_names_in_one_group_are_bound() -> unit
+        val a = trim("  hi  ", " ")
+        assert(a == "hi", s"trim got '$a'")
+        val parts = split("a,b,c", ",")
+        assert(len(parts) == 3, s"split len=${len(parts)}")
+        assert(parts[0] == "a", "parts[0]")
+        assert(parts[1] == "b", "parts[1]")
+        assert(parts[2] == "c", "parts[2]")
+
+
+### Selectively-imported name does not shadow a local of the same name
+
+A local `var trim` is a perfectly legal identifier (locals always win
+over module-level names within their scope). The import is silent
+inside the local's region.
+
+    #test
+    test_is_selective_does_not_force_shadow() -> unit
+        val trim = 42
+        assert(trim == 42, "local trim wins inside its scope")
+
+
+### Selectively-imported names compose with other operations
+
+The imported `trim` integrates with sysl-builtins (`len`,
+interpolation, equality) — it's just a function value like any other.
+
+    #test
+    test_is_selective_composes_with_builtins() -> unit
+        val raw = "   spaces and tabs\t\t\t"
+        val cleaned = trim(raw, " \t")
+        assert(len(cleaned) == 15, s"len=${len(cleaned)}, got '$cleaned'")
+        assert(cleaned == "spaces and tabs", s"got '$cleaned'")
+
+
+### Selectively-imported `split` returns the right shape
+
+`split` returns `[]string`. Pin the slice's length and element access
+via index expressions so the imported function's return type isn't
+secretly degraded.
+
+    #test
+    test_is_split_returns_slice_of_string() -> unit
+        val parts = split("alpha|beta|gamma|delta", "|")
+        assert(len(parts) == 4, s"len=${len(parts)}")
+        assert(parts[0] == "alpha", "first")
+        assert(parts[3] == "delta", "last")
+        // Iteration also works on the imported result.
+        var concat = ""
+        for p in parts
+            concat = concat + p
+        assert(concat == "alphabetagammadelta", s"concat='$concat'")
+
+
+### Selectively-imported names survive a non-trivial call site
+
+Combining `trim` and `split` in one expression chain pins both names
+through analyzer + codegen in a tight pipeline. Any miscompilation
+that drops one symbol would surface here as "undefined function" or
+mistyped output.
+
+    #test
+    test_is_chained_use() -> unit
+        val parts = split(trim("  a;b;c  ", " "), ";")
+        assert(len(parts) == 3, "chain len")
+        assert(parts[0] == "a", "chain[0]")
+        assert(parts[1] == "b", "chain[1]")
+        assert(parts[2] == "c", "chain[2]")
