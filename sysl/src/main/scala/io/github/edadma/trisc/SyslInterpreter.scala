@@ -916,7 +916,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         val v = evalAny(inner, env)
         val s = v match
           case IntVal(n) => n.toString
-          case FloatVal(d) => d.toString
+          case FloatVal(d) => formatDouble(d)
           case _ => throw RuntimeError(s"str(): unsupported value $v")
         StringVal(s.getBytes("UTF-8"))
 

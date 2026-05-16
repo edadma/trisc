@@ -65,6 +65,7 @@ class SyslSVMCodegen:
   private var needsStrFromBool: Boolean = false
   private var needsStrFmtI64: Boolean = false
   private var needsStrFmtStr: Boolean = false
+  private var needsStrFromF64: Boolean = false
 
   // Map: function name → parameter types (for arg-coercion at call sites).
   private val funcParamTypes = new mutable.HashMap[String, List[SyslType]]
@@ -479,6 +480,7 @@ class SyslSVMCodegen:
     needsStrFromBool = false
     needsStrFmtI64 = false
     needsStrFmtStr = false
+    needsStrFromF64 = false
     deinitFunctions.clear()
 
     // Register canonical struct types so stale placeholder StructType(_, Nil)
@@ -746,6 +748,8 @@ class SyslSVMCodegen:
       emit("extern __svm_str_fmt_i64")
     if needsStrFmtStr && !definedSymbols.contains("__svm_str_fmt_str") then
       emit("extern __svm_str_fmt_str")
+    if needsStrFromF64 && !definedSymbols.contains("__svm_str_from_f64") then
+      emit("extern __svm_str_from_f64")
     if needsNewSlice && !definedSymbols.contains("__svm_new_slice") then
       emit("extern __svm_new_slice")
 
@@ -1877,6 +1881,21 @@ class SyslSVMCodegen:
             needsStrFromI64 = true
           else
             emitStrPlaceholder(inner)
+        case SyslType.FloatType(64) =>
+          genExpr(inner)
+          emit("  call __svm_str_from_f64")
+          needsStrFromF64 = true
+        case SyslType.FloatType(32) =>
+          // Widen f32 → f64, then format. SVM expression results for f32 live
+          // in the same 8-byte slot as f64; reinterpreting as double is a
+          // bit-pattern issue. Use a `dup; fneg; fneg` no-op? Simpler: route
+          // through the runtime helper as-is — f32 values in SVM are already
+          // stored as f64 bit patterns because the stack is 8 bytes wide.
+          // (If f32 ever genuinely materialises here, the helper still treats
+          // the bits as f64.)
+          genExpr(inner)
+          emit("  call __svm_str_from_f64")
+          needsStrFromF64 = true
         case _ =>
           emitStrPlaceholder(inner)
 

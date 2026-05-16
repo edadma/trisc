@@ -1107,6 +1107,242 @@ object SVMRuntime:
        |  local_get 7
        |  ret
        |
+       |; __svm_str_from_f64(x: f64) -> *string
+       |; Format a finite double as decimal with up to 6 fractional digits.
+       |; Trailing zeros (and a trailing '.') are trimmed so `3.14` looks like
+       |; the interpreter / LLVM output rather than the TRISC "3.140000" style.
+       |; NaN and infinities are not handled (no current call site exercises them).
+       |;
+       |; Memory layout, low → high:
+       |;   [base+0..15]   string descriptor {ptr, len}
+       |;   [base+16..47]  main buffer (32 bytes — sign + ≤17 int digits + '.' + 6 frac)
+       |;   [base+48..63]  digit scratch (16 bytes — LSB-first integer digits)
+       |;
+       |; Locals:
+       |;   0 = x           (possibly negated)
+       |;   1 = struct_addr
+       |;   2 = main_buf
+       |;   3 = is_neg
+       |;   4 = int_part_f
+       |;   5 = int_int     (u64 integer part)
+       |;   6 = frac_int    (u64 0..999999)
+       |;   7 = write_ptr   (cursor in main_buf)
+       |;   8 = digit_buf
+       |;   9 = scratch (digit_count / loop counter)
+       |;  10 = scratch (loop index)
+       |;  11 = scratch (probe pointer for trim loop)
+       |global __svm_str_from_f64, func
+       |__svm_str_from_f64:
+       |  frame 12
+       |  local_set 0
+       |  ; Allocate 64 bytes (struct + main + scratch).
+       |  push_i64 __sp
+       |  dup
+       |  load64
+       |  push_i8 64
+       |  sub
+       |  dup
+       |  rot
+       |  store64
+       |  local_set 1
+       |  local_get 1
+       |  push_i8 16
+       |  add
+       |  local_set 2
+       |  local_get 1
+       |  push_i8 48
+       |  add
+       |  local_set 8
+       |  ; is_neg = (x < 0.0)
+       |  local_get 0
+       |  push_f0
+       |  flt
+       |  local_set 3
+       |  ; if neg: x = -x
+       |  local_get 3
+       |  jumpz .ffd_have_x
+       |  local_get 0
+       |  fneg
+       |  local_set 0
+       |.ffd_have_x:
+       |  ; int_part_f = ftrunc(x)
+       |  local_get 0
+       |  ftrunc
+       |  local_set 4
+       |  ; int_int = f2u(int_part_f)
+       |  local_get 4
+       |  f2u
+       |  local_set 5
+       |  ; frac_int = f2u(fround((x - int_part_f) * 1000000.0))
+       |  local_get 0
+       |  local_get 4
+       |  fsub
+       |  push_i32 1000000
+       |  i2f
+       |  fmul
+       |  fround
+       |  f2u
+       |  local_set 6
+       |  ; Carry: if frac_int >= 1000000 then frac_int -= 1000000; int_int += 1
+       |  local_get 6
+       |  push_i32 1000000
+       |  geu
+       |  jumpz .ffd_no_carry
+       |  local_get 6
+       |  push_i32 1000000
+       |  sub
+       |  local_set 6
+       |  local_get 5
+       |  inc
+       |  local_set 5
+       |.ffd_no_carry:
+       |  ; Extract integer-part digits LSB-first into digit_buf.
+       |  push_0
+       |  local_set 9                  ; digit_count
+       |  ; Special-case int_int == 0 → one '0' digit.
+       |  local_get 5
+       |  jumpnz .ffd_int_loop
+       |  push_i8 48
+       |  local_get 8
+       |  store8
+       |  push_1
+       |  local_set 9
+       |  jump .ffd_int_done
+       |.ffd_int_loop:
+       |  local_get 5
+       |  eqz
+       |  jumpnz .ffd_int_done
+       |  local_get 5
+       |  push_i8 10
+       |  modu
+       |  push_i8 48
+       |  add
+       |  local_get 8
+       |  local_get 9
+       |  add
+       |  store8
+       |  local_get 5
+       |  push_i8 10
+       |  divu
+       |  local_set 5
+       |  local_get 9
+       |  inc
+       |  local_set 9
+       |  jump .ffd_int_loop
+       |.ffd_int_done:
+       |  ; Main buffer writes start here.
+       |  local_get 2
+       |  local_set 7
+       |  ; Write '-' if negative.
+       |  local_get 3
+       |  jumpz .ffd_no_sign
+       |  push_i8 45
+       |  local_get 7
+       |  store8
+       |  local_get 7
+       |  inc
+       |  local_set 7
+       |.ffd_no_sign:
+       |  ; Copy int digits MSB-first from digit_buf[count-1..0].
+       |.ffd_int_copy:
+       |  local_get 9
+       |  eqz
+       |  jumpnz .ffd_int_copied
+       |  local_get 9
+       |  dec
+       |  local_set 9
+       |  local_get 8
+       |  local_get 9
+       |  add
+       |  load8
+       |  local_get 7
+       |  store8
+       |  local_get 7
+       |  inc
+       |  local_set 7
+       |  jump .ffd_int_copy
+       |.ffd_int_copied:
+       |  ; Write '.'
+       |  push_i8 46
+       |  local_get 7
+       |  store8
+       |  local_get 7
+       |  inc
+       |  local_set 7
+       |  ; Reserve 6 frac slots and fill in reverse from LSB.
+       |  local_get 7
+       |  push_i8 6
+       |  add
+       |  local_set 7
+       |  push_i8 6
+       |  local_set 9
+       |.ffd_frac_loop:
+       |  local_get 9
+       |  eqz
+       |  jumpnz .ffd_frac_done
+       |  local_get 7
+       |  dec
+       |  local_set 7
+       |  local_get 6
+       |  push_i8 10
+       |  modu
+       |  push_i8 48
+       |  add
+       |  local_get 7
+       |  store8
+       |  local_get 6
+       |  push_i8 10
+       |  divu
+       |  local_set 6
+       |  local_get 9
+       |  dec
+       |  local_set 9
+       |  jump .ffd_frac_loop
+       |.ffd_frac_done:
+       |  ; Restore write_ptr to end of the frac block.
+       |  local_get 7
+       |  push_i8 6
+       |  add
+       |  local_set 7
+       |  ; Trim trailing zeros.
+       |.ffd_trim:
+       |  local_get 7
+       |  dec
+       |  local_set 11
+       |  local_get 11
+       |  load8
+       |  push_i8 48
+       |  eq
+       |  jumpz .ffd_trim_dot_check
+       |  local_get 11
+       |  local_set 7
+       |  jump .ffd_trim
+       |.ffd_trim_dot_check:
+       |  ; If the new last char is '.', drop it too.
+       |  local_get 7
+       |  dec
+       |  local_set 11
+       |  local_get 11
+       |  load8
+       |  push_i8 46
+       |  eq
+       |  jumpz .ffd_finish
+       |  local_get 11
+       |  local_set 7
+       |.ffd_finish:
+       |  local_get 2
+       |  local_get 1
+       |  store64
+       |  local_get 7
+       |  local_get 2
+       |  sub
+       |  local_get 1
+       |  push_i8 8
+       |  add
+       |  store64
+       |  local_get 1
+       |  ret
+       |
        |segment rodata
        |global __svm_str_true_data, data, 5
        |global __svm_str_false_data, data, 6

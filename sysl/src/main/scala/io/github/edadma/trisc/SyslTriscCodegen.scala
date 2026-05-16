@@ -6660,9 +6660,32 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emit("  stb r3, r1, r0")
       emit("  addi r1, r1, 1")
 
-    // Pop total_length and data_ptr
-    emit("  popd r3")              // r3 = total_length
-    emit("  popd r1")              // r1 = data_ptr
+    // Trim trailing '0' digits in the fractional part, then drop a now-orphan
+    // '.' if every fractional digit was zero. This matches the interpreter /
+    // LLVM "3.14" output style instead of the bare "3.140000" the buffer
+    // currently holds. r1 currently sits one past the last written byte.
+    val trimLoop  = newLabel("strf_trim_loop")
+    val trimDone  = newLabel("strf_trim_done")
+    val trimDot   = newLabel("strf_trim_dot")
+    emit(s"$trimLoop")
+    emit("  addi r1, r1, -1")
+    emit("  ldb r2, r1, r0")
+    emit("  ldi r3, 48")           // '0'
+    emit(s"  beq r2, r3, $trimLoop")
+    // Last char isn't '0'; if it's '.' drop it, else step r1 back to one-past-end.
+    emit("  ldi r3, 46")           // '.'
+    emit(s"  beq r2, r3, $trimDot")
+    emit("  addi r1, r1, 1")
+    emit(s"  bra $trimDone")
+    emit(s"$trimDot")
+    // r1 already points AT the '.' — that's the new one-past-end.
+    emit(s"$trimDone")
+
+    // Pop saved (total_length, data_ptr); compute trimmed length from r1.
+    emit("  popd r3")              // r3 = (untrimmed) total_length (discarded)
+    emit("  popd r2")              // r2 = data_ptr (start)
+    emit("  sub r3, r1, r2")       // r3 = trimmed length
+    emit("  mov r1, r2")           // r1 = data_ptr
 
     // Write {ptr, len} to return slot
     emitAddImm(4, 5, 16)

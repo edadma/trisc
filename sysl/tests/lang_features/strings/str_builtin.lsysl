@@ -17,28 +17,13 @@ gaps.
 
 File-local prefix `Sbi` (str-builtin).
 
-**TODO — cross-backend divergence found 2026-05-15, dropped
-from this file pending fixes:**
-
-  - `str(bool)` diverges three ways across the seven
-    backends:
-      * "1" / "0" — interpreter, trisc, riscv64, riscv32
-      * "true" / "false" — svm-host
-      * crash (LLVM `unreachable` / SIGBUS) — llvm-host,
-        wasm32
-    A language-design decision is needed (which output form
-    is canonical) before pinning. See
-    `feedback_sysl_str_bool_divergence.md`.
-
-  - `str(float)` on svm-host emits the placeholder string
-    `"???"` (unimplemented). The other six backends agree on
-    either `"3.14"` (interpreter / LLVM-host / RV / wasm32)
-    or `"3.140000"` (TRISC). See
-    `feedback_sysl_svm_str_float_unimplemented.md`.
-
-This file pins the four surfaces that *do* agree across all
-seven backends — `str()` on int / string / data-enum / fn-
-boundary / interpolation slot.
+**TODO — `str(bool)` still diverges three ways across the seven
+backends; a language-design decision is needed (which output form
+is canonical) before pinning. See
+`feedback_sysl_str_bool_divergence.md`. The float divergence has
+been fixed: all seven backends now produce the trimmed `"3.14"`
+form, with whole numbers rendering as bare integers (`"42"`, not
+`"42.0"`).**
 
     module sysl.tests.lang_features
 
@@ -89,6 +74,39 @@ across calls and across the seven backends.
     test_sbi_int_through_fn() -> unit
         val s = str(sbi_double(5))
         assert(s == "10", s"str(double(5)); got '$s'")
+
+Floats — trimmed decimal
+------------------------
+
+`str()` on a 64-bit float renders the value as decimal with up to
+six fractional digits, trimming trailing zeros (and the decimal
+point itself when every fractional digit is zero). Whole-number
+values therefore render as bare integers without a `.0` suffix.
+
+    #test
+    test_sbi_float_basic() -> unit
+        val x: f64 = 3.14
+        assert(str(x) == "3.14", s"str(3.14); got '${str(x)}'")
+
+    #test
+    test_sbi_float_negative() -> unit
+        val x: f64 = -2.5
+        assert(str(x) == "-2.5", s"str(-2.5); got '${str(x)}'")
+
+    #test
+    test_sbi_float_zero() -> unit
+        val x: f64 = 0.0
+        assert(str(x) == "0", s"str(0.0); got '${str(x)}'")
+
+    #test
+    test_sbi_float_whole() -> unit
+        val x: f64 = 42.0
+        assert(str(x) == "42", s"str(42.0); got '${str(x)}'")
+
+    #test
+    test_sbi_float_sub_one() -> unit
+        val x: f64 = 0.5
+        assert(str(x) == "0.5", s"str(0.5); got '${str(x)}'")
 
 Strings — identity
 ------------------
