@@ -1635,6 +1635,61 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  $result = getelementptr i8, i8* $ptrVal, i64 $byteOff")
         result
 
+      case TBinary(left, "&&", right, _) =>
+        // Short-circuit `&&`: if left is false, don't evaluate right.
+        // The earlier eager-AND lowering violated sysl's documented
+        // short-circuit semantics — visible whenever the RHS has a
+        // side effect.
+        val l = genExpr(left)
+        val lt = exprType(left)
+        val lBool = newReg()
+        emit(s"  $lBool = icmp ne $lt $l, 0")
+        val evalRhs = newLabel("and_rhs")
+        val lhsFalse = newLabel("and_lhs_false")
+        val mergeLbl = newLabel("and_merge")
+        emit(s"  br i1 $lBool, label %$evalRhs, label %$lhsFalse")
+        emitLabel(evalRhs)
+        val r = genExpr(right)
+        val rt = exprType(right)
+        val rBool = newReg()
+        emit(s"  $rBool = icmp ne $rt $r, 0")
+        val rhsExitBlock = currentBlock
+        emit(s"  br label %$mergeLbl")
+        emitLabel(lhsFalse)
+        emit(s"  br label %$mergeLbl")
+        emitLabel(mergeLbl)
+        val resultBool = newReg()
+        emit(s"  $resultBool = phi i1 [ $rBool, %$rhsExitBlock ], [ false, %$lhsFalse ]")
+        val result = newReg()
+        emit(s"  $result = zext i1 $resultBool to $t")
+        result
+
+      case TBinary(left, "||", right, _) =>
+        // Short-circuit `||`: if left is true, don't evaluate right.
+        val l = genExpr(left)
+        val lt = exprType(left)
+        val lBool = newReg()
+        emit(s"  $lBool = icmp ne $lt $l, 0")
+        val evalRhs = newLabel("or_rhs")
+        val lhsTrue = newLabel("or_lhs_true")
+        val mergeLbl = newLabel("or_merge")
+        emit(s"  br i1 $lBool, label %$lhsTrue, label %$evalRhs")
+        emitLabel(evalRhs)
+        val r = genExpr(right)
+        val rt = exprType(right)
+        val rBool = newReg()
+        emit(s"  $rBool = icmp ne $rt $r, 0")
+        val rhsExitBlock = currentBlock
+        emit(s"  br label %$mergeLbl")
+        emitLabel(lhsTrue)
+        emit(s"  br label %$mergeLbl")
+        emitLabel(mergeLbl)
+        val resultBool = newReg()
+        emit(s"  $resultBool = phi i1 [ $rBool, %$rhsExitBlock ], [ true, %$lhsTrue ]")
+        val result = newReg()
+        emit(s"  $result = zext i1 $resultBool to $t")
+        result
+
       case TBinary(left, op, right, _) =>
         var l = genExpr(left)
         var r = genExpr(right)

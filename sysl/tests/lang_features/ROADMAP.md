@@ -342,7 +342,7 @@ Reference §"Operators (by precedence...)", "Chained Comparisons", "Compound Ass
 | File | Tests pinned |
 |---|---|
 | `precedence_arithmetic.lsysl` 🟢 | * / bind tighter than + -; parens override; left-assoc at same level (sub, div, mixed); unary minus binds tighter than binary; full mix (quadratic, diff-of-squares) (21 tests) |
-| `precedence_logical.lsysl` 🔴 | `&&` / `||` / `!`; short-circuit semantics |
+| `precedence_logical.lsysl` 🟢 | truth tables for && / ||; unary ! basics and doubled; && tighter than ||; ! tighter than && / ||; parens override; **short-circuit** for && (LHS-false skips RHS) and || (LHS-true skips RHS), plus 3-way chain short-circuit at start and middle (23 tests). Fixed LLVM codegen which was eager-evaluating both operands |
 | `precedence_bitwise.lsysl` 🔴 | `&`, `|`, `^`, `<<`, `>>`; precedence vs comparison |
 | `chained_comparisons.lsysl` 🔴 | `a < b < c`; evaluation order; mid-chain false short-circuit |
 | `compound_assign.lsysl` 🔴 | `x += y`, `x *= y`, etc.; on locals, fields, slice elements |
