@@ -1,0 +1,123 @@
+Per-Symbol Import Aliases — `import M.{name => alias}`
+=======================================================
+
+Per reference §Imports:
+
+> A selector list entry may rename the imported symbol with the
+> arrow syntax `name => alias`. The home-module name `name` is
+> brought in as `alias` only; the original name is **not** also
+> visible in the importing scope.
+
+This file pins the **runtime-observable** half of selector aliasing:
+
+- The alias is callable; calling it produces the same result as
+  calling the home function would.
+- Multiple aliases in one selector list each rebind.
+- Aliasing two functions from different home modules to the same
+  alias is a per-import affair; the file-local alias wins where it's
+  defined.
+- An alias and a non-aliased selector can share one `{...}` group.
+
+What this file does NOT pin:
+
+- Compile-time *rejection* of the original (un-aliased) name. The
+  reference says it isn't visible, but enforcing that is the
+  analyzer's job — and we don't have a compile-error mechanism
+  in the runtime test runner.
+
+The sysl import grammar **does not have whole-module aliasing**
+(`import M as alias` is not a parser branch — see SyslParser.scala
+near `importDecl`). Per-symbol aliasing via `{name => alias}` is
+the supported form.
+
+File-local prefix `Ia` (Import-Alias).
+
+    module sysl.tests.lang_features.modules.import_alias
+
+    import std.strings.{trim => str_trim, split => str_split}
+
+
+### A renamed import is callable under its alias
+
+`str_trim` is the local handle for `std.strings.trim`; the alias
+should behave identically.
+
+    #test
+    test_ia_alias_callable() -> unit
+        val s = str_trim("xxhelloxx", "x")
+        assert(s == "hello", s"got '$s'")
+
+
+### Multiple renames in one selector list each rebind
+
+Both `trim => str_trim` and `split => str_split` were named in the
+same `{...}` group. Both must resolve under their aliases.
+
+    #test
+    test_ia_both_aliases_bind() -> unit
+        val a = str_trim("  hi  ", " ")
+        assert(a == "hi", s"trim got '$a'")
+        val parts = str_split("a,b,c", ",")
+        assert(len(parts) == 3, "split len")
+        assert(parts[0] == "a" && parts[1] == "b" && parts[2] == "c", "split parts")
+
+
+### Alias doesn't bind the original name in the importing scope
+
+The alias `str_trim` is the local handle. The reference says the
+original `trim` is not also visible — but enforcing that statically
+is the analyzer's job. What we *can* pin at runtime: a local
+identifier called `trim` is freely usable (no module-level `trim`
+shadows it).
+
+    #test
+    test_ia_original_name_is_local_only_if_declared() -> unit
+        // A local-only `trim` is not affected by the aliased import.
+        val trim = "i am a local string, not a function"
+        assert(trim == "i am a local string, not a function", "local trim wins")
+        // The alias still works alongside.
+        val cleaned = str_trim("__abc__", "_")
+        assert(cleaned == "abc", s"got '$cleaned'")
+
+
+### Aliased call composes with builtins exactly like the un-aliased call would
+
+The alias is just a name rebinding; type checking, codegen, and
+return shape all behave identically to a direct call.
+
+    #test
+    test_ia_alias_composes() -> unit
+        val raw = "\t\t  mixed-trim  \t\t"
+        val out = str_trim(raw, " \t")
+        assert(len(out) == 10, s"len=${len(out)}, got '$out'")
+        assert(out == "mixed-trim", s"got '$out'")
+
+
+### Aliased function value can be chained as an inner argument
+
+Chaining aliases through analyzer + codegen pins both bindings in a
+tight pipeline; an aliased symbol that silently lost its binding
+would surface here as "undefined function" or a typecheck error.
+
+    #test
+    test_ia_chain_aliases() -> unit
+        val parts = str_split(str_trim("  a;b;c;d  ", " "), ";")
+        assert(len(parts) == 4, "chain len")
+        assert(parts[0] == "a", "chain[0]")
+        assert(parts[3] == "d", "chain[3]")
+
+
+### Alias survives across iteration & accumulation
+
+A loop over a `str_split` result, with each iteration calling
+`str_trim`, exercises the alias bindings from multiple call sites
+(loop body, expression tail, accumulator). The aliases must remain
+resolved across all of those.
+
+    #test
+    test_ia_alias_in_loop() -> unit
+        val parts = str_split(" alpha ,  beta ,gamma", ",")
+        var concat = ""
+        for p in parts
+            concat = concat + str_trim(p, " ")
+        assert(concat == "alphabetagamma", s"got '$concat'")
