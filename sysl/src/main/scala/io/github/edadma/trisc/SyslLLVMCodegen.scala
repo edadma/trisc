@@ -3663,6 +3663,60 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"  store $lt $newVal, $lt* ${local.reg}")
         oldVal
 
+      case TFieldPreInc(obj, fieldIndex, typ) =>
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
+            val slt = llvmType(inner)
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TFieldPreInc on non-struct type: $other")
+        val ft = st.fields(fieldIndex)._2
+        val fieldType = llvmType(ft)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $fieldType, $fieldType* $gep")
+        val newVal = newReg()
+        if ft.isFloat then
+          emit(s"  $newVal = fadd $fieldType $oldVal, 1.0")
+        else
+          emit(s"  $newVal = add $fieldType $oldVal, 1")
+        emit(s"  store $fieldType $newVal, $fieldType* $gep")
+        newVal // pre-inc returns the NEW value
+
+      case TFieldPreDec(obj, fieldIndex, typ) =>
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
+            val slt = llvmType(inner)
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TFieldPreDec on non-struct type: $other")
+        val ft = st.fields(fieldIndex)._2
+        val fieldType = llvmType(ft)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $fieldType, $fieldType* $gep")
+        val newVal = newReg()
+        if ft.isFloat then
+          emit(s"  $newVal = fsub $fieldType $oldVal, 1.0")
+        else
+          emit(s"  $newVal = sub $fieldType $oldVal, 1")
+        emit(s"  store $fieldType $newVal, $fieldType* $gep")
+        newVal // pre-dec returns the NEW value
+
       case TFieldPostInc(obj, fieldIndex, typ) =>
         val (st, structLt, addr) = obj.typ match
           case pt: SyslType.PtrType =>
