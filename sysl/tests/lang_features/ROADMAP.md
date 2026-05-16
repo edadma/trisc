@@ -166,7 +166,7 @@ Reference §"Control Flow", "If Expression", "Return".
 | `while_loops.lsysl` 🟢 | counted while; while + break; while + continue; never-runs; nested (5 tests) |
 | `for_in_range.lsysl` 🟢 | `0..<n` exclusive; `0..n` inclusive; empty; single-element; negative range (8 tests) |
 | `for_in_slice.lsysl` 🟡 | covered by `slices/slice_iter_for_in.lsysl` with the TRISC `for x in slice` TODO |
-| `for_in_string.lsysl` 🔴 | `for c in s` iterates byte / rune — not yet pinned |
+| `for_in_string.lsysl` 🟢 | `for c in s` iterates **bytes** (one iteration per UTF-8 byte): sum / count / empty / single-byte / multi-byte UTF-8 / left-to-right order / temporary-source via val workaround / single-line `= for` form (10 tests). TRISC TODO commented in-file: iterating a fresh `fn_call()` / concat result fails on TRISC because the parser-level for-each desugar re-evaluates the source per iteration; same shape as the documented TRISC `for x in slice` over a sub-slice gap. Workaround: bind to a `val` first. See `feedback_sysl_trisc_for_in_temporary.md` |
 | `loop_labels.lsysl` 🔴 | `outer: for ...` + `break outer` / `continue outer` — not yet pinned |
 | `early_return.lsysl` 🟢 | early return from loop; nested blocks; ARC refcount cleanup on every path (4 tests). Surfaced+fixed SVM array-pass-by-value bug (emitStore for ArrayType fell through to store64) |
 | `return_implicit.lsysl` 🟢 | `def` expression-bodied function; block-body last-expr return; implicit/explicit match (3 tests) |
