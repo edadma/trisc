@@ -1,0 +1,88 @@
+`#test(should_panic)` — Panic Is Success
+=========================================
+
+Per reference §"`should_panic`":
+
+```sysl
+#test(should_panic)
+test_guard() -> unit
+    panic("this must fire")
+```
+
+A `should_panic` test **passes** iff its body panics. The panic can
+come from:
+
+- An explicit `panic("msg")` call.
+- A failed `assert(false, "...")`.
+- Any explicit failure (`abort()`).
+
+Runtime traps (divide-by-zero, OOB index, null dereference) also
+fail the test, but only on backends where they *trap rather than
+return undefined values*. Behaviour differs: TRISC and the
+interpreter trap on `1 / 0`; LLVM-derived backends emit `sdiv` which
+is UB and may silently produce any value. This file pins **explicit**
+panic sources only — the trap-on-UB behaviour is backend-specific
+and tested elsewhere.
+
+A `should_panic` body that *completes normally* fails the test.
+
+This file pins:
+
+- `#test(should_panic)` accepts a panicking body and reports ✓.
+- Multiple `should_panic` tests in the same file each register
+  independently.
+- Explicit panic sources (`panic` and failing `assert`) both satisfy
+  the should-panic expectation.
+
+The combined form `#test("name", should_panic)` is **not** part of
+the reference's documented attribute grammar. The reference shows
+`should_panic` and named-test as separate forms; combined usage
+parses but the `should_panic` directive is silently ignored. Each
+form is pinned individually below.
+
+Note: testing the *inverse* (a should_panic body that doesn't panic
+should fail) requires the runner to expose "expected failure"
+semantics — not available in this corpus. The pin here is that
+should_panic bodies that DO panic report as ✓.
+
+File-local prefix `Tsp` (Test-Should-Panic).
+
+    module sysl.tests.lang_features
+
+
+### Bare `panic` — primary form
+
+The canonical case: explicit `panic(msg)` call.
+
+    #test(should_panic)
+    tsp_bare_panic() -> unit
+        panic("expected panic")
+
+### Failing `assert` — should_panic catches assertion failures
+
+`assert(false, "...")` is implemented as `panic("...")`. A
+should_panic test with a failing assert is equivalent.
+
+    #test(should_panic)
+    tsp_failing_assert() -> unit
+        assert(false, "expected assertion failure")
+
+### Multiple should_panic tests register independently
+
+Two `should_panic` tests above plus this one — verify the runner
+reports three passes (one per test), not one. The fact that all
+three show ✓ confirms independent registration.
+
+    #test(should_panic)
+    tsp_fourth_distinct() -> unit
+        panic("fourth")
+
+### Panic with an interpolated message
+
+`panic` accepts an interpolated string. should_panic catches it the
+same way.
+
+    #test(should_panic)
+    tsp_interp_message() -> unit
+        var x: int = 42
+        panic(s"computed value $x is out of range")
