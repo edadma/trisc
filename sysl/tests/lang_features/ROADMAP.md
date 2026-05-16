@@ -503,7 +503,7 @@ dedicated pin.
 
 ---
 
-### `attributes/` — #pure, #reads/#writes, #address, #deprecated, #ghost — 🔴 P3
+### `attributes/` — #pure, #reads/#writes, #address, #deprecated, #ghost — 🟢 P3
 
 Reference §"Attributes". Most of these affect tooling rather than
 runtime, but the runtime-affecting ones (`#address`, `#pure`) still
@@ -511,11 +511,20 @@ need pins.
 
 | File | Tests pinned |
 |---|---|
-| `pure_attribute.lsysl` 🔴 | `#pure` fn behaves identically + analyzer marks call-site CSE-able |
-| `address_attribute.lsysl` 🔴 | `#address(0x1000_0000)` maps a var to a fixed PA; read/write hits that address |
-| `deprecated_attribute.lsysl` 🔴 | `#deprecated("use foo2")` emits a warning at call site (compile diagnostic test) |
-| `reads_writes_effects.lsysl` 🔴 | `#reads(...)` / `#writes(...)` accepted; effect-system diagnostics fire |
-| `ghost_decl.lsysl` 🔴 | `#ghost` declarations stripped from non-verification builds |
+| `pure_attribute.lsysl` 🟢 | 12 tests — #pure runtime-equivalence: arithmetic, recursion, mutual recursion, local mutation, const reads, pure→pure calls, expr contexts, match, generics, multi-return, `def` is implicitly #pure |
+| `address_attribute.lsysl` ⚪ | **Dropped** — requires hardware MMIO mapping; interpreter has a virtual map but LLVM/SVM/TRISC/RV/wasm all segfault on writes to hardcoded physical addresses, and `#address` only accepts integer literals (no Sysl-allocated buffer addresses) |
+| `deprecated_attribute.lsysl` 🟢 | 8 tests — runtime-equivalence; ASCII + Unicode + `\xC3\xB1` high-byte reasons all run; deprecation chain; with #pure; empty reason |
+| `reads_writes_effects.lsysl` 🟢 | 9 tests — #reads / #writes runtime: read returns value; write persists; compound assign (+= -= *=); stacked attrs; multi-var; empty effects; annotated→annotated calls; pure call from annotated; conditional writes |
+| `ghost_decl.lsysl` 🟢 | 7 tests — strip pass: ghost var coexists with real code; ghost fn never invoked; require/ensure with ghost refs dropped; real contracts survive; ghost init doesn't run; **match-branch strip regression** (fixed alongside) |
+
+**Strip-pass fix landed.** Surfaced a compiler bug: `stripGhostStmts`
+didn't recurse into `TIfExpr` / `TMatchExpr` inside `TExprStmt`, so
+contract checks cloned into per-branch return tails (via
+`rewriteReturnsForEnsure`) survived with their ghost references
+intact. Two new cases added (`stripExpr` helper +
+`TExprStmt(e) => stripExpr(e)`). Regression tests in
+`ghost_decl.lsysl::test_gh_ensure_with_ghost_call_is_dropped` and
+`::test_gh_match_branch_strips`.
 
 ---
 

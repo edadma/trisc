@@ -2557,6 +2557,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       mapTExpr(e)(walk)
       touches
 
+    // Recurse through TIfExpr / TMatchExpr inside TExprStmt so contract
+    // checks that `rewriteReturnsForEnsure` cloned into per-branch return
+    // tails get the ghost strip applied too. Without this, ghost-touching
+    // ensure clauses survive on every non-fall-through path of a
+    // multi-return-point function body.
+    def stripExpr(e: TExpr): TExpr = e match
+      case TIfExpr(c, tb, eb, t) =>
+        TIfExpr(c, tb.flatMap(stripStmt), eb.map(_.flatMap(stripStmt)), t)
+      case TMatchExpr(scrut, arms, dflt, t) =>
+        val newArms = arms.map(a => TMatchArm(a.patterns, a.guard, a.body.flatMap(stripStmt)))
+        TMatchExpr(scrut, newArms, dflt.map(_.flatMap(stripStmt)), t)
+      case other => other
+
     def stripStmt(s: TStmt): Option[TStmt] = s match
       case TVarStmt(n, _, _, _, true) =>
         ghostLocals += n
@@ -2573,6 +2586,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TLoopStmt(b, lbl)               => Some(TLoopStmt(b.flatMap(stripStmt), lbl))
       case TDeferStmt(inner)               => stripStmt(inner).map(TDeferStmt(_))
       case TMultiStmt(ss)                  => Some(TMultiStmt(ss.flatMap(stripStmt)))
+      case TExprStmt(e)                    => Some(TExprStmt(stripExpr(e)))
       case other                           => Some(other)
 
     stmts.flatMap(stripStmt)
