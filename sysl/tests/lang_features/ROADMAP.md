@@ -321,7 +321,7 @@ Reference §"`?` Operator (Try)".
 
 ## Tier 2 — Specialized
 
-### `integers/` — widths, overflow, intrinsics, within-constraints — 🔴 P2
+### `integers/` — widths, overflow, intrinsics, within-constraints — 🟢 P2
 
 Reference §"Integer Overflow", "Overflow Intrinsics".
 
@@ -331,7 +331,7 @@ Reference §"Integer Overflow", "Overflow Intrinsics".
 | `int_overflow_wrap.lsysl` 🟢 | unsigned wrap (modular) for `+`/`-`/`*` at every width (u8/u16/u32/u64); signed wrap (two's-complement) at every width (i8/i16/i32/i64); `+` MAX+1 → MIN, `-` MIN-1 → MAX, `*` keeps low bits, `i32 MIN * -1` wraps to MIN; result-width identity (`u8 + u8` fits in `u8` — no implicit promotion) (24 tests) |
 | `overflow_intrinsics.lsysl` 🟢 | `wrapping_{add,sub,mul}` at every width matches the default wrap; `saturating_{add,sub,mul}` clamps to type MAX/MIN at u8/u16/u32/i8/i16/i32 boundaries; agree-on-no-overflow and diverge-on-overflow pinned together. Surfaced an SVM signed-saturating bug for narrow widths (i8/i16/i32) — sign-of-result detection only works at 64-bit width where wrapping is forced; SVM does add/sub in full i64 so r doesn't wrap and the old check missed overflow. Fix at `SyslSVMCodegen.scala:2096` adds a `width<64` branch that range-checks `r > maxV` / `r < minV` before clamping. std/ 974/974 on SVM clean. 64-bit signed saturating and `saturating_mul(u32)` omitted today per the reference's TRISC-gap note (28 tests) |
 | `int_within_constraint.lsysl` 🟢 | inclusive `within 0..N` and exclusive `..<` construction at in-range / lower-edge / upper-edge values; `::First` / `::Last` fold to lower/upper bound (`::Last` of `..<10` is 9); `::Valid(x)` is non-trapping bool for in/out-of-range probes; subtype is base-compatible (no `int(a)` cast); arithmetic on subtype yields plain int; `::Valid` guards production before assignment; explicit-width base (`i32 within 0..255`); `const`-named bound; negative-low signed range `-10..10` (20 tests) |
-| `int_within_succ_pred.lsysl` 🔴 | `T::Succ(x)`, `T::Pred(x)` for constrained int types |
+| `int_within_succ_pred.lsysl` 🟢 | `T::Succ(x)` advances by 1, `T::Pred(x)` retreats by 1; both within an inclusive range and the exclusive-upper `..<` variant; `Succ` from `::First` yields `::First+1`, `Pred` from `::Last` yields `::Last-1`; repeated `Succ` walks the range; round-trips `Succ ∘ Pred` = `Pred ∘ Succ` = id; works across zero on a negative-low range `-3..3`; `Succ`/`Pred` results compose with plain int arithmetic (`Succ(x)+Pred(x)=2x`). Trap-on-boundary tests deferred to a future runtime-trap harness (15 tests) |
 
 ---
 
