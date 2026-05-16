@@ -295,7 +295,7 @@ Existing: `struct_return.lsysl` → `structs/struct_return.lsysl`.
 | File | Tests pinned |
 |---|---|
 | `float_extremes.lsysl` 🟢 | NaN, infinity, signed zeros, in-range trunc *(move from top level)* |
-| `float_arithmetic.lsysl` 🔴 | denormals, rounding modes, FP-strict comparisons |
+| `float_arithmetic.lsysl` 🟢 | Exact-representable arithmetic (small integer products, halves, quarters); identity laws (x+0=x, x*1=x, x/1=x, x-x=0); sign correctness; double-half round-trip; three-term sum; polynomial-shaped expr; overflow to ±∞; sign-handling round-trip; int-promote-add associativity (24 tests). Brittle non-exact equality intentionally not pinned. |
 | `float_int_cast.lsysl` 🟢 | `int(f)` exact integer-valued, truncates toward zero on +ve and -ve, half-down on .5; `f64(i)` exact for ±100 range; round-trip integrity for -10..10; casts in arithmetic / float exprs / division; promotion arithmetic. (18 tests) |
 | `float_compare.lsysl` 🟢 | finite-ordering (lt/le/gt/ge/eq/ne, positive & negative); signed-zero equality; **NaN poisons every comparison** (lt, le, gt, ge, eq false; ne true) — fixed TRISC's `<=` / `>=` codegen which was using XOR-flip on `<` (NaN-incorrect); signed-infinity ordering; comparisons in if / && / || (19 tests) |
 | `float_literal_parsing.lsysl` 🟢 | 0.5, 1.5, 0.0, -0.0; positive scientific (1e3, 2.5e2, 1e6, 1.0E5, 1.0e+3); negative scientific (1e-3, 5e-2, 1.5e-1); underscore separators in fractional + integer parts; negative-literals via unary minus; literals as fn arg / return value; mixed-exponent sum. (19 tests) |
