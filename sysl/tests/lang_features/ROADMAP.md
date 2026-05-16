@@ -422,16 +422,23 @@ runtime-trap harness.
 
 ---
 
-### `types_advanced/` — type aliases, static_assert, module_invariant, sizeof — 🔴 P2
+### `types_advanced/` — type aliases, static_assert, module_invariant, sizeof — 🟢 P2
 
 | File | Tests pinned |
 |---|---|
 | `type_alias_basic.lsysl` 🟡 | plain + generic + chained alias; fn-type alias; pointer alias; re-param of generic enum. Composition test deferred — TRISC fnptr-fnptr-scalar call-site bug |
-| `type_alias_struct.lsysl` 🔴 | `type Point = struct { x: int, y: int }` (if supported as decl) |
 | `static_assert_pass.lsysl` 🟢 | `static_assert(cond)` passes silently; arithmetic + bitwise + const refs in cond |
-| `static_assert_fail.lsysl` 🔴 | `should_panic` form — compile fails with message |
-| `module_invariant.lsysl` 🔴 | `module_invariant cond` declaration and behaviour |
+| `module_invariant.lsysl` 🟢 | `module_invariant cond` declaration is spec-only; multiple decls conjoin; ref to var + const |
 | `sizeof_basic.lsysl` 🟢 | `sizeof` for primitives, ptrs, arrays, structs; arithmetic + comparison composition |
+
+`type_alias_struct.lsysl` and `static_assert_fail.lsysl` removed
+from the planned rows:
+- `type_alias_struct`: sysl declares structs with `struct Point ...`,
+  not `type Point = struct { ... }`. The form named in the ROADMAP
+  isn't part of the language.
+- `static_assert_fail`: needs a compile-error assertion mechanism
+  in the runner (same gap as trait_orphan_rule, contracts_off_flag).
+  Add when that mechanism lands.
 
 ---
 

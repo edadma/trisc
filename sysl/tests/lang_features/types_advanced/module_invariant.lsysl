@@ -1,0 +1,176 @@
+`module_invariant` — Spec-Only Module-Scope Predicate
+======================================================
+
+Per reference §"`module_invariant <expr> [, "message"]`":
+
+```sysl
+var counter: int = 0
+var max: int = 100
+
+module_invariant counter >= 0
+module_invariant counter <= max
+```
+
+- Module-scope **verification-only** predicate. Declares a property
+  of module-level state that every public function must preserve.
+- Used by the WhyML / Why3 backend (Phase δ.3): emits the predicate
+  as `predicate module_inv ()` and attaches implicit
+  `requires { module_inv () }` / `ensures { module_inv () }` to
+  every public function.
+- **At runtime: module invariants are spec-only.** They produce no
+  code in any backend (interpreter, LLVM, SVM, TRISC).
+- Multiple declarations are conjoined.
+- Expression must be `bool`-typed and may reference any module-level
+  value or `const` in scope.
+
+This file pins:
+
+- A `module_invariant` declaration parses and compiles successfully.
+- Multiple declarations conjoin (the build succeeds with several).
+- Referencing module-level `var` works.
+- Referencing module-level `const` works.
+- Compound boolean expressions work.
+- Module functions that DO preserve the invariant compile cleanly.
+
+Because module invariants emit no runtime code, the test bodies
+verify only that the program compiled and the module-level state
+behaves as declared. They do NOT verify Why3-side proof outcomes.
+
+File-local prefix `Mi` (Module-Invariant).
+
+    module sysl.tests.lang_features
+
+
+Module-level state and invariants
+----------------------------------
+
+    var mi_counter: int = 0
+    const MiMax = 100
+
+    module_invariant mi_counter >= 0
+    module_invariant mi_counter <= MiMax
+    module_invariant mi_counter >= 0 && mi_counter <= MiMax, "counter in bounds"
+
+
+Module function that preserves the invariant
+---------------------------------------------
+
+    mi_bump()
+        if mi_counter < MiMax then mi_counter = mi_counter + 1
+
+    mi_reset()
+        mi_counter = 0
+
+
+### Compile + run reaches here
+
+    #test
+    test_mi_compile_reached() -> unit
+        // module_invariant emits no runtime code; we just verify the build
+        // succeeded and the module-level var is observable.
+        assert(mi_counter >= 0, "counter starts at 0")
+        assert(mi_counter <= MiMax, "counter starts <= MiMax")
+
+### Function that preserves invariant runs cleanly
+
+    #test
+    test_mi_bump_preserves() -> unit
+        mi_reset()
+        mi_bump()
+        assert(mi_counter == 1, "after one bump")
+        assert(mi_counter >= 0, "invariant holds")
+        assert(mi_counter <= MiMax, "invariant holds")
+        mi_bump()
+        mi_bump()
+        mi_bump()
+        assert(mi_counter == 4, "after four bumps")
+        assert(mi_counter <= MiMax, "still in bounds")
+
+### Saturating-bump preserves the upper bound
+
+    #test
+    test_mi_saturates() -> unit
+        mi_reset()
+        // Walk to MiMax — at the boundary, mi_bump becomes a no-op.
+        var i: int = 0
+        while i < MiMax + 5
+            mi_bump()
+            i = i + 1
+        assert(mi_counter == MiMax, s"saturated at $mi_counter")
+
+
+Additional module-level state with its own invariants
+------------------------------------------------------
+
+A second piece of state with its own invariants — verify that
+multiple unrelated invariants conjoin correctly. Initial values
+are set lazily in the first test that touches them (module-level
+var inits with non-trivial expressions don't reliably evaluate
+across all backends — see feedback_sysl_module_var_init).
+
+    var mi_lo: int = 0
+    var mi_hi: int = 50
+
+    module_invariant mi_lo <= mi_hi
+    module_invariant mi_lo >= 0 - 100
+    module_invariant mi_hi <= 100
+
+    mi_reset_lohi()
+        mi_lo = 0 - 50
+        mi_hi = 50
+
+    mi_widen()
+        mi_lo = mi_lo - 5
+        mi_hi = mi_hi + 5
+
+    mi_narrow()
+        if mi_hi - mi_lo > 2 then
+            mi_lo = mi_lo + 1
+            mi_hi = mi_hi - 1
+
+
+### After explicit reset, state respects all invariants
+
+    #test
+    test_mi_second_state_initial() -> unit
+        mi_reset_lohi()
+        assert(mi_lo == 0 - 50, s"lo=$mi_lo")
+        assert(mi_hi == 50, s"hi=$mi_hi")
+        assert(mi_lo <= mi_hi, "ordered")
+        assert(mi_lo >= 0 - 100, "lo in bound")
+        assert(mi_hi <= 100, "hi in bound")
+
+### Narrowing preserves invariants
+
+    #test
+    test_mi_narrow_preserves() -> unit
+        mi_reset_lohi()
+        mi_narrow()
+        mi_narrow()
+        mi_narrow()
+        assert(mi_lo == 0 - 47, s"lo=$mi_lo")
+        assert(mi_hi == 47, s"hi=$mi_hi")
+        assert(mi_lo <= mi_hi, "still ordered")
+
+
+Const + arithmetic in invariant expression
+-------------------------------------------
+
+    const MiOffset = 10
+    var mi_pos: int = MiOffset
+
+    module_invariant mi_pos >= 0
+    module_invariant mi_pos >= MiOffset / 2
+
+    mi_advance(n: int)
+        if n > 0 then mi_pos = mi_pos + n
+
+### Advancing preserves the const-relative bound
+
+    #test
+    test_mi_const_in_invariant() -> unit
+        mi_pos = MiOffset
+        mi_advance(5)
+        mi_advance(7)
+        assert(mi_pos == MiOffset + 12, s"got $mi_pos")
+        assert(mi_pos >= MiOffset / 2, "invariant holds")
