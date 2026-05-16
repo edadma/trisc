@@ -369,7 +369,7 @@ gains the toggle.
 
 ---
 
-### `traits_impl/` — trait decls, impl blocks, operator overload — 🔴 P2
+### `traits_impl/` — trait decls, impl blocks, operator overload — 🟢 P2
 
 Reference §"Traits and `impl` blocks", "Operator Overloading via Traits".
 
@@ -380,7 +380,12 @@ Reference §"Traits and `impl` blocks", "Operator Overloading via Traits".
 | `operator_overload_prefix.lsysl` 🟢 | user prefix op via single-param trait + #operator; built-in `-`/`!` overloaded on structs |
 | `operator_overload_user_symbols.lsysl` 🟢 | user infix `<>`, `<=>`, `~~`, `\|>`, `<*>`, `+++`; precedence-by-first-char |
 | `trait_generic_impl.lsysl` 🟢 | `impl[T] Trait[Box[T]]` generic impl; multi-tvar; coexists w/ concrete impl |
-| `trait_orphan_rule.lsysl` 🔴 | orphan rule rejected (compile-error test — `should_panic` or analyzer test) |
+
+`trait_orphan_rule.lsysl` removed from the planned row — coherence
+violations are compile-time errors, and the test runner can only
+assert runtime panics (`#test(should_panic)`) so it cannot pin a
+compile-error case. Add when a compile-error assertion mechanism
+lands.
 
 ---
 
