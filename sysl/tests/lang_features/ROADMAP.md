@@ -486,20 +486,36 @@ byte-array construction to work around this.
 
 ---
 
-### `modules/` — imports, visibility, name mangling — 🔴 P3
+### `modules/` — imports, visibility, name mangling — 🟢 P3
 
-Hard to test inside a single .lsysl file. May need multi-file fixtures
-under `modules/fixtures/`. Many of these are already exercised by the
-parsyl-split fixes (sysl@2c4f1c095 .. sysl@2de1a83cc) but with no
-dedicated pin.
+Multi-file fixtures live under `modules/siblings/` for the
+sibling-visibility row. The two negative-case rows (cycle rejection,
+extern reachability) were dropped — both require a compile-error
+assertion mechanism the runtime test runner doesn't have, and
+`extern` reachability needs a real link target.
 
 | File | Tests pinned |
 |---|---|
-| `import_selective.lsysl` 🔴 | `import std.strings.{trim, split}` — only those names visible |
-| `import_alias.lsysl` 🔴 | `import std.io as io` aliasing — *if supported* |
-| `import_cyclic_rejected.lsysl` 🔴 | true cycle between modules rejected at compile |
-| `sibling_file_visibility.lsysl` 🔴 | symbols visible across files of one module without explicit import (sysl@6747d762b) |
-| `name_mangling.lsysl` 🔴 | mangled symbol name reachable by `extern`; collision-free |
+| `import_selective.lsysl` 🟢 | 6 tests — `import std.strings.{trim, split}`: bare-name callable, multiple selectors bind, doesn't force-shadow locals, composes with builtins, slice-return shape preserved, chains through codegen |
+| `import_alias.lsysl` 🟢 | 6 tests — `import std.strings.{trim => str_trim, split => str_split}`: per-symbol aliases callable, multiple aliases each bind, alias coexists with local of original name, composes with builtins, chained calls, loop bodies |
+| `import_cyclic_rejected.lsysl` ⚪ | **Dropped** — cycle rejection throws DriverError (fatal), not a per-test failure; no compile-error mechanism in test runner |
+| `siblings/sibling_file_visibility.lsysl` + `siblings/sibling_helper.lsysl` 🟢 | 8 tests across 2 files (same module) — plain fn, parameterized fn, struct type, struct method, enum value, enum match (local scrutinee), const, var (incl. cross-file mutation) all visible without explicit import |
+| `name_mangling.lsysl` ⚪ | **Dropped** — `extern` reachability needs real link target outside the test runner |
+
+**Three compiler fixes landed alongside this category** (commit
+`99c79bfcb`): (1) `SyslAnalyzer.registerSiblingForwardDeclsFrom`
+pre-registers sibling module-level vars/consts in globalScope, fixing
+cross-file writes (reads worked via a later registerImport pass);
+(2) `SyslLLVMCodegen` pre-populates `globalVarTypes` for all
+TVarDecls before generating function bodies so source-order
+independence holds; (3) `SyslLLVMCodegen` handles simple-enum
+function-return as scalar i32 produced into an aggregate `[N x i8]`
+slot, plus a new TCast aggregate→scalar case for `::Image` etc.
+
+The SVM and TRISC backends have an analogous simple-enum-fn-return
+bug (catalogued in `feedback_sysl_simple_enum_fn_return` memory) —
+the sibling-visibility tests route around it by constructing enum
+values inline rather than via a fn-result-then-local-var.
 
 ---
 
