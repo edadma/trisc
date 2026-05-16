@@ -1,0 +1,219 @@
+UTF-8 Byte Iteration — `len(s)` is the **byte** count
+======================================================
+
+Per reference §"String type":
+
+> Sysl strings are byte-oriented `{ptr, len}` values with no enforced
+> encoding, but by convention they hold UTF-8.
+
+This file pins:
+
+- `len(s)` returns the **byte length**, not the codepoint count.
+- ASCII characters encode as a single byte equal to their codepoint.
+- Multi-byte UTF-8 sequences (`ñ`, `€`, `😀`) round-trip through
+  source-level literals — the bytes you'd write in UTF-8 are the
+  bytes you read back.
+- Iterating a string with `s[i]` walks the UTF-8 bytes in order.
+- A minimal hand-rolled decoder lifts each multi-byte sequence to its
+  codepoint, confirming the byte patterns match the UTF-8 spec.
+
+The point of this file is **not** to re-test `std.utf8` — that's the
+standard library's job. The point is to pin the *language-level*
+guarantees: string literals are bytes, indexing yields bytes, and
+source-level non-ASCII characters encode as UTF-8.
+
+> **Lexer note.** `\xNN` for `N >= 0x80` is currently interpreted as
+> a 16-bit codepoint (via `Char.toChar`) and re-encoded as UTF-8
+> downstream, NOT as a raw byte as the reference describes. Until
+> the lexer is fixed (see `feedback_sysl_high_byte_x_escape.md`),
+> this file uses source-level Unicode characters instead of `\xNN`
+> escapes for non-ASCII bytes.
+
+File-local prefix `Ud` (Utf8-Decode).
+
+    module sysl.tests.lang_features
+
+
+Helpers — minimal lead-byte → expected-length table
+----------------------------------------------------
+
+A 1-byte lead has the high bit clear (`0xxxxxxx`). A 2-byte lead
+matches `110xxxxx`. A 3-byte lead matches `1110xxxx`. A 4-byte lead
+matches `11110xxx`. Continuation bytes match `10xxxxxx` and are not
+valid as leads. This helper returns 0 for an invalid lead byte; the
+test bodies expect only valid leads, so 0 means a bug somewhere
+upstream.
+
+    ud_lead_len(b: int) -> int
+        if (b & 0x80) == 0 then return 1
+        if (b & 0xE0) == 0xC0 then return 2
+        if (b & 0xF0) == 0xE0 then return 3
+        if (b & 0xF8) == 0xF0 then return 4
+        return 0
+
+Decode the codepoint at byte offset `i`. Returns the rune assembled
+from the lead + continuation bytes. Assumes well-formed input — the
+test bodies only pass strings built from known-good source chars.
+
+    ud_decode_at(s: string, i: int) -> int
+        val b0 = int(s[i])
+        val n = ud_lead_len(b0)
+        if n == 1 then return b0
+        if n == 2 then
+            val b1 = int(s[i + 1]) & 0x3F
+            return ((b0 & 0x1F) << 6) | b1
+        if n == 3 then
+            val b1 = int(s[i + 1]) & 0x3F
+            val b2 = int(s[i + 2]) & 0x3F
+            return ((b0 & 0x0F) << 12) | (b1 << 6) | b2
+        if n == 4 then
+            val b1 = int(s[i + 1]) & 0x3F
+            val b2 = int(s[i + 2]) & 0x3F
+            val b3 = int(s[i + 3]) & 0x3F
+            return ((b0 & 0x07) << 18) | (b1 << 12) | (b2 << 6) | b3
+        return 0 - 1
+
+
+### `len(s)` is byte length, not character count
+
+A pure-ASCII string has one byte per character — `"hello"` is 5 bytes
+because each ASCII codepoint occupies exactly one UTF-8 byte.
+
+    #test
+    test_ud_ascii_len_is_byte_count() -> unit
+        val s = "hello"
+        assert(len(s) == 5, s"ascii len=${len(s)}")
+        assert(int(s[0]) == 0x68, "h")
+        assert(int(s[4]) == 0x6F, "o")
+
+### ñ — two-byte UTF-8 sequence
+
+U+00F1 (`ñ`) encodes as `0xC3 0xB1`. The visible character count is 1,
+but the **byte** count is 2.
+
+    #test
+    test_ud_ntilde_is_two_bytes() -> unit
+        val s = "ñ"
+        assert(len(s) == 2, s"len=${len(s)}")
+        assert(int(s[0]) == 0xC3, s"lead=${int(s[0])}")
+        assert(int(s[1]) == 0xB1, s"cont=${int(s[1])}")
+        assert(ud_lead_len(int(s[0])) == 2, "lead classifies as 2-byte")
+        assert(ud_decode_at(s, 0) == 0xF1, "decodes to U+00F1")
+
+### € — three-byte UTF-8 sequence
+
+U+20AC (`€`) encodes as `0xE2 0x82 0xAC`. Lead matches the 3-byte
+pattern; the two continuations carry the low 12 bits of the
+codepoint.
+
+    #test
+    test_ud_euro_is_three_bytes() -> unit
+        val s = "€"
+        assert(len(s) == 3, s"len=${len(s)}")
+        assert(int(s[0]) == 0xE2, s"lead=${int(s[0])}")
+        assert(int(s[1]) == 0x82, s"cont1=${int(s[1])}")
+        assert(int(s[2]) == 0xAC, s"cont2=${int(s[2])}")
+        assert(ud_lead_len(int(s[0])) == 3, "lead classifies as 3-byte")
+        assert(ud_decode_at(s, 0) == 0x20AC, "decodes to U+20AC")
+
+### 😀 — four-byte UTF-8 sequence
+
+U+1F600 (`😀`) encodes as `0xF0 0x9F 0x98 0x80`. This is the canonical
+"non-BMP" emoji — visible character count 1, byte count 4.
+
+    #test
+    test_ud_smiley_is_four_bytes() -> unit
+        val s = "😀"
+        assert(len(s) == 4, s"len=${len(s)}")
+        assert(int(s[0]) == 0xF0, s"lead=${int(s[0])}")
+        assert(int(s[1]) == 0x9F, s"cont1=${int(s[1])}")
+        assert(int(s[2]) == 0x98, s"cont2=${int(s[2])}")
+        assert(int(s[3]) == 0x80, s"cont3=${int(s[3])}")
+        assert(ud_lead_len(int(s[0])) == 4, "lead classifies as 4-byte")
+        assert(ud_decode_at(s, 0) == 0x1F600, "decodes to U+1F600")
+
+
+### Mixed-width string — iterate runes, count codepoints
+
+A string with one character of each width pins that:
+
+- Total byte length is `1 + 2 + 3 + 4 == 10`.
+- A loop that advances by `ud_lead_len` visits exactly 4 codepoints.
+- The decoded codepoints come out in order: `A`, `ñ`, `€`, `😀`.
+
+    #test
+    test_ud_mixed_widths_iterate() -> unit
+        val s = "Añ€😀"
+        assert(len(s) == 10, s"total bytes=${len(s)}")
+        var i: int = 0
+        var count: int = 0
+        var sum: int = 0
+        while i < len(s)
+            val r = ud_decode_at(s, i)
+            sum = sum + r
+            count = count + 1
+            i = i + ud_lead_len(int(s[i]))
+        assert(count == 4, s"4 codepoints, got $count")
+        assert(sum == 0x41 + 0xF1 + 0x20AC + 0x1F600, s"sum=$sum")
+
+### Each rune width's decoded codepoint in isolation
+
+Pin each width individually so a regression isolates to the offending
+encoder/decoder path.
+
+    #test
+    test_ud_each_width_decoded() -> unit
+        assert(ud_decode_at("A", 0) == 0x41, "1-byte")
+        assert(ud_decode_at("ñ", 0) == 0xF1, "2-byte ñ")
+        assert(ud_decode_at("€", 0) == 0x20AC, "3-byte €")
+        assert(ud_decode_at("😀", 0) == 0x1F600, "4-byte 😀")
+
+
+ASCII byte escape — `\xNN` for low bytes
+-----------------------------------------
+
+For `NN < 0x80`, the `\xNN` escape works as documented (single byte).
+The reference cites `\x1b` for ESC and `\x00` for NUL. Pin both.
+
+### ESC + NUL via `\xNN`
+
+    #test
+    test_ud_low_x_escape() -> unit
+        val esc = "\x1B"
+        assert(len(esc) == 1, s"ESC len=${len(esc)}")
+        assert(int(esc[0]) == 0x1B, "ESC byte")
+        val nul = "\x00"
+        assert(len(nul) == 1, s"NUL len=${len(nul)}")
+        assert(int(nul[0]) == 0x00, "NUL byte")
+
+### Mid-string ASCII `\xNN`
+
+    #test
+    test_ud_mid_string_low_x() -> unit
+        val s = "AB\x09CD"
+        assert(len(s) == 5, s"len=${len(s)}")
+        assert(int(s[2]) == 0x09, "TAB at offset 2")
+
+
+Codepoint width via the lead byte
+----------------------------------
+
+The lead byte alone tells you how wide the rune is. Pin this for each
+class, including the "I can't lead" case for continuation bytes.
+
+### Continuation bytes are not valid leads
+
+    #test
+    test_ud_continuation_not_lead() -> unit
+        // 0x80..0xBF (10xxxxxx) — all continuation bytes
+        assert(ud_lead_len(0x80) == 0, "0x80 not a lead")
+        assert(ud_lead_len(0xBF) == 0, "0xBF not a lead")
+        assert(ud_lead_len(0xA5) == 0, "0xA5 not a lead")
+
+### Standard ASCII leads classify as 1-byte
+
+    #test
+    test_ud_ascii_leads() -> unit
+        assert(ud_lead_len(0x00) == 1, "NUL")
+        assert(ud_lead_len(0x41) == 1, "A")
+        assert(ud_lead_len(0x7F) == 1, "DEL")
