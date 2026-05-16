@@ -1,0 +1,190 @@
+Option[string] — ARC Behavior
+==============================
+
+`Option[string]` carries an ARC-managed string payload in the
+`Some` variant. The `None` variant doesn't allocate a string
+buffer. Per reference, sysl strings are ARC-tracked (16-byte
+descriptor + heap buffer with refcount).
+
+This file pins:
+
+- `Some("...")` carries the exact string through match.
+- `None` doesn't allocate — only the enum tag is stored.
+- Returning Option[string] from a function preserves the
+  string buffer through the call boundary.
+- Pass-and-return through several layers preserves the
+  buffer.
+- Concatenation result inside `Some(...)`.
+- Option swap between Some/None across multiple calls.
+- String equality after Option round-trip.
+- Long strings (forcing heap allocation) survive the
+  round-trip without truncation.
+
+File-local prefix `Sops` (Sysl Option Payload String).
+
+    module sysl.tests.lang_features
+
+    enum SopsOpt[T]
+        SopsSome(value: T)
+        SopsNone
+
+Construction with literal strings
+----------------------------------
+
+    sops_unwrap(o: SopsOpt[string]) -> string
+        o match
+            SopsSome(s) -> s
+            SopsNone -> "(none)"
+
+### Some carries the exact literal
+
+    #test
+    test_sops_some_literal() -> unit
+        val o = SopsSome("alpha")
+        val s = sops_unwrap(o)
+        assert(s == "alpha", s"got '$s'")
+
+### Some with empty string
+
+    #test
+    test_sops_some_empty() -> unit
+        val o = SopsSome("")
+        val s = sops_unwrap(o)
+        assert(s == "", s"got '$s'")
+
+### None — fallback string returned
+
+    #test
+    test_sops_none() -> unit
+        val o: SopsOpt[string] = SopsNone
+        val s = sops_unwrap(o)
+        assert(s == "(none)", s"got '$s'")
+
+### Two Somes — each carries its own string
+
+    #test
+    test_sops_two_somes_distinct() -> unit
+        val a = SopsSome("first")
+        val b = SopsSome("second")
+        assert(sops_unwrap(a) == "first", "a")
+        assert(sops_unwrap(b) == "second", "b")
+
+Round-trip through functions
+-----------------------------
+
+    sops_make_some(s: string) -> SopsOpt[string] = SopsSome(s)
+
+### Function returns Some — string preserved
+
+    #test
+    test_sops_returned_some() -> unit
+        val o = sops_make_some("returned")
+        val s = sops_unwrap(o)
+        assert(s == "returned", s"got '$s'")
+
+### Function returns None (Option[string] specifically)
+
+    sops_make_none() -> SopsOpt[string] = SopsNone
+
+    #test
+    test_sops_returned_none() -> unit
+        val o = sops_make_none()
+        assert(sops_unwrap(o) == "(none)", "got fallback")
+
+### Pass Option[string] through identity function
+
+    sops_identity(o: SopsOpt[string]) -> SopsOpt[string] = o
+
+    #test
+    test_sops_identity_some() -> unit
+        val o = SopsSome("preserved")
+        val r = sops_identity(o)
+        assert(sops_unwrap(r) == "preserved", "passed through")
+
+    #test
+    test_sops_identity_none() -> unit
+        val o: SopsOpt[string] = SopsNone
+        val r = sops_identity(o)
+        assert(sops_unwrap(r) == "(none)", "none preserved")
+
+### Three layers of identity functions
+
+    sops_id_l1(o: SopsOpt[string]) -> SopsOpt[string] = sops_identity(o)
+    sops_id_l2(o: SopsOpt[string]) -> SopsOpt[string] = sops_id_l1(o)
+
+    #test
+    test_sops_three_layers_some() -> unit
+        val o = SopsSome("traverses")
+        val r = sops_id_l2(o)
+        assert(sops_unwrap(r) == "traverses", "after 3 layers")
+
+Computed payload — string concat inside Some
+---------------------------------------------
+
+    sops_concat_some(a: string, b: string) -> SopsOpt[string]
+        return SopsSome(a + b)
+
+### Concatenation result is carried by Some
+
+    #test
+    test_sops_concat_in_some() -> unit
+        val o = sops_concat_some("foo", "bar")
+        val s = sops_unwrap(o)
+        assert(s == "foobar", s"got '$s'")
+
+### Empty + non-empty concat
+
+    #test
+    test_sops_concat_empty_left() -> unit
+        val o = sops_concat_some("", "right")
+        val s = sops_unwrap(o)
+        assert(s == "right", s"got '$s'")
+
+### Non-empty + empty concat
+
+    #test
+    test_sops_concat_empty_right() -> unit
+        val o = sops_concat_some("left", "")
+        val s = sops_unwrap(o)
+        assert(s == "left", s"got '$s'")
+
+Long-string payload — forces heap allocation
+---------------------------------------------
+
+    sops_long_string() -> SopsOpt[string] =
+        SopsSome("the quick brown fox jumps over the lazy dog 0123456789")
+
+### Long string carried through
+
+    #test
+    test_sops_long_some() -> unit
+        val o = sops_long_string()
+        val s = sops_unwrap(o)
+        assert(s == "the quick brown fox jumps over the lazy dog 0123456789", "long")
+
+### Long string passes through several layers
+
+    #test
+    test_sops_long_through_layers() -> unit
+        val o = sops_long_string()
+        val r = sops_id_l2(o)
+        assert(sops_unwrap(r) == "the quick brown fox jumps over the lazy dog 0123456789", "preserved")
+
+Option in map-like flow
+------------------------
+
+    sops_uppercase_first(o: SopsOpt[string]) -> SopsOpt[string]
+        o match
+            SopsSome(s) -> SopsSome(s + "!")
+            SopsNone -> SopsNone
+
+### Map transforms only the Some branch
+
+    #test
+    test_sops_map_some_only() -> unit
+        val a = SopsSome("hi")
+        val b: SopsOpt[string] = SopsNone
+        val a2 = sops_uppercase_first(a)
+        val b2 = sops_uppercase_first(b)
+        assert(sops_unwrap(a2) == "hi!", "a transformed")
+        assert(sops_unwrap(b2) == "(none)", "b stays none")
