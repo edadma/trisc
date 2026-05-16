@@ -1,0 +1,270 @@
+UDP outbound + IPv4 pseudo-header L4 checksum helpers
+=====================================================
+
+`inet_send_udp` builds a full Ethernet/IPv4/UDP frame and hands
+it to the nic. `inet_resolve_mac` picks the next-hop MAC; on
+ARP miss the datagram is parked in the pending UDP queue so the
+caller doesn't see a transient drop.
+
+The pseudo-header checksum helpers are L4-shared (UDP requires,
+TCP requires) but live here next to the sole non-TCP caller —
+TCP's own use is module-internal in tcp.lsysl. PMTU-driven
+fragmentation routes through `inet_pmtu_get`.
+
+Same `oskit.servers` module as `inet_proto.lsysl`, so siblings
+(frame pool, ARP cache, pending UDP queue, link-layer state)
+resolve without imports.
+
+    module oskit.servers
+
+    import std.net.{ETHERTYPE_IPV4, IP_PROTO_UDP,
+        pkt_read_u16, pkt_write_u16, pkt_write_mac, pkt_write_ipv4,
+        net_checksum, ipv4, ipv4_octet}
+
+
+### L4 checksum helpers (IPv4 pseudo-header)
+
+Core one's-complement sum over `pseudo-header + L4 header +
+payload`. Pseudo-header layout (12 bytes): src_ip (4) + dst_ip
+(4) + zero (1) + proto (1) + l4_len (2). The L4 bytes come
+straight from the frame buffer at `[l4_off .. l4_off + l4_len)`
+— caller decides whether the checksum field there is zero (for
+transmit) or stored (for receive-side verify).
+
+Returns the folded 16-bit sum (not complemented). Valid transmit
+frames have the complement stored in their checksum field;
+receive-side verification expects this helper to return `0xffff`
+when the stored checksum is correct. Shared by UDP (proto=17)
+and TCP (proto=6).
+
+    inet_l4_partial_sum(src_ip: u32, dst_ip: u32, proto: int,
+                        frame: *byte, l4_off: int, l4_len: int) -> int
+        var sum = 0
+        sum += (ipv4_octet(src_ip, 0) << 8) | ipv4_octet(src_ip, 1)
+        sum += (ipv4_octet(src_ip, 2) << 8) | ipv4_octet(src_ip, 3)
+        sum += (ipv4_octet(dst_ip, 0) << 8) | ipv4_octet(dst_ip, 1)
+        sum += (ipv4_octet(dst_ip, 2) << 8) | ipv4_octet(dst_ip, 3)
+        sum += proto
+        sum += l4_len
+        var i = 0
+        while i + 1 < l4_len
+            sum += pkt_read_u16(frame, l4_off + i)
+            i += 2
+        if i < l4_len
+            sum += (int(frame[l4_off + i]) & 0xff) << 8
+        while (sum >> 16) != 0
+            sum = (sum & 0xffff) + (sum >> 16)
+        sum
+
+
+Transmit-side helper. Caller must zero the UDP checksum field in
+`frame` before calling. A computed 0 maps to `0xffff` so the
+written value never collides with the "no checksum" sentinel
+(RFC 768).
+
+    inet_udp_checksum(src_ip: u32, dst_ip: u32,
+                     frame: *byte, udp_off: int, udp_len: int) -> int
+        val s = inet_l4_partial_sum(src_ip, dst_ip, IP_PROTO_UDP,
+                                    frame, udp_off, udp_len)
+        val c = (~s) & 0xffff
+        if c == 0
+            return 0xffff
+        c
+
+
+Receive-side verify. Frame still carries its sender-written
+checksum; a valid packet folds to `0xffff`. A stored 0 means
+"no checksum" (accept unconditionally, IPv4-only). Returns 1
+on valid, 0 on corrupt.
+
+    inet_udp_verify(src_ip: u32, dst_ip: u32,
+                   frame: *byte, udp_off: int, udp_len: int) -> int
+        val stored = pkt_read_u16(frame, udp_off + 6)
+        if stored == 0
+            return 1
+        val s = inet_l4_partial_sum(src_ip, dst_ip, IP_PROTO_UDP,
+                                    frame, udp_off, udp_len)
+        if s == 0xffff
+            return 1
+        0
+
+
+### UDP — outbound
+
+Builds a full Ethernet/IPv4/UDP frame and hands it to the nic.
+`inet_resolve_mac` picks the next-hop MAC: the destination's own
+cached MAC for on-subnet targets, the gateway's for off-subnet.
+Cache miss fires an ARP request; we park the datagram in the
+pending UDP queue so `inet_arp_drain_pending` can retry it when
+the reply arrives, and report success to the caller. Returns -1
+only for hard failures (link not ready, `dlen` out of range, nic
+rejection, or pending queue full).
+
+UDP checksum is computed over the IPv4 pseudo-header + UDP header
++ payload — required for IPv6 peers and recommended for IPv4.
+
+    inet_send_udp(owner_tid: int, dst_ip: u32, dst_port: int, src_port: int, data: *byte, dlen: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        if dlen < 0
+            return -1
+        if dlen > 1472
+            return -1
+
+Limited broadcast (255.255.255.255) skips ARP — there is no
+"MAC of the broadcast address", we simply transmit with
+Ethernet dst = `ff:ff:ff:ff:ff:ff`. We also force IP src =
+`0.0.0.0` and the UDP pseudo-header src to 0: DHCP clients
+(RFC 2131 §4.1) must use 0.0.0.0 until they bind a lease,
+because the addr they want to use is what they are asking for.
+
+        val bcast_all = ipv4(255, 255, 255, 255)
+        val is_bcast = dst_ip == bcast_all
+        var next_hop_mac: [6]byte
+        if is_bcast
+            var bi = 0
+            while bi < 6
+                next_hop_mac[bi] = byte(0xff)
+                bi += 1
+        else
+            if inet_resolve_mac(dst_ip, next_hop_mac) == 0
+                // ARP miss: park the datagram; the reply handler
+                // will retransmit it. Returning -1 only if the
+                // pending queue is full.
+                if inet_queue_pending_udp(owner_tid, dst_ip, dst_port, src_port, data, dlen) != 0
+                    return dlen
+                return -1
+
+Effective MTU. PMTU cache lookup; default = link MTU when no
+entry exists for this destination. The cache is keyed by dst_ip,
+so a test can seed an entry against 255.255.255.255 to drive the
+fragmentation path without depending on ARP resolution; in the
+typical case nothing is cached and the lookup returns link MTU,
+which keeps the single-fragment fast path active.
+
+        val eff_mtu = inet_pmtu_get(dst_ip)
+
+        var pseudo_src = inet_get_our_ip()
+        if is_bcast
+            pseudo_src = u32(0)
+
+        val ip_ident = inet_next_ip_id()
+        val ip_total = 20 + 8 + dlen      // single-fragment IP total length
+
+Single-fragment fast path: the entire `ETH+IP+UDP+payload` fits
+within `eff_mtu` after adding the IP header. No frag flags, no
+offset, MF=0. This is the path traffic takes any time the cache
+either has no entry for the destination or learned an MTU large
+enough to swallow the full datagram.
+
+        if ip_total <= eff_mtu
+            val fidx = inet_frame_alloc()
+            val frame = inet_frame_buf(fidx)
+            val total_len = 14 + ip_total
+
+            pkt_write_mac(frame, 0, next_hop_mac)
+            pkt_write_mac(frame, 6, inet_our_mac)
+            pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+
+            frame[14] = 0x45
+            frame[15] = 0
+            pkt_write_u16(frame, 16, ip_total)
+            pkt_write_u16(frame, 18, ip_ident)
+            pkt_write_u16(frame, 20, 0)
+            frame[22] = 64
+            frame[23] = byte(IP_PROTO_UDP)
+            pkt_write_u16(frame, 24, 0)
+            if is_bcast
+                pkt_write_ipv4(frame, 26, 0, 0, 0, 0)
+            else
+                pkt_write_ipv4(frame, 26,
+                    INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+            pkt_write_ipv4(frame, 30, ipv4_octet(dst_ip, 0), ipv4_octet(dst_ip, 1), ipv4_octet(dst_ip, 2), ipv4_octet(dst_ip, 3))
+            pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+
+            pkt_write_u16(frame, 34, src_port)
+            pkt_write_u16(frame, 36, dst_port)
+            pkt_write_u16(frame, 38, 8 + dlen)
+            pkt_write_u16(frame, 40, 0)
+            var i = 0
+            while i < dlen
+                frame[42 + i] = data[i]
+                i += 1
+            pkt_write_u16(frame, 40,
+                inet_udp_checksum(pseudo_src, dst_ip, frame, 34, 8 + dlen))
+
+            val rc = inet_nic_send_packet(frame, total_len)
+            inet_frame_release(fidx)
+            return rc
+
+Fragmentation path (RFC 791 §3.2). The full L4 datagram is
+`UDP_header(8) + payload(dlen)` bytes; we stage it in
+`inet_udp_egress_buf`, compute the UDP checksum over the whole
+datagram, then walk the buffer in slices of `frag_payload`
+bytes, emitting one IP fragment per slice. Non-final slice
+sizes must be 8-byte multiples so `frag_offset` (in 8-byte
+units) lands on a boundary. The last fragment carries whatever
+remains and clears the MF flag.
+
+        var staging: [1480]byte
+        pkt_write_u16(staging, 0, src_port)
+        pkt_write_u16(staging, 2, dst_port)
+        pkt_write_u16(staging, 4, 8 + dlen)
+        pkt_write_u16(staging, 6, 0)
+        var bi = 0
+        while bi < dlen
+            staging[8 + bi] = data[bi]
+            bi += 1
+        pkt_write_u16(staging, 6,
+            inet_udp_checksum(pseudo_src, dst_ip, staging, 0, 8 + dlen))
+
+        val total_l4 = 8 + dlen
+        var frag_payload = ((eff_mtu - 20) / 8) * 8
+        if frag_payload < 8
+            frag_payload = 8
+
+        var off = 0
+        while off < total_l4
+            var this_len = total_l4 - off
+            var more = 0
+            if this_len > frag_payload
+                this_len = frag_payload
+                more = 1
+
+            val fidx = inet_frame_alloc()
+            val frame = inet_frame_buf(fidx)
+
+            pkt_write_mac(frame, 0, next_hop_mac)
+            pkt_write_mac(frame, 6, inet_our_mac)
+            pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+
+            frame[14] = 0x45
+            frame[15] = 0
+            pkt_write_u16(frame, 16, 20 + this_len)
+            pkt_write_u16(frame, 18, ip_ident)
+            val flags_frag = (more << 13) | (off / 8)
+            pkt_write_u16(frame, 20, flags_frag)
+            frame[22] = 64
+            frame[23] = byte(IP_PROTO_UDP)
+            pkt_write_u16(frame, 24, 0)
+            if is_bcast
+                pkt_write_ipv4(frame, 26, 0, 0, 0, 0)
+            else
+                pkt_write_ipv4(frame, 26,
+                    INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+            pkt_write_ipv4(frame, 30, ipv4_octet(dst_ip, 0), ipv4_octet(dst_ip, 1), ipv4_octet(dst_ip, 2), ipv4_octet(dst_ip, 3))
+            pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+
+            var k = 0
+            while k < this_len
+                frame[34 + k] = staging[off + k]
+                k += 1
+
+            inet_nic_send_packet(frame, 14 + 20 + this_len)
+            inet_frame_release(fidx)
+            inet_frag_egress_count += 1
+
+            off += this_len
+        dlen
+
+

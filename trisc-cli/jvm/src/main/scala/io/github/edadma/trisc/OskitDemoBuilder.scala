@@ -52,6 +52,8 @@ object OskitDemoBuilder:
   private lazy val inetEpollSysl: String = readLsysl("oskit/servers/inet_epoll.lsysl")
   private lazy val pendingUdpSysl: String = readLsysl("oskit/servers/pending_udp.lsysl")
   private lazy val pingReplySysl: String = readLsysl("oskit/servers/ping_reply.lsysl")
+  private lazy val tcpSysl: String = readLsysl("oskit/servers/tcp.lsysl")
+  private lazy val udpSysl: String = readLsysl("oskit/servers/udp.lsysl")
   private lazy val unixSrvSysl: String   = readLsysl("oskit/servers/unix.lsysl")
   private lazy val stdNetPacketSysl: String = readLsysl("std/net/packet.lsysl")
   private lazy val stdNetSysl: String    = readLsysl("std/net/net.lsysl")
@@ -385,6 +387,8 @@ import oskit.hal.memset
           "oskit/servers/inet_epoll" -> inetEpollSysl,
           "oskit/servers/pending_udp" -> pendingUdpSysl,
           "oskit/servers/ping_reply" -> pingReplySysl,
+          "oskit/servers/tcp"        -> tcpSysl,
+          "oskit/servers/udp"        -> udpSysl,
           "std/net/net"              -> stdNetSysl,
           "std/net/packet"           -> stdNetPacketSysl,
           "std/debug/debug"          -> debugSysl,

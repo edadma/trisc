@@ -312,6 +312,8 @@ build_inet() {
         oskit/servers/inet_epoll.lsysl \
         oskit/servers/pending_udp.lsysl \
         oskit/servers/ping_reply.lsysl \
+        oskit/servers/tcp.lsysl \
+        oskit/servers/udp.lsysl \
         std/net/net.lsysl \
         std/net/packet.lsysl
 }
