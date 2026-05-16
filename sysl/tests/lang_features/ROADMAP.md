@@ -345,7 +345,7 @@ Reference §"Operators (by precedence...)", "Chained Comparisons", "Compound Ass
 | `precedence_logical.lsysl` 🟢 | truth tables for && / ||; unary ! basics and doubled; && tighter than ||; ! tighter than && / ||; parens override; **short-circuit** for && (LHS-false skips RHS) and || (LHS-true skips RHS), plus 3-way chain short-circuit at start and middle (23 tests). Fixed LLVM codegen which was eager-evaluating both operands |
 | `precedence_bitwise.lsysl` 🟢 | basic bitwise (and/or/xor with 0 and self), `~` (zero / minus-one / double-not); shifts (`<<` / `>>` by 1, by 4, truncation, left-assoc); `&` tighter than `^` tighter than `\|`; shifts tighter than bitwise; bitwise tighter than `==`; common patterns (pack/extract nibbles, clear/set/toggle bit). Note: sysl does not support `0b...` binary literals — used decimal with `// 0b...` comments (28 tests) |
 | `chained_comparisons.lsysl` 🔴 | `a < b < c`; evaluation order; mid-chain false short-circuit |
-| `compound_assign.lsysl` 🔴 | `x += y`, `x *= y`, etc.; on locals, fields, slice elements |
+| `compound_assign.lsysl` 🟢 | `+=`/`-=`/`*=`/`/=`/`%=`/`&=`/`\|=`/`^=`/`<<=`/`>>=` on locals; on struct fields; on `[N]int` array elements; on dynamic `new [N]int[:]` slice elements; equivalence with `x = x op y`; xor double-toggle self-inverse (22 tests) |
 | `increment_decrement.lsysl` 🔴 | `x++` / `++x` and analogues — *if supported* |
 
 ---
