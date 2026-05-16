@@ -1,0 +1,254 @@
+`#pure` — Side-Effect-Free Functions
+=====================================
+
+Per reference §`#pure` — mark side-effect-free functions:
+
+> A function marked `#pure` is checked by the compiler to have no
+> observable side effects. Pure functions are a discipline enforcement
+> tool: any violation is a compile-time error, not a warning.
+
+This file pins the *runtime-observable* half:
+
+- A `#pure` function compiles and runs identically to an unmarked
+  function with the same body. Purity is a **static** enforcement —
+  it never changes generated code.
+- The allowed inhabitants (recursion, local mutation, calls to other
+  `#pure` functions, reading module-level `const`s, all arithmetic /
+  control flow / cast / pattern-match constructs) actually produce
+  the expected values at runtime.
+
+What this file does NOT pin (out of reach of the test runner):
+
+- Compile-time *rejection* of impure operations inside `#pure` — the
+  runner has no compile-error assertion mechanism. Those negative
+  cases live in JVM-side analyzer tests.
+- Cross-module `.smeta` propagation — single-file scope.
+
+File-local prefix `Pu` (Pure).
+
+    module sysl.tests.lang_features
+
+
+### `#pure` zero-arg function returns a constant
+
+A `#pure` function with no parameters and a const body must return
+the body expression. No side-effect-related codegen difference is
+allowed.
+
+    #pure
+    pu_answer() -> int = 42
+
+    #test
+    test_pu_returns_constant() -> unit
+        assert(pu_answer() == 42, s"got ${pu_answer()}")
+
+
+### `#pure` function reads its parameters and computes
+
+The simplest non-trivial pure function — arithmetic on parameters.
+
+    #pure
+    pu_square(x: int) -> int = x * x
+
+    #test
+    test_pu_param_arithmetic() -> unit
+        assert(pu_square(0) == 0, "0² = 0")
+        assert(pu_square(7) == 49, "7² = 49")
+        assert(pu_square(-3) == 9, "-3 squared is 9")
+
+
+### Recursion in a `#pure` function
+
+The reference cites `fact` as the canonical recursive example.
+
+    #pure
+    pu_fact(n: int) -> int
+        if n <= 1 then return 1
+        return n * pu_fact(n - 1)
+
+    #test
+    test_pu_recursive() -> unit
+        assert(pu_fact(0) == 1, "0! = 1")
+        assert(pu_fact(1) == 1, "1! = 1")
+        assert(pu_fact(5) == 120, "5! = 120")
+        assert(pu_fact(10) == 3628800, "10! = 3628800")
+
+
+### Mutually recursive `#pure` functions
+
+The reference: "Recurse (including mutually)". Pin the standard
+even/odd cross-recursion.
+
+    #pure
+    pu_is_even(n: int) -> bool
+        if n == 0 then return true
+        return pu_is_odd(n - 1)
+
+    #pure
+    pu_is_odd(n: int) -> bool
+        if n == 0 then return false
+        return pu_is_even(n - 1)
+
+    #test
+    test_pu_mutually_recursive() -> unit
+        assert(pu_is_even(0), "0 is even")
+        assert(pu_is_odd(1), "1 is odd")
+        assert(pu_is_even(4), "4 is even")
+        assert(pu_is_odd(7), "7 is odd")
+        assert(!pu_is_even(7), "7 is not even")
+
+
+### Local mutable variables inside `#pure`
+
+Local variables in a pure function can mutate freely — they can't
+escape, so the function's external behavior is still a pure mapping
+from inputs to output.
+
+    #pure
+    pu_sum_to_n(n: int) -> int
+        var total: int = 0
+        var i: int = 1
+        while i <= n
+            total = total + i
+            i = i + 1
+        return total
+
+    #test
+    test_pu_local_mutation() -> unit
+        assert(pu_sum_to_n(0) == 0, "empty sum")
+        assert(pu_sum_to_n(1) == 1, "1")
+        assert(pu_sum_to_n(10) == 55, "1+2+…+10 = 55")
+        assert(pu_sum_to_n(100) == 5050, "1+2+…+100 = 5050")
+
+
+### Reading module-level `const` from inside `#pure`
+
+A `#pure` function may read module-level `const`s. The value is
+captured at the const's definition site; purity doesn't observe
+mutation because consts can't mutate.
+
+    const PuMaxBucket = 16
+
+    #pure
+    pu_clamp_to_bucket(n: int) -> int
+        if n > PuMaxBucket then return PuMaxBucket
+        if n < 0 then return 0
+        return n
+
+    #test
+    test_pu_reads_const() -> unit
+        assert(pu_clamp_to_bucket(5) == 5, "in range")
+        assert(pu_clamp_to_bucket(100) == 16, "clamped to PuMaxBucket")
+        assert(pu_clamp_to_bucket(-2) == 0, "negative -> 0")
+
+
+### `#pure` function calling another `#pure` function
+
+Pure→pure calls are explicitly allowed.
+
+    #pure
+    pu_double(x: int) -> int = x * 2
+
+    #pure
+    pu_double_plus_square(x: int) -> int = pu_double(x) + pu_square(x)
+
+    #test
+    test_pu_pure_calls_pure() -> unit
+        assert(pu_double_plus_square(3) == 6 + 9, "double(3)+square(3) = 15")
+        assert(pu_double_plus_square(5) == 10 + 25, "double(5)+square(5) = 35")
+
+
+### `#pure` in arithmetic / boolean / cast contexts
+
+A pure function call participates in all the usual expression
+contexts. Output values must match the impure equivalent.
+
+    #pure
+    pu_min(a: int, b: int) -> int
+        if a < b then return a
+        return b
+
+    #test
+    test_pu_in_expression_contexts() -> unit
+        // arithmetic
+        val a = pu_square(2) + pu_square(3)
+        assert(a == 13, s"4+9=13 got $a")
+        // boolean
+        val b = pu_is_even(8) && pu_is_odd(9)
+        assert(b, "both pure boolean calls true")
+        // nested
+        val c = pu_min(pu_square(2), pu_double(5))
+        assert(c == 4, s"min(4, 10)=4 got $c")
+
+
+### `#pure` with control flow — `match` over an `int`
+
+Pattern matching inside a pure function. We match an `int`
+scrutinee (rather than a simple enum) to avoid the known
+analyzer bug that rejects simple-enum-typed function parameters
+in a `match` — that bug lives in `enum_simple_int.lsysl`, not
+here.
+
+    #pure
+    pu_classify_by_sign(n: int) -> int
+        n match
+            0 -> 0
+            _ if n < 0 -> -1
+            _ -> 1
+
+    #test
+    test_pu_match_in_pure() -> unit
+        assert(pu_classify_by_sign(0) == 0, "zero")
+        assert(pu_classify_by_sign(-5) == -1, "neg")
+        assert(pu_classify_by_sign(42) == 1, "pos")
+
+
+### `#pure` on a generic function
+
+Type parameters work the same way under `#pure`. Each monomorphic
+instantiation must still pass the purity check.
+
+    #pure
+    pu_id[T](x: T) -> T = x
+
+    #test
+    test_pu_generic() -> unit
+        assert(pu_id(5) == 5, "int id")
+        assert(pu_id(0) == 0, "zero id")
+        assert(pu_id(true), "bool id true")
+        assert(!pu_id(false), "bool id false")
+
+
+### `#pure` with multiple return paths and early returns
+
+Multiple `return` paths are fine; purity only restricts *what* you
+can do, not the control-flow shape.
+
+    #pure
+    pu_classify(n: int) -> int
+        if n < 0 then return -1
+        if n == 0 then return 0
+        if n < 10 then return 1
+        if n < 100 then return 2
+        return 3
+
+    #test
+    test_pu_multiple_returns() -> unit
+        assert(pu_classify(-5) == -1, "negative")
+        assert(pu_classify(0)  == 0,  "zero")
+        assert(pu_classify(7)  == 1,  "single digit")
+        assert(pu_classify(50) == 2,  "two digits")
+        assert(pu_classify(500) == 3, "three+ digits")
+
+
+### `def` is implicitly `#pure`
+
+Per reference: "Every `def` is implicitly `#pure`". A `def` and a
+`#pure` function with the same body must compute the same result.
+
+    def pu_def_square(x: int) -> int = x * x
+
+    #test
+    test_pu_def_implicit_pure() -> unit
+        assert(pu_def_square(4) == 16, "def square 4 = 16")
+        assert(pu_def_square(4) == pu_square(4), "def and #pure agree")
