@@ -357,9 +357,9 @@ Reference §"Design by Contract".
 | File | Tests pinned |
 |---|---|
 | `require_basic.lsysl` 🟢 | `require cond, "msg"` precondition (happy path; trap-side deferred to uniform harness) |
-| `ensure_basic.lsysl` 🔴 | `ensure cond, "msg"` postcondition; `result` in cond |
-| `ensure_old_expr.lsysl` 🔴 | `old(x)` captures pre-state for postcondition |
-| `invariant_loop.lsysl` 🔴 | `invariant cond` at top of loop body |
+| `ensure_basic.lsysl` 🟢 | `ensure cond, "msg"` postcondition; `result` in cond (happy path) |
+| `ensure_old_expr.lsysl` 🟢 | `old(x)` captures pre-state for postcondition (happy path) |
+| `invariant_loop.lsysl` 🟢 | `invariant cond` at top of loop body (happy path; `loop_entry` covered) |
 | `variant_decreasing.lsysl` 🔴 | `variant expr` decrease witness; violation traps |
 | `contracts_off_flag.lsysl` 🔴 | with `--no-contracts`, violations no longer trap |
 

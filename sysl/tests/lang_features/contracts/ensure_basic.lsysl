@@ -1,0 +1,225 @@
+`ensure` Postconditions — Happy-Path Coverage
+==============================================
+
+Per reference §"Design by Contract":
+
+```sysl
+sqrt(x: f64) -> f64
+    require x >= 0.0
+    ensure result >= 0.0
+    ensure result * result <= x + 1.0e-6
+    ...
+```
+
+- `ensure <bool> [, "message"]` evaluated **before every return**
+  (including the implicit fall-through return of a trailing
+  expression).
+- Inside an `ensure` expression, the identifier `result` refers to
+  the function's return value. Outside `ensure` clauses, `result` is
+  just a normal identifier.
+- Multiple `ensure` clauses are allowed; all must hold at every
+  return site.
+- Both run-time checks go through the standard trap path.
+
+This file pins the **happy-path** behaviour of `ensure` across all
+seven backends — every test calls a function whose postconditions are
+*satisfied* on every return path, and asserts that the body's return
+value is correct. Failing-postcondition (trap) tests are deferred to a
+future uniform runtime-trap harness; the `compile_errors/` category
+will eventually own those.
+
+File-local prefix `Enb` (ENsure-Basic).
+
+    module sysl.tests.lang_features
+
+
+A single `ensure` clause using `result`
+----------------------------------------
+
+### Bare postcondition on return value
+
+    enb_double(x: int) -> int
+        ensure result == x * 2
+        x + x
+
+    #test
+    test_enb_bare_ensure() -> unit
+        assert(enb_double(21) == 42, "21 doubled")
+        assert(enb_double(0) == 0, "0 doubled")
+        assert(enb_double(0 - 7) == 0 - 14, "negative doubled")
+
+### Postcondition with a message
+
+    enb_pos(x: int) -> int
+        ensure result > 0, "result must be positive"
+        x + 1
+
+    #test
+    test_enb_ensure_with_message() -> unit
+        assert(enb_pos(0) == 1, "0+1=1, positive")
+        assert(enb_pos(99) == 100, "interior, positive")
+
+
+Multiple `ensure` clauses — all hold
+-------------------------------------
+
+### Two ensures — bounds on result
+
+    enb_clamp_pos(x: int) -> int
+        ensure result >= 0
+        ensure result <= 100
+        if x < 0 then 0
+        else if x > 100 then 100
+        else x
+
+    #test
+    test_enb_two_ensures() -> unit
+        assert(enb_clamp_pos(50) == 50, "interior")
+        assert(enb_clamp_pos(0 - 1) == 0, "clamped lo")
+        assert(enb_clamp_pos(101) == 100, "clamped hi")
+
+### Three ensures with messages
+
+    enb_three(a: int, b: int) -> int
+        ensure result >= a, "ge a"
+        ensure result >= b, "ge b"
+        ensure result == a + b, "exact sum"
+        a + b
+
+    #test
+    test_enb_three_ensures() -> unit
+        assert(enb_three(3, 4) == 7, "3+4")
+        assert(enb_three(0, 0) == 0, "zero")
+        assert(enb_three(10, 0) == 10, "right zero")
+
+
+`ensure` fires on every return path
+------------------------------------
+
+### Function with an explicit early return and a fall-through
+
+    enb_abs(x: int) -> int
+        ensure result >= 0, "abs is non-negative"
+        if x < 0 then return 0 - x
+        x
+
+    #test
+    test_enb_ensure_every_return() -> unit
+        assert(enb_abs(5) == 5, "positive: fall-through return")
+        assert(enb_abs(0) == 0, "zero: fall-through return")
+        assert(enb_abs(0 - 7) == 7, "negative: explicit return")
+
+
+`require` + `ensure` interplay
+-------------------------------
+
+### Both clauses
+
+    enb_safe_square(x: int) -> int
+        require x >= 0
+        ensure result >= 0
+        x * x
+
+    #test
+    test_enb_require_plus_ensure() -> unit
+        assert(enb_safe_square(0) == 0, "0 squared")
+        assert(enb_safe_square(5) == 25, "5 squared")
+        assert(enb_safe_square(11) == 121, "11 squared")
+
+
+`ensure` cond uses arithmetic on `result`
+------------------------------------------
+
+The postcondition is an arithmetic expression that mentions `result`
+rather than a bare equality — pins that the analyzer resolves
+`result` through composite expressions.
+
+    enb_double_meets_lower(x: int) -> int
+        require x >= 0
+        ensure result * 2 >= x
+        x
+
+    #test
+    test_enb_arith_on_result_nonneg() -> unit
+        assert(enb_double_meets_lower(0) == 0, "0*2 >= 0")
+        assert(enb_double_meets_lower(5) == 5, "5*2 >= 5")
+        assert(enb_double_meets_lower(99) == 99, "99*2=198 >= 99")
+
+
+`ensure` references multiple params
+------------------------------------
+
+### Postcondition compares `result` to multiple params
+
+    enb_max(a: int, b: int) -> int
+        ensure result >= a
+        ensure result >= b
+        if a > b then a else b
+
+    #test
+    test_enb_max() -> unit
+        assert(enb_max(3, 7) == 7, "b larger")
+        assert(enb_max(9, 2) == 9, "a larger")
+        assert(enb_max(5, 5) == 5, "equal")
+
+
+`ensure` with a chained comparison on `result`
+-----------------------------------------------
+
+### `lo <= result <= hi`
+
+    enb_in_bounds(x: int, lo: int, hi: int) -> int
+        require lo <= hi
+        ensure lo <= result <= hi
+        if x < lo then lo
+        else if x > hi then hi
+        else x
+
+    #test
+    test_enb_chained_on_result() -> unit
+        assert(enb_in_bounds(5, 0, 10) == 5, "interior")
+        assert(enb_in_bounds(0 - 1, 0, 10) == 0, "clamped lo")
+        assert(enb_in_bounds(11, 0, 10) == 10, "clamped hi")
+
+
+`ensure` with a struct field as `result`
+-----------------------------------------
+
+### Returning a struct; postcondition asserts a field constraint
+
+    struct EnbBox
+        lo: int
+        hi: int
+
+    enb_make_box(a: int, b: int) -> EnbBox
+        ensure result.lo <= result.hi
+        if a <= b then EnbBox(a, b) else EnbBox(b, a)
+
+    #test
+    test_enb_struct_result() -> unit
+        val ba = enb_make_box(2, 7)
+        assert(ba.lo == 2 && ba.hi == 7, "ordered input passes through")
+        val bb = enb_make_box(9, 1)
+        assert(bb.lo == 1 && bb.hi == 9, "out-of-order swapped to satisfy ensure")
+
+
+`result` is *only* a contract keyword inside `ensure`
+------------------------------------------------------
+
+Per reference: outside `ensure` clauses, `result` is a normal
+identifier. We pin that by declaring a local named `result` in the
+function body — the body sees a plain local, the `ensure` clause sees
+the function's return value.
+
+    enb_result_is_local(x: int) -> int
+        ensure result >= 0
+        var result: int = 0 - 999
+        result = x + 1
+        if x < 0 then return 0
+        result
+
+    #test
+    test_enb_result_local_in_body() -> unit
+        assert(enb_result_is_local(0) == 1, "x>=0, body returns x+1")
+        assert(enb_result_is_local(5) == 6, "x=5 returns 6")
+        assert(enb_result_is_local(0 - 1) == 0, "x<0 returns 0")

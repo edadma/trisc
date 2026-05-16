@@ -6171,11 +6171,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       else Nil
     TBlockBody(snapshotDecls ++ variantPrefix ++ resultDecl ++ requireChecks ++ finalized)
 
-  /** Zero-value expression for a scalar/pointer return type. */
+  /** Zero-value expression for a return type — used to initialize the synthetic
+   * `__result__` local at function entry before the body runs. */
   protected def zeroExprFor(t: SyslType): TExpr = t.underlying match
-    case _: FloatType => TFloatLit(0.0, t)
-    case BoolType     => TBoolLit(false, t)
-    case _            => TIntLit(0, t)
+    case _: FloatType         => TFloatLit(0.0, t)
+    case BoolType             => TBoolLit(false, t)
+    case st: SyslType.StructType => TStructLit(st)
+    case _                    => TIntLit(0, t)
 
   /** Recursively rewrite every `return v` inside a stmt list so that `v` is stored into
    * __result__, then the ensure checks fire, then `return __result__` runs. For void
