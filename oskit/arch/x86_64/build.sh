@@ -50,6 +50,7 @@ SYSL_FILES=(
     oskit/posix/fs.lsysl
     oskit/posix/time.lsysl
     oskit/posix/mem.lsysl
+    oskit/posix/epoll.lsysl
     oskit/posix/signals.lsysl
 )
 

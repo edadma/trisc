@@ -56,6 +56,7 @@ SYSL_FILES=(
     oskit/posix/fs.lsysl
     oskit/posix/time.lsysl
     oskit/posix/mem.lsysl
+    oskit/posix/epoll.lsysl
     oskit/posix/signals.lsysl
     oskit/arch/aarch64/board/virt/hello.lsysl
 )
