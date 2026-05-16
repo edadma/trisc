@@ -356,7 +356,7 @@ Reference §"Design by Contract".
 
 | File | Tests pinned |
 |---|---|
-| `require_basic.lsysl` 🔴 | `require cond, "msg"` precondition; trap with message on violation |
+| `require_basic.lsysl` 🟢 | `require cond, "msg"` precondition (happy path; trap-side deferred to uniform harness) |
 | `ensure_basic.lsysl` 🔴 | `ensure cond, "msg"` postcondition; `result` in cond |
 | `ensure_old_expr.lsysl` 🔴 | `old(x)` captures pre-state for postcondition |
 | `invariant_loop.lsysl` 🔴 | `invariant cond` at top of loop body |
