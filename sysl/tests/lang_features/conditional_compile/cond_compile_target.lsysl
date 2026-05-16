@@ -1,0 +1,131 @@
+`#if SYMBOL == "value"` / `!= "value"` — Equality Conditions
+==============================================================
+
+Per reference §"Conditional Compilation":
+
+> - `#if SYMBOL == "value"` — string equality
+> - `#if SYMBOL != "value"` — string inequality
+
+This file pins the equality / inequality forms:
+
+- `#if UNDEF == "x"` evaluates to **false** (undefined symbol != any
+  specific value).
+- `#if UNDEF != "x"` evaluates to **true** (undefined symbol is not
+  equal to "x" — `!=` is the inverse of `==`).
+- Equality cascades — multiple `#if X == "..."` blocks select
+  independently.
+
+The intended use case from the reference is per-target branching:
+
+```sysl
+#if TARGET == "trisc"
+    extern halt()
+#endif
+```
+
+However, the standard test runner doesn't define `TARGET` (or any
+other symbol), so all `#if X == "value"` blocks evaluate to false
+under the runner. This is the runtime-observable half of the
+behaviour; the "TARGET defined to a real value" case is exercised
+by JVM-side `SyslCondCompTests` with the config map populated.
+
+File-local prefix `Cct` (Cond-Compile-Target).
+
+    module sysl.tests.lang_features
+
+
+### `#if UNDEF == "x"` — equality with undefined is false, `#else` taken
+
+    #if CCT_TARGET == "trisc"
+    cct_target_check() -> int = 1
+    #else
+    cct_target_check() -> int = 0
+    #endif
+
+    #test
+    test_cct_eq_undefined_else() -> unit
+        assert(cct_target_check() == 0, s"undef != \"trisc\", got ${cct_target_check()}")
+
+
+### `#if UNDEF != "x"` — inequality with undefined is true
+
+    #if CCT_TARGET != "trisc"
+    cct_not_trisc() -> int = 1
+    #else
+    cct_not_trisc() -> int = 0
+    #endif
+
+    #test
+    test_cct_neq_undefined_then() -> unit
+        assert(cct_not_trisc() == 1, s"undef != \"trisc\", #then active, got ${cct_not_trisc()}")
+
+
+### Cascade — three independent target checks
+
+A common per-target dispatch pattern. With CCT_TARGET undefined, all
+three `==` branches resolve to `#else`. The final fallback (no `#if`)
+is what `cct_dispatch` returns.
+
+    #if CCT_TARGET == "trisc"
+    cct_dispatch() -> int = 10
+    #else
+    #if CCT_TARGET == "llvm-host"
+    cct_dispatch() -> int = 20
+    #else
+    #if CCT_TARGET == "wasm32"
+    cct_dispatch() -> int = 30
+    #else
+    cct_dispatch() -> int = 99
+    #endif
+    #endif
+    #endif
+
+    #test
+    test_cct_three_way_cascade() -> unit
+        assert(cct_dispatch() == 99, s"fallthrough to 99, got ${cct_dispatch()}")
+
+
+### Equality form picks `#else` over multiple unrelated symbols
+
+Each `#if` is independent — undefined `CCT_ARCH` and undefined
+`CCT_OS` each pick their `#else`.
+
+    #if CCT_ARCH == "x86_64"
+    cct_arch() -> int = 1
+    #else
+    cct_arch() -> int = 0
+    #endif
+
+    #if CCT_OS == "linux"
+    cct_os() -> int = 1
+    #else
+    cct_os() -> int = 0
+    #endif
+
+    #test
+    test_cct_independent_equality() -> unit
+        assert(cct_arch() == 0, "arch else")
+        assert(cct_os() == 0, "os else")
+
+
+### `==` / `!=` polarity on the same undefined symbol
+
+Same symbol, both polarities — `==` is false, `!=` is true.
+
+    #if CCT_MODE == "debug"
+    cct_eq_branch() -> int = 1
+    #else
+    cct_eq_branch() -> int = 0
+    #endif
+
+    #if CCT_MODE != "debug"
+    cct_neq_branch() -> int = 1
+    #else
+    cct_neq_branch() -> int = 0
+    #endif
+
+    #test
+    test_cct_eq_neq_polarity() -> unit
+        assert(cct_eq_branch() == 0, "eq is false for undef")
+        assert(cct_neq_branch() == 1, "neq is true for undef")
+        assert(cct_eq_branch() + cct_neq_branch() == 1, "exactly one polarity wins")

@@ -519,15 +519,21 @@ need pins.
 
 ---
 
-### `conditional_compile/` — #if / #else / #endif — 🔴 P3
+### `conditional_compile/` — #if / #else / #endif — 🟢 P3
 
 Reference §"Conditional Compilation".
 
 | File | Tests pinned |
 |---|---|
-| `cond_compile_defined.lsysl` 🔴 | `#if DEBUG ... #endif` honoured by flag |
-| `cond_compile_target.lsysl` 🔴 | `#if TARGET == "trisc"` branches per-backend |
-| `cond_compile_negated.lsysl` 🔴 | `#if !BARE_METAL` |
+| `cond_compile_defined.lsysl` 🟢 | `#if SYMBOL` undefined-symbol behaviour (5 tests) |
+| `cond_compile_target.lsysl` 🟢 | `#if SYMBOL == "value"` / `!= "value"` undefined-symbol behaviour (5 tests) |
+| `cond_compile_negated.lsysl` 🟢 | `#if !SYMBOL` undefined-symbol behaviour (5 tests) |
+
+Note: the test runner's driver is instantiated without preprocessor
+defines, so these tests pin the *undefined-symbol* half of cond-comp
+behaviour (which is what the runner exposes). The defined-symbol
+half — where DEBUG / TARGET / BARE_METAL is set via the config map —
+is exercised by JVM-side `SyslCondCompTests`.
 
 ---
 
