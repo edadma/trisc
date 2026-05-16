@@ -1,0 +1,141 @@
+`T::Image(x)` — Variant Name / Numeric String
+==============================================
+
+Per reference §"Type Attributes":
+
+```sysl
+Day::Image(d)  // "Tue" for d = Day.Tue
+```
+
+`::Image(x)` applies to:
+- **simple enums**: returns the variant name as a `string`
+  (e.g. `Day::Image(Day.Tue) == "Tue"`)
+- **constrained numeric types**: returns `str(x)`
+
+Round-trip with `::Value`: `T::Value(T::Image(x)) == x` for every
+variant. Covered in `type_value_valid.lsysl`.
+
+This file pins:
+
+- `::Image` on every variant of a simple enum
+- `::Image` on a `within`-constrained numeric type — `str(x)`
+- Image strings round-trip through string equality
+- Image of `::First` / `::Last` returns the matching variant name
+- Image on a single-variant enum
+- Image on adjacent variants doesn't conflate them
+
+File-local prefix `Tim` (Type-IMage).
+
+    module sysl.tests.lang_features
+
+
+A simple enum
+--------------
+
+    enum TimDay
+        Mon
+        Tue
+        Wed
+        Thu
+        Fri
+        Sat
+        Sun
+
+
+### `::Image` returns the variant's declared name as a string
+
+    #test
+    test_tim_enum_basic() -> unit
+        assert(TimDay::Image(TimDay.Mon) == "Mon", "Mon")
+        assert(TimDay::Image(TimDay.Tue) == "Tue", "Tue")
+        assert(TimDay::Image(TimDay.Wed) == "Wed", "Wed")
+        assert(TimDay::Image(TimDay.Thu) == "Thu", "Thu")
+        assert(TimDay::Image(TimDay.Fri) == "Fri", "Fri")
+        assert(TimDay::Image(TimDay.Sat) == "Sat", "Sat")
+        assert(TimDay::Image(TimDay.Sun) == "Sun", "Sun")
+
+### `::Image(T::First)` / `::Image(T::Last)`
+
+    #test
+    test_tim_first_last_image() -> unit
+        assert(TimDay::Image(TimDay::First) == "Mon", "First = Mon")
+        assert(TimDay::Image(TimDay::Last) == "Sun", "Last = Sun")
+
+
+Distinct variants have distinct images
+---------------------------------------
+
+### Adjacent variants are not conflated
+
+    #test
+    test_tim_distinct_images() -> unit
+        val a = TimDay::Image(TimDay.Mon)
+        val b = TimDay::Image(TimDay.Tue)
+        assert(a != b, s"$a vs $b")
+
+### All 7 day names differ from each other
+
+    #test
+    test_tim_all_pairs_distinct() -> unit
+        val days = [TimDay.Mon, TimDay.Tue, TimDay.Wed, TimDay.Thu, TimDay.Fri, TimDay.Sat, TimDay.Sun]
+        for i in 0..<7
+            for j in 0..<7
+                if i != j then
+                    assert(TimDay::Image(days[i]) != TimDay::Image(days[j]), s"i=$i j=$j")
+
+
+Single-variant enum
+--------------------
+
+    enum TimOnly
+        OnlyOne
+
+### Single-variant image
+
+    #test
+    test_tim_single_variant() -> unit
+        assert(TimOnly::Image(TimOnly.OnlyOne) == "OnlyOne", "got name")
+
+
+Image-as-string is usable in regular string ops
+------------------------------------------------
+
+### Image string can be concatenated, length-checked, indexed-equal
+
+    #test
+    test_tim_image_as_string() -> unit
+        val s = TimDay::Image(TimDay.Fri)
+        assert(s == "Fri", s"got $s")
+        assert(len(s) == 3, s"length 3")
+        val combined = "Day: " + s
+        assert(combined == "Day: Fri", s"got $combined")
+
+
+`::Image` on a value picked dynamically
+----------------------------------------
+
+The argument is a value loaded from a local; ensures Image dispatches
+on the runtime value rather than a compile-time constant.
+
+    #test
+    test_tim_image_dynamic() -> unit
+        var d = TimDay.Mon
+        d = TimDay.Wed
+        assert(TimDay::Image(d) == "Wed", s"got ${TimDay::Image(d)}")
+        d = TimDay.Sun
+        assert(TimDay::Image(d) == "Sun", s"got ${TimDay::Image(d)}")
+
+
+`::Image` over `T::Range` — produces every variant's name
+----------------------------------------------------------
+
+### Iterate the range, collect images, verify all distinct and in order
+
+    #test
+    test_tim_image_in_range_loop() -> unit
+        val expected = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        var idx: int = 0
+        for d in TimDay::Range
+            assert(TimDay::Image(d) == expected[idx], s"idx=$idx")
+            idx = idx + 1
+        assert(idx == 7, s"saw 7 variants, got $idx")

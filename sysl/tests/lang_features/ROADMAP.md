@@ -411,7 +411,7 @@ Reference §"Type Attributes (`T::Attr`)".
 | File | Tests pinned |
 |---|---|
 | `type_range.lsysl` 🟢 | `T::Range` forward + reverse over within-int + enum; exclusive bound; nested |
-| `type_image.lsysl` 🔴 | `T::Image` (set of valid values) — usage in contracts |
+| `type_image.lsysl` 🟢 | `T::Image(x)` variant name string on enum; dynamic dispatch; range-loop |
 | `type_value_valid.lsysl` 🔴 | `T::Value(x)` / `T::Valid(x)` — bool runtime check |
 | `type_succ_pred.lsysl` 🔴 | `T::Succ` / `T::Pred` on enums (boundary behaviour) |
 
