@@ -431,7 +431,7 @@ runtime-trap harness.
 | `static_assert_pass.lsysl` 🔴 | `static_assert(sizeof(T) == 16, "msg")` passes silently |
 | `static_assert_fail.lsysl` 🔴 | `should_panic` form — compile fails with message |
 | `module_invariant.lsysl` 🔴 | `module_invariant cond` declaration and behaviour |
-| `sizeof_basic.lsysl` 🔴 | `sizeof(int)`, `sizeof(MyStruct)`, slice/string sizes |
+| `sizeof_basic.lsysl` 🟢 | `sizeof` for primitives, ptrs, arrays, structs; arithmetic + comparison composition |
 
 ---
 
