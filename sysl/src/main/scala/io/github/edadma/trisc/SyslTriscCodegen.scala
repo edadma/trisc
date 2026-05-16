@@ -1427,10 +1427,16 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emit("  ldd r2, r1, r0")
       emit("  addi r3, r1, 8")
       emit("  ldd r3, r3, r0")
-      val extra = preOffset - stackOffset
-      if extra > 0 then
-        emitAddImm(7, 7, extra)
-        stackOffset = preOffset
+      // Do NOT rewind the temp region (`extra = preOffset - stackOffset`)
+      // before pushing. For an inline-constructed iface arg
+      // (`use_shape(Square(9))`), `data_ptr` (r3) points INTO the temp
+      // region — and the subsequent `pshd r3; pshd r2` would overwrite
+      // the source struct data before the callee dereferences
+      // `data_ptr`. Same hazard for stack-env closures passed as FuncType
+      // args. Leak the temp until the function epilogue restores r7.
+      // The TCall cleanup adds it all back in one go via
+      // `argsAllocated = cleanupTo - stackOffset`, so accounting stays
+      // correct.
       emit("  pshd r3")
       emit("  pshd r2")
       stackOffset -= 16
@@ -4215,16 +4221,20 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             stackOffset -= 24
             regAggregateDataOffset = stackOffset
           else if arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
-            // Pre-evaluate 16-byte pair register arg
-            val preOffset = stackOffset
+            // Pre-evaluate 16-byte pair register arg.
+            // Do NOT rewind the temp region before pushing. For an
+            // inline-constructed iface arg (`use_shape(Square(9))`),
+            // `data_ptr` (r3) points INTO the temp region — and the
+            // subsequent `pshd r3; pshd r2` would overwrite the source
+            // struct data before the callee dereferences `data_ptr`.
+            // Same hazard for stack-env closures as FuncType args. Leak
+            // the temp until the function epilogue restores r7. The
+            // TCall cleanup adds it all back in one go via
+            // `argsAllocated = cleanupTo - stackOffset`.
             genExpr(arg)
             emit("  ldd r2, r1, r0")
             emit("  addi r3, r1, 8")
             emit("  ldd r3, r3, r0")
-            val extra = preOffset - stackOffset
-            if extra > 0 then
-              emitAddImm(7, 7, extra)
-              stackOffset = preOffset
             emit("  pshd r3")
             emit("  pshd r2")
             stackOffset -= 16
