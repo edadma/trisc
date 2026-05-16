@@ -1,0 +1,137 @@
+`#if SYMBOL` — Conditional Compilation on Defined Symbols
+==========================================================
+
+Per reference §"Conditional Compilation":
+
+> - `#if SYMBOL` — true if the symbol is defined and not `"false"`,
+>   `"0"`, or `""`
+
+This file pins the "undefined symbol" half of conditional compilation
+— the half the standard test runner exposes. The test runner's
+driver is instantiated without any preprocessor defines, so every
+`#if SYMBOL` test expression evaluates to **false** (symbol not in
+the config map).
+
+The "defined symbol" half (where DEBUG is defined to a non-falsy
+value and the `#then` branch should be taken) requires the runner to
+expose a `--define KEY=value` flag, which isn't available in the
+test command. That coverage lives in
+`sysl/src/test/scala/SyslCondCompTests.scala` (JVM tests that
+instantiate the driver with a config map directly).
+
+This file pins:
+
+- `#if UNDEF ... #else ... #endif` takes the `#else` branch when
+  UNDEF is not defined.
+- `#if UNDEF ... #endif` strips its body when UNDEF is not defined
+  (the function declared inside is not callable).
+- Multiple `#if` blocks compose — independent branches resolve
+  independently.
+
+File-local prefix `Ccd` (Cond-Compile-Defined).
+
+    module sysl.tests.lang_features
+
+
+Two functions selected by `#if/#else`
+--------------------------------------
+
+`CCD_DEBUG` is never defined by the test runner, so `ccd_active()`
+takes the `#else` branch.
+
+    #if CCD_DEBUG
+    ccd_active() -> int = 1
+    #else
+    ccd_active() -> int = 2
+    #endif
+
+### `#if/#else` — undefined symbol selects `#else` branch
+
+    #test
+    test_ccd_if_else_undefined() -> unit
+        assert(ccd_active() == 2, s"else branch, got ${ccd_active()}")
+
+
+`#if/#endif` without `#else` — undefined symbol strips the body
+----------------------------------------------------------------
+
+When the symbol is undefined and there's no `#else`, the conditional
+block disappears entirely. The fallback function below is the *only*
+definition of `ccd_fallback_only()` — if the `#if` branch were taken,
+this file wouldn't compile (duplicate definition).
+
+    #if CCD_RELEASE
+    ccd_fallback_only() -> int = 100
+    #endif
+
+    ccd_fallback_only() -> int = 999
+
+### `#if/#endif` (no else) — body stripped when symbol undefined
+
+    #test
+    test_ccd_if_only_undefined() -> unit
+        assert(ccd_fallback_only() == 999, s"fallback only, got ${ccd_fallback_only()}")
+
+
+Multiple independent `#if` blocks
+----------------------------------
+
+Independent conditional blocks resolve independently — both
+`CCD_LOG` and `CCD_VERBOSE` are undefined, so both blocks take
+their `#else` branches.
+
+    #if CCD_LOG
+    ccd_log_mode() -> int = 1
+    #else
+    ccd_log_mode() -> int = 0
+    #endif
+
+    #if CCD_VERBOSE
+    ccd_verbose_mode() -> int = 1
+    #else
+    ccd_verbose_mode() -> int = 0
+    #endif
+
+### Multiple `#if` blocks each resolve independently
+
+    #test
+    test_ccd_multiple_blocks() -> unit
+        assert(ccd_log_mode() == 0, "log else branch")
+        assert(ccd_verbose_mode() == 0, "verbose else branch")
+        assert(ccd_log_mode() + ccd_verbose_mode() == 0, "both else")
+
+
+`#if` over a `var` declaration
+-------------------------------
+
+Module-level vars can be conditionally defined too.
+
+    #if CCD_TRACE
+    var ccd_trace_count: int = 100
+    #else
+    var ccd_trace_count: int = 0
+    #endif
+
+### Conditional `var` initialiser
+
+    #test
+    test_ccd_conditional_var() -> unit
+        assert(ccd_trace_count == 0, s"trace count else, got $ccd_trace_count")
+
+
+`#if` over a `const` declaration
+---------------------------------
+
+Compile-time constants can also branch on `#if`.
+
+    #if CCD_PROD
+    const CcdMaxRetries = 100
+    #else
+    const CcdMaxRetries = 3
+    #endif
+
+### Conditional `const` value
+
+    #test
+    test_ccd_conditional_const() -> unit
+        assert(CcdMaxRetries == 3, s"max retries else, got $CcdMaxRetries")
