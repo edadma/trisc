@@ -1,0 +1,183 @@
+Struct Methods on Ref-bound Receivers
+======================================
+
+Calling a method on a `&Struct` (heap-allocated, ref-counted)
+receiver works the same syntactically as on a value-bound
+`Struct`: `r.method(...)`. The method's `self` parameter is
+still `*Struct` internally; the only difference is the
+caller's storage mode (heap vs stack) and refcount
+management.
+
+This file pins:
+
+- Methods called on a `new Struct(...)` (a `&Struct`).
+- Read methods through a ref see the heap data.
+- Mutating methods through a ref persist the change across
+  ref aliases and across passing into other functions.
+- Multiple refs to the same heap object share state (one
+  ref's mutation is visible through another).
+- A ref passed to a function and returned, then called
+  through the original variable, sees the mutated state.
+- Refcount semantics — a ref dropped at scope exit doesn't
+  affect the surviving aliased ref.
+- Method on a ref stored in a struct field.
+
+File-local prefix `Ssmr` (Sysl Struct Method Ref).
+
+The ref's existence itself is pinned in `arc/new_ref_*`;
+this file focuses on the *method-call* path through a ref.
+
+    module sysl.tests.lang_features
+
+Basic ref method calls
+-----------------------
+
+    struct Cell
+        n: int
+
+    Cell.read() -> int = self.n
+
+    Cell.inc() -> unit
+        self.n = self.n + 1
+
+    Cell.set(v: int) -> unit
+        self.n = v
+
+### Read through a ref
+
+    #test
+    test_ssmr_ref_read() -> unit
+        val r = new Cell(42)
+        val v = r.read()
+        assert(v == 42, s"got $v")
+
+### Mutate through a ref
+
+    #test
+    test_ssmr_ref_inc() -> unit
+        val r = new Cell(0)
+        r.inc()
+        r.inc()
+        r.inc()
+        assert(r.read() == 3, s"got ${r.read()}")
+
+### Set then read
+
+    #test
+    test_ssmr_ref_set_then_read() -> unit
+        val r = new Cell(0)
+        r.set(99)
+        assert(r.read() == 99, s"got ${r.read()}")
+
+Shared heap object via aliased refs
+------------------------------------
+
+`val a: &Cell; val b: &Cell = a` — both point to the same
+heap object. Mutating through `a` shows up via `b`.
+
+### Mutation through a, read through b
+
+    #test
+    test_ssmr_aliased_ref_mutation() -> unit
+        val a = new Cell(0)
+        val b = a
+        a.inc()
+        a.inc()
+        val va = a.read()
+        val vb = b.read()
+        assert(va == 2, "via a")
+        assert(vb == 2, "via b — same heap object")
+        assert(va == vb, "consistent")
+
+### Set via b, read via a
+
+    #test
+    test_ssmr_set_via_alias() -> unit
+        val a = new Cell(0)
+        val b = a
+        b.set(77)
+        assert(a.read() == 77, "via a")
+        assert(b.read() == 77, "via b")
+
+Method calls on a ref passed to a function
+-------------------------------------------
+
+    bump_three_times(c: &Cell) -> unit
+        c.inc()
+        c.inc()
+        c.inc()
+
+### Pass a ref, mutate inside, see result outside
+
+    #test
+    test_ssmr_ref_arg_mutation_visible() -> unit
+        val r = new Cell(5)
+        bump_three_times(r)
+        assert(r.read() == 8, s"5+3; got ${r.read()}")
+
+### Pass through two layers of functions
+
+    bump_via_helper(c: &Cell) -> unit
+        bump_three_times(c)
+
+    #test
+    test_ssmr_ref_arg_two_layers() -> unit
+        val r = new Cell(10)
+        bump_via_helper(r)
+        assert(r.read() == 13, s"got ${r.read()}")
+
+### Read through ref arg
+
+    read_doubled(c: &Cell) -> int = c.read() * 2
+
+    #test
+    test_ssmr_ref_arg_read() -> unit
+        val r = new Cell(7)
+        val v = read_doubled(r)
+        assert(v == 14, s"got $v")
+
+A function that returns a `&Cell`
+----------------------------------
+
+    make_cell(init: int) -> &Cell = new Cell(init)
+
+### Returned ref is usable
+
+    #test
+    test_ssmr_returned_ref() -> unit
+        val r = make_cell(100)
+        assert(r.read() == 100, s"got ${r.read()}")
+        r.inc()
+        assert(r.read() == 101, s"after inc; got ${r.read()}")
+
+Ref-typed struct field — method on the inner ref
+-------------------------------------------------
+
+    struct Container
+        cell: &Cell
+        tag: int
+
+    Container.bump_inner() -> unit
+        self.cell.inc()
+
+### Container.bump_inner mutates the inner cell
+
+    #test
+    test_ssmr_method_on_ref_field() -> unit
+        val r = new Cell(0)
+        var c = Container(r, 1)
+        c.bump_inner()
+        c.bump_inner()
+        c.bump_inner()
+        assert(r.read() == 3, s"shared cell; got ${r.read()}")
+        assert(c.tag == 1, "tag preserved")
+
+### Calling read directly on `c.cell`
+
+    Container.read_inner() -> int = self.cell.read()
+
+    #test
+    test_ssmr_read_inner_via_outer() -> unit
+        val r = new Cell(42)
+        val c = Container(r, 0)
+        assert(c.read_inner() == 42, "outer reads inner ref")
