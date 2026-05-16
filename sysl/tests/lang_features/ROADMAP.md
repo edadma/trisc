@@ -458,13 +458,18 @@ this dir adds simple-enum coverage and edge cases.
 
 ---
 
-### `unicode_strings/` — UTF-8, escapes, runes — 🔴 P3
+### `unicode_strings/` — UTF-8, escapes, runes — 🟢 P3
 
 | File | Tests pinned |
 |---|---|
-| `utf8_decode.lsysl` 🔴 | iterating UTF-8 multi-byte sequences; `len(s)` is byte length |
-| `utf8_invalid_handling.lsysl` 🔴 | how the language handles invalid sequences (spec-pinned) |
-| `unicode_escape_literal.lsysl` 🔴 | `\u{1F600}` literal decodes correctly |
+| `utf8_decode.lsysl` 🟢 | iterating UTF-8 multi-byte sequences; `len(s)` is byte length (10 tests) |
+| `utf8_invalid_handling.lsysl` 🟢 | how the language handles invalid sequences (spec-pinned) (9 tests) |
+| ~~`unicode_escape_literal.lsysl`~~ | dropped — `\u{XXXX}` escape is not part of the sysl lexer (backslash is preserved literally) |
+
+Note: `\xNN` for `N >= 0x80` is currently mis-handled (treated as
+16-bit codepoint, not raw byte — see `feedback_sysl_high_byte_x_escape`).
+Tests use source-level Unicode characters and `string(&buf[0], n)`
+byte-array construction to work around this.
 
 ---
 
