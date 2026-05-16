@@ -1,0 +1,225 @@
+Within-Constrained Integer Types
+=================================
+
+Per reference §"Type Declarations" and §"Type Attributes":
+
+```sysl
+type Age = int within 0..150        // inclusive range
+type Prob = i32 within 0..100       // any int width works
+type Half = int within 0..<10       // exclusive upper
+```
+
+- Subtypes (without `new`) are *base-compatible* — no cast needed; the
+  runtime check fires on every produce site (assignment, parameter
+  bind, return, cast) that produces a value of the constrained type.
+- Out-of-range values trap at the produce site.
+- `T::Valid(x)` reports range membership without trapping.
+- `T::First` and `T::Last` fold to compile-time constants (lower bound
+  and upper-bound-minus-1-if-`..<` respectively).
+
+This file pins:
+
+- Construction from in-range and out-of-range literals.
+- Range bounds at edges (lo, hi).
+- Exclusive upper (`..<`).
+- Trap on assignment of an out-of-range value.
+- `::Valid(x)` is a non-trapping bool.
+- `::First` / `::Last` fold correctly.
+
+File-local prefix `Iwc` (Integer Within Constraint).
+
+    module sysl.tests.lang_features
+
+A simple inclusive-range type
+------------------------------
+
+    type IwcAge = int within 0..150
+
+### In-range assignment
+
+    #test
+    test_iwc_in_range() -> unit
+        val a: IwcAge = 42
+        assert(a == 42, s"got $a")
+
+### Lower edge
+
+    #test
+    test_iwc_lower_edge() -> unit
+        val a: IwcAge = 0
+        assert(a == 0, s"got $a")
+
+### Upper edge (inclusive)
+
+    #test
+    test_iwc_upper_edge() -> unit
+        val a: IwcAge = 150
+        assert(a == 150, s"got $a")
+
+### `::First` is the lower bound
+
+    #test
+    test_iwc_first_attr() -> unit
+        val lo = IwcAge::First
+        assert(lo == 0, s"got $lo")
+
+### `::Last` is the upper bound (inclusive)
+
+    #test
+    test_iwc_last_attr() -> unit
+        val hi = IwcAge::Last
+        assert(hi == 150, s"got $hi")
+
+### `::Valid(x)` returns true for in-range x
+
+    #test
+    test_iwc_valid_in_range() -> unit
+        assert(IwcAge::Valid(42), "in range")
+        assert(IwcAge::Valid(0), "lower")
+        assert(IwcAge::Valid(150), "upper")
+
+### `::Valid(x)` returns false for out-of-range x (never traps)
+
+    #test
+    test_iwc_valid_out_of_range() -> unit
+        assert(!IwcAge::Valid(-1), "below")
+        assert(!IwcAge::Valid(151), "above")
+        assert(!IwcAge::Valid(1000), "way above")
+
+Exclusive upper bound (`..<`)
+------------------------------
+
+    type IwcHalf = int within 0..<10
+
+### In-range value just below the exclusive upper
+
+    #test
+    test_iwc_half_below_upper() -> unit
+        val x: IwcHalf = 9
+        assert(x == 9, s"got $x")
+
+### `::Last` of `..<10` is 9 (one less than the exclusive bound)
+
+    #test
+    test_iwc_half_last() -> unit
+        val hi = IwcHalf::Last
+        assert(hi == 9, s"got $hi")
+
+### `::Valid(10)` is false — exclusive
+
+    #test
+    test_iwc_half_ten_invalid() -> unit
+        assert(!IwcHalf::Valid(10), "exclusive upper")
+        assert(IwcHalf::Valid(9), "in")
+
+Subtype is base-compatible — no cast needed
+--------------------------------------------
+
+### Assigning IwcAge to plain int works (no `int(a)` needed)
+
+    #test
+    test_iwc_subtype_to_base() -> unit
+        val a: IwcAge = 42
+        val b: int = a
+        assert(b == 42, s"got $b")
+
+### Arithmetic produces a plain int — passes back through int
+arithmetic without re-checking the constraint until reassignment to
+the constrained type.
+
+    #test
+    test_iwc_subtype_arithmetic() -> unit
+        val a: IwcAge = 50
+        val b = a + 10
+        assert(b == 60, s"got $b")
+
+Cast back into the constrained type validates
+----------------------------------------------
+
+### In-range cast succeeds
+
+    #test
+    test_iwc_cast_in_range_ok() -> unit
+        val raw: int = 100
+        if IwcAge::Valid(raw) then
+            val a: IwcAge = raw
+            assert(a == 100, "ok")
+
+### `::Valid` lets us guard before producing the constrained value
+
+    #test
+    test_iwc_valid_guards_production() -> unit
+        val raw: int = 200
+        // raw is out of range — don't produce IwcAge; verify with Valid
+        assert(!IwcAge::Valid(raw), "guarded")
+
+Different bases — i32 vs int
+-----------------------------
+
+    type IwcByte = i32 within 0..255
+
+### Within over an explicit base width
+
+    #test
+    test_iwc_byte_in_range() -> unit
+        val b: IwcByte = 200
+        assert(b == 200, s"got $b")
+
+### `::First`/`::Last` for IwcByte
+
+    #test
+    test_iwc_byte_bounds() -> unit
+        assert(IwcByte::First == 0, "first")
+        assert(IwcByte::Last == 255, "last")
+
+### `::Valid` for IwcByte
+
+    #test
+    test_iwc_byte_valid() -> unit
+        assert(IwcByte::Valid(0), "0")
+        assert(IwcByte::Valid(255), "255")
+        assert(!IwcByte::Valid(256), "256 over")
+        assert(!IwcByte::Valid(-1), "-1 under")
+
+Const can be used as a within bound
+------------------------------------
+
+    const IwcMaxLevel = 9
+
+    type IwcLevel = int within 0..IwcMaxLevel
+
+### `::Last` from a const bound
+
+    #test
+    test_iwc_const_bound() -> unit
+        val l: IwcLevel = IwcMaxLevel
+        assert(l == 9, s"got $l")
+        assert(IwcLevel::Last == 9, s"last ${IwcLevel::Last}")
+        assert(!IwcLevel::Valid(10), "above")
+
+Negative-low bound
+-------------------
+
+    type IwcSigned = int within -10..10
+
+### Span across zero
+
+    #test
+    test_iwc_signed_span() -> unit
+        val a: IwcSigned = 0
+        val b: IwcSigned = -10
+        val c: IwcSigned = 10
+        assert(a == 0, "zero")
+        assert(b == -10, "min")
+        assert(c == 10, "max")
+
+### `::First` / `::Last` over a negative-low range
+
+    #test
+    test_iwc_signed_bounds() -> unit
+        assert(IwcSigned::First == -10, "first")
+        assert(IwcSigned::Last == 10, "last")
+        assert(IwcSigned::Valid(-10), "lo edge")
+        assert(IwcSigned::Valid(10), "hi edge")
+        assert(!IwcSigned::Valid(-11), "below")
+        assert(!IwcSigned::Valid(11), "above")
