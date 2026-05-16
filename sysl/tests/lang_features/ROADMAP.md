@@ -298,7 +298,7 @@ Existing: `struct_return.lsysl` → `structs/struct_return.lsysl`.
 | `float_arithmetic.lsysl` 🔴 | denormals, rounding modes, FP-strict comparisons |
 | `float_int_cast.lsysl` 🟢 | `int(f)` exact integer-valued, truncates toward zero on +ve and -ve, half-down on .5; `f64(i)` exact for ±100 range; round-trip integrity for -10..10; casts in arithmetic / float exprs / division; promotion arithmetic. (18 tests) |
 | `float_compare.lsysl` 🔴 | NaN-aware `<`, `<=`, ordered/unordered semantics |
-| `float_literal_parsing.lsysl` 🔴 | `1.0e10`, `0.5`, `1e-5`, negative exponent |
+| `float_literal_parsing.lsysl` 🟢 | 0.5, 1.5, 0.0, -0.0; positive scientific (1e3, 2.5e2, 1e6, 1.0E5, 1.0e+3); negative scientific (1e-3, 5e-2, 1.5e-1); underscore separators in fractional + integer parts; negative-literals via unary minus; literals as fn arg / return value; mixed-exponent sum. (19 tests) |
 
 Existing: `float_extremes.lsysl` → `floats/float_extremes.lsysl`.
 
