@@ -1,0 +1,207 @@
+`T::Value(s)` and `T::Valid(x)` — Parse and Check
+==================================================
+
+Per reference §"Type Attributes":
+
+```sysl
+Day::Value("Tue")  // Day.Tue — parses a string back to its variant
+Age::Valid(raw)    // bool — true iff `raw` is in range, never traps
+```
+
+- `T::Value(s)` applies to **simple enums**: returns the variant
+  whose declared name equals `s`. Traps on no match.
+- `T::Valid(x)` applies to **within-constrained ints and simple
+  enums**: returns a bool. Never traps. Folds to inline
+  `x >= lo && x <= hi` for within-int types.
+- Round-trip: `T::Value(T::Image(x)) == x` for every variant.
+
+This file pins:
+
+- `::Value(s)` for every variant of a simple enum
+- `::Value` / `::Image` round-trip on enums
+- `::Valid` on a within-int with both inclusive and exclusive upper
+- `::Valid` on an enum (every legal variant returns true)
+- `::Valid` returning false without trapping for out-of-range int
+- `::Valid` used as guard before producing a constrained value
+
+Trap-side tests (`::Value` on a non-matching name) are deferred to
+the future uniform runtime-trap harness.
+
+File-local prefix `Tvv` (Type-Value-Valid).
+
+    module sysl.tests.lang_features
+
+
+A simple enum for value-parsing
+--------------------------------
+
+    enum TvvDay
+        Mon
+        Tue
+        Wed
+        Thu
+        Fri
+        Sat
+        Sun
+
+
+### `::Value(name_str)` returns the matching variant
+
+    #test
+    test_tvv_value_basic() -> unit
+        assert(TvvDay::Value("Mon") == TvvDay.Mon, "Mon")
+        assert(TvvDay::Value("Tue") == TvvDay.Tue, "Tue")
+        assert(TvvDay::Value("Wed") == TvvDay.Wed, "Wed")
+        assert(TvvDay::Value("Sun") == TvvDay.Sun, "Sun")
+
+### `::Value(::Image(x)) == x` round-trip
+
+    #test
+    test_tvv_value_image_round_trip() -> unit
+        val a = TvvDay.Wed
+        val img = TvvDay::Image(a)
+        val back = TvvDay::Value(img)
+        assert(back == a, "Wed → \"Wed\" → Wed")
+
+### Round-trip over every variant via `::Range`
+
+    #test
+    test_tvv_round_trip_all() -> unit
+        var count: int = 0
+        for d in TvvDay::Range
+            val back = TvvDay::Value(TvvDay::Image(d))
+            assert(back == d, s"round-trip failed for variant ${TvvDay::Image(d)}")
+            count = count + 1
+        assert(count == 7, s"saw 7 variants, got $count")
+
+
+`::Valid` on a within-constrained int
+--------------------------------------
+
+    type TvvAge = int within 0..150
+
+### In-range values return true
+
+    #test
+    test_tvv_valid_in_range() -> unit
+        assert(TvvAge::Valid(0), "lower edge")
+        assert(TvvAge::Valid(42), "interior")
+        assert(TvvAge::Valid(150), "upper edge inclusive")
+
+### Out-of-range values return false (never traps)
+
+    #test
+    test_tvv_valid_out_of_range() -> unit
+        assert(!TvvAge::Valid(0 - 1), "below")
+        assert(!TvvAge::Valid(151), "above")
+        assert(!TvvAge::Valid(0 - 100), "far below")
+        assert(!TvvAge::Valid(10000), "far above")
+
+
+`::Valid` on exclusive-upper `..<`
+-----------------------------------
+
+    type TvvHalf = int within 0..<10
+
+### Boundary on `..<10` — 9 valid, 10 invalid
+
+    #test
+    test_tvv_valid_exclusive_upper() -> unit
+        assert(TvvHalf::Valid(0), "0 lo")
+        assert(TvvHalf::Valid(9), "9 just under exclusive bound")
+        assert(!TvvHalf::Valid(10), "10 not valid — exclusive")
+        assert(!TvvHalf::Valid(0 - 1), "below 0")
+
+
+`::Valid` on a simple enum
+---------------------------
+
+For a simple enum, `T::Valid(int_value)` would check whether the
+integer corresponds to a declared variant. The reference says
+`::Valid` applies to enums; we verify via int casting.
+
+    #test
+    test_tvv_valid_enum_int_values() -> unit
+        // 7 variants → ints 0..6 all valid
+        for i in 0..<7
+            assert(TvvDay::Valid(i), s"i=$i should be valid")
+        // 7 and beyond — invalid
+        assert(!TvvDay::Valid(7), "7 above last variant")
+        assert(!TvvDay::Valid(0 - 1), "-1 below first variant")
+        assert(!TvvDay::Valid(100), "way above")
+
+
+`::Valid` as a guard before producing a constrained value
+----------------------------------------------------------
+
+The reference's prescribed pattern:
+
+```sysl
+if Age::Valid(raw) then
+    var a: Age = raw          // safe: the range check will pass
+```
+
+### Guard pattern works for in-range input
+
+    #test
+    test_tvv_valid_guards_in_range() -> unit
+        val raw: int = 99
+        var got: int = 0 - 1
+        if TvvAge::Valid(raw) then
+            val a: TvvAge = raw
+            got = int(a)
+        assert(got == 99, s"got $got")
+
+### Guard rejects out-of-range without trapping
+
+    #test
+    test_tvv_valid_guards_out_of_range() -> unit
+        val raw: int = 200
+        var produced: bool = false
+        if TvvAge::Valid(raw) then
+            produced = true
+        assert(!produced, "out-of-range correctly skipped the guarded branch")
+
+
+`::Valid` is a pure bool expression — combinable
+-------------------------------------------------
+
+### Combining with `&&` / `||`
+
+    #test
+    test_tvv_valid_combines() -> unit
+        val a: int = 50
+        val b: int = 200
+        val both = TvvAge::Valid(a) && TvvAge::Valid(b)
+        val either = TvvAge::Valid(a) || TvvAge::Valid(b)
+        assert(!both, "200 invalid, so AND is false")
+        assert(either, "50 valid, so OR is true")
+
+
+Single-variant enum
+--------------------
+
+    enum TvvOnly
+        OnlyOne
+
+### Value parses the single variant name
+
+    #test
+    test_tvv_single_variant() -> unit
+        assert(TvvOnly::Value("OnlyOne") == TvvOnly.OnlyOne, "got the only variant")
+
+
+Negative-low within range
+--------------------------
+
+    type TvvSigned = int within -10..10
+
+### Both edges + interior
+
+    #test
+    test_tvv_valid_signed() -> unit
+        assert(TvvSigned::Valid(0), "zero")
+        assert(TvvSigned::Valid(0 - 10), "lo edge")
+        assert(TvvSigned::Valid(10), "hi edge")
+        assert(!TvvSigned::Valid(0 - 11), "below")
+        assert(!TvvSigned::Valid(11), "above")

@@ -3017,7 +3017,16 @@ class SyslSVMCodegen:
         case TValuePattern(v) =>
           genExpr(v)
           emit(s"  local_get $scrIdx")
-          emit("  eq")
+          if scrutinee.typ == SyslType.StringType then
+            // Strings are 16-byte fat pointers; the generic `eq` opcode
+            // compares only the descriptor addresses (each TStringLit
+            // allocates a fresh descriptor, so two equal-content strings
+            // never compare equal under raw eq). Route through the
+            // dedicated byte-wise __svm_str_eq helper.
+            emit("  call __svm_str_eq")
+            needsStrEq = true
+          else
+            emit("  eq")
           emit(s"  jumpnz $hitLabel")
         case TRangePattern(lo, hi) =>
           val rangeNext = newLabel("match_rng")
