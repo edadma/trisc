@@ -1,0 +1,195 @@
+Simple Enum — ::Succ / ::Pred Boundary Behavior
+================================================
+
+Per reference §"Type Attributes":
+
+- `T::Succ(x)` — next variant (traps at the upper end).
+- `T::Pred(x)` — previous variant (traps at the lower end).
+- `T::Valid(x)` — bool, **never traps** — true iff `x`
+  satisfies the constraint.
+
+The mid-range cases for `::Succ` / `::Pred` are already pinned
+in `enum_simple_int.lsysl` (Red→Green, Green→Blue, etc.).
+This file pins the *boundary* surface — specifically the
+non-trapping companion `::Valid`, which is the safe way to
+ask "would `::Succ` / `::Pred` trap here?"
+
+Pins:
+
+- `::Valid(raw_int)` returns true for in-range integers.
+- `::Valid(raw_int)` returns false for out-of-range integers
+  (including negative).
+- `::Valid` on every position in the auto-increment range.
+- `::Valid` on a sparse enum (explicit values) — only the
+  declared values are valid.
+- `::First` / `::Last` ARE always valid via `::Valid`.
+- `::Valid` works in a conditional / boolean context.
+- The trap behavior of `::Succ(::Last)` and `::Pred(::First)`
+  is documented but NOT pinned (would abort the test).
+
+File-local prefix `Sesp` (Sysl Enum Succ-Pred).
+
+    module sysl.tests.lang_features
+
+A contiguous-range simple enum
+-------------------------------
+
+    enum SespColor
+        SespRed                 // 0
+        SespGreen               // 1
+        SespBlue                // 2
+        SespYellow              // 3
+
+### ::Valid is true for every position in the range
+
+    #test
+    test_sesp_valid_in_range() -> unit
+        assert(SespColor::Valid(0), "0")
+        assert(SespColor::Valid(1), "1")
+        assert(SespColor::Valid(2), "2")
+        assert(SespColor::Valid(3), "3")
+
+### ::Valid is false for out-of-range values (below)
+
+    #test
+    test_sesp_valid_below_range() -> unit
+        assert(!SespColor::Valid(-1), "-1 invalid")
+        assert(!SespColor::Valid(-100), "-100 invalid")
+
+### ::Valid is false for out-of-range values (above)
+
+    #test
+    test_sesp_valid_above_range() -> unit
+        assert(!SespColor::Valid(4), "4 invalid")
+        assert(!SespColor::Valid(100), "100 invalid")
+        assert(!SespColor::Valid(99999), "99999 invalid")
+
+### Bounds are themselves valid
+
+    #test
+    test_sesp_valid_at_bounds() -> unit
+        assert(SespColor::Valid(SespColor::First), "First valid")
+        assert(SespColor::Valid(SespColor::Last), "Last valid")
+
+### ::Valid composes with conditional dispatch
+
+    #test
+    test_sesp_valid_in_if() -> unit
+        val raw = 2
+        var result = 0
+        if SespColor::Valid(raw) then
+            val v = SespColor::Val(raw)
+            result = SespColor::Pos(v)
+        else
+            result = -1
+        assert(result == 2, s"got $result")
+
+### ::Valid guards the unsafe ::Val
+
+    sesp_safe_val(raw: int) -> int
+        if SespColor::Valid(raw) then
+            val v = SespColor::Val(raw)
+            return SespColor::Pos(v)
+        else
+            return -1
+
+    #test
+    test_sesp_safe_val_in_range() -> unit
+        assert(sesp_safe_val(0) == 0, "0 → 0")
+        assert(sesp_safe_val(1) == 1, "1 → 1")
+        assert(sesp_safe_val(3) == 3, "3 → 3")
+
+    #test
+    test_sesp_safe_val_out_of_range() -> unit
+        assert(sesp_safe_val(-1) == -1, "-1 → -1")
+        assert(sesp_safe_val(99) == -1, "99 → -1")
+
+A sparse / explicit-value enum
+-------------------------------
+
+    enum SespStatus
+        SespOk = 200
+        SespClientErr = 400
+        SespServerErr = 500
+
+### ::First and ::Last for the explicit-value enum
+
+    #test
+    test_sesp_explicit_first_last() -> unit
+        assert(SespStatus::First == 200, s"got ${SespStatus::First}")
+        assert(SespStatus::Last == 500, s"got ${SespStatus::Last}")
+
+### ::Pos is by-position (0/1/2), not by-value (200/400/500)
+
+    #test
+    test_sesp_explicit_pos_by_position() -> unit
+        assert(SespStatus::Pos(SespStatus.SespOk) == 0, "Ok at 0")
+        assert(SespStatus::Pos(SespStatus.SespClientErr) == 1, "ClientErr at 1")
+        assert(SespStatus::Pos(SespStatus.SespServerErr) == 2, "ServerErr at 2")
+
+### ::Valid on explicit-value enum — only the declared values
+
+For a `where`-style enum, `::Valid` returns true iff `raw` is
+one of the declared values (200, 400, 500). 300 is NOT valid
+even though it's between First and Last.
+
+(This is a known design point — `::Valid` on sparse-value
+simple enums may return true only for declared values, or may
+return true for the full integer range. We pin the boundaries
+that ARE consistent across backends — the declared values.)
+
+    #test
+    test_sesp_explicit_declared_valid() -> unit
+        assert(SespStatus::Valid(200), "200 declared")
+        assert(SespStatus::Valid(400), "400 declared")
+        assert(SespStatus::Valid(500), "500 declared")
+
+### Below and above the range are definitively invalid
+
+    #test
+    test_sesp_explicit_out_of_range() -> unit
+        assert(!SespStatus::Valid(199), "199 < First")
+        assert(!SespStatus::Valid(501), "501 > Last")
+        assert(!SespStatus::Valid(0), "0 < First")
+        assert(!SespStatus::Valid(1000), "1000 > Last")
+
+::Succ / ::Pred in the mid-range — non-boundary cases
+------------------------------------------------------
+
+These are also covered in `enum_simple_int.lsysl`; we pin
+them again here against an enum specifically designed for
+boundary testing.
+
+### Succ chains forward through 0-1-2-3
+
+    #test
+    test_sesp_succ_chain() -> unit
+        val a = SespColor.SespRed                       // pos 0
+        val b = SespColor::Succ(a)                      // pos 1
+        val c = SespColor::Succ(b)                      // pos 2
+        val d = SespColor::Succ(c)                      // pos 3
+        assert(SespColor::Pos(a) == 0, "a pos")
+        assert(SespColor::Pos(b) == 1, "b pos")
+        assert(SespColor::Pos(c) == 2, "c pos")
+        assert(SespColor::Pos(d) == 3, "d pos")
+
+### Pred chains backward through 3-2-1-0
+
+    #test
+    test_sesp_pred_chain() -> unit
+        val a = SespColor.SespYellow                    // pos 3
+        val b = SespColor::Pred(a)                      // pos 2
+        val c = SespColor::Pred(b)                      // pos 1
+        val d = SespColor::Pred(c)                      // pos 0
+        assert(SespColor::Pos(a) == 3, "a pos")
+        assert(SespColor::Pos(b) == 2, "b pos")
+        assert(SespColor::Pos(c) == 1, "c pos")
+        assert(SespColor::Pos(d) == 0, "d pos")
+
+### Succ then Pred is identity (mid-range)
+
+    #test
+    test_sesp_succ_pred_identity_mid() -> unit
+        val a = SespColor.SespGreen
+        val b = SespColor::Pred(SespColor::Succ(a))
+        assert(SespColor::Pos(b) == SespColor::Pos(a), "identity")
