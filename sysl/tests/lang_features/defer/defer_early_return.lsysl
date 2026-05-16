@@ -1,0 +1,93 @@
+Defer fires on a value-return path
+==================================
+
+When a `defer stmt` is queued in a function whose return type
+is non-unit, the deferred body must run before the function
+returns its value to the caller — both on the explicit-`return val`
+path *and* the fall-through-then-`return val` path. Mirrors the
+implicit-exit coverage of `defer_no_return.lsysl`, but for
+value-returning fns.
+
+This pins a TRISC-specific stack-tracking bug (see
+`feedback_sysl_trisc_defer_nonunit_return.md`) that was fixed by
+saving r1 into a fresh FP-relative slot in `emitDefers` instead
+of using `pshd/popd` — the prior scheme silently corrupted the
+saved return value when the defer body allocated its own
+unbalanced FP-relative scratch (e.g. the refcount-bracketed path
+for `t.s = "literal"` field assignment).
+
+    module sysl.tests.lang_features
+
+    struct DerTrace
+        s: string
+
+Defer on an explicit early-return path
+--------------------------------------
+
+The fn takes an early `return -1` inside an `if`; the defer
+must fire before control leaves the fn, so the caller sees the
+mutation after the call returns.
+
+    der_early_branch(t: *DerTrace, x: int) -> int
+        defer t.s = t.s + "D"
+        if x == 0
+            return -1
+        return x * 10
+
+    #test
+    test_defer_fires_on_early_return() -> unit
+        var t = DerTrace("")
+        val r = der_early_branch(&t, 0)
+        assert(r == -1, s"expected -1, got $r")
+        assert(t.s == "D", s"expected 'D' after early return, got '${t.s}'")
+
+    #test
+    test_defer_fires_on_fall_through_return() -> unit
+        var t = DerTrace("")
+        val r = der_early_branch(&t, 7)
+        assert(r == 70, s"expected 70, got $r")
+        assert(t.s == "D", s"expected 'D' after fall-through return, got '${t.s}'")
+
+Defer with a literal-string field write
+---------------------------------------
+
+The original TRISC bug had two layers:
+the `t.s = t.s + "D"` form (concat) AND the simpler
+`t.s = "D"` (literal) form both failed. The bug surfaced
+specifically with string-typed field-assigns through `*T` in
+the defer body — the refcount-bracketed codegen allocates a
+16-byte scratch via `addi r7, r7, -16` without an matching
+restore, and the old `emitDefers` `pshd/popd` for r1 read
+garbage from that leaked region.
+
+    der_literal_write(t: *DerTrace) -> int
+        defer t.s = "L"
+        return 42
+
+    #test
+    test_defer_literal_write_value_return() -> unit
+        var t = DerTrace("")
+        val r = der_literal_write(&t)
+        assert(r == 42, s"expected 42, got $r")
+        assert(t.s == "L", s"expected 'L', got '${t.s}'")
+
+Two stacked defers, value return, LIFO via pointer
+--------------------------------------------------
+
+Two defers on the same `*int` — LIFO order must hold even when
+the enclosing fn returns a value. Without the fix, the inline
+defer bodies clobbered the saved return value and r1 came back
+holding a stack pointer instead of the literal.
+
+    der_two_defers(c: *int) -> int
+        defer *c = *c + 1
+        defer *c = *c * 10
+        return 99
+
+    #test
+    test_two_defers_value_return() -> unit
+        var c = 0
+        val r = der_two_defers(&c)
+        assert(r == 99, s"expected 99, got $r")
+        // LIFO: c=0; (*=10) → 0; (+1) → 1
+        assert(c == 1, s"expected 1 (LIFO), got $c")

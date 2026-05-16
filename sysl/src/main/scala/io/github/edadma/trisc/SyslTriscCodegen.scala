@@ -2155,10 +2155,31 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
   private def emitDefers(): Unit =
     if deferStack.nonEmpty then
-      emit("  pshd r1") // save return value
+      // Save the return value into a fresh fp-relative slot so it survives the
+      // defer body's stack churn. `pshd r1` is wrong here for two reasons:
+      // (1) it lowers r7 without updating stackOffset, so a subsequent
+      // FP-relative allocation in the body picks slots that collide with the
+      // saved r1; (2) some inline statement codegen (e.g. TFieldAssignStmt
+      // with a refcounted field) lowers r7 unilaterally and relies on the
+      // function epilogue's `mov r7, r5` to reclaim — so the matching `popd
+      // r1` reads garbage from the body's leaked region instead of the saved
+      // return value. The FP-relative save is immune to both.
+      val savedSO = stackOffset
+      emitAddImm(7, 7, -8)
+      stackOffset -= 8
+      val saveOff = stackOffset
+      emitAddImm(2, 5, saveOff)
+      emit("  std r1, r2, r0")
       for stmt <- deferStack.reverseIterator do
         genStmt(stmt)
-      emit("  popd r1") // restore return value
+      emitAddImm(2, 5, saveOff)
+      emit("  ldd r1, r2, r0")
+      // Restore r7 to the pre-defer level (discarding any unbalanced
+      // body allocations). The epilogue's `mov r7, r5` would do this
+      // eventually but emitRefCleanup runs in between and uses pshd/popd
+      // for r1 preservation — those need a coherent stack pointer.
+      emitAddImm(7, 5, savedSO)
+      stackOffset = savedSO
 
   private def emitEpilogue(): Unit =
     emit("  mov r7, r5")
