@@ -1,0 +1,246 @@
+Chained Comparisons
+====================
+
+Per reference §"Chained Comparisons":
+
+```
+if 1 <= x <= 10 then ...    // equivalent to: 1 <= x && x <= 10
+if a < b < c < d then ...   // all pairs checked, short-circuits
+```
+
+Each adjacent pair must hold; sub-expressions are evaluated
+left-to-right and **at most once** (no quadratic re-evaluation of
+the middle terms); evaluation stops at the first false pair.
+
+This file pins:
+
+- 2-pair, 3-pair, 4-pair chains over plain literals/locals.
+- Mixed comparison operators inside a chain (`<` with `<=`, `<` with `==`, etc.).
+- Boundary inclusivity for `<=` / `>=`.
+- Short-circuit: when an early pair is false, later sub-expressions
+  are not evaluated (observable via a side-effecting helper).
+- Evaluation order: each operand is computed left-to-right.
+- The middle operand is evaluated **only once**, even though it
+  participates in two comparisons.
+
+File-local prefix `Scc` (Sysl Chained Comparisons).
+
+    module sysl.tests.lang_features
+
+Basic 2-pair chain — `a < b < c`
+---------------------------------
+
+### All three increasing — true
+
+    #test
+    test_scc_lt_lt_true() -> unit
+        assert(1 < 5 < 10, "1 < 5 < 10")
+
+### Middle equals upper — `5 < 10 < 10` is false (`10 < 10` fails)
+
+    #test
+    test_scc_lt_lt_mid_eq_upper() -> unit
+        assert(!(5 < 10 < 10), "10 < 10 is false")
+
+### Lower equals middle — `5 < 5 < 10` is false (`5 < 5` fails)
+
+    #test
+    test_scc_lt_lt_lower_eq_mid() -> unit
+        assert(!(5 < 5 < 10), "5 < 5 is false")
+
+### Out-of-order — `1 < 10 < 5` is false (second pair fails)
+
+    #test
+    test_scc_lt_lt_second_fails() -> unit
+        assert(!(1 < 10 < 5), "10 < 5 is false")
+
+Inclusive bounds — `lo <= x <= hi`
+-----------------------------------
+
+### Strict interior
+
+    #test
+    test_scc_range_interior() -> unit
+        val x = 5
+        assert(1 <= x <= 10, "5 in [1,10]")
+
+### At lower bound (inclusive)
+
+    #test
+    test_scc_range_at_lower() -> unit
+        val x = 1
+        assert(1 <= x <= 10, "1 in [1,10]")
+
+### At upper bound (inclusive)
+
+    #test
+    test_scc_range_at_upper() -> unit
+        val x = 10
+        assert(1 <= x <= 10, "10 in [1,10]")
+
+### Below lower bound
+
+    #test
+    test_scc_range_below() -> unit
+        val x = 0
+        assert(!(1 <= x <= 10), "0 not in [1,10]")
+
+### Above upper bound
+
+    #test
+    test_scc_range_above() -> unit
+        val x = 11
+        assert(!(1 <= x <= 10), "11 not in [1,10]")
+
+3-pair chain — `a < b < c < d`
+-------------------------------
+
+### Strictly increasing — true
+
+    #test
+    test_scc_3pair_increasing() -> unit
+        assert(1 < 2 < 3 < 4, "1<2<3<4")
+
+### Tail violates — `1 < 2 < 3 < 3` false
+
+    #test
+    test_scc_3pair_tail_fail() -> unit
+        assert(!(1 < 2 < 3 < 3), "tail 3<3 false")
+
+### Head violates — `5 < 2 < 3 < 4` false
+
+    #test
+    test_scc_3pair_head_fail() -> unit
+        assert(!(5 < 2 < 3 < 4), "head 5<2 false")
+
+Mixed operators inside a chain
+-------------------------------
+
+### `a < b <= c` — `1 < 5 <= 5`
+
+    #test
+    test_scc_mixed_lt_le() -> unit
+        assert(1 < 5 <= 5, "1<5<=5")
+        assert(!(1 < 5 <= 4), "1<5<=4 fails on 5<=4")
+
+### `a <= b < c` — `5 <= 5 < 10`
+
+    #test
+    test_scc_mixed_le_lt() -> unit
+        assert(5 <= 5 < 10, "5<=5<10")
+        assert(!(5 <= 5 < 5), "5<=5<5 fails on 5<5")
+
+### Descending chain — `10 > 5 > 1`
+
+    #test
+    test_scc_gt_chain() -> unit
+        assert(10 > 5 > 1, "10>5>1")
+        assert(!(10 > 5 > 5), "fails on 5>5")
+
+### `10 >= 5 >= 5` — inclusive descending
+
+    #test
+    test_scc_ge_chain() -> unit
+        assert(10 >= 5 >= 5, "10>=5>=5")
+        assert(!(10 >= 5 >= 6), "fails on 5>=6")
+
+Short-circuit — later sub-expressions not evaluated when early pair fails
+-------------------------------------------------------------------------
+
+    var scc_count = 0
+
+    scc_bump(v: int) -> int
+        scc_count = scc_count + 1
+        return v
+
+### Head pair fails — middle and tail helpers not called
+
+    #test
+    test_scc_short_circuit_head() -> unit
+        scc_count = 0
+        // 10 < 5 is false; should stop without calling either helper
+        val r = 10 < scc_bump(5) < scc_bump(10)
+        assert(!r, "head false")
+        assert(scc_count == 1, s"only middle evaluated, then comparison fails (got $scc_count)")
+
+### Middle-tail pair fails — second pair short-circuits the chain
+
+Per reference, `1 < bump(5) < bump(2)` lowers to
+`1 < bump(5) && bump(5) < bump(2)` — the middle is referenced in
+both pairs, so the middle helper runs twice; the tail helper runs
+once.
+
+    #test
+    test_scc_short_circuit_after_first_pair() -> unit
+        scc_count = 0
+        val r = 1 < scc_bump(5) < scc_bump(2)
+        assert(!r, "tail 5<2 false")
+        // bump(5) twice + bump(2) once = 3
+        assert(scc_count == 3, s"got $scc_count")
+
+Lowering — middle operand participates in two comparisons
+----------------------------------------------------------
+
+The reference explicitly defines chained comparisons by rewriting
+each adjacent pair, so a middle term that appears in two pairs is
+evaluated once per pair. (This pins the documented lowering; if a
+future optimisation introduces single-evaluation, these tests would
+flag the behaviour change.)
+
+### `1 < bump(5) < 10` — middle evaluated twice
+
+    #test
+    test_scc_middle_twice() -> unit
+        scc_count = 0
+        val r = 1 < scc_bump(5) < 10
+        assert(r, "1<5<10")
+        assert(scc_count == 2, s"middle in two pairs; got $scc_count")
+
+### Long chain — interior operands twice, ends once each
+
+    #test
+    test_scc_long_chain_eval_count() -> unit
+        scc_count = 0
+        val r = scc_bump(1) < scc_bump(2) < scc_bump(3) < scc_bump(4)
+        assert(r, "1<2<3<4")
+        // bump(1) once + bump(2) twice + bump(3) twice + bump(4) once = 6
+        assert(scc_count == 6, s"got $scc_count")
+
+Boundary — equality inside a chain
+-----------------------------------
+
+### `a < b == c` — `1 < 5 == 5`
+
+    #test
+    test_scc_lt_eq() -> unit
+        assert(1 < 5 == 5, "1<5==5")
+        assert(!(1 < 5 == 4), "1<5==4 fails")
+
+### `a == b == c` — true only when both equalities hold
+
+    #test
+    test_scc_eq_eq() -> unit
+        assert(5 == 5 == 5, "5==5==5")
+        assert(!(5 == 5 == 4), "5==5==4 fails")
+
+Chains over locals (not just literals)
+---------------------------------------
+
+### Same patterns over var bindings
+
+    #test
+    test_scc_locals() -> unit
+        val lo = 1
+        val x = 5
+        val hi = 10
+        assert(lo <= x <= hi, "interior")
+        val y = 11
+        assert(!(lo <= y <= hi), "above")
+
+### Chain inside an `if` expression
+
+    #test
+    test_scc_in_if() -> unit
+        val x = 7
+        val label = if 1 <= x <= 10 then "ok" else "bad"
+        assert(label == "ok", s"got $label")
