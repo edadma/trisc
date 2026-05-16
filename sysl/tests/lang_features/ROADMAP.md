@@ -378,7 +378,7 @@ Reference §"Traits and `impl` blocks", "Operator Overloading via Traits".
 | `trait_decl_impl.lsysl` 🟢 | trait declaration; impl for a user struct; method call dispatched correctly |
 | `operator_overload_infix.lsysl` 🟢 | user `+` `-` `*` `/` `<` `==` etc. on a user struct via traits; mixed-operand |
 | `operator_overload_prefix.lsysl` 🟢 | user prefix op via single-param trait + #operator; built-in `-`/`!` overloaded on structs |
-| `operator_overload_user_symbols.lsysl` 🔴 | user-defined operator symbols (whatever's documented) |
+| `operator_overload_user_symbols.lsysl` 🟢 | user infix `<>`, `<=>`, `~~`, `\|>`, `<*>`, `+++`; precedence-by-first-char |
 | `trait_generic_impl.lsysl` 🔴 | `impl[T] Trait for Box[T]` generic impl block |
 | `trait_orphan_rule.lsysl` 🔴 | orphan rule rejected (compile-error test — `should_panic` or analyzer test) |
 

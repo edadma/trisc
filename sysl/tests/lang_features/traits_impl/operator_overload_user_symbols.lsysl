@@ -1,0 +1,207 @@
+User-Defined Operator Symbols
+==============================
+
+Per reference §"User-Defined Operator Symbols":
+
+Beyond the fixed built-in operators, users can introduce new binary
+operator symbols by attaching `#operator("sym")` to a 2-arg trait
+method. The lexer is greedy over the operator characters
+`+ - * / % < > = ! & | ^ ~`, and the parser slots each user
+operator into the precedence ladder by its **first character**:
+
+| First char | Level | Examples |
+|---|---|---|
+| `*` `/` `%` | multiplicative | `<*` `*>` `/?` |
+| `+` `-` | additive | `+++` `<+>` |
+| `<` `>` `=` `!` | comparison | `<>` `<=>` `>>>` `===` `!==` |
+| `&` | bitwise-and | `&&&` |
+| `^` `~` | bitwise-xor | `~~` `^^` |
+| `\|` | bitwise-or | `\|>` `<\|` |
+
+This file pins:
+
+- `<>` infix on a user struct (canonical reference example).
+- Different first-char precedence: `<>` (comparison-level) vs `+++`
+  (additive-level), checked by relative position in a mixed-arity
+  expression.
+- Symbol on the operator-char set: `~~`, `|>`, `<*>`.
+- Both operands user-typed, single trait.
+- Distinguishing user symbol from a reserved sigil — `++` and `--`
+  are reserved, but `+++` is user-overloadable (different prefix).
+
+File-local prefix `Ous` (Operator-Overload-User-Symbols).
+
+    module sysl.tests.lang_features
+
+
+Canonical `<>` example — set union
+-----------------------------------
+
+    struct OusSet
+        bits: int
+
+    trait OusUnion[T]
+        #operator("<>")
+        ous_union(a: T, b: T) -> T
+
+    impl OusUnion[OusSet]
+        ous_union(a: OusSet, b: OusSet) -> OusSet = OusSet(a.bits | b.bits)
+
+### Basic `<>` dispatch
+
+    #test
+    test_ous_union_basic() -> unit
+        val a = OusSet(3)     // 0b0011
+        val b = OusSet(12)    // 0b1100
+        val c = a <> b
+        assert(c.bits == 15, s"3 | 12 = 15, got ${c.bits}")
+
+### Idempotence
+
+    #test
+    test_ous_union_idempotent() -> unit
+        val a = OusSet(7)
+        val c = a <> a
+        assert(c.bits == 7, s"got ${c.bits}")
+
+
+A second symbol on the comparison-level group: `<=>`
+-----------------------------------------------------
+
+    trait OusSpaceship[T]
+        #operator("<=>")
+        ous_cmp(a: T, b: T) -> int
+
+    impl OusSpaceship[OusSet]
+        ous_cmp(a: OusSet, b: OusSet) -> int = a.bits - b.bits
+
+    #test
+    test_ous_spaceship() -> unit
+        val a = OusSet(10)
+        val b = OusSet(3)
+        val r = a <=> b
+        assert(r == 7, s"10 - 3 = 7, got $r")
+
+
+Tilde-prefix symbol: `~~`
+--------------------------
+
+`~` is in the bitwise-xor precedence group. `~~` lexes as one
+operator.
+
+    trait OusXor[T]
+        #operator("~~")
+        ous_xor(a: T, b: T) -> T
+
+    impl OusXor[OusSet]
+        ous_xor(a: OusSet, b: OusSet) -> OusSet = OusSet(a.bits ^ b.bits)
+
+    #test
+    test_ous_xor() -> unit
+        val a = OusSet(10)    // 0b1010
+        val b = OusSet(6)     // 0b0110
+        val c = a ~~ b
+        // 0b1010 ^ 0b0110 = 0b1100 = 12
+        assert(c.bits == 12, s"got ${c.bits}")
+
+
+Pipe symbol: `|>`
+------------------
+
+`|` is in the bitwise-or precedence group. `|>` (compose-pipe) is
+a single user operator.
+
+    trait OusPipe[A, B, R]
+        #operator("|>")
+        ous_pipe(a: A, b: B) -> R
+
+    impl OusPipe[OusSet, OusSet, OusSet]
+        ous_pipe(a: OusSet, b: OusSet) -> OusSet = OusSet(a.bits | b.bits)
+
+    #test
+    test_ous_pipe() -> unit
+        val a = OusSet(1)
+        val b = OusSet(4)
+        val c = a |> b
+        assert(c.bits == 5, s"1 | 4 = 5, got ${c.bits}")
+
+
+Multi-char symbol on multiplicative group: `<*>`
+-------------------------------------------------
+
+`<*>` starts with `<`. Per the reference, `<*>` lexes as one
+operator. The first character is `<`, so it slots into the
+**comparison** precedence group (not multiplicative — that's only for
+symbols starting with `*` `/` `%`).
+
+    trait OusApply[T]
+        #operator("<*>")
+        ous_apply(a: T, b: T) -> T
+
+    impl OusApply[OusSet]
+        ous_apply(a: OusSet, b: OusSet) -> OusSet = OusSet(a.bits + b.bits)
+
+    #test
+    test_ous_apply_multichar() -> unit
+        val a = OusSet(5)
+        val b = OusSet(7)
+        val c = a <*> b
+        assert(c.bits == 12, s"5 + 7 = 12, got ${c.bits}")
+
+
+Two user symbols composed
+--------------------------
+
+`a <> b ~~ c` — both symbols are in the bitwise group; left-to-right
+associativity within the same group.
+
+    #test
+    test_ous_two_symbols_compose() -> unit
+        val a = OusSet(3)     // 0b0011
+        val b = OusSet(6)     // 0b0110
+        val c = OusSet(10)    // 0b1010
+        val r = (a <> b) ~~ c
+        // a<>b = 3|6 = 7 (0b0111)
+        // 7 ^ 10 (0b1010) = 0b1101 = 13
+        assert(r.bits == 13, s"got ${r.bits}")
+
+
+`+++` triple plus — user additive operator (different precedence
+from comparison-group `<>`)
+----------------------------------------------------------------
+
+`+++` starts with `+` → additive group. `<>` starts with `<` →
+comparison group. In a mixed expression, additive binds tighter than
+comparison, so `a +++ b <> c` parses as `(a +++ b) <> c`.
+
+    trait OusBigAdd[T]
+        #operator("+++")
+        ous_bigadd(a: T, b: T) -> T
+
+    impl OusBigAdd[OusSet]
+        ous_bigadd(a: OusSet, b: OusSet) -> OusSet = OusSet(a.bits + b.bits)
+
+    #test
+    test_ous_precedence_mixed() -> unit
+        val a = OusSet(2)
+        val b = OusSet(3)
+        val c = OusSet(0)
+        // additive binds tighter: a +++ b <> c == (a +++ b) <> c
+        // a +++ b = 5
+        // 5 <> 0 = OusSet(5 | 0) = OusSet(5)
+        val r = a +++ b <> c
+        assert(r.bits == 5, s"got ${r.bits}")
+
+
+Both operands user-typed via the same trait method
+---------------------------------------------------
+
+The trait above already binds two T args; this test pins that the
+binding finds the impl when both operand types are equal.
+
+    #test
+    test_ous_same_type_both_sides() -> unit
+        val a = OusSet(1)
+        val b = OusSet(2)
+        val c = a <> b
+        assert(c.bits == 3, s"1 | 2 = 3, got ${c.bits}")
