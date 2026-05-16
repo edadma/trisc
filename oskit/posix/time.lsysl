@@ -1,0 +1,523 @@
+Time, sleep, rlimit, and getrandom
+==================================
+
+POSIX time / sleep / random / rlimit syscalls: eventfd2,
+timerfd_create/settime/gettime, clock_gettime/getres,
+gettimeofday, nanosleep, clock_nanosleep, getrandom,
+and the prlimit64 / rlimit query path.
+
+All clockids resolve to `monotonic_ms() / 10` at 100 Hz.
+
+    module oskit.posix
+
+    import oskit.services.{sleep, monotonic_ms}
+
+
+SYS_EVENTFD2 (slix-musl syscall 156, sits next to the
+epoll triplet at 153/154/155). Allocates an
+eventfd backing slot with `initval` as the starting counter.
+`flags` honors:
+
+- `EFD_NONBLOCK` (0x800 = 2048) — same bit as `O_NONBLOCK`,
+  recorded on the slot's flags so read/write pick the
+  EAGAIN path on starvation.
+- `EFD_CLOEXEC`  (0x80000 = 524288) — slix doesn't track CLOEXEC
+  yet; accepted and ignored (matches the existing accept4 stance).
+- `EFD_SEMAPHORE` (1) — read decrements the counter by 1 instead
+  of returning the full count and zeroing it.
+
+Returns the allocated POSIX fd, or -EMFILE if no slot is free.
+
+    val POSIX_EFD_SEMAPHORE = 1
+    val POSIX_EFD_CLOEXEC   = 524288
+    val POSIX_EFD_NONBLOCK  = 2048
+
+    sys_eventfd2(initval: int, flags: int) -> i64
+        val pfd = posix_fd_alloc(POSIX_FD_EVENTFD, 0)
+        if pfd < 0
+            return i64(-EMFILE)
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + pfd
+        posix_fd_table[idx].eventfd_count = i64(initval)
+        var sem = 0
+        if (flags & POSIX_EFD_SEMAPHORE) != 0
+            sem = 1
+        posix_fd_table[idx].eventfd_semaphore = sem
+        var fd_flags = 0
+        if (flags & POSIX_EFD_NONBLOCK) != 0
+            fd_flags = fd_flags | POSIX_O_NONBLOCK
+        posix_fd_set_flags(pfd, fd_flags)
+        i64(pfd)
+
+
+SYS_TIMERFD_CREATE / SETTIME / GETTIME (slix-musl 356/357/358).
+Periodic / one-shot kernel-managed timer fd. Read returns the
+number of expirations since the last read; epoll EPOLLIN fires
+when expirations > 0.
+
+Slix runs the scheduler at 100 Hz, so sub-10 ms precision rounds
+down to whole ticks. `CLOCK_REALTIME` and `CLOCK_MONOTONIC` are
+both backed by `monotonic_ms() / 10` here — slix has no
+wall-clock-vs-monotonic distinction, so the two clockids resolve
+to the same tick stream.  Programs that depend on a real wall
+clock (e.g.  DST handling) won't get one until a real RTC bridge
+lands.
+
+Time conversion: 1 tick = 10 ms = 10_000_000 ns. We round down
+on the nsec → tick conversion, which means a `tv_nsec=5_000_000`
+(5 ms) request lands at "next whole tick" and may fire up to
+10 ms late.  Programs needing finer precision lose nothing they
+weren't going to lose to scheduler quanta anyway.
+
+`flags` (TFD_NONBLOCK = 2048, TFD_CLOEXEC = 524288) — same bits
+as O_NONBLOCK / O_CLOEXEC. Non-blocking is honoured; CLOEXEC
+accept-and-ignore (matches accept4 / eventfd2).
+
+`itimerspec` is a 32-byte LP64 struct: it_interval{tv_sec(8),
+tv_nsec(8)} + it_value{tv_sec(8), tv_nsec(8)}.
+
+    val POSIX_TFD_NONBLOCK  = 2048
+    val POSIX_TFD_CLOEXEC   = 524288
+    val POSIX_TFD_TIMER_ABSTIME = 1
+    val POSIX_CLOCK_REALTIME         = 0
+    val POSIX_CLOCK_MONOTONIC        = 1
+    val POSIX_CLOCK_PROCESS_CPUTIME  = 2
+    val POSIX_CLOCK_THREAD_CPUTIME   = 3
+    val POSIX_CLOCK_MONOTONIC_RAW    = 4
+    val POSIX_CLOCK_REALTIME_COARSE  = 5
+    val POSIX_CLOCK_MONOTONIC_COARSE = 6
+    val POSIX_CLOCK_BOOTTIME         = 7
+    val POSIX_CLOCK_TAI              = 11
+
+    shim_itimerspec_to_ticks(p: *byte, off: int) -> int
+        // Read tv_sec (low 8B) + tv_nsec (high 8B). Slix's tick
+        // resolution is 10 ms so we don't need the high half of
+        // tv_sec for any sane timer; clamp to int range.
+        var sec_lo = 0
+        var bi = 0
+        while bi < 4
+            sec_lo = sec_lo | ((int(p[off + bi]) & 0xff) << (bi * 8))
+            bi += 1
+        var nsec_lo = 0
+        bi = 0
+        while bi < 4
+            nsec_lo = nsec_lo | ((int(p[off + 8 + bi]) & 0xff) << (bi * 8))
+            bi += 1
+        if sec_lo < 0
+            sec_lo = 0
+        if nsec_lo < 0
+            nsec_lo = 0
+        sec_lo * 100 + (nsec_lo / 10000000)
+
+    shim_ticks_to_itimerspec(p: *byte, off: int, ticks: int)
+        // Write tv_sec (8B LE) + tv_nsec (8B LE). Use i64 for the
+        // shift-and-mask loop so byte-extraction past bit 31 doesn't
+        // hit the i32 shift-by-≥-width undefined-behaviour path some
+        // sysl backends fold into a no-op.
+        val sec = i64(ticks / 100)
+        val ns = i64((ticks % 100) * 10000000)
+        var bi = 0
+        while bi < 8
+            p[off + bi] = byte(int((sec >> i64(bi * 8))) & 0xff)
+            bi += 1
+        bi = 0
+        while bi < 8
+            p[off + 8 + bi] = byte(int((ns >> i64(bi * 8))) & 0xff)
+            bi += 1
+
+
+Catch up `expirations` to the current monotonic_ms/10 tick: every
+full `interval` between `next_tick` and now becomes one
+expiration. Returns without doing anything if the timer is
+disarmed or hasn't fired yet. Called lazily from sys_read /
+epoll_query_ready so the timer state is always coherent at the
+moment the user observes it.
+
+    timerfd_advance(idx: int)
+        if posix_fd_table[idx].timerfd_next_tick == 0
+            return
+        val now = int(monotonic_ms() / i64(10))
+        if now < posix_fd_table[idx].timerfd_next_tick
+            return
+        val interval = posix_fd_table[idx].timerfd_interval_ticks
+        if interval <= 0
+            // One-shot timer: a single expiration, then disarm.
+            val cur1 = posix_fd_table[idx].timerfd_expirations
+            posix_fd_table[idx].timerfd_expirations = cur1 + i64(1)
+            posix_fd_table[idx].timerfd_next_tick = 0
+            return
+        // Periodic: catch up by however many full intervals have
+        // elapsed past `next_tick`.  +1 covers the boundary tick
+        // itself.
+        val past = now - posix_fd_table[idx].timerfd_next_tick
+        val fired = (past / interval) + 1
+        val cur2 = posix_fd_table[idx].timerfd_expirations
+        posix_fd_table[idx].timerfd_expirations = cur2 + i64(fired)
+        val nt = posix_fd_table[idx].timerfd_next_tick
+        posix_fd_table[idx].timerfd_next_tick = nt + fired * interval
+
+
+    sys_timerfd_create(clockid: int, flags: int) -> i64
+        if clockid != POSIX_CLOCK_REALTIME
+            if clockid != POSIX_CLOCK_MONOTONIC
+                return i64(-EINVAL)
+        val pfd = posix_fd_alloc(POSIX_FD_TIMERFD, 0)
+        if pfd < 0
+            return i64(-EMFILE)
+        var fd_flags = 0
+        if (flags & POSIX_TFD_NONBLOCK) != 0
+            fd_flags = fd_flags | POSIX_O_NONBLOCK
+        posix_fd_set_flags(pfd, fd_flags)
+        i64(pfd)
+
+
+    sys_timerfd_settime(fd: int, flags: int, new_value: i64, old_value: i64) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_TIMERFD
+            return i64(-EINVAL)
+        if new_value == i64(0)
+            return i64(-EFAULT)
+        val pid_t = posix_fd_current_pid()
+        val tidx = pid_t * POSIX_FDS_PER_PROC + fd
+        // Catch up before snapshotting old_value so any
+        // unobserved expirations are accounted to the previous
+        // configuration.
+        timerfd_advance(tidx)
+        // Stash old value if requested (interval, then remaining
+        // time-to-fire).
+        if old_value != i64(0)
+            val oldp: *byte = *byte(old_value)
+            shim_ticks_to_itimerspec(oldp, 0,
+                posix_fd_table[tidx].timerfd_interval_ticks)
+            var remaining = 0
+            if posix_fd_table[tidx].timerfd_next_tick > 0
+                remaining = posix_fd_table[tidx].timerfd_next_tick - int(monotonic_ms() / i64(10))
+                if remaining < 0
+                    remaining = 0
+            shim_ticks_to_itimerspec(oldp, 16, remaining)
+        val newp: *byte = *byte(new_value)
+        val it_interval_ticks = shim_itimerspec_to_ticks(newp, 0)
+        val it_value_ticks = shim_itimerspec_to_ticks(newp, 16)
+        // it_value == 0 disarms the timer (Linux semantics).
+        if it_value_ticks <= 0
+            posix_fd_table[tidx].timerfd_interval_ticks = 0
+            posix_fd_table[tidx].timerfd_next_tick = 0
+            return i64(0)
+        // TFD_TIMER_ABSTIME: it_value is an absolute tick (treating
+        // tv_sec*100+tv_nsec/1e7 as ticks-since-boot).  Otherwise
+        // it_value is relative to now.  Slix collapses both clocks
+        // to monotonic_ms/10 so the meaning of "absolute" matches
+        // whatever the caller expects from CLOCK_MONOTONIC.
+        if (flags & POSIX_TFD_TIMER_ABSTIME) != 0
+            posix_fd_table[tidx].timerfd_next_tick = it_value_ticks
+        else
+            posix_fd_table[tidx].timerfd_next_tick = int(monotonic_ms() / i64(10)) + it_value_ticks
+        posix_fd_table[tidx].timerfd_interval_ticks = it_interval_ticks
+        // Reset expirations to 0 on rearm (Linux: setttime starts
+        // fresh; the read counter is wiped).
+        posix_fd_table[tidx].timerfd_expirations = i64(0)
+        i64(0)
+
+
+    sys_timerfd_gettime(fd: int, curr_value: i64) -> i64
+        if posix_fd_kind(fd) != POSIX_FD_TIMERFD
+            return i64(-EINVAL)
+        if curr_value == i64(0)
+            return i64(-EFAULT)
+        val pid_t = posix_fd_current_pid()
+        val tidx = pid_t * POSIX_FDS_PER_PROC + fd
+        // Catch up so the snapshot reflects the live timer state.
+        timerfd_advance(tidx)
+        val cp: *byte = *byte(curr_value)
+        shim_ticks_to_itimerspec(cp, 0,
+            posix_fd_table[tidx].timerfd_interval_ticks)
+        var remaining = 0
+        if posix_fd_table[tidx].timerfd_next_tick > 0
+            remaining = posix_fd_table[tidx].timerfd_next_tick - int(monotonic_ms() / i64(10))
+            if remaining < 0
+                remaining = 0
+        shim_ticks_to_itimerspec(cp, 16, remaining)
+        i64(0)
+
+
+### POSIX time syscalls
+
+`clock_gettime` / `gettimeofday` / `clock_getres` / `nanosleep` /
+`clock_nanosleep`. All clocks (REALTIME, MONOTONIC, BOOTTIME,
+PROCESS_CPUTIME, THREAD_CPUTIME, *_RAW, *_COARSE) collapse to the
+kernel's `monotonic_ms() / 10` tick counter at 100 Hz — slix has
+no wallclock or per-thread CPU accounting yet, but apps that just
+need a monotonic timestamp (the overwhelming majority) keep
+working. timerfd already takes the same shortcut.
+
+Whitelist the clock IDs that are meaningful in slix today.
+We have no wallclock, no NTP slewing, no suspend, no leap-second
+handling, no per-thread/per-process CPU accounting — every
+"different" Linux clock here just maps onto monotonic_ms. The clocks
+that *would* require real accounting (CPUTIME_ID variants) are
+rejected so programs that probe them learn the truth instead of
+silently getting wrong numbers. The realtime-alarm variants are
+also rejected since they need signal delivery.
+
+    shim_clock_supported(clockid: int) -> int
+        if clockid == POSIX_CLOCK_REALTIME
+            return 1
+        if clockid == POSIX_CLOCK_MONOTONIC
+            return 1
+        if clockid == POSIX_CLOCK_MONOTONIC_RAW
+            return 1
+        if clockid == POSIX_CLOCK_REALTIME_COARSE
+            return 1
+        if clockid == POSIX_CLOCK_MONOTONIC_COARSE
+            return 1
+        if clockid == POSIX_CLOCK_BOOTTIME
+            return 1
+        if clockid == POSIX_CLOCK_TAI
+            return 1
+        0
+
+    sys_clock_gettime(clockid: int, tp: i64) -> i64
+        if shim_clock_supported(clockid) == 0
+            return i64(-EINVAL)
+        if tp == i64(0)
+            return i64(-EFAULT)
+        val p: *byte = *byte(tp)
+        shim_ticks_to_itimerspec(p, 0, int(monotonic_ms() / i64(10)))
+        i64(0)
+
+    sys_clock_getres(clockid: int, tp: i64) -> i64
+        if shim_clock_supported(clockid) == 0
+            return i64(-EINVAL)
+        if tp == i64(0)
+            return i64(0)               // Linux: NULL is allowed for clock_getres
+        val p: *byte = *byte(tp)
+        // Resolution = 10ms = 10_000_000 ns. Reuse the helper
+        // by passing 1 tick.
+        shim_ticks_to_itimerspec(p, 0, 1)
+        i64(0)
+
+`gettimeofday` predates `clock_gettime`. Layout differs by one
+field: `tv_usec` (microseconds) instead of `tv_nsec`. The
+`tz` arg has been deprecated since the 1990s — Linux ignores
+it but accepts the pointer. We do the same.
+
+    sys_gettimeofday(tv: i64, tz: i64) -> i64
+        if tv == i64(0)
+            return i64(-EFAULT)
+        val p: *byte = *byte(tv)
+        val ticks = int(monotonic_ms() / i64(10))
+        val sec = i64(ticks / 100)
+        val usec = i64((ticks % 100) * 10000)
+        var bi = 0
+        while bi < 8
+            p[bi] = byte(int((sec >> i64(bi * 8))) & 0xff)
+            bi += 1
+        bi = 0
+        while bi < 8
+            p[8 + bi] = byte(int((usec >> i64(bi * 8))) & 0xff)
+            bi += 1
+        // tz: write {0, 0} if non-null. Most callers pass NULL
+        // these days but glibc still accepts it.
+        if tz != i64(0)
+            val tzp: *byte = *byte(tz)
+            var ti = 0
+            while ti < 8
+                tzp[ti] = byte(0)
+                ti += 1
+        i64(0)
+
+`prlimit64` / `getrlimit` — read-only resource limits.
+
+Slix has hardcoded capacities (`POSIX_FDS_PER_PROC=64`,
+`MAX_PROCESSES=32`, kernel stacks 16 KB each, no swap). We
+expose those through the POSIX rlimit ABI so libc/musl init
+and any program that probes `getrlimit(RLIMIT_NOFILE)` for
+malloc heuristics or fd-table sizing learn the real numbers.
+The `new_limit` write side of `prlimit64` is silently accepted
+— we don't track per-process overrides, so changes are no-ops
+(matches the "lower without tracking" pattern POSIX programs
+expect when the limit isn't enforced).
+
+Resource codes (Linux x86_64 / aarch64 share these):
+
+  0  RLIMIT_CPU         no CPU time accounting → infinity
+  1  RLIMIT_FSIZE       no max file size → infinity
+  2  RLIMIT_DATA        no enforced limit → infinity
+  3  RLIMIT_STACK       16384 (slix THREAD_STACK_SIZE)
+  4  RLIMIT_CORE        0 (no coredumps)
+  5  RLIMIT_RSS         no RSS accounting → infinity
+  6  RLIMIT_NPROC       32 (MAX_PROCESSES)
+  7  RLIMIT_NOFILE      64 (POSIX_FDS_PER_PROC)
+  8  RLIMIT_MEMLOCK     no mlock → infinity
+  9  RLIMIT_AS          no enforced limit → infinity
+  10 RLIMIT_LOCKS       no lock accounting → infinity
+  11 RLIMIT_SIGPENDING  no signal accounting → infinity
+  12 RLIMIT_MSGQUEUE    no posix mqueues → infinity
+  13 RLIMIT_NICE        0 (no priority boosting)
+  14 RLIMIT_RTPRIO      0 (no realtime scheduling)
+  15 RLIMIT_RTTIME      no rt-time accounting → infinity
+
+Layout: `struct rlimit { rlim_cur: u64, rlim_max: u64 }` = 16 B.
+`RLIM_INFINITY` is `0xffffffffffffffff` (all-ones) on Linux.
+
+    shim_rlimit_value(resource: int) -> i64
+        if resource == 0
+            return i64(-1)         // RLIMIT_CPU
+        if resource == 1
+            return i64(-1)         // RLIMIT_FSIZE
+        if resource == 2
+            return i64(-1)         // RLIMIT_DATA
+        if resource == 3
+            return i64(16384)      // RLIMIT_STACK
+        if resource == 4
+            return i64(0)          // RLIMIT_CORE
+        if resource == 5
+            return i64(-1)         // RLIMIT_RSS
+        if resource == 6
+            return i64(32)         // RLIMIT_NPROC
+        if resource == 7
+            return i64(64)         // RLIMIT_NOFILE
+        if resource == 8
+            return i64(-1)         // RLIMIT_MEMLOCK
+        if resource == 9
+            return i64(-1)         // RLIMIT_AS
+        if resource == 10
+            return i64(-1)         // RLIMIT_LOCKS
+        if resource == 11
+            return i64(-1)         // RLIMIT_SIGPENDING
+        if resource == 12
+            return i64(-1)         // RLIMIT_MSGQUEUE
+        if resource == 13
+            return i64(0)          // RLIMIT_NICE
+        if resource == 14
+            return i64(0)          // RLIMIT_RTPRIO
+        if resource == 15
+            return i64(-1)         // RLIMIT_RTTIME
+        i64(-2)                    // sentinel: unknown
+
+    shim_write_rlimit(p: *byte, off: int, v: i64)
+        var bi = 0
+        while bi < 8
+            p[off + bi] = byte(int((v >> i64(bi * 8))) & 0xff)
+            bi += 1
+
+    sys_prlimit64(resource: int, new_limit: i64, old_limit: i64) -> i64
+        val rv = shim_rlimit_value(resource)
+        if rv == i64(-2)
+            return i64(-EINVAL)
+        if old_limit != i64(0)
+            val p: *byte = *byte(old_limit)
+            shim_write_rlimit(p, 0, rv)       // rlim_cur
+            shim_write_rlimit(p, 8, rv)       // rlim_max
+        // new_limit silently accepted — see docstring.
+        i64(0)
+
+`nanosleep` and `clock_nanosleep` block for the requested
+duration, rounded up to the next 10ms tick. We don't have
+signals so the call always completes — `rem` (if non-null) is
+zeroed to indicate "no time left". TIMER_ABSTIME (clock_nanosleep
+flag = 1) means the request is an absolute deadline — convert
+to relative by subtracting current `monotonic_ms() / 10`.
+
+    shim_timespec_to_ticks(p: *byte) -> int
+        // Read tv_sec (i64) + tv_nsec (i64), convert to a
+        // tick count rounded up so a 1ns sleep yields 1 tick
+        // (10 ms) instead of 0.
+        var sec = i64(0)
+        var i = 7
+        while i >= 0
+            sec = (sec << i64(8)) | i64(int(p[i]) & 0xff)
+            i -= 1
+        var nsec = i64(0)
+        i = 7
+        while i >= 0
+            nsec = (nsec << i64(8)) | i64(int(p[8 + i]) & 0xff)
+            i -= 1
+        // ticks = sec*100 + ceil(nsec / 10_000_000)
+        val tick_from_sec = int(sec) * 100
+        val tick_from_ns = int((nsec + i64(9999999)) / i64(10000000))
+        var t = tick_from_sec + tick_from_ns
+        if t < 0
+            t = 0
+        t
+
+    sys_nanosleep(req: i64, rem: i64) -> i64
+        if req == i64(0)
+            return i64(-EFAULT)
+        val rp: *byte = *byte(req)
+        val ticks = shim_timespec_to_ticks(rp)
+        if ticks > 0
+            sleep(ticks)
+        if rem != i64(0)
+            val remp: *byte = *byte(rem)
+            var ri = 0
+            while ri < 16
+                remp[ri] = byte(0)
+                ri += 1
+        i64(0)
+
+### getrandom
+
+Non-cryptographic xorshift64* PRNG seeded from `monotonic_ms()`
+plus a per-call counter. Real `getrandom(2)` taps the kernel CSPRNG;
+slix has no entropy source today, so this is best-effort
+"different bytes every call" useful for non-crypto consumers
+(libuv buffer cookies, malloc-debug salts, etc.). Crypto code
+should not rely on this — once a real entropy source lands,
+swap the seed/state generator.
+
+`flags` is accepted but ignored: GRND_NONBLOCK (1) is naturally
+satisfied (we never block), GRND_RANDOM (2) is irrelevant
+without a real CSPRNG. Returns the byte count on success,
+-EFAULT on bad buffer.
+
+    var rng_state: i64 = i64(0)
+
+    rng_step() -> i64
+        if rng_state == i64(0)
+            rng_state = monotonic_ms() / i64(10) | i64(0x9E3779B97F4A7C15)
+        var x = rng_state
+        x = x ^ (x << i64(13))
+        x = x ^ (i64(u64(x) >> u64(7)))
+        x = x ^ (x << i64(17))
+        rng_state = x
+        x
+
+    sys_getrandom(buf: i64, len: int, flags: int) -> i64
+        if buf == i64(0)
+            return i64(-EFAULT)
+        if len < 0
+            return i64(-EINVAL)
+        val p: *byte = *byte(buf)
+        var written = 0
+        while written < len
+            val r = rng_step()
+            var bi = 0
+            while bi < 8 && written + bi < len
+                p[written + bi] = byte(int((r >> i64(bi * 8))) & 0xff)
+                bi += 1
+            written += bi
+        i64(written)
+
+
+    sys_clock_nanosleep(clockid: int, flags: int, req: i64, rem: i64) -> i64
+        if req == i64(0)
+            return i64(-EFAULT)
+        val rp: *byte = *byte(req)
+        var ticks = shim_timespec_to_ticks(rp)
+        // TIMER_ABSTIME = 1: req is an absolute time. Convert to
+        // relative by subtracting current monotonic_ms/10.
+        if (flags & 1) != 0
+            val now_t = int(monotonic_ms() / i64(10))
+            ticks = ticks - now_t
+            if ticks < 0
+                ticks = 0
+        if ticks > 0
+            sleep(ticks)
+        if rem != i64(0)
+            val remp: *byte = *byte(rem)
+            var ri = 0
+            while ri < 16
+                remp[ri] = byte(0)
+                ri += 1
+        i64(0)
+
