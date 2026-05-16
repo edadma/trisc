@@ -1,0 +1,211 @@
+Cross-File Generic Functions — Sibling Import
+==============================================
+
+Per reference §Modules:
+
+> A module may span multiple source files in the same directory.
+> Files that declare the same module path share a single
+> namespace: declarations in one file are directly visible from
+> the others **without an explicit `import` clause**.
+
+This file pins **generic functions** declared in
+`generic_helpers.lsysl` and called from here, all without an
+`import`. The two files share module path
+`sysl.tests.lang_features.generics.siblings`.
+
+Pins the regression fixed at sysl@4f1f81725 ("cross-file
+generic-fn body re-analysis"):
+
+  - Sibling-imported generic functions resolve and instantiate at
+    explicit type args.
+  - Inference works at the call site when the type argument is
+    determined by the value argument(s).
+  - Two-parameter generic inference works across file boundaries.
+  - A generic function returning a generic struct produces an
+    instance whose fields are readable at the caller — `linkImported
+    GenericStructToTemplate` plumbs the template binding through.
+  - An outer generic body calling another sibling-imported generic
+    works.
+  - A **parameterless** generic-returning function imported from a
+    sibling auto-calls on bare reference (was the headline bug: the
+    `isParameterless` flag was dropped on the wire, so callers
+    treated the symbol as a function pointer and inference broke).
+
+What this file does NOT pin:
+
+- Same-file generic functions (covered by `generic_fn_basic.lsysl`
+  in the parent directory).
+- Generic type aliases — those live in
+  `generic_alias_cross_file.lsysl`.
+
+File-local prefix `Gfsi` (Generic-Fn Sibling-Import).
+
+    module sysl.tests.lang_features.generics.siblings
+
+
+Explicit type-arg call across the file boundary
+-----------------------------------------------
+
+### Generic fn with explicit `[int]` instantiation
+
+    #test
+    test_gfsi_explicit_type_arg() -> unit
+        val r = gh_id[int](42)
+        assert(r == 42, s"gh_id[int](42); got $r")
+
+### Generic fn with explicit `[string]` instantiation
+
+A different concrete instantiation of the same generic — the
+analyzer must monomorphize each instance separately and the
+cross-file symbol table must serve both at the same call site
+context.
+
+    #test
+    test_gfsi_explicit_type_arg_string() -> unit
+        val r = gh_id[string]("hello")
+        assert(r == "hello", s"gh_id[string](\"hello\"); got '$r'")
+
+
+Type-argument inference across the file boundary
+------------------------------------------------
+
+### Inferred type arg — int
+
+The type argument is determined entirely by the value-argument
+expression. The sibling-imported `gh_id` must register as
+generic in the importing analyzer or this fails with
+"'gh_id' is not generic" or a wrong-type error.
+
+    #test
+    test_gfsi_inferred_int() -> unit
+        val r = gh_id(7)
+        assert(r == 7, s"inferred int; got $r")
+
+### Inferred type arg — bool
+
+    #test
+    test_gfsi_inferred_bool() -> unit
+        val r = gh_id(true)
+        assert(r == true, "inferred bool")
+
+### Inferred type arg — string
+
+    #test
+    test_gfsi_inferred_string() -> unit
+        val r = gh_id("world")
+        assert(r == "world", s"inferred string; got '$r'")
+
+
+Two-parameter generic inference
+-------------------------------
+
+### `gh_first[A, B]` inferred from positional args
+
+`gh_first[A, B](a: A, b: B) -> A` — both type variables get bound
+from the call's value arguments. The result type is the first
+type variable, so the assignment site has a concrete type
+flowing back too.
+
+    #test
+    test_gfsi_two_param_inferred() -> unit
+        val r = gh_first(99, "discarded")
+        assert(r == 99, s"first; got $r")
+
+### `gh_first` with explicit type args
+
+    #test
+    test_gfsi_two_param_explicit() -> unit
+        val r = gh_first[int, string](5, "ignored")
+        assert(r == 5, s"explicit; got $r")
+
+
+Generic function returning a generic struct
+-------------------------------------------
+
+`gh_wrap[T](x: T) -> GhBox[T]` exercises the cross-file template
+linking. The returned struct's `value` field must be read in this
+file via field access (`.value`) — that only works if the
+analyzer has linked the imported `GhBox_int` symbol back to its
+generic template.
+
+### Read a field of a generic struct returned by a sibling generic
+
+    #test
+    test_gfsi_wrap_int_field_read() -> unit
+        val b = gh_wrap(11)
+        assert(b.value == 11, s"value=${b.value}")
+
+### Round-trip through `gh_wrap` for two different concrete types
+
+The two instantiations live in the importing unit's monomorph
+table simultaneously — pin that this works.
+
+    #test
+    test_gfsi_wrap_two_instantiations() -> unit
+        val bi = gh_wrap(3)
+        val bs = gh_wrap("note")
+        assert(bi.value == 3, s"int box; got ${bi.value}")
+        assert(bs.value == "note", s"string box; got '${bs.value}'")
+
+
+Generic body calling another sibling-imported generic
+-----------------------------------------------------
+
+### `gh_wrap_twice` defined in the helper composes `gh_wrap` and `gh_id`
+
+Both inner calls are themselves sibling-imported generics. The
+test only sees the outer; the analyzer has to monomorphize
+*through* the imported generic at the inner call sites.
+
+    #test
+    test_gfsi_wrap_twice_int() -> unit
+        val b = gh_wrap_twice(20)
+        assert(b.value == 20, s"value=${b.value}")
+
+
+Generic with body using arithmetic on the type parameter
+--------------------------------------------------------
+
+### `gh_double[int]` returns 2x
+
+`gh_double[T](x: T) -> T = x + x` — body uses `+`. Concrete int
+instantiation must compile and run.
+
+    #test
+    test_gfsi_double_int() -> unit
+        val r = gh_double(21)
+        assert(r == 42, s"double; got $r")
+
+
+Parameterless generic-returning function — bare reference auto-calls
+--------------------------------------------------------------------
+
+This is the headline regression of sysl@4f1f81725: a sibling-
+imported parameterless function that returns a generic-struct
+instance. The bare reference must auto-call and the result must
+typecheck as `GhBox[int]`.
+
+### Bare reference reads the box's field
+
+If the parameterless flag is lost on the wire, this either fails
+to compile (`gh_zero_box` resolves as `() -> GhBox[int]` and
+`.value` is invalid on a function pointer) or compiles but does
+not invoke the helper.
+
+    #test
+    test_gfsi_parameterless_bare_call() -> unit
+        val v = gh_zero_box.value
+        assert(v == 0, s"value=${v}")
+
+### Two bare references both auto-call
+
+Pin that the auto-call site is at the use site, not somehow
+cached per-symbol — two distinct reads should both produce
+fresh `GhBox[int]` instances and both read `.value == 0`.
+
+    #test
+    test_gfsi_parameterless_two_reads() -> unit
+        val a = gh_zero_box
+        val b = gh_zero_box
+        assert(a.value == 0, s"a.value=${a.value}")
+        assert(b.value == 0, s"b.value=${b.value}")
