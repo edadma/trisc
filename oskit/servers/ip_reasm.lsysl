@@ -1,0 +1,323 @@
+IP reassembly — ingress IPv4 fragment table
+============================================
+
+Inbound IPv4 fragments are stashed here and reassembled into a
+synthetic full-size frame that re-enters `inet_handle_frame` for
+normal L4 dispatch. Without this, any peer-side fragmentation
+(e.g. a UDP datagram > MTU from a peer that ignored our
+advertised MSS) silently drops in L4 demux because the partial
+header fails checksum.
+
+Four concurrent datagram assemblies are tracked; each times out
+after `IP_REASM_TIMEOUT_MS` ms (RFC 791 — 30 s). Timed-out slots
+emit ICMP Time Exceeded (RFC 792 §3.5) toward the source if the
+first fragment was seen.
+
+Same `oskit.servers` module as `inet_proto.lsysl`, so sibling
+state — the frame pool, link-layer mac, `inet_handle_frame`,
+`inet_resolve_mac`, `inet_send_icmp_time_exceeded`,
+`inet_nic_send_packet` — resolves without an import. Selftest
+helpers in `inet.lsysl` (`inet_ip_reasm_inject_frag`,
+`inet_ip_reasm_selftest_run`, `inet_ip_reasm_overlap_test_run`)
+reach back here via the same sibling-resolution path.
+
+    module oskit.servers
+
+    import oskit.services.{monotonic_ms}
+    import std.net.{ETHERTYPE_IPV4,
+        IP_PROTO_ICMP, ICMP_TIME_EXCEEDED,
+        pkt_write_mac, pkt_write_u16, pkt_write_ipv4,
+        net_checksum, ipv4, ipv4_octet}
+
+
+### IP reassembly (ingress fragments)
+
+Inbound IPv4 fragments are stashed here and reassembled into a
+synthetic full-size frame that re-enters `inet_handle_frame` for
+normal L4 dispatch. Without this, any peer-side fragmentation
+(e.g. a UDP datagram > MTU from a peer that ignored our advertised
+MSS) silently drops in L4 demux because the partial header fails
+checksum.
+
+We support fragments up to `IP_REASM_MAX_DATA` bytes of L4 payload
+total — 8 KB, enough for jumbo UDP. Four concurrent datagram
+assemblies are tracked; each times out after `IP_REASM_TIMEOUT_MS`
+milliseconds (RFC 791 says 30 s = 30000 ms). Timed-out slots
+are silently dropped — ICMP Time Exceeded emit is a follow-up.
+
+    val IP_REASM_SLOTS      = 4
+    val IP_REASM_MAX_DATA   = 8192
+    val IP_REASM_TIMEOUT_MS = 30000
+    val IP_REASM_HDR_MAX    = 60
+
+    struct IpReasmSlot
+        in_use: int
+        poisoned: int
+        src_ip: u32
+        dst_ip: u32
+        ident: int
+        proto: int
+        deadline: int
+        have_first: int
+        total_len: int
+        ihl_bytes: int
+        eth_ip: [74]byte
+        payload: [8192]byte
+        received: [8192]byte
+
+    var inet_ip_reasm_table: [4]IpReasmSlot
+    var inet_ip_reasm_staging: [8320]byte
+    var inet_ip_reasm_timeouts_sent: int = 0
+
+
+Find the slot matching `(src_ip, dst_ip, ident, proto)`. Returns
+slot index or -1.
+
+    inet_ip_reasm_find(src_ip: u32, dst_ip: u32, ident: int, proto: int) -> int
+        var i = 0
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].in_use != 0
+                if inet_ip_reasm_table[i].src_ip == src_ip
+                    if inet_ip_reasm_table[i].dst_ip == dst_ip
+                        if inet_ip_reasm_table[i].ident == ident
+                            if inet_ip_reasm_table[i].proto == proto
+                                return i
+            i += 1
+        -1
+
+
+Allocate a free slot, evicting the slot with the earliest
+deadline if the table is full.
+
+    inet_ip_reasm_alloc() -> int
+        var i = 0
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].in_use == 0
+                return i
+            i += 1
+        var best = 0
+        var best_dl = inet_ip_reasm_table[0].deadline
+        i = 1
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].deadline < best_dl
+                best = i
+                best_dl = inet_ip_reasm_table[i].deadline
+            i += 1
+        best
+
+
+Reset slot fields ahead of accepting a new datagram.
+
+    inet_ip_reasm_reset(s: int)
+        inet_ip_reasm_table[s].in_use = 0
+        inet_ip_reasm_table[s].poisoned = 0
+        inet_ip_reasm_table[s].have_first = 0
+        inet_ip_reasm_table[s].total_len = -1
+        inet_ip_reasm_table[s].ihl_bytes = 0
+        var i = 0
+        while i < IP_REASM_MAX_DATA
+            inet_ip_reasm_table[s].received[i] = byte(0)
+            i += 1
+
+
+Accept one fragment. Returns the assembled frame length (>0) on
+completion (written to `inet_ip_reasm_staging`), 0 when more
+fragments are needed, -1 on unrecoverable failure (oversize or
+malformed).
+
+`eth_ip` points at the start of the inbound Ethernet frame so we
+can clone the original ETH+IP header from the first fragment.
+`payload` points at the L4 payload (frame + 14 + ihl).
+
+    inet_ip_reasm_accept(eth_ip: *byte, src_ip: u32, dst_ip: u32,
+            ident: int, proto: int, mf: int, offset: int,
+            ihl_bytes: int, payload: *byte, payload_len: int) -> int
+        if offset < 0
+            return -1
+        if payload_len <= 0
+            return -1
+        if offset + payload_len > IP_REASM_MAX_DATA
+            return -1
+        if ihl_bytes > IP_REASM_HDR_MAX
+            return -1
+
+        var s = inet_ip_reasm_find(src_ip, dst_ip, ident, proto)
+        if s < 0
+            s = inet_ip_reasm_alloc()
+            inet_ip_reasm_reset(s)
+            inet_ip_reasm_table[s].in_use = 1
+            inet_ip_reasm_table[s].src_ip = src_ip
+            inet_ip_reasm_table[s].dst_ip = dst_ip
+            inet_ip_reasm_table[s].ident = ident
+            inet_ip_reasm_table[s].proto = proto
+
+        inet_ip_reasm_table[s].deadline = int(monotonic_ms()) + IP_REASM_TIMEOUT_MS
+
+RFC 5722 §4: a fragment that overlaps any previously received
+range MUST cause the entire datagram to be dropped. We mark the
+slot poisoned and silently drop every subsequent fragment for
+the same (src, dst, id, proto) tuple. The slot stays in_use
+until its deadline so the attacker can't immediately recycle it
+with a fresh-allocation request.
+
+        if inet_ip_reasm_table[s].poisoned != 0
+            return 0
+        var ov = 0
+        while ov < payload_len
+            if inet_ip_reasm_table[s].received[offset + ov] != byte(0)
+                inet_ip_reasm_table[s].poisoned = 1
+                return 0
+            ov += 1
+
+        if offset == 0
+            inet_ip_reasm_table[s].have_first = 1
+            inet_ip_reasm_table[s].ihl_bytes = ihl_bytes
+            var k = 0
+            while k < 14 + ihl_bytes
+                inet_ip_reasm_table[s].eth_ip[k] = eth_ip[k]
+                k += 1
+
+        var i = 0
+        while i < payload_len
+            inet_ip_reasm_table[s].payload[offset + i] = payload[i]
+            inet_ip_reasm_table[s].received[offset + i] = byte(1)
+            i += 1
+
+        if mf == 0
+            inet_ip_reasm_table[s].total_len = offset + payload_len
+
+        if inet_ip_reasm_table[s].have_first == 0
+            return 0
+        val tl = inet_ip_reasm_table[s].total_len
+        if tl <= 0
+            return 0
+        var j = 0
+        while j < tl
+            if inet_ip_reasm_table[s].received[j] == byte(0)
+                return 0
+            j += 1
+
+Assemble the synthetic frame: ETH + (patched IP header) +
+contiguous payload. We patch IP total_length, clear
+flags-and-fragment-offset, and recompute the IP header checksum;
+the L4 checksum is left as-is since the peer computed it over the
+full datagram before fragmenting.
+
+        val hdr = inet_ip_reasm_table[s].ihl_bytes
+        var w = 0
+        while w < 14 + hdr
+            inet_ip_reasm_staging[w] = inet_ip_reasm_table[s].eth_ip[w]
+            w += 1
+        val ip_total = hdr + tl
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 2, ip_total)
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 6, 0)
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 10, 0)
+        pkt_write_u16(inet_ip_reasm_staging, 14 + 10,
+            net_checksum(inet_ip_reasm_staging + 14, hdr))
+        var p = 0
+        while p < tl
+            inet_ip_reasm_staging[14 + hdr + p] = inet_ip_reasm_table[s].payload[p]
+            p += 1
+        inet_ip_reasm_table[s].in_use = 0
+        return 14 + hdr + tl
+
+
+Send ICMP Type 11 Code 1 (Time Exceeded / Fragment reassembly time
+exceeded) per RFC 792 §3.5 toward the original sender of `eth_ip`.
+The ICMP body carries the original IP header (`ihl_bytes`) plus
+the first 8 bytes of L4 payload — for fragmented datagrams the
+caller must supply this from the slot's first-fragment payload,
+since later fragments don't include those bytes.
+
+Bumps `inet_ip_reasm_timeouts_sent` on every call (whether the
+NIC send actually succeeds or not) so test infrastructure can
+verify the emit attempt without depending on slirp / ARP state.
+
+Returns 0 on emit, -1 if MAC unknown or peer ARP cache miss.
+
+    inet_send_icmp_time_exceeded(eth_ip: *byte, ihl_bytes: int,
+                                  payload8: *byte) -> int
+        inet_ip_reasm_timeouts_sent += 1
+        if inet_our_mac_known == 0
+            return -1
+        val peer_ip = ipv4(int(eth_ip[14 + 12]) & 0xff, int(eth_ip[14 + 13]) & 0xff,
+                           int(eth_ip[14 + 14]) & 0xff, int(eth_ip[14 + 15]) & 0xff)
+        var next_hop_mac: [6]byte
+        if inet_resolve_mac(peer_ip, next_hop_mac) == 0
+            return -1
+        val fidx = inet_frame_alloc()
+        val frame = inet_frame_buf(fidx)
+        val icmp_body = ihl_bytes + 8
+        val icmp_len = 8 + icmp_body
+        val ip_total = 20 + icmp_len
+        val total = 14 + ip_total
+        pkt_write_mac(frame, 0, next_hop_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+        frame[14] = byte(0x45)
+        frame[15] = byte(0)
+        pkt_write_u16(frame, 16, ip_total)
+        pkt_write_u16(frame, 18, 0)
+        pkt_write_u16(frame, 20, 0x4000)
+        frame[22] = byte(64)
+        frame[23] = byte(IP_PROTO_ICMP)
+        pkt_write_u16(frame, 24, 0)
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30,
+            ipv4_octet(peer_ip, 0), ipv4_octet(peer_ip, 1),
+            ipv4_octet(peer_ip, 2), ipv4_octet(peer_ip, 3))
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+        val icmp_off = 14 + 20
+        frame[icmp_off + 0] = byte(11)         // ICMP_TIME_EXCEEDED
+        frame[icmp_off + 1] = byte(1)          // code 1: frag reassembly
+        pkt_write_u16(frame, icmp_off + 2, 0)
+        pkt_write_u16(frame, icmp_off + 4, 0)
+        pkt_write_u16(frame, icmp_off + 6, 0)
+        // Body: original IP header + 8 bytes of original L4 payload.
+        var i = 0
+        while i < ihl_bytes
+            frame[icmp_off + 8 + i] = eth_ip[14 + i]
+            i += 1
+        var j = 0
+        while j < 8
+            frame[icmp_off + 8 + ihl_bytes + j] = payload8[j]
+            j += 1
+        pkt_write_u16(frame, icmp_off + 2,
+            net_checksum(frame + icmp_off, icmp_len))
+        inet_nic_send_packet(frame, total)
+        inet_frame_release(fidx)
+        0
+
+
+Force-expire a reassembly slot's deadline so the next scan sweep
+clears it. Used by test infrastructure (inet.lsysl can't write
+sibling-file vars directly per `feedback_sysl_module_split.md`).
+
+    inet_ip_reasm_force_expire(s: int)
+        if s >= 0
+            if s < IP_REASM_SLOTS
+                inet_ip_reasm_table[s].deadline = 0
+
+
+Drop slots whose deadline has passed. Called once per timer tick
+from the inet main loop alongside `inet_tcp_scan_timers`. Emits
+ICMP Time Exceeded (RFC 792 §3.5) toward the source if we ever
+saw the first fragment — without it we don't have an IP header
+to embed and skipping the emit is mandatory.
+
+    inet_ip_reasm_scan_timeouts()
+        val now = int(monotonic_ms())
+        var i = 0
+        while i < IP_REASM_SLOTS
+            if inet_ip_reasm_table[i].in_use != 0
+                if now >= inet_ip_reasm_table[i].deadline
+                    if inet_ip_reasm_table[i].have_first != 0
+                        if inet_ip_reasm_table[i].poisoned == 0
+                            inet_send_icmp_time_exceeded(
+                                inet_ip_reasm_table[i].eth_ip,
+                                inet_ip_reasm_table[i].ihl_bytes,
+                                inet_ip_reasm_table[i].payload)
+                    inet_ip_reasm_table[i].in_use = 0
+            i += 1
+

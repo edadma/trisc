@@ -1,0 +1,168 @@
+Inet epoll subscriber table — readiness fan-out to user threads
+================================================================
+
+Phase A2: per-socket subscriber list keyed on
+`(owner_tid, epoll_inst, kind, inet_fd)`. The shim registers a
+subscription when `epoll_ctl(EPOLL_CTL_ADD)` fires; the inet
+server sends a `notify_send_to(owner_tid, value=1)` whenever
+readiness changes on the watched socket. The notify is a
+generic "wake up and re-scan" — the shim replays
+`INET_CMD_POLL` for every active entry to discover what's
+ready, so the protocol stays minimal.
+
+Subscriptions are flat (single global table) rather than
+per-socket because the cardinality is bounded and the
+fast-path is "any subscriber for socket X?" — a per-socket
+linked list would save a constant-factor scan but cost
+allocator complexity in this single-threaded server.
+
+Same `oskit.servers` module as `inet_proto.lsysl`, so the
+ready-edge callers in protocol code reach `inet_epoll_fire`
+without an import.
+
+    module oskit.servers
+
+    import oskit.services.{notify_send_to}
+
+
+### Epoll subscribers
+
+Phase A2: per-socket subscriber list keyed on
+`(owner_tid, epoll_inst, kind, inet_fd)`. The shim registers a
+subscription when `epoll_ctl(EPOLL_CTL_ADD)` fires; we send a
+`notify_send_to(owner_tid, value=1)` whenever readiness changes
+on the watched socket. The notify is a generic "wake up and
+re-scan" — the shim will replay `INET_CMD_POLL` for every active
+entry to discover what's ready, so we don't need to communicate
+which fd changed. This keeps the protocol minimal while still
+freeing the caller from the polling loop.
+
+This state lives in `inet_proto.lsysl` (not the higher-level
+`inet.lsysl`) so the readiness-edge call sites in this file —
+`inet_tcp_close_slot`, `inet_tcp_drain_reorder`,
+`inet_tcp_state_step`, `inet_tcp_accept_enqueue` — can call
+`inet_epoll_fire` without forming a cross-file cycle (sibling
+imports in sysl multi-file modules require an acyclic call
+graph; see `feedback_sysl_module_split.md`).
+
+Subscriptions are flat (single global table) rather than per-
+socket so cleanup paths (PID exit, epoll instance close) can
+linear-scan once. 32 slots — generous for the test workloads
+since each watched fd costs one slot. Ownership is by
+`(owner_tid, epoll_inst)` because a single tid can hold
+multiple epoll instances.
+
+    val INET_MAX_EPOLL_SUBS = 32
+
+    struct InetEpollSub
+        in_use: int
+        kind: int           // 1=UDP, 2=TCP, matches INET_CMD_POLL kind
+        inet_fd: int        // index into inet_sockets[] or tcp_sockets[]
+        owner_tid: int
+        epoll_inst: int     // shim-side epoll instance number
+
+    var inet_epoll_subs: [32]InetEpollSub
+
+    // Per-UDP-fd monotonic fire counter. Lives here (not in
+    // InetSocket which is in inet.lsysl) so `inet_epoll_fire`
+    // — a sibling of the data — can mutate it without forcing
+    // inet_proto.lsysl to take a sibling read on inet.lsysl,
+    // which would create an analyzer cycle with `inet_our_mac`.
+    // TCP's counter sits as a struct field on TcpSocket since
+    // that struct lives in this file.
+    var inet_udp_fire_seq: [32]int
+
+    inet_epoll_init()
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            inet_epoll_subs[i].in_use = 0
+            i += 1
+
+
+Find an existing subscription matching all four keys. Used for
+both upsert (SUB on an existing entry just updates) and unsub.
+Returns the slot index or -1.
+
+    inet_epoll_find_sub(kind: int, inet_fd: int, owner_tid: int, epoll_inst: int) -> int
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use != 0
+                if inet_epoll_subs[i].kind == kind
+                    if inet_epoll_subs[i].inet_fd == inet_fd
+                        if inet_epoll_subs[i].owner_tid == owner_tid
+                            if inet_epoll_subs[i].epoll_inst == epoll_inst
+                                return i
+            i += 1
+        -1
+
+
+Allocate a fresh subscription slot. Returns -1 if the table is
+full — caller maps that to ENOSPC.
+
+    inet_epoll_alloc_sub() -> int
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use == 0
+                return i
+            i += 1
+        -1
+
+
+Walk the subscriber table and notify every (owner_tid) that has
+a subscription matching `(kind, inet_fd)`. Caller invokes this
+on every readiness boundary; the shim re-queries via
+`INET_CMD_POLL` to figure out the actual ready bits. Multiple
+subscribers on the same socket are allowed (e.g., a child that
+inherited the fd plus the parent), and each gets its own wake.
+
+    inet_epoll_fire(kind: int, inet_fd: int)
+        // Bump the per-fd fire counter so the shim's per-entry
+        // last_seen_seq tracker can detect "this specific fd
+        // crossed an edge" without a per-instance bulk clear of
+        // last_reported (which over-fires on multi-fd loops).
+        // UDP's counter is a sibling parallel array (`inet_udp_fire_seq`
+        // above); TCP's lives on the TcpSocket struct further down
+        // in this file — same-file forward references to a struct
+        // type and array trip the analyzer, so we go through a
+        // helper (`inet_tcp_bump_fire_seq`) defined after the
+        // TcpSocket declaration.
+        if kind == 1 && inet_fd >= 0 && inet_fd < 32
+            inet_udp_fire_seq[inet_fd] = inet_udp_fire_seq[inet_fd] + 1
+        else if kind == 2
+            inet_tcp_bump_fire_seq(inet_fd)
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use != 0
+                if inet_epoll_subs[i].kind == kind
+                    if inet_epoll_subs[i].inet_fd == inet_fd
+                        notify_send_to(inet_epoll_subs[i].owner_tid, 1)
+            i += 1
+
+
+Drop every subscription belonging to a particular epoll
+instance. Called by `INET_CMD_EPOLL_INST_CLOSE` when the shim's
+last reference to an epoll fd goes away.
+
+    inet_epoll_drop_inst(owner_tid: int, epoll_inst: int)
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use != 0
+                if inet_epoll_subs[i].owner_tid == owner_tid
+                    if inet_epoll_subs[i].epoll_inst == epoll_inst
+                        inet_epoll_subs[i].in_use = 0
+            i += 1
+
+
+Drop every subscription belonging to a particular owner_tid.
+Called from `inet_handle_pid_exit` (in `inet.lsysl`) so a
+process that died without closing its epoll fds doesn't leak
+subscriber slots.
+
+    inet_epoll_drop_owner(owner_tid: int)
+        var i = 0
+        while i < INET_MAX_EPOLL_SUBS
+            if inet_epoll_subs[i].in_use != 0
+                if inet_epoll_subs[i].owner_tid == owner_tid
+                    inet_epoll_subs[i].in_use = 0
+            i += 1
+

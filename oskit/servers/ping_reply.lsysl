@@ -1,0 +1,217 @@
+ICMP echo reply table and reply builder
+=======================================
+
+Small table of outstanding ping requests so `ping`-style
+programs can wait for a matching ECHO_REP. When the inet RX
+path sees an ECHO_REP it looks up `(id, seq)` here and stamps
+`reply_ms` + `src_ip`; the client polls via
+`INET_CMD_ICMP_CHECK`. The companion `inet_send_icmp_echo_reply`
+builds the outbound reply frame for an inbound ECHO_REQ.
+
+Phase 2 chunk 3 added per-tid cleanup so a dying client doesn't
+leak a slot. Bounded table (INET_PING_MAX = 4) keeps the worst
+case predictable in a single-threaded server.
+
+Same `oskit.servers` module as `inet_proto.lsysl`, so sibling
+helpers (`inet_frame_alloc` / `_buf` / `_release` from
+`frame_pool.lsysl`, `inet_nic_send_packet` from the nic-client
+wrappers) resolve without imports.
+
+    module oskit.servers
+
+    import std.net.{ICMP_ECHO_REP, pkt_write_mac, pkt_write_u16,
+        net_checksum}
+
+
+### Ping reply table
+
+Small table of outstanding ping requests so `ping`-style programs
+can wait for the matching ECHO_REP. When the inet RX path sees an
+ECHO_REP, it looks up (id, seq) here and stamps reply_ms +
+src_ip. The client polls via INET_CMD_ICMP_CHECK.
+
+    val INET_PING_MAX = 4
+
+    struct InetPingSlot
+        in_use: int
+        owner_tid: int
+        id: int
+        seq: int
+        send_ms: int
+        src_ip: u32
+        reply_ms: int
+        received: int
+
+    var inet_ping_table: [4]InetPingSlot
+
+
+Allocate a slot and record (id, seq, send_ms). Returns slot
+index on success, -1 if the table is full. Duplicate (id, seq)
+from a previous un-checked slot just overwrites that slot.
+
+    inet_ping_register(owner_tid: int, id: int, seq: int, send_ms: int) -> int
+        var found = -1
+        var i = 0
+        while i < INET_PING_MAX
+            if inet_ping_table[i].in_use != 0
+                if inet_ping_table[i].id == id
+                    if inet_ping_table[i].seq == seq
+                        found = i
+            i += 1
+        if found < 0
+            i = 0
+            while i < INET_PING_MAX
+                if inet_ping_table[i].in_use == 0
+                    found = i
+                    i = INET_PING_MAX
+                else
+                    i += 1
+        if found < 0
+            return -1
+        inet_ping_table[found].in_use = 1
+        inet_ping_table[found].owner_tid = owner_tid
+        inet_ping_table[found].id = id
+        inet_ping_table[found].seq = seq
+        inet_ping_table[found].send_ms = send_ms
+        inet_ping_table[found].src_ip = u32(0)
+        inet_ping_table[found].reply_ms = 0
+        inet_ping_table[found].received = 0
+        found
+
+
+Phase 2 chunk 3 — PID_EXIT cleanup audit. When a process dies
+without reading its ping reply, the slot would otherwise leak
+until id+seq collide or a peer sends an unsolicited reply.
+INET_PING_MAX is only 4, so this becomes a real pinch point
+under any kind of churn. Walk the table and free every slot
+whose owner_tid matches.
+
+    inet_ping_cleanup_owner(tid: int)
+        var i = 0
+        while i < INET_PING_MAX
+            if inet_ping_table[i].in_use != 0
+                if inet_ping_table[i].owner_tid == tid
+                    inet_ping_table[i].in_use = 0
+            i += 1
+
+
+Selftest helper — used by INET_CMD_PID_EXIT_SELFTEST. Registers
+a synthetic ping owned by `tid`, then verifies cleanup_owner
+frees it. Returns 0 on pass, 1..3 on failure step.
+
+    inet_ping_cleanup_selftest(tid: int) -> int
+        val before = inet_ping_count_owner(tid)
+        if before != 0
+            return 1
+        if inet_ping_register(tid, 0xdead, 0xbeef, 0) < 0
+            return 2
+        if inet_ping_count_owner(tid) != 1
+            return 3
+        inet_ping_cleanup_owner(tid)
+        if inet_ping_count_owner(tid) != 0
+            return 4
+        0
+
+
+Count in-use ping slots whose owner_tid matches `tid`.  Used
+above and from the selftest harness.
+
+    inet_ping_count_owner(tid: int) -> int
+        var n = 0
+        var i = 0
+        while i < INET_PING_MAX
+            if inet_ping_table[i].in_use != 0
+                if inet_ping_table[i].owner_tid == tid
+                    n += 1
+            i += 1
+        n
+
+
+Called from `inet_handle_frame` on ICMP_ECHO_REP. Updates the
+matching slot with src_ip and reply_ms so the client's CHECK
+returns a completed entry.
+
+    inet_ping_deliver(src_ip: u32, id: int, seq: int, now_ms: int)
+        var i = 0
+        while i < INET_PING_MAX
+            if inet_ping_table[i].in_use != 0
+                if inet_ping_table[i].received == 0
+                    if inet_ping_table[i].id == id
+                        if inet_ping_table[i].seq == seq
+                            inet_ping_table[i].src_ip = src_ip
+                            inet_ping_table[i].reply_ms = now_ms
+                            inet_ping_table[i].received = 1
+                            return
+            i += 1
+
+
+Look up (id, seq) and, if a reply has arrived, fill `out_src_ip`
++ `out_rtt` and free the slot. Returns 1 on complete, 0 on still
+waiting, -1 on no such slot.
+
+    inet_ping_check(id: int, seq: int, out_src_ip: *u32, out_rtt: *int) -> int
+        var i = 0
+        while i < INET_PING_MAX
+            if inet_ping_table[i].in_use != 0
+                if inet_ping_table[i].id == id
+                    if inet_ping_table[i].seq == seq
+                        if inet_ping_table[i].received != 0
+                            *out_src_ip = inet_ping_table[i].src_ip
+                            *out_rtt = inet_ping_table[i].reply_ms - inet_ping_table[i].send_ms
+                            inet_ping_table[i].in_use = 0
+                            return 1
+                        return 0
+            i += 1
+        -1
+
+
+ICMP echo reply in response to `req`. `req` points at the start
+of the Ethernet frame (ICMP payload starts at offset 14 + ihl).
+
+    inet_send_icmp_reply(req: *byte, total_len: int) -> int
+        if inet_our_mac_known == 0
+            return -1
+        if total_len > INET_FRAME_BUF_SIZE
+            return -1
+        if total_len < 14 + 20 + 8
+            return -1
+        val fidx = inet_frame_alloc()
+        val frame = inet_frame_buf(fidx)
+
+Copy the whole request into our buffer as a starting point; we
+then rewrite the bits that change between request and reply.
+
+        var i = 0
+        while i < total_len
+            frame[i] = req[i]
+            i += 1
+
+Ethernet: swap src and dst.
+
+        pkt_write_mac(frame, 0, req + 6)
+        pkt_write_mac(frame, 6, inet_our_mac)
+
+IPv4: swap src and dst IP, zero checksum, recompute.
+
+        var j = 0
+        while j < 4
+            frame[14 + 12 + j] = req[14 + 16 + j]   // dst <- old src
+            frame[14 + 16 + j] = req[14 + 12 + j]   // src <- old dst
+            j += 1
+        pkt_write_u16(frame, 14 + 10, 0)
+        val ihl_bytes = (int(frame[14]) & 0x0f) * 4
+        pkt_write_u16(frame, 14 + 10, net_checksum(frame + 14, ihl_bytes))
+
+ICMP: flip type from echo-request to echo-reply, zero checksum,
+recompute over the full ICMP message.
+
+        val icmp_off = 14 + ihl_bytes
+        frame[icmp_off] = byte(ICMP_ECHO_REP)
+        pkt_write_u16(frame, icmp_off + 2, 0)
+        val icmp_len = total_len - icmp_off
+        pkt_write_u16(frame, icmp_off + 2,
+            net_checksum(frame + icmp_off, icmp_len))
+
+        val rc = inet_nic_send_packet(frame, total_len)
+        inet_frame_release(fidx)
+        rc

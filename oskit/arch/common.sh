@@ -307,6 +307,11 @@ build_inet() {
         "import oskit.servers.{inet_server}" \
         oskit/servers/inet.lsysl \
         oskit/servers/inet_proto.lsysl \
+        oskit/servers/ip_reasm.lsysl \
+        oskit/servers/frame_pool.lsysl \
+        oskit/servers/inet_epoll.lsysl \
+        oskit/servers/pending_udp.lsysl \
+        oskit/servers/ping_reply.lsysl \
         std/net/net.lsysl \
         std/net/packet.lsysl
 }
