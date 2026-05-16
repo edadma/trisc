@@ -314,7 +314,7 @@ Reference §"`?` Operator (Try)".
 | `try_postfix_result.lsysl` 🟢 | happy `Ok/Ok`; first-position `Err` preserves payload; second-position `Err`; three-step chain; middle `Err` propagation (5 tests) |
 | `option_basic.lsysl` 🟢 | Some(v) inferring T; None with explicit type; both-variant match; payload binding; unwrap-like helpers (trap-on-none and default-on-none); Option flowing through fn boundary (map-like); Option carrying string / struct payloads (14 tests) |
 | `result_basic.lsysl` 🟢 | Ok/Err construction with explicit types; match-arm dispatch; is_ok / is_err / unwrap / unwrap_or helpers; map-like transform (Ok payload doubled / Err preserved); Result with struct payload + with int-int error type (15 tests) |
-| `try_postfix_chain.lsysl` 🔴 | `a()?.b()?.c()?` chain; each `?` distinct |
+| `try_postfix_chain.lsysl` 🟢 | three sequential `?`s — all-success, first/middle/last fails for both Option (None) and Result (Err); chain through int-err Result; two-step `?` with intervening logic (11 tests) |
 | `option_payload_string.lsysl` 🔴 | `Option[string]` — ARC interaction; `None` doesn't construct a buffer |
 
 ---
