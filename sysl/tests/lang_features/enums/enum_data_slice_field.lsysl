@@ -1,0 +1,176 @@
+Data Enum with Slice Field of Self-Type
+========================================
+
+A recursive data enum with a slice-of-self field is a real
+recursion pattern — e.g. a generic tree where one variant
+holds a slice of children. Past regression history at
+sysl@9ee727db documented an analyzer bug where the recursive
+snapshot's `EnumType` instance didn't structurally match the
+runtime-resolved instance, so `[]Tree` from the field decl
+didn't unify with `(new [N]Tree)[:]` at the use site. Fixed
+by switching slice/array element compatibility to nominal
+(name-based) equality for nominal types.
+
+This file pins the regression — both as a parse + analyzer
+acceptance check, and as a runtime data-flow check.
+
+File-local prefix `Sedsf` (Sysl Enum Data Slice Field).
+
+    module sysl.tests.lang_features
+
+    enum SedsfTree
+        SedsfLeaf
+        SedsfNode(children: []SedsfTree)
+
+Construction and analysis
+--------------------------
+
+### A bare Leaf
+
+    #test
+    test_sedsf_leaf_only() -> unit
+        var t: SedsfTree = SedsfLeaf
+        assert(str(t) == "SedsfLeaf", s"got '${str(t)}'")
+
+### A Node with an empty children slice
+
+    #test
+    test_sedsf_node_empty_children() -> unit
+        val empty: []SedsfTree = new [0]SedsfTree[:]
+        val n = SedsfNode(empty)
+        assert(str(n) == "SedsfNode", s"got '${str(n)}'")
+
+### A Node with one Leaf child
+
+    #test
+    test_sedsf_node_one_leaf() -> unit
+        val arr = new [1]SedsfTree
+        arr[0] = SedsfLeaf
+        val n = SedsfNode(arr[:])
+        assert(str(n) == "SedsfNode", "node name")
+
+### A Node with multiple Leaf children
+
+    #test
+    test_sedsf_node_three_leaves() -> unit
+        val arr = new [3]SedsfTree
+        arr[0] = SedsfLeaf
+        arr[1] = SedsfLeaf
+        arr[2] = SedsfLeaf
+        val n = SedsfNode(arr[:])
+        assert(str(n) == "SedsfNode", "node name")
+
+Pattern matching on the variant
+--------------------------------
+
+### Match distinguishes Leaf from Node
+
+    #test
+    test_sedsf_match_distinguishes() -> unit
+        var leaf_local: SedsfTree = SedsfLeaf
+        val arr = new [2]SedsfTree
+        arr[0] = SedsfLeaf
+        arr[1] = SedsfLeaf
+        var node_local: SedsfTree = SedsfNode(arr[:])
+        var leaf_code = 0
+        var node_code = 0
+        leaf_local match
+            SedsfLeaf -> leaf_code = 1
+            SedsfNode(_) -> leaf_code = 2
+        node_local match
+            SedsfLeaf -> node_code = 1
+            SedsfNode(_) -> node_code = 2
+        assert(leaf_code == 1, "leaf -> 1")
+        assert(node_code == 2, "node -> 2")
+
+### Match binds the children slice for Node arm
+
+    #test
+    test_sedsf_match_binds_children() -> unit
+        val arr = new [3]SedsfTree
+        arr[0] = SedsfLeaf
+        arr[1] = SedsfLeaf
+        arr[2] = SedsfLeaf
+        var n_local: SedsfTree = SedsfNode(arr[:])
+        var count = 0
+        n_local match
+            SedsfLeaf -> count = -1
+            SedsfNode(c) -> count = len(c)
+        assert(count == 3, s"3 children; got $count")
+
+### Match on a Node with zero children — empty slice
+
+    #test
+    test_sedsf_match_empty_children() -> unit
+        val empty: []SedsfTree = new [0]SedsfTree[:]
+        var n: SedsfTree = SedsfNode(empty)
+        var count = 99
+        n match
+            SedsfLeaf -> count = -1
+            SedsfNode(c) -> count = len(c)
+        assert(count == 0, s"0 children; got $count")
+
+Two-level recursion
+--------------------
+
+A Node whose children include another Node. Exercises the
+type-recursion through two levels at runtime.
+
+### A Node whose first child is itself a Node
+
+    #test
+    test_sedsf_two_level() -> unit
+        // inner Node with two Leaf children
+        val inner_kids = new [2]SedsfTree
+        inner_kids[0] = SedsfLeaf
+        inner_kids[1] = SedsfLeaf
+        val inner_node = SedsfNode(inner_kids[:])
+        // outer Node holding the inner Node + a Leaf
+        val outer_kids = new [2]SedsfTree
+        outer_kids[0] = inner_node
+        outer_kids[1] = SedsfLeaf
+        var outer: SedsfTree = SedsfNode(outer_kids[:])
+        // Outer has 2 children at top level
+        var top_count = 0
+        outer match
+            SedsfLeaf -> top_count = -1
+            SedsfNode(c) -> top_count = len(c)
+        assert(top_count == 2, s"top has 2 children; got $top_count")
+
+A non-recursive sibling enum with a slice of unrelated type
+------------------------------------------------------------
+
+For comparison: a data enum that carries a slice of a
+different (non-self) element type. Pins that the
+slice-as-variant-field works for any element type, not just
+recursively.
+
+    enum SedsfBag
+        SedsfItems(values: []int)
+        SedsfEmpty2
+
+### Bag with ints
+
+    #test
+    test_sedsf_bag_with_ints() -> unit
+        val arr = new [3]int
+        arr[0] = 10
+        arr[1] = 20
+        arr[2] = 30
+        var b: SedsfBag = SedsfItems(arr[:])
+        var sum = 0
+        b match
+            SedsfItems(v) -> sum = v[0] + v[1] + v[2]
+            SedsfEmpty2 -> sum = -1
+        assert(sum == 60, s"got $sum")
+
+### Empty bag
+
+    #test
+    test_sedsf_bag_empty() -> unit
+        var b: SedsfBag = SedsfEmpty2
+        var code = 0
+        b match
+            SedsfItems(_) -> code = 1
+            SedsfEmpty2 -> code = 2
+        assert(code == 2, "Empty arm")
