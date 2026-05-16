@@ -1,0 +1,291 @@
+Overflow Intrinsics
+====================
+
+Per reference §"Overflow Intrinsics":
+
+| Intrinsic | Behavior |
+|-----------|----------|
+| `wrapping_add(a, b)` | Two's-complement wrap on overflow |
+| `wrapping_sub(a, b)` | Two's-complement wrap on underflow |
+| `wrapping_mul(a, b)` | Low bits of the true product |
+| `saturating_add(a, b)` | Clamp to type's MAX (or MIN for signed underflow) |
+| `saturating_sub(a, b)` | Clamp to type's MIN (0 for unsigned) |
+| `saturating_mul(a, b)` | Clamp to type's MAX/MIN on overflow |
+
+The reference also notes:
+
+> TRISC backend: `saturating_*` on 64-bit types and `saturating_mul` on
+> `u32` are not yet supported. LLVM backend supports all widths.
+
+This file pins:
+
+- `wrapping_*` matches the default `+`/`-`/`*` wrap (same observable
+  semantics — useful as an explicit, intent-marked spelling).
+- `saturating_*` clamps to the type's MAX / MIN edges.
+- Cover u8 / u16 / u32 / i8 / i16 / i32; tests for 64-bit saturating
+  and `saturating_mul(u32)` are intentionally omitted today per the
+  reference's TRISC-gap note.
+
+File-local prefix `Iox` (Integer OverfloW Intrinsics — kept short).
+
+    module sysl.tests.lang_features
+
+`wrapping_*` mirrors the default wrap
+--------------------------------------
+
+### `wrapping_add(u8(255), u8(1))` → 0
+
+    #test
+    test_iox_wrapping_add_u8() -> unit
+        val a: u8 = 255
+        val b: u8 = 1
+        val c = wrapping_add(a, b)
+        assert(i32(c) == 0, s"got ${i32(c)}")
+
+### `wrapping_add(u16 MAX, 1)` → 0
+
+    #test
+    test_iox_wrapping_add_u16() -> unit
+        val a: u16 = 0xFFFF
+        val b: u16 = 1
+        val c = wrapping_add(a, b)
+        assert(i32(c) == 0, s"got ${i32(c)}")
+
+### `wrapping_add(u32 MAX, 1)` → 0
+
+    #test
+    test_iox_wrapping_add_u32() -> unit
+        val a: u32 = 0xFFFFFFFFu32
+        val b: u32 = 1u32
+        val c = wrapping_add(a, b)
+        assert(i64(c) == 0i64, s"got ${i64(c)}")
+
+### `wrapping_add(i32 MAX, 1)` → i32 MIN
+
+    #test
+    test_iox_wrapping_add_i32() -> unit
+        val a: i32 = 2147483647
+        val c = wrapping_add(a, 1)
+        assert(c == -2147483648, s"got $c")
+
+### `wrapping_sub(u8(0), u8(1))` → 255
+
+    #test
+    test_iox_wrapping_sub_u8() -> unit
+        val a: u8 = 0
+        val b: u8 = 1
+        val c = wrapping_sub(a, b)
+        assert(i32(c) == 255, s"got ${i32(c)}")
+
+### `wrapping_sub(i32 MIN, 1)` → i32 MAX
+
+    #test
+    test_iox_wrapping_sub_i32() -> unit
+        val a: i32 = -2147483648
+        val c = wrapping_sub(a, 1)
+        assert(c == 2147483647, s"got $c")
+
+### `wrapping_mul(u8(16), u8(16))` → 0 (low byte of 256)
+
+    #test
+    test_iox_wrapping_mul_u8() -> unit
+        val a: u8 = 16
+        val b: u8 = 16
+        val c = wrapping_mul(a, b)
+        assert(i32(c) == 0, s"got ${i32(c)}")
+
+### `wrapping_mul(u16(0x100), u16(0x100))` → 0
+
+    #test
+    test_iox_wrapping_mul_u16() -> unit
+        val a: u16 = 0x100
+        val b: u16 = 0x100
+        val c = wrapping_mul(a, b)
+        assert(i32(c) == 0, s"got ${i32(c)}")
+
+### `wrapping_mul(i32(65536), i32(65536))` → 0
+
+    #test
+    test_iox_wrapping_mul_i32() -> unit
+        val a: i32 = 65536
+        val b: i32 = 65536
+        val c = wrapping_mul(a, b)
+        assert(c == 0, s"got $c")
+
+`saturating_*` clamps to MAX / MIN
+-----------------------------------
+
+### `saturating_add(u8(200), u8(100))` clamps to 255 (would have been 300)
+
+    #test
+    test_iox_saturating_add_u8() -> unit
+        val a: u8 = 200
+        val b: u8 = 100
+        val c = saturating_add(a, b)
+        assert(i32(c) == 255, s"got ${i32(c)}")
+
+### `saturating_add(u8(255), u8(255))` clamps to 255
+
+    #test
+    test_iox_saturating_add_u8_max_max() -> unit
+        val a: u8 = 255
+        val b: u8 = 255
+        val c = saturating_add(a, b)
+        assert(i32(c) == 255, s"got ${i32(c)}")
+
+### `saturating_add(u8(100), u8(50))` does NOT clamp (true sum fits)
+
+    #test
+    test_iox_saturating_add_u8_no_clamp() -> unit
+        val a: u8 = 100
+        val b: u8 = 50
+        val c = saturating_add(a, b)
+        assert(i32(c) == 150, s"got ${i32(c)}")
+
+### `saturating_add(u16 MAX-1, u16(2))` clamps to u16 MAX
+
+    #test
+    test_iox_saturating_add_u16() -> unit
+        val a: u16 = 0xFFFE
+        val b: u16 = 2
+        val c = saturating_add(a, b)
+        assert(i32(c) == 0xFFFF, s"got ${i32(c)}")
+
+### `saturating_add(i8 MAX, i8(1))` clamps to i8 MAX (127)
+
+    #test
+    test_iox_saturating_add_i8_pos() -> unit
+        val a: i8 = 127
+        val b: i8 = 1
+        val c = saturating_add(a, b)
+        assert(i32(c) == 127, s"got ${i32(c)}")
+
+### `saturating_add(i8 MIN, i8(-1))` clamps to i8 MIN (-128) — signed underflow on add
+
+    #test
+    test_iox_saturating_add_i8_neg() -> unit
+        val a: i8 = -128
+        val b: i8 = -1
+        val c = saturating_add(a, b)
+        assert(i32(c) == -128, s"got ${i32(c)}")
+
+### `saturating_add(i32 MAX, 1)` clamps to i32 MAX
+
+    #test
+    test_iox_saturating_add_i32_pos() -> unit
+        val a: i32 = 2147483647
+        val c = saturating_add(a, 1)
+        assert(c == 2147483647, s"got $c")
+
+### `saturating_add(i32 MIN, -1)` clamps to i32 MIN
+
+    #test
+    test_iox_saturating_add_i32_neg() -> unit
+        val a: i32 = -2147483648
+        val c = saturating_add(a, -1)
+        assert(c == -2147483648, s"got $c")
+
+### `saturating_sub(u8(50), u8(100))` clamps to 0 (would have been -50)
+
+    #test
+    test_iox_saturating_sub_u8() -> unit
+        val a: u8 = 50
+        val b: u8 = 100
+        val c = saturating_sub(a, b)
+        assert(i32(c) == 0, s"got ${i32(c)}")
+
+### `saturating_sub(u32(5), u32(10))` clamps to 0
+
+    #test
+    test_iox_saturating_sub_u32() -> unit
+        val a: u32 = 5u32
+        val b: u32 = 10u32
+        val c = saturating_sub(a, b)
+        assert(i64(c) == 0i64, s"got ${i64(c)}")
+
+### `saturating_sub(i32 MIN, 1)` clamps to i32 MIN
+
+    #test
+    test_iox_saturating_sub_i32_neg() -> unit
+        val a: i32 = -2147483648
+        val c = saturating_sub(a, 1)
+        assert(c == -2147483648, s"got $c")
+
+### `saturating_sub(i32 MAX, -1)` clamps to i32 MAX
+
+    #test
+    test_iox_saturating_sub_i32_pos() -> unit
+        val a: i32 = 2147483647
+        val c = saturating_sub(a, -1)
+        assert(c == 2147483647, s"got $c")
+
+### `saturating_mul(u8(16), u8(16))` clamps to 255
+
+    #test
+    test_iox_saturating_mul_u8() -> unit
+        val a: u8 = 16
+        val b: u8 = 16
+        val c = saturating_mul(a, b)
+        assert(i32(c) == 255, s"got ${i32(c)}")
+
+### `saturating_mul(u16(0x100), u16(0x100))` clamps to 0xFFFF
+
+    #test
+    test_iox_saturating_mul_u16() -> unit
+        val a: u16 = 0x100
+        val b: u16 = 0x100
+        val c = saturating_mul(a, b)
+        assert(i32(c) == 0xFFFF, s"got ${i32(c)}")
+
+### `saturating_mul(i32(65536), i32(65536))` clamps to i32 MAX
+
+    #test
+    test_iox_saturating_mul_i32_pos() -> unit
+        val a: i32 = 65536
+        val b: i32 = 65536
+        val c = saturating_mul(a, b)
+        assert(c == 2147483647, s"got $c")
+
+### `saturating_mul(i32(-65536), i32(65536))` clamps to i32 MIN
+
+    #test
+    test_iox_saturating_mul_i32_neg() -> unit
+        val a: i32 = -65536
+        val b: i32 = 65536
+        val c = saturating_mul(a, b)
+        assert(c == -2147483648, s"got $c")
+
+### `saturating_mul(u8(10), u8(20))` does NOT clamp (true product fits)
+
+    #test
+    test_iox_saturating_mul_u8_no_clamp() -> unit
+        val a: u8 = 10
+        val b: u8 = 20
+        val c = saturating_mul(a, b)
+        assert(i32(c) == 200, s"got ${i32(c)}")
+
+Wrapping vs saturating diverge on overflow
+-------------------------------------------
+
+### `wrapping_add` and `saturating_add` agree when no overflow
+
+    #test
+    test_iox_agree_when_no_overflow() -> unit
+        val a: u8 = 10
+        val b: u8 = 20
+        val w = wrapping_add(a, b)
+        val s = saturating_add(a, b)
+        assert(i32(w) == i32(s), "agree")
+        assert(i32(w) == 30, s"got ${i32(w)}")
+
+### And diverge on overflow
+
+    #test
+    test_iox_diverge_on_overflow() -> unit
+        val a: u8 = 200
+        val b: u8 = 100
+        val w = wrapping_add(a, b)
+        val s = saturating_add(a, b)
+        // 300 mod 256 = 44; clamp = 255
+        assert(i32(w) == 44, s"wrap; got ${i32(w)}")
+        assert(i32(s) == 255, s"sat; got ${i32(s)}")

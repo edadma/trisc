@@ -2095,46 +2095,78 @@ class SyslSVMCodegen:
             // signed overflow detection
             intrName match
               case "saturating_add" =>
-                // overflow if (a >= 0 && b >= 0 && r < 0) → MAX
-                // underflow if (a < 0 && b < 0 && r >= 0) → MIN
-                val noOv = newLabel("sat_no_ov")
-                val checkUf = newLabel("sat_check_uf")
-                // a >= 0?
-                emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $checkUf") // a < 0 → check underflow
-                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $noOv")    // b < 0 → no overflow
-                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpz $noOv")     // r >= 0 → no overflow
-                emitPushInt(maxV); emit(s"  local_set $rIdx")
-                emit(s"  jump $noOv")
-                emit(s"$checkUf:")
-                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpz $noOv")     // b >= 0 → no underflow
-                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $noOv")    // r < 0 → no underflow
-                emitPushInt(minV); emit(s"  local_set $rIdx")
-                emit(s"$noOv:")
+                if width < 64 then
+                  // Narrow signed add: SVM does the sum in full i64, so
+                  // r doesn't wrap yet — overflow is whether r escapes
+                  // [minV, maxV]. r > maxV → MAX; r < minV → MIN.
+                  val noOv = newLabel("sat_no_ov")
+                  val tryUf = newLabel("sat_try_uf")
+                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gt")
+                  emit(s"  jumpz $tryUf")
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $noOv")
+                  emit(s"$tryUf:")
+                  emit(s"  local_get $rIdx"); emitPushInt(minV); emit("  lt")
+                  emit(s"  jumpz $noOv")
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$noOv:")
+                else
+                  // 64-bit signed add: wrapping has already happened in r,
+                  // so detect by sign pattern of inputs vs result.
+                  // overflow if (a >= 0 && b >= 0 && r < 0) → MAX
+                  // underflow if (a < 0 && b < 0 && r >= 0) → MIN
+                  val noOv = newLabel("sat_no_ov")
+                  val checkUf = newLabel("sat_check_uf")
+                  emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $checkUf") // a < 0 → check underflow
+                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $noOv")    // b < 0 → no overflow
+                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpz $noOv")     // r >= 0 → no overflow
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $noOv")
+                  emit(s"$checkUf:")
+                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpz $noOv")     // b >= 0 → no underflow
+                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $noOv")    // r < 0 → no underflow
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$noOv:")
               case "saturating_sub" =>
-                // overflow if (a >= 0 && b < 0 && r < 0) → MAX
-                // underflow if (a < 0 && b >= 0 && r >= 0) → MIN
-                val noOv = newLabel("sat_no_ov")
-                val checkUf = newLabel("sat_check_uf")
-                emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $checkUf")
-                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpz $noOv")     // b >= 0 → no overflow (a-b: a>=0, b>=0 stays in range or underflows below)
-                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpz $noOv")
-                emitPushInt(maxV); emit(s"  local_set $rIdx")
-                emit(s"  jump $noOv")
-                emit(s"$checkUf:")
-                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $noOv")
-                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $noOv")
-                emitPushInt(minV); emit(s"  local_set $rIdx")
-                emit(s"$noOv:")
+                if width < 64 then
+                  // Narrow signed sub: same range-check shape as narrow add.
+                  val noOv = newLabel("sat_no_ov")
+                  val tryUf = newLabel("sat_try_uf")
+                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gt")
+                  emit(s"  jumpz $tryUf")
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $noOv")
+                  emit(s"$tryUf:")
+                  emit(s"  local_get $rIdx"); emitPushInt(minV); emit("  lt")
+                  emit(s"  jumpz $noOv")
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$noOv:")
+                else
+                  // 64-bit signed sub: wrapping happened in r, detect by signs.
+                  // overflow if (a >= 0 && b < 0 && r < 0) → MAX
+                  // underflow if (a < 0 && b >= 0 && r >= 0) → MIN
+                  val noOv = newLabel("sat_no_ov")
+                  val checkUf = newLabel("sat_check_uf")
+                  emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $checkUf")
+                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpz $noOv")
+                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpz $noOv")
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $noOv")
+                  emit(s"$checkUf:")
+                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $noOv")
+                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $noOv")
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$noOv:")
               case "saturating_mul" =>
                 // For narrow widths: check against [minV, maxV].
                 if width < 64 then
