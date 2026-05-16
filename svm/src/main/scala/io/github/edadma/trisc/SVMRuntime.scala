@@ -957,6 +957,156 @@ object SVMRuntime:
        |  local_get 8
        |  ret
        |
+       |; __svm_str_fmt_str(s: *string, width: i64, leftAlign: bool) -> *string
+       |; Pad a string with spaces to at least `width` characters. If `s.len >=
+       |; width` the source descriptor is returned unchanged (no copy). Otherwise
+       |; a fresh `width`-byte buffer + 16-byte descriptor is allocated on the
+       |; memory stack; the buffer is filled with either "s_bytes + spaces"
+       |; (leftAlign == 1) or "spaces + s_bytes" (right-align, leftAlign == 0)
+       |; and the new descriptor points at it.
+       |;
+       |; Locals: 0=s, 1=width, 2=leftAlign, 3=s_ptr, 4=s_len, 5=pad_count,
+       |;         6=buf_ptr, 7=struct_addr, 8=i (loop cursor), 9=aligned_buf_size.
+       |global __svm_str_fmt_str, func
+       |__svm_str_fmt_str:
+       |  frame 10
+       |  local_set 2            ; leftAlign
+       |  local_set 1            ; width
+       |  local_set 0            ; s
+       |  ; s_ptr = s[0]; s_len = s[8]
+       |  local_get 0
+       |  load64
+       |  local_set 3
+       |  local_get 0
+       |  push_i8 8
+       |  add
+       |  load64
+       |  local_set 4
+       |  ; if s_len >= width: return s (no padding needed)
+       |  local_get 4
+       |  local_get 1
+       |  geu
+       |  jumpz .fmtss_pad
+       |  local_get 0
+       |  ret
+       |.fmtss_pad:
+       |  ; pad_count = width - s_len
+       |  local_get 1
+       |  local_get 4
+       |  sub
+       |  local_set 5
+       |  ; aligned_buf_size = (width + 7) & ~7
+       |  local_get 1
+       |  push_i8 7
+       |  add
+       |  push_i64 -8
+       |  and
+       |  local_set 9
+       |  ; Allocate aligned_buf_size + 16 bytes (struct directly above buffer)
+       |  push_i64 __sp
+       |  dup
+       |  load64
+       |  local_get 9
+       |  push_i8 16
+       |  add
+       |  sub
+       |  dup
+       |  rot
+       |  store64
+       |  local_set 7            ; struct_addr (lowest address)
+       |  local_get 7
+       |  push_i8 16
+       |  add
+       |  local_set 6            ; buf_ptr = struct_addr + 16
+       |  ; Decide layout: leftAlign → s_bytes then spaces; else spaces then s_bytes.
+       |  push_0
+       |  local_set 8            ; i = 0
+       |  local_get 2
+       |  jumpz .fmtss_right
+       |  ; left-align: copy s_bytes to buf[0..s_len), then pad spaces to width
+       |.fmtss_la_copy:
+       |  local_get 8
+       |  local_get 4
+       |  ltu
+       |  jumpz .fmtss_la_pad
+       |  local_get 3
+       |  local_get 8
+       |  add
+       |  load8
+       |  local_get 6
+       |  local_get 8
+       |  add
+       |  store8
+       |  local_get 8
+       |  inc
+       |  local_set 8
+       |  jump .fmtss_la_copy
+       |.fmtss_la_pad:
+       |  ; spaces from buf[s_len .. width)
+       |.fmtss_la_pad_loop:
+       |  local_get 8
+       |  local_get 1
+       |  ltu
+       |  jumpz .fmtss_finish
+       |  push_i8 32             ; ' '
+       |  local_get 6
+       |  local_get 8
+       |  add
+       |  store8
+       |  local_get 8
+       |  inc
+       |  local_set 8
+       |  jump .fmtss_la_pad_loop
+       |.fmtss_right:
+       |  ; right-align: pad_count spaces at buf[0..pad_count), then s_bytes
+       |.fmtss_ra_pad:
+       |  local_get 8
+       |  local_get 5
+       |  ltu
+       |  jumpz .fmtss_ra_copy
+       |  push_i8 32             ; ' '
+       |  local_get 6
+       |  local_get 8
+       |  add
+       |  store8
+       |  local_get 8
+       |  inc
+       |  local_set 8
+       |  jump .fmtss_ra_pad
+       |.fmtss_ra_copy:
+       |  ; copy s_bytes to buf[pad_count .. width)
+       |.fmtss_ra_copy_loop:
+       |  local_get 8
+       |  local_get 1
+       |  ltu
+       |  jumpz .fmtss_finish
+       |  local_get 3
+       |  local_get 8
+       |  add
+       |  local_get 5
+       |  sub
+       |  load8
+       |  local_get 6
+       |  local_get 8
+       |  add
+       |  store8
+       |  local_get 8
+       |  inc
+       |  local_set 8
+       |  jump .fmtss_ra_copy_loop
+       |.fmtss_finish:
+       |  ; struct.ptr = buf_ptr; struct.len = width
+       |  local_get 6
+       |  local_get 7
+       |  store64
+       |  local_get 1
+       |  local_get 7
+       |  push_i8 8
+       |  add
+       |  store64
+       |  local_get 7
+       |  ret
+       |
        |segment rodata
        |global __svm_str_true_data, data, 5
        |global __svm_str_false_data, data, 6

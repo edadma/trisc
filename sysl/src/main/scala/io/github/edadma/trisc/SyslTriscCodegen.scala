@@ -15,6 +15,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   private var needsStrInt = false // set when codegen needs __str_int helper
   private var needsStrFloat = false // set when codegen needs __str_float helper
   private var needsStrFmtI64 = false // set when codegen needs __str_fmt_i64 helper (f"..." on i64)
+  private var needsStrFmtStr = false // set when codegen needs __str_fmt_str helper (f"..."%Ns/%-Ns on string)
 
   private def newLabel(prefix: String): String =
     labelCounter += 1
@@ -152,6 +153,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     needsStrInt = false
     needsStrFloat = false
     needsStrFmtI64 = false
+    needsStrFmtStr = false
     globalConstants.clear()
     itables.clear()
 
@@ -254,6 +256,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
     // Emit __str_fmt_i64 helper if needed (formatted integer interpolation, audit #14)
     if needsStrFmtI64 then emitStrFmtI64Helper()
+    if needsStrFmtStr then emitStrFmtStrHelper()
 
     // Pre-walk dataGlobals to intern any string-literal initializers (scalar or
     // array elements). This must run before rodata emission so the bodies land
@@ -4820,9 +4823,44 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             needsAllocExtern = true
 
           case 's' if inner.typ.underlying == SyslType.StringType =>
-            // Pass-through. Width/pad on string verbs isn't implemented
-            // anywhere yet — matches SVM/LLVM behavior.
-            genExpr(inner)
+            if spec.width <= 0 then
+              // No padding requested; pass the source string through unchanged.
+              genExpr(inner)
+            else
+              // Build the result via __str_fmt_str(s_ptr, s_len, width, leftAlign).
+              // Same ABI shape as __str_fmt_i64: 16-byte return slot allocated
+              // below the stack args, r1 = ret-slot address at call time.
+              emitAddImm(7, 7, -16)
+              stackOffset -= 16
+              emit("  std r0, r7, r0")
+              emitAddImm(2, 7, 8)
+              emit("  std r0, r2, r0")
+
+              // Evaluate the input string into a 16-byte struct addressed by r1.
+              genExpr(inner)
+              // r1 = &{s_ptr, s_len}; read fields into r2 (s_ptr) and r3 (s_len).
+              emit("  ldd r2, r1, r0")
+              emitAddImm(4, 1, 8)
+              emit("  ldd r3, r4, r0")
+
+              // Push args right-to-left so callee sees:
+              //   [fp+24] = s_ptr, [fp+32] = s_len,
+              //   [fp+40] = width, [fp+48] = leftAlign
+              val leftAlignBit = if spec.leftAlign then 1 else 0
+              emitLoadImm(4, leftAlignBit); emit("  pshd r4"); stackOffset -= 8 // leftAlign → [fp+48]
+              emitLoadImm(4, spec.width);   emit("  pshd r4"); stackOffset -= 8 // width     → [fp+40]
+              emit("  pshd r3");                                stackOffset -= 8 // s_len     → [fp+32]
+              emit("  pshd r2");                                stackOffset -= 8 // s_ptr     → [fp+24]
+
+              emitAddImm(1, 7, 32)
+              val mpfs = if modulePrefix.nonEmpty then s"_$modulePrefix" else ""
+              emit(s"  movi r4, __str_fmt_str$mpfs")
+              emit("  jalr r6, r4")
+              emitAddImm(7, 7, 32)
+              stackOffset += 32
+              emit("  mov r1, r7")
+              needsStrFmtStr = true
+              needsAllocExtern = true
 
           case _ =>
             // Any other shape (bool with %d, etc.) — fall back to plain TStr
@@ -6875,6 +6913,153 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     emit("  popd r5")
     emit("  popd r6")
     emitAddImm(7, 7, 8)                               // skip 1 reg param (hidden return ptr)
+    emit("  jalr r0, r6")
+
+  /** Emit the `__str_fmt_str` helper used to pad string-valued `%Ns` /
+   *  `%-Ns` f-string slots on the TRISC backend. Mirrors SVM's
+   *  `__svm_str_fmt_str`.
+   *
+   *  ABI: identical shape to `__str_fmt_i64` — caller pushes 4 stack args
+   *  (s_ptr, s_len, width, leftAlign) and passes `r1` = pre-allocated
+   *  16-byte return slot.
+   *
+   *  Behaviour: if `s_len >= width`, write `{s_ptr, s_len}` into the
+   *  return slot unchanged (printf-style no-op for over-wide strings).
+   *  Otherwise malloc(8 + width), set refcount=1, fill `width` bytes with
+   *  either "s_bytes + spaces" (leftAlign != 0) or "spaces + s_bytes"
+   *  (right-align), and stash `{data_ptr, width}` in the return slot. */
+  private def emitStrFmtStrHelper(): Unit =
+    val mp = if modulePrefix.nonEmpty then s"_$modulePrefix" else ""
+    emit(s"# helper: __str_fmt_str$mp(s_ptr: i64, s_len: i64, width: i64, leftAlign: i64) -> string")
+    emit(s"global __str_fmt_str$mp, func, 1 i64 i64 i64 i64 i64")
+    emit(s"__str_fmt_str$mp:")
+    emit("  pshd r1")                                 // save hidden return ptr
+    emit("  pshd r6")
+    emit("  pshd r5")
+    emit("  mov r5, r7")
+    // No locals; everything lives in stack-arg slots or registers.
+
+    val passthrough = newLabel("ffs_passthrough")
+    val padLeft     = newLabel("ffs_pad_left")
+    val padRight    = newLabel("ffs_pad_right")
+    val cpLoop      = newLabel("ffs_cp_loop")
+    val cpDone      = newLabel("ffs_cp_done")
+    val spLoop      = newLabel("ffs_sp_loop")
+    val spDone      = newLabel("ffs_sp_done")
+    val cpLoop2     = newLabel("ffs_cp_loop2")
+    val cpDone2     = newLabel("ffs_cp_done2")
+    val spLoop2     = newLabel("ffs_sp_loop2")
+    val spDone2     = newLabel("ffs_sp_done2")
+    val allocOk     = newLabel("ffs_alloc_ok")
+    val finish      = newLabel("ffs_finish")
+
+    // Step 1: if s_len >= width, return source unchanged.
+    emitAddImm(2, 5, 32); emit("  ldd r2, r2, r0")   // r2 = s_len
+    emitAddImm(3, 5, 40); emit("  ldd r3, r3, r0")   // r3 = width
+    emit("  sltu r4, r2, r3")                        // r4 = (s_len < width)
+    emit(s"  beq r4, r0, $passthrough")
+
+    // Step 2: pad path. malloc(8 + width).
+    emit("  addi r1, r3, 8")                         // r1 = 8 + width
+    emit("  movi r4, malloc")
+    emit("  jalr r6, r4")
+    emit(s"  bne r1, r0, $allocOk")
+    emit("  ldi r1, 2")
+    emit("  trap 1")
+    emit(s"$allocOk")
+    // Set refcount = 1 at [base+0]; data_ptr = base + 8.
+    emit("  ldi r2, 1")
+    emit("  std r2, r1, r0")
+    emit("  addi r1, r1, 8")                         // r1 = data_ptr (write cursor for left-align;
+                                                     // also data_ptr_base for return)
+    emit("  pshd r1")                                // save data_ptr_base
+
+    // Decide alignment.
+    emitAddImm(4, 5, 48); emit("  ldd r4, r4, r0")   // r4 = leftAlign
+    emit(s"  beq r4, r0, $padRight")
+
+    // Step 3a — left-align: copy s_bytes, then trailing spaces.
+    emit(s"$padLeft")
+    // r1 = write cursor. Load s_ptr + s_len.
+    emitAddImm(2, 5, 24); emit("  ldd r2, r2, r0")   // r2 = s_ptr
+    emitAddImm(3, 5, 32); emit("  ldd r3, r3, r0")   // r3 = s_len
+    emit(s"$cpLoop")
+    emit(s"  beq r3, r0, $cpDone")
+    emit("  ldb r4, r2, r0")
+    emit("  stb r4, r1, r0")
+    emit("  addi r2, r2, 1")
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $cpLoop")
+    emit(s"$cpDone")
+    // pad_count = width - s_len   (r1 already advanced by s_len)
+    emitAddImm(3, 5, 40); emit("  ldd r3, r3, r0")   // r3 = width
+    emitAddImm(4, 5, 32); emit("  ldd r4, r4, r0")   // r4 = s_len
+    emit("  sub r3, r3, r4")                         // r3 = pad_count
+    emit(s"$spLoop")
+    emit(s"  beq r3, r0, $spDone")
+    emit("  ldi r4, 32")                             // ' '
+    emit("  stb r4, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $spLoop")
+    emit(s"$spDone")
+    emit(s"  bra $finish")
+
+    // Step 3b — right-align: leading spaces, then s_bytes.
+    emit(s"$padRight")
+    // pad_count = width - s_len
+    emitAddImm(3, 5, 40); emit("  ldd r3, r3, r0")   // r3 = width
+    emitAddImm(4, 5, 32); emit("  ldd r4, r4, r0")   // r4 = s_len
+    emit("  sub r3, r3, r4")                         // r3 = pad_count
+    emit(s"$spLoop2")
+    emit(s"  beq r3, r0, $spDone2")
+    emit("  ldi r4, 32")
+    emit("  stb r4, r1, r0")
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $spLoop2")
+    emit(s"$spDone2")
+    emitAddImm(2, 5, 24); emit("  ldd r2, r2, r0")   // r2 = s_ptr
+    emitAddImm(3, 5, 32); emit("  ldd r3, r3, r0")   // r3 = s_len
+    emit(s"$cpLoop2")
+    emit(s"  beq r3, r0, $cpDone2")
+    emit("  ldb r4, r2, r0")
+    emit("  stb r4, r1, r0")
+    emit("  addi r2, r2, 1")
+    emit("  addi r1, r1, 1")
+    emit("  addi r3, r3, -1")
+    emit(s"  bra $cpLoop2")
+    emit(s"$cpDone2")
+
+    // Step 4 — write {data_ptr_base, width} into the return slot and return.
+    emit(s"$finish")
+    emit("  popd r1")                                // r1 = data_ptr_base
+    emitAddImm(2, 5, 40); emit("  ldd r2, r2, r0")   // r2 = width (final len)
+    emitAddImm(3, 5, 16); emit("  ldd r3, r3, r0")   // r3 = return slot
+    emit("  std r1, r3, r0")
+    emit("  addi r3, r3, 8")
+    emit("  std r2, r3, r0")
+    emitAddImm(1, 5, 16); emit("  ldd r1, r1, r0")
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emitAddImm(7, 7, 8)
+    emit("  jalr r0, r6")
+
+    // Pass-through: write the source ptr/len pair into the return slot.
+    emit(s"$passthrough")
+    emitAddImm(2, 5, 24); emit("  ldd r2, r2, r0")   // r2 = s_ptr
+    emitAddImm(3, 5, 32); emit("  ldd r3, r3, r0")   // r3 = s_len
+    emitAddImm(4, 5, 16); emit("  ldd r4, r4, r0")   // r4 = return slot
+    emit("  std r2, r4, r0")
+    emit("  addi r4, r4, 8")
+    emit("  std r3, r4, r0")
+    emitAddImm(1, 5, 16); emit("  ldd r1, r1, r0")
+    emit("  mov r7, r5")
+    emit("  popd r5")
+    emit("  popd r6")
+    emitAddImm(7, 7, 8)
     emit("  jalr r0, r6")
 
   /** Inline helper used inside `emitStrFmtI64Helper`: write `pad_count`

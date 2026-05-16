@@ -133,6 +133,49 @@ path). See file-header TODO for `%b` on non-zero values.
         val out = f"$e%s"
         assert(out == "", s"%s empty; got '$out'")
 
+`%Ns` — right-aligned string padding
+------------------------------------
+
+`%Ns` pads the string on the left with spaces until the total
+length is `N`. When `len(s) >= N` the string is returned as-is
+with no padding (printf semantics).
+
+    #test
+    test_ffs_string_right_align() -> unit
+        val s = "hi"
+        val out = f"[$s%10s]"
+        assert(out == "[        hi]", s"%10s; got '$out'")
+
+    #test
+    test_ffs_string_right_align_exact() -> unit
+        val s = "abcde"
+        val out = f"[$s%5s]"
+        assert(out == "[abcde]", s"%5s exact-width; got '$out'")
+
+    #test
+    test_ffs_string_right_align_overflow() -> unit
+        val s = "abcdefgh"
+        val out = f"[$s%3s]"
+        assert(out == "[abcdefgh]", s"%3s overflow; got '$out'")
+
+`%-Ns` — left-aligned string padding
+------------------------------------
+
+`%-Ns` pads the string on the right with spaces until the total
+length is `N`. Same overflow semantics as the right-aligned form.
+
+    #test
+    test_ffs_string_left_align() -> unit
+        val s = "hi"
+        val out = f"[$s%-10s]"
+        assert(out == "[hi        ]", s"%-10s; got '$out'")
+
+    #test
+    test_ffs_string_left_align_empty() -> unit
+        val e = ""
+        val out = f"[$e%-4s]"
+        assert(out == "[    ]", s"%-4s empty; got '$out'")
+
 `%+d` — explicit sign
 ---------------------
 

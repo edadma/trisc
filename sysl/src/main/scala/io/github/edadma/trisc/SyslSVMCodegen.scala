@@ -64,6 +64,7 @@ class SyslSVMCodegen:
   private var needsStrFromI64: Boolean = false
   private var needsStrFromBool: Boolean = false
   private var needsStrFmtI64: Boolean = false
+  private var needsStrFmtStr: Boolean = false
 
   // Map: function name → parameter types (for arg-coercion at call sites).
   private val funcParamTypes = new mutable.HashMap[String, List[SyslType]]
@@ -155,8 +156,8 @@ class SyslSVMCodegen:
       case TBinary(l, _, r, _) => scanExpr(l); scanExpr(r)
       case TUnary(_, o, _) => scanExpr(o)
       case TCast(inner, _) => scanExpr(inner)
-      case TStringFromSlice(s, _) => count += 2; scanExpr(s)
-      case TStringFromPtr(p, l, _) => count += 3; scanExpr(p); scanExpr(l)
+      case TStringFromSlice(s, _) => count += 6; scanExpr(s)
+      case TStringFromPtr(p, l, _) => count += 5; scanExpr(p); scanExpr(l)
       case TCall(_, args, _) => args.foreach(scanExpr)
       case TTempAddr(e, _) => scanExpr(e)
       case TIndirectCall(c, args, _) => scanExpr(c); args.foreach(scanExpr)
@@ -244,6 +245,59 @@ class SyslSVMCodegen:
     emit("  rot")             // ( new_sp new_sp &__sp )
     emit("  store64")         // write new_sp to __sp; ( new_sp ) remains
     needsSpExtern = true
+
+  /** Allocate a fresh `len` bytes (top-of-stack i64) on the memory stack,
+    * 8-aligned. Leaves the base address on TOS. Used when the size isn't
+    * known at codegen time (e.g. `string(ptr, len)` byte-copy). */
+  private def emitMemAllocDyn(): Unit =
+    // align len to 8: aligned = (len + 7) & ~7
+    emitPushInt(7)
+    emit("  add")                // ( aligned_plus_partial )
+    emit("  push_i64 -8")
+    emit("  and")                // ( aligned )
+    emit("  push_i64 __sp")      // ( aligned &__sp )
+    emit("  dup")                // ( aligned &__sp &__sp )
+    emit("  load64")             // ( aligned &__sp old_sp )
+    emit("  rot")                // ( &__sp old_sp aligned )
+    emit("  sub")                // ( &__sp new_sp )
+    emit("  dup")                // ( &__sp new_sp new_sp )
+    emit("  rot")                // ( new_sp new_sp &__sp )
+    emit("  store64")            // write new_sp to __sp; ( new_sp )
+    needsSpExtern = true
+
+  /** Allocate a fresh buffer holding `lenLocal` bytes copied from `srcLocal`,
+    * and return the buffer's local index. Used by string-from-bytes
+    * constructors to give the new string an independent backing store. */
+  private def emitDynByteAllocAndCopy(srcLocal: Int, lenLocal: Int): Int =
+    emit(s"  local_get $lenLocal")
+    emitMemAllocDyn()
+    val bufIdx = nextLocalIndex; nextLocalIndex += 1
+    emit(s"  local_set $bufIdx")
+    // byte-copy loop: for i in 0..<len: buf[i] = src[i]
+    val iIdx = nextLocalIndex; nextLocalIndex += 1
+    emit("  push_0")
+    emit(s"  local_set $iIdx")
+    val loopLbl = newLabel("strcpy_loop")
+    val doneLbl = newLabel("strcpy_done")
+    emit(s"$loopLbl:")
+    emit(s"  local_get $iIdx")
+    emit(s"  local_get $lenLocal")
+    emit("  ltu")
+    emit(s"  jumpz $doneLbl")
+    emit(s"  local_get $srcLocal")
+    emit(s"  local_get $iIdx")
+    emit("  add")
+    emit("  load8")
+    emit(s"  local_get $bufIdx")
+    emit(s"  local_get $iIdx")
+    emit("  add")
+    emit("  store8")
+    emit(s"  local_get $iIdx")
+    emit("  inc")
+    emit(s"  local_set $iIdx")
+    emit(s"  jump $loopLbl")
+    emit(s"$doneLbl:")
+    bufIdx
 
   // ============================================================================
   // Refcount machinery for `&T` references
@@ -424,6 +478,7 @@ class SyslSVMCodegen:
     needsStrFromI64 = false
     needsStrFromBool = false
     needsStrFmtI64 = false
+    needsStrFmtStr = false
     deinitFunctions.clear()
 
     // Register canonical struct types so stale placeholder StructType(_, Nil)
@@ -689,6 +744,8 @@ class SyslSVMCodegen:
       emit("extern __svm_str_from_bool")
     if needsStrFmtI64 && !definedSymbols.contains("__svm_str_fmt_i64") then
       emit("extern __svm_str_fmt_i64")
+    if needsStrFmtStr && !definedSymbols.contains("__svm_str_fmt_str") then
+      emit("extern __svm_str_fmt_str")
     if needsNewSlice && !definedSymbols.contains("__svm_new_slice") then
       emit("extern __svm_new_slice")
 
@@ -1724,31 +1781,44 @@ class SyslSVMCodegen:
       emit(s"$passLbl:")
 
     case TStringFromSlice(slice, _) =>
-      // []byte -> string: allocate fresh 16-byte {ptr, len i64}, copy slice ptr/len
+      // []byte -> string: copy the slice's bytes into a fresh memory-stack
+      // buffer and return a new 16-byte {ptr, len} descriptor pointing at
+      // the copy. The reference (§3231) makes this an explicit copy so
+      // later mutation of the source array doesn't alias into the string.
       genExpr(slice)
       val srcIdx = nextLocalIndex; nextLocalIndex += 1
       emit(s"  local_set $srcIdx")
+      // Slice layout is {ptr i64 @0, len i32 @8, cap i32 @12, backref ...}.
+      // Extract ptr + len-as-i64 (load32 zero-extends).
+      val srcPtrIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_get $srcIdx"); emit("  load64"); emit(s"  local_set $srcPtrIdx")
+      val lenIdx = nextLocalIndex; nextLocalIndex += 1
+      emit(s"  local_get $srcIdx"); emitPushInt(8); emit("  add"); emit("  load32")
+      emit(s"  local_set $lenIdx")
+      val bufIdx = emitDynByteAllocAndCopy(srcPtrIdx, lenIdx)
       emitMemAlloc(16)
       val dstIdx = nextLocalIndex; nextLocalIndex += 1
       emit(s"  local_set $dstIdx")
-      emit(s"  local_get $srcIdx"); emit("  load64")
-      emit(s"  local_get $dstIdx"); emit("  store64")
-      emit(s"  local_get $srcIdx"); emitPushInt(8); emit("  add"); emit("  load32")
-      emit(s"  local_get $dstIdx"); emitPushInt(8); emit("  add"); emit("  store64")
+      emit(s"  local_get $bufIdx"); emit(s"  local_get $dstIdx"); emit("  store64")
+      emit(s"  local_get $lenIdx"); emit(s"  local_get $dstIdx"); emitPushInt(8); emit("  add"); emit("  store64")
       emit(s"  local_get $dstIdx")
 
     case TStringFromPtr(ptr, len, _) =>
-      // string(ptr, len) -> string: allocate 16-byte {ptr, len}, fill both
+      // string(ptr, len) -> string: copy `len` bytes from `ptr` into a fresh
+      // buffer and stash that buffer in the new descriptor. Reference
+      // (§3231) prescribes the copy so subsequent writes through `ptr`
+      // don't bleed into the string.
       genExpr(ptr)
       val ptrIdx = nextLocalIndex; nextLocalIndex += 1
       emit(s"  local_set $ptrIdx")
       genExpr(len)
       val lenIdx = nextLocalIndex; nextLocalIndex += 1
       emit(s"  local_set $lenIdx")
+      val bufIdx = emitDynByteAllocAndCopy(ptrIdx, lenIdx)
       emitMemAlloc(16)
       val dstIdx = nextLocalIndex; nextLocalIndex += 1
       emit(s"  local_set $dstIdx")
-      emit(s"  local_get $ptrIdx"); emit(s"  local_get $dstIdx"); emit("  store64")
+      emit(s"  local_get $bufIdx"); emit(s"  local_get $dstIdx"); emit("  store64")
       emit(s"  local_get $lenIdx"); emit(s"  local_get $dstIdx"); emitPushInt(8); emit("  add"); emit("  store64")
       emit(s"  local_get $dstIdx")
 
@@ -1947,10 +2017,12 @@ class SyslSVMCodegen:
           emit("  call __svm_str_fmt_i64")
           needsStrFmtI64 = true
         case 's' if inner.typ.underlying == SyslType.StringType =>
-          // %s without width: pass through. With width, padding isn't yet
-          // implemented for string verbs; just pass through (matches current
-          // behaviour of LLVM with simple specs).
           genExpr(inner)
+          if spec.width > 0 then
+            emitPushInt(spec.width)
+            emitPushInt(if spec.leftAlign then 1 else 0)
+            emit("  call __svm_str_fmt_str")
+            needsStrFmtStr = true
         case _ =>
           // Any other shape: fall back to plain TStr semantics.
           genExpr(TStr(inner))

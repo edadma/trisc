@@ -11,23 +11,13 @@ can be built two ways:
     fixed array slice, `arr[:]`, or a sub-slice of `new [n]byte`).
     Copies all bytes in `s`.
 
-Both forms **copy** the source bytes per the reference — but
-see TODO below for an SVM bug where the copy semantics are
-not honoured today.
+Both forms **copy** the source bytes per the reference.
 
 The constructed string has the source's byte length and the
 exact source bytes (no implicit transcoding, no NUL
 termination — sysl strings carry their length explicitly).
 
 File-local prefix `Sfb` (string-from-bytes).
-
-**TODO — SVM bug found 2026-05-15, two tests dropped:**
-
-  - `string(&buf[0], n)` and `string(slice)` on SVM share
-    the source's backing storage rather than copying it.
-    Mutating the source after `string(...)` mutates the
-    constructed string. The other 6 backends correctly copy.
-    See `feedback_sysl_svm_string_from_bytes_aliasing.md`.
 
     module sysl.tests.lang_features
 
@@ -188,3 +178,42 @@ indexable.
         val s = string(&buf[0], 3)
         assert(int(s[0]) == 112, "byte 0 is 'p'")
         assert(int(s[2]) == 114, "byte 2 is 'r'")
+
+Copy semantics — `string(...)` snapshots the bytes
+--------------------------------------------------
+
+The reference makes `string(ptr, len)` and `string(slice)` value copies.
+Mutating the source buffer after construction must not bleed into the
+string. This used to be SVM-broken — both forms aliased the source —
+and is now pinned across all seven backends.
+
+### Pointer + length form does not alias source
+
+    #test
+    test_sfb_ptr_len_is_copy() -> unit
+        var buf: [3]byte
+        buf[0] = byte('a')
+        buf[1] = byte('b')
+        buf[2] = byte('c')
+        val s = string(&buf[0], 3)
+        assert(s == "abc", "initial value")
+        buf[0] = byte('X')
+        buf[1] = byte('Y')
+        buf[2] = byte('Z')
+        assert(s == "abc", s"after source mutation; got '$s'")
+        assert(int(s[0]) == 97, "byte 0 still 'a'")
+
+### Slice form does not alias source
+
+    #test
+    test_sfb_slice_is_copy() -> unit
+        var arr: [4]byte
+        arr[0] = byte('w')
+        arr[1] = byte('x')
+        arr[2] = byte('y')
+        arr[3] = byte('z')
+        val s = string(arr[:])
+        assert(s == "wxyz", "initial value")
+        arr[0] = byte('!')
+        arr[3] = byte('?')
+        assert(s == "wxyz", s"after source mutation; got '$s'")
