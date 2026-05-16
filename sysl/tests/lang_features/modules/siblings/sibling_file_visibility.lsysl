@@ -1,0 +1,144 @@
+Sibling-File Visibility — Calling Across Files of One Module
+=============================================================
+
+Per reference §Modules:
+
+> A module may span multiple source files in the same directory.
+> Files that declare the same module path share a single
+> namespace: declarations in one file are directly visible from
+> the others **without an explicit `import` clause**.
+
+This file pins that visibility by **calling, constructing,
+pattern-matching, and mutating** names defined in
+`sibling_helper.lsysl` — all without writing a single `import`
+line. Both files declare the same module path
+(`sysl.tests.lang_features.modules.siblings`).
+
+Sibling visibility was already exercised end-to-end by the
+parsyl-split work (sysl@2c4f1c095 .. sysl@2de1a83cc), but had
+no dedicated pin until this file existed.
+
+What this file does NOT pin:
+
+- Visibility across **different** modules in sibling directories
+  (that requires an explicit import). The point here is
+  *same-module*, not *same-parent-directory*.
+
+File-local prefix `Sfv` (Sibling-File-Visibility).
+
+    module sysl.tests.lang_features.modules.siblings
+
+
+### A sibling-defined plain function is callable by its bare name
+
+`sib_helper_value` is defined in `sibling_helper.lsysl`. With both
+files declaring the same module, the call here resolves with no
+import.
+
+    #test
+    test_sfv_plain_fn_visible() -> unit
+        assert(sib_helper_value() == 42, "sibling fn returns")
+
+
+### A sibling-defined function with parameters works
+
+    #test
+    test_sfv_param_fn_visible() -> unit
+        assert(sib_double(21) == 42, "sib_double(21)")
+        assert(sib_double(-5) == -10, "sib_double(-5)")
+        assert(sib_sum_three(10, 20, 12) == 42, "sib_sum_three")
+
+
+### A sibling-defined struct is constructible by its bare name
+
+The type `SibPoint` is defined next door. We construct one, store
+it, and read fields — all without naming the sibling file.
+
+    #test
+    test_sfv_struct_type_visible() -> unit
+        val p = SibPoint(3, 4)
+        assert(p.x == 3, "x")
+        assert(p.y == 4, "y")
+
+
+### A method declared on the sibling-defined struct is callable
+
+`SibPoint.manhattan()` is defined in the helper file. Method
+dispatch must see across file boundaries within one module.
+
+    #test
+    test_sfv_struct_method_visible() -> unit
+        val p1 = SibPoint(3, 4)
+        assert(p1.manhattan() == 7, "manhattan |3|+|4|")
+        val p2 = SibPoint(-2, -5)
+        assert(p2.manhattan() == 7, "manhattan |-2|+|-5|")
+
+
+### A sibling-defined enum variant constructs and is reflectable
+
+The variant `SibColor.SibRed` and the `::Image` reflection helper
+both resolve via sibling visibility — they reference an enum
+declared in `sibling_helper.lsysl`. Construct the variant locally
+to side-step a separate compiler issue with simple-enum-as-fn-return
+(catalogued — surfaced by an earlier draft of this file). The
+visibility point — that `SibColor` and `SibColor.SibRed` resolve
+across files — is what this test pins; the construction site
+isn't load-bearing for that.
+
+    #test
+    test_sfv_enum_value_visible() -> unit
+        val c = SibColor.SibRed
+        assert(SibColor::Image(c) == "SibRed", s"got '${SibColor::Image(c)}'")
+        assert(SibColor::Pos(c) == 0, s"pos=${SibColor::Pos(c)}")
+
+
+### A sibling-defined enum pattern-matches with a local scrutinee
+
+Match on a sibling-defined enum, with a locally-constructed
+scrutinee (sysl has a known analyzer bug on simple-enum-as-fn-result
+match — see enums/enum_simple_int.lsysl — so we use a local var).
+Each variant pattern resolves into the sibling-declared variant.
+
+    #test
+    test_sfv_enum_match_visible() -> unit
+        var c = SibColor.SibGreen
+        val name = c match
+            SibColor.SibRed    -> "red"
+            SibColor.SibGreen  -> "green"
+            SibColor.SibBlue   -> "blue"
+            else               -> "other"
+        assert(name == "green", s"got '$name'")
+
+
+### A sibling-defined `const` is readable by bare name
+
+Module-level constants share the same visibility rules as
+functions / types / vars.
+
+    #test
+    test_sfv_const_visible() -> unit
+        assert(SIB_ANSWER == 7, "SIB_ANSWER")
+        // And usable in expressions, of course.
+        assert(SIB_ANSWER * 6 == 42, "arithmetic with sib const")
+
+
+### A sibling-defined `var` is observable AND mutable
+
+The `sib_counter` lives in the helper file. Sibling visibility
+means real shared state — not a per-file copy. We exercise both
+direct read and indirect mutation via the sibling's `sib_bump`
+function within a single test (each test is a fresh program
+execution on most backends, so we don't rely on cross-test
+state).
+
+    #test
+    test_sfv_var_visible_and_mutable() -> unit
+        // module-level vars default-init to zero per spec.
+        assert(sib_counter == 0, s"start counter=${sib_counter}")
+        // Mutate directly across the file boundary.
+        sib_counter = sib_counter + 5
+        assert(sib_counter == 5, s"after direct +5 counter=${sib_counter}")
+        // Mutate indirectly via the sibling's bump function.
+        sib_bump()
+        sib_bump()
+        assert(sib_counter == 7, s"after two bumps counter=${sib_counter}")

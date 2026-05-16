@@ -1,0 +1,100 @@
+Sibling-File Helper — Provides Definitions
+==========================================
+
+This file is the **helper** half of the sibling-file-visibility
+pin. It declares the same module path as the test file next to it
+(`sibling_file_visibility.lsysl`), defines a handful of names, and
+exposes no `#test` decls of its own.
+
+The companion file calls into these names **without an explicit
+`import` clause** — sibling files of one module must see each
+other's declarations directly.
+
+If sibling visibility regressed, the test file would fail compile
+("undefined function" / "unknown type"), not at runtime.
+
+File-local prefix `Sib` (Sibling). Keep it sparse — anything new
+must also be touched from the test file to actually pin
+visibility.
+
+    module sysl.tests.lang_features.modules.siblings
+
+
+### Plain function
+
+A bare function. Sibling file should call it as `sib_helper_value()`.
+
+    sib_helper_value() -> int = 42
+
+
+### Function taking and returning ints
+
+    sib_double(x: int) -> int = x * 2
+
+
+### Function with multiple parameters and a body
+
+    sib_sum_three(a: int, b: int, c: int) -> int
+        val total = a + b + c
+        return total
+
+
+### Struct declaration
+
+A type defined here must be constructible in the sibling file by
+its plain name, without import.
+
+    struct SibPoint
+        x: int
+        y: int
+
+
+### Method on the sibling-defined struct
+
+    SibPoint.manhattan() -> int
+        return abs_int(self.x) + abs_int(self.y)
+
+
+### A helper that the struct method uses
+
+Lives in the same module — no import needed for sibling method use
+either.
+
+    abs_int(x: int) -> int
+        if x < 0 then return 0 - x
+        return x
+
+
+### Enum declaration
+
+A data enum the sibling file pattern-matches on.
+
+    enum SibColor
+        SibRed
+        SibGreen
+        SibBlue
+
+
+### Function returning a sibling enum value
+
+    sib_make_red() -> SibColor = SibColor.SibRed
+
+
+### Module-level constant
+
+A `const` defined here must be readable from the sibling file by
+its plain name.
+
+    const SIB_ANSWER: int = 7
+
+
+### Module-level mutable variable
+
+A `var` here is read-write across the sibling boundary. Used to
+pin that the sibling file can both observe and mutate same-module
+state.
+
+    var sib_counter: int = 0
+
+    sib_bump() -> unit
+        sib_counter = sib_counter + 1

@@ -246,12 +246,23 @@ class SyslLLVMCodegen(target: String = "host"):
     // Without this, calls to functions defined later in the file would not know
     // the parameter types, causing aggregate arguments (arrays, structs) to be
     // passed by value instead of by pointer — a silent ABI mismatch.
+    //
+    // Also pre-populate globalVarTypes so a function body that touches a sibling
+    // file's module-level var hits the globalVarTypes branch in TAssignStmt /
+    // TVarRef instead of the fresh-local fallback. Without this, the assignment
+    // would silently allocate a local of the same name and shadow the global —
+    // reads still resolved through TVarRef (the analyzer's SymInfo has the
+    // mangled name and the global decl is emitted by the same compilation
+    // unit), so the bug was a write-only divergence.
     for decl <- program.decls do
       decl match
         case TExternFuncDecl(name, params, _) =>
           funcParamTypes(name) = params.map(llvmType)
         case f: TFunDecl =>
           funcParamTypes(f.name) = f.params.map(p => llvmType(p.typ))
+        case TVarDecl(name, typ, _, _, isVolatile, _, _) =>
+          globalVarTypes(name) = typ
+          if isVolatile then volatileGlobals += name
         case _ =>
 
     // Generate functions into a buffer so string constants are collected first
@@ -611,7 +622,9 @@ class SyslLLVMCodegen(target: String = "host"):
             emit(s"  $loaded = load $retType, $retType* $result")
             loaded
           else result
-        else emitSextIfNeeded(result, rt, retType, expr.typ.isSigned)
+        else fun.returnType match
+          case et: SyslType.EnumType => coerceScalarToEnumReturn(result, rt, et)
+          case _ => emitSextIfNeeded(result, rt, retType, expr.typ.isSigned)
         emitReleaseRefs(returnedSliceAllocas(expr))
         emitRet(retType, finalVal)
       case TBlockBody(stmts) =>
@@ -1014,7 +1027,9 @@ class SyslLLVMCodegen(target: String = "host"):
           val loaded = newReg()
           emit(s"  $loaded = load $retType, $retType* $v")
           loaded
-        else emitSextIfNeeded(v, vt, retType, value.typ.isSigned)
+        else currentFunction.returnType match
+          case et: SyslType.EnumType => coerceScalarToEnumReturn(v, vt, et)
+          case _ => emitSextIfNeeded(v, vt, retType, value.typ.isSigned)
         emitDefers()
         emitReleaseRefs(returnedSliceAllocas(value))
         emitRet(retType, finalVal)
@@ -3617,6 +3632,14 @@ class SyslLLVMCodegen(target: String = "host"):
               val gep = newReg()
               emit(s"  $gep = getelementptr $arrLt, $arrLt* $v, i32 0, i32 0")
               emit(s"  $result = ptrtoint ${llvmType(inner.typ.asInstanceOf[SyslType.ArrayType].elem)}* $gep to $toLt")
+            case _ if isAggregate(inner.typ) && targetType.isIntegral =>
+              // Aggregate-to-scalar: genExpr returns a pointer; bitcast the pointer
+              // to a scalar-typed pointer and load. Used by simple-enum unwrapping
+              // (`SibColor::Image(c)` inserts `TCast(c, I32)` whenever c's static
+              // type is EnumType rather than the raw tag).
+              val typedPtr = newReg()
+              emit(s"  $typedPtr = bitcast $fromLt* $v to $toLt*")
+              emit(s"  $result = load $toLt, $toLt* $typedPtr")
             case _ if isAggregate(inner.typ) =>
               // Aggregate types: genExpr returns a pointer, so bitcast the pointer
               emit(s"  $result = bitcast $fromLt* $v to $toLt")
@@ -4173,6 +4196,26 @@ class SyslLLVMCodegen(target: String = "host"):
 
   // Emit widening/narrowing cast when fromType != toType; return the (possibly cast) register.
   // signed: whether the SOURCE value is signed — controls sext vs zext for integer widening.
+  // Simple-enum `Name.Member` lowers in the analyzer to TIntLit(value, I32); when
+  // that scalar flows through a function-tail / TReturnStmt into a slot whose
+  // declared type is the enum (laid out as `[N x i8]`), naive sext yields invalid
+  // IR (`sext i32 .. to [N x i8]`). Materialise a slot of the aggregate shape,
+  // memset to zero, store the i32 at offset 0 via a typed bitcast, and load back
+  // as bytes.
+  private def coerceScalarToEnumReturn(value: String, fromLlvm: String, toSysl: SyslType.EnumType): String =
+    val total = llvmSizeOf(toSysl)
+    val toLlvm = llvmType(toSysl)
+    val slot = deferAlloca(toLlvm)
+    val slotCast = newReg()
+    emit(s"  $slotCast = bitcast $toLlvm* $slot to i8*")
+    emit(s"  call void @$memsetIntrinsic(i8* $slotCast, i8 0, $sizeT $total, i1 false)")
+    val typedAddr = newReg()
+    emit(s"  $typedAddr = bitcast $toLlvm* $slot to $fromLlvm*")
+    emit(s"  store $fromLlvm $value, $fromLlvm* $typedAddr")
+    val loaded = newReg()
+    emit(s"  $loaded = load $toLlvm, $toLlvm* $slot")
+    loaded
+
   private def emitSextIfNeeded(value: String, fromType: String, toType: String, signed: Boolean = true): String =
     if fromType == toType then value
     else if toType == "void" then value // discarded — no cast needed

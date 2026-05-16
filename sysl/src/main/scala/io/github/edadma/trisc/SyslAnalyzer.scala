@@ -1799,6 +1799,30 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                 )
                 importedConcreteImplKeys += ((traitName, resolvedTargets))
               }
+        case VarDeclAST(name, typOpt, init, _, isMutable, attrs, _, isConst) =>
+          // Sibling-file module-level var/const: register the symbol with its
+          // mangled name so cross-file reads AND writes resolve to the global,
+          // not a freshly-created local. Without this, `sib_counter = ...` from
+          // a sibling test file goes through lookupOrCreate → fresh local alloca,
+          // and any subsequent call to a helper-file function that updates the
+          // same global only updates one of two cells. Best-effort type
+          // resolution: explicit annotation first, else infer from a literal
+          // initializer; on failure (cross-sibling type still loading), fall
+          // back to UnitType — Pass 2 will overwrite the SymInfo with the real
+          // type. Keep the mangled name stable across passes.
+          if !globalScope.contains(name) then
+            val mangled = if shouldMangle(name) then mangleName(name) else name
+            val isGhost = attrs.exists(_.name == "ghost")
+            val resolvedType = scala.util.Try {
+              typOpt match
+                case Some(t) => resolveType(t)
+                case None => init match
+                  case _: IntLitAST => I32
+                  case _: BoolLitAST => BoolType
+                  case _: StringLitAST => StringType
+                  case _ => SyslType.UnitType
+            }.getOrElse(SyslType.UnitType)
+            globalScope(name) = SymInfo(mangled, resolvedType, isMutable, isConst = isConst, isGhost = isGhost)
         case _ => ()
 
   def analyze(programIn: ProgramAST): TProgram =
