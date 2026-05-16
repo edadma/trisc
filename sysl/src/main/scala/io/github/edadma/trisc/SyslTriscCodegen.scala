@@ -3466,13 +3466,21 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             case ">" =>
               emit("  fslt r1, r2, r1")
             case "<=" =>
-              emit("  fslt r1, r2, r1")  // r1 = (right < left)
-              emit("  ldi r3, 1")
-              emit("  xor r1, r1, r3")   // flip: !(right < left) = left <= right
+              // Synthesize `a <= b` as `(a < b) | (a == b)` so NaN poisons
+              // correctly (IEEE 754: any comparison with NaN is false; the
+              // earlier `!(b < a)` approach turned NaN's false-poisoned
+              // `<` into `true`). r1 = a (left), r2 = b (right).
+              emit("  mov r4, r1")        // r4 = a
+              emit("  fslt r1, r1, r2")   // r1 = (a < b)
+              emit("  fseq r4, r4, r2")   // r4 = (a == b)
+              emit("  or r1, r1, r4")     // r1 = a <= b
             case ">=" =>
-              emit("  fslt r1, r1, r2")  // r1 = (left < right)
-              emit("  ldi r3, 1")
-              emit("  xor r1, r1, r3")   // flip: !(left < right) = left >= right
+              // Synthesize `a >= b` as `(b < a) | (a == b)` — same NaN-correctness
+              // motivation as `<=` above.
+              emit("  mov r4, r1")        // r4 = a
+              emit("  fslt r1, r2, r1")   // r1 = (b < a) = (a > b)
+              emit("  fseq r4, r4, r2")   // r4 = (a == b)
+              emit("  or r1, r1, r4")     // r1 = a >= b
             case _ => // unsupported float op — fall through
         else
           op match
