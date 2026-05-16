@@ -1,0 +1,161 @@
+Kernel-side ELF64 selftest — locks down the parser before execve
+================================================================
+
+Phase 1 chunk 7. Builds a tiny two-LOAD-segment ELF in a 256-byte
+BSS buffer, runs it through every `oskit.lib.elf` accessor, and
+returns 0 on pass or 1..N on the first failing step. There is no
+userspace ELF producer wired up yet (sysl-built binaries are TRB
+after objcopy), so this stand-in pins the parser's behavior —
+and therefore chunk 8's `execve` and chunk 9's PT_INTERP handoff —
+before any real ELF flows through the loader.
+
+This file is the same `oskit.kernel` module as `kernel.lsysl`,
+so `syscall_return` and `kernel_continue_current` resolve as
+siblings without an import. The handler is registered into the
+syscall dispatch table from kernel.lsysl's bootstrap with the
+syscall number `SYS_ELF_SELFTEST = 92`.
+
+    module oskit.kernel
+
+    import oskit.lib.{ELF_OK, ELF_PT_LOAD, ELF_PF_R, ELF_PF_W, ELF_PF_X, ELF_ERR_NOT_ELF, ELF_ERR_TRUNCATED, elf64_validate, elf64_entry, elf64_phnum, elf64_ph_type, elf64_ph_vaddr, elf64_ph_memsz, elf64_ph_filesz, elf64_ph_flags, elf64_pf_to_vma_prot}
+
+
+Phase 1 chunk 7 — synthetic ELF64 selftest. The kernel-side
+`sys_elf_selftest_handler` (SYS_ELF_SELFTEST = 92) builds a tiny
+two-LOAD-segment ELF in a 256-byte BSS buffer, runs it through
+`oskit.lib.elf` accessors, and compares each field to a
+hardcoded expected value. Returns 0 on pass, 1..N for the
+failing step. There is no userspace ELF-file producer wired up
+yet (sysl-built binaries are TRB after objcopy), so this stand-
+in exists to lock down the parser's behavior — and therefore
+chunk 8's `execve` and chunk 9's PT_INTERP handoff — before any
+real ELF flows through the loader.
+
+Little-endian field writers used only by the selftest. Kept
+local to the kernel module so `oskit.lib.elf` stays a read-only
+parser; if a future user ever needs to *produce* ELF in-kernel
+the writers here can move out, but until then they're dead code
+to everyone except the selftest.
+
+    elf_write_u16_le(p: *byte, v: int)
+        p[0] = byte(v & 0xFF)
+        p[1] = byte((v >> 8) & 0xFF)
+
+    elf_write_u32_le(p: *byte, v: i64)
+        p[0] = byte(int(v) & 0xFF)
+        p[1] = byte(int(v >> 8) & 0xFF)
+        p[2] = byte(int(v >> 16) & 0xFF)
+        p[3] = byte(int(v >> 24) & 0xFF)
+
+    elf_write_u64_le(p: *byte, v: i64)
+        p[0] = byte(int(v) & 0xFF)
+        p[1] = byte(int(v >> 8) & 0xFF)
+        p[2] = byte(int(v >> 16) & 0xFF)
+        p[3] = byte(int(v >> 24) & 0xFF)
+        p[4] = byte(int(v >> 32) & 0xFF)
+        p[5] = byte(int(v >> 40) & 0xFF)
+        p[6] = byte(int(v >> 48) & 0xFF)
+        p[7] = byte(int(v >> 56) & 0xFF)
+
+`elf64_selftest` returns 0 on pass, 1..N on the failing step. The
+synthetic image describes two LOAD segments laid out the way a
+real ELF would: a R+X text segment at 0x60001000 (memsz > filesz
+so it has a tail of "padding" but no .bss because text is fully
+initialized) and a R+W data segment at 0x60010000 with a 0x1000-
+byte .bss tail. Step numbers are deliberately stable across the
+positive and negative cases so a regression in any one accessor
+is greppable from the test output.
+
+    elf64_selftest() -> int
+        var buf: [256]byte
+        var i = 0
+        while i < 256
+            buf[i] = byte(0)
+            i += 1
+
+        buf[0] = 0x7F
+        buf[1] = byte('E')
+        buf[2] = byte('L')
+        buf[3] = byte('F')
+        buf[4] = byte(2)
+        buf[5] = byte(1)
+
+        elf_write_u64_le(&buf[24], i64(0x60001000))
+        elf_write_u64_le(&buf[32], i64(64))
+        elf_write_u16_le(&buf[54], 56)
+        elf_write_u16_le(&buf[56], 2)
+
+        val ph0 = 64
+        elf_write_u32_le(&buf[ph0 + 0],  i64(ELF_PT_LOAD))
+        elf_write_u32_le(&buf[ph0 + 4],  i64(ELF_PF_R | ELF_PF_X))
+        elf_write_u64_le(&buf[ph0 + 8],  i64(0x100))
+        elf_write_u64_le(&buf[ph0 + 16], i64(0x60001000))
+        elf_write_u64_le(&buf[ph0 + 32], i64(0x1500))
+        elf_write_u64_le(&buf[ph0 + 40], i64(0x2000))
+
+        val ph1 = 120
+        elf_write_u32_le(&buf[ph1 + 0],  i64(ELF_PT_LOAD))
+        elf_write_u32_le(&buf[ph1 + 4],  i64(ELF_PF_R | ELF_PF_W))
+        elf_write_u64_le(&buf[ph1 + 8],  i64(0x2000))
+        elf_write_u64_le(&buf[ph1 + 16], i64(0x60010000))
+        elf_write_u64_le(&buf[ph1 + 32], i64(0x2000))
+        elf_write_u64_le(&buf[ph1 + 40], i64(0x3000))
+
+        val pbuf: *byte = &buf[0]
+        val total_len = ph1 + 56
+
+        if elf64_validate(pbuf, total_len) != ELF_OK
+            return 1
+        if elf64_entry(pbuf) != u64(0x60001000)
+            return 2
+        if elf64_phnum(pbuf) != 2
+            return 3
+
+        if elf64_ph_type(pbuf, 0) != ELF_PT_LOAD
+            return 4
+        if elf64_ph_vaddr(pbuf, 0) != u64(0x60001000)
+            return 5
+        if elf64_ph_filesz(pbuf, 0) != i64(0x1500)
+            return 6
+        if elf64_ph_memsz(pbuf, 0) != i64(0x2000)
+            return 7
+        if elf64_pf_to_vma_prot(elf64_ph_flags(pbuf, 0)) != 5
+            return 8
+
+        if elf64_ph_type(pbuf, 1) != ELF_PT_LOAD
+            return 9
+        if elf64_ph_vaddr(pbuf, 1) != u64(0x60010000)
+            return 10
+        if elf64_ph_filesz(pbuf, 1) != i64(0x2000)
+            return 11
+        if elf64_ph_memsz(pbuf, 1) != i64(0x3000)
+            return 12
+        if elf64_pf_to_vma_prot(elf64_ph_flags(pbuf, 1)) != 3
+            return 13
+
+Negative-path tests. Mutate the buffer to break each invariant
+in turn and verify `elf64_validate` returns the right error
+code, then restore. The buffer is restored between mutations so
+each negative case stands on its own.
+
+        buf[0] = byte(0xFF)
+        if elf64_validate(pbuf, total_len) != ELF_ERR_NOT_ELF
+            return 14
+        buf[0] = 0x7F
+
+        if elf64_validate(pbuf, 32) != ELF_ERR_TRUNCATED
+            return 15
+
+        0
+
+SYS_ELF_SELFTEST (92): runs the kernel-side ELF parser selftest
+and returns its 0/N result. Debug-only — exists so the chunk-7
+test program can validate `oskit.lib.elf` end-to-end without
+yet having a real ELF binary in the ramdisk (that capability
+arrives in chunk 8 with `exec()`).
+
+    sys_elf_selftest_handler(arg: int)
+        val rc = elf64_selftest()
+        syscall_return(i64(rc))
+        kernel_continue_current()
+

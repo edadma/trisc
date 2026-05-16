@@ -33,6 +33,10 @@ SYSL_FILES=(
     oskit/kernel/kstack.lsysl
     oskit/kernel/vma.lsysl
     oskit/kernel/page_refcnt.lsysl
+    oskit/kernel/signals.lsysl
+    oskit/kernel/elf_selftest.lsysl
+    oskit/kernel/mmap.lsysl
+    oskit/kernel/grants.lsysl
     oskit/lib/elf.lsysl
     oskit/arch/x86_64/cpu.lsysl
     oskit/arch/x86_64/prog_config.sysl

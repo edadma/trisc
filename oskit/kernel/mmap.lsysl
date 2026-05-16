@@ -1,0 +1,212 @@
+Kernel mmap / munmap / mprotect — anonymous VMA layer
+=====================================================
+
+Phase 1 chunk 4. The POSIX shim (`oskit.posix`) doesn't have
+direct access to the per-process VMA tree, so it routes through
+these kernel-side helpers; all three operate on the calling
+thread's own process by reading `current_thread`'s pid + ptbr
+internally — no caller can target another process.
+
+`kernel_mmap_anon` registers a fresh anonymous VMA; the address
+allocation policy lives in the shim, which consults either
+`kernel_find_mmap_range` (for non-FIXED requests) or
+`kernel_range_check_free` (for MAP_FIXED). `kernel_munmap` and
+`kernel_mprotect` share `kernel_vma_split_edges` to make
+partial-overlap operations work cleanly.
+
+Same `oskit.kernel` module as `kernel.lsysl`, so siblings like
+`current_thread`, `threads`, `processes`, `kfree_user_page`, and
+the entire `vma_*` API from `vma.lsysl` resolve without imports.
+
+    module oskit.kernel
+
+    import oskit.config.{MAX_PROCESSES, PAGE_SIZE}
+    import oskit.arch.{vm_unmap_user_page, vm_update_user_prot}
+
+
+Phase 1 chunk 4 — `mmap` / `munmap` / `mprotect` for anonymous
+mappings. The shim layer (`oskit.posix`) doesn't have direct
+access to the per-process VMA tree, so it calls into these
+kernel-side helpers. All three operate on the calling thread's
+own process — they read `current_thread`'s pid + ptbr internally
+so no caller can target another process.
+
+`kernel_mmap_anon` registers a fresh anonymous VMA over `[vstart,
+vend)`. Returns 0 on success, -1 on overlap with an existing VMA
+or pool exhaustion. The shim's `sys_mmap` is responsible for the
+address-allocation policy (it consults `kernel_find_mmap_range`
+or `kernel_range_check_free` first depending on MAP_FIXED); this
+layer just enforces "no two VMAs overlap" as a final guard.
+
+    kernel_mmap_anon(vstart: u64, vend: u64, prot: int) -> int
+        if current_thread < 0
+            return -1
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        val t = &processes[pid].vma_tree
+        if vma_lookup_addr(t, vstart) != VMA_NIL
+            return -1
+        var n = vma_first(t)
+        while n != VMA_NIL
+            if vma_pool[n].vstart >= vend
+                break
+            if vma_pool[n].vstart >= vstart
+                return -1
+            n = vma_next(n)
+        val idx = vma_create(t, vstart, vend, prot,
+                             VMA_MAP_ANON | VMA_MAP_PRIVATE,
+                             -1, u64(0))
+        if idx == VMA_NIL
+            return -1
+        0
+
+
+`kernel_find_mmap_range` runs `vma_find_free_range` over the
+calling thread's VMA tree across the full user-VA window. Returns
+the chosen base, or `u64(0)` on no-fit / invalid state. This is
+the address-allocation oracle that replaced `sys_mmap`'s legacy
+per-process bump pointer when the fixed `[POSIX_MMAP_BASE,
+POSIX_MMAP_LIMIT)` arena was retired — `[VMA_USER_VA_BOT,
+VMA_USER_VA_TOP)` is now the single source of truth for where
+user mappings may live, and the VMA tree decides which sub-ranges
+are free.
+
+    kernel_find_mmap_range(len: u64, align: u64) -> u64
+        if current_thread < 0
+            return u64(0)
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return u64(0)
+        if pid >= MAX_PROCESSES
+            return u64(0)
+        vma_find_free_range(&processes[pid].vma_tree, len, align,
+                            u64(VMA_USER_VA_BOT), u64(VMA_USER_VA_TOP))
+
+
+`kernel_range_check_free` tells the shim whether a MAP_FIXED
+range is entirely free in the calling process's VMA tree. Returns
+1 if free, 0 if any VMA overlaps `[vstart, vend)` (or the call
+is malformed). The shim uses this to decide whether to accept or
+reject a MAP_FIXED request before it reaches `kernel_mmap_anon`.
+
+    kernel_range_check_free(vstart: u64, vend: u64) -> int
+        if current_thread < 0
+            return 0
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return 0
+        if pid >= MAX_PROCESSES
+            return 0
+        vma_range_free(&processes[pid].vma_tree, vstart, vend)
+
+
+Boundary-split helper used by both munmap and mprotect: ensures
+that `[vstart, vend)` is bordered exactly by VMA edges. Splits
+any VMA that straddles `vstart` or `vend`. Returns 0 on success,
+-1 on pool exhaustion during a split. Either edge that already
+falls on a VMA boundary (or in a hole) is a no-op.
+
+    kernel_vma_split_edges(t: *VMATree, vstart: u64, vend: u64) -> int
+        val left_v = vma_lookup_addr(t, vstart)
+        if left_v != VMA_NIL
+            if vma_pool[left_v].vstart < vstart
+                if vma_split(t, left_v, vstart) == VMA_NIL
+                    return -1
+        if vend > u64(0)
+            val right_v = vma_lookup_addr(t, vend - u64(1))
+            if right_v != VMA_NIL
+                if vma_pool[right_v].vend > vend
+                    if vma_split(t, right_v, vend) == VMA_NIL
+                        return -1
+        0
+
+
+`kernel_munmap` removes every VMA in `[vstart, vend)`, splitting
+edge VMAs first so partial-overlap unmaps work. Then it walks
+the affected PTE range and frees any frame the demand-paging
+fault path had installed. A page that was never faulted-in
+(zero PTE) costs one walk and no allocator activity.
+
+Returns 0 on success, -1 if a boundary split fails (pool
+exhausted). Empty ranges and ranges that hit no VMAs both
+return 0 — Linux semantics.
+
+    kernel_munmap(vstart: u64, vend: u64) -> int
+        if current_thread < 0
+            return -1
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        val ptbr = threads[current_thread].ptbr
+        val t = &processes[pid].vma_tree
+        if kernel_vma_split_edges(t, vstart, vend) != 0
+            return -1
+        var va = vstart
+        while va < vend
+            val pa = vm_unmap_user_page(ptbr, va)
+            if pa != u64(0)
+                kfree_user_page(pa)
+            va += u64(PAGE_SIZE)
+        var n = vma_lookup_addr(t, vstart)
+        while n != VMA_NIL
+            if vma_pool[n].vstart >= vend
+                break
+            val saved_end = vma_pool[n].vend
+            vma_remove(t, n)
+            if saved_end >= vend
+                break
+            n = vma_lookup_addr(t, saved_end)
+        0
+
+
+`kernel_mprotect` updates the prot field on every VMA in `[vstart,
+vend)` and re-flags any already-faulted-in pages. The range must
+be fully covered by VMAs (no holes); a hole rejects the call with
+-1 and leaves both VMAs and PTEs untouched. Linux returns ENOMEM
+in this case — the shim translates -1 accordingly.
+
+After updating the VMAs we walk the PTE range. Pages that haven't
+been faulted in yet are skipped (the VMA's new prot will govern
+their first install). Pages already present get their AP bits
+flipped via the arch-specific `vm_update_user_prot`.
+
+    kernel_mprotect(vstart: u64, vend: u64, prot: int) -> int
+        if current_thread < 0
+            return -1
+        val pid = threads[current_thread].pid
+        if pid <= 0
+            return -1
+        if pid >= MAX_PROCESSES
+            return -1
+        val ptbr = threads[current_thread].ptbr
+        val t = &processes[pid].vma_tree
+        if kernel_vma_split_edges(t, vstart, vend) != 0
+            return -1
+        var probe = vstart
+        while probe < vend
+            val v = vma_lookup_addr(t, probe)
+            if v == VMA_NIL
+                return -1
+            probe = vma_pool[v].vend
+        var n = vma_lookup_addr(t, vstart)
+        while n != VMA_NIL
+            if vma_pool[n].vstart >= vend
+                break
+            vma_pool[n].prot = prot
+            n = vma_next(n)
+        var writable = 0
+        if (prot & VMA_PROT_WRITE) != 0
+            writable = 1
+        var executable = 0
+        if (prot & VMA_PROT_EXEC) != 0
+            executable = 1
+        var va = vstart
+        while va < vend
+            vm_update_user_prot(ptbr, va, writable, executable)
+            va += u64(PAGE_SIZE)
+        0

@@ -41,6 +41,10 @@ SYSL_FILES=(
     oskit/kernel/vma.lsysl
     oskit/kernel/page_refcnt.lsysl
     oskit/kernel/spinlock.lsysl
+    oskit/kernel/signals.lsysl
+    oskit/kernel/elf_selftest.lsysl
+    oskit/kernel/mmap.lsysl
+    oskit/kernel/grants.lsysl
     oskit/lib/elf.lsysl
     oskit/services/services.lsysl
     oskit/ipc/ipc.lsysl

@@ -1,0 +1,288 @@
+Grant table — kernel-mediated memory sharing for IPC
+====================================================
+
+Clients call `SYS_GRANT_CREATE` to publish a (vaddr, len, flags)
+window of their own address space; servers then use
+`SYS_GRANT_COPY` to move bytes through the kernel (one direction
+per call, validated against the grant's RW flags) or
+`SYS_GRANT_MAP` to map the granter's pages into their own page
+table for direct access. Both halves can revoke or unmap at any
+time; process reap walks `grant_table` and tears down everything
+the dying process granted.
+
+The shim also calls into `kernel_grant_create_inline` /
+`kernel_grant_revoke_inline` for short-lived grants it builds and
+tears down on a single shim call — same logic as the syscall
+handlers but without `kernel_continue_current()`, since the shim
+is already running on the user thread's kernel stack and will
+return via the normal SVC path.
+
+Same `oskit.kernel` module as `kernel.lsysl`, so sibling state
+(`processes`, `threads`, `current_thread`) resolves without an
+import. The grant state itself moved here so the subsystem is
+self-contained.
+
+    module oskit.kernel
+
+    import oskit.config.{MAX_PROCESSES}
+    import oskit.arch.{vm_copy_from, vm_grant_find_free, vm_grant_unmap_pages, vm_grant_map_page, vm_flush_tlb, vm_v2p}
+
+
+Grant table for grant-based IPC. Clients create grants to
+allow servers to access their memory regions. The kernel
+mediates copies via grant_copy, validating access rights.
+
+    struct Grant
+        granter_pid: int
+        vaddr: u64
+        len: int
+        flags: int
+        in_use: int
+        mapped_vaddr: u64
+        mapped_pages: int
+        mapper_ptbr: u64
+
+    private val GRANT_READ  = 1
+    private val GRANT_WRITE = 2
+    private val GRANT_RW    = 3
+    val MAX_GRANTS  = 128
+    var grant_table: [128]Grant
+
+
+SYS_GRANT_CREATE (71): Create a memory grant.
+Args: a0=vaddr, a1=len, a2=flags. Returns grant_id or -1 if table full.
+
+    sys_grant_create_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val vaddr = u64(a0)
+        val len = int(a1)
+        val flags = int(a2)
+        val pid = threads[current_thread].pid
+        var i = 0
+        while i < MAX_GRANTS
+            if grant_table[i].in_use == 0
+                grant_table[i].granter_pid = pid
+                grant_table[i].vaddr = vaddr
+                grant_table[i].len = len
+                grant_table[i].flags = flags
+                grant_table[i].in_use = 1
+                kernel_continue_current()
+                return i64(i)
+            i += 1
+        kernel_continue_current()
+        i64(-1)
+
+SYS_GRANT_REVOKE (72): Revoke a grant.
+Arg = grant_id. Returns 0 on success, -1 on error.
+
+    sys_grant_revoke_handler(arg: int)
+        val gid = arg
+        if gid < 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if gid >= MAX_GRANTS
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if grant_table[gid].in_use == 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        val pid = threads[current_thread].pid
+        if grant_table[gid].granter_pid != pid
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        grant_unmap_if_mapped(gid)
+        grant_table[gid].in_use = 0
+        syscall_return(0)
+        kernel_continue_current()
+
+SYS_GRANT_COPY (73): Copy data using a grant.
+Args: a0=grant_id, a1=offset, a2=local_buf, a3=len, a4=direction.
+Direction: 0 = from granter to caller, 1 = from caller to granter.
+Returns bytes copied or -1 on error.
+
+    sys_grant_copy_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val gid = int(a0)
+        val offset = int(a1)
+        val local_buf = *byte(a2)
+        val len = int(a3)
+        val direction = int(a4)
+        if gid < 0
+            kernel_continue_current()
+            return i64(-1)
+        if gid >= MAX_GRANTS
+            kernel_continue_current()
+            return i64(-1)
+        if grant_table[gid].in_use == 0
+            kernel_continue_current()
+            return i64(-1)
+        if offset + len > grant_table[gid].len
+            kernel_continue_current()
+            return i64(-1)
+        // Validate direction against grant flags
+        if direction == 0
+            if (grant_table[gid].flags & GRANT_READ) == 0
+                kernel_continue_current()
+                return i64(-1)
+        else
+            if (grant_table[gid].flags & GRANT_WRITE) == 0
+                kernel_continue_current()
+                return i64(-1)
+        val granter_ptbr = processes[grant_table[gid].granter_pid].ptbr
+        val remote_addr = grant_table[gid].vaddr + u64(offset)
+        if direction == 0
+            vm_copy_from(granter_ptbr, remote_addr, local_buf, len)
+        else
+            // VMA-authorized: the granter is a real process whose
+            // VMA tree must cover `remote_addr`. -1 returns surface
+            // as a 0-bytes-copied/length result here, which is the
+            // existing failure shape.
+            if kernel_vm_copy_to(granter_ptbr, remote_addr, local_buf, len) != 0
+                kernel_continue_current()
+                return i64(-1)
+        kernel_continue_current()
+        i64(len)
+
+SYS_GRANT_MAP (74): Map granter's pages into caller's address space.
+Args: a0=grant_id, a1=offset, a2=len.
+Returns mapped virtual address or -1 on error.
+
+    sys_grant_map_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        val gid = int(a0)
+        val offset = int(a1)
+        val len = int(a2)
+        if gid < 0
+            kernel_continue_current()
+            return i64(-1)
+        if gid >= MAX_GRANTS
+            kernel_continue_current()
+            return i64(-1)
+        if grant_table[gid].in_use == 0
+            kernel_continue_current()
+            return i64(-1)
+        if offset + len > grant_table[gid].len
+            kernel_continue_current()
+            return i64(-1)
+        if grant_table[gid].mapped_vaddr != 0
+            kernel_continue_current()
+            return i64(-1)
+        val granter_ptbr = processes[grant_table[gid].granter_pid].ptbr
+        val granter_vaddr = grant_table[gid].vaddr + u64(offset)
+        val page_offset = granter_vaddr & u64(0xFFF)
+        val page_count = int((page_offset + u64(len) + u64(4095)) / u64(4096))
+        val caller_ptbr = threads[current_thread].ptbr
+        val base_vaddr = vm_grant_find_free(caller_ptbr, page_count)
+        if base_vaddr == 0
+            kernel_continue_current()
+            return i64(-1)
+        val writable = grant_table[gid].flags & GRANT_WRITE
+        val granter_pid = grant_table[gid].granter_pid
+        var i = 0
+        while i < page_count
+            val src_va = (granter_vaddr & ~u64(0xFFF)) + u64(i) * u64(4096)
+            var paddr = vm_v2p(granter_ptbr, src_va)
+            if paddr == 0
+                // Phase 1 chunk 3: granter page may be a lazily-paged
+                // VMA region. Route through `vma_handle_fault` to
+                // allocate-and-install on demand instead of failing
+                // the grant. Without this, fs_read/grant-based IPC
+                // breaks the moment a fresh `malloc` buffer is the
+                // grant target — std.alloc returns memory in pages
+                // that haven't faulted yet.
+                if granter_pid > 0 && granter_pid < MAX_PROCESSES
+                    if vma_handle_fault(&processes[granter_pid].vma_tree, src_va, granter_ptbr, int(writable)) == 0
+                        paddr = vm_v2p(granter_ptbr, src_va)
+            if paddr == 0
+                // Granter page not present — unmap what we did so far
+                vm_grant_unmap_pages(caller_ptbr, base_vaddr, i)
+                kernel_continue_current()
+                return i64(-1)
+            vm_grant_map_page(caller_ptbr, base_vaddr + u64(i) * u64(4096), paddr & ~u64(0xFFF), writable)
+            i += 1
+        vm_flush_tlb()
+        grant_table[gid].mapped_vaddr = base_vaddr
+        grant_table[gid].mapped_pages = page_count
+        grant_table[gid].mapper_ptbr = caller_ptbr
+        kernel_continue_current()
+        i64(base_vaddr + page_offset)
+
+SYS_GRANT_UNMAP (75): Unmap a previously mapped grant.
+Arg = grant_id. Returns 0 on success, -1 on error.
+
+    sys_grant_unmap_handler(arg: int)
+        val gid = arg
+        if gid < 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if gid >= MAX_GRANTS
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if grant_table[gid].in_use == 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        if grant_table[gid].mapped_vaddr == 0
+            syscall_return(-1)
+            kernel_continue_current()
+            return
+        vm_grant_unmap_pages(grant_table[gid].mapper_ptbr, grant_table[gid].mapped_vaddr, grant_table[gid].mapped_pages)
+        grant_table[gid].mapped_vaddr = 0
+        grant_table[gid].mapped_pages = 0
+        grant_table[gid].mapper_ptbr = 0
+        syscall_return(0)
+        kernel_continue_current()
+
+Unmap a grant if it's currently mapped. Used by revoke and cleanup.
+
+    grant_unmap_if_mapped(gid: int)
+        if grant_table[gid].mapped_vaddr != 0
+            vm_grant_unmap_pages(grant_table[gid].mapper_ptbr, grant_table[gid].mapped_vaddr, grant_table[gid].mapped_pages)
+            grant_table[gid].mapped_vaddr = 0
+            grant_table[gid].mapped_pages = 0
+            grant_table[gid].mapper_ptbr = 0
+
+Revoke all grants for a process. Called on process reap.
+
+    grant_revoke_all(pid: int)
+        var i = 0
+        while i < MAX_GRANTS
+            if grant_table[i].in_use == 1
+                if grant_table[i].granter_pid == pid
+                    grant_unmap_if_mapped(i)
+                    grant_table[i].in_use = 0
+            i += 1
+
+In-kernel grant helpers used by the POSIX shim. Same logic as
+the syscall handlers but without the `kernel_continue_current()`
+side effect (the shim is already running on the user thread's
+kernel stack and will return to it via the SVC path).
+
+    kernel_grant_create_inline(pid: int, vaddr: u64, glen: int, flags: int) -> int
+        var i = 0
+        while i < MAX_GRANTS
+            if grant_table[i].in_use == 0
+                grant_table[i].granter_pid = pid
+                grant_table[i].vaddr = vaddr
+                grant_table[i].len = glen
+                grant_table[i].flags = flags
+                grant_table[i].in_use = 1
+                return i
+            i += 1
+        -1
+
+    kernel_grant_revoke_inline(pid: int, gid: int)
+        if gid < 0
+            return
+        if gid >= MAX_GRANTS
+            return
+        if grant_table[gid].in_use == 0
+            return
+        if grant_table[gid].granter_pid != pid
+            return
+        grant_unmap_if_mapped(gid)
+        grant_table[gid].in_use = 0
+

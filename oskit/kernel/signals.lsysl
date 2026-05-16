@@ -1,0 +1,221 @@
+Kernel signal state — POSIX sigaction / sigmask / sigpending
+============================================================
+
+Phase 2 chunks 1 and 2 of `project_slix_phase2_roadmap.md`. The
+shim layer (`oskit.posix`) owns wire-format conversion from
+musl's 152-byte `struct sigaction` and 128-byte `sigset_t`; the
+kernel exposes a small native-typed surface that reads and writes
+the per-process disposition table (`processes[pid].sigact[]`) and
+the per-thread mask + pending bitmaps (`threads[t].sigmask` /
+`threads[t].sigpending`). Delivery (running a handler at the
+return-to-user point) lands in chunk 3 and lives elsewhere; this
+sibling holds the bookkeeping plus the synchronous SIGKILL
+fast-path used by `kill()` / `tkill()`.
+
+This file is the same `oskit.kernel` module as `kernel.lsysl`,
+so sibling state — `processes`, `threads`, `current_thread`,
+`thread_count`, `STATE_TERMINATED`, `PROC_FREE`, `PROC_ZOMBIE`,
+and `kernel_kill_process` — resolves without import.
+
+    module oskit.kernel
+
+    import oskit.config.{MAX_PROCESSES}
+
+
+Phase 2 chunk 1 — POSIX signal state plumbing.
+
+Shape (recap of `project_slix_phase2_roadmap.md`): sigaction is a
+per-process table indexed by signo, sigmask + sigpending are
+per-thread u64 bitmaps with bit (signo-1). Chunk 1 only stores
+and queries this state — no handler ever runs, and `kill(pid,
+signo)` keeps its placeholder semantics from PM. The svcs below
+are addressed by the POSIX shim, which translates between musl's
+152-byte `struct sigaction` wire format and the compact 32-byte
+kernel form.
+
+`process_sigact_clear` resets every signo's disposition to
+SIG_DFL (handler=0, flags=0, mask=0, restorer=0). Called from
+both `create_process` paths and from `create_process_suspended`.
+
+    process_sigact_clear(pid: int)
+        if pid < 0
+            return
+        if pid >= MAX_PROCESSES
+            return
+        var i = 0
+        while i <= 64
+            processes[pid].sigact[i].handler  = i64(0)
+            processes[pid].sigact[i].flags    = 0
+            processes[pid].sigact[i]._pad     = 0
+            processes[pid].sigact[i].mask     = i64(0)
+            processes[pid].sigact[i].restorer = i64(0)
+            i += 1
+
+`process_sigact_copy` clones a parent's disposition table into a
+child slot. Called from `kernel_fork`; POSIX says the child
+inherits the parent's signal actions verbatim. (execve will
+later be expected to reset custom dispositions to SIG_DFL while
+keeping SIG_IGN — that lives in chunk 3 / 4, after we actually
+deliver signals.)
+
+    process_sigact_copy(child_pid: int, parent_pid: int)
+        if child_pid < 0 || child_pid >= MAX_PROCESSES
+            return
+        if parent_pid < 0 || parent_pid >= MAX_PROCESSES
+            return
+        var i = 0
+        while i <= 64
+            processes[child_pid].sigact[i].handler  = processes[parent_pid].sigact[i].handler
+            processes[child_pid].sigact[i].flags    = processes[parent_pid].sigact[i].flags
+            processes[child_pid].sigact[i]._pad     = processes[parent_pid].sigact[i]._pad
+            processes[child_pid].sigact[i].mask     = processes[parent_pid].sigact[i].mask
+            processes[child_pid].sigact[i].restorer = processes[parent_pid].sigact[i].restorer
+            i += 1
+
+`how` values for `kernel_sigmask_set`. The numeric mapping matches
+POSIX `SIG_BLOCK`/`SIG_UNBLOCK`/`SIG_SETMASK` so the shim can
+pass musl's `how` argument through untranslated, but the kernel
+itself isn't taking POSIX as an import — these are just the
+agreed-upon enum values for the kernel API.
+
+    val KSIG_HOW_BLOCK   = 0
+    val KSIG_HOW_UNBLOCK = 1
+    val KSIG_HOW_SETMASK = 2
+
+`SIGKILL` (signo 9) and `SIGSTOP` (signo 19) cannot be blocked,
+ignored, or have their handler changed. Bits for these signals
+are silently dropped from any sigmask change, and `kernel_sigaction_set`
+returns -2 when asked to override their disposition.
+
+    val SIG_UNMASKABLE = i64(1 << 8) | i64(1 << 18)   // bit (SIGKILL-1) | bit (SIGSTOP-1)
+
+Kernel-side signal API for the POSIX shim. The shim owns all
+wire-format conversion (musl's 152-byte `struct sigaction`,
+128-byte `sigset_t`); the kernel exposes a small set of native-
+typed helpers that read/write the per-process/per-thread state.
+Both calls operate on the caller (current thread, current
+thread's process) — chunk 2 will introduce explicit-target
+variants when `tkill` and cross-thread `kill` land.
+
+`kernel_sigaction_set` updates one disposition slot, returning
+the previous disposition through the `*out_*` pointers (which
+may be 0 to skip the read-back). Returns 0 on success, -1 on a
+signo outside the 1..64 range, -2 on a SIGKILL/SIGSTOP override
+attempt.
+
+    kernel_sigaction_set(signo: int,
+                         new_handler: i64, new_flags: i32, new_mask: i64, new_restorer: i64,
+                         install_new: int,
+                         out_handler: *i64, out_flags: *i32, out_mask: *i64, out_restorer: *i64) -> int
+        if signo <= 0 || signo > 64
+            return -1
+        if signo == 9 || signo == 19
+            if install_new != 0
+                return -2
+        val pid = threads[current_thread].pid
+        if i64(out_handler) != i64(0)
+            *out_handler  = processes[pid].sigact[signo].handler
+        if i64(out_flags) != i64(0)
+            *out_flags    = i32(processes[pid].sigact[signo].flags)
+        if i64(out_mask) != i64(0)
+            *out_mask     = processes[pid].sigact[signo].mask
+        if i64(out_restorer) != i64(0)
+            *out_restorer = processes[pid].sigact[signo].restorer
+        if install_new != 0
+            processes[pid].sigact[signo].handler  = new_handler
+            processes[pid].sigact[signo].flags    = int(new_flags)
+            processes[pid].sigact[signo]._pad     = 0
+            processes[pid].sigact[signo].mask     = new_mask & ~SIG_UNMASKABLE
+            processes[pid].sigact[signo].restorer = new_restorer
+        0
+
+`kernel_sigmask_set` reads/modifies the caller's per-thread
+blocked-signal mask. Returns the *previous* mask. `how == -1`
+means "query only" (no modification). For BLOCK/UNBLOCK/SETMASK
+the bits for SIGKILL/SIGSTOP are silently dropped from `newmask`
+so the unblockables stay deliverable.
+
+    kernel_sigmask_set(how: int, newmask: i64) -> i64
+        val old = threads[current_thread].sigmask
+        if how == -1
+            return old
+        val bits = newmask & ~SIG_UNMASKABLE
+        if how == KSIG_HOW_BLOCK
+            threads[current_thread].sigmask = old | bits
+        else if how == KSIG_HOW_UNBLOCK
+            threads[current_thread].sigmask = old & ~bits
+        else if how == KSIG_HOW_SETMASK
+            threads[current_thread].sigmask = bits
+        old
+
+`kernel_sigpending_get` reports the caller-thread's pending
+bitmap. Used by `sigpending(2)`; bit (signo-1) is set iff that
+signal was generated while blocked.
+
+    kernel_sigpending_get() -> i64
+        threads[current_thread].sigpending
+
+Phase 2 chunk 2 — signal generation (kill / tkill / raise).
+
+`kernel_sig_send_to_thread` sets the pending bit for `signo` on
+the per-thread bitmap of `tid`. SIGKILL (9) takes the synchronous
+fast path — POSIX says SIGKILL cannot be caught, blocked, or
+ignored, and on a thread it still terminates the whole process —
+so we route to `kernel_kill_process` directly without touching the
+bitmap. `signo == 0` is the POSIX existence-check: validate the
+thread is in-use and return 0 without modifying state. Returns 0
+on success, -3 (ESRCH) on a bad/free thread, -1 (EINVAL) on a
+signo outside 1..64.
+
+    kernel_sig_send_to_thread(tid: int, signo: int) -> int
+        if tid < 0
+            return -3
+        if tid >= thread_count
+            return -3
+        if signo < 0 || signo > 64
+            return -1
+        if threads[tid].state == STATE_TERMINATED
+            return -3
+        if signo == 0
+            return 0
+        if signo == 9
+            kernel_kill_process(threads[tid].pid)
+            return 0
+        val bit: i64 = i64(1) << (signo - 1)
+        threads[tid].sigpending = threads[tid].sigpending | bit
+        0
+
+`kernel_sig_send_to_process` broadcasts `signo` to every thread
+belonging to `pid` by OR-ing the pending bit. POSIX prescribes
+"some thread", but chunk 2 has no delivery side yet — chunk 3
+will pick the lowest-eligible thread off the broadcast set, and
+chunk 9 (pthread) will need a real selection policy. SIGKILL
+short-circuits to `kernel_kill_process(pid)` for the same reason
+as the thread variant. `signo == 0` is the existence-check.
+Returns 0 on success, -3 (ESRCH) if the pid is free/zombie,
+-1 (EINVAL) on a signo outside 1..64.
+
+    kernel_sig_send_to_process(pid: int, signo: int) -> int
+        if pid <= 0
+            return -3
+        if pid >= MAX_PROCESSES
+            return -3
+        if signo < 0 || signo > 64
+            return -1
+        if processes[pid].state == PROC_FREE
+            return -3
+        if processes[pid].state == PROC_ZOMBIE
+            return -3
+        if signo == 0
+            return 0
+        if signo == 9
+            kernel_kill_process(pid)
+            return 0
+        val bit: i64 = i64(1) << (signo - 1)
+        var i = 0
+        while i < thread_count
+            if threads[i].pid == pid
+                if threads[i].state != STATE_TERMINATED
+                    threads[i].sigpending = threads[i].sigpending | bit
+            i += 1
+        0
