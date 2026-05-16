@@ -296,7 +296,7 @@ Existing: `struct_return.lsysl` → `structs/struct_return.lsysl`.
 |---|---|
 | `float_extremes.lsysl` 🟢 | NaN, infinity, signed zeros, in-range trunc *(move from top level)* |
 | `float_arithmetic.lsysl` 🔴 | denormals, rounding modes, FP-strict comparisons |
-| `float_int_cast.lsysl` 🔴 | `int(f)` truncates toward zero; `f64(i)` exact for small i |
+| `float_int_cast.lsysl` 🟢 | `int(f)` exact integer-valued, truncates toward zero on +ve and -ve, half-down on .5; `f64(i)` exact for ±100 range; round-trip integrity for -10..10; casts in arithmetic / float exprs / division; promotion arithmetic. (18 tests) |
 | `float_compare.lsysl` 🔴 | NaN-aware `<`, `<=`, ordered/unordered semantics |
 | `float_literal_parsing.lsysl` 🔴 | `1.0e10`, `0.5`, `1e-5`, negative exponent |
 

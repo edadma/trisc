@@ -1,0 +1,191 @@
+Float ↔ Int Casts (In-Range)
+==============================
+
+This file pins the **in-range** float-to-int and int-to-float
+cast semantics. Out-of-range and NaN cases are deliberately
+NOT pinned — see `float_extremes.lsysl` for the rationale
+and `project_sysl_wasm_chunk5_prereq_trunc_sat.md` for the
+trunc-sat divergence.
+
+Pins:
+
+- `int(f)` truncates toward zero (positive and negative).
+- `int(f)` on integer-valued floats is exact.
+- `f64(i)` is exact for small integers (within float's
+  contiguous range).
+- Round-tripping `int(f64(i))` for small i.
+- Float-to-int with various float magnitudes inside the
+  i32 range.
+- Negative float to negative int.
+- Truncation drops the fractional part (no rounding).
+- Cast inside an arithmetic expression.
+
+File-local prefix `Sfic` (Sysl Float Int Cast).
+
+    module sysl.tests.lang_features
+
+Integer-valued float casts
+---------------------------
+
+### `int(3.0)` is exactly 3
+
+    #test
+    test_sfic_int_of_exact_positive() -> unit
+        val f = 3.0
+        val n = int(f)
+        assert(n == 3, s"got $n")
+
+### `int(0.0)` is 0
+
+    #test
+    test_sfic_int_of_zero() -> unit
+        val f = 0.0
+        assert(int(f) == 0, "0")
+
+### `int(-3.0)` is -3
+
+    #test
+    test_sfic_int_of_exact_negative() -> unit
+        val f = -3.0
+        val n = int(f)
+        assert(n == -3, s"got $n")
+
+Truncation toward zero (positive)
+----------------------------------
+
+### `int(3.7)` truncates to 3 (NOT rounded)
+
+    #test
+    test_sfic_truncate_positive() -> unit
+        val f = 3.7
+        val n = int(f)
+        assert(n == 3, s"3.7 truncates down; got $n")
+
+### `int(3.999)` truncates to 3
+
+    #test
+    test_sfic_truncate_just_below_4() -> unit
+        val f = 3.999
+        assert(int(f) == 3, "below 4 → 3")
+
+### `int(3.5)` (banker's rounding boundary) truncates to 3
+
+    #test
+    test_sfic_truncate_half() -> unit
+        val f = 3.5
+        assert(int(f) == 3, "3.5 → 3")
+
+Truncation toward zero (negative)
+----------------------------------
+
+### `int(-3.7)` truncates toward zero → -3
+
+    #test
+    test_sfic_truncate_negative() -> unit
+        val f = -3.7
+        val n = int(f)
+        assert(n == -3, s"-3.7 toward zero is -3; got $n")
+
+### `int(-3.999)` truncates to -3
+
+    #test
+    test_sfic_truncate_negative_just_above_minus_4() -> unit
+        val f = -3.999
+        assert(int(f) == -3, "just above -4")
+
+### `int(-0.5)` truncates to 0 (not -1)
+
+    #test
+    test_sfic_truncate_negative_small() -> unit
+        val f = -0.5
+        assert(int(f) == 0, "-0.5 toward zero → 0")
+
+### `int(0.5)` truncates to 0 (not 1)
+
+    #test
+    test_sfic_truncate_small_positive() -> unit
+        val f = 0.5
+        assert(int(f) == 0, "0.5 toward zero → 0")
+
+`f64(i)` — int to float
+------------------------
+
+### Small positive int → float is exact
+
+    #test
+    test_sfic_f64_of_small_positive() -> unit
+        val i = 42
+        val f = f64(i)
+        // Compare via int round-trip (avoid float == comparison)
+        assert(int(f) == 42, "round-trips")
+
+### Small negative int → float is exact
+
+    #test
+    test_sfic_f64_of_small_negative() -> unit
+        val i = -100
+        val f = f64(i)
+        assert(int(f) == -100, "round-trips")
+
+### Zero round-trips
+
+    #test
+    test_sfic_zero_round_trip() -> unit
+        val i = 0
+        val f = f64(i)
+        assert(int(f) == 0, "0 round-trips")
+
+### Multiple round-trips for small ints
+
+    #test
+    test_sfic_round_trip_range() -> unit
+        var i = -10
+        while i <= 10
+            val f = f64(i)
+            val back = int(f)
+            assert(back == i, s"round-trip i=$i got $back")
+            i = i + 1
+
+Cast in arithmetic context
+---------------------------
+
+### Cast result feeds arithmetic
+
+    #test
+    test_sfic_cast_in_arith() -> unit
+        val f = 6.7
+        val n = int(f) + 10
+        // 6 + 10 = 16
+        assert(n == 16, s"got $n")
+
+### Cast applied to a float expression
+
+    #test
+    test_sfic_cast_of_float_expr() -> unit
+        val a = 2.5
+        val b = 1.5
+        val sum = a + b   // 4.0
+        val n = int(sum)
+        assert(n == 4, s"got $n")
+
+### Cast applied to division result
+
+    #test
+    test_sfic_cast_of_division() -> unit
+        val a = 7.0
+        val b = 2.0
+        val n = int(a / b)   // 3.5 → 3
+        assert(n == 3, s"got $n")
+
+f64-then-back chain for arithmetic precision
+---------------------------------------------
+
+### `int((f64(i) * 2.0)) == i * 2` for small i
+
+    #test
+    test_sfic_promotion_arithmetic() -> unit
+        var i = 1
+        while i <= 10
+            val product = int(f64(i) * 2.0)
+            assert(product == i * 2, s"i*2; i=$i got $product")
+            i = i + 1
