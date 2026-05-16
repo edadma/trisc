@@ -365,21 +365,29 @@ object SyslPrettyPrinter:
 
   // --- String escaping ---
 
+  // `s` is a lexer byte-form string — each Char is one UTF-8 byte (0..0xFF).
+  // Bytes >= 0x80 must emit as `\xNN` so the printed source round-trips back
+  // through the lexer as the *same* byte sequence (otherwise the pretty
+  // printer's raw Char would be UTF-8-encoded into multiple bytes by the
+  // file writer, and re-lexing would produce different content).
   private def escapeString(s: String): String =
     val sb = new StringBuilder("\"")
     for c <- s do
-      c match
-        case '\n' => sb ++= "\\n"
-        case '\t' => sb ++= "\\t"
-        case '\r' => sb ++= "\\r"
-        case '\\' => sb ++= "\\\\"
-        case '"'  => sb ++= "\\\""
-        case '\u0000' => sb ++= "\\0"
-        case c if c < ' ' => sb ++= f"\\x${c.toInt}%02x"
-        case c    => sb += c
+      val b = c.toInt & 0xFF
+      b match
+        case 0x0A => sb ++= "\\n"
+        case 0x09 => sb ++= "\\t"
+        case 0x0D => sb ++= "\\r"
+        case 0x5C => sb ++= "\\\\"
+        case 0x22 => sb ++= "\\\""
+        case 0x00 => sb ++= "\\0"
+        case n if n < 0x20 || n >= 0x7F => sb ++= f"\\x$n%02x"
+        case _    => sb += c
     sb += '"'
     sb.toString
 
+  // legacy
+  //b\u0000' => sb ++= "\\0"
   private def escapeChar(c: Char): String = c match
     case '\n' => "\\n"
     case '\t' => "\\t"

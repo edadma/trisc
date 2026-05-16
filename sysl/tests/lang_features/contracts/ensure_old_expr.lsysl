@@ -1,0 +1,200 @@
+`old(expr)` in `ensure` Clauses — Happy-Path Coverage
+======================================================
+
+Per reference §"Design by Contract":
+
+```sysl
+increment(p: *int)
+    ensure *p == old(*p) + 1
+    *p = *p + 1
+```
+
+- `old(expr)` may only appear inside `ensure` clauses.
+- It captures the value of `expr` at **function entry**, before any
+  body statement runs — so later mutations of the underlying
+  variable or pointee do not affect what `old()` sees.
+- Each `old(expr)` allocates a hidden snapshot local that is
+  initialized at the top of the function body.
+- `old()` accepts any expression (pointer derefs, field accesses,
+  arithmetic, calls), but nested `old(old(...))` is rejected.
+
+This file pins the **happy-path** behaviour of `old(...)` across all
+seven backends — every test calls a function whose postcondition
+references a pre-state value via `old()` and whose body mutates the
+state in a way the postcondition predicts. Failing-postcondition
+(trap) tests are deferred to a future uniform runtime-trap harness.
+
+File-local prefix `Eoe` (Ensure-Old-Expr).
+
+    module sysl.tests.lang_features
+
+
+`old` of a pointer dereference
+-------------------------------
+
+### `increment(p)` — `*p == old(*p) + 1`
+
+    eoe_increment(p: *int)
+        ensure *p == old(*p) + 1
+        *p = *p + 1
+
+    #test
+    test_eoe_increment_pointer() -> unit
+        var n: int = 41
+        eoe_increment(&n)
+        assert(n == 42, s"got $n")
+
+### Repeated calls — each capture is fresh per invocation
+
+    #test
+    test_eoe_increment_twice() -> unit
+        var n: int = 10
+        eoe_increment(&n)
+        eoe_increment(&n)
+        assert(n == 12, s"got $n")
+
+
+`old` over an `inout` parameter
+--------------------------------
+
+### `inout` parameter with old(x) — body always sees the *post* state
+
+    eoe_add_inout(inout x: int, by: int)
+        ensure x == old(x) + by
+        x = x + by
+
+    #test
+    test_eoe_inout_old() -> unit
+        var a: int = 100
+        eoe_add_inout(a, 5)
+        assert(a == 105, s"got $a")
+
+
+`old` of an arithmetic expression
+----------------------------------
+
+### `old(*p * 2)` — snapshot the *value* of the expression at entry
+
+    eoe_double_then_add_one(p: *int)
+        ensure *p == old(*p * 2) + 1
+        *p = *p * 2
+        *p = *p + 1
+
+    #test
+    test_eoe_arith_in_old() -> unit
+        var n: int = 5
+        eoe_double_then_add_one(&n)
+        assert(n == 11, s"5*2+1=11; got $n")
+
+
+`old` of a struct field
+------------------------
+
+### Mutate one field, postcondition pins old vs new
+
+    struct EoePair
+        a: int
+        b: int
+
+    eoe_swap_fields(p: *EoePair)
+        ensure (*p).a == old((*p).b)
+        ensure (*p).b == old((*p).a)
+        val ta: int = (*p).a
+        val tb: int = (*p).b
+        (*p).a = tb
+        (*p).b = ta
+
+    #test
+    test_eoe_struct_field_old() -> unit
+        var pr = EoePair(1, 2)
+        eoe_swap_fields(&pr)
+        assert(pr.a == 2 && pr.b == 1, s"got a=${pr.a} b=${pr.b}")
+
+
+Multiple `old(...)` calls in one function
+------------------------------------------
+
+### Each `old(expr)` gets its own hidden snapshot
+
+    eoe_three_old(inout x: int, inout y: int)
+        ensure x == old(y)
+        ensure y == old(x)
+        ensure x + y == old(x) + old(y)
+        val t: int = x
+        x = y
+        y = t
+
+    #test
+    test_eoe_three_old_snapshots() -> unit
+        var p: int = 7
+        var q: int = 13
+        eoe_three_old(p, q)
+        assert(p == 13 && q == 7, s"got p=$p q=$q")
+
+
+`old` of a complex expression
+------------------------------
+
+### `old(x + y * 2)` — pure expression snapshot, no aliasing concern
+
+    eoe_clobber_both(inout x: int, inout y: int)
+        ensure x == 0
+        ensure y == 0
+        ensure old(x + y * 2) >= 0
+        x = 0
+        y = 0
+
+    #test
+    test_eoe_complex_old() -> unit
+        var x: int = 4
+        var y: int = 3
+        eoe_clobber_both(x, y)
+        // expression old(x + y*2) = 4 + 6 = 10 — snapshot >= 0, post both 0
+        assert(x == 0 && y == 0, s"got x=$x y=$y")
+
+
+`old` snapshots before any body statement runs
+-----------------------------------------------
+
+### A function that mutates immediately, then reads via old()
+
+    eoe_inc_and_double(inout x: int)
+        ensure x == old(x) * 2 + 1
+        x = x * 2
+        x = x + 1
+
+    #test
+    test_eoe_old_before_body() -> unit
+        var n: int = 6
+        eoe_inc_and_double(n)
+        // entry x=6, body sets to 13; old(x)*2+1 = 13 ✓
+        assert(n == 13, s"got $n")
+
+
+`old` of an arithmetic literal (degenerate)
+--------------------------------------------
+
+### Degenerate but legal: `old(7)` — snapshot a constant
+
+    eoe_constant_old() -> int
+        ensure result == old(7) + 0
+        7
+
+    #test
+    test_eoe_constant_old() -> unit
+        assert(eoe_constant_old() == 7, "old(7) == 7")
+
+
+`old` combined with `require`
+------------------------------
+
+    eoe_safe_inc(inout x: int)
+        require x >= 0
+        ensure x == old(x) + 1
+        x = x + 1
+
+    #test
+    test_eoe_old_with_require() -> unit
+        var n: int = 0
+        eoe_safe_inc(n)
+        assert(n == 1, s"got $n")

@@ -297,11 +297,11 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     // String literals with immortal refcount headers
     if stringLiterals.nonEmpty then
       for (label, value) <- stringLiterals do
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         // Total: 8 (refcount) + bytes + 1 (null terminator)
         emit(s"global $label, data, ${bytes.length + 9}")
       for (label, value) <- stringLiterals do
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         emit(s"  dl -1") // immortal refcount header (assembler auto-aligns dl)
         emit(s"$label:")
         for b <- bytes do emit(s"  db ${b & 0xff}")
@@ -502,18 +502,18 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     val typ = typ0.underlying
     typ.isInstanceOf[SyslType.StructType] || typ == SyslType.StringType || typ.isInstanceOf[SyslType.SliceType] || typ.isInstanceOf[SyslType.EnumType] || typ.isInstanceOf[SyslType.FuncType] || typ.isInstanceOf[SyslType.InterfaceType]
 
-  // Method-on-temporary receiver where the inner expression is a call that
-  // returns a struct/enum by value. Only this shape produces a stack-resident
-  // ret slot that genExpr leaves r1 pointing into, so it needs a stable-slot
-  // copy in the OUTER call's regArg pre-eval. TTempAddr wrapping a TDeref
-  // (e.g. an `inout` param's auto-deref) just yields the dereferenced pointer
-  // and uses the existing else-branch path.
+  // Method-on-temporary receiver where the inner expression is a call or
+  // struct/enum constructor that produces a stack-resident temp. genExpr
+  // leaves r1 pointing INTO that temp, so a generic stack-rewind would
+  // reclaim the temp before its address is consumed (corrupting the data).
+  // TTempAddr wrapping a TDeref (e.g. an `inout` param's auto-deref) just
+  // yields the dereferenced pointer and uses the existing else-branch path.
   private def isStructLikeTempAddr(arg: TExpr): Boolean = arg match
     case TTempAddr(inner, _) =>
       val innerTyp = inner.typ
       val isStructLike = innerTyp.isInstanceOf[SyslType.StructType] || innerTyp.isInstanceOf[SyslType.EnumType]
       val producesStackTemp = inner match
-        case _: TCall | _: TIndirectCall | _: TInterfaceDispatch => true
+        case _: TCall | _: TIndirectCall | _: TInterfaceDispatch | _: TStructConstruct => true
         case _ => false
       isStructLike && producesStackTemp
     case _ => false
@@ -1430,10 +1430,16 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emit("  ldd r2, r1, r0")
       emit("  addi r3, r1, 8")
       emit("  ldd r3, r3, r0")
-      val extra = preOffset - stackOffset
-      if extra > 0 then
-        emitAddImm(7, 7, extra)
-        stackOffset = preOffset
+      // Do NOT rewind the temp region (`extra = preOffset - stackOffset`)
+      // before pushing. For an inline-constructed iface arg
+      // (`use_shape(Square(9))`), `data_ptr` (r3) points INTO the temp
+      // region — and the subsequent `pshd r3; pshd r2` would overwrite
+      // the source struct data before the callee dereferences
+      // `data_ptr`. Same hazard for stack-env closures passed as FuncType
+      // args. Leak the temp until the function epilogue restores r7.
+      // The TCall cleanup adds it all back in one go via
+      // `argsAllocated = cleanupTo - stackOffset`, so accounting stays
+      // correct.
       emit("  pshd r3")
       emit("  pshd r2")
       stackOffset -= 16
@@ -1457,6 +1463,18 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  ldd r3, r3, r0")
         emitAddImm(4, 7, off)
         emit("  std r3, r4, r0")
+    else if isStructLikeTempAddr(arg) then
+      // Method-on-temporary receiver passed as a stack arg (e.g. `outer(inner())`
+      // where `inner()` returns a struct by value, and the outer takes the
+      // struct's address). genExpr leaves r1 pointing INTO the inner call's
+      // hidden return slot (which lives on the stack just above us). The
+      // generic rewind below would reclaim the inner ret slot before the pshd,
+      // and pshd would then write the pointer value INTO the freed slot it
+      // points to — corrupting the struct data. Leak the inner ret slot until
+      // the outer's final cleanup; the post-call `argsAllocated = cleanupTo -
+      // stackOffset` reclaims it then.
+      emit("  pshd r1")
+      stackOffset -= 8
     else
       val extra = preOffset - stackOffset
       if extra > 0 then
@@ -3451,13 +3469,21 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             case ">" =>
               emit("  fslt r1, r2, r1")
             case "<=" =>
-              emit("  fslt r1, r2, r1")  // r1 = (right < left)
-              emit("  ldi r3, 1")
-              emit("  xor r1, r1, r3")   // flip: !(right < left) = left <= right
+              // Synthesize `a <= b` as `(a < b) | (a == b)` so NaN poisons
+              // correctly (IEEE 754: any comparison with NaN is false; the
+              // earlier `!(b < a)` approach turned NaN's false-poisoned
+              // `<` into `true`). r1 = a (left), r2 = b (right).
+              emit("  mov r4, r1")        // r4 = a
+              emit("  fslt r1, r1, r2")   // r1 = (a < b)
+              emit("  fseq r4, r4, r2")   // r4 = (a == b)
+              emit("  or r1, r1, r4")     // r1 = a <= b
             case ">=" =>
-              emit("  fslt r1, r1, r2")  // r1 = (left < right)
-              emit("  ldi r3, 1")
-              emit("  xor r1, r1, r3")   // flip: !(left < right) = left >= right
+              // Synthesize `a >= b` as `(b < a) | (a == b)` — same NaN-correctness
+              // motivation as `<=` above.
+              emit("  mov r4, r1")        // r4 = a
+              emit("  fslt r1, r2, r1")   // r1 = (b < a) = (a > b)
+              emit("  fseq r4, r4, r2")   // r4 = (a == b)
+              emit("  or r1, r1, r4")     // r1 = a >= b
             case _ => // unsupported float op — fall through
         else
           op match
@@ -3639,7 +3665,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
       case TCast(TStringLit(value, _), target) if target.isInstanceOf[SyslType.PtrType] =>
         // String literal → *i8 decay: emit data pointer directly, no fat pointer needed
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         labelCounter += 1
         val strLabel = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
         stringLiterals += ((strLabel, value))
@@ -4218,16 +4244,20 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             stackOffset -= 24
             regAggregateDataOffset = stackOffset
           else if arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
-            // Pre-evaluate 16-byte pair register arg
-            val preOffset = stackOffset
+            // Pre-evaluate 16-byte pair register arg.
+            // Do NOT rewind the temp region before pushing. For an
+            // inline-constructed iface arg (`use_shape(Square(9))`),
+            // `data_ptr` (r3) points INTO the temp region — and the
+            // subsequent `pshd r3; pshd r2` would overwrite the source
+            // struct data before the callee dereferences `data_ptr`.
+            // Same hazard for stack-env closures as FuncType args. Leak
+            // the temp until the function epilogue restores r7. The
+            // TCall cleanup adds it all back in one go via
+            // `argsAllocated = cleanupTo - stackOffset`.
             genExpr(arg)
             emit("  ldd r2, r1, r0")
             emit("  addi r3, r1, 8")
             emit("  ldd r3, r3, r0")
-            val extra = preOffset - stackOffset
-            if extra > 0 then
-              emitAddImm(7, 7, extra)
-              stackOffset = preOffset
             emit("  pshd r3")
             emit("  pshd r2")
             stackOffset -= 16
@@ -4267,9 +4297,35 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
               emit("  std r3, r4, r0")
             regAggregateDataOffset = stackOffset
         }
+        // Pre-evaluate stack args that are method-on-temporary receivers
+        // into stable slots. Without this, the inner call's ret slot is
+        // leaked between previously-pushed args and the receiver pointer,
+        // shifting subsequent stack args off their expected offsets.
+        // Mirror the regArg pre-eval pattern: copy the inner ret-slot
+        // bytes into a fresh slot here, then push only the address in the
+        // main loop.
+        val stackArgPreEvalOffsets = mutable.Map[Int, Int]()
+        for ((arg, idx) <- stackArgs.zipWithIndex) do
+          if isStructLikeTempAddr(arg) then
+            val structType = arg.asInstanceOf[TTempAddr].expr.typ
+            genExpr(arg)
+            val aligned = (stackSize(structType) + 7) & ~7
+            emitAddImm(7, 7, -aligned)
+            stackOffset -= aligned
+            for off <- 0 until aligned by 8 do
+              emitAddImm(3, 1, off)
+              emit("  ldd r3, r3, r0")
+              emitAddImm(4, 7, off)
+              emit("  std r3, r4, r0")
+            stackArgPreEvalOffsets(idx) = stackOffset
         // Push stack args (1+) right-to-left
-        for arg <- stackArgs.reverse do
-          evalAndPush(arg)
+        for ((arg, idx) <- stackArgs.zipWithIndex.reverse) do
+          if stackArgPreEvalOffsets.contains(idx) then
+            emitAddImm(1, 5, stackArgPreEvalOffsets(idx))
+            emit("  pshd r1")
+            stackOffset -= 8
+          else
+            evalAndPush(arg)
         // Push the register arg, then pop into r1
         regArgOpt.foreach { arg =>
           if arg.typ == SyslType.StringType then
@@ -4706,7 +4762,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
       case TStringLit(value, _) =>
         // Allocate 16-byte {ptr, len} fat pointer on stack
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         labelCounter += 1
         val strLabel = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
         stringLiterals += ((strLabel, value))
@@ -6335,7 +6391,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     labelCounter += 1
     val label = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
     stringLiterals += ((label, value))
-    (label, value.getBytes("UTF-8").length)
+    (label, value.getBytes("ISO-8859-1").length)
 
   // Data directive for a type: db (1 byte), ds (2), dw (4), dl (8)
   private def emitDataDirective(typ: SyslType): String = typ match

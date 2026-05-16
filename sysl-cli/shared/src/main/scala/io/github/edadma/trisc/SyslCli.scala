@@ -460,8 +460,15 @@ object SyslCli:
       line: Option[Int],
   )
 
+  // The lexer carries StringLit content in byte-form (each Char is one UTF-8
+  // byte; see SyslLexer.assembleString). At the host JVM boundary — display,
+  // substring matching against runtime stdout — decode back to a proper Java
+  // String so Unicode test names / panic messages render and compare correctly.
+  private def decodeByteForm(v: String): String =
+    new String(v.getBytes("ISO-8859-1"), "UTF-8")
+
   private def attrString(a: AttrArg): Option[String] = a match
-    case AttrPositional(AttrLitString(v)) => Some(v)
+    case AttrPositional(AttrLitString(v)) => Some(decodeByteForm(v))
     case _                                => None
 
   private def attrIdent(a: AttrArg): Option[String] = a match
@@ -469,7 +476,7 @@ object SyslCli:
     case _                               => None
 
   private def attrNamedString(a: AttrArg, key: String): Option[String] = a match
-    case AttrNamed(k, AttrLitString(v)) if k == key => Some(v)
+    case AttrNamed(k, AttrLitString(v)) if k == key => Some(decodeByteForm(v))
     case _                                          => None
 
   /** Strip module prefix from a mangled name for display. */

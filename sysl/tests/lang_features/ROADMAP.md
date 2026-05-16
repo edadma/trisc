@@ -151,8 +151,8 @@ covered now; one SVM bug TODO'd.
 | `generic_fn_operator_rhs.lsysl` 🟢 | bare-call placeholder `_ + _` RHS; explicit type args; two-arg inference; full closure-literal RHS — pins sysl@950415fde + sysl@eb3fa5673 across all 7 backends (4 tests) |
 | `generic_struct_method.lsysl` 🟢 | `Box[T].get()` & `.set(x)`; mutating-self via `&self`; method on two-param `Pair[A,B]`; chained method call (6 tests) |
 | `generic_alias_basic.lsysl` 🟡 | `type GabUnary[T] = (T) -> T` as parameter type; two-param alias `(A,A)->B` (2 tests). TODO: alias instantiation as struct *field* type fails with `'GabUnary' is not a generic type` even when the identical instantiation works as a fn param — analyzer field-type resolution gap, same on all 7 backends |
-| `generic_fn_sibling_import.lsysl` 🔴 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression) — multi-file fixture, not yet pinned |
-| `generic_alias_cross_file.lsysl` 🔴 | generic alias visible across files (sysl@2c4f1c095 regression) — multi-file fixture, not yet pinned |
+| `siblings/generic_fn_sibling_import.lsysl` 🟢 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression): explicit type-arg + inferred (int/bool/string); two-param inferred + explicit; generic returning generic struct + field-read at caller; outer generic body calling sibling-imported generic; parameterless generic-returning fn bare-reference auto-call (13 tests) |
+| `siblings/generic_alias_cross_file.lsysl` 🟢 | generic alias visible across files (sysl@2c4f1c095 regression): `GhUnary[int]` as fn param (arrow / placeholder / second call site); `GhBin[int,int]` with two-arg closures; newtype `GhIdAlias[T]` at int + string instantiations; locally-declared fn using sibling-imported alias; two aliases coexist (10 tests). One SVM divergence routed around (two HOF calls in one body — shares the `generic_fn_basic.lsysl` `apply_twice` SVM gap) |
 
 ---
 
@@ -166,8 +166,8 @@ Reference §"Control Flow", "If Expression", "Return".
 | `while_loops.lsysl` 🟢 | counted while; while + break; while + continue; never-runs; nested (5 tests) |
 | `for_in_range.lsysl` 🟢 | `0..<n` exclusive; `0..n` inclusive; empty; single-element; negative range (8 tests) |
 | `for_in_slice.lsysl` 🟡 | covered by `slices/slice_iter_for_in.lsysl` with the TRISC `for x in slice` TODO |
-| `for_in_string.lsysl` 🔴 | `for c in s` iterates byte / rune — not yet pinned |
-| `loop_labels.lsysl` 🔴 | `outer: for ...` + `break outer` / `continue outer` — not yet pinned |
+| `for_in_string.lsysl` 🟢 | `for c in s` iterates **bytes** (one iteration per UTF-8 byte): sum / count / empty / single-byte / multi-byte UTF-8 / left-to-right order / temporary-source via val workaround / single-line `= for` form (10 tests). TRISC TODO commented in-file: iterating a fresh `fn_call()` / concat result fails on TRISC because the parser-level for-each desugar re-evaluates the source per iteration; same shape as the documented TRISC `for x in slice` over a sub-slice gap. Workaround: bind to a `val` first. See `feedback_sysl_trisc_for_in_temporary.md` |
+| `loop_labels.lsysl` 🟢 | `outer: for ...` / `outer: while ...` + `break outer` / `continue outer`: nested for-in-for; visit-count pin; continue-outer skip-to-update; plain `break` still innermost inside labeled outer; labeled while broken from nested for; labeled for broken from nested while; three-deep nesting break-outer + continue-outer; label on innermost (semantically plain) (9 tests). **Surfaced + fixed SVM bug**: `TBreakStmt(lbl)` / `TContinueStmt(lbl)` always jumped to innermost — `breakLabels.top` / `continueLabels.top` ignoring the label. Mirror TRISC's `loopNameStack` + `resolveLoopIdx` pattern; std/ svm 974/974 after fix. |
 | `early_return.lsysl` 🟢 | early return from loop; nested blocks; ARC refcount cleanup on every path (4 tests). Surfaced+fixed SVM array-pass-by-value bug (emitStore for ArrayType fell through to store64) |
 | `return_implicit.lsysl` 🟢 | `def` expression-bodied function; block-body last-expr return; implicit/explicit match (3 tests) |
 
@@ -264,11 +264,11 @@ Existing: `out_inout_params.lsysl` → `functions/out_inout_params.lsysl`.
 | File | Tests pinned |
 |---|---|
 | `iface_mutating_self.lsysl` 🟢 | mutating-self through iface *(move from top level)* |
-| `iface_basic_dispatch.lsysl` 🔴 | non-mutating method through iface; correct impl chosen |
-| `iface_composed.lsysl` 🔴 | `interface ReadWriter : Reader, Writer`; method dispatch picks right impl |
-| `iface_generic_method.lsysl` 🔴 | iface with a generic method; instantiation |
-| `iface_default_methods.lsysl` 🔴 | trait/iface default method body — *if supported* |
-| `iface_box_lifetime.lsysl` 🔴 | iface receiver lifetime; ARC interaction (TInterfaceBox path) |
+| `iface_basic_dispatch.lsysl` 🟢 | non-mutating method through iface; correct impl chosen (16 tests) |
+| `iface_composed.lsysl` 🟢 | embedded interfaces; method dispatch picks right impl (10 tests) |
+| `iface_generic_method.lsysl` 🟡 | iface methods with parametric built-in types — slice, slice-of-struct, returning slice (8 tests). Generic-struct-implements-iface is unsupported (analyzer + iface-dispatch naming mismatch) |
+| ~~`iface_default_methods.lsysl`~~ | ✖ **Not applicable** — sysl interface methods cannot have default bodies (parser rejects `=` after signature; verified 2026-05-15). Default-method semantics live in **traits** instead (see reference §"Traits and `impl` blocks") — covered separately when a `traits/` category opens. |
+| `iface_box_lifetime.lsysl` 🟡 | iface receiver lifetime through call frames + local bindings + mutating dispatch (8 tests). Two gaps deferred: iface-as-struct-field (analyzer rejects `struct S { f: Iface }`) and returning iface from a function constructing source as local (UAF) |
 
 Existing: `iface_mutating_self.lsysl` → `interfaces/iface_mutating_self.lsysl`.
 
@@ -279,12 +279,12 @@ Existing: `iface_mutating_self.lsysl` → `interfaces/iface_mutating_self.lsysl`
 | File | Tests pinned |
 |---|---|
 | `struct_return.lsysl` 🟢 | direct field, local, chained *(move from top level)* |
-| `struct_ctor_args.lsysl` 🔴 | positional vs named field init; partial init with defaults |
-| `struct_method_value.lsysl` 🔴 | `Struct.method()` on value receiver; self is a copy |
-| `struct_method_ptr.lsysl` 🔴 | `Struct.method()` where method takes `*Self` (mutating) |
-| `struct_method_ref.lsysl` 🔴 | method on `&Struct` ref receiver |
-| `struct_nested.lsysl` 🔴 | struct containing another struct; field-of-field access; assignment |
-| `struct_tuple_return.lsysl` 🔴 | returning a tuple-shaped struct from a fn |
+| `struct_ctor_args.lsysl` 🟢 | positional / all-named / reordered / mixed pos+named struct construction; multi-type fields; nested struct fields; byte fields; in val/var/fn-arg/fn-return contexts (22 tests). Note: sysl does not support struct field defaults (parse error) — defaults are a function-parameter feature only |
+| `struct_method_value.lsysl` 🟢 | `Struct.method()` on value-bound receiver — read-only patterns (sysl has no "true" value receiver; self is always `*Self`, but body chooses whether to mutate). Field reads, computed reads, repeated reads, struct return, chained method-on-temp returning struct, string returns, nested-struct method via outer. (11 tests) |
+| `struct_method_ptr.lsysl` 🟢 | mutating methods — set / inc / read-modify-write / multi-field assign / swap-fields / inc-and-return / nested struct mutation via outer field / mutation on array element (14 tests) |
+| `struct_method_ref.lsysl` 🟢 | methods on `&Struct` (heap, ref-counted) receivers — read / mutate / aliased-ref mutation / pass-as-arg / returned ref / method on iface-typed struct field (11 tests) |
+| `struct_nested.lsysl` 🟢 | two- and three-level nesting; field-of-field read / assign / partial / whole-inner replace; returning nested by value; passing nested by value; methods reading + mutating inner fields; method returning fresh nested (14 tests) |
+| `struct_tuple_return.lsysl` 🟢 | tuple-return + destructuring — 2/3-tuples; mixed int/string/bool types; `val a, b =` / `val (a, b) =` / `var a, b =` forms; tuple chained through wrapper fns; computed-tuple returns (minmax, divmod); destructured-in-arith; tuple-in-local-then-destructure (14 tests) |
 
 Existing: `struct_return.lsysl` → `structs/struct_return.lsysl`.
 
@@ -295,10 +295,10 @@ Existing: `struct_return.lsysl` → `structs/struct_return.lsysl`.
 | File | Tests pinned |
 |---|---|
 | `float_extremes.lsysl` 🟢 | NaN, infinity, signed zeros, in-range trunc *(move from top level)* |
-| `float_arithmetic.lsysl` 🔴 | denormals, rounding modes, FP-strict comparisons |
-| `float_int_cast.lsysl` 🔴 | `int(f)` truncates toward zero; `f64(i)` exact for small i |
-| `float_compare.lsysl` 🔴 | NaN-aware `<`, `<=`, ordered/unordered semantics |
-| `float_literal_parsing.lsysl` 🔴 | `1.0e10`, `0.5`, `1e-5`, negative exponent |
+| `float_arithmetic.lsysl` 🟢 | Exact-representable arithmetic (small integer products, halves, quarters); identity laws (x+0=x, x*1=x, x/1=x, x-x=0); sign correctness; double-half round-trip; three-term sum; polynomial-shaped expr; overflow to ±∞; sign-handling round-trip; int-promote-add associativity (24 tests). Brittle non-exact equality intentionally not pinned. |
+| `float_int_cast.lsysl` 🟢 | `int(f)` exact integer-valued, truncates toward zero on +ve and -ve, half-down on .5; `f64(i)` exact for ±100 range; round-trip integrity for -10..10; casts in arithmetic / float exprs / division; promotion arithmetic. (18 tests) |
+| `float_compare.lsysl` 🟢 | finite-ordering (lt/le/gt/ge/eq/ne, positive & negative); signed-zero equality; **NaN poisons every comparison** (lt, le, gt, ge, eq false; ne true) — fixed TRISC's `<=` / `>=` codegen which was using XOR-flip on `<` (NaN-incorrect); signed-infinity ordering; comparisons in if / && / || (19 tests) |
+| `float_literal_parsing.lsysl` 🟢 | 0.5, 1.5, 0.0, -0.0; positive scientific (1e3, 2.5e2, 1e6, 1.0E5, 1.0e+3); negative scientific (1e-3, 5e-2, 1.5e-1); underscore separators in fractional + integer parts; negative-literals via unary minus; literals as fn arg / return value; mixed-exponent sum. (19 tests) |
 
 Existing: `float_extremes.lsysl` → `floats/float_extremes.lsysl`.
 
@@ -312,26 +312,26 @@ Reference §"`?` Operator (Try)".
 |---|---|
 | `try_postfix_option.lsysl` 🟢 | happy `Some/Some`; first-position `None` short-circuit; second-position `None` short-circuit; three-step chain; middle `None` short-circuit (5 tests) |
 | `try_postfix_result.lsysl` 🟢 | happy `Ok/Ok`; first-position `Err` preserves payload; second-position `Err`; three-step chain; middle `Err` propagation (5 tests) |
-| `option_basic.lsysl` 🔴 | `Some` / `None` construction; match; `unwrap`, `unwrap_or` |
-| `result_basic.lsysl` 🔴 | `Ok` / `Err`; match; payload extraction |
-| `try_postfix_chain.lsysl` 🔴 | `a()?.b()?.c()?` chain; each `?` distinct |
-| `option_payload_string.lsysl` 🔴 | `Option[string]` — ARC interaction; `None` doesn't construct a buffer |
+| `option_basic.lsysl` 🟢 | Some(v) inferring T; None with explicit type; both-variant match; payload binding; unwrap-like helpers (trap-on-none and default-on-none); Option flowing through fn boundary (map-like); Option carrying string / struct payloads (14 tests) |
+| `result_basic.lsysl` 🟢 | Ok/Err construction with explicit types; match-arm dispatch; is_ok / is_err / unwrap / unwrap_or helpers; map-like transform (Ok payload doubled / Err preserved); Result with struct payload + with int-int error type (15 tests) |
+| `try_postfix_chain.lsysl` 🟢 | three sequential `?`s — all-success, first/middle/last fails for both Option (None) and Result (Err); chain through int-err Result; two-step `?` with intervening logic (11 tests) |
+| `option_payload_string.lsysl` 🟢 | `Option[string]` ARC — literal / empty / None / two-distinct payloads; returned via fn (Some + None forms); identity round-trip; 3-layer pass-through; concat-inside-Some; long-string heap allocation survives; map-like Some-only transform (15 tests) |
 
 ---
 
 ## Tier 2 — Specialized
 
-### `integers/` — widths, overflow, intrinsics, within-constraints — 🔴 P2
+### `integers/` — widths, overflow, intrinsics, within-constraints — 🟢 P2
 
 Reference §"Integer Overflow", "Overflow Intrinsics".
 
 | File | Tests pinned |
 |---|---|
-| `int_widths_cast.lsysl` 🔴 | `i8`/`i16`/`i32`/`i64`/`u*` cast round-trips; truncation; sign-extension |
-| `int_overflow_wrap.lsysl` 🔴 | unsigned wrap is defined; signed overflow per language spec |
-| `overflow_intrinsics.lsysl` 🔴 | `add_overflow`, `mul_overflow` etc. (whatever sysl exposes) |
-| `int_within_constraint.lsysl` 🔴 | `type Idx = within 0..n int`; assignment outside range traps |
-| `int_within_succ_pred.lsysl` 🔴 | `T::Succ(x)`, `T::Pred(x)` for constrained int types |
+| `int_widths_cast.lsysl` 🟢 | `sizeof` for every signed/unsigned width (i8/i16/i32/i64/u8/u16/u32/u64 = 1/2/4/8 each); `int` = 4-byte (i32-shaped); truncation modulo 2^N on narrowing (u8(0x1FF)=0xFF, i8(256)=0, i8(128)=-128, u16(0x12345)=0x2345, i32(0x123456789i64)=0x23456789); sign-extension widening (i8(-1)→i32=-1, i64=-1; i16(-1)→i64; i32(-1)→i64; i8(-128)→i64); zero-extension widening (u8(0xFF)→i32=255, i64=255; u16(0xFFFF)→i64=65535; u32(0xFFFFFFFF)→i64=4294967295); cross-signedness reinterpretation (i8(-1)↔u8(255); i32(-1)↔u32(0xFFFFFFFF); u32(0x80000000)→i32 MIN); narrow-then-widen round-trips (low-byte sign vs zero extension diverges); boundary identity casts (i32 MAX/MIN, i64 MAX/MIN, u64 MAX as bit pattern) (32 tests) |
+| `int_overflow_wrap.lsysl` 🟢 | unsigned wrap (modular) for `+`/`-`/`*` at every width (u8/u16/u32/u64); signed wrap (two's-complement) at every width (i8/i16/i32/i64); `+` MAX+1 → MIN, `-` MIN-1 → MAX, `*` keeps low bits, `i32 MIN * -1` wraps to MIN; result-width identity (`u8 + u8` fits in `u8` — no implicit promotion) (24 tests) |
+| `overflow_intrinsics.lsysl` 🟢 | `wrapping_{add,sub,mul}` at every width matches the default wrap; `saturating_{add,sub,mul}` clamps to type MAX/MIN at u8/u16/u32/i8/i16/i32 boundaries; agree-on-no-overflow and diverge-on-overflow pinned together. Surfaced an SVM signed-saturating bug for narrow widths (i8/i16/i32) — sign-of-result detection only works at 64-bit width where wrapping is forced; SVM does add/sub in full i64 so r doesn't wrap and the old check missed overflow. Fix at `SyslSVMCodegen.scala:2096` adds a `width<64` branch that range-checks `r > maxV` / `r < minV` before clamping. std/ 974/974 on SVM clean. 64-bit signed saturating and `saturating_mul(u32)` omitted today per the reference's TRISC-gap note (28 tests) |
+| `int_within_constraint.lsysl` 🟢 | inclusive `within 0..N` and exclusive `..<` construction at in-range / lower-edge / upper-edge values; `::First` / `::Last` fold to lower/upper bound (`::Last` of `..<10` is 9); `::Valid(x)` is non-trapping bool for in/out-of-range probes; subtype is base-compatible (no `int(a)` cast); arithmetic on subtype yields plain int; `::Valid` guards production before assignment; explicit-width base (`i32 within 0..255`); `const`-named bound; negative-low signed range `-10..10` (20 tests) |
+| `int_within_succ_pred.lsysl` 🟢 | `T::Succ(x)` advances by 1, `T::Pred(x)` retreats by 1; both within an inclusive range and the exclusive-upper `..<` variant; `Succ` from `::First` yields `::First+1`, `Pred` from `::Last` yields `::Last-1`; repeated `Succ` walks the range; round-trips `Succ ∘ Pred` = `Pred ∘ Succ` = id; works across zero on a negative-low range `-3..3`; `Succ`/`Pred` results compose with plain int arithmetic (`Succ(x)+Pred(x)=2x`). Trap-on-boundary tests deferred to a future runtime-trap harness (15 tests) |
 
 ---
 
@@ -341,83 +341,104 @@ Reference §"Operators (by precedence...)", "Chained Comparisons", "Compound Ass
 
 | File | Tests pinned |
 |---|---|
-| `precedence_arithmetic.lsysl` 🔴 | `a + b * c` parses as `a + (b * c)`; unary / binary mix |
-| `precedence_logical.lsysl` 🔴 | `&&` / `||` / `!`; short-circuit semantics |
-| `precedence_bitwise.lsysl` 🔴 | `&`, `|`, `^`, `<<`, `>>`; precedence vs comparison |
-| `chained_comparisons.lsysl` 🔴 | `a < b < c`; evaluation order; mid-chain false short-circuit |
-| `compound_assign.lsysl` 🔴 | `x += y`, `x *= y`, etc.; on locals, fields, slice elements |
-| `increment_decrement.lsysl` 🔴 | `x++` / `++x` and analogues — *if supported* |
+| `precedence_arithmetic.lsysl` 🟢 | * / bind tighter than + -; parens override; left-assoc at same level (sub, div, mixed); unary minus binds tighter than binary; full mix (quadratic, diff-of-squares) (21 tests) |
+| `precedence_logical.lsysl` 🟢 | truth tables for && / ||; unary ! basics and doubled; && tighter than ||; ! tighter than && / ||; parens override; **short-circuit** for && (LHS-false skips RHS) and || (LHS-true skips RHS), plus 3-way chain short-circuit at start and middle (23 tests). Fixed LLVM codegen which was eager-evaluating both operands |
+| `precedence_bitwise.lsysl` 🟢 | basic bitwise (and/or/xor with 0 and self), `~` (zero / minus-one / double-not); shifts (`<<` / `>>` by 1, by 4, truncation, left-assoc); `&` tighter than `^` tighter than `\|`; shifts tighter than bitwise; bitwise tighter than `==`; common patterns (pack/extract nibbles, clear/set/toggle bit). Note: sysl does not support `0b...` binary literals — used decimal with `// 0b...` comments (28 tests) |
+| `chained_comparisons.lsysl` 🟢 | 2/3/4-pair chains `<` / `<=` / `>` / `>=` / `==`; mixed operators (lt+le, le+lt, ge+ge); inclusive boundary on `<=`; short-circuit at head; lowering semantics pinned (middle operand in two pairs is evaluated once per pair — `1 < bump(5) < 10` runs bump twice; long chain 1<2<3<4 runs interior helpers twice and ends once); chain inside `if` expr (24 tests) |
+| `compound_assign.lsysl` 🟢 | `+=`/`-=`/`*=`/`/=`/`%=`/`&=`/`\|=`/`^=`/`<<=`/`>>=` on locals; on struct fields; on `[N]int` array elements; on dynamic `new [N]int[:]` slice elements; equivalence with `x = x op y`; xor double-toggle self-inverse (22 tests) |
+| `increment_decrement.lsysl` 🟢 | statement-form `++x`/`x++`/`--x`/`x--`; expression-form returns new (pre) / old (post) value; compose with arithmetic (`++x + 1`); repeated stmt-form; struct fields (`++p.x`, `p.x++`); drive `while` loop counter; equivalence with `x = x + 1`. Surfaced LLVM-codegen gap (`TFieldPreInc`/`TFieldPreDec` unhandled) — fixed at `SyslLLVMCodegen.scala:3666` by mirroring the existing PostInc/PostDec handlers and returning the new value. Indexed lvalues (`++arr[i]` / `arr[i]++`) FAIL TO PARSE — feedback memo + workaround uses compound-assign on indexed elements (19 tests) |
 
 ---
 
-### `contracts/` — require/ensure/old/result/invariant/variant — 🔴 P2
+### `contracts/` — require/ensure/old/result/invariant/variant — 🟢 P2
 
 Reference §"Design by Contract".
 
 | File | Tests pinned |
 |---|---|
-| `require_basic.lsysl` 🔴 | `require cond, "msg"` precondition; trap with message on violation |
-| `ensure_basic.lsysl` 🔴 | `ensure cond, "msg"` postcondition; `result` in cond |
-| `ensure_old_expr.lsysl` 🔴 | `old(x)` captures pre-state for postcondition |
-| `invariant_loop.lsysl` 🔴 | `invariant cond` at top of loop body |
-| `variant_decreasing.lsysl` 🔴 | `variant expr` decrease witness; violation traps |
-| `contracts_off_flag.lsysl` 🔴 | with `--no-contracts`, violations no longer trap |
+| `require_basic.lsysl` 🟢 | `require cond, "msg"` precondition (happy path; trap-side deferred to uniform harness) |
+| `ensure_basic.lsysl` 🟢 | `ensure cond, "msg"` postcondition; `result` in cond (happy path) |
+| `ensure_old_expr.lsysl` 🟢 | `old(x)` captures pre-state for postcondition (happy path) |
+| `invariant_loop.lsysl` 🟢 | `invariant cond` at top of loop body (happy path; `loop_entry` covered) |
+| `variant_decreasing.lsysl` 🟢 | `variant expr` decrease witness (happy path; single-expr form, lex-tuple is verification-only) |
+
+`--no-contracts` flag behaviour requires runner-side support
+(`TestCommand` in `sysl-cli/.../SyslCli.scala` doesn't yet accept the
+flag) and is out of scope for this category — add when the runner
+gains the toggle.
 
 ---
 
-### `traits_impl/` — trait decls, impl blocks, operator overload — 🔴 P2
+### `traits_impl/` — trait decls, impl blocks, operator overload — 🟢 P2
 
 Reference §"Traits and `impl` blocks", "Operator Overloading via Traits".
 
 | File | Tests pinned |
 |---|---|
-| `trait_decl_impl.lsysl` 🔴 | trait declaration; impl for a user struct; method call dispatched correctly |
-| `operator_overload_infix.lsysl` 🔴 | user `+` on a user struct via trait |
-| `operator_overload_prefix.lsysl` 🔴 | user prefix op (e.g. `<>x`) via single-param trait |
-| `operator_overload_user_symbols.lsysl` 🔴 | user-defined operator symbols (whatever's documented) |
-| `trait_generic_impl.lsysl` 🔴 | `impl[T] Trait for Box[T]` generic impl block |
-| `trait_orphan_rule.lsysl` 🔴 | orphan rule rejected (compile-error test — `should_panic` or analyzer test) |
+| `trait_decl_impl.lsysl` 🟢 | trait declaration; impl for a user struct; method call dispatched correctly |
+| `operator_overload_infix.lsysl` 🟢 | user `+` `-` `*` `/` `<` `==` etc. on a user struct via traits; mixed-operand |
+| `operator_overload_prefix.lsysl` 🟢 | user prefix op via single-param trait + #operator; built-in `-`/`!` overloaded on structs |
+| `operator_overload_user_symbols.lsysl` 🟢 | user infix `<>`, `<=>`, `~~`, `\|>`, `<*>`, `+++`; precedence-by-first-char |
+| `trait_generic_impl.lsysl` 🟢 | `impl[T] Trait[Box[T]]` generic impl; multi-tvar; coexists w/ concrete impl |
+
+`trait_orphan_rule.lsysl` removed from the planned row — coherence
+violations are compile-time errors, and the test runner can only
+assert runtime panics (`#test(should_panic)`) so it cannot pin a
+compile-error case. Add when a compile-error assertion mechanism
+lands.
 
 ---
 
-### `methods/` — dispatch on Struct vs *Struct vs &Struct — 🔴 P2
+### `methods/` — dispatch on Struct vs *Struct vs &Struct — 🟢 P2
 
 (Some overlap with `structs/` and `interfaces/`; this dir focuses on
 *how the receiver type changes dispatch and ARC*.)
 
 | File | Tests pinned |
 |---|---|
-| `method_self_value_copy.lsysl` 🔴 | `T.m()` with implicit value `self` — caller's value isn't mutated |
-| `method_self_ptr_mutates.lsysl` 🔴 | `T.m()` whose body mutates `self.f` — caller sees the mutation |
-| `method_self_ref_arc.lsysl` 🔴 | `T.m()` on `&T` — refcount preserved across the call |
-| `method_chained.lsysl` 🔴 | `obj.a().b().c()` chained call lifetime |
-| `method_on_generic_struct.lsysl` 🔴 | `Box[T].get()` after instantiation |
+| `method_self_value_copy.lsysl` 🟢 | `T.m()` with implicit value `self` — read-only path, caller value preserved |
+| `method_self_ptr_mutates.lsysl` 🟢 | `T.m()` whose body mutates `self.f` — caller sees the mutation |
+| `method_self_ref_arc.lsysl` 🟢 | `T.m()` on `&T` — refcount preserved across the call |
+| `method_chained.lsysl` 🟢 | `obj.a().b().c()` chained call lifetime; with args; cross-type |
+| `method_on_generic_struct.lsysl` 🟢 | `Box[T].method()` after instantiation; mutating, returning T, distinct insts |
 
 ---
 
-### `type_attrs/` — T::Range / T::Image / T::Valid / T::Succ / T::Pred — 🔴 P2
+### `type_attrs/` — T::Range / T::Image / T::Valid / T::Succ / T::Pred — 🟢 P2
 
 Reference §"Type Attributes (`T::Attr`)".
 
 | File | Tests pinned |
 |---|---|
-| `type_range.lsysl` 🔴 | `T::Range` for constrained int + simple enum |
-| `type_image.lsysl` 🔴 | `T::Image` (set of valid values) — usage in contracts |
-| `type_value_valid.lsysl` 🔴 | `T::Value(x)` / `T::Valid(x)` — bool runtime check |
-| `type_succ_pred.lsysl` 🔴 | `T::Succ` / `T::Pred` on enums (boundary behaviour) |
+| `type_range.lsysl` 🟢 | `T::Range` forward + reverse over within-int + enum; exclusive bound; nested |
+| `type_image.lsysl` 🟢 | `T::Image(x)` variant name string on enum; dynamic dispatch; range-loop |
+| `type_value_valid.lsysl` 🟢 | `T::Value(s)` enum parse; `T::Valid(x)` bool guard on int + enum |
+| `type_succ_pred.lsysl` 🟢 | `T::Succ` / `T::Pred` on enums; walk, round-trip, multi-size enums |
+
+`::Succ`/`::Pred` on within-int already covered in
+`integers/int_within_succ_pred.lsysl` (session 8). Boundary-trap
+tests (driving past Last/First) deferred to the future uniform
+runtime-trap harness.
 
 ---
 
-### `types_advanced/` — type aliases, static_assert, module_invariant, sizeof — 🔴 P2
+### `types_advanced/` — type aliases, static_assert, module_invariant, sizeof — 🟢 P2
 
 | File | Tests pinned |
 |---|---|
-| `type_alias_basic.lsysl` 🔴 | `type Idx = int` (and generic form) |
-| `type_alias_struct.lsysl` 🔴 | `type Point = struct { x: int, y: int }` (if supported as decl) |
-| `static_assert_pass.lsysl` 🔴 | `static_assert(sizeof(T) == 16, "msg")` passes silently |
-| `static_assert_fail.lsysl` 🔴 | `should_panic` form — compile fails with message |
-| `module_invariant.lsysl` 🔴 | `module_invariant cond` declaration and behaviour |
-| `sizeof_basic.lsysl` 🔴 | `sizeof(int)`, `sizeof(MyStruct)`, slice/string sizes |
+| `type_alias_basic.lsysl` 🟡 | plain + generic + chained alias; fn-type alias; pointer alias; re-param of generic enum. Composition test deferred — TRISC fnptr-fnptr-scalar call-site bug |
+| `static_assert_pass.lsysl` 🟢 | `static_assert(cond)` passes silently; arithmetic + bitwise + const refs in cond |
+| `module_invariant.lsysl` 🟢 | `module_invariant cond` declaration is spec-only; multiple decls conjoin; ref to var + const |
+| `sizeof_basic.lsysl` 🟢 | `sizeof` for primitives, ptrs, arrays, structs; arithmetic + comparison composition |
+
+`type_alias_struct.lsysl` and `static_assert_fail.lsysl` removed
+from the planned rows:
+- `type_alias_struct`: sysl declares structs with `struct Point ...`,
+  not `type Point = struct { ... }`. The form named in the ROADMAP
+  isn't part of the language.
+- `static_assert_fail`: needs a compile-error assertion mechanism
+  in the runner (same gap as trait_orphan_rule, contracts_off_flag).
+  Add when that mechanism lands.
 
 ---
 
@@ -429,55 +450,76 @@ this dir adds simple-enum coverage and edge cases.
 
 | File | Tests pinned |
 |---|---|
-| `enum_simple_int.lsysl` 🔴 | int-backed enum; cast to/from int; explicit values |
-| `enum_simple_succ_pred.lsysl` 🔴 | `T::Succ` / `T::Pred` boundary on simple enum |
-| `enum_data_recursive.lsysl` 🔴 | `Tree { Leaf, Node(int, Tree, Tree) }` recursive data enum |
-| `enum_data_slice_field.lsysl` 🔴 | data enum with `[]T` field (sysl@9ee727db regression) |
-| `enum_str_variant_name.lsysl` 🔴 | `str(SomeVariant)` returns the variant's name |
+| `enum_simple_int.lsysl` 🟡 | ::First / ::Last / ::Pos / ::Val / ::Image / ::Succ / ::Pred; pattern match (via local-bound scrutinee); two distinct enums coexist (26 tests). Two ::Value(string) tests dropped — SVM `::Value` runtime helper panics. Match-on-param fails analyzer (separate gap). |
+| `enum_simple_succ_pred.lsysl` 🟢 | `::Valid(raw_int)` (in-range / below / above / at-bounds); guards unsafe ::Val (safe-val function pattern); sparse explicit-value enum (200/400/500) — Pos by position not value, Valid for declared values; Succ chains forward, Pred chains backward; Succ/Pred mutual identity mid-range (14 tests) |
+| `enum_data_recursive.lsysl` 🟡 | direct recursion shape — construction at depth 2; match distinguishes Leaf vs Node; match binds payload value; cons-list match; Leaf base case for recursive fn (11 tests). Multi-level recursive walk fails on 6 of 7 backends — separate bug catalogued |
+| `enum_data_slice_field.lsysl` 🟢 | `enum Tree { Leaf, Node(children: []Tree) }` and similar recursive shape (sysl@9ee727db regression test). Leaf / empty-children Node / single-child / three-child; match distinguishes variants and binds children slice; two-level Node-of-Node; non-recursive sibling Bag(values: []int). (10 tests) |
+| `enum_str_variant_name.lsysl` 🟢 | `str(data_enum_variant)` returns the constructor name — Circle / Rect / Triangle / Empty; payload-independence; in concat + `s"..."` interpolation; two data enums coexist. Note: `str(simple_enum)` returns the int value (not the name) — use `EnumType::Image` for simple enums (12 tests) |
 
 ---
 
-### `unicode_strings/` — UTF-8, escapes, runes — 🔴 P3
+### `unicode_strings/` — UTF-8, escapes, runes — 🟢 P3
 
 | File | Tests pinned |
 |---|---|
-| `utf8_decode.lsysl` 🔴 | iterating UTF-8 multi-byte sequences; `len(s)` is byte length |
-| `utf8_invalid_handling.lsysl` 🔴 | how the language handles invalid sequences (spec-pinned) |
-| `unicode_escape_literal.lsysl` 🔴 | `\u{1F600}` literal decodes correctly |
+| `utf8_decode.lsysl` 🟢 | iterating UTF-8 multi-byte sequences; `len(s)` is byte length (10 tests) |
+| `utf8_invalid_handling.lsysl` 🟢 | how the language handles invalid sequences (spec-pinned) (9 tests) |
+| ~~`unicode_escape_literal.lsysl`~~ | dropped — `\u{XXXX}` escape is not part of the sysl lexer (backslash is preserved literally) |
+
+Note: `\xNN` for `N >= 0x80` is currently mis-handled (treated as
+16-bit codepoint, not raw byte — see `feedback_sysl_high_byte_x_escape`).
+Tests use source-level Unicode characters and `string(&buf[0], n)`
+byte-array construction to work around this.
 
 ---
 
 ## Tier 3 — Diagnostics & tooling
 
-### `test_framework/` — `#test` variants — 🔴 P3
+### `test_framework/` — `#test` variants — 🟢 P3
 
 | File | Tests pinned |
 |---|---|
-| `test_named.lsysl` 🔴 | `#test("custom name shown in output")` |
-| `test_should_panic.lsysl` 🔴 | `#test(should_panic)` succeeds when body panics |
-| `test_should_panic_with_msg.lsysl` 🔴 | `#test(should_panic = "expected text")` matches substring |
-| `test_attribute_combinations.lsysl` 🔴 | order of attributes; multiple attributes on one fn |
+| `test_named.lsysl` 🟢 | `#test("custom name shown in output")` (6 tests) |
+| `test_should_panic.lsysl` 🟢 | `#test(should_panic)` succeeds when body panics (4 tests) |
+| `test_should_panic_with_msg.lsysl` 🟢 | `#test(should_panic: "expected text")` matches substring (7 tests) |
+| `test_attribute_combinations.lsysl` 🟢 | order of attributes; multiple attributes on one fn (9 tests) |
 
 ---
 
-### `modules/` — imports, visibility, name mangling — 🔴 P3
+### `modules/` — imports, visibility, name mangling — 🟢 P3
 
-Hard to test inside a single .lsysl file. May need multi-file fixtures
-under `modules/fixtures/`. Many of these are already exercised by the
-parsyl-split fixes (sysl@2c4f1c095 .. sysl@2de1a83cc) but with no
-dedicated pin.
+Multi-file fixtures live under `modules/siblings/` for the
+sibling-visibility row. The two negative-case rows (cycle rejection,
+extern reachability) were dropped — both require a compile-error
+assertion mechanism the runtime test runner doesn't have, and
+`extern` reachability needs a real link target.
 
 | File | Tests pinned |
 |---|---|
-| `import_selective.lsysl` 🔴 | `import std.strings.{trim, split}` — only those names visible |
-| `import_alias.lsysl` 🔴 | `import std.io as io` aliasing — *if supported* |
-| `import_cyclic_rejected.lsysl` 🔴 | true cycle between modules rejected at compile |
-| `sibling_file_visibility.lsysl` 🔴 | symbols visible across files of one module without explicit import (sysl@6747d762b) |
-| `name_mangling.lsysl` 🔴 | mangled symbol name reachable by `extern`; collision-free |
+| `import_selective.lsysl` 🟢 | 6 tests — `import std.strings.{trim, split}`: bare-name callable, multiple selectors bind, doesn't force-shadow locals, composes with builtins, slice-return shape preserved, chains through codegen |
+| `import_alias.lsysl` 🟢 | 6 tests — `import std.strings.{trim => str_trim, split => str_split}`: per-symbol aliases callable, multiple aliases each bind, alias coexists with local of original name, composes with builtins, chained calls, loop bodies |
+| `import_cyclic_rejected.lsysl` ⚪ | **Dropped** — cycle rejection throws DriverError (fatal), not a per-test failure; no compile-error mechanism in test runner |
+| `siblings/sibling_file_visibility.lsysl` + `siblings/sibling_helper.lsysl` 🟢 | 8 tests across 2 files (same module) — plain fn, parameterized fn, struct type, struct method, enum value, enum match (local scrutinee), const, var (incl. cross-file mutation) all visible without explicit import |
+| `name_mangling.lsysl` ⚪ | **Dropped** — `extern` reachability needs real link target outside the test runner |
+
+**Three compiler fixes landed alongside this category** (commit
+`99c79bfcb`): (1) `SyslAnalyzer.registerSiblingForwardDeclsFrom`
+pre-registers sibling module-level vars/consts in globalScope, fixing
+cross-file writes (reads worked via a later registerImport pass);
+(2) `SyslLLVMCodegen` pre-populates `globalVarTypes` for all
+TVarDecls before generating function bodies so source-order
+independence holds; (3) `SyslLLVMCodegen` handles simple-enum
+function-return as scalar i32 produced into an aggregate `[N x i8]`
+slot, plus a new TCast aggregate→scalar case for `::Image` etc.
+
+The SVM and TRISC backends have an analogous simple-enum-fn-return
+bug (catalogued in `feedback_sysl_simple_enum_fn_return` memory) —
+the sibling-visibility tests route around it by constructing enum
+values inline rather than via a fn-result-then-local-var.
 
 ---
 
-### `attributes/` — #pure, #reads/#writes, #address, #deprecated, #ghost — 🔴 P3
+### `attributes/` — #pure, #reads/#writes, #address, #deprecated, #ghost — 🟢 P3
 
 Reference §"Attributes". Most of these affect tooling rather than
 runtime, but the runtime-affecting ones (`#address`, `#pure`) still
@@ -485,23 +527,38 @@ need pins.
 
 | File | Tests pinned |
 |---|---|
-| `pure_attribute.lsysl` 🔴 | `#pure` fn behaves identically + analyzer marks call-site CSE-able |
-| `address_attribute.lsysl` 🔴 | `#address(0x1000_0000)` maps a var to a fixed PA; read/write hits that address |
-| `deprecated_attribute.lsysl` 🔴 | `#deprecated("use foo2")` emits a warning at call site (compile diagnostic test) |
-| `reads_writes_effects.lsysl` 🔴 | `#reads(...)` / `#writes(...)` accepted; effect-system diagnostics fire |
-| `ghost_decl.lsysl` 🔴 | `#ghost` declarations stripped from non-verification builds |
+| `pure_attribute.lsysl` 🟢 | 12 tests — #pure runtime-equivalence: arithmetic, recursion, mutual recursion, local mutation, const reads, pure→pure calls, expr contexts, match, generics, multi-return, `def` is implicitly #pure |
+| `address_attribute.lsysl` ⚪ | **Dropped** — requires hardware MMIO mapping; interpreter has a virtual map but LLVM/SVM/TRISC/RV/wasm all segfault on writes to hardcoded physical addresses, and `#address` only accepts integer literals (no Sysl-allocated buffer addresses) |
+| `deprecated_attribute.lsysl` 🟢 | 8 tests — runtime-equivalence; ASCII + Unicode + `\xC3\xB1` high-byte reasons all run; deprecation chain; with #pure; empty reason |
+| `reads_writes_effects.lsysl` 🟢 | 9 tests — #reads / #writes runtime: read returns value; write persists; compound assign (+= -= *=); stacked attrs; multi-var; empty effects; annotated→annotated calls; pure call from annotated; conditional writes |
+| `ghost_decl.lsysl` 🟢 | 7 tests — strip pass: ghost var coexists with real code; ghost fn never invoked; require/ensure with ghost refs dropped; real contracts survive; ghost init doesn't run; **match-branch strip regression** (fixed alongside) |
+
+**Strip-pass fix landed.** Surfaced a compiler bug: `stripGhostStmts`
+didn't recurse into `TIfExpr` / `TMatchExpr` inside `TExprStmt`, so
+contract checks cloned into per-branch return tails (via
+`rewriteReturnsForEnsure`) survived with their ghost references
+intact. Two new cases added (`stripExpr` helper +
+`TExprStmt(e) => stripExpr(e)`). Regression tests in
+`ghost_decl.lsysl::test_gh_ensure_with_ghost_call_is_dropped` and
+`::test_gh_match_branch_strips`.
 
 ---
 
-### `conditional_compile/` — #if / #else / #endif — 🔴 P3
+### `conditional_compile/` — #if / #else / #endif — 🟢 P3
 
 Reference §"Conditional Compilation".
 
 | File | Tests pinned |
 |---|---|
-| `cond_compile_defined.lsysl` 🔴 | `#if DEBUG ... #endif` honoured by flag |
-| `cond_compile_target.lsysl` 🔴 | `#if TARGET == "trisc"` branches per-backend |
-| `cond_compile_negated.lsysl` 🔴 | `#if !BARE_METAL` |
+| `cond_compile_defined.lsysl` 🟢 | `#if SYMBOL` undefined-symbol behaviour (5 tests) |
+| `cond_compile_target.lsysl` 🟢 | `#if SYMBOL == "value"` / `!= "value"` undefined-symbol behaviour (5 tests) |
+| `cond_compile_negated.lsysl` 🟢 | `#if !SYMBOL` undefined-symbol behaviour (5 tests) |
+
+Note: the test runner's driver is instantiated without preprocessor
+defines, so these tests pin the *undefined-symbol* half of cond-comp
+behaviour (which is what the runner exposes). The defined-symbol
+half — where DEBUG / TARGET / BARE_METAL is set via the config map —
+is exercised by JVM-side `SyslCondCompTests`.
 
 ---
 

@@ -1,0 +1,207 @@
+`sizeof` — Compile-Time Size Operator
+======================================
+
+Per reference §"sizeof":
+
+```sysl
+sizeof(int)        // 4
+sizeof(*int)       // 8
+sizeof(Point)      // sum of fields + padding
+sizeof([10]int)    // 40
+```
+
+- `sizeof` is a compile-time constant; the result is an integer.
+- Folds into other compile-time expressions (e.g. `static_assert`,
+  `const` initializers).
+- The unit is bytes.
+
+This file pins:
+
+- `sizeof` for each primitive width (`i8`/`i16`/`i32`/`i64`,
+  `u8`/`u16`/`u32`/`u64`, `bool`, `f32`/`f64`)
+- `sizeof(*T)` is always 8 (on the targeted 64-bit ABI)
+- `sizeof([N]T)` is `N * sizeof(T)` for primitive arrays
+- `sizeof(MyStruct)` sums fields + padding
+- `sizeof` composes in arithmetic and inequality
+
+Note: this test focuses on **runtime-observable** sizes. The exact
+struct padding rules are platform-dependent in some details, so the
+struct tests use *patterns* (e.g. `>= sum_of_fields`, `multiple of
+alignment`) rather than exact numerics where reasonable. Where the
+reference pins a number (e.g. `sizeof(int) == 4`), we assert exact.
+
+File-local prefix `Szb` (SiZeof-Basic).
+
+    module sysl.tests.lang_features
+
+
+Primitive widths
+-----------------
+
+### Each integer width matches its declared size
+
+    #test
+    test_szb_int_widths() -> unit
+        assert(sizeof(i8) == 1, s"i8 = ${sizeof(i8)}")
+        assert(sizeof(i16) == 2, s"i16 = ${sizeof(i16)}")
+        assert(sizeof(i32) == 4, s"i32 = ${sizeof(i32)}")
+        assert(sizeof(i64) == 8, s"i64 = ${sizeof(i64)}")
+
+### Unsigned widths match signed widths
+
+    #test
+    test_szb_uint_widths() -> unit
+        assert(sizeof(u8) == 1, "u8")
+        assert(sizeof(u16) == 2, "u16")
+        assert(sizeof(u32) == 4, "u32")
+        assert(sizeof(u64) == 8, "u64")
+
+### Plain `int` is 4 bytes per the reference
+
+    #test
+    test_szb_plain_int() -> unit
+        assert(sizeof(int) == 4, s"int = ${sizeof(int)}")
+
+### Bool is 1 byte
+
+    #test
+    test_szb_bool() -> unit
+        assert(sizeof(bool) == 1, s"bool = ${sizeof(bool)}")
+
+### Float widths
+
+    #test
+    test_szb_floats() -> unit
+        assert(sizeof(f32) == 4, "f32")
+        assert(sizeof(f64) == 8, "f64")
+
+
+Pointers
+---------
+
+### `sizeof(*T)` is 8 on the 64-bit ABI
+
+    #test
+    test_szb_pointer_size() -> unit
+        assert(sizeof(*int) == 8, "*int")
+        assert(sizeof(*i64) == 8, "*i64")
+        assert(sizeof(*bool) == 8, "*bool")
+
+
+Fixed arrays
+-------------
+
+### `sizeof([N]T)` is `N * sizeof(T)` for primitive T
+
+    #test
+    test_szb_array_int_widths() -> unit
+        assert(sizeof([10]i32) == 40, s"[10]i32 = ${sizeof([10]i32)}")
+        assert(sizeof([5]i64) == 40, "[5]i64 = 40")
+        assert(sizeof([4]u16) == 8, "[4]u16 = 8")
+        assert(sizeof([16]u8) == 16, "[16]u8 = 16")
+
+### Zero-length array is 0 bytes
+
+    #test
+    test_szb_zero_length_array() -> unit
+        assert(sizeof([0]i64) == 0, s"got ${sizeof([0]i64)}")
+
+### Single-element array equals element size
+
+    #test
+    test_szb_single_element_array() -> unit
+        assert(sizeof([1]i32) == 4, "[1]i32 = 4")
+        assert(sizeof([1]i64) == 8, "[1]i64 = 8")
+
+
+Structs — well-defined layouts
+-------------------------------
+
+    struct SzbPair
+        a: i32
+        b: i32
+
+    struct SzbBig
+        x: i64
+        y: i64
+        z: i64
+
+### `sizeof` of struct sums fields when alignment doesn't pad
+
+    #test
+    test_szb_no_padding() -> unit
+        assert(sizeof(SzbPair) == 8, s"SzbPair = ${sizeof(SzbPair)}")
+
+### Three i64 fields = 24 bytes
+
+    #test
+    test_szb_three_i64() -> unit
+        assert(sizeof(SzbBig) == 24, s"SzbBig = ${sizeof(SzbBig)}")
+
+### Single-field struct has the field's size (possibly padded)
+
+    struct SzbBoxU8
+        b: u8
+
+    #test
+    test_szb_single_u8_field() -> unit
+        // 1 byte if no padding, possibly aligned up by backend convention.
+        // Reference doesn't pin this; assert sane bound.
+        assert(sizeof(SzbBoxU8) >= 1, s"at least 1, got ${sizeof(SzbBoxU8)}")
+
+
+`sizeof` composes in arithmetic
+--------------------------------
+
+### Used in a const-like expression
+
+    #test
+    test_szb_in_arith() -> unit
+        val total: int = sizeof(i32) + sizeof(i64)
+        assert(total == 12, s"4 + 8 = 12, got $total")
+
+### Used in comparison
+
+    #test
+    test_szb_comparison() -> unit
+        assert(sizeof(i64) > sizeof(i32), "i64 > i32")
+        assert(sizeof(i32) >= sizeof(i32), "i32 >= i32")
+        assert(sizeof(*int) >= sizeof(int), "ptr >= int")
+
+### Used to compute array size from N and elem type
+
+    #test
+    test_szb_array_byte_count() -> unit
+        const N = 100
+        val total: int = N * sizeof(i32)
+        assert(total == 400, s"got $total")
+
+
+`sizeof` is a compile-time constant
+------------------------------------
+
+### Value is always the same — call site doesn't matter
+
+    szb_get_int_size() -> int = sizeof(int)
+    szb_get_int_size_2() -> int = sizeof(int)
+
+    #test
+    test_szb_constant_across_callers() -> unit
+        assert(szb_get_int_size() == szb_get_int_size_2(), "same")
+        assert(szb_get_int_size() == sizeof(int), "same as inline")
+
+
+Nested types
+-------------
+
+    struct SzbOuter
+        first: i64
+        nested: SzbPair
+        last: i32
+
+### Inner struct fields contribute to outer size
+
+    #test
+    test_szb_nested_struct() -> unit
+        // 8 (first) + 8 (SzbPair) + 4 (last) + possible padding ≥ 20.
+        assert(sizeof(SzbOuter) >= 20, s"at least 20, got ${sizeof(SzbOuter)}")

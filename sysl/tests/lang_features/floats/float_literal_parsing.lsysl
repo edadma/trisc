@@ -1,0 +1,209 @@
+Float Literal Parsing
+======================
+
+Per reference §"Literals", sysl float literals support:
+
+```
+3.14                    // standard decimal
+1.5e10                  // scientific notation
+3.141_592               // underscore separators in fractional part
+```
+
+Plus negative literals via unary minus, and the bare-`e`
+exponent forms found in most C-family languages.
+
+This file pins:
+
+- Basic decimal literals (`0.5`, `1.5`).
+- Positive scientific notation (`1.0e3`, `2.5e2`).
+- Negative-exponent scientific (`1e-3`, `5e-2`).
+- Capital-E and lowercase-e exponents both work.
+- Underscore separators in fractional part.
+- Negative float literals via unary minus.
+- Float zero forms (`0.0`, `-0.0`).
+- Very small fractional values.
+- Literals as function args / return values.
+
+Float equality is brittle for non-exact values; we mostly
+compare via `int(...)` round-trip or by reading back through
+a slightly different form, except where the literal is
+representable exactly (powers of 2 and small integers).
+
+File-local prefix `Sflp` (Sysl Float Literal Parsing).
+
+    module sysl.tests.lang_features
+
+Basic decimal literals
+-----------------------
+
+### `0.5`
+
+    #test
+    test_sflp_half() -> unit
+        val f = 0.5
+        // 0.5 is exactly representable; doubling gives 1.0 exactly
+        val doubled = f + f
+        assert(int(doubled) == 1, "0.5 + 0.5 = 1.0")
+
+### `1.5`
+
+    #test
+    test_sflp_one_and_half() -> unit
+        val f = 1.5
+        // 1.5 * 2 = 3.0 exactly
+        val doubled = f * 2.0
+        assert(int(doubled) == 3, "1.5 * 2 = 3")
+
+### `0.0`
+
+    #test
+    test_sflp_zero() -> unit
+        val f = 0.0
+        assert(int(f) == 0, "zero")
+        assert(f + 1.0 == 1.0, "0+1 = 1")
+
+### `-0.0` (signed zero)
+
+    #test
+    test_sflp_negative_zero() -> unit
+        val f = -0.0
+        // -0.0 == 0.0 by IEEE 754
+        assert(f == 0.0, "negative zero compares equal")
+        assert(int(f) == 0, "trunc to 0")
+
+Scientific notation, positive exponent
+---------------------------------------
+
+### `1.0e3` = 1000.0
+
+    #test
+    test_sflp_e3() -> unit
+        val f = 1.0e3
+        assert(int(f) == 1000, s"got ${int(f)}")
+
+### `2.5e2` = 250.0
+
+    #test
+    test_sflp_2_5e2() -> unit
+        val f = 2.5e2
+        assert(int(f) == 250, s"got ${int(f)}")
+
+### `1e6` = 1_000_000.0 (no fractional part before e)
+
+    #test
+    test_sflp_1e6() -> unit
+        val f = 1e6
+        assert(int(f) == 1_000_000, s"got ${int(f)}")
+
+### `1.0E5` = 100_000 (capital E)
+
+    #test
+    test_sflp_capital_e() -> unit
+        val f = 1.0E5
+        assert(int(f) == 100_000, s"got ${int(f)}")
+
+### Explicit `+` in exponent
+
+    #test
+    test_sflp_explicit_plus_exp() -> unit
+        val f = 1.0e+3
+        assert(int(f) == 1000, s"got ${int(f)}")
+
+Scientific notation, negative exponent
+---------------------------------------
+
+### `1e-3` is small positive — `1e-3 * 1000.0 = 1.0`
+
+    #test
+    test_sflp_e_minus_3() -> unit
+        val f = 1e-3
+        val scaled = f * 1000.0
+        // 0.001 * 1000 = 1.0 (exactly representable? close enough that int(scaled) == 1)
+        assert(int(scaled) == 1, s"got ${int(scaled)}")
+
+### `5e-2` (= 0.05) — `5e-2 * 20.0 = 1.0`
+
+    #test
+    test_sflp_5e_minus_2() -> unit
+        val f = 5e-2
+        val scaled = f * 20.0
+        assert(int(scaled) == 1, s"5e-2 * 20 = 1; got ${int(scaled)}")
+
+### `1.5e-1` (= 0.15) — multiplied to recover an int
+
+    #test
+    test_sflp_one_point_five_e_minus_1() -> unit
+        val f = 1.5e-1
+        // 0.15 * 100 = 15 (small enough to be ~exact)
+        val scaled = f * 100.0
+        assert(int(scaled) == 15, s"got ${int(scaled)}")
+
+Underscore separators
+----------------------
+
+### Underscores in fractional part
+
+    #test
+    test_sflp_underscore_fraction() -> unit
+        val a = 3.141_592
+        val b = 3.141592
+        // Both parse to the same value
+        assert(a == b, "underscores are ignored")
+
+### Underscores in integer part of a float
+
+    #test
+    test_sflp_underscore_integer() -> unit
+        val a = 1_000.0
+        val b = 1000.0
+        assert(a == b, "underscores in int part of float")
+
+Negative float literals (unary minus)
+--------------------------------------
+
+### `-1.5`
+
+    #test
+    test_sflp_negative_literal() -> unit
+        val f = -1.5
+        // -1.5 + 1.5 = 0
+        assert(int(f + 1.5) == 0, "cancels")
+
+### `-1e3` = -1000
+
+    #test
+    test_sflp_negative_e3() -> unit
+        val f = -1.0e3
+        assert(int(f) == -1000, s"got ${int(f)}")
+
+Literals at function boundaries
+-------------------------------
+
+    sflp_double_it(x: f64) -> f64 = x * 2.0
+
+### Literal as arg
+
+    #test
+    test_sflp_literal_as_arg() -> unit
+        val r = sflp_double_it(1.5)
+        assert(int(r) == 3, "1.5*2")
+
+### Literal as return — return 7.5
+
+    sflp_const_value() -> f64 = 7.5
+
+    #test
+    test_sflp_literal_as_return() -> unit
+        val r = sflp_const_value()
+        val doubled = r * 2.0
+        assert(int(doubled) == 15, "7.5*2")
+
+Sums of various scientific-notation literals
+---------------------------------------------
+
+### `1e2 + 2e1 + 3e0 = 123`
+
+    #test
+    test_sflp_mixed_exp_sum() -> unit
+        val f = 1e2 + 2e1 + 3e0
+        assert(int(f) == 123, s"100+20+3; got ${int(f)}")

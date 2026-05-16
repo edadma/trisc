@@ -1,0 +1,220 @@
+Operator Overloading via Traits — Built-in Infix Operators
+===========================================================
+
+Per reference §"Operator Overloading via Traits":
+
+| Operator | Trait | Method | Signature |
+|---|---|---|---|
+| `<` `<=` `>` `>=` | `Ord` | `lt` `le` `gt` `ge` | `(T, T) -> bool` |
+| `==` `!=` | `Eq` | `eq` `ne` | `(T, T) -> bool` |
+| `+` | `Add` | `add` | `(T, T) -> T` |
+| `-` | `Sub` | `sub` | `(T, T) -> T` |
+| `*` | `Mul` | `mul` | `(T, T) -> T` |
+| `/` | `Div` | `div` | `(T, T) -> T` |
+
+- Operators on user-defined struct/enum types desugar to trait
+  method calls.
+- The compiler maps each operator to a fixed `(trait, method)` pair.
+- Built-in numeric operators on `int`, `f64`, etc. are unaffected.
+- Dispatch through a trait applies whenever **at least one** operand
+  is a user-defined named type and a matching `impl` exists.
+- Mixed-operand impls (e.g. `Mul[int, Vec3, Vec3]`) let primitives
+  appear on either side.
+
+This file pins:
+
+- Trait `Add` on user struct → `+` works
+- Sub, Mul, Div on user struct
+- Mixed-operand `Mul[int, Vec3, Vec3]` — primitive on the LHS
+- Ord on user struct → `<`, `<=`, `>`, `>=`
+- Eq on user struct → `==`, `!=`
+- Composition: `a + b - c` desugars correctly
+
+File-local prefix `Ooi` (Operator-Overload-Infix).
+
+    module sysl.tests.lang_features
+
+
+A 2D vector struct
+-------------------
+
+    struct OoiVec2
+        x: int
+        y: int
+
+
+### `+` via `Add` trait
+
+    trait OoiAdd[T]
+        ooi_add(a: T, b: T) -> T
+
+    impl OoiAdd[OoiVec2]
+        ooi_add(a: OoiVec2, b: OoiVec2) -> OoiVec2 = OoiVec2(a.x + b.x, a.y + b.y)
+
+    #test
+    test_ooi_add_via_trait() -> unit
+        val a = OoiVec2(1, 2)
+        val b = OoiVec2(10, 20)
+        val c = OoiAdd.ooi_add(a, b)
+        assert(c.x == 11 && c.y == 22, s"got (${c.x}, ${c.y})")
+
+
+### `+` desugaring on user struct via the canonical `Add[T]` trait
+
+The reference's headline example: `c = a + b` desugars to
+`Add.add(a, b) → Add_add_Vec2(a, b)`.
+
+    trait Add[T]
+        add(a: T, b: T) -> T
+
+    impl Add[OoiVec2]
+        add(a: OoiVec2, b: OoiVec2) -> OoiVec2 = OoiVec2(a.x + b.x, a.y + b.y)
+
+    #test
+    test_ooi_plus_desugar() -> unit
+        val a = OoiVec2(1, 2)
+        val b = OoiVec2(10, 20)
+        val c = a + b
+        assert(c.x == 11 && c.y == 22, s"got (${c.x}, ${c.y})")
+
+
+### `-` via `Sub` trait
+
+    trait Sub[T]
+        sub(a: T, b: T) -> T
+
+    impl Sub[OoiVec2]
+        sub(a: OoiVec2, b: OoiVec2) -> OoiVec2 = OoiVec2(a.x - b.x, a.y - b.y)
+
+    #test
+    test_ooi_minus_desugar() -> unit
+        val a = OoiVec2(10, 20)
+        val b = OoiVec2(3, 4)
+        val c = a - b
+        assert(c.x == 7 && c.y == 16, s"got (${c.x}, ${c.y})")
+
+
+### `*` via `Mul` trait on a user struct (component-wise)
+
+    trait Mul[T]
+        mul(a: T, b: T) -> T
+
+    impl Mul[OoiVec2]
+        mul(a: OoiVec2, b: OoiVec2) -> OoiVec2 = OoiVec2(a.x * b.x, a.y * b.y)
+
+    #test
+    test_ooi_times_desugar() -> unit
+        val a = OoiVec2(2, 3)
+        val b = OoiVec2(5, 7)
+        val c = a * b
+        assert(c.x == 10 && c.y == 21, s"got (${c.x}, ${c.y})")
+
+
+### `/` via `Div` trait on a user struct (component-wise)
+
+    trait Div[T]
+        div(a: T, b: T) -> T
+
+    impl Div[OoiVec2]
+        div(a: OoiVec2, b: OoiVec2) -> OoiVec2 = OoiVec2(a.x / b.x, a.y / b.y)
+
+    #test
+    test_ooi_div_desugar() -> unit
+        val a = OoiVec2(20, 30)
+        val b = OoiVec2(4, 5)
+        val c = a / b
+        assert(c.x == 5 && c.y == 6, s"got (${c.x}, ${c.y})")
+
+
+Composition: `a + b - c` chains desugared operators
+----------------------------------------------------
+
+### Add and Sub combine cleanly
+
+    #test
+    test_ooi_chain() -> unit
+        val a = OoiVec2(10, 20)
+        val b = OoiVec2(3, 4)
+        val c = OoiVec2(2, 5)
+        val r = a + b - c
+        assert(r.x == 11 && r.y == 19, s"got (${r.x}, ${r.y})")
+
+
+Mixed-operand `Mul` — primitive on the LHS
+-------------------------------------------
+
+Per the reference, `3 * Vec3(1,2,4)` dispatches via
+`Mul[int, Vec3, Vec3]`. The reverse needs its own impl — there is
+no implicit symmetry.
+
+    struct OoiVec3
+        x: int
+        y: int
+        z: int
+
+    trait OoiScale[A, B, R]
+        ooi_smul(a: A, b: B) -> R
+
+    impl OoiScale[int, OoiVec3, OoiVec3]
+        ooi_smul(s: int, v: OoiVec3) -> OoiVec3 = OoiVec3(s * v.x, s * v.y, s * v.z)
+
+    #test
+    test_ooi_mixed_operand() -> unit
+        val v = OoiVec3(1, 2, 4)
+        val r = OoiScale.ooi_smul(3, v)
+        assert(r.x == 3 && r.y == 6 && r.z == 12, s"got (${r.x}, ${r.y}, ${r.z})")
+
+
+Ord on a user struct via `<` `<=` `>` `>=`
+-------------------------------------------
+
+The reference says Ord maps to the four order operators. We compare
+two `OoiBox` values by their `.v` field.
+
+    struct OoiBox
+        v: int
+
+    trait Ord[T]
+        lt(a: T, b: T) -> bool
+        le(a: T, b: T) -> bool
+        gt(a: T, b: T) -> bool
+        ge(a: T, b: T) -> bool
+
+    impl Ord[OoiBox]
+        lt(a: OoiBox, b: OoiBox) -> bool = a.v < b.v
+        le(a: OoiBox, b: OoiBox) -> bool = a.v <= b.v
+        gt(a: OoiBox, b: OoiBox) -> bool = a.v > b.v
+        ge(a: OoiBox, b: OoiBox) -> bool = a.v >= b.v
+
+    #test
+    test_ooi_ord_operators() -> unit
+        val a = OoiBox(3)
+        val b = OoiBox(5)
+        val c = OoiBox(3)
+        assert(a < b, "3 < 5")
+        assert(!(b < a), "5 not < 3")
+        assert(a <= c, "3 <= 3")
+        assert(b > a, "5 > 3")
+        assert(c >= a, "3 >= 3")
+
+
+Eq on a user struct via `==` `!=`
+----------------------------------
+
+    trait Eq[T]
+        eq(a: T, b: T) -> bool
+        ne(a: T, b: T) -> bool
+
+    impl Eq[OoiBox]
+        eq(a: OoiBox, b: OoiBox) -> bool = a.v == b.v
+        ne(a: OoiBox, b: OoiBox) -> bool = a.v != b.v
+
+    #test
+    test_ooi_eq_operators() -> unit
+        val a = OoiBox(7)
+        val b = OoiBox(7)
+        val c = OoiBox(9)
+        assert(a == b, "7 == 7")
+        assert(!(a == c), "7 not == 9")
+        assert(a != c, "7 != 9")
+        assert(!(a != b), "7 not != 7")

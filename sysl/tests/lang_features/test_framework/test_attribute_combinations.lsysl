@@ -1,0 +1,125 @@
+Attribute Stacking — `#test` Combined With Other Attributes
+============================================================
+
+Per reference §"Attributes":
+
+> Multiple attributes stack on separate preceding lines. Unknown
+> attribute names are stored as-is (no error), so new attributes can
+> be introduced incrementally.
+
+This file pins the *attribute grammar* around `#test`:
+
+- Multiple attributes can stack on a single function definition.
+- Order does not affect dispatch — `#test #pure` and `#pure #test`
+  both yield a registered test.
+- An unknown attribute name (e.g., `#custom_marker`) is accepted
+  silently — the compiler stores it without erroring, so new
+  attributes can be introduced without breaking older code.
+- `#deprecated("msg")` with an argument stacks with `#test`.
+- The named-test form `#test("name")` stacks with other attributes.
+- `#test(should_panic)` can also stack with other attributes.
+- Three or more stacked attributes work the same as two.
+
+Note: `#pure` is **enforced** when present. A `#pure` function cannot
+call impure functions like `panic`. So a `#pure` + `#test(should_panic)`
+combination would *fail to compile* with "cannot call impure function
+'panic'". This is correct behaviour; the relevant attribute combination
+that stacks cleanly with should_panic is `should_panic + (any unknown
+or non-pure attribute)`.
+
+File-local prefix `Tac` (Test-Attr-Combinations).
+
+    module sysl.tests.lang_features
+
+
+### `#test` + `#pure` — pure tests register and run
+
+A test annotated `#pure` is constrained: it can only call other pure
+functions (and built-ins that the analyzer considers pure, like
+`assert`). The combination of `#test` + `#pure` registers a normal
+test that happens to satisfy the purity check.
+
+    #test
+    #pure
+    tac_test_pure() -> unit
+        assert(2 + 2 == 4, "pure math")
+
+### `#pure` + `#test` — reverse order
+
+Stacking order doesn't matter — `#pure` above `#test` is equivalent.
+
+    #pure
+    #test
+    tac_pure_test() -> unit
+        assert(3 + 3 == 6, "pure-first order")
+
+### `#test` + `#deprecated("...")` — deprecated attribute with arg
+
+`#deprecated("msg")` attaches a deprecation marker. It does not
+prevent the function from running — call-site diagnostics are the
+deprecation mechanism. Stacked with `#test`, the test still runs.
+
+    #test
+    #deprecated("scheduled for removal in v0.5")
+    tac_test_deprecated() -> unit
+        assert(10 - 3 == 7, "deprecated but still runs")
+
+### `#test` + unknown attribute — unknown is stored, not rejected
+
+Per reference: unknown attribute names are accepted silently. This
+lets new attributes be added incrementally.
+
+    #test
+    #custom_marker
+    tac_test_unknown() -> unit
+        assert(8 * 8 == 64, "unknown attr is silent")
+
+### `#test` + unknown attribute with args
+
+Unknown attribute names accept argument lists too — the args are
+stored verbatim, no validation.
+
+    #test
+    #custom_with_args("foo", 42, true)
+    tac_test_unknown_args() -> unit
+        assert(5 + 5 == 10, "unknown attr with args silent")
+
+### Three stacked attributes
+
+Two known + one unknown — order chosen to put `#test` second to
+verify stacking isn't position-sensitive.
+
+    #deprecated("legacy")
+    #test
+    #custom_third
+    tac_three_attrs() -> unit
+        assert(7 + 8 == 15, "three attrs")
+
+### Named `#test("...")` stacks with other attributes
+
+The named-test form composes the same way as the bare `#test`.
+
+    #test("tac — named test stacked with pure")
+    #pure
+    tac_named_pure() -> unit
+        assert(11 * 11 == 121, "named + pure")
+
+### `#test(should_panic)` stacks with an unknown attribute
+
+`should_panic` is a `#test` argument, not a separate attribute.
+The combination `#test(should_panic)` + `#custom_marker` puts
+should_panic semantics on a test that also carries a custom marker.
+
+    #test(should_panic)
+    #custom_marker
+    tac_sp_unknown() -> unit
+        panic("should-panic-with-marker")
+
+### `#test(should_panic: "...")` stacks with an unknown attribute
+
+Substring-match should_panic + unknown marker.
+
+    #test(should_panic: "marker")
+    #custom_label("orange")
+    tac_spm_unknown() -> unit
+        panic("contains marker substring")

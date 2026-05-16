@@ -49,6 +49,16 @@ class SyslSVMCodegen:
   // Loop labels for break/continue
   private val breakLabels = new mutable.Stack[String]
   private val continueLabels = new mutable.Stack[String]
+  // User-supplied loop labels (None for unlabeled loops). Parallel to break/continue stacks.
+  private val loopNameStack = new mutable.Stack[Option[String]]
+
+  /** Find stack index of loop matching `label` (0 = innermost). None → innermost. */
+  private def resolveLoopIdx(label: Option[String]): Int = label match
+    case None => 0
+    case Some(name) =>
+      val idx = loopNameStack.indexWhere(_.contains(name))
+      if idx < 0 then throw new RuntimeException(s"SVM: no enclosing loop with label '$name'")
+      idx
 
   // Deferred statements — per-function stack, emitted LIFO at every return.
   private val deferStack = new mutable.Stack[TStmt]
@@ -161,7 +171,15 @@ class SyslSVMCodegen:
       case TStringFromPtr(p, l, _) => count += 5; scanExpr(p); scanExpr(l)
       case TCall(_, args, _) => args.foreach(scanExpr)
       case TTempAddr(e, _) => scanExpr(e)
-      case TIndirectCall(c, args, _) => scanExpr(c); args.foreach(scanExpr)
+      case TIndirectCall(c, args, _) =>
+        // The FuncType branch of TIndirectCall's codegen allocates one
+        // anonymous local (descrIdx) to hold the 16-byte closure-descriptor
+        // address across arg evaluation. countLocals must reserve a slot,
+        // or nested calls (g(f(x))) trip an out-of-bounds local access at
+        // runtime when the second TIndirectCall's local_set lands past the
+        // declared frame size.
+        if c.typ.isInstanceOf[SyslType.FuncType] then count += 1
+        scanExpr(c); args.foreach(scanExpr)
       case TIndex(a, i, _) => scanExpr(a); scanExpr(i)
       case TFieldAccess(o, _, _) => scanExpr(o)
       case TDeref(p, _) => scanExpr(p)
@@ -587,12 +605,12 @@ class SyslSVMCodegen:
     if stringLiterals.nonEmpty || itables.nonEmpty then
       emit("segment rodata")
       for (label, value) <- stringLiterals do
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         emit(s"global $label, data, ${bytes.length + 9}")
       for (iname, (iface, _)) <- itables do
         emit(s"global $iname, data, ${iface.methods.length * 8}")
       for (label, value) <- stringLiterals do
-        val bytes = value.getBytes("UTF-8")
+        val bytes = value.getBytes("ISO-8859-1")
         emit(s"  dl -1") // immortal refcount header
         emit(s"$label:")
         for b <- bytes do emit(s"  db ${b & 0xff}")
@@ -625,7 +643,7 @@ class SyslSVMCodegen:
               // pre-registered before rodata emission.
               init match
                 case TStringLit(s, _) =>
-                  val bytes = s.getBytes("UTF-8")
+                  val bytes = s.getBytes("ISO-8859-1")
                   emit(s"  dl ${stringGlobalLabels(name)}")
                   emit(s"  dl ${bytes.length}")
                 case _ =>
@@ -636,7 +654,7 @@ class SyslSVMCodegen:
                 case TArrayLit(elements, _) =>
                   for (e, idx) <- elements.zipWithIndex do e match
                     case TStringLit(s, _) =>
-                      val bytes = s.getBytes("UTF-8")
+                      val bytes = s.getBytes("ISO-8859-1")
                       emit(s"  dl ${stringArrayElemLabels((name, idx))}")
                       emit(s"  dl ${bytes.length}")
                     case _ =>
@@ -650,7 +668,7 @@ class SyslSVMCodegen:
               // Byte array with string-literal / array-literal init.
               init match
                 case TStringLit(s, _) =>
-                  val bytes = s.getBytes("UTF-8")
+                  val bytes = s.getBytes("ISO-8859-1")
                   for b <- bytes do emit(s"  db ${b & 0xff}")
                   for _ <- bytes.length until arrSize.toInt do emit("  db 0")
                 case TArrayLit(elements, _) =>
@@ -1365,27 +1383,30 @@ class SyslSVMCodegen:
       emitFunctionExitRefDecrs()
       emit("  ret")
 
-    case TWhileStmt(cond, body, _) =>
+    case TWhileStmt(cond, body, userLabel) =>
       val loopLabel = newLabel("while")
       val endLabel = newLabel("while_end")
       breakLabels.push(endLabel)
       continueLabels.push(loopLabel)
+      loopNameStack.push(userLabel)
       emit(s"$loopLabel:")
       genExpr(cond)
       emit(s"  jumpz $endLabel")
       genStmts(body)
       emit(s"  jump $loopLabel")
       emit(s"$endLabel:")
+      loopNameStack.pop()
       breakLabels.pop()
       continueLabels.pop()
 
-    case TForStmt(init, cond, update, body, _) =>
+    case TForStmt(init, cond, update, body, userLabel) =>
       val loopLabel = newLabel("for")
       val updateLabel = newLabel("for_upd")
       val endLabel = newLabel("for_end")
       genStmt(init)
       breakLabels.push(endLabel)
       continueLabels.push(updateLabel)
+      loopNameStack.push(userLabel)
       emit(s"$loopLabel:")
       genExpr(cond)
       emit(s"  jumpz $endLabel")
@@ -1394,39 +1415,46 @@ class SyslSVMCodegen:
       genStmt(update)
       emit(s"  jump $loopLabel")
       emit(s"$endLabel:")
+      loopNameStack.pop()
       breakLabels.pop()
       continueLabels.pop()
 
-    case TDoWhileStmt(cond, body, _) =>
+    case TDoWhileStmt(cond, body, userLabel) =>
       val loopLabel = newLabel("do")
       val endLabel = newLabel("do_end")
       breakLabels.push(endLabel)
       continueLabels.push(loopLabel)
+      loopNameStack.push(userLabel)
       emit(s"$loopLabel:")
       genStmts(body)
       genExpr(cond)
       emit(s"  jumpnz $loopLabel")
       emit(s"$endLabel:")
+      loopNameStack.pop()
       breakLabels.pop()
       continueLabels.pop()
 
-    case TLoopStmt(body, _) =>
+    case TLoopStmt(body, userLabel) =>
       val loopLabel = newLabel("loop")
       val endLabel = newLabel("loop_end")
       breakLabels.push(endLabel)
       continueLabels.push(loopLabel)
+      loopNameStack.push(userLabel)
       emit(s"$loopLabel:")
       genStmts(body)
       emit(s"  jump $loopLabel")
       emit(s"$endLabel:")
+      loopNameStack.pop()
       breakLabels.pop()
       continueLabels.pop()
 
-    case TBreakStmt(_) =>
-      emit(s"  jump ${breakLabels.top}")
+    case TBreakStmt(lbl) =>
+      val idx = resolveLoopIdx(lbl)
+      emit(s"  jump ${breakLabels(idx)}")
 
-    case TContinueStmt(_) =>
-      emit(s"  jump ${continueLabels.top}")
+    case TContinueStmt(lbl) =>
+      val idx = resolveLoopIdx(lbl)
+      emit(s"  jump ${continueLabels(idx)}")
 
     case TExprStmt(TMatchExpr(scrutinee, arms, default, matchTyp)) =>
       genMatch(scrutinee, arms, default, matchTyp, asExpr = matchTyp != SyslType.UnitType)
@@ -1982,7 +2010,7 @@ class SyslSVMCodegen:
       labelCounter += 1
       val label = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
       stringLiterals += ((label, value))
-      val bytes = value.getBytes("UTF-8")
+      val bytes = value.getBytes("ISO-8859-1")
       // String is a 16-byte fat pointer {ptr, len} allocated on memory stack.
       // The label points past the refcount header to the byte data.
       emitMemAlloc(16)
@@ -2186,46 +2214,78 @@ class SyslSVMCodegen:
             // signed overflow detection
             intrName match
               case "saturating_add" =>
-                // overflow if (a >= 0 && b >= 0 && r < 0) → MAX
-                // underflow if (a < 0 && b < 0 && r >= 0) → MIN
-                val noOv = newLabel("sat_no_ov")
-                val checkUf = newLabel("sat_check_uf")
-                // a >= 0?
-                emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $checkUf") // a < 0 → check underflow
-                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $noOv")    // b < 0 → no overflow
-                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpz $noOv")     // r >= 0 → no overflow
-                emitPushInt(maxV); emit(s"  local_set $rIdx")
-                emit(s"  jump $noOv")
-                emit(s"$checkUf:")
-                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpz $noOv")     // b >= 0 → no underflow
-                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $noOv")    // r < 0 → no underflow
-                emitPushInt(minV); emit(s"  local_set $rIdx")
-                emit(s"$noOv:")
+                if width < 64 then
+                  // Narrow signed add: SVM does the sum in full i64, so
+                  // r doesn't wrap yet — overflow is whether r escapes
+                  // [minV, maxV]. r > maxV → MAX; r < minV → MIN.
+                  val noOv = newLabel("sat_no_ov")
+                  val tryUf = newLabel("sat_try_uf")
+                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gt")
+                  emit(s"  jumpz $tryUf")
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $noOv")
+                  emit(s"$tryUf:")
+                  emit(s"  local_get $rIdx"); emitPushInt(minV); emit("  lt")
+                  emit(s"  jumpz $noOv")
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$noOv:")
+                else
+                  // 64-bit signed add: wrapping has already happened in r,
+                  // so detect by sign pattern of inputs vs result.
+                  // overflow if (a >= 0 && b >= 0 && r < 0) → MAX
+                  // underflow if (a < 0 && b < 0 && r >= 0) → MIN
+                  val noOv = newLabel("sat_no_ov")
+                  val checkUf = newLabel("sat_check_uf")
+                  emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $checkUf") // a < 0 → check underflow
+                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $noOv")    // b < 0 → no overflow
+                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpz $noOv")     // r >= 0 → no overflow
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $noOv")
+                  emit(s"$checkUf:")
+                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpz $noOv")     // b >= 0 → no underflow
+                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $noOv")    // r < 0 → no underflow
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$noOv:")
               case "saturating_sub" =>
-                // overflow if (a >= 0 && b < 0 && r < 0) → MAX
-                // underflow if (a < 0 && b >= 0 && r >= 0) → MIN
-                val noOv = newLabel("sat_no_ov")
-                val checkUf = newLabel("sat_check_uf")
-                emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $checkUf")
-                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpz $noOv")     // b >= 0 → no overflow (a-b: a>=0, b>=0 stays in range or underflows below)
-                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpz $noOv")
-                emitPushInt(maxV); emit(s"  local_set $rIdx")
-                emit(s"  jump $noOv")
-                emit(s"$checkUf:")
-                emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $noOv")
-                emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                emit(s"  jumpnz $noOv")
-                emitPushInt(minV); emit(s"  local_set $rIdx")
-                emit(s"$noOv:")
+                if width < 64 then
+                  // Narrow signed sub: same range-check shape as narrow add.
+                  val noOv = newLabel("sat_no_ov")
+                  val tryUf = newLabel("sat_try_uf")
+                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gt")
+                  emit(s"  jumpz $tryUf")
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $noOv")
+                  emit(s"$tryUf:")
+                  emit(s"  local_get $rIdx"); emitPushInt(minV); emit("  lt")
+                  emit(s"  jumpz $noOv")
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$noOv:")
+                else
+                  // 64-bit signed sub: wrapping happened in r, detect by signs.
+                  // overflow if (a >= 0 && b < 0 && r < 0) → MAX
+                  // underflow if (a < 0 && b >= 0 && r >= 0) → MIN
+                  val noOv = newLabel("sat_no_ov")
+                  val checkUf = newLabel("sat_check_uf")
+                  emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $checkUf")
+                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpz $noOv")
+                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpz $noOv")
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $noOv")
+                  emit(s"$checkUf:")
+                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $noOv")
+                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
+                  emit(s"  jumpnz $noOv")
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$noOv:")
               case "saturating_mul" =>
                 // For narrow widths: check against [minV, maxV].
                 if width < 64 then
@@ -3076,7 +3136,16 @@ class SyslSVMCodegen:
         case TValuePattern(v) =>
           genExpr(v)
           emit(s"  local_get $scrIdx")
-          emit("  eq")
+          if scrutinee.typ == SyslType.StringType then
+            // Strings are 16-byte fat pointers; the generic `eq` opcode
+            // compares only the descriptor addresses (each TStringLit
+            // allocates a fresh descriptor, so two equal-content strings
+            // never compare equal under raw eq). Route through the
+            // dedicated byte-wise __svm_str_eq helper.
+            emit("  call __svm_str_eq")
+            needsStrEq = true
+          else
+            emit("  eq")
           emit(s"  jumpnz $hitLabel")
         case TRangePattern(lo, hi) =>
           val rangeNext = newLabel("match_rng")

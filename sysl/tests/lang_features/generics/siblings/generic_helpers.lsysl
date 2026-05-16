@@ -1,0 +1,130 @@
+Cross-File Generic Helpers
+==========================
+
+This file is the **helper** half of the cross-file generics pins.
+It declares the same module path as the two test files next to it
+(`generic_fn_sibling_import.lsysl`,
+`generic_alias_cross_file.lsysl`) and exposes no `#test` decls of
+its own.
+
+Both companion files call into these names **without an explicit
+`import` clause** — sibling files of one module must see each
+other's generic functions, generic structs, and generic type
+aliases directly.
+
+The shapes here are deliberately the same as the in-file generic
+coverage (`generic_fn_basic.lsysl`, `generic_struct.lsysl`,
+`generic_alias_basic.lsysl`) — the test files re-pin every shape
+across a file boundary, so a regression in cross-file generic
+linking shows up next to the specific surface that broke.
+
+File-local prefix `Gh` (Generic Helpers).
+
+    module sysl.tests.lang_features.generics.siblings
+
+
+### Generic function — single type parameter, identity
+
+    gh_id[T](x: T) -> T = x
+
+
+### Generic function — single type parameter, body call
+
+`gh_double` doubles a numeric value. Only used at concrete int
+instantiations by the test files. Sysl has no `Numeric` trait
+constraint, so the body works for any `T` that supports `+`; the
+test sites pin `int`.
+
+    gh_double[T](x: T) -> T = x + x
+
+
+### Generic function — two type parameters, first-projection
+
+Pinned at three concrete instantiations across the test files to
+exercise two-parameter inference and explicit args.
+
+    gh_first[A, B](a: A, b: B) -> A = a
+
+
+### Generic struct — single type parameter
+
+The classic Box. Used both as a return type (so the test file
+imports a `GhBox[int]` instance back) and constructed directly in
+the test file.
+
+    struct GhBox[T]
+        value: T
+
+
+### Generic struct — two type parameters
+
+    struct GhPair[A, B]
+        first: A
+        second: B
+
+
+### Generic function returning a generic struct instance
+
+Regression-relevant: the test file's call site has to receive a
+`GhBox[int]` back and read its `value` field. Cross-file generic
+linking (`linkImportedGenericStructToTemplate` at sysl@4f1f81725)
+is what makes `wrap(5).value` typecheck at the call site.
+
+    gh_wrap[T](x: T) -> GhBox[T] = GhBox(x)
+
+
+### Generic function whose body calls another generic function
+
+Pins the same path as the regression — an outer generic body
+referencing another generic in the same module — but at one extra
+level of indirection. The outer is itself generic, so the inner's
+instantiation flows from the outer's type argument.
+
+    gh_wrap_twice[T](x: T) -> GhBox[T] = gh_wrap[T](gh_id[T](x))
+
+
+### Parameterless generic-returning function
+
+The exact shape that surfaced the sysl@4f1f81725 bug: declared
+parameterless (no parens), returning a *concrete* instantiation
+of a generic struct. The test file's bare `gh_zero_box` reference
+must auto-call across files — if the parameterless flag is
+dropped on the wire, the cross-file caller resolves it as a
+function pointer and inference breaks.
+
+    gh_zero_box -> GhBox[int] = GhBox(0)
+
+
+### Generic type alias — function-typed, single type parameter
+
+The shape `(T) -> T`. Test file uses it at `GhUnary[int]` as a
+function parameter type.
+
+    type GhUnary[T] = (T) -> T
+
+
+### Generic type alias — two type parameters, function-typed
+
+Two-parameter alias whose body is `(A, A) -> B`. Test file uses
+it at `GhBin[int, int]`.
+
+    type GhBin[A, B] = (A, A) -> B
+
+
+### Generic type alias — newtype-shaped (alias body = type variable)
+
+`GhIdAlias[T]` is just `T` — the simplest possible alias body.
+
+    type GhIdAlias[T] = T
+
+
+### Functions that consume the generic aliases at concrete instantiations
+
+These both serve as call sites for the test file: by calling them
+from the test, we exercise that the alias name itself resolves
+across the file boundary (parser + analyzer), and that the
+function dispatches correctly at runtime.
+
+    gh_apply_unary(f: GhUnary[int], x: int) -> int = f(x)
+
+    gh_apply_bin(f: GhBin[int, int], a: int, b: int) -> int = f(a, b)

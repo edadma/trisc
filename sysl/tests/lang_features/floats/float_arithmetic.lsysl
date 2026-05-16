@@ -1,0 +1,262 @@
+Float Arithmetic
+=================
+
+This file pins the basic IEEE-754 arithmetic surface for
+floats — the operations that should produce identical
+results across all backends because they fall within the
+"safe" exactly-representable range.
+
+Pins:
+
+- Sum / difference / product / quotient on exactly-representable
+  values (small integers, halves, quarters — all binary-exact).
+- Operations producing exactly-representable results
+  (1.5 * 2 = 3, 0.5 + 0.5 = 1, etc.).
+- Identity laws (x + 0 = x, x * 1 = x, x / 1 = x, x - x = 0).
+- Sign-of-result correctness.
+- Division by very small but non-zero values.
+- Overflow to +inf / -inf.
+- Underflow to zero.
+- Sequences of operations.
+
+Brittle equality (e.g. 0.1 + 0.2 != 0.3) is intentionally NOT
+pinned — that would commit one backend's rounding mode and
+break with even tiny representation differences. We compare
+through int-truncation round-trip or against values that ARE
+exactly representable.
+
+File-local prefix `Sfa` (Sysl Float Arithmetic).
+
+    module sysl.tests.lang_features
+
+Exact addition
+---------------
+
+### Small integers via float
+
+    #test
+    test_sfa_add_small_ints() -> unit
+        val a = 3.0
+        val b = 4.0
+        val sum = a + b
+        assert(int(sum) == 7, s"got ${int(sum)}")
+
+### Half + half = 1.0 (exact)
+
+    #test
+    test_sfa_add_halves() -> unit
+        val a = 0.5
+        val b = 0.5
+        assert(a + b == 1.0, "exact")
+
+### Quarter + quarter + quarter + quarter = 1.0
+
+    #test
+    test_sfa_add_quarters() -> unit
+        val q = 0.25
+        val sum = q + q + q + q
+        assert(sum == 1.0, "exact")
+
+### Adding zero is identity
+
+    #test
+    test_sfa_add_zero_identity() -> unit
+        val a = 17.5
+        assert(a + 0.0 == a, "x + 0 = x")
+        assert(0.0 + a == a, "0 + x = x")
+
+Exact subtraction
+------------------
+
+### Self-difference is zero
+
+    #test
+    test_sfa_sub_self_zero() -> unit
+        val a = 99.5
+        assert(a - a == 0.0, "x - x = 0")
+
+### Subtraction preserves sign
+
+    #test
+    test_sfa_sub_sign() -> unit
+        val a = 3.0
+        val b = 5.0
+        val d = a - b
+        assert(int(d) == -2, s"got ${int(d)}")
+
+### Subtracting a negative is adding positive
+
+    #test
+    test_sfa_sub_neg_is_add_pos() -> unit
+        val a = 3.0
+        val b = -2.0
+        val c = a - b
+        assert(int(c) == 5, "3 - (-2) = 5")
+
+Exact multiplication
+---------------------
+
+### Small integers via float
+
+    #test
+    test_sfa_mul_small_ints() -> unit
+        val a = 6.0
+        val b = 7.0
+        assert(int(a * b) == 42, "exact")
+
+### Multiplication by one is identity
+
+    #test
+    test_sfa_mul_one_identity() -> unit
+        val a = 12.5
+        assert(a * 1.0 == a, "x * 1 = x")
+        assert(1.0 * a == a, "1 * x = x")
+
+### Multiplication by zero is zero
+
+    #test
+    test_sfa_mul_zero() -> unit
+        val a = 123.456
+        val r = a * 0.0
+        assert(r == 0.0, "x * 0 = 0")
+
+### Multiplication by -1 negates
+
+    #test
+    test_sfa_mul_neg_one() -> unit
+        val a = 5.0
+        val b = a * (-1.0)
+        assert(int(b) == -5, "negate")
+
+### Half-multiplication: doubling and halving
+
+    #test
+    test_sfa_double_half_round_trip() -> unit
+        val a = 7.5
+        val doubled = a * 2.0
+        val back = doubled * 0.5
+        assert(back == a, "exact round-trip")
+
+Exact division
+---------------
+
+### Division by one is identity
+
+    #test
+    test_sfa_div_one_identity() -> unit
+        val a = 17.5
+        assert(a / 1.0 == a, "x / 1 = x")
+
+### Self-division is one (for nonzero)
+
+    #test
+    test_sfa_div_self_one() -> unit
+        val a = 7.5
+        assert(a / a == 1.0, "x / x = 1")
+
+### Division produces exact halves
+
+    #test
+    test_sfa_div_to_half() -> unit
+        val a = 5.0
+        val b = a / 2.0
+        // 5/2 = 2.5 exact
+        assert(b * 2.0 == a, "2.5 * 2 = 5")
+        val truncated = int(b)
+        assert(truncated == 2, "truncates to 2")
+
+### Division by two equals multiplication by 0.5
+
+    #test
+    test_sfa_div_two_vs_mul_half() -> unit
+        val a = 7.5
+        assert(a / 2.0 == a * 0.5, "equivalent")
+
+Sequenced ops
+--------------
+
+### Three-term sum
+
+    #test
+    test_sfa_three_term_sum() -> unit
+        val a = 1.5
+        val b = 2.5
+        val c = 4.0
+        val sum = a + b + c
+        // 1.5 + 2.5 + 4 = 8
+        assert(int(sum) == 8, s"got ${int(sum)}")
+
+### Polynomial-like: a*a + 2*a + 1 for a = 2
+
+    #test
+    test_sfa_polynomial() -> unit
+        val a = 2.0
+        val r = a * a + 2.0 * a + 1.0
+        // 4 + 4 + 1 = 9
+        assert(int(r) == 9, s"got ${int(r)}")
+
+Overflow to infinity
+---------------------
+
+### `1.0e308 * 10.0` overflows to +inf
+
+    #test
+    test_sfa_overflow_pos_inf() -> unit
+        val big = 1.0e308
+        val r = big * 10.0
+        // Overflow to +inf is greater than any finite value
+        assert(r > 1.0e308, "is greater than the source")
+        // +inf == +inf (unlike NaN, infinity compares equal to itself)
+        val inf = 1.0e308 * 10.0
+        assert(r == inf, "equals canonical +inf")
+
+### Negation of overflow is -inf
+
+    #test
+    test_sfa_overflow_neg_inf() -> unit
+        val big = 1.0e308
+        val r = -big * 10.0
+        assert(r < -1.0e308, "less than the source")
+
+Sign-handling
+--------------
+
+### Negation round-trip
+
+    #test
+    test_sfa_neg_neg() -> unit
+        val a = 3.5
+        val b = -a
+        val c = -b
+        assert(c == a, "double-negation")
+
+### Sum of opposite-sign equal magnitudes
+
+    #test
+    test_sfa_opposite_sign_sum() -> unit
+        val a = 4.5
+        val b = -4.5
+        assert(a + b == 0.0, "cancels exactly")
+
+### Product of negatives is positive
+
+    #test
+    test_sfa_neg_times_neg() -> unit
+        val a = -3.0
+        val b = -4.0
+        assert(int(a * b) == 12, "neg * neg = pos")
+
+Mixed integer-float values
+---------------------------
+
+### `f64(i) + f64(j) == f64(i + j)` for small i, j
+
+    #test
+    test_sfa_addition_associates_with_promotion() -> unit
+        var i = 1
+        while i <= 5
+            val j = i + 3
+            val a = f64(i) + f64(j)
+            val b = f64(i + j)
+            assert(a == b, s"i=$i, j=$j")
+            i = i + 1

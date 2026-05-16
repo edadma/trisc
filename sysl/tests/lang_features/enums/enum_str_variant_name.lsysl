@@ -1,0 +1,163 @@
+`str(data_enum_variant)` Returns the Variant's Name
+====================================================
+
+Per reference: `str()` on a **data-enum** variant returns
+the variant's constructor name (NOT the payload). This is
+the same as `EnumType::Image(v)`.
+
+Note: `str(simple_enum_variant)` does NOT return the variant
+name — it returns the underlying i32 value, because simple
+enums lower to numeric constants. The name-getter for simple
+enums is `EnumType::Image(v)`, exercised in
+`enum_simple_int.lsysl`.
+
+This file pins data-enum behaviour only:
+
+- `str(VariantWithPayload(...))` returns the constructor name.
+- Different payload values share the same constructor name.
+- No-payload variant of a data enum.
+- `str(v)` in concat / `s"..."` interpolation.
+- Variants from different data enums coexist with distinct
+  names.
+
+File-local prefix `Sesvn` (Sysl Enum Str Variant Name).
+
+    module sysl.tests.lang_features
+
+    enum SesvnShape
+        SesvnCircle(r: int)
+        SesvnRect(w: int, h: int)
+        SesvnEmpty
+        SesvnTriangle(a: int, b: int, c: int)
+
+`str` on each variant
+----------------------
+
+### Circle returns "SesvnCircle"
+
+    #test
+    test_sesvn_circle_name() -> unit
+        val v = SesvnCircle(5)
+        assert(str(v) == "SesvnCircle", s"got '${str(v)}'")
+
+### Rect returns "SesvnRect"
+
+    #test
+    test_sesvn_rect_name() -> unit
+        val v = SesvnRect(3, 4)
+        assert(str(v) == "SesvnRect", s"got '${str(v)}'")
+
+### Triangle returns "SesvnTriangle"
+
+    #test
+    test_sesvn_triangle_name() -> unit
+        val v = SesvnTriangle(3, 4, 5)
+        assert(str(v) == "SesvnTriangle", s"got '${str(v)}'")
+
+### Empty (no-payload variant of a data enum) returns "SesvnEmpty"
+
+    #test
+    test_sesvn_empty_name() -> unit
+        var v: SesvnShape = SesvnEmpty
+        assert(str(v) == "SesvnEmpty", s"got '${str(v)}'")
+
+All names distinct
+-------------------
+
+    #test
+    test_sesvn_all_names_distinct() -> unit
+        val a = str(SesvnCircle(1))
+        val b = str(SesvnRect(1, 2))
+        val c = str(SesvnTriangle(1, 2, 3))
+        var e_local: SesvnShape = SesvnEmpty
+        val d = str(e_local)
+        assert(a != b, "Circle != Rect")
+        assert(b != c, "Rect != Triangle")
+        assert(c != d, "Triangle != Empty")
+        assert(a != d, "Circle != Empty")
+        assert(b != d, "Rect != Empty")
+        assert(a != c, "Circle != Triangle")
+
+Payload-independence
+---------------------
+
+### Two Circles with different radii share the constructor name
+
+    #test
+    test_sesvn_circle_payload_independent() -> unit
+        val a = SesvnCircle(5)
+        val b = SesvnCircle(10)
+        val c = SesvnCircle(99999)
+        assert(str(a) == str(b), "a == b")
+        assert(str(b) == str(c), "b == c")
+        assert(str(a) == "SesvnCircle", "name")
+
+### Two Rects with different dimensions share the name
+
+    #test
+    test_sesvn_rect_payload_independent() -> unit
+        val a = SesvnRect(1, 2)
+        val b = SesvnRect(100, 200)
+        assert(str(a) == str(b), "same name")
+        assert(str(a) == "SesvnRect", "name")
+
+`str(v)` in concatenation
+--------------------------
+
+### Prefix + str(variant)
+
+    #test
+    test_sesvn_in_concat() -> unit
+        val v = SesvnCircle(7)
+        val s = "shape is " + str(v)
+        assert(s == "shape is SesvnCircle", s"got '$s'")
+
+### Two str-results joined
+
+    #test
+    test_sesvn_two_strs_joined() -> unit
+        val a = SesvnCircle(1)
+        val b = SesvnRect(2, 3)
+        val s = str(a) + " vs " + str(b)
+        assert(s == "SesvnCircle vs SesvnRect", s"got '$s'")
+
+`str(v)` in s"..." interpolation
+---------------------------------
+
+### Single slot
+
+    #test
+    test_sesvn_in_interp_single() -> unit
+        val v = SesvnRect(4, 5)
+        val s = s"kind=${str(v)}"
+        assert(s == "kind=SesvnRect", s"got '$s'")
+
+### Multi-slot mixed with literals
+
+    #test
+    test_sesvn_in_interp_multi() -> unit
+        val a = SesvnCircle(1)
+        val b = SesvnRect(2, 3)
+        val s = s"a=${str(a)} b=${str(b)}"
+        assert(s == "a=SesvnCircle b=SesvnRect", s"got '$s'")
+
+Two data enums coexist
+-----------------------
+
+    enum SesvnColor
+        SesvnRed
+        SesvnGreen
+        SesvnBlue(intensity: int)
+
+### Each enum's variants have their own names
+
+    #test
+    test_sesvn_two_enums_names() -> unit
+        var r_local: SesvnColor = SesvnRed
+        val a = str(r_local)
+        val b = str(SesvnBlue(50))
+        val c = str(SesvnCircle(5))
+        assert(a == "SesvnRed", "Red")
+        assert(b == "SesvnBlue", "Blue")
+        assert(c == "SesvnCircle", "Circle")
+        assert(a != c, "different enums, different names")

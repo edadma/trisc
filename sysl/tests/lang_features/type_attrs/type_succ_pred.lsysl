@@ -1,0 +1,186 @@
+`T::Succ` and `T::Pred` on Simple Enums
+========================================
+
+Per reference §"Type Attributes":
+
+```sysl
+Day::Succ(d)    // Wed  for d = Day.Tue
+Day::Pred(d)    // Mon  for d = Day.Tue
+```
+
+- `T::Succ(x)` on a simple enum: returns the next variant in
+  declaration order. Traps when `x` is already the last variant.
+- `T::Pred(x)` on a simple enum: returns the previous variant.
+  Traps when `x` is already the first variant.
+
+`integers/int_within_succ_pred.lsysl` (session 8) already pinned
+`::Succ`/`::Pred` on `within`-constrained int types. This file
+covers the **enum** side: variant walking, round-trip, boundary
+behaviour (without driving past Last/First — those traps are
+deferred to the future uniform runtime-trap harness).
+
+File-local prefix `Tsp` (Type-Succ/Pred).
+
+    module sysl.tests.lang_features
+
+
+A seven-variant enum (calendar days)
+-------------------------------------
+
+    enum TspDay
+        Mon
+        Tue
+        Wed
+        Thu
+        Fri
+        Sat
+        Sun
+
+
+### `::Succ` advances one variant
+
+    #test
+    test_tsp_succ_basic() -> unit
+        assert(TspDay::Succ(TspDay.Mon) == TspDay.Tue, "Mon -> Tue")
+        assert(TspDay::Succ(TspDay.Tue) == TspDay.Wed, "Tue -> Wed")
+        assert(TspDay::Succ(TspDay.Wed) == TspDay.Thu, "Wed -> Thu")
+        assert(TspDay::Succ(TspDay.Thu) == TspDay.Fri, "Thu -> Fri")
+        assert(TspDay::Succ(TspDay.Fri) == TspDay.Sat, "Fri -> Sat")
+        assert(TspDay::Succ(TspDay.Sat) == TspDay.Sun, "Sat -> Sun")
+
+### `::Pred` retreats one variant
+
+    #test
+    test_tsp_pred_basic() -> unit
+        assert(TspDay::Pred(TspDay.Sun) == TspDay.Sat, "Sun -> Sat")
+        assert(TspDay::Pred(TspDay.Sat) == TspDay.Fri, "Sat -> Fri")
+        assert(TspDay::Pred(TspDay.Fri) == TspDay.Thu, "Fri -> Thu")
+        assert(TspDay::Pred(TspDay.Thu) == TspDay.Wed, "Thu -> Wed")
+        assert(TspDay::Pred(TspDay.Wed) == TspDay.Tue, "Wed -> Tue")
+        assert(TspDay::Pred(TspDay.Tue) == TspDay.Mon, "Tue -> Mon")
+
+
+Round-trip `Succ` then `Pred` is identity (interior variants)
+---------------------------------------------------------------
+
+    #test
+    test_tsp_succ_pred_round_trip() -> unit
+        // For each non-last variant, Pred(Succ(x)) == x
+        assert(TspDay::Pred(TspDay::Succ(TspDay.Mon)) == TspDay.Mon, "Mon")
+        assert(TspDay::Pred(TspDay::Succ(TspDay.Wed)) == TspDay.Wed, "Wed")
+        assert(TspDay::Pred(TspDay::Succ(TspDay.Sat)) == TspDay.Sat, "Sat")
+
+
+Round-trip `Pred` then `Succ` is identity
+------------------------------------------
+
+    #test
+    test_tsp_pred_succ_round_trip() -> unit
+        assert(TspDay::Succ(TspDay::Pred(TspDay.Tue)) == TspDay.Tue, "Tue")
+        assert(TspDay::Succ(TspDay::Pred(TspDay.Fri)) == TspDay.Fri, "Fri")
+        assert(TspDay::Succ(TspDay::Pred(TspDay.Sun)) == TspDay.Sun, "Sun")
+
+
+`::Succ`/`::Pred` walk across the entire range
+-----------------------------------------------
+
+### Walk via repeated `::Succ` covers every variant
+
+    #test
+    test_tsp_succ_walk_all() -> unit
+        var d = TspDay.Mon
+        var count: int = 1
+        // 6 calls to Succ: Mon -> ... -> Sun
+        d = TspDay::Succ(d)
+        count = count + 1
+        d = TspDay::Succ(d)
+        count = count + 1
+        d = TspDay::Succ(d)
+        count = count + 1
+        d = TspDay::Succ(d)
+        count = count + 1
+        d = TspDay::Succ(d)
+        count = count + 1
+        d = TspDay::Succ(d)
+        count = count + 1
+        assert(d == TspDay.Sun, "walked to Sun")
+        assert(count == 7, "visited 7 variants")
+
+### Walk via repeated `::Pred` from Sun down to Mon
+
+    #test
+    test_tsp_pred_walk_all() -> unit
+        var d = TspDay.Sun
+        d = TspDay::Pred(d)
+        d = TspDay::Pred(d)
+        d = TspDay::Pred(d)
+        d = TspDay::Pred(d)
+        d = TspDay::Pred(d)
+        d = TspDay::Pred(d)
+        assert(d == TspDay.Mon, "walked to Mon")
+
+
+`::Succ` of `::First`
+----------------------
+
+    #test
+    test_tsp_succ_of_first() -> unit
+        val s = TspDay::Succ(TspDay::First)
+        assert(s == TspDay.Tue, "First+1 = Tue")
+
+`::Pred` of `::Last`
+---------------------
+
+    #test
+    test_tsp_pred_of_last() -> unit
+        val p = TspDay::Pred(TspDay::Last)
+        assert(p == TspDay.Sat, "Last-1 = Sat")
+
+
+A 3-variant enum — small range
+-------------------------------
+
+    enum TspRGB
+        R
+        G
+        B
+
+### Walk via Succ R -> G -> B
+
+    #test
+    test_tsp_rgb_succ() -> unit
+        assert(TspRGB::Succ(TspRGB.R) == TspRGB.G, "R -> G")
+        assert(TspRGB::Succ(TspRGB.G) == TspRGB.B, "G -> B")
+
+### Walk via Pred B -> G -> R
+
+    #test
+    test_tsp_rgb_pred() -> unit
+        assert(TspRGB::Pred(TspRGB.B) == TspRGB.G, "B -> G")
+        assert(TspRGB::Pred(TspRGB.G) == TspRGB.R, "G -> R")
+
+
+Two-variant enum (smallest non-trivial)
+----------------------------------------
+
+    enum TspBit
+        Lo
+        Hi
+
+### One Succ, one Pred — only legal moves
+
+    #test
+    test_tsp_bit_walk() -> unit
+        assert(TspBit::Succ(TspBit.Lo) == TspBit.Hi, "Lo -> Hi")
+        assert(TspBit::Pred(TspBit.Hi) == TspBit.Lo, "Hi -> Lo")
+
+
+Composition with `::Image` / `::Value` and `::Range`
+-----------------------------------------------------
+
+### Succ produces variants whose images match expected names
+
+    #test
+    test_tsp_succ_image() -> unit
+        val s = TspDay::Succ(TspDay.Tue)
+        assert(TspDay::Image(s) == "Wed", s"got ${TspDay::Image(s)}")

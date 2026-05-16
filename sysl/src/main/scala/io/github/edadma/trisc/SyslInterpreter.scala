@@ -740,7 +740,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
       case TBoolLit(b, _) => IntVal(if b then 1L else 0L)
       case TUnitLit(_)    => IntVal(0L)  // 0-byte type — represented as 0 at runtime
 
-      case TStringLit(s, _) => StringVal(s.getBytes("UTF-8"))
+      case TStringLit(s, _) => StringVal(s.getBytes("ISO-8859-1"))
 
       case TArrayDecl(size, typ) =>
         def initElem(t: SyslType): Value = t match

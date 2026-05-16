@@ -1,0 +1,223 @@
+Struct Methods That Mutate Self
+================================
+
+Since sysl methods always receive `self` as `*Self` (pointer
+to the original storage), any method that writes to `self.*`
+mutates the caller's struct value in place. This is the
+default mode — no special syntax is needed to opt in.
+
+This file pins:
+
+- Simple field assignment through self.
+- Multi-field assignment through self.
+- Field-from-field update (read then write).
+- Calling a mutating method multiple times accumulates state.
+- A mutating method that also returns a value.
+- Calling a mutating method on a struct accessed via an
+  outer struct's field (deep mutation).
+- Calling a mutating method on an array element.
+- Mutating method on a struct local declared `var` (the
+  expected case).
+
+File-local prefix `Ssmp` (Sysl Struct Method Ptr).
+
+The non-mutating read-only variant lives in
+`struct_method_value.lsysl`. The mutation-through-iface
+contract lives in `iface_mutating_self.lsysl`.
+
+    module sysl.tests.lang_features
+
+Simple mutation
+----------------
+
+    struct Slot
+        n: int
+
+    Slot.set(v: int) -> unit
+        self.n = v
+
+    Slot.inc() -> unit
+        self.n = self.n + 1
+
+### Single set call mutates caller's slot
+
+    #test
+    test_ssmp_set_mutates() -> unit
+        var s = Slot(0)
+        s.set(42)
+        assert(s.n == 42, s"got ${s.n}")
+
+### Read-modify-write via inc
+
+    #test
+    test_ssmp_inc_mutates() -> unit
+        var s = Slot(10)
+        s.inc()
+        assert(s.n == 11, s"got ${s.n}")
+
+### Repeated mutation accumulates
+
+    #test
+    test_ssmp_inc_repeated() -> unit
+        var s = Slot(0)
+        s.inc()
+        s.inc()
+        s.inc()
+        s.inc()
+        s.inc()
+        assert(s.n == 5, s"got ${s.n}")
+
+### Set after inc — last writer wins
+
+    #test
+    test_ssmp_set_after_inc() -> unit
+        var s = Slot(10)
+        s.inc()
+        assert(s.n == 11, "after inc")
+        s.set(100)
+        assert(s.n == 100, "after set")
+
+Multi-field mutation
+---------------------
+
+    struct Pair
+        a: int
+        b: int
+
+    Pair.zero() -> unit
+        self.a = 0
+        self.b = 0
+
+    Pair.set_both(x: int, y: int) -> unit
+        self.a = x
+        self.b = y
+
+### Zeroing both fields
+
+    #test
+    test_ssmp_zero_both() -> unit
+        var p = Pair(5, 7)
+        p.zero()
+        assert(p.a == 0, "a")
+        assert(p.b == 0, "b")
+
+### Setting both fields via args
+
+    #test
+    test_ssmp_set_both() -> unit
+        var p = Pair(0, 0)
+        p.set_both(10, 20)
+        assert(p.a == 10, "a")
+        assert(p.b == 20, "b")
+
+Field-from-field update
+------------------------
+
+    Pair.swap_fields() -> unit
+        val tmp = self.a
+        self.a = self.b
+        self.b = tmp
+
+### Swap via mutating method
+
+    #test
+    test_ssmp_swap_fields() -> unit
+        var p = Pair(1, 2)
+        p.swap_fields()
+        assert(p.a == 2, "a")
+        assert(p.b == 1, "b")
+
+### Two swaps cancel out
+
+    #test
+    test_ssmp_swap_twice() -> unit
+        var p = Pair(7, 9)
+        p.swap_fields()
+        p.swap_fields()
+        assert(p.a == 7, "a")
+        assert(p.b == 9, "b")
+
+Mutating method that also returns a value
+------------------------------------------
+
+    Slot.inc_and_get() -> int
+        self.n = self.n + 1
+        return self.n
+
+### Increment + return new value
+
+    #test
+    test_ssmp_inc_and_get() -> unit
+        var s = Slot(5)
+        val v = s.inc_and_get()
+        assert(v == 6, "returned")
+        assert(s.n == 6, "stored")
+
+### Repeated inc_and_get
+
+    #test
+    test_ssmp_inc_and_get_repeated() -> unit
+        var s = Slot(0)
+        val a = s.inc_and_get()
+        val b = s.inc_and_get()
+        val c = s.inc_and_get()
+        assert(a == 1, "a")
+        assert(b == 2, "b")
+        assert(c == 3, "c")
+        assert(s.n == 3, "final")
+
+Nested struct — mutating method on the inner via outer field
+-------------------------------------------------------------
+
+    struct Holder
+        inner: Slot
+        bias: int
+
+### Mutate the inner Slot through outer.inner.method()
+
+    #test
+    test_ssmp_inner_mutation() -> unit
+        var h = Holder(Slot(0), 100)
+        h.inner.inc()
+        h.inner.inc()
+        h.inner.inc()
+        assert(h.inner.n == 3, s"inner.n; got ${h.inner.n}")
+        assert(h.bias == 100, "bias preserved")
+
+### Set the inner Slot's value through outer field
+
+    #test
+    test_ssmp_inner_set() -> unit
+        var h = Holder(Slot(0), 100)
+        h.inner.set(99)
+        assert(h.inner.n == 99, s"inner.n; got ${h.inner.n}")
+
+Method on an array element
+---------------------------
+
+### Calling a mutating method on `arr[i]`
+
+    #test
+    test_ssmp_method_on_array_element() -> unit
+        var arr: [3]Slot
+        arr[0] = Slot(0)
+        arr[1] = Slot(10)
+        arr[2] = Slot(20)
+        arr[1].inc()
+        arr[1].inc()
+        assert(arr[0].n == 0, "arr[0] unchanged")
+        assert(arr[1].n == 12, s"arr[1] inc'd twice; got ${arr[1].n}")
+        assert(arr[2].n == 20, "arr[2] unchanged")
+
+### Calling set on an array element
+
+    #test
+    test_ssmp_set_on_array_element() -> unit
+        var arr: [3]Slot
+        arr[0] = Slot(1)
+        arr[1] = Slot(2)
+        arr[2] = Slot(3)
+        arr[1].set(999)
+        assert(arr[0].n == 1, "0 unchanged")
+        assert(arr[1].n == 999, "1 set")
+        assert(arr[2].n == 3, "2 unchanged")

@@ -1,0 +1,237 @@
+Composed Interfaces
+===================
+
+An interface can embed other interfaces — a member that is a
+bare identifier (no `()`) names another interface whose methods
+are merged into this one. A struct that satisfies all of the
+embedded interfaces' methods (and any directly-declared methods)
+satisfies the composed interface.
+
+This file pins:
+
+- Single-level composition (`ReadWriter` embeds `Reader` + `Writer`).
+- A struct can be boxed both as the composed interface and as
+  either of the embedded interfaces.
+- Calls through the composed interface dispatch to the right
+  impl method (whether it came from an embedded interface or a
+  direct declaration).
+- Two-level composition (`Closer` embeds `Reader`, then
+  `ReadCloser` embeds `Closer` + adds a direct method).
+- Calling each embedded interface's method through the composed
+  interface produces the expected value.
+
+File-local prefix `Sic` (Sysl Iface Composed).
+
+    module sysl.tests.lang_features
+
+Single-level composition
+-------------------------
+
+`Reader` and `Writer` are atomic interfaces. `ReadWriter`
+composes both. A struct that implements both `.read()` and
+`.write(b)` automatically satisfies `ReadWriter`.
+
+    interface Reader
+        read() -> int
+
+    interface Writer
+        write(b: int) -> unit
+
+    interface ReadWriter
+        Reader
+        Writer
+
+    struct Cell
+        value: int
+
+    Cell.read() -> int = self.value
+
+    Cell.write(b: int) -> unit
+        self.value = b
+
+### Box Cell into ReadWriter — both methods dispatch correctly
+
+    use_rw(rw: ReadWriter, x: int) -> int
+        rw.write(x)
+        return rw.read()
+
+    #test
+    test_sic_composed_round_trip() -> unit
+        var c = Cell(0)
+        val v = use_rw(c, 99)
+        assert(v == 99, s"got $v")
+
+### Several writes / reads through the composed interface
+
+    #test
+    test_sic_composed_multi_round_trip() -> unit
+        var c = Cell(0)
+        val a = use_rw(c, 11)
+        val b = use_rw(c, 22)
+        val d = use_rw(c, 33)
+        assert(a == 11, "first")
+        assert(b == 22, "second")
+        assert(d == 33, "third")
+
+Box as embedded interfaces too
+-------------------------------
+
+Cell, which satisfies the composed `ReadWriter`, also satisfies
+each embedded interface in isolation.
+
+### Box Cell as `Reader`
+
+    only_read(r: Reader) -> int = r.read()
+
+    #test
+    test_sic_box_as_reader() -> unit
+        var c = Cell(123)
+        val v = only_read(c)
+        assert(v == 123, s"got $v")
+
+### Box Cell as `Writer` (write only, then check via direct call)
+
+    only_write(w: Writer, n: int) -> unit
+        w.write(n)
+
+    #test
+    test_sic_box_as_writer() -> unit
+        var c = Cell(0)
+        only_write(c, 77)
+        assert(c.value == 77, s"got ${c.value}")
+
+### Direct call vs through composed iface — same result
+
+    #test
+    test_sic_direct_vs_composed_parity() -> unit
+        var c = Cell(0)
+        c.write(42)
+        val direct = c.read()
+        val via_iface = use_rw(c, 99)
+        assert(direct == 42, "direct read after direct write")
+        assert(via_iface == 99, "composed write+read")
+
+Composed interface with a directly-declared method
+---------------------------------------------------
+
+`Storage` embeds `Reader` + `Writer` and *also* declares a new
+method `clear()`. A struct must satisfy all three to qualify.
+
+    interface Storage
+        Reader
+        Writer
+        clear() -> unit
+
+    struct Box
+        n: int
+
+    Box.read() -> int = self.n
+
+    Box.write(b: int) -> unit
+        self.n = b
+
+    Box.clear() -> unit
+        self.n = 0
+
+### Box satisfies Storage — all three methods dispatch
+
+    fill_then_clear(s: Storage, v: int) -> int
+        s.write(v)
+        val before = s.read()
+        s.clear()
+        val after = s.read()
+        return before * 100 + after
+
+    #test
+    test_sic_direct_method_in_composed() -> unit
+        var b = Box(0)
+        val v = fill_then_clear(b, 5)
+        // before=5, after=0 → 5*100 + 0 = 500
+        assert(v == 500, s"got $v")
+
+### Clear via Storage, then read via the same iface
+
+    #test
+    test_sic_clear_through_composed() -> unit
+        var b = Box(99)
+        val s: Storage = b
+        assert(s.read() == 99, "before clear")
+        s.clear()
+        assert(s.read() == 0, "after clear")
+
+Two-level composition
+----------------------
+
+`Closer` is a fresh atomic. `Sink` embeds `Writer` + `Closer`.
+Demonstrates that composition nests — a struct satisfying every
+leaf interface's methods qualifies for the outer composition.
+
+    interface Closer
+        close() -> int
+
+    interface Sink
+        Writer
+        Closer
+
+    struct Channel
+        n: int
+        closed: int
+
+    Channel.write(b: int) -> unit
+        self.n = b
+
+    Channel.close() -> int
+        self.closed = 1
+        return self.n
+
+### Sink: write then close — both methods dispatch
+
+    publish(sk: Sink, x: int) -> int
+        sk.write(x)
+        return sk.close()
+
+    #test
+    test_sic_two_level_publish() -> unit
+        var ch = Channel(0, 0)
+        val v = publish(ch, 88)
+        assert(v == 88, s"got $v")
+        assert(ch.closed == 1, "closed flag set")
+
+### Channel as just `Closer`
+
+    only_close(c: Closer) -> int = c.close()
+
+    #test
+    test_sic_subset_as_closer() -> unit
+        var ch = Channel(7, 0)
+        val v = only_close(ch)
+        assert(v == 7, "returned stored n")
+        assert(ch.closed == 1, "closed flag set")
+
+Several different structs implementing the same composition
+------------------------------------------------------------
+
+Two distinct concretes implement `ReadWriter`. Each call to the
+composed iface dispatches to the right impl.
+
+    struct Twice
+        n: int
+
+    Twice.read() -> int = self.n * 2
+
+    Twice.write(b: int) -> unit
+        self.n = b
+
+### Cell and Twice both qualify as ReadWriter; dispatch picks each
+
+    #test
+    test_sic_two_concretes_same_composition() -> unit
+        var a = Cell(0)
+        var b = Twice(0)
+        // Each gets 10 via write, then reads back per impl
+        a.write(10)
+        b.write(10)
+        val ra: ReadWriter = a
+        val rb: ReadWriter = b
+        assert(ra.read() == 10, "Cell.read returns stored")
+        assert(rb.read() == 20, "Twice.read returns stored*2")

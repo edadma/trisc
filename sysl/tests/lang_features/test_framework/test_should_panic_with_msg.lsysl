@@ -1,0 +1,95 @@
+`#test(should_panic: "substring")` — Panic Message Matching
+============================================================
+
+Per reference §"`should_panic`":
+
+```sysl
+#test(should_panic: "out of range")
+test_bounds() -> unit
+    // substring match: panic message must contain "out of range"
+    panic("index 42 is out of range")
+```
+
+A `should_panic: "<text>"` test **passes** iff the body panics AND
+the panic's message contains `<text>` as a substring. A panic with a
+non-matching message fails the test.
+
+This file pins:
+
+- `should_panic: "..."` parses and runs.
+- Substring matching works for ASCII text in any position (prefix,
+  middle, suffix) of the panic message.
+- Whole-message match (the entire panic message equals the substring)
+  works.
+- The substring can include punctuation and Unicode.
+- `assert(false, "msg")` panics with `msg`, so the substring match
+  applies to assertion failures too.
+- A failing-assert with a matching substring is equivalent to a
+  matching `panic`.
+
+Note: testing the *negative* case (panic message doesn't contain the
+substring → test fails) requires the runner to expose "expected
+failure" semantics — not available in this corpus. The pin here is
+that matching panic messages satisfy the expectation.
+
+File-local prefix `Tspm` (Test-Should-Panic-Message).
+
+    module sysl.tests.lang_features
+
+
+### Substring matches as suffix
+
+The reference's worked example: panic msg ends with the matched text.
+
+    #test(should_panic: "out of range")
+    tspm_suffix() -> unit
+        panic("index 42 is out of range")
+
+### Substring matches as prefix
+
+Match at the start of the panic message.
+
+    #test(should_panic: "bad input")
+    tspm_prefix() -> unit
+        panic("bad input received from caller")
+
+### Substring matches in the middle
+
+Match somewhere mid-message.
+
+    #test(should_panic: "must be positive")
+    tspm_middle() -> unit
+        panic("argument n must be positive, got -3")
+
+### Whole panic message equals the substring
+
+The substring covers the entire message — exact-match case.
+
+    #test(should_panic: "exact")
+    tspm_whole() -> unit
+        panic("exact")
+
+### Substring with punctuation
+
+The substring isn't restricted to alphanumerics.
+
+    #test(should_panic: "got (-1)")
+    tspm_punct() -> unit
+        panic("unexpected return: got (-1) from helper")
+
+### Substring with Unicode characters
+
+UTF-8 substrings in panic messages match byte-for-byte.
+
+    #test(should_panic: "ñ é")
+    tspm_unicode() -> unit
+        panic("Spanish accent test — ñ é — both present")
+
+### `assert(false, msg)` is equivalent to `panic(msg)`
+
+A failing assert panics with the message — should_panic substring
+match catches the assertion failure the same way.
+
+    #test(should_panic: "invariant")
+    tspm_assert() -> unit
+        assert(false, "loop invariant violated")

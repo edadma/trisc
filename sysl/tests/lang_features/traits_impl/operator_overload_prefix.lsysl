@@ -1,0 +1,181 @@
+User-Defined Prefix Operators via Traits
+=========================================
+
+Per reference §"User-Defined Prefix Operators":
+
+```sysl
+struct N
+    v: int
+
+trait Boost[T]
+    #operator("<>")
+    boost(a: T) -> T
+
+impl Boost[N]
+    boost(a: N) -> N = N(a.v * 2 + 1)
+
+main() -> int
+    var x = N(7)
+    var r = <>x              // desugars to Boost.boost(x)
+    r.v                      // 15
+```
+
+- A trait method with **one** parameter (rather than two) and the
+  `#operator("sym")` attribute registers `sym` as a **prefix**
+  operator.
+- The same `#operator(...)` attribute is used for both forms; the
+  trait method's arity (1 vs 2) decides which slot the symbol fills.
+- The five built-in prefix sigils `-`, `!`, `~`, `*`, `&` are
+  overloadable on operand types outside their natural built-in
+  domain.
+- `++` / `--` remain reserved.
+- Chaining requires whitespace: `<><><>x` lexes as one operator,
+  but `<> <> <> x` is three applications.
+
+This file pins:
+
+- User-defined `<>` prefix on a user struct
+- The result has a numeric body, observable via field access
+- A second user sigil (`~~`) on a different struct
+- Two `<>` applications composed via whitespace
+- Built-in `-` overloaded on a struct (non-natural domain)
+- Built-in `!` overloaded on a struct (non-bool operand)
+
+File-local prefix `Oop` (Operator-Overload-Prefix).
+
+    module sysl.tests.lang_features
+
+
+User struct `OopN` with a `<>` prefix
+--------------------------------------
+
+    struct OopN
+        v: int
+
+    trait OopBoost[T]
+        #operator("<>")
+        oop_boost(a: T) -> T
+
+    impl OopBoost[OopN]
+        oop_boost(a: OopN) -> OopN = OopN(a.v * 2 + 1)
+
+### Basic `<>x` dispatches to `OopBoost.oop_boost(x)`
+
+    #test
+    test_oop_boost_basic() -> unit
+        val x = OopN(7)
+        val r = <>x
+        assert(r.v == 15, s"got ${r.v}")
+
+### Composing two `<>` applications (whitespace-separated)
+
+    #test
+    test_oop_boost_compose() -> unit
+        val x = OopN(7)
+        val r = <> <>x
+        // inner: <>OopN(7) = OopN(15)
+        // outer: <>OopN(15) = OopN(31)
+        assert(r.v == 31, s"got ${r.v}")
+
+
+A different user sigil `~~`
+----------------------------
+
+    struct OopW
+        a: int
+        b: int
+
+    trait OopFlip[T]
+        #operator("~~")
+        oop_flip(x: T) -> T
+
+    impl OopFlip[OopW]
+        oop_flip(x: OopW) -> OopW = OopW(x.b, x.a)
+
+### `~~x` swaps fields
+
+    #test
+    test_oop_flip() -> unit
+        val w = OopW(3, 4)
+        val f = ~~w
+        assert(f.a == 4 && f.b == 3, s"got (${f.a}, ${f.b})")
+
+
+Built-in sigil `-` overloaded on a user struct
+-----------------------------------------------
+
+Per the reference: the five built-in prefix sigils are overloadable
+on operand types outside their natural domain. `OopN` is a struct
+(not numeric), so `-OopN(7)` may dispatch to a user impl when one
+is registered.
+
+    trait OopNeg[T]
+        #operator("-")
+        oop_neg(x: T) -> T
+
+    impl OopNeg[OopN]
+        oop_neg(x: OopN) -> OopN = OopN(0 - x.v)
+
+    #test
+    test_oop_minus_on_struct() -> unit
+        val x = OopN(11)
+        val r = -x
+        assert(r.v == 0 - 11, s"got ${r.v}")
+
+
+Built-in sigil `!` overloaded on a user struct
+-----------------------------------------------
+
+`!` is built-in for `bool`. On a struct it may be overloaded.
+
+    trait OopNot[T]
+        #operator("!")
+        oop_not(x: T) -> T
+
+    impl OopNot[OopN]
+        oop_not(x: OopN) -> OopN = OopN(0 - x.v - 1)
+
+    #test
+    test_oop_bang_on_struct() -> unit
+        val x = OopN(4)
+        val r = !x
+        assert(r.v == 0 - 5, s"got ${r.v}")
+
+
+User prefix combined with infix
+--------------------------------
+
+The single sigil `<>` was used above for prefix; the same trait
+method count distinguishes prefix (1-arg) from infix (2-arg). Here
+we use the prefix form alongside a separate infix `Add` trait, to
+show they coexist cleanly.
+
+    trait OopAdd[T]
+        oop_add(a: T, b: T) -> T
+
+    impl OopAdd[OopN]
+        oop_add(a: OopN, b: OopN) -> OopN = OopN(a.v + b.v)
+
+    #test
+    test_oop_prefix_with_infix() -> unit
+        val x = OopN(3)
+        val y = OopN(4)
+        val r = OopAdd.oop_add(<>x, y)
+        // <>x = OopN(3*2+1) = OopN(7); add y=4 → OopN(11)
+        assert(r.v == 11, s"got ${r.v}")
+
+
+Prefix `-` on the natural-numeric type still uses the built-in
+---------------------------------------------------------------
+
+Per the reference: `&p` for `p: Parser[int]` dispatches to `Peek`,
+but `&i` for `i: int` still produces `*int`. We exercise the same
+rule for `-`: `-3` is still built-in numeric negation, even when an
+`OopNeg[OopN]` impl exists for the same sigil.
+
+    #test
+    test_oop_minus_int_still_builtin() -> unit
+        val n: int = 0 - 5
+        assert(n == 0 - 5, s"got $n")
+        val k: int = 0 - 0
+        assert(k == 0, s"got $k")

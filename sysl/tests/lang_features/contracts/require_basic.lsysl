@@ -1,0 +1,199 @@
+`require` Preconditions — Happy-Path Coverage
+==============================================
+
+Per reference §"Design by Contract":
+
+```sysl
+pos(x: int) -> int
+    require x >= 0, "x must be non-negative"
+    x + 1
+```
+
+- `require <bool> [, "message"]` evaluated **once on function entry**.
+- Traps if false (`precondition check failed[: msg]`); otherwise the
+  body runs.
+- Multiple `require` clauses are allowed; all must hold.
+- Both `require` and `ensure` must appear before the first regular
+  statement.
+
+This file pins the **happy-path** behaviour of `require` across all
+seven backends — every test calls a function whose precondition is
+*satisfied*, and asserts that the body's return value comes through
+unchanged. Failing-precondition (trap) tests are deferred to a future
+uniform runtime-trap harness; see the same note in
+`integers/int_within_succ_pred.lsysl` and the `compile_errors/`
+category.
+
+File-local prefix `Rqb` (Require-Basic).
+
+    module sysl.tests.lang_features
+
+
+A single `require` clause that holds
+-------------------------------------
+
+### Bare condition
+
+    rqb_nonneg(x: int) -> int
+        require x >= 0
+        x + 1
+
+    #test
+    test_rqb_nonneg_basic() -> unit
+        assert(rqb_nonneg(0) == 1, "lo edge passes precondition")
+        assert(rqb_nonneg(5) == 6, "interior passes precondition")
+
+### Condition with a message
+
+    rqb_pos(x: int) -> int
+        require x > 0, "x must be positive"
+        x * 2
+
+    #test
+    test_rqb_pos_with_message() -> unit
+        assert(rqb_pos(1) == 2, "lo edge passes")
+        assert(rqb_pos(10) == 20, "interior passes")
+
+
+Multiple `require` clauses — all hold
+--------------------------------------
+
+### Two requires
+
+    rqb_in_range(x: int) -> int
+        require x >= 0
+        require x <= 100
+        x
+
+    #test
+    test_rqb_two_requires() -> unit
+        assert(rqb_in_range(0) == 0, "lo edge")
+        assert(rqb_in_range(50) == 50, "interior")
+        assert(rqb_in_range(100) == 100, "hi edge")
+
+### Three requires with messages
+
+    rqb_three(a: int, b: int, c: int) -> int
+        require a >= 0, "a non-negative"
+        require b >= 0, "b non-negative"
+        require c >= 0, "c non-negative"
+        a + b + c
+
+    #test
+    test_rqb_three_requires() -> unit
+        assert(rqb_three(1, 2, 3) == 6, "1+2+3=6")
+        assert(rqb_three(0, 0, 0) == 0, "all zero")
+
+
+`require` cond uses arithmetic on the param
+--------------------------------------------
+
+### Param expression, not just bare compare
+
+    rqb_double_under(x: int) -> int
+        require x * 2 < 100
+        x
+
+    #test
+    test_rqb_arith_in_require() -> unit
+        assert(rqb_double_under(0) == 0, "0*2 = 0 < 100")
+        assert(rqb_double_under(49) == 49, "49*2 = 98 < 100, boundary")
+
+
+`require` references multiple params
+-------------------------------------
+
+### Cross-param condition
+
+    rqb_ordered(lo: int, hi: int) -> int
+        require lo <= hi, "lo must not exceed hi"
+        hi - lo
+
+    #test
+    test_rqb_cross_params() -> unit
+        assert(rqb_ordered(0, 10) == 10, "ordered span = 10")
+        assert(rqb_ordered(5, 5) == 0, "equal lo/hi, span = 0")
+        assert(rqb_ordered(-5, 5) == 10, "negative lo, span = 10")
+
+
+`require` on a `bool` parameter
+--------------------------------
+
+    rqb_must_be_true(b: bool, n: int) -> int
+        require b, "flag must be true"
+        n + 1
+
+    #test
+    test_rqb_bool_param() -> unit
+        assert(rqb_must_be_true(true, 41) == 42, "flag=true, n+1")
+
+
+`require` is evaluated only at entry
+-------------------------------------
+
+The reference guarantees that `require` is checked **once on function
+entry** — not after each statement, and not on each iteration of a
+loop in the body. We pin this by satisfying the precondition once at
+entry and then mutating a captured-by-ref state that *would* violate
+it if the check re-fired; the body still runs to completion and the
+result reflects the mutation.
+
+    rqb_entry_only(out n: int)
+        require n >= 0
+        n = 0 - 1
+
+    #test
+    test_rqb_entry_only_check() -> unit
+        var v: int = 5
+        rqb_entry_only(v)
+        assert(v == 0 - 1, s"body mutated to -1 without re-firing require, got $v")
+
+
+`require` with a comparison chain
+----------------------------------
+
+Chained comparisons in the precondition lower the same way as in
+regular expressions — see `operators/chained_comparisons.lsysl`.
+
+    rqb_in_open_range(lo: int, x: int, hi: int) -> int
+        require lo < x < hi
+        x
+
+    #test
+    test_rqb_chained_compare() -> unit
+        assert(rqb_in_open_range(0, 5, 10) == 5, "0<5<10")
+        assert(rqb_in_open_range(-3, 0, 3) == 0, "-3<0<3")
+
+
+`require` and `ensure` mixed
+-----------------------------
+
+A function with both — basic interplay. The dedicated `ensure_basic`
+file covers `ensure` semantics more thoroughly.
+
+    rqb_safe_double(x: int) -> int
+        require x >= 0
+        ensure result >= 0
+        x * 2
+
+    #test
+    test_rqb_require_and_ensure() -> unit
+        assert(rqb_safe_double(0) == 0, "0 doubled")
+        assert(rqb_safe_double(7) == 14, "7 doubled")
+
+
+`require` on a struct-field condition
+--------------------------------------
+
+    struct RqbBox
+        lo: int
+        hi: int
+
+    rqb_box_span(b: RqbBox) -> int
+        require b.lo <= b.hi, "lo must not exceed hi"
+        b.hi - b.lo
+
+    #test
+    test_rqb_struct_field_require() -> unit
+        val b = RqbBox(2, 7)
+        assert(rqb_box_span(b) == 5, "span of [2,7] = 5")

@@ -1,0 +1,267 @@
+Integer Overflow — Wrap Semantics
+==================================
+
+Per reference §"Integer Overflow":
+
+> All integer arithmetic wraps at the declared type width. There is no
+> implicit integer promotion — `u8 + u8` produces `u8`, not `int`.
+>
+> - **Unsigned types** wrap via modular arithmetic (zero-extension):
+>   `u8(255) + u8(1)` → `0`
+> - **Signed types** wrap via two's complement (sign-extension):
+>   `int(2147483647) + 1` → `-2147483648`
+> - **64-bit types** (`i64`, `u64`) use the full register width and do
+>   not truncate
+
+This file pins:
+
+- Unsigned wrap at every width (`u8`, `u16`, `u32`, `u64`).
+- Signed wrap (two's complement) at every width (`i8`, `i16`, `i32`,
+  `i64`).
+- Wrap behaviour for `+`, `-`, `*`.
+- The result type of an operation matches the operand type (no implicit
+  promotion).
+
+File-local prefix `Iov` (Integer OVerflow).
+
+    module sysl.tests.lang_features
+
+Unsigned wrap — `+` overflows to 0 at type MAX + 1
+---------------------------------------------------
+
+### `u8(255) + u8(1)` → 0
+
+    #test
+    test_iov_u8_add_wrap() -> unit
+        val a: u8 = 255
+        val b: u8 = 1
+        val c = a + b
+        assert(i32(c) == 0, s"got ${i32(c)}")
+
+### `u8(200) + u8(100)` → 44 (300 mod 256)
+
+    #test
+    test_iov_u8_add_wrap_mid() -> unit
+        val a: u8 = 200
+        val b: u8 = 100
+        val c = a + b
+        assert(i32(c) == 44, s"got ${i32(c)}")
+
+### `u16(65535) + u16(1)` → 0
+
+    #test
+    test_iov_u16_add_wrap() -> unit
+        val a: u16 = 65535
+        val b: u16 = 1
+        val c = a + b
+        assert(i32(c) == 0, s"got ${i32(c)}")
+
+### `u16(0xFFFF) + u16(0xFFFF)` → 0xFFFE
+
+    #test
+    test_iov_u16_add_double_max() -> unit
+        val a: u16 = 0xFFFF
+        val b: u16 = 0xFFFF
+        val c = a + b
+        // 0xFFFE in 16 bits
+        assert(i32(c) == 0xFFFE, s"got ${i32(c)}")
+
+### `u32(0xFFFFFFFF) + u32(1)` → 0
+
+    #test
+    test_iov_u32_add_wrap() -> unit
+        val a: u32 = 0xFFFFFFFFu32
+        val b: u32 = 1u32
+        val c = a + b
+        assert(i64(c) == 0i64, s"got ${i64(c)}")
+
+### `u64(0xFFFFFFFFFFFFFFFF) + u64(1)` → 0
+
+    #test
+    test_iov_u64_add_wrap() -> unit
+        val a: u64 = 0xFFFFFFFFFFFFFFFFu64
+        val b: u64 = 1u64
+        val c = a + b
+        assert(c == 0u64, s"got u64 wrap")
+
+Unsigned wrap — `-` underflows to MAX at 0 - 1
+-----------------------------------------------
+
+### `u8(0) - u8(1)` → 255
+
+    #test
+    test_iov_u8_sub_wrap() -> unit
+        val a: u8 = 0
+        val b: u8 = 1
+        val c = a - b
+        assert(i32(c) == 255, s"got ${i32(c)}")
+
+### `u16(0) - u16(1)` → 0xFFFF
+
+    #test
+    test_iov_u16_sub_wrap() -> unit
+        val a: u16 = 0
+        val b: u16 = 1
+        val c = a - b
+        assert(i32(c) == 0xFFFF, s"got ${i32(c)}")
+
+### `u32(0) - u32(1)` → 0xFFFFFFFF
+
+    #test
+    test_iov_u32_sub_wrap() -> unit
+        val a: u32 = 0u32
+        val b: u32 = 1u32
+        val c = a - b
+        assert(i64(c) == 0xFFFFFFFFi64, s"got ${i64(c)}")
+
+### `u64(0) - u64(1)` → all-ones
+
+    #test
+    test_iov_u64_sub_wrap() -> unit
+        val a: u64 = 0u64
+        val b: u64 = 1u64
+        val c = a - b
+        assert(c == 0xFFFFFFFFFFFFFFFFu64, "u64 wrap")
+
+Unsigned wrap — `*` keeps the low bits
+---------------------------------------
+
+### `u8(16) * u8(16)` → 0 (low byte of 256)
+
+    #test
+    test_iov_u8_mul_wrap() -> unit
+        val a: u8 = 16
+        val b: u8 = 16
+        val c = a * b
+        assert(i32(c) == 0, s"got ${i32(c)}")
+
+### `u16(0x100) * u16(0x100)` → 0 (low 16 bits of 0x10000)
+
+    #test
+    test_iov_u16_mul_wrap() -> unit
+        val a: u16 = 0x100
+        val b: u16 = 0x100
+        val c = a * b
+        assert(i32(c) == 0, s"got ${i32(c)}")
+
+Signed wrap — `+` overflows from MAX to MIN
+---------------------------------------------
+
+### `i32 MAX + 1` → i32 MIN
+
+    #test
+    test_iov_i32_add_max_plus_one() -> unit
+        val a: i32 = 2147483647
+        val c = a + 1
+        assert(c == -2147483648, s"got $c")
+
+### `i32 MAX + i32 MAX` → -2
+
+    #test
+    test_iov_i32_add_max_plus_max() -> unit
+        val a: i32 = 2147483647
+        val c = a + a
+        assert(c == -2, s"got $c")
+
+### `i8(127) + i8(1)` → -128
+
+    #test
+    test_iov_i8_add_wrap_to_min() -> unit
+        val a: i8 = 127
+        val b: i8 = 1
+        val c = a + b
+        assert(i32(c) == -128, s"got ${i32(c)}")
+
+### `i16(0x7FFF) + i16(1)` → -32768
+
+    #test
+    test_iov_i16_add_wrap_to_min() -> unit
+        val a: i16 = 32767
+        val b: i16 = 1
+        val c = a + b
+        assert(i32(c) == -32768, s"got ${i32(c)}")
+
+### `i64 MAX + 1` → i64 MIN
+
+    #test
+    test_iov_i64_add_max_plus_one() -> unit
+        val a: i64 = 9223372036854775807i64
+        val c = a + 1i64
+        // i64 MIN
+        val expected: i64 = -9223372036854775807i64 - 1i64
+        assert(c == expected, s"got $c")
+
+Signed wrap — `-` underflows from MIN
+--------------------------------------
+
+### `i32 MIN - 1` → i32 MAX
+
+    #test
+    test_iov_i32_sub_min_minus_one() -> unit
+        val a: i32 = -2147483648
+        val c = a - 1
+        assert(c == 2147483647, s"got $c")
+
+### `i8(-128) - i8(1)` → 127
+
+    #test
+    test_iov_i8_sub_min_minus_one() -> unit
+        val a: i8 = -128
+        val b: i8 = 1
+        val c = a - b
+        assert(i32(c) == 127, s"got ${i32(c)}")
+
+### `i64 MIN - 1` → i64 MAX
+
+    #test
+    test_iov_i64_sub_min_minus_one() -> unit
+        val a: i64 = -9223372036854775807i64 - 1i64
+        val c = a - 1i64
+        assert(c == 9223372036854775807i64, s"got $c")
+
+Signed wrap — `*` keeps low bits with two's-complement sign
+-------------------------------------------------------------
+
+### `i8(64) * i8(2)` → -128 (low byte of 128, top bit set)
+
+    #test
+    test_iov_i8_mul_to_min() -> unit
+        val a: i8 = 64
+        val b: i8 = 2
+        val c = a * b
+        assert(i32(c) == -128, s"got ${i32(c)}")
+
+### `i32(65536) * i32(65536)` → 0 (low 32 bits of 2^32)
+
+    #test
+    test_iov_i32_mul_to_zero() -> unit
+        val a: i32 = 65536
+        val b: i32 = 65536
+        val c = a * b
+        assert(c == 0, s"got $c")
+
+### `i32 MIN * -1` → i32 MIN (the one signed-overflow case where negation overflows)
+
+    #test
+    test_iov_i32_neg_min_wraps() -> unit
+        val a: i32 = -2147483648
+        val c = a * -1
+        // -INT_MIN = INT_MIN under two's-complement wrap
+        assert(c == -2147483648, s"got $c")
+
+Result type matches operand type — no implicit promotion
+---------------------------------------------------------
+
+If `+` widened `u8` to `int`, then `u8(200) + u8(100)` would be 300,
+not 44. The wrap behaviour pinned above implicitly tests this, but the
+following test also pins the result's *width* — the result fits in a
+`u8` variable directly without truncation.
+
+### `u8(200) + u8(100)` fits in a u8 variable
+
+    #test
+    test_iov_u8_result_width() -> unit
+        val a: u8 = 200
+        val b: u8 = 100
+        val c: u8 = a + b
+        assert(i32(c) == 44, s"got ${i32(c)}")

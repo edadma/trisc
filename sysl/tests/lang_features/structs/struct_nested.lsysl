@@ -1,0 +1,221 @@
+Nested Structs — Field of Field
+================================
+
+A struct field can itself be a struct, forming a tree of
+value structs. Accessing or mutating a deep field uses
+`outer.inner.field` syntax. The codegen has to compute the
+correct offset chain into the outer's storage and read/write
+at the right depth.
+
+This file pins:
+
+- Two-level nesting: outer holds an inner struct field.
+- Three-level nesting: outer holds an inner holding a leaf.
+- Reading via the field-of-field path.
+- Mutating via field-of-field assignment.
+- Constructing nested structs literally (positional and named).
+- Returning a nested struct from a function (deep value return).
+- Function arg / return preserves all nested data.
+- Method on outer accessing the inner field.
+- Outer.copy_inner() helper that produces a fresh nested.
+
+File-local prefix `Ssn` (Sysl Struct Nested).
+
+    module sysl.tests.lang_features
+
+Two-level nesting
+------------------
+
+    struct Inner
+        a: int
+        b: int
+
+    struct Outer
+        inner: Inner
+        tag: int
+
+### Direct read of deep field
+
+    #test
+    test_ssn_two_level_read() -> unit
+        val o = Outer(Inner(1, 2), 100)
+        assert(o.inner.a == 1, "a")
+        assert(o.inner.b == 2, "b")
+        assert(o.tag == 100, "tag")
+
+### Direct assignment to deep field
+
+    #test
+    test_ssn_two_level_assign() -> unit
+        var o = Outer(Inner(0, 0), 0)
+        o.inner.a = 10
+        o.inner.b = 20
+        o.tag = 100
+        assert(o.inner.a == 10, "a")
+        assert(o.inner.b == 20, "b")
+        assert(o.tag == 100, "tag")
+
+### Named-construction of outer with named inner
+
+    #test
+    test_ssn_two_level_named_construction() -> unit
+        val o = Outer(inner = Inner(a = 7, b = 8), tag = 5)
+        assert(o.inner.a == 7, "a")
+        assert(o.inner.b == 8, "b")
+        assert(o.tag == 5, "tag")
+
+Three-level nesting
+--------------------
+
+    struct Mid
+        leaf: Inner
+        n: int
+
+    struct Top
+        mid: Mid
+        version: int
+
+### Reading the leaf through three levels
+
+    #test
+    test_ssn_three_level_read() -> unit
+        val t = Top(Mid(Inner(1, 2), 99), 7)
+        assert(t.mid.leaf.a == 1, "leaf.a")
+        assert(t.mid.leaf.b == 2, "leaf.b")
+        assert(t.mid.n == 99, "mid.n")
+        assert(t.version == 7, "version")
+
+### Mutating the leaf through three levels
+
+    #test
+    test_ssn_three_level_assign() -> unit
+        var t = Top(Mid(Inner(0, 0), 0), 0)
+        t.mid.leaf.a = 100
+        t.mid.leaf.b = 200
+        t.mid.n = 300
+        t.version = 400
+        assert(t.mid.leaf.a == 100, "leaf.a")
+        assert(t.mid.leaf.b == 200, "leaf.b")
+        assert(t.mid.n == 300, "mid.n")
+        assert(t.version == 400, "version")
+
+Mixed field assignment patterns
+--------------------------------
+
+### Mutate only the deepest field, others preserved
+
+    #test
+    test_ssn_partial_assign_deepest() -> unit
+        var o = Outer(Inner(11, 22), 33)
+        o.inner.a = 999
+        assert(o.inner.a == 999, "deep mutated")
+        assert(o.inner.b == 22, "sibling untouched")
+        assert(o.tag == 33, "outer untouched")
+
+### Reset whole inner via inner-struct assignment
+
+    #test
+    test_ssn_whole_inner_replace() -> unit
+        var o = Outer(Inner(1, 2), 9)
+        o.inner = Inner(7, 8)
+        assert(o.inner.a == 7, "a")
+        assert(o.inner.b == 8, "b")
+        assert(o.tag == 9, "tag preserved")
+
+Returning a nested struct from a function
+------------------------------------------
+
+    make_outer(a: int, b: int, t: int) -> Outer
+        return Outer(Inner(a, b), t)
+
+### Returned nested struct is fully readable
+
+    #test
+    test_ssn_returned_nested() -> unit
+        val o = make_outer(3, 4, 5)
+        assert(o.inner.a == 3, "a")
+        assert(o.inner.b == 4, "b")
+        assert(o.tag == 5, "tag")
+
+### Returned three-level nested
+
+    make_top(a: int, b: int, n: int, v: int) -> Top
+        return Top(Mid(Inner(a, b), n), v)
+
+    #test
+    test_ssn_returned_three_level() -> unit
+        val t = make_top(1, 2, 3, 4)
+        assert(t.mid.leaf.a == 1, "a")
+        assert(t.mid.leaf.b == 2, "b")
+        assert(t.mid.n == 3, "n")
+        assert(t.version == 4, "v")
+
+Passing a nested struct as an argument
+---------------------------------------
+
+    sum_outer(o: Outer) -> int =
+        o.inner.a + o.inner.b + o.tag
+
+    sum_top(t: Top) -> int =
+        t.mid.leaf.a + t.mid.leaf.b + t.mid.n + t.version
+
+### Pass by value to function; sum fields
+
+    #test
+    test_ssn_pass_nested_to_fn() -> unit
+        val o = Outer(Inner(1, 2), 7)
+        val s = sum_outer(o)
+        assert(s == 10, s"1+2+7; got $s")
+
+### Pass three-level by value
+
+    #test
+    test_ssn_pass_three_level_to_fn() -> unit
+        val t = Top(Mid(Inner(1, 2), 3), 4)
+        val s = sum_top(t)
+        assert(s == 10, s"1+2+3+4; got $s")
+
+Method on outer accessing inner field
+--------------------------------------
+
+    Outer.inner_sum() -> int = self.inner.a + self.inner.b
+
+    Outer.bump_inner() -> unit
+        self.inner.a = self.inner.a + 1
+        self.inner.b = self.inner.b + 1
+
+### Read method that combines inner fields
+
+    #test
+    test_ssn_method_reads_inner() -> unit
+        val o = Outer(Inner(3, 4), 0)
+        assert(o.inner_sum() == 7, "3+4")
+
+### Mutating method bumps inner fields
+
+    #test
+    test_ssn_method_mutates_inner() -> unit
+        var o = Outer(Inner(0, 0), 0)
+        o.bump_inner()
+        o.bump_inner()
+        o.bump_inner()
+        assert(o.inner.a == 3, "a")
+        assert(o.inner.b == 3, "b")
+
+Outer constructs and returns a fresh nested
+--------------------------------------------
+
+### `Outer.swap_inner()` returns Outer with inner.a and inner.b swapped
+
+    Outer.swap_inner() -> Outer = Outer(Inner(self.inner.b, self.inner.a), self.tag)
+
+    #test
+    test_ssn_returns_nested_struct() -> unit
+        val o = Outer(Inner(10, 20), 99)
+        val q = o.swap_inner()
+        assert(q.inner.a == 20, "swapped a")
+        assert(q.inner.b == 10, "swapped b")
+        assert(q.tag == 99, "tag")
+        // Original untouched
+        assert(o.inner.a == 10, "orig a")
+        assert(o.inner.b == 20, "orig b")

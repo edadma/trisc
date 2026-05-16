@@ -1,0 +1,220 @@
+Float Comparison
+=================
+
+Per IEEE 754: any comparison involving NaN returns `false`,
+including `NaN == NaN`. Sysl follows the IEEE rule for
+`<`, `<=`, `>`, `>=`, `==`, and `!=` on floats (the existing
+`float_extremes.lsysl` already pins `NaN != NaN`).
+
+This file pins the comparison ordering on **finite** floats
+(where IEEE behaves as standard arithmetic), plus the
+NaN-poisons-comparison rule across each operator, plus
+infinity ordering.
+
+Pins:
+
+- Basic ordered comparisons of finite values.
+- Strict vs non-strict inequality boundaries.
+- NaN poisons every ordering comparison.
+- NaN != NaN is `true` (the canonical IEEE rule).
+- Signed zero comparisons: `-0.0 == 0.0`.
+- Infinity ordering: `-inf < finite < +inf`.
+- Mixed-sign comparisons.
+- Comparisons inside if-conditions and boolean expressions.
+
+File-local prefix `Sfc` (Sysl Float Compare).
+
+    module sysl.tests.lang_features
+
+Basic finite ordering
+----------------------
+
+### Less-than on positive finites
+
+    #test
+    test_sfc_lt_positive() -> unit
+        assert(1.0 < 2.0, "1<2")
+        assert(!(2.0 < 1.0), "!(2<1)")
+        assert(!(1.0 < 1.0), "!(1<1) — strict")
+
+### Less-than-or-equal on positive finites
+
+    #test
+    test_sfc_le_positive() -> unit
+        assert(1.0 <= 2.0, "1<=2")
+        assert(1.0 <= 1.0, "1<=1 — non-strict")
+        assert(!(2.0 <= 1.0), "!(2<=1)")
+
+### Greater-than and greater-than-or-equal
+
+    #test
+    test_sfc_gt_ge_positive() -> unit
+        assert(2.0 > 1.0, "2>1")
+        assert(!(1.0 > 1.0), "!(1>1)")
+        assert(2.0 >= 1.0, "2>=1")
+        assert(2.0 >= 2.0, "2>=2")
+
+### Equality and inequality on finites
+
+    #test
+    test_sfc_eq_ne_finite() -> unit
+        assert(1.0 == 1.0, "1==1")
+        assert(!(1.0 == 2.0), "!(1==2)")
+        assert(1.0 != 2.0, "1!=2")
+        assert(!(1.0 != 1.0), "!(1!=1)")
+
+Negative finite ordering
+-------------------------
+
+### Negative-positive crossover
+
+    #test
+    test_sfc_neg_pos() -> unit
+        assert(-1.0 < 1.0, "-1 < 1")
+        assert(1.0 > -1.0, "1 > -1")
+        assert(-2.0 < -1.0, "-2 < -1 (more negative is less)")
+
+### Mixed range chain
+
+    #test
+    test_sfc_chain_ordering() -> unit
+        val a = -3.0
+        val b = -1.5
+        val c = 0.0
+        val d = 1.5
+        val e = 3.0
+        assert(a < b, "a<b")
+        assert(b < c, "b<c")
+        assert(c < d, "c<d")
+        assert(d < e, "d<e")
+
+Signed zero
+------------
+
+### -0.0 == 0.0
+
+    #test
+    test_sfc_signed_zero_eq() -> unit
+        val pz = 0.0
+        val nz = -0.0
+        assert(pz == nz, "0.0 == -0.0")
+        assert(!(pz != nz), "!(0.0 != -0.0)")
+
+### -0.0 not < 0.0 (they are equal)
+
+    #test
+    test_sfc_signed_zero_lt() -> unit
+        val pz = 0.0
+        val nz = -0.0
+        assert(!(nz < pz), "-0.0 not < 0.0")
+        assert(!(pz < nz), "0.0 not < -0.0")
+
+NaN poisoning
+--------------
+
+NaN against anything (including itself) returns false for
+ordering comparisons. NaN != NaN is true.
+
+    #test
+    test_sfc_nan_lt_anything_is_false() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(nan < 1.0), "NaN < 1 false")
+        assert(!(nan < -1.0), "NaN < -1 false")
+        assert(!(nan < 0.0), "NaN < 0 false")
+        assert(!(nan < nan), "NaN < NaN false")
+
+    #test
+    test_sfc_anything_lt_nan_is_false() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(1.0 < nan), "1 < NaN false")
+        assert(!(-1.0 < nan), "-1 < NaN false")
+        assert(!(0.0 < nan), "0 < NaN false")
+
+    #test
+    test_sfc_nan_le_anything_is_false() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(nan <= 1.0), "NaN <= 1 false")
+        assert(!(1.0 <= nan), "1 <= NaN false")
+        assert(!(nan <= nan), "NaN <= NaN false")
+
+    #test
+    test_sfc_nan_gt_ge_is_false() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(nan > 1.0), "NaN > 1 false")
+        assert(!(1.0 > nan), "1 > NaN false")
+        assert(!(nan >= 1.0), "NaN >= 1 false")
+        assert(!(1.0 >= nan), "1 >= NaN false")
+
+    #test
+    test_sfc_nan_eq_is_false_ne_is_true() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(nan == 1.0), "NaN == 1 false")
+        assert(nan != 1.0, "NaN != 1 true")
+        assert(nan != nan, "NaN != NaN true (canonical)")
+
+Infinity ordering
+------------------
+
+### +inf is greater than every finite
+
+    #test
+    test_sfc_pos_inf_compare() -> unit
+        val inf = 1.0e308 * 10.0
+        assert(inf > 0.0, "+inf > 0")
+        assert(inf > 1.0e100, "+inf > 1e100")
+        assert(inf > -1.0e308, "+inf > -1e308")
+        assert(!(inf < inf), "!(+inf < +inf)")
+
+### -inf is less than every finite
+
+    #test
+    test_sfc_neg_inf_compare() -> unit
+        val neg_inf = -1.0e308 * 10.0
+        assert(neg_inf < 0.0, "-inf < 0")
+        assert(neg_inf < -1.0e100, "-inf < -1e100")
+        assert(neg_inf < 1.0e308, "-inf < 1e308")
+        assert(!(neg_inf > neg_inf), "!(-inf > -inf)")
+
+### +inf > -inf
+
+    #test
+    test_sfc_inf_vs_neg_inf() -> unit
+        val inf = 1.0e308 * 10.0
+        val neg_inf = -inf
+        assert(inf > neg_inf, "+inf > -inf")
+        assert(neg_inf < inf, "-inf < +inf")
+        assert(inf != neg_inf, "+inf != -inf")
+
+Comparisons in if / boolean contexts
+-------------------------------------
+
+### Comparison drives if branch
+
+    #test
+    test_sfc_in_if() -> unit
+        var r = 0
+        val a = 3.0
+        val b = 5.0
+        if a < b then r = 1
+        else r = 2
+        assert(r == 1, "branch picked")
+
+### Comparison combined with `&&`
+
+    #test
+    test_sfc_in_and() -> unit
+        val a = 1.0
+        val b = 2.0
+        val c = 3.0
+        val ok = a < b && b < c
+        assert(ok, "chain &&")
+
+### Comparison combined with `||`
+
+    #test
+    test_sfc_in_or() -> unit
+        val a = 5.0
+        val b = 3.0
+        val c = 2.0
+        // a > b (true) OR b < c (false) → true
+        assert(a > b || b < c, "first arm")

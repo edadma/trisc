@@ -1,0 +1,178 @@
+Cross-File Generic Type Aliases
+================================
+
+A generic type alias declared in one file of a multi-file module
+must be usable with full generic syntax (`Name[T]`) from any
+other file in the same module — same rule as generic functions
+and generic structs.
+
+Per reference §Modules + §Generic Type Aliases.
+
+Pins the regression fixed at sysl@2c4f1c095 ("generic type
+aliases visible across files of same module"):
+
+  - `type Name[T] = ...` declared in `generic_helpers.lsysl`
+    resolves with `Name[int]` syntax from this sibling file.
+  - Resolves in function-parameter type position.
+  - Resolves at multiple concrete instantiations side-by-side.
+  - Two-parameter aliases work cross-file (`type Name[A, B]`).
+  - Newtype-shaped alias (body is the type variable itself)
+    works.
+
+What this file does NOT pin:
+
+- Same-file generic alias surfaces (covered by
+  `generic_alias_basic.lsysl` in the parent directory).
+- Cross-MODULE generic alias import (would need an explicit
+  `import` and a different module — this file pins the
+  cross-FILE / same-module path).
+- Alias-as-struct-field-type (the field-type analyzer gap
+  documented at the bottom of `generic_alias_basic.lsysl`
+  is separate from the sibling-visibility regression pinned
+  here; it would block this test the same way it blocks the
+  in-file test).
+
+File-local prefix `Gacf` (Generic-Alias Cross-File).
+
+    module sysl.tests.lang_features.generics.siblings
+
+
+Function-typed alias — single type parameter
+---------------------------------------------
+
+The helper file declares `type GhUnary[T] = (T) -> T` and
+`gh_apply_unary(f: GhUnary[int], x: int) -> int = f(x)`.
+
+### Pass a closure literal matching the imported alias' instantiation
+
+The call site supplies a closure whose shape `int -> int` is
+exactly what `GhUnary[int]` denotes. If the cross-file alias
+import is broken, the helper function itself fails to compile
+(the alias name doesn't resolve in the parameter type) and the
+whole unit fails to build.
+
+    #test
+    test_gacf_unary_closure_arrow() -> unit
+        val r = gh_apply_unary(x -> x + 1, 41)
+        assert(r == 42, s"42; got $r")
+
+### Pass the bare-call placeholder `_ * _` at the same alias
+
+`_ * 2` is a single-arg closure inferred to `(int) -> int` and
+must match `GhUnary[int]` the same way the explicit `x -> ...`
+form does.
+
+    #test
+    test_gacf_unary_placeholder() -> unit
+        val r = gh_apply_unary(_ * 2, 21)
+        assert(r == 42, s"42; got $r")
+
+### Same alias, second call site — distinct test
+
+Pin that a second `gh_apply_unary` call with a different
+closure body resolves the same way as the first. We keep this
+in its own test rather than chaining both calls in one body
+because SVM has a known stack/closure regression with two
+back-to-back HOF calls in a single function body (see ROADMAP
+note on `apply_twice` in `generic_fn_basic.lsysl`; this file
+inherits the constraint).
+
+    #test
+    test_gacf_unary_second_call_site() -> unit
+        val b = gh_apply_unary(x -> x * 5, 4)
+        assert(b == 20, s"b=$b")
+
+
+Function-typed alias — two type parameters
+-------------------------------------------
+
+`gh_apply_bin(f: GhBin[int, int], a: int, b: int) -> int` uses
+the two-parameter alias `type GhBin[A, B] = (A, A) -> B`.
+
+### Pass a two-arg closure matching `GhBin[int, int]`
+
+    #test
+    test_gacf_bin_two_args() -> unit
+        val r = gh_apply_bin(_ + _, 10, 20)
+        assert(r == 30, s"10+20; got $r")
+
+### Two-arg closure with body that uses both params
+
+    #test
+    test_gacf_bin_two_args_arrow() -> unit
+        val r = gh_apply_bin((a, b) -> a * b + 1, 6, 7)
+        assert(r == 43, s"6*7+1; got $r")
+
+
+Newtype-shaped alias — body is the type variable
+-------------------------------------------------
+
+The helper declares `type GhIdAlias[T] = T`. There is no
+codegen for this kind of alias — it's pure type-level
+abbreviation. The test pins that the sibling file can name
+`GhIdAlias[int]` in a function signature without the analyzer
+rejecting it as "not a generic type" (the exact symptom from
+the regression).
+
+    gacf_use_id_alias(x: GhIdAlias[int]) -> int = x + 100
+
+### Newtype alias instantiated as a parameter type
+
+    #test
+    test_gacf_id_alias_int_param() -> unit
+        val r = gacf_use_id_alias(7)
+        assert(r == 107, s"got $r")
+
+### Newtype alias at a different concrete instantiation
+
+    gacf_use_id_alias_str(s: GhIdAlias[string]) -> int = len(s)
+
+    #test
+    test_gacf_id_alias_string_param() -> unit
+        val r = gacf_use_id_alias_str("hello")
+        assert(r == 5, s"got $r")
+
+
+Alias in a locally-declared function-parameter type
+---------------------------------------------------
+
+Beyond using the helper's `gh_apply_unary`, declare a brand-new
+local function in **this** file whose parameter type names the
+sibling-imported alias `GhUnary`. This pins the analyzer
+resolving the imported alias *during analysis of this file's
+declarations*, not just the helper's.
+
+    gacf_local_apply(f: GhUnary[int], x: int) -> int = f(x) + 1
+
+### Local function using sibling-imported alias resolves and runs
+
+    #test
+    test_gacf_local_uses_imported_alias() -> unit
+        val r = gacf_local_apply(x -> x * 3, 4)
+        assert(r == 13, s"4*3+1; got $r")
+
+
+Two distinct sibling-imported aliases coexist
+----------------------------------------------
+
+Both aliases must resolve from the helper file. We pin each in
+its own one-call test rather than mixing them in a single body
+because of the same SVM HOF-chaining stack regression noted
+above. The compile-time fact this section pins — that both
+`GhUnary` and `GhBin` resolve as types in this file — is
+already exercised by the standalone tests above; the runtime
+companion is two isolated calls.
+
+### Single `GhUnary[int]` call site — sanity
+
+    #test
+    test_gacf_unary_alone() -> unit
+        val u = gh_apply_unary(x -> x + 10, 5)
+        assert(u == 15, s"unary; got $u")
+
+### Single `GhBin[int, int]` call site — sanity
+
+    #test
+    test_gacf_bin_alone() -> unit
+        val b = gh_apply_bin(_ - _, 100, 15)
+        assert(b == 85, s"bin; got $b")

@@ -1,0 +1,228 @@
+Interface Methods with Parametric Types
+========================================
+
+Sysl interfaces don't carry type parameters (`interface Iter[T]`
+isn't supported) and their methods can't declare their own type
+parameters. The closest thing to a "generic method on an
+interface" is a method whose signature uses sysl's built-in
+parametric type constructors — slices (`[]T`), pointers (`*T`),
+fixed arrays (`[n]T`) — at concrete element types. This is the
+pattern `std/io` uses: `Reader.read(buf: []byte) -> int`.
+
+This file pins:
+
+- Interface method takes a slice argument — call site supplies a
+  slice, dispatch returns the slice's length.
+- Two different concretes implementing the same slice-param iface
+  dispatch to each impl's own slice consumer.
+- An interface method returning a slice / array — the boxed
+  receiver decides the contents.
+- Slice-of-struct argument through the iface preserves the struct
+  data.
+
+File-local prefix `Sigm` (Sysl Iface Generic Method).
+
+**Feature gap — generic-struct → interface dispatch:**
+
+  A generic struct (`Box[T]`) implementing a non-generic interface
+  is NOT currently supported. The analyzer rejects calls like
+  `use_counter(b)` where `b: Box[int]` with the error
+  `expects Counter, got Box_i32`. Root cause: `satisfiesInterface`
+  looks up methods by the mangled struct name (`Box_i32`) but the
+  generic method's template is keyed by the template name (`Box`).
+  Even with a template-fallback lookup, the runtime iface dispatch
+  builds the methodMap as `${structName}_$method` (= `Box_i32_bump`),
+  while the method-call site instantiates the template under the
+  reverse naming `${templateName}_$method_$typeArgs` (= `Box_bump_i32`).
+  Fixing this needs a coordinated change to (1) the analyzer's
+  `satisfiesInterface` to monomorphize the method, and (2) the
+  iface boxing path in every backend to use the
+  template-instantiation naming convention.
+
+  Repro (commented out — restore when fixed):
+
+      // struct Box[T]
+      //     n: int
+      // Box[T].bump() -> unit
+      //     self.n = self.n + 1
+      // Box[T].get() -> int = self.n
+      // interface Counter
+      //     bump() -> unit
+      //     get() -> int
+      // use_counter(c: Counter) -> int
+      //     c.bump(); c.bump(); return c.get()
+      //
+      // test: `var b = Box[int](0); use_counter(b) == 2`
+
+    module sysl.tests.lang_features
+
+Slice-param interface method
+-----------------------------
+
+`Sink.write(buf: []byte) -> int` mirrors std/io's Writer pattern.
+
+    interface Sink
+        write(buf: []byte) -> int
+
+    struct Logger
+        count: int
+
+    Logger.write(buf: []byte) -> int
+        self.count = self.count + len(buf)
+        return len(buf)
+
+### Box Logger into Sink and write a 3-byte slice
+
+    drain(s: Sink, data: []byte) -> int = s.write(data)
+
+    #test
+    test_sigm_slice_param_basic() -> unit
+        var l = Logger(0)
+        val buf = new [3]byte
+        buf[0] = byte('a')
+        buf[1] = byte('b')
+        buf[2] = byte('c')
+        val n = drain(l, buf[:])
+        assert(n == 3, s"got $n")
+        assert(l.count == 3, s"count; got ${l.count}")
+
+### Empty slice — write returns 0
+
+    #test
+    test_sigm_slice_param_empty() -> unit
+        var l = Logger(0)
+        val buf = new [4]byte
+        val n = drain(l, buf[:0])
+        assert(n == 0, s"got $n")
+        assert(l.count == 0, "no bytes consumed")
+
+### Multiple drains accumulate state through the iface
+
+    #test
+    test_sigm_slice_param_accumulates() -> unit
+        var l = Logger(0)
+        val a = new [2]byte
+        val b = new [5]byte
+        drain(l, a[:])
+        drain(l, b[:])
+        assert(l.count == 7, s"2+5; got ${l.count}")
+
+Two impls of the same slice-param interface
+--------------------------------------------
+
+Two concretes (`Counter` and `Echo`) both implement
+`Sink.write([]byte) -> int`. Calling `drain` with each picks the
+right impl.
+
+    struct EchoSink
+        last_len: int
+
+    EchoSink.write(buf: []byte) -> int
+        self.last_len = len(buf)
+        return len(buf) * 2
+
+### Dispatch to Logger.write vs EchoSink.write
+
+    #test
+    test_sigm_two_impls_distinct() -> unit
+        var l = Logger(0)
+        var e = EchoSink(0)
+        val buf = new [4]byte
+        val nl = drain(l, buf[:])
+        val ne = drain(e, buf[:])
+        // Logger returns len = 4; EchoSink returns len*2 = 8
+        assert(nl == 4, s"Logger; got $nl")
+        assert(ne == 8, s"EchoSink; got $ne")
+
+Interface method returning a slice
+-----------------------------------
+
+`Producer.emit() -> []int` — boxed receiver decides what slice is
+produced.
+
+    interface Producer
+        emit() -> []int
+
+    struct Sequence
+        start: int
+        n: int
+
+    Sequence.emit() -> []int
+        val out = new [self.n]int
+        var i = 0
+        while i < self.n
+            out[i] = self.start + i
+            i = i + 1
+        return out[:]
+
+### Sequence(10, 3).emit() through iface returns [10, 11, 12]
+
+    collect(p: Producer) -> []int = p.emit()
+
+    #test
+    test_sigm_iface_returns_slice() -> unit
+        val s = Sequence(10, 3)
+        val v = collect(s)
+        assert(len(v) == 3, s"len; got ${len(v)}")
+        assert(v[0] == 10, "v[0]")
+        assert(v[1] == 11, "v[1]")
+        assert(v[2] == 12, "v[2]")
+
+### Single-element production via iface
+
+    #test
+    test_sigm_iface_returns_singleton_slice() -> unit
+        val s = Sequence(42, 1)
+        val v = collect(s)
+        assert(len(v) == 1, "len 1")
+        assert(v[0] == 42, "the single element")
+
+### Empty production via iface
+
+    #test
+    test_sigm_iface_returns_empty_slice() -> unit
+        val s = Sequence(0, 0)
+        val v = collect(s)
+        assert(len(v) == 0, "empty")
+
+Slice-of-struct argument through the iface
+-------------------------------------------
+
+`Inspector.scan(items: []Point) -> int` — the slice's element type
+is itself a user-defined struct. Dispatch must preserve the
+element layout.
+
+    struct Point
+        x: int
+        y: int
+
+    interface Inspector
+        scan(items: []Point) -> int
+
+    struct Sum
+        total: int
+
+    Sum.scan(items: []Point) -> int
+        var s = 0
+        var i = 0
+        while i < len(items)
+            s = s + items[i].x + items[i].y
+            i = i + 1
+        self.total = s
+        return s
+
+### Pass a 3-element slice of Point through the iface
+
+    inspect(insp: Inspector, items: []Point) -> int = insp.scan(items)
+
+    #test
+    test_sigm_slice_of_struct_arg() -> unit
+        var summer = Sum(0)
+        val arr = new [3]Point
+        arr[0] = Point(1, 2)
+        arr[1] = Point(3, 4)
+        arr[2] = Point(5, 6)
+        val total = inspect(summer, arr[:])
+        // 1+2+3+4+5+6 = 21
+        assert(total == 21, s"got $total")
+        assert(summer.total == 21, s"impl wrote total; got ${summer.total}")
