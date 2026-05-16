@@ -45,6 +45,8 @@ SYSL_FILES=(
     oskit/services/services.lsysl
     std/alloc/alloc.lsysl
     oskit/posix/shim.lsysl
+    oskit/posix/unix.lsysl
+    oskit/posix/signals.lsysl
 )
 
 # App-specific extra modules

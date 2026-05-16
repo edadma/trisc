@@ -1,0 +1,189 @@
+POSIX signal-state shims (Phase 2 chunk 1+2)
+============================================
+
+Wire-format translators between musl's `struct k_sigaction` /
+8-byte kernel-shape `sigset_t` and the kernel-side native types,
+plus the kill/tkill generation entrypoints.
+
+Chunk 1 (sigaction/sigprocmask/sigpending) only stores and queries
+state; chunk 2 (kill/tkill) sets pending bits but the delivery side
+isn't wired until chunk 3, so handler bits stored here have no
+observable effect yet. The work that sees these shims fire is libc
+startup probing default disposition plus the C test program in
+`slix/test/sigact.c`.
+
+This file is part of `module oskit.posix` — the same module as
+`shim.lsysl`. Cross-file references (`shim_read_le_i64`,
+`shim_write_le_i64`, errno vals) resolve via shared module scope.
+The dispatch entries (134/135/136/214/360) live in
+`shim.lsysl::posix_dispatch`.
+
+    module oskit.posix
+
+    import oskit.kernel.{kernel_sigaction_set, kernel_sigmask_set,
+        kernel_sigpending_get, kernel_sig_send_to_thread,
+        kernel_sig_send_to_process}
+
+
+sys_rt_sigaction
+----------------
+
+**Important:** musl does NOT pass its userspace 152-byte `struct
+sigaction` directly to `rt_sigaction` — it wraps it in a compact
+32-byte kernel-shape `struct k_sigaction` (see
+`slix/musl/src/internal/ksigaction.h` and the per-arch override at
+`slix/musl/arch/x86_64-slix/ksigaction.h`). slix-musl defines
+`SA_RESTORER` for both aarch64 and x86_64, so both arches use the
+same kernel-shape layout:
+
+```
+offset 0:  handler   (8B, fn ptr or SIG_DFL=0 / SIG_IGN=1)
+offset 8:  flags     (8B, unsigned long — high 32 always 0)
+offset 16: restorer  (8B, fn ptr to libc __restore_rt)
+offset 24: mask      (8B = unsigned mask[2], LE;
+                      low u32 = signals 1..32,
+                      high u32 = signals 33..64)
+```
+
+`sigsetsize` arg passed by musl is `_NSIG/8 = 8` for slix-musl.
+We accept anything ≥ 8 and ignore.
+
+Likewise `sigset_t` for rt_sigprocmask / rt_sigpending is the
+kernel-shape 8-byte mask (NOT musl's 128-byte userspace
+`sigset_t`).
+
+SYS_RT_SIGACTION (283). Args: a0=signo, a1=*act (or 0), a2=*oldact
+(or 0), a3=sigsetsize. Returns 0 on success, -EINVAL on bad signo
+or SIGKILL/SIGSTOP override attempt.
+
+    sys_rt_sigaction(signo: int, act_va: i64, oldact_va: i64, sigsetsize: int) -> i64
+        if signo <= 0 || signo > 64
+            return i64(-EINVAL)
+        if sigsetsize < 8
+            return i64(-EINVAL)
+
+        var new_h: i64 = i64(0)
+        var new_f: i32 = i32(0)
+        var new_m: i64 = i64(0)
+        var new_r: i64 = i64(0)
+        var install = 0
+        if act_va != i64(0)
+            val ap: *byte = *byte(act_va)
+            new_h = shim_read_le_i64(ap, 0)
+            new_f = i32(shim_read_le_i64(ap, 8) & i64(0xFFFFFFFF))
+            new_r = shim_read_le_i64(ap, 16)
+            new_m = shim_read_le_i64(ap, 24)
+            install = 1
+
+        var old_h: i64 = i64(0)
+        var old_f: i32 = i32(0)
+        var old_m: i64 = i64(0)
+        var old_r: i64 = i64(0)
+        val rc = kernel_sigaction_set(signo, new_h, new_f, new_m, new_r, install,
+                                      &old_h, &old_f, &old_m, &old_r)
+        if rc == -1
+            return i64(-EINVAL)
+        if rc == -2
+            return i64(-EINVAL)
+
+        if oldact_va != i64(0)
+            val op: *byte = *byte(oldact_va)
+            shim_write_le_i64(op, 0,  old_h)
+            shim_write_le_i64(op, 8,  i64(int(old_f)) & i64(0xFFFFFFFF))
+            shim_write_le_i64(op, 16, old_r)
+            shim_write_le_i64(op, 24, old_m)
+
+        i64(0)
+
+
+sys_rt_sigprocmask
+------------------
+
+SYS_RT_SIGPROCMASK (285). Args: a0=how, a1=*newset (or 0),
+a2=*oldset (or 0), a3=sigsetsize. `how` is SIG_BLOCK=0 /
+SIG_UNBLOCK=1 / SIG_SETMASK=2 (matches musl).
+
+    sys_rt_sigprocmask(how: int, newset_va: i64, oldset_va: i64, sigsetsize: int) -> i64
+        if sigsetsize < 8
+            return i64(-EINVAL)
+        if how < -1 || how > 2
+            return i64(-EINVAL)
+        var newmask: i64 = i64(0)
+        var actual_how = -1   // query-only by default
+        if newset_va != i64(0)
+            val np: *byte = *byte(newset_va)
+            newmask = shim_read_le_i64(np, 0)
+            actual_how = how
+        val oldmask = kernel_sigmask_set(actual_how, newmask)
+        if oldset_va != i64(0)
+            val op: *byte = *byte(oldset_va)
+            shim_write_le_i64(op, 0, oldmask)
+        i64(0)
+
+
+sys_rt_sigpending
+-----------------
+
+SYS_RT_SIGPENDING (284). Args: a0=*set, a1=sigsetsize. Writes the
+caller-thread's pending bitmap (8 bytes, kernel-shape) and returns 0.
+
+    sys_rt_sigpending(set_va: i64, sigsetsize: int) -> i64
+        if sigsetsize < 8
+            return i64(-EINVAL)
+        if set_va == i64(0)
+            return i64(-EFAULT)
+        val pending = kernel_sigpending_get()
+        val sp: *byte = *byte(set_va)
+        shim_write_le_i64(sp, 0, pending)
+        i64(0)
+
+
+sys_kill
+--------
+
+SYS_KILL (214). Args: a0=pid, a1=signo. POSIX `kill(pid, sig)`.
+Sends `signo` to every thread in the target process; SIGKILL is
+the synchronous-terminate fast path. `signo == 0` is the
+"does this pid exist?" probe — kernel reports ESRCH if not.
+Returns 0 on success, -EINVAL on a bad signo, -ESRCH on a free /
+zombie pid. The "broadcast to all threads" choice is the
+chunk-2 stopgap — chunk 3's delivery side will pick one
+eligible thread when handlers actually fire.
+
+Pid <= 0 forms (kill(0,_) → process-group; kill(-1,_) → broadcast
+to every process the caller may signal) are not yet supported;
+they return ESRCH for now. Process groups are a Phase-3 follow-up.
+
+    sys_kill(pid: int, signo: int) -> i64
+        if pid <= 0
+            return i64(-ESRCH)
+        if signo < 0 || signo > 64
+            return i64(-EINVAL)
+        val rc = kernel_sig_send_to_process(pid, signo)
+        if rc == -1
+            return i64(-EINVAL)
+        if rc == -3
+            return i64(-ESRCH)
+        i64(0)
+
+
+sys_tkill
+---------
+
+SYS_TKILL (360). Args: a0=tid, a1=signo. Linux's per-thread
+`tkill(tid, sig)` — POSIX raise(3) compiles to tkill(gettid(),
+sig) in musl, so wiring this also wires raise(). SIGKILL on
+any thread still tears down the whole process (POSIX says
+SIGKILL is process-scoped at the implementation level).
+
+    sys_tkill(tid: int, signo: int) -> i64
+        if tid < 0
+            return i64(-ESRCH)
+        if signo < 0 || signo > 64
+            return i64(-EINVAL)
+        val rc = kernel_sig_send_to_thread(tid, signo)
+        if rc == -1
+            return i64(-EINVAL)
+        if rc == -3
+            return i64(-ESRCH)
+        i64(0)
