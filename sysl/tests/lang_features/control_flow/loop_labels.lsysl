@@ -1,0 +1,230 @@
+Loop Labels — `label: loop` / `break label` / `continue label`
+================================================================
+
+Per reference §"Control Flow":
+
+> A loop statement can be prefixed by an `<ident>:` label.
+> A `break <ident>` or `continue <ident>` then jumps to (or
+> continues) that labeled loop directly, even from inside a
+> nested loop. Without a label, `break` and `continue` apply
+> to the innermost enclosing loop.
+
+The syntax is the Java / Rust shape: `outer: for i in ... { for j in
+... { break outer } }`. Sysl's parser routes through `labeledLoop`
+in `SyslParser.scala`, attaching the label to the underlying
+`ForStmtAST` / `WhileStmtAST` / `DoWhileStmtAST` / `LoopStmtAST`.
+The TRISC codegen's `loopNameStack` matches the label at
+`break label` / `continue label` time and unwinds the stack
+accordingly.
+
+This file pins:
+
+- `break outer` exits an outer for-loop from a nested for body.
+- `continue outer` skips to the outer's update.
+- Plain `break` (no label) still applies to the innermost loop
+  inside a labeled outer.
+- A label can be attached to a `while` loop and reached from a
+  nested `for`.
+- A label can be attached to a `for` loop and reached from a
+  nested `while`.
+- Three-deep nesting: `outer: for { mid: for { for ... break
+  outer } }`.
+- Label on the innermost loop is semantically the same as plain
+  `break` (no-op label).
+
+What this file does NOT pin:
+
+- Shadowing rules for label names (whether `outer:` may be
+  re-used in a nested loop). Sysl currently has no specified
+  shadowing behaviour — leave unpinned until the reference says.
+- `break` / `continue` of a label *outside* the enclosing
+  function (only legal targets are enclosing loops in the same
+  body).
+
+File-local prefix `Llb` (Loop Labels).
+
+    module sysl.tests.lang_features
+
+
+`break outer` — exit outer for-loop from nested for body
+---------------------------------------------------------
+
+A nested for-loop fires `break outer` when its inner state hits
+some condition. Without the label, only the inner loop would
+exit and the outer would continue.
+
+    #test
+    test_llb_break_outer_for_for() -> unit
+        var hit_i = 0
+        var hit_j = 0
+        outer: for i in 0..<5
+            for j in 0..<5
+                if i == 2 && j == 3 then
+                    hit_i = i
+                    hit_j = j
+                    break outer
+        assert(hit_i == 2, s"hit_i=$hit_i")
+        assert(hit_j == 3, s"hit_j=$hit_j")
+
+### Counting iterations confirms the outer truly stopped
+
+If `break outer` mis-fired, the outer would run further and
+the visit counter would record more pairs.
+
+    #test
+    test_llb_break_outer_visit_count() -> unit
+        var visits = 0
+        outer: for i in 0..<4
+            for j in 0..<4
+                visits = visits + 1
+                if i == 1 && j == 2 then break outer
+        // (0,0..3)=4, (1,0..2)=3 → 7 iterations
+        assert(visits == 7, s"visits=$visits")
+
+
+`continue outer` — skip to outer's update
+------------------------------------------
+
+`continue outer` finishes the inner loop and the outer's
+*current* iteration in one go, then resumes at the outer's
+update step.
+
+    #test
+    test_llb_continue_outer() -> unit
+        var inner_runs = 0
+        var outer_runs = 0
+        outer: for i in 0..<3
+            outer_runs = outer_runs + 1
+            for j in 0..<3
+                if j == 1 then continue outer
+                inner_runs = inner_runs + 1
+        // Each i: j=0 increments inner (1 per outer iter); j=1 fires
+        // continue outer; j=2 never runs.
+        assert(inner_runs == 3, s"inner=$inner_runs")
+        // Outer runs 3 times.
+        assert(outer_runs == 3, s"outer=$outer_runs")
+
+
+Plain `break` inside a labeled outer applies to innermost
+----------------------------------------------------------
+
+`break` without a label keeps its usual "innermost" semantics
+even when an outer loop has a label.
+
+    #test
+    test_llb_plain_break_inside_labeled_outer() -> unit
+        var outer_iters = 0
+        var inner_iters = 0
+        outer: for i in 0..<3
+            outer_iters = outer_iters + 1
+            for j in 0..<3
+                inner_iters = inner_iters + 1
+                if j == 1 then break    // exits inner only
+        // outer runs 3 times; inner does 2 iters per outer (j=0, j=1) = 6
+        assert(outer_iters == 3, s"outer=$outer_iters")
+        assert(inner_iters == 6, s"inner=$inner_iters")
+
+
+Label on a `while` loop, broken from a nested `for`
+----------------------------------------------------
+
+    #test
+    test_llb_break_outer_while_from_for() -> unit
+        var i = 0
+        var exited_at = -1
+        outer: while i < 5
+            for j in 0..<5
+                if i == 2 && j == 3 then
+                    exited_at = i * 10 + j
+                    break outer
+            i = i + 1
+        assert(exited_at == 23, s"exited_at=$exited_at")
+        // i should still be 2 — `break outer` happened before the
+        // outer's increment.
+        assert(i == 2, s"i=$i")
+
+
+Label on a `for` loop, broken from a nested `while`
+----------------------------------------------------
+
+The mirror of the previous test.
+
+    #test
+    test_llb_break_outer_for_from_while() -> unit
+        var pairs = 0
+        outer: for i in 0..<4
+            var j = 0
+            while j < 4
+                pairs = pairs + 1
+                if i == 1 && j == 2 then break outer
+                j = j + 1
+        // i=0: 4 pairs (j=0..3); i=1: 3 pairs (j=0,1,2) → break → 7
+        assert(pairs == 7, s"pairs=$pairs")
+
+
+Three-deep nesting: `break outer` from the innermost
+-----------------------------------------------------
+
+`break outer` must unwind through *two* enclosing loops, not
+just one. Pins that the label-resolution walks the loop stack
+to find the named target, not just the parent.
+
+    #test
+    test_llb_three_deep_break_outer() -> unit
+        var triples = 0
+        var found_i = -1
+        var found_j = -1
+        var found_k = -1
+        outer: for i in 0..<3
+            for j in 0..<3
+                for k in 0..<3
+                    triples = triples + 1
+                    if i == 1 && j == 1 && k == 1 then
+                        found_i = i
+                        found_j = j
+                        found_k = k
+                        break outer
+        assert(found_i == 1, s"i=$found_i")
+        assert(found_j == 1, s"j=$found_j")
+        assert(found_k == 1, s"k=$found_k")
+        // i=0: 9 triples; i=1: j=0 (3), j=1: k=0,1 → 2 then break = 14
+        assert(triples == 14, s"triples=$triples")
+
+
+Label on innermost — semantically same as plain `break`
+--------------------------------------------------------
+
+A label on the innermost loop is legal; `break inner` from
+inside that loop's body fires just like a plain `break`.
+
+    #test
+    test_llb_label_on_innermost() -> unit
+        var iters = 0
+        for i in 0..<3
+            iters = iters + 1
+            inner: for j in 0..<10
+                if j == 4 then break inner
+        // outer runs 3 times → iters=3
+        assert(iters == 3, s"iters=$iters")
+
+
+Continue outer from three-deep nesting
+---------------------------------------
+
+Like `break outer` but with `continue outer`. Resumes the
+outer's iteration counter rather than exiting entirely.
+
+    #test
+    test_llb_three_deep_continue_outer() -> unit
+        var outer_iters = 0
+        var inner_runs = 0
+        outer: for i in 0..<3
+            outer_iters = outer_iters + 1
+            for j in 0..<3
+                for k in 0..<3
+                    if k == 0 then continue outer
+                    inner_runs = inner_runs + 1
+        // Every (i, j=0, k=0) triggers `continue outer`, so k=1..2
+        // never run, and j=1..2 never start. inner_runs stays 0.
+        assert(outer_iters == 3, s"outer=$outer_iters")
+        assert(inner_runs == 0, s"inner=$inner_runs")

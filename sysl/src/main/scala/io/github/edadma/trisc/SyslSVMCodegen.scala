@@ -49,6 +49,16 @@ class SyslSVMCodegen:
   // Loop labels for break/continue
   private val breakLabels = new mutable.Stack[String]
   private val continueLabels = new mutable.Stack[String]
+  // User-supplied loop labels (None for unlabeled loops). Parallel to break/continue stacks.
+  private val loopNameStack = new mutable.Stack[Option[String]]
+
+  /** Find stack index of loop matching `label` (0 = innermost). None → innermost. */
+  private def resolveLoopIdx(label: Option[String]): Int = label match
+    case None => 0
+    case Some(name) =>
+      val idx = loopNameStack.indexWhere(_.contains(name))
+      if idx < 0 then throw new RuntimeException(s"SVM: no enclosing loop with label '$name'")
+      idx
 
   // Deferred statements — per-function stack, emitted LIFO at every return.
   private val deferStack = new mutable.Stack[TStmt]
@@ -1312,27 +1322,30 @@ class SyslSVMCodegen:
       emitFunctionExitRefDecrs()
       emit("  ret")
 
-    case TWhileStmt(cond, body, _) =>
+    case TWhileStmt(cond, body, userLabel) =>
       val loopLabel = newLabel("while")
       val endLabel = newLabel("while_end")
       breakLabels.push(endLabel)
       continueLabels.push(loopLabel)
+      loopNameStack.push(userLabel)
       emit(s"$loopLabel:")
       genExpr(cond)
       emit(s"  jumpz $endLabel")
       genStmts(body)
       emit(s"  jump $loopLabel")
       emit(s"$endLabel:")
+      loopNameStack.pop()
       breakLabels.pop()
       continueLabels.pop()
 
-    case TForStmt(init, cond, update, body, _) =>
+    case TForStmt(init, cond, update, body, userLabel) =>
       val loopLabel = newLabel("for")
       val updateLabel = newLabel("for_upd")
       val endLabel = newLabel("for_end")
       genStmt(init)
       breakLabels.push(endLabel)
       continueLabels.push(updateLabel)
+      loopNameStack.push(userLabel)
       emit(s"$loopLabel:")
       genExpr(cond)
       emit(s"  jumpz $endLabel")
@@ -1341,39 +1354,46 @@ class SyslSVMCodegen:
       genStmt(update)
       emit(s"  jump $loopLabel")
       emit(s"$endLabel:")
+      loopNameStack.pop()
       breakLabels.pop()
       continueLabels.pop()
 
-    case TDoWhileStmt(cond, body, _) =>
+    case TDoWhileStmt(cond, body, userLabel) =>
       val loopLabel = newLabel("do")
       val endLabel = newLabel("do_end")
       breakLabels.push(endLabel)
       continueLabels.push(loopLabel)
+      loopNameStack.push(userLabel)
       emit(s"$loopLabel:")
       genStmts(body)
       genExpr(cond)
       emit(s"  jumpnz $loopLabel")
       emit(s"$endLabel:")
+      loopNameStack.pop()
       breakLabels.pop()
       continueLabels.pop()
 
-    case TLoopStmt(body, _) =>
+    case TLoopStmt(body, userLabel) =>
       val loopLabel = newLabel("loop")
       val endLabel = newLabel("loop_end")
       breakLabels.push(endLabel)
       continueLabels.push(loopLabel)
+      loopNameStack.push(userLabel)
       emit(s"$loopLabel:")
       genStmts(body)
       emit(s"  jump $loopLabel")
       emit(s"$endLabel:")
+      loopNameStack.pop()
       breakLabels.pop()
       continueLabels.pop()
 
-    case TBreakStmt(_) =>
-      emit(s"  jump ${breakLabels.top}")
+    case TBreakStmt(lbl) =>
+      val idx = resolveLoopIdx(lbl)
+      emit(s"  jump ${breakLabels(idx)}")
 
-    case TContinueStmt(_) =>
-      emit(s"  jump ${continueLabels.top}")
+    case TContinueStmt(lbl) =>
+      val idx = resolveLoopIdx(lbl)
+      emit(s"  jump ${continueLabels(idx)}")
 
     case TExprStmt(TMatchExpr(scrutinee, arms, default, matchTyp)) =>
       genMatch(scrutinee, arms, default, matchTyp, asExpr = matchTyp != SyslType.UnitType)
