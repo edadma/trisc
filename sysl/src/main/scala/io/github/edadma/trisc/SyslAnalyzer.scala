@@ -1967,12 +1967,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
     // below. The main declaration pass (~line 782) repopulates simpleEnumTypes
     // with the same value plus the variant→enum bindings; this just gets the
     // type known to `resolveType` before any field resolution runs.
+    //
+    // Same logic for generic type aliases: a struct field whose declared type
+    // is `Alias[T]` would otherwise hit "'Alias' is not a generic type"
+    // because the alias is only registered in `genericTypeAliases` during the
+    // main first pass. The main pass re-registers idempotently; this just
+    // gets the alias visible to `resolveType` during struct/enum field
+    // resolution. The duplicate-check in the main pass tolerates the
+    // pre-seeded entry (see ~line 2197).
     for decl <- program.decls do
       decl match
         case EnumDeclAST(name, members, _) =>
           if !simpleEnumTypes.contains(name) then
             val variants = members.map((vname, _) => (vname, Nil: List[(String, SyslType)]))
             simpleEnumTypes(name) = SyslType.EnumType(name, variants)
+        case TypeAliasDeclAST(name, target, tparams, _, isNew, _, _, defs, bounds) if tparams.nonEmpty =>
+          if !genericTypeAliases.contains(name) && !typeAliases.contains(name) then
+            genericTypeAliases(name) = (tparams, target, isNew)
+            if defs.nonEmpty then genericTypeAliasDefaults(name) = defs
+            if bounds.nonEmpty then genericTypeAliasBounds(name) = bounds
         case _ => ()
 
     def resolveStructsAndEnums(): Unit =
@@ -2186,7 +2199,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             // Variants already resolved by pass 0.5 (resolveStructsAndEnums).
             // Do not re-assign dataEnumTypes here — same reason as StructDeclAST above.
         case TypeAliasDeclAST(name, target, tparams, _, isNew, range, predicate, defaults, bounds) =>
-          if typeAliases.contains(name) || genericTypeAliases.contains(name) then
+          // The struct-field pre-pass (~line 1976) seeds generic type aliases
+          // into `genericTypeAliases` so struct fields can name them. When the
+          // main pass revisits the SAME decl, skip the duplicate diagnostic so
+          // the pre-seeded entry doesn't trip it.
+          val preSeededGeneric = tparams.nonEmpty && genericTypeAliases.get(name)
+            .exists(_ == ((tparams, target, isNew)))
+          if !preSeededGeneric && (typeAliases.contains(name) || genericTypeAliases.contains(name)) then
             throw AnalysisError(s"duplicate type alias: '$name'", decl)
           if tparams.nonEmpty then
             // `within` and `where` need scalar ordering / operations on T; both are
