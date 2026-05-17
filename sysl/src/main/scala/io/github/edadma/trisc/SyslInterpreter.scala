@@ -65,6 +65,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
   private def matchPattern(pat: TMatchPattern, value: Value, env: Env): Boolean =
     pat match
       case TWildcard => true
+      case TBindPattern(_, _) => true
       case TValuePattern(expr) =>
         val pv = evalAny(expr, env)
         // String comparison must be structural (byte-for-byte), not pointer-based.
@@ -106,6 +107,8 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
   private def bindPattern(pat: TMatchPattern, value: Value, env: Env): Unit =
     pat match
+      case TBindPattern(name, _) =>
+        env(name) = new Cell(value)
       case TDestructurePattern(_, bindings, _, nested) =>
         val (cells, off) = value match
           case ArrVal(c, o) => (c, o)

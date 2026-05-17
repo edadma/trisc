@@ -7002,6 +7002,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val (_, variantFields) = et.variants(variantIdx)
         if variantFields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${variantFields.length} argument(s) in pattern")
         TVariantPattern(et, variantIdx, Nil, Nil)
+      // Bare-name binding pattern at top level: any identifier that is NOT
+      // a struct or variant name (of the scrutinee's enum type) becomes a
+      // fresh binding capturing the whole scrutinee. Mirrors the destructure
+      // field-binding convention (see `analyzeFieldPattern` at line 6923):
+      // names bind freely; module-level consts referenced as patterns must
+      // be written `MOD.OK` or destructured explicitly.
+      case ValuePatternAST(VarRefAST(name))
+          if scopeStack != null
+            && !structTypes.contains(name)
+            && resolveVariant(name, scrutineeType).isEmpty =>
+        currentScope(name) = SymInfo(name, scrutineeType, false)
+        TBindPattern(name, scrutineeType)
       // Top-level tuple pattern on a tuple-typed scrutinee — destructure directly.
       case ValuePatternAST(TupleLitAST(elems)) if isTupleStructType(scrutineeType) =>
         val st = scrutineeType.underlying.asInstanceOf[SyslType.StructType]

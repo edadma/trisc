@@ -104,6 +104,12 @@ sealed trait TMatchPattern
 case object TWildcard extends TMatchPattern
 case class TValuePattern(expr: TExpr) extends TMatchPattern
 case class TRangePattern(low: TExpr, high: TExpr) extends TMatchPattern
+// Bare-name binding pattern: always matches; binds `name` to the
+// scrutinee's value for the arm body. Analogous to a destructure field
+// binding but at the top level (no field index). Surfaced by the
+// parser as `ValuePatternAST(VarRefAST(name))` when `name` is not
+// already a no-arg variant of the scrutinee type.
+case class TBindPattern(name: String, typ: SyslType) extends TMatchPattern
 // `nestedPatterns`: optional per-field sub-pattern. When `Some(p)` at index i,
 // the field at index i must additionally satisfy `p` for the arm to match
 // (and any bindings inside `p` are added to the arm scope). Empty `Nil`

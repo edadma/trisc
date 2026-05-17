@@ -3120,6 +3120,8 @@ class SyslLLVMCodegen(target: String = "host"):
                 both
               case TWildcard =>
                 "true" // always matches
+              case TBindPattern(_, _) =>
+                "true" // binding pattern always matches; name->slot below
               case vp @ TVariantPattern(_, _, _, _, _) =>
                 emitNestedPatternCheckLLVM(vp, scrut)
               case dp @ TDestructurePattern(_, _, _, _) =>
@@ -3150,6 +3152,18 @@ class SyslLLVMCodegen(target: String = "host"):
           val preArmLocals = locals.keySet.toSet
           // Bind variant/destructure fields if this is a binding pattern.
           arm.patterns.headOption match
+            case Some(TBindPattern(bName, bTyp)) =>
+              if isAggregate(bTyp) then
+                // Aggregate: `scrut` is already a typed pointer (alloca/GEP).
+                // Alias the user's name to it; no copy needed.
+                locals(bName) = LocalVar(bName, scrut, bTyp)
+              else
+                // Scalar: `scrut` is an SSA value. Stash in a fresh alloca so
+                // it can be reassigned or have its address taken.
+                val blt = llvmType(bTyp)
+                val alloc = deferAlloca(blt)
+                emit(s"  store $blt $scrut, $blt* $alloc")
+                locals(bName) = LocalVar(bName, alloc, bTyp)
             case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes, nested)) =>
               val dataOffset = llvmEnumDataOffset(et)
               val scrutCast2 = newReg()

@@ -1789,6 +1789,7 @@ trait SyslAnalyzerExpressions:
             for arm <- tArms; pat <- arm.patterns do
               if arm.guard.isEmpty then pat match
                 case TWildcard => wildcardCovers = true
+                case TBindPattern(_, _) => wildcardCovers = true
                 case TVariantPattern(_, idx, _, _, nested) =>
                   variantEntries += ((idx, nested))
                 case _ =>
