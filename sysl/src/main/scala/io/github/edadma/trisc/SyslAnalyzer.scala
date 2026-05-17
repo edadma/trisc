@@ -4300,7 +4300,39 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   protected def satisfiesInterface(st: SyslType.StructType, iface: SyslType.InterfaceType): Boolean =
     val structName = st.name
     iface.methods.forall { (methodName, paramTypes, retType, ifaceEffects) =>
-      lookupMethod(structName, methodName) match
+      val funInfoOpt = lookupMethod(structName, methodName).orElse {
+        // Generic struct method: the impl lives as `${templateName}_$method` in
+        // `genericTemplates`. Instantiate it for this concrete struct so we can
+        // structurally compare its monomorphized signature against the iface.
+        // Instantiation is idempotent (call sites would do the same).
+        structToTemplate.get(structName).flatMap { case (templateName, _) =>
+          val templateFuncName = s"${templateName}_$methodName"
+          if genericTemplates.contains(templateFuncName) then
+            try
+              val allArgTypes: List[SyslType] = SyslType.PtrType(st) :: paramTypes
+              val (mangled, fi) = instantiateGeneric(templateFuncName, allArgTypes)
+              // Box dispatch (interpreter + every codegen) looks up methods
+              // under `${structName}_$methodName`. For monomorphized generic
+              // struct methods the real function is named `${templateName}_${methodName}_${typeArgs}`,
+              // which dispatch can't find. Emit a thin forwarding TFunDecl
+              // under the dispatch-expected name so every backend Just Works.
+              val aliasName = s"${structName}_$methodName"
+              if !functions.contains(aliasName) then
+                val aliasFi = fi.copy(name = aliasName)
+                functions(aliasName) = aliasFi
+                val aliasParams = fi.params.map((n, t) => TParam(n, t))
+                val aliasArgs: List[TExpr] = fi.params.map((n, t) => TVarRef(n, t))
+                val aliasCall = TCall(mangled, aliasArgs, fi.returnType)
+                val aliasBody =
+                  if fi.returnType == SyslType.UnitType then TBlockBody(List(TExprStmt(aliasCall)))
+                  else TExprBody(aliasCall)
+                specializedDecls += TFunDecl(aliasName, aliasParams, fi.returnType, aliasBody, isPrivate = true)
+              Some(fi)
+            catch case _: AnalysisError => None
+          else None
+        }
+      }
+      funInfoOpt match
         case Some(funInfo) =>
           val userParams = funInfo.params.drop(1).map(_._2)
           val structuralOk = userParams == paramTypes && funInfo.returnType == retType
