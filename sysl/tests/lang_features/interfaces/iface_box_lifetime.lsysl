@@ -1,0 +1,157 @@
+Interface Box Lifetime
+======================
+
+When a concrete value gets boxed into an interface, the boxed
+iface holds a `data_ptr` that points at the original concrete
+value's storage — the box is by reference, not by copy. This
+makes mutating methods through the iface propagate back to the
+caller (pinned by `iface_mutating_self.lsysl`), but it also
+means the box's `data_ptr` is only valid as long as the source
+value's storage is.
+
+This file pins:
+
+- Passing an iface to a function and back again.
+- Iface stored in an iface-typed local; repeated dispatch.
+- Calling iface method many times in sequence.
+- Mutating through iface, reading back through the same iface.
+
+Known gaps (not pinned here):
+
+- Iface-as-struct-field (`struct S { f: Iface }`) — analyzer
+  rejects with "unknown type". See
+  `feedback_sysl_interface_as_struct_field.md`.
+- Returning an iface from a function whose body constructs the
+  source as a local is a use-after-free.
+- SVM struct-field string aliasing — see the feedback memo.
+
+File-local prefix `Sibl` (Sysl Iface Box Lifetime).
+
+    module sysl.tests.lang_features
+
+Passing iface through a function
+---------------------------------
+
+`Tally` is the value-struct source; `IntHolder` is the iface.
+
+    interface IntHolder
+        value() -> int
+
+    struct Tally
+        n: int
+
+    Tally.value() -> int = self.n
+
+    relay(h: IntHolder) -> int = h.value()
+
+### Source survives a single iface call
+
+    #test
+    test_sibl_pass_and_call() -> unit
+        var c = Tally(42)
+        val v = relay(c)
+        assert(v == 42, s"got $v")
+
+### Source survives nested iface calls
+
+    nested_relay(h: IntHolder) -> int = relay(h)
+
+    #test
+    test_sibl_pass_through_two_frames() -> unit
+        var c = Tally(99)
+        val v = nested_relay(c)
+        assert(v == 99, s"got $v")
+
+### Three levels of forwarding
+
+    three_relay(h: IntHolder) -> int = nested_relay(h)
+
+    #test
+    test_sibl_pass_through_three_frames() -> unit
+        var c = Tally(7)
+        val v = three_relay(c)
+        assert(v == 7, s"got $v")
+
+Iface stored in a local
+------------------------
+
+### Many calls through a single iface local
+
+    #test
+    test_sibl_many_calls_via_local() -> unit
+        var c = Tally(11)
+        val h: IntHolder = c
+        val a = h.value()
+        val b = h.value()
+        val d = h.value()
+        val e = h.value()
+        assert(a == 11, "1st call")
+        assert(b == 11, "2nd call")
+        assert(d == 11, "3rd call")
+        assert(e == 11, "4th call")
+
+### Two iface locals from the same source
+
+    #test
+    test_sibl_two_locals_same_source() -> unit
+        var c = Tally(55)
+        val h1: IntHolder = c
+        val h2: IntHolder = c
+        assert(h1.value() == h2.value(), "consistent")
+        assert(h1.value() == 55, "value")
+
+### Iface in a loop body — N invocations stable
+
+    #test
+    test_sibl_iface_in_loop_body() -> unit
+        var c = Tally(3)
+        val h: IntHolder = c
+        var sum = 0
+        var i = 0
+        while i < 4
+            sum = sum + h.value()
+            i = i + 1
+        assert(sum == 12, s"got $sum")
+
+Mutating through iface, reading back through iface
+---------------------------------------------------
+
+    interface MutTally
+        tick() -> unit
+        get() -> int
+
+    Tally.tick() -> unit
+        self.n = self.n + 1
+
+    Tally.get() -> int = self.n
+
+### Five ticks via iface, then read-back through iface
+
+    #test
+    test_sibl_five_ticks_read_back() -> unit
+        var c = Tally(0)
+        val m: MutTally = c
+        m.tick()
+        m.tick()
+        m.tick()
+        m.tick()
+        m.tick()
+        assert(m.get() == 5, s"got ${m.get()}")
+        assert(c.n == 5, s"caller's c.n; got ${c.n}")
+
+### Interleaved tick + get through iface
+
+    #test
+    test_sibl_interleaved_tick_get() -> unit
+        var c = Tally(0)
+        val m: MutTally = c
+        m.tick()
+        val a = m.get()
+        m.tick()
+        m.tick()
+        val b = m.get()
+        m.tick()
+        val d = m.get()
+        assert(a == 1, "after 1st tick")
+        assert(b == 3, "after 3rd tick")
+        assert(d == 4, "after 4th tick")

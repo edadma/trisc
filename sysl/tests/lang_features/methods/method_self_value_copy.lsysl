@@ -1,0 +1,142 @@
+Methods on Value-Typed Locals — Read-Only `self`
+=================================================
+
+Per reference §"Methods":
+
+```sysl
+Point.magnitude() -> int
+    self.x * self.x + self.y * self.y
+
+main() -> int
+    var p: Point
+    p.x = 3
+    p.y = 4
+    p.magnitude()     // desugars to Point_magnitude(&p)
+```
+
+- Methods are declared with `StructName.methodName(...)` syntax.
+- The parser prepends a hidden `__self__: *StructName` parameter,
+  so inside the body `self` has type `*StructName`.
+- The receiver `p` (a value-typed local) is auto-`&`'d at the call
+  site.
+
+This file pins the **read-only-self** dispatch shape across all
+seven backends: a method that reads `self.f` (without writing) does
+not perturb the caller's value, and the returned value reflects
+the field state at call time.
+
+File-local prefix `Mvc` (Method-Value-Copy).
+
+    module sysl.tests.lang_features
+
+
+A simple struct with read-only methods
+---------------------------------------
+
+    struct MvcPoint
+        x: int
+        y: int
+
+    MvcPoint.mvc_sum() -> int = self.x + self.y
+    MvcPoint.mvc_xtimes(k: int) -> int = self.x * k
+
+
+### Calling a read-only method does not change the caller's value
+
+    #test
+    test_mvc_method_no_mutation() -> unit
+        var p = MvcPoint(3, 4)
+        val s = p.mvc_sum()
+        assert(s == 7, s"sum=7, got $s")
+        assert(p.x == 3, s"x preserved, got ${p.x}")
+        assert(p.y == 4, s"y preserved, got ${p.y}")
+
+### Method receives field values via implicit `*self`
+
+    #test
+    test_mvc_method_reads_field() -> unit
+        var p = MvcPoint(10, 20)
+        val r = p.mvc_xtimes(3)
+        assert(r == 30, s"10*3=30, got $r")
+
+### Method on a different field combination
+
+    MvcPoint.mvc_diff() -> int = self.x - self.y
+
+    #test
+    test_mvc_diff() -> unit
+        var p = MvcPoint(15, 6)
+        assert(p.mvc_diff() == 9, "15-6=9")
+        var q = MvcPoint(3, 10)
+        assert(q.mvc_diff() == 0 - 7, "3-10=-7")
+
+
+Method called on a fresh constructor expression
+------------------------------------------------
+
+The reference says the receiver is auto-`&`'d. When the receiver is
+a constructor expression (no named local), the compiler still has to
+materialize a temp.
+
+    #test
+    test_mvc_method_on_temp_value() -> unit
+        val s = MvcPoint(11, 22).mvc_sum()
+        assert(s == 33, s"got $s")
+
+
+Method called inside a regular function
+----------------------------------------
+
+    mvc_use_point(p: MvcPoint) -> int
+        p.mvc_sum() + p.mvc_xtimes(2)
+
+    #test
+    test_mvc_method_in_fn() -> unit
+        var p = MvcPoint(4, 5)
+        // mvc_sum=9, mvc_xtimes(2)=8 → 17
+        val r = mvc_use_point(p)
+        assert(r == 17, s"got $r")
+
+
+Method on a struct with three fields
+-------------------------------------
+
+    struct MvcTriple
+        a: int
+        b: int
+        c: int
+
+    MvcTriple.mvc_total() -> int = self.a + self.b + self.c
+    MvcTriple.mvc_max() -> int
+        if self.a >= self.b && self.a >= self.c then self.a
+        else if self.b >= self.c then self.b
+        else self.c
+
+    #test
+    test_mvc_triple_total() -> unit
+        var t = MvcTriple(1, 2, 3)
+        assert(t.mvc_total() == 6, "1+2+3=6")
+        assert(t.mvc_max() == 3, "max=3")
+
+    #test
+    test_mvc_triple_after_call() -> unit
+        var t = MvcTriple(7, 5, 9)
+        val m = t.mvc_max()
+        assert(m == 9, s"got $m")
+        // fields preserved after the call
+        assert(t.a == 7 && t.b == 5 && t.c == 9, "fields preserved")
+
+
+Multiple methods on the same struct
+------------------------------------
+
+The two `mvc_sum` and `mvc_xtimes` methods coexist on `MvcPoint`
+(declared above). Pin that calling one then the other works.
+
+    #test
+    test_mvc_two_methods_chain_independent() -> unit
+        var p = MvcPoint(2, 3)
+        val s = p.mvc_sum()
+        val x = p.mvc_xtimes(10)
+        assert(s == 5, s"got $s")
+        assert(x == 20, s"got $x")

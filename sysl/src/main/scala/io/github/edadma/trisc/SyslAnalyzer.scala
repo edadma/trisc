@@ -1826,7 +1826,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
                   initStubType(init).map(t => (t, tryConstEvalInit(init)))
               stubInfo.foreach { case (resolvedType, foldedOpt) =>
                 val mangledName = if shouldMangle(name) then mangleName(name) else name
-                globalScope(name) = SymInfo(mangledName, resolvedType, mutable = isMutable, isConst = isConst)
+                val isGhost = attrs.exists(_.name == "ghost")
+                globalScope(name) = SymInfo(mangledName, resolvedType, mutable = isMutable, isConst = isConst, isGhost = isGhost)
                 externalSymbols += name
                 // Only register a compile-time constant for immutable bindings
                 // (val/const). Mutable vars must always go through a runtime
@@ -2135,9 +2136,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             if fd.isParameterless && fd.typeParams.nonEmpty then
               throw AnalysisError(s"parameterless function '$name' cannot be generic", decl)
             functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet, isGhost, if anyByName then byNameFlags else Nil, fd.isParameterless)
-            // Record #deprecated info
+            // Record #deprecated info. The lexer's StringLit carrier is
+            // byte-form (each Char is one UTF-8 byte); decode for the host
+            // diagnostic so Unicode reasons render correctly when printed.
             for attr <- fd.attributes if attr.name == "deprecated" do
-              val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) => s }
+              val reason = attr.args.collectFirst { case AttrPositional(AttrLitString(s)) =>
+                new String(s.getBytes("ISO-8859-1"), "UTF-8")
+              }
               deprecations(name) = reason
             // Register as method if name matches StructName_methodName pattern
             val underscoreIdx = name.indexOf('_')
@@ -2635,6 +2640,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       mapTExpr(e)(walk)
       touches
 
+    // Recurse through TIfExpr / TMatchExpr inside TExprStmt so contract
+    // checks that `rewriteReturnsForEnsure` cloned into per-branch return
+    // tails get the ghost strip applied too. Without this, ghost-touching
+    // ensure clauses survive on every non-fall-through path of a
+    // multi-return-point function body.
+    def stripExpr(e: TExpr): TExpr = e match
+      case TIfExpr(c, tb, eb, t) =>
+        TIfExpr(c, tb.flatMap(stripStmt), eb.map(_.flatMap(stripStmt)), t)
+      case TMatchExpr(scrut, arms, dflt, t) =>
+        val newArms = arms.map(a => TMatchArm(a.patterns, a.guard, a.body.flatMap(stripStmt)))
+        TMatchExpr(scrut, newArms, dflt.map(_.flatMap(stripStmt)), t)
+      case other => other
+
     def stripStmt(s: TStmt): Option[TStmt] = s match
       case TVarStmt(n, _, _, _, true) =>
         ghostLocals += n
@@ -2651,6 +2669,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TLoopStmt(b, lbl)               => Some(TLoopStmt(b.flatMap(stripStmt), lbl))
       case TDeferStmt(inner)               => stripStmt(inner).map(TDeferStmt(_))
       case TMultiStmt(ss)                  => Some(TMultiStmt(ss.flatMap(stripStmt)))
+      case TExprStmt(e)                    => Some(TExprStmt(stripExpr(e)))
       case other                           => Some(other)
 
     stmts.flatMap(stripStmt)
@@ -4403,7 +4422,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val ArrayType(elemType, size) = target: @unchecked
         if elemType != U8 && elemType != I8 then
           throw AnalysisError(s"cannot initialize [$size]$elemType from string literal (element type must be byte or i8)")
-        val bytes = s.getBytes("UTF-8")
+        val bytes = s.getBytes("ISO-8859-1")
         if bytes.length > size then
           throw AnalysisError(s"string literal has ${bytes.length} bytes but array has only $size elements")
         val elems = bytes.map(b => TIntLit((b & 0xff).toLong, elemType)).toList ++
@@ -6253,11 +6272,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       else Nil
     TBlockBody(snapshotDecls ++ variantPrefix ++ resultDecl ++ requireChecks ++ finalized)
 
-  /** Zero-value expression for a scalar/pointer return type. */
+  /** Zero-value expression for a return type — used to initialize the synthetic
+   * `__result__` local at function entry before the body runs. */
   protected def zeroExprFor(t: SyslType): TExpr = t.underlying match
-    case _: FloatType => TFloatLit(0.0, t)
-    case BoolType     => TBoolLit(false, t)
-    case _            => TIntLit(0, t)
+    case _: FloatType         => TFloatLit(0.0, t)
+    case BoolType             => TBoolLit(false, t)
+    case st: SyslType.StructType => TStructLit(st)
+    case _                    => TIntLit(0, t)
 
   /** Recursively rewrite every `return v` inside a stmt list so that `v` is stored into
    * __result__, then the ensure checks fire, then `return __result__` runs. For void

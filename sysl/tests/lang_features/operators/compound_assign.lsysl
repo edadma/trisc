@@ -1,0 +1,278 @@
+Compound Assignment Operators
+==============================
+
+Per reference §"Compound Assignment", sysl supports
+`x += y`, `x -= y`, `x *= y`, `x /= y`, `x %= y`, `x &= y`,
+`x |= y`, `x ^= y`, `x <<= y`, `x >>= y`. Each is equivalent
+to `x = x op y`.
+
+This file pins each compound operator on:
+
+- Plain locals.
+- Struct fields.
+- Array / slice elements.
+- Chained sequences accumulate state correctly.
+
+File-local prefix `Sca` (Sysl Compound Assign).
+
+    module sysl.tests.lang_features
+
+Compound `+=` on a local
+-------------------------
+
+    #test
+    test_sca_add_assign() -> unit
+        var x = 10
+        x += 5
+        assert(x == 15, s"got $x")
+
+### Chained `+=`
+
+    #test
+    test_sca_add_assign_chain() -> unit
+        var x = 0
+        x += 1
+        x += 2
+        x += 3
+        x += 4
+        assert(x == 10, s"got $x")
+
+`-=` on a local
+----------------
+
+    #test
+    test_sca_sub_assign() -> unit
+        var x = 10
+        x -= 4
+        assert(x == 6, s"got $x")
+
+`*=`
+-----
+
+    #test
+    test_sca_mul_assign() -> unit
+        var x = 3
+        x *= 4
+        assert(x == 12, s"got $x")
+
+`/=`
+-----
+
+    #test
+    test_sca_div_assign() -> unit
+        var x = 100
+        x /= 5
+        assert(x == 20, s"got $x")
+
+`%=`
+-----
+
+    #test
+    test_sca_mod_assign() -> unit
+        var x = 17
+        x %= 5
+        assert(x == 2, s"17 mod 5; got $x")
+
+Bitwise compound — `&=`, `|=`, `^=`
+------------------------------------
+
+### `&=`
+
+    #test
+    test_sca_and_assign() -> unit
+        var x = 0xFF
+        x &= 0x0F
+        assert(x == 0x0F, s"got $x")
+
+### `|=`
+
+    #test
+    test_sca_or_assign() -> unit
+        var x = 0x10
+        x |= 0x01
+        assert(x == 0x11, s"got $x")
+
+### `^=`
+
+    #test
+    test_sca_xor_assign() -> unit
+        var x = 0xFF
+        x ^= 0x0F
+        assert(x == 0xF0, s"got $x")
+
+### Toggle bit pattern: `^= mask` is self-inverse
+
+    #test
+    test_sca_xor_assign_toggle_inverse() -> unit
+        var x = 0x55
+        val mask = 0x0F
+        x ^= mask
+        x ^= mask
+        assert(x == 0x55, "double-toggle returns original")
+
+Shift compound — `<<=`, `>>=`
+-------------------------------
+
+    #test
+    test_sca_shl_assign() -> unit
+        var x = 1
+        x <<= 4
+        assert(x == 16, s"got $x")
+
+    #test
+    test_sca_shr_assign() -> unit
+        var x = 100
+        x >>= 2
+        assert(x == 25, s"got $x")
+
+### Multiple shifts accumulate
+
+    #test
+    test_sca_shl_assign_repeated() -> unit
+        var x = 1
+        x <<= 1
+        x <<= 1
+        x <<= 1
+        x <<= 1
+        // 1 << 4 = 16
+        assert(x == 16, s"got $x")
+
+Compound assign on struct fields
+---------------------------------
+
+    struct ScaPoint
+        x: int
+        y: int
+
+### `s.x += v`
+
+    #test
+    test_sca_field_add_assign() -> unit
+        var p = ScaPoint(10, 20)
+        p.x += 5
+        assert(p.x == 15, "x changed")
+        assert(p.y == 20, "y untouched")
+
+### `s.y *= v`
+
+    #test
+    test_sca_field_mul_assign() -> unit
+        var p = ScaPoint(3, 7)
+        p.y *= 2
+        assert(p.x == 3, "x untouched")
+        assert(p.y == 14, "y doubled")
+
+### Bitwise compound on field
+
+    #test
+    test_sca_field_bitwise() -> unit
+        var p = ScaPoint(0xFF, 0x00)
+        p.x &= 0x0F
+        p.y |= 0x10
+        assert(p.x == 0x0F, "x and-masked")
+        assert(p.y == 0x10, "y or-masked")
+
+Compound assign on array elements
+----------------------------------
+
+### `arr[i] += v`
+
+    #test
+    test_sca_array_add_assign() -> unit
+        var arr: [3]int
+        arr[0] = 10
+        arr[1] = 20
+        arr[2] = 30
+        arr[1] += 5
+        assert(arr[0] == 10, "0 untouched")
+        assert(arr[1] == 25, "1 += 5")
+        assert(arr[2] == 30, "2 untouched")
+
+### `arr[i] *= v`
+
+    #test
+    test_sca_array_mul_assign() -> unit
+        var arr: [4]int
+        arr[0] = 1
+        arr[1] = 2
+        arr[2] = 3
+        arr[3] = 4
+        var i = 0
+        while i < 4
+            arr[i] *= 10
+            i = i + 1
+        assert(arr[0] == 10, "0")
+        assert(arr[1] == 20, "1")
+        assert(arr[2] == 30, "2")
+        assert(arr[3] == 40, "3")
+
+### Bitwise compound on array element
+
+    #test
+    test_sca_array_bitwise() -> unit
+        var arr: [2]int
+        arr[0] = 0xFF
+        arr[1] = 0x00
+        arr[0] &= 0x0F
+        arr[1] |= 0x01
+        assert(arr[0] == 0x0F, "0")
+        assert(arr[1] == 0x01, "1")
+
+Compound assign on dynamic slice elements
+------------------------------------------
+
+### Same patterns work on `new [N]T[:]` slices
+
+    #test
+    test_sca_slice_add_assign() -> unit
+        val arr = new [3]int
+        arr[0] = 100
+        arr[1] = 200
+        arr[2] = 300
+        val s = arr[:]
+        s[1] += 5
+        assert(s[0] == 100, "0")
+        assert(s[1] == 205, "1 += 5")
+        assert(s[2] == 300, "2")
+
+### Mix: walk slice with compound
+
+    #test
+    test_sca_slice_walk_xor() -> unit
+        val arr = new [4]int
+        arr[0] = 0x10
+        arr[1] = 0x20
+        arr[2] = 0x30
+        arr[3] = 0x40
+        val s = arr[:]
+        var i = 0
+        while i < 4
+            s[i] ^= 0x0F
+            i = i + 1
+        assert(s[0] == 0x1F, "0")
+        assert(s[1] == 0x2F, "1")
+        assert(s[2] == 0x3F, "2")
+        assert(s[3] == 0x4F, "3")
+
+Equivalence with `x = x op y`
+------------------------------
+
+### `x += y` ≡ `x = x + y` for a variety of patterns
+
+    #test
+    test_sca_equivalence() -> unit
+        var a = 7
+        var b = 7
+        a += 13
+        b = b + 13
+        assert(a == b, "++=")
+        var c = 100
+        var d = 100
+        c -= 35
+        d = d - 35
+        assert(c == d, "-=")
+        var e = 5
+        var f = 5
+        e *= 6
+        f = f * 6
+        assert(e == f, "*=")

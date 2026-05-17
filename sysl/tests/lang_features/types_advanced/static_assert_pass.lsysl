@@ -1,0 +1,147 @@
+`static_assert` — Compile-Time Predicate (Pass Cases)
+======================================================
+
+Per reference §"`static_assert(cond [, "message"])`":
+
+```sysl
+struct EthHeader
+    dst: [6]byte
+    src: [6]byte
+    ethertype: u16
+
+static_assert(sizeof(EthHeader) == 14, "EthHeader must be 14 bytes")
+static_assert(MAX_FRAME >= 64 && MAX_FRAME <= 1518)
+```
+
+- Module-scope compile-time check.
+- Condition is evaluated by the constant folder (sizeof, comparisons,
+  bitwise, shifts, arithmetic, refs to other `const` names).
+- True ⇒ no code emitted.
+- False ⇒ compile error citing the optional message.
+
+This file pins **passing** static_asserts across all seven backends.
+The asserts themselves emit no code, but their *presence* gates
+compilation — if any one of them produces a wrong result through
+the constant folder, the build would fail. After the asserts, a
+small set of runtime tests confirms compilation actually succeeded
+and the asserted layouts agree with the runtime sizes.
+
+Failing-static_assert tests (`should_panic`-style for compile
+errors) need a compile-error assertion mechanism in the runner that
+isn't available yet — same gap as `trait_orphan_rule.lsysl` and
+`contracts_off_flag.lsysl`. Deferred.
+
+File-local prefix `Sap` (Static-Assert-Pass).
+
+    module sysl.tests.lang_features
+
+
+Basic equality on `sizeof`
+---------------------------
+
+    struct SapPair
+        a: i32
+        b: i32
+
+    static_assert(sizeof(SapPair) == 8)
+    static_assert(sizeof(SapPair) == 8, "SapPair must be 8 bytes")
+
+
+Inequality on primitive widths
+-------------------------------
+
+    static_assert(sizeof(i8) < sizeof(i64))
+    static_assert(sizeof(i64) > sizeof(i32))
+    static_assert(sizeof(i64) >= 8)
+    static_assert(sizeof(i32) <= 4)
+    static_assert(sizeof(i32) != sizeof(i64))
+
+
+Compound conditions
+--------------------
+
+    const SapMaxFrame = 1518
+    const SapMinFrame = 64
+
+    static_assert(SapMaxFrame >= SapMinFrame)
+    static_assert(SapMaxFrame >= 64 && SapMaxFrame <= 1518)
+    static_assert(SapMinFrame >= 64 || SapMinFrame == 0)
+
+
+Arithmetic in the condition
+----------------------------
+
+    static_assert(sizeof(i64) * 2 == 16)
+    static_assert(sizeof(i32) + sizeof(i32) == sizeof(i64))
+    static_assert(sizeof([10]i32) == 10 * sizeof(i32))
+
+
+Bitwise + shift in the condition
+---------------------------------
+
+    static_assert((1 << 4) == 16)
+    static_assert((0xFF & 0x0F) == 0x0F)
+    static_assert((0xF0 | 0x0F) == 0xFF)
+    static_assert((0xAA ^ 0xFF) == 0x55)
+    static_assert((1 << 10) > 1000)
+
+
+References to other `const` names
+----------------------------------
+
+    const SapBaseSize = 64
+    const SapDouble = SapBaseSize * 2
+    const SapTriple = SapBaseSize * 3
+
+    static_assert(SapDouble == 128)
+    static_assert(SapTriple == 192)
+    static_assert(SapDouble + SapBaseSize == SapTriple)
+
+
+On-wire packet header layout
+-----------------------------
+
+    struct SapEthHeader
+        dst: [6]u8
+        src: [6]u8
+        ethertype: u16
+
+    static_assert(sizeof(SapEthHeader) >= 14, "EthHeader at least 14 bytes")
+    // Some backends may pad to 16 — assert the un-padded payload is reachable.
+    static_assert(sizeof(SapEthHeader) <= 16)
+
+
+Runtime confirmations
+----------------------
+
+The static asserts above ran at compile time and emitted nothing.
+These tests confirm the build reached runtime and the runtime sizes
+match what was asserted.
+
+### sizeof matches at runtime
+
+    #test
+    test_sap_compile_reached_runtime() -> unit
+        assert(sizeof(SapPair) == 8, "compile + runtime agree")
+        assert(sizeof(i64) > sizeof(i32), "compile + runtime agree")
+        assert(SapMaxFrame == 1518, "const value preserved")
+
+### const arithmetic survives codegen
+
+    #test
+    test_sap_const_arithmetic() -> unit
+        assert(SapDouble == 128, "double")
+        assert(SapTriple == 192, "triple")
+        assert(SapBaseSize + SapDouble == SapTriple, "sum")
+
+### packet header struct sizeof remains reachable from runtime
+
+The struct's layout was already asserted at compile time via
+`static_assert(sizeof(SapEthHeader) >= 14, ...)`. Re-confirm here
+that `sizeof` agrees at runtime — the constructor itself isn't the
+point of this category.
+
+    #test
+    test_sap_packet_header_struct() -> unit
+        assert(sizeof(SapEthHeader) >= 14, s"got ${sizeof(SapEthHeader)}")
+        assert(sizeof(SapEthHeader) <= 16, s"got ${sizeof(SapEthHeader)}")

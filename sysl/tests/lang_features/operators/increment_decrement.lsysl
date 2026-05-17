@@ -1,0 +1,244 @@
+Increment / Decrement
+=====================
+
+Per reference §"Increment/Decrement":
+
+```
+++x       // prefix: increments x, returns new value
+x++       // postfix: returns old value, then increments
+--x       // prefix decrement
+x--       // postfix decrement
+```
+
+This file pins:
+
+- Statement-form: `++x` / `x++` / `--x` / `x--` mutate the binding.
+- Expression-form: `++x` returns the *new* value, `x++` returns the
+  *old* value (same for `--`).
+- Compose cleanly inside larger expressions.
+- Work on struct fields and on array/slice elements.
+- Used inside loop bodies (drive a `while`).
+
+File-local prefix `Sid` (Sysl Increment Decrement).
+
+    module sysl.tests.lang_features
+
+Statement form — pure side effect
+----------------------------------
+
+### `++x` on a local
+
+    #test
+    test_sid_pre_inc_stmt() -> unit
+        var x = 5
+        ++x
+        assert(x == 6, s"got $x")
+
+### `x++` on a local
+
+    #test
+    test_sid_post_inc_stmt() -> unit
+        var x = 5
+        x++
+        assert(x == 6, s"got $x")
+
+### `--x` on a local
+
+    #test
+    test_sid_pre_dec_stmt() -> unit
+        var x = 5
+        --x
+        assert(x == 4, s"got $x")
+
+### `x--` on a local
+
+    #test
+    test_sid_post_dec_stmt() -> unit
+        var x = 5
+        x--
+        assert(x == 4, s"got $x")
+
+Expression form — return value
+-------------------------------
+
+### `++x` returns the **new** value
+
+    #test
+    test_sid_pre_inc_returns_new() -> unit
+        var x = 5
+        val y = ++x
+        assert(y == 6, s"prefix returns new; got $y")
+        assert(x == 6, s"x mutated; got $x")
+
+### `x++` returns the **old** value
+
+    #test
+    test_sid_post_inc_returns_old() -> unit
+        var x = 5
+        val y = x++
+        assert(y == 5, s"postfix returns old; got $y")
+        assert(x == 6, s"x mutated; got $x")
+
+### `--x` returns the **new** value
+
+    #test
+    test_sid_pre_dec_returns_new() -> unit
+        var x = 5
+        val y = --x
+        assert(y == 4, s"prefix returns new; got $y")
+        assert(x == 4, s"x mutated; got $x")
+
+### `x--` returns the **old** value
+
+    #test
+    test_sid_post_dec_returns_old() -> unit
+        var x = 5
+        val y = x--
+        assert(y == 5, s"postfix returns old; got $y")
+        assert(x == 4, s"x mutated; got $x")
+
+Compose with arithmetic
+------------------------
+
+### Prefix in `+` expression: uses the new value
+
+    #test
+    test_sid_pre_inc_in_add() -> unit
+        var x = 5
+        // ++x = 6, then 6 + 1 = 7
+        val r = ++x + 1
+        assert(r == 7, s"got $r")
+        assert(x == 6, "x mutated")
+
+### Postfix in `+` expression: uses the old value
+
+    #test
+    test_sid_post_inc_in_add() -> unit
+        var x = 5
+        // x++ = 5, then 5 + 1 = 6; afterwards x is 6
+        val r = x++ + 1
+        assert(r == 6, s"got $r")
+        assert(x == 6, "x mutated")
+
+Repeated statement-form
+------------------------
+
+### Several `++x` accumulate
+
+    #test
+    test_sid_repeated_pre_inc() -> unit
+        var x = 0
+        ++x
+        ++x
+        ++x
+        ++x
+        ++x
+        assert(x == 5, s"got $x")
+
+### `x++` then `x--` returns to start
+
+    #test
+    test_sid_round_trip() -> unit
+        var x = 10
+        x++
+        x--
+        assert(x == 10, s"got $x")
+
+Increment / decrement on struct fields
+---------------------------------------
+
+    struct SidPoint
+        x: int
+        y: int
+
+### `++p.x` mutates the field
+
+    #test
+    test_sid_field_pre_inc() -> unit
+        var p = SidPoint(10, 20)
+        ++p.x
+        assert(p.x == 11, "x mutated")
+        assert(p.y == 20, "y untouched")
+
+### `p.x++` returns old, mutates field
+
+    #test
+    test_sid_field_post_inc() -> unit
+        var p = SidPoint(10, 20)
+        val old = p.x++
+        assert(old == 10, s"old; got $old")
+        assert(p.x == 11, "x mutated")
+        assert(p.y == 20, "y untouched")
+
+### `--p.y` mutates the field
+
+    #test
+    test_sid_field_pre_dec() -> unit
+        var p = SidPoint(10, 20)
+        --p.y
+        assert(p.y == 19, "y mutated")
+        assert(p.x == 10, "x untouched")
+
+Increment / decrement in loop control
+--------------------------------------
+
+Note: at the time these tests were written, `++arr[i]` and `arr[i]++`
+fail to parse — the parser only accepts `++`/`--` on plain locals and
+struct fields, not on indexed lvalues. Tests below walk an array with
+`++i` / `i++` driving the loop counter; element updates use the
+explicit compound-assign form (`arr[i] += 1`).
+
+### Walk array with `++i` in loop control
+
+    #test
+    test_sid_loop_pre_inc() -> unit
+        var arr: [4]int
+        arr[0] = 1
+        arr[1] = 2
+        arr[2] = 3
+        arr[3] = 4
+        var i = 0
+        var sum = 0
+        while i < 4
+            sum = sum + arr[i]
+            ++i
+        assert(sum == 10, s"got $sum")
+        assert(i == 4, s"i = 4; got $i")
+
+### Walk array with `i++` in loop control (same outcome)
+
+    #test
+    test_sid_loop_post_inc() -> unit
+        var arr: [3]int
+        arr[0] = 10
+        arr[1] = 20
+        arr[2] = 30
+        var i = 0
+        var sum = 0
+        while i < 3
+            sum = sum + arr[i]
+            i++
+        assert(sum == 60, s"got $sum")
+
+Equivalence with `x = x + 1`
+-----------------------------
+
+### `++x` ≡ `x = x + 1` (final state)
+
+    #test
+    test_sid_equivalence_inc() -> unit
+        var a = 7
+        var b = 7
+        ++a
+        b = b + 1
+        assert(a == b, s"$a vs $b")
+
+### `--x` ≡ `x = x - 1` (final state)
+
+    #test
+    test_sid_equivalence_dec() -> unit
+        var a = 7
+        var b = 7
+        --a
+        b = b - 1
+        assert(a == b, s"$a vs $b")

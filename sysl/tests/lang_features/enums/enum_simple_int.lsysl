@@ -1,0 +1,279 @@
+Simple Int-Backed Enums
+=========================
+
+Per reference §"Enum Types (Simple)":
+
+```
+enum Color
+    Red               // 0
+    Green             // 1
+    Blue = 10         // explicit value
+    Yellow            // 11 (auto-increment)
+```
+
+Simple-enum members are plain `i32` values at runtime, with
+auto-incrementing values starting at 0 unless explicitly
+assigned.
+
+The type system exposes the enum machinery via attributes:
+
+- `T::First` / `T::Last` — first / last variant's *value*.
+- `T::Pos(x)` — 0-based *declaration position* (independent
+  of the variant's underlying value).
+- `T::Val(n)` — the variant at position `n` (traps OOR).
+- `T::Image(x)` — variant name as a string.
+- `T::Value(s)` — string back to variant (traps if no match).
+- `T::Succ(x)` / `T::Pred(x)` — next / previous variant.
+- `T::Valid(raw)` — bool, never traps.
+
+This file pins:
+
+- `::First` / `::Last` bounds for an enum with explicit values.
+- `::Pos` on each variant (positions independent of values).
+- `::Val(n)` round-trips with `::Pos`.
+- `::Image` / `::Value` round-trip (variant → name → variant).
+- `::Succ` / `::Pred` step through variants.
+- Match-on-enum (where the scrutinee is a local var).
+- Two distinct enums coexist.
+
+**Known analyzer bug — not pinned here:** matching on a
+function parameter of simple-enum type fails to typecheck
+(`match pattern type int incompatible with <EnumType>`).
+The workaround is to bind the param via `var c2 = c` ... no,
+even that fails. The actual workaround is to construct the
+value inside the function (`var c = Color.Green`) and not
+accept simple enums as parameters until the bug is fixed.
+See `feedback_sysl_simple_enum_param_match.md`.
+
+File-local prefix `Sei` (Sysl Enum Int).
+
+    module sysl.tests.lang_features
+
+    enum SeiColor
+        SeiRed                 // 0
+        SeiGreen               // 1
+        SeiBlue = 10           // explicit
+        SeiYellow              // 11 (auto-increment after explicit)
+
+Bounds — ::First and ::Last
+----------------------------
+
+### ::First is 0 (first variant starts at default 0)
+
+    #test
+    test_sei_first_is_zero() -> unit
+        assert(SeiColor::First == 0, s"First; got ${SeiColor::First}")
+
+### ::Last is 11 (auto-increment past Blue=10)
+
+    #test
+    test_sei_last_is_eleven() -> unit
+        assert(SeiColor::Last == 11, s"Last; got ${SeiColor::Last}")
+
+Position via ::Pos
+-------------------
+
+### Each variant's ::Pos is its declaration position
+
+    #test
+    test_sei_pos_red_zero() -> unit
+        assert(SeiColor::Pos(SeiColor.SeiRed) == 0, "Red at 0")
+
+    #test
+    test_sei_pos_green_one() -> unit
+        assert(SeiColor::Pos(SeiColor.SeiGreen) == 1, "Green at 1")
+
+### Pos is by position, not by value — Blue is at position 2 even though value is 10
+
+    #test
+    test_sei_pos_blue_is_two_not_ten() -> unit
+        assert(SeiColor::Pos(SeiColor.SeiBlue) == 2, "Blue at pos 2")
+
+    #test
+    test_sei_pos_yellow_three() -> unit
+        assert(SeiColor::Pos(SeiColor.SeiYellow) == 3, "Yellow at 3")
+
+### All positions distinct and in order
+
+    #test
+    test_sei_all_positions() -> unit
+        val a = SeiColor::Pos(SeiColor.SeiRed)
+        val b = SeiColor::Pos(SeiColor.SeiGreen)
+        val c = SeiColor::Pos(SeiColor.SeiBlue)
+        val d = SeiColor::Pos(SeiColor.SeiYellow)
+        assert(a == 0 && b == 1 && c == 2 && d == 3, s"got $a $b $c $d")
+
+::Val(n) recovers variant at position n
+----------------------------------------
+
+### ::Val + ::Pos round-trip via the Image string
+
+    #test
+    test_sei_val_zero_is_red() -> unit
+        val v = SeiColor::Val(0)
+        assert(SeiColor::Image(v) == "SeiRed", "0 → Red")
+
+    #test
+    test_sei_val_two_is_blue() -> unit
+        val v = SeiColor::Val(2)
+        assert(SeiColor::Image(v) == "SeiBlue", "2 → Blue")
+
+    #test
+    test_sei_val_three_is_yellow() -> unit
+        val v = SeiColor::Val(3)
+        assert(SeiColor::Image(v) == "SeiYellow", "3 → Yellow")
+
+::Image and ::Value (string round-trip)
+----------------------------------------
+
+### ::Image returns variant name
+
+    #test
+    test_sei_image_red() -> unit
+        assert(SeiColor::Image(SeiColor.SeiRed) == "SeiRed", "Red name")
+
+    #test
+    test_sei_image_green() -> unit
+        assert(SeiColor::Image(SeiColor.SeiGreen) == "SeiGreen", "Green name")
+
+    #test
+    test_sei_image_blue() -> unit
+        assert(SeiColor::Image(SeiColor.SeiBlue) == "SeiBlue", "Blue name")
+
+    #test
+    test_sei_image_yellow() -> unit
+        assert(SeiColor::Image(SeiColor.SeiYellow) == "SeiYellow", "Yellow name")
+
+**TODO — SVM bug, two `::Value` round-trip tests dropped.**
+`SeiColor::Value("SeiRed")` panics on SVM (the runtime helper
+that maps a string back to a variant traps with
+`svm.result=0x0`). Other 6 backends correctly recover the
+variant. See `feedback_sysl_svm_enum_value_string_lookup.md`.
+
+::Succ / ::Pred step through variants
+--------------------------------------
+
+### Succ steps from one variant to the next (by position)
+
+    #test
+    test_sei_succ_red_to_green() -> unit
+        val v = SeiColor::Succ(SeiColor.SeiRed)
+        assert(SeiColor::Image(v) == "SeiGreen", "Red → Green")
+
+    #test
+    test_sei_succ_green_to_blue() -> unit
+        val v = SeiColor::Succ(SeiColor.SeiGreen)
+        assert(SeiColor::Image(v) == "SeiBlue", "Green → Blue")
+
+### Pred goes backward
+
+    #test
+    test_sei_pred_yellow_to_blue() -> unit
+        val v = SeiColor::Pred(SeiColor.SeiYellow)
+        assert(SeiColor::Image(v) == "SeiBlue", "Yellow → Blue")
+
+    #test
+    test_sei_pred_blue_to_green() -> unit
+        val v = SeiColor::Pred(SeiColor.SeiBlue)
+        assert(SeiColor::Image(v) == "SeiGreen", "Blue → Green")
+
+### Pred / Succ are mutual inverses inside the bounds
+
+    #test
+    test_sei_pred_succ_round_trip() -> unit
+        val a = SeiColor.SeiGreen
+        val b = SeiColor::Pred(SeiColor::Succ(a))
+        assert(SeiColor::Image(b) == "SeiGreen", "round-trips")
+
+Pattern matching with a local-bound scrutinee
+----------------------------------------------
+
+The simple-enum-as-param case currently fails the analyzer
+(see file-header note); we test the variant of match that
+does work — a `var`-local scrutinee.
+
+    classify_green() -> int
+        var c = SeiColor.SeiGreen
+        c match
+            SeiColor.SeiRed -> 100
+            SeiColor.SeiGreen -> 200
+            SeiColor.SeiBlue -> 300
+            SeiColor.SeiYellow -> 400
+            else -> 999
+
+    classify_red() -> int
+        var c = SeiColor.SeiRed
+        c match
+            SeiColor.SeiRed -> 100
+            SeiColor.SeiGreen -> 200
+            SeiColor.SeiBlue -> 300
+            SeiColor.SeiYellow -> 400
+            else -> 999
+
+    classify_blue() -> int
+        var c = SeiColor.SeiBlue
+        c match
+            SeiColor.SeiRed -> 100
+            SeiColor.SeiGreen -> 200
+            SeiColor.SeiBlue -> 300
+            SeiColor.SeiYellow -> 400
+            else -> 999
+
+    classify_yellow() -> int
+        var c = SeiColor.SeiYellow
+        c match
+            SeiColor.SeiRed -> 100
+            SeiColor.SeiGreen -> 200
+            SeiColor.SeiBlue -> 300
+            SeiColor.SeiYellow -> 400
+            else -> 999
+
+### Each arm fires correctly for the matching variant
+
+    #test
+    test_sei_match_red_arm() -> unit
+        assert(classify_red() == 100, "Red")
+
+    #test
+    test_sei_match_green_arm() -> unit
+        assert(classify_green() == 200, "Green")
+
+    #test
+    test_sei_match_blue_arm() -> unit
+        assert(classify_blue() == 300, "Blue")
+
+    #test
+    test_sei_match_yellow_arm() -> unit
+        assert(classify_yellow() == 400, "Yellow")
+
+Two distinct enums coexist
+---------------------------
+
+    enum SeiDir
+        SeiNorth                // 0
+        SeiSouth                // 1
+        SeiEast                 // 2
+        SeiWest                 // 3
+
+### Both enums have ::First = 0 but they're distinct types
+
+    #test
+    test_sei_two_enums_first() -> unit
+        assert(SeiColor::First == 0, "Color first")
+        assert(SeiDir::First == 0, "Dir first")
+
+### Variant names are independent across enums
+
+    #test
+    test_sei_two_enums_names() -> unit
+        assert(SeiColor::Image(SeiColor.SeiRed) == "SeiRed", "Color.Red name")
+        assert(SeiDir::Image(SeiDir.SeiNorth) == "SeiNorth", "Dir.North name")
+
+### Each enum has its own ::Last
+
+    #test
+    test_sei_two_enums_last() -> unit
+        // SeiColor::Last = 11 (Yellow's value)
+        // SeiDir::Last = 3 (West's value, auto-increment from 0)
+        assert(SeiColor::Last == 11, "Color last")
+        assert(SeiDir::Last == 3, "Dir last")

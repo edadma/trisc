@@ -178,9 +178,8 @@ themselves (one byte in, one byte out).
     #test
     test_ses_hex_uppercase_digits() -> unit
         val s = "\xAB"
-        assert(int(s[0]) == 0xC2, "0xAB UTF-8 encodes to leading byte 0xC2")
-        assert(int(s[1]) == 0xAB, "and continuation byte 0xAB")
-        assert(len(s) == 2, "non-ASCII byte 0xAB takes two UTF-8 bytes")
+        assert(len(s) == 1, s"'\\xAB' is one raw byte; got ${len(s)}")
+        assert(int(s[0]) == 0xAB, s"the byte is 0xAB; got ${int(s[0])}")
 
     #test
     test_ses_hex_zero_byte() -> unit

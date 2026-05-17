@@ -1,0 +1,213 @@
+Invalid UTF-8 — Bytes Pass Through Verbatim
+============================================
+
+Per reference §"String type":
+
+> Sysl strings are byte-oriented `{ptr, len}` values with no enforced
+> encoding...
+> There is no locale, no Unicode normalisation, no case folding —
+> two strings with the same UTF-8 bytes are equal; two strings with
+> different UTF-8 bytes are not.
+
+This file pins:
+
+- The language **does not validate** strings against UTF-8.
+- An invalid sequence (lone continuation, truncated lead, overlong
+  encoding, bytes above 0x10FFFF) survives construction unchanged.
+- `len(s)` always returns the byte count, valid or invalid.
+- `s[i]` always returns the raw byte, valid or invalid.
+- Whether a string is valid UTF-8 is a *runtime predicate* the caller
+  evaluates with their own checker — not a type-system invariant.
+
+The actual UTF-8-validity predicate lives in `std.utf8.valid` and is
+covered there. This file just pins the language-level invariant that
+strings are bag-of-bytes — no implicit re-encoding, no rejection at
+construction, no normalisation.
+
+> **Lexer note.** Because `\xNN` for `N >= 0x80` is currently
+> mis-handled by the lexer (treated as a codepoint, not a raw byte —
+> see `feedback_sysl_high_byte_x_escape.md`), this file constructs
+> invalid sequences via byte arrays and `string(&buf[0], n)` rather
+> than via source-level escape sequences.
+
+File-local prefix `Uih` (Utf8-Invalid-Handling).
+
+    module sysl.tests.lang_features
+
+
+Helpers
+-------
+
+`uih_lead_len` classifies a lead byte by the standard UTF-8 patterns;
+returns 0 for any byte that cannot start a sequence. Same shape as
+the helper in `utf8_decode.lsysl`, duplicated here so this file is
+self-contained.
+
+    uih_lead_len(b: int) -> int
+        if (b & 0x80) == 0 then return 1
+        if (b & 0xE0) == 0xC0 then return 2
+        if (b & 0xF0) == 0xE0 then return 3
+        if (b & 0xF8) == 0xF0 then return 4
+        return 0
+
+A trivial UTF-8 validity check — walks the buffer, requires each lead
+to match the expected continuation pattern and the right number of
+continuations to follow. Returns false on any deviation. The
+test bodies use this as a black-box predicate; the assertions pin
+both `len(s)` (always correct) and `uih_valid` (false for the
+deliberately-invalid sequences).
+
+    uih_valid(s: string) -> bool
+        var i: int = 0
+        while i < len(s)
+            val b0 = int(s[i])
+            val n = uih_lead_len(b0)
+            if n == 0 then return false
+            if i + n > len(s) then return false
+            var k: int = 1
+            while k < n
+                val bk = int(s[i + k])
+                if (bk & 0xC0) != 0x80 then return false
+                k = k + 1
+            i = i + n
+        return true
+
+
+### Valid UTF-8 round-trips through `string(&buf[0], n)`
+
+A sanity check first: a well-formed sequence (`ñ`) constructed via
+the byte-array form has the same bytes as the source-level literal,
+and `uih_valid` says it's valid.
+
+    #test
+    test_uih_valid_roundtrip() -> unit
+        var buf: [4]u8 = [0xC3u8, 0xB1u8, 0u8, 0u8]
+        val s = string(&buf[0], 2)
+        assert(len(s) == 2, s"len=${len(s)}")
+        assert(int(s[0]) == 0xC3, s"b0=${int(s[0])}")
+        assert(int(s[1]) == 0xB1, s"b1=${int(s[1])}")
+        assert(uih_valid(s), "ñ is valid UTF-8")
+
+### Lone continuation byte — survives as a byte
+
+A byte in `0x80..0xBF` is a UTF-8 continuation and cannot stand alone.
+The language doesn't reject it — the string holds it verbatim and the
+validator reports false.
+
+    #test
+    test_uih_lone_continuation() -> unit
+        var buf: [2]u8 = [0xA5u8, 0u8]
+        val s = string(&buf[0], 1)
+        assert(len(s) == 1, s"len=${len(s)}")
+        assert(int(s[0]) == 0xA5, s"byte=${int(s[0])}")
+        assert(uih_lead_len(int(s[0])) == 0, "0xA5 is not a lead")
+        assert(!uih_valid(s), "lone continuation is invalid")
+
+### Truncated 2-byte sequence — lead with no continuation
+
+`0xC3` is a 2-byte lead, but if the buffer ends there the continuation
+is missing. The byte is preserved; the validator catches the truncation.
+
+    #test
+    test_uih_truncated_2byte() -> unit
+        var buf: [2]u8 = [0xC3u8, 0u8]
+        val s = string(&buf[0], 1)
+        assert(len(s) == 1, s"len=${len(s)}")
+        assert(int(s[0]) == 0xC3, s"byte=${int(s[0])}")
+        assert(uih_lead_len(int(s[0])) == 2, "expected 2-byte sequence")
+        assert(!uih_valid(s), "truncated lead is invalid")
+
+### Bad continuation byte — lead followed by another lead
+
+`0xC3 0x41` — lead byte then ASCII `A`. The second byte does NOT
+match `10xxxxxx`, so the sequence is invalid.
+
+    #test
+    test_uih_bad_continuation() -> unit
+        var buf: [3]u8 = [0xC3u8, 0x41u8, 0u8]
+        val s = string(&buf[0], 2)
+        assert(len(s) == 2, s"len=${len(s)}")
+        assert(int(s[0]) == 0xC3, s"b0=${int(s[0])}")
+        assert(int(s[1]) == 0x41, s"b1=${int(s[1])}")
+        assert(!uih_valid(s), "bad continuation is invalid")
+
+### Overlong NUL — 2-byte encoding of U+0000
+
+`0xC0 0x80` is the modified-UTF-8 / Java way to encode U+0000 (so
+strings can contain NUL without a literal NUL byte). It is **not**
+valid UTF-8 — the spec requires the shortest encoding. Our minimal
+validator only checks lead patterns and continuation bits, so it
+accepts this sequence; a real UTF-8 validator (`std.utf8.valid`)
+would reject it. We pin that the language doesn't reject it at
+construction time — the bytes survive.
+
+    #test
+    test_uih_overlong_nul_bytes_survive() -> unit
+        var buf: [3]u8 = [0xC0u8, 0x80u8, 0u8]
+        val s = string(&buf[0], 2)
+        assert(len(s) == 2, s"len=${len(s)}")
+        assert(int(s[0]) == 0xC0, s"b0=${int(s[0])}")
+        assert(int(s[1]) == 0x80, s"b1=${int(s[1])}")
+
+### Surrogate range — 3-byte encoding of U+D800
+
+UTF-16 high surrogate U+D800 maps to bytes `0xED 0xA0 0x80`. UTF-8
+forbids surrogates. The bytes still pass through verbatim.
+
+    #test
+    test_uih_surrogate_bytes_survive() -> unit
+        var buf: [4]u8 = [0xEDu8, 0xA0u8, 0x80u8, 0u8]
+        val s = string(&buf[0], 3)
+        assert(len(s) == 3, s"len=${len(s)}")
+        assert(int(s[0]) == 0xED, s"b0=${int(s[0])}")
+        assert(int(s[1]) == 0xA0, s"b1=${int(s[1])}")
+        assert(int(s[2]) == 0x80, s"b2=${int(s[2])}")
+
+### NUL byte mid-string — strings are not C-style null-terminated
+
+A literal `0x00` byte at offset 2 does NOT terminate the string.
+`len(s)` reflects the buffer length passed in.
+
+    #test
+    test_uih_embedded_nul() -> unit
+        var buf: [5]u8 = [0x41u8, 0x42u8, 0x00u8, 0x43u8, 0x44u8]
+        val s = string(&buf[0], 5)
+        assert(len(s) == 5, s"len=${len(s)}")
+        assert(int(s[0]) == 0x41, "A")
+        assert(int(s[1]) == 0x42, "B")
+        assert(int(s[2]) == 0x00, "NUL at 2")
+        assert(int(s[3]) == 0x43, "C")
+        assert(int(s[4]) == 0x44, "D")
+
+### Bytes 0xFE / 0xFF — never valid as UTF-8 leads
+
+The bytes `0xFE` and `0xFF` cannot appear anywhere in a valid UTF-8
+sequence (not as lead, not as continuation). They pass through
+unchanged at the language level.
+
+    #test
+    test_uih_FE_FF_bytes_survive() -> unit
+        var buf: [3]u8 = [0xFEu8, 0xFFu8, 0u8]
+        val s = string(&buf[0], 2)
+        assert(len(s) == 2, s"len=${len(s)}")
+        assert(int(s[0]) == 0xFE, s"b0=${int(s[0])}")
+        assert(int(s[1]) == 0xFF, s"b1=${int(s[1])}")
+        assert(uih_lead_len(0xFE) == 0, "0xFE not a lead")
+        assert(uih_lead_len(0xFF) == 0, "0xFF not a lead")
+        assert(!uih_valid(s), "0xFE 0xFF is invalid UTF-8")
+
+### Mixed valid + invalid — validator finds the bad byte
+
+A buffer with a valid `ñ` followed by a lone continuation. The valid
+prefix iterates normally; the validator returns false once it hits
+the lone continuation.
+
+    #test
+    test_uih_mixed_valid_invalid() -> unit
+        var buf: [4]u8 = [0xC3u8, 0xB1u8, 0xA5u8, 0u8]
+        val s = string(&buf[0], 3)
+        assert(len(s) == 3, s"len=${len(s)}")
+        assert(int(s[0]) == 0xC3, "lead")
+        assert(int(s[1]) == 0xB1, "cont")
+        assert(int(s[2]) == 0xA5, "lone cont")
+        assert(!uih_valid(s), "trailing lone continuation invalidates")

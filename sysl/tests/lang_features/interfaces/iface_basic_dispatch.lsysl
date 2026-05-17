@@ -1,0 +1,241 @@
+Basic Interface Dispatch
+========================
+
+Per reference: an `interface` declares a set of methods. Any
+`struct` whose `StructName.method() -> T = body` set covers
+the interface's signatures can be boxed into the interface
+type and dispatched dynamically.
+
+Dispatch is **by argument type** — different concrete types
+passed to the same `f(x: Iface)` slot must resolve to the
+matching impl's method. This file pins:
+
+- Single struct + single interface — dispatch through a
+  function-typed `Iface` parameter.
+- Two different structs implementing the same interface — each
+  call goes to the right impl.
+- Multiple methods on one interface — dispatch picks the right
+  method as well as the right impl.
+- An iface-typed local; subsequent calls through the local
+  still go to the same impl.
+- Calling the impl method directly (`s.area()`) vs through the
+  iface (`f(s: Shape)`) returns the same value.
+- Re-boxing the same concrete into the interface twice —
+  consistent dispatch each time.
+
+File-local prefix `Sibd` (Sysl Iface Basic Dispatch).
+
+The existing `iface_mutating_self.lsysl` pins the mutating
+case — see that file for the *mutate-through-iface* contract.
+
+    module sysl.tests.lang_features
+
+Single interface + two impls
+-----------------------------
+
+`Shape` has one method, two concrete implementations.
+
+    interface Shape
+        area() -> int
+
+    struct Square
+        side: int
+
+    Square.area() -> int = self.side * self.side
+
+    struct Triangle
+        base: int
+        height: int
+
+    Triangle.area() -> int = (self.base * self.height) / 2
+
+    use_shape(s: Shape) -> int = s.area()
+
+### Square dispatches to Square.area
+
+    #test
+    test_sibd_dispatch_square() -> unit
+        val s = Square(4)
+        val v = use_shape(s)
+        assert(v == 16, s"4*4; got $v")
+
+### Triangle dispatches to Triangle.area
+
+    #test
+    test_sibd_dispatch_triangle() -> unit
+        val t = Triangle(4, 6)
+        val v = use_shape(t)
+        assert(v == 12, s"(4*6)/2; got $v")
+
+### Two different concretes through the same dispatcher
+
+Calling `use_shape` once for each must pick the right impl
+for each call independently.
+
+    #test
+    test_sibd_two_calls_distinct_impls() -> unit
+        val s = Square(3)       // area = 9
+        val t = Triangle(4, 6)  // area = 12
+        val sum = use_shape(s) + use_shape(t)
+        assert(sum == 21, s"9+12; got $sum")
+
+Multiple methods on one interface
+----------------------------------
+
+`Named` extends Shape with a name accessor — dispatch picks
+both the right impl and the right method.
+
+    interface Named
+        kind() -> int
+        size() -> int
+
+    struct Tag
+        n: int
+
+    Tag.kind() -> int = 1
+    Tag.size() -> int = self.n
+
+    struct Marker
+        n: int
+
+    Marker.kind() -> int = 2
+    Marker.size() -> int = self.n * 10
+
+    sum_named(x: Named) -> int = x.kind() + x.size()
+
+### Tag dispatches to Tag.{kind,size}
+
+    #test
+    test_sibd_multi_method_tag() -> unit
+        val t = Tag(7)
+        // kind=1, size=7 → 8
+        val v = sum_named(t)
+        assert(v == 8, s"got $v")
+
+### Marker dispatches to Marker.{kind,size}
+
+    #test
+    test_sibd_multi_method_marker() -> unit
+        val m = Marker(7)
+        // kind=2, size=70 → 72
+        val v = sum_named(m)
+        assert(v == 72, s"got $v")
+
+### Single-method dispatch picks the right method of the right impl
+
+    just_kind(x: Named) -> int = x.kind()
+    just_size(x: Named) -> int = x.size()
+
+    #test
+    test_sibd_just_kind() -> unit
+        val t = Tag(99)
+        val m = Marker(99)
+        assert(just_kind(t) == 1, "Tag.kind")
+        assert(just_kind(m) == 2, "Marker.kind")
+
+    #test
+    test_sibd_just_size() -> unit
+        val t = Tag(5)
+        val m = Marker(5)
+        assert(just_size(t) == 5, "Tag.size")
+        assert(just_size(m) == 50, "Marker.size")
+
+Iface-typed local
+------------------
+
+Storing a concrete into an iface-typed `val`/`var` and then
+calling through it pins that the dispatch information rides
+on the boxed value, not on the surrounding parameter context.
+
+### `val s: Shape = Square(...)` then `s.area()`
+
+    #test
+    test_sibd_local_iface_square() -> unit
+        val s: Shape = Square(5)
+        val v = s.area()
+        assert(v == 25, s"5*5; got $v")
+
+### Iface-typed local for Triangle
+
+    #test
+    test_sibd_local_iface_triangle() -> unit
+        val s: Shape = Triangle(6, 4)
+        val v = s.area()
+        assert(v == 12, s"(6*4)/2; got $v")
+
+### Two iface locals from different concretes
+
+    #test
+    test_sibd_two_locals_distinct() -> unit
+        val a: Shape = Square(2)        // area = 4
+        val b: Shape = Triangle(2, 2)   // area = 2
+        assert(a.area() == 4, "Square via local")
+        assert(b.area() == 2, "Triangle via local")
+        assert(a.area() + b.area() == 6, "sum 4+2")
+
+Direct call vs iface dispatch parity
+-------------------------------------
+
+### Direct and iface-routed calls produce the same value
+
+    #test
+    test_sibd_direct_vs_iface_parity_square() -> unit
+        val s = Square(7)
+        val direct = s.area()
+        val via_iface = use_shape(s)
+        assert(direct == via_iface, s"direct=$direct iface=$via_iface")
+        assert(direct == 49, "7*7")
+
+### Same parity for Triangle
+
+    #test
+    test_sibd_direct_vs_iface_parity_triangle() -> unit
+        val t = Triangle(5, 4)
+        val direct = t.area()
+        val via_iface = use_shape(t)
+        assert(direct == via_iface, s"direct=$direct iface=$via_iface")
+        assert(direct == 10, "(5*4)/2")
+
+Re-boxing — same concrete dispatches consistently
+--------------------------------------------------
+
+### Box the same Square into iface twice — both calls return same value
+
+    #test
+    test_sibd_rebox_square_consistent() -> unit
+        val s = Square(6)
+        val a: Shape = s
+        val b: Shape = s
+        assert(a.area() == b.area(), "consistent")
+        assert(a.area() == 36, "6*6")
+
+### Box the same Marker into iface twice
+
+    #test
+    test_sibd_rebox_marker_consistent() -> unit
+        val m = Marker(8)
+        val a: Named = m
+        val b: Named = m
+        assert(a.kind() == b.kind(), "kind consistent")
+        assert(a.size() == b.size(), "size consistent")
+        assert(a.size() == 80, "Marker.size = n*10")
+
+Dispatch through an expression result
+--------------------------------------
+
+The boxed receiver doesn't have to come from a `val`/`var` —
+calling through a struct literal directly also works.
+
+### Inline `Square(...)` → iface dispatch
+
+    #test
+    test_sibd_inline_square_into_iface() -> unit
+        val v = use_shape(Square(9))
+        assert(v == 81, s"9*9; got $v")
+
+### Inline `Triangle(...)` → iface dispatch
+
+    #test
+    test_sibd_inline_triangle_into_iface() -> unit
+        val v = use_shape(Triangle(10, 6))
+        assert(v == 30, s"(10*6)/2; got $v")

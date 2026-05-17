@@ -1,0 +1,309 @@
+Integer Widths and Casts
+=========================
+
+Per reference §"Composite Types" and §"Casts":
+
+- Signed integer types: `i8`, `i16`, `i32`, `i64`, `int` (= `i32`).
+- Unsigned integer types: `u8`, `u16`, `u32`, `u64`.
+- Sizes (verified): `sizeof(i8)=1`, `sizeof(i16)=2`, `sizeof(i32)=4`,
+  `sizeof(i64)=8`; unsigned analogues match.
+- Casts are **explicit** — no implicit promotion between widths or
+  signedness. `i8(x)` truncates to 1 byte; `i64(x)` sign-extends from
+  smaller signed types; `u64(x)` zero-extends from smaller unsigned
+  types.
+
+This file pins:
+
+- `sizeof` for every signed and unsigned width.
+- Cast round-trips: narrow then widen, with the right truncation /
+  sign-extension at the boundary.
+- Truncation modulo 2^n at narrowing.
+- Sign-extension from smaller signed types.
+- Zero-extension from smaller unsigned types.
+- Cross-signedness reinterpretation (`i8(-1)` → `u8(255)` etc.).
+- Boundary values (MIN, MAX) survive identity casts.
+
+File-local prefix `Iw` (Integer Width).
+
+    module sysl.tests.lang_features
+
+sizeof for every width
+-----------------------
+
+### Signed widths
+
+    #test
+    test_iw_sizeof_signed() -> unit
+        assert(sizeof(i8) == 1, s"i8: ${sizeof(i8)}")
+        assert(sizeof(i16) == 2, s"i16: ${sizeof(i16)}")
+        assert(sizeof(i32) == 4, s"i32: ${sizeof(i32)}")
+        assert(sizeof(i64) == 8, s"i64: ${sizeof(i64)}")
+
+### `int` is `i32`-shaped (4 bytes)
+
+    #test
+    test_iw_sizeof_int() -> unit
+        assert(sizeof(int) == 4, s"int: ${sizeof(int)}")
+
+### Unsigned widths
+
+    #test
+    test_iw_sizeof_unsigned() -> unit
+        assert(sizeof(u8) == 1, s"u8: ${sizeof(u8)}")
+        assert(sizeof(u16) == 2, s"u16: ${sizeof(u16)}")
+        assert(sizeof(u32) == 4, s"u32: ${sizeof(u32)}")
+        assert(sizeof(u64) == 8, s"u64: ${sizeof(u64)}")
+
+Truncation on narrowing — `iN(x)` keeps only the low N bits
+-------------------------------------------------------------
+
+### `u8(0x1FF)` → `0xFF` (drop the high bit)
+
+    #test
+    test_iw_u8_trunc() -> unit
+        val x: i32 = 0x1FF
+        val y = u8(x)
+        assert(i32(y) == 0xFF, s"got ${i32(y)}")
+
+### `u8(0x100)` → `0` (full byte boundary)
+
+    #test
+    test_iw_u8_trunc_boundary() -> unit
+        val x: i32 = 0x100
+        val y = u8(x)
+        assert(i32(y) == 0, s"got ${i32(y)}")
+
+### `i8(256)` → `0` (mod 256)
+
+    #test
+    test_iw_i8_wrap_mod_256() -> unit
+        val x: i32 = 256
+        val y = i8(x)
+        assert(i32(y) == 0, s"got ${i32(y)}")
+
+### `i8(257)` → `1`
+
+    #test
+    test_iw_i8_wrap_257() -> unit
+        val x: i32 = 257
+        val y = i8(x)
+        assert(i32(y) == 1, s"got ${i32(y)}")
+
+### `i8(127)` is fine (signed max)
+
+    #test
+    test_iw_i8_max() -> unit
+        val x: i32 = 127
+        val y = i8(x)
+        assert(i32(y) == 127, s"got ${i32(y)}")
+
+### `i8(128)` wraps to `-128` (signed min after wrap)
+
+    #test
+    test_iw_i8_wrap_to_min() -> unit
+        val x: i32 = 128
+        val y = i8(x)
+        assert(i32(y) == -128, s"got ${i32(y)}")
+
+### `u16(0x12345)` → `0x2345`
+
+    #test
+    test_iw_u16_trunc() -> unit
+        val x: i32 = 0x12345
+        val y = u16(x)
+        assert(i32(y) == 0x2345, s"got ${i32(y)}")
+
+### `i32(0x123456789i64)` → low 32 bits = `0x23456789`
+
+    #test
+    test_iw_i32_trunc_from_i64() -> unit
+        val x: i64 = 0x123456789i64
+        val y = i32(x)
+        assert(i64(y) == 0x23456789i64, s"got ${i64(y)}")
+
+Sign-extension when widening a signed value
+--------------------------------------------
+
+### `i32(i8(-1))` is `-1` (not `255`)
+
+    #test
+    test_iw_sign_ext_i8_to_i32() -> unit
+        val a: i8 = -1
+        val b = i32(a)
+        assert(b == -1, s"got $b")
+
+### `i64(i8(-1))` is `-1`
+
+    #test
+    test_iw_sign_ext_i8_to_i64() -> unit
+        val a: i8 = -1
+        val b = i64(a)
+        assert(b == -1i64, s"got $b")
+
+### `i64(i16(-1))` is `-1`
+
+    #test
+    test_iw_sign_ext_i16_to_i64() -> unit
+        val a: i16 = -1
+        val b = i64(a)
+        assert(b == -1i64, s"got $b")
+
+### `i64(i32(-1))` is `-1`
+
+    #test
+    test_iw_sign_ext_i32_to_i64() -> unit
+        val a: i32 = -1
+        val b = i64(a)
+        assert(b == -1i64, s"got $b")
+
+### `i64(i8(-128))` is `-128`
+
+    #test
+    test_iw_sign_ext_i8_min() -> unit
+        val a: i8 = -128
+        val b = i64(a)
+        assert(b == -128i64, s"got $b")
+
+Zero-extension when widening an unsigned value
+-----------------------------------------------
+
+### `i32(u8(0xFF))` is `255`, NOT `-1`
+
+    #test
+    test_iw_zero_ext_u8_to_i32() -> unit
+        val a: u8 = 0xFF
+        val b = i32(a)
+        assert(b == 255, s"got $b")
+
+### `i64(u8(0xFF))` is `255`
+
+    #test
+    test_iw_zero_ext_u8_to_i64() -> unit
+        val a: u8 = 0xFF
+        val b = i64(a)
+        assert(b == 255i64, s"got $b")
+
+### `i64(u16(0xFFFF))` is `65535`
+
+    #test
+    test_iw_zero_ext_u16_to_i64() -> unit
+        val a: u16 = 0xFFFF
+        val b = i64(a)
+        assert(b == 65535i64, s"got $b")
+
+### `i64(u32(0xFFFFFFFF))` is `4_294_967_295`
+
+    #test
+    test_iw_zero_ext_u32_to_i64() -> unit
+        val a: u32 = 0xFFFFFFFFu32
+        val b = i64(a)
+        assert(b == 4294967295i64, s"got $b")
+
+Cross-signedness reinterpretation (same width)
+-----------------------------------------------
+
+### `u8(i8(-1))` → `255`
+
+    #test
+    test_iw_i8_to_u8_neg() -> unit
+        val a: i8 = -1
+        val b = u8(a)
+        assert(i32(b) == 255, s"got ${i32(b)}")
+
+### `i8(u8(255))` → `-1`
+
+    #test
+    test_iw_u8_to_i8_high() -> unit
+        val a: u8 = 255
+        val b = i8(a)
+        assert(i32(b) == -1, s"got ${i32(b)}")
+
+### `u32(i32(-1))` → `0xFFFFFFFF`
+
+    #test
+    test_iw_i32_to_u32_neg() -> unit
+        val a: i32 = -1
+        val b = u32(a)
+        assert(i64(b) == 4294967295i64, s"got ${i64(b)}")
+
+### `i32(u32(0x80000000u32))` → `-2147483648`
+
+    #test
+    test_iw_u32_to_i32_high_bit() -> unit
+        val a: u32 = 0x80000000u32
+        val b = i32(a)
+        assert(b == -2147483648, s"got $b")
+
+Round-trips — narrow then widen preserves only the low bits
+-------------------------------------------------------------
+
+### `i32(i8(i32(0x1234)))` keeps only low byte then sign-extends — `0x34`
+
+    #test
+    test_iw_round_trip_via_i8() -> unit
+        val x: i32 = 0x1234
+        val narrow = i8(x)
+        val wide = i32(narrow)
+        assert(wide == 0x34, s"got $wide")
+
+### `i32(i8(i32(0x1280)))` — low byte 0x80 = -128 in i8, sign-extends to -128
+
+    #test
+    test_iw_round_trip_via_i8_high() -> unit
+        val x: i32 = 0x1280
+        val narrow = i8(x)
+        val wide = i32(narrow)
+        assert(wide == -128, s"got $wide")
+
+### `i32(u8(i32(0x1280)))` — low byte 0x80 = 128 in u8, zero-extends to 128
+
+    #test
+    test_iw_round_trip_via_u8() -> unit
+        val x: i32 = 0x1280
+        val narrow = u8(x)
+        val wide = i32(narrow)
+        assert(wide == 128, s"got $wide")
+
+Boundary values survive identity casts
+---------------------------------------
+
+### i32 MAX
+
+    #test
+    test_iw_i32_max_identity() -> unit
+        val x: i32 = 2147483647
+        val y = i32(x)
+        assert(y == 2147483647, s"got $y")
+
+### i32 MIN
+
+    #test
+    test_iw_i32_min_identity() -> unit
+        val x: i32 = -2147483648
+        val y = i32(x)
+        assert(y == -2147483648, s"got $y")
+
+### i64 MAX
+
+    #test
+    test_iw_i64_max_identity() -> unit
+        val x: i64 = 9223372036854775807i64
+        val y = i64(x)
+        assert(y == 9223372036854775807i64, s"got $y")
+
+### i64 MIN
+
+    #test
+    test_iw_i64_min_identity() -> unit
+        val x: i64 = -9223372036854775807i64 - 1i64
+        val y = i64(x)
+        assert(y == -9223372036854775807i64 - 1i64, s"got $y")
+
+### u64 MAX as bit pattern (avoid signed-literal limits)
+
+    #test
+    test_iw_u64_max_identity() -> unit
+        val x: u64 = 0xFFFFFFFFFFFFFFFFu64
+        val y = u64(x)
+        // compare as bits — equality on u64 is exact
+        assert(y == 0xFFFFFFFFFFFFFFFFu64, "round-trip")

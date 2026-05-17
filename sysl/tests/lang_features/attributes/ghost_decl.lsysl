@@ -1,0 +1,185 @@
+`#ghost` — Verification-Only Declarations
+==========================================
+
+Per reference §`#ghost` — verification-only declarations:
+
+> A `#ghost` annotation marks a declaration as visible to the
+> verifier but invisible at runtime. Ghost code lets contracts and
+> proofs talk about state that doesn't exist in the executable
+> without paying any runtime cost.
+
+This file pins the **runtime-observable** half — what the program
+looks like *after* the compiler's ghost-strip pass:
+
+- A program with `#ghost` decls runs identically to the same program
+  without them. No allocation, no execution time, no side effects.
+- A `#ghost var` produces no storage — referencing it from real code
+  is a compile-time error, but its mere presence does not affect
+  the rest of the program's runtime behaviour.
+- `require` / `ensure` clauses that touch a ghost name or call a
+  ghost function get **dropped entirely** by the strip pass — the
+  real function still runs, no contract violation can be raised
+  from a ghost-only assertion at runtime.
+- `#ghost` is mutually exclusive with `#pure`, `#reads`, `#writes`,
+  `#address`, `const` — we only test the runtime-visible side, so
+  those interactions are not exercised here.
+
+What this file does NOT pin (out of reach of the test runner):
+
+- Compile-time *rejection* of real code reading ghost state, ghost
+  code writing real state, or instantiating a `#ghost struct` from
+  real code. Those negative cases live in JVM-side analyzer tests.
+
+File-local prefix `Gh` (Ghost).
+
+    module sysl.tests.lang_features
+
+
+### A program with a `#ghost var` runs unchanged
+
+The ghost var has no storage at runtime; the real function below
+runs the same way it would if `gh_seen_count` weren't declared.
+
+    #ghost
+    var gh_seen_count: int = 0
+
+    gh_double(x: int) -> int = x * 2
+
+    #test
+    test_gh_program_with_ghost_var_runs() -> unit
+        assert(gh_double(7) == 14, "real code returns same value")
+        assert(gh_double(0) == 0, "even with a ghost var present")
+
+
+### A `#ghost` function exists at compile time and is stripped at runtime
+
+The ghost function `gh_is_sorted` is invisible to runtime code; real
+code calls another real function that does the actual work.
+
+    #ghost
+    gh_is_sorted_spec(n: int) -> bool
+        if n <= 0 then return true
+        return true
+
+    gh_real_compute(x: int) -> int = x + 1
+
+    #test
+    test_gh_ghost_fn_does_not_block_runtime() -> unit
+        // The ghost function is never invoked from real code; real
+        // code just runs.
+        assert(gh_real_compute(0) == 1, "0+1")
+        assert(gh_real_compute(99) == 100, "99+1")
+
+
+### `require` clause with a ghost name is dropped
+
+A real function's `require` clause that mentions a ghost var must
+be stripped before codegen. At runtime, the function executes
+without any contract check against the ghost name.
+
+    #ghost
+    var gh_max_allowed: int = 10
+
+    gh_clamp_with_ghost(x: int) -> int
+        require gh_max_allowed >= 0, "ghost-only precondition"
+        if x > 100 then return 100
+        if x < 0 then return 0
+        return x
+
+    #test
+    test_gh_require_with_ghost_is_dropped() -> unit
+        // If the require survived codegen and could read a ghost
+        // name, it would either fail at compile time or panic at
+        // runtime. We get neither — the function just runs.
+        assert(gh_clamp_with_ghost(50) == 50, "in range")
+        assert(gh_clamp_with_ghost(200) == 100, "clamp high")
+        assert(gh_clamp_with_ghost(-5) == 0, "clamp low")
+
+
+### `ensure` clause with a ghost function call is dropped
+
+Same rule for `ensure`: if the postcondition's expression touches a
+ghost name (calls a ghost fn), the clause is dropped. The real
+function still returns its real value.
+
+    #ghost
+    gh_postcond_holds(n: int) -> bool = n >= 0
+
+    gh_make_nonneg(x: int) -> int
+        ensure gh_postcond_holds(result), "ghost-only postcondition"
+        if x < 0 then return 0
+        return x
+
+    #test
+    test_gh_ensure_with_ghost_call_is_dropped() -> unit
+        assert(gh_make_nonneg(7) == 7, "positive passes through")
+        assert(gh_make_nonneg(0) == 0, "zero")
+        assert(gh_make_nonneg(-1) == 0, "negative -> 0")
+
+
+### Real `require` survives alongside dropped ghost clauses
+
+The strip pass removes only the ghost-referencing clauses; pure
+real-code contracts are preserved. Pin that a real `require` still
+runs by giving it a passing precondition.
+
+    #ghost
+    var gh_some_ghost: int = 0
+
+    gh_with_mixed_contracts(x: int) -> int
+        require x >= 0, "real precondition that runs"
+        require gh_some_ghost >= 0, "ghost precondition that gets dropped"
+        ensure result >= x, "real postcondition that runs"
+        return x + 1
+
+    #test
+    test_gh_real_contract_survives() -> unit
+        assert(gh_with_mixed_contracts(0) == 1, "0+1 with passing real require")
+        assert(gh_with_mixed_contracts(99) == 100, "99+1")
+
+
+### `#ghost var` initialiser does not execute at runtime
+
+The ghost var's initialiser must be stripped along with the
+declaration. A side-effecting initialiser (in theory — we use a
+constant here because the v1 stripper is conservative) would not
+fire at runtime.
+
+    #ghost
+    var gh_init_only: int = 12345
+
+    gh_real_runtime_marker: int = 0
+
+    #test
+    test_gh_init_does_not_run() -> unit
+        // gh_real_runtime_marker is module-level, default-zero.
+        // No real code mutates it; the ghost var's initialiser
+        // cannot touch real state by design.
+        assert(gh_real_runtime_marker == 0, "real marker untouched")
+
+
+### Strip pass reaches inside `match` arm bodies (regression)
+
+Same shape as the multi-return `if` test above, but with a `match`
+expression. Before the 2026-05-16 strip-pass fix, the strip pass
+recursed into TWhile/TFor/TLoop bodies but not into TIfExpr or
+TMatchExpr inside a TExprStmt — so a `match` whose arms each ended
+in `return` left the ensure-check clones (carrying ghost refs)
+alive in the post-rewrite IR, producing "undefined function" at
+runtime when the ghost function had already been stripped.
+
+    #ghost
+    gh_pos_postcond(n: int) -> bool = n >= 0
+
+    gh_match_classify(x: int) -> int
+        ensure gh_pos_postcond(result), "ghost-only postcondition"
+        x match
+            0  -> return 0
+            _ if x < 0 -> return 0
+            _  -> return x
+
+    #test
+    test_gh_match_branch_strips() -> unit
+        assert(gh_match_classify(0) == 0, "zero branch")
+        assert(gh_match_classify(-5) == 0, "negative branch")
+        assert(gh_match_classify(7) == 7, "default branch")

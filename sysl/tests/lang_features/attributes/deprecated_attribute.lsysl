@@ -1,0 +1,157 @@
+`#deprecated("msg")` — Deprecation Annotation
+==============================================
+
+Per reference §"Attributes" — `#deprecated` is a metadata annotation
+that flags a function as deprecated. The reason string is intended
+for tooling (compile-time diagnostics) and **must never change
+runtime semantics** — a deprecated function still runs, still
+returns the correct value, and is still callable from any context.
+
+This file pins:
+
+- A `#deprecated` function returns the same value it would without
+  the attribute.
+- Deprecated functions are callable from regular code, from another
+  `#deprecated` function, and from `#pure` callers.
+- The reason argument accepts arbitrary strings — including Unicode
+  — because the analyzer's attribute-reason path decodes the lexer's
+  byte-form `StringLit` back to a proper Java String for the host
+  JVM diagnostic. (See `feedback_sysl_high_byte_x_escape.md` —
+  fixed 2026-05-16.)
+
+What this file does NOT pin (out of reach of the test runner):
+
+- That a `#deprecated` call-site actually emits a warning at compile
+  time — the runner has no diagnostic-capture mechanism. That lives
+  in JVM-side analyzer tests.
+
+File-local prefix `Dep` (Deprecated).
+
+    module sysl.tests.lang_features
+
+
+### `#deprecated` with no reason — bare attribute
+
+The argument is optional. A bare `#deprecated` is a flag-only form.
+
+    #deprecated
+    dep_old_answer() -> int = 42
+
+    #test
+    test_dep_bare_no_reason() -> unit
+        assert(dep_old_answer() == 42, s"got ${dep_old_answer()}")
+
+
+### `#deprecated("...")` with an ASCII reason
+
+The most common form. Runtime behavior is identical to the
+unmarked version.
+
+    #deprecated("use dep_new_double")
+    dep_old_double(x: int) -> int = x * 2
+
+    dep_new_double(x: int) -> int = x * 2
+
+    #test
+    test_dep_with_ascii_reason() -> unit
+        assert(dep_old_double(7) == 14, s"old got ${dep_old_double(7)}")
+        assert(dep_old_double(7) == dep_new_double(7), "old equals new")
+
+
+### `#deprecated` with a Unicode reason
+
+The reason string flows through the lexer's byte-form `StringLit`
+and gets decoded to UTF-8 at the analyzer boundary. The function
+itself runs unchanged.
+
+    #deprecated("renamed — use dep_new_id (≈3× faster) ✓")
+    dep_old_id(x: int) -> int = x
+
+    #test
+    test_dep_unicode_reason() -> unit
+        assert(dep_old_id(0) == 0, "id 0")
+        assert(dep_old_id(123) == 123, "id 123")
+        assert(dep_old_id(-1) == -1, "id -1")
+
+
+### `#deprecated` call from another `#deprecated` function
+
+A deprecation chain: `dep_chain_outer` is itself deprecated, and it
+calls `dep_chain_inner` which is also deprecated. Both should still
+execute normally.
+
+    #deprecated("use dep_chain_new")
+    dep_chain_inner(x: int) -> int = x + 1
+
+    #deprecated("use the new pipeline")
+    dep_chain_outer(x: int) -> int = dep_chain_inner(x) * 2
+
+    #test
+    test_dep_calls_deprecated() -> unit
+        assert(dep_chain_inner(0) == 1, "inner 0+1")
+        assert(dep_chain_outer(5) == 12, "outer (5+1)*2 = 12")
+
+
+### `#deprecated` on a `#pure` function
+
+`#deprecated` is metadata, not a behavioral attribute. Stacking it
+with `#pure` should leave both invariants intact: the function is
+still pure (no compile error from purity violations) and still
+deprecated.
+
+    #pure
+    #deprecated("use the constexpr helper instead")
+    dep_pure_square(x: int) -> int = x * x
+
+    #test
+    test_dep_with_pure() -> unit
+        assert(dep_pure_square(0) == 0, "0²")
+        assert(dep_pure_square(8) == 64, "8²")
+        assert(dep_pure_square(-3) == 9, "-3²")
+
+
+### `#deprecated` reason embedded inside another deprecated function
+
+The `dep_via` function is deprecated and recursive — purely
+structural. Pin that the body still runs.
+
+    #deprecated("recursive form is the slow one; use the iterative dep_iter")
+    dep_via(n: int) -> int
+        if n <= 0 then return 0
+        return n + dep_via(n - 1)
+
+    #test
+    test_dep_recursive() -> unit
+        assert(dep_via(0) == 0, "0")
+        assert(dep_via(1) == 1, "1")
+        assert(dep_via(5) == 15, "1+2+…+5 = 15")
+        assert(dep_via(10) == 55, "1+2+…+10 = 55")
+
+
+### `#deprecated` with an empty reason string
+
+`#deprecated("")` is unusual but should be accepted; the empty
+reason is the same as a bare `#deprecated` for runtime purposes.
+
+    #deprecated("")
+    dep_empty_reason() -> int = 7
+
+    #test
+    test_dep_empty_reason() -> unit
+        assert(dep_empty_reason() == 7, "empty-reason runs")
+
+
+### `#deprecated` reason with `\xNN` high-byte escapes
+
+After the 2026-05-16 lexer fix, `\xNN` for `N >= 0x80` emits a single
+raw byte. The reason string in attribute args is plain `String` at
+the analyzer level (carried through `StringLit` byte form, decoded
+to UTF-8 at the host JVM boundary). The function still runs
+identically.
+
+    #deprecated("contains a high byte \xC3\xB1 inside")
+    dep_high_byte_reason() -> int = 99
+
+    #test
+    test_dep_high_byte_reason() -> unit
+        assert(dep_high_byte_reason() == 99, "runs with high-byte reason")

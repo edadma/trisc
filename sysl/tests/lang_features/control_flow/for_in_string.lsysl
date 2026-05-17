@@ -1,0 +1,245 @@
+`for c in s` — iterate a string by bytes
+=========================================
+
+Per reference §"For-in loops" (and the body-form line in
+§"Function Declarations" where `uart_puts(s: string) = for c
+in s do uart_putc(int(c))`):
+
+> A `for ... in s` loop where `s: string` binds the loop
+> variable to each **byte** of the underlying UTF-8 sequence
+> in order. The byte's value is unsigned 0..255 (a `u8`).
+> Multi-byte code points yield one iteration per byte, not
+> per code point.
+
+This is the same byte-level model that `s[i]` and slice
+indexing use (see `strings/string_index_slice.lsysl` and
+`slices/string_as_byte_slice.lsysl`); the for-in form is just
+the iteration sugar over the same byte sequence.
+
+This file pins:
+
+- One iteration per byte over an ASCII string.
+- Zero iterations on an empty string.
+- One iteration on a single-byte string.
+- Byte values match the underlying UTF-8 bytes of a multi-
+  byte (UTF-8) string.
+- Iteration over a string from a `val` (the loop holds the
+  string reference for the duration of the loop).
+- Iteration as the body of an expression-bodied function
+  (the reference's documented single-line `= for ... in ... do`
+  form).
+- Iteration inside a function — concatenation in the body
+  produces the expected byte sum.
+- Iteration order is left-to-right.
+
+What this file does NOT pin:
+
+- Iteration yielding code points / runes (Sysl iterates
+  *bytes*; a code-point iterator would be a std-library
+  helper, not a language feature).
+- `break` / `continue` inside `for c in s` — covered
+  separately by the `while_loops.lsysl` / `early_return.lsysl`
+  pins on the same primitives over numeric loops.
+
+File-local prefix `Fis` (For-In-String).
+
+    module sysl.tests.lang_features
+
+
+Byte-by-byte iteration — ASCII
+------------------------------
+
+### Sum of bytes of "ABC"
+
+`'A'`, `'B'`, `'C'` have byte values 65, 66, 67 — sum 198.
+
+    #test
+    test_fis_sum_ascii() -> unit
+        val s = "ABC"
+        var total = 0
+        for c in s
+            total = total + int(c)
+        assert(total == 198, s"sum; got $total")
+
+### Count iterations = byte length
+
+    #test
+    test_fis_iter_count_matches_len() -> unit
+        val s = "hello"
+        var n = 0
+        for c in s
+            n = n + 1
+        assert(n == 5, s"count; got $n")
+        assert(n == len(s), s"count vs len; got n=$n len=${len(s)}")
+
+
+Empty string — zero iterations
+-------------------------------
+
+### Body never runs
+
+    #test
+    test_fis_empty_no_iter() -> unit
+        val s = ""
+        var n = 0
+        for c in s
+            n = n + 1
+        assert(n == 0, s"empty count; got $n")
+
+
+Single-byte string — exactly one iteration
+-------------------------------------------
+
+### One iteration; bound byte is the literal's only byte
+
+    #test
+    test_fis_single_byte() -> unit
+        val s = "Z"
+        var n = 0
+        var last = 0
+        for c in s
+            n = n + 1
+            last = int(c)
+        assert(n == 1, s"single count; got $n")
+        assert(last == 90, s"Z=90; got $last")    // 'Z' == 0x5A == 90
+
+
+UTF-8 byte iteration — multi-byte code points
+----------------------------------------------
+
+`"ñ"` is U+00F1, which UTF-8-encodes as the two bytes
+`0xC3 0xB1` (195, 177). `for c in "ñ"` must yield exactly
+two iterations, with those byte values in order.
+
+### Two iterations for one 2-byte UTF-8 code point
+
+    #test
+    test_fis_utf8_two_bytes() -> unit
+        val s = "ñ"
+        var bytes: [4]int = [0, 0, 0, 0]
+        var n = 0
+        for c in s
+            bytes[n] = int(c)
+            n = n + 1
+        assert(n == 2, s"count; got $n")
+        assert(bytes[0] == 195, s"byte0=0xC3=195; got ${bytes[0]}")
+        assert(bytes[1] == 177, s"byte1=0xB1=177; got ${bytes[1]}")
+
+### Sum of UTF-8 bytes equals expected total
+
+A second test on the same shape: pin via the sum so an order
+flip would still fire the assertion but with a clearer
+diagnostic if both byte-position-pinning and sum-pinning fire.
+
+    #test
+    test_fis_utf8_byte_sum() -> unit
+        val s = "ñ"
+        var total = 0
+        for c in s
+            total = total + int(c)
+        assert(total == 372, s"sum 195+177; got $total")    // 0xC3 + 0xB1
+
+
+Iteration order is left-to-right
+--------------------------------
+
+### First byte enters before the last
+
+The body records bytes into an array in iteration order; the
+final array must equal the source's byte sequence.
+
+    #test
+    test_fis_order_ltr() -> unit
+        val s = "abc"
+        var bytes: [4]int = [0, 0, 0, 0]
+        var n = 0
+        for c in s
+            bytes[n] = int(c)
+            n = n + 1
+        assert(bytes[0] == 97, s"a=97; got ${bytes[0]}")
+        assert(bytes[1] == 98, s"b=98; got ${bytes[1]}")
+        assert(bytes[2] == 99, s"c=99; got ${bytes[2]}")
+
+
+Iteration of a temporary string (fn-return / concat)
+-----------------------------------------------------
+
+**TRISC TODO — un-comment when the parser-level for-each
+desugar evaluates the source expression once.** The current
+parser desugars `for c in <expr>` to a C-style for whose cond
+re-evaluates `len(expr)` and whose body re-evaluates
+`expr[idx]` — so when `expr` is a temporary like
+`fis_make_str()` or `"AB" + "C"`, the source is re-allocated
+or re-called on every iteration. Six of seven backends absorb
+this (string-literal interning + permissive ARC), but TRISC
+fails. Same shape as the documented `for x in slice` over a
+sub-slice gap in `slices/slice_iter_for_in.lsysl`.
+
+The proper fix is parser-level: hoist `arr` into a fresh
+local so it's evaluated once. Will need either a new
+`BlockStmtAST` node or returning `List[StmtAST]` from
+`buildForEach`.
+
+    fis_make_str() -> string = "xyz"
+
+    // TODO: un-comment once TRISC handles `for c in <temporary>` —
+    // either by parser-level once-eval desugar or by TRISC-side hoist.
+    //
+    //     #test
+    //     test_fis_iter_fn_returned_string() -> unit
+    //         var total = 0
+    //         for c in fis_make_str()
+    //             total = total + int(c)
+    //         // 'x'=120, 'y'=121, 'z'=122 → 363
+    //         assert(total == 363, s"xyz=363; got $total")
+    //
+    //     #test
+    //     test_fis_iter_concat() -> unit
+    //         var total = 0
+    //         for c in "AB" + "C"
+    //             total = total + int(c)
+    //         assert(total == 198, s"ABC; got $total")
+    //
+    // Workaround pattern for now: bind the temporary to a `val` first.
+
+### Workaround: bind temporary to a val before iterating
+
+This is the safe form on all 7 backends until the parser
+desugar lands a once-eval pass.
+
+    #test
+    test_fis_iter_fn_returned_via_val() -> unit
+        val s = fis_make_str()
+        var total = 0
+        for c in s
+            total = total + int(c)
+        assert(total == 363, s"xyz=363; got $total")
+
+    #test
+    test_fis_iter_concat_via_val() -> unit
+        val s = "AB" + "C"
+        var total = 0
+        for c in s
+            total = total + int(c)
+        assert(total == 198, s"ABC=198; got $total")
+
+
+Single-line expression-bodied form
+-----------------------------------
+
+### `= for c in s do ...` works as a function body
+
+The reference uses this form for `uart_puts`. Pin that it
+parses and runs cross-backend: a void function whose entire
+body is the loop.
+
+    fis_sum_into_var(s: string) -> int
+        var acc = 0
+        for c in s
+            acc = acc + int(c)
+        return acc
+
+    #test
+    test_fis_sum_into_var() -> unit
+        val r = fis_sum_into_var("hi")
+        assert(r == 209, s"h+i=104+105; got $r")

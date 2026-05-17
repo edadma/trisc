@@ -1,0 +1,278 @@
+Operator Precedence — Bitwise
+==============================
+
+Per reference §"Operators (by precedence, high to low)":
+
+- Shifts `<<` / `>>` bind tighter than comparisons.
+- `&` binds tighter than `^`, which binds tighter than `|`.
+- All bitwise binary ops bind tighter than `==` / `!=` /
+  comparisons.
+
+This file pins bitwise behavior + precedence interactions.
+
+File-local prefix `Spb` (Sysl Precedence Bitwise).
+
+    module sysl.tests.lang_features
+
+Basic bitwise ops on small literals
+------------------------------------
+
+### `12 & 10` = 0b1000 = 8
+
+    #test
+    test_spb_and_basic() -> unit
+        val r = 12 & 10
+        // 1100 & 1010 = 1000
+        assert(r == 8, s"got $r")
+
+### `12 | 10` = 14 = 14
+
+    #test
+    test_spb_or_basic() -> unit
+        val r = 12 | 10
+        assert(r == 14, s"got $r")
+
+### `12 ^ 10` = 0b0110 = 6
+
+    #test
+    test_spb_xor_basic() -> unit
+        val r = 12 ^ 10
+        assert(r == 6, s"got $r")
+
+### Self-XOR is zero
+
+    #test
+    test_spb_xor_self() -> unit
+        val x = 42
+        assert((x ^ x) == 0, "x ^ x = 0")
+
+### AND with all-zero / all-mask edges
+
+    #test
+    test_spb_and_zero() -> unit
+        val x = 0xAB
+        assert((x & 0) == 0, "x & 0 = 0")
+
+### OR with zero is identity
+
+    #test
+    test_spb_or_zero() -> unit
+        val x = 0xAB
+        assert((x | 0) == x, "x | 0 = x")
+
+Bitwise NOT (`~`)
+------------------
+
+### `~0` is -1 (signed int)
+
+    #test
+    test_spb_not_zero() -> unit
+        assert(~0 == -1, "~0 = -1")
+
+### `~(-1)` is 0
+
+    #test
+    test_spb_not_minus_one() -> unit
+        assert(~(-1) == 0, "~-1 = 0")
+
+### Double-NOT is identity
+
+    #test
+    test_spb_double_not() -> unit
+        val x = 0x55
+        assert(~(~x) == x, "double NOT")
+
+Shifts — `<<` / `>>`
+---------------------
+
+### Left-shift by 1 = times 2
+
+    #test
+    test_spb_shl_1() -> unit
+        val r = 5 << 1
+        assert(r == 10, "5 << 1 = 10")
+
+### Left-shift by 4
+
+    #test
+    test_spb_shl_4() -> unit
+        val r = 1 << 4
+        assert(r == 16, "1 << 4 = 16")
+
+### Right-shift (signed) by 1
+
+    #test
+    test_spb_shr_1() -> unit
+        val r = 20 >> 1
+        assert(r == 10, "20 >> 1 = 10")
+
+### Right-shift truncates (positive)
+
+    #test
+    test_spb_shr_truncates() -> unit
+        val r = 5 >> 1
+        // 5 = 0b101 >> 1 = 0b10 = 2 (drops the lowest bit)
+        assert(r == 2, s"5 >> 1 = 2; got $r")
+
+### Shifts left-associative same level
+
+    #test
+    test_spb_shifts_left_assoc() -> unit
+        val r = 100 >> 1 >> 1
+        // (100 >> 1) >> 1 = 50 >> 1 = 25
+        assert(r == 25, s"got $r")
+
+`&` binds tighter than `^` which binds tighter than `|`
+--------------------------------------------------------
+
+### `a | b & c` is `a | (b & c)`
+
+    #test
+    test_spb_or_then_and() -> unit
+        val a = 4    // 0b100
+        val b = 6    // 0b110
+        val c = 3    // 0b011
+        val r = a | b & c
+        // b & c = 110 & 011 = 010 = 2
+        // a | 2 = 100 | 010 = 110 = 6
+        assert(r == 6, s"got $r")
+
+### `a ^ b & c` is `a ^ (b & c)`
+
+    #test
+    test_spb_xor_then_and() -> unit
+        val a = 15   // 0b1111
+        val b = 12   // 0b1100
+        val c = 10   // 0b1010
+        val r = a ^ b & c
+        // b & c = 1100 & 1010 = 1000 = 8
+        // a ^ 8 = 1111 ^ 1000 = 0111 = 7
+        assert(r == 7, s"got $r")
+
+### `a | b ^ c` is `a | (b ^ c)`
+
+    #test
+    test_spb_or_then_xor() -> unit
+        val a = 8    // 0b1000
+        val b = 6    // 0b0110
+        val c = 5    // 0b0101
+        val r = a | b ^ c
+        // b ^ c = 0110 ^ 0101 = 0011 = 3
+        // a | 3 = 1000 | 0011 = 1011 = 11
+        assert(r == 11, s"got $r")
+
+### Parens flip the order
+
+    #test
+    test_spb_parens_flip_order() -> unit
+        val a = 4    // 0b100
+        val b = 6    // 0b110
+        val c = 3    // 0b011
+        val r = (a | b) & c
+        // (100 | 110) = 110 = 6; 6 & 011 = 010 = 2
+        assert(r == 2, s"parens; got $r")
+
+Shifts bind tighter than `&` / `^` / `|`
+-----------------------------------------
+
+### `1 << 3 | 1` is `(1 << 3) | 1` = 9
+
+    #test
+    test_spb_shift_then_or() -> unit
+        val r = 1 << 3 | 1
+        // 1 << 3 = 8; 8 | 1 = 9
+        assert(r == 9, s"got $r")
+
+### `0xF0 >> 2 & 0x0F` is `(0xF0 >> 2) & 0x0F`
+
+    #test
+    test_spb_shift_then_and() -> unit
+        val r = 0xF0 >> 2 & 0x0F
+        // 0xF0 >> 2 = 60 (0x3C); 0x3C & 0x0F = 0x0C = 12
+        assert(r == 12, s"got $r")
+
+Bitwise ops bind tighter than comparisons
+------------------------------------------
+
+### `a & b == c` is `(a & b) == c` (per most C-family precedence)
+
+    #test
+    test_spb_and_then_eq() -> unit
+        val a = 14
+        val b = 10
+        // a & b = 1010 = 10
+        val r = (a & b) == 10
+        assert(r, "equal")
+
+### `(a & b) != 0` for nonzero overlap
+
+    #test
+    test_spb_and_then_ne_zero() -> unit
+        val a = 0xF0
+        val b = 0x18
+        // overlap is 0x10
+        assert((a & b) != 0, "nonzero overlap")
+
+### `(a & b) == 0` for disjoint masks
+
+    #test
+    test_spb_and_then_eq_zero_disjoint() -> unit
+        val a = 0xF0
+        val b = 0x0F
+        assert((a & b) == 0, "disjoint")
+
+Combined patterns
+------------------
+
+### Pack two nibbles via `| <<`
+
+    #test
+    test_spb_pack_nibbles() -> unit
+        val hi = 0x5
+        val lo = 0xA
+        val packed = hi << 4 | lo
+        // hi<<4 = 0x50; 0x50 | 0xA = 0x5A
+        assert(packed == 0x5A, s"got $packed")
+
+### Mask-extract via `& >>`
+
+    #test
+    test_spb_extract_field() -> unit
+        val packed = 0x5A
+        // Extract high nibble
+        val hi = (packed >> 4) & 0x0F
+        // Extract low nibble
+        val lo = packed & 0x0F
+        assert(hi == 0x5, "hi")
+        assert(lo == 0xA, "lo")
+
+### Clear-bit pattern: `x & ~mask`
+
+    #test
+    test_spb_clear_bit() -> unit
+        val x = 0xFF
+        val mask = 0x0F
+        val r = x & ~mask
+        // ~0x0F = ...FFFF0; x & ~mask keeps the high nibble: 0xF0
+        assert(r == 0xF0, s"got $r")
+
+### Set-bit pattern: `x | mask`
+
+    #test
+    test_spb_set_bit() -> unit
+        val x = 0x10
+        val mask = 0x01
+        val r = x | mask
+        assert(r == 0x11, s"got $r")
+
+### Toggle-bit pattern: `x ^ mask`
+
+    #test
+    test_spb_toggle_bit() -> unit
+        val x = 0x11
+        val mask = 0x01
+        // toggle the low bit
+        val r1 = x ^ mask
+        val r2 = r1 ^ mask
+        assert(r1 == 0x10, s"first toggle; got $r1")
+        assert(r2 == x, "double toggle returns original")

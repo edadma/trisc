@@ -1,0 +1,217 @@
+Operator Precedence — Logical (&& || !)
+========================================
+
+Per reference §"Operators (by precedence, high to low)":
+
+- `!` is unary, binds tightest.
+- `&&` binds tighter than `||`.
+- Both are short-circuit (right operand is not evaluated if
+  the result is determined by the left).
+
+This file pins logical precedence + short-circuit + truth-
+table coverage. Short-circuit observation uses a mutable
+counter incremented by a helper.
+
+File-local prefix `Spl` (Sysl Precedence Logical).
+
+    module sysl.tests.lang_features
+
+Truth tables — `&&`
+--------------------
+
+### F && F → F
+
+    #test
+    test_spl_and_ff() -> unit
+        assert(!(false && false), "F&&F=F")
+
+### F && T → F
+
+    #test
+    test_spl_and_ft() -> unit
+        assert(!(false && true), "F&&T=F")
+
+### T && F → F
+
+    #test
+    test_spl_and_tf() -> unit
+        assert(!(true && false), "T&&F=F")
+
+### T && T → T
+
+    #test
+    test_spl_and_tt() -> unit
+        assert(true && true, "T&&T=T")
+
+Truth tables — `||`
+--------------------
+
+### F || F → F
+
+    #test
+    test_spl_or_ff() -> unit
+        assert(!(false || false), "F||F=F")
+
+### F || T → T
+
+    #test
+    test_spl_or_ft() -> unit
+        assert(false || true, "F||T=T")
+
+### T || F → T
+
+    #test
+    test_spl_or_tf() -> unit
+        assert(true || false, "T||F=T")
+
+### T || T → T
+
+    #test
+    test_spl_or_tt() -> unit
+        assert(true || true, "T||T=T")
+
+Unary `!`
+----------
+
+### !true / !false
+
+    #test
+    test_spl_not_basic() -> unit
+        assert(!false, "!false=T")
+        assert(!(!true), "!!true=T")
+
+### !(a == b) is the same as a != b
+
+    #test
+    test_spl_not_eq() -> unit
+        val a = 3
+        val b = 5
+        assert(!(a == b) == (a != b), "deMorgan-like")
+
+`&&` binds tighter than `||`
+-----------------------------
+
+### `true || true && false` = T (not F)
+
+    #test
+    test_spl_and_tighter_than_or_1() -> unit
+        // && first: true && false = F. Then true || F = T.
+        val r = true || true && false
+        assert(r, "T || (T && F) = T")
+
+### `false && true || true` = T
+
+    #test
+    test_spl_and_tighter_than_or_2() -> unit
+        // && first: F && T = F. Then F || T = T.
+        val r = false && true || true
+        assert(r, "(F && T) || T = T")
+
+### `(false || true) && false` = F (parens override)
+
+    #test
+    test_spl_parens_override() -> unit
+        val r = (false || true) && false
+        assert(!r, "(F || T) && F = F")
+
+`!` binds tighter than `&&` / `||`
+-----------------------------------
+
+### `!false && true` is `(!false) && true` = T
+
+    #test
+    test_spl_not_tighter_than_and() -> unit
+        val r = !false && true
+        assert(r, "!F && T = T")
+
+### `!true || false` is `(!true) || false` = F
+
+    #test
+    test_spl_not_tighter_than_or() -> unit
+        val r = !true || false
+        assert(!r, "!T || F = F")
+
+### `!(false && true)` = T (parens force the inner first)
+
+    #test
+    test_spl_not_around_and() -> unit
+        val r = !(false && true)
+        assert(r, "!(F && T) = !F = T")
+
+Short-circuit — `&&` doesn't evaluate RHS if LHS is false
+----------------------------------------------------------
+
+    var spl_count = 0
+
+    spl_flag(b: bool) -> bool
+        spl_count = spl_count + 1
+        return b
+
+### `false && spl_flag(true)` — RHS not evaluated
+
+    #test
+    test_spl_short_circuit_and() -> unit
+        spl_count = 0
+        val r = false && spl_flag(true)
+        assert(!r, "F && _ = F")
+        assert(spl_count == 0, s"RHS not called; got $spl_count")
+
+### `true && spl_flag(true)` — RHS IS evaluated
+
+    #test
+    test_spl_no_short_circuit_and_when_lhs_true() -> unit
+        spl_count = 0
+        val r = true && spl_flag(true)
+        assert(r, "T && T = T")
+        assert(spl_count == 1, s"RHS called once; got $spl_count")
+
+Short-circuit — `||` doesn't evaluate RHS if LHS is true
+---------------------------------------------------------
+
+### `true || spl_flag(false)` — RHS not evaluated
+
+    #test
+    test_spl_short_circuit_or() -> unit
+        spl_count = 0
+        val r = true || spl_flag(false)
+        assert(r, "T || _ = T")
+        assert(spl_count == 0, s"RHS not called; got $spl_count")
+
+### `false || spl_flag(true)` — RHS IS evaluated
+
+    #test
+    test_spl_no_short_circuit_or_when_lhs_false() -> unit
+        spl_count = 0
+        val r = false || spl_flag(true)
+        assert(r, "F || T = T")
+        assert(spl_count == 1, s"RHS called once; got $spl_count")
+
+Composition — short-circuit across chains
+------------------------------------------
+
+### `false && spl_flag(true) && spl_flag(true)` — only LHS
+
+    #test
+    test_spl_chain_and_short_circuit_at_start() -> unit
+        spl_count = 0
+        val r = false && spl_flag(true) && spl_flag(true)
+        assert(!r, "F && _ && _ = F")
+        assert(spl_count == 0, s"neither RHS called; got $spl_count")
+
+### `true || spl_flag(false) || spl_flag(false)` — only LHS
+
+    #test
+    test_spl_chain_or_short_circuit_at_start() -> unit
+        spl_count = 0
+        val r = true || spl_flag(false) || spl_flag(false)
+        assert(r, "T || _ || _ = T")
+        assert(spl_count == 0, s"neither RHS called; got $spl_count")
+
+### `true && spl_flag(false) && spl_flag(true)` — mid-chain false stops next
+
+    #test
+    test_spl_chain_and_short_circuit_in_middle() -> unit
+        spl_count = 0
+        val r = true && spl_flag(false) && spl_flag(true)
+        assert(!r, "T && F && _ = F")
+        assert(spl_count == 1, s"only first RHS called; got $spl_count")

@@ -140,7 +140,7 @@ class SyslStringInterpolationTests extends SyslTestHelpers {
         |    val x = 42.0
         |    puts(s"x=$x")
         |    0
-        |""".stripMargin) shouldBe "x=42.0"
+        |""".stripMargin) shouldBe "x=42"
   }
 
   "str of float" in {

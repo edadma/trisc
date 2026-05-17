@@ -1,0 +1,238 @@
+`?` Postfix in Chains
+======================
+
+The existing `try_postfix_option.lsysl` and
+`try_postfix_result.lsysl` files pin `?` on individual values.
+This file pins the `?` chained across **multiple calls in a
+single expression** — `f()?` where `f()` returns Option/Result,
+then immediately threaded into another op. Each `?` is its own
+distinct early-return; the failing one wins.
+
+This file pins:
+
+- Two sequential `?`s in a row (`a()?` then `b()?`).
+- A chain where the first call fails — short-circuits to that
+  failure.
+- A chain where the second call fails — first call succeeded,
+  second's failure propagates.
+- A chain of three: any one failing means the function returns
+  that failure shape.
+- `?` on a Result whose error type is a string — error
+  string is carried through.
+- `?` on a Result whose error is an int code.
+
+File-local prefix `Stpc` (Sysl Try Postfix Chain).
+
+    module sysl.tests.lang_features
+
+    enum StpcOpt[T]
+        StpcSome(value: T)
+        StpcNone
+
+    enum StpcRes[T, E]
+        StpcOk(value: T)
+        StpcErr(error: E)
+
+Option `?` chain
+-----------------
+
+    stpc_get_opt_a() -> StpcOpt[int] = StpcSome(10)
+    stpc_get_opt_b() -> StpcOpt[int] = StpcSome(20)
+    stpc_get_opt_c() -> StpcOpt[int] = StpcSome(30)
+    stpc_get_opt_none() -> StpcOpt[int] = StpcNone
+
+    stpc_chain_three_opts() -> StpcOpt[int]
+        val a = stpc_get_opt_a()?
+        val b = stpc_get_opt_b()?
+        val c = stpc_get_opt_c()?
+        return StpcSome(a + b + c)
+
+### Three Some's chain — all three unwrapped, summed
+
+    #test
+    test_stpc_opt_all_some() -> unit
+        val r = stpc_chain_three_opts()
+        var v = 0
+        r match
+            StpcSome(x) -> v = x
+            StpcNone -> v = -1
+        assert(v == 60, s"10+20+30; got $v")
+
+Chained `?` where one step fails
+---------------------------------
+
+    stpc_chain_first_fails() -> StpcOpt[int]
+        val a = stpc_get_opt_none()?
+        val b = stpc_get_opt_b()?
+        return StpcSome(a + b)
+
+    stpc_chain_middle_fails() -> StpcOpt[int]
+        val a = stpc_get_opt_a()?
+        val b = stpc_get_opt_none()?
+        val c = stpc_get_opt_c()?
+        return StpcSome(a + b + c)
+
+    stpc_chain_last_fails() -> StpcOpt[int]
+        val a = stpc_get_opt_a()?
+        val b = stpc_get_opt_b()?
+        val c = stpc_get_opt_none()?
+        return StpcSome(a + b + c)
+
+### First-position None short-circuits
+
+    #test
+    test_stpc_opt_first_fails() -> unit
+        val r = stpc_chain_first_fails()
+        r match
+            StpcSome(_) -> assert(false, "should be None")
+            StpcNone -> assert(true, "got None")
+
+### Middle-position None short-circuits
+
+    #test
+    test_stpc_opt_middle_fails() -> unit
+        val r = stpc_chain_middle_fails()
+        r match
+            StpcSome(_) -> assert(false, "should be None")
+            StpcNone -> assert(true, "got None")
+
+### Last-position None short-circuits
+
+    #test
+    test_stpc_opt_last_fails() -> unit
+        val r = stpc_chain_last_fails()
+        r match
+            StpcSome(_) -> assert(false, "should be None")
+            StpcNone -> assert(true, "got None")
+
+Result `?` chain
+-----------------
+
+    stpc_get_res_a() -> StpcRes[int, string] = StpcOk(1)
+    stpc_get_res_b() -> StpcRes[int, string] = StpcOk(2)
+    stpc_get_res_c() -> StpcRes[int, string] = StpcOk(3)
+    stpc_get_res_err_first() -> StpcRes[int, string] = StpcErr("err-1")
+    stpc_get_res_err_middle() -> StpcRes[int, string] = StpcErr("err-2")
+    stpc_get_res_err_last() -> StpcRes[int, string] = StpcErr("err-3")
+
+    stpc_chain_three_oks() -> StpcRes[int, string]
+        val a = stpc_get_res_a()?
+        val b = stpc_get_res_b()?
+        val c = stpc_get_res_c()?
+        return StpcOk(a + b + c)
+
+### All-Ok chain returns the sum
+
+    #test
+    test_stpc_res_all_ok() -> unit
+        val r = stpc_chain_three_oks()
+        var v = 0
+        r match
+            StpcOk(x) -> v = x
+            StpcErr(_) -> v = -1
+        assert(v == 6, "1+2+3")
+
+### First-position Err propagates with its payload
+
+    stpc_chain_first_err() -> StpcRes[int, string]
+        val a = stpc_get_res_err_first()?
+        val b = stpc_get_res_b()?
+        return StpcOk(a + b)
+
+    #test
+    test_stpc_res_first_err_propagates() -> unit
+        val r = stpc_chain_first_err()
+        var got = ""
+        r match
+            StpcOk(_) -> got = "(ok)"
+            StpcErr(e) -> got = e
+        assert(got == "err-1", "first err preserved")
+
+### Middle Err — first Ok consumed, then propagation
+
+    stpc_chain_middle_err() -> StpcRes[int, string]
+        val a = stpc_get_res_a()?
+        val b = stpc_get_res_err_middle()?
+        val c = stpc_get_res_c()?
+        return StpcOk(a + b + c)
+
+    #test
+    test_stpc_res_middle_err_propagates() -> unit
+        val r = stpc_chain_middle_err()
+        var got = ""
+        r match
+            StpcOk(_) -> got = "(ok)"
+            StpcErr(e) -> got = e
+        assert(got == "err-2", "middle err preserved")
+
+### Last Err — first two Ok consumed, then propagation
+
+    stpc_chain_last_err() -> StpcRes[int, string]
+        val a = stpc_get_res_a()?
+        val b = stpc_get_res_b()?
+        val c = stpc_get_res_err_last()?
+        return StpcOk(a + b + c)
+
+    #test
+    test_stpc_res_last_err_propagates() -> unit
+        val r = stpc_chain_last_err()
+        var got = ""
+        r match
+            StpcOk(_) -> got = "(ok)"
+            StpcErr(e) -> got = e
+        assert(got == "err-3", "last err preserved")
+
+Result with int error type — chain with error code
+---------------------------------------------------
+
+    stpc_int_err() -> StpcRes[int, int] = StpcErr(404)
+    stpc_int_ok() -> StpcRes[int, int] = StpcOk(42)
+
+    stpc_chain_int_err() -> StpcRes[int, int]
+        val a = stpc_int_ok()?
+        val b = stpc_int_err()?
+        return StpcOk(a + b)
+
+### Int-error chain — error code carried through
+
+    #test
+    test_stpc_int_err_chain() -> unit
+        val r = stpc_chain_int_err()
+        var got = 0
+        r match
+            StpcOk(_) -> got = -1
+            StpcErr(c) -> got = c
+        assert(got == 404, s"error code; got $got")
+
+Mixed-depth chain — two `?`s in one function
+---------------------------------------------
+
+A function that uses `?` twice but in different statements
+(rather than the same line) should still short-circuit on
+the first failure encountered.
+
+    stpc_two_steps(a: StpcOpt[int], b: StpcOpt[int]) -> StpcOpt[int]
+        val x = a?
+        // intervening logic that doesn't touch options
+        val y = b?
+        return StpcSome(x * 100 + y)
+
+### Both Some — both extracted
+
+    #test
+    test_stpc_two_steps_both_some() -> unit
+        val r = stpc_two_steps(StpcSome(3), StpcSome(5))
+        var v = 0
+        r match
+            StpcSome(x) -> v = x
+            StpcNone -> v = -1
+        assert(v == 305, "3*100+5")
+
+### First None — second `?` never runs
+
+    #test
+    test_stpc_two_steps_first_none() -> unit
+        val r = stpc_two_steps(StpcNone, StpcSome(5))
+        r match
+            StpcSome(_) -> assert(false, "should be None")
+            StpcNone -> assert(true, "got None")

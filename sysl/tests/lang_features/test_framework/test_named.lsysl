@@ -1,0 +1,89 @@
+`#test("display name")` — Named Tests
+=======================================
+
+Per reference §"`#test` — unit tests":
+
+```sysl
+#test("descriptive name shown in output")
+test_with_display_name() -> unit
+    0
+```
+
+The argument form replaces the function name in the test runner's
+output (`✓ descriptive name shown in output` instead of
+`✓ test_with_display_name`). The function-side name is still required
+(parser needs an identifier) but is hidden from human readers when a
+display name is present.
+
+This file pins:
+
+- A `#test("name")` test parses and runs.
+- Display-name strings with whitespace, punctuation, and Unicode work.
+- The display-name argument doesn't change test semantics — a passing
+  body still passes, a panicking body without `should_panic` still
+  fails (verified indirectly: these tests pass cleanly, so the runner
+  is treating them as regular tests).
+- Multiple `#test("...")` tests in the same file each register
+  separately.
+
+The runner's *output formatting* — that the display name actually
+appears in the textual output — is the responsibility of the runner
+and isn't checked from within the test. The pin here is that the
+attribute form is **accepted, parsed, and dispatched correctly**.
+
+File-local prefix `Tn` (Test-Named).
+
+    module sysl.tests.lang_features
+
+
+### Plain `#test` with no argument — baseline
+
+A no-argument `#test` works the same as a `#test("function name")`.
+This is the baseline behaviour the named form must not regress.
+
+    #test
+    tn_plain_baseline() -> unit
+        assert(1 + 1 == 2, "baseline math")
+
+### `#test("name")` with a simple ASCII display name
+
+The most common form — short, lowercase, words separated by spaces.
+
+    #test("tn simple display name")
+    tn_simple() -> unit
+        assert(2 + 3 == 5, "simple")
+
+### Display name with punctuation
+
+Display names are arbitrary strings — punctuation, hyphens, parens.
+
+    #test("tn — punctuation, hyphens, and (parens) work")
+    tn_punctuation() -> unit
+        assert(10 - 4 == 6, "punctuation")
+
+### Display name with embedded numbers and ASCII
+
+Mixed alphanumeric and underscores.
+
+    #test("tn_with_underscores_and_123")
+    tn_alnum_underscore() -> unit
+        assert(7 * 6 == 42, "alnum")
+
+### Display name with Unicode characters
+
+Display names hold UTF-8 bytes the same way regular strings do.
+
+    #test("tn — Unicode in test name: ñ é ✓")
+    tn_unicode() -> unit
+        assert(100 / 4 == 25, "unicode")
+
+### Multiple `#test("...")` tests register independently
+
+Five `#test`-annotated functions in this file (including the baseline).
+If the runner reported `N != 5` total, the named form would be
+mis-registering. The fact that all five report ✓ means independent
+registration is working.
+
+    #test("tn — fifth distinct test")
+    tn_fifth() -> unit
+        assert(999 + 1 == 1000, "fifth")

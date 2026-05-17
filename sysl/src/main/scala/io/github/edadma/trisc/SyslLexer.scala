@@ -165,14 +165,52 @@ class SyslLexical extends IndentationLexical(
       }
     )
 
+  // A string-body element. `Left(c)` is a source char (UTF-16 code unit; may
+  // be one half of a surrogate pair); it will be UTF-8-encoded when the body
+  // is assembled. `Right(b)` is a *byte* produced by an escape — `\xNN` for
+  // `N>=0x80` must reach the final string as a single raw byte, not as a
+  // codepoint that re-encodes to multi-byte UTF-8.
+  private def stringPart: Parser[Either[Char, Int]] =
+    ('\\' ~> (
+      elem('n')  ^^^ Right[Char, Int](0x0A) |
+      elem('t')  ^^^ Right[Char, Int](0x09) |
+      elem('r')  ^^^ Right[Char, Int](0x0D) |
+      elem('0')  ^^^ Right[Char, Int](0x00) |
+      elem('\\') ^^^ Right[Char, Int](0x5C) |
+      elem('\'') ^^^ Right[Char, Int](0x27) |
+      elem('"')  ^^^ Right[Char, Int](0x22) |
+      elem('x') ~> escapeHexDigit ~ escapeHexDigit ^^ { case hi ~ lo =>
+        Right[Char, Int](Integer.parseInt(s"$hi$lo", 16))
+      }
+    )) | chrExcept('"', '\n', EofCh) ^^ { c => Left[Char, Int](c) }
+
+  // Walk a parts list and emit a byte-form String: each Java Char in the
+  // result represents exactly one byte. ISO-8859-1 is the byte<->Char
+  // round-trip charset. Source chars get UTF-8-encoded as a group (a
+  // StringBuilder preserves surrogate pairing so supplementary codepoints
+  // encode to a single 4-byte UTF-8 sequence).
+  private def assembleString(parts: List[Either[Char, Int]]): String =
+    val out = new java.io.ByteArrayOutputStream()
+    val acc = new StringBuilder()
+    def flush(): Unit =
+      if acc.nonEmpty then
+        out.write(acc.toString.getBytes("UTF-8"))
+        acc.setLength(0)
+    parts.foreach {
+      case Left(c)  => acc.append(c)
+      case Right(b) => flush(); out.write(b & 0xFF)
+    }
+    flush()
+    new String(out.toByteArray, "ISO-8859-1")
+
   // Interpolated string: s"..." — uses "s:" prefix in token value to mark it
   // Custom parser to avoid consuming 's' when not followed by '"'
   private def interpStringLit: Parser[Token] =
     Parser { in =>
       if in.first == 's' && !in.rest.atEnd && in.rest.first == '"' then
-        val bodyParser = rep(escapeChar | chrExcept('"', '\n', EofCh)) <~ '"'
+        val bodyParser = rep(stringPart) <~ '"'
         bodyParser(in.rest.rest) match // skip 's' and opening '"'
-          case Success(chars, next) => Success(StringLit("s:" + chars.mkString), next)
+          case Success(parts, next) => Success(StringLit("s:" + assembleString(parts)), next)
           case ns: NoSuccess => ns
       else
         Failure("not an interpolated string", in)
@@ -182,9 +220,9 @@ class SyslLexical extends IndentationLexical(
   private def fmtStringLit: Parser[Token] =
     Parser { in =>
       if in.first == 'f' && !in.rest.atEnd && in.rest.first == '"' then
-        val bodyParser = rep(escapeChar | chrExcept('"', '\n', EofCh)) <~ '"'
+        val bodyParser = rep(stringPart) <~ '"'
         bodyParser(in.rest.rest) match
-          case Success(chars, next) => Success(StringLit("f:" + chars.mkString), next)
+          case Success(parts, next) => Success(StringLit("f:" + assembleString(parts)), next)
           case ns: NoSuccess => ns
       else
         Failure("not a formatted string", in)
@@ -223,8 +261,10 @@ class SyslLexical extends IndentationLexical(
           case None => NumericLit(value)
     } |
     // String literal with escape processing: "hello\nworld"
-    '"' ~> rep(escapeChar | chrExcept('"', '\n', EofCh)) <~ '"' ^^ { chars =>
-      StringLit(chars.mkString)
+    // Body is byte-form (each Char = one UTF-8 byte). See `stringPart` /
+    // `assembleString` above for the encoding rule.
+    '"' ~> rep(stringPart) <~ '"' ^^ { parts =>
+      StringLit(assembleString(parts))
     } |
     operatorMuncher |
     super.token

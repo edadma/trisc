@@ -154,22 +154,27 @@ class SyslLLVMCodegen(target: String = "host"):
 
   /** Intern a sysl string literal — emits a global with an immortal refcount header.
     * The label refers to the WRAPPING `<{ i64, [byteLen x i8] }>` constant, NOT the data ptr.
-    * Use `gepStringDataConst(label, byteLen)` to get a constant data-ptr expression. */
+    * Use `gepStringDataConst(label, byteLen)` to get a constant data-ptr expression.
+    * `s` is the lexer's byte-form String (each Char = one UTF-8 byte) — ISO-8859-1
+    * round-trips Char<->byte. */
   private def internString(s: String): (String, Int) =
     stringConstants.getOrElseUpdate(s, {
       stringCounter += 1
       val label = s"@.sstr.$stringCounter"
-      val byteLen = s.getBytes("UTF-8").length + 1 // +1 for null terminator
+      val byteLen = s.getBytes("ISO-8859-1").length + 1 // +1 for null terminator
       (label, byteLen)
     })
 
   /** Intern a raw C-style string (e.g. printf format string) — no refcount header.
-    * Returns (label, byteLen) where label refers to a `[byteLen x i8]` global. */
+    * Returns (label, byteLen) where label refers to a `[byteLen x i8]` global.
+    * Accepts both lexer byte-form strings and compiler-internal Java Strings;
+    * for the latter, every Char is ASCII (format strings) so the encoding is
+    * identical under either charset. */
   private def internCString(s: String): (String, Int) =
     cStringConstants.getOrElseUpdate(s, {
       stringCounter += 1
       val label = s"@.cstr.$stringCounter"
-      val byteLen = s.getBytes("UTF-8").length + 1
+      val byteLen = s.getBytes("ISO-8859-1").length + 1
       (label, byteLen)
     })
 
@@ -241,12 +246,23 @@ class SyslLLVMCodegen(target: String = "host"):
     // Without this, calls to functions defined later in the file would not know
     // the parameter types, causing aggregate arguments (arrays, structs) to be
     // passed by value instead of by pointer — a silent ABI mismatch.
+    //
+    // Also pre-populate globalVarTypes so a function body that touches a sibling
+    // file's module-level var hits the globalVarTypes branch in TAssignStmt /
+    // TVarRef instead of the fresh-local fallback. Without this, the assignment
+    // would silently allocate a local of the same name and shadow the global —
+    // reads still resolved through TVarRef (the analyzer's SymInfo has the
+    // mangled name and the global decl is emitted by the same compilation
+    // unit), so the bug was a write-only divergence.
     for decl <- program.decls do
       decl match
         case TExternFuncDecl(name, params, _) =>
           funcParamTypes(name) = params.map(llvmType)
         case f: TFunDecl =>
           funcParamTypes(f.name) = f.params.map(p => llvmType(p.typ))
+        case TVarDecl(name, typ, _, _, isVolatile, _, _) =>
+          globalVarTypes(name) = typ
+          if isVolatile then volatileGlobals += name
         case _ =>
 
     // Generate functions into a buffer so string constants are collected first
@@ -437,16 +453,24 @@ class SyslLLVMCodegen(target: String = "host"):
       emit(s"%struct.$name = type { $fieldTypes }")
     if structTypes.nonEmpty then emit("")
 
-    // Helper: escape a string for LLVM c"..." form
-    def escapeForLlvm(s: String): String = s.flatMap {
-      case '\n' => "\\0A"
-      case '\r' => "\\0D"
-      case '\t' => "\\09"
-      case '\\' => "\\5C"
-      case '"'  => "\\22"
-      case '\u0000' => "\\00"
-      case c    => c.toString
+    // Helper: escape a byte-form string for LLVM c"..." form. Input is
+    // ISO-8859-1 carrier where each Char in 0..0xFF is one byte. High bytes
+    // must emit `\NN` escapes — emitting them as raw Chars would let the .ll
+    // writer UTF-8-encode them into 2-byte sequences, which would both break
+    // the byteLen we computed and corrupt the runtime string contents.
+    def escapeForLlvm(s: String): String = s.flatMap { c =>
+      val b = c.toInt & 0xFF
+      b match
+        case 0x0A => "\\0A"
+        case 0x0D => "\\0D"
+        case 0x09 => "\\09"
+        case 0x5C => "\\5C"
+        case 0x22 => "\\22"
+        case 0x00 => "\\00"
+        case n if n < 0x20 || n >= 0x7F => f"\\$n%02X"
+        case _    => c.toString
     }
+//done\u0000' => "\\00"
     // Emit raw C-string constants (no refcount header) — used for printf format strings, etc.
     for (s, (label, byteLen)) <- cStringConstants do
       emit(s"""$label = private unnamed_addr constant [$byteLen x i8] c"${escapeForLlvm(s)}\\00"""")
@@ -603,7 +627,9 @@ class SyslLLVMCodegen(target: String = "host"):
             emit(s"  $loaded = load $retType, $retType* $result")
             loaded
           else result
-        else emitSextIfNeeded(result, rt, retType, expr.typ.isSigned)
+        else fun.returnType match
+          case et: SyslType.EnumType => coerceScalarToEnumReturn(result, rt, et)
+          case _ => emitSextIfNeeded(result, rt, retType, expr.typ.isSigned)
         emitReleaseRefs(returnedSliceAllocas(expr))
         emitRet(retType, finalVal)
       case TBlockBody(stmts) =>
@@ -1006,7 +1032,9 @@ class SyslLLVMCodegen(target: String = "host"):
           val loaded = newReg()
           emit(s"  $loaded = load $retType, $retType* $v")
           loaded
-        else emitSextIfNeeded(v, vt, retType, value.typ.isSigned)
+        else currentFunction.returnType match
+          case et: SyslType.EnumType => coerceScalarToEnumReturn(v, vt, et)
+          case _ => emitSextIfNeeded(v, vt, retType, value.typ.isSigned)
         emitDefers()
         emitReleaseRefs(returnedSliceAllocas(value))
         emitRet(retType, finalVal)
@@ -1638,6 +1666,61 @@ class SyslLLVMCodegen(target: String = "host"):
         else emit(s"  $byteOff = mul i64 $idx64, $elemSize")
         val result = newReg()
         emit(s"  $result = getelementptr i8, i8* $ptrVal, i64 $byteOff")
+        result
+
+      case TBinary(left, "&&", right, _) =>
+        // Short-circuit `&&`: if left is false, don't evaluate right.
+        // The earlier eager-AND lowering violated sysl's documented
+        // short-circuit semantics — visible whenever the RHS has a
+        // side effect.
+        val l = genExpr(left)
+        val lt = exprType(left)
+        val lBool = newReg()
+        emit(s"  $lBool = icmp ne $lt $l, 0")
+        val evalRhs = newLabel("and_rhs")
+        val lhsFalse = newLabel("and_lhs_false")
+        val mergeLbl = newLabel("and_merge")
+        emit(s"  br i1 $lBool, label %$evalRhs, label %$lhsFalse")
+        emitLabel(evalRhs)
+        val r = genExpr(right)
+        val rt = exprType(right)
+        val rBool = newReg()
+        emit(s"  $rBool = icmp ne $rt $r, 0")
+        val rhsExitBlock = currentBlock
+        emit(s"  br label %$mergeLbl")
+        emitLabel(lhsFalse)
+        emit(s"  br label %$mergeLbl")
+        emitLabel(mergeLbl)
+        val resultBool = newReg()
+        emit(s"  $resultBool = phi i1 [ $rBool, %$rhsExitBlock ], [ false, %$lhsFalse ]")
+        val result = newReg()
+        emit(s"  $result = zext i1 $resultBool to $t")
+        result
+
+      case TBinary(left, "||", right, _) =>
+        // Short-circuit `||`: if left is true, don't evaluate right.
+        val l = genExpr(left)
+        val lt = exprType(left)
+        val lBool = newReg()
+        emit(s"  $lBool = icmp ne $lt $l, 0")
+        val evalRhs = newLabel("or_rhs")
+        val lhsTrue = newLabel("or_lhs_true")
+        val mergeLbl = newLabel("or_merge")
+        emit(s"  br i1 $lBool, label %$lhsTrue, label %$evalRhs")
+        emitLabel(evalRhs)
+        val r = genExpr(right)
+        val rt = exprType(right)
+        val rBool = newReg()
+        emit(s"  $rBool = icmp ne $rt $r, 0")
+        val rhsExitBlock = currentBlock
+        emit(s"  br label %$mergeLbl")
+        emitLabel(lhsTrue)
+        emit(s"  br label %$mergeLbl")
+        emitLabel(mergeLbl)
+        val resultBool = newReg()
+        emit(s"  $resultBool = phi i1 [ $rBool, %$rhsExitBlock ], [ true, %$lhsTrue ]")
+        val result = newReg()
+        emit(s"  $result = zext i1 $resultBool to $t")
         result
 
       case TBinary(left, op, right, _) =>
@@ -3639,6 +3722,14 @@ class SyslLLVMCodegen(target: String = "host"):
               val gep = newReg()
               emit(s"  $gep = getelementptr $arrLt, $arrLt* $v, i32 0, i32 0")
               emit(s"  $result = ptrtoint ${llvmType(inner.typ.asInstanceOf[SyslType.ArrayType].elem)}* $gep to $toLt")
+            case _ if isAggregate(inner.typ) && targetType.isIntegral =>
+              // Aggregate-to-scalar: genExpr returns a pointer; bitcast the pointer
+              // to a scalar-typed pointer and load. Used by simple-enum unwrapping
+              // (`SibColor::Image(c)` inserts `TCast(c, I32)` whenever c's static
+              // type is EnumType rather than the raw tag).
+              val typedPtr = newReg()
+              emit(s"  $typedPtr = bitcast $fromLt* $v to $toLt*")
+              emit(s"  $result = load $toLt, $toLt* $typedPtr")
             case _ if isAggregate(inner.typ) =>
               // Aggregate types: genExpr returns a pointer, so bitcast the pointer
               emit(s"  $result = bitcast $fromLt* $v to $toLt")
@@ -3697,6 +3788,60 @@ class SyslLLVMCodegen(target: String = "host"):
           emit(s"  $newVal = sub $lt $oldVal, 1")
         emit(s"  store $lt $newVal, $lt* ${local.reg}")
         oldVal
+
+      case TFieldPreInc(obj, fieldIndex, typ) =>
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
+            val slt = llvmType(inner)
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TFieldPreInc on non-struct type: $other")
+        val ft = st.fields(fieldIndex)._2
+        val fieldType = llvmType(ft)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $fieldType, $fieldType* $gep")
+        val newVal = newReg()
+        if ft.isFloat then
+          emit(s"  $newVal = fadd $fieldType $oldVal, 1.0")
+        else
+          emit(s"  $newVal = add $fieldType $oldVal, 1")
+        emit(s"  store $fieldType $newVal, $fieldType* $gep")
+        newVal // pre-inc returns the NEW value
+
+      case TFieldPreDec(obj, fieldIndex, typ) =>
+        val (st, structLt, addr) = obj.typ match
+          case pt: SyslType.PtrType =>
+            val inner = canonicalStruct(pt.pointee.asInstanceOf[SyslType.StructType])
+            val slt = llvmType(inner)
+            val ptr = genExpr(obj)
+            val cast = newReg()
+            emit(s"  $cast = bitcast i8* $ptr to $slt*")
+            (inner, slt, cast)
+          case st: SyslType.StructType =>
+            (canonicalStruct(st), llvmType(obj.typ), genStructAddr(obj))
+          case other =>
+            throw new RuntimeException(s"TFieldPreDec on non-struct type: $other")
+        val ft = st.fields(fieldIndex)._2
+        val fieldType = llvmType(ft)
+        val gep = newReg()
+        emit(s"  $gep = getelementptr $structLt, $structLt* $addr, i32 0, i32 $fieldIndex")
+        val oldVal = newReg()
+        emit(s"  $oldVal = load $fieldType, $fieldType* $gep")
+        val newVal = newReg()
+        if ft.isFloat then
+          emit(s"  $newVal = fsub $fieldType $oldVal, 1.0")
+        else
+          emit(s"  $newVal = sub $fieldType $oldVal, 1")
+        emit(s"  store $fieldType $newVal, $fieldType* $gep")
+        newVal // pre-dec returns the NEW value
 
       case TFieldPostInc(obj, fieldIndex, typ) =>
         val (st, structLt, addr) = obj.typ match
@@ -4141,6 +4286,26 @@ class SyslLLVMCodegen(target: String = "host"):
 
   // Emit widening/narrowing cast when fromType != toType; return the (possibly cast) register.
   // signed: whether the SOURCE value is signed — controls sext vs zext for integer widening.
+  // Simple-enum `Name.Member` lowers in the analyzer to TIntLit(value, I32); when
+  // that scalar flows through a function-tail / TReturnStmt into a slot whose
+  // declared type is the enum (laid out as `[N x i8]`), naive sext yields invalid
+  // IR (`sext i32 .. to [N x i8]`). Materialise a slot of the aggregate shape,
+  // memset to zero, store the i32 at offset 0 via a typed bitcast, and load back
+  // as bytes.
+  private def coerceScalarToEnumReturn(value: String, fromLlvm: String, toSysl: SyslType.EnumType): String =
+    val total = llvmSizeOf(toSysl)
+    val toLlvm = llvmType(toSysl)
+    val slot = deferAlloca(toLlvm)
+    val slotCast = newReg()
+    emit(s"  $slotCast = bitcast $toLlvm* $slot to i8*")
+    emit(s"  call void @$memsetIntrinsic(i8* $slotCast, i8 0, $sizeT $total, i1 false)")
+    val typedAddr = newReg()
+    emit(s"  $typedAddr = bitcast $toLlvm* $slot to $fromLlvm*")
+    emit(s"  store $fromLlvm $value, $fromLlvm* $typedAddr")
+    val loaded = newReg()
+    emit(s"  $loaded = load $toLlvm, $toLlvm* $slot")
+    loaded
+
   private def emitSextIfNeeded(value: String, fromType: String, toType: String, signed: Boolean = true): String =
     if fromType == toType then value
     else if toType == "void" then value // discarded — no cast needed

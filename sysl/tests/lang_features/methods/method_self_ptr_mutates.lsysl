@@ -1,0 +1,161 @@
+Methods that Mutate `self.field`
+=================================
+
+Per reference §"Methods": inside a method body, `self` is an alias
+for the implicit receiver with type `*StructName` (raw pointer to
+the instance). Writes through `self.field` therefore modify the
+caller's actual instance.
+
+This file pins the **mutating-self** dispatch shape across all
+seven backends:
+
+- A method that writes `self.f = ...` mutates the caller's value.
+- Multiple mutations within one method all stick.
+- A method that reads then writes the same field (`self.f += 1`)
+  sees the new value on the next call.
+- Mutating methods composed with read-only methods chain correctly.
+
+File-local prefix `Mpm` (Method-Ptr-Mutates).
+
+    module sysl.tests.lang_features
+
+
+A simple counter struct
+------------------------
+
+    struct MpmCounter
+        count: int
+
+    MpmCounter.mpm_bump()
+        self.count = self.count + 1
+
+    MpmCounter.mpm_add(k: int)
+        self.count = self.count + k
+
+
+### Method that increments a field
+
+    #test
+    test_mpm_basic_mutation() -> unit
+        var c = MpmCounter(0)
+        c.mpm_bump()
+        assert(c.count == 1, s"got ${c.count}")
+
+### Multiple calls accumulate
+
+    #test
+    test_mpm_repeated_calls() -> unit
+        var c = MpmCounter(0)
+        c.mpm_bump()
+        c.mpm_bump()
+        c.mpm_bump()
+        c.mpm_bump()
+        assert(c.count == 4, s"got ${c.count}")
+
+### Method with extra param mutates field
+
+    #test
+    test_mpm_method_with_param() -> unit
+        var c = MpmCounter(10)
+        c.mpm_add(7)
+        assert(c.count == 17, s"got ${c.count}")
+        c.mpm_add(3)
+        assert(c.count == 20, s"got ${c.count}")
+
+### Method that mixes read + write of the same field
+
+    MpmCounter.mpm_double_in_place()
+        self.count = self.count * 2
+
+    #test
+    test_mpm_read_then_write() -> unit
+        var c = MpmCounter(5)
+        c.mpm_double_in_place()
+        assert(c.count == 10, s"got ${c.count}")
+        c.mpm_double_in_place()
+        assert(c.count == 20, s"got ${c.count}")
+
+
+A struct with two fields — multiple mutations in one method
+------------------------------------------------------------
+
+    struct MpmPoint
+        x: int
+        y: int
+
+    MpmPoint.mpm_translate(dx: int, dy: int)
+        self.x = self.x + dx
+        self.y = self.y + dy
+
+### One method writes two fields
+
+    #test
+    test_mpm_two_field_mutation() -> unit
+        var p = MpmPoint(10, 20)
+        p.mpm_translate(3, 4)
+        assert(p.x == 13, s"x=${p.x}")
+        assert(p.y == 24, s"y=${p.y}")
+
+### Method that swaps two fields
+
+    MpmPoint.mpm_swap()
+        val t: int = self.x
+        self.x = self.y
+        self.y = t
+
+    #test
+    test_mpm_swap_fields() -> unit
+        var p = MpmPoint(7, 11)
+        p.mpm_swap()
+        assert(p.x == 11 && p.y == 7, s"got (${p.x}, ${p.y})")
+        p.mpm_swap()
+        assert(p.x == 7 && p.y == 11, s"swapped back")
+
+
+Mutating then reading via a read-only method
+---------------------------------------------
+
+    MpmPoint.mpm_sum() -> int = self.x + self.y
+
+### Mutate via one method, observe via another
+
+    #test
+    test_mpm_mutate_then_read() -> unit
+        var p = MpmPoint(1, 2)
+        p.mpm_translate(10, 20)
+        assert(p.mpm_sum() == 33, s"got ${p.mpm_sum()}")
+
+
+Mutating method called inside a regular function
+-------------------------------------------------
+
+`out` parameter mode: the function takes a counter by reference and
+calls the mutating method on it. Caller observes the change.
+
+    mpm_double_caller(out c: MpmCounter)
+        c.mpm_double_in_place()
+        c.mpm_bump()
+
+    #test
+    test_mpm_via_outparam_fn() -> unit
+        var c = MpmCounter(3)
+        mpm_double_caller(c)
+        // double: 6, bump: 7
+        assert(c.count == 7, s"got ${c.count}")
+
+
+Mutating method on a struct returned by a function
+---------------------------------------------------
+
+The returned local goes into the caller's variable; subsequent
+mutating method calls land on that caller-owned instance.
+
+    mpm_make_counter(initial: int) -> MpmCounter
+        MpmCounter(initial)
+
+    #test
+    test_mpm_returned_then_mutated() -> unit
+        var c = mpm_make_counter(42)
+        c.mpm_bump()
+        c.mpm_bump()
+        assert(c.count == 44, s"got ${c.count}")

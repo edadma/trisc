@@ -1,0 +1,222 @@
+Result[T, E] — Construction, Match, Payload Extraction
+=======================================================
+
+Per reference §"Generic Enums (Tagged Unions)":
+
+```
+enum Result[T, E]
+    Ok(value: T)
+    Err(error: E)
+```
+
+This file pins the basic `Result`-style surfaces on a
+file-local `Srb` enum (avoiding collision with `std.result`).
+
+Pins:
+
+- Constructing `Ok(v)` with T inferred and E inferred from
+  the expected type.
+- Constructing `Err(e)` with E inferred and T from expected.
+- Match both variants; payload binding for each.
+- `is_ok` / `is_err`-like helpers via match.
+- `unwrap`-like (panic-on-Err).
+- `unwrap_or`-like (return default on Err).
+- Map-like helper: `Result[T, E]` → `Result[U, E]`.
+- Result with string error type (the canonical pattern).
+- Result with struct payload.
+
+File-local prefix `Srb` (Sysl Result Basic).
+
+    module sysl.tests.lang_features
+
+    enum SrbRes[T, E]
+        SrbOk(value: T)
+        SrbErr(error: E)
+
+Construction
+-------------
+
+### Ok(int) with explicit type — both T and E pinned
+
+    #test
+    test_srb_construct_ok_int() -> unit
+        val r: SrbRes[int, string] = SrbOk(42)
+        var v = 0
+        r match
+            SrbOk(x) -> v = x
+            SrbErr(_) -> v = -1
+        assert(v == 42, s"got $v")
+
+### Err(string) with explicit type
+
+    #test
+    test_srb_construct_err_string() -> unit
+        val r: SrbRes[int, string] = SrbErr("bad")
+        var got = ""
+        r match
+            SrbOk(_) -> got = "ok"
+            SrbErr(e) -> got = e
+        assert(got == "bad", s"got '$got'")
+
+### Ok / Err distinguished by match
+
+    #test
+    test_srb_match_distinguishes_variants() -> unit
+        val a: SrbRes[int, string] = SrbOk(7)
+        val b: SrbRes[int, string] = SrbErr("fail")
+        var ar = 0
+        var br = 0
+        a match
+            SrbOk(v) -> ar = v
+            SrbErr(_) -> ar = -1
+        b match
+            SrbOk(v) -> br = v
+            SrbErr(_) -> br = -1
+        assert(ar == 7, "ok side")
+        assert(br == -1, "err side")
+
+`is_ok` / `is_err` helpers
+---------------------------
+
+    srb_is_ok(r: SrbRes[int, string]) -> bool
+        r match
+            SrbOk(_) -> true
+            SrbErr(_) -> false
+
+    srb_is_err(r: SrbRes[int, string]) -> bool
+        r match
+            SrbOk(_) -> false
+            SrbErr(_) -> true
+
+### is_ok on Ok / Err
+
+    #test
+    test_srb_is_ok_on_ok() -> unit
+        val r: SrbRes[int, string] = SrbOk(1)
+        assert(srb_is_ok(r), "ok is ok")
+
+    #test
+    test_srb_is_ok_on_err() -> unit
+        val r: SrbRes[int, string] = SrbErr("x")
+        assert(!srb_is_ok(r), "err is not ok")
+
+### is_err is the inverse
+
+    #test
+    test_srb_is_err_complementary() -> unit
+        val a: SrbRes[int, string] = SrbOk(1)
+        val b: SrbRes[int, string] = SrbErr("x")
+        assert(srb_is_ok(a) != srb_is_err(a), "a")
+        assert(srb_is_ok(b) != srb_is_err(b), "b")
+
+`unwrap`-like and `unwrap_or`-like helpers
+-------------------------------------------
+
+    srb_unwrap(r: SrbRes[int, string]) -> int
+        r match
+            SrbOk(v) -> v
+            SrbErr(_) -> panic("unwrap on Err")
+
+    srb_unwrap_or(r: SrbRes[int, string], default: int) -> int
+        r match
+            SrbOk(v) -> v
+            SrbErr(_) -> default
+
+### unwrap on Ok returns the payload
+
+    #test
+    test_srb_unwrap_ok() -> unit
+        val r: SrbRes[int, string] = SrbOk(999)
+        assert(srb_unwrap(r) == 999, "got")
+
+### unwrap_or returns the value on Ok
+
+    #test
+    test_srb_unwrap_or_ok() -> unit
+        val r: SrbRes[int, string] = SrbOk(7)
+        assert(srb_unwrap_or(r, -1) == 7, "value")
+
+### unwrap_or returns the default on Err
+
+    #test
+    test_srb_unwrap_or_err() -> unit
+        val r: SrbRes[int, string] = SrbErr("boom")
+        assert(srb_unwrap_or(r, -1) == -1, "default")
+
+Map-like — transforming `T` while preserving `E`
+-------------------------------------------------
+
+    srb_map_double(r: SrbRes[int, string]) -> SrbRes[int, string]
+        r match
+            SrbOk(v) -> SrbOk(v * 2)
+            SrbErr(e) -> SrbErr(e)
+
+### Ok flows through, payload transformed
+
+    #test
+    test_srb_map_double_ok() -> unit
+        val r: SrbRes[int, string] = SrbOk(21)
+        val r2 = srb_map_double(r)
+        assert(srb_unwrap(r2) == 42, "doubled")
+
+### Err flows through, error preserved
+
+    #test
+    test_srb_map_double_err() -> unit
+        val r: SrbRes[int, string] = SrbErr("propagated")
+        val r2 = srb_map_double(r)
+        var got = ""
+        r2 match
+            SrbOk(_) -> got = "(ok)"
+            SrbErr(e) -> got = e
+        assert(got == "propagated", "error survived")
+
+Result with struct payload
+---------------------------
+
+    struct SrbInfo
+        code: int
+        kind: int
+
+    srb_unwrap_info(r: SrbRes[SrbInfo, string], default: SrbInfo) -> SrbInfo
+        r match
+            SrbOk(info) -> info
+            SrbErr(_) -> default
+
+### Ok with struct payload
+
+    #test
+    test_srb_struct_ok() -> unit
+        val r: SrbRes[SrbInfo, string] = SrbOk(SrbInfo(200, 1))
+        val info = srb_unwrap_info(r, SrbInfo(0, 0))
+        assert(info.code == 200, "code")
+        assert(info.kind == 1, "kind")
+
+### Err with struct payload type — returns default
+
+    #test
+    test_srb_struct_err() -> unit
+        val r: SrbRes[SrbInfo, string] = SrbErr("fail")
+        val info = srb_unwrap_info(r, SrbInfo(-1, -1))
+        assert(info.code == -1, "code default")
+        assert(info.kind == -1, "kind default")
+
+Result with int error type
+---------------------------
+
+    srb_unwrap_or_int(r: SrbRes[int, int], default: int) -> int
+        r match
+            SrbOk(v) -> v
+            SrbErr(_) -> default
+
+### Result[int, int] both variants
+
+    #test
+    test_srb_int_int_ok() -> unit
+        val r: SrbRes[int, int] = SrbOk(100)
+        assert(srb_unwrap_or_int(r, -1) == 100, "ok")
+
+    #test
+    test_srb_int_int_err() -> unit
+        val r: SrbRes[int, int] = SrbErr(404)
+        assert(srb_unwrap_or_int(r, -1) == -1, "err uses default")

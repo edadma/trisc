@@ -1,0 +1,189 @@
+Function-Level `variant` Clauses — Happy-Path Coverage
+=======================================================
+
+Per reference §"Design by Contract" — function-level `variant`:
+
+```sysl
+fact(n: int) -> int
+    variant n
+    if n <= 1 then return 1
+    return n * fact(n - 1)
+```
+
+- A SPARK-style `Subprogram_Variant`: an integer expression that
+  must strictly decrease at every direct recursive call.
+- Snapshotted at function entry into a hidden local
+  `__variant_entry__`.
+- At every direct recursive call, the variant is re-evaluated with
+  the call's arguments substituted for the function's parameters;
+  the result must be strictly less than the entry snapshot AND ≥ 0.
+- Lives at the contract-clause position alongside `require` /
+  `ensure` — must precede the first regular statement.
+- At most one `variant` per function.
+
+This file pins the **happy-path** behaviour of single-expression
+function-level `variant` across all seven backends — each test calls
+a recursive function whose variant strictly decreases on every direct
+self-call. Failing-variant (trap) tests are deferred to a future
+uniform runtime-trap harness.
+
+Lexicographic variants (`variant { e1, e2 }`) are verification-only
+per the reference (no runtime decrease check emitted), so this file
+covers the runtime-checked single-expression form only.
+
+File-local prefix `Vdc` (Variant-DeCreasing).
+
+    module sysl.tests.lang_features
+
+
+Factorial with `variant n`
+---------------------------
+
+### Classic recursive factorial
+
+    vdc_fact(n: int) -> int
+        variant n
+        if n <= 1 then return 1
+        return n * vdc_fact(n - 1)
+
+    #test
+    test_vdc_fact_base() -> unit
+        assert(vdc_fact(0) == 1, "0! = 1")
+        assert(vdc_fact(1) == 1, "1! = 1")
+
+    #test
+    test_vdc_fact_recurse() -> unit
+        assert(vdc_fact(5) == 120, "5! = 120")
+        assert(vdc_fact(7) == 5040, "7! = 5040")
+
+
+GCD with `variant b`
+---------------------
+
+### Euclid's algorithm — `b` strictly decreases mod `a`
+
+    vdc_gcd(a: int, b: int) -> int
+        variant b
+        if b == 0 then return a
+        return vdc_gcd(b, a % b)
+
+    #test
+    test_vdc_gcd_basic() -> unit
+        assert(vdc_gcd(48, 18) == 6, "gcd(48,18)=6")
+        assert(vdc_gcd(100, 25) == 25, "gcd(100,25)=25")
+        assert(vdc_gcd(17, 13) == 1, "gcd(17,13)=1 — coprime")
+        assert(vdc_gcd(42, 0) == 42, "gcd(n,0)=n — base case")
+
+
+`variant` alongside `require` and `ensure`
+-------------------------------------------
+
+### All three contract kinds on the same recursive function
+
+    vdc_fact_full(n: int) -> int
+        require n >= 0
+        variant n
+        ensure result >= 1
+        if n <= 1 then return 1
+        return n * vdc_fact_full(n - 1)
+
+    #test
+    test_vdc_full_contracts() -> unit
+        assert(vdc_fact_full(0) == 1, "0! = 1, ensure >= 1 holds")
+        assert(vdc_fact_full(4) == 24, "4! = 24")
+        assert(vdc_fact_full(6) == 720, "6! = 720")
+
+
+`variant` with an arithmetic expression
+----------------------------------------
+
+### Sum-of-digits via `n / 10` — variant decreases as `n`
+
+    vdc_digit_sum(n: int) -> int
+        variant n
+        if n == 0 then return 0
+        return (n % 10) + vdc_digit_sum(n / 10)
+
+    #test
+    test_vdc_digit_sum() -> unit
+        assert(vdc_digit_sum(0) == 0, "no digits")
+        assert(vdc_digit_sum(7) == 7, "single digit")
+        assert(vdc_digit_sum(123) == 6, "1+2+3 = 6")
+        assert(vdc_digit_sum(9999) == 36, "9*4 = 36")
+
+
+`variant` over a *parameter expression*
+----------------------------------------
+
+### Variant `hi - lo` strictly decreases as `lo` advances or `hi` shrinks
+
+    vdc_count_up(lo: int, hi: int) -> int
+        variant hi - lo
+        if lo >= hi then return 0
+        return 1 + vdc_count_up(lo + 1, hi)
+
+    #test
+    test_vdc_param_expr_variant() -> unit
+        assert(vdc_count_up(0, 5) == 5, "[0,5) = 5 elements")
+        assert(vdc_count_up(3, 3) == 0, "empty range")
+        assert(vdc_count_up(10, 20) == 10, "[10,20) = 10")
+
+
+`variant` on a fibonacci-style multi-recursive call
+----------------------------------------------------
+
+### Both recursive calls in `vdc_fib(n-1) + vdc_fib(n-2)` decrease `n`
+
+    vdc_fib(n: int) -> int
+        require n >= 0
+        variant n
+        if n < 2 then return n
+        return vdc_fib(n - 1) + vdc_fib(n - 2)
+
+    #test
+    test_vdc_fib_small() -> unit
+        assert(vdc_fib(0) == 0, "fib(0)=0")
+        assert(vdc_fib(1) == 1, "fib(1)=1")
+        assert(vdc_fib(2) == 1, "fib(2)=1")
+        assert(vdc_fib(5) == 5, "fib(5)=5")
+        assert(vdc_fib(10) == 55, "fib(10)=55")
+
+
+`variant` where the recursion call uses a non-trivial argument expression
+-------------------------------------------------------------------------
+
+### Halve and recurse — variant `n` strictly decreases through `n / 2`
+
+    vdc_count_halves(n: int) -> int
+        require n >= 0
+        variant n
+        if n == 0 then return 0
+        return 1 + vdc_count_halves(n / 2)
+
+    #test
+    test_vdc_halves() -> unit
+        assert(vdc_count_halves(0) == 0, "zero")
+        assert(vdc_count_halves(1) == 1, "1 -> 0")
+        assert(vdc_count_halves(2) == 2, "2 -> 1 -> 0")
+        assert(vdc_count_halves(8) == 4, "8 -> 4 -> 2 -> 1 -> 0")
+        assert(vdc_count_halves(63) == 6, "63 -> 31 -> 15 -> 7 -> 3 -> 1 -> 0")
+
+
+Variant pointing at a struct-field-derived count
+-------------------------------------------------
+
+### Count down via an inout param that we drive externally
+
+A function with `variant n` where `n` comes from a parameter.
+
+    vdc_strict_down(n: int) -> int
+        variant n
+        if n <= 0 then return 0
+        return 1 + vdc_strict_down(n - 1)
+
+    #test
+    test_vdc_strict_down() -> unit
+        assert(vdc_strict_down(0) == 0, "base")
+        assert(vdc_strict_down(1) == 1, "1 step")
+        assert(vdc_strict_down(10) == 10, "10 steps")
+        assert(vdc_strict_down(50) == 50, "50 steps")

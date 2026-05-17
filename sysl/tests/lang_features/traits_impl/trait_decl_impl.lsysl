@@ -1,0 +1,185 @@
+Trait Declarations and `impl` Blocks
+=====================================
+
+Per reference §"Traits and `impl` blocks":
+
+```sysl
+trait Ord[T]
+    cmp(a: T, b: T) -> int                  // required (no body)
+    lt(a: T, b: T) -> bool = cmp(a, b) < 0  // default body
+    le(a: T, b: T) -> bool = cmp(a, b) <= 0
+    gt(a: T, b: T) -> bool = cmp(a, b) > 0
+    ge(a: T, b: T) -> bool = cmp(a, b) >= 0
+
+impl Ord[int]
+    cmp(a: int, b: int) -> int = a - b
+```
+
+- A trait method with a body is a **default**; impls may override.
+- A trait method without a body is **required**; every impl must
+  provide it.
+- `impl Trait[T]` for the same `(trait, type)` pair may appear only
+  once.
+- Calls via `Trait.method(args)` infer the target type from arg types
+  and dispatch to the matching impl's method.
+- Inside a default body, unqualified calls to sibling trait methods
+  (`cmp(a, b)` inside `lt`) resolve to the current impl.
+- Monomorphization: each impl method compiles to a mangled top-level
+  function (e.g. `Ord_cmp_i32`). No runtime dispatch.
+
+This file pins:
+
+- Required method provided + dispatched
+- Default method inherited
+- Default method overridden
+- Sibling-method call inside a default resolves to the same impl
+- Multiple impls coexist for the same trait, distinguished by type
+
+File-local prefix `Tdi` (Trait-Decl-Impl).
+
+    module sysl.tests.lang_features
+
+
+A simple ordering trait
+------------------------
+
+    trait TdiOrd[T]
+        tdi_cmp(a: T, b: T) -> int
+        tdi_lt(a: T, b: T) -> bool = tdi_cmp(a, b) < 0
+        tdi_le(a: T, b: T) -> bool = tdi_cmp(a, b) <= 0
+        tdi_gt(a: T, b: T) -> bool = tdi_cmp(a, b) > 0
+        tdi_ge(a: T, b: T) -> bool = tdi_cmp(a, b) >= 0
+
+    impl TdiOrd[int]
+        tdi_cmp(a: int, b: int) -> int = a - b
+
+### Required method dispatches to the impl
+
+    #test
+    test_tdi_required_dispatch() -> unit
+        assert(TdiOrd.tdi_cmp(5, 3) > 0, "5 > 3, cmp > 0")
+        assert(TdiOrd.tdi_cmp(3, 5) < 0, "3 < 5, cmp < 0")
+        assert(TdiOrd.tdi_cmp(7, 7) == 0, "7 == 7, cmp = 0")
+
+### Default method inherited by the impl
+
+    #test
+    test_tdi_default_inherited() -> unit
+        assert(TdiOrd.tdi_lt(3, 5), "3 < 5 via default body")
+        assert(!TdiOrd.tdi_lt(5, 3), "5 not < 3")
+        assert(!TdiOrd.tdi_lt(4, 4), "4 not < 4")
+
+### All four order relations via defaults
+
+    #test
+    test_tdi_all_order_defaults() -> unit
+        assert(TdiOrd.tdi_le(3, 5), "3 <= 5")
+        assert(TdiOrd.tdi_le(4, 4), "4 <= 4")
+        assert(!TdiOrd.tdi_le(6, 5), "6 not <= 5")
+
+        assert(TdiOrd.tdi_gt(5, 3), "5 > 3")
+        assert(!TdiOrd.tdi_gt(3, 5), "3 not > 5")
+        assert(!TdiOrd.tdi_gt(4, 4), "4 not > 4")
+
+        assert(TdiOrd.tdi_ge(5, 3), "5 >= 3")
+        assert(TdiOrd.tdi_ge(4, 4), "4 >= 4")
+        assert(!TdiOrd.tdi_ge(3, 5), "3 not >= 5")
+
+
+A trait + impl on a user struct
+--------------------------------
+
+    struct TdiBox
+        v: int
+
+    trait TdiTotal[T]
+        tdi_total(x: T) -> int
+
+    impl TdiTotal[TdiBox]
+        tdi_total(x: TdiBox) -> int = x.v
+
+### Dispatch on struct type
+
+    #test
+    test_tdi_struct_dispatch() -> unit
+        val b = TdiBox(42)
+        assert(TdiTotal.tdi_total(b) == 42, "dispatch resolves to TdiBox impl")
+
+
+Default body sibling-call resolution
+-------------------------------------
+
+The default body of `tdi_descr` references the trait's required
+method `tdi_total`; per the reference, that call resolves to the
+current impl's method (not to a free `tdi_total` of the same name).
+
+    trait TdiDescr[T]
+        tdi_total(x: T) -> int
+        tdi_double(x: T) -> int = tdi_total(x) * 2
+
+    impl TdiDescr[TdiBox]
+        tdi_total(x: TdiBox) -> int = x.v
+
+### Default body uses sibling impl method
+
+    #test
+    test_tdi_default_sibling_call() -> unit
+        val b = TdiBox(21)
+        assert(TdiDescr.tdi_double(b) == 42, "21 * 2 = 42")
+
+
+Default body overridden by the impl
+------------------------------------
+
+    trait TdiGreet[T]
+        tdi_name(x: T) -> int
+        tdi_label(x: T) -> int = tdi_name(x) + 100
+
+    impl TdiGreet[TdiBox]
+        tdi_name(x: TdiBox) -> int = x.v
+        tdi_label(x: TdiBox) -> int = x.v * 1000
+
+### Impl override of default body wins over the default
+
+    #test
+    test_tdi_default_overridden() -> unit
+        val b = TdiBox(7)
+        assert(TdiGreet.tdi_name(b) == 7, "name returns v")
+        assert(TdiGreet.tdi_label(b) == 7000, "override: 7 * 1000 = 7000")
+
+
+Multiple impls for the same trait
+----------------------------------
+
+The same trait can be implemented for several distinct types; the
+right impl is picked by argument type.
+
+    struct TdiOtherBox
+        s: int
+        t: int
+
+    impl TdiTotal[TdiOtherBox]
+        tdi_total(x: TdiOtherBox) -> int = x.s + x.t
+
+### Dispatch picks the right impl by arg type
+
+    #test
+    test_tdi_multi_impl_by_type() -> unit
+        val a = TdiBox(10)
+        val b = TdiOtherBox(3, 4)
+        assert(TdiTotal.tdi_total(a) == 10, "TdiBox impl")
+        assert(TdiTotal.tdi_total(b) == 7, "TdiOtherBox impl")
+
+
+Trait method called inside a regular function
+----------------------------------------------
+
+    tdi_use_total(b: TdiBox, ob: TdiOtherBox) -> int
+        TdiTotal.tdi_total(b) + TdiTotal.tdi_total(ob)
+
+    #test
+    test_tdi_called_from_function() -> unit
+        val a = TdiBox(100)
+        val o = TdiOtherBox(5, 6)
+        val r = tdi_use_total(a, o)
+        assert(r == 111, s"got $r")

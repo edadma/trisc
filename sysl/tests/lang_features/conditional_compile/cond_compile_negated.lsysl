@@ -1,0 +1,106 @@
+`#if !SYMBOL` — Negated Conditional Compilation
+================================================
+
+Per reference §"Conditional Compilation":
+
+> - `#if !SYMBOL` — negation
+
+This file pins the negated form of conditional compilation:
+
+- `#if !UNDEF` evaluates to **true** when UNDEF isn't defined, so the
+  `#then` branch is taken.
+- `#if !UNDEF ... #else ... #endif` takes the `#then` branch and
+  strips `#else`.
+- Negation composes with the other variants — `#if UNDEF` is the
+  inverse of `#if !UNDEF` for the same symbol.
+
+The standard test runner doesn't expose `--define KEY=value`, so the
+"defined symbol" case for `#if !SYMBOL` (where the symbol IS defined
+and negation flips to false) is covered by JVM-side
+`SyslCondCompTests`. Here we pin the runtime-observable half.
+
+File-local prefix `Ccn` (Cond-Compile-Negated).
+
+    module sysl.tests.lang_features
+
+
+### `#if !UNDEF` with no `#else` — body active
+
+`CCN_BARE_METAL` is undefined, so `!CCN_BARE_METAL` is true and the
+declaration inside the block is active.
+
+    #if !CCN_BARE_METAL
+    ccn_has_stdlib() -> int = 42
+    #endif
+
+    #test
+    test_ccn_neg_undefined_active() -> unit
+        assert(ccn_has_stdlib() == 42, s"neg undef active, got ${ccn_has_stdlib()}")
+
+
+### `#if !UNDEF` with `#else` — `#then` active, `#else` stripped
+
+    #if !CCN_PRODUCTION
+    ccn_mode() -> int = 1
+    #else
+    ccn_mode() -> int = 0
+    #endif
+
+    #test
+    test_ccn_neg_if_else_undefined() -> unit
+        assert(ccn_mode() == 1, s"neg-then branch, got ${ccn_mode()}")
+
+
+### Negation flips a `#if/#endif` block
+
+When two blocks reference the *same* undefined symbol — once
+positively, once negatively — they select opposite branches. With
+`CCN_TRACE` undefined: positive `#if` is false (body stripped, the
+top-level fallback wins); negative `#if !` is true (body active, no
+top-level fallback needed — and adding one would conflict).
+
+    #if CCN_TRACE
+    ccn_positive() -> int = 1
+    #endif
+
+    ccn_positive() -> int = 0
+
+    #if !CCN_TRACE
+    ccn_negative() -> int = 1
+    #endif
+
+    #test
+    test_ccn_polarity_inverts() -> unit
+        assert(ccn_positive() == 0, "positive stripped, fallback wins")
+        assert(ccn_negative() == 1, "negative active")
+
+
+### Negation over a `const`
+
+    #if !CCN_PROD
+    const CcnTimeoutMs = 10
+    #else
+    const CcnTimeoutMs = 30000
+    #endif
+
+    #test
+    test_ccn_negation_const() -> unit
+        assert(CcnTimeoutMs == 10, s"dev timeout, got $CcnTimeoutMs")
+
+
+### Negation over a `var` with non-trivial initialiser
+
+Module-level var init via const arithmetic. The `#else` branch's
+init is not evaluated; only the `#then`'s expression is used.
+
+    const CcnBase = 50
+
+    #if !CCN_FAST
+    var ccn_size: int = CcnBase
+    #else
+    var ccn_size: int = 1000
+    #endif
+
+    #test
+    test_ccn_negation_var() -> unit
+        assert(ccn_size == 50, s"size from CcnBase, got $ccn_size")

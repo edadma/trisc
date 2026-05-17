@@ -1,0 +1,180 @@
+`T::Succ` / `T::Pred` on Within-Constrained Int Types
+=======================================================
+
+Per reference §"Type Attributes":
+
+| Attribute    | Behaviour on a `within`-constrained int type     |
+|--------------|--------------------------------------------------|
+| `T::Succ(x)` | `x + 1`; traps if `x` is already at the upper end |
+| `T::Pred(x)` | `x - 1`; traps if `x` is already at the lower end |
+
+This file pins:
+
+- `::Succ(x)` and `::Pred(x)` move within the range step-by-step.
+- The arithmetic is plain integer arithmetic; the result is the
+  constrained type (re-checked at production).
+- Multiple successive `::Succ` calls accumulate.
+- Result of `::Succ` / `::Pred` is base-compatible with `int`.
+- Boundaries (`::First`, `::Last`) interplay correctly — `::Succ` of
+  `::First` yields `::First + 1`, `::Pred` of `::Last` yields
+  `::Last - 1`.
+
+This file deliberately does *not* drive `Succ` past `::Last` or `Pred`
+below `::First` — those are documented as trapping, and trap tests
+are deferred to the `compile_errors/` / contracts harness once the
+runtime-trap surface has a uniform test wrapper.
+
+File-local prefix `Iwsp` (Integer Within Succ/Pred).
+
+    module sysl.tests.lang_features
+
+A small inclusive range
+------------------------
+
+    type IwspLevel = int within 0..9
+
+### `::Succ` advances by one within the range
+
+    #test
+    test_iwsp_succ_basic() -> unit
+        val a: IwspLevel = 3
+        val b = IwspLevel::Succ(a)
+        assert(b == 4, s"got $b")
+
+### `::Pred` retreats by one within the range
+
+    #test
+    test_iwsp_pred_basic() -> unit
+        val a: IwspLevel = 3
+        val b = IwspLevel::Pred(a)
+        assert(b == 2, s"got $b")
+
+### `::Succ` from `::First`
+
+    #test
+    test_iwsp_succ_from_first() -> unit
+        val a: IwspLevel = IwspLevel::First
+        val b = IwspLevel::Succ(a)
+        assert(b == IwspLevel::First + 1, s"got $b")
+        assert(b == 1, s"first+1=1; got $b")
+
+### `::Pred` from `::Last`
+
+    #test
+    test_iwsp_pred_from_last() -> unit
+        val a: IwspLevel = IwspLevel::Last
+        val b = IwspLevel::Pred(a)
+        assert(b == IwspLevel::Last - 1, s"got $b")
+        assert(b == 8, s"last-1=8; got $b")
+
+### Repeated `::Succ` walks across the range
+
+    #test
+    test_iwsp_succ_walk() -> unit
+        var a: IwspLevel = 0
+        a = IwspLevel::Succ(a)
+        a = IwspLevel::Succ(a)
+        a = IwspLevel::Succ(a)
+        a = IwspLevel::Succ(a)
+        assert(a == 4, s"got $a")
+
+### Round-trip `Succ` then `Pred` is identity (interior)
+
+    #test
+    test_iwsp_succ_pred_round_trip() -> unit
+        val a: IwspLevel = 5
+        val b = IwspLevel::Pred(IwspLevel::Succ(a))
+        assert(b == a, s"got $b vs $a")
+
+### Round-trip `Pred` then `Succ` is identity (interior)
+
+    #test
+    test_iwsp_pred_succ_round_trip() -> unit
+        val a: IwspLevel = 5
+        val b = IwspLevel::Succ(IwspLevel::Pred(a))
+        assert(b == a, s"got $b vs $a")
+
+`::Succ` / `::Pred` work over an exclusive-upper range
+-------------------------------------------------------
+
+    type IwspExcl = int within 0..<5
+
+### `::Succ` from a value below `::Last`
+
+    #test
+    test_iwsp_excl_succ() -> unit
+        val a: IwspExcl = 3
+        val b = IwspExcl::Succ(a)
+        assert(b == 4, s"got $b")
+
+### `::Last` of `..<5` is 4; `Pred(::Last)` is 3
+
+    #test
+    test_iwsp_excl_pred_from_last() -> unit
+        val a: IwspExcl = IwspExcl::Last
+        assert(a == 4, "last")
+        val b = IwspExcl::Pred(a)
+        assert(b == 3, s"got $b")
+
+`::Succ` / `::Pred` over a negative-low range
+----------------------------------------------
+
+    type IwspSigned = int within -3..3
+
+### `::Succ` crosses zero from -1 to 0 to 1
+
+    #test
+    test_iwsp_signed_cross_zero_up() -> unit
+        var a: IwspSigned = -1
+        a = IwspSigned::Succ(a)
+        assert(a == 0, s"got $a")
+        a = IwspSigned::Succ(a)
+        assert(a == 1, s"got $a")
+
+### `::Pred` crosses zero downward
+
+    #test
+    test_iwsp_signed_cross_zero_down() -> unit
+        var a: IwspSigned = 1
+        a = IwspSigned::Pred(a)
+        assert(a == 0, s"got $a")
+        a = IwspSigned::Pred(a)
+        assert(a == -1, s"got $a")
+
+### `::Succ` from `::First` over a negative-low range
+
+    #test
+    test_iwsp_signed_succ_from_first() -> unit
+        val a: IwspSigned = IwspSigned::First
+        assert(a == -3, "first")
+        val b = IwspSigned::Succ(a)
+        assert(b == -2, s"got $b")
+
+### `::Pred` from `::Last` over a negative-low range
+
+    #test
+    test_iwsp_signed_pred_from_last() -> unit
+        val a: IwspSigned = IwspSigned::Last
+        assert(a == 3, "last")
+        val b = IwspSigned::Pred(a)
+        assert(b == 2, s"got $b")
+
+`Succ`/`Pred` results compose with plain arithmetic
+----------------------------------------------------
+
+### Sum of `Succ(x)` and `Pred(x)` in the interior is `2x`
+
+    #test
+    test_iwsp_succ_plus_pred() -> unit
+        val a: IwspLevel = 4
+        val s = IwspLevel::Succ(a)
+        val p = IwspLevel::Pred(a)
+        assert(s + p == 2 * a, s"got ${s + p}, want ${2 * a}")
+
+### Difference of `Succ(x)` and `Pred(x)` is 2
+
+    #test
+    test_iwsp_succ_minus_pred() -> unit
+        val a: IwspLevel = 4
+        val diff = IwspLevel::Succ(a) - IwspLevel::Pred(a)
+        assert(diff == 2, s"got $diff")
