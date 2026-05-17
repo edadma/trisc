@@ -1719,11 +1719,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
           if !functions.contains(name) && !genericTemplates.contains(name) then
             scala.util.Try {
               val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+              val paramModes = params.map(_.mode)
               val retType = returnType.map(resolveType).getOrElse(UnitType)
               val mangled = if shouldMangle(name) then mangleName(name) else name
               val isPure = attrs.exists(_.name == "pure")
               functions(name) = FunInfo(
                 mangled, paramTypes, retType, isDef, isPure,
+                modes = paramModes,
                 isParameterless = isParameterless,
               )
               externalSymbols += name
@@ -5238,21 +5240,22 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       typeArgs: List[SyslType],
       typeBounds: Map[String, List[String]],
   ): Either[String, Unit] =
-    for tp <- typeParams do
-      val bounds = typeBounds.getOrElse(tp, Nil)
-      val concreteType = typeArgs(typeParams.indexOf(tp))
-      for traitName <- bounds do
-        if !traits.contains(traitName) then
-          return Left(s"bound '$traitName' on type parameter '$tp' of $what refers to unknown trait")
-        val matched = implTemplates.getOrElse(traitName, Nil).exists { t =>
-          if t.typeParams.isEmpty then
-            t.resolvedConcrete.flatMap(_.headOption).contains(concreteType)
-          else
-            tryUnifyAll(t.targetPatterns.headOption.toList, List(concreteType), t.typeParams.toSet).isDefined
-        }
-        if !matched then
-          return Left(s"type $concreteType does not satisfy bound '$traitName' for type parameter '$tp' in $what")
-    Right(())
+    scala.util.boundary:
+      for tp <- typeParams do
+        val bounds = typeBounds.getOrElse(tp, Nil)
+        val concreteType = typeArgs(typeParams.indexOf(tp))
+        for traitName <- bounds do
+          if !traits.contains(traitName) then
+            scala.util.boundary.break(Left(s"bound '$traitName' on type parameter '$tp' of $what refers to unknown trait"))
+          val matched = implTemplates.getOrElse(traitName, Nil).exists { t =>
+            if t.typeParams.isEmpty then
+              t.resolvedConcrete.flatMap(_.headOption).contains(concreteType)
+            else
+              tryUnifyAll(t.targetPatterns.headOption.toList, List(concreteType), t.typeParams.toSet).isDefined
+          }
+          if !matched then
+            scala.util.boundary.break(Left(s"type $concreteType does not satisfy bound '$traitName' for type parameter '$tp' in $what"))
+      Right(())
 
   /** Build the assoc-bindings env for `typeParams` instantiated to `typeArgs`,
    *  by locating each bounded type parameter's matching impl and pulling its

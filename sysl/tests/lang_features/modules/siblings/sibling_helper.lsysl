@@ -98,3 +98,39 @@ state.
 
     sib_bump() -> unit
         sib_counter = sib_counter + 1
+
+
+### Function with an `out` parameter
+
+This pins the param-mode-across-sibling fix: when the caller lives
+in `sibling_file_visibility.lsysl` and the callee lives here, the
+analyzer must preserve the `out` qualifier so the call site passes
+the address (not a loaded value cast back through `inttoptr`).
+
+Regressed silently 2026-05-16 — the broken codegen passed the
+zero-initialized value of the caller's local, so the write below
+landed on a truncated/garbage pointer.
+
+    sib_writes_out(out x: int) -> unit
+        x = 42
+
+
+### Function with an `inout` parameter
+
+`inout` is the read-write variant — the body both reads the
+caller-supplied value and writes back.
+
+    sib_doubles_inout(inout x: int) -> unit
+        x = x * 2
+
+
+### Function with two `out` parameters
+
+Mirrors `tcp_opts_get_ts(..., out tsval: u32, out tsecr: u32)`, the
+real OS callsite where this bug surfaced as random TCP corruption
+under aarch64 — two distinct out-pointers, both truncated by the
+broken codegen.
+
+    sib_two_outs(out a: int, out b: int) -> unit
+        a = 100
+        b = 200

@@ -142,3 +142,51 @@ state).
         sib_bump()
         sib_bump()
         assert(sib_counter == 7, s"after two bumps counter=${sib_counter}")
+
+
+### Cross-file `out` parameter writes back to the caller's local
+
+Regression coverage for the analyzer bug fixed 2026-05-17 in
+`SyslAnalyzer.registerSiblingForwardDeclsFrom`: param modes
+(`out`/`inout`) were not carried into the pre-registered `FunInfo`,
+so a call from one sibling to an `out`-param function in another
+sibling lost the mode and lowered to pass-by-value — silently
+clobbering pointer semantics. On aarch64 the broken codegen also
+truncated the pointer (i32 inttoptr to i8*), so the write landed
+on a garbage 32-bit address.
+
+Surfaced when `tcp.lsysl` was split into `tcp.lsysl` +
+`tcp_state.lsysl` + `tcp_opts.lsysl`: `tcp_state` called
+`tcp_opts_get_wscale(..., out shift)` / `tcp_opts_get_ts(...,
+out tsval, out tsecr)` and the writes were lost, breaking every
+TCP option parse.
+
+    #test
+    test_sfv_cross_sibling_out_param() -> unit
+        var x = 0
+        sib_writes_out(x)
+        assert(x == 42, s"out param wrote across siblings: got ${x}")
+
+
+### Cross-file `inout` parameter reads AND writes
+
+    #test
+    test_sfv_cross_sibling_inout_param() -> unit
+        var x = 7
+        sib_doubles_inout(x)
+        assert(x == 14, s"inout param doubled across siblings: got ${x}")
+
+
+### Cross-file multiple `out` parameters (the real OS bug shape)
+
+Two distinct out-pointers in one call — mirrors `tcp_opts_get_ts`'s
+`(out tsval, out tsecr)` shape. Pre-fix, BOTH pointers were
+truncated independently.
+
+    #test
+    test_sfv_cross_sibling_two_out_params() -> unit
+        var a = 0
+        var b = 0
+        sib_two_outs(a, b)
+        assert(a == 100, s"first out: got ${a}")
+        assert(b == 200, s"second out: got ${b}")
