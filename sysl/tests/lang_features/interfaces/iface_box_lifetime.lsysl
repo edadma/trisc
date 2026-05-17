@@ -18,8 +18,6 @@ This file pins:
 
 Known gaps (not pinned here):
 
-- Returning an iface from a function whose body constructs the
-  source as a local is a use-after-free.
 - SVM struct-field string aliasing — see the feedback memo.
 
 File-local prefix `Sibl` (Sysl Iface Box Lifetime).
@@ -193,3 +191,162 @@ auto-box).
         // Independent bias values
         assert(w1.bias == 1, "w1 bias")
         assert(w2.bias == 100, "w2 bias")
+
+
+Returning iface from a fn with local source
+--------------------------------------------
+
+When an iface is constructed from a local value and returned from
+its constructing function, the iface's `data_ptr` would otherwise
+point at a dead stack frame. The analyzer marks return-position
+iface boxes as `owns=true`; LLVM-derived codegens heap-copy the
+source struct so the data buffer outlives the source slot. The
+interpreter naturally returns by value (the iface holds the
+struct's value, not a pointer to it); SVM/TRISC's bump-allocated
+memory stack persists across returns by construction. Also
+required an analyzer fix: `ReturnStmtAST` was not auto-boxing for
+iface return types (the existing fn-arg / var-decl / struct-field
+auto-box paths didn't apply to return values).
+
+    factory_value() -> IntHolder
+        var c = Tally(42)
+        return c
+
+    factory_with_branches(x: int) -> IntHolder
+        if x > 0
+            var pos = Tally(1)
+            return pos
+        else
+            var neg = Tally(-1)
+            return neg
+
+### Basic: return iface boxed from local
+
+    #test
+    test_sibl_return_iface_local() -> unit
+        val h = factory_value()
+        assert(h.value() == 42, s"got ${h.value()}")
+
+### Two distinct factory calls hand back independent data
+
+    #test
+    test_sibl_two_factory_calls() -> unit
+        val a = factory_value()
+        val b = factory_value()
+        assert(a.value() == 42, s"a; got ${a.value()}")
+        assert(b.value() == 42, s"b; got ${b.value()}")
+
+### Branched return — each branch's local boxed and returned
+
+    #test
+    test_sibl_branched_return() -> unit
+        val a = factory_with_branches(5)
+        val b = factory_with_branches(-5)
+        assert(a.value() == 1, s"pos; got ${a.value()}")
+        assert(b.value() == -1, s"neg; got ${b.value()}")
+
+### Factory result used through a forwarding function
+
+    drain_value(h: IntHolder) -> int = h.value()
+
+    #test
+    test_sibl_factory_through_fn() -> unit
+        val h = factory_value()
+        assert(drain_value(h) == 42, "factory → relay")
+
+
+Heap-allocated struct with iface field
+---------------------------------------
+
+`new Wrapper(src, bias)` heap-allocates a Wrapper. Its iface
+field must own its data buffer (heap-copy at boxing time)
+because the Wrapper may outlive the source's stack storage.
+Previously the `new` path didn't auto-box for iface fields at
+all (silent garbage / segfault); after auto-box landed, two
+successive factory calls aliased the same source slot.
+`new Struct(...)` now boxes iface fields with `owns=true`.
+
+    make_wrapper(n: int, bias: int) -> &Wrapper
+        val src = Tally(n)
+        return new Wrapper(src, bias)
+
+### `new Wrapper` returned from a fn whose source is local
+
+    #test
+    test_sibl_new_wrapper_returned() -> unit
+        val w = make_wrapper(40, 2)
+        assert(w.total() == 42, s"got ${w.total()}")
+
+### Two `new Wrapper`s built and used independently
+
+    #test
+    test_sibl_two_new_wrappers() -> unit
+        val a = make_wrapper(10, 1)
+        val b = make_wrapper(100, 2)
+        assert(a.total() == 11, s"a; got ${a.total()}")
+        assert(b.total() == 102, s"b; got ${b.total()}")
+
+
+Iface in slice/array element and via field reassignment
+--------------------------------------------------------
+
+`arr[i] = concrete` and `obj.iface_field = concrete` go through
+the index-assign and field-assign paths. Both previously didn't
+auto-box; segfault on LLVM-derived backends. Fixed with owns=true
+auto-box at both sites — array/slice elements and struct fields
+of iface type now heap-copy their source on assignment.
+
+    struct ArrCell
+        owner: int
+
+### Array of iface populated and read back
+
+    #test
+    test_sibl_array_of_iface() -> unit
+        var arr = new [3]IntHolder
+        var x = Tally(10)
+        var y = Tally(20)
+        var z = Tally(30)
+        arr[0] = x
+        arr[1] = y
+        arr[2] = z
+        assert(arr[0].value() == 10, "arr[0]")
+        assert(arr[1].value() == 20, "arr[1]")
+        assert(arr[2].value() == 30, "arr[2]")
+
+### Sum a slice of iface
+
+    sibl_sum(items: []IntHolder) -> int
+        var total = 0
+        var i = 0
+        while i < len(items)
+            total = total + items[i].value()
+            i = i + 1
+        return total
+
+    #test
+    test_sibl_sum_slice_of_iface() -> unit
+        var arr = new [3]IntHolder
+        var x = Tally(1)
+        var y = Tally(2)
+        var z = Tally(3)
+        arr[0] = x
+        arr[1] = y
+        arr[2] = z
+        assert(sibl_sum(arr[:]) == 6, s"got ${sibl_sum(arr[:])}")
+
+### Reassign iface field on a heap-allocated struct
+
+    struct SinglyHolder
+        inner: IntHolder
+
+    SinglyHolder.dispatch() -> int = self.inner.value()
+
+    #test
+    test_sibl_reassign_iface_field() -> unit
+        var t1 = Tally(7)
+        val w = new SinglyHolder(t1)
+        assert(w.dispatch() == 7, s"initial; got ${w.dispatch()}")
+        var t2 = Tally(42)
+        w.inner = t2
+        assert(w.dispatch() == 42, s"after reassign; got ${w.dispatch()}")

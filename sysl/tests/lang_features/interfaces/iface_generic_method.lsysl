@@ -22,38 +22,6 @@ This file pins:
 
 File-local prefix `Sigm` (Sysl Iface Generic Method).
 
-**Feature gap — generic-struct → interface dispatch:**
-
-  A generic struct (`Box[T]`) implementing a non-generic interface
-  is NOT currently supported. The analyzer rejects calls like
-  `use_counter(b)` where `b: Box[int]` with the error
-  `expects Counter, got Box_i32`. Root cause: `satisfiesInterface`
-  looks up methods by the mangled struct name (`Box_i32`) but the
-  generic method's template is keyed by the template name (`Box`).
-  Even with a template-fallback lookup, the runtime iface dispatch
-  builds the methodMap as `${structName}_$method` (= `Box_i32_bump`),
-  while the method-call site instantiates the template under the
-  reverse naming `${templateName}_$method_$typeArgs` (= `Box_bump_i32`).
-  Fixing this needs a coordinated change to (1) the analyzer's
-  `satisfiesInterface` to monomorphize the method, and (2) the
-  iface boxing path in every backend to use the
-  template-instantiation naming convention.
-
-  Repro (commented out — restore when fixed):
-
-      // struct Box[T]
-      //     n: int
-      // Box[T].bump() -> unit
-      //     self.n = self.n + 1
-      // Box[T].get() -> int = self.n
-      // interface Counter
-      //     bump() -> unit
-      //     get() -> int
-      // use_counter(c: Counter) -> int
-      //     c.bump(); c.bump(); return c.get()
-      //
-      // test: `var b = Box[int](0); use_counter(b) == 2`
-
     module sysl.tests.lang_features
 
 Slice-param interface method
@@ -226,3 +194,90 @@ element layout.
         // 1+2+3+4+5+6 = 21
         assert(total == 21, s"got $total")
         assert(summer.total == 21, s"impl wrote total; got ${summer.total}")
+
+
+Generic struct implements a non-generic interface
+--------------------------------------------------
+
+A generic struct (`Holder[T]`) with a method whose signature is
+non-generic (`get() -> int`) can satisfy a non-generic interface.
+Was a 🟡 gap: `satisfiesInterface` only looked up methods by the
+monomorphized struct name (e.g. `Holder_i32_get`), but the
+generic method's template registers under the *template* name
+(`Holder_get`) and instantiates to `Holder_get_i32`.
+
+Fixed by (1) teaching `satisfiesInterface` to fall back to
+`structToTemplate` and `instantiateGeneric` so the iface check
+sees the monomorphized signature; and (2) emitting a thin
+forwarding TFunDecl under the dispatch-expected name
+`${structName}_$method` so every backend's box dispatch finds it
+without needing to know about generics.
+
+    interface SigmContainer
+        sigm_get() -> int
+
+    struct SigmHolder[T]
+        v: T
+
+    SigmHolder[T].sigm_get() -> int = self.v
+
+### Basic generic-struct → iface assignment
+
+    #test
+    test_sigm_holder_int_as_container() -> unit
+        val h = SigmHolder[int](42)
+        val c: SigmContainer = h
+        assert(c.sigm_get() == 42, s"via iface; got ${c.sigm_get()}")
+
+### Two distinct values, same instantiation
+
+    #test
+    test_sigm_holder_two_values() -> unit
+        val a = SigmHolder[int](7)
+        val b = SigmHolder[int](99)
+        val ca: SigmContainer = a
+        val cb: SigmContainer = b
+        assert(ca.sigm_get() == 7, "first")
+        assert(cb.sigm_get() == 99, "second")
+
+### Function-arg auto-box
+
+    sigm_use_container(c: SigmContainer) -> int = c.sigm_get()
+
+    #test
+    test_sigm_holder_via_fn_arg() -> unit
+        val h = SigmHolder[int](123)
+        assert(sigm_use_container(h) == 123, "fn-arg auto-box")
+
+### Iface method that takes an extra arg
+
+    interface SigmAdjuster
+        sigm_bump(by: int) -> int
+
+    SigmHolder[T].sigm_bump(by: int) -> int = self.v + by
+
+    #test
+    test_sigm_holder_bump_via_iface() -> unit
+        val h = SigmHolder[int](10)
+        val a: SigmAdjuster = h
+        assert(a.sigm_bump(5) == 15, s"got ${a.sigm_bump(5)}")
+
+### Mutating method through the iface
+
+    interface SigmCounter
+        sigm_inc() -> unit
+        sigm_count() -> int
+
+    SigmHolder[T].sigm_inc() -> unit
+        self.v = self.v + 1
+
+    SigmHolder[T].sigm_count() -> int = self.v
+
+    #test
+    test_sigm_holder_mutate_via_iface() -> unit
+        var h = SigmHolder[int](0)
+        val c: SigmCounter = h
+        c.sigm_inc()
+        c.sigm_inc()
+        c.sigm_inc()
+        assert(c.sigm_count() == 3, s"got ${c.sigm_count()}")

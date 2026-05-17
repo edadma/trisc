@@ -266,9 +266,9 @@ Existing: `out_inout_params.lsysl` → `functions/out_inout_params.lsysl`.
 | `iface_mutating_self.lsysl` 🟢 | mutating-self through iface *(move from top level)* |
 | `iface_basic_dispatch.lsysl` 🟢 | non-mutating method through iface; correct impl chosen (16 tests) |
 | `iface_composed.lsysl` 🟢 | embedded interfaces; method dispatch picks right impl (10 tests) |
-| `iface_generic_method.lsysl` 🟡 | iface methods with parametric built-in types — slice, slice-of-struct, returning slice (8 tests). Generic-struct-implements-iface is unsupported (analyzer + iface-dispatch naming mismatch) |
+| `iface_generic_method.lsysl` 🟢 | iface methods with parametric built-in types — slice, slice-of-struct, returning slice (8 tests). Plus generic-struct-implements-iface (`Holder[T]` → `Container`) with value/mutating/extra-arg/fn-arg-coercion shapes (5 tests). Fixed at sysl@221cf83ae. |
 | ~~`iface_default_methods.lsysl`~~ | ✖ **Not applicable** — sysl interface methods cannot have default bodies (parser rejects `=` after signature; verified 2026-05-15). Default-method semantics live in **traits** instead (see reference §"Traits and `impl` blocks") — covered separately when a `traits/` category opens. |
-| `iface_box_lifetime.lsysl` 🟡 | iface receiver lifetime through call frames + local bindings + mutating dispatch + **iface as struct field type** (10 tests). Iface-as-struct-field fixed at sysl@972ea9f63. Remaining gap: returning iface from a function constructing source as local (UAF). |
+| `iface_box_lifetime.lsysl` 🟢 | iface receiver lifetime through call frames + local bindings + mutating dispatch + iface as struct field type + return iface boxed from local + branched return + iface field on heap-allocated struct + array/slice of iface + iface field reassignment (19 tests). Iface-as-struct-field fixed at sysl@972ea9f63. Return-from-local-source UAF fixed at sysl@5a0a0a65c. Branched-return aggregate (LLVM-only) fixed at sysl@6873e507f. `new Struct` iface field auto-box (with owns=true) at sysl@3c2291946. Index-assign + field-assign auto-box at sysl@046a9d446. |
 
 Existing: `iface_mutating_self.lsysl` → `interfaces/iface_mutating_self.lsysl`.
 

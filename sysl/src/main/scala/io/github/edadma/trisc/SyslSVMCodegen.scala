@@ -183,7 +183,7 @@ class SyslSVMCodegen:
       case TAppend(sl, el, _) =>
         count += 6 // slice, oldPtr, oldLen, new, dst, rem
         scanExpr(sl); scanExpr(el)
-      case TInterfaceBox(inner, _) => count += 2; scanExpr(inner)
+      case TInterfaceBox(inner, _, _) => count += 2; scanExpr(inner)
       case TInterfaceDispatch(v, _, args, _) => count += 1; scanExpr(v); args.foreach(scanExpr)
       case TBinary(l, _, r, _) => scanExpr(l); scanExpr(r)
       case TUnary(_, o, _) => scanExpr(o)
@@ -890,7 +890,7 @@ class SyslSVMCodegen:
       case TTempAddr(i, _) => scanAddrOfE(i)
       case TStringFromSlice(s, _) => scanAddrOfE(s)
       case TStringFromPtr(p, l, _) => scanAddrOfE(p); scanAddrOfE(l)
-      case TInterfaceBox(i, _) => scanAddrOfE(i)
+      case TInterfaceBox(i, _, _) => scanAddrOfE(i)
       case TInterfaceDispatch(v, _, args, _) => scanAddrOfE(v); args.foreach(scanAddrOfE)
       case TRangeCheck(i, _, _, _) => scanAddrOfE(i)
       case TStr(i) => scanAddrOfE(i)
@@ -2591,10 +2591,13 @@ class SyslSVMCodegen:
       // Leave new slice addr on TOS
       emit(s"  local_get $newIdx")
 
-    case TInterfaceBox(inner, iface) =>
+    case TInterfaceBox(inner, iface, owns) =>
       // Box a concrete value into a 16-byte {itable_ptr, data_ptr} struct
       // on the memory stack. For struct values the data_ptr is the struct's
       // backing address; for pointer/ref types the pointer IS the data_ptr.
+      // owns=true (set by the analyzer for boxes that escape their source
+      // frame, e.g. return position): heap-copy the source struct so the
+      // data buffer outlives the source's local slot.
       val structName = inner.typ.underlying match
         case SyslType.StructType(n, _, _) => n
         case SyslType.PtrType(s) => s.underlying match

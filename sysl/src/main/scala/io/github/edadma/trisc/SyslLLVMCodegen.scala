@@ -810,29 +810,34 @@ class SyslLLVMCodegen(target: String = "host"):
         stmts.last match
           case TExprStmt(expr) =>
             val result = genExpr(expr)
-            val rt = exprType(expr)
-            val finalVal = if retType == "void" then
-              // Function returns void: discard the expression's value. Loading
-              // would emit `load void, void*` when the expr is void-typed (e.g.
-              // a trailing `val _ = ...` whose aggregate RHS leaves an alloca
-              // result) or a dead aggregate load.
-              ""
-            else if isAggregate(expr.typ) then
-              val loaded = newReg()
-              emit(s"  $loaded = load $retType, $retType* $result")
-              loaded
-            else if rt == "void" && retType != "void" then
-              // Match/expression type is void (diverging arms) but function expects a value.
-              if retType.startsWith("[") || retType.startsWith("%struct.") then
+            // genExpr may have terminated the current block (e.g. an if-expr
+            // where both branches `return` — TIfExpr emits `unreachable` and
+            // sets hasReturned). Skip the trailing load+ret in that case.
+            if hasReturned then ()
+            else
+              val rt = exprType(expr)
+              val finalVal = if retType == "void" then
+                // Function returns void: discard the expression's value. Loading
+                // would emit `load void, void*` when the expr is void-typed (e.g.
+                // a trailing `val _ = ...` whose aggregate RHS leaves an alloca
+                // result) or a dead aggregate load.
+                ""
+              else if isAggregate(expr.typ) then
                 val loaded = newReg()
                 emit(s"  $loaded = load $retType, $retType* $result")
                 loaded
-              else result
-            else emitSextIfNeeded(result, rt, retType, expr.typ.isSigned)
-            emitDefers()
-            emitReleaseRefs(returnedSliceAllocas(expr))
-            emitRet(retType, finalVal)
-            hasReturned = true
+              else if rt == "void" && retType != "void" then
+                // Match/expression type is void (diverging arms) but function expects a value.
+                if retType.startsWith("[") || retType.startsWith("%struct.") then
+                  val loaded = newReg()
+                  emit(s"  $loaded = load $retType, $retType* $result")
+                  loaded
+                else result
+              else emitSextIfNeeded(result, rt, retType, expr.typ.isSigned)
+              emitDefers()
+              emitReleaseRefs(returnedSliceAllocas(expr))
+              emitRet(retType, finalVal)
+              hasReturned = true
           case TAsmStmt(code) =>
             // asm as last statement in a function body
             val escaped = code.replace("\\n", "\n").replace("\"", "\\22")
@@ -2150,7 +2155,16 @@ class SyslLLVMCodegen(target: String = "host"):
         hasReturned = savedHasReturned
 
         emitLabel(mergeLabel)
-        aggResult match
+        // Both branches early-returned: the merge block is unreachable. Emit
+        // `unreachable` so we don't leave a half-initialized aggregate value
+        // dangling, and propagate hasReturned so genBlock skips the redundant
+        // load+ret (which would otherwise try `load %T, %T* 0` on the "0"
+        // sentinel result and trip clang).
+        if thenReturned && elseReturned then
+          emit("  unreachable")
+          hasReturned = true
+          "0"
+        else aggResult match
           case Some(alloca) => alloca // return pointer for aggregate types
           case None =>
             if !thenReturned && !elseReturned && t != "void" then
@@ -4052,11 +4066,15 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"""  $result = call $retLt asm sideeffect "$escaped", "=r"()""")
         result
 
-      case TInterfaceBox(inner, iface) =>
+      case TInterfaceBox(inner, iface, owns) =>
         // Box a concrete value into %struct.iface { itable_ptr, data_ptr }.
-        // Value-type structs are heap-copied so the iface owns an independent
-        // buffer (simple leak model — matches TRISC for now); pointer/ref types
-        // pass their pointer directly as data_ptr.
+        // For value structs: the default (owns=false) passes a pointer to the
+        // source's storage so mutations through the iface propagate to the
+        // caller's source (cf. iface_box_lifetime + iface_mutating_self). The
+        // owns=true mode (set by the analyzer when the box escapes its source's
+        // frame — return position, etc.) heap-copies the source so the data
+        // buffer outlives the source's stack alloca. Pointer/ref source types
+        // always pass their pointer directly regardless of owns.
         val structName = inner.typ.underlying match
           case SyslType.StructType(n, _, _) => n
           case SyslType.PtrType(SyslType.StructType(n, _, _)) => n
@@ -4067,17 +4085,18 @@ class SyslLLVMCodegen(target: String = "host"):
           itables(itableName) = (iface, structName)
         val dataPtr = inner.typ.underlying match
           case st: SyslType.StructType =>
-            // Value-type struct: genExpr returns a pointer to the struct's
-            // storage (alloca or field address). Pass that pointer as data_ptr
-            // — methods mutate the original, matching interpreter semantics.
-            // Non-escaping interface use only: if the iface outlives the
-            // struct's scope this becomes a dangling pointer. std tests all
-            // use interfaces at the call site and discard them immediately.
             val src = genExpr(inner)
             val lt = llvmType(st)
-            val cast = newReg()
-            emit(s"  $cast = bitcast $lt* $src to i8*")
-            cast
+            val srcI8 = newReg()
+            emit(s"  $srcI8 = bitcast $lt* $src to i8*")
+            if owns then
+              val size = llvmSizeOf(st)
+              val heapBuf = newReg()
+              emit(s"  $heapBuf = call i8* @malloc($sizeT $size)")
+              val cpResult = newReg()
+              emit(s"  $cpResult = call i8* @memcpy(i8* $heapBuf, i8* $srcI8, $sizeT $size)")
+              heapBuf
+            else srcI8
           case _ =>
             // Pointer/ref: genExpr returns the raw pointer value directly
             genExpr(inner)

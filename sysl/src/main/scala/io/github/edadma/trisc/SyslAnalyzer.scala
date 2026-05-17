@@ -3013,7 +3013,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TStr(e)                         => checkExpr(e)
       case TFmtStr(e, _)                   => checkExpr(e)
       case _: TClosure                     => reject("cannot construct closures (may capture mutable state)")
-      case TInterfaceBox(e, _)             => checkExpr(e)
+      case TInterfaceBox(e, _, _)          => checkExpr(e)
       case TInterfaceDispatch(ifaceVal, methodIdx, args, _) =>
         // Allowed only if the interface method's effect signature is `#pure` — every impl
         // is then guaranteed to satisfy the pure discipline (`satisfiesInterface` enforces
@@ -3240,7 +3240,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TStr(e)                         => checkExpr(e)
       case TFmtStr(e, _)                   => checkExpr(e)
       case _: TClosure                     => reject("cannot construct closures (may capture mutable state)")
-      case TInterfaceBox(e, _)             => checkExpr(e)
+      case TInterfaceBox(e, _, _)          => checkExpr(e)
       case TInterfaceDispatch(ifaceVal, methodIdx, args, _) =>
         // Subset check against the interface method's declared effects (the impl is
         // guaranteed by `satisfiesInterface` to satisfy these at boxing time).
@@ -3436,7 +3436,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         case TStr(inner)                     => checkExpr(inner)
         case TFmtStr(inner, _)               => checkExpr(inner)
         case _: TClosure                     => bail()
-        case TInterfaceBox(i, _)             => checkExpr(i)
+        case TInterfaceBox(i, _, _)          => checkExpr(i)
         case TInterfaceDispatch(v, idx, args, _) =>
           v.typ match
             case InterfaceType(_, methods) =>
@@ -3639,7 +3639,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TStr(inner)                     => checkExpr(inner, ghostCtx)
       case TFmtStr(inner, _)               => checkExpr(inner, ghostCtx)
       case _: TClosure                     => () // Closures snapshot their environment; treat as opaque for ghost purposes.
-      case TInterfaceBox(inner, _)         => checkExpr(inner, ghostCtx)
+      case TInterfaceBox(inner, _, _)      => checkExpr(inner, ghostCtx)
       case TInterfaceDispatch(v, _, args, _) => checkExpr(v, ghostCtx); args.foreach(checkExpr(_, ghostCtx))
       case TIntrinsicCall(_, args, _)      => args.foreach(checkExpr(_, ghostCtx))
       case TRangeCheck(inner, _, _, _)     => checkExpr(inner, ghostCtx)
@@ -4310,7 +4310,39 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   protected def satisfiesInterface(st: SyslType.StructType, iface: SyslType.InterfaceType): Boolean =
     val structName = st.name
     iface.methods.forall { (methodName, paramTypes, retType, ifaceEffects) =>
-      lookupMethod(structName, methodName) match
+      val funInfoOpt = lookupMethod(structName, methodName).orElse {
+        // Generic struct method: the impl lives as `${templateName}_$method` in
+        // `genericTemplates`. Instantiate it for this concrete struct so we can
+        // structurally compare its monomorphized signature against the iface.
+        // Instantiation is idempotent (call sites would do the same).
+        structToTemplate.get(structName).flatMap { case (templateName, _) =>
+          val templateFuncName = s"${templateName}_$methodName"
+          if genericTemplates.contains(templateFuncName) then
+            try
+              val allArgTypes: List[SyslType] = SyslType.PtrType(st) :: paramTypes
+              val (mangled, fi) = instantiateGeneric(templateFuncName, allArgTypes)
+              // Box dispatch (interpreter + every codegen) looks up methods
+              // under `${structName}_$methodName`. For monomorphized generic
+              // struct methods the real function is named `${templateName}_${methodName}_${typeArgs}`,
+              // which dispatch can't find. Emit a thin forwarding TFunDecl
+              // under the dispatch-expected name so every backend Just Works.
+              val aliasName = s"${structName}_$methodName"
+              if !functions.contains(aliasName) then
+                val aliasFi = fi.copy(name = aliasName)
+                functions(aliasName) = aliasFi
+                val aliasParams = fi.params.map((n, t) => TParam(n, t))
+                val aliasArgs: List[TExpr] = fi.params.map((n, t) => TVarRef(n, t))
+                val aliasCall = TCall(mangled, aliasArgs, fi.returnType)
+                val aliasBody =
+                  if fi.returnType == SyslType.UnitType then TBlockBody(List(TExprStmt(aliasCall)))
+                  else TExprBody(aliasCall)
+                specializedDecls += TFunDecl(aliasName, aliasParams, fi.returnType, aliasBody, isPrivate = true)
+              Some(fi)
+            catch case _: AnalysisError => None
+          else None
+        }
+      }
+      funInfoOpt match
         case Some(funInfo) =>
           val userParams = funInfo.params.drop(1).map(_._2)
           val structuralOk = userParams == paramTypes && funInfo.returnType == retType
@@ -6419,7 +6451,7 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TStr(inner)                     => TStr(go(inner))
       case TFmtStr(inner, spec)            => TFmtStr(go(inner), spec)
       case _: TClosure                     => x // closures captured environments — don't descend
-      case TInterfaceBox(inner, iface)     => TInterfaceBox(go(inner), iface)
+      case TInterfaceBox(inner, iface, owns) => TInterfaceBox(go(inner), iface, owns)
       case TInterfaceDispatch(v, m, args, rt) => TInterfaceDispatch(go(v), m, args.map(go), rt)
       case TIntrinsicCall(n, args, t)      => TIntrinsicCall(n, args.map(go), t)
       case TRangeCheck(inner, r, an, t)    => TRangeCheck(go(inner), r, an, t)
@@ -6687,7 +6719,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val tArray = analyzeExpr(array)
         val tIndex = analyzeExpr(index)
         val tValue = analyzeExpr(value)
-        TIndexAssignStmt(tArray, tIndex, tValue)
+        // Auto-box into iface when the element type is an interface — same
+        // pattern as var-decl / fn-arg / struct-construct / new-struct paths.
+        // owns=true: the array/slice may outlive the source's scope; the slot
+        // must own its data buffer.
+        val elemType = tArray.typ.underlying match
+          case SyslType.ArrayType(et, _) => Some(et)
+          case SyslType.SliceType(et) => Some(et)
+          case SyslType.RefType(SyslType.SliceType(et)) => Some(et)
+          case SyslType.RefType(SyslType.ArrayType(et, _)) => Some(et)
+          case _ => None
+        val tValueBoxed = (elemType, tValue.typ) match
+          case (Some(iface: SyslType.InterfaceType), vt) if !vt.isInstanceOf[SyslType.InterfaceType] =>
+            TInterfaceBox(tValue, iface, owns = true)
+          case _ => tValue
+        TIndexAssignStmt(tArray, tIndex, tValueBoxed)
 
       case FieldAssignStmtAST(obj, field, value) =>
         val tObj = analyzeExpr(obj)
@@ -6711,7 +6757,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val savedExp = currentExpected
         currentExpected = Some(structType.fields(idx)._2)
         val tValue = try analyzeExpr(value) finally currentExpected = savedExp
-        val assign = TFieldAssignStmt(resolvedObj, idx, tValue)
+        // Auto-box into iface when the field type is an interface — same
+        // shape as the other coercion sites. owns=true because the
+        // containing struct may outlive the source's scope.
+        val fieldType = structType.fields(idx)._2
+        val tValueBoxed = (fieldType, tValue.typ) match
+          case (iface: SyslType.InterfaceType, vt) if !vt.isInstanceOf[SyslType.InterfaceType] =>
+            TInterfaceBox(tValue, iface, owns = true)
+          case _ => tValue
+        val assign = TFieldAssignStmt(resolvedObj, idx, tValueBoxed)
         val checks = buildStructInvariantChecks(obj, structType.name)
         if checks.isEmpty then assign else TMultiStmt(assign :: checks)
 
@@ -6733,7 +6787,19 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case ReturnStmtAST(value) =>
         TReturnStmt(value.map { v =>
           val tv = analyzeExpr(v)
-          applyTargetType(tv, currentReturnType)
+          // Auto-box into iface when the return type is an interface — same
+          // pattern as the var-decl, fn-arg, and struct-construct paths.
+          // Without this, `return c` where `c: Tally` and return type
+          // `IntHolder` would emit a raw struct value where the caller
+          // expected an iface descriptor (UAF / type confusion).
+          val tvBoxed = (tv.typ, currentReturnType) match
+            case (_, iface: SyslType.InterfaceType) if !tv.typ.isInstanceOf[SyslType.InterfaceType] =>
+              // owns=true: the iface escapes this frame, so the data buffer
+              // must outlive the source's stack alloca. Codegens that emit
+              // pointer-to-source for value structs heap-copy when owns=true.
+              TInterfaceBox(tv, iface, owns = true)
+            case _ => tv
+          applyTargetType(tvBoxed, currentReturnType)
         })
 
       case ForStmtAST(init, cond, update, body, label) =>
