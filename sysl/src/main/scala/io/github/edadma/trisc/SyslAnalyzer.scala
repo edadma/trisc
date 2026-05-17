@@ -4266,6 +4266,28 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   protected def latestStruct(st: SyslType.StructType): SyslType.StructType =
     structTypes.getOrElse(st.name, st)
 
+  /** A captured `InterfaceType` may carry the pre-main-pass placeholder (empty
+   *  `methods`) if its enclosing data-enum's variant payload was resolved
+   *  during pass 0.5 before the main pass populated iface methods. The post-
+   *  main-pass `resolveStructsAndEnums()` refreshes non-recursive enum variant
+   *  fields, but a self-referencing enum's `Cons(value: I, next: &Self)`
+   *  captures the placeholder into the EnumType stored under the recursive
+   *  reference, and any function param typed `&Self` reads back the stale
+   *  iface during dispatch. Re-look up by name to defeat that staleness. */
+  protected def latestInterface(it: SyslType.InterfaceType): SyslType.InterfaceType =
+    if it.methods.isEmpty then interfaceTypes.getOrElse(it.name, it) else it
+
+  /** A function param typed by an `EnumType` is captured at function
+   *  registration in the main pass — before the post-main-pass
+   *  `resolveStructsAndEnums()` rewrites `dataEnumTypes` with variant payloads
+   *  whose iface types now carry their full method list. The captured enum
+   *  reference is the pre-rewrite snapshot, so variant patterns reading
+   *  `et.variants(i)._2` see empty-methods ifaces and `MethodCallAST` on the
+   *  bound payload OOBs. Refresh at variant-resolution time, the same way
+   *  `latestStruct` refreshes field-access on struct field types. */
+  protected def latestEnum(et: SyslType.EnumType): SyslType.EnumType =
+    dataEnumTypes.getOrElse(et.name, et)
+
   /** Convert an expression AST to a type AST (for explicit type args parsed as index expressions).
    *  The expression-position grammar parses generic type args as expressions, so this maps
    *  the relevant shapes back to types: `A` (VarRef), `Parser[A]` (Index of VarRef),
@@ -6968,7 +6990,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
   // type first (for monomorphized generic enums) and then the global variantToEnum map.
   protected def resolveVariant(name: String, scrutineeType: SyslType): Option[(SyslType.EnumType, Int)] =
     scrutineeType match
-      case et: SyslType.EnumType =>
+      case etRaw: SyslType.EnumType =>
+        val et = latestEnum(etRaw)
         val idx = et.variants.indexWhere(_._1 == name)
         if idx >= 0 then Some((et, idx))
         else variantToEnum.get(name)

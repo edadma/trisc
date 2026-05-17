@@ -449,7 +449,8 @@ trait SyslAnalyzerExpressions:
       case NewExprAST(typeName, args) =>
         // Check variant name first (e.g. `new Ok(42)`) before resolving as type
         variantToEnum.get(typeName) match
-          case Some((et, idx)) =>
+          case Some((etRaw, idx)) =>
+            val et = latestEnum(etRaw)
             val tArgs = args.map(analyzeExpr)
             val variantFields = et.variants(idx)._2
             if tArgs.length != variantFields.length then
@@ -458,7 +459,10 @@ trait SyslAnalyzerExpressions:
               val coerced = coerceLiteral(arg, fieldType)
               if !compatible(coerced.typ, fieldType) then
                 throw AnalysisError(s"field '$fieldName' expects $fieldType, got ${coerced.typ}")
-              coerced
+              (fieldType, coerced.typ) match
+                case (ifaceRaw: SyslType.InterfaceType, ct) if !ct.isInstanceOf[SyslType.InterfaceType] =>
+                  TInterfaceBox(coerced, latestInterface(ifaceRaw), owns = true)
+                case _ => coerced
             }
             TNewEnum(et, idx, checkedArgs)
           case None =>
@@ -1278,7 +1282,8 @@ trait SyslAnalyzerExpressions:
         val tArgs = args.map(analyzeExpr)
         // Interface dispatch
         tObj.typ match
-          case iface: InterfaceType =>
+          case ifaceRaw: InterfaceType =>
+            val iface = latestInterface(ifaceRaw)
             val methodIdx = iface.methods.indexWhere(_._1 == method)
             if methodIdx < 0 then throw AnalysisError(s"interface ${iface.name} has no method '$method'")
             val (_, paramTypes, retType, _) = iface.methods(methodIdx)
@@ -1610,7 +1615,10 @@ trait SyslAnalyzerExpressions:
             val coerced = coerceLiteral(arg, fieldType)
             if !compatible(coerced.typ, fieldType) then
               throw AnalysisError(s"variant '$name' field '$fieldName' expects $fieldType, got ${coerced.typ}")
-            coerced
+            (fieldType, coerced.typ) match
+              case (ifaceRaw: SyslType.InterfaceType, ct) if !ct.isInstanceOf[SyslType.InterfaceType] =>
+                TInterfaceBox(coerced, latestInterface(ifaceRaw), owns = true)
+              case _ => coerced
           }
           TEnumConstruct(et, variantIdx, checkedArgs)
         else if genericVariantToEnum.contains(name) then
@@ -1641,7 +1649,10 @@ trait SyslAnalyzerExpressions:
             val coerced = coerceLiteral(arg, fieldType)
             if !compatible(coerced.typ, fieldType) then
               throw AnalysisError(s"variant '$name' field '$fieldName' expects $fieldType, got ${coerced.typ}")
-            coerced
+            (fieldType, coerced.typ) match
+              case (ifaceRaw: SyslType.InterfaceType, ct) if !ct.isInstanceOf[SyslType.InterfaceType] =>
+                TInterfaceBox(coerced, latestInterface(ifaceRaw), owns = true)
+              case _ => coerced
           }
           TEnumConstruct(et, variantIdx, checkedArgs)
         else
