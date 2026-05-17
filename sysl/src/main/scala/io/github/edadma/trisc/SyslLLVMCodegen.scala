@@ -215,6 +215,15 @@ class SyslLLVMCodegen(target: String = "host"):
   // Bodies in declaration order; iterated in reverse for LIFO at exit.
   private val deferBodies = new mutable.ArrayBuffer[TStmt]
 
+  // Pre-allocated env allocas for closure args at TCall / TIndirectCall /
+  // TInterfaceDispatch arg-eval sites. Key = the value `closureCounter` will
+  // hold inside the matching TClosure case (i.e. one past the pre-alloc-time
+  // value, since TClosure increments `closureCounter` on entry). Value = the
+  // entry-block alloca register typed `[envSize x i8]*`. Populated by call
+  // sites; consumed (and the lookup is the StackEnv-viability check) by
+  // TClosure. See `feedback_sysl_returned_closure_llvm_uaf.md`.
+  private val preAllocatedClosureEnvs = new mutable.HashMap[Int, String]
+
   def generate(program: TProgram): String =
     out.clear()
     stringConstants.clear()
@@ -569,6 +578,7 @@ class SyslLLVMCodegen(target: String = "host"):
     hasReturned = false
     deferSiteCounters.clear()
     deferBodies.clear()
+    preAllocatedClosureEnvs.clear()
     funcBorrowParams = fun.params.collect {
       case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
     }.toSet
@@ -688,6 +698,7 @@ class SyslLLVMCodegen(target: String = "host"):
     hasReturned = false
     deferSiteCounters.clear()
     deferBodies.clear()
+    preAllocatedClosureEnvs.clear()
     captureBorrows = closure.captures.map(_._1).toSet
     funcBorrowParams = closure.params.collect {
       case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
@@ -1973,6 +1984,20 @@ class SyslLLVMCodegen(target: String = "host"):
 
       case TCall(name, args, _) =>
         val declaredParams = funcParamTypes.getOrElse(name, Nil)
+        // Pre-allocate stack envs for any TClosure arg that closureKindOf
+        // says is StackEnv. The pre-alloc lives in THIS function's entry
+        // block (via deferAlloca) so it outlives the call but is reclaimed
+        // when this function returns — exactly the StackEnv contract. Key
+        // by (closureCounter + n) where n is the StackEnv-arg index, since
+        // TClosure pre-increments closureCounter before its first lookup.
+        var envPreallocCounter = closureCounter + 1
+        for arg <- args do arg match
+          case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+            val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
+            val rawAlloca = deferAlloca(s"[$envSize x i8]")
+            preAllocatedClosureEnvs(envPreallocCounter) = rawAlloca
+            envPreallocCounter += 1
+          case _ =>
         val argVals = args.zipWithIndex.map { (a, i) =>
           val v = genExpr(a)
           val vt = exprType(a)
@@ -3294,14 +3319,30 @@ class SyslLLVMCodegen(target: String = "host"):
         //   StackEnv → alloca'd in caller's frame (no header, no rc, no free).
         //              Used for non-escaping non-rc-bearing captures.
         //   HeapEnv  → malloc'd with [rc:i64@-16 | deinit_ptr:i8*@-8 | data] header.
+        //
+        // **StackEnv requires pre-allocation in the CALLER's frame.** If a
+        // TClosure is constructed without a matching pre-alloc (e.g. it's
+        // the return-position body of a function: `make_adder(k) -> (int) -> int
+        // = (x) -> x + k`), StackEnv would `alloca` the env in the constructing
+        // function's own frame — which is freed when the function returns,
+        // leaving the returned closure with a dangling env_ptr. Downgrade to
+        // HeapEnv when no pre-alloc exists. See
+        // `feedback_sysl_returned_closure_llvm_uaf.md`.
         val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
-        val kind = closureKindOf(c)
+        val rawKind = closureKindOf(c)
+        val prealloc = preAllocatedClosureEnvs.get(closureCounter)
+        val kind = if rawKind == FuncKind.StackEnv && prealloc.isEmpty
+                   then FuncKind.HeapEnv
+                   else rawKind
         val envPtr = kind match
           case FuncKind.NullEnv => "null"
           case FuncKind.StackEnv =>
-            // Stack env: alloca on the function's frame (deferred to entry block
-            // so it's stable across the construction expression's IR shape).
-            val rawAlloca = deferAlloca(s"[$envSize x i8]")
+            // Stack env: alloca in the CALLER's frame, pre-allocated by the
+            // enclosing TCall / TIndirectCall / TInterfaceDispatch via
+            // `preAllocatedClosureEnvs`. Without pre-alloc the kind would have
+            // been downgraded to HeapEnv above. The pre-allocated alloca is
+            // typed `[envSize x i8]*`.
+            val rawAlloca = prealloc.get
             val ep = newReg()
             emit(s"  $ep = bitcast [$envSize x i8]* $rawAlloca to i8*")
             // Store captures (no incr — StackEnv has no rc-bearing captures).
@@ -3421,6 +3462,15 @@ class SyslLLVMCodegen(target: String = "host"):
         alloca
 
       case TIndirectCall(callee, args, typ) =>
+        // Pre-allocate stack envs for StackEnv TClosure args (mirrors TCall).
+        var icEnvPreallocCounter = closureCounter + 1
+        for arg <- args do arg match
+          case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+            val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
+            val rawAlloca = deferAlloca(s"[$envSize x i8]")
+            preAllocatedClosureEnvs(icEnvPreallocCounter) = rawAlloca
+            icEnvPreallocCounter += 1
+          case _ =>
         // callee is a %struct.closure — extract func_ptr and env_ptr
         val closurePtr = genExpr(callee) // returns alloca pointer (aggregate)
         val fpGep = newReg()
@@ -4017,6 +4067,15 @@ class SyslLLVMCodegen(target: String = "host"):
         alloca
 
       case TInterfaceDispatch(ifaceVal, methodIndex, args, retType) =>
+        // Pre-allocate stack envs for StackEnv TClosure args (mirrors TCall).
+        var idEnvPreallocCounter = closureCounter + 1
+        for arg <- args do arg match
+          case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+            val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
+            val rawAlloca = deferAlloca(s"[$envSize x i8]")
+            preAllocatedClosureEnvs(idEnvPreallocCounter) = rawAlloca
+            idEnvPreallocCounter += 1
+          case _ =>
         // Dynamic dispatch: load itable + data from interface value, call
         // method at given index with data_ptr as self.
         val ifacePtr = genExpr(ifaceVal)

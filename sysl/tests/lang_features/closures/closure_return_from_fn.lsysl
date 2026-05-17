@@ -1,0 +1,107 @@
+Returning a closure from a function — captured-env lifetime
+============================================================
+
+A function that builds a closure capturing its parameters or
+locals must hand the closure's environment ownership to the
+returned closure value: the env outlives the constructing
+function's stack frame. Without the fix, the LLVM-based
+backends (llvm-host, riscv64, riscv32, wasm32) used to free
+the env at the constructing function's exit, leaving the
+returned closure with a dangling env_ptr.
+
+Interpreter / SVM / TRISC already handled this correctly.
+
+See `feedback_sysl_returned_closure_llvm_uaf.md`.
+
+    module sysl.tests.lang_features
+
+    crf_apply(f: (int) -> int, x: int) -> int = f(x)
+
+    make_adder(k: int) -> (int) -> int = (x: int) -> x + k
+
+    make_multiplier(k: int) -> (int) -> int = (x: int) -> x * k
+
+Basic captured-param round-trip
+-------------------------------
+
+A factory returns a closure that captures its parameter. The
+returned closure outlives the factory call and is invoked
+directly from the caller's frame.
+
+    #test
+    test_returned_closure_basic() -> unit
+        val add5 = make_adder(5)
+        assert(add5(10) == 15, s"add5(10) expected 15, got ${add5(10)}")
+        assert(add5(0) == 5, s"add5(0) expected 5, got ${add5(0)}")
+        assert(add5(-3) == 2, s"add5(-3) expected 2, got ${add5(-3)}")
+
+Returned closure through a higher-order function
+------------------------------------------------
+
+A factory's result is passed through a HOF (which itself
+takes a (int) -> int param) and invoked there. The HOF call
+exercises an additional layer of arg-passing on the closure
+value — the env_ptr must survive the round-trip.
+
+    #test
+    test_returned_closure_through_hof() -> unit
+        val mult7 = make_multiplier(7)
+        val r = crf_apply(mult7, 6)
+        assert(r == 42, s"crf_apply(mult7, 6) expected 42, got $r")
+
+Closure captures a local (not a param)
+--------------------------------------
+
+The captured binding is declared inside the factory body
+rather than being a param. Same lifetime requirement.
+
+    make_constant() -> () -> int
+        val c = 12345
+        return () -> c
+
+    #test
+    test_returned_closure_captures_local() -> unit
+        val k = make_constant()
+        // Repeat-invocation pins that the env hasn't been recycled
+        // by the allocator between calls (the original bug surfaced
+        // on the second invocation when the assert s"..." formatter
+        // reallocated the freed region).
+        assert(k() == 12345, s"k() first call expected 12345, got ${k()}")
+        assert(k() == 12345, s"k() repeat call expected 12345, got ${k()}")
+        assert(k() == 12345, s"k() third call expected 12345, got ${k()}")
+
+Repeated factory calls produce independent closures
+---------------------------------------------------
+
+Each call to `make_adder` mallocs a fresh env. Two returned
+closures with different `k` values must not alias each other.
+
+    #test
+    test_factory_produces_independent_closures() -> unit
+        val a = make_adder(10)
+        val b = make_adder(100)
+        assert(a(1) == 11, s"a(1) expected 11, got ${a(1)}")
+        assert(b(1) == 101, s"b(1) expected 101, got ${b(1)}")
+        // Interleave — if either's env got freed, the survivor would
+        // get corrupted between calls.
+        assert(a(2) == 12, s"a(2) expected 12, got ${a(2)}")
+        assert(b(2) == 102, s"b(2) expected 102, got ${b(2)}")
+        assert(a(3) == 13, s"a(3) expected 13, got ${a(3)}")
+
+Chained factories — closure-returning closure
+---------------------------------------------
+
+A factory builds and returns a closure that itself builds
+and returns a closure. Both env allocations must survive
+their respective construction-fn returns.
+
+    make_offset_then_scale(off: int) -> (int) -> (int) -> int
+        return (s: int) -> (x: int) -> x * s + off
+
+    #test
+    test_chained_factory() -> unit
+        val scaler = make_offset_then_scale(5)
+        val triple_plus_5 = scaler(3)
+        val r = triple_plus_5(10)
+        // 10 * 3 + 5 = 35
+        assert(r == 35, s"triple_plus_5(10) expected 35, got $r")
