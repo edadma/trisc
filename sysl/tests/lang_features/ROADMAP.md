@@ -455,6 +455,7 @@ this dir adds simple-enum coverage and edge cases.
 | `enum_data_recursive.lsysl` 🟡 | direct recursion shape — construction at depth 2; match distinguishes Leaf vs Node; match binds payload value; cons-list match; Leaf base case for recursive fn (11 tests). Multi-level recursive walk fails on 6 of 7 backends — separate bug catalogued |
 | `enum_data_slice_field.lsysl` 🟢 | `enum Tree { Leaf, Node(children: []Tree) }` and similar recursive shape (sysl@9ee727db regression test). Leaf / empty-children Node / single-child / three-child; match distinguishes variants and binds children slice; two-level Node-of-Node; non-recursive sibling Bag(values: []int). (10 tests) |
 | `enum_str_variant_name.lsysl` 🟢 | `str(data_enum_variant)` returns the constructor name — Circle / Rect / Triangle / Empty; payload-independence; in concat + `s"..."` interpolation; two data enums coexist. Note: `str(simple_enum)` returns the int value (not the name) — use `EnumType::Image` for simple enums (12 tests) |
+| `enum_data_iface_field.lsysl` 🟢 | Data-enum variant whose payload is an `interface` type. Single-payload `SedifMaybe { SedifJust(payload: I), SedifNone }`; two-field variant `(payload: I, tag: int)` + positional sanity with iface in second slot; recursive enum `SedifTree { SedifLeaf, SedifNode(payload: I, children: []SedifTree) }`. Two analyzer fixes: `latestEnum`/`latestInterface` refreshers + iface auto-box at all three variant-construction sites (CallAST/`new`/generic) with `owns=true`. (8 tests) |
 
 ---
 
