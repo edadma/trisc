@@ -159,17 +159,28 @@ Aliases used in arithmetic
         assert(c == 30, s"got $c")
 
 
-Composition via aliased function types is **deferred**
--------------------------------------------------------
+Composition via aliased function types
+----------------------------------------
 
-A test exercising two-step composition (`tab_compose(f, g, x) =
-g(f(x))`) was prepared but exposes a TRISC codegen bug at the call
-site: passing two `FuncType` arguments adjacent to (in any order
-attempted) an `int` argument trips a panic or DoubleFault. The bug
-is independent of the type-alias system itself — `(int)->int`
-without an alias fails identically. Tracked separately for a
-focused fix; once resolved, the test below can be re-enabled.
+Was deferred pending the TRISC fnptr-fnptr-scalar codegen bug;
+fixed at sysl@392cca670 (chunk 3 of the bug-fix campaign — call-
+site rewind gated on FuncType + body-side stackParamOffset bump-
+by-16). The composition shape is now re-enabled.
 
-The other 9 tests in this file already exercise generic aliases
-applied to function types via `tab_apply_transform`, so generic
-alias coverage is preserved.
+    type TabUnary = (int) -> int
+
+    tab_compose(f: TabUnary, g: TabUnary, x: int) -> int = g(f(x))
+
+    #test
+    test_tab_compose() -> unit
+        val r = tab_compose(x -> x + 1, x -> x * 2, 5)
+        // (5+1)*2 = 12
+        assert(r == 12, s"compose expected 12, got $r")
+
+    #test
+    test_tab_compose_reordered() -> unit
+        // Swap argument order — guards against the original bug's
+        // sensitivity to fn1/fn2/int order.
+        val r = tab_compose(x -> x * 2, x -> x + 1, 5)
+        // (5*2)+1 = 11
+        assert(r == 11, s"compose-reordered expected 11, got $r")

@@ -135,11 +135,22 @@ Position via ::Pos
     test_sei_image_yellow() -> unit
         assert(SeiColor::Image(SeiColor.SeiYellow) == "SeiYellow", "Yellow name")
 
-**TODO — SVM bug, two `::Value` round-trip tests dropped.**
-`SeiColor::Value("SeiRed")` panics on SVM (the runtime helper
-that maps a string back to a variant traps with
-`svm.result=0x0`). Other 6 backends correctly recover the
-variant. See `feedback_sysl_svm_enum_value_string_lookup.md`.
+### ::Value parses a variant name back to the variant
+
+Was dropped pending the SVM `::Value` runtime-helper panic; fixed
+in the chunk-5 SVM TValuePattern string-eq fix at sysl@72f5555fd
+(SVM `genMatch` over a string scrutinee was using scalar `eq`
+instead of `__svm_str_eq`).
+
+    #test
+    test_sei_value_red_round_trip() -> unit
+        val v = SeiColor::Value("SeiRed")
+        assert(SeiColor::Image(v) == "SeiRed", "Red round-trip")
+
+    #test
+    test_sei_value_yellow_round_trip() -> unit
+        val v = SeiColor::Value("SeiYellow")
+        assert(SeiColor::Image(v) == "SeiYellow", "Yellow round-trip")
 
 ::Succ / ::Pred step through variants
 --------------------------------------

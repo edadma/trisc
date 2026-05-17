@@ -90,6 +90,39 @@ but withheld pending a codegen fix.)
         // at function exit (defer scope = function, not block).
         assert(t.s == "xyB", s"expected 'xyB', got '${t.s}'")
 
+Defer queued inside a skipped if-branch — must NOT fire
+-------------------------------------------------------
+
+The defer statement is reached only inside a conditional that is
+*not* taken at runtime. Defer's queueing is dynamic: the per-defer-
+site counter is incremented when control reaches the defer stmt,
+NOT at compile time. So a skipped branch leaves the counter at 0
+and the body never replays.
+
+Fixed at sysl@e95bfe65a (per-defer-site counter pattern across
+LLVM/SVM/TRISC). Before that fix, 6 of 7 codegen backends
+(everything except the interpreter) fired the defer anyway.
+
+    dnr_defer_in_skipped_branch(t: *DnrTrace, take: bool) -> unit
+        if take
+            defer t.s = t.s + "B"
+            t.s = t.s + "x"
+        t.s = t.s + "y"
+
+    #test
+    test_defer_in_skipped_branch_does_not_fire() -> unit
+        var t = DnrTrace("")
+        dnr_defer_in_skipped_branch(&t, false)
+        // Branch skipped → no "x", no defer "B"; only post-branch "y" runs.
+        assert(t.s == "y", s"expected 'y', got '${t.s}'")
+
+    #test
+    test_defer_in_skipped_branch_taken_path_still_fires() -> unit
+        var t = DnrTrace("")
+        dnr_defer_in_skipped_branch(&t, true)
+        // Same fn, taken path: "x" + "y" + defer "B"
+        assert(t.s == "xyB", s"expected 'xyB', got '${t.s}'")
+
 Zero defers — sanity baseline
 -----------------------------
 
