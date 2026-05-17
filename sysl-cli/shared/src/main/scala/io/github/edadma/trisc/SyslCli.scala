@@ -25,6 +25,7 @@ case class TestCommand(
     backend: String = "interpreter",
     failFast: Boolean = false,
     verbose: Boolean = false,
+    noContracts: Boolean = false,
 ) extends SyslCommand
 case class ProveCommand(
     inputs: Seq[String] = Seq.empty,
@@ -198,6 +199,14 @@ object SyslCli:
                 case other           => other
               )
             ),
+          opt[Unit]("no-contracts")
+            .text("Strip runtime contract checks (require/ensure/invariant/variant/type-predicates/type-attrs).")
+            .action((_, c) =>
+              c.copy(command = c.command match
+                case tc: TestCommand => tc.copy(noContracts = true)
+                case other           => other
+              )
+            ),
           arg[String]("<source>...")
             .unbounded()
             .text("Sysl source files or a directory")
@@ -323,7 +332,7 @@ object SyslCli:
             failure("No input files specified for run")
           case DocCommand(inputs, _) if inputs.isEmpty =>
             failure("No input files specified for doc")
-          case TestCommand(inputs, _, _, _, _) if inputs.isEmpty =>
+          case TestCommand(inputs, _, _, _, _, _) if inputs.isEmpty =>
             failure("No input files specified for test")
           case ProveCommand(inputs, _) if inputs.isEmpty =>
             failure("No input files specified for prove")
@@ -1755,7 +1764,8 @@ object SyslCli:
           List(resolveSource(p, ""))
       }.toMap
     val sources = resolveTransitiveSources(initialSources, baseDirs)
-    val driver = new SyslDriver(Some(io), baseDirs, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
+    val config = if cmd.noContracts then Map("contracts" -> "off") else Map.empty[String, String]
+    val driver = new SyslDriver(Some(io), baseDirs, config = config, tangler = Some(raw => LiterateRenderer.tangle(new LiterateParser().parse(raw))))
     val result = driver.compile(sources, keepTests = true)
     val stdlibImports = driver.collectStdlibImports(result.units)
 

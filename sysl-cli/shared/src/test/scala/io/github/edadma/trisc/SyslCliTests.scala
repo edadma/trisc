@@ -130,6 +130,24 @@ class SyslCliTests extends AnyFreeSpec with Matchers {
       config.command.asInstanceOf[TestCommand].backend shouldBe backend
   }
 
+  // --- test --no-contracts ---
+  //
+  // Parallel to the existing compile/run `--no-contracts` flag. Strips
+  // require/ensure/invariant/variant from the typed AST before lowering so
+  // failing-precondition tests can exercise body-only behaviour.
+
+  "parse test --no-contracts sets the flag" in {
+    val Some(config) = SyslCli.parse(Seq("test", "--no-contracts", "foo.lsysl")): @unchecked
+    val cmd = config.command.asInstanceOf[TestCommand]
+    cmd.noContracts shouldBe true
+    cmd.inputs shouldBe Seq("foo.lsysl")
+  }
+
+  "parse test without --no-contracts leaves the flag false" in {
+    val Some(config) = SyslCli.parse(Seq("test", "foo.lsysl")): @unchecked
+    config.command.asInstanceOf[TestCommand].noContracts shouldBe false
+  }
+
   // --- Doc rendering ---
 
   "renderHTML produces highlighted code" in {
