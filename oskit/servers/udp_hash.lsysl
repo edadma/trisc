@@ -1,0 +1,172 @@
+UDP port hash + per-socket owners-ring
+======================================
+
+Two cohesive UDP socket-table helpers split out of `inet.lsysl`:
+
+  - **UDP port hash (Phase 3 chunk 2).** A chained bucket table
+    keyed on `bound_port & (N-1)`. `inet_find_bound` /
+    `inet_find_bound_port` use it on every inbound datagram —
+    replacing the prior O(MAX_SOCKETS) linear scan. Maintenance
+    points (insert / remove) called from `inet_handle_bind`,
+    auto-bind in `inet_handle_sendto`, `inet_handle_close`, and
+    `inet_handle_pid_exit`.
+
+  - **Owners-ring helpers.** Mirror the TCP owners-ring shape so
+    a single per-socket array can hold up to
+    `INET_UDP_OWNERS_MAX` tids that share an fd (dup/fork/SCM_RIGHTS).
+    Primary owner stays at slot 0 — that's the tid charged
+    against per-tid quotas.
+
+Same `oskit.servers` module as `inet.lsysl`, so sibling state
+(`inet_sockets`, `INET_MAX_SOCKETS`, etc.) resolves without
+imports.
+
+    module oskit.servers
+
+
+### UDP port hash (Phase 3 chunk 2)
+
+`inet_find_bound` and `inet_find_bound_port` are the two hot lookups
+on the inbound UDP path: every received datagram pays one of them to
+find the destination socket. A linear scan over the 32-slot table is
+fine for current loads, but the plan calls for hashing now while the
+caps are small so growth doesn't surface a perf wall.
+
+The hash is a chained table keyed on `bound_port & (N - 1)`. N is a
+power of two so the mask is a single `&`. Each socket holds a
+`next_in_udp_bucket` link forming a singly-linked list per bucket;
+`inet_udp_port_hash[h]` is the head index, or -1 for empty. With
+N=16 and 32 sockets we average 2 entries per bucket — already a 16x
+constant-factor win over the linear scan, and it scales linearly
+with N if MAX_SOCKETS grows.
+
+Maintenance points: `inet_handle_bind` and the auto-bind in
+`inet_handle_sendto` insert; `inet_handle_close` and
+`inet_handle_pid_exit` remove. Tests catch missed maintenance via
+the duplicate-bind detection in `inet_handle_bind` (collisions or
+stale entries surface as either a refused legitimate bind or an
+allowed dup bind).
+
+    val INET_UDP_HASH_N = 16
+
+    var inet_udp_port_hash: [16]int
+
+Hash a port to a bucket. Limited to the low 16 bits per the IPv4
+TCP/UDP port-number space.
+
+    inet_udp_bucket(port: int) -> int
+        (port & 0xffff) & (INET_UDP_HASH_N - 1)
+
+Initialize the bucket array. Called once from `inet_init_sockets`.
+
+    inet_udp_hash_init()
+        var i = 0
+        while i < INET_UDP_HASH_N
+            inet_udp_port_hash[i] = -1
+            i += 1
+
+Insert socket `idx` at the head of its `bound_port` bucket. Caller
+guarantees `bound_port` is set and the socket isn't already in any
+bucket (i.e. only call after a fresh bind).
+
+    inet_udp_hash_insert(idx: int)
+        val h = inet_udp_bucket(inet_sockets[idx].bound_port)
+        inet_sockets[idx].next_in_udp_bucket = inet_udp_port_hash[h]
+        inet_udp_port_hash[h] = idx
+
+Remove socket `idx` from its bucket. Walks the chain to find the
+predecessor, splices the link past `idx`, and clears `next`. No-op
+if `idx` isn't actually in the bucket — happens when `pid_exit`
+sweeps a socket that close() already cleaned up.
+
+    inet_udp_hash_remove(idx: int)
+        val h = inet_udp_bucket(inet_sockets[idx].bound_port)
+        var cur = inet_udp_port_hash[h]
+        if cur == idx
+            inet_udp_port_hash[h] = inet_sockets[idx].next_in_udp_bucket
+            inet_sockets[idx].next_in_udp_bucket = -1
+            return
+        while cur >= 0
+            val nx = inet_sockets[cur].next_in_udp_bucket
+            if nx == idx
+                inet_sockets[cur].next_in_udp_bucket = inet_sockets[idx].next_in_udp_bucket
+                inet_sockets[idx].next_in_udp_bucket = -1
+                return
+            cur = nx
+
+
+Owners-ring helpers for `inet_sockets[s]`. Mirrors the TCP shape
+in inet_proto.lsysl: up to `INET_OWNERS_MAX` tids per slot, the
+live entries occupy the prefix `[0..owners_count)` and -1
+elsewhere. Primary owner sits at `owners[0]`; that's the tid we
+charge against the per-tid slot/buffer budget.
+
+    inet_udp_owners_init(s: int)
+        var i = 0
+        while i < INET_OWNERS_MAX
+            inet_sockets[s].owners[i] = -1
+            i += 1
+        inet_sockets[s].owners_count = 0
+
+    inet_udp_owners_set(s: int, tid: int)
+        var i = 0
+        while i < INET_OWNERS_MAX
+            inet_sockets[s].owners[i] = -1
+            i += 1
+        inet_sockets[s].owners[0] = tid
+        inet_sockets[s].owners_count = 1
+
+    inet_udp_owners_primary(s: int) -> int
+        if inet_sockets[s].owners_count == 0
+            return -1
+        inet_sockets[s].owners[0]
+
+    inet_udp_owners_has(s: int, tid: int) -> int
+        var i = 0
+        while i < inet_sockets[s].owners_count
+            if inet_sockets[s].owners[i] == tid
+                return 1
+            i += 1
+        0
+
+    inet_udp_owners_add(s: int, tid: int) -> int
+        if inet_udp_owners_has(s, tid) != 0
+            return 1
+        if inet_sockets[s].owners_count >= INET_OWNERS_MAX
+            return 0
+        inet_sockets[s].owners[inet_sockets[s].owners_count] = tid
+        inet_sockets[s].owners_count += 1
+        1
+
+    inet_udp_owners_remove(s: int, tid: int) -> int
+        var i = 0
+        while i < inet_sockets[s].owners_count
+            if inet_sockets[s].owners[i] == tid
+                var j = i
+                while j < inet_sockets[s].owners_count - 1
+                    inet_sockets[s].owners[j] = inet_sockets[s].owners[j + 1]
+                    j += 1
+                inet_sockets[s].owners_count -= 1
+                inet_sockets[s].owners[inet_sockets[s].owners_count] = -1
+                return inet_sockets[s].owners_count
+            i += 1
+        inet_sockets[s].owners_count
+
+
+Phase 2 of the net-stack quality plan: count UDP slots whose
+owners ring contains `tid`.  Companion to `inet_count_tcp_owner`
+in inet_proto.lsysl; callers add the two for the full per-tid
+usage.  Lives in this file because cross-file VAR reads break
+the analyzer (see feedback_sysl_syntax_gotchas #19); cross-file
+FN calls are fine, hence the split.
+
+    inet_count_udp_owner(tid: int) -> int
+        var n = 0
+        var i = 0
+        while i < INET_MAX_SOCKETS
+            if inet_sockets[i].in_use != 0
+                if inet_udp_owners_has(i, tid) != 0
+                    n += 1
+            i += 1
+        n
+

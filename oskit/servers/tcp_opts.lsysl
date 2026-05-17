@@ -1,0 +1,291 @@
+OSKit INET TCP — sequence numbers, segment encoders, SACK board
+================================================================
+
+Same-module sibling of `tcp.lsysl`. Three groups of utility-grade
+code that the rest of the TCP stack reuses on every segment:
+
+* `tcp_seq_{lt,le}` — wrapping 32-bit sequence-number compares.
+* `tcp_{read,write}_u32` — big-endian seq/ack field encoders.
+* TCP options parsing (`tcp_opts_has_sack_permitted`,
+  `tcp_opts_get_wscale`, `tcp_opts_get_ts`, `tcp_opts_apply_sack`)
+  and the SACK scoreboard helpers
+  (`tcp_sack_board_insert/purge/clear`, `tcp_sack_next_hole`).
+
+Lifted out of `tcp.lsysl` because none of these touch the state
+machine — they're pure transforms over the bytes on the wire and
+the per-socket scoreboard. Keeping them in their own file makes
+the state-machine file easier to follow.
+
+    module oskit.servers
+
+
+32-bit sequence-number comparisons, wrapping modulo 2^32.
+
+    tcp_seq_lt(a: u32, b: u32) -> int
+        val d = i32(a - b)
+        if d < 0
+            return 1
+        0
+
+    tcp_seq_le(a: u32, b: u32) -> int
+        val d = i32(a - b)
+        if d <= 0
+            return 1
+        0
+
+
+TCP seq/ack field helpers (big-endian u32).
+
+    tcp_write_u32(frame: *byte, off: int, v: u32)
+        frame[off]     = byte((v >> 24) & u32(0xff))
+        frame[off + 1] = byte((v >> 16) & u32(0xff))
+        frame[off + 2] = byte((v >>  8) & u32(0xff))
+        frame[off + 3] = byte( v        & u32(0xff))
+
+    tcp_read_u32(frame: *byte, off: int) -> u32
+        val b0 = u32(frame[off]     & 0xff)
+        val b1 = u32(frame[off + 1] & 0xff)
+        val b2 = u32(frame[off + 2] & 0xff)
+        val b3 = u32(frame[off + 3] & 0xff)
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+
+Walk TCP options in the segment starting at `tcp_off + 20` and
+ending at `tcp_off + hdr_len`. Returns 1 if a SACK-permitted
+option (RFC 2018 §2, kind=4 len=2) is present, 0 otherwise.
+
+`kind=0` (EOL) terminates. `kind=1` (NOP) is a single-byte
+skip. Everything else has `len` at `off+1`; we bounds-check
+to tolerate malformed segments without reading past the
+header end. Unknown options are skipped.
+
+    tcp_opts_has_sack_permitted(frame: *byte, tcp_off: int,
+                                hdr_len: int) -> int
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return 0
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return 0
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return 0
+                if off + olen > opts_end
+                    return 0
+                if kind == TCP_OPT_SACK_PERMITTED
+                    if olen == 2
+                        return 1
+                off += olen
+        0
+
+
+RFC 7323 §2 Window Scale option parser. Returns 1 (with `shift`
+filled in, clamped to 0..14 per §2.3) if a WS option is present
+in the TCP header, 0 otherwise. Only meaningful on SYN segments
+since the option is exchanged exactly once during the handshake.
+
+    tcp_opts_get_wscale(frame: *byte, tcp_off: int, hdr_len: int,
+                        out shift: int) -> int
+        shift = 0
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return 0
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return 0
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return 0
+                if off + olen > opts_end
+                    return 0
+                if kind == TCP_OPT_WSCALE
+                    if olen == 3
+                        var s = int(frame[off + 2]) & 0xff
+                        if s > 14
+                            s = 14
+                        shift = s
+                        return 1
+                off += olen
+        0
+
+
+RFC 7323 §3 Timestamps option parser. Returns 1 (with `tsval`
+and `tsecr` filled in) if a TS option is present, 0 otherwise.
+Caller is responsible for the PAWS check and for echoing
+`tsval` back as `tsecr` on the next outbound segment via
+`ts_recent`.
+
+    tcp_opts_get_ts(frame: *byte, tcp_off: int, hdr_len: int,
+                    out tsval: u32, out tsecr: u32) -> int
+        tsval = u32(0)
+        tsecr = u32(0)
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return 0
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return 0
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return 0
+                if off + olen > opts_end
+                    return 0
+                if kind == TCP_OPT_TS
+                    if olen == 10
+                        tsval = tcp_read_u32(frame, off + 2)
+                        tsecr = tcp_read_u32(frame, off + 6)
+                        return 1
+                off += olen
+        0
+
+
+Merge a new SACK block `[seq, end)` into socket `s`'s scoreboard.
+Coalesces with overlapping or adjacent existing blocks; drops
+blocks wholly to the left of `snd_una` (cumulative ACK already
+covers them). Caller guarantees `seq < end`.
+
+    tcp_sack_board_insert(s: int, left: u32, right: u32)
+        if tcp_seq_le(right, tcp_sockets[s].snd_una) != 0
+            return
+        var nleft = left
+        var nright = right
+        if tcp_seq_lt(nleft, tcp_sockets[s].snd_una) != 0
+            nleft = tcp_sockets[s].snd_una
+        var bi = 0
+        while bi < TCP_SACK_BOARD
+            if tcp_sockets[s].sack_board[bi].in_use != 0
+                val bleft = tcp_sockets[s].sack_board[bi].left
+                val bright = tcp_sockets[s].sack_board[bi].right
+                val overlap = tcp_seq_le(nleft, bright) != 0
+                if overlap
+                    if tcp_seq_le(bleft, nright) != 0
+                        if tcp_seq_lt(bleft, nleft) != 0
+                            nleft = bleft
+                        if tcp_seq_lt(nright, bright) != 0
+                            nright = bright
+                        tcp_sockets[s].sack_board[bi].in_use = 0
+            bi += 1
+        bi = 0
+        while bi < TCP_SACK_BOARD
+            if tcp_sockets[s].sack_board[bi].in_use == 0
+                tcp_sockets[s].sack_board[bi].in_use = 1
+                tcp_sockets[s].sack_board[bi].left = nleft
+                tcp_sockets[s].sack_board[bi].right = nright
+                return
+            bi += 1
+
+
+Purge scoreboard entries covered by the advanced `snd_una`.
+Blocks strictly to the left get dropped; blocks straddling the
+boundary get left-clipped.
+
+    tcp_sack_board_purge(s: int)
+        var bi = 0
+        while bi < TCP_SACK_BOARD
+            if tcp_sockets[s].sack_board[bi].in_use != 0
+                val bright = tcp_sockets[s].sack_board[bi].right
+                if tcp_seq_le(bright, tcp_sockets[s].snd_una) != 0
+                    tcp_sockets[s].sack_board[bi].in_use = 0
+                else
+                    val bleft = tcp_sockets[s].sack_board[bi].left
+                    if tcp_seq_lt(bleft, tcp_sockets[s].snd_una) != 0
+                        tcp_sockets[s].sack_board[bi].left = tcp_sockets[s].snd_una
+            bi += 1
+
+
+Clear all scoreboard entries. Called on full recovery exit and
+socket reuse — we don't want a stale block to influence the
+next connection or retransmit round.
+
+    tcp_sack_board_clear(s: int)
+        var bi = 0
+        while bi < TCP_SACK_BOARD
+            tcp_sockets[s].sack_board[bi].in_use = 0
+            bi += 1
+        tcp_sockets[s].sack_rexmit_valid = 0
+
+
+Parse every `Kind=5` SACK option in the TCP options area and
+insert each block into the socket's scoreboard. Unknown,
+malformed, or duplicate options are tolerated: the parser
+bails early on the first length inconsistency rather than
+reading past the header.
+
+    tcp_opts_apply_sack(s: int, frame: *byte, tcp_off: int,
+                        hdr_len: int)
+        var off = tcp_off + 20
+        val opts_end = tcp_off + hdr_len
+        while off < opts_end
+            val kind = int(frame[off]) & 0xff
+            if kind == TCP_OPT_EOL
+                return
+            if kind == TCP_OPT_NOP
+                off += 1
+            else
+                if off + 1 >= opts_end
+                    return
+                val olen = int(frame[off + 1]) & 0xff
+                if olen < 2
+                    return
+                if off + olen > opts_end
+                    return
+                if kind == TCP_OPT_SACK
+                    // Block payload: (olen - 2) bytes = 8n,
+                    // n ∈ {1..4}. Anything else is malformed.
+                    val payload_len = olen - 2
+                    if payload_len >= 8
+                        if (payload_len % 8) == 0
+                            var bo = off + 2
+                            val bend_off = off + olen
+                            while bo + 8 <= bend_off
+                                val blk_left = tcp_read_u32(frame, bo)
+                                val blk_right = tcp_read_u32(frame, bo + 4)
+                                if tcp_seq_lt(blk_left, blk_right) != 0
+                                    tcp_sack_board_insert(s, blk_left, blk_right)
+                                bo += 8
+                off += olen
+
+
+Find the next un-SACKed byte `≥ cursor` within `[snd_una, snd_nxt)`,
+or `snd_nxt` if no hole remains. Straightforward scan over the
+scoreboard: if any block covers `cursor`, jump `cursor` to its
+end and restart. Terminates because each jump advances cursor
+by ≥ 1 byte and the scoreboard has at most `TCP_SACK_BOARD`
+blocks — so at most `TCP_SACK_BOARD + 1` passes.
+
+    tcp_sack_next_hole(s: int, cursor: u32) -> u32
+        var c = cursor
+        if tcp_seq_lt(c, tcp_sockets[s].snd_una) != 0
+            c = tcp_sockets[s].snd_una
+        var passes = 0
+        while passes <= TCP_SACK_BOARD
+            var moved = 0
+            var bi = 0
+            while bi < TCP_SACK_BOARD
+                if tcp_sockets[s].sack_board[bi].in_use != 0
+                    val bleft = tcp_sockets[s].sack_board[bi].left
+                    val bright = tcp_sockets[s].sack_board[bi].right
+                    if tcp_seq_le(bleft, c) != 0
+                        if tcp_seq_lt(c, bright) != 0
+                            c = bright
+                            moved = 1
+                bi += 1
+            if moved == 0
+                return c
+            passes += 1
+        c

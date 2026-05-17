@@ -1,0 +1,326 @@
+OSKit INET TCP — outbound emit (header build + options + xmit)
+================================================================
+
+Same-module sibling of `tcp.lsysl`. Owns `inet_tcp_emit` — the
+single funnel for every outbound TCP segment, which composes the
+Ethernet/IP framing, the TCP header (including SYN options /
+post-SYN Timestamps / SACK blocks), the segment-window
+mathematics, and finally the NIC hand-off. Also keeps
+`inet_tcp_eff_mss` (PMTU-driven payload cap) next to its only
+caller.
+
+    module oskit.servers
+
+    import oskit.services.{monotonic_ms}
+    import std.net.{ipv4, pkt_write_mac, pkt_write_u16, pkt_write_ipv4,
+        ETHERTYPE_IPV4, IP_PROTO_TCP, ipv4_octet, net_checksum}
+
+
+PMTU-driven effective MSS (RFC 1191 §5). The send-side payload
+cap is `pmtu - IP(20) - TCP(<=40 with options)`. Slix's drain
+path picks the segment size before knowing the exact option
+shape — Timestamps + SACK can grow the header to 36 or 40
+bytes — so we conservatively reserve 40 bytes for the TCP
+header. Over-conservative just means slightly smaller
+segments on the wire, never a frame-too-big rejection inside
+`inet_tcp_emit`. Loopback destinations hit the same lookup;
+the default-MTU miss returns 1500 so the existing TCP_MAX_SEG
+ceiling continues to dominate when the cache hasn't learned
+anything.
+
+A floor of 1 byte prevents a degenerate cap from stalling the
+connection — if a peer reports an MTU below the architectural
+minimum the cache clamps it to `INET_PMTU_MIN=296` anyway, so
+this floor is belt-and-suspenders.
+
+    inet_tcp_eff_mss(s: int) -> int
+        val pmtu = inet_pmtu_get(tcp_sockets[s].remote_ip)
+        var cap = pmtu - 20 - 40
+        if cap < 1
+            cap = 1
+        cap
+
+`inet_tcp_data_seg_emit_count` ticks whenever `inet_tcp_emit`
+sends a segment carrying user payload (any non-zero
+`payload_len`). Pure ACKs, retransmits with payload, SYN/FIN
+without data, and the loopback fastpath all pass through —
+the counter records data delivery as observed at the emit
+seam, not the wire. Test scaffolding reads this counter
+across a `send()` to assert the segment count matches what a
+PMTU-clamped path would produce.
+
+    var inet_tcp_data_seg_emit_count: int = 0
+
+
+Build a single Ethernet + IPv4 + TCP frame for socket `s`. Payload
+is `payload_len` bytes of send_buf starting at `payload_seq`
+(relative to snd_una).
+
+TCP options attached:
+
+- Active SYN frames advertise MSS + SACK-permitted + Timestamps
+  + Window-scale: 20 bytes of options, `hdr_bytes = 40`.
+- SYN-ACK frames echo TS / WS only if the peer's SYN advertised
+  them.  The exact layout follows from the include flags below.
+- Post-handshake segments include a 12-byte TS block (2 NOPs +
+  10-byte option) once TS has been negotiated, plus an optional
+  SACK block when reorder slots are populated.
+- All other segments carry no options — `hdr_bytes = 20`.
+
+    inet_tcp_emit(s: int, flags: int, seq: u32,
+                  payload_seq: u32, payload_len: int) -> int
+        // Test-only ACK blackhole. When `ack_blackholed != 0`, drop
+        // pure-ACK segments (ACK set, no payload, no SYN/FIN/RST).
+        // SYN/FIN/RST still fly so the test can establish + tear
+        // down the connection; only acknowledgements are silently
+        // discarded, which on slix's synchronous loopback fastpath
+        // is the only way to simulate "peer went dark" without
+        // breaking handshake.
+        if tcp_sockets[s].ack_blackholed != 0
+            val pure_ack_mask = TCP_F_ACK
+            val deny_mask = TCP_F_SYN | TCP_F_FIN | TCP_F_RST
+            if (flags & deny_mask) == 0
+                if (flags & pure_ack_mask) != 0
+                    if payload_len == 0
+                        return 0
+        if inet_our_mac_known == 0
+            return -1
+        val is_loopback = inet_is_loopback_ip(tcp_sockets[s].remote_ip)
+        var next_hop_mac: [6]byte
+        if is_loopback != 0
+            // Loopback never goes to the NIC; the eth header is
+            // ignored on the inbound dispatch path so any MAC is
+            // fine. Re-using `inet_our_mac` keeps construction
+            // uniform with the wire path below.
+            var mi = 0
+            while mi < 6
+                next_hop_mac[mi] = inet_our_mac[mi]
+                mi += 1
+        else
+            if inet_resolve_mac(tcp_sockets[s].remote_ip, next_hop_mac) == 0
+                // ARP request now in-flight.  Mark the slot so
+                // `inet_arp_drain_pending` can re-emit when the
+                // reply lands, instead of waiting an RTO.
+                tcp_sockets[s].arp_pending = 1
+                return -1
+        val is_syn = (flags & TCP_F_SYN) != 0
+        // Count SACK blocks we'd emit on this segment. SACK is
+        // only ever attached to non-SYN ACKs once both sides
+        // agreed on SACK-permitted at handshake.
+        var sack_count = 0
+        if is_syn == 0
+            if (flags & TCP_F_ACK) != 0
+                if tcp_sockets[s].sack_ok != 0
+                    var ri = 0
+                    while ri < TCP_REORDER_SLOTS
+                        if tcp_sockets[s].reorder[ri].in_use != 0
+                            if sack_count < TCP_MAX_SACK_BLOCKS
+                                sack_count += 1
+                        ri += 1
+        // RFC 7323 negotiate-and-echo rules. Active SYN (no ACK
+        // bit) advertises everything we support. SYN-ACK only
+        // includes options the peer's SYN already opted into.
+        // Post-handshake includes TS on every segment iff TS was
+        // negotiated.
+        var include_ts = 0
+        var include_ws = 0
+        if is_syn
+            if (flags & TCP_F_ACK) == 0
+                include_ts = 1
+                include_ws = 1
+            else
+                if tcp_sockets[s].ts_ok != 0
+                    include_ts = 1
+                if tcp_sockets[s].rcv_wscale != 0
+                    include_ws = 1
+        else
+            if tcp_sockets[s].ts_ok != 0
+                include_ts = 1
+        var hdr_bytes = 20
+        if is_syn
+            // MSS(4) + SACK_PERM(2) = 6, then variable trailers
+            // chosen so the total stays 4-byte aligned.
+            if include_ts != 0 && include_ws != 0
+                hdr_bytes = 40
+            else if include_ts != 0
+                hdr_bytes = 36
+            else if include_ws != 0
+                hdr_bytes = 32
+            else
+                hdr_bytes = 28
+        else
+            if include_ts != 0
+                hdr_bytes = 32
+                if sack_count > 0
+                    hdr_bytes = 32 + 4 + 8 * sack_count
+            else if sack_count > 0
+                hdr_bytes = 20 + 4 + 8 * sack_count
+        var seg_len = hdr_bytes + payload_len
+        if seg_len > 1460
+            return -1
+        if payload_len > 0
+            inet_tcp_data_seg_emit_count += 1
+        val fidx = inet_frame_alloc()
+        val frame = inet_frame_buf(fidx)
+        val total_len = 14 + 20 + seg_len
+        pkt_write_mac(frame, 0, next_hop_mac)
+        pkt_write_mac(frame, 6, inet_our_mac)
+        pkt_write_u16(frame, 12, ETHERTYPE_IPV4)
+        frame[14] = 0x45
+        frame[15] = 0
+        pkt_write_u16(frame, 16, 20 + seg_len)
+        pkt_write_u16(frame, 18, 0)
+        pkt_write_u16(frame, 20, 0x4000)
+        frame[22] = 64
+        frame[23] = byte(IP_PROTO_TCP)
+        pkt_write_u16(frame, 24, 0)
+        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
+            INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 26,
+            INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+        pkt_write_ipv4(frame, 30,
+            ipv4_octet(tcp_sockets[s].remote_ip, 0),
+            ipv4_octet(tcp_sockets[s].remote_ip, 1),
+            ipv4_octet(tcp_sockets[s].remote_ip, 2),
+            ipv4_octet(tcp_sockets[s].remote_ip, 3))
+        pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+        val tcp_off = 34
+        pkt_write_u16(frame, tcp_off + 0, tcp_sockets[s].local_port)
+        pkt_write_u16(frame, tcp_off + 2, tcp_sockets[s].remote_port)
+        tcp_write_u32(frame, tcp_off + 4, seq)
+        var ack_val: u32 = u32(0)
+        if (flags & TCP_F_ACK) != 0
+            ack_val = tcp_sockets[s].rcv_nxt
+        tcp_write_u32(frame, tcp_off + 8, ack_val)
+        val data_off_words = hdr_bytes / 4
+        frame[tcp_off + 12] = byte((data_off_words << 4) & 0xf0)
+        frame[tcp_off + 13] = byte(flags & 0xff)
+        val stashed = inet_tcp_reorder_bytes(s)
+        var rwnd = tcp_sockets[s].recv_buf_size - tcp_sockets[s].recv_len - stashed
+        if rwnd < 0
+            rwnd = 0
+        // RFC 7323 §2.2: SYN segments advertise the unscaled
+        // window field; non-SYN segments advertise (rwnd >>
+        // rcv_wscale). When `rcv_wscale == 0` (no negotiation)
+        // the shift is a no-op.
+        var rwnd_field = rwnd
+        if is_syn == 0
+            rwnd_field = rwnd >> tcp_sockets[s].rcv_wscale
+        if rwnd_field > 0xffff
+            rwnd_field = 0xffff
+        pkt_write_u16(frame, tcp_off + 14, rwnd_field)
+        pkt_write_u16(frame, tcp_off + 16, 0)
+        pkt_write_u16(frame, tcp_off + 18, 0)
+        // Compute the values we'll write into the TS option.
+        // tsval baked from a per-connection random offset so
+        // the host kernel's tick count doesn't leak; tsecr
+        // mirrors `ts_recent`, which is 0 on the initial active
+        // SYN (peer hasn't advertised yet).
+        val tsval = u32(monotonic_ms()) + tcp_sockets[s].ts_offset
+        val tsecr = tcp_sockets[s].ts_recent
+        if is_syn
+            // MSS (RFC 793): kind=2 len=4 value=TCP_MSS_ADV
+            frame[tcp_off + 20] = byte(TCP_OPT_MSS)
+            frame[tcp_off + 21] = 4
+            pkt_write_u16(frame, tcp_off + 22, TCP_MSS_ADV)
+            // SACK-permitted (RFC 2018 §2): kind=4 len=2
+            frame[tcp_off + 24] = byte(TCP_OPT_SACK_PERMITTED)
+            frame[tcp_off + 25] = 2
+            if include_ts != 0 && include_ws != 0
+                // TS at +26..35, NOP at +36, WS at +37..39.
+                frame[tcp_off + 26] = byte(TCP_OPT_TS)
+                frame[tcp_off + 27] = 10
+                tcp_write_u32(frame, tcp_off + 28, tsval)
+                tcp_write_u32(frame, tcp_off + 32, tsecr)
+                frame[tcp_off + 36] = byte(TCP_OPT_NOP)
+                frame[tcp_off + 37] = byte(TCP_OPT_WSCALE)
+                frame[tcp_off + 38] = 3
+                frame[tcp_off + 39] = byte(TCP_RCV_WSCALE)
+            else if include_ts != 0
+                // TS at +26..35, already aligned.
+                frame[tcp_off + 26] = byte(TCP_OPT_TS)
+                frame[tcp_off + 27] = 10
+                tcp_write_u32(frame, tcp_off + 28, tsval)
+                tcp_write_u32(frame, tcp_off + 32, tsecr)
+            else if include_ws != 0
+                // 2 NOPs at +26..27, WS at +28..30, NOP at +31.
+                frame[tcp_off + 26] = byte(TCP_OPT_NOP)
+                frame[tcp_off + 27] = byte(TCP_OPT_NOP)
+                frame[tcp_off + 28] = byte(TCP_OPT_WSCALE)
+                frame[tcp_off + 29] = 3
+                frame[tcp_off + 30] = byte(TCP_RCV_WSCALE)
+                frame[tcp_off + 31] = byte(TCP_OPT_NOP)
+            else
+                // Pad to 4-byte alignment with NOPs (legacy layout).
+                frame[tcp_off + 26] = byte(TCP_OPT_NOP)
+                frame[tcp_off + 27] = byte(TCP_OPT_NOP)
+        else
+            var opts_cur = tcp_off + 20
+            if include_ts != 0
+                // 2 NOPs + TS option = 12 bytes, naturally aligned.
+                frame[opts_cur] = byte(TCP_OPT_NOP)
+                frame[opts_cur + 1] = byte(TCP_OPT_NOP)
+                frame[opts_cur + 2] = byte(TCP_OPT_TS)
+                frame[opts_cur + 3] = 10
+                tcp_write_u32(frame, opts_cur + 4, tsval)
+                tcp_write_u32(frame, opts_cur + 8, tsecr)
+                opts_cur += 12
+            if sack_count > 0
+                // 2 NOPs prefix for alignment (Linux emits this
+                // pattern too) — placing SACK at a 4-byte boundary.
+                frame[opts_cur]     = byte(TCP_OPT_NOP)
+                frame[opts_cur + 1] = byte(TCP_OPT_NOP)
+                // SACK header: kind=5, len = 2 + 8 * nblocks.
+                frame[opts_cur + 2] = byte(TCP_OPT_SACK)
+                frame[opts_cur + 3] = byte(2 + 8 * sack_count)
+                var out_off = opts_cur + 4
+                var ri2 = 0
+                var emitted = 0
+                while ri2 < TCP_REORDER_SLOTS
+                    if emitted < sack_count
+                        if tcp_sockets[s].reorder[ri2].in_use != 0
+                            val blk_left = tcp_sockets[s].reorder[ri2].seq
+                            val blk_right = blk_left + u32(tcp_sockets[s].reorder[ri2].len)
+                            tcp_write_u32(frame, out_off, blk_left)
+                            tcp_write_u32(frame, out_off + 4, blk_right)
+                            out_off += 8
+                            emitted += 1
+                    ri2 += 1
+        if payload_len > 0
+            val offset = int(i32(payload_seq - tcp_sockets[s].snd_una))
+            var i = 0
+            while i < payload_len
+                frame[tcp_off + hdr_bytes + i] = tcp_sockets[s].send_buf_ptr[offset + i]
+                i += 1
+        pkt_write_u16(frame, tcp_off + 16,
+            (~inet_l4_partial_sum(our_ip, tcp_sockets[s].remote_ip,
+                IP_PROTO_TCP, frame, tcp_off, seg_len)) & 0xffff)
+        if is_loopback != 0
+            // Swap IP src/dst so the inbound dispatcher sees a
+            // peer-shaped frame, then recompute IP and TCP
+            // checksums against the new pseudo-header. The TCP
+            // pseudo-header was originally `(our_ip, remote_ip)`;
+            // on inbound it will be evaluated as `(src_from_frame,
+            // our_ip)`, so swapping puts both into agreement.
+            var sw = 0
+            while sw < 4
+                val tmp = frame[26 + sw]
+                frame[26 + sw] = frame[30 + sw]
+                frame[30 + sw] = tmp
+                sw += 1
+            pkt_write_u16(frame, 24, 0)
+            pkt_write_u16(frame, 24, net_checksum(frame + 14, 20))
+            val src_in = ipv4(int(frame[26]) & 0xff, int(frame[27]) & 0xff,
+                int(frame[28]) & 0xff, int(frame[29]) & 0xff)
+            val dst_in = ipv4(int(frame[30]) & 0xff, int(frame[31]) & 0xff,
+                int(frame[32]) & 0xff, int(frame[33]) & 0xff)
+            pkt_write_u16(frame, tcp_off + 16, 0)
+            pkt_write_u16(frame, tcp_off + 16,
+                (~inet_l4_partial_sum(src_in, dst_in,
+                    IP_PROTO_TCP, frame, tcp_off, seg_len)) & 0xffff)
+            inet_tcp_handle_segment(frame, total_len, 20)
+            inet_frame_release(fidx)
+            return 0
+        inet_nic_send_packet(frame, total_len)
+        inet_frame_release(fidx)
+        0

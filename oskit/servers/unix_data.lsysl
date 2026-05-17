@@ -1,0 +1,397 @@
+OSKit UNIX server — data-path handlers (DGRAM + STREAM)
+========================================================
+
+Same-module sibling of `unix.lsysl`. The four "actually move bytes"
+handlers grouped together because they share the queue / rx_buf
+state machines they manipulate:
+
+* `SENDTO` / `RECVFROM` — DGRAM datagram queue
+* `SEND` / `RECV` — STREAM rx_buf + peer-closed semantics
+
+Connection-setup, connection-teardown, and out-of-band (sockopt,
+shutdown, peercred, ...) handlers stay in `unix.lsysl`. The
+SCM_RIGHTS variants live in `unix_scm.lsysl`.
+
+    module oskit.servers
+
+    import oskit.ipc.{ipc_reply}
+
+
+### SENDTO handler (DGRAM)
+
+Locates the bound destination, copies the message into its
+queue. If the queue is full, fails with -EAGAIN — POSIX
+allows blocking but the existing inet pattern returns
+status=1 + nsent=0 to signal "drop". For unix we emit
+explicit -EAGAIN since the shim is the source of blocking
+semantics.
+
+If a thread is parked on recvfrom for the destination, drain
+the just-enqueued datagram and reply directly.
+
+    unix_handle_sendto(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EBADF)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_DGRAM
+            var err: [3]byte
+            err[0] = byte(-UNIX_EINVAL)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val plen = int(buf[2]) & 0xff
+        val dlen = unix_read_u16(buf, 3 + plen)
+        val data: *byte = buf + 3 + plen + 2
+
+`plen == 0` is the "no destination" form used by socketpair-
+DGRAM and by `send(2)` / `write(2)` on a connected DGRAM
+socket: route to `peer_idx` instead of doing a path lookup.
+
+        var target = -1
+        if plen == 0
+            val pi = unix_sockets[fd].peer_idx
+            if pi < 0
+                var err: [3]byte
+                err[0] = byte(-UNIX_ENOTCONN)
+                err[1] = 0
+                err[2] = 0
+                ipc_reply(sender, err, 3)
+                return
+            target = pi
+        else
+            target = unix_find_bound(buf + 3, plen)
+        if target < 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_ECONNREFUSED)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[target].stype != UNIX_SOCK_DGRAM
+            var err: [3]byte
+            err[0] = byte(-UNIX_ECONNREFUSED)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+
+If the receiver is parked and its queue is empty,
+short-circuit straight into the parked reply — saves a queue
+hop and means the wake-up happens before the sender's reply,
+so a tight ping-pong sees the pong already on the wire when
+ping() returns. The reply shape depends on whether the parker
+is recvfrom (recvfrom-shape) or recvmsg (recvmsg-shape with
+nfds=0 — sendto carries no ancillary).
+
+        val parked = unix_sockets[target].pending_recv_tid
+        // Connected-DGRAM filter: if target is connected to someone
+        // other than this sender, silently drop (POSIX/Linux: non-peer
+        // dgrams are silently discarded by a connected receiver).
+        // Acknowledge to the sender as if delivered. Doing this *before*
+        // touching the parker preserves the "parked ⇒ dg_count==0"
+        // invariant — neither deliver nor enqueue.
+        val tpeer = unix_sockets[target].peer_idx
+        if tpeer >= 0
+            if tpeer != fd
+                var dr: [3]byte
+                dr[0] = 0
+                var dl_drop = dlen
+                if dl_drop > UNIX_DG_DATA_MAX
+                    dl_drop = UNIX_DG_DATA_MAX
+                unix_write_u16(&dr[0], 1, dl_drop)
+                ipc_reply(sender, dr, 3)
+                return
+        if parked >= 0
+            if unix_sockets[target].dg_count == 0
+                val is_msg = unix_sockets[target].pending_recv_is_msg
+                val parked_peek = unix_sockets[target].pending_recv_peek
+                unix_sockets[target].pending_recv_tid = -1
+                unix_sockets[target].pending_recv_is_msg = 0
+                unix_sockets[target].pending_recv_peek = 0
+                val maxlen = unix_sockets[target].pending_recv_maxlen
+                var dl = dlen
+                if dl > UNIX_DG_DATA_MAX
+                    dl = UNIX_DG_DATA_MAX
+                val spl = unix_sockets[fd].path_len
+                var dlcap = dl
+                if dlcap > maxlen
+                    dlcap = maxlen
+                if is_msg != 0
+                    var pr: [600]byte
+                    pr[0] = 0
+                    pr[1] = byte(spl & 0xff)
+                    var i = 0
+                    while i < spl
+                        pr[2 + i] = unix_sockets[fd].bound_path[i]
+                        i += 1
+                    pr[2 + spl] = byte(0)
+                    unix_write_u16(&pr[0], 2 + spl + 1, dlcap)
+                    i = 0
+                    while i < dlcap
+                        pr[2 + spl + 1 + 2 + i] = data[i]
+                        i += 1
+                    ipc_reply(parked, &pr[0], 2 + spl + 1 + 2 + dlcap)
+                else
+                    var pr: [512]byte
+                    pr[0] = 0
+                    pr[1] = byte(spl & 0xff)
+                    var i = 0
+                    while i < spl
+                        pr[2 + i] = unix_sockets[fd].bound_path[i]
+                        i += 1
+                    unix_write_u16(&pr[0], 2 + spl, dlcap)
+                    i = 0
+                    while i < dlcap
+                        pr[2 + spl + 2 + i] = data[i]
+                        i += 1
+                    ipc_reply(parked, &pr[0], 2 + spl + 2 + dlcap)
+                // If the parker was MSG_PEEK, also enqueue: peek
+                // must leave the dgram observable to a follow-up
+                // recv. The "deliver-without-enqueue" fast path
+                // is correct only for non-peek consumers.
+                if parked_peek != 0
+                    if unix_sockets[target].dg_count < UNIX_DG_QUEUE
+                        unix_dg_enqueue(target, fd, data, dlen)
+                var sr: [3]byte
+                sr[0] = 0
+                unix_write_u16(&sr[0], 1, dl)
+                ipc_reply(sender, sr, 3)
+                return
+
+Otherwise enqueue and reply with the count.
+
+        if unix_sockets[target].dg_count >= UNIX_DG_QUEUE
+            var err: [3]byte
+            err[0] = byte(-UNIX_EAGAIN)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val nsent = unix_dg_enqueue(target, fd, data, dlen)
+        var sreply: [3]byte
+        sreply[0] = 0
+        unix_write_u16(&sreply[0], 1, nsent)
+        ipc_reply(sender, sreply, 3)
+
+
+### RECVFROM handler (DGRAM)
+
+Drains one datagram and replies. If empty, parks the caller
+via `pending_recv_tid`. The `_NB` cmd byte
+(UNIX_CMD_RECVFROM_NB) sets `no_park=1`, which makes an empty
+queue reply with -EAGAIN immediately. `buf[4]` carries the
+POSIX `MSG_PEEK` flag — when non-zero, the head dgram is
+copied to the caller without dequeuing (a subsequent recv
+re-reads the same bytes), and the parked-recv path stores
+peek so a later sender enqueues *and* delivers (peek must
+leave the dgram observable to a follow-up reader).
+
+The wire was extended from 4 to 5 bytes when peek landed.
+Older callers passing 4-byte requests cause `buf[4]` to read
+the first byte after the message — `ipc_recv` zeroes the
+unused tail in our buffer, so this naturally degrades to
+peek=0. Still, callers must send 5 bytes from this point on.
+
+    unix_handle_recvfrom(sender: int, buf: *byte, no_park: int)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [4]byte
+            err[0] = byte(-UNIX_EBADF)
+            err[1] = 0
+            err[2] = 0
+            err[3] = 0
+            ipc_reply(sender, err, 4)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_DGRAM
+            var err: [4]byte
+            err[0] = byte(-UNIX_EINVAL)
+            err[1] = 0
+            err[2] = 0
+            err[3] = 0
+            ipc_reply(sender, err, 4)
+            return
+        val maxlen = unix_read_u16(buf, 2)
+        val peek = int(buf[4]) & 0xff
+        // Connected-DGRAM filter (POSIX/Linux): if peer_idx is set,
+        // silently drop non-peer dgrams from the head of the queue
+        // before serving the recv. Post-connect arrivals are
+        // already filtered at sendto/sendmsg time; this catches
+        // the pre-connect-queue edge case.
+        unix_dg_drop_nonpeer_head(fd)
+        if unix_sockets[fd].dg_count > 0
+            var pr: [512]byte
+            val n = unix_dg_dequeue_reply(fd, maxlen, peek, &pr[0])
+            ipc_reply(sender, &pr[0], n)
+            return
+        if no_park != 0
+            var err: [4]byte
+            err[0] = byte(-UNIX_EAGAIN)
+            err[1] = 0
+            err[2] = 0
+            err[3] = 0
+            ipc_reply(sender, err, 4)
+            return
+        unix_sockets[fd].pending_recv_tid = sender
+        unix_sockets[fd].pending_recv_maxlen = maxlen
+        unix_sockets[fd].pending_recv_peek = peek
+        unix_sockets[fd].pending_recv_is_msg = 0
+
+
+### SEND handler (STREAM)
+
+Appends to the peer's rx_buf. If the peer has a parked recv,
+unblocks it. If the peer is gone (`peer_closed`), returns
+-EPIPE.
+
+    unix_handle_send(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EBADF)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_STREAM
+            var err: [3]byte
+            err[0] = byte(-UNIX_EINVAL)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val peer = unix_sockets[fd].peer_idx
+        if peer < 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_ENOTCONN)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].peer_closed != 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EPIPE)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].shut_wr != 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EPIPE)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val dlen = unix_read_u16(buf, 2)
+        val data: *byte = buf + 4
+        val nsent = unix_rx_append(peer, data, dlen)
+        var sreply: [3]byte
+        sreply[0] = 0
+        unix_write_u16(&sreply[0], 1, nsent)
+        ipc_reply(sender, sreply, 3)
+
+If the peer is parked on recv or recvmsg, drain and unblock.
+A recvmsg parker uses the recvmsg-shaped reply; recv uses the
+recv-shaped reply. Either way the rx_total_drained advance
+covers any pending_scm anchor that fell in the drained range:
+recvmsg claims them, recv drops them.
+
+        val parked = unix_sockets[peer].pending_recv_tid
+        if parked >= 0
+            val maxlen = unix_sockets[peer].pending_recv_maxlen
+            val pmsg = unix_sockets[peer].pending_recv_is_msg
+            val pmaxn = unix_sockets[peer].pending_recv_max_nfds
+            unix_sockets[peer].pending_recv_tid = -1
+            unix_sockets[peer].pending_recv_is_msg = 0
+            if pmsg != 0
+                unix_stream_drain_for_msg(peer, parked, pmaxn, maxlen)
+            else
+                var pr: [2050]byte
+                pr[0] = 0
+                val n = unix_rx_drain(peer, &pr[3], maxlen, 0)
+                val end_off = unix_sockets[peer].rx_total_drained
+                var dummy: [1]byte
+                unix_stream_scm_consume(peer, end_off, -1, 0,
+                    &dummy[0], &dummy[0], &dummy[0])
+                unix_write_u16(&pr[0], 1, n)
+                ipc_reply(parked, &pr[0], 3 + n)
+
+
+### RECV handler (STREAM)
+
+Drains rx_buf and replies. If empty and peer is gone,
+returns 0 bytes (clean EOF). If empty and peer is alive,
+parks the caller. The `_NB` cmd byte (UNIX_CMD_RECV_NB) sets
+`no_park=1`, which turns the alive-peer empty case into
+-EAGAIN. EOF (peer closed, no data) still returns 0 — that's
+how POSIX distinguishes "would block" from "stream closed".
+
+    unix_handle_recv(sender: int, buf: *byte, no_park: int)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EBADF)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_STREAM
+            var err: [3]byte
+            err[0] = byte(-UNIX_EINVAL)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        val maxlen = unix_read_u16(buf, 2)
+        if unix_sockets[fd].shut_rd != 0
+            var pr: [3]byte
+            pr[0] = 0
+            unix_write_u16(&pr[0], 1, 0)
+            ipc_reply(sender, pr, 3)
+            return
+        if unix_sockets[fd].rx_count > 0
+            var pr: [2050]byte
+            pr[0] = 0
+            val n = unix_rx_drain(fd, &pr[3], maxlen, 0)
+            val end_off = unix_sockets[fd].rx_total_drained
+            var dummy: [1]byte
+            unix_stream_scm_consume(fd, end_off, -1, 0,
+                &dummy[0], &dummy[0], &dummy[0])
+            unix_write_u16(&pr[0], 1, n)
+            ipc_reply(sender, &pr[0], 3 + n)
+            return
+        if unix_sockets[fd].peer_idx < 0
+            var pr: [3]byte
+            pr[0] = 0
+            unix_write_u16(&pr[0], 1, 0)
+            ipc_reply(sender, pr, 3)
+            return
+        if unix_sockets[fd].peer_closed != 0
+            var pr: [3]byte
+            pr[0] = 0
+            unix_write_u16(&pr[0], 1, 0)
+            ipc_reply(sender, pr, 3)
+            return
+        val peer_for_eof = unix_sockets[fd].peer_idx
+        if unix_sockets[peer_for_eof].shut_wr != 0
+            var pr: [3]byte
+            pr[0] = 0
+            unix_write_u16(&pr[0], 1, 0)
+            ipc_reply(sender, pr, 3)
+            return
+        if no_park != 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EAGAIN)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        unix_sockets[fd].pending_recv_tid = sender
+        unix_sockets[fd].pending_recv_maxlen = maxlen
+        unix_sockets[fd].pending_recv_peek = 0
+        unix_sockets[fd].pending_recv_is_msg = 0

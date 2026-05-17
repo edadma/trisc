@@ -1,0 +1,186 @@
+OSKit INET — EtherType dispatch + RX drain + link-layer init
+============================================================
+
+Same-module sibling of `inet.lsysl`. Contains the per-frame
+EtherType dispatch (`inet_handle_frame`), the NIC RX drain
+that pumps frames into it, and `inet_link_init` (called once
+from `inet_server` after port registration). All three live
+together because they share the protocol-stack boundary —
+this is the file you read to follow what happens to a packet
+between "NIC notified us" and "an L4 handler ran".
+
+    module oskit.servers
+
+    import oskit.services.{monotonic_ms}
+    import std.net.{ipv4, ETHERTYPE_ARP, ETHERTYPE_IPV4,
+        ARP_OP_REQUEST, ARP_OP_REPLY,
+        IP_PROTO_ICMP, IP_PROTO_UDP, IP_PROTO_TCP,
+        ICMP_ECHO_REQ, ICMP_ECHO_REP, ICMP_DEST_UNREACH,
+        pkt_read_u16, pkt_match_ipv4}
+
+
+### EtherType dispatch
+
+Called by the RX drain for every frame. ARP requests for us ->
+reply, ARP reply from gateway -> cache gw MAC + send one ICMP
+echo, ICMP echo request -> reply, ICMP echo reply -> diag count,
+UDP -> socket dispatch. Returns 1 if we acted, 0 otherwise
+(diagnostic only).
+
+    inet_handle_frame(frame: *byte, len: int) -> int
+        if len < 14
+            return 0
+        val etype = pkt_read_u16(frame, 12)
+        if etype == ETHERTYPE_ARP
+            if len < 14 + 28
+                return 0
+            val op = pkt_read_u16(frame, 14 + 6)
+            // ARP probe conflict detection (RFC 5227 §2.1.1).
+            // Every ARP frame whose sender IP matches the address
+            // being probed counts as a defender — *unless* its
+            // sender MAC matches ours, in which case it's our own
+            // probe looped back through the NIC. We watch both
+            // REQUEST and REPLY since a defender can use either.
+            if inet_arp_probe_matches(frame) != 0
+                arp_probe_seen = 1
+            if op == ARP_OP_REQUEST
+                if pkt_match_ipv4(frame, 14 + 24, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D) == 0
+                    return 0
+                inet_send_arp_reply(frame)
+                return 1
+            if op == ARP_OP_REPLY
+                // Cache (sender IP, sender MAC) for any reply — the
+                // payer stack wants to know anyone who answered, not
+                // just the gateway. ARP frame layout:
+                //   14..19 HTYPE/PTYPE/HLEN/PLEN
+                //   20..21 OPER
+                //   22..27 SHA (sender MAC)   <- frame + 14 + 8
+                //   28..31 SPA (sender IPv4)  <- frame + 14 + 14
+                val sender_ip = ipv4(
+                    int(frame[14 + 14]) & 0xff,
+                    int(frame[14 + 15]) & 0xff,
+                    int(frame[14 + 16]) & 0xff,
+                    int(frame[14 + 17]) & 0xff)
+                inet_arp_insert(sender_ip, frame + 14 + 8)
+                // Keep the boot-demo ICMP echo on the first gateway
+                // reply so the existing pcap regression still shows
+                // the full ARP → ICMP round-trip.
+                if pkt_match_ipv4(frame, 14 + 14, INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D) != 0
+                    inet_send_icmp_echo(0x1234, 1)
+                return 1
+            return 0
+        if etype == ETHERTYPE_IPV4
+            if len < 14 + 20
+                return 0
+            val ihl_bytes = (int(frame[14]) & 0x0f) * 4
+            if ihl_bytes < 20
+                return 0
+            // Accept unicast to us OR the limited-broadcast
+            // 255.255.255.255. The broadcast allowance lets DHCP
+            // OFFER/ACK through pre-lease (we have no IP yet at
+            // DISCOVER time, so the server replies by broadcast
+            // per RFC 2131 §4.1).
+            val is_unicast = pkt_match_ipv4(frame, 14 + 16, INET_OUR_IP_A, INET_OUR_IP_B, INET_OUR_IP_C, INET_OUR_IP_D)
+            val is_bcast = pkt_match_ipv4(frame, 14 + 16, 255, 255, 255, 255)
+            if is_unicast == 0
+                if is_bcast == 0
+                    return 0
+            // IP fragment? bits 12..0 of frame[14+6..14+8] are MF +
+            // fragment offset. Anything nonzero means this is part of
+            // a fragmented datagram and the L4 header isn't where the
+            // proto switch would expect it. Hand off to reassembly;
+            // when the final fragment arrives the slot synthesizes a
+            // contiguous frame and we re-enter on it.
+            val flags_frag = pkt_read_u16(frame, 14 + 6)
+            if (flags_frag & 0x3FFF) != 0
+                val ip_total_in = pkt_read_u16(frame, 14 + 2)
+                val payload_len = ip_total_in - ihl_bytes
+                if payload_len <= 0
+                    return 0
+                val ident_v = pkt_read_u16(frame, 14 + 4)
+                val mf_v = (flags_frag >> 13) & 1
+                val offset_v = (flags_frag & 0x1FFF) * 8
+                val frag_proto = int(frame[14 + 9]) & 0xff
+                val frag_src = ipv4(
+                    int(frame[14 + 12]) & 0xff, int(frame[14 + 13]) & 0xff,
+                    int(frame[14 + 14]) & 0xff, int(frame[14 + 15]) & 0xff)
+                val frag_dst = ipv4(
+                    int(frame[14 + 16]) & 0xff, int(frame[14 + 17]) & 0xff,
+                    int(frame[14 + 18]) & 0xff, int(frame[14 + 19]) & 0xff)
+                val flen = inet_ip_reasm_accept(frame, frag_src, frag_dst,
+                    ident_v, frag_proto, mf_v, offset_v, ihl_bytes,
+                    frame + 14 + ihl_bytes, payload_len)
+                if flen > 0
+                    inet_handle_frame(inet_ip_reasm_staging, flen)
+                return 1
+            val proto = int(frame[14 + 9]) & 0xff
+            if proto == IP_PROTO_ICMP
+                val icmp_off = 14 + ihl_bytes
+                if len < icmp_off + 8
+                    return 0
+                val itype = int(frame[icmp_off]) & 0xff
+                if itype == ICMP_ECHO_REQ
+                    inet_send_icmp_reply(frame, len)
+                    return 1
+                if itype == ICMP_ECHO_REP
+                    inet_bump_pings_received()
+                    val rep_id = pkt_read_u16(frame, icmp_off + 4)
+                    val rep_seq = pkt_read_u16(frame, icmp_off + 6)
+                    val rep_src = ipv4(
+                        int(frame[14 + 12]) & 0xff,
+                        int(frame[14 + 13]) & 0xff,
+                        int(frame[14 + 14]) & 0xff,
+                        int(frame[14 + 15]) & 0xff)
+                    inet_ping_deliver(rep_src, rep_id, rep_seq, int(monotonic_ms()))
+                    return 1
+                if itype == ICMP_DEST_UNREACH
+                    inet_handle_icmp_dest_unreach(frame, len, icmp_off)
+                    return 1
+                return 0
+            if proto == IP_PROTO_UDP
+                inet_handle_udp(frame, len, ihl_bytes)
+                return 1
+            if proto == IP_PROTO_TCP
+                inet_tcp_handle_segment(frame, len, ihl_bytes)
+                return 1
+            return 0
+        0
+
+
+### RX drain
+
+Called on every `ipc_recv_notify` wake where the result was -2
+(a nic notification). Drains the RX queue non-blockingly, feeding
+each frame into `inet_handle_frame`.
+
+    inet_drain_rx()
+        val idx = inet_frame_alloc()
+        val frame = inet_frame_buf(idx)
+        while true
+            val n = inet_nic_recv_packet(frame, 1514)
+            if n <= 0
+                break
+            inet_handle_frame(frame, n)
+        inet_frame_release(idx)
+
+
+### Link-layer init
+
+Called once from `inet_server()` after it registers its port.
+Fetches our MAC from the nic, subscribes for RX notifications,
+and fires the boot ARP request for the gateway (so the familiar
+ARP + ICMP echo pcap still drops out of a cold boot).
+
+Returns 1 if the nic responded and we subscribed successfully, 0
+if the nic isn't reachable (e.g. x86 builds without virtio-net).
+UDP loopback works either way.
+
+    inet_link_init() -> int
+        var mac: [6]byte
+        if inet_nic_get_mac(mac) != 0
+            return 0
+        inet_set_our_mac(mac)
+        if inet_nic_subscribe_rx() != 0
+            return 0
+        inet_send_arp_request(INET_GW_IP_A, INET_GW_IP_B, INET_GW_IP_C, INET_GW_IP_D)
+        1

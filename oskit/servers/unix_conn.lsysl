@@ -1,0 +1,353 @@
+OSKit UNIX server — connection-setup handlers
+==============================================
+
+Same-module sibling of `unix.lsysl`. Five connection-setup
+handlers grouped together because they share the same slot-lifecycle
+state machine — moving a slot from FREE → LISTENING → ACCEPTING →
+CONNECTED, and back to FREE on DISCONNECT:
+
+* `SOCKET` — allocate a slot, mark it owned by sender
+* `BIND` — attach a path or autobind sockaddr
+* `LISTEN` — mark the slot as a listener with an accept queue
+* `CONNECT` — STREAM connect (synchronous accept-or-park) plus
+  DGRAM connect (just records the peer for future SENDTO)
+* `DISCONNECT` — STREAM-only, clears connected_to and wakes peer
+* `ACCEPT` — pulls one waiting peer from the listener's queue
+
+Data-path handlers live in `unix_data.lsysl`; SCM_RIGHTS variants
+in `unix_scm.lsysl`; introspection / shutdown / sockopt handlers
+stay in `unix.lsysl`.
+
+    module oskit.servers
+
+    import oskit.ipc.{ipc_reply}
+
+
+### SOCKET handler
+
+    unix_handle_socket(sender: int, buf: *byte)
+        val stype = int(buf[1]) & 0xff
+        if stype != UNIX_SOCK_STREAM
+            if stype != UNIX_SOCK_DGRAM
+                var err: [2]byte
+                err[0] = byte(-UNIX_EINVAL)
+                err[1] = 0
+                ipc_reply(sender, err, 2)
+                return
+        val idx = unix_alloc_slot(sender, stype)
+        if idx < 0
+            var err: [2]byte
+            err[0] = byte(-UNIX_ENOMEM)
+            err[1] = 0
+            ipc_reply(sender, err, 2)
+            return
+        var reply: [2]byte
+        reply[0] = 0
+        reply[1] = byte(idx & 0xff)
+        ipc_reply(sender, reply, 2)
+
+
+### BIND handler
+
+Sets the path on an existing slot. Path must be 1..UNIX_PATH_MAX
+bytes and not already taken by another bound slot.
+
+    unix_handle_bind(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, err, 1)
+            return
+        val plen = int(buf[2]) & 0xff
+        if plen <= 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        if plen > UNIX_PATH_MAX
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[fd].bound != 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_find_bound(buf + 3, plen) >= 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EADDRINUSE)
+            ipc_reply(sender, err, 1)
+            return
+        var i = 0
+        while i < plen
+            unix_sockets[fd].bound_path[i] = (buf + 3)[i]
+            i += 1
+        unix_sockets[fd].path_len = plen
+        unix_sockets[fd].bound = 1
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### LISTEN handler
+
+Marks a STREAM slot as listening. Backlog is clamped to the
+server's UNIX_BACKLOG_MAX. POSIX requires a prior bind, so
+we enforce that.
+
+    unix_handle_listen(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_STREAM
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[fd].bound == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        unix_sockets[fd].listening = 1
+        var reply: [1]byte
+        reply[0] = 0
+        ipc_reply(sender, reply, 1)
+
+
+### CONNECT handler (STREAM + DGRAM)
+
+For STREAM: allocates a server-end slot owned by the
+listener's owner, pairs it with the connector, enqueues it on
+the listener's backlog. If a thread is already blocked on
+accept(), unparks it. Reply to the connector is immediate (no
+pending state) — matches loopback-AF_UNIX semantics where
+connect succeeds the moment the new socket is queued.
+
+For DGRAM: just looks up the target by path and sets
+`peer_idx` so subsequent `send(2)` / `write(2)` route there
+without an explicit destination. No backlog, no listening
+requirement — Linux DGRAM connect is purely a default-peer
+record. Re-connecting overwrites the previous peer.
+
+    unix_handle_connect(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, err, 1)
+            return
+        val plen = int(buf[2]) & 0xff
+        if plen <= 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        val target = unix_find_bound(buf + 3, plen)
+        if target < 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_ECONNREFUSED)
+            ipc_reply(sender, err, 1)
+            return
+
+DGRAM short-circuit: target must also be DGRAM, then just
+set peer_idx and ack.
+
+        if unix_sockets[fd].stype == UNIX_SOCK_DGRAM
+            if unix_sockets[target].stype != UNIX_SOCK_DGRAM
+                var err: [1]byte
+                err[0] = byte(-UNIX_ECONNREFUSED)
+                ipc_reply(sender, err, 1)
+                return
+            unix_sockets[fd].peer_idx = target
+            var ok: [1]byte
+            ok[0] = 0
+            ipc_reply(sender, ok, 1)
+            return
+
+        if unix_sockets[fd].stype != UNIX_SOCK_STREAM
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[fd].peer_idx >= 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[target].listening == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_ECONNREFUSED)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[target].pending_count >= UNIX_BACKLOG_MAX
+            var err: [1]byte
+            err[0] = byte(-UNIX_ECONNREFUSED)
+            ipc_reply(sender, err, 1)
+            return
+
+Allocate the server-end slot; it is owned by the listener's
+owner so accept() on that thread can claim it and ops on it
+pass `unix_fd_valid`. peer_idx links the two halves so
+subsequent send/recv route through each other's `rx_buf`.
+
+If the connector itself was bound to a path (typical Linux
+servers don't bind clients, but some apps do for naming /
+auth), copy it onto the server-end as `connector_path` so the
+accept reply can hand it back. Unbound connectors leave
+`connector_path_len = 0` and accept reports an empty path.
+
+        val server_end = unix_alloc_slot(unix_sockets[target].owners[0],
+            UNIX_SOCK_STREAM)
+        if server_end < 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_ENOMEM)
+            ipc_reply(sender, err, 1)
+            return
+        unix_sockets[fd].peer_idx = server_end
+        unix_sockets[server_end].peer_idx = fd
+        if unix_sockets[fd].bound != 0
+            val cplen = unix_sockets[fd].path_len
+            var ci = 0
+            while ci < cplen
+                unix_sockets[server_end].connector_path[ci] = unix_sockets[fd].bound_path[ci]
+                ci += 1
+            unix_sockets[server_end].connector_path_len = cplen
+        else
+            unix_sockets[server_end].connector_path_len = 0
+
+Linux's `getsockname` on the accepted server end returns the
+listening socket's path. Copy the listener's bound_path into
+the server_end without setting `bound=1` — `unix_find_bound`
+filters by `bound`, so this won't create a lookup alias.
+
+        val lplen = unix_sockets[target].path_len
+        var li = 0
+        while li < lplen
+            unix_sockets[server_end].bound_path[li] = unix_sockets[target].bound_path[li]
+            li += 1
+        unix_sockets[server_end].path_len = lplen
+
+Reply to the connector first so the connect() unblocks
+without depending on listener-side state. If a thread was
+already parked on accept(), unblock it now with the new fd —
+otherwise enqueue the server_end on the backlog for a
+future accept(). The accept reply is variable-length:
+`status(1) + new_fd(1) + plen(1) + path(P)`.
+
+        var creply: [1]byte
+        creply[0] = 0
+        ipc_reply(sender, creply, 1)
+
+        if unix_sockets[target].pending_accept_tid >= 0
+            val waiter = unix_sockets[target].pending_accept_tid
+            unix_sockets[target].pending_accept_tid = -1
+            var ar: [128]byte
+            ar[0] = 0
+            ar[1] = byte(server_end & 0xff)
+            val plen = unix_sockets[server_end].connector_path_len
+            ar[2] = byte(plen & 0xff)
+            var pi = 0
+            while pi < plen
+                ar[3 + pi] = unix_sockets[server_end].connector_path[pi]
+                pi += 1
+            ipc_reply(waiter, &ar[0], 3 + plen)
+        else
+            val tail = unix_sockets[target].pending_tail
+            unix_sockets[target].pending_q[tail] = server_end
+            unix_sockets[target].pending_tail = (tail + 1) % UNIX_BACKLOG_MAX
+            unix_sockets[target].pending_count += 1
+            unix_bump_fire_seq(target)
+
+
+### DISCONNECT handler
+
+AF_UNSPEC dissolve on a DGRAM-connected socket. POSIX/Linux
+allows `connect(fd, sin_family=AF_UNSPEC, ...)` on a DGRAM
+socket to clear the previously-set default peer; subsequent
+`send()` returns -ENOTCONN while explicit `sendto(addr)`
+still works. STREAM is rejected with -EINVAL — Linux dissolve
+on STREAM is a no-op-error in practice (the stream is
+already connected and disconnecting is a `shutdown` /
+`close` concern, not a connect concern).
+
+The shim emits this command when it sees `sun_family ==
+AF_UNSPEC` in the connect address; otherwise `sys_connect`
+hits the regular `UNIX_CMD_CONNECT` path.
+
+    unix_handle_disconnect(sender: int, buf: *byte)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [1]byte
+            err[0] = byte(-UNIX_EBADF)
+            ipc_reply(sender, err, 1)
+            return
+        if unix_sockets[fd].stype != UNIX_SOCK_DGRAM
+            var err: [1]byte
+            err[0] = byte(-UNIX_EINVAL)
+            ipc_reply(sender, err, 1)
+            return
+        unix_sockets[fd].peer_idx = -1
+        var ok: [1]byte
+        ok[0] = 0
+        ipc_reply(sender, ok, 1)
+
+
+### ACCEPT handler
+
+Drains one slot from the listener's backlog. If the queue is
+empty, parks the caller via `pending_accept_tid` — the
+matching CONNECT will unblock it. The `_NB` cmd byte
+(UNIX_CMD_ACCEPT_NB) sets `no_park=1`, which makes an empty
+queue reply with -EAGAIN immediately instead of parking.
+
+Reply wire shape: `status(1) + new_fd(1) + plen(1) + path(P)`.
+Errors emit `(-errno, 0, 0)` — 3 bytes; the shim peeks status
+first, so the trailing zero plen is harmless.
+
+    unix_handle_accept(sender: int, buf: *byte, no_park: int)
+        val fd = int(buf[1]) & 0xff
+        if unix_fd_valid(fd, sender) == 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EBADF)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].listening == 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EINVAL)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        if unix_sockets[fd].pending_count > 0
+            val head = unix_sockets[fd].pending_head
+            val server_end = unix_sockets[fd].pending_q[head]
+            unix_sockets[fd].pending_head = (head + 1) % UNIX_BACKLOG_MAX
+            unix_sockets[fd].pending_count -= 1
+            unix_bump_fire_seq(fd)
+            var reply: [128]byte
+            reply[0] = 0
+            reply[1] = byte(server_end & 0xff)
+            val plen = unix_sockets[server_end].connector_path_len
+            reply[2] = byte(plen & 0xff)
+            var pi = 0
+            while pi < plen
+                reply[3 + pi] = unix_sockets[server_end].connector_path[pi]
+                pi += 1
+            ipc_reply(sender, &reply[0], 3 + plen)
+            return
+        if no_park != 0
+            var err: [3]byte
+            err[0] = byte(-UNIX_EAGAIN)
+            err[1] = 0
+            err[2] = 0
+            ipc_reply(sender, err, 3)
+            return
+        unix_sockets[fd].pending_accept_tid = sender

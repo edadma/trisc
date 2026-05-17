@@ -1,0 +1,518 @@
+OSKit INET TCP — test-only selftests
+====================================
+
+Same-module sibling of `tcp.lsysl`. Collects the three TCP
+internal-state selftests that the test harness drives via the
+INET_CMD_TCP_OOO_SELFTEST / TCP_SEND_PARK_TEST / TCP_ARP_REPLAY_TEST
+commands. Kept out of `tcp.lsysl` to keep that file focussed on
+production state-machine + hash code.
+
+Each selftest constructs a synthetic TCP slot via `inet_tcp_alloc`
+(so the heap-backed send/recv buffers exist), forces it into the
+exact state being exercised, drives one or more events, and
+returns 0 on full pass or a small step-numbered error code on
+failure. They never touch the wire — everything stays inside the
+per-slot tables.
+
+    module oskit.servers
+
+    import std.net.{ipv4}
+
+
+Test-only: drive inet_tcp_state_step against a scratch TCP socket
+with a deliberately out-of-order segment sequence. Verifies stash,
+drain, and recv_buf ordering. Returns 0 on pass, 1..6 on failure.
+
+Sequence exercised:
+  1. Seg A at seq 200 len 50  (bytes 'B') — out-of-order, stashed.
+  2. Seg B at seq 250 len 50  (bytes 'C') — out-of-order, stashed.
+  3. Seg C at seq 100 len 100 (bytes 'A') — in-order, triggers
+     drain of the two stashed slots so rcv_nxt advances 100 → 300.
+Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
+100 'A' + 50 'B' + 50 'C'.
+
+    inet_tcp_ooo_selftest() -> int
+        // Use inet_tcp_alloc so the heap-backed send/recv buffers
+        // exist — the in-order seg below copies its payload through
+        // recv_buf_ptr, which is null on a manually-initialised slot.
+        val s = inet_tcp_alloc()
+        if s < 0
+            return 100
+        tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+        tcp_sockets[s].rcv_nxt = u32(100)
+        tcp_sockets[s].snd_una = u32(1)
+        tcp_sockets[s].snd_nxt = u32(1)
+        inet_tcp_owners_init(s)
+        tcp_sockets[s].local_port = 0
+        tcp_sockets[s].remote_port = 0
+        tcp_sockets[s].remote_ip = u32(0)
+
+        var seg_b: [50]byte
+        var i = 0
+        while i < 50
+            seg_b[i] = byte('B')
+            i += 1
+        inet_tcp_state_step(s, TCP_F_ACK, u32(200), u32(1), 1024,
+            seg_b, 50, 0, 0, 0, 0, u32(0), u32(0))
+        if tcp_sockets[s].rcv_nxt != u32(100)
+            inet_tcp_close_slot(s, 0)
+            return 1
+
+        var seg_c: [50]byte
+        i = 0
+        while i < 50
+            seg_c[i] = byte('C')
+            i += 1
+        inet_tcp_state_step(s, TCP_F_ACK, u32(250), u32(1), 1024,
+            seg_c, 50, 0, 0, 0, 0, u32(0), u32(0))
+        if tcp_sockets[s].rcv_nxt != u32(100)
+            inet_tcp_close_slot(s, 0)
+            return 2
+
+        // Two segments totalling 100 bytes are stashed — helper must
+        // report 100 so the advertised rwnd can shrink accordingly.
+        if inet_tcp_reorder_bytes(s) != 100
+            inet_tcp_close_slot(s, 0)
+            return 13
+
+        var seg_a: [100]byte
+        i = 0
+        while i < 100
+            seg_a[i] = byte('A')
+            i += 1
+        inet_tcp_state_step(s, TCP_F_ACK, u32(100), u32(1), 1024,
+            seg_a, 100, 0, 0, 0, 0, u32(0), u32(0))
+        if tcp_sockets[s].rcv_nxt != u32(300)
+            inet_tcp_close_slot(s, 0)
+            return 3
+        if tcp_sockets[s].recv_len != 200
+            inet_tcp_close_slot(s, 0)
+            return 4
+
+        i = 0
+        while i < 100
+            if tcp_sockets[s].recv_buf_ptr[i] != byte('A')
+                inet_tcp_close_slot(s, 0)
+                return 5
+            i += 1
+        while i < 150
+            if tcp_sockets[s].recv_buf_ptr[i] != byte('B')
+                inet_tcp_close_slot(s, 0)
+                return 5
+            i += 1
+        while i < 200
+            if tcp_sockets[s].recv_buf_ptr[i] != byte('C')
+                inet_tcp_close_slot(s, 0)
+                return 5
+            i += 1
+
+        // After drain the reorder queue is empty — helper must
+        // return 0 so rwnd is only shrunk while bytes are in flight.
+        if inet_tcp_reorder_bytes(s) != 0
+            inet_tcp_close_slot(s, 0)
+            return 14
+
+        // RFC 6298 RTO math. Scratch socket starts fresh in alloc
+        // state (rtt_measured = 0). We overwrote the above fields
+        // directly instead of going through alloc, so rebaseline
+        // the RTT state first.
+        tcp_sockets[s].srtt = 0
+        tcp_sockets[s].rttvar = 0
+        tcp_sockets[s].rto = TCP_RTO_MS_INITIAL
+        tcp_sockets[s].rtt_measured = 0
+        tcp_sockets[s].rtt_sample_valid = 0
+
+        // First measurement R=500 ms → SRTT=500, RTTVAR=250, RTO=1500.
+        // Above TCP_RTO_MS_MIN (200) and well below TCP_RTO_MS_MAX (60000),
+        // so no clamping fires.
+        inet_tcp_rtt_update(s, 500)
+        if tcp_sockets[s].srtt != 500
+            inet_tcp_close_slot(s, 0)
+            return 6
+        if tcp_sockets[s].rttvar != 250
+            inet_tcp_close_slot(s, 0)
+            return 7
+        if tcp_sockets[s].rto != 1500
+            inet_tcp_close_slot(s, 0)
+            return 8
+
+        // Second measurement R=400.
+        //   RTTVAR = 250 + (|500-400| - 250) >> 2 = 250 + (-150 >> 2)
+        //          = 250 + (-38) = 212
+        //   SRTT   = 500 + (400-500) >> 3         = 500 + (-100 >> 3)
+        //          = 500 + (-13) = 487
+        //   RTO    = 487 + 4*212 = 487 + 848 = 1335
+        inet_tcp_rtt_update(s, 400)
+        if tcp_sockets[s].srtt != 487
+            inet_tcp_close_slot(s, 0)
+            return 9
+        if tcp_sockets[s].rttvar != 212
+            inet_tcp_close_slot(s, 0)
+            return 10
+        if tcp_sockets[s].rto != 1335
+            inet_tcp_close_slot(s, 0)
+            return 11
+
+        // Backoff doubles RTO: 1335 → 2670 (still below MAX=60000).
+        inet_tcp_rto_backoff(s)
+        if tcp_sockets[s].rto != 2670
+            inet_tcp_close_slot(s, 0)
+            return 12
+
+        inet_tcp_close_slot(s, 0)
+
+        // IP-config round-trip: save the current triple, install a
+        // deliberately different one, verify every getter + the
+        // bitwise `inet_in_subnet`, then restore. Lets the harness
+        // prove inet_set/get + CIDR matching before a real DHCP
+        // client is live.
+        val saved_ip = inet_get_our_ip()
+        val saved_mask = inet_get_mask()
+        val saved_gw = inet_get_gw()
+        val probe_ip = ipv4(192, 168, 7, 42)
+        val probe_mask = ipv4(255, 255, 0, 0)
+        val probe_gw = ipv4(192, 168, 7, 1)
+        inet_set_ip_config(probe_ip, probe_mask, probe_gw)
+        if inet_get_our_ip() != probe_ip
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 15
+        if inet_get_mask() != probe_mask
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 16
+        if inet_get_gw() != probe_gw
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 17
+        // /16 says 192.168.99.5 is on-link; 192.169.0.5 is not.
+        if inet_in_subnet(ipv4(192, 168, 99, 5)) == 0
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 18
+        if inet_in_subnet(ipv4(192, 169, 0, 5)) != 0
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 19
+        inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+        if inet_get_our_ip() != saved_ip
+            return 20
+
+        // RFC 2018 SACK-permitted parser. QEMU's slirp doesn't carry
+        // the option in SYN-ACKs, so we can't observe negotiation
+        // over the wire in CI — verify it in isolation instead.
+        //
+        // Frame layout: 14 B Ethernet header + 20 B IPv4 header +
+        // 28 B TCP header (MSS + SACK-permitted + 2 NOPs).
+        var synframe: [54]byte
+        var bi = 0
+        while bi < 54
+            synframe[bi] = 0
+            bi += 1
+        // Data offset = 7 words (28 bytes); flags = SYN.
+        synframe[34 + 12] = byte(0x70)
+        synframe[34 + 13] = byte(TCP_F_SYN & 0xff)
+        synframe[34 + 20] = byte(TCP_OPT_MSS)
+        synframe[34 + 21] = 4
+        synframe[34 + 22] = byte(0x05)
+        synframe[34 + 23] = byte(0xb4)
+        synframe[34 + 24] = byte(TCP_OPT_SACK_PERMITTED)
+        synframe[34 + 25] = 2
+        synframe[34 + 26] = byte(TCP_OPT_NOP)
+        synframe[34 + 27] = byte(TCP_OPT_NOP)
+        if tcp_opts_has_sack_permitted(synframe, 34, 28) != 1
+            return 21
+
+        // Same frame without SACK-permitted (replace kind=4 with a
+        // 2-byte unknown option) must parse as "not permitted".
+        synframe[34 + 24] = byte(0xfe)
+        if tcp_opts_has_sack_permitted(synframe, 34, 28) != 0
+            return 22
+
+        // Exercise the SYN_SENT → ESTABLISHED transition with a
+        // synthetic peer_sack_perm = 1 and verify `sack_ok` flips.
+        val ss = TCP_MAX_SOCKETS - 1
+        tcp_sockets[ss].in_use = 1
+        tcp_sockets[ss].state = TCP_STATE_SYN_SENT
+        tcp_sockets[ss].snd_una = u32(0)
+        tcp_sockets[ss].snd_nxt = u32(1)
+        tcp_sockets[ss].recv_len = 0
+        tcp_sockets[ss].send_len = 0
+        tcp_sockets[ss].fin_pending = 0
+        tcp_sockets[ss].peer_fin = 0
+        tcp_sockets[ss].our_fin_sent = 0
+        tcp_sockets[ss].recv_waiter = -1
+        tcp_sockets[ss].send_waiter = -1
+        tcp_sockets[ss].connect_waiter = -1
+        tcp_sockets[ss].close_waiter = -1
+        tcp_sockets[ss].accept_waiter = -1
+        tcp_sockets[ss].is_listen = 0
+        inet_tcp_owners_init(ss)
+        tcp_sockets[ss].local_port = 0
+        tcp_sockets[ss].remote_port = 0
+        tcp_sockets[ss].remote_ip = u32(0)
+        tcp_sockets[ss].sack_ok = 0
+        var rk = 0
+        while rk < TCP_REORDER_SLOTS
+            tcp_sockets[ss].reorder[rk].in_use = 0
+            rk += 1
+        // state_step only inspects flags/seq/ack/wnd + peer_sack_perm
+        // when walking the SYN_SENT → ESTABLISHED edge — the payload
+        // pointer is unused for the SYN-ACK case, so pass a stub.
+        var nullbuf: [1]byte
+        inet_tcp_state_step(ss,
+            TCP_F_SYN | TCP_F_ACK,
+            u32(100), u32(1), 1024,
+            nullbuf, 0, 1, 0, 0, 0, u32(0), u32(0))
+        if tcp_sockets[ss].sack_ok != 1
+            inet_tcp_close_slot(ss, 0)
+            return 23
+        inet_tcp_close_slot(ss, 0)
+
+        // Phase 4b sender scoreboard. Exercise the primitives
+        // the live selective-retransmit path is built on —
+        // QEMU's slirp strips SACK options so we can't drive
+        // these through a real peer; verify them in isolation.
+        val sb = TCP_MAX_SOCKETS - 1
+        tcp_sockets[sb].in_use = 1
+        tcp_sockets[sb].snd_una = u32(1000)
+        tcp_sockets[sb].snd_nxt = u32(4360)
+        var bc = 0
+        while bc < TCP_SACK_BOARD
+            tcp_sockets[sb].sack_board[bc].in_use = 0
+            bc += 1
+
+        // Single block `[2440, 3400)` — a hole under it at
+        // 1000..2440 and another at 3400..4360. `next_hole`
+        // should report 1000 first, then 3400 if the cursor
+        // has already consumed the first hole.
+        tcp_sack_board_insert(sb, u32(2440), u32(3400))
+        if tcp_sack_next_hole(sb, u32(1000)) != u32(1000)
+            inet_tcp_close_slot(sb, 0)
+            return 24
+        if tcp_sack_next_hole(sb, u32(2440)) != u32(3400)
+            inet_tcp_close_slot(sb, 0)
+            return 25
+        if tcp_sack_next_hole(sb, u32(3400)) != u32(3400)
+            inet_tcp_close_slot(sb, 0)
+            return 26
+
+        // Adjacent block `[3400, 3880)` — must coalesce with the
+        // existing one into a single `[2440, 3880)` entry so the
+        // scoreboard stays compact under heavy SACK churn.
+        tcp_sack_board_insert(sb, u32(3400), u32(3880))
+        var merged_seen = 0
+        var any_other = 0
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                if tcp_sockets[sb].sack_board[bc].left == u32(2440)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(3880)
+                        merged_seen = 1
+                    else
+                        any_other = 1
+                else
+                    any_other = 1
+            bc += 1
+        if merged_seen == 0
+            inet_tcp_close_slot(sb, 0)
+            return 27
+        if any_other != 0
+            inet_tcp_close_slot(sb, 0)
+            return 28
+
+        // Advance snd_una past the block's left edge but not its
+        // right. Purge must clip the block's left edge so the
+        // scoreboard only covers bytes still-in-flight.
+        tcp_sockets[sb].snd_una = u32(3000)
+        tcp_sack_board_purge(sb)
+        var clipped_seen = 0
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                if tcp_sockets[sb].sack_board[bc].left == u32(3000)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(3880)
+                        clipped_seen = 1
+            bc += 1
+        if clipped_seen == 0
+            inet_tcp_close_slot(sb, 0)
+            return 29
+
+        // Advance snd_una past the block's right edge. Purge
+        // must drop it entirely — no stale entry to mislead
+        // `next_hole` on the next recovery round.
+        tcp_sockets[sb].snd_una = u32(3880)
+        tcp_sack_board_purge(sb)
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                inet_tcp_close_slot(sb, 0)
+                return 30
+            bc += 1
+
+        // Drive the byte-walk that `tcp_opts_apply_sack`
+        // uses on the wire. Synthesize a TCP header with two
+        // SACK blocks — `[500, 700)` and `[1200, 1500)` —
+        // under a reset scoreboard, parse, verify both blocks
+        // landed as distinct `[left, right)` pairs. The header
+        // layout mirrors what a typical Linux dup-ACK would send:
+        // NOP + NOP + kind=5 + len=18 + 2 blocks.
+        tcp_sack_board_clear(sb)
+        tcp_sockets[sb].snd_una = u32(400)
+        var ackframe: [60]byte
+        var ai = 0
+        while ai < 60
+            ackframe[ai] = 0
+            ai += 1
+        // Data offset = 10 words (40 bytes header); flags = ACK.
+        ackframe[34 + 12] = byte(0xa0)
+        ackframe[34 + 13] = byte(TCP_F_ACK & 0xff)
+        ackframe[34 + 20] = byte(TCP_OPT_NOP)
+        ackframe[34 + 21] = byte(TCP_OPT_NOP)
+        ackframe[34 + 22] = byte(TCP_OPT_SACK)
+        ackframe[34 + 23] = byte(2 + 8 * 2)
+        // Block 1: left=500, right=700.
+        ackframe[34 + 24] = 0
+        ackframe[34 + 25] = 0
+        ackframe[34 + 26] = byte(1)
+        ackframe[34 + 27] = byte(244)
+        ackframe[34 + 28] = 0
+        ackframe[34 + 29] = 0
+        ackframe[34 + 30] = byte(2)
+        ackframe[34 + 31] = byte(188)
+        // Block 2: left=1200, right=1500.
+        ackframe[34 + 32] = 0
+        ackframe[34 + 33] = 0
+        ackframe[34 + 34] = byte(4)
+        ackframe[34 + 35] = byte(176)
+        ackframe[34 + 36] = 0
+        ackframe[34 + 37] = 0
+        ackframe[34 + 38] = byte(5)
+        ackframe[34 + 39] = byte(220)
+        tcp_opts_apply_sack(sb, ackframe, 34, 40)
+        var saw_500 = 0
+        var saw_1200 = 0
+        bc = 0
+        while bc < TCP_SACK_BOARD
+            if tcp_sockets[sb].sack_board[bc].in_use != 0
+                if tcp_sockets[sb].sack_board[bc].left == u32(500)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(700)
+                        saw_500 = 1
+                if tcp_sockets[sb].sack_board[bc].left == u32(1200)
+                    if tcp_sockets[sb].sack_board[bc].right == u32(1500)
+                        saw_1200 = 1
+            bc += 1
+        if saw_500 == 0
+            inet_tcp_close_slot(sb, 0)
+            return 31
+        if saw_1200 == 0
+            inet_tcp_close_slot(sb, 0)
+            return 32
+        inet_tcp_close_slot(sb, 0)
+
+        0
+
+
+Test-only: prove the send-buf parking pipeline works end to end.
+
+Steps:
+  1. Allocate a TCP slot, force ESTABLISHED.
+  2. Pre-fill `send_buf` to capacity so `inet_tcp_do_send` returns
+     0 (the trigger condition for parking).
+  3. Verify `send_waiter` is unset (-1) initially.
+  4. Synthetically park a fake waiter (a tid past `thread_count`
+     so `ipc_reply_handler`'s validation drops the wake silently).
+  5. Drain `send_len` to mimic an incoming ACK.
+  6. Call `inet_tcp_drain_send_waiter`.  It must clear
+     `send_waiter` to -1 because space > 0 after the drain.
+  7. Run it again — the second call is a no-op (waiter already
+     cleared) and must not crash.
+
+Returns 0 on full pass; 1..6 on the failure step.
+
+Test-only: prove the ARP-driven TCP retransmit hook works.
+
+  1. Pin a deterministic IP config (10.0.2.15/24 with gw
+     10.0.2.2) so the next-hop math is predictable, regardless of
+     whether DHCP has run.
+  2. Allocate a TCP slot, force ESTABLISHED, point it at an IP
+     in subnet (10.0.2.99) so its next-hop is itself, not the
+     gateway.
+  3. Set `arp_pending = 1` directly — the same flag that
+     `inet_tcp_emit` sets on a real MAC miss.
+  4. Insert a fake ARP entry for 10.0.2.99 via `inet_arp_insert`,
+     which fires `inet_arp_drain_pending` at the end.  The drain
+     walks TCP, finds our slot with `arp_pending=1`, clears it,
+     and calls `inet_tcp_retransmit`.
+  5. Verify `arp_pending == 0` afterwards.
+
+Returns 0 on pass, 1..3 on the failure step.
+
+    inet_tcp_arp_replay_selftest() -> int
+        val saved_ip = inet_get_our_ip()
+        val saved_mask = inet_get_mask()
+        val saved_gw = inet_get_gw()
+        inet_set_ip_config(ipv4(10, 0, 2, 15), ipv4(255, 255, 255, 0),
+            ipv4(10, 0, 2, 2))
+
+        val s = inet_tcp_alloc()
+        if s < 0
+            inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+            return 1
+        tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+        val test_ip = ipv4(10, 0, 2, 99)
+        tcp_sockets[s].remote_ip = test_ip
+        tcp_sockets[s].arp_pending = 1
+
+        var fake_mac: [6]byte
+        var i = 0
+        while i < 6
+            fake_mac[i] = byte(0x10 + i)
+            i += 1
+        inet_arp_insert(test_ip, fake_mac)
+
+        val rc = if tcp_sockets[s].arp_pending == 0 then 0 else 2
+
+        val idx = inet_arp_lookup_idx(test_ip)
+        if idx >= 0
+            inet_arp_cache[idx].in_use = 0
+        inet_tcp_close_slot(s, 0)
+        inet_set_ip_config(saved_ip, saved_mask, saved_gw)
+        rc
+
+
+    inet_tcp_send_park_selftest() -> int
+        val s = inet_tcp_alloc()
+        if s < 0
+            return 1
+        tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+
+        if tcp_sockets[s].send_waiter != -1
+            inet_tcp_close_slot(s, 0)
+            return 2
+
+        tcp_sockets[s].send_len = tcp_sockets[s].send_buf_size
+        var d: [1]byte
+        d[0] = byte('q')
+        val ds = inet_tcp_do_send(s, &d[0], 1)
+        if ds != 0
+            inet_tcp_close_slot(s, 0)
+            return 3
+
+        // Fake tid past thread_count — ipc_reply_handler drops it.
+        tcp_sockets[s].send_waiter = 0xCAFE
+        tcp_sockets[s].send_waiter_len = 1
+
+        tcp_sockets[s].send_len = 0
+        inet_tcp_drain_send_waiter(s)
+
+        if tcp_sockets[s].send_waiter != -1
+            inet_tcp_close_slot(s, 0)
+            return 4
+        if tcp_sockets[s].send_waiter_len != 0
+            inet_tcp_close_slot(s, 0)
+            return 5
+
+        // Second call is a no-op: waiter already cleared.
+        inet_tcp_drain_send_waiter(s)
+        if tcp_sockets[s].send_waiter != -1
+            inet_tcp_close_slot(s, 0)
+            return 6
+
+        inet_tcp_close_slot(s, 0)
+        0

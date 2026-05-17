@@ -293,6 +293,8 @@ build_vfs() {
     build_server vfs vfs_server \
         "import oskit.servers.{vfs_server}" \
         oskit/servers/vfs.lsysl \
+        oskit/servers/vfs_pipe.lsysl \
+        oskit/servers/vfs_tcp.lsysl \
         oskit/config/config.sysl
 }
 
@@ -313,7 +315,16 @@ build_inet() {
         oskit/servers/pending_udp.lsysl \
         oskit/servers/ping_reply.lsysl \
         oskit/servers/tcp.lsysl \
+        oskit/servers/tcp_state.lsysl \
+        oskit/servers/tcp_emit.lsysl \
+        oskit/servers/tcp_setopts.lsysl \
+        oskit/servers/tcp_selftests.lsysl \
+        oskit/servers/tcp_opts.lsysl \
         oskit/servers/udp.lsysl \
+        oskit/servers/udp_hash.lsysl \
+        oskit/servers/inet_tcp_handlers.lsysl \
+        oskit/servers/inet_dispatch.lsysl \
+        oskit/servers/inet_udp_in.lsysl \
         std/net/net.lsysl \
         std/net/packet.lsysl
 }
@@ -321,7 +332,10 @@ build_inet() {
 build_unix() {
     build_server unix unix_server \
         "import oskit.servers.{unix_server}" \
-        oskit/servers/unix.lsysl
+        oskit/servers/unix.lsysl \
+        oskit/servers/unix_scm.lsysl \
+        oskit/servers/unix_data.lsysl \
+        oskit/servers/unix_conn.lsysl
 }
 
 build_nic() {

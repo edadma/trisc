@@ -1,0 +1,679 @@
+OSKit INET TCP — inbound segment handling, state machine, timers
+=================================================================
+
+Same-module sibling of `tcp.lsysl`. The "second half" of the TCP
+stack: the inbound segment parser (`inet_tcp_handle_segment`), the
+reorder buffer (`inet_tcp_reorder_*`), the per-socket state-machine
+step (`inet_tcp_state_step`), and the per-tick deadline scanner +
+retransmitter (`inet_tcp_scan_timers`, `inet_tcp_retransmit`).
+
+Lifted out so that `tcp.lsysl` can focus on sockets/hashes/options
++ outbound emit, and this file can focus on the segment-arrival
+side of the same connection state.
+
+    module oskit.servers
+
+    import oskit.services.{monotonic_ms}
+    import std.net.{ipv4, IP_PROTO_TCP, pkt_read_u16}
+
+
+
+Inbound IPv4 protocol=6 dispatch. Parses header, verifies
+checksum, locates the matching socket, and delegates.
+
+    inet_tcp_handle_segment(frame: *byte, total_len: int, ihl_bytes: int)
+        val tcp_off = 14 + ihl_bytes
+        if total_len < tcp_off + 20
+            return
+        val src_port = pkt_read_u16(frame, tcp_off + 0)
+        val dst_port = pkt_read_u16(frame, tcp_off + 2)
+        val seq = tcp_read_u32(frame, tcp_off + 4)
+        val ack = tcp_read_u32(frame, tcp_off + 8)
+        val data_off_words = (int(frame[tcp_off + 12]) >> 4) & 0x0f
+        val tcp_hdr_len = data_off_words * 4
+        val flags = int(frame[tcp_off + 13]) & 0xff
+        val wnd = pkt_read_u16(frame, tcp_off + 14)
+        if tcp_hdr_len < 20
+            return
+        if total_len < tcp_off + tcp_hdr_len
+            return
+        val ip_total = pkt_read_u16(frame, 16)
+        val tcp_len = ip_total - ihl_bytes
+        val payload_len = tcp_len - tcp_hdr_len
+        val payload: *byte = frame + tcp_off + tcp_hdr_len
+        val src_ip = ipv4(
+            int(frame[14 + 12]) & 0xff, int(frame[14 + 13]) & 0xff,
+            int(frame[14 + 14]) & 0xff, int(frame[14 + 15]) & 0xff)
+        val our_ip = ipv4(INET_OUR_IP_A, INET_OUR_IP_B,
+            INET_OUR_IP_C, INET_OUR_IP_D)
+        if inet_l4_partial_sum(src_ip, our_ip, IP_PROTO_TCP,
+                frame, tcp_off, tcp_len) != 0xffff
+            return
+        // RFC 2018 SACK-permitted is negotiated once on the
+        // handshake; parse it here so both the passive-open and
+        // state-step paths can see the peer's offer.
+        val peer_sack_perm = tcp_opts_has_sack_permitted(
+            frame, tcp_off, tcp_hdr_len)
+        // RFC 7323 WS + TS — also handshake-negotiated, but TS
+        // appears on every segment once enabled so we parse on
+        // every inbound and let state_step decide.
+        var ws_shift = 0
+        val peer_has_ws = tcp_opts_get_wscale(frame, tcp_off,
+            tcp_hdr_len, ws_shift)
+        var ts_val: u32 = u32(0)
+        var ts_ecr: u32 = u32(0)
+        val peer_has_ts = tcp_opts_get_ts(frame, tcp_off,
+            tcp_hdr_len, ts_val, ts_ecr)
+        val s = inet_tcp_find(dst_port, src_ip, src_port)
+        if s < 0
+            // No connection match. SYN-to-a-listen gets the passive
+            // open path. Anything else that isn't already a RST gets
+            // a stateless RST per RFC 793 §3.4.
+            if (flags & TCP_F_RST) != 0
+                return
+            if (flags & TCP_F_SYN) != 0
+                val ls = inet_tcp_find_listen(dst_port)
+                if ls >= 0
+                    inet_tcp_handle_passive_syn(ls, src_ip, src_port,
+                        seq, peer_sack_perm, peer_has_ws, ws_shift,
+                        peer_has_ts, ts_val)
+                    return
+            inet_tcp_emit_rst(src_ip, src_port, dst_port,
+                              flags, seq, ack, payload_len)
+            return
+        // RFC 2018 §4: consult the SACK option on ACKs so the sender
+        // scoreboard stays current. Only meaningful once both sides
+        // agreed on SACK-permitted — otherwise the peer's option
+        // field is garbage we shouldn't trust.
+        if tcp_sockets[s].sack_ok != 0
+            if (flags & TCP_F_ACK) != 0
+                tcp_opts_apply_sack(s, frame, tcp_off, tcp_hdr_len)
+        // SO_KEEPALIVE: any inbound segment for this connection
+        // resets the idle clock, so an active flow never trips the
+        // probe path.  Bumping unconditionally (not just on data) is
+        // what Linux does — a peer ACK on idle counts as liveness.
+        tcp_sockets[s].last_recv_ms = int(monotonic_ms())
+        tcp_sockets[s].keepalive_probes = 0
+        tcp_sockets[s].keepalive_next_probe = 0
+        inet_tcp_state_step(s, flags, seq, ack, wnd, payload,
+            payload_len, peer_sack_perm, peer_has_ws, ws_shift,
+            peer_has_ts, ts_val, ts_ecr)
+
+
+Reorder queue for out-of-order segments.
+
+`inet_tcp_reorder_bytes` returns the total payload bytes currently
+stashed in the reorder queue for socket `s`. Used by `inet_tcp_emit`
+to subtract stashed bytes from the advertised receive window, and
+by the stash window check so peer sees a consistent window.
+
+    inet_tcp_reorder_bytes(s: int) -> int
+        var total = 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            if tcp_sockets[s].reorder[k].in_use != 0
+                total += tcp_sockets[s].reorder[k].len
+            k += 1
+        total
+
+`inet_tcp_reorder_store` stashes a segment whose seq > rcv_nxt but
+still inside the advertised recv window. Duplicates (seq already
+stored) and partial overlaps are rejected — peer will retransmit.
+Returns 1 if stored, 0 if dropped.
+
+    inet_tcp_reorder_store(s: int, seq: u32, payload: *byte,
+                           payload_len: int) -> int
+        if payload_len <= 0
+            return 0
+        if payload_len > TCP_MAX_SEG
+            return 0
+        var k = 0
+        while k < TCP_REORDER_SLOTS
+            if tcp_sockets[s].reorder[k].in_use != 0
+                val e_seq = tcp_sockets[s].reorder[k].seq
+                val e_end = e_seq + u32(tcp_sockets[s].reorder[k].len)
+                val n_end = seq + u32(payload_len)
+                if tcp_seq_lt(seq, e_end) != 0
+                    if tcp_seq_lt(e_seq, n_end) != 0
+                        return 0
+            k += 1
+        var j = 0
+        while j < TCP_REORDER_SLOTS
+            if tcp_sockets[s].reorder[j].in_use == 0
+                tcp_sockets[s].reorder[j].in_use = 1
+                tcp_sockets[s].reorder[j].seq = seq
+                tcp_sockets[s].reorder[j].len = payload_len
+                var i = 0
+                while i < payload_len
+                    tcp_sockets[s].reorder[j].data[i] = payload[i]
+                    i += 1
+                return 1
+            j += 1
+        0
+
+`inet_tcp_drain_reorder` is called after a contiguous append to
+recv_buf. It scans the reorder queue for slots whose seq matches
+the new rcv_nxt, copies their bytes into recv_buf, advances
+rcv_nxt, and frees the slot. Continues until no slot lines up.
+If a pending FIN (fin_pending != 0, fin_seq == rcv_nxt) lines up,
+processes it too.
+
+Returns non-zero if any data was drained (caller uses this to
+decide whether an ACK needs to be re-emitted). Bit 0 = data,
+bit 1 = FIN processed.
+
+    inet_tcp_drain_reorder(s: int) -> int
+        var result = 0
+        var progress = 1
+        while progress != 0
+            progress = 0
+            var k = 0
+            while k < TCP_REORDER_SLOTS
+                if tcp_sockets[s].reorder[k].in_use != 0
+                    if tcp_sockets[s].reorder[k].seq == tcp_sockets[s].rcv_nxt
+                        val take = tcp_sockets[s].reorder[k].len
+                        val room = tcp_sockets[s].recv_buf_size - tcp_sockets[s].recv_len
+                        if take <= room
+                            var i = 0
+                            while i < take
+                                tcp_sockets[s].recv_buf_ptr[tcp_sockets[s].recv_len + i] = tcp_sockets[s].reorder[k].data[i]
+                                i += 1
+                            tcp_sockets[s].recv_len += take
+                            tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
+                            tcp_sockets[s].reorder[k].in_use = 0
+                            result = result | 1
+                            progress = 1
+                k += 1
+            if tcp_sockets[s].fin_pending != 0
+                if tcp_sockets[s].fin_seq == tcp_sockets[s].rcv_nxt
+                    tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(1)
+                    tcp_sockets[s].peer_fin = 1
+                    tcp_sockets[s].fin_pending = 0
+                    result = result | 2
+        // One fire covers both newly-drained data and resolved FIN —
+        // the shim's poll re-derives the actual mask either way.
+        if result != 0
+            inet_epoll_fire(2, s)
+        result
+
+
+Per-socket state transition for one validated segment.
+
+    inet_tcp_state_step(s: int, flags: int, seq: u32, ack: u32,
+                        wnd: int, payload: *byte, payload_len: int,
+                        peer_sack_perm: int,
+                        peer_has_ws: int, ws_shift: int,
+                        peer_has_ts: int, ts_val: u32, ts_ecr: u32)
+        val st = tcp_sockets[s].state
+        if st == TCP_STATE_SYN_SENT
+            if (flags & TCP_F_RST) != 0
+                // RFC 793: RST in response to a SYN means the peer is
+                // not listening (or refused). NB-connect surfaces this
+                // as ECONNREFUSED via SO_ERROR after close_slot tears
+                // down the slot.
+                tcp_sockets[s].pending_error = 111
+                inet_tcp_close_slot(s, -1)
+                return
+            if (flags & TCP_F_SYN) == 0
+                return
+            if (flags & TCP_F_ACK) == 0
+                return
+            if ack != tcp_sockets[s].snd_nxt
+                return
+            tcp_sockets[s].irs = seq
+            tcp_sockets[s].rcv_nxt = seq + u32(1)
+            tcp_sockets[s].snd_una = ack
+            // RFC 7323 §2.2: SYN window field is unscaled. Apply
+            // shift only after the SYN-ACK lands and we know the
+            // peer's wscale.
+            tcp_sockets[s].snd_wnd = wnd
+            tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+            // RFC 2018 §2: both our SYN and the peer's SYN-ACK
+            // must carry SACK-permitted for SACK to be enabled
+            // on this connection. We always advertise it in our
+            // SYN, so the peer's SYN-ACK option is the deciding
+            // factor.
+            if peer_sack_perm != 0
+                tcp_sockets[s].sack_ok = 1
+            // RFC 7323 §1.3: WS / TS only stick if the peer
+            // echoes them in the SYN-ACK. Otherwise our SYN's
+            // offer is silently dropped — leave snd_wscale=0 and
+            // ts_ok=0 (already initialised in alloc).
+            if peer_has_ws != 0
+                tcp_sockets[s].snd_wscale = ws_shift
+                tcp_sockets[s].rcv_wscale = TCP_RCV_WSCALE
+            if peer_has_ts != 0
+                tcp_sockets[s].ts_ok = 1
+                tcp_sockets[s].ts_recent = ts_val
+            inet_tcp_disarm_rtx(s)
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+            if tcp_sockets[s].connect_waiter >= 0
+                inet_tcp_reply_connect(tcp_sockets[s].connect_waiter, 0, s)
+                tcp_sockets[s].connect_waiter = -1
+            // Connect completed → EPOLLOUT becomes deliverable on the
+            // socket (Linux semantics: writability transitions on the
+            // SYN-ACK).
+            inet_epoll_fire(2, s)
+            return
+        if st == TCP_STATE_SYN_RCVD
+            if (flags & TCP_F_RST) != 0
+                tcp_sockets[s].pending_error = 104  // ECONNRESET
+                inet_tcp_close_slot(s, -1)
+                return
+            if (flags & TCP_F_ACK) == 0
+                return
+            if ack != tcp_sockets[s].snd_nxt
+                return
+            tcp_sockets[s].snd_una = ack
+            // RFC 7323 §2.3: this is the first non-SYN segment from
+            // the peer, so apply our negotiated `snd_wscale`.
+            tcp_sockets[s].snd_wnd = wnd << tcp_sockets[s].snd_wscale
+            tcp_sockets[s].state = TCP_STATE_ESTABLISHED
+            inet_tcp_disarm_rtx(s)
+            // Hand child to parent listen (or directly to the parked
+            // accept caller). Data in this segment is ignored — rely on
+            // the peer retransmitting once we ACK the next segment.
+            inet_tcp_accept_enqueue(s)
+            return
+
+TIME_WAIT is its own branch so the past-handshake logic below
+doesn't second-guess a quiescent socket. We re-ACK retransmitted
+FINs (peer missed our last ACK) and refresh the 2MSL timer so a
+stream of FIN retransmits keeps absorbing; new-SYN-on-TIME_WAIT
+(RFC 1122 §4.2.2.13) is silently dropped here — peer retries and
+the listen path picks it up.
+
+        if st == TCP_STATE_TIME_WAIT
+            if (flags & TCP_F_RST) != 0
+                inet_tcp_close_slot(s, 0)
+                return
+            if (flags & TCP_F_FIN) != 0
+                inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+                tcp_sockets[s].tw_deadline = int(monotonic_ms()) + TCP_TW_MS
+            return
+
+RFC 7323 §5.3 PAWS: a stale duplicate's TSval will be older than
+the highest TSval we've recorded for the connection. If the gap is
+big enough we drop the segment (but still ACK current rcv_nxt so
+the peer doesn't keep retransmitting). The check only runs once
+both sides have agreed on TS during the handshake.
+
+After PAWS clears, advance `ts_recent` so subsequent retransmit
+duplicates of this segment will be filtered. We use the loose
+"any TSval ≥ recent" rule rather than the stricter §4.3 form
+(SEG.SEQ ≤ Last.ACK.sent) — the difference only matters when
+peer aggressively reorders.
+
+        if tcp_sockets[s].ts_ok != 0
+            if peer_has_ts != 0
+                if tcp_seq_lt(ts_val, tcp_sockets[s].ts_recent) != 0
+                    inet_tcp_emit(s, TCP_F_ACK,
+                        tcp_sockets[s].snd_nxt, u32(0), 0)
+                    return
+                if tcp_seq_lt(tcp_sockets[s].ts_recent, ts_val) != 0
+                    tcp_sockets[s].ts_recent = ts_val
+
+Past handshake: process ACK, data, FIN in that order.
+
+        if (flags & TCP_F_RST) != 0
+            tcp_sockets[s].pending_error = 104  // ECONNRESET
+            inet_tcp_close_slot(s, -1)
+            return
+
+RFC 5961 §4: a SYN arriving on a synchronized connection is a
+challenge — respond with our current ACK and drop the segment.
+Covers confused peers / port-collision retries without tearing
+the connection down.
+
+        if (flags & TCP_F_SYN) != 0
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+            return
+        if (flags & TCP_F_ACK) != 0
+            if tcp_seq_lt(tcp_sockets[s].snd_una, ack) != 0
+                if tcp_seq_le(ack, tcp_sockets[s].snd_nxt) != 0
+                    val acked = int(i32(ack - tcp_sockets[s].snd_una))
+                    var eff = acked
+                    if tcp_sockets[s].our_fin_sent != 0
+                        if ack == tcp_sockets[s].snd_nxt
+                            eff -= 1
+                    if eff > tcp_sockets[s].send_len
+                        eff = tcp_sockets[s].send_len
+                    var k = eff
+                    while k < tcp_sockets[s].send_len
+                        tcp_sockets[s].send_buf_ptr[k - eff] = tcp_sockets[s].send_buf_ptr[k]
+                        k += 1
+                    tcp_sockets[s].send_len -= eff
+                    tcp_sockets[s].snd_una = ack
+                    // TCP_USER_TIMEOUT bookkeeping (RFC 5482 §3):
+                    // any cumulative ACK is "progress" — restart the
+                    // unack clock from this moment.  Once the unacked
+                    // window fully drains (snd_una == snd_nxt) clear
+                    // it so the timer doesn't fire on an idle
+                    // connection waiting for the next write.
+                    if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                        tcp_sockets[s].earliest_unack_ms = 0
+                    else
+                        tcp_sockets[s].earliest_unack_ms = int(monotonic_ms())
+                    // RFC 7323 §2.3: shift the raw header field by
+                    // the negotiated peer scale.  Defaults to 0
+                    // (no-op) when WS wasn't agreed on.
+                    tcp_sockets[s].snd_wnd = wnd << tcp_sockets[s].snd_wscale
+                    tcp_sockets[s].dup_ack_count = 0
+                    // Send-buffer drained — wake any epoll waiter on
+                    // EPOLLOUT. We over-fire (no full→drain check) on
+                    // purpose; the shim filters via INET_CMD_POLL.
+                    if eff > 0
+                        inet_epoll_fire(2, s)
+                        inet_tcp_drain_send_waiter(s)
+                    // Cumulative ACK just swept some bytes — drop any
+                    // scoreboard entries now wholly covered. Keeps
+                    // `tcp_sack_next_hole` pointed at the right place
+                    // without stale blocks lingering.
+                    tcp_sack_board_purge(s)
+                    // Prefer the TS-based RTT sample (RFC 7323 §4):
+                    // it isn't ambiguous on retransmits the way Karn's
+                    // sequence sampling is, so we get fresh
+                    // measurements even after loss.  Falls back to
+                    // Karn's algorithm when TS isn't negotiated.
+                    if tcp_sockets[s].ts_ok != 0 && peer_has_ts != 0 && ts_ecr != u32(0)
+                        val r = int(monotonic_ms()) - int(i32(ts_ecr - tcp_sockets[s].ts_offset))
+                        if r >= 0 && r <= TCP_RTO_MS_MAX
+                            tcp_sockets[s].rtt_sample_valid = 0
+                            inet_tcp_rtt_update(s, r)
+                    else
+                        inet_tcp_rtt_maybe_sample(s, ack)
+                    // RFC 5681 §3.2 ¶6 — recovering ACK: if we're
+                    // in fast recovery and this ACK reaches beyond
+                    // the recovery_point captured at entry, deflate
+                    // cwnd back to ssthresh and leave recovery.
+                    // Otherwise grow cwnd via the normal slow-start
+                    // / CA path.
+                    if tcp_sockets[s].fast_recovery != 0
+                        if tcp_seq_le(tcp_sockets[s].recovery_point, ack) != 0
+                            tcp_sockets[s].snd_cwnd = tcp_sockets[s].snd_ssthresh
+                            tcp_sockets[s].fast_recovery = 0
+                            tcp_sack_board_clear(s)
+                        else
+                            // Partial ACK inside recovery: if SACK is
+                            // live, plug the next hole immediately
+                            // instead of waiting for RTO (RFC 6675
+                            // style NextSeg — slix's minimal form
+                            // issues one hole per partial ACK).
+                            if tcp_sockets[s].sack_ok != 0
+                                inet_tcp_sack_rexmit_next(s)
+                    else
+                        inet_tcp_cwnd_on_ack(s, eff)
+                    if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                        inet_tcp_disarm_rtx(s)
+                    else
+                        inet_tcp_arm_rtx(s)
+                    inet_tcp_drain_send(s)
+            else if ack == tcp_sockets[s].snd_una
+                // Potential duplicate ACK (RFC 5681 §2). Counts as
+                // a "pure" dup only if there's no payload and we
+                // still have outstanding unacked data.
+                if payload_len == 0
+                    if tcp_sockets[s].send_len > 0
+                        if tcp_sockets[s].fast_recovery == 0
+                            // Count toward fast-retransmit trigger.
+                            tcp_sockets[s].dup_ack_count += 1
+                            if tcp_sockets[s].dup_ack_count == 3
+                                inet_tcp_fast_retransmit(s)
+                        else
+                            // RFC 5681 §3.2 ¶7 — already in fast
+                            // recovery. Each additional dup-ACK
+                            // means another segment left the net,
+                            // so inflate cwnd by one SMSS and try
+                            // to drain (may enable a new segment
+                            // to be sent).
+                            tcp_sockets[s].snd_cwnd += TCP_MAX_SEG
+                            if tcp_sockets[s].snd_cwnd > 65535
+                                tcp_sockets[s].snd_cwnd = 65535
+                            // Each dup-ACK during recovery likely
+                            // brought a fresh SACK block — if a new
+                            // hole becomes visible, plug it now.
+                            if tcp_sockets[s].sack_ok != 0
+                                inet_tcp_sack_rexmit_next(s)
+                            inet_tcp_drain_send(s)
+
+        var did_data = 0
+        var did_fin = 0
+        if payload_len > 0
+            if seq == tcp_sockets[s].rcv_nxt
+                val room = tcp_sockets[s].recv_buf_size - tcp_sockets[s].recv_len
+                var take = payload_len
+                if take > room
+                    take = room
+                var i = 0
+                while i < take
+                    tcp_sockets[s].recv_buf_ptr[tcp_sockets[s].recv_len + i] = payload[i]
+                    i += 1
+                tcp_sockets[s].recv_len += take
+                tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(take)
+                did_data = 1
+                // Bytes arrived in-order — fire EPOLLIN. drain_reorder
+                // below has its own fire so OOO-then-in-order doesn't
+                // miss a wake either.
+                if take > 0
+                    inet_epoll_fire(2, s)
+            else if tcp_seq_lt(tcp_sockets[s].rcv_nxt, seq) != 0
+                // seq > rcv_nxt: out-of-order. Stash if it fits in
+                // our advertised window. If the stash fails (full
+                // queue, overlap), peer will retransmit — the dup
+                // re-ACK path below still advertises rcv_nxt.
+                val seg_end = seq + u32(payload_len)
+                val rem = tcp_sockets[s].recv_buf_size - tcp_sockets[s].recv_len - inet_tcp_reorder_bytes(s)
+                var rem_clamped = rem
+                if rem_clamped < 0
+                    rem_clamped = 0
+                val wnd_room = u32(rem_clamped)
+                val wnd_end = tcp_sockets[s].rcv_nxt + wnd_room
+                if tcp_seq_le(seg_end, wnd_end) != 0
+                    inet_tcp_reorder_store(s, seq, payload, payload_len)
+
+        if (flags & TCP_F_FIN) != 0
+            val fin_end = seq + u32(payload_len)
+            if fin_end == tcp_sockets[s].rcv_nxt
+                tcp_sockets[s].rcv_nxt = tcp_sockets[s].rcv_nxt + u32(1)
+                tcp_sockets[s].peer_fin = 1
+                did_fin = 1
+                // peer_fin transitions readability + hangup — fire so
+                // an epoll waiter sees EPOLLIN | EPOLLHUP immediately.
+                inet_epoll_fire(2, s)
+            else if tcp_seq_lt(tcp_sockets[s].rcv_nxt, fin_end) != 0
+                // FIN is out-of-order — stash its seq and process
+                // when drain catches up.
+                tcp_sockets[s].fin_seq = fin_end
+                tcp_sockets[s].fin_pending = 1
+
+        if did_data != 0
+            val drained = inet_tcp_drain_reorder(s)
+            if (drained & 2) != 0
+                did_fin = 1
+
+        if did_data != 0
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+            if tcp_sockets[s].recv_waiter >= 0
+                val mx = tcp_sockets[s].recv_maxlen
+                var give = tcp_sockets[s].recv_len
+                if give > mx
+                    give = mx
+                inet_tcp_reply_recv(s, give)
+        if did_fin != 0
+            inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+
+        // Re-ACK out-of-window segments (old data or dup FIN peer is
+        // retransmitting because an earlier ACK of ours was lost).
+        // Without this, peer keeps retransmitting until giveup+RST.
+        if did_data == 0 && did_fin == 0
+            if payload_len > 0 || (flags & TCP_F_FIN) != 0
+                inet_tcp_emit(s, TCP_F_ACK, tcp_sockets[s].snd_nxt, u32(0), 0)
+
+        val st2 = tcp_sockets[s].state
+        if st2 == TCP_STATE_ESTABLISHED
+            if did_fin != 0
+                tcp_sockets[s].state = TCP_STATE_CLOSE_WAIT
+                if tcp_sockets[s].recv_waiter >= 0
+                    if tcp_sockets[s].recv_len == 0
+                        inet_tcp_reply_recv(s, 0)
+        else if st2 == TCP_STATE_FIN_WAIT_1
+            if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                if tcp_sockets[s].peer_fin != 0
+                    // Our FIN acked and peer has FIN'd (either in this
+                    // segment — simultaneous close — or earlier while
+                    // our FIN was still unacked, which RFC 793 models
+                    // as the CLOSING state). Either way enter TIME_WAIT.
+                    inet_tcp_enter_time_wait(s)
+                else
+                    // Arm an idle timeout so the slot is reclaimed
+                    // even if the peer never FINs. Linux's default
+                    // tcp_fin_timeout is 60s; we match that.
+                    tcp_sockets[s].state = TCP_STATE_FIN_WAIT_2
+                    tcp_sockets[s].tw_deadline = int(monotonic_ms()) + TCP_FW2_MS
+        else if st2 == TCP_STATE_FIN_WAIT_2
+            if did_fin != 0
+                // Peer FIN after our FIN-ACK — enter TIME_WAIT.
+                inet_tcp_enter_time_wait(s)
+        else if st2 == TCP_STATE_LAST_ACK
+            if tcp_sockets[s].snd_una == tcp_sockets[s].snd_nxt
+                inet_tcp_close_slot(s, 0)
+
+
+Called from inet main loop on every wake. Scans every active
+socket for retransmit and TIME_WAIT deadlines.
+
+    inet_tcp_scan_timers()
+        val now = int(monotonic_ms())
+        var i = 0
+        while i < TCP_MAX_SOCKETS
+            if tcp_sockets[i].in_use != 0
+                val rtx = tcp_sockets[i].rtx_deadline
+                if rtx != 0
+                    if now >= rtx
+                        if tcp_sockets[i].retries >= TCP_MAX_RETRIES
+                            tcp_sockets[i].pending_error = 110  // ETIMEDOUT
+                            inet_tcp_close_slot(i, -1)
+                        else
+                            tcp_sockets[i].retries += 1
+                            inet_tcp_cwnd_on_rto(i)
+                            inet_tcp_retransmit(i)
+                            inet_tcp_rto_backoff(i)
+                            inet_tcp_arm_rtx(i)
+                // SO_SNDTIMEO: parked sender wakes with status=2 once
+                // its deadline elapses.  Caller (shim sys_write /
+                // sys_sendto_tcp) maps that to -EAGAIN, or returns
+                // accumulated `sent_total` if any chunk got through
+                // before the deadline.
+                if tcp_sockets[i].in_use != 0
+                    val sd = tcp_sockets[i].send_deadline
+                    if sd != 0 && tcp_sockets[i].send_waiter >= 0
+                        if now >= sd
+                            val w = tcp_sockets[i].send_waiter
+                            tcp_sockets[i].send_waiter = -1
+                            tcp_sockets[i].send_waiter_len = 0
+                            tcp_sockets[i].send_deadline = 0
+                            inet_tcp_reply_send(w, 2, 0)
+                // TCP_USER_TIMEOUT (RFC 5482) — abort the connection
+                // when no progress has been made on unacked data for
+                // `user_timeout_ms`.  Distinct from SO_SNDTIMEO:
+                // SNDTIMEO returns EAGAIN to the caller and leaves
+                // the connection alive; USER_TIMEOUT records a
+                // pending ETIMEDOUT and tears the slot down so the
+                // *next* read/write/getsockopt(SO_ERROR) surfaces 110
+                // (Linux semantics).  The earliest_unack_ms gate
+                // ensures we don't fire on idle connections that have
+                // simply gone quiet.
+                if tcp_sockets[i].in_use != 0
+                    val ut = tcp_sockets[i].user_timeout_ms
+                    val eu = tcp_sockets[i].earliest_unack_ms
+                    if ut > 0 && eu > 0
+                        if (now - eu) >= ut
+                            tcp_sockets[i].pending_error = 110  // ETIMEDOUT
+                            inet_tcp_close_slot(i, -1)
+                val tw = tcp_sockets[i].tw_deadline
+                if tw != 0
+                    if now >= tw
+                        inet_tcp_close_slot(i, 0)
+                // SO_KEEPALIVE — only fires on ESTABLISHED /
+                // CLOSE_WAIT (real connections with a peer to probe).
+                // SYN_SENT / SYN_RCVD have their own retransmit
+                // timer; LISTEN / TIME_WAIT have nothing to keep alive.
+                if tcp_sockets[i].in_use != 0
+                    if tcp_sockets[i].keepalive_on != 0
+                        val kst = tcp_sockets[i].state
+                        if kst == TCP_STATE_ESTABLISHED || kst == TCP_STATE_CLOSE_WAIT
+                            var idle_eff = 0
+                            var intvl_eff = 0
+                            var cnt_eff = 0
+                            inet_tcp_eff_keepalive(i, idle_eff, intvl_eff, cnt_eff)
+                            if tcp_sockets[i].keepalive_next_probe == 0
+                                // Idle timer just (re)started — schedule
+                                // first probe `idle_eff` ticks after last recv.
+                                val first_probe = tcp_sockets[i].last_recv_ms + idle_eff
+                                tcp_sockets[i].keepalive_next_probe = first_probe
+                            if now >= tcp_sockets[i].keepalive_next_probe
+                                if tcp_sockets[i].keepalive_probes >= cnt_eff
+                                    // Peer is dead. Close as -ETIMEDOUT.
+                                    tcp_sockets[i].pending_error = 110  // ETIMEDOUT
+                                    inet_tcp_close_slot(i, -1)
+                                else
+                                    // Probe: empty ACK at snd_una - 1
+                                    // (Linux's "1 byte before unacked"
+                                    // pattern). Peer ACKs back with the
+                                    // current ack number, which our
+                                    // handle_segment treats as fresh
+                                    // liveness and resets probes.
+                                    val probe_seq = tcp_sockets[i].snd_una - u32(1)
+                                    inet_tcp_emit(i, TCP_F_ACK, probe_seq, u32(0), 0)
+                                    tcp_sockets[i].keepalive_probes += 1
+                                    tcp_sockets[i].keepalive_next_probe = now + intvl_eff
+            i += 1
+
+    inet_tcp_retransmit(s: int)
+        val st = tcp_sockets[s].state
+        if st == TCP_STATE_SYN_SENT
+            inet_tcp_emit(s, TCP_F_SYN, tcp_sockets[s].iss, u32(0), 0)
+            return
+        if st == TCP_STATE_SYN_RCVD
+            inet_tcp_emit(s, TCP_F_SYN | TCP_F_ACK, tcp_sockets[s].iss, u32(0), 0)
+            return
+        if st == TCP_STATE_ESTABLISHED || st == TCP_STATE_CLOSE_WAIT
+            if tcp_sockets[s].send_len > 0
+                // Retransmit exactly one MSS-sized segment from the
+                // front of send_buf. cwnd has already been collapsed
+                // to TCP_MIN_CWND in scan_timers; subsequent ACKs
+                // will grow it back via slow start and drain_send
+                // will push more segments as the window opens.
+                var retx_len = tcp_sockets[s].send_len
+                if retx_len > TCP_MAX_SEG
+                    retx_len = TCP_MAX_SEG
+                val pmtu_cap = inet_tcp_eff_mss(s)
+                if retx_len > pmtu_cap
+                    retx_len = pmtu_cap
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_PSH,
+                    tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
+                    retx_len)
+                val retx_end = tcp_sockets[s].snd_una + u32(retx_len)
+                tcp_sockets[s].snd_nxt = retx_end
+            return
+        if st == TCP_STATE_FIN_WAIT_1
+            // If data was still in flight when close() ran, resend it
+            // together with the FIN. A FIN-only retransmit leaves the
+            // peer rejecting our FIN as out-of-window until giveup.
+            if tcp_sockets[s].send_len > 0
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN | TCP_F_PSH,
+                    tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
+                    tcp_sockets[s].send_len)
+            else
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
+                    tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
+            return
+        if st == TCP_STATE_LAST_ACK
+            if tcp_sockets[s].send_len > 0
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN | TCP_F_PSH,
+                    tcp_sockets[s].snd_una, tcp_sockets[s].snd_una,
+                    tcp_sockets[s].send_len)
+            else
+                inet_tcp_emit(s, TCP_F_ACK | TCP_F_FIN,
+                    tcp_sockets[s].snd_nxt - u32(1), u32(0), 0)
+            return

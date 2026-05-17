@@ -1,0 +1,363 @@
+POSIX shim — INET client wire helpers + SCM_RIGHTS cmsg machinery
+==================================================================
+
+Same-module sibling of `shim.lsysl`. Owns the shim-side wire
+helpers that talk to the inet server (INET_CMD_* request /
+reply encoders) and the SCM_RIGHTS in-flight queued-ref
+machinery — both the inet-side (`shim_inet_bump_oft_ref` etc.)
+and the VFS-side (`shim_vfs_oft_queue_ref` etc.) helpers used
+by sendmsg / recvmsg to keep cmsg fds alive while in transit.
+
+Lifted out of `shim.lsysl` to keep that file focussed on the
+per-process fd table + per-syscall handlers.
+
+    module oskit.posix
+
+    import oskit.ipc.{port_lookup, ipc_send}
+
+
+INET client helpers (shim-side)
+-------------------------------
+
+Minimal wire helpers that mirror `oskit/servers/inet.lsysl`'s
+message layout. The shim talks to the inet server via the same
+IPC protocol that `oskit/net/client.lsysl` uses from user space;
+we replicate the writers here instead of importing `oskit.net` to
+keep the kernel link free of the full socket-API module.
+
+    const INET_CMD_SOCKET      = 1
+    const INET_CMD_BIND        = 2
+    const INET_CMD_SENDTO      = 3
+    const INET_CMD_RECVFROM    = 4
+    const INET_CMD_CLOSE       = 5
+    const INET_CMD_TCP_CONNECT = 10
+    const INET_CMD_TCP_SEND    = 11
+    const INET_CMD_TCP_RECV    = 12
+    const INET_CMD_TCP_CLOSE   = 13
+    const INET_CMD_TCP_LISTEN  = 14
+    const INET_CMD_TCP_ACCEPT  = 15
+    const INET_CMD_UDP_GETNAME = 24
+    const INET_CMD_TCP_GETNAME = 25
+    const INET_CMD_RECVFROM_TIMEOUT = 18
+    const INET_CMD_TCP_RECV_NB = 26
+    const INET_CMD_TCP_SHUTDOWN = 27
+    const INET_CMD_POLL        = 28
+    const INET_CMD_EPOLL_SUB   = 29
+    const INET_CMD_EPOLL_UNSUB = 30
+    const INET_CMD_EPOLL_INST_CLOSE = 31
+    const INET_CMD_TCP_ACCEPT_NB = 32
+    const INET_CMD_TCP_CONNECT_NB = 33
+    const INET_CMD_TCP_SETBUF  = 34
+    const INET_CMD_TCP_GETBUF  = 35
+    const INET_CMD_TCP_ABORT_CLOSE = 36
+    const INET_CMD_TCP_SET_KEEPALIVE = 37
+    const INET_CMD_TCP_SET_KEEPOPT = 39
+    const INET_CMD_TCP_GET_KEEPOPT = 40
+    const INET_CMD_TCP_GET_ERR     = 41
+    const INET_CMD_TCP_GET_INFO    = 43
+    const INET_CMD_TCP_SET_USERTO  = 52
+    const INET_CMD_TCP_BLACKHOLE_ACKS_TEST = 53
+    const INET_CMD_ADD_OWNER_C     = 58
+
+    const INET_MAX_TCP_SEG     = 480
+
+    val POSIX_AF_UNSPEC      = 0
+    val POSIX_AF_UNIX        = 1
+    val POSIX_AF_INET        = 2
+    val POSIX_SOCK_DGRAM     = 2
+    val POSIX_SOCK_STREAM    = 1
+
+
+AF_UNIX wire protocol mirror for the unix server. Track
+`oskit/servers/unix.lsysl`. Path is 108 bytes max
+(POSIX `sockaddr_un.sun_path[108]`).
+
+    const UNIX_CMD_SOCKET    = 1
+    const UNIX_CMD_BIND      = 2
+    const UNIX_CMD_CONNECT   = 3
+    const UNIX_CMD_LISTEN    = 4
+    const UNIX_CMD_ACCEPT    = 5
+    const UNIX_CMD_SENDTO    = 6
+    const UNIX_CMD_RECVFROM  = 7
+    const UNIX_CMD_SEND      = 8
+    const UNIX_CMD_RECV      = 9
+    const UNIX_CMD_CLOSE     = 10
+    const UNIX_CMD_PID_EXIT  = 11
+    const UNIX_CMD_SENDMSG   = 12
+    const UNIX_CMD_RECVMSG   = 13
+    const UNIX_CMD_ACCEPT_NB        = 14
+    const UNIX_CMD_RECVFROM_NB      = 15
+    const UNIX_CMD_RECV_NB          = 16
+    const UNIX_CMD_POLL             = 17
+    const UNIX_CMD_EPOLL_SUB        = 18
+    const UNIX_CMD_EPOLL_UNSUB      = 19
+    const UNIX_CMD_EPOLL_INST_CLOSE = 20
+    const UNIX_CMD_RECVMSG_NB       = 21
+    const UNIX_CMD_GETSOCKNAME      = 22
+    const UNIX_CMD_GETPEERNAME      = 23
+    const UNIX_CMD_SOCKETPAIR       = 24
+    const UNIX_CMD_SHUTDOWN         = 25
+    const UNIX_CMD_PEERCRED         = 26
+    const UNIX_CMD_DISCONNECT       = 27
+
+    const UNIX_PATH_MAX      = 108
+    const UNIX_SCM_MAX_FDS   = 4
+
+SCM_RIGHTS cmsg constants. SOL_SOCKET / SCM_RIGHTS match
+Linux UAPI; the cmsghdr is 16 bytes on LP64
+(`size_t cmsg_len + int cmsg_level + int cmsg_type`).
+
+    val SHIM_SOL_SOCKET      = 1
+    val SHIM_SCM_RIGHTS      = 1
+    val SHIM_CMSG_HDR_LEN    = 16
+
+sendmsg/recvmsg gather/scatter caps. `SHIM_IOV_MAX` bounds
+the iovec array we'll walk; `SHIM_MSG_MAX` bounds the
+total payload bytes (Ethernet MTU for UDP, plenty for TCP).
+
+    val SHIM_IOV_MAX         = 8
+    val SHIM_MSG_MAX         = 1472
+
+socket(2) / accept4(2) flag bits OR'd into `stype` / `flags`.
+SOCK_NONBLOCK is honoured (mirrored into the slot's flags field
+as `POSIX_O_NONBLOCK`); SOCK_CLOEXEC is accepted and ignored
+(no fork/exec yet). Used by both `sys_socket` and `sys_accept4`,
+so they live up here near `POSIX_SOCK_DGRAM`.
+
+    val POSIX_SOCK_NONBLOCK  = 2048
+    val POSIX_SOCK_CLOEXEC   = 524288
+
+POSIX `O_NONBLOCK` is Linux octal 04000 = 2048. We only track this
+flag today; other open(2) flags (O_APPEND etc.) would need the
+shim to honour them, so we mask them off on `F_SETFL`.
+
+`O_CREAT` (0o100) and `O_EXCL` (0o200) are inspected once during
+`sys_openat` to drive the create-then-retry path; we don't store
+them on the fd so they won't surface from `F_GETFL`. `O_TRUNC`
+(0o1000) is parsed but left as a deferred — TFS has no truncate
+operation today, so an `open(O_WRONLY|O_TRUNC)` against an
+existing file just rewrites starting at offset 0 (the caller is
+expected to know whether the residual tail matters).
+
+    val POSIX_O_NONBLOCK     = 2048
+    val POSIX_O_CREAT        = 64
+    val POSIX_O_EXCL         = 128
+    val POSIX_O_TRUNC        = 512
+
+POSIX recv()/send() flags. Currently only DONTWAIT (per-call NB
+override) and PEEK (read without dequeuing) are honored — the
+others are accepted-and-ignored by the recv path, never inspected
+by send.
+
+    val POSIX_MSG_PEEK       = 2
+    val POSIX_MSG_DONTWAIT   = 64
+
+fcntl command codes (`<fcntl.h>` in musl arch).
+
+    val POSIX_F_DUPFD          = 0
+    val POSIX_F_GETFD          = 1
+    val POSIX_F_SETFD          = 2
+    val POSIX_F_GETFL          = 3
+    val POSIX_F_SETFL          = 4
+    val POSIX_F_DUPFD_CLOEXEC  = 1030
+    val POSIX_F_SETPIPE_SZ     = 1031
+    val POSIX_F_GETPIPE_SZ     = 1032
+
+    var inet_port_cached = -1
+
+    inet_get_port() -> int
+        if inet_port_cached < 0
+            inet_port_cached = port_lookup("inet")
+        inet_port_cached
+
+    var unix_port_cached = -1
+
+    unix_get_port() -> int
+        if unix_port_cached < 0
+            unix_port_cached = port_lookup("unix")
+        unix_port_cached
+
+Phase 2B chunk 3 — bump or drop one in-flight SCM_RIGHTS
+reference on a TCP / UDP slot. The wire format mirrors
+`inet_handle_queue_ref` directly: 5-byte request, 1-byte reply.
+
+`kind` is the POSIX_FD_* enum value (4=UDP, 5=TCP); we map to
+inet's 0/1 internal kind. `delta` must be +1 or -1; the inet
+server rejects any other byte. The +1 leg is balanced by either
+the receiver shim's drain (`-1` after ADD_OWNER lands) or the
+unix server's drop-on-close path (`-1` from
+`unix_inet_queue_ref_drop`). Returns 0 on success, -1 otherwise.
+
+Add `new_tid` to the inet slot's owners ring. Mirrors the
+inline `INET_CMD_ADD_OWNER` send from `posix_fd_transplant`,
+factored out so the SCM_RIGHTS receive path can reuse it.
+
+    shim_inet_add_owner(posix_kind: int, handle: int, new_tid: int) -> int
+        if new_tid <= 0
+            return -1
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var inet_kind = -1
+        if posix_kind == POSIX_FD_UDP_SOCKET
+            inet_kind = 0
+        if posix_kind == POSIX_FD_TCP_SOCKET
+            inet_kind = 1
+        if inet_kind < 0
+            return -1
+        var msg: [8]byte
+        msg[0] = byte(58)
+        msg[1] = byte(inet_kind & 0xff)
+        msg[2] = byte((handle >> 8) & 0xff)
+        msg[3] = byte(handle & 0xff)
+        msg[4] = byte((new_tid >> 24) & 0xff)
+        msg[5] = byte((new_tid >> 16) & 0xff)
+        msg[6] = byte((new_tid >> 8) & 0xff)
+        msg[7] = byte(new_tid & 0xff)
+        var reply: [1]byte
+        val rc = ipc_send(port, &msg[0], 8, &reply[0], 1)
+        if rc < 0
+            return -1
+        if int(reply[0]) & 0xff != 0
+            return -1
+        0
+
+
+Phase 2B chunk 4 — VFS-side queued-ref helpers, parallel to the
+inet ones above. Two flavors of the bump path:
+
+- `shim_vfs_oft_queue_ref_by_handle(src_pid, src_handle, delta)`
+  — combined lookup-and-bump. The shim doesn't know the target's
+  OFT idx until vfs resolves it; one IPC round-trips both
+  pieces. Used by the SENDMSG path on the +1 leg. Returns the
+  OFT idx on success, -1 on failure.
+- `shim_vfs_oft_queue_ref(oft_idx, delta)` — bump or drop a
+  known OFT idx. Used by the receiver shim's -1 leg after
+  `REGISTER_FD_BY_OFT` succeeds, and by the sender shim's
+  rollback path (where the +1's returned OFT idx is in scope).
+
+    shim_vfs_oft_queue_ref_by_handle(src_pid: int, src_handle: int,
+            delta: int) -> int
+        val port = vfs_get_port()
+        if port < 0
+            return -1
+        var delta_byte = 0
+        if delta == 1
+            delta_byte = 1
+        else if delta == -1
+            delta_byte = 0xff
+        else
+            return -1
+        var msg: [10]byte
+        msg[0] = byte(26)
+        msg[1] = byte((src_pid >> 24) & 0xff)
+        msg[2] = byte((src_pid >> 16) & 0xff)
+        msg[3] = byte((src_pid >> 8) & 0xff)
+        msg[4] = byte(src_pid & 0xff)
+        msg[5] = byte((src_handle >> 24) & 0xff)
+        msg[6] = byte((src_handle >> 16) & 0xff)
+        msg[7] = byte((src_handle >> 8) & 0xff)
+        msg[8] = byte(src_handle & 0xff)
+        msg[9] = byte(delta_byte & 0xff)
+        var reply: [5]byte
+        val rc = ipc_send(port, &msg[0], 10, &reply[0], 5)
+        if rc < 0
+            return -1
+        if int(reply[0]) & 0xff != 0
+            return -1
+        val b1 = int(reply[1]) & 0xff
+        val b2 = int(reply[2]) & 0xff
+        val b3 = int(reply[3]) & 0xff
+        val b4 = int(reply[4]) & 0xff
+        (b1 << 24) | (b2 << 16) | (b3 << 8) | b4
+
+    shim_vfs_oft_queue_ref(oft_idx: int, delta: int) -> int
+        val port = vfs_get_port()
+        if port < 0
+            return -1
+        var delta_byte = 0
+        if delta == 1
+            delta_byte = 1
+        else if delta == -1
+            delta_byte = 0xff
+        else
+            return -1
+        var msg: [6]byte
+        msg[0] = byte(27)
+        msg[1] = byte((oft_idx >> 24) & 0xff)
+        msg[2] = byte((oft_idx >> 16) & 0xff)
+        msg[3] = byte((oft_idx >> 8) & 0xff)
+        msg[4] = byte(oft_idx & 0xff)
+        msg[5] = byte(delta_byte & 0xff)
+        var reply: [1]byte
+        val rc = ipc_send(port, &msg[0], 6, &reply[0], 1)
+        if rc < 0
+            return -1
+        if int(reply[0]) & 0xff != 0
+            return -1
+        0
+
+
+Allocate a fresh dst-pid VFS handle pointing at OFT `oft_idx`.
+Used by the receiver shim's STREAM RECVMSG drain when a cmsg
+tuple carries `kind = POSIX_FD_FILE`. Returns the new handle
+(>= 0) on success, -1 on failure.
+
+    shim_vfs_register_fd_by_oft(dst_pid: int, oft_idx: int) -> int
+        val port = vfs_get_port()
+        if port < 0
+            return -1
+        var msg: [9]byte
+        msg[0] = byte(28)
+        msg[1] = byte((dst_pid >> 24) & 0xff)
+        msg[2] = byte((dst_pid >> 16) & 0xff)
+        msg[3] = byte((dst_pid >> 8) & 0xff)
+        msg[4] = byte(dst_pid & 0xff)
+        msg[5] = byte((oft_idx >> 24) & 0xff)
+        msg[6] = byte((oft_idx >> 16) & 0xff)
+        msg[7] = byte((oft_idx >> 8) & 0xff)
+        msg[8] = byte(oft_idx & 0xff)
+        var reply: [5]byte
+        val rc = ipc_send(port, &msg[0], 9, &reply[0], 5)
+        if rc < 0
+            return -1
+        if int(reply[0]) & 0xff != 0
+            return -1
+        val b1 = int(reply[1]) & 0xff
+        val b2 = int(reply[2]) & 0xff
+        val b3 = int(reply[3]) & 0xff
+        val b4 = int(reply[4]) & 0xff
+        (b1 << 24) | (b2 << 16) | (b3 << 8) | b4
+
+
+    shim_inet_queue_ref(posix_kind: int, handle: int, delta: int) -> int
+        val port = inet_get_port()
+        if port < 0
+            return -1
+        var inet_kind = -1
+        if posix_kind == POSIX_FD_UDP_SOCKET
+            inet_kind = 0
+        if posix_kind == POSIX_FD_TCP_SOCKET
+            inet_kind = 1
+        if inet_kind < 0
+            return -1
+        var delta_byte = 0
+        if delta == 1
+            delta_byte = 1
+        else if delta == -1
+            delta_byte = 0xff
+        else
+            return -1
+        var msg: [5]byte
+        msg[0] = byte(59)
+        msg[1] = byte(inet_kind & 0xff)
+        msg[2] = byte((handle >> 8) & 0xff)
+        msg[3] = byte(handle & 0xff)
+        msg[4] = byte(delta_byte & 0xff)
+        var reply: [1]byte
+        val rc = ipc_send(port, &msg[0], 5, &reply[0], 1)
+        if rc < 0
+            return -1
+        if int(reply[0]) & 0xff != 0
+            return -1
+        0

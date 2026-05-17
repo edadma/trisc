@@ -43,6 +43,8 @@ object OskitDemoBuilder:
   private lazy val pbkdf2Sysl: String    = readLsysl("std/crypto/pbkdf2/pbkdf2.lsysl")
   private lazy val pmSrvSysl: String     = readLsysl("oskit/servers/pm.lsysl")
   private lazy val vfsSrvSysl: String    = readLsysl("oskit/servers/vfs.lsysl")
+  private lazy val vfsPipeSysl: String   = readLsysl("oskit/servers/vfs_pipe.lsysl")
+  private lazy val vfsTcpSysl: String    = readLsysl("oskit/servers/vfs_tcp.lsysl")
   private lazy val rsSrvSysl: String     = readLsysl("oskit/servers/rs.lsysl")
   private lazy val dsSrvSysl: String     = readLsysl("oskit/servers/ds.lsysl")
   private lazy val inetSrvSysl: String   = readLsysl("oskit/servers/inet.lsysl")
@@ -53,8 +55,20 @@ object OskitDemoBuilder:
   private lazy val pendingUdpSysl: String = readLsysl("oskit/servers/pending_udp.lsysl")
   private lazy val pingReplySysl: String = readLsysl("oskit/servers/ping_reply.lsysl")
   private lazy val tcpSysl: String = readLsysl("oskit/servers/tcp.lsysl")
+  private lazy val tcpSelftestsSysl: String = readLsysl("oskit/servers/tcp_selftests.lsysl")
+  private lazy val tcpStateSysl: String = readLsysl("oskit/servers/tcp_state.lsysl")
+  private lazy val tcpEmitSysl: String = readLsysl("oskit/servers/tcp_emit.lsysl")
+  private lazy val tcpSetoptsSysl: String = readLsysl("oskit/servers/tcp_setopts.lsysl")
+  private lazy val tcpOptsSysl: String = readLsysl("oskit/servers/tcp_opts.lsysl")
   private lazy val udpSysl: String = readLsysl("oskit/servers/udp.lsysl")
+  private lazy val udpHashSysl: String = readLsysl("oskit/servers/udp_hash.lsysl")
+  private lazy val inetTcpHandlersSysl: String = readLsysl("oskit/servers/inet_tcp_handlers.lsysl")
+  private lazy val inetDispatchSysl: String = readLsysl("oskit/servers/inet_dispatch.lsysl")
+  private lazy val inetUdpInSysl: String = readLsysl("oskit/servers/inet_udp_in.lsysl")
   private lazy val unixSrvSysl: String   = readLsysl("oskit/servers/unix.lsysl")
+  private lazy val unixScmSysl: String   = readLsysl("oskit/servers/unix_scm.lsysl")
+  private lazy val unixDataSysl: String  = readLsysl("oskit/servers/unix_data.lsysl")
+  private lazy val unixConnSysl: String  = readLsysl("oskit/servers/unix_conn.lsysl")
   private lazy val stdNetPacketSysl: String = readLsysl("std/net/packet.lsysl")
   private lazy val stdNetSysl: String    = readLsysl("std/net/net.lsysl")
   private lazy val halMemSysl: String   = readLsysl("oskit/hal/mem_dma.lsysl")
@@ -368,7 +382,9 @@ import oskit.hal.memset
         )),
       "vfs"  -> compileServerTrb("oskit/servers/vfs", "oskit.servers", vfsSrvSysl, "vfs_server",
         extraSources = Map(
-          "oskit/config/config" -> configSysl,
+          "oskit/servers/vfs_pipe" -> vfsPipeSysl,
+          "oskit/servers/vfs_tcp"  -> vfsTcpSysl,
+          "oskit/config/config"    -> configSysl,
         )),
       "pm"   -> compileServerTrb("oskit/servers/pm", "oskit.servers", pmSrvSysl, "pm_server",
         extraSources = Map(
@@ -388,12 +404,26 @@ import oskit.hal.memset
           "oskit/servers/pending_udp" -> pendingUdpSysl,
           "oskit/servers/ping_reply" -> pingReplySysl,
           "oskit/servers/tcp"        -> tcpSysl,
+          "oskit/servers/tcp_state"  -> tcpStateSysl,
+          "oskit/servers/tcp_emit"   -> tcpEmitSysl,
+          "oskit/servers/tcp_setopts" -> tcpSetoptsSysl,
+          "oskit/servers/tcp_selftests" -> tcpSelftestsSysl,
+          "oskit/servers/tcp_opts"      -> tcpOptsSysl,
           "oskit/servers/udp"        -> udpSysl,
+          "oskit/servers/udp_hash"   -> udpHashSysl,
+          "oskit/servers/inet_tcp_handlers" -> inetTcpHandlersSysl,
+          "oskit/servers/inet_dispatch"     -> inetDispatchSysl,
+          "oskit/servers/inet_udp_in"       -> inetUdpInSysl,
           "std/net/net"              -> stdNetSysl,
           "std/net/packet"           -> stdNetPacketSysl,
           "std/debug/debug"          -> debugSysl,
         )),
-      "unix" -> compileServerTrb("oskit/servers/unix", "oskit.servers", unixSrvSysl, "unix_server"),
+      "unix" -> compileServerTrb("oskit/servers/unix", "oskit.servers", unixSrvSysl, "unix_server",
+        extraSources = Map(
+          "oskit/servers/unix_scm"  -> unixScmSysl,
+          "oskit/servers/unix_data" -> unixDataSysl,
+          "oskit/servers/unix_conn" -> unixConnSysl,
+        )),
       "init"  -> compileServerTrb("oskit/apps/init/init", "oskit.apps.init", initSysl, "init",
         extraSources = Map(
           "oskit/fs/client"      -> fsClientSysl,

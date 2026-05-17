@@ -1,0 +1,245 @@
+OSKit INET TCP — setsockopt / getsockopt helpers
+================================================
+
+Same-module sibling of `tcp.lsysl`. Owns the small but talkative
+cluster of `set_*` / `get_*` helpers that back the SO_SNDBUF /
+SO_RCVBUF / SO_KEEPALIVE / TCP_KEEPIDLE / TCP_KEEPINTVL /
+TCP_KEEPCNT / SLIX_TCP_ACK_BLACKHOLE / SLIX_TCP_USERTO sockopt
+ABIs:
+
+* `inet_tcp_resize_buf` — SO_SNDBUF / SO_RCVBUF
+* `inet_tcp_set_keepalive` — SO_KEEPALIVE on/off
+* `inet_tcp_set_userto` — RFC 5482 TCP_USER_TIMEOUT
+* `inet_tcp_set_ack_blackhole` — test-only ACK suppression
+* `inet_tcp_set_keepopt` / `inet_tcp_get_keepopt` — keepalive tunables
+* `inet_tcp_eff_keepalive` — effective values (overrides + defaults)
+* `inet_tcp_get_bufsize` — getsockopt(SO_SNDBUF/SO_RCVBUF)
+
+Sockopts live together because they share validation patterns
+(slot ownership, state guards, the [TCP_BUF_MIN, TCP_BUF_MAX]
+clamp) and have no callers outside the command-handler layer
+in `inet_tcp_handlers.lsysl`.
+
+    module oskit.servers
+
+    import oskit.services.{monotonic_ms}
+    import std.alloc.{free, malloc}
+
+
+setsockopt(SO_SNDBUF) / setsockopt(SO_RCVBUF) implementation. Resizes
+the heap-backed send or recv buffer on socket `s`. `kind` selects
+which buffer (0 = SNDBUF, 1 = RCVBUF). `size` is the requested new
+size in bytes (clamped to [TCP_BUF_MIN, TCP_BUF_MAX]).
+
+Resize only happens in the CLOSED state with no buffered data. After
+connect/listen/accept, Linux silently accepts the call but ignores
+the new value (`tcp_set_rcvbuf` warns at most once); we mirror that
+"return 0, no-op" behavior so well-behaved servers that call
+`setsockopt` after `accept` don't get spurious EINVALs. Returns 0 on
+success (whether or not a resize actually happened), -1 on bad fd or
+out-of-range kind.
+
+    inet_tcp_resize_buf(s: int, kind: int, size: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if kind != 0 && kind != 1
+            return -1
+        var clamped = size
+        if clamped < TCP_BUF_MIN
+            clamped = TCP_BUF_MIN
+        if clamped > TCP_BUF_MAX
+            clamped = TCP_BUF_MAX
+        // Phase 2 chunk 2 — per-tid TCP buffer-memory cap.  Linux-
+        // ish silent clamp: if growing the buffer would push owner
+        // over TCP_PER_TID_BUF_MAX, shrink the request to whatever
+        // budget remains. owners_count == 0 means alloc has run but
+        // begin_*/handle_passive_syn hasn't stamped yet — skip the
+        // check; the caller will own the budget after stamping.
+        val owner = inet_tcp_owners_primary(s)
+        if owner >= 0
+            var current = tcp_sockets[s].send_buf_size
+            if kind != 0
+                current = tcp_sockets[s].recv_buf_size
+            if clamped > current
+                val others = inet_tcp_buf_bytes_owner(owner) - current
+                val budget = TCP_PER_TID_BUF_MAX - others
+                if clamped > budget
+                    clamped = budget
+                if clamped < TCP_BUF_MIN
+                    return 0
+        // Only the CLOSED state with empty buffers is a safe resize
+        // window: connect/listen latch the buffer pointer into flow-
+        // control state, and copying live in-flight data on a
+        // realloc would race the receive path.
+        if tcp_sockets[s].state != TCP_STATE_CLOSED
+            return 0
+        if kind == 0
+            if tcp_sockets[s].send_len != 0
+                return 0
+            if clamped == tcp_sockets[s].send_buf_size
+                return 0
+            free(tcp_sockets[s].send_buf_ptr)
+            tcp_sockets[s].send_buf_ptr = malloc(i64(clamped))
+            tcp_sockets[s].send_buf_size = clamped
+        else
+            if tcp_sockets[s].recv_len != 0
+                return 0
+            if clamped == tcp_sockets[s].recv_buf_size
+                return 0
+            free(tcp_sockets[s].recv_buf_ptr)
+            tcp_sockets[s].recv_buf_ptr = malloc(i64(clamped))
+            tcp_sockets[s].recv_buf_size = clamped
+        0
+
+
+setsockopt(SO_KEEPALIVE) — flips the per-socket keepalive flag.
+Turning it on baselines `last_recv_ms` to now and clears any
+in-flight probe count, so a freshly-enabled socket waits a full
+`TCP_KEEPALIVE_IDLE_MS` from this point before the first probe.
+Turning it off zeroes the schedule.
+
+Idempotent (no-op for same-state calls).  Returns 0 on success,
+-1 on bad fd / closed slot.
+
+    inet_tcp_set_keepalive(s: int, on: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if on != 0
+            tcp_sockets[s].keepalive_on = 1
+            tcp_sockets[s].last_recv_ms = int(monotonic_ms())
+            tcp_sockets[s].keepalive_probes = 0
+            tcp_sockets[s].keepalive_next_probe = 0
+        else
+            tcp_sockets[s].keepalive_on = 0
+            tcp_sockets[s].keepalive_probes = 0
+            tcp_sockets[s].keepalive_next_probe = 0
+        0
+
+
+setsockopt(TCP_USER_TIMEOUT) — write the per-socket cap in
+milliseconds (the unit the user already passed at the POSIX
+boundary; RFC 5482 §3 is in ms, the man page is misleading).
+0 disables (Linux's "system default" semantics — slix has no
+sysctl for this, so 0 means "no cap").
+
+Returns 0 on success, -1 on bad fd.
+
+    inet_tcp_set_userto(s: int, timeout_ms: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        var t = timeout_ms
+        if t < 0
+            t = 0
+        tcp_sockets[s].user_timeout_ms = t
+        0
+
+
+Test-only: arm or disarm the ACK blackhole on a slot.  When set,
+`inet_tcp_emit` drops pure-ACK segments from this slot, so the
+peer never sees acknowledgements while SYN/FIN/RST handshake
+flow continues.  Used by `slix/test/musrto.c` to drive a
+TCP_USER_TIMEOUT abort over the loopback fastpath, which would
+otherwise ACK every segment synchronously.
+
+Returns 0 on success, -1 on bad fd.
+
+    inet_tcp_set_ack_blackhole(s: int, on: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if on != 0
+            tcp_sockets[s].ack_blackholed = 1
+        else
+            tcp_sockets[s].ack_blackholed = 0
+        0
+
+
+setsockopt(TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT) — write a
+per-socket override that scan_timers consults instead of the
+global default. `kind` selects which option (0 = idle, 1 = intvl,
+2 = cnt). Idle/intvl arrive in *milliseconds* (the shim has already
+converted from seconds via `secs * 1000`); cnt is a raw probe count.
+Clamp to a non-zero positive — 0 is reserved internally to mean
+"use default", so a caller passing 0 still routes to the global
+constant. Resets the probe schedule so the new cadence takes
+effect on the next scan, regardless of any in-flight probe.
+
+Returns 0 on success, -1 on bad fd / unknown kind.
+
+    inet_tcp_set_keepopt(s: int, kind: int, value: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        var v = value
+        if v < 0
+            v = 0
+        if kind == 0
+            tcp_sockets[s].keepalive_idle = v
+        else if kind == 1
+            tcp_sockets[s].keepalive_intvl = v
+        else if kind == 2
+            tcp_sockets[s].keepalive_cnt = v
+        else
+            return -1
+        // Force a reschedule on the next scan: any cached probe
+        // deadline was derived from the old cadence and would
+        // misbehave (probe too soon / too late) under the new
+        // values.
+        tcp_sockets[s].keepalive_next_probe = 0
+        0
+
+
+getsockopt(TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT) — read the
+persisted per-socket override. Returns the *milliseconds* / count.
+The caller (typically the shim) is responsible for converting back
+to seconds. Returns -1 on bad fd / unknown kind. A 0 reply means
+"using the global default" — distinct from a real 0, which is
+forbidden by the setter clamp.
+
+    inet_tcp_get_keepopt(s: int, kind: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if kind == 0
+            return tcp_sockets[s].keepalive_idle
+        if kind == 1
+            return tcp_sockets[s].keepalive_intvl
+        if kind == 2
+            return tcp_sockets[s].keepalive_cnt
+        -1
+
+
+Resolve the effective keepalive timing for socket `s`. Returns
+the values scan_timers should use, falling back to the global
+default whenever a per-socket override is 0. Centralized so the
+fallback rule stays in one place rather than duplicated three
+times in scan_timers.
+
+    inet_tcp_eff_keepalive(s: int, out idle: int, out intvl: int, out cnt: int)
+        val raw_idle = tcp_sockets[s].keepalive_idle
+        val raw_intvl = tcp_sockets[s].keepalive_intvl
+        val raw_cnt = tcp_sockets[s].keepalive_cnt
+        idle = if raw_idle != 0 then raw_idle else TCP_KEEPALIVE_IDLE_MS
+        intvl = if raw_intvl != 0 then raw_intvl else TCP_KEEPALIVE_INTVL_MS
+        cnt = if raw_cnt != 0 then raw_cnt else TCP_KEEPALIVE_MAX_PROBES
+
+
+    inet_tcp_get_bufsize(s: int, kind: int) -> int
+        if s < 0 || s >= TCP_MAX_SOCKETS
+            return -1
+        if tcp_sockets[s].in_use == 0
+            return -1
+        if kind == 0
+            return tcp_sockets[s].send_buf_size
+        if kind == 1
+            return tcp_sockets[s].recv_buf_size
+        -1

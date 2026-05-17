@@ -49,6 +49,7 @@ SYSL_FILES=(
     oskit/services/services.lsysl
     std/alloc/alloc.lsysl
     oskit/posix/shim.lsysl
+    oskit/posix/shim_inet_cmsg.lsysl
     oskit/posix/inet.lsysl
     oskit/posix/unix.lsysl
     oskit/posix/fs.lsysl
