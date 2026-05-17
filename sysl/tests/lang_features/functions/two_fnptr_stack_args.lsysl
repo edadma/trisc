@@ -1,0 +1,136 @@
+Two consecutive FuncType stack args don't corrupt adjacent args
+===============================================================
+
+Pins the bug from `feedback_sysl_trisc_two_fnptr_then_scalar.md`.
+
+TRISC `evalAndPushArg` (and the matching TCall regArg pre-eval)
+used to **leak** the 16-byte source descriptor temp allocated by
+`TFuncRef` rather than rewinding it before pushing the
+destination pair. With two adjacent FuncType args plus a scalar
+neighbour, the leaks interleaved between adjacent destination
+slots in the callee's stack-arg region, shifting every
+subsequent arg off its expected offset. The callee then read
+`g` from `f`'s leaked temp and `x` from `g`'s leaked temp —
+both 16B in the wrong place.
+
+The fix gates the rewind on `arg.typ.isInstanceOf[FuncType]`
+specifically (env_ptr never points into the temp), keeping the
+existing leak for `InterfaceType` (where inline iface
+construction stores `data_ptr` into the same temp block —
+rewinding would reclaim the struct before the callee
+dereferences `data_ptr`).
+
+Helper fns in this file exercise every shape the original repro
+hit: two fnptrs first then int, scalar first, fnptr-int-fnptr
+sandwich, and the indirect call (`g(f(x))`) over distinct fns
+so the bug can't hide behind the symmetry of identical args.
+
+    module sysl.tests.lang_features
+
+    incr(x: int) -> int = x + 1
+
+    dbl(x: int) -> int = x * 2
+
+Two fnptrs then scalar
+----------------------
+
+The exact failing signature from the memo. Three params, first
+in r1 by TRISC ABI, second and third on the stack. `g` (second
+fnptr, 16 bytes) and `x` (scalar, 8 bytes) must land at
+contiguous fp+24 / fp+40 slots in the callee.
+
+    take_two_fnptr_then_int(f: (int) -> int, g: (int) -> int, x: int) -> int
+        g(f(x))
+
+    #test
+    test_two_fnptr_then_int_distinct_fns() -> unit
+        // distinct fns prove `g` isn't being read from `f`'s leaked
+        // temp — that would silently give incr(incr(5)) = 7 by chance.
+        val r = take_two_fnptr_then_int(incr, dbl, 5)
+        // (5+1)*2 = 12
+        assert(r == 12, s"expected 12 = dbl(incr(5)), got $r")
+
+    #test
+    test_two_fnptr_then_int_symmetric() -> unit
+        // also pin the symmetric case so regression catches a fix
+        // that only happens to work on distinct fns.
+        val r = take_two_fnptr_then_int(incr, incr, 5)
+        // incr(incr(5)) = 7
+        assert(r == 7, s"expected 7 = incr(incr(5)), got $r")
+
+Scalar first, then two fnptrs
+-----------------------------
+
+Reg arg is scalar (5), both fnptrs on the stack. The reg-arg
+path no longer needs the rewind (scalar isn't an aggregate),
+but the two consecutive FuncType stack-arg pushes still must
+not interleave temps.
+
+    take_int_first(x: int, f: (int) -> int, g: (int) -> int) -> int
+        g(f(x))
+
+    #test
+    test_int_first_distinct_fns() -> unit
+        val r = take_int_first(5, incr, dbl)
+        assert(r == 12, s"expected 12, got $r")
+
+    #test
+    test_int_first_swap() -> unit
+        val r = take_int_first(5, dbl, incr)
+        // dbl(5)=10, then incr(10)=11
+        assert(r == 11, s"expected 11, got $r")
+
+Fnptr, int, fnptr sandwich
+--------------------------
+
+The alternating pattern that worked even before the fix. Keep
+it here so regressions on the alternating layout are caught too.
+
+    take_fnptr_int_fnptr(f: (int) -> int, x: int, g: (int) -> int) -> int
+        g(f(x))
+
+    #test
+    test_fnptr_int_fnptr() -> unit
+        val r = take_fnptr_int_fnptr(incr, 5, dbl)
+        assert(r == 12, s"expected 12, got $r")
+
+Compose helper — fnptrs first then int, called indirectly
+---------------------------------------------------------
+
+`compose(f, g, x) = g(f(x))` was the original repro that
+panicked. Same shape as `take_two_fnptr_then_int` but the body
+calls both fnptrs in sequence — exercises both the call-site
+push and the in-body indirect call against adjacent FuncType
+locals.
+
+    compose(f: (int) -> int, g: (int) -> int, x: int) -> int
+        g(f(x))
+
+    #test
+    test_compose_distinct() -> unit
+        val r = compose(incr, dbl, 7)
+        // (7+1)*2 = 16
+        assert(r == 16, s"expected 16, got $r")
+
+    #test
+    test_compose_swap() -> unit
+        val r = compose(dbl, incr, 7)
+        // 7*2 + 1 = 15
+        assert(r == 15, s"expected 15, got $r")
+
+Three fnptrs and a scalar — stress the multi-leak case
+------------------------------------------------------
+
+Three adjacent FuncType stack args with a scalar at the end.
+Without the fix, three leaks interleave with three pushed
+pairs and the final scalar; the callee reads garbage for
+every arg past the first.
+
+    chain_three(f: (int) -> int, g: (int) -> int, h: (int) -> int, x: int) -> int
+        h(g(f(x)))
+
+    #test
+    test_chain_three_distinct() -> unit
+        val r = chain_three(incr, dbl, incr, 3)
+        // ((3+1)*2)+1 = 9
+        assert(r == 9, s"expected 9, got $r")

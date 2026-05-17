@@ -40,13 +40,48 @@ Two-parameter alias
         val r = use_bin(_ + _, 10, 20)
         assert(r == 30, s"10+20 should be 30, got $r")
 
-    // TODO: re-enable once the analyzer accepts a generic-alias instantiation
-    // in a struct field-type position. Currently:
-    //
-    //     struct GabPipeline
-    //         f: GabUnary[int]
-    //
-    // fails with "'GabUnary' is not a generic type" while the *exact same*
-    // instantiation as a function parameter type (above) succeeds. The bug is
-    // therefore a field-type resolution gap, not an alias gap. Filed in the
-    // ROADMAP under the "known gaps" section.
+Generic alias as a struct field type
+-------------------------------------
+
+Previously failed with "'GabUnary' is not a generic type"
+because struct fields are resolved in pass 0.5 (before the
+main declaration pass registers `genericTypeAliases`). The
+pre-pass now seeds `genericTypeAliases` so field-type
+resolution sees the alias.
+
+    struct GabPipeline
+        f: GabUnary[int]
+        bias: int
+
+    apply_pipeline(p: GabPipeline, x: int) -> int = p.f(x) + p.bias
+
+    #test
+    test_alias_as_field_basic() -> unit
+        val p = GabPipeline(x -> x * 2, 7)
+        val r = apply_pipeline(p, 10)
+        assert(r == 27, s"2*10+7 should be 27, got $r")
+
+    #test
+    test_alias_as_field_swap_closure() -> unit
+        val p = GabPipeline(x -> x + 100, 1)
+        val r = apply_pipeline(p, 4)
+        assert(r == 105, s"4+100+1 should be 105, got $r")
+
+### Two-parameter alias in a struct field
+
+    struct GabComputer
+        op: GabBin[int, int]
+        seed: int
+
+    run_computer(c: GabComputer, a: int, b: int) -> int = c.op(a, b) + c.seed
+
+    #test
+    test_alias_two_param_field() -> unit
+        val c = GabComputer(_ + _, 1000)
+        val r = run_computer(c, 30, 70)
+        assert(r == 1100, s"30+70+1000 should be 1100, got $r")
+
+    #test
+    test_alias_two_param_field_mul() -> unit
+        val c = GabComputer(_ * _, 0)
+        assert(run_computer(c, 6, 7) == 42, "6*7+0")

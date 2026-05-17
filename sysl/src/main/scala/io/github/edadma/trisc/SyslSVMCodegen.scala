@@ -60,9 +60,29 @@ class SyslSVMCodegen:
       if idx < 0 then throw new RuntimeException(s"SVM: no enclosing loop with label '$name'")
       idx
 
-  // Deferred statements — per-function stack, emitted LIFO at every return.
-  private val deferStack = new mutable.Stack[TStmt]
-  private def emitDefers(): Unit = for stmt <- deferStack do genStmt(stmt)
+  // Per-defer-site state. Each lexical `defer S` in a fn body owns one i64
+  // counter local; the counter is bumped at the defer-statement site and the
+  // body is replayed at every fn-exit path inside `while counter > 0`. This
+  // gives correct dynamic semantics — skipped branches see counter=0 (no
+  // fire), loop iterations bump the counter to N (fires N times) — without
+  // requiring a runtime defer queue.
+  private val deferSiteSlot = new mutable.LinkedHashMap[TStmt, Int]
+  private val deferBodies = new mutable.ArrayBuffer[TStmt]
+  private def emitDefers(): Unit =
+    for body <- deferBodies.reverseIterator do
+      val slot = deferSiteSlot(body)
+      val loopLbl = newLabel("defer_loop")
+      val endLbl = newLabel("defer_end")
+      emit(s"$loopLbl:")
+      emit(s"  local_get $slot")
+      emit("  eqz")
+      emit(s"  jumpnz $endLbl")
+      emit(s"  local_get $slot")
+      emit("  dec")
+      emit(s"  local_set $slot")
+      genStmt(body)
+      emit(s"  jump $loopLbl")
+      emit(s"$endLbl:")
 
   // Current function
   private var currentFunction: TFunDecl = null
@@ -180,6 +200,17 @@ class SyslSVMCodegen:
         // declared frame size.
         if c.typ.isInstanceOf[SyslType.FuncType] then count += 1
         scanExpr(c); args.foreach(scanExpr)
+      case _: TClosure =>
+        // genClosureExpr allocates one anonymous local (envIdx) per
+        // construction site to hold the env pointer across descriptor
+        // wiring. The slot is never released, so two closure literals in
+        // the same outer body each need their own — without this
+        // reservation the second `local_set` lands past the declared
+        // frame and silently overwrites adjacent locals (a TVarStmt's
+        // slot, etc.). The closure body itself is hoisted to its own
+        // function with its own `frame` directive, so we do not scan
+        // it from the outer fn's countLocals.
+        count += 1
       case TIndex(a, i, _) => scanExpr(a); scanExpr(i)
       case TFieldAccess(o, _, _) => scanExpr(o)
       case TDeref(p, _) => scanExpr(p)
@@ -219,6 +250,12 @@ class SyslSVMCodegen:
       case TReturnStmt(Some(e)) => scanExpr(e)
       case TMultiStmt(children) => children.foreach(scanStmt)
       case TContractCheck(_, e, _) => scanExpr(e)
+      case TDeferStmt(b) =>
+        // One i64 counter slot per textual defer-site, plus whatever locals
+        // the body itself needs (the body is replayed at fn-exit, so its
+        // local-allocating constructs run in the per-site cleanup loop).
+        count += 1
+        scanStmt(b)
       case _ =>
     body match
       case TExprBody(e) => scanExpr(e)
@@ -251,6 +288,41 @@ class SyslSVMCodegen:
     case _: SyslType.EnumType => true
     case _: SyslType.FuncType => true     // 16-byte {func_ptr, env_ptr} closure descriptor
     case _ => false
+
+  /** Wrap a scalar on TOS into an EnumType-shaped buffer on the memory stack.
+   *
+   *  Background: a function declared `f() -> SimpleEnum = SimpleEnum.Variant`
+   *  has its body lowered to `TIntLit(variantOrdinal, I32)`. Without this
+   *  wrap, the return site emits a bare scalar that the caller dereferences
+   *  as an enum address — garbage. Mirror of `coerceScalarToEnumReturn` in
+   *  the LLVM backend (fixed 2026-05-16 at sysl@99c79bfcb).
+   *
+   *  Stack in : ( ..., scalar )
+   *  Stack out: ( ..., enum-buf-addr )
+   */
+  private def coerceScalarToEnumReturn(et: SyslType.EnumType): Unit =
+    val size = et.sizeOf
+    emitMemAlloc(size)                                       // ( scalar, addr )
+    val aligned = ((size + 7) / 8 * 8).toInt
+    for i <- 0 until aligned by 8 do
+      emit("  dup")                                          // ( scalar, addr, addr )
+      if i > 0 then { emitPushInt(i); emit("  add") }
+      emit("  push_0")
+      emit("  swap")
+      emit("  store64")                                      // ( scalar, addr )
+    emit("  swap")                                           // ( addr, scalar )
+    emit("  over")                                           // ( addr, scalar, addr )
+    emit("  store32")                                        // ( addr )
+
+  /** If the current function's declared return type is an `EnumType` but the
+   *  expression being returned was lowered to a scalar, wrap it. No-op otherwise.
+   */
+  private def maybeCoerceReturnToEnum(exprTyp: SyslType): Unit =
+    if currentFunction != null then
+      (currentFunction.returnType, exprTyp) match
+        case (et: SyslType.EnumType, t) if !needsMemAlloc(t) && t != SyslType.StringType && !t.isInstanceOf[SyslType.SliceType] =>
+          coerceScalarToEnumReturn(et)
+        case _ => ()
 
   /** Emit code to allocate `size` bytes on the memory stack. Leaves address on data stack. */
   private def emitMemAlloc(size: Long): Unit =
@@ -780,7 +852,8 @@ class SyslSVMCodegen:
     currentFunction = fun
     locals = new mutable.LinkedHashMap
     nextLocalIndex = 0
-    deferStack.clear()
+    deferSiteSlot.clear()
+    deferBodies.clear()
     addressedLocals = new mutable.HashSet[String]
     // Pre-scan body for any TAddrOf(name) — those names need to be stored
     // on the memory stack so the pointer and the local refer to the same cell.
@@ -921,6 +994,7 @@ class SyslSVMCodegen:
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr)
+        maybeCoerceReturnToEnum(expr.typ)
         emitDefers()
         emitFunctionExitRefDecrs()
         emit("  ret")
@@ -1026,14 +1100,16 @@ class SyslSVMCodegen:
     val savedLocals = locals
     val savedNextIdx = nextLocalIndex
     val savedAddressed = addressedLocals
-    val savedDeferStack = deferStack.toList
+    val savedDeferSiteSlot = deferSiteSlot.toList
+    val savedDeferBodies = deferBodies.toList
     val savedFunc = currentFunction
 
     closureCaptures = captureMap
     locals = new mutable.LinkedHashMap
     nextLocalIndex = 0
     addressedLocals = new mutable.HashSet[String]
-    deferStack.clear()
+    deferSiteSlot.clear()
+    deferBodies.clear()
 
     // Pre-scan body for &x on locals (skip captures — they're not addressable
     // through this scan since they live in env).
@@ -1101,8 +1177,10 @@ class SyslSVMCodegen:
     locals = savedLocals
     nextLocalIndex = savedNextIdx
     addressedLocals = savedAddressed
-    deferStack.clear()
-    deferStack.pushAll(savedDeferStack.reverse)
+    deferSiteSlot.clear()
+    for (b, s) <- savedDeferSiteSlot do deferSiteSlot(b) = s
+    deferBodies.clear()
+    deferBodies ++= savedDeferBodies
     currentFunction = savedFunc
 
   /** Fallback for TStr on types we can't render: emit "???" string. */
@@ -1166,7 +1244,7 @@ class SyslSVMCodegen:
         case TExprStmt(expr) =>
           genExpr(expr)
           if expr.typ == SyslType.UnitType then emitPushInt(0)
-        case TReturnStmt(Some(expr)) => genExpr(expr); emitDefers(); emitFunctionExitRefDecrs(); emit("  ret")
+        case TReturnStmt(Some(expr)) => genExpr(expr); maybeCoerceReturnToEnum(expr.typ); emitDefers(); emitFunctionExitRefDecrs(); emit("  ret")
         case other => genStmt(other); emitPushInt(0)
 
   private def genStmt(stmt: TStmt): Unit = stmt match
@@ -1374,6 +1452,7 @@ class SyslSVMCodegen:
 
     case TReturnStmt(Some(expr)) =>
       genExpr(expr)
+      maybeCoerceReturnToEnum(expr.typ)
       emitDefers()
       emitFunctionExitRefDecrs()
       emit("  ret")
@@ -1484,7 +1563,23 @@ class SyslSVMCodegen:
       emit(s"  $code")
 
     case TDeferStmt(body) =>
-      deferStack.push(body)
+      // Allocate a counter slot the first time we see this defer-site (keyed
+      // by body identity), then bump the counter at this point in the
+      // control flow. emitDefers replays the body `counter` times in a
+      // while-loop at every fn-exit path. The slot is zero-initialised by
+      // the `frame N` opcode at fn entry — DO NOT emit a push_0/local_set
+      // here, because if this defer is inside a loop body the explicit reset
+      // would zero the counter on every iteration and the defer would only
+      // ever fire once.
+      val slot = deferSiteSlot.getOrElseUpdate(body, {
+        deferBodies += body
+        val s = nextLocalIndex
+        nextLocalIndex += 1
+        s
+      })
+      emit(s"  local_get $slot")
+      emit("  inc")
+      emit(s"  local_set $slot")
 
     case TMultiStmt(children) =>
       children.foreach(genStmt)
@@ -2994,6 +3089,16 @@ class SyslSVMCodegen:
       // (Arrays are already data-addressed, so array→ptr is a no-op.)
       case (StringType | _: SliceType, _: PtrType) =>
         emit("  load64")
+      // Enum → integral: the enum value on the stack is an address pointing at
+      // the enum buffer; the tag (variant ordinal) lives as i32 at offset 0.
+      // Synthesised by the analyzer at `Type::Image(c)` / `Type::Pos(c)` /
+      // pattern-match scrutinee coercions whenever the static type is
+      // EnumType but the consumer expects i32. Without this case the address
+      // itself was reaching the consumer (giant random ordinal → "?" in Image
+      // lookups), which combined with the broken return-site lowering to
+      // produce the surface bug catalogued in feedback_sysl_simple_enum_fn_return.
+      case (_: EnumType, t) if t.isIntegral =>
+        emit("  load32s")
       case _ => to match
         case IntType(8) =>
           emitPushInt(56); emit("  shl"); emitPushInt(56); emit("  sar")
@@ -3145,6 +3250,13 @@ class SyslSVMCodegen:
             emit("  call __svm_str_eq")
             needsStrEq = true
           else
+            scrutinee.typ.underlying match
+              case et: SyslType.EnumType if et.variants.forall(_._2.isEmpty) =>
+                // Simple-enum scrutinee is stored as a pointer to an enum
+                // buffer (tag at offset 0). Pattern compares against the
+                // variant's i32 value, so deref the tag first.
+                emit("  load32")
+              case _ =>
             emit("  eq")
           emit(s"  jumpnz $hitLabel")
         case TRangePattern(lo, hi) =>

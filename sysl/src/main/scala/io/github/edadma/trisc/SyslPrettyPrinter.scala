@@ -209,6 +209,11 @@ object SyslPrettyPrinter:
     case AsmStmtAST(code) =>
       s"asm(${escapeString(code)})"
 
+    case BlockStmtAST(stmts) =>
+      // Synthetic group from parser desugar — emit children inline so the
+      // printed source remains a valid statement sequence.
+      stmts.map(stmtToSource(_, depth)).mkString("\n" + "    " * depth)
+
     case ExprStmtAST(expr) =>
       exprToSource(expr, depth)
 

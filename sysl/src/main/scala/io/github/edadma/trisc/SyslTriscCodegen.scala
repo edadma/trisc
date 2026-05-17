@@ -1430,16 +1430,27 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emit("  ldd r2, r1, r0")
       emit("  addi r3, r1, 8")
       emit("  ldd r3, r3, r0")
-      // Do NOT rewind the temp region (`extra = preOffset - stackOffset`)
-      // before pushing. For an inline-constructed iface arg
-      // (`use_shape(Square(9))`), `data_ptr` (r3) points INTO the temp
-      // region — and the subsequent `pshd r3; pshd r2` would overwrite
-      // the source struct data before the callee dereferences
-      // `data_ptr`. Same hazard for stack-env closures passed as FuncType
-      // args. Leak the temp until the function epilogue restores r7.
-      // The TCall cleanup adds it all back in one go via
-      // `argsAllocated = cleanupTo - stackOffset`, so accounting stays
-      // correct.
+      // For FuncType: env_ptr (r3) is null (TFuncRef), or points at a
+      // pre-allocated __env_N in the permanent caller frame (StackEnv
+      // closure), or at malloc'd heap (HeapEnv). Never into the per-arg
+      // temp region. Rewinding the temp is safe — without the rewind,
+      // two consecutive FuncType stack args interleave 16-byte leaks
+      // between the pushed pairs, shifting the second arg (and every
+      // following arg) off its expected fp-relative offset in the
+      // callee. See `feedback_sysl_trisc_two_fnptr_then_scalar.md`.
+      //
+      // For InterfaceType: `data_ptr` of an inline-constructed iface
+      // (`use_shape(Square(9))`) DOES point into the per-arg temp,
+      // because TInterfaceBox keeps the source struct in the same
+      // outer temp block. Rewinding would reclaim that struct before
+      // the callee dereferences data_ptr — keep the leak in that case.
+      // The TCall cleanup reclaims the leak via
+      // `argsAllocated = cleanupTo - stackOffset`.
+      if arg.typ.isInstanceOf[SyslType.FuncType] then
+        val extra = preOffset - stackOffset
+        if extra > 0 then
+          emitAddImm(7, 7, extra)
+          stackOffset = preOffset
       emit("  pshd r3")
       emit("  pshd r2")
       stackOffset -= 16
@@ -1581,7 +1592,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     }.toSet
     closureLocalKind.clear()
     stackOffset = 0
-    deferStack.clear()
+    deferSiteOffset.clear()
+    deferBodies.clear()
 
     val structReturn = returnsViaPointer(fun.returnType)
 
@@ -1632,6 +1644,15 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       else if param.typ.isInstanceOf[SyslType.SliceType] then
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
         stackParamOffset += 24
+      else if param.typ.isInstanceOf[SyslType.FuncType] || param.typ.isInstanceOf[SyslType.InterfaceType] then
+        // FuncType / InterfaceType params are 16-byte {func_ptr, env_ptr} or
+        // {data_ptr, itable_ptr} pairs on the caller stack. Without bumping
+        // stackParamOffset by 16 here, the NEXT param's offset overlaps the
+        // env/itable half of this one — every arg past the first FuncType /
+        // InterfaceType stack param gets read from inside the pair instead of
+        // its own slot. See `feedback_sysl_trisc_two_fnptr_then_scalar.md`.
+        locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
+        stackParamOffset += 16
       else if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] then
         val aligned = (stackSize(param.typ) + 7) & ~7
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
@@ -1736,10 +1757,17 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emitStructStringFieldsRC(5, newLocal.offset, st, incr = true)
         case _ =>
 
+    // Reserve and zero one i64 FP-relative slot per defer-site in fn body.
+    // Slots persist through the whole body; emitDefers reads them on each
+    // exit path. Must run AFTER param copies (which adjust stackOffset) and
+    // BEFORE body codegen (which uses stackOffset for its own locals).
+    allocDeferCounters(fun.body)
+
     // Generate body
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr) // result in r1
+        maybeCoerceReturnToEnum(expr.typ)
         emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
@@ -1777,7 +1805,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     closureLocalKind.clear()
     captureBorrows = closure.captures.map(_._1).toSet
     stackOffset = 0
-    deferStack.clear()
+    deferSiteOffset.clear()
+    deferBodies.clear()
 
     val structReturn = returnsViaPointer(fun.returnType)
 
@@ -1952,10 +1981,15 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             locals(capName) = LocalVar(capName, stackOffset, capType)
         envOffset += size
 
+    // Reserve defer counter slots in the closure's frame, just like
+    // genFunction. Each lexical defer-site in the body gets one i64 slot.
+    allocDeferCounters(fun.body)
+
     // Generate body
     fun.body match
       case TExprBody(expr) =>
         genExpr(expr)
+        maybeCoerceReturnToEnum(expr.typ)
         emitFuncReturnIncrIfBorrowed(expr)
         if structReturn then emitStructReturn()
         emitDefers()
@@ -2023,6 +2057,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       stmts.last match
         case TExprStmt(expr) =>
           genExpr(expr) // result in r1
+          maybeCoerceReturnToEnum(expr.typ)
           if sr then emitStructReturn()
           emitDefers()
           emitRefCleanup()
@@ -2071,6 +2106,46 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case "<<" => emit("  lsl r1, r1, r3")
       case ">>" => emit("  asr r1, r1, r3")
 
+  /** If the function returns an EnumType but the value currently in r1 is a
+   *  scalar (because the body was lowered from `Color.Variant` to a bare i32),
+   *  materialize an enum-shaped buffer on the stack, write the scalar as the
+   *  i32 tag at offset 0, zero-fill the rest, and leave r1 pointing at the
+   *  buffer. emitStructReturn then copies the buffer to _ret_ptr like any
+   *  other aggregate return. Mirror of the LLVM `coerceScalarToEnumReturn`
+   *  fix (sysl@99c79bfcb) and the SVM helper of the same name.
+   *
+   *  Implementation note: an earlier version saved r1 via `pshd r1`, then
+   *  allocated the buffer with `addi r7, r7, -aligned`. The `pshd` lowered SP
+   *  by 8 without updating `stackOffset`, so the buffer was addressed at
+   *  FP+baseOff but actually lived at FP+baseOff-8; the zero-fill clobbered
+   *  the saved tag and the buffer contained garbage on read-back. The current
+   *  form moves r1 to r2 before allocating — caller-saved scratch only, no
+   *  data-stack imbalance with `stackOffset`.
+   */
+  private def maybeCoerceReturnToEnum(exprTyp: SyslType): Unit =
+    if currentFunction == null then return
+    (currentFunction.returnType.underlying, exprTyp.underlying) match
+      case (et: SyslType.EnumType, t) if t.isIntegral =>
+        // Stash the scalar tag in r2 — caller-saved scratch register; nothing
+        // below depends on r2's prior content.
+        emit("  mov r2, r1")
+        // Allocate enum-shaped buffer on the call stack.
+        val totalSize = stackSize(et)
+        val aligned = (totalSize + 7) & ~7
+        emitAddImm(7, 7, -aligned)
+        stackOffset -= aligned
+        val baseOff = stackOffset
+        // Zero-initialize 8 bytes at a time using r3 (also caller-saved scratch).
+        for i <- 0 until aligned by 8 do
+          emitAddImm(3, 5, baseOff + i)
+          emit("  std r0, r3, r0")
+        // Write the saved tag as i32 at offset 0.
+        emitAddImm(3, 5, baseOff)
+        emit("  stw r2, r3, r0")
+        // r1 = enum buffer address.
+        emitAddImm(1, 5, baseOff)
+      case _ => ()
+
   // Copy multi-word value from src address (r1) to _ret_ptr, then set r1 = _ret_ptr
   // Works for both StructType and StringType (16 bytes)
   private def emitStructReturn(): Unit =
@@ -2111,11 +2186,67 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case _ =>
 
   private def emitDefers(): Unit =
-    if deferStack.nonEmpty then
-      emit("  pshd r1") // save return value
-      for stmt <- deferStack.reverseIterator do
-        genStmt(stmt)
-      emit("  popd r1") // restore return value
+    if deferBodies.nonEmpty then
+      // Save the return value into a fresh fp-relative slot so it survives the
+      // defer body's stack churn. `pshd r1` is wrong here for two reasons
+      // (see bug #3 fix history): pshd lowers r7 without updating
+      // stackOffset, and some inline body codegen (e.g. TFieldAssignStmt with
+      // a refcounted field) lowers r7 unilaterally and relies on the
+      // function epilogue to reclaim — so the matching popd r1 reads garbage
+      // from the leaked region. The FP-relative save is immune to both.
+      val savedSO = stackOffset
+      emitAddImm(7, 7, -8)
+      stackOffset -= 8
+      val saveOff = stackOffset
+      emitAddImm(2, 5, saveOff)
+      emit("  std r1, r2, r0")
+      // Per-site cleanup loops in reverse declaration order. Each site's
+      // counter slot lives at a stable FP+off allocated in the prologue, so
+      // we can read/decrement it across body codegen that perturbs r7. Two
+      // resets are critical:
+      //
+      //   (1) at runtime, before each iteration's body runs, reset r7 to a
+      //   known baseline so successive iterations all see the same r7 (the
+      //   body codegen freely lowers r7 and never restores it — it relies on
+      //   the fn epilogue's `mov r7, r5`). Without this, iteration N+1
+      //   continues from where iteration N left r7, and the body's
+      //   FP-relative slot stores eventually fall outside the live stack.
+      //
+      //   (2) at codegen time, between site emissions, reset stackOffset to
+      //   the same baseline so the next site's body codegen plans its slot
+      //   offsets from a consistent starting point. Otherwise site A's
+      //   internal decrements bleed into site B's slot planning and site B
+      //   writes to FP-relative slots that aren't backed by allocated stack
+      //   at runtime (the failure mode for tests where only site A's body
+      //   ran — site A's body asm was never executed but its codegen
+      //   left stackOffset deeper than r7 actually was).
+      val loopBaseSO = stackOffset
+      for body <- deferBodies.reverseIterator do
+        val off = deferSiteOffset(body)
+        val loopLbl = newLabel("defer_loop")
+        val endLbl = newLabel("defer_end")
+        emit(s"$loopLbl")
+        emitAddImm(2, 5, off)
+        emit("  ldd r1, r2, r0")
+        emit(s"  beq r1, r0, $endLbl")
+        emit("  addi r1, r1, -1")
+        emit("  std r1, r2, r0")
+        // Runtime: reset r7 to baseline. Codegen: stackOffset is already at
+        // baseline (we restore it after each body emission below).
+        emitAddImm(7, 5, loopBaseSO)
+        genStmt(body)
+        emit(s"  bra $loopLbl")
+        emit(s"$endLbl")
+        // Codegen: reset stackOffset so the next site starts fresh.
+        stackOffset = loopBaseSO
+      emitAddImm(2, 5, saveOff)
+      emit("  ldd r1, r2, r0")
+      // Restore r7 to the pre-defer level (discarding any unbalanced body
+      // allocations). The epilogue's `mov r7, r5` would do this eventually
+      // but emitRefCleanup runs in between and uses pshd/popd for r1
+      // preservation — those need a coherent stack pointer.
+      emitAddImm(7, 5, savedSO)
+      stackOffset = savedSO
 
   private def emitEpilogue(): Unit =
     emit("  mov r7, r5")
@@ -2150,8 +2281,113 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       if idx < 0 then throw new RuntimeException(s"no enclosing loop with label '$name'")
       idx
 
-  // Defer stack — deferred statements executed in LIFO order before return/epilogue
-  private val deferStack = new mutable.ArrayBuffer[TStmt]
+  // Per-defer-site state. Each lexical `defer S` in a fn body owns one i64
+  // FP-relative counter slot allocated up-front in the prologue. The
+  // defer-statement codegen bumps the counter; emitDefers replays the body
+  // at each fn-exit path inside `while counter > 0`. This gives correct
+  // dynamic semantics — skipped branches see counter=0 (no fire), loop
+  // iterations bump the counter to N (fires N times) — without requiring
+  // a runtime defer queue or closure environment.
+  private val deferSiteOffset = new mutable.LinkedHashMap[TStmt, Int]
+  private val deferBodies = new mutable.ArrayBuffer[TStmt]
+
+  /** Collect every TDeferStmt body in fn-body source order. The pre-scan lets
+    * us reserve all counter slots in the prologue, which gives stable
+    * FP-relative offsets across every body emission. */
+  private def collectDeferSites(body: TFunBody): List[TStmt] =
+    val out = new mutable.ArrayBuffer[TStmt]
+    def visitE(e: TExpr): Unit = e match
+      case TIfExpr(c, t, e2, _) =>
+        visitE(c); t.foreach(visitS); e2.foreach(_.foreach(visitS))
+      case TMatchExpr(scr, arms, default, _) =>
+        visitE(scr)
+        for a <- arms do
+          a.guard.foreach(visitE)
+          a.body.foreach(visitS)
+        default.foreach(_.foreach(visitS))
+      case TBinary(l, _, r, _) => visitE(l); visitE(r)
+      case TUnary(_, o, _) => visitE(o)
+      case TCast(i, _) => visitE(i)
+      case TCall(_, args, _) => args.foreach(visitE)
+      case TIndirectCall(c, args, _) => visitE(c); args.foreach(visitE)
+      case TInterfaceDispatch(o, _, args, _) => visitE(o); args.foreach(visitE)
+      case TInterfaceBox(i, _) => visitE(i)
+      case TIntrinsicCall(_, args, _) => args.foreach(visitE)
+      case TIndex(a, i, _) => visitE(a); visitE(i)
+      case TSliceExpr(a, lo, hi, _) => visitE(a); lo.foreach(visitE); hi.foreach(visitE)
+      case TAppend(s, el, _) => visitE(s); visitE(el)
+      case TFieldAccess(o, _, _) => visitE(o)
+      case TFieldPreInc(o, _, _) => visitE(o)
+      case TFieldPreDec(o, _, _) => visitE(o)
+      case TFieldPostInc(o, _, _) => visitE(o)
+      case TFieldPostDec(o, _, _) => visitE(o)
+      case TDeref(p, _) => visitE(p)
+      case TTempAddr(i, _) => visitE(i)
+      case TAddrOfIndex(a, i, _) => visitE(a); visitE(i)
+      case TAddrOfField(o, _, _) => visitE(o)
+      case TStructConstruct(_, args) => args.foreach(visitE)
+      case TEnumConstruct(_, _, args) => args.foreach(visitE)
+      case TArrayLit(es, _) => es.foreach(visitE)
+      case TLen(a, _) => visitE(a)
+      case TCap(a, _) => visitE(a)
+      case TNewArray(_, sz) => visitE(sz)
+      case TNew(_, args) => args.foreach(visitE)
+      case TNewEnum(_, _, args) => args.foreach(visitE)
+      case TQuantifier(_, _, _, lo, hi, _, pred, _) =>
+        visitE(lo); visitE(hi); visitE(pred)
+      case TRangeCheck(i, _, _, _) => visitE(i)
+      case TStringFromSlice(s, _) => visitE(s)
+      case TStringFromPtr(p, l, _) => visitE(p); visitE(l)
+      case TStr(i) => visitE(i)
+      case _ =>
+    def visitS(s: TStmt): Unit = s match
+      case TDeferStmt(b) => out += b; visitS(b)
+      case TVarStmt(_, _, init, _, _) => visitE(init)
+      case TAssignStmt(_, v) => visitE(v)
+      case TFieldAssignStmt(o, _, v) => visitE(o); visitE(v)
+      case TIndexAssignStmt(a, i, v) => visitE(a); visitE(i); visitE(v)
+      case TDerefAssignStmt(p, v) => visitE(p); visitE(v)
+      case TCompoundAssignStmt(_, _, v) => visitE(v)
+      case TFieldCompoundAssignStmt(o, _, _, v) => visitE(o); visitE(v)
+      case TExprStmt(e) => visitE(e)
+      case TReturnStmt(Some(e)) => visitE(e)
+      case TWhileStmt(c, b, _) => visitE(c); b.foreach(visitS)
+      case TDoWhileStmt(c, b, _) => visitE(c); b.foreach(visitS)
+      case TForStmt(init, c, upd, b, _) =>
+        visitS(init); visitE(c); visitS(upd); b.foreach(visitS)
+      case TLoopStmt(b, _) => b.foreach(visitS)
+      case TIfExpr(c, t, e, _) => visitE(c); t.foreach(visitS); e.foreach(_.foreach(visitS))
+      case TMatchExpr(scr, arms, default, _) =>
+        visitE(scr)
+        for a <- arms do
+          a.guard.foreach(visitE)
+          a.body.foreach(visitS)
+        default.foreach(_.foreach(visitS))
+      case TMultiStmt(c) => c.foreach(visitS)
+      case TContractCheck(_, e, _) => visitE(e)
+      case TDestructureStmt(_, _, init) => visitE(init)
+      case TDestructureAssignStmt(_, _, init) => visitE(init)
+      case _ =>
+    body match
+      case TExprBody(e) => visitE(e)
+      case TBlockBody(stmts) => stmts.foreach(visitS)
+    out.toList
+
+  /** Reserve N i64 FP-relative slots for the current fn's defer counters and
+    * zero-initialise each. Must be called from the prologue, after all param
+    * copies, before body codegen runs — so the offsets are stable for every
+    * subsequent FP+off access. */
+  private def allocDeferCounters(body: TFunBody): Unit =
+    val sites = collectDeferSites(body)
+    if sites.nonEmpty then
+      emitAddImm(7, 7, -8 * sites.length)
+      stackOffset -= 8 * sites.length
+      for (b, idx) <- sites.zipWithIndex do
+        val off = stackOffset + idx * 8
+        emitAddImm(2, 5, off)
+        emit("  std r0, r2, r0")
+        deferSiteOffset(b) = off
+        deferBodies += b
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
@@ -2561,6 +2797,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
 
       case TReturnStmt(Some(value)) =>
         genExpr(value) // result in r1
+        maybeCoerceReturnToEnum(value.typ)
         emitFuncReturnIncrIfBorrowed(value)
         if currentFunction != null && returnsViaPointer(currentFunction.returnType) then
           emitStructReturn()
@@ -2575,7 +2812,13 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emitEpilogue()
 
       case TDeferStmt(body) =>
-        deferStack += body
+        // Counter slot was reserved at fn-prologue (allocDeferCounters);
+        // here we just bump it at this point in the dynamic control flow.
+        val off = deferSiteOffset(body)
+        emitAddImm(2, 5, off)
+        emit("  ldd r1, r2, r0")
+        emit("  addi r1, r1, 1")
+        emit("  std r1, r2, r0")
 
       case TMultiStmt(children) =>
         children.foreach(genStmt)
@@ -3702,6 +3945,14 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case TCast(inner, target) =>
         genExpr(inner)
         import SyslType.*
+        // Enum → integral: r1 holds the enum-struct address; the tag (variant
+        // ordinal) lives as i32 at offset 0. Load it so the consumer sees the
+        // scalar rather than the address. Synthesised by the analyzer at
+        // `Type::Image(c)` / `Type::Pos(c)` / pattern-match scrutinee coercions
+        // whenever the static type is EnumType but the consumer expects i32.
+        // Without this case the address itself reached the consumer.
+        if inner.typ.underlying.isInstanceOf[EnumType] && target.isIntegral then
+          emit("  ldw r1, r1, r0")
         val srcIsFloat = inner.typ.isFloat
         val tgtIsFloat = target.isFloat
         // Float → int: convert float bits to integer value first
@@ -4244,20 +4495,21 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             stackOffset -= 24
             regAggregateDataOffset = stackOffset
           else if arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
-            // Pre-evaluate 16-byte pair register arg.
-            // Do NOT rewind the temp region before pushing. For an
-            // inline-constructed iface arg (`use_shape(Square(9))`),
-            // `data_ptr` (r3) points INTO the temp region — and the
-            // subsequent `pshd r3; pshd r2` would overwrite the source
-            // struct data before the callee dereferences `data_ptr`.
-            // Same hazard for stack-env closures as FuncType args. Leak
-            // the temp until the function epilogue restores r7. The
-            // TCall cleanup adds it all back in one go via
-            // `argsAllocated = cleanupTo - stackOffset`.
+            // Pre-evaluate 16-byte pair register arg. For FuncType we can
+            // safely rewind the per-arg temp before the pshd (env_ptr never
+            // points into the temp). For InterfaceType the inline-iface
+            // hazard means we must leak (see the matching evalAndPushArg
+            // branch above).
+            val preOffset = stackOffset
             genExpr(arg)
             emit("  ldd r2, r1, r0")
             emit("  addi r3, r1, 8")
             emit("  ldd r3, r3, r0")
+            if arg.typ.isInstanceOf[SyslType.FuncType] then
+              val extra = preOffset - stackOffset
+              if extra > 0 then
+                emitAddImm(7, 7, extra)
+                stackOffset = preOffset
             emit("  pshd r3")
             emit("  pshd r2")
             stackOffset -= 16
@@ -5161,6 +5413,12 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                 genExpr(v)
                 emitAddImm(2, 5, scrutineeOffset)
                 emit("  ldd r2, r2, r0")
+                scrutinee.typ.underlying match
+                  case et: SyslType.EnumType if et.variants.forall(_._2.isEmpty) =>
+                    // Simple-enum scrutinee is address-represented; deref the
+                    // i32 tag at offset 0 to compare with the pattern's value.
+                    emit("  ldw r2, r2, r0")
+                  case _ =>
                 emit(s"  beq r1, r2, $hitLabel")
               case TRangePattern(low, high) =>
                 val rangeCheck = newLabel("range_chk")

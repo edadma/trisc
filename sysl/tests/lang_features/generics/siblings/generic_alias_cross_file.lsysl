@@ -70,17 +70,25 @@ form does.
 ### Same alias, second call site — distinct test
 
 Pin that a second `gh_apply_unary` call with a different
-closure body resolves the same way as the first. We keep this
-in its own test rather than chaining both calls in one body
-because SVM has a known stack/closure regression with two
-back-to-back HOF calls in a single function body (see ROADMAP
-note on `apply_twice` in `generic_fn_basic.lsysl`; this file
-inherits the constraint).
+closure body resolves the same way as the first.
 
     #test
     test_gacf_unary_second_call_site() -> unit
         val b = gh_apply_unary(x -> x * 5, 4)
         assert(b == 20, s"b=$b")
+
+### Two HOF calls back-to-back in one body
+
+Previously SVM regressed on two HOF calls in a single
+function body (the `apply_twice` gap). Now stable across all
+backends.
+
+    #test
+    test_gacf_unary_two_calls_in_body() -> unit
+        val a = gh_apply_unary(x -> x + 1, 10)
+        val b = gh_apply_unary(x -> x * 3, 4)
+        assert(a == 11, s"a=11; got $a")
+        assert(b == 12, s"b=12; got $b")
 
 
 Function-typed alias — two type parameters
@@ -155,13 +163,11 @@ declarations*, not just the helper's.
 Two distinct sibling-imported aliases coexist
 ----------------------------------------------
 
-Both aliases must resolve from the helper file. We pin each in
-its own one-call test rather than mixing them in a single body
-because of the same SVM HOF-chaining stack regression noted
-above. The compile-time fact this section pins — that both
-`GhUnary` and `GhBin` resolve as types in this file — is
-already exercised by the standalone tests above; the runtime
-companion is two isolated calls.
+Both aliases must resolve from the helper file. The
+compile-time fact this section pins — that both `GhUnary` and
+`GhBin` resolve as types in this file — is already exercised
+by the standalone tests above; the runtime companion is two
+isolated calls.
 
 ### Single `GhUnary[int]` call site — sanity
 

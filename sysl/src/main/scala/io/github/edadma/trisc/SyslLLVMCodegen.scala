@@ -205,8 +205,24 @@ class SyslLLVMCodegen(target: String = "host"):
       val idx = loopNameStack.indexWhere(_.contains(name))
       if idx < 0 then throw new RuntimeException(s"no enclosing loop with label '$name'")
       idx
-  // Defer stack — LIFO execution before returns
-  private val deferStack = new mutable.Stack[TStmt]
+  // Per-defer-site state. Each lexical `defer S` in a fn body owns one i64
+  // counter alloca; the counter is bumped at the defer-statement site and the
+  // body is replayed at every fn-exit path inside a `while counter > 0` loop.
+  // This gives correct dynamic semantics (skipped branches don't fire, loop
+  // defers fire N times) while keeping defer-body codegen lexical (no
+  // closure env, no runtime queue allocation).
+  private val deferSiteCounters = new mutable.LinkedHashMap[TStmt, String]
+  // Bodies in declaration order; iterated in reverse for LIFO at exit.
+  private val deferBodies = new mutable.ArrayBuffer[TStmt]
+
+  // Pre-allocated env allocas for closure args at TCall / TIndirectCall /
+  // TInterfaceDispatch arg-eval sites. Key = the value `closureCounter` will
+  // hold inside the matching TClosure case (i.e. one past the pre-alloc-time
+  // value, since TClosure increments `closureCounter` on entry). Value = the
+  // entry-block alloca register typed `[envSize x i8]*`. Populated by call
+  // sites; consumed (and the lookup is the StackEnv-viability check) by
+  // TClosure. See `feedback_sysl_returned_closure_llvm_uaf.md`.
+  private val preAllocatedClosureEnvs = new mutable.HashMap[Int, String]
 
   def generate(program: TProgram): String =
     out.clear()
@@ -560,7 +576,9 @@ class SyslLLVMCodegen(target: String = "host"):
     regCounter = 0
     labelCounter = 0
     hasReturned = false
-    deferStack.clear()
+    deferSiteCounters.clear()
+    deferBodies.clear()
+    preAllocatedClosureEnvs.clear()
     funcBorrowParams = fun.params.collect {
       case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
     }.toSet
@@ -637,6 +655,7 @@ class SyslLLVMCodegen(target: String = "host"):
 
     // Assemble: switch back to out, emit deferred allocas, then body
     activeOut = out
+    val counterRegSet = deferSiteCounters.values.toSet
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
       // Zero-initialize allocas whose cleanup walks rc-tracked pointers, so
@@ -658,6 +677,10 @@ class SyslLLVMCodegen(target: String = "host"):
           case Some(st) if structHasStringFields(st) =>
             emit(s"  store $lt zeroinitializer, $lt* $reg")
           case _ =>
+      else if counterRegSet.contains(reg) then
+        // Per-defer-site counters must start at 0 so unreached defers don't
+        // observe stack garbage and erroneously fire on exit.
+        emit(s"  store i64 0, i64* $reg")
     out ++= bodyBuf
 
     emit("}")
@@ -673,7 +696,9 @@ class SyslLLVMCodegen(target: String = "host"):
     regCounter = 0
     labelCounter = 0
     hasReturned = false
-    deferStack.clear()
+    deferSiteCounters.clear()
+    deferBodies.clear()
+    preAllocatedClosureEnvs.clear()
     captureBorrows = closure.captures.map(_._1).toSet
     funcBorrowParams = closure.params.collect {
       case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
@@ -742,12 +767,15 @@ class SyslLLVMCodegen(target: String = "host"):
 
     // Assemble: switch back to out, emit deferred allocas, then body
     activeOut = out
+    val closureCounterRegSet = deferSiteCounters.values.toSet
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
       if lt == "%struct.slice" then
         emit(s"  store %struct.slice zeroinitializer, %struct.slice* $reg")
       else if lt == "i8*" then
         emit(s"  store i8* null, i8** $reg")
+      else if closureCounterRegSet.contains(reg) then
+        emit(s"  store i64 0, i64* $reg")
     out ++= bodyBuf
 
     emit("}")
@@ -1049,7 +1077,20 @@ class SyslLLVMCodegen(target: String = "host"):
         hasReturned = true
 
       case TDeferStmt(body) =>
-        deferStack.push(body)
+        // Allocate a counter slot the first time we see this lexical defer
+        // site (keyed by body identity), then emit a counter++ at this point
+        // in the control flow. The site's body is replayed at every fn-exit
+        // path inside `while counter > 0` — so skipped branches see counter=0
+        // (no fire) and loop iterations bump counter to N (fires N times).
+        val counterReg = deferSiteCounters.getOrElseUpdate(body, {
+          deferBodies += body
+          deferAlloca("i64")
+        })
+        val cur = newReg()
+        emit(s"  $cur = load i64, i64* $counterReg")
+        val nxt = newReg()
+        emit(s"  $nxt = add i64 $cur, 1")
+        emit(s"  store i64 $nxt, i64* $counterReg")
 
       case TMultiStmt(children) =>
         children.foreach(genStmt)
@@ -1943,6 +1984,20 @@ class SyslLLVMCodegen(target: String = "host"):
 
       case TCall(name, args, _) =>
         val declaredParams = funcParamTypes.getOrElse(name, Nil)
+        // Pre-allocate stack envs for any TClosure arg that closureKindOf
+        // says is StackEnv. The pre-alloc lives in THIS function's entry
+        // block (via deferAlloca) so it outlives the call but is reclaimed
+        // when this function returns — exactly the StackEnv contract. Key
+        // by (closureCounter + n) where n is the StackEnv-arg index, since
+        // TClosure pre-increments closureCounter before its first lookup.
+        var envPreallocCounter = closureCounter + 1
+        for arg <- args do arg match
+          case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+            val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
+            val rawAlloca = deferAlloca(s"[$envSize x i8]")
+            preAllocatedClosureEnvs(envPreallocCounter) = rawAlloca
+            envPreallocCounter += 1
+          case _ =>
         val argVals = args.zipWithIndex.map { (a, i) =>
           val v = genExpr(a)
           val vt = exprType(a)
@@ -3035,10 +3090,23 @@ class SyslLLVMCodegen(target: String = "host"):
                   emit(s"  $cmp = phi i1 [ false, %$lenBlock ], [ $bytesEq, %$matchBlock ]")
                   cmp
                 else
-                  val cmp = newReg()
-                  val st = exprType(scrutinee)
-                  emit(s"  $cmp = icmp eq $st $scrut, $patVal")
-                  cmp
+                  scrutinee.typ.underlying match
+                    case et: SyslType.EnumType if et.variants.forall(_._2.isEmpty) =>
+                      // Simple-enum scrutinee is an enum-buffer pointer; deref
+                      // the i32 tag at offset 0 to compare with the pattern's
+                      // integer value. Mirrors the TVariantPattern path.
+                      val tagPtr = newReg()
+                      emit(s"  $tagPtr = bitcast ${llvmType(et)}* $scrut to i32*")
+                      val tag = newReg()
+                      emit(s"  $tag = load i32, i32* $tagPtr")
+                      val cmp = newReg()
+                      emit(s"  $cmp = icmp eq i32 $tag, $patVal")
+                      cmp
+                    case _ =>
+                      val cmp = newReg()
+                      val st = exprType(scrutinee)
+                      emit(s"  $cmp = icmp eq $st $scrut, $patVal")
+                      cmp
               case TRangePattern(low, high) =>
                 val lo = genExpr(low)
                 val hi = genExpr(high)
@@ -3264,14 +3332,30 @@ class SyslLLVMCodegen(target: String = "host"):
         //   StackEnv → alloca'd in caller's frame (no header, no rc, no free).
         //              Used for non-escaping non-rc-bearing captures.
         //   HeapEnv  → malloc'd with [rc:i64@-16 | deinit_ptr:i8*@-8 | data] header.
+        //
+        // **StackEnv requires pre-allocation in the CALLER's frame.** If a
+        // TClosure is constructed without a matching pre-alloc (e.g. it's
+        // the return-position body of a function: `make_adder(k) -> (int) -> int
+        // = (x) -> x + k`), StackEnv would `alloca` the env in the constructing
+        // function's own frame — which is freed when the function returns,
+        // leaving the returned closure with a dangling env_ptr. Downgrade to
+        // HeapEnv when no pre-alloc exists. See
+        // `feedback_sysl_returned_closure_llvm_uaf.md`.
         val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
-        val kind = closureKindOf(c)
+        val rawKind = closureKindOf(c)
+        val prealloc = preAllocatedClosureEnvs.get(closureCounter)
+        val kind = if rawKind == FuncKind.StackEnv && prealloc.isEmpty
+                   then FuncKind.HeapEnv
+                   else rawKind
         val envPtr = kind match
           case FuncKind.NullEnv => "null"
           case FuncKind.StackEnv =>
-            // Stack env: alloca on the function's frame (deferred to entry block
-            // so it's stable across the construction expression's IR shape).
-            val rawAlloca = deferAlloca(s"[$envSize x i8]")
+            // Stack env: alloca in the CALLER's frame, pre-allocated by the
+            // enclosing TCall / TIndirectCall / TInterfaceDispatch via
+            // `preAllocatedClosureEnvs`. Without pre-alloc the kind would have
+            // been downgraded to HeapEnv above. The pre-allocated alloca is
+            // typed `[envSize x i8]*`.
+            val rawAlloca = prealloc.get
             val ep = newReg()
             emit(s"  $ep = bitcast [$envSize x i8]* $rawAlloca to i8*")
             // Store captures (no incr — StackEnv has no rc-bearing captures).
@@ -3391,6 +3475,15 @@ class SyslLLVMCodegen(target: String = "host"):
         alloca
 
       case TIndirectCall(callee, args, typ) =>
+        // Pre-allocate stack envs for StackEnv TClosure args (mirrors TCall).
+        var icEnvPreallocCounter = closureCounter + 1
+        for arg <- args do arg match
+          case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+            val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
+            val rawAlloca = deferAlloca(s"[$envSize x i8]")
+            preAllocatedClosureEnvs(icEnvPreallocCounter) = rawAlloca
+            icEnvPreallocCounter += 1
+          case _ =>
         // callee is a %struct.closure — extract func_ptr and env_ptr
         val closurePtr = genExpr(callee) // returns alloca pointer (aggregate)
         val fpGep = newReg()
@@ -3987,6 +4080,15 @@ class SyslLLVMCodegen(target: String = "host"):
         alloca
 
       case TInterfaceDispatch(ifaceVal, methodIndex, args, retType) =>
+        // Pre-allocate stack envs for StackEnv TClosure args (mirrors TCall).
+        var idEnvPreallocCounter = closureCounter + 1
+        for arg <- args do arg match
+          case c: TClosure if closureKindOf(c) == FuncKind.StackEnv =>
+            val envSize = c.captures.map((_, t) => llvmSizeOf(t)).sum
+            val rawAlloca = deferAlloca(s"[$envSize x i8]")
+            preAllocatedClosureEnvs(idEnvPreallocCounter) = rawAlloca
+            idEnvPreallocCounter += 1
+          case _ =>
         // Dynamic dispatch: load itable + data from interface value, call
         // method at given index with data_ptr as self.
         val ifacePtr = genExpr(ifaceVal)
@@ -4215,9 +4317,31 @@ class SyslLLVMCodegen(target: String = "host"):
       case _ =>
         genExpr(obj) // for other expressions, genExpr returns pointer for struct types
 
-  // Emit deferred statements in LIFO order (does not pop — they may run again on another return path)
+  // Emit per-defer-site cleanup loops in LIFO declaration order. Each site's
+  // body is replayed `counter[i]` times; sites that were never reached
+  // dynamically have counter=0 and emit no work at this exit. Called at every
+  // return path; safe to call multiple times because every TDeferStmt counter
+  // is independent and only loaded/decremented inside this loop's bodyLbl.
   private def emitDefers(): Unit =
-    for stmt <- deferStack do genStmt(stmt)
+    for body <- deferBodies.reverseIterator do
+      val counterReg = deferSiteCounters(body)
+      val checkLbl = newLabel("defer_check")
+      val bodyLbl = newLabel("defer_body")
+      val endLbl = newLabel("defer_end")
+      emit(s"  br label %$checkLbl")
+      emitLabel(checkLbl)
+      val cur = newReg()
+      emit(s"  $cur = load i64, i64* $counterReg")
+      val gtz = newReg()
+      emit(s"  $gtz = icmp ne i64 $cur, 0")
+      emit(s"  br i1 $gtz, label %$bodyLbl, label %$endLbl")
+      emitLabel(bodyLbl)
+      val dec = newReg()
+      emit(s"  $dec = sub i64 $cur, 1")
+      emit(s"  store i64 $dec, i64* $counterReg")
+      genStmt(body)
+      emit(s"  br label %$checkLbl")
+      emitLabel(endLbl)
 
   // Extract the data pointer from a slice or ref-to-slice
   private def emitSliceDataPtr(base: String, typ: SyslType): String =

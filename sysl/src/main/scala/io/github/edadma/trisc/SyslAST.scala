@@ -187,6 +187,18 @@ case class BreakStmtAST(label: Option[String] = None) extends StmtAST
 case class ContinueStmtAST(label: Option[String] = None) extends StmtAST
 case class DeferStmtAST(body: StmtAST) extends StmtAST
 case class AsmStmtAST(code: String) extends StmtAST
+// Synthetic statement carrying a group of statements that must lower as a flat
+// sequence in the enclosing block, NOT as a nested scope. Used by parser
+// desugars whose source is a single grammar production but whose lowering
+// needs an introductory binding plus a follow-up statement (e.g. `for v in
+// arr` capturing the source expression once before the loop). All AST
+// consumers must recurse on `stmts` rather than treat this as a single
+// statement. The analyzer flattens it into the surrounding scope; no fresh
+// lexical scope is introduced — locals declared inside leak to their
+// enclosing block, which is what the for-each desugar needs so the captured
+// source can be referenced by the for-loop's condition and body without
+// shadowing.
+case class BlockStmtAST(stmts: List[StmtAST]) extends StmtAST
 // `def name(params) -> ret body` inside a function body — a named local closure with
 // self-reference (recursion) support. Reuses FunDeclAST as the carrier; the analyzer
 // lowers it to a TClosure with selfName set, then a TVarStmt binding the name to that

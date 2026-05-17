@@ -58,3 +58,58 @@ snapshotted value `10`, not the updated `25`.
         k = -3
         assert(ccm_apply(read_k) == 10, "second outer mutation still invisible")
 
+Two closures share the same captured `var`
+------------------------------------------
+
+Both closures snapshot the value the captured `var` had at
+*their own* construction time. SVM previously crashed here
+with `ArrayIndexOutOfBoundsException`; that's now fixed.
+
+    #test
+    test_two_closures_share_var() -> unit
+        var k = 10
+        val f = () -> k
+        val g = () -> k * 2
+        assert(ccm_apply(f) == 10, s"f=10; got ${ccm_apply(f)}")
+        assert(ccm_apply(g) == 20, s"g=20; got ${ccm_apply(g)}")
+        k = 5
+        assert(ccm_apply(f) == 10, s"f still snapshot 10; got ${ccm_apply(f)}")
+        assert(ccm_apply(g) == 20, s"g still snapshot 20; got ${ccm_apply(g)}")
+
+Block-bodied closure returns its last expression
+------------------------------------------------
+
+A `() -> ...` closure with an indented multi-statement body
+returns whatever expression appears last. SVM previously
+miscomputed the return for this shape.
+
+    #test
+    test_block_body_returns_last() -> unit
+        val k = 7
+        val f = () ->
+            val a = k + 1
+            val b = a * 2
+            b + 3
+        assert(ccm_apply(f) == 19, s"expected (7+1)*2+3=19; got ${ccm_apply(f)}")
+
+`var p: struct` is captured by snapshot, not by reference
+---------------------------------------------------------
+
+A struct-typed `var` captured by a closure is snapshotted
+the same way a scalar `var` is. Replacing `p` in the outer
+scope after closure construction does not change what the
+closure body reads. TRISC previously captured by reference
+on this path.
+
+    struct CcmP
+        x: int
+        y: int
+
+    #test
+    test_struct_var_capture_snapshot() -> unit
+        var p = CcmP(10, 20)
+        val f = () -> p.x + p.y
+        assert(ccm_apply(f) == 30, s"first read 30; got ${ccm_apply(f)}")
+        p = CcmP(100, 200)
+        assert(ccm_apply(f) == 30, s"snapshot remains 30; got ${ccm_apply(f)}")
+

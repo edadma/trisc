@@ -52,12 +52,28 @@ Generic function in different contexts
         assert(max_t(3, 7) == 7, s"max_t(3,7) should be 7, got ${max_t(3, 7)}")
         assert(max_t(10, 2) == 10, s"max_t(10,2) should be 10, got ${max_t(10, 2)}")
 
-    // TODO: re-enable once SVM's higher-order-generic call path is stable.
-    // Currently overflows SVM's 1024-item data stack at apply_twice's call site:
-    //
-    //     apply_twice[T](f: (T) -> T, x: T) -> T = f(f(x))
-    //     inc(n: int) -> int = n + 1
-    //
-    //     #test
-    //     test_apply_twice() -> unit
-    //         assert(apply_twice(inc, 5) == 7, "")
+Higher-order generic — call the fn-pointer arg twice in one body
+----------------------------------------------------------------
+
+`apply_twice` instantiates the generic at `int` and calls its
+fn-pointer arg twice in `f(f(x))`. This previously overflowed
+SVM's data stack; verifies the SVM call path is stable.
+
+    apply_twice[T](f: (T) -> T, x: T) -> T = f(f(x))
+    inc(n: int) -> int = n + 1
+
+    #test
+    test_apply_twice() -> unit
+        assert(apply_twice(inc, 5) == 7, s"apply_twice(inc, 5) should be 7, got ${apply_twice(inc, 5)}")
+        assert(apply_twice(inc, 0) == 2, s"apply_twice(inc, 0) should be 2")
+        assert(apply_twice(inc, -3) == -1, s"apply_twice(inc, -3) should be -1")
+
+`apply_twice` called twice in one body — pairs the "two HOFs
+in one body" case with the "one HOF calls its arg twice" case.
+
+    #test
+    test_two_apply_twice_calls() -> unit
+        val a = apply_twice(inc, 1)
+        val b = apply_twice(inc, 100)
+        assert(a == 3, s"a=3; got $a")
+        assert(b == 102, s"b=102; got $b")

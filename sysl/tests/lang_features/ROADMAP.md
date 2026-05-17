@@ -112,7 +112,7 @@ TRISC's `for x in slice` codegen broken).
 | `slice_full_subslice.lsysl` 🟢 | `s[:]`, `s[i:]`, `s[:j]` omitted-bound forms (4 tests) |
 | `slice_descriptor_passing.lsysl` 🟢 | slice param shares backing with caller; `len()` works inside callee; sub-slice through param (4 tests) |
 | `slice_append.lsysl` 🟢 | append single, append many, append preserves predecessors, append on pre-filled slice (4 tests). NB SVM exhausts memory at large append counts (bump-allocator + no free); test uses 100 elements not 1000 |
-| `slice_iter_for_in.lsysl` 🟡 | `for x in [literal array]` works (4 tests). TODO entries for `for x in slice` and `for x in dynamic[:]` once TRISC's slice-iter codegen lands; today TRISC traps on those forms while the other 6 backends work |
+| `slice_iter_for_in.lsysl` 🟢 | `for x in [literal array]`, `for x in a[i:j]` (sub-slice), `for x in d[:]` (dynamic-array full slice) all uniform on 7 backends. TRISC was the lone holdout (it dereferenced the re-evaluated sub-slice descriptor each iteration, hitting a stale temp); closed by the parser-level once-eval for-each desugar (sysl@<chunk1-cluster-A>) (6 tests) |
 | `string_as_byte_slice.lsysl` 🟢 | string indexing yields bytes; len = byte count; UTF-8 multi-byte (4 tests) |
 
 ---
@@ -142,7 +142,7 @@ covered now; one SVM bug TODO'd.
 
 | File | Tests pinned |
 |---|---|
-| `generic_fn_basic.lsysl` 🟢 | explicit type arg; inference; multi-param; max-of-T; (5 tests). TODO: `apply_twice[T](f: (T)->T, x: T)` higher-order — SVM overflows its 1024-item data stack on f(f(x)); other 6 backends fine |
+| `generic_fn_basic.lsysl` 🟢 | explicit type arg; inference; multi-param; max-of-T; higher-order `apply_twice[T](f: (T)->T, x: T) = f(f(x))` (single + two call sites in one body) — pins the SVM countLocals-misses-TClosure-envIdx fix (7 tests) |
 | `generic_struct.lsysl` 🟢 | `Box[T]` construct & read; inferred construct; pass-to-fn; two-param `Pair[A,B]` (4 tests) |
 | `generic_enum.lsysl` 🟢 | `Maybe[T]` with `Just(value: T)` / `Nope`; match with payload bind; two instantiations side-by-side (3 tests) |
 | `generic_nested.lsysl` 🟢 | `Box[Box[int]]`, three-deep `Box[Box[Box[int]]]`, `Box[Opt[int]]`, two-param `Pair[A,B]` (4 tests) |
@@ -152,11 +152,11 @@ covered now; one SVM bug TODO'd.
 | `generic_struct_method.lsysl` 🟢 | `Box[T].get()` & `.set(x)`; mutating-self via `&self`; method on two-param `Pair[A,B]`; chained method call (6 tests) |
 | `generic_alias_basic.lsysl` 🟡 | `type GabUnary[T] = (T) -> T` as parameter type; two-param alias `(A,A)->B` (2 tests). TODO: alias instantiation as struct *field* type fails with `'GabUnary' is not a generic type` even when the identical instantiation works as a fn param — analyzer field-type resolution gap, same on all 7 backends |
 | `siblings/generic_fn_sibling_import.lsysl` 🟢 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression): explicit type-arg + inferred (int/bool/string); two-param inferred + explicit; generic returning generic struct + field-read at caller; outer generic body calling sibling-imported generic; parameterless generic-returning fn bare-reference auto-call (13 tests) |
-| `siblings/generic_alias_cross_file.lsysl` 🟢 | generic alias visible across files (sysl@2c4f1c095 regression): `GhUnary[int]` as fn param (arrow / placeholder / second call site); `GhBin[int,int]` with two-arg closures; newtype `GhIdAlias[T]` at int + string instantiations; locally-declared fn using sibling-imported alias; two aliases coexist (10 tests). One SVM divergence routed around (two HOF calls in one body — shares the `generic_fn_basic.lsysl` `apply_twice` SVM gap) |
+| `siblings/generic_alias_cross_file.lsysl` 🟢 | generic alias visible across files (sysl@2c4f1c095 regression): `GhUnary[int]` as fn param (arrow / placeholder / second call site + two HOF calls in one body); `GhBin[int,int]` with two-arg closures; newtype `GhIdAlias[T]` at int + string instantiations; locally-declared fn using sibling-imported alias; two aliases coexist (11 tests). The two-HOF case pins the SVM countLocals-misses-TClosure-envIdx fix |
 
 ---
 
-### `control_flow/` — if-expr, while, for, loops, break/continue, return — 🟡 P0
+### `control_flow/` — if-expr, while, for, loops, break/continue, return — 🟢 P0
 
 Reference §"Control Flow", "If Expression", "Return".
 
@@ -165,8 +165,8 @@ Reference §"Control Flow", "If Expression", "Return".
 | `if_expr.lsysl` 🟢 | if as value, side-effect cond, if/else-if chain, no-else, nested (5 tests). Covers both `if_expr_as_value`, `if_expr_unit`, `if_chain` |
 | `while_loops.lsysl` 🟢 | counted while; while + break; while + continue; never-runs; nested (5 tests) |
 | `for_in_range.lsysl` 🟢 | `0..<n` exclusive; `0..n` inclusive; empty; single-element; negative range (8 tests) |
-| `for_in_slice.lsysl` 🟡 | covered by `slices/slice_iter_for_in.lsysl` with the TRISC `for x in slice` TODO |
-| `for_in_string.lsysl` 🟢 | `for c in s` iterates **bytes** (one iteration per UTF-8 byte): sum / count / empty / single-byte / multi-byte UTF-8 / left-to-right order / temporary-source via val workaround / single-line `= for` form (10 tests). TRISC TODO commented in-file: iterating a fresh `fn_call()` / concat result fails on TRISC because the parser-level for-each desugar re-evaluates the source per iteration; same shape as the documented TRISC `for x in slice` over a sub-slice gap. Workaround: bind to a `val` first. See `feedback_sysl_trisc_for_in_temporary.md` |
+| `for_in_slice.lsysl` 🟢 | covered by `slices/slice_iter_for_in.lsysl` — uniform on all 7 backends after the parser-level once-eval for-each desugar |
+| `for_in_string.lsysl` 🟢 | `for c in s` iterates **bytes** (one iteration per UTF-8 byte): sum / count / empty / single-byte / multi-byte UTF-8 / left-to-right order / temporary-source via val workaround / single-line `= for` form / fn-returned string / concatenation / source-evaluated-once-via-counter (13 tests). Parser-level once-eval for-each desugar (sysl@<chunk1-cluster-A>) hoists the source expression into a fresh local before the loop, so side-effecting sources fire exactly once per for-each on every backend — closed the TRISC for-in-temporary gap |
 | `loop_labels.lsysl` 🟢 | `outer: for ...` / `outer: while ...` + `break outer` / `continue outer`: nested for-in-for; visit-count pin; continue-outer skip-to-update; plain `break` still innermost inside labeled outer; labeled while broken from nested for; labeled for broken from nested while; three-deep nesting break-outer + continue-outer; label on innermost (semantically plain) (9 tests). **Surfaced + fixed SVM bug**: `TBreakStmt(lbl)` / `TContinueStmt(lbl)` always jumped to innermost — `breakLabels.top` / `continueLabels.top` ignoring the label. Mirror TRISC's `loopNameStack` + `resolveLoopIdx` pattern; std/ svm 974/974 after fix. |
 | `early_return.lsysl` 🟢 | early return from loop; nested blocks; ARC refcount cleanup on every path (4 tests). Surfaced+fixed SVM array-pass-by-value bug (emitStore for ArrayType fell through to store64) |
 | `return_implicit.lsysl` 🟢 | `def` expression-bodied function; block-body last-expr return; implicit/explicit match (3 tests) |
@@ -195,11 +195,11 @@ Existing: `defer_lifo.lsysl` → `defer/defer_lifo.lsysl`.
 | File | Tests pinned |
 |---|---|
 | `closures_hof.lsysl` 🟢 | basic captures, stored-in-struct, repeated invocation *(move from top level)* |
-| `closure_capture_mutable.lsysl` 🟡 | snapshot-not-reference capture semantics: `val` capture (1), `var k` outer mutation invisible after build (1). **Bugs surfaced and dropped from this file:** SVM `ArrayIndexOutOfBoundsException` when two closures capture the same `var` in one fn; SVM block-bodied closure returning last expression miscomputes return value; TRISC captures `var p: struct` by reference instead of by snapshot (2 tests). (2 tests; 3 known-divergence cases TODO'd in commit msg) |
+| `closure_capture_mutable.lsysl` 🟢 | snapshot-not-reference capture semantics: `val` capture (1); `var k` outer mutation invisible after build (1); two closures capture the same `var` (1); block-bodied closure returns its last expression (1); `var p: struct` is captured by snapshot, not by reference (1) — 5 tests. The latter three pin formerly-dropped divergences (SVM ArrayIndexOutOfBoundsException; SVM block-body misreturn; TRISC struct-var by-ref) now passing on all 7 backends |
 | `closure_return_from_fn.lsysl` 🔴 | returning a closure from a fn; lifetime of captured locals **— BLOCKED on a real compiler bug**: 4 of 7 backends (llvm-host, riscv64, riscv32, wasm32 — all LLVM-based) free the closure environment when the outer fn returns. Symptoms: llvm-host returns garbage (`mult7(6) = 70904496`); rv64/rv32 return 0; wasm32 traps `unreachable`. Interpreter, svm-host, trisc all pass. **Surfaced 2026-05-15; file drafted and removed; see commit msg of sysl@ec6acbd08+1 for repro.** |
 | `closure_recursive_inner_def.lsysl` 🟡 | single-fn self-recursive inner `def`: factorial (3), fib (2), capture-from-outer-scope (1) — 6 tests. **Bug surfaced and dropped from this file:** SVM panics ("svm.result=0xa") when an outer fn contains two unrelated self-recursive inner defs, even when they don't reference each other. 6/7 backends pass two-separate-defs. |
 | `closure_in_closure.lsysl` 🔴 | closure declared inside another closure's body *(blocked on sysl bug — see feedback_sysl_closure_in_closure.md)* |
-| `function_pointer_call.lsysl` 🟡 | bind a top-level fn to a val/var, call it directly; pass to a hof; reassign a `var f`; two pointers side by side (4 tests). **Bug surfaced and dropped from this file:** SVM crashes returning a fn-pointer from a hof — "address not found: 10000000000000" (high-bit-set tag in the fn-pointer encoding doesn't survive the return path). 6/7 backends pass the returned-fn-pointer test. |
+| `function_pointer_call.lsysl` 🟢 | bind a top-level fn to a val/var, call it directly; pass to a hof; reassign a `var f`; two pointers side by side; HOF returns its input fn-pointer (id, pick-of-two, inline-call); previously-dropped SVM "address not found" returned-fn-pointer crash now passes on all 7 backends (8 tests) |
 | `closure_underscore_placeholder.lsysl` 🟢 | `_ + 1`; `_ * 7`; two-arg `_ - _` order-sensitive; `_ * 2 + 1` bubble-up through arithmetic; paren-narrowed `(_ + 1)`; `_ * _` same arg twice (7 tests) |
 
 Existing: `closures_hof.lsysl` → `closures/closures_hof.lsysl`.
@@ -222,7 +222,7 @@ Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.ls
 
 ---
 
-### `strings/` — concat, interpolation, format, str() — 🟡 P1
+### `strings/` — concat, interpolation, format, str() — 🟢 P1
 
 | File | Tests pinned |
 |---|---|
@@ -234,9 +234,9 @@ Existing: `enum_match_payload.lsysl` → `pattern_matching/enum_match_payload.ls
 | `string_index_slice.lsysl` 🟢 | `s[i]` (byte / `u8`) and `s[i:j]` (sub-slice) — 23 tests pinning indexing, middle/prefix/suffix/full/empty slicing, var-bounded slicing, sub-of-sub indexing, substring through concat / fn boundary / equality, UTF-8 byte-level (`"aña"` byte slicing at code-point boundaries) — 7/7 backends. **Surfaced + fixed SVM bug**: `TSliceExpr` had no `StringType` branch and produced a 24-byte slice struct in place of a 16-byte string descriptor, corrupting every downstream consumer (concat / interp / equality). Fixed by adding a dedicated StringType branch (16-byte descriptor with i64 length, no cap/backref). Empty slices passed only because the layout-mismatched length happened to land at zero |
 | `string_len_empty.lsysl` 🟢 | `len("")` is 0; len of single char; len five chars; two empty literals equal; len stable across reads; len of returned string; len of returned ""; len after rebind; len(a+b)=len(a)+len(b) for ASCII (9 tests) |
 | `string_compare.lsysl` 🟢 | `==` / `!=` / `<` / `<=` / `>` / `>=` on strings — 22 tests: equality (literal / var / concat / fn-result), lexicographic ordering (first-byte-differs / prefix-extends / strict-on-equal), `<=`/`>=` collapse on equal inputs, empty-is-minimum, case sensitivity (ASCII `'A'` < `'a'` via raw bytes), length mismatch, UTF-8 byte-equality / inequality, result flowing through `val` / `if` / fn (7/7 backends). Lexicographic ordering shipped 2026-05-15 — interpreter (Scala loop), LLVM (`memcmp` + select-based tiebreak), SVM (new `__svm_str_cmp` runtime helper), TRISC (inline three-way diff loop) |
-| `f_format_strings.lsysl` 🟡 | `f"..."` with format specs — 25 tests universally green: `%d`, `%x`, `%X`, `%o`, `%s` (no width), `%+d`, `%%`, `%b` (zero only), `%08d` / `%04x` when value fits, `%Ns` / `%-Ns` exact-width-match, `${expr}%spec`, multi-slot, fall-through to `str()`. **Four cross-backend bug clusters surfaced and dropped from this file** (see `feedback_sysl_fstring_divergences.md`): (a) `%b` non-zero crashes on the 4 LLVM-based backends; (b) `%Ns` string padding unsupported on SVM + trisc; (c) trisc `%08d` mis-pads when value's digit count ≥ width; (d) trisc fails reference's headline mixed-verb example. File flips 🟡 → 🟢 when all four are fixed |
-| `str_builtin.lsysl` 🟡 | `str(x)` on int / string / data-enum variant name / fn-boundary / interp-slot (20 tests, 7/7 backends). **Two cross-backend bug clusters surfaced and dropped from this file**: (1) `str(bool)` returns `"1"`/`"0"` on 4 backends, `"true"`/`"false"` on SVM, crashes on llvm-host + wasm32 — needs language-design decision (see `feedback_sysl_str_bool_divergence.md`); (2) SVM `str(float)` emits placeholder `"???"` while other 6 backends format the float (see `feedback_sysl_svm_str_float_unimplemented.md`). File flips 🟡 → 🟢 when both clusters are resolved |
-| `string_from_bytes.lsysl` 🟡 | `string(&buf[0], n)` + `string(slice)` constructors — 12 tests universally green: basic ASCII / empty / partial / embedded NUL / UTF-8 raw bytes / from `new [n]byte` slice / fixed-array full + subrange slice / equality with literal / concat / byte index. **SVM bug surfaced and dropped from this file**: both constructor forms share source backing storage instead of copying (mutating source after construction mutates the resulting string — reference says both forms copy). Other 6 backends copy correctly. See `feedback_sysl_svm_string_from_bytes_aliasing.md`. File flips 🟡 → 🟢 when SVM is fixed |
+| `f_format_strings.lsysl` 🟢 | `f"..."` with format specs — full coverage on all 7 backends. All four cross-backend bug clusters fixed in slix-originating commits `725f635a1` (SVM string-from-bytes + %Ns string padding), `b2b0d168c` (TRISC narrow-int sext + LLVM %b binary verb) and follow-on aligners; arrived on sysl via dev merge 2026-05-16 (commit `b4ee3cf1c`) |
+| `str_builtin.lsysl` 🟢 | `str(x)` on int / string / data-enum variant / float / bool / fn-boundary — universal across 7 backends. Both prior cross-backend clusters fixed: `str(bool)` aligned to `"true"`/`"false"` (slix `862c8b660`), SVM `str(float)` aligned to trimmed form (slix `8c8016e69`); on sysl via dev merge 2026-05-16 |
+| `string_from_bytes.lsysl` 🟢 | `string(&buf[0], n)` + `string(slice)` — SVM aliasing fixed (slix `725f635a1`); both forms now copy on all 7 backends. On sysl via dev merge 2026-05-16 |
 
 Existing: `format_strings.lsysl` → `strings/format_strings.lsysl`.
 `field_self_concat.lsysl` → `strings/field_self_concat.lsysl` (also referenced from `arc/`).
