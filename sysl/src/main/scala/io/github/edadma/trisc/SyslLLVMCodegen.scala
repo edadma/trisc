@@ -4052,11 +4052,15 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"""  $result = call $retLt asm sideeffect "$escaped", "=r"()""")
         result
 
-      case TInterfaceBox(inner, iface) =>
+      case TInterfaceBox(inner, iface, owns) =>
         // Box a concrete value into %struct.iface { itable_ptr, data_ptr }.
-        // Value-type structs are heap-copied so the iface owns an independent
-        // buffer (simple leak model — matches TRISC for now); pointer/ref types
-        // pass their pointer directly as data_ptr.
+        // For value structs: the default (owns=false) passes a pointer to the
+        // source's storage so mutations through the iface propagate to the
+        // caller's source (cf. iface_box_lifetime + iface_mutating_self). The
+        // owns=true mode (set by the analyzer when the box escapes its source's
+        // frame — return position, etc.) heap-copies the source so the data
+        // buffer outlives the source's stack alloca. Pointer/ref source types
+        // always pass their pointer directly regardless of owns.
         val structName = inner.typ.underlying match
           case SyslType.StructType(n, _, _) => n
           case SyslType.PtrType(SyslType.StructType(n, _, _)) => n
@@ -4067,17 +4071,18 @@ class SyslLLVMCodegen(target: String = "host"):
           itables(itableName) = (iface, structName)
         val dataPtr = inner.typ.underlying match
           case st: SyslType.StructType =>
-            // Value-type struct: genExpr returns a pointer to the struct's
-            // storage (alloca or field address). Pass that pointer as data_ptr
-            // — methods mutate the original, matching interpreter semantics.
-            // Non-escaping interface use only: if the iface outlives the
-            // struct's scope this becomes a dangling pointer. std tests all
-            // use interfaces at the call site and discard them immediately.
             val src = genExpr(inner)
             val lt = llvmType(st)
-            val cast = newReg()
-            emit(s"  $cast = bitcast $lt* $src to i8*")
-            cast
+            val srcI8 = newReg()
+            emit(s"  $srcI8 = bitcast $lt* $src to i8*")
+            if owns then
+              val size = llvmSizeOf(st)
+              val heapBuf = newReg()
+              emit(s"  $heapBuf = call i8* @malloc($sizeT $size)")
+              val cpResult = newReg()
+              emit(s"  $cpResult = call i8* @memcpy(i8* $heapBuf, i8* $srcI8, $sizeT $size)")
+              heapBuf
+            else srcI8
           case _ =>
             // Pointer/ref: genExpr returns the raw pointer value directly
             genExpr(inner)

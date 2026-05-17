@@ -1332,7 +1332,7 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
         selfName.foreach { n => capturedEnv(n) = new Cell(closureVal) }
         closureVal
 
-      case TInterfaceBox(expr, iface) =>
+      case TInterfaceBox(expr, iface, _) =>
         val dataVal = evalAny(expr, env)
         // Build method map: interface method name → actual registered function name
         val structName = expr.typ match

@@ -18,8 +18,6 @@ This file pins:
 
 Known gaps (not pinned here):
 
-- Returning an iface from a function whose body constructs the
-  source as a local is a use-after-free.
 - SVM struct-field string aliasing — see the feedback memo.
 
 File-local prefix `Sibl` (Sysl Iface Box Lifetime).
@@ -193,3 +191,48 @@ auto-box).
         // Independent bias values
         assert(w1.bias == 1, "w1 bias")
         assert(w2.bias == 100, "w2 bias")
+
+
+Returning iface from a fn with local source
+--------------------------------------------
+
+When an iface is constructed from a local value and returned from
+its constructing function, the iface's `data_ptr` would otherwise
+point at a dead stack frame. The analyzer marks return-position
+iface boxes as `owns=true`; LLVM-derived codegens heap-copy the
+source struct so the data buffer outlives the source slot. The
+interpreter naturally returns by value (the iface holds the
+struct's value, not a pointer to it); SVM/TRISC's bump-allocated
+memory stack persists across returns by construction. Also
+required an analyzer fix: `ReturnStmtAST` was not auto-boxing for
+iface return types (the existing fn-arg / var-decl / struct-field
+auto-box paths didn't apply to return values).
+
+    factory_value() -> IntHolder
+        var c = Tally(42)
+        return c
+
+### Basic: return iface boxed from local
+
+    #test
+    test_sibl_return_iface_local() -> unit
+        val h = factory_value()
+        assert(h.value() == 42, s"got ${h.value()}")
+
+### Two distinct factory calls hand back independent data
+
+    #test
+    test_sibl_two_factory_calls() -> unit
+        val a = factory_value()
+        val b = factory_value()
+        assert(a.value() == 42, s"a; got ${a.value()}")
+        assert(b.value() == 42, s"b; got ${b.value()}")
+
+### Factory result used through a forwarding function
+
+    drain_value(h: IntHolder) -> int = h.value()
+
+    #test
+    test_sibl_factory_through_fn() -> unit
+        val h = factory_value()
+        assert(drain_value(h) == 42, "factory → relay")

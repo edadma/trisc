@@ -133,7 +133,7 @@ case class TFmtStr(expr: TExpr, spec: FmtSpec) extends TExpr { def typ: SyslType
 case class TClosure(params: List[TParam], returnType: SyslType, body: TFunBody, captures: List[(String, SyslType)], escapes: Boolean = true, effects: FuncEffects = FuncEffects.Unknown, selfName: Option[String] = None) extends TExpr {
   def typ: SyslType = SyslType.FuncType(params.map(_.typ), returnType, effects = effects)
 }
-case class TInterfaceBox(expr: TExpr, iface: SyslType.InterfaceType) extends TExpr {
+case class TInterfaceBox(expr: TExpr, iface: SyslType.InterfaceType, owns: Boolean = false) extends TExpr {
   def typ: SyslType = iface
 }
 case class TInterfaceDispatch(ifaceVal: TExpr, methodIndex: Int, args: List[TExpr], retType: SyslType) extends TExpr {

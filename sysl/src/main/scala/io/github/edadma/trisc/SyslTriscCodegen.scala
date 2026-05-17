@@ -1003,7 +1003,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         retType.isInstanceOf[SyslType.FuncType] || scanE(callee) || args.exists(scanE)
       case TInterfaceDispatch(obj, _, args, retType) =>
         retType.isInstanceOf[SyslType.FuncType] || scanE(obj) || args.exists(scanE)
-      case TInterfaceBox(inner, _) => scanE(inner)
+      case TInterfaceBox(inner, _, _) => scanE(inner)
       case TIntrinsicCall(_, args, _) => args.exists(scanE)
       case TIfExpr(c, t, e, _) => scanE(c) || t.exists(scanS) || e.exists(_.exists(scanS))
       case TQuantifier(_, _, _, lo, hi, _, pred, _) => scanE(lo) || scanE(hi) || scanE(pred)
@@ -2311,7 +2311,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case TCall(_, args, _) => args.foreach(visitE)
       case TIndirectCall(c, args, _) => visitE(c); args.foreach(visitE)
       case TInterfaceDispatch(o, _, args, _) => visitE(o); args.foreach(visitE)
-      case TInterfaceBox(i, _) => visitE(i)
+      case TInterfaceBox(i, _, _) => visitE(i)
       case TIntrinsicCall(_, args, _) => args.foreach(visitE)
       case TIndex(a, i, _) => visitE(a); visitE(i)
       case TSliceExpr(a, lo, hi, _) => visitE(a); lo.foreach(visitE); hi.foreach(visitE)
@@ -4230,8 +4230,11 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                 emitAddImm(3, 2, selfOffHeap + i)
                 emit("  std r4, r3, r0")
 
-      case TInterfaceBox(expr, iface) =>
+      case TInterfaceBox(expr, iface, owns) =>
         // Box a concrete value into an interface: {itable_ptr, data_ptr}
+        // owns=true (set by analyzer for boxes that escape — e.g. return
+        // position): heap-copy the source struct so its data outlives the
+        // source's stack slot.
         val structName = expr.typ match
           case SyslType.StructType(name, _, _) => name
           case SyslType.PtrType(SyslType.StructType(name, _, _)) => name
@@ -4256,24 +4259,33 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             // passes &w as self) and the interpreter's behavior (which wraps
             // the value in a Cell that the method writes through).
             //
-            // The historical implementation heap-allocated a copy here, which
-            // made interface dispatch silently lose any mutating-method side
-            // effect — `w.write(buf)` through a `Writer` iface filled a heap
-            // copy that was discarded on return, so `w` in the caller stayed
-            // empty (entire `std/io` test_writer_interface + test_copy
-            // cluster). The lifetime risk (returning a Writer of a stack
-            // local now dangles) is the same risk the language already has
-            // for `*T` of a stack local; it's the user's responsibility,
-            // and direct dispatch already had the same shape.
-            genExpr(expr)                    // r1 = address of struct data (the original)
-            emit("  pshd r1")               // save data_ptr
-            stackOffset -= 8
+            // owns=true (set by analyzer for boxes that escape — return
+            // position): malloc + emitAggregateCopy a heap copy so the data
+            // buffer outlives the source's stack slot.
+            if owns then
+              val structSize = stackSize(st)
+              genExpr(expr)                  // r1 = source addr
+              emit("  pshd r1")             // save src addr
+              stackOffset -= 8
+              emitLoadImm(1, structSize)
+              emit("  movi r4, malloc")
+              emit("  jalr r6, r4")          // r1 = heap ptr
+              emit("  popd r2")             // r2 = src addr
+              stackOffset += 8
+              emitAggregateCopy(2, 1, structSize, stackAlign(st))
+              // r1 still holds heap ptr → push as data_ptr
+              emit("  pshd r1")
+              stackOffset -= 8
+            else
+              genExpr(expr)                  // r1 = address of struct data (the original)
+              emit("  pshd r1")             // save data_ptr
+              stackOffset -= 8
             emitAddImm(7, 7, -16)
             stackOffset -= 16
             emit(s"  movi r1, $itableLabel")
             emit("  std r1, r7, r0")         // itable_ptr at [sp+0]
             emitAddImm(2, 7, 8)
-            emit("  popd r3")               // r3 = data_ptr (the saved original)
+            emit("  popd r3")               // r3 = data_ptr (the saved original/heap)
             stackOffset += 8
             emit("  std r3, r2, r0")         // data_ptr at [sp+8]
             emit("  mov r1, r7")             // r1 = address of the pair
