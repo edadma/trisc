@@ -60,9 +60,29 @@ class SyslSVMCodegen:
       if idx < 0 then throw new RuntimeException(s"SVM: no enclosing loop with label '$name'")
       idx
 
-  // Deferred statements — per-function stack, emitted LIFO at every return.
-  private val deferStack = new mutable.Stack[TStmt]
-  private def emitDefers(): Unit = for stmt <- deferStack do genStmt(stmt)
+  // Per-defer-site state. Each lexical `defer S` in a fn body owns one i64
+  // counter local; the counter is bumped at the defer-statement site and the
+  // body is replayed at every fn-exit path inside `while counter > 0`. This
+  // gives correct dynamic semantics — skipped branches see counter=0 (no
+  // fire), loop iterations bump the counter to N (fires N times) — without
+  // requiring a runtime defer queue.
+  private val deferSiteSlot = new mutable.LinkedHashMap[TStmt, Int]
+  private val deferBodies = new mutable.ArrayBuffer[TStmt]
+  private def emitDefers(): Unit =
+    for body <- deferBodies.reverseIterator do
+      val slot = deferSiteSlot(body)
+      val loopLbl = newLabel("defer_loop")
+      val endLbl = newLabel("defer_end")
+      emit(s"$loopLbl:")
+      emit(s"  local_get $slot")
+      emit("  eqz")
+      emit(s"  jumpnz $endLbl")
+      emit(s"  local_get $slot")
+      emit("  dec")
+      emit(s"  local_set $slot")
+      genStmt(body)
+      emit(s"  jump $loopLbl")
+      emit(s"$endLbl:")
 
   // Current function
   private var currentFunction: TFunDecl = null
@@ -219,6 +239,12 @@ class SyslSVMCodegen:
       case TReturnStmt(Some(e)) => scanExpr(e)
       case TMultiStmt(children) => children.foreach(scanStmt)
       case TContractCheck(_, e, _) => scanExpr(e)
+      case TDeferStmt(b) =>
+        // One i64 counter slot per textual defer-site, plus whatever locals
+        // the body itself needs (the body is replayed at fn-exit, so its
+        // local-allocating constructs run in the per-site cleanup loop).
+        count += 1
+        scanStmt(b)
       case _ =>
     body match
       case TExprBody(e) => scanExpr(e)
@@ -815,7 +841,8 @@ class SyslSVMCodegen:
     currentFunction = fun
     locals = new mutable.LinkedHashMap
     nextLocalIndex = 0
-    deferStack.clear()
+    deferSiteSlot.clear()
+    deferBodies.clear()
     addressedLocals = new mutable.HashSet[String]
     // Pre-scan body for any TAddrOf(name) — those names need to be stored
     // on the memory stack so the pointer and the local refer to the same cell.
@@ -1062,14 +1089,16 @@ class SyslSVMCodegen:
     val savedLocals = locals
     val savedNextIdx = nextLocalIndex
     val savedAddressed = addressedLocals
-    val savedDeferStack = deferStack.toList
+    val savedDeferSiteSlot = deferSiteSlot.toList
+    val savedDeferBodies = deferBodies.toList
     val savedFunc = currentFunction
 
     closureCaptures = captureMap
     locals = new mutable.LinkedHashMap
     nextLocalIndex = 0
     addressedLocals = new mutable.HashSet[String]
-    deferStack.clear()
+    deferSiteSlot.clear()
+    deferBodies.clear()
 
     // Pre-scan body for &x on locals (skip captures — they're not addressable
     // through this scan since they live in env).
@@ -1137,8 +1166,10 @@ class SyslSVMCodegen:
     locals = savedLocals
     nextLocalIndex = savedNextIdx
     addressedLocals = savedAddressed
-    deferStack.clear()
-    deferStack.pushAll(savedDeferStack.reverse)
+    deferSiteSlot.clear()
+    for (b, s) <- savedDeferSiteSlot do deferSiteSlot(b) = s
+    deferBodies.clear()
+    deferBodies ++= savedDeferBodies
     currentFunction = savedFunc
 
   /** Fallback for TStr on types we can't render: emit "???" string. */
@@ -1521,7 +1552,23 @@ class SyslSVMCodegen:
       emit(s"  $code")
 
     case TDeferStmt(body) =>
-      deferStack.push(body)
+      // Allocate a counter slot the first time we see this defer-site (keyed
+      // by body identity), then bump the counter at this point in the
+      // control flow. emitDefers replays the body `counter` times in a
+      // while-loop at every fn-exit path. The slot is zero-initialised by
+      // the `frame N` opcode at fn entry — DO NOT emit a push_0/local_set
+      // here, because if this defer is inside a loop body the explicit reset
+      // would zero the counter on every iteration and the defer would only
+      // ever fire once.
+      val slot = deferSiteSlot.getOrElseUpdate(body, {
+        deferBodies += body
+        val s = nextLocalIndex
+        nextLocalIndex += 1
+        s
+      })
+      emit(s"  local_get $slot")
+      emit("  inc")
+      emit(s"  local_set $slot")
 
     case TMultiStmt(children) =>
       children.foreach(genStmt)

@@ -1,0 +1,109 @@
+Defer in a not-taken branch does not fire
+=========================================
+
+`defer` semantics are **dynamic**, not lexical: a `defer stmt`
+queues a cleanup only if control actually reaches the
+statement. If the branch containing the `defer` is never
+entered at runtime, the deferred body must NOT run at function
+exit.
+
+For a long time every codegen backend (llvm-host, svm-host,
+trisc, riscv64, riscv32, wasm32) treated `defer` lexically —
+one cleanup site per textual `defer` regardless of dynamic
+reachability — so the deferred body fired even in skipped
+branches. Only the interpreter honored dynamic queuing. The
+fix is the per-defer-site counter scheme: at runtime each
+defer-site has an i64 counter, the defer-statement codegen
+emits a `counter++`, and the fn-exit codegen replays the body
+`counter` times inside a `while counter > 0` loop. A skipped
+branch leaves the counter at 0; the loop runs 0 iterations;
+the body never fires.
+
+See `feedback_sysl_codegen_defer_in_skipped_branch.md`.
+
+    module sysl.tests.lang_features
+
+    struct DsbTrace
+        s: string
+
+Branch-conditional defer with both paths
+----------------------------------------
+
+A single helper takes a `bool` switch. When the switch is
+true the defer queues and fires at fn exit; when false the
+defer is never queued and must not fire.
+
+    dsb_branch(t: *DsbTrace, take: bool) -> unit
+        if take
+            defer t.s = t.s + "B"
+            t.s = t.s + "x"
+        t.s = t.s + "y"
+
+    #test
+    test_taken_branch_fires_defer() -> unit
+        var t = DsbTrace("")
+        dsb_branch(&t, true)
+        assert(t.s == "xyB", s"expected 'xyB' on taken branch, got '${t.s}'")
+
+    #test
+    test_skipped_branch_does_not_fire_defer() -> unit
+        var t = DsbTrace("")
+        dsb_branch(&t, false)
+        assert(t.s == "y", s"expected 'y' on skipped branch (no defer), got '${t.s}'")
+
+Two branches, only one's defer fires
+------------------------------------
+
+If/else where each arm has its own `defer`. Whichever arm
+runs queues its defer; the other's is never queued.
+
+    dsb_two_branches(t: *DsbTrace, pick: int) -> unit
+        if pick == 1
+            defer t.s = t.s + "1"
+            t.s = t.s + "a"
+        else
+            defer t.s = t.s + "2"
+            t.s = t.s + "b"
+
+    #test
+    test_two_branches_pick_first() -> unit
+        var t = DsbTrace("")
+        dsb_two_branches(&t, 1)
+        assert(t.s == "a1", s"expected 'a1' (then-branch only), got '${t.s}'")
+
+    #test
+    test_two_branches_pick_second() -> unit
+        var t = DsbTrace("")
+        dsb_two_branches(&t, 7)
+        assert(t.s == "b2", s"expected 'b2' (else-branch only), got '${t.s}'")
+
+Early-return path skips post-defer
+----------------------------------
+
+A defer queued before an early return must still fire on the
+early-return path; a defer queued *after* the early return
+must not fire on that path. This pins that counters increment
+strictly at the defer-statement source location, not at the
+top of the function.
+
+    dsb_early_return(t: *DsbTrace, x: int) -> int
+        defer t.s = t.s + "A"
+        if x == 0
+            return -1
+        defer t.s = t.s + "B"
+        return x
+
+    #test
+    test_early_return_only_first_defer() -> unit
+        var t = DsbTrace("")
+        val r = dsb_early_return(&t, 0)
+        assert(r == -1, s"expected -1, got $r")
+        assert(t.s == "A", s"expected 'A' only (B was after early return), got '${t.s}'")
+
+    #test
+    test_fall_through_both_defers() -> unit
+        var t = DsbTrace("")
+        val r = dsb_early_return(&t, 7)
+        assert(r == 7, s"expected 7, got $r")
+        // LIFO: A queued first, B queued second; exit fires B then A.
+        assert(t.s == "BA", s"expected 'BA' (LIFO), got '${t.s}'")

@@ -1581,7 +1581,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     }.toSet
     closureLocalKind.clear()
     stackOffset = 0
-    deferStack.clear()
+    deferSiteOffset.clear()
+    deferBodies.clear()
 
     val structReturn = returnsViaPointer(fun.returnType)
 
@@ -1736,6 +1737,12 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emitStructStringFieldsRC(5, newLocal.offset, st, incr = true)
         case _ =>
 
+    // Reserve and zero one i64 FP-relative slot per defer-site in fn body.
+    // Slots persist through the whole body; emitDefers reads them on each
+    // exit path. Must run AFTER param copies (which adjust stackOffset) and
+    // BEFORE body codegen (which uses stackOffset for its own locals).
+    allocDeferCounters(fun.body)
+
     // Generate body
     fun.body match
       case TExprBody(expr) =>
@@ -1778,7 +1785,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     closureLocalKind.clear()
     captureBorrows = closure.captures.map(_._1).toSet
     stackOffset = 0
-    deferStack.clear()
+    deferSiteOffset.clear()
+    deferBodies.clear()
 
     val structReturn = returnsViaPointer(fun.returnType)
 
@@ -1952,6 +1960,10 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             emitStore(2, 3, capType)
             locals(capName) = LocalVar(capName, stackOffset, capType)
         envOffset += size
+
+    // Reserve defer counter slots in the closure's frame, just like
+    // genFunction. Each lexical defer-site in the body gets one i64 slot.
+    allocDeferCounters(fun.body)
 
     // Generate body
     fun.body match
@@ -2154,30 +2166,65 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case _ =>
 
   private def emitDefers(): Unit =
-    if deferStack.nonEmpty then
+    if deferBodies.nonEmpty then
       // Save the return value into a fresh fp-relative slot so it survives the
-      // defer body's stack churn. `pshd r1` is wrong here for two reasons:
-      // (1) it lowers r7 without updating stackOffset, so a subsequent
-      // FP-relative allocation in the body picks slots that collide with the
-      // saved r1; (2) some inline statement codegen (e.g. TFieldAssignStmt
-      // with a refcounted field) lowers r7 unilaterally and relies on the
-      // function epilogue's `mov r7, r5` to reclaim — so the matching `popd
-      // r1` reads garbage from the body's leaked region instead of the saved
-      // return value. The FP-relative save is immune to both.
+      // defer body's stack churn. `pshd r1` is wrong here for two reasons
+      // (see bug #3 fix history): pshd lowers r7 without updating
+      // stackOffset, and some inline body codegen (e.g. TFieldAssignStmt with
+      // a refcounted field) lowers r7 unilaterally and relies on the
+      // function epilogue to reclaim — so the matching popd r1 reads garbage
+      // from the leaked region. The FP-relative save is immune to both.
       val savedSO = stackOffset
       emitAddImm(7, 7, -8)
       stackOffset -= 8
       val saveOff = stackOffset
       emitAddImm(2, 5, saveOff)
       emit("  std r1, r2, r0")
-      for stmt <- deferStack.reverseIterator do
-        genStmt(stmt)
+      // Per-site cleanup loops in reverse declaration order. Each site's
+      // counter slot lives at a stable FP+off allocated in the prologue, so
+      // we can read/decrement it across body codegen that perturbs r7. Two
+      // resets are critical:
+      //
+      //   (1) at runtime, before each iteration's body runs, reset r7 to a
+      //   known baseline so successive iterations all see the same r7 (the
+      //   body codegen freely lowers r7 and never restores it — it relies on
+      //   the fn epilogue's `mov r7, r5`). Without this, iteration N+1
+      //   continues from where iteration N left r7, and the body's
+      //   FP-relative slot stores eventually fall outside the live stack.
+      //
+      //   (2) at codegen time, between site emissions, reset stackOffset to
+      //   the same baseline so the next site's body codegen plans its slot
+      //   offsets from a consistent starting point. Otherwise site A's
+      //   internal decrements bleed into site B's slot planning and site B
+      //   writes to FP-relative slots that aren't backed by allocated stack
+      //   at runtime (the failure mode for tests where only site A's body
+      //   ran — site A's body asm was never executed but its codegen
+      //   left stackOffset deeper than r7 actually was).
+      val loopBaseSO = stackOffset
+      for body <- deferBodies.reverseIterator do
+        val off = deferSiteOffset(body)
+        val loopLbl = newLabel("defer_loop")
+        val endLbl = newLabel("defer_end")
+        emit(s"$loopLbl")
+        emitAddImm(2, 5, off)
+        emit("  ldd r1, r2, r0")
+        emit(s"  beq r1, r0, $endLbl")
+        emit("  addi r1, r1, -1")
+        emit("  std r1, r2, r0")
+        // Runtime: reset r7 to baseline. Codegen: stackOffset is already at
+        // baseline (we restore it after each body emission below).
+        emitAddImm(7, 5, loopBaseSO)
+        genStmt(body)
+        emit(s"  bra $loopLbl")
+        emit(s"$endLbl")
+        // Codegen: reset stackOffset so the next site starts fresh.
+        stackOffset = loopBaseSO
       emitAddImm(2, 5, saveOff)
       emit("  ldd r1, r2, r0")
-      // Restore r7 to the pre-defer level (discarding any unbalanced
-      // body allocations). The epilogue's `mov r7, r5` would do this
-      // eventually but emitRefCleanup runs in between and uses pshd/popd
-      // for r1 preservation — those need a coherent stack pointer.
+      // Restore r7 to the pre-defer level (discarding any unbalanced body
+      // allocations). The epilogue's `mov r7, r5` would do this eventually
+      // but emitRefCleanup runs in between and uses pshd/popd for r1
+      // preservation — those need a coherent stack pointer.
       emitAddImm(7, 5, savedSO)
       stackOffset = savedSO
 
@@ -2214,8 +2261,113 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       if idx < 0 then throw new RuntimeException(s"no enclosing loop with label '$name'")
       idx
 
-  // Defer stack — deferred statements executed in LIFO order before return/epilogue
-  private val deferStack = new mutable.ArrayBuffer[TStmt]
+  // Per-defer-site state. Each lexical `defer S` in a fn body owns one i64
+  // FP-relative counter slot allocated up-front in the prologue. The
+  // defer-statement codegen bumps the counter; emitDefers replays the body
+  // at each fn-exit path inside `while counter > 0`. This gives correct
+  // dynamic semantics — skipped branches see counter=0 (no fire), loop
+  // iterations bump the counter to N (fires N times) — without requiring
+  // a runtime defer queue or closure environment.
+  private val deferSiteOffset = new mutable.LinkedHashMap[TStmt, Int]
+  private val deferBodies = new mutable.ArrayBuffer[TStmt]
+
+  /** Collect every TDeferStmt body in fn-body source order. The pre-scan lets
+    * us reserve all counter slots in the prologue, which gives stable
+    * FP-relative offsets across every body emission. */
+  private def collectDeferSites(body: TFunBody): List[TStmt] =
+    val out = new mutable.ArrayBuffer[TStmt]
+    def visitE(e: TExpr): Unit = e match
+      case TIfExpr(c, t, e2, _) =>
+        visitE(c); t.foreach(visitS); e2.foreach(_.foreach(visitS))
+      case TMatchExpr(scr, arms, default, _) =>
+        visitE(scr)
+        for a <- arms do
+          a.guard.foreach(visitE)
+          a.body.foreach(visitS)
+        default.foreach(_.foreach(visitS))
+      case TBinary(l, _, r, _) => visitE(l); visitE(r)
+      case TUnary(_, o, _) => visitE(o)
+      case TCast(i, _) => visitE(i)
+      case TCall(_, args, _) => args.foreach(visitE)
+      case TIndirectCall(c, args, _) => visitE(c); args.foreach(visitE)
+      case TInterfaceDispatch(o, _, args, _) => visitE(o); args.foreach(visitE)
+      case TInterfaceBox(i, _) => visitE(i)
+      case TIntrinsicCall(_, args, _) => args.foreach(visitE)
+      case TIndex(a, i, _) => visitE(a); visitE(i)
+      case TSliceExpr(a, lo, hi, _) => visitE(a); lo.foreach(visitE); hi.foreach(visitE)
+      case TAppend(s, el, _) => visitE(s); visitE(el)
+      case TFieldAccess(o, _, _) => visitE(o)
+      case TFieldPreInc(o, _, _) => visitE(o)
+      case TFieldPreDec(o, _, _) => visitE(o)
+      case TFieldPostInc(o, _, _) => visitE(o)
+      case TFieldPostDec(o, _, _) => visitE(o)
+      case TDeref(p, _) => visitE(p)
+      case TTempAddr(i, _) => visitE(i)
+      case TAddrOfIndex(a, i, _) => visitE(a); visitE(i)
+      case TAddrOfField(o, _, _) => visitE(o)
+      case TStructConstruct(_, args) => args.foreach(visitE)
+      case TEnumConstruct(_, _, args) => args.foreach(visitE)
+      case TArrayLit(es, _) => es.foreach(visitE)
+      case TLen(a, _) => visitE(a)
+      case TCap(a, _) => visitE(a)
+      case TNewArray(_, sz) => visitE(sz)
+      case TNew(_, args) => args.foreach(visitE)
+      case TNewEnum(_, _, args) => args.foreach(visitE)
+      case TQuantifier(_, _, _, lo, hi, _, pred, _) =>
+        visitE(lo); visitE(hi); visitE(pred)
+      case TRangeCheck(i, _, _, _) => visitE(i)
+      case TStringFromSlice(s, _) => visitE(s)
+      case TStringFromPtr(p, l, _) => visitE(p); visitE(l)
+      case TStr(i) => visitE(i)
+      case _ =>
+    def visitS(s: TStmt): Unit = s match
+      case TDeferStmt(b) => out += b; visitS(b)
+      case TVarStmt(_, _, init, _, _) => visitE(init)
+      case TAssignStmt(_, v) => visitE(v)
+      case TFieldAssignStmt(o, _, v) => visitE(o); visitE(v)
+      case TIndexAssignStmt(a, i, v) => visitE(a); visitE(i); visitE(v)
+      case TDerefAssignStmt(p, v) => visitE(p); visitE(v)
+      case TCompoundAssignStmt(_, _, v) => visitE(v)
+      case TFieldCompoundAssignStmt(o, _, _, v) => visitE(o); visitE(v)
+      case TExprStmt(e) => visitE(e)
+      case TReturnStmt(Some(e)) => visitE(e)
+      case TWhileStmt(c, b, _) => visitE(c); b.foreach(visitS)
+      case TDoWhileStmt(c, b, _) => visitE(c); b.foreach(visitS)
+      case TForStmt(init, c, upd, b, _) =>
+        visitS(init); visitE(c); visitS(upd); b.foreach(visitS)
+      case TLoopStmt(b, _) => b.foreach(visitS)
+      case TIfExpr(c, t, e, _) => visitE(c); t.foreach(visitS); e.foreach(_.foreach(visitS))
+      case TMatchExpr(scr, arms, default, _) =>
+        visitE(scr)
+        for a <- arms do
+          a.guard.foreach(visitE)
+          a.body.foreach(visitS)
+        default.foreach(_.foreach(visitS))
+      case TMultiStmt(c) => c.foreach(visitS)
+      case TContractCheck(_, e, _) => visitE(e)
+      case TDestructureStmt(_, _, init) => visitE(init)
+      case TDestructureAssignStmt(_, _, init) => visitE(init)
+      case _ =>
+    body match
+      case TExprBody(e) => visitE(e)
+      case TBlockBody(stmts) => stmts.foreach(visitS)
+    out.toList
+
+  /** Reserve N i64 FP-relative slots for the current fn's defer counters and
+    * zero-initialise each. Must be called from the prologue, after all param
+    * copies, before body codegen runs — so the offsets are stable for every
+    * subsequent FP+off access. */
+  private def allocDeferCounters(body: TFunBody): Unit =
+    val sites = collectDeferSites(body)
+    if sites.nonEmpty then
+      emitAddImm(7, 7, -8 * sites.length)
+      stackOffset -= 8 * sites.length
+      for (b, idx) <- sites.zipWithIndex do
+        val off = stackOffset + idx * 8
+        emitAddImm(2, 5, off)
+        emit("  std r0, r2, r0")
+        deferSiteOffset(b) = off
+        deferBodies += b
 
   private def genStmt(stmt: TStmt): Unit =
     stmt match
@@ -2640,7 +2792,13 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emitEpilogue()
 
       case TDeferStmt(body) =>
-        deferStack += body
+        // Counter slot was reserved at fn-prologue (allocDeferCounters);
+        // here we just bump it at this point in the dynamic control flow.
+        val off = deferSiteOffset(body)
+        emitAddImm(2, 5, off)
+        emit("  ldd r1, r2, r0")
+        emit("  addi r1, r1, 1")
+        emit("  std r1, r2, r0")
 
       case TMultiStmt(children) =>
         children.foreach(genStmt)

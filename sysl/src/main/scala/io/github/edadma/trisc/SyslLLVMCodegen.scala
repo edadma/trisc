@@ -205,8 +205,15 @@ class SyslLLVMCodegen(target: String = "host"):
       val idx = loopNameStack.indexWhere(_.contains(name))
       if idx < 0 then throw new RuntimeException(s"no enclosing loop with label '$name'")
       idx
-  // Defer stack — LIFO execution before returns
-  private val deferStack = new mutable.Stack[TStmt]
+  // Per-defer-site state. Each lexical `defer S` in a fn body owns one i64
+  // counter alloca; the counter is bumped at the defer-statement site and the
+  // body is replayed at every fn-exit path inside a `while counter > 0` loop.
+  // This gives correct dynamic semantics (skipped branches don't fire, loop
+  // defers fire N times) while keeping defer-body codegen lexical (no
+  // closure env, no runtime queue allocation).
+  private val deferSiteCounters = new mutable.LinkedHashMap[TStmt, String]
+  // Bodies in declaration order; iterated in reverse for LIFO at exit.
+  private val deferBodies = new mutable.ArrayBuffer[TStmt]
 
   def generate(program: TProgram): String =
     out.clear()
@@ -560,7 +567,8 @@ class SyslLLVMCodegen(target: String = "host"):
     regCounter = 0
     labelCounter = 0
     hasReturned = false
-    deferStack.clear()
+    deferSiteCounters.clear()
+    deferBodies.clear()
     funcBorrowParams = fun.params.collect {
       case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
     }.toSet
@@ -637,6 +645,7 @@ class SyslLLVMCodegen(target: String = "host"):
 
     // Assemble: switch back to out, emit deferred allocas, then body
     activeOut = out
+    val counterRegSet = deferSiteCounters.values.toSet
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
       // Zero-initialize allocas whose cleanup walks rc-tracked pointers, so
@@ -658,6 +667,10 @@ class SyslLLVMCodegen(target: String = "host"):
           case Some(st) if structHasStringFields(st) =>
             emit(s"  store $lt zeroinitializer, $lt* $reg")
           case _ =>
+      else if counterRegSet.contains(reg) then
+        // Per-defer-site counters must start at 0 so unreached defers don't
+        // observe stack garbage and erroneously fire on exit.
+        emit(s"  store i64 0, i64* $reg")
     out ++= bodyBuf
 
     emit("}")
@@ -673,7 +686,8 @@ class SyslLLVMCodegen(target: String = "host"):
     regCounter = 0
     labelCounter = 0
     hasReturned = false
-    deferStack.clear()
+    deferSiteCounters.clear()
+    deferBodies.clear()
     captureBorrows = closure.captures.map(_._1).toSet
     funcBorrowParams = closure.params.collect {
       case p if p.typ.isInstanceOf[SyslType.FuncType] || p.typ.isInstanceOf[SyslType.InterfaceType] => p.name
@@ -742,12 +756,15 @@ class SyslLLVMCodegen(target: String = "host"):
 
     // Assemble: switch back to out, emit deferred allocas, then body
     activeOut = out
+    val closureCounterRegSet = deferSiteCounters.values.toSet
     for (reg, lt) <- deferredAllocas do
       emit(s"  $reg = alloca $lt")
       if lt == "%struct.slice" then
         emit(s"  store %struct.slice zeroinitializer, %struct.slice* $reg")
       else if lt == "i8*" then
         emit(s"  store i8* null, i8** $reg")
+      else if closureCounterRegSet.contains(reg) then
+        emit(s"  store i64 0, i64* $reg")
     out ++= bodyBuf
 
     emit("}")
@@ -1049,7 +1066,20 @@ class SyslLLVMCodegen(target: String = "host"):
         hasReturned = true
 
       case TDeferStmt(body) =>
-        deferStack.push(body)
+        // Allocate a counter slot the first time we see this lexical defer
+        // site (keyed by body identity), then emit a counter++ at this point
+        // in the control flow. The site's body is replayed at every fn-exit
+        // path inside `while counter > 0` — so skipped branches see counter=0
+        // (no fire) and loop iterations bump counter to N (fires N times).
+        val counterReg = deferSiteCounters.getOrElseUpdate(body, {
+          deferBodies += body
+          deferAlloca("i64")
+        })
+        val cur = newReg()
+        emit(s"  $cur = load i64, i64* $counterReg")
+        val nxt = newReg()
+        emit(s"  $nxt = add i64 $cur, 1")
+        emit(s"  store i64 $nxt, i64* $counterReg")
 
       case TMultiStmt(children) =>
         children.foreach(genStmt)
@@ -4215,9 +4245,31 @@ class SyslLLVMCodegen(target: String = "host"):
       case _ =>
         genExpr(obj) // for other expressions, genExpr returns pointer for struct types
 
-  // Emit deferred statements in LIFO order (does not pop — they may run again on another return path)
+  // Emit per-defer-site cleanup loops in LIFO declaration order. Each site's
+  // body is replayed `counter[i]` times; sites that were never reached
+  // dynamically have counter=0 and emit no work at this exit. Called at every
+  // return path; safe to call multiple times because every TDeferStmt counter
+  // is independent and only loaded/decremented inside this loop's bodyLbl.
   private def emitDefers(): Unit =
-    for stmt <- deferStack do genStmt(stmt)
+    for body <- deferBodies.reverseIterator do
+      val counterReg = deferSiteCounters(body)
+      val checkLbl = newLabel("defer_check")
+      val bodyLbl = newLabel("defer_body")
+      val endLbl = newLabel("defer_end")
+      emit(s"  br label %$checkLbl")
+      emitLabel(checkLbl)
+      val cur = newReg()
+      emit(s"  $cur = load i64, i64* $counterReg")
+      val gtz = newReg()
+      emit(s"  $gtz = icmp ne i64 $cur, 0")
+      emit(s"  br i1 $gtz, label %$bodyLbl, label %$endLbl")
+      emitLabel(bodyLbl)
+      val dec = newReg()
+      emit(s"  $dec = sub i64 $cur, 1")
+      emit(s"  store i64 $dec, i64* $counterReg")
+      genStmt(body)
+      emit(s"  br label %$checkLbl")
+      emitLabel(endLbl)
 
   // Extract the data pointer from a slice or ref-to-slice
   private def emitSliceDataPtr(base: String, typ: SyslType): String =

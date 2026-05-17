@@ -1,0 +1,110 @@
+Defer in a loop body fires once per iteration
+=============================================
+
+A `defer stmt` inside a loop body queues a cleanup on every
+iteration, not once for the whole loop. All N queued bodies
+must run at function exit in LIFO order (most-recently-queued
+fires first).
+
+For a long time every codegen backend (llvm-host, svm-host,
+trisc, riscv64, riscv32, wasm32) fired the defer only **once**
+regardless of iteration count — the lexical-cleanup pattern
+emits one cleanup site per textual `defer` source location.
+Only the interpreter queued correctly. The fix is the
+per-defer-site counter scheme: each `defer` source location
+owns one i64 counter alloca; the defer-statement codegen emits
+`counter++`; the fn-exit codegen replays the body inside
+`while counter > 0`, so an N-iteration loop bumps the counter
+to N and the body fires N times on exit.
+
+See `feedback_sysl_codegen_defer_in_loop_queue_depth.md`.
+
+**Known limitation** (intentional, pragmatic): a defer body
+inside a loop cannot capture the iteration variable, because
+the bodies are all replayed at fn exit after the loop has
+ended. Workaround: copy the value into a struct or call a
+helper that takes it by value. The counter scheme cannot model
+per-iteration captures without per-defer-execution closure
+environments.
+
+    module sysl.tests.lang_features
+
+    struct DilCounter
+        n: int
+
+Loop fires N defers
+-------------------
+
+A `for` loop runs 3 iterations; each iteration queues one
+`defer c.n = c.n + 1`. At fn exit all 3 fire and the counter
+ends at 3.
+
+    dil_count_increments(c: *DilCounter) -> unit
+        for i in 0..<3
+            defer c.n = c.n + 1
+
+    #test
+    test_defer_in_loop_fires_per_iteration() -> unit
+        var c = DilCounter(0)
+        dil_count_increments(&c)
+        assert(c.n == 3, s"expected 3 defers, got ${c.n}")
+
+Zero-iteration loop fires no defers
+-----------------------------------
+
+If the loop body never runs, the defer is never queued, so
+nothing fires at exit. This pins that the per-iteration
+queueing is dynamic, not lexical.
+
+    dil_zero_iterations(c: *DilCounter) -> unit
+        for i in 0..<0
+            defer c.n = c.n + 1
+
+    #test
+    test_zero_iteration_loop_fires_no_defers() -> unit
+        var c = DilCounter(0)
+        dil_zero_iterations(&c)
+        assert(c.n == 0, s"expected 0 defers, got ${c.n}")
+
+While loop with variable count
+------------------------------
+
+Same idea but driven by a `while`. Confirms the per-iteration
+counter mechanism doesn't depend on `for`-range desugaring.
+
+    dil_while_count(c: *DilCounter, n: int) -> unit
+        var i = 0
+        while i < n
+            defer c.n = c.n + 1
+            i = i + 1
+
+    #test
+    test_while_loop_fires_per_iteration() -> unit
+        var c = DilCounter(0)
+        dil_while_count(&c, 5)
+        assert(c.n == 5, s"expected 5 defers, got ${c.n}")
+
+Two defer sites in a loop body — both counted
+---------------------------------------------
+
+Two distinct `defer` statements in one loop body — each owns
+its own counter and each is queued per iteration. The exact
+firing order across sites within a single iteration is
+intentionally **not** pinned: the interpreter interleaves
+Go-style (per-iteration LIFO), but the codegen scheme groups
+by site (all instances of one site, then the other). The
+*total count* — every queued body fires — is what this test
+locks down. Both orderings end with `c.n` increased by 2×N.
+
+    dil_two_sites_count_total(c: *DilCounter) -> unit
+        for i in 0..<3
+            defer c.n = c.n + 1
+            defer c.n = c.n + 10
+
+    #test
+    test_two_defer_sites_total_count() -> unit
+        var c = DilCounter(0)
+        dil_two_sites_count_total(&c)
+        // 3 iterations × (one +1 + one +10) = 33. Order across sites
+        // diverges between backends but the sum doesn't.
+        assert(c.n == 33, s"expected 33 (3×(1+10)), got ${c.n}")
