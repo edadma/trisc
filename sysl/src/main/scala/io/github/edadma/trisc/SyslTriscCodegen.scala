@@ -1430,16 +1430,27 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       emit("  ldd r2, r1, r0")
       emit("  addi r3, r1, 8")
       emit("  ldd r3, r3, r0")
-      // Do NOT rewind the temp region (`extra = preOffset - stackOffset`)
-      // before pushing. For an inline-constructed iface arg
-      // (`use_shape(Square(9))`), `data_ptr` (r3) points INTO the temp
-      // region — and the subsequent `pshd r3; pshd r2` would overwrite
-      // the source struct data before the callee dereferences
-      // `data_ptr`. Same hazard for stack-env closures passed as FuncType
-      // args. Leak the temp until the function epilogue restores r7.
-      // The TCall cleanup adds it all back in one go via
-      // `argsAllocated = cleanupTo - stackOffset`, so accounting stays
-      // correct.
+      // For FuncType: env_ptr (r3) is null (TFuncRef), or points at a
+      // pre-allocated __env_N in the permanent caller frame (StackEnv
+      // closure), or at malloc'd heap (HeapEnv). Never into the per-arg
+      // temp region. Rewinding the temp is safe — without the rewind,
+      // two consecutive FuncType stack args interleave 16-byte leaks
+      // between the pushed pairs, shifting the second arg (and every
+      // following arg) off its expected fp-relative offset in the
+      // callee. See `feedback_sysl_trisc_two_fnptr_then_scalar.md`.
+      //
+      // For InterfaceType: `data_ptr` of an inline-constructed iface
+      // (`use_shape(Square(9))`) DOES point into the per-arg temp,
+      // because TInterfaceBox keeps the source struct in the same
+      // outer temp block. Rewinding would reclaim that struct before
+      // the callee dereferences data_ptr — keep the leak in that case.
+      // The TCall cleanup reclaims the leak via
+      // `argsAllocated = cleanupTo - stackOffset`.
+      if arg.typ.isInstanceOf[SyslType.FuncType] then
+        val extra = preOffset - stackOffset
+        if extra > 0 then
+          emitAddImm(7, 7, extra)
+          stackOffset = preOffset
       emit("  pshd r3")
       emit("  pshd r2")
       stackOffset -= 16
@@ -1633,6 +1644,15 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       else if param.typ.isInstanceOf[SyslType.SliceType] then
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
         stackParamOffset += 24
+      else if param.typ.isInstanceOf[SyslType.FuncType] || param.typ.isInstanceOf[SyslType.InterfaceType] then
+        // FuncType / InterfaceType params are 16-byte {func_ptr, env_ptr} or
+        // {data_ptr, itable_ptr} pairs on the caller stack. Without bumping
+        // stackParamOffset by 16 here, the NEXT param's offset overlaps the
+        // env/itable half of this one — every arg past the first FuncType /
+        // InterfaceType stack param gets read from inside the pair instead of
+        // its own slot. See `feedback_sysl_trisc_two_fnptr_then_scalar.md`.
+        locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
+        stackParamOffset += 16
       else if param.typ.isInstanceOf[SyslType.StructType] || param.typ.isInstanceOf[SyslType.EnumType] then
         val aligned = (stackSize(param.typ) + 7) & ~7
         locals(param.name) = LocalVar(param.name, stackParamOffset, param.typ)
@@ -4475,20 +4495,21 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             stackOffset -= 24
             regAggregateDataOffset = stackOffset
           else if arg.typ.isInstanceOf[SyslType.FuncType] || arg.typ.isInstanceOf[SyslType.InterfaceType] then
-            // Pre-evaluate 16-byte pair register arg.
-            // Do NOT rewind the temp region before pushing. For an
-            // inline-constructed iface arg (`use_shape(Square(9))`),
-            // `data_ptr` (r3) points INTO the temp region — and the
-            // subsequent `pshd r3; pshd r2` would overwrite the source
-            // struct data before the callee dereferences `data_ptr`.
-            // Same hazard for stack-env closures as FuncType args. Leak
-            // the temp until the function epilogue restores r7. The
-            // TCall cleanup adds it all back in one go via
-            // `argsAllocated = cleanupTo - stackOffset`.
+            // Pre-evaluate 16-byte pair register arg. For FuncType we can
+            // safely rewind the per-arg temp before the pshd (env_ptr never
+            // points into the temp). For InterfaceType the inline-iface
+            // hazard means we must leak (see the matching evalAndPushArg
+            // branch above).
+            val preOffset = stackOffset
             genExpr(arg)
             emit("  ldd r2, r1, r0")
             emit("  addi r3, r1, 8")
             emit("  ldd r3, r3, r0")
+            if arg.typ.isInstanceOf[SyslType.FuncType] then
+              val extra = preOffset - stackOffset
+              if extra > 0 then
+                emitAddImm(7, 7, extra)
+                stackOffset = preOffset
             emit("  pshd r3")
             emit("  pshd r2")
             stackOffset -= 16
