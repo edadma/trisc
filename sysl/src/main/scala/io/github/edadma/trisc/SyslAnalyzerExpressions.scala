@@ -472,7 +472,16 @@ trait SyslAnalyzerExpressions:
                   val coerced = coerceLiteral(arg, fieldType)
                   if !compatible(coerced.typ, fieldType) then
                     throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
-                  coerced
+                  // Box concrete into iface when the field is an interface — same
+                  // shape as the TStructConstruct path (sysl@972ea9f63). owns=true
+                  // because the enclosing struct is heap-allocated and may outlive
+                  // the source: the iface field's data buffer must own its bytes
+                  // (heap-copy) instead of pointing at the source's potentially-
+                  // ephemeral storage.
+                  (fieldType, coerced.typ) match
+                    case (iface: SyslType.InterfaceType, ct) if !ct.isInstanceOf[SyslType.InterfaceType] =>
+                      TInterfaceBox(coerced, iface, owns = true)
+                    case _ => coerced
                 }
                 TNew(st, checkedArgs)
               case _ =>

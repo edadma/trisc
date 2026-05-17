@@ -253,3 +253,35 @@ auto-box paths didn't apply to return values).
     test_sibl_factory_through_fn() -> unit
         val h = factory_value()
         assert(drain_value(h) == 42, "factory → relay")
+
+
+Heap-allocated struct with iface field
+---------------------------------------
+
+`new Wrapper(src, bias)` heap-allocates a Wrapper. Its iface
+field must own its data buffer (heap-copy at boxing time)
+because the Wrapper may outlive the source's stack storage.
+Previously the `new` path didn't auto-box for iface fields at
+all (silent garbage / segfault); after auto-box landed, two
+successive factory calls aliased the same source slot.
+`new Struct(...)` now boxes iface fields with `owns=true`.
+
+    make_wrapper(n: int, bias: int) -> &Wrapper
+        val src = Tally(n)
+        return new Wrapper(src, bias)
+
+### `new Wrapper` returned from a fn whose source is local
+
+    #test
+    test_sibl_new_wrapper_returned() -> unit
+        val w = make_wrapper(40, 2)
+        assert(w.total() == 42, s"got ${w.total()}")
+
+### Two `new Wrapper`s built and used independently
+
+    #test
+    test_sibl_two_new_wrappers() -> unit
+        val a = make_wrapper(10, 1)
+        val b = make_wrapper(100, 2)
+        assert(a.total() == 11, s"a; got ${a.total()}")
+        assert(b.total() == 102, s"b; got ${b.total()}")
