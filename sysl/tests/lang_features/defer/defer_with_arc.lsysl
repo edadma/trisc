@@ -1,0 +1,147 @@
+Defer Mutating an ARC-Counted Struct Field
+============================================
+
+Reference §"Defer", §"Three-Mode Memory Model". A `defer` body
+that mutates a field of a heap-allocated (`new`) struct must:
+
+  1. Keep the struct alive across the deferred mutation — the
+     enclosing fn's local that holds the `&Struct` reference must
+     not have its rc decremented to 0 before the defer fires.
+  2. Apply the mutation visibly: the caller's reference still
+     points at the SAME heap object, so reads after the call see
+     the field's new value.
+  3. Balance refcounts on field overwrites: if the defer assigns
+     a fresh string (or `new Other(...)`) to a string-typed or
+     ref-typed field, the OLD value's rc must drop and the NEW
+     value's rc must rise.
+
+Defer + ARC sits at the intersection of two cleanup mechanisms
+(defer ordering + ARC rc-decrement). The closest existing
+coverage is `defer_no_return.lsysl` (defer on unit-return fns) and
+`defer_early_return.lsysl` (defer with string-field mutation on
+`*Trace`, not `&Trace`). This file adds the `&Struct` (ref-counted)
+shape.
+
+File-local prefix `Dwa` (Defer-With-Arc).
+
+    module sysl.tests.lang_features
+
+
+    struct DwaCounter
+        n: int
+        label: string
+
+
+Defer mutates a heap-allocated int field
+------------------------------------------
+
+### Through `&DwaCounter` — visible after the call
+
+The factory allocates a fresh counter (`new`), the body returns
+the reference, and the deferred bump happens AFTER the body's
+return value is captured (defer fires LAST in LIFO order). The
+caller reads `n` and sees the bumped value.
+
+    dwa_make_bumped(start: int) -> &DwaCounter
+        val c = new DwaCounter(start, "made")
+        defer c.n = c.n + 100
+        return c
+
+    #test
+    test_dwa_defer_bumps_int_field() -> unit
+        val c = dwa_make_bumped(7)
+        // defer fired before c was handed back; caller sees 107
+        assert(c.n == 107, s"expected 107, got ${c.n}")
+        assert(c.label == "made", s"label untouched, got '${c.label}'")
+
+
+Defer mutates a heap-allocated string field
+---------------------------------------------
+
+### Field-assign of a fresh literal — rc balance
+
+The defer body assigns a literal-string to `label`. The OLD label
+("init") must drop rc; the NEW label ("done") must rise. Failure
+modes:
+
+  - Memory leak of the OLD buffer (no observable wrong output,
+    but cumulative leaks under heavy use).
+  - Double-free of the OLD buffer if the rc-dec happens twice.
+  - Stale reads if the caller's `label` access happens before the
+    defer fired.
+
+The test only pins the OBSERVABLE result (caller reads "done").
+Leak / double-free symptoms surface on AddressSanitizer or under
+load, not in a single-shot test.
+
+    dwa_relabel(initial: string) -> &DwaCounter
+        val c = new DwaCounter(0, initial)
+        defer c.label = "done"
+        return c
+
+    #test
+    test_dwa_defer_overwrites_string_field() -> unit
+        val c = dwa_relabel("init")
+        assert(c.label == "done", s"expected 'done', got '${c.label}'")
+
+
+Multiple defers in LIFO order on the same heap object
+-------------------------------------------------------
+
+### Three defers, last-queued runs first
+
+LIFO semantics (per the reference) means the LAST `defer`
+statement runs FIRST. The caller reads the cumulative result.
+
+    dwa_three_defers(start: int) -> &DwaCounter
+        val c = new DwaCounter(start, "")
+        defer c.n = c.n * 2       // runs LAST (queued first)
+        defer c.n = c.n + 10      // runs SECOND
+        defer c.n = c.n + 1       // runs FIRST (queued last)
+        return c
+
+    #test
+    test_dwa_three_defers_lifo() -> unit
+        val c = dwa_three_defers(5)
+        // Order: +1 → 6, then +10 → 16, then *2 → 32
+        assert(c.n == 32, s"LIFO order expected 32, got ${c.n}")
+
+
+Defer with no early-return — fall-through path
+------------------------------------------------
+
+### The defer body still fires on implicit / explicit return
+
+Confirms defer is not return-path-specific: the body runs at fn
+exit regardless of how exit happens.
+
+    dwa_fall_through(start: int) -> &DwaCounter
+        val c = new DwaCounter(start, "fall")
+        defer c.n = c.n - 1
+        return c
+
+    #test
+    test_dwa_defer_on_fall_through() -> unit
+        val c = dwa_fall_through(100)
+        assert(c.n == 99, s"defer decremented, expected 99 got ${c.n}")
+
+
+Defer references a local that captures the heap ref
+-----------------------------------------------------
+
+### The defer body uses the OUTER local name, not a re-binding
+
+The defer body reads `c` (the local holding the &DwaCounter). The
+local must remain in scope through the defer.
+
+    dwa_observe_then_bump() -> int
+        val c = new DwaCounter(50, "obs")
+        defer c.n = c.n * 3
+        val snapshot = c.n        // 50 — taken before defer fires
+        return snapshot
+
+    #test
+    test_dwa_local_captures_observe() -> unit
+        val r = dwa_observe_then_bump()
+        // snapshot was 50; the *3 mutation happens after snapshot reads c.n
+        assert(r == 50, s"snapshot taken before defer, expected 50 got $r")

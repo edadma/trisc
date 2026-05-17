@@ -4914,6 +4914,13 @@ class SyslLLVMCodegen(target: String = "host"):
         Set(locals(name).reg)
       case TVarRef(name, typ) if structHasStringFields(typ) && locals.contains(name) =>
         Set(locals(name).reg)
+      // RefType (`&Struct`) returned from a fn: the local owns rc=1 by construction
+      // (`new`) or by transferred ownership (assignment from a fresh return). The
+      // fn-exit `emitReleaseRefs` would decrement that to 0 and free before
+      // the caller can use the return value. Skip the local's reg so the rc
+      // transfers to the caller intact.
+      case TVarRef(name, typ) if isRef(typ) && locals.contains(name) =>
+        Set(locals(name).reg)
       case TVarRef(name, _) if derivedFromSlice != null && derivedFromSlice.contains(name) =>
         val sliceName = derivedFromSlice(name)
         if locals.contains(sliceName) then Set(locals(sliceName).reg) else Set.empty
@@ -5288,7 +5295,7 @@ class SyslLLVMCodegen(target: String = "host"):
       val flushIgnored = newReg()
       emit(s"  $flushIgnored = call i32 @fflush(i8* null)")
     for (name, local) <- locals if isRef(local.typ) do
-      if !captureBorrows.contains(name) then
+      if !captureBorrows.contains(name) && !skipSliceRegs.contains(local.reg) then
         val hoff = refHeaderOffset(local.typ)
         val ptr = newReg()
         emit(s"  $ptr = load i8*, i8** ${local.reg}")
