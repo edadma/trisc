@@ -200,6 +200,17 @@ class SyslSVMCodegen:
         // declared frame size.
         if c.typ.isInstanceOf[SyslType.FuncType] then count += 1
         scanExpr(c); args.foreach(scanExpr)
+      case _: TClosure =>
+        // genClosureExpr allocates one anonymous local (envIdx) per
+        // construction site to hold the env pointer across descriptor
+        // wiring. The slot is never released, so two closure literals in
+        // the same outer body each need their own — without this
+        // reservation the second `local_set` lands past the declared
+        // frame and silently overwrites adjacent locals (a TVarStmt's
+        // slot, etc.). The closure body itself is hoisted to its own
+        // function with its own `frame` directive, so we do not scan
+        // it from the outer fn's countLocals.
+        count += 1
       case TIndex(a, i, _) => scanExpr(a); scanExpr(i)
       case TFieldAccess(o, _, _) => scanExpr(o)
       case TDeref(p, _) => scanExpr(p)

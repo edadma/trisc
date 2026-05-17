@@ -142,7 +142,7 @@ covered now; one SVM bug TODO'd.
 
 | File | Tests pinned |
 |---|---|
-| `generic_fn_basic.lsysl` 🟢 | explicit type arg; inference; multi-param; max-of-T; (5 tests). TODO: `apply_twice[T](f: (T)->T, x: T)` higher-order — SVM overflows its 1024-item data stack on f(f(x)); other 6 backends fine |
+| `generic_fn_basic.lsysl` 🟢 | explicit type arg; inference; multi-param; max-of-T; higher-order `apply_twice[T](f: (T)->T, x: T) = f(f(x))` (single + two call sites in one body) — pins the SVM countLocals-misses-TClosure-envIdx fix (7 tests) |
 | `generic_struct.lsysl` 🟢 | `Box[T]` construct & read; inferred construct; pass-to-fn; two-param `Pair[A,B]` (4 tests) |
 | `generic_enum.lsysl` 🟢 | `Maybe[T]` with `Just(value: T)` / `Nope`; match with payload bind; two instantiations side-by-side (3 tests) |
 | `generic_nested.lsysl` 🟢 | `Box[Box[int]]`, three-deep `Box[Box[Box[int]]]`, `Box[Opt[int]]`, two-param `Pair[A,B]` (4 tests) |
@@ -152,7 +152,7 @@ covered now; one SVM bug TODO'd.
 | `generic_struct_method.lsysl` 🟢 | `Box[T].get()` & `.set(x)`; mutating-self via `&self`; method on two-param `Pair[A,B]`; chained method call (6 tests) |
 | `generic_alias_basic.lsysl` 🟡 | `type GabUnary[T] = (T) -> T` as parameter type; two-param alias `(A,A)->B` (2 tests). TODO: alias instantiation as struct *field* type fails with `'GabUnary' is not a generic type` even when the identical instantiation works as a fn param — analyzer field-type resolution gap, same on all 7 backends |
 | `siblings/generic_fn_sibling_import.lsysl` 🟢 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression): explicit type-arg + inferred (int/bool/string); two-param inferred + explicit; generic returning generic struct + field-read at caller; outer generic body calling sibling-imported generic; parameterless generic-returning fn bare-reference auto-call (13 tests) |
-| `siblings/generic_alias_cross_file.lsysl` 🟢 | generic alias visible across files (sysl@2c4f1c095 regression): `GhUnary[int]` as fn param (arrow / placeholder / second call site); `GhBin[int,int]` with two-arg closures; newtype `GhIdAlias[T]` at int + string instantiations; locally-declared fn using sibling-imported alias; two aliases coexist (10 tests). One SVM divergence routed around (two HOF calls in one body — shares the `generic_fn_basic.lsysl` `apply_twice` SVM gap) |
+| `siblings/generic_alias_cross_file.lsysl` 🟢 | generic alias visible across files (sysl@2c4f1c095 regression): `GhUnary[int]` as fn param (arrow / placeholder / second call site + two HOF calls in one body); `GhBin[int,int]` with two-arg closures; newtype `GhIdAlias[T]` at int + string instantiations; locally-declared fn using sibling-imported alias; two aliases coexist (11 tests). The two-HOF case pins the SVM countLocals-misses-TClosure-envIdx fix |
 
 ---
 
