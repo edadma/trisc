@@ -164,6 +164,7 @@ class SyslSVMCodegen:
               case TVariantPattern(_, _, bindings, _, _) => count += bindings.count(_.isDefined)
               case TValuePattern(v) => scanExpr(v)
               case TRangePattern(lo, hi) => scanExpr(lo); scanExpr(hi)
+              case TBindPattern(_, _) => count += 1
               case _ =>
           arm.guard.foreach(scanExpr)
           arm.body.foreach(scanStmt)
@@ -3238,6 +3239,10 @@ class SyslSVMCodegen:
       for pat <- arm.patterns do pat match
         case TWildcard =>
           emit(s"  jump $hitLabel")
+        case TBindPattern(_, _) =>
+          // Binding pattern matches anything; the actual name->slot
+          // wiring happens after the hit label below.
+          emit(s"  jump $hitLabel")
         case TValuePattern(v) =>
           genExpr(v)
           emit(s"  local_get $scrIdx")
@@ -3309,6 +3314,10 @@ class SyslSVMCodegen:
       emit(s"$hitLabel:")
       // Bind destructure/variant pattern fields to locals before guard
       for pat <- arm.patterns do pat match
+        case TBindPattern(name, typ) =>
+          // Top-level binding: alias the user's name to the scrutinee slot.
+          // No copy needed — arm body won't mutate the synthetic slot.
+          locals(name) = LocalInfo(scrIdx, typ)
         case TVariantPattern(et, variantIndex, bindings, _, nested) =>
           val dataOff = et.dataOffset.toInt
           val variantFields = et.variants(variantIndex)._2

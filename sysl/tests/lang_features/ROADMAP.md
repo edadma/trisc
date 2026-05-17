@@ -132,7 +132,7 @@ Reference §"Pointers", "Pointer Dereference Is Explicit", "Array/Pointer Decay"
 
 ---
 
-### `generics/` — Generic functions / structs / enums / aliases — 🟡 P0
+### `generics/` — Generic functions / structs / enums / aliases — 🟢 P0
 
 Reference §"Generic Functions", "Generic Structs", "Generic Tagged Unions",
 "Generic Type Aliases", "Methods on generic structs". `std/` uses Option /
@@ -150,7 +150,7 @@ covered now; one SVM bug TODO'd.
 | `generic_fn_inferred.lsysl` 🟢 | subsumed by `generic_fn_basic.lsysl` |
 | `generic_fn_operator_rhs.lsysl` 🟢 | bare-call placeholder `_ + _` RHS; explicit type args; two-arg inference; full closure-literal RHS — pins sysl@950415fde + sysl@eb3fa5673 across all 7 backends (4 tests) |
 | `generic_struct_method.lsysl` 🟢 | `Box[T].get()` & `.set(x)`; mutating-self via `&self`; method on two-param `Pair[A,B]`; chained method call (6 tests) |
-| `generic_alias_basic.lsysl` 🟡 | `type GabUnary[T] = (T) -> T` as parameter type; two-param alias `(A,A)->B` (2 tests). TODO: alias instantiation as struct *field* type fails with `'GabUnary' is not a generic type` even when the identical instantiation works as a fn param — analyzer field-type resolution gap, same on all 7 backends |
+| `generic_alias_basic.lsysl` 🟢 | `type GabUnary[T] = (T) -> T` as parameter type; two-param alias `(A,A)->B`; alias as struct field type (6 tests). Field-type gap fixed at sysl@1194e72da. |
 | `siblings/generic_fn_sibling_import.lsysl` 🟢 | generic fn instantiated across files of the same module (sysl@4f1f81725 regression): explicit type-arg + inferred (int/bool/string); two-param inferred + explicit; generic returning generic struct + field-read at caller; outer generic body calling sibling-imported generic; parameterless generic-returning fn bare-reference auto-call (13 tests) |
 | `siblings/generic_alias_cross_file.lsysl` 🟢 | generic alias visible across files (sysl@2c4f1c095 regression): `GhUnary[int]` as fn param (arrow / placeholder / second call site + two HOF calls in one body); `GhBin[int,int]` with two-arg closures; newtype `GhIdAlias[T]` at int + string instantiations; locally-declared fn using sibling-imported alias; two aliases coexist (11 tests). The two-HOF case pins the SVM countLocals-misses-TClosure-envIdx fix |
 
@@ -175,30 +175,30 @@ Reference §"Control Flow", "If Expression", "Return".
 
 ## Tier 1 — Common surfaces
 
-### `defer/` — defer LIFO + interactions — 🟡 P1
+### `defer/` — defer LIFO + interactions — 🟢 P1
 
 | File | Tests pinned |
 |---|---|
 | `defer_lifo.lsysl` 🟢 | LIFO ordering via pointer-mutating helper *(move from top level)* |
-| `defer_early_return.lsysl` 🔴 | defer fires on every return path **— BLOCKED on TRISC compiler bug**: defer doesn't fire (or doesn't take effect) when the enclosing fn has a non-unit return type and uses `return value`. 6/7 backends pass (interp, llvm-host, svm, rv64, rv32, wasm32). Existing `defer_lifo.lsysl` works because its helper is `-> unit`. File drafted and removed 2026-05-15; see feedback_sysl_trisc_defer_nonunit_return.md for repro + suspect codegen sites |
-| `defer_with_arc.lsysl` 🔴 | defer that mutates a ref-counted struct field |
-| `defer_no_return.lsysl` 🟡 | single defer + implicit exit; defer-then-body; defer in always-taken if-branch fires at fn exit; no-defer baseline (4 tests). **Bug surfaced and withheld:** defer queued inside a *skipped* `if`-branch still fires on 6 of 7 backends (everything except interpreter). Test was authored but dropped pending fix — see feedback_sysl_codegen_defer_in_skipped_branch.md |
-| `defer_in_loop.lsysl` 🔴 | defer inside loop body — fires at end of *function*, not iteration **— BLOCKED on codegen cluster**: 6 of 7 codegen backends fire only 1 defer when N were queued in a loop body. TRISC additionally fails to link if the deferred statement references the loop variable (`undefined symbol: 'i'`). Same lexical-cleanup family as `defer-in-skipped-branch`. File drafted and withdrawn 2026-05-15; see feedback_sysl_codegen_defer_in_loop_queue_depth.md for the cluster repro |
+| `defer_early_return.lsysl` 🟢 | defer fires on every return path (8 tests). Was blocked on the TRISC non-unit-return bug (sysl@29b760bd8). |
+| `defer_with_arc.lsysl` 🟢 | defer mutating a `&Struct` field on a heap-allocated `new` value (5 tests). Surfaced the LLVM-derived-backend rc-free-before-return bug, fixed at sysl@103a54dba (`returnedSliceAllocas` + `emitReleaseRefs` skipSliceRegs gating for the RefType arm). |
+| `defer_no_return.lsysl` 🟢 | single defer + implicit exit; defer-then-body; defer in always-taken if-branch fires at fn exit; **defer in skipped if-branch does NOT fire**; no-defer baseline (6 tests). Skipped-branch defer fixed at sysl@e95bfe65a. |
+| `defer_in_loop.lsysl` 🟢 | defer inside loop body — fires at end of *function* with the right total count (4 tests). Was blocked on the per-defer-site-counter cluster (sysl@e95bfe65a). |
 | `defer_nested_call.lsysl` 🟢 | inner defers complete before outer resumes; outer's own defer fires after inner is fully gone; two-per-frame LIFO without cross-frame interleave; three-deep A→B→C nesting (4 tests) |
 
 Existing: `defer_lifo.lsysl` → `defer/defer_lifo.lsysl`.
 
 ---
 
-### `closures/` — closures, captures, fn pointers — 🟡 P1
+### `closures/` — closures, captures, fn pointers — 🟢 P1
 
 | File | Tests pinned |
 |---|---|
 | `closures_hof.lsysl` 🟢 | basic captures, stored-in-struct, repeated invocation *(move from top level)* |
 | `closure_capture_mutable.lsysl` 🟢 | snapshot-not-reference capture semantics: `val` capture (1); `var k` outer mutation invisible after build (1); two closures capture the same `var` (1); block-bodied closure returns its last expression (1); `var p: struct` is captured by snapshot, not by reference (1) — 5 tests. The latter three pin formerly-dropped divergences (SVM ArrayIndexOutOfBoundsException; SVM block-body misreturn; TRISC struct-var by-ref) now passing on all 7 backends |
-| `closure_return_from_fn.lsysl` 🔴 | returning a closure from a fn; lifetime of captured locals **— BLOCKED on a real compiler bug**: 4 of 7 backends (llvm-host, riscv64, riscv32, wasm32 — all LLVM-based) free the closure environment when the outer fn returns. Symptoms: llvm-host returns garbage (`mult7(6) = 70904496`); rv64/rv32 return 0; wasm32 traps `unreachable`. Interpreter, svm-host, trisc all pass. **Surfaced 2026-05-15; file drafted and removed; see commit msg of sysl@ec6acbd08+1 for repro.** |
-| `closure_recursive_inner_def.lsysl` 🟡 | single-fn self-recursive inner `def`: factorial (3), fib (2), capture-from-outer-scope (1) — 6 tests. **Bug surfaced and dropped from this file:** SVM panics ("svm.result=0xa") when an outer fn contains two unrelated self-recursive inner defs, even when they don't reference each other. 6/7 backends pass two-separate-defs. |
-| `closure_in_closure.lsysl` 🔴 | closure declared inside another closure's body *(blocked on sysl bug — see feedback_sysl_closure_in_closure.md)* |
+| `closure_return_from_fn.lsysl` 🟢 | returning a closure from a fn; lifetime of captured locals (5 tests). Was blocked on the LLVM closure-env free bug (sysl@be0ec3246). |
+| `closure_recursive_inner_def.lsysl` 🟢 | single-fn self-recursive inner `def`: factorial (3), fib (2), capture-from-outer-scope (1), two unrelated self-recursive inner defs (1), three unrelated self-recursive inner defs (1) — 8 tests. SVM two-defs panic eliminated by the chunk-3 closure-env fixes (sysl@8551e6777 / be0ec3246 / ed7eb3d89). |
+| `closure_in_closure.lsysl` 🟢 | closure declared inside another fn's body (6 tests). Was blocked on the bare-assign-as-spurious-capture bug (sysl@71fd9519). |
 | `function_pointer_call.lsysl` 🟢 | bind a top-level fn to a val/var, call it directly; pass to a hof; reassign a `var f`; two pointers side by side; HOF returns its input fn-pointer (id, pick-of-two, inline-call); previously-dropped SVM "address not found" returned-fn-pointer crash now passes on all 7 backends (8 tests) |
 | `closure_underscore_placeholder.lsysl` 🟢 | `_ + 1`; `_ * 7`; two-arg `_ - _` order-sensitive; `_ * 2 + 1` bubble-up through arithmetic; paren-narrowed `(_ + 1)`; `_ * _` same arg twice (7 tests) |
 
@@ -206,15 +206,15 @@ Existing: `closures_hof.lsysl` → `closures/closures_hof.lsysl`.
 
 ---
 
-### `pattern_matching/` — match, payloads, `is`, guards — 🟡 P1
+### `pattern_matching/` — match, payloads, `is`, guards — 🟢 P1
 
 | File | Tests pinned |
 |---|---|
 | `enum_match_payload.lsysl` 🟢 | data variants + exhaustive *(move from top level)* |
 | `match_exhaustive_simple_enum.lsysl` 🟢 | three-tag enum exhaustive match returning string / int / bool; match as arithmetic operand; match in if-cond; two reads stable; through fn boundary (6 tests) |
 | `match_nested_payload.lsysl` 🟢 | two-level `Some(Ok(v))` / `Some(Bad(why))` / None; three-level `Wrap(Some(Ok(v)))`; struct payload at leaf; full exhaustive sweep (10 tests). **Surfaced analyzer gap:** exhaustiveness checker requires explicit `Outer(_)` catch-all when nested patterns exhaust a variant — see feedback_sysl_match_nested_exhaustiveness.md. Codegen works on all 7 backends; only the checker is conservative |
-| `match_guards.lsysl` 🔴 | guard clauses (`case Some(x) if x > 0 => ...`) — *if supported* |
-| `match_or_patterns.lsysl` 🔴 | `case (A | B) => ...` — *if supported* |
+| `match_guards.lsysl` 🟢 | guard clauses (24 tests): bare-name binding with guard, destructure-bound guards, compound `&&`/`||` guards, multi-binding guards, builtin-call inside guard, all-guarded-arms with default fallthrough. |
+| `match_or_patterns.lsysl` 🟢 | comma-separated alts share a body (24 tests): tag-only or-patterns, 4-variant or-list, value-list dispatch, or+guard combo, same-name destructure across alts, range+value mix. Sysl uses `,` not `\|`. |
 | `if_is_pattern.lsysl` 🟢 | Some/None happy + fail; else-arm form; int / string / struct payload binds; chained `if .. is ..` on two-variant outcome; else-arm has no binding leak; pattern check is pure across two reads (8 tests) |
 | `destructure_assign.lsysl` 🟢 | `val q, r = divmod(...)`; `var` form with subsequent mutate; parenthesized; swap; three-way rotate; struct destructure by field-order; non-consuming (7 tests) |
 
@@ -243,7 +243,7 @@ Existing: `format_strings.lsysl` → `strings/format_strings.lsysl`.
 
 ---
 
-### `functions/` — default args, named args, parameter modes — 🟡 P1
+### `functions/` — default args, named args, parameter modes — 🟢 P1
 
 | File | Tests pinned |
 |---|---|
@@ -268,13 +268,13 @@ Existing: `out_inout_params.lsysl` → `functions/out_inout_params.lsysl`.
 | `iface_composed.lsysl` 🟢 | embedded interfaces; method dispatch picks right impl (10 tests) |
 | `iface_generic_method.lsysl` 🟡 | iface methods with parametric built-in types — slice, slice-of-struct, returning slice (8 tests). Generic-struct-implements-iface is unsupported (analyzer + iface-dispatch naming mismatch) |
 | ~~`iface_default_methods.lsysl`~~ | ✖ **Not applicable** — sysl interface methods cannot have default bodies (parser rejects `=` after signature; verified 2026-05-15). Default-method semantics live in **traits** instead (see reference §"Traits and `impl` blocks") — covered separately when a `traits/` category opens. |
-| `iface_box_lifetime.lsysl` 🟡 | iface receiver lifetime through call frames + local bindings + mutating dispatch (8 tests). Two gaps deferred: iface-as-struct-field (analyzer rejects `struct S { f: Iface }`) and returning iface from a function constructing source as local (UAF) |
+| `iface_box_lifetime.lsysl` 🟡 | iface receiver lifetime through call frames + local bindings + mutating dispatch + **iface as struct field type** (10 tests). Iface-as-struct-field fixed at sysl@972ea9f63. Remaining gap: returning iface from a function constructing source as local (UAF). |
 
 Existing: `iface_mutating_self.lsysl` → `interfaces/iface_mutating_self.lsysl`.
 
 ---
 
-### `structs/` — construction, return-by-value, methods — 🟡 P1
+### `structs/` — construction, return-by-value, methods — 🟢 P1
 
 | File | Tests pinned |
 |---|---|
@@ -290,7 +290,7 @@ Existing: `struct_return.lsysl` → `structs/struct_return.lsysl`.
 
 ---
 
-### `floats/` — IEEE 754, math, casts — 🟡 P1
+### `floats/` — IEEE 754, math, casts — 🟢 P1
 
 | File | Tests pinned |
 |---|---|
@@ -304,7 +304,7 @@ Existing: `float_extremes.lsysl` → `floats/float_extremes.lsysl`.
 
 ---
 
-### `errors/` — `?` postfix, Option, Result chains — 🟡 P1
+### `errors/` — `?` postfix, Option, Result chains — 🟢 P1
 
 Reference §"`?` Operator (Try)".
 
@@ -335,7 +335,7 @@ Reference §"Integer Overflow", "Overflow Intrinsics".
 
 ---
 
-### `operators/` — precedence, chains, compound — 🔴 P2
+### `operators/` — precedence, chains, compound — 🟢 P2
 
 Reference §"Operators (by precedence...)", "Chained Comparisons", "Compound Assignment".
 
@@ -426,7 +426,7 @@ runtime-trap harness.
 
 | File | Tests pinned |
 |---|---|
-| `type_alias_basic.lsysl` 🟡 | plain + generic + chained alias; fn-type alias; pointer alias; re-param of generic enum. Composition test deferred — TRISC fnptr-fnptr-scalar call-site bug |
+| `type_alias_basic.lsysl` 🟢 | plain + generic + chained alias; fn-type alias; pointer alias; re-param of generic enum; **two-step composition** via aliased function types (10 tests). TRISC fnptr-fnptr-scalar bug fixed at sysl@392cca670. |
 | `static_assert_pass.lsysl` 🟢 | `static_assert(cond)` passes silently; arithmetic + bitwise + const refs in cond |
 | `module_invariant.lsysl` 🟢 | `module_invariant cond` declaration is spec-only; multiple decls conjoin; ref to var + const |
 | `sizeof_basic.lsysl` 🟢 | `sizeof` for primitives, ptrs, arrays, structs; arithmetic + comparison composition |
@@ -442,7 +442,7 @@ from the planned rows:
 
 ---
 
-### `enums/` — simple + data + attributes — 🔴 P2
+### `enums/` — simple + data + attributes — 🟡 P2
 
 Reference §"Enum Types (Simple)", "Tagged Unions (Data Enums)". The
 *payload* variants are partly covered by `pattern_matching/enum_match_payload`;
@@ -450,7 +450,7 @@ this dir adds simple-enum coverage and edge cases.
 
 | File | Tests pinned |
 |---|---|
-| `enum_simple_int.lsysl` 🟡 | ::First / ::Last / ::Pos / ::Val / ::Image / ::Succ / ::Pred; pattern match (via local-bound scrutinee); two distinct enums coexist (26 tests). Two ::Value(string) tests dropped — SVM `::Value` runtime helper panics. Match-on-param fails analyzer (separate gap). |
+| `enum_simple_int.lsysl` 🟢 | ::First / ::Last / ::Pos / ::Val / ::Image / ::Succ / ::Pred; pattern match (via local-bound scrutinee + via fn param after match-on-param fix at sysl@a013c330a); two distinct enums coexist; ::Value(string) round-trip via SVM string-eq fix at sysl@72f5555fd (37 tests). |
 | `enum_simple_succ_pred.lsysl` 🟢 | `::Valid(raw_int)` (in-range / below / above / at-bounds); guards unsafe ::Val (safe-val function pattern); sparse explicit-value enum (200/400/500) — Pos by position not value, Valid for declared values; Succ chains forward, Pred chains backward; Succ/Pred mutual identity mid-range (14 tests) |
 | `enum_data_recursive.lsysl` 🟡 | direct recursion shape — construction at depth 2; match distinguishes Leaf vs Node; match binds payload value; cons-list match; Leaf base case for recursive fn (11 tests). Multi-level recursive walk fails on 6 of 7 backends — separate bug catalogued |
 | `enum_data_slice_field.lsysl` 🟢 | `enum Tree { Leaf, Node(children: []Tree) }` and similar recursive shape (sysl@9ee727db regression test). Leaf / empty-children Node / single-child / three-child; match distinguishes variants and binds children slice; two-level Node-of-Node; non-recursive sibling Bag(values: []int). (10 tests) |

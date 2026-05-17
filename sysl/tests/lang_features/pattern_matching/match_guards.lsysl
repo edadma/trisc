@@ -1,0 +1,252 @@
+`match` Guards
+================
+
+Reference §"Match Expressions". An arm pattern can be followed by
+`if <bool-expr>` — the arm matches only when both the structural
+pattern fits AND the guard evaluates true. Bindings introduced by
+the pattern are in scope inside the guard expression.
+
+Sysl supports guards on:
+
+  - Destructure-bound names (`Some(n) if n > 0 -> ...`)
+  - Bare-name binding patterns (`n if n > 0 -> ...` — added at
+    sysl@185dc2c94)
+  - Wildcards (semantically pointless but parser-legal)
+
+A guarded arm is NOT considered to "cover" its variant for
+exhaustiveness — the analyzer treats it as fallible. So an enum
+match where every variant has a guarded arm still needs a default
+catch-all (wildcard / `else`) unless an additional unguarded arm
+covers each variant.
+
+File-local prefix `Mg` (Match-Guard).
+
+    module sysl.tests.lang_features
+
+
+Bare-name binding with simple guard
+-------------------------------------
+
+### Single arm with `n` capturing the whole scrutinee
+
+The simplest shape: bind `n`, check `n > 0`, return derived. The
+default `_` is required because guarded `n` doesn't cover all ints.
+
+    mg_sign(x: int) -> int
+        x match
+            n if n > 0 -> return 1
+            n if n < 0 -> return -1
+            _ -> return 0
+        return 0
+
+    #test
+    test_mg_sign_pos() -> unit
+        assert(mg_sign(5) == 1, "pos")
+        assert(mg_sign(1) == 1, "lo-pos")
+        assert(mg_sign(1000000) == 1, "huge")
+
+    #test
+    test_mg_sign_neg() -> unit
+        assert(mg_sign(-1) == -1, "neg")
+        assert(mg_sign(-9999) == -1, "huge-neg")
+
+    #test
+    test_mg_sign_zero() -> unit
+        assert(mg_sign(0) == 0, "wildcard catches zero")
+
+### First-match wins between two truthy guards
+
+Both `n > 0` and `n > 5` could fire for `n = 10`; arm order resolves it.
+Pins the codegen's top-to-bottom arm evaluation.
+
+    mg_first_match(x: int) -> int
+        x match
+            n if n > 100 -> return 3
+            n if n > 10 -> return 2
+            n if n > 0 -> return 1
+            _ -> return 0
+        return 0
+
+    #test
+    test_mg_first_match_top() -> unit
+        assert(mg_first_match(1000) == 3, "tier-3")
+
+    #test
+    test_mg_first_match_mid() -> unit
+        assert(mg_first_match(50) == 2, "tier-2")
+
+    #test
+    test_mg_first_match_low() -> unit
+        assert(mg_first_match(1) == 1, "tier-1")
+        assert(mg_first_match(10) == 1, ">10 inclusive on the >10 arm? no — strict >10 → tier-1")
+
+
+Destructure-bound name with guard
+-----------------------------------
+
+### `Some(n) if n > 0` shape
+
+Confirms that bindings introduced by a destructure pattern are
+visible to the guard. Same shape as the very first sysl probe that
+worked even before today's NamePattern fix.
+
+    enum MgOpt
+        MgNone
+        MgSome(v: int)
+
+    mg_classify_opt(x: MgOpt) -> int
+        x match
+            MgSome(n) if n > 10 -> return 100
+            MgSome(n) if n > 0 -> return 10
+            MgSome(_) -> return -1
+            MgNone -> return 0
+
+    #test
+    test_mg_opt_high() -> unit
+        assert(mg_classify_opt(MgSome(99)) == 100, "high")
+
+    #test
+    test_mg_opt_mid() -> unit
+        assert(mg_classify_opt(MgSome(5)) == 10, "mid")
+
+    #test
+    test_mg_opt_neg() -> unit
+        // -1 hits Some(_) (no guard) — covers everything Some(n) guards miss
+        assert(mg_classify_opt(MgSome(-1)) == -1, "neg")
+
+    #test
+    test_mg_opt_none() -> unit
+        assert(mg_classify_opt(MgNone) == 0, "none")
+
+
+Compound boolean guard
+-----------------------
+
+### `&&` / `||` inside the guard
+
+Confirms the guard accepts arbitrary boolean expressions, not just
+single comparisons. The fragments individually exercise short-circuit
+evaluation, which has its own pinned tests elsewhere.
+
+    mg_inrange(x: int) -> int
+        x match
+            n if n >= 0 && n <= 9 -> return 1
+            n if n >= 10 && n <= 99 -> return 2
+            n if n >= 100 || n <= -1 -> return 3
+            _ -> return 0
+        return 0
+
+    #test
+    test_mg_inrange_single() -> unit
+        assert(mg_inrange(5) == 1, "single-digit")
+
+    #test
+    test_mg_inrange_double() -> unit
+        assert(mg_inrange(42) == 2, "double-digit")
+
+    #test
+    test_mg_inrange_huge() -> unit
+        assert(mg_inrange(100) == 3, "huge or neg via ||")
+
+    #test
+    test_mg_inrange_neg() -> unit
+        assert(mg_inrange(-5) == 3, "neg also via ||")
+
+
+Guard referencing multiple bindings
+-------------------------------------
+
+### Two destructured fields participate in a single guard
+
+`Rect(w, h) if w == h -> ...` — guard reads both bindings. Confirms
+that all bindings from a destructure are simultaneously in scope.
+
+    enum MgShape
+        MgRect(w: int, h: int)
+        MgCircle(radius: int)
+
+    mg_shape_kind(s: MgShape) -> int
+        s match
+            MgRect(w, h) if w == h -> return 1
+            MgRect(_, _) -> return 2
+            MgCircle(r) if r > 0 -> return 3
+            MgCircle(_) -> return 4
+
+    #test
+    test_mg_shape_square() -> unit
+        assert(mg_shape_kind(MgRect(5, 5)) == 1, "square via guard")
+
+    #test
+    test_mg_shape_rect() -> unit
+        assert(mg_shape_kind(MgRect(3, 4)) == 2, "non-square rect")
+
+    #test
+    test_mg_shape_positive_circle() -> unit
+        assert(mg_shape_kind(MgCircle(7)) == 3, "positive radius")
+
+    #test
+    test_mg_shape_zero_circle() -> unit
+        assert(mg_shape_kind(MgCircle(0)) == 4, "zero radius via fallback")
+
+
+Guard with builtin call
+-------------------------
+
+### `len(s)` inside a string-scrutinee guard
+
+Guards can call builtins. Confirms that aggregate-typed bindings
+(string here) are usable inside the guard expression.
+
+    mg_len_label(s: string) -> string
+        s match
+            t if len(t) == 0 -> return "empty"
+            t if len(t) < 5 -> return "short"
+            t if len(t) < 20 -> return "medium"
+            _ -> return "long"
+
+    #test
+    test_mg_len_empty() -> unit
+        assert(mg_len_label("") == "empty", "empty")
+
+    #test
+    test_mg_len_short() -> unit
+        assert(mg_len_label("hi") == "short", "short")
+
+    #test
+    test_mg_len_medium() -> unit
+        assert(mg_len_label("hello world") == "medium", "medium")
+
+    #test
+    test_mg_len_long() -> unit
+        assert(mg_len_label("this is a much longer string") == "long", "long")
+
+
+Guard interacts with fall-through to default
+----------------------------------------------
+
+### Every concrete arm guarded; default catches the rest
+
+When every guard fails, control falls to `_`. Pins the codegen's
+fall-through path through a long string of guarded arms.
+
+    mg_bucket(x: int) -> int
+        x match
+            n if n == 1 -> return 11
+            n if n == 2 -> return 22
+            n if n == 3 -> return 33
+            n if n == 4 -> return 44
+            _ -> return 99
+        return 99
+
+    #test
+    test_mg_bucket_hits() -> unit
+        assert(mg_bucket(1) == 11, "1")
+        assert(mg_bucket(2) == 22, "2")
+        assert(mg_bucket(3) == 33, "3")
+        assert(mg_bucket(4) == 44, "4")
+
+    #test
+    test_mg_bucket_misses() -> unit
+        assert(mg_bucket(0) == 99, "0 falls through")
+        assert(mg_bucket(5) == 99, "5 falls through")
+        assert(mg_bucket(-100) == 99, "neg falls through")

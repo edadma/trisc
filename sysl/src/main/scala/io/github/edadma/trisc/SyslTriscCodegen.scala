@@ -5353,6 +5353,10 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
             pat match
               case TWildcard =>
                 emit(s"  bra $hitLabel")
+              case TBindPattern(_, _) =>
+                // Binding pattern always matches; name->slot wiring lives
+                // in the per-arm binding block below the hit label.
+                emit(s"  bra $hitLabel")
               case TValuePattern(v) if scrutinee.typ == SyslType.StringType =>
                 // String pattern: compare lengths then bytes
                 // Evaluate pattern string first (may allocate temps)
@@ -5483,6 +5487,33 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           // Bind destructure/variant patterns BEFORE guard (guard may reference bindings)
           for pat <- arm.patterns do
             pat match
+              case TBindPattern(name, typ) =>
+                // Copy the scrutinee into a fresh local. The scrutinee was
+                // pushed as a single 8-byte slot (`pshd r1`) by the match
+                // prologue, so r1's full register width holds the value
+                // (scalars) or the aggregate's pointer. Use type-aware
+                // emitStore so narrow ints land where emitLoad (used later
+                // by VarRef reads) expects them — TRISC is big-endian, so a
+                // raw `std`-then-`ldw` mismatch reads the wrong half.
+                val local = allocLocal(name, typ)
+                emitAddImm(1, 5, scrutineeOffset)
+                emit("  ldd r1, r1, r0")
+                emitAddImm(2, 5, local.offset)
+                emitStore(1, 2, typ)
+                typ match
+                  case SyslType.StringType if needsAllocExtern =>
+                    emitAddImm(1, 5, local.offset)
+                    emit("  ldd r1, r1, r0")
+                    emitRefIncr(1, 8)
+                  case st2: SyslType.StructType if structHasStringFields(st2) =>
+                    emitStructStringFieldsRC(5, local.offset, st2, incr = true)
+                  case et2: SyslType.EnumType if structHasStringFields(et2) =>
+                    emitEnumStringFieldsRC(5, local.offset, et2, incr = true)
+                  case rt: SyslType.RefType =>
+                    emitAddImm(1, 5, local.offset)
+                    emit("  ldd r1, r1, r0")
+                    emitRefIncr(1, refHeaderOffset(rt))
+                  case _ =>
               case TDestructurePattern(st, bindings, fieldTypes, nested) =>
                 for (binding, i) <- bindings.zipWithIndex do
                   val fieldType = fieldTypes(i)

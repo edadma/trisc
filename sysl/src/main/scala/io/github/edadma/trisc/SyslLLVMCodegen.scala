@@ -3120,6 +3120,8 @@ class SyslLLVMCodegen(target: String = "host"):
                 both
               case TWildcard =>
                 "true" // always matches
+              case TBindPattern(_, _) =>
+                "true" // binding pattern always matches; name->slot below
               case vp @ TVariantPattern(_, _, _, _, _) =>
                 emitNestedPatternCheckLLVM(vp, scrut)
               case dp @ TDestructurePattern(_, _, _, _) =>
@@ -3150,6 +3152,18 @@ class SyslLLVMCodegen(target: String = "host"):
           val preArmLocals = locals.keySet.toSet
           // Bind variant/destructure fields if this is a binding pattern.
           arm.patterns.headOption match
+            case Some(TBindPattern(bName, bTyp)) =>
+              if isAggregate(bTyp) then
+                // Aggregate: `scrut` is already a typed pointer (alloca/GEP).
+                // Alias the user's name to it; no copy needed.
+                locals(bName) = LocalVar(bName, scrut, bTyp)
+              else
+                // Scalar: `scrut` is an SSA value. Stash in a fresh alloca so
+                // it can be reassigned or have its address taken.
+                val blt = llvmType(bTyp)
+                val alloc = deferAlloca(blt)
+                emit(s"  store $blt $scrut, $blt* $alloc")
+                locals(bName) = LocalVar(bName, alloc, bTyp)
             case Some(TVariantPattern(et, variantIdx, bindings, fieldTypes, nested)) =>
               val dataOffset = llvmEnumDataOffset(et)
               val scrutCast2 = newReg()
@@ -4900,6 +4914,13 @@ class SyslLLVMCodegen(target: String = "host"):
         Set(locals(name).reg)
       case TVarRef(name, typ) if structHasStringFields(typ) && locals.contains(name) =>
         Set(locals(name).reg)
+      // RefType (`&Struct`) returned from a fn: the local owns rc=1 by construction
+      // (`new`) or by transferred ownership (assignment from a fresh return). The
+      // fn-exit `emitReleaseRefs` would decrement that to 0 and free before
+      // the caller can use the return value. Skip the local's reg so the rc
+      // transfers to the caller intact.
+      case TVarRef(name, typ) if isRef(typ) && locals.contains(name) =>
+        Set(locals(name).reg)
       case TVarRef(name, _) if derivedFromSlice != null && derivedFromSlice.contains(name) =>
         val sliceName = derivedFromSlice(name)
         if locals.contains(sliceName) then Set(locals(sliceName).reg) else Set.empty
@@ -5274,7 +5295,7 @@ class SyslLLVMCodegen(target: String = "host"):
       val flushIgnored = newReg()
       emit(s"  $flushIgnored = call i32 @fflush(i8* null)")
     for (name, local) <- locals if isRef(local.typ) do
-      if !captureBorrows.contains(name) then
+      if !captureBorrows.contains(name) && !skipSliceRegs.contains(local.reg) then
         val hoff = refHeaderOffset(local.typ)
         val ptr = newReg()
         emit(s"  $ptr = load i8*, i8** ${local.reg}")

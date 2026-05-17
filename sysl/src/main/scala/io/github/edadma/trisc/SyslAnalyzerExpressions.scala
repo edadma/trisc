@@ -1566,7 +1566,10 @@ trait SyslAnalyzerExpressions:
             val coerced = coerceLiteral(arg, fieldType)
             if !compatible(coerced.typ, fieldType) then
               throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
-            coerced
+            (fieldType, coerced.typ) match
+              case (iface: SyslType.InterfaceType, ct) if !ct.isInstanceOf[SyslType.InterfaceType] =>
+                TInterfaceBox(coerced, iface)
+              case _ => coerced
           }
           TStructConstruct(st, checkedArgs)
         else if genericStructs.contains(name) then
@@ -1789,6 +1792,7 @@ trait SyslAnalyzerExpressions:
             for arm <- tArms; pat <- arm.patterns do
               if arm.guard.isEmpty then pat match
                 case TWildcard => wildcardCovers = true
+                case TBindPattern(_, _) => wildcardCovers = true
                 case TVariantPattern(_, idx, _, _, nested) =>
                   variantEntries += ((idx, nested))
                 case _ =>

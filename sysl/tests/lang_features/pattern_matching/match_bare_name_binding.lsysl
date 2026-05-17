@@ -1,0 +1,137 @@
+Bare-name binding patterns in `match`
+======================================
+
+A pattern that's just a fresh identifier binds the whole scrutinee
+to that name for the arm body. Mirrors OCaml/Rust `n =>` patterns
+and lets you write `x match { n if cond -> ... }` without wrapping
+the scrutinee in a destructure pattern. The earlier sysl convention
+required the user to wrap in a single-variant data enum or take the
+binding from a destructure field; bare names at top level were
+rejected with `undefined variable: n`.
+
+The match arm grammar (`SyslParser.scala:1094`) already allowed
+guards (`opt("if" ~> logicalOr)`) and the analyzer wired pattern
+bindings into the guard's scope. What was missing was a top-level
+binding-pattern case: a bare ident at pattern position now lowers to
+`TBindPattern(name, scrutineeType)` instead of falling through to
+value-comparison. The codegens treat `TBindPattern` as
+always-matches-and-binds: alloc a local of the scrutinee's type,
+copy the scrutinee, and continue.
+
+File-local prefix `Bnb` (Bare-Name-Binding).
+
+    module sysl.tests.lang_features
+
+
+Bare name with guard
+---------------------
+
+### Classifying an int scrutinee through three guarded binding arms
+
+A function whose body is `match` with guarded `n` arms. The
+analyzer must accept `n` as a binding (not a missing variable),
+all seven codegens must agree on the value, and a trailing
+wildcard catches everything else.
+
+    bnb_classify(x: int) -> int
+        x match
+            n if n > 10 -> return 100
+            n if n > 0 -> return 10
+            n if n < 0 -> return -1
+            _ -> return 0
+        return 0
+
+    #test
+    test_bnb_classify_high() -> unit
+        assert(bnb_classify(99) == 100, "high")
+
+    #test
+    test_bnb_classify_low() -> unit
+        assert(bnb_classify(5) == 10, "low")
+
+    #test
+    test_bnb_classify_zero() -> unit
+        assert(bnb_classify(0) == 0, "zero")
+
+    #test
+    test_bnb_classify_neg() -> unit
+        assert(bnb_classify(-5) == -1, "neg")
+
+
+Bare name without guard — pure rename
+---------------------------------------
+
+### Binding the whole scrutinee and operating on it
+
+Without a guard the bare name unconditionally matches and acts as
+a local rename. Confirms the binding can be referenced inside the
+arm body (arithmetic and as a return value).
+
+    bnb_double(x: int) -> int
+        x match
+            n -> return n * 2
+        return 0
+
+    #test
+    test_bnb_double() -> unit
+        assert(bnb_double(7) == 14, "double")
+
+    #test
+    test_bnb_double_negative() -> unit
+        assert(bnb_double(-3) == -6, "neg-double")
+
+    #test
+    test_bnb_double_zero() -> unit
+        assert(bnb_double(0) == 0, "zero-double")
+
+
+Bare name over a string scrutinee
+-----------------------------------
+
+### Aggregate (string) bindings preserve the value across the arm
+
+String scrutinees pass through pointer-or-aggregate plumbing in
+SVM, TRISC, and LLVM. Confirm the binding survives an aggregate-
+typed match and a guard that calls a builtin (`len`) on the bound
+name.
+
+    bnb_label_str(s: string) -> string
+        s match
+            t if len(t) > 5 -> return "long"
+            t -> return t
+
+    #test
+    test_bnb_label_str_long() -> unit
+        assert(bnb_label_str("hello world") == "long", "long")
+
+    #test
+    test_bnb_label_str_short() -> unit
+        assert(bnb_label_str("hi") == "hi", "short")
+
+    #test
+    test_bnb_label_str_boundary() -> unit
+        // exactly 6 chars — should hit the >5 guard
+        assert(bnb_label_str("abcdef") == "long", "boundary")
+
+    #test
+    test_bnb_label_str_exact5() -> unit
+        assert(bnb_label_str("abcde") == "abcde", "exact-5-falls-through")
+
+
+Bare name shadows the param name
+----------------------------------
+
+### Pattern-local `x` shadows the outer parameter
+
+A common pattern: bind the scrutinee under the SAME name to
+narrow / re-type it inside the arm. The analyzer must push the
+arm scope before binding so the outer `x` is shadowed cleanly.
+
+    bnb_shadow(x: int) -> int
+        x match
+            x -> return x + 1
+        return 0
+
+    #test
+    test_bnb_shadow() -> unit
+        assert(bnb_shadow(41) == 42, "shadow")

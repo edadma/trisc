@@ -1,0 +1,106 @@
+`--no-contracts` Strips Runtime Contract Checks
+=================================================
+
+`sbt "syslCliJVM/run test --no-contracts <path>"` removes
+`require`/`ensure`/`invariant`/`variant` checks from the typed AST
+before lowering. Calling a function with arguments that would
+normally trip its precondition becomes a plain body invocation —
+exactly Ada's `pragma Assertion_Policy(Disable)` semantics.
+
+The CLI flag was wired into `TestCommand` after the bug-fix campaign
+audit found the implementation already in place for `compile`/`run`
+but missing on `test`. See `feedback_sysl_test_no_contracts_flag` for
+context.
+
+This file is **only meaningful when run with `--no-contracts`** and
+intentionally lives outside `sysl/tests/lang_features/` so the default
+directory-recursive lang_features sweep does not pick it up and fail.
+The dedicated end-to-end test in `SyslCliTests.scala` invokes the
+runner with the flag against this fixture.
+
+File-local prefix `Ncs` (No-Contracts-Strip).
+
+    module sysl.tests.cli_features
+
+
+require — stripped under --no-contracts
+-----------------------------------------
+
+### Bare precondition
+
+    ncs_pos(x: int) -> int
+        require x > 0
+        return x + 1
+
+    #test
+    test_ncs_require_bare_stripped() -> unit
+        assert(ncs_pos(0) == 1, "bare require stripped, body runs")
+        assert(ncs_pos(-5) == -4, "negative also passes when stripped")
+
+### Precondition with message
+
+    ncs_must_positive(x: int) -> int
+        require x > 0, "x must be positive"
+        return x * 2
+
+    #test
+    test_ncs_require_with_msg_stripped() -> unit
+        assert(ncs_must_positive(0) == 0, "msg-form stripped at lo edge")
+        assert(ncs_must_positive(-3) == -6, "msg-form stripped at negative")
+
+
+ensure — stripped under --no-contracts
+----------------------------------------
+
+### Postcondition that would otherwise fail
+
+The body returns `0` deliberately, which violates `ensure result > 0`.
+With contracts on, the call traps after the body. With contracts
+stripped, the return value comes through unchanged.
+
+    ncs_force_zero() -> int
+        ensure result > 0, "result must be positive"
+        return 0
+
+    #test
+    test_ncs_ensure_stripped() -> unit
+        assert(ncs_force_zero() == 0, "ensure stripped, body's 0 returned")
+
+
+Multiple clauses — all stripped together
+------------------------------------------
+
+### Two requires and an ensure on the same fn
+
+    ncs_combo(x: int, y: int) -> int
+        require x >= 0, "x non-negative"
+        require y >= 0, "y non-negative"
+        ensure result < 100, "small result"
+        return x * y * 1000   // way over 100
+
+    #test
+    test_ncs_multi_clause_stripped() -> unit
+        // x=-1 fails first require, return 10000 fails ensure;
+        // with --no-contracts both clauses vanish and the body runs.
+        assert(ncs_combo(-1, 10) == -10000, "x<0 + huge result both stripped")
+
+
+invariant / variant — stripped from loops
+-------------------------------------------
+
+### Loop invariant that would not hold
+
+`invariant` is checked at the top of each iteration. The invariant
+`i < 0` never holds for the loop's actual range, so contracts-on would
+trap on the first check. Contracts-off just runs the loop.
+
+    ncs_count_to(n: int) -> int
+        var sum = 0
+        for i in 0..<n
+            invariant i < 0
+            sum = sum + i
+        return sum
+
+    #test
+    test_ncs_invariant_stripped() -> unit
+        assert(ncs_count_to(5) == 10, "0+1+2+3+4 = 10, invariant stripped")

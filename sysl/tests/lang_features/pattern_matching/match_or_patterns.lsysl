@@ -1,0 +1,245 @@
+`match` Or-Patterns
+=====================
+
+Reference §"Match Expressions". A single arm can list multiple
+patterns separated by `,` — the arm matches when ANY of them
+match. The arm body executes once. Sysl's grammar
+(`SyslParser.scala:1094`) uses `rep1sep(matchPattern, ",")` for
+this; the more common `|` form (Rust / OCaml) is intentionally NOT
+the sysl syntax.
+
+Or-patterns are useful for collapsing tag-only enum cases that
+share a result and for value-list dispatch (`1, 3, 5 -> ...`).
+
+A few constraints (pinned by tests below):
+
+  - Bindings introduced by an arm's patterns are visible inside
+    that arm's body and guard. When two patterns in the SAME arm
+    introduce DIFFERENT names, the analyzer treats each name as
+    optional and references inside the body must work for both
+    paths. (Pinned by avoiding that shape — see "Mixed bindings"
+    note at the bottom.)
+  - Each comma-separated pattern is type-checked independently
+    against the scrutinee. Mixing patterns of incompatible types
+    is an analyzer error.
+  - A guard applies to the whole arm (after any pattern matches).
+
+File-local prefix `Mop` (Match-Or-Pattern).
+
+    module sysl.tests.lang_features
+
+
+Tag-only or-patterns over a data enum
+---------------------------------------
+
+### Two tag-only variants share an arm body
+
+The classic shape: `OpA, OpB -> 1`. Confirms the arm fires for
+either tag.
+
+    enum MopTag
+        MopA
+        MopB
+        MopC
+        MopD
+        MopE
+
+    mop_label(t: MopTag) -> int
+        t match
+            MopA, MopB -> return 1
+            MopC, MopD -> return 2
+            MopE -> return 3
+
+    #test
+    test_mop_label_a() -> unit
+        assert(mop_label(MopA) == 1, "A → 1")
+
+    #test
+    test_mop_label_b() -> unit
+        assert(mop_label(MopB) == 1, "B → 1")
+
+    #test
+    test_mop_label_c() -> unit
+        assert(mop_label(MopC) == 2, "C → 2")
+
+    #test
+    test_mop_label_d() -> unit
+        assert(mop_label(MopD) == 2, "D → 2")
+
+    #test
+    test_mop_label_e() -> unit
+        assert(mop_label(MopE) == 3, "E alone → 3")
+
+### Four-variant or-pattern
+
+Confirms `rep1sep` accepts arbitrary-length comma lists.
+
+    mop_three_or_four(t: MopTag) -> int
+        t match
+            MopA, MopB, MopC, MopD -> return 1
+            MopE -> return 0
+
+    #test
+    test_mop_four_a() -> unit
+        assert(mop_three_or_four(MopA) == 1, "A in 4-list")
+
+    #test
+    test_mop_four_d() -> unit
+        assert(mop_three_or_four(MopD) == 1, "D in 4-list")
+
+    #test
+    test_mop_four_e() -> unit
+        assert(mop_three_or_four(MopE) == 0, "E outside 4-list")
+
+
+Value or-patterns over integers
+---------------------------------
+
+### Pinpoint several int values to one arm
+
+Useful for sparse dispatch. The arm body fires for any of the
+listed values; everything else falls through.
+
+    mop_is_vowel_code(c: int) -> bool
+        c match
+            65, 69, 73, 79, 85 -> return true        // upper-case vowels
+            97, 101, 105, 111, 117 -> return true   // lower-case vowels
+            _ -> return false
+        return false
+
+    #test
+    test_mop_vowel_upper() -> unit
+        assert(mop_is_vowel_code(65), "A=65")
+        assert(mop_is_vowel_code(73), "I=73")
+        assert(mop_is_vowel_code(85), "U=85")
+
+    #test
+    test_mop_vowel_lower() -> unit
+        assert(mop_is_vowel_code(97), "a=97")
+        assert(mop_is_vowel_code(101), "e=101")
+
+    #test
+    test_mop_vowel_consonant() -> unit
+        assert(!mop_is_vowel_code(66), "B=66 not vowel")
+        assert(!mop_is_vowel_code(122), "z=122 not vowel")
+
+    #test
+    test_mop_vowel_zero() -> unit
+        assert(!mop_is_vowel_code(0), "0 not vowel")
+
+
+Or-pattern combined with guard
+--------------------------------
+
+### Guard applies to the arm, not to a specific alt
+
+For `MopA, MopB if cond -> body`, the arm matches when (tag == A
+OR tag == B) AND cond holds. The guard fires once after one of the
+patterns matched.
+
+    enum MopMode
+        MopOn(level: int)
+        MopOff
+        MopAuto(level: int)
+
+    mop_should_glow(m: MopMode) -> bool
+        m match
+            MopOn(n), MopAuto(n) if n > 5 -> return true
+            _ -> return false
+        return false
+
+    #test
+    test_mop_glow_on_high() -> unit
+        assert(mop_should_glow(MopOn(10)), "on-high")
+
+    #test
+    test_mop_glow_auto_high() -> unit
+        assert(mop_should_glow(MopAuto(10)), "auto-high")
+
+    #test
+    test_mop_glow_on_low() -> unit
+        assert(!mop_should_glow(MopOn(2)), "on-low fails guard")
+
+    #test
+    test_mop_glow_auto_low() -> unit
+        assert(!mop_should_glow(MopAuto(2)), "auto-low fails guard")
+
+    #test
+    test_mop_glow_off() -> unit
+        assert(!mop_should_glow(MopOff), "off → wildcard")
+
+
+Or-pattern with destructure binding (same name)
+-------------------------------------------------
+
+### Two destructure patterns bind the SAME name
+
+When both alts in an or-pattern destructure with the same name and
+same field type, the body can reference that name uniformly. This
+is the common "either Some(n) or Just(n) — give me n" shape.
+
+    enum MopBox
+        MopFull(v: int)
+        MopHalf(v: int)
+        MopEmpty
+
+    mop_unbox(b: MopBox) -> int
+        b match
+            MopFull(n), MopHalf(n) -> return n + 1
+            MopEmpty -> return 0
+
+    #test
+    test_mop_unbox_full() -> unit
+        assert(mop_unbox(MopFull(7)) == 8, "full")
+
+    #test
+    test_mop_unbox_half() -> unit
+        assert(mop_unbox(MopHalf(7)) == 8, "half")
+
+    #test
+    test_mop_unbox_empty() -> unit
+        assert(mop_unbox(MopEmpty) == 0, "empty")
+
+
+Range-or-value mix
+--------------------
+
+### A range pattern and a value pattern in the same arm
+
+Confirms ranges and values can coexist within `,`-separated arms.
+
+    mop_classify_int(x: int) -> int
+        x match
+            0..9 -> return 1
+            10..99 -> return 2
+            100, 200, 300 -> return 3
+            _ -> return 0
+        return 0
+
+    #test
+    test_mop_classify_single_digit() -> unit
+        assert(mop_classify_int(7) == 1, "single-digit via range")
+        assert(mop_classify_int(0) == 1, "lo edge of range")
+        assert(mop_classify_int(9) == 1, "hi edge of range")
+
+    #test
+    test_mop_classify_double_digit() -> unit
+        assert(mop_classify_int(42) == 2, "double-digit")
+
+    #test
+    test_mop_classify_specific() -> unit
+        assert(mop_classify_int(100) == 3, "100 specific")
+        assert(mop_classify_int(200) == 3, "200 specific")
+        assert(mop_classify_int(300) == 3, "300 specific")
+
+    #test
+    test_mop_classify_miss() -> unit
+        assert(mop_classify_int(150) == 0, "150 misses all → wildcard")
+        assert(mop_classify_int(-5) == 0, "neg misses all → wildcard")
+
+Note on mixed bindings: an or-pattern where each alt binds a
+DIFFERENT name (`Some(a), Other(b) -> ...`) would leave `a` undefined
+when the second alt matches, and vice versa. Sysl's analyzer does
+not currently model "optional binding" across or-pattern alts; the
+ergonomic same-name form above is the supported pattern. A separate
+test exercising the mixed-binding case is intentionally omitted.
