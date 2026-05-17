@@ -78,3 +78,52 @@ one doesn't change the other.
         assert(a(4) == 8, "a(4)=8")
         assert(b(4) == 16, "b(4)=16")
 
+Hof returns a fn-pointer it was given
+-------------------------------------
+
+Previously the SVM backend crashed on this with "address not
+found" — the 16-byte fn-pointer descriptor's func_ptr slot
+held a value that didn't survive the return path. Now stable
+across all 7 backends.
+
+    fpc_id_fn(f: (int) -> int) -> (int) -> int = f
+
+    #test
+    test_hof_returns_input_fn() -> unit
+        val g = fpc_id_fn(fpc_double)
+        assert(g(7) == 14, s"g(7) expected 14, got ${g(7)}")
+        // Call again to exercise that nothing was consumed.
+        assert(g(11) == 22, s"g(11) expected 22, got ${g(11)}")
+
+Hof selects one of two fn-pointers based on a flag
+--------------------------------------------------
+
+A multi-arg HOF that picks between fn-pointers exercises both
+arg-passing of two fn-ptrs and return-position fn-ptr selection.
+
+    fpc_pick(use_square: bool, a: (int) -> int, b: (int) -> int) -> (int) -> int
+        if use_square then return a
+        return b
+
+    #test
+    test_hof_pick_square() -> unit
+        val g = fpc_pick(true, fpc_square, fpc_double)
+        assert(g(5) == 25, s"got ${g(5)}")
+
+    #test
+    test_hof_pick_double() -> unit
+        val g = fpc_pick(false, fpc_square, fpc_double)
+        assert(g(5) == 10, s"got ${g(5)}")
+
+Inline-call returned fn-pointer
+-------------------------------
+
+Apply the HOF's result without binding it to a local — pins
+that the descriptor returned on the data stack can be called
+directly by the next expression.
+
+    #test
+    test_inline_call() -> unit
+        val r = fpc_id_fn(fpc_double)(8)
+        assert(r == 16, s"inline call expected 16, got $r")
+
