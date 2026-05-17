@@ -77,3 +77,87 @@ path, early-return leaks. If it over-decrements, we underflow.
         assert(v == 43, s"v should be 43, got $v")
         // Both r and r2 drop on the late-return path.
         assert(er_deinit_count == 2, s"deinit should fire twice, got $er_deinit_count")
+
+
+Both branches early-return — merge block is unreachable
+--------------------------------------------------------
+
+`if cond { return a } else { return b }` makes the syntactic merge
+block dead. The LLVM codegen previously emitted a tail `load %T,
+%T* 0` + `ret` in that merge block whenever the if's type was an
+aggregate (struct / iface), tripping clang's
+`integer constant must have integer type` rejector. Fixed by
+emitting `unreachable` in the merge block when both branches
+returned, and skipping the trailing load+ret in `genBlock` when
+`genExpr` of the last statement had already terminated. Other
+backends handled the shape correctly already.
+
+    struct ErPair
+        a: int
+        b: int
+
+    pick_pair(x: int) -> ErPair
+        if x > 0
+            return ErPair(1, 2)
+        else
+            return ErPair(3, 4)
+
+### Both-branch-return aggregate (struct)
+
+    #test
+    test_both_return_pos() -> unit
+        val p = pick_pair(5)
+        assert(p.a == 1, s"a; got ${p.a}")
+        assert(p.b == 2, s"b; got ${p.b}")
+
+    #test
+    test_both_return_neg() -> unit
+        val p = pick_pair(-5)
+        assert(p.a == 3, s"a; got ${p.a}")
+        assert(p.b == 4, s"b; got ${p.b}")
+
+### Both-branch-return scalar (was always fine — pin it)
+
+    abs_via_branches(x: int) -> int
+        if x >= 0
+            return x
+        else
+            return 0 - x
+
+    #test
+    test_abs_via_branches() -> unit
+        assert(abs_via_branches(5) == 5, "pos")
+        assert(abs_via_branches(-7) == 7, "neg")
+        assert(abs_via_branches(0) == 0, "zero")
+
+### Both-branch-return string
+
+    sign_label(x: int) -> string
+        if x > 0
+            return "positive"
+        else
+            return "non-positive"
+
+    #test
+    test_sign_label() -> unit
+        assert(sign_label(5) == "positive", "pos")
+        assert(sign_label(-1) == "non-positive", "neg")
+        assert(sign_label(0) == "non-positive", "zero")
+
+### Nested both-branch-return
+
+    classify(x: int) -> int
+        if x > 0
+            if x > 10
+                return 2
+            else
+                return 1
+        else
+            return 0
+
+    #test
+    test_classify_nested() -> unit
+        assert(classify(20) == 2, "big-pos")
+        assert(classify(5) == 1, "small-pos")
+        assert(classify(0) == 0, "zero")
+        assert(classify(-1) == 0, "neg")

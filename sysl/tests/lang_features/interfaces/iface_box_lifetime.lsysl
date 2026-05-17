@@ -212,6 +212,14 @@ auto-box paths didn't apply to return values).
         var c = Tally(42)
         return c
 
+    factory_with_branches(x: int) -> IntHolder
+        if x > 0
+            var pos = Tally(1)
+            return pos
+        else
+            var neg = Tally(-1)
+            return neg
+
 ### Basic: return iface boxed from local
 
     #test
@@ -227,6 +235,15 @@ auto-box paths didn't apply to return values).
         val b = factory_value()
         assert(a.value() == 42, s"a; got ${a.value()}")
         assert(b.value() == 42, s"b; got ${b.value()}")
+
+### Branched return — each branch's local boxed and returned
+
+    #test
+    test_sibl_branched_return() -> unit
+        val a = factory_with_branches(5)
+        val b = factory_with_branches(-5)
+        assert(a.value() == 1, s"pos; got ${a.value()}")
+        assert(b.value() == -1, s"neg; got ${b.value()}")
 
 ### Factory result used through a forwarding function
 
