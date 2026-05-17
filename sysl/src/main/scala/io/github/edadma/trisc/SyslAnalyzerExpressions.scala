@@ -264,6 +264,9 @@ trait SyslAnalyzerExpressions:
             innerBody match
               case TExprBody(e) => scanCaptures(e, innerLocals)
               case TBlockBody(stmts) => scanStmtSeq(stmts, innerLocals)
+          case TInterfaceDispatch(v, _, args, _) =>
+            scanCaptures(v, locals); args.foreach(scanCaptures(_, locals))
+          case TInterfaceBox(e, _, _) => scanCaptures(e, locals)
           case _ => ()
         /** Walk statements in order; extend locals with val/destructure bindings so they are not mistaken for captures. */
         def scanStmtSeq(stmts: List[TStmt], startLocals: Set[String]): Unit =
