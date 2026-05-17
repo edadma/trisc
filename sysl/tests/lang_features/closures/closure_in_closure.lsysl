@@ -1,0 +1,146 @@
+Closure Declared Inside Another Closure's Body
+==================================================
+
+Reference §"Closures and Function Pointers". When the BODY of one
+closure declares another (locally-defined) closure, the inner's
+captures resolve against the outer's bindings and the outer's own
+capture set MUST NOT spuriously include the inner's locally-bound
+name.
+
+This was a real compiler bug fixed at sysl@71fd9519 (2026-04-26).
+See `feedback_sysl_closure_in_closure.md`. The bug surfaced when the
+inner closure was bound with a bare-assignment (`inner = ...`)
+instead of an explicit `val inner = ...`: AssignStmtAST's lowering
+treated the bare-binding as a write to an outer-scope name (it
+isn't), so the capture-detection pass added `inner` to the outer
+closure's capture list. The outer then tried to look up `inner` in
+its DEFINING environment — where `inner` was supposed to be bound
+by a body statement that hadn't yet executed — and crashed with
+"undefined variable: inner".
+
+Sysl's closure-literal grammar accepts only single-expression
+bodies (`(x) -> expr`); multi-stmt bodies have to go through a
+helper. The tests below isolate the closure-in-closure shape via
+factory helpers whose body returns a freshly-constructed closure
+that captures the outer's parameter (and may itself invoke another
+locally-constructed closure).
+
+File-local prefix `Cic` (Closure-In-Closure).
+
+    module sysl.tests.lang_features
+
+
+Local closure that captures the outer's param
+-----------------------------------------------
+
+### `make_adder(n)` returns a closure that adds n
+
+The simplest closure-of-fn shape: outer is a regular fn (not a
+closure), inner is a closure that captures the outer's param.
+
+    cic_make_adder(n: int) -> (int) -> int = (x: int) -> x + n
+
+    #test
+    test_cic_make_adder() -> unit
+        val add10 = cic_make_adder(10)
+        assert(add10(5) == 15, "10+5")
+        assert(add10(0) == 10, "10+0")
+
+
+Inner declared with bare-binding inside a multi-stmt outer
+-------------------------------------------------------------
+
+### Multi-stmt outer body locally binds an inner closure
+
+The outer body uses `val inner = (...) -> ...` (the form covered by
+the 2026-04-26 fix). The outer fn then invokes the inner closure
+and returns the result.
+
+    cic_invoke_inner(base: int, x: int) -> int
+        val inner = (y: int) -> y + base
+        return inner(x) + 1
+
+    #test
+    test_cic_inner_basic() -> unit
+        assert(cic_invoke_inner(10, 5) == 16, "(5+10) + 1")
+        assert(cic_invoke_inner(10, 0) == 11, "(0+10) + 1")
+        assert(cic_invoke_inner(0, 0) == 1, "0+0+1")
+
+
+Two inner closures coexist in one outer body
+----------------------------------------------
+
+### Both `add` and `mul` declared inside; both reference outer's `base`
+
+Pins that two locally-declared closures in one fn body each see
+the outer's captures and don't shadow each other.
+
+    cic_two_inners(base: int, x: int) -> int
+        val add = (n: int) -> n + base
+        val mul = (n: int) -> n * base
+        return add(x) + mul(x)
+
+    #test
+    test_cic_two_inners() -> unit
+        // f(4, 5) -> (5+4) + (5*4) = 9 + 20 = 29
+        assert(cic_two_inners(4, 5) == 29, "9+20 = 29")
+        // base=0: 0 + 0 = 0
+        assert(cic_two_inners(0, 7) == 7, "7+0 = 7")
+
+
+Inner closure invoked twice within outer body
+-----------------------------------------------
+
+### Same closure value called multiple times, captures stable
+
+Re-invocation must resolve against the SAME captures — no
+re-binding between calls.
+
+    cic_inner_twice(scale: int, x: int) -> int
+        val add_scale = (n: int) -> n + scale
+        return add_scale(add_scale(x))
+
+    #test
+    test_cic_inner_twice() -> unit
+        // x=5, scale=3 → add_scale(add_scale(5)) = add_scale(8) = 11
+        assert(cic_inner_twice(3, 5) == 11, "5+3+3 = 11")
+        assert(cic_inner_twice(10, 0) == 20, "0+10+10 = 20")
+
+
+Closure-returning fn called from inside another fn's body
+-----------------------------------------------------------
+
+### Factory used inside a wrapper fn
+
+Combines two mechanisms: an inner fn invokes a factory to get a
+closure, then calls it with its own argument. Pins that values
+returned by sub-calls remain valid through the wrapper's body.
+
+    cic_wrap(base: int, x: int) -> int
+        val f = cic_make_adder(base)
+        return f(x)
+
+    #test
+    test_cic_wrap() -> unit
+        assert(cic_wrap(7, 3) == 10, "7+3")
+        assert(cic_wrap(100, 0) == 100, "100+0")
+
+
+Two distinct closures from same factory don't alias
+-----------------------------------------------------
+
+### Two factory calls produce closures with disjoint captures
+
+Pins that the factory's `n` parameter is captured separately into
+each closure's env — modifying one shouldn't affect the other.
+
+    #test
+    test_cic_two_distinct() -> unit
+        val add3 = cic_make_adder(3)
+        val add9 = cic_make_adder(9)
+        assert(add3(10) == 13, "add3")
+        assert(add9(10) == 19, "add9")
+        // Interleave calls
+        assert(add3(1) + add9(1) == 14, "4 + 10 = 14")
+        assert(add3(0) == 3, "add3 still 3")
+        assert(add9(0) == 9, "add9 still 9")
