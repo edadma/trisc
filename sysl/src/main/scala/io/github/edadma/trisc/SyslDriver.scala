@@ -588,28 +588,31 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           val dirPath = io.joinPath(base, modulePath)
           val smetaPath = io.joinPath(dirPath, ".smeta")
           val filePath = s"${io.joinPath(base, modulePath)}.sysl"
+          val lsyslPath = s"${io.joinPath(base, modulePath)}.lsysl"
 
-          if io.exists(smetaPath) then
-            // Directory with .smeta — returns None if stale version
-            ModuleMeta.fromSmeta(io.readFile(smetaPath))
-          else if io.exists(filePath) then
-            // Single file module — compile it on demand
-            compileExternalFile(io.readFile(filePath))
-          else
-            // Try .lsysl (literate source) — requires tangler
-            val lsyslPath = s"${io.joinPath(base, modulePath)}.lsysl"
-            if tangler.isDefined && io.exists(lsyslPath) then
+          // Try the .smeta cache first. fromSmeta returns None when the file
+          // is from a stale SMETA_VERSION — in that case fall through to
+          // recompile from source rather than failing the import.
+          val smetaResult: Option[ModuleMeta] =
+            if io.exists(smetaPath) then ModuleMeta.fromSmeta(io.readFile(smetaPath))
+            else None
+
+          smetaResult.orElse {
+            if io.exists(filePath) then
+              // Single file module — compile it on demand
+              compileExternalFile(io.readFile(filePath))
+            else if tangler.isDefined && io.exists(lsyslPath) then
               compileExternalFile(tangler.get(io.readFile(lsyslPath)))
-            else
+            else if tangler.isDefined && io.exists(dirPath) && io.isDirectory(dirPath) then
               // Try directory with .lsysl files inside
-              if tangler.isDefined && io.exists(dirPath) && io.isDirectory(dirPath) then
-                val lsyslFiles = io.listFiles(dirPath).filter(_.endsWith(".lsysl"))
-                if lsyslFiles.nonEmpty then
-                  val metas = lsyslFiles.flatMap { f =>
-                    compileExternalFile(tangler.get(io.readFile(f)))
-                  }
-                  if metas.nonEmpty then Some(metas.reduce(_.merge(_)))
-                  else None
+              val lsyslFiles = io.listFiles(dirPath).filter(_.endsWith(".lsysl"))
+              if lsyslFiles.nonEmpty then
+                val metas = lsyslFiles.flatMap { f =>
+                  compileExternalFile(tangler.get(io.readFile(f)))
+                }
+                if metas.nonEmpty then Some(metas.reduce(_.merge(_)))
                 else None
               else None
+            else None
+          }
         }.nextOption()
