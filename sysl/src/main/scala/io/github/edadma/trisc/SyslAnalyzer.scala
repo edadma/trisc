@@ -6712,7 +6712,21 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val tArray = analyzeExpr(array)
         val tIndex = analyzeExpr(index)
         val tValue = analyzeExpr(value)
-        TIndexAssignStmt(tArray, tIndex, tValue)
+        // Auto-box into iface when the element type is an interface — same
+        // pattern as var-decl / fn-arg / struct-construct / new-struct paths.
+        // owns=true: the array/slice may outlive the source's scope; the slot
+        // must own its data buffer.
+        val elemType = tArray.typ.underlying match
+          case SyslType.ArrayType(et, _) => Some(et)
+          case SyslType.SliceType(et) => Some(et)
+          case SyslType.RefType(SyslType.SliceType(et)) => Some(et)
+          case SyslType.RefType(SyslType.ArrayType(et, _)) => Some(et)
+          case _ => None
+        val tValueBoxed = (elemType, tValue.typ) match
+          case (Some(iface: SyslType.InterfaceType), vt) if !vt.isInstanceOf[SyslType.InterfaceType] =>
+            TInterfaceBox(tValue, iface, owns = true)
+          case _ => tValue
+        TIndexAssignStmt(tArray, tIndex, tValueBoxed)
 
       case FieldAssignStmtAST(obj, field, value) =>
         val tObj = analyzeExpr(obj)
@@ -6736,7 +6750,15 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val savedExp = currentExpected
         currentExpected = Some(structType.fields(idx)._2)
         val tValue = try analyzeExpr(value) finally currentExpected = savedExp
-        val assign = TFieldAssignStmt(resolvedObj, idx, tValue)
+        // Auto-box into iface when the field type is an interface — same
+        // shape as the other coercion sites. owns=true because the
+        // containing struct may outlive the source's scope.
+        val fieldType = structType.fields(idx)._2
+        val tValueBoxed = (fieldType, tValue.typ) match
+          case (iface: SyslType.InterfaceType, vt) if !vt.isInstanceOf[SyslType.InterfaceType] =>
+            TInterfaceBox(tValue, iface, owns = true)
+          case _ => tValue
+        val assign = TFieldAssignStmt(resolvedObj, idx, tValueBoxed)
         val checks = buildStructInvariantChecks(obj, structType.name)
         if checks.isEmpty then assign else TMultiStmt(assign :: checks)
 

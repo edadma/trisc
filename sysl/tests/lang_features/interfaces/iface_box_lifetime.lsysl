@@ -285,3 +285,68 @@ successive factory calls aliased the same source slot.
         val b = make_wrapper(100, 2)
         assert(a.total() == 11, s"a; got ${a.total()}")
         assert(b.total() == 102, s"b; got ${b.total()}")
+
+
+Iface in slice/array element and via field reassignment
+--------------------------------------------------------
+
+`arr[i] = concrete` and `obj.iface_field = concrete` go through
+the index-assign and field-assign paths. Both previously didn't
+auto-box; segfault on LLVM-derived backends. Fixed with owns=true
+auto-box at both sites — array/slice elements and struct fields
+of iface type now heap-copy their source on assignment.
+
+    struct ArrCell
+        owner: int
+
+### Array of iface populated and read back
+
+    #test
+    test_sibl_array_of_iface() -> unit
+        var arr = new [3]IntHolder
+        var x = Tally(10)
+        var y = Tally(20)
+        var z = Tally(30)
+        arr[0] = x
+        arr[1] = y
+        arr[2] = z
+        assert(arr[0].value() == 10, "arr[0]")
+        assert(arr[1].value() == 20, "arr[1]")
+        assert(arr[2].value() == 30, "arr[2]")
+
+### Sum a slice of iface
+
+    sibl_sum(items: []IntHolder) -> int
+        var total = 0
+        var i = 0
+        while i < len(items)
+            total = total + items[i].value()
+            i = i + 1
+        return total
+
+    #test
+    test_sibl_sum_slice_of_iface() -> unit
+        var arr = new [3]IntHolder
+        var x = Tally(1)
+        var y = Tally(2)
+        var z = Tally(3)
+        arr[0] = x
+        arr[1] = y
+        arr[2] = z
+        assert(sibl_sum(arr[:]) == 6, s"got ${sibl_sum(arr[:])}")
+
+### Reassign iface field on a heap-allocated struct
+
+    struct SinglyHolder
+        inner: IntHolder
+
+    SinglyHolder.dispatch() -> int = self.inner.value()
+
+    #test
+    test_sibl_reassign_iface_field() -> unit
+        var t1 = Tally(7)
+        val w = new SinglyHolder(t1)
+        assert(w.dispatch() == 7, s"initial; got ${w.dispatch()}")
+        var t2 = Tally(42)
+        w.inner = t2
+        assert(w.dispatch() == 42, s"after reassign; got ${w.dispatch()}")
