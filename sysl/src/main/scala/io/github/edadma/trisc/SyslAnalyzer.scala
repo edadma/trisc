@@ -1986,6 +1986,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             genericTypeAliases(name) = (tparams, target, isNew)
             if defs.nonEmpty then genericTypeAliasDefaults(name) = defs
             if bounds.nonEmpty then genericTypeAliasBounds(name) = bounds
+        // Pre-seed interface placeholders so a struct field declared as
+        // `field: SomeInterface` resolves during `resolveStructsAndEnums`
+        // below. The main declaration pass repopulates with the real method
+        // list; the duplicate-check there tolerates a placeholder entry.
+        case InterfaceDeclAST(name, _, _, _) =>
+          if !interfaceTypes.contains(name) then
+            interfaceTypes(name) = SyslType.InterfaceType(name, Nil)
         case _ => ()
 
     def resolveStructsAndEnums(): Unit =
@@ -2267,7 +2274,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             // perFileMeta.
             importedTraitNames -= name
         case InterfaceDeclAST(name, methodASTs, embeddedNames, _) =>
-          if interfaceTypes.contains(name) then throw AnalysisError(s"duplicate interface: '$name'", decl)
+          // Tolerate a placeholder pre-seeded by pass 0.5 (empty methods list)
+          // — pass 0.5 pre-registers interface names so struct fields typed by
+          // them resolve before this pass runs. A real duplicate (non-empty
+          // methods list) still throws.
+          val preSeededInterface = interfaceTypes.get(name).exists(_.methods.isEmpty)
+          if interfaceTypes.contains(name) && !preSeededInterface then throw AnalysisError(s"duplicate interface: '$name'", decl)
           // Resolve embedded interfaces and flatten methods
           val embeddedMethods = embeddedNames.flatMap { en =>
             interfaceTypes.getOrElse(en, throw AnalysisError(s"embedded interface '$en' not found", decl)).methods
@@ -2575,6 +2587,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
             checkCoherence(traitName, newTemplate, decl)
             implTemplates.getOrElseUpdate(traitName, mutable.ListBuffer.empty) += newTemplate
         case _ =>
+
+    // Re-resolve struct/enum fields one more time so any field captured at
+    // pass 0.5 against a placeholder interface (empty methods) picks up the
+    // now-fully-populated InterfaceType. Without this, `struct S { f: I }`
+    // would dispatch through a zero-method `I` and fail with "interface I has
+    // no method 'foo'" at the first call site.
+    resolveStructsAndEnums()
 
     // Second pass: produce typed AST (skip generic templates; they're instantiated on demand)
     val tDecls = program.decls.flatMap {

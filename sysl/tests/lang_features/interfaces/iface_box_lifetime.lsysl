@@ -18,9 +18,6 @@ This file pins:
 
 Known gaps (not pinned here):
 
-- Iface-as-struct-field (`struct S { f: Iface }`) — analyzer
-  rejects with "unknown type". See
-  `feedback_sysl_interface_as_struct_field.md`.
 - Returning an iface from a function whose body constructs the
   source as a local is a use-after-free.
 - SVM struct-field string aliasing — see the feedback memo.
@@ -155,3 +152,44 @@ Mutating through iface, reading back through iface
         assert(a == 1, "after 1st tick")
         assert(b == 3, "after 3rd tick")
         assert(d == 4, "after 4th tick")
+
+
+Iface as struct field type
+---------------------------
+
+A `struct S { f: Iface }` embeds a boxed iface inline. Was a 🟡
+gap (analyzer rejected interface names in struct-field-type
+position). Fixed by pre-seeding `interfaceTypes` in pass 0.5 and
+re-running `resolveStructsAndEnums` after the main pass picks up
+the real method list, plus auto-boxing concrete-to-iface in the
+struct-construct arg coercer (parallel to the function-call-arg
+auto-box).
+
+    struct Wrapper
+        inner: IntHolder
+        bias: int
+
+    Wrapper.total() -> int = self.inner.value() + self.bias
+
+### Basic field-iface dispatch
+
+    #test
+    test_sibl_iface_field_in_struct() -> unit
+        val c = Tally(40)
+        val w = Wrapper(c, 2)
+        assert(w.total() == 42, s"40 + 2 = 42, got ${w.total()}")
+        assert(w.inner.value() == 40, s"direct field dispatch: got ${w.inner.value()}")
+        assert(w.bias == 2, "bias preserved")
+
+### Two wrappers, same source struct
+
+    #test
+    test_sibl_two_wrappers_same_source() -> unit
+        val src = Tally(10)
+        val w1 = Wrapper(src, 1)
+        val w2 = Wrapper(src, 100)
+        assert(w1.total() == 11, s"w1 total: ${w1.total()}")
+        assert(w2.total() == 110, s"w2 total: ${w2.total()}")
+        // Independent bias values
+        assert(w1.bias == 1, "w1 bias")
+        assert(w2.bias == 100, "w2 bias")
