@@ -5230,10 +5230,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       typeArgs: List[SyslType],
       typeBounds: Map[String, List[String]],
   ): Either[String, Unit] =
-    for tp <- typeParams do
+    val tpIter = typeParams.iterator
+    while tpIter.hasNext do
+      val tp = tpIter.next()
       val bounds = typeBounds.getOrElse(tp, Nil)
       val concreteType = typeArgs(typeParams.indexOf(tp))
-      for traitName <- bounds do
+      val tnIter = bounds.iterator
+      while tnIter.hasNext do
+        val traitName = tnIter.next()
         if !traits.contains(traitName) then
           return Left(s"bound '$traitName' on type parameter '$tp' of $what refers to unknown trait")
         val matched = implTemplates.getOrElse(traitName, Nil).exists { t =>
@@ -7000,7 +7004,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         val tv = analyzeExpr(expr)
         val coerced = coerceLiteral(tv, scrutineeType)
         if !compatible(coerced.typ, scrutineeType) then
-          throw AnalysisError(s"match pattern type ${coerced.typ} incompatible with ${scrutineeType}")
+          // Simple-enum scrutinee tolerates an integer-typed pattern: variant
+          // access `Color.Red` analyzes to `TIntLit(value, I32)` because simple
+          // enums are represented as i32 at runtime, but a fn parameter typed
+          // `c: Color` keeps the nominal EnumType, so the structural compare
+          // would otherwise reject the well-formed pattern. Scoped to the
+          // pattern site only — global `compatible(int, EnumType)` would also
+          // affect arg-passing where the runtime ABI mismatches (params of
+          // simple-enum type are address-represented, raw ints are scalars).
+          val simpleEnumOk = scrutineeType.underlying match
+            case SyslType.EnumType(_, variants) =>
+              variants.forall(_._2.isEmpty) && coerced.typ.isIntegral
+            case _ => false
+          if !simpleEnumOk then
+            throw AnalysisError(s"match pattern type ${coerced.typ} incompatible with ${scrutineeType}")
         TValuePattern(coerced)
       case RangePatternAST(low, high) =>
         val tLow = coerceLiteral(analyzeExpr(low), scrutineeType)

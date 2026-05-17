@@ -3250,6 +3250,13 @@ class SyslSVMCodegen:
             emit("  call __svm_str_eq")
             needsStrEq = true
           else
+            scrutinee.typ.underlying match
+              case et: SyslType.EnumType if et.variants.forall(_._2.isEmpty) =>
+                // Simple-enum scrutinee is stored as a pointer to an enum
+                // buffer (tag at offset 0). Pattern compares against the
+                // variant's i32 value, so deref the tag first.
+                emit("  load32")
+              case _ =>
             emit("  eq")
           emit(s"  jumpnz $hitLabel")
         case TRangePattern(lo, hi) =>

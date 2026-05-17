@@ -36,15 +36,6 @@ This file pins:
 - Match-on-enum (where the scrutinee is a local var).
 - Two distinct enums coexist.
 
-**Known analyzer bug — not pinned here:** matching on a
-function parameter of simple-enum type fails to typecheck
-(`match pattern type int incompatible with <EnumType>`).
-The workaround is to bind the param via `var c2 = c` ... no,
-even that fails. The actual workaround is to construct the
-value inside the function (`var c = Color.Green`) and not
-accept simple enums as parameters until the bug is fixed.
-See `feedback_sysl_simple_enum_param_match.md`.
-
 File-local prefix `Sei` (Sysl Enum Int).
 
     module sysl.tests.lang_features
@@ -188,10 +179,6 @@ variant. See `feedback_sysl_svm_enum_value_string_lookup.md`.
 Pattern matching with a local-bound scrutinee
 ----------------------------------------------
 
-The simple-enum-as-param case currently fails the analyzer
-(see file-header note); we test the variant of match that
-does work — a `var`-local scrutinee.
-
     classify_green() -> int
         var c = SeiColor.SeiGreen
         c match
@@ -245,6 +232,64 @@ does work — a `var`-local scrutinee.
     #test
     test_sei_match_yellow_arm() -> unit
         assert(classify_yellow() == 400, "Yellow")
+
+Pattern matching with a function-parameter scrutinee
+-----------------------------------------------------
+
+Simple-enum members are represented as i32 at runtime, but a
+fn parameter typed `c: SeiColor` keeps the nominal `EnumType`.
+The analyzer must reconcile the int-typed pattern `SeiColor.SeiRed`
+with the enum-typed scrutinee on its own. Fixed at sysl@<TBD>;
+previously failed at analysis with "match pattern type int
+incompatible with SeiColor".
+
+The test supplies its `SeiColor` value via a same-typed fn
+return (`sei_fn_make_red()` etc.) — those returns are wrapped
+into proper enum buffers by the simple-enum-return coercion
+already in place on every backend, so the param sees a real
+`SeiColor` and the match can exercise the analyzer fix without
+hitting the open caller-side "pass an i32 literal where a
+simple-enum is expected" gap. That gap is documented in
+`feedback_sysl_simple_enum_param_match` as a follow-up.
+
+    classify_param(c: SeiColor) -> int
+        c match
+            SeiColor.SeiRed -> 100
+            SeiColor.SeiGreen -> 200
+            SeiColor.SeiBlue -> 300
+            SeiColor.SeiYellow -> 400
+            else -> 999
+
+    #test
+    test_sei_param_match_red() -> unit
+        val c = sei_fn_make_red()
+        assert(classify_param(c) == 100, s"Red got ${classify_param(c)}")
+
+    #test
+    test_sei_param_match_green() -> unit
+        val c = sei_fn_make_green()
+        assert(classify_param(c) == 200, s"Green got ${classify_param(c)}")
+
+    #test
+    test_sei_param_match_blue() -> unit
+        val c = sei_fn_make_blue()
+        assert(classify_param(c) == 300, s"Blue got ${classify_param(c)}")
+
+    #test
+    test_sei_param_match_yellow() -> unit
+        val c = sei_fn_make_yellow()
+        assert(classify_param(c) == 400, s"Yellow got ${classify_param(c)}")
+
+### Param-match composes with enum-typed fn returns
+
+The pipeline `sei_fn_make_X() → classify_param(_)` chains the
+fn-return-coercion and the new param-match fix in a single
+expression, with no intermediate var.
+
+    #test
+    test_sei_param_match_chained() -> unit
+        assert(classify_param(sei_fn_make_blue()) == 300, "blue chained")
+        assert(classify_param(sei_fn_make_yellow()) == 400, "yellow chained")
 
 Two distinct enums coexist
 ---------------------------

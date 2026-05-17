@@ -5413,6 +5413,12 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                 genExpr(v)
                 emitAddImm(2, 5, scrutineeOffset)
                 emit("  ldd r2, r2, r0")
+                scrutinee.typ.underlying match
+                  case et: SyslType.EnumType if et.variants.forall(_._2.isEmpty) =>
+                    // Simple-enum scrutinee is address-represented; deref the
+                    // i32 tag at offset 0 to compare with the pattern's value.
+                    emit("  ldw r2, r2, r0")
+                  case _ =>
                 emit(s"  beq r1, r2, $hitLabel")
               case TRangePattern(low, high) =>
                 val rangeCheck = newLabel("range_chk")

@@ -3090,10 +3090,23 @@ class SyslLLVMCodegen(target: String = "host"):
                   emit(s"  $cmp = phi i1 [ false, %$lenBlock ], [ $bytesEq, %$matchBlock ]")
                   cmp
                 else
-                  val cmp = newReg()
-                  val st = exprType(scrutinee)
-                  emit(s"  $cmp = icmp eq $st $scrut, $patVal")
-                  cmp
+                  scrutinee.typ.underlying match
+                    case et: SyslType.EnumType if et.variants.forall(_._2.isEmpty) =>
+                      // Simple-enum scrutinee is an enum-buffer pointer; deref
+                      // the i32 tag at offset 0 to compare with the pattern's
+                      // integer value. Mirrors the TVariantPattern path.
+                      val tagPtr = newReg()
+                      emit(s"  $tagPtr = bitcast ${llvmType(et)}* $scrut to i32*")
+                      val tag = newReg()
+                      emit(s"  $tag = load i32, i32* $tagPtr")
+                      val cmp = newReg()
+                      emit(s"  $cmp = icmp eq i32 $tag, $patVal")
+                      cmp
+                    case _ =>
+                      val cmp = newReg()
+                      val st = exprType(scrutinee)
+                      emit(s"  $cmp = icmp eq $st $scrut, $patVal")
+                      cmp
               case TRangePattern(low, high) =>
                 val lo = genExpr(low)
                 val hi = genExpr(high)
