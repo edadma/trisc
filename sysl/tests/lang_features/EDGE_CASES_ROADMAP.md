@@ -121,19 +121,25 @@ correct.
 
 ---
 
-## 6. Match exhaustiveness corners — 🔴 P2
+## 6. Match exhaustiveness corners — 🟢
 
-Now testable as compile-fail tests via the new
-`SyslCompileErrorTests` helper.
+Two .lsysl runtime test files + 3 new compile-error rows in
+`SyslCompileErrorTests`. Some originally-planned compile-error
+rows were dropped because the corresponding condition isn't
+actually an analyzer-side rejection in sysl (overlap +
+guard-static + same-name-different-arms are all *allowed*
+with first-match-wins semantics — pinned positively in the
+overlap test instead).
 
 | Surface | Pinned in |
 |---|---|
-| Non-exhaustive on single-variant enum 🔴 | `SyslCompileErrorTests` |
-| Guard that's statically true/false 🔴 | `SyslCompileErrorTests` |
-| Mixed range + value patterns covering same int 🔴 | `SyslCompileErrorTests` |
-| Two patterns binding same name in different arms 🔴 | `SyslCompileErrorTests` |
-| Match on a function-call result (rvalue scrutinee) 🔴 | `pattern_matching/match_rvalue_scrutinee.lsysl` |
-| Patterns that overlap via int range vs literal 🔴 | `pattern_matching/match_pattern_overlap.lsysl` |
+| Non-exhaustive on multi-variant enum 🟢 | `SyslCompileErrorTests.non-exhaustive match on enum rejected` |
+| Non-exhaustive on single-variant enum 🟢 | `SyslCompileErrorTests.non-exhaustive single-variant enum match rejected` (guarded `_` doesn't count as catch-all) |
+| Match guard must be bool 🟢 | `SyslCompileErrorTests.match guard must be a bool` |
+| Match on a function-call result (rvalue scrutinee) 🟢 | `pattern_matching/match_rvalue_scrutinee.lsysl` (8 tests): side-effect counter pins single-evaluation; constructor / arithmetic / string-rvalue / method-call results all work as scrutinees |
+| Patterns that overlap via int range vs literal 🟢 | `pattern_matching/match_pattern_overlap.lsysl` (12 tests): first-arm-wins ordering when range and literal cover the same value; two-overlapping-ranges first wins; wildcard-last; guarded-then-bind |
+| Guard that's statically true/false | NOT enforced (sysl analyzer doesn't constant-fold guards; deferred lint-tier) |
+| Two patterns binding same name in different arms | NOT an error — each arm has its own scope; same name in disjoint arms is legal |
 
 ---
 

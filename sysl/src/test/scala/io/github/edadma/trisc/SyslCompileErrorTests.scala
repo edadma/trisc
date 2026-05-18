@@ -91,4 +91,61 @@ class SyslCompileErrorTests extends SyslTestHelpers {
         |    0
         |""".stripMargin
     }
+
+  // EDGE_CASES #6 — match exhaustiveness corners.
+
+  // Non-exhaustive match on an enum: the analyzer enumerates the variants
+  // the arms cover and rejects when at least one is missing AND there's
+  // no wildcard / `else` catch-all.
+  "non-exhaustive match on enum rejected" in rejects("non-exhaustive match") {
+    """enum E
+      |    A
+      |    B
+      |    C
+      |
+      |main() -> int
+      |    val x: E = A
+      |    x match
+      |        A -> 1
+      |        B -> 2
+      |    0
+      |""".stripMargin
+  }
+
+  // Single-variant enum: still subject to exhaustiveness. An empty match
+  // body (which technically wouldn't parse) is impossible; here we ask
+  // the analyzer to reject a match that fails to mention the one variant.
+  "non-exhaustive single-variant enum match rejected" in rejects("non-exhaustive match") {
+    """enum One
+      |    Only
+      |
+      |main() -> int
+      |    val x: One = Only
+      |    x match
+      |        _ if false -> 1
+      |    0
+      |""".stripMargin
+  }
+
+  // Match guard must be bool — a guard expression of any other type is
+  // rejected. The analyzer's diagnostic names the surface explicitly.
+  "match guard must be a bool" in rejects("match guard must be bool") {
+    """main() -> int
+      |    val x: int = 5
+      |    x match
+      |        n if n -> 1
+      |        _ -> 0
+      |""".stripMargin
+  }
+
+  // Exhaustiveness is reactive to a wildcard catch-all: as soon as a
+  // wildcard arm appears, missing variants are covered. The wildcard +
+  // single variant case is exhaustive; the wildcard alone is too. This
+  // ISN'T a rejection — confirming a positive case by NOT having it in
+  // this file would be invisible, but we can document it via a comment:
+  //   `x match { _ -> 0 }` and `x match { A -> 1; _ -> 0 }` both compile.
+
+  // Companion runtime tests for the non-error overlap and rvalue corners
+  // live in pattern_matching/match_rvalue_scrutinee.lsysl and
+  // pattern_matching/match_pattern_overlap.lsysl.
 }
