@@ -565,20 +565,30 @@ is exercised by JVM-side `SyslCondCompTests`.
 
 ---
 
-### `compile_errors/` — analyzer rejections (compile-fail tests) — 🔴 P3
+### Analyzer rejections (compile-fail tests) — 🟢
 
-These require the `#test(should_panic)` form on compile-time failures,
-or a separate mechanism if sysl doesn't yet support "this file should
-fail to compile with this message". Track separately and skip if the
-test framework can't express it.
+Compile-time rejections live as **Scala tests** in
+`sysl/src/test/scala/io/github/edadma/trisc/SyslCompileErrorTests.scala`,
+not as `.lsysl` files under `lang_features/`. Reason: ScalaTest already
+gives us `intercept[RuntimeException]` and `should include(...)` for
+matching the diagnostic, so no new test-runner machinery is needed.
+The Scala file's `rejects(msgFragment)(source)` helper compiles the
+source, expects an `AnalysisError` (an inner case class of
+`SyslAnalyzer`), and asserts its message contains the fragment.
 
-| File | Tests pinned |
-|---|---|
-| `compile_fail_double_decl.lsysl` 🔴 | duplicate fn / struct declaration |
-| `compile_fail_unknown_field.lsysl` 🔴 | accessing a field that doesn't exist |
-| `compile_fail_arity_mismatch.lsysl` 🔴 | wrong arg count |
-| `compile_fail_immutable_assign.lsysl` 🔴 | assigning to a `val` |
-| `compile_fail_ptr_to_ref.lsysl` 🔴 | converting `*T → &T` rejected |
+Currently pinned:
+- duplicate function declaration → "duplicate function"
+- duplicate struct declaration → "duplicate struct"
+- accessing a field that doesn't exist → "has no field"
+- calling a function with wrong arg count → "argument(s), got"
+- assigning to a `val` → "immutable variable"
+- ptr→ref conversion at a val-decl → "cannot assign"
+
+Add new entries as `rejects(...)` calls in the Scala file; no
+`.lsysl` file is needed (or desired — a `.lsysl` whose only purpose
+is to fail to compile would clutter every backend's positive-test
+sweep). The natural counterpart to a positive lang_features test is
+a positive-or-negative ScalaTest, not a separate ROADMAP row.
 
 ---
 
