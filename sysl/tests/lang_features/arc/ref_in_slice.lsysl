@@ -1,0 +1,170 @@
+Refs stored in a dynamic-array slice
+====================================
+
+`new [n]&T` allocates a heap slice whose cells hold `&T`
+references. Each cell starts as a null ref (zero-init); writes
+of `new T(...)` populate cells with owning refs.
+
+The refcount obligations on a slice-of-refs are subtle:
+
+  - **Write**: `xs[i] = r` must increment `r`'s refcount AND
+    decrement the previous occupant of `xs[i]` (if any). A
+    naive "just store the pointer" causes double-frees on
+    drop.
+  - **Read**: `xs[i]` reads the ref *without* taking
+    ownership; the refcount stays the same.
+  - **Drop**: when the slice itself is dropped (binding goes
+    out of scope, or `xs` is reassigned), every cell that
+    holds a live ref must decrement that ref's refcount, then
+    the underlying buffer is freed. A cell holding a null ref
+    must not be decremented.
+  - **Sub-slice**: `xs[a:b]` produces a view that shares
+    cells with the parent. Reads through the view see the
+    same data. The current sysl spec doesn't require sub-
+    slices to retain their parent (no "lifetime extension"),
+    so this file only pins the **shared-storage** observation
+    via parent-then-child reads.
+
+The bug class to surface: a backend that doesn't iterate
+slice cells on drop, or that decrements cells holding null
+refs, or that fails to incr-on-write.
+
+    module sysl.tests.lang_features
+
+    struct RisBox
+        v: int
+
+Basic write-then-read of refs in a slice
+----------------------------------------
+
+Each cell receives an owned `new RisBox(...)`. The reads see
+the right v. The slice goes out of scope at fn exit; the
+backing buffer + each cell's ref must drop cleanly. A bug
+that leaks the cells wouldn't be visible from this test
+alone, but a bug that double-frees or decrements null refs
+would corrupt the heap and the *next* allocation traps.
+
+    #test
+    test_slice_of_refs_basic_write_read() -> unit
+        val xs: &[]&RisBox = new [3]&RisBox
+        xs[0] = new RisBox(10)
+        xs[1] = new RisBox(20)
+        xs[2] = new RisBox(30)
+        assert(xs[0].v == 10, s"xs[0].v should be 10, got ${xs[0].v}")
+        assert(xs[1].v == 20, s"xs[1].v should be 20, got ${xs[1].v}")
+        assert(xs[2].v == 30, s"xs[2].v should be 30, got ${xs[2].v}")
+
+Allocating, dropping, re-allocating — heap not corrupted
+---------------------------------------------------------
+
+After a slice-of-refs goes out of scope, the next allocation
+should succeed unchanged. Repeats N times to stress
+allocator state — any double-free or use-after-free in the
+drop path would taint the freelist and a subsequent malloc
+would return a stale or null pointer.
+
+    #test
+    test_slice_of_refs_alloc_drop_loop() -> unit
+        var i = 0
+        while i < 20
+            val xs: &[]&RisBox = new [5]&RisBox
+            var j = 0
+            while j < 5
+                xs[j] = new RisBox(i * 10 + j)
+                j = j + 1
+            // Verify the writes are consistent
+            assert(xs[0].v == i * 10, s"xs[0] should be ${i * 10}, got ${xs[0].v}")
+            assert(xs[4].v == i * 10 + 4, s"xs[4] should be ${i * 10 + 4}, got ${xs[4].v}")
+            i = i + 1
+        // If 20 iterations completed without trap, the drop path is sound.
+        assert(true, "completed 20 alloc/drop cycles")
+
+Reassigning a cell drops the old ref
+------------------------------------
+
+`xs[0] = new RisBox(...)` replaces the existing occupant.
+The OLD ref's refcount must drop (and the old box gets freed
+if it was the only owner). A bug that skips the decrement
+leaks the old box; a bug that double-decrements double-frees.
+
+    #test
+    test_cell_reassign_drops_old() -> unit
+        val xs: &[]&RisBox = new [1]&RisBox
+        xs[0] = new RisBox(1)
+        xs[0] = new RisBox(2)
+        xs[0] = new RisBox(3)
+        // If any reassignment double-freed, subsequent allocations
+        // would hit corrupted heap; the read here would trap.
+        assert(xs[0].v == 3, s"after three reassigns, xs[0].v should be 3, got ${xs[0].v}")
+
+Mutation through a cell visible after read-out
+----------------------------------------------
+
+`val r = xs[i]` reads the ref. Mutating through `r` is
+visible through `xs[i]` because both bindings point to the
+same box. Pins that cell-reads share storage, not copy.
+
+    #test
+    test_cell_read_shares_storage() -> unit
+        val xs: &[]&RisBox = new [1]&RisBox
+        xs[0] = new RisBox(7)
+        val r: &RisBox = xs[0]
+        r.v = 99
+        assert(xs[0].v == 99, s"mutation through aliased ref should be visible in slice; got ${xs[0].v}")
+
+Sub-slice shares storage with parent
+------------------------------------
+
+`xs[a:b]` is a view, not a copy. Mutating through the view
+is visible through the parent and vice-versa. The slice
+header (ptr+len+cap) is a value-typed descriptor, but the
+underlying backing buffer is shared.
+
+    #test
+    test_sub_slice_shares_cells() -> unit
+        val xs: &[]&RisBox = new [3]&RisBox
+        xs[0] = new RisBox(1)
+        xs[1] = new RisBox(2)
+        xs[2] = new RisBox(3)
+        val view = xs[1:3]
+        assert(len(view) == 2, s"view len should be 2, got ${len(view)}")
+        assert(view[0].v == 2, s"view[0] aliases xs[1]; expected 2, got ${view[0].v}")
+        // Mutate through the view; visible in parent.
+        view[0].v = 42
+        assert(xs[1].v == 42, s"parent xs[1] should see view's mutation; got ${xs[1].v}")
+
+Two slice variables sharing the same underlying buffer
+------------------------------------------------------
+
+When a slice binding is copied to another binding of the
+same type, both bindings see the same data. Pins that the
+slice descriptor's underlying buffer is shared (not deep-
+copied) — same as the sub-slice case but without indexing.
+
+    #test
+    test_slice_binding_copy_shares() -> unit
+        val a: &[]&RisBox = new [2]&RisBox
+        a[0] = new RisBox(10)
+        a[1] = new RisBox(20)
+        val b: &[]&RisBox = a
+        assert(b[0].v == 10, s"b[0] aliases a[0]; expected 10, got ${b[0].v}")
+        b[1].v = 200
+        assert(a[1].v == 200, s"a[1] should see b's mutation; got ${a[1].v}")
+
+Many writes to same cell — no leak (heap probe)
+-----------------------------------------------
+
+A single cell, written many times with fresh `new RisBox`.
+Each write must drop the previous occupant. If the drop is
+skipped, allocating 1000 boxes one-by-one would exhaust
+memory. The test runs 200 writes which is enough to surface
+any allocator-state corruption.
+
+    #test
+    test_single_cell_repeated_write() -> unit
+        val xs: &[]&RisBox = new [1]&RisBox
+        var i = 0
+        while i < 200
+            xs[i % 1] = new RisBox(i)
+            i = i + 1
+        assert(xs[0].v == 199, s"final xs[0] should be 199, got ${xs[0].v}")

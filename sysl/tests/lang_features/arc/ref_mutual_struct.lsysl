@@ -1,0 +1,100 @@
+Mutually-referencing structs — safe asymmetric pattern
+=======================================================
+
+When two structs need to point at each other, the safe shape
+is asymmetric: one direction via `&T` (refcounted, owning),
+the other via `*T` (raw, non-owning back-pointer). The
+parent owns the child via ARC; the child carries an unsafe
+back-pointer to the parent that's only valid while the
+parent is alive.
+
+This avoids the cycle problem. An all-`&`-both-ways pattern
+would form a reference cycle that ARC can't collect (sysl's
+ARC has no cycle collector); the planned `unowned`
+qualifier (per CLAUDE.md TRISC TODO) is what will eventually
+let users mark the second direction non-owning. Until then,
+the asymmetric `&` + `*` pattern is the idiomatic way to
+model parent/child relationships.
+
+    module sysl.tests.lang_features
+
+    struct RmsChild
+        name: string
+        parent: *RmsParent
+
+    struct RmsParent
+        label: string
+        child: &RmsChild
+
+Construct + wire back-pointer
+-----------------------------
+
+Construct a parent with a fresh child whose back-pointer
+starts as a null `*RmsParent`. Wire the back-pointer to `&p`
+after the parent is in place. Both directions readable.
+
+    #test
+    test_parent_owns_child_child_ptr_to_parent() -> unit
+        var p = RmsParent("root", new RmsChild("c0", *RmsParent(0)))
+        p.child.parent = &p
+        assert(p.child.name == "c0", s"forward read failed: ${p.child.name}")
+        assert((*p.child.parent).label == "root", s"back read failed: ${(*p.child.parent).label}")
+
+Reassign the child — old child's refcount drops
+-----------------------------------------------
+
+The parent's `&` field is reassigned to a fresh `new
+RmsChild(...)`. The old child's refcount drops (and is
+freed, since the parent was its only owner). The new
+child's back-pointer is set during construction.
+
+    #test
+    test_parent_reassigns_child() -> unit
+        var p = RmsParent("root", new RmsChild("first", *RmsParent(0)))
+        p.child.parent = &p
+        assert(p.child.name == "first", s"first child name: ${p.child.name}")
+        p.child = new RmsChild("second", &p)
+        assert(p.child.name == "second", s"after reassign: ${p.child.name}")
+        assert((*p.child.parent).label == "root", s"back-ptr through new child: ${(*p.child.parent).label}")
+
+Many parent/child cycles in a loop — no allocator drift
+-------------------------------------------------------
+
+N iterations, each creating a fresh parent and child. The
+parent goes out of scope at end of iteration → child refcount
+drops to 0 → child frees. If any backend mis-handles the
+&-field-decref-on-struct-drop, repeated allocations would
+exhaust memory or corrupt the allocator and a later read
+would trap.
+
+    #test
+    test_many_parent_child_cycles_asymmetric() -> unit
+        var i = 0
+        var ok = true
+        while i < 100
+            var p = RmsParent(s"p$i", new RmsChild(s"c$i", *RmsParent(0)))
+            p.child.parent = &p
+            if p.child.name != s"c$i" then ok = false
+            i = i + 1
+        assert(ok, s"all 100 iterations had matching child names")
+
+Mutation through one direction visible via the other
+----------------------------------------------------
+
+Mutating a field through the back-pointer is visible through
+the forward link too — the storage is shared. Confirms that
+the parent's `&` field and the child's `*` field reach the
+same underlying objects.
+
+    #test
+    test_mutation_visible_both_directions() -> unit
+        var p = RmsParent("orig", new RmsChild("c", *RmsParent(0)))
+        p.child.parent = &p
+        // Mutate parent's label via the child's back-pointer.
+        (*p.child.parent).label = "mutated"
+        // Read forward — parent's label is updated.
+        assert(p.label == "mutated", s"forward read after back-ptr mutation: got ${p.label}")
+        // Mutate child's name via the parent.
+        p.child.name = "renamed"
+        // Read back via the back-pointer's child link.
+        assert((*p.child.parent).child.name == "renamed", s"back-ptr then forward: got ${(*p.child.parent).child.name}")

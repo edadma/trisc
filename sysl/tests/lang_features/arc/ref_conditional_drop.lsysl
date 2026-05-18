@@ -1,0 +1,197 @@
+Refs in conditional / branching control flow
+============================================
+
+A `&T` declared inside a branch must be dropped at the
+branch's scope exit, NOT at the enclosing function's exit.
+If the branch is skipped, the ref is never constructed and
+must not be (double-)decremented.
+
+Bug families to surface:
+
+  - **Lexical decref of skipped branch**: emitting a decref
+    at function exit for a ref declared only in the `then`
+    branch, regardless of whether the branch was taken.
+    Decrements a null pointer (best case) or random heap
+    memory (worst).
+  - **Missed decref in taken branch**: if the branch
+    cleanup is wired to the enclosing function rather than
+    the branch's local scope, the ref might leak.
+  - **Double-drop on early-return path**: a branch with an
+    early return must decref locally; the function-exit
+    pass must not re-decref the same already-dropped ref.
+
+Companion to `defer_skipped_branch.lsysl` (which pins defer
+semantics in skipped branches); this file pins **refcount**
+semantics under the same control-flow shapes.
+
+    module sysl.tests.lang_features
+
+    struct RcdBox
+        v: int
+
+Ref declared in `then` branch — drop is branch-local
+----------------------------------------------------
+
+When the branch fires, the ref is constructed (rc=1) and
+must drop to 0 at the branch's scope exit (before the
+following statement). When the branch is skipped, no ref
+exists and the function-exit cleanup must not act.
+
+To observe both cases without leaking the box, we read
+`v` while the branch is active and write to a `*int`
+counter that we read after the function returns.
+
+    rcd_branch_only(take: bool, out: *int) -> unit
+        if take
+            val r: &RcdBox = new RcdBox(100)
+            *out = r.v
+        // After this point, r is gone (taken case) or never existed (skipped).
+
+    #test
+    test_ref_in_then_branch_taken() -> unit
+        var x = 0
+        rcd_branch_only(true, &x)
+        assert(x == 100, s"expected 100, got $x")
+
+    #test
+    test_ref_in_then_branch_skipped() -> unit
+        var x = -1
+        rcd_branch_only(false, &x)
+        // Branch never ran; out untouched.
+        assert(x == -1, s"expected -1 (untouched), got $x")
+
+If-else where each branch declares its own ref
+----------------------------------------------
+
+Both arms construct an independent ref. Each arm's ref is
+local to that arm and must drop at the arm's scope exit.
+Pins that the ARC pass tracks per-branch lifetimes
+separately (no "merge into the fn scope and decr at exit").
+
+    rcd_either_arm(pick: int, out: *int) -> unit
+        if pick == 1
+            val a: &RcdBox = new RcdBox(11)
+            *out = a.v
+        else
+            val b: &RcdBox = new RcdBox(22)
+            *out = b.v
+
+    #test
+    test_either_arm_then_taken() -> unit
+        var x = 0
+        rcd_either_arm(1, &x)
+        assert(x == 11, s"expected 11, got $x")
+
+    #test
+    test_either_arm_else_taken() -> unit
+        var x = 0
+        rcd_either_arm(7, &x)
+        assert(x == 22, s"expected 22, got $x")
+
+Early-return from a branch with a live ref
+------------------------------------------
+
+The branch constructs a ref, then returns from the
+function. The branch-scoped cleanup must fire BEFORE the
+return (or the return path must include the decref).
+Without it, the box leaks.
+
+The test runs the function many times; on any backend that
+leaks per-call, the allocator's working set grows. We
+can't observe leaks directly, but we can confirm that
+N invocations all return the right value (which they
+wouldn't if the heap was corrupted by mismatched decrefs).
+
+    rcd_early_return_in_branch(x: int) -> int
+        if x > 0
+            val r: &RcdBox = new RcdBox(x * 2)
+            return r.v
+        return 0
+
+    #test
+    test_early_return_in_branch_pos() -> unit
+        assert(rcd_early_return_in_branch(5) == 10, s"5*2 = 10")
+
+    #test
+    test_early_return_in_branch_zero() -> unit
+        assert(rcd_early_return_in_branch(0) == 0, s"zero case")
+
+    #test
+    test_many_early_returns() -> unit
+        var i = 0
+        var sum = 0
+        while i < 100
+            sum = sum + rcd_early_return_in_branch(i)
+            i = i + 1
+        // sum = 2 * (1+2+...+99) = 2 * 4950 = 9900
+        assert(sum == 9900, s"expected 9900, got $sum")
+
+Ref reassigned inside a branch — old binding drops
+---------------------------------------------------
+
+A ref is constructed before the branch, then conditionally
+reassigned inside the branch. The old binding's ref must
+drop at reassignment (rc-- → maybe free), and the new
+binding's ref takes over the slot. After the branch, the
+binding holds the new ref (taken case) or the old one
+(skipped case).
+
+    rcd_reassign_in_branch(take: bool) -> int
+        var r: &RcdBox = new RcdBox(1)
+        if take
+            r = new RcdBox(2)
+        return r.v
+
+    #test
+    test_reassign_in_branch_taken() -> unit
+        val v = rcd_reassign_in_branch(true)
+        assert(v == 2, s"taken: new ref's value, got $v")
+
+    #test
+    test_reassign_in_branch_skipped() -> unit
+        val v = rcd_reassign_in_branch(false)
+        assert(v == 1, s"skipped: original ref's value, got $v")
+
+Nested branches with refs at each level
+---------------------------------------
+
+Three nested `if`s, each declaring its own ref. Each layer's
+ref must drop at its own scope exit. The deepest active
+branch's ref is the one read out.
+
+    rcd_nested(a: bool, b: bool, c: bool, out: *int) -> unit
+        if a
+            val ra: &RcdBox = new RcdBox(1)
+            if b
+                val rb: &RcdBox = new RcdBox(10)
+                if c
+                    val rc: &RcdBox = new RcdBox(100)
+                    *out = ra.v + rb.v + rc.v
+                else
+                    *out = ra.v + rb.v
+            else
+                *out = ra.v
+
+    #test
+    test_nested_aaa() -> unit
+        var x = 0
+        rcd_nested(true, true, true, &x)
+        assert(x == 111, s"a+b+c = 111, got $x")
+
+    #test
+    test_nested_aab() -> unit
+        var x = 0
+        rcd_nested(true, true, false, &x)
+        assert(x == 11, s"a+b = 11, got $x")
+
+    #test
+    test_nested_a_only() -> unit
+        var x = 0
+        rcd_nested(true, false, false, &x)
+        assert(x == 1, s"a only = 1, got $x")
+
+    #test
+    test_nested_none() -> unit
+        var x = 999
+        rcd_nested(false, false, false, &x)
+        assert(x == 999, s"no branch taken, out untouched, got $x")

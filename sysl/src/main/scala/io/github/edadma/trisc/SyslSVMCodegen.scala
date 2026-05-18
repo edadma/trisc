@@ -439,7 +439,17 @@ class SyslSVMCodegen extends SyslSVMCodegenStatements, SyslSVMCodegenMatch, Sysl
     val immortal = newLabel("rc_decr_immortal")
     val nonzero  = newLabel("rc_decr_nonzero")
     val endLabel = newLabel("rc_decr_end")
+    val nullSkip = newLabel("rc_decr_null")
     val deinitName = deinitFunctions.get(canonicalStruct(st).name)
+    // Null guard: a function-exit decref on a ref-local declared inside an
+    // unreachable branch (or before its initializing assignment) sees ptr=0.
+    // Loading at -8 would trap. Skip the whole decref instead.
+    emit("  dup")                       // ( ptr, ptr )
+    emit("  eqz")                       // ( ptr, ptr == 0 )
+    emit(s"  jumpz $nullSkip")          // non-null → continue
+    emit("  drop")                      // null → drop ptr, ( )
+    emit(s"  jump $endLabel")
+    emit(s"$nullSkip:")
     emit("  dup")                       // ( ptr, ptr )
     emit("  push_i8 -8")
     emit("  add")                       // ( ptr, hdr )

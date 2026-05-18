@@ -3506,6 +3506,11 @@ class SyslLLVMCodegen(target: String = "host"):
                   emit(s"  store $lt $v, $lt* $typedEnvPtr")
                 if structHasStringFields(capType) then
                   emitValueRC(typedEnvPtr, capType, incr = true)
+                else if capType.isInstanceOf[SyslType.RefType] then
+                  // Captured ref: the env is now an owner. Incref the
+                  // ref's heap header so the captured ref outlives the
+                  // constructor's frame. Decremented in the env deinit.
+                  emitRefIncr(v, refHeaderOffset(capType))
               offset += llvmSizeOf(capType)
             ep
         // Build %struct.closure
@@ -5256,6 +5261,17 @@ class SyslLLVMCodegen(target: String = "host"):
         val typedAddr = newReg()
         emit(s"  $typedAddr = bitcast i8* $byteAddr to $lt*")
         emitValueRC(typedAddr, capType, incr = false)
+      else if capType.isInstanceOf[SyslType.RefType] then
+        // Captured ref: load the data ptr from the env slot and
+        // decref it. Mirrors the incref done at closure
+        // construction.
+        val byteAddr = newReg()
+        emit(s"  $byteAddr = getelementptr i8, i8* %env, i64 $offset")
+        val refPtrPtr = newReg()
+        emit(s"  $refPtrPtr = bitcast i8* $byteAddr to i8**")
+        val refPtr = newReg()
+        emit(s"  $refPtr = load i8*, i8** $refPtrPtr")
+        emitRefDecr(refPtr, refHeaderOffset(capType), deinitFor(capType))
       offset += llvmSizeOf(capType)
     emit("  ret i32 0")
     emit("}")

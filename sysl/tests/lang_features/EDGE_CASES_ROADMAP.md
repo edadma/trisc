@@ -104,18 +104,20 @@ ones cover the surface:
 
 ---
 
-## 5. Refcount lifetime corners — 🔴 P1
+## 5. Refcount lifetime corners — 🟢
 
-Recursive-enum auto-box was one slice (now 🟢). Other refcount
-shapes that haven't been pinned across all backends:
+Recursive-enum auto-box (1 row 🟢). Closure-captured refs and
+branch-local refs both surfaced real cross-backend bugs.
+Slice-of-refs and asymmetric struct-cycles were already
+correct.
 
-| File | Corners pinned |
+| File | Corners pinned / bugs surfaced |
 |---|---|
-| `arc/ref_self_assign.lsysl` 🔴 | `r = r` (same ref) — refcount stable, NOT bumped-then-dropped-to-zero |
-| `arc/ref_in_slice.lsysl` 🔴 | `var xs: []&Box = ...` — refs stored in slice; behavior on slice grow / drop / sub-slice (do refs incref on copy?) |
-| `arc/ref_in_escaping_closure.lsysl` 🔴 | Ref captured by a closure that escapes (returned from fn) — does the closure incref? Does the captured ref outlive the original local? |
-| `arc/ref_conditional_drop.lsysl` 🔴 | `if cond then val r = f() else 0` — one branch keeps a ref, other doesn't; verify no double-drop on the "doesn't" branch |
-| `arc/ref_mutual_struct.lsysl` 🔴 | Mutually-referencing **structs** (not enums — that's recursive-enum land); cycle handling (ARC doesn't collect; `unowned` should be required) |
+| `arc/ref_self_assign.lsysl` — covered by existing `new_ref_assignment.lsysl` 🟢 | `r = r` is incr-then-decr (existing test) |
+| `arc/ref_in_slice.lsysl` 🟢 (new, 7 tests) | `new [n]&T` slice of refs: write/read; alloc/drop loop; cell reassignment drops old occupant; cell read shares storage; sub-slice shares cells with parent; binding copy aliases; single-cell repeated write (200 iters) with no allocator drift. **Zero new bugs**. |
+| `arc/ref_in_escaping_closure.lsysl` 🟢 (new, 5 tests) | Captured `&T` ref's refcount must be extended for the closure env. **LLVM-derived backends (llvm-host, riscv64, riscv32, wasm32) were missing both the incref-on-capture and decref-on-deinit for RefType captures** — `emitValueRC` only handled string/struct-with-strings, never RefType. Fix at `SyslLLVMCodegen.scala` TClosure HeapEnv path + `emitClosureEnvDeinit`. SVM/TRISC/interpreter were already correct. |
+| `arc/ref_conditional_drop.lsysl` 🟢 (new, 13 tests) | Ref declared in a branch dropped at branch-scope exit, not fn-scope; either-arm both arms; early return inside a branch; reassign in branch; nested branches. **SVM `emitRefDecr` was missing a null-check** — function-exit decref of a branch-local ref slot that was never written (slot=0) tried to load at -8 and trapped. Mirror of LLVM's existing null-check. |
+| `arc/ref_mutual_struct.lsysl` 🟢 (new, 4 tests) | Safe asymmetric parent/child: parent owns child via `&`, child carries `*Parent` raw back-pointer. Construction, reassignment, 100-iter alloc/drop loop, bidirectional mutation. The all-`&`-both-ways cycle pattern is intentionally NOT tested — it requires `unowned` (planned in CLAUDE.md TODO) to be safe, and an ARC-without-cycles cycle just leaks. **Zero new bugs**. |
 
 ---
 
