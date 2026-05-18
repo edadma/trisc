@@ -11,7 +11,8 @@ Covers:
   when O_NONBLOCK is set, instead of blocking.
 - `fcntl(fd, F_GETFD)` returns 0; `fcntl(fd, F_SETFD, FD_CLOEXEC)`
   returns 0 (accept+ignore).
-- `fcntl(fd, F_DUPFD, 0)` returns -EINVAL — not implemented.
+- `fcntl(fd, F_DUPFD, 0)` returns a positive fd — `sys_fcntl` allocates
+  the lowest free fd ≥ `arg` of the same kind, with the source's flags.
 
 Pass = `nonblock: done` at the end with no `FAIL` markers.
 
@@ -173,10 +174,20 @@ Pass = `nonblock: done` at the end with no `FAIL` markers.
         puts("nonblock: F_DUPFD = ")
         print_sdec(r_dup)
         puts("\n")
-        if r_dup != -22
-            puts("nonblock: FAIL F_DUPFD (expected -22)\n")
+        if r_dup < 0
+            puts("nonblock: FAIL F_DUPFD (expected positive fd)\n")
             exit_with(9)
             return
+        // Dup'd fd should carry the source's O_NONBLOCK flag forward.
+        val r_dup_flags = posix_fcntl(r_dup, F_GETFL, 0)
+        puts("nonblock: F_GETFL(dup) = ")
+        print_sdec(r_dup_flags)
+        puts("\n")
+        if (r_dup_flags & O_NONBLOCK) == 0
+            puts("nonblock: FAIL F_DUPFD did not inherit O_NONBLOCK\n")
+            exit_with(10)
+            return
+        posix_close(r_dup)
 
         posix_close(fd)
 

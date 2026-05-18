@@ -2292,10 +2292,11 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     // test_nonblock drives syscall 171 (fcntl) and 132 (accept4).
     // Verifies recvfrom on an empty UDP queue returns -EAGAIN
     // when O_NONBLOCK is set; F_GETFL/F_SETFL round-trip;
-    // F_GETFD/F_SETFD accept+ignore; F_DUPFD -EINVAL stub.  Then
-    // creates a TCP listener, sets it non-blocking, and asserts
-    // accept4(SOCK_NONBLOCK) returns -EAGAIN on an empty queue
-    // and accept4 with an unknown flag bit returns -EINVAL.
+    // F_GETFD/F_SETFD accept+ignore; F_DUPFD allocates a fresh fd
+    // that inherits the source's flags.  Then creates a TCP listener,
+    // sets it non-blocking, and asserts accept4(SOCK_NONBLOCK) returns
+    // -EAGAIN on an empty queue and accept4 with an unknown flag bit
+    // returns -EINVAL.
     qemu.send("test_nonblock\n")
     val output = qemu.waitFor("nonblock: done")
     output should include("nonblock: F_GETFL pre = 0")
@@ -2304,7 +2305,8 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("nonblock: recvfrom (empty) = -11")
     output should include("nonblock: F_GETFD = 0")
     output should include("nonblock: F_SETFD(FD_CLOEXEC) = 0")
-    output should include("nonblock: F_DUPFD = -22")
+    output should include regex "nonblock: F_DUPFD = [0-9]+".r
+    output should include("nonblock: F_GETFL(dup) = 2048")
     output should include("nonblock: accept4 NB empty = -11")
     output should include("nonblock: accept4 bad flag = -22")
     output should include("nonblock: done")
