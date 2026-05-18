@@ -1,0 +1,90 @@
+Iface closure capture
+=====================
+
+When a closure captures an iface-typed local and the closure outlives its
+constructing frame, the captured iface descriptor's `data_ptr` would point
+into the dead stack if the var-decl auto-box left ownership as `owns=false`.
+The analyzer's post-pass `rewriteEscapingClosureCaptureOwns` flips owns→true
+for iface vars captured by closures, so the source struct is heap-copied at
+the box site and the closure-env's iface descriptor stays valid.
+
+Without the fix, llvm-host returns garbage and trisc traps after a small
+amount of macOS libmalloc / TRISC bump-pool stack reuse.
+
+    module sysl.tests.lang_features
+
+    interface ClcIntHolder
+        value() -> int
+
+    struct ClcTally
+        n: int
+
+    ClcTally.value() -> int = self.n
+
+Factory: stores struct on stack, wraps it as iface in a local, and returns
+a closure capturing the iface. The captured iface must own its data (heap
+copy) so the closure can deref after the factory frame is gone.
+
+    make_reader(seed: int) -> () -> int
+        var t = ClcTally(seed)
+        val h: ClcIntHolder = t
+        return () -> h.value()
+
+### Closure carries iface; called once
+
+    #test
+    test_closure_captures_iface_once() -> unit
+        val f = make_reader(42)
+        assert(f() == 42, s"got ${f()}")
+
+### Closure called multiple times — iface still alive each call
+
+    #test
+    test_closure_iface_many_calls() -> unit
+        val f = make_reader(7)
+        val a = f()
+        val b = f()
+        val c = f()
+        assert(a == 7, s"a; got $a")
+        assert(b == 7, s"b; got $b")
+        assert(c == 7, s"c; got $c")
+
+### Two independent factories, two closures, two ifaces
+
+The two closure envs hold independent owned iface descriptors, so the data
+from factory #1 cannot leak into closure #2's results.
+
+    #test
+    test_two_closures_independent() -> unit
+        val f1 = make_reader(10)
+        val f2 = make_reader(100)
+        assert(f1() == 10, s"f1; got ${f1()}")
+        assert(f2() == 100, s"f2; got ${f2()}")
+        assert(f1() == 10, s"f1 again; got ${f1()}")
+        assert(f2() == 100, s"f2 again; got ${f2()}")
+
+### Closure captures iface that wraps a freshly-allocated struct
+
+    make_reader_inline(seed: int) -> () -> int
+        val h: ClcIntHolder = ClcTally(seed * 2)
+        return () -> h.value()
+
+    #test
+    test_closure_captures_inline_iface() -> unit
+        val f = make_reader_inline(21)
+        assert(f() == 42, s"got ${f()}")
+
+### Closure captures iface inside a destructured return position
+
+    make_pair(a: int, b: int) -> (() -> int, () -> int)
+        var ta = ClcTally(a)
+        var tb = ClcTally(b)
+        val ha: ClcIntHolder = ta
+        val hb: ClcIntHolder = tb
+        return (() -> ha.value(), () -> hb.value())
+
+    #test
+    test_closure_pair_of_ifaces() -> unit
+        val pair = make_pair(11, 22)
+        assert(pair.0() == 11, s"a; got ${pair.0()}")
+        assert(pair.1() == 22, s"b; got ${pair.1()}")

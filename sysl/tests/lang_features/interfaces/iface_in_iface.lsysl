@@ -1,0 +1,146 @@
+Interface ↔ Interface — Composition Through Dispatch
+======================================================
+
+An interface whose method takes or returns another interface
+type. The interesting cases involve the iface-in-iface flowing
+back and forth across the dispatch boundary — return-position
+iface (auto-boxed, owns=true), iface-typed param (boxed by
+caller), and chained dispatch where one iface call produces a
+value that is itself dispatched.
+
+This file covers what the prior iface tests didn't: iface
+*composition*, where ifaces themselves appear in iface
+signatures. Earlier work pinned iface-in-struct-field
+(`iface_box_lifetime`) and iface-as-fn-param (`iface_basic_dispatch`),
+but the cross-iface case (iface method whose signature mentions
+another iface) was not exercised. No compiler bug surfaced —
+the file pins the working behavior so a future regression to the
+analyzer's iface-resolution or to any backend's vtable dispatch
+would show up here.
+
+File-local prefix `Sii` (Sysl Iface in Iface).
+
+    module sysl.tests.lang_features
+
+    interface SiiSource
+        next() -> int
+
+    interface SiiProducer
+        make() -> SiiSource
+
+    struct SiiCounter
+        seed: int
+
+    SiiCounter.next() -> int
+        self.seed = self.seed + 1
+        return self.seed
+
+    struct SiiMaker
+        start: int
+
+    SiiMaker.make() -> SiiSource
+        var c = SiiCounter(self.start)
+        return c
+
+Producer.make() returns Source
+------------------------------
+
+### Single producer.make → source.next
+
+    #test
+    test_sii_producer_returns_source() -> unit
+        var m = SiiMaker(10)
+        val p: SiiProducer = m
+        val src = p.make()
+        assert(src.next() == 11, s"first; got ${src.next()}")
+
+### Two producers give independent sources
+
+    #test
+    test_sii_two_producers() -> unit
+        var m1 = SiiMaker(0)
+        var m2 = SiiMaker(100)
+        val p1: SiiProducer = m1
+        val p2: SiiProducer = m2
+        val s1 = p1.make()
+        val s2 = p2.make()
+        assert(s1.next() == 1, s"s1; got ${s1.next()}")
+        assert(s2.next() == 101, s"s2; got ${s2.next()}")
+
+### Chain — p.make().next() in a single expression
+
+    #test
+    test_sii_chain_in_one_expression() -> unit
+        var m = SiiMaker(42)
+        val p: SiiProducer = m
+        val v = p.make().next()
+        assert(v == 43, s"chained; got $v")
+
+Sink.accept(Source) — iface param to iface method
+--------------------------------------------------
+
+    interface SiiSink
+        accept(src: SiiSource) -> int
+
+    struct SiiTally
+        running: int
+
+    SiiTally.accept(src: SiiSource) -> int
+        self.running = self.running + src.next()
+        return self.running
+
+### Single accept call
+
+    #test
+    test_sii_sink_accepts_source() -> unit
+        var t = SiiTally(0)
+        var c = SiiCounter(99)
+        val sink: SiiSink = t
+        val src: SiiSource = c
+        val r = sink.accept(src)
+        assert(r == 100, s"99+1=100; got $r")
+
+### Multiple accepts on the same sink + source
+
+    #test
+    test_sii_sink_accepts_three_times() -> unit
+        var t = SiiTally(0)
+        var c = SiiCounter(0)
+        val sink: SiiSink = t
+        val src: SiiSource = c
+        val a = sink.accept(src)
+        val b = sink.accept(src)
+        val d = sink.accept(src)
+        assert(a == 1, s"a; got $a")
+        assert(b == 3, s"b=1+2; got $b")
+        assert(d == 6, s"d=1+2+3; got $d")
+
+### Same sink, two different source ifaces
+
+    #test
+    test_sii_sink_two_sources() -> unit
+        var t = SiiTally(0)
+        var c1 = SiiCounter(0)
+        var c2 = SiiCounter(99)
+        val sink: SiiSink = t
+        val src1: SiiSource = c1
+        val src2: SiiSource = c2
+        sink.accept(src1)             // adds 1
+        sink.accept(src2)             // adds 100
+        val r = sink.accept(src1)     // adds 2 → 103
+        assert(r == 103, s"1+100+2=103; got $r")
+
+End-to-end: producer.make() → sink.accept()
+--------------------------------------------
+
+### Producer makes the source the sink consumes
+
+    #test
+    test_sii_producer_into_sink() -> unit
+        var m = SiiMaker(50)
+        var t = SiiTally(0)
+        val p: SiiProducer = m
+        val sink: SiiSink = t
+        val src = p.make()
+        val r = sink.accept(src)
+        assert(r == 51, s"50+1=51; got $r")

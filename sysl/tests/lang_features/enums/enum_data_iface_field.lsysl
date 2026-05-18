@@ -1,0 +1,166 @@
+Data Enum with Interface Field
+================================
+
+A data-enum variant whose payload is an `interface` type was
+previously analyzer-OOB at the iface dispatch site (interpreter
+threw `IndexOutOfBoundsException: 0`) whenever the variant was
+constructed in one function and matched in another. Root cause:
+function parameters of `EnumType` were captured at registration
+in the main pass — before the post-main-pass `resolveStructsAndEnums()`
+refreshed `dataEnumTypes` with variant payload types whose iface
+fields now carried their full method list. The captured enum
+held the pre-refresh placeholder iface (empty `methods`), and a
+match-binding's `payload.method()` indexed past the end of an
+empty methods list.
+
+Two analyzer fixes land together:
+
+- `latestEnum(et)` — re-look up `dataEnumTypes(et.name)` so any
+  captured `EnumType` snapshot picks up the post-pass-3 variant
+  payload types. Used by `resolveVariant` and by all three variant
+  construction paths.
+- Iface auto-box at every variant construction site — the
+  `CallAST` path (`Cons(t, ...)`), the `new` path (`new Ok(t)`),
+  and the generic-variant path (`Some(t)`). Mirrors the existing
+  struct-construct / new-struct / index-assign / field-assign
+  auto-boxes, with `owns=true` because the enclosing enum value
+  may outlive the source. Without auto-box at construction the
+  raw concrete value lands in the variant field and the
+  unwrapping match downstream got an `ArrVal` where an
+  `InterfaceVal` was expected.
+
+This file pins:
+
+- Non-recursive enum with iface variant payload.
+- Variant with two fields where one is an iface and one is a
+  plain scalar.
+- Recursive enum (slice-of-self) with an iface payload field.
+- `payload_of` called across a fn boundary so the param-captured
+  enum is the one used during pattern analysis.
+
+File-local prefix `Sedif` (Sysl Enum Data Iface Field).
+
+    module sysl.tests.lang_features
+
+    interface SedifHolder
+        value() -> int
+
+    struct SedifTally
+        n: int
+
+    SedifTally.value() -> int = self.n
+
+Single-variant enum with iface payload
+---------------------------------------
+
+    enum SedifMaybe
+        SedifJust(payload: SedifHolder)
+        SedifNone
+
+### Construction and match: SedifJust(iface)
+
+    #test
+    test_sedif_just_iface() -> unit
+        var t = SedifTally(11)
+        val m: SedifMaybe = SedifJust(t)
+        m match
+            SedifJust(v) -> assert(v.value() == 11, s"got ${v.value()}")
+            SedifNone    -> assert(false, "should not be None")
+
+### Bare none variant
+
+    #test
+    test_sedif_none() -> unit
+        val m: SedifMaybe = SedifNone
+        m match
+            SedifJust(_) -> assert(false, "should not be Just")
+            SedifNone    -> ()
+
+Two-field variant: iface + int
+-------------------------------
+
+    enum SedifPair
+        SedifEmpty
+        SedifCell(payload: SedifHolder, tag: int)
+
+### Cell with both fields visible
+
+    payload_of_pair(p: SedifPair) -> int =
+        p match
+            SedifEmpty            -> -1
+            SedifCell(v, _)       -> v.value()
+
+    #test
+    test_sedif_pair_cell() -> unit
+        var t = SedifTally(13)
+        val c = SedifCell(t, 99)
+        assert(payload_of_pair(c) == 13, s"got ${payload_of_pair(c)}")
+
+### Iface in second slot (positional sanity)
+
+    enum SedifPair2
+        SedifEmpty2
+        SedifCell2(tag: int, payload: SedifHolder)
+
+    payload_of_pair2(p: SedifPair2) -> int =
+        p match
+            SedifEmpty2           -> -1
+            SedifCell2(_, v)      -> v.value()
+
+    #test
+    test_sedif_pair2_cell() -> unit
+        var t = SedifTally(17)
+        val c = SedifCell2(99, t)
+        assert(payload_of_pair2(c) == 17, s"got ${payload_of_pair2(c)}")
+
+Recursive enum (slice-of-self) with iface field
+------------------------------------------------
+
+A tree where each node carries an iface payload plus a slice of
+children. Exercises both the recursive-enum capture and the
+iface-payload refresh.
+
+    enum SedifTree
+        SedifLeaf
+        SedifNode(payload: SedifHolder, children: []SedifTree)
+
+### Bare leaf (no iface payload)
+
+    #test
+    test_sedif_tree_leaf() -> unit
+        var t: SedifTree = SedifLeaf
+        assert(str(t) == "SedifLeaf", s"got '${str(t)}'")
+
+### Node with payload, no children
+
+    #test
+    test_sedif_tree_node_no_children() -> unit
+        var p = SedifTally(42)
+        val empty: []SedifTree = new [0]SedifTree[:]
+        val n = SedifNode(p, empty)
+        assert(str(n) == "SedifNode", s"got '${str(n)}'")
+
+### Extract iface payload through match
+
+    sedif_payload(t: SedifTree) -> int =
+        t match
+            SedifLeaf           -> -1
+            SedifNode(p, _)     -> p.value()
+
+    #test
+    test_sedif_tree_extract_payload() -> unit
+        var p = SedifTally(13)
+        val empty: []SedifTree = new [0]SedifTree[:]
+        val n = SedifNode(p, empty)
+        assert(sedif_payload(n) == 13, s"got ${sedif_payload(n)}")
+
+### Node with two leaf children — iface payload survives slice-of-self
+
+    #test
+    test_sedif_tree_two_leaves() -> unit
+        var p = SedifTally(7)
+        val arr = new [2]SedifTree
+        arr[0] = SedifLeaf
+        arr[1] = SedifLeaf
+        val n = SedifNode(p, arr[:])
+        assert(sedif_payload(n) == 7, s"got ${sedif_payload(n)}")
