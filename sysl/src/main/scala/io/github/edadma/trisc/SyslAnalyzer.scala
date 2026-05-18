@@ -2828,7 +2828,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         if funInfo.reads.isDefined || funInfo.writes.isDefined then
           validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
         validateGhostDiscipline(name, funInfo, tBody)
-        TFunDecl(funInfo.name, tParams, retType, tBody, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo), isParameterless = funInfo.isParameterless)
+        val tBodyFixed = rewriteEscapingClosureCaptureOwns(tBody)
+        TFunDecl(funInfo.name, tParams, retType, tBodyFixed, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo), isParameterless = funInfo.isParameterless)
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>
         scopeStack = new mutable.ArrayBuffer
@@ -6497,6 +6498,180 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
       case TMultiStmt(xs)                       => TMultiStmt(xs.map(goS))
       case TExprStmt(e)                         => TExprStmt(mapTExpr(e)(f))
     goS(s)
+
+  /** Post-pass that fixes the closure-iface UAF: when an iface-typed local is captured by
+   *  an escaping closure, rewrite its `TVarStmt`'s initializer `TInterfaceBox(_,_,owns=false)`
+   *  to `owns=true` so codegen heap-copies the source struct instead of pointing into the
+   *  caller's stack frame (which is dead by the time the escaped closure runs).
+   *
+   *  Why a post-pass: at var-decl time we don't yet know whether the var will be captured
+   *  later. The conservative `owns=false` default is correct for in-scope use (including
+   *  mutating-self through the iface), but breaks once the iface descriptor is copied into
+   *  a heap closure env and outlives the source.
+   *
+   *  Scope: covers DIRECT capture by an escaping closure (and indirect-via-nested-closure
+   *  because scanCaptures recursively bubbles inner-body refs up into the outer closure's
+   *  capture list when the inner var doesn't shadow them). Does NOT cover the case where
+   *  an iface is captured by a non-escaping closure that is itself captured-by-reference via
+   *  another var (a FuncType local captured by an outer escaping closure); that pattern
+   *  would need additional bookkeeping and is not currently exercised by any test. */
+  protected def rewriteEscapingClosureCaptureOwns(tBody: TFunBody): TFunBody =
+    val capturedIfaceNames = scala.collection.mutable.Set.empty[String]
+    def walkExpr(e: TExpr): Unit = e match
+      case TClosure(_, _, body, captures, _, _, _) =>
+        // Conservative: rewrite captured iface ownership for ANY closure regardless
+        // of the analyzer's `escapes` flag. The flag is unreliable for return-position
+        // closures (FuncType.escaping defaults to false even though the closure literally
+        // escapes via return). The over-approximation is safe because mutating-self via
+        // iface uses a method receiver, not a closure-captured iface var.
+        for (n, t) <- captures do
+          t match
+            case _: SyslType.InterfaceType => capturedIfaceNames += n
+            case _ => ()
+        body match
+          case TExprBody(inner) => walkExpr(inner)
+          case TBlockBody(ss)   => ss.foreach(walkStmt)
+      case TBinary(l, _, r, _) => walkExpr(l); walkExpr(r)
+      case TUnary(_, o, _)     => walkExpr(o)
+      case TCall(_, args, _)   => args.foreach(walkExpr)
+      case TIndirectCall(c, args, _) => walkExpr(c); args.foreach(walkExpr)
+      case TIndex(a, i, _)     => walkExpr(a); walkExpr(i)
+      case TFieldAccess(o, _, _) => walkExpr(o)
+      case TDeref(e1, _)       => walkExpr(e1)
+      case TCast(e1, _)        => walkExpr(e1)
+      case TAddrOfIndex(a, i, _) => walkExpr(a); walkExpr(i)
+      case TAddrOfField(o, _, _) => walkExpr(o)
+      case TFieldPreInc(o, _, _) => walkExpr(o)
+      case TFieldPreDec(o, _, _) => walkExpr(o)
+      case TFieldPostInc(o, _, _) => walkExpr(o)
+      case TFieldPostDec(o, _, _) => walkExpr(o)
+      case TTempAddr(inner, _) => walkExpr(inner)
+      case TIfExpr(c, tb, eb, _) =>
+        walkExpr(c); tb.foreach(walkStmt); eb.foreach(_.foreach(walkStmt))
+      case TQuantifier(_, _, _, lo, hi, _, p, _) => walkExpr(lo); walkExpr(hi); walkExpr(p)
+      case TMatchExpr(scr, arms, dflt, _) =>
+        walkExpr(scr)
+        for a <- arms do
+          a.guard.foreach(walkExpr)
+          a.body.foreach(walkStmt)
+        dflt.foreach(_.foreach(walkStmt))
+      case TEnumConstruct(_, _, args) => args.foreach(walkExpr)
+      case TStructConstruct(_, args)  => args.foreach(walkExpr)
+      case TArrayLit(els, _)   => els.foreach(walkExpr)
+      case TNew(_, args)       => args.foreach(walkExpr)
+      case TNewEnum(_, _, args) => args.foreach(walkExpr)
+      case TNewArray(_, sz)    => walkExpr(sz)
+      case TLen(e1, _)         => walkExpr(e1)
+      case TCap(e1, _)         => walkExpr(e1)
+      case TSliceExpr(a, lo, hi, _) =>
+        walkExpr(a); lo.foreach(walkExpr); hi.foreach(walkExpr)
+      case TAppend(s, el, _)   => walkExpr(s); walkExpr(el)
+      case TStringFromPtr(p, l, _) => walkExpr(p); walkExpr(l)
+      case TStringFromSlice(s, _) => walkExpr(s)
+      case TStr(e1)            => walkExpr(e1)
+      case TFmtStr(e1, _)      => walkExpr(e1)
+      case TInterfaceBox(inner, _, _) => walkExpr(inner)
+      case TInterfaceDispatch(v, _, args, _) => walkExpr(v); args.foreach(walkExpr)
+      case TIntrinsicCall(_, args, _) => args.foreach(walkExpr)
+      case TRangeCheck(inner, _, _, _) => walkExpr(inner)
+      case _ => ()
+    def walkStmt(s: TStmt): Unit = s match
+      case TVarStmt(_, _, init, _, _) => walkExpr(init)
+      case TDestructureStmt(_, _, init) => walkExpr(init)
+      case TDestructureAssignStmt(_, _, init) => walkExpr(init)
+      case TAssignStmt(_, v) => walkExpr(v)
+      case TCompoundAssignStmt(_, _, v) => walkExpr(v)
+      case TDerefAssignStmt(p, v) => walkExpr(p); walkExpr(v)
+      case TIndexAssignStmt(a, i, v) => walkExpr(a); walkExpr(i); walkExpr(v)
+      case TFieldAssignStmt(o, _, v) => walkExpr(o); walkExpr(v)
+      case TFieldCompoundAssignStmt(o, _, _, v) => walkExpr(o); walkExpr(v)
+      case TReturnStmt(v) => v.foreach(walkExpr)
+      case TWhileStmt(c, b, _) => walkExpr(c); b.foreach(walkStmt)
+      case TForStmt(init, c, upd, b, _) =>
+        walkStmt(init); walkExpr(c); walkStmt(upd); b.foreach(walkStmt)
+      case TDoWhileStmt(c, b, _) => walkExpr(c); b.foreach(walkStmt)
+      case TLoopStmt(b, _) => b.foreach(walkStmt)
+      case TDeferStmt(inner) => walkStmt(inner)
+      case TContractCheck(_, e, _) => walkExpr(e)
+      case TMultiStmt(xs) => xs.foreach(walkStmt)
+      case TExprStmt(e) => walkExpr(e)
+      case _ => ()
+    tBody match
+      case TExprBody(e) => walkExpr(e)
+      case TBlockBody(ss) => ss.foreach(walkStmt)
+    if capturedIfaceNames.isEmpty then return tBody
+
+    def rwExpr(e: TExpr): TExpr = e match
+      case TClosure(p, r, body, caps, esc, eff, sn) =>
+        val nb = body match
+          case TExprBody(inner) => TExprBody(rwExpr(inner))
+          case TBlockBody(ss)   => TBlockBody(ss.map(rwStmt))
+        TClosure(p, r, nb, caps, esc, eff, sn)
+      case TBinary(l, op, r, t) => TBinary(rwExpr(l), op, rwExpr(r), t)
+      case TUnary(op, o, t) => TUnary(op, rwExpr(o), t)
+      case TCall(n, args, t) => TCall(n, args.map(rwExpr), t)
+      case TIndirectCall(c, args, t) => TIndirectCall(rwExpr(c), args.map(rwExpr), t)
+      case TIndex(a, i, t) => TIndex(rwExpr(a), rwExpr(i), t)
+      case TFieldAccess(o, idx, t) => TFieldAccess(rwExpr(o), idx, t)
+      case TDeref(e1, t) => TDeref(rwExpr(e1), t)
+      case TCast(e1, t) => TCast(rwExpr(e1), t)
+      case TAddrOfIndex(a, i, t) => TAddrOfIndex(rwExpr(a), rwExpr(i), t)
+      case TAddrOfField(o, idx, t) => TAddrOfField(rwExpr(o), idx, t)
+      case TFieldPreInc(o, idx, t) => TFieldPreInc(rwExpr(o), idx, t)
+      case TFieldPreDec(o, idx, t) => TFieldPreDec(rwExpr(o), idx, t)
+      case TFieldPostInc(o, idx, t) => TFieldPostInc(rwExpr(o), idx, t)
+      case TFieldPostDec(o, idx, t) => TFieldPostDec(rwExpr(o), idx, t)
+      case TTempAddr(inner, t) => TTempAddr(rwExpr(inner), t)
+      case TIfExpr(c, tb, eb, t) => TIfExpr(rwExpr(c), tb.map(rwStmt), eb.map(_.map(rwStmt)), t)
+      case TQuantifier(k, n, nt, lo, hi, inc, p, t) =>
+        TQuantifier(k, n, nt, rwExpr(lo), rwExpr(hi), inc, rwExpr(p), t)
+      case TMatchExpr(scr, arms, dflt, t) =>
+        val na = arms.map(a => TMatchArm(a.patterns, a.guard.map(rwExpr), a.body.map(rwStmt)))
+        TMatchExpr(rwExpr(scr), na, dflt.map(_.map(rwStmt)), t)
+      case TEnumConstruct(et, idx, args) => TEnumConstruct(et, idx, args.map(rwExpr))
+      case TStructConstruct(st, args) => TStructConstruct(st, args.map(rwExpr))
+      case TArrayLit(els, t) => TArrayLit(els.map(rwExpr), t)
+      case TNew(st, args) => TNew(st, args.map(rwExpr))
+      case TNewEnum(et, idx, args) => TNewEnum(et, idx, args.map(rwExpr))
+      case TNewArray(et, sz) => TNewArray(et, rwExpr(sz))
+      case TLen(e1, t) => TLen(rwExpr(e1), t)
+      case TCap(e1, t) => TCap(rwExpr(e1), t)
+      case TSliceExpr(a, lo, hi, t) => TSliceExpr(rwExpr(a), lo.map(rwExpr), hi.map(rwExpr), t)
+      case TAppend(s, el, t) => TAppend(rwExpr(s), rwExpr(el), t)
+      case TStringFromPtr(p, l, t) => TStringFromPtr(rwExpr(p), rwExpr(l), t)
+      case TStringFromSlice(s, t) => TStringFromSlice(rwExpr(s), t)
+      case TStr(e1) => TStr(rwExpr(e1))
+      case TFmtStr(e1, sp) => TFmtStr(rwExpr(e1), sp)
+      case TInterfaceBox(inner, iface, owns) => TInterfaceBox(rwExpr(inner), iface, owns)
+      case TInterfaceDispatch(v, m, args, rt) => TInterfaceDispatch(rwExpr(v), m, args.map(rwExpr), rt)
+      case TIntrinsicCall(n, args, t) => TIntrinsicCall(n, args.map(rwExpr), t)
+      case TRangeCheck(inner, r, an, t) => TRangeCheck(rwExpr(inner), r, an, t)
+      case other => other
+    def rwStmt(s: TStmt): TStmt = s match
+      case TVarStmt(name, t, TInterfaceBox(inner, iface, false), vol, g) if capturedIfaceNames.contains(name) =>
+        TVarStmt(name, t, TInterfaceBox(rwExpr(inner), iface, true), vol, g)
+      case TVarStmt(n, t, init, vol, g) => TVarStmt(n, t, rwExpr(init), vol, g)
+      case TDestructureStmt(ns, ts, init) => TDestructureStmt(ns, ts, rwExpr(init))
+      case TDestructureAssignStmt(ns, ts, init) => TDestructureAssignStmt(ns, ts, rwExpr(init))
+      case TAssignStmt(tg, v) => TAssignStmt(tg, rwExpr(v))
+      case TCompoundAssignStmt(tg, op, v) => TCompoundAssignStmt(tg, op, rwExpr(v))
+      case TDerefAssignStmt(p, v) => TDerefAssignStmt(rwExpr(p), rwExpr(v))
+      case TIndexAssignStmt(a, i, v) => TIndexAssignStmt(rwExpr(a), rwExpr(i), rwExpr(v))
+      case TFieldAssignStmt(o, idx, v) => TFieldAssignStmt(rwExpr(o), idx, rwExpr(v))
+      case TFieldCompoundAssignStmt(o, idx, op, v) => TFieldCompoundAssignStmt(rwExpr(o), idx, op, rwExpr(v))
+      case TReturnStmt(v) => TReturnStmt(v.map(rwExpr))
+      case TWhileStmt(c, b, lbl) => TWhileStmt(rwExpr(c), b.map(rwStmt), lbl)
+      case TForStmt(init, c, upd, b, lbl) => TForStmt(rwStmt(init), rwExpr(c), rwStmt(upd), b.map(rwStmt), lbl)
+      case TDoWhileStmt(c, b, lbl) => TDoWhileStmt(rwExpr(c), b.map(rwStmt), lbl)
+      case TLoopStmt(b, lbl) => TLoopStmt(b.map(rwStmt), lbl)
+      case TDeferStmt(inner) => TDeferStmt(rwStmt(inner))
+      case TContractCheck(k, e, m) => TContractCheck(k, rwExpr(e), m)
+      case TMultiStmt(xs) => TMultiStmt(xs.map(rwStmt))
+      case TExprStmt(e) => TExprStmt(rwExpr(e))
+      case other => other
+    tBody match
+      case TExprBody(e) => TExprBody(rwExpr(e))
+      case TBlockBody(ss) => TBlockBody(ss.map(rwStmt))
 
   /** Lower a function's `variant <expr>` clause: snapshot the variant at entry, then wrap
    *  every direct recursive call (TCall to `selfMangledName`) with a runtime check that
