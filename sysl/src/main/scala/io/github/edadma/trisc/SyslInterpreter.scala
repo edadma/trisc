@@ -1199,7 +1199,16 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           case _: PtrType =>
             v match
               case PtrVal(_) | ArrVal(_, _) => v  // already a pointer
-              case RefVal(cells, _, _) => PtrVal(ArrayPtr(cells, 0))  // ref to pointer
+              // ref-struct → *Struct: wrap the ref's flat field cells in an
+              // ArrVal so the resulting pointer's field-access/deref paths see
+              // the same struct shape a TAddrOf(localStruct) produces. The
+              // wrapper cell shares the `cells` array, so writes through `*p`
+              // propagate back through the original ref.
+              case RefVal(cells, _, _) => PtrVal(CellPtr(new Cell(ArrVal(cells, 0))))
+              // ref-enum → *Enum: same idea — wrap as a value-enum so the
+              // pointer's deref/match path matches the EnumVal shape.
+              case RefEnumVal(tag, fields, _) =>
+                PtrVal(CellPtr(new Cell(EnumVal(tag, fields))))
               case FuncVal(name) => IntVal(0) // func to pointer (address not meaningful in interpreter)
               case IntVal(0) => PtrVal(ArrayPtr(Array.empty[Cell], 0))  // null pointer
               case IntVal(n) => PtrVal(longToPointer(n))  // integer to pointer

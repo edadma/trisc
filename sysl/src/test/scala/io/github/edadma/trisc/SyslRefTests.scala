@@ -513,4 +513,61 @@ class SyslRefTests extends SyslTestHelpers {
         |    g.value
         |""".stripMargin) shouldBe 42
   }
+
+  // ===== ref → ptr downgrade (`&r` where r: &T yields *T) =====
+  // Unsafe escape hatch per CLAUDE.md three-mode Conversion Rules:
+  // no refcount change, no lifetime extension. Lets ARC-managed
+  // data interop with kernel-style code that takes `*T` params.
+
+  "&r yields *T pointing at the heap data — read-through" in {
+    eval(
+      """struct R2pBox
+        |    v: int
+        |
+        |main() -> int
+        |    val r: &R2pBox = new R2pBox(42)
+        |    val p: *R2pBox = &r
+        |    p.v
+        |""".stripMargin) shouldBe 42
+  }
+
+  "mutation through *p derived from &r is visible via the ref" in {
+    eval(
+      """struct R2pBox
+        |    v: int
+        |
+        |main() -> int
+        |    val r: &R2pBox = new R2pBox(1)
+        |    val p: *R2pBox = &r
+        |    p.v = 99
+        |    r.v
+        |""".stripMargin) shouldBe 99
+  }
+
+  "ref and ptr coexist seeing the same data; ref-side mutation is visible to ptr" in {
+    eval(
+      """struct R2pBox
+        |    v: int
+        |
+        |main() -> int
+        |    val r: &R2pBox = new R2pBox(10)
+        |    val p: *R2pBox = &r
+        |    r.v = 50
+        |    p.v
+        |""".stripMargin) shouldBe 50
+  }
+
+  "*T from &r passes to a *T-taking function param" in {
+    eval(
+      """struct R2pBox
+        |    v: int
+        |
+        |sum_via_ptr(p: *R2pBox) -> int
+        |    p.v
+        |
+        |main() -> int
+        |    val r: &R2pBox = new R2pBox(7)
+        |    sum_via_ptr(&r)
+        |""".stripMargin) shouldBe 7
+  }
 }

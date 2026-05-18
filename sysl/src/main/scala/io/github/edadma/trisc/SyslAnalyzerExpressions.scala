@@ -798,6 +798,15 @@ trait SyslAnalyzerExpressions:
               case Some(t) => return t
               case None    => () // fall through to built-in lvalue lowering
           tOperand match
+            // ref → ptr unwrap. `&r` on `r: &T` yields a raw `*T` pointing at
+            // the same heap allocation the ref holds. Per CLAUDE.md three-mode
+            // Conversion Rules, this is the explicit unsafe escape hatch: no
+            // refcount change, no lifetime extension — programmer owns the
+            // dangling-risk. Each backend's TCast path already does the right
+            // thing (interpreter RefVal→PtrVal, LLVM opaque ptr, SVM/TRISC
+            // no-op) because the ref's stored value IS the user-data pointer.
+            case TVarRef(_, SyslType.RefType(inner)) =>
+              return TCast(tOperand, SyslType.PtrType(inner))
             case TVarRef(n, t)             => return TAddrOf(n, PtrType(t))
             case TFieldAccess(obj, idx, t) => return TAddrOfField(obj, idx, PtrType(t))
             case TIndex(arr, ix, t)        => return TAddrOfIndex(arr, ix, PtrType(t))
