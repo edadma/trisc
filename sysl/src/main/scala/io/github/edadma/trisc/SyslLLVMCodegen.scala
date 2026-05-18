@@ -3728,6 +3728,21 @@ class SyslLLVMCodegen(target: String = "host"):
             emit(s"  $phi = phi %struct.string* [ $zeroStr, %$zeroLbl ], [ $nzStr, %$exitLbl ]")
             phi
 
+          case t if t.isIntegral && spec.verb == 'c' =>
+            // %c emits a 1-byte string with the value's low 8 bits — NOT a
+            // decimal stringification. The verb is in the analyzer's accepted
+            // set but every backend previously fell through to %d; this case
+            // is the missing implementation. Width and alignment flags are
+            // currently ignored (matches the existing pattern for unimplemented
+            // string padding paths — see f_format_strings.lsysl header).
+            val vt = llvmType(inner.typ)
+            val valI8 = newReg()
+            if vt == "i8" then emit(s"  $valI8 = bitcast i8 $v to i8")
+            else emit(s"  $valI8 = trunc $vt $v to i8")
+            val buf = emitStringBufferAlloc("1")
+            emit(s"  store i8 $valI8, i8* $buf")
+            emitMakeString(buf, "1")
+
           case t if t.isIntegral =>
             val verb = if spec.upperCase then spec.verb.toUpper else spec.verb
             verb match

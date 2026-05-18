@@ -1,0 +1,184 @@
+Format-string corner cases
+===========================
+
+`f_format_strings.lsysl` covers the happy path of each verb plus
+the four previously-fixed bug clusters. This file pins the
+*combinations* and edge values that f_format_strings doesn't
+explicitly hit:
+
+  - **Zero-pad with a negative value** — `printf` convention says
+    the field width includes the `-` sign. `f"-5"%08d"` is
+    `"-0000005"` (8 chars), not `"-00000005"` (9 chars).
+  - **Width without `0` flag** — default padding is space, not
+    zero. `%10d` of 7 is `"        7"`, not `"0000000007"`.
+  - **Left-align integers** — `%-Nd` pads on the right with
+    spaces, regardless of sign.
+  - **Combined `+`, `0`, width flags** — `%+08d` shows sign even
+    for non-negatives AND zero-pads to width.
+  - **Literal `%%` followed by another spec** — `%%` consumes
+    nothing and the spec that follows fires normally.
+  - **`%c` rendering** — ASCII bytes plus the boundary case of a
+    high-bit byte (0xC2 = first byte of U+0080 in UTF-8 encoding,
+    so the byte-level interpretation is unambiguous).
+
+Float verbs (`%f`, `%e`, `%g`, `%.Nf`) are NOT in sysl's spec —
+see `parseFmtSpec` in `SyslAnalyzerExpressions.scala`; the verb
+set is `d / x / X / o / b / s / c`. Pinning a float verb here
+would be testing a non-feature.
+
+    module sysl.tests.lang_features
+
+`%08d` width includes the sign
+-------------------------------
+
+### Negative single-digit `%08d`: `-5` → `"-0000005"` (8 chars total)
+
+    #test
+    test_fmtc_zero_pad_negative_single() -> unit
+        val n = -5
+        val out = f"$n%08d"
+        assert(out == "-0000005", s"expected '-0000005', got '$out'")
+
+### Negative multi-digit `%08d`: `-42` → `"-0000042"`
+
+    #test
+    test_fmtc_zero_pad_negative_multi() -> unit
+        val n = -42
+        val out = f"$n%08d"
+        assert(out == "-0000042", s"expected '-0000042', got '$out'")
+
+`%Nd` without `0` flag defaults to space padding
+-------------------------------------------------
+
+### `%10d` of 7 left-pads with spaces
+
+    #test
+    test_fmtc_space_pad_positive() -> unit
+        val n = 7
+        val out = f"[$n%10d]"
+        assert(out == "[         7]", s"expected 9 spaces + '7', got '$out'")
+
+### `%10d` of -5 left-pads with spaces
+
+    #test
+    test_fmtc_space_pad_negative() -> unit
+        val n = -5
+        val out = f"[$n%10d]"
+        assert(out == "[        -5]", s"expected 8 spaces + '-5', got '$out'")
+
+### `%10d` of zero left-pads with 9 spaces and a `'0'`
+
+    #test
+    test_fmtc_space_pad_zero() -> unit
+        val n = 0
+        val out = f"[$n%10d]"
+        assert(out == "[         0]", s"expected 9 spaces + '0', got '$out'")
+
+`%-Nd` left-aligns integers
+----------------------------
+
+### `%-10d` of 7 pads on the right
+
+    #test
+    test_fmtc_left_align_positive() -> unit
+        val n = 7
+        val out = f"[$n%-10d]"
+        assert(out == "[7         ]", s"expected '7' + 9 spaces, got '$out'")
+
+### `%-10d` of -5 pads on the right (sign stays attached to digit)
+
+    #test
+    test_fmtc_left_align_negative() -> unit
+        val n = -5
+        val out = f"[$n%-10d]"
+        assert(out == "[-5        ]", s"expected '-5' + 8 spaces, got '$out'")
+
+### `%-Nd` with value width equal to N: no padding
+
+    #test
+    test_fmtc_left_align_exact() -> unit
+        val n = 12345
+        val out = f"[$n%-5d]"
+        assert(out == "[12345]", s"expected '12345', got '$out'")
+
+`%+08d` — combined `+` sign and zero-pad
+-----------------------------------------
+
+### `%+08d` of 7 zero-pads with `+` prefix
+
+    #test
+    test_fmtc_plus_zero_pad_positive() -> unit
+        val n = 7
+        val out = f"$n%+08d"
+        assert(out == "+0000007", s"expected '+0000007', got '$out'")
+
+### `%+08d` of -7 zero-pads with `-` prefix
+
+    #test
+    test_fmtc_plus_zero_pad_negative() -> unit
+        val n = -7
+        val out = f"$n%+08d"
+        assert(out == "-0000007", s"expected '-0000007', got '$out'")
+
+### `%+08d` of 0 shows `+0` and zero-pads
+
+    #test
+    test_fmtc_plus_zero_pad_zero() -> unit
+        val n = 0
+        val out = f"$n%+08d"
+        assert(out == "+0000000", s"expected '+0000000', got '$out'")
+
+`%%` adjacent to another spec
+------------------------------
+
+### Two consecutive literal `%%`: `f"%%%%"` is `"%%"`
+
+    #test
+    test_fmtc_two_literal_percent() -> unit
+        val out = f"%%%%"
+        assert(out == "%%", s"expected '%%', got '$out'")
+
+### `%%` followed by `%d`: `f"%%$n%d"` is `"%" + "$n"`
+
+    #test
+    test_fmtc_pct_then_d() -> unit
+        val n = 42
+        val out = f"%%$n%d"
+        assert(out == "%42", s"expected '%42', got '$out'")
+
+### `%d` then `%%` then `%d`: surrounding spec slots fire correctly
+
+    #test
+    test_fmtc_d_pct_d() -> unit
+        val a = 1
+        val b = 2
+        val out = f"$a%d%%$b%d"
+        assert(out == "1%2", s"expected '1%2', got '$out'")
+
+`%c` — character rendering
+---------------------------
+
+### `%c` with ASCII printable
+
+    #test
+    test_fmtc_c_ascii() -> unit
+        val ch = 65
+        val out = f"$ch%c"
+        assert(out == "A", s"expected 'A', got '$out'")
+
+### `%c` with control char (newline) — must produce a single 0x0A byte
+
+    #test
+    test_fmtc_c_newline() -> unit
+        val ch = 10
+        val out = f"$ch%c"
+        assert(len(out) == 1, s"expected len 1, got ${len(out)}")
+        assert(out == "\n", s"expected newline, got bytes len=${len(out)}")
+
+### `%c` with zero — emits a NUL byte (length 1, not empty string)
+
+    #test
+    test_fmtc_c_zero() -> unit
+        val ch = 0
+        val out = f"$ch%c"
+        assert(len(out) == 1, s"expected len 1, got ${len(out)}")

@@ -936,6 +936,18 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
 
       case TFmtStr(inner, spec) =>
         val v = evalAny(inner, env)
+        // %c is special: emit a 1-byte string containing the value's low 8
+        // bits, NOT a decimal representation. Width-flag interactions
+        // (`%-5c`, etc.) fall through to the post-format padding step
+        // identically to other verbs.
+        if spec.verb == 'c' then
+          val byte = (toLong(v) & 0xFF).toByte
+          val singleByte = Array(byte)
+          val padded: Array[Byte] = if spec.width > 1 then
+            val pad = Array.fill[Byte](spec.width - 1)(' '.toByte)
+            if spec.leftAlign then singleByte ++ pad else pad ++ singleByte
+          else singleByte
+          return StringVal(padded)
         val raw = v match
           case IntVal(n) =>
             val base = spec.verb match

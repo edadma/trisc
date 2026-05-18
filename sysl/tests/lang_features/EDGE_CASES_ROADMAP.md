@@ -58,15 +58,30 @@ on first sweep.
 
 ---
 
-## 3. Format string corners — 🔴 P1
+## 3. Format string corners — 🟢
 
 Four format-string bugs landed during the lang_features sweep
 (see [[feedback_sysl_fstring_divergences]] — all four fixed at
-`sysl@725f635a1` + `b2b0d168c`). Untested neighbours below.
+`sysl@725f635a1` + `b2b0d168c`). This file pinned the untested
+neighbours AND surfaced two new cross-backend bugs along the way:
+
+1. **`%c` was silently producing decimal on every backend.** The
+   analyzer accepts the verb but each codegen's TFmtStr handler
+   fell through to `%d`. Fixed in all 4 codegens: interpreter,
+   SVM (stack-only sequence — no locals because countLocals
+   doesn't see TFmtStr-scoped temps), LLVM (1-byte buffer alloc +
+   struct.string wrap), TRISC (malloc(9) for refcount header + 1
+   data byte, then 16-byte descriptor on stack).
+2. **SVM `%-Nd` (left-align integer) crashed at runtime** with
+   "address not found" — the runtime helper `__svm_str_fmt_i64`
+   wrote `pad_count` spaces past the end of the 64-byte digit
+   buffer. Fixed by rewriting the leftAlign branch: build the
+   result at the START of the buffer (sign, forward-copied
+   digits, then spaces) instead of appending past the tail.
 
 | File | Corners pinned |
 |---|---|
-| `strings/fmt_corners.lsysl` 🔴 | `%08d` with negative (width-includes-sign?); `%.3f` with NaN / +Inf / -Inf; `%s` with empty string; literal `%%` adjacent to another `%d`; `%c` with `0x80..0xFF` (high-bit byte — what's the rendering contract?); width larger than printed value (`%10d` with `7` — pad with spaces, not zeros); `%+d` on `0` (`+0`?); `%+d` on negative (sign-prefix interaction) |
+| `strings/fmt_corners.lsysl` 🟢 | `%08d` with negative (width includes the sign — `-5` → `"-0000005"`); `%Nd` without `0` flag defaults to space padding; `%-Nd` left-aligns integer with spaces on the right; `%+08d` combined sign+zero-pad+width (positive, negative, zero); literal `%%` followed by `%d` and other specs; `%c` for ASCII / control / NUL bytes (each yields a 1-byte string, NOT a decimal representation). 17 tests, all 7 backends green after the two bugs above were fixed. Float verbs (`%f`, `%e`, `.Nf`) are NOT in sysl's spec — verb set is `d/x/X/o/b/s/c`. |
 
 ---
 

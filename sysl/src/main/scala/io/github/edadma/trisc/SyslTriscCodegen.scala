@@ -5275,6 +5275,41 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
               needsStrFmtStr = true
               needsAllocExtern = true
 
+          case 'c' if inner.typ.isIntegral =>
+            // %c emits a 1-byte string with the value's low 8 bits. Same
+            // shape as TStringFromPtr but with a single byte instead of a
+            // copy loop. Width/alignment flags are intentionally not honored
+            // on this path (no canonical use case for padded %c; the existing
+            // string-padded path handles %-Ns).
+            needsAllocExtern = true
+            genExpr(inner)                       // r1 = value (low byte is the char)
+            emit("  pshd r1")                    // save value
+            stackOffset -= 8
+            // malloc(9) — 8-byte refcount header + 1 byte data
+            emit("  ldi r1, 9")
+            emit("  movi r4, malloc")
+            emit("  jalr r6, r4")
+            val allocOkC = newLabel("alloc_ok")
+            emit(s"  bne r1, r0, $allocOkC")
+            emit("  ldi r1, 2")
+            emit("  trap 1")
+            emit(s"$allocOkC")
+            // r1 = base (header). Set refcount = 1, then store byte at base+8.
+            emit("  ldi r2, 1")
+            emit("  std r2, r1, r0")             // refcount
+            emit("  popd r3")                    // r3 = value
+            stackOffset += 8
+            emit("  addi r2, r1, 8")             // r2 = data ptr
+            emit("  stb r3, r2, r0")             // *data = low byte of value
+            // Build 16-byte descriptor on stack: {ptr=data, len=1}
+            emitAddImm(7, 7, -16)
+            stackOffset -= 16
+            emit("  std r2, r7, r0")             // descr.ptr = data
+            emitAddImm(3, 7, 8)
+            emit("  ldi r4, 1")
+            emit("  std r4, r3, r0")             // descr.len = 1
+            emit("  mov r1, r7")                 // r1 = descr addr
+
           case _ =>
             // Any other shape (bool with %d, etc.) — fall back to plain TStr
             // semantics. This is a lossy fallback: width/pad flags get dropped.
