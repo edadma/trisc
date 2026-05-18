@@ -2,26 +2,13 @@ Dynamic-array bounds checking
 =============================
 
 `new [n]int` yields a `&[]int` of length `n`. Out-of-bounds
-indexing should be a runtime trap: the program halts via the
-contract-check / panic path.
+indexing is a runtime trap: the program halts via the panic /
+abort path. Every backend that materialises a slice descriptor
+honours this. The raw `*T` pointer mode is explicitly *not*
+bounds-checked — it's the unsafe escape hatch for kernel code.
 
-Today only the interpreter enforces bounds checks. Five
-backends (llvm-host, svm-host, riscv64, riscv32, wasm32)
-let OOB reads/writes silently succeed, reading garbage memory
-or writing into adjacent allocations. TRISC is the closest
-to correct — it traps some but not all of the cases (e.g.
-the OOB-store case slips through). This is a real cross-
-backend feature gap and one of the biggest remaining
-soundness holes.
-
-We pin the in-bounds happy-path here; the trapping cases
-get a TODO until every backend traps uniformly. The expected
-tests, once bounds checking is universal:
-
-  - `a[len]` traps    — index equal to length
-  - `a[100]` traps    — index past length
-  - `a[-1]` traps     — negative index
-  - `a[5] = 7` traps  — OOB store on a 3-element array
+The dropped 🟡 placeholder is restored — bounds checks are now
+universal on every backend.
 
     module sysl.tests.lang_features
 
@@ -46,11 +33,40 @@ In-bounds writes followed by reads
         assert(a[0] == 1 && a[1] == 22 && a[2] == 333,
             s"a = [${a[0]},${a[1]},${a[2]}], expected [1,22,333]")
 
-    // TODO: re-enable once uniform bounds-check trapping lands on every
-    // backend (currently only the interpreter and TRISC partially honour
-    // the OOB-traps contract):
-    //
-    //     #test(should_panic) test_index_equal_to_len()  -- a[3] on [3]int
-    //     #test(should_panic) test_index_past_len()      -- a[100]
-    //     #test(should_panic) test_negative_index()      -- a[-1]
-    //     #test(should_panic) test_oob_store()           -- a[5] = 7
+Index equal to length traps
+----------------------------
+
+The length-3 array has valid indices 0, 1, 2. Reading `a[3]` is
+out of bounds and must trap.
+
+    #test(should_panic)
+    test_index_equal_to_len() -> unit
+        val a: &[]int = new [3]int
+        val _x = a[3]
+
+Index well past the end traps
+-----------------------------
+
+    #test(should_panic)
+    test_index_past_len() -> unit
+        val a: &[]int = new [3]int
+        val _x = a[100]
+
+Negative index traps
+--------------------
+
+Sysl int is signed; a negative index sexts to a huge unsigned
+value and falls outside `[0, len)`.
+
+    #test(should_panic)
+    test_negative_index() -> unit
+        val a: &[]int = new [5]int
+        val _x = a[-1]
+
+Out-of-bounds store traps
+-------------------------
+
+    #test(should_panic)
+    test_oob_store() -> unit
+        val a: &[]int = new [3]int
+        a[5] = 7

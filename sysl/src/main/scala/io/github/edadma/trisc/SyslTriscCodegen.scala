@@ -704,6 +704,23 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
       case other =>
         throw new RuntimeException(s"emitStore: unexpected type $other")
 
+  // Bounds-check helper: traps if `r$idxReg` is outside `[0, r$lenReg)`.
+  // Mirrors the inline pattern already used by the TIndex read path on
+  // Slice / RefType(Slice) / String — extracted so TIndexAssignStmt can
+  // share it. Uses r4 as scratch; `idxReg` and `lenReg` must be distinct
+  // from r4 and from r0. Trap code 1 = out-of-bounds (matches the read path).
+  private def emitBoundsCheckRegs(idxReg: Int, lenReg: Int): Unit =
+    val boundsErr = newLabel("bounds_err")
+    val boundsOk  = newLabel("bounds_ok")
+    emit(s"  slt r4, r$idxReg, r0")            // r4 = (idx < 0)
+    emit(s"  bne r4, r0, $boundsErr")
+    emit(s"  slt r4, r$idxReg, r$lenReg")      // r4 = (idx < len)
+    emit(s"  bne r4, r0, $boundsOk")
+    emit(s"$boundsErr")
+    emit("  ldi r1, 1")                         // error code: 1 = out-of-bounds
+    emit("  trap 1")
+    emit(s"$boundsOk")
+
   // Recursively emit a discriminator check for a NESTED match pattern.
   // The outer scrutinee value's address is loaded from
   // `(fp + scrutineeOffset)` (where scrutineeOffset is fp-relative).
@@ -3019,10 +3036,27 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           emit("  pshd r1")       // save as 64-bit temp
           genExpr(index)           // r1 = index
           emit("  pshd r1")
-          genExpr(array)           // r1 = array/slice address
-          if isSlice then
-            emit("  ldd r1, r1, r0") // r1 = data pointer (from slice struct)
-          emit("  popd r2")        // r2 = index
+          genExpr(array)           // r1 = array/slice address (or data ptr for RefType)
+          emit("  popd r2")        // r2 = index, dstack: [value]
+          // Bounds check — same shape as TIndex (read path), but covers the
+          // store side which used to slip through, see the OOB-store dropped
+          // test in lang_features/slices/dynamic_array_bounds. PtrType skips
+          // by design (unsafe escape hatch).
+          array.typ match
+            case SyslType.SliceType(_) =>
+              emit("  addi r3, r1, 8")
+              emit("  ldw r3, r3, r0")               // r3 = len (32-bit field)
+              emitBoundsCheckRegs(2, 3)
+              emit("  ldd r1, r1, r0")               // r1 = data ptr
+            case SyslType.RefType(SyslType.SliceType(_)) =>
+              emitAddImm(3, 1, -8)
+              emit("  ldd r3, r3, r0")               // r3 = len (64-bit)
+              emitBoundsCheckRegs(2, 3)
+            case SyslType.ArrayType(_, size) =>
+              emitLoadImm(3, size)                    // r3 = compile-time size
+              emitBoundsCheckRegs(2, 3)
+            case _ =>
+              // PtrType — no bounds check
           emitLoadImm(3, elemSize)
           emit("  mul r2, r2, r3") // r2 = index * elemSize
           emit("  add r1, r1, r2") // r1 = base + offset
@@ -3033,11 +3067,24 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
           genExpr(index)
           emit("  pshd r1")        // save index temporarily
           stackOffset -= 8
-          genExpr(array)           // r1 = array/slice address
-          if isSlice then
-            emit("  ldd r1, r1, r0") // r1 = data pointer
+          genExpr(array)           // r1 = array/slice address (or data ptr for RefType)
           emit("  popd r2")        // r2 = index
           stackOffset += 8
+          // Bounds check, same shape as the non-RC path. Skip for PtrType.
+          array.typ match
+            case SyslType.SliceType(_) =>
+              emit("  addi r3, r1, 8")
+              emit("  ldw r3, r3, r0")
+              emitBoundsCheckRegs(2, 3)
+              emit("  ldd r1, r1, r0") // r1 = data ptr
+            case SyslType.RefType(SyslType.SliceType(_)) =>
+              emitAddImm(3, 1, -8)
+              emit("  ldd r3, r3, r0")
+              emitBoundsCheckRegs(2, 3)
+            case SyslType.ArrayType(_, size) =>
+              emitLoadImm(3, size)
+              emitBoundsCheckRegs(2, 3)
+            case _ =>
           emitLoadImm(3, elemSize)
           emit("  mul r2, r2, r3") // r2 = index * elemSize
           emit("  add r1, r1, r2") // r1 = element address

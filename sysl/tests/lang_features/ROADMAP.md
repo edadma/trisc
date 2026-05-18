@@ -107,7 +107,7 @@ TRISC's `for x in slice` codegen broken).
 | `array_of_struct.lsysl` 🟢 | array of value structs — element read/write, whole-element assignment (4 tests) |
 | `array_decay.lsysl` 🟢 | `[3]int` passed to `*int` parameter (array-decay); `&arr[0]` explicit form (3 tests) |
 | `dynamic_array_new.lsysl` 🟢 | `new [n]int` allocates, zero-init, runtime n; many-alloc smoke (4 tests) |
-| `dynamic_array_bounds.lsysl` 🟡 | in-bounds happy path (2 tests). TODO: re-enable OOB-trap tests once uniform bounds checking lands — currently only the interpreter (and partially TRISC) trap on OOB index/store; the other 5 silently succeed. **Real cross-backend soundness gap.** |
+| `dynamic_array_bounds.lsysl` 🟢 | OOB read/write trap uniformly on every backend (6 tests: in-bounds read, in-bounds write, idx==len trap, idx past len trap, negative idx trap, OOB store trap). LLVM-host / SVM gaps closed by codegen-side bounds-check emission; TRISC store-side gap fixed by extending TIndexAssignStmt to match TIndex. Raw `*T` pointer mode stays unchecked by design (unsafe escape hatch). |
 | `slice_from_array.lsysl` 🟢 | `arr[i:j]` shares backing; mutations visible through either side; empty slice (5 tests) |
 | `slice_full_subslice.lsysl` 🟢 | `s[:]`, `s[i:]`, `s[:j]` omitted-bound forms (4 tests) |
 | `slice_descriptor_passing.lsysl` 🟢 | slice param shares backing with caller; `len()` works inside callee; sub-slice through param (4 tests) |

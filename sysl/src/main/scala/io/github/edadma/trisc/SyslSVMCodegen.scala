@@ -1430,11 +1430,38 @@ class SyslSVMCodegen:
         case _ => SyslType.I64
       genExpr(value)
       genExpr(array)
+      // Bounds check, mirroring TIndex. Stack invariant after this block is
+      // [value, base_or_data_ptr, idx] for non-pointer types and the original
+      // [value, base, idx] for raw PtrType. See TIndex for the layout notes
+      // (also: stack-only, no locals — countLocals doesn't see temps).
       array.typ match
+        case SyslType.ArrayType(_, size) =>
+          genExpr(index)                                  // [value, base, idx]
+          emit("  dup")                                   // [value, base, idx, idx]
+          emitPushInt(size)
+          emit("  ltu")                                   // [value, base, idx, ok]
+          val pass = newLabel("oob_pass")
+          emit(s"  jumpnz $pass")
+          emit("  halt")
+          emit(s"$pass:")
         case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
-          emit("  load64") // deref slice struct → data ptr
+          emit("  dup")                                   // [value, base, base]
+          emit("  load64")                                // [value, base, data_ptr]
+          emit("  swap")                                  // [value, data_ptr, base]
+          emitPushInt(8)
+          emit("  add")
+          emit("  load32")                                // [value, data_ptr, len]
+          genExpr(index)                                  // [value, data_ptr, len, idx]
+          emit("  dup")                                   // [value, data_ptr, len, idx, idx]
+          emit("  rot")                                   // [value, data_ptr, idx, idx, len]
+          emit("  ltu")                                   // [value, data_ptr, idx, ok]
+          val pass = newLabel("oob_pass")
+          emit(s"  jumpnz $pass")
+          emit("  halt")
+          emit(s"$pass:")                                 // [value, data_ptr, idx]
         case _ =>
-      genExpr(index)
+          // PtrType (raw, unsafe — no check) and any other fallthrough.
+          genExpr(index)
       emitPushInt(elemType.sizeOf)
       emit("  mul")
       emit("  add")
@@ -1759,11 +1786,49 @@ class SyslSVMCodegen:
         case SyslType.RefType(SyslType.SliceType(e)) => e
         case SyslType.StringType => SyslType.UIntType(8)
         case _ => typ
+      // Bounds check before deref. PtrType is the unsafe escape hatch and
+      // skips the check by design; arrays use the compile-time size; slice /
+      // ref-slice / string read the runtime length from the descriptor at
+      // offset 8 (field is i32 — load32 zero-extends).
+      // The check halts on failure (unsigned compare catches negatives too).
+      // After the check the stack still holds [base, idx] before the load.
+      // Bounds check before the load. PtrType is the unsafe escape hatch and
+      // skips the check by design. The check halts on failure (unsigned compare
+      // catches negatives too). Stack manipulation only — locals can't be used
+      // here because countLocals' pre-pass doesn't see expression-scoped temps,
+      // and an unaccounted local_set would land past the declared frame size.
       array.typ match
+        case SyslType.ArrayType(_, size) =>
+          genExpr(index)                                  // [base, idx]
+          emit("  dup")                                   // [base, idx, idx]
+          emitPushInt(size)
+          emit("  ltu")                                   // [base, idx, ok]
+          val pass = newLabel("oob_pass")
+          emit(s"  jumpnz $pass")
+          emit("  halt")
+          emit(s"$pass:")                                 // [base, idx]
+        case SyslType.PtrType(_) =>
+          genExpr(index)
         case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) | SyslType.StringType =>
-          emit("  load64") // deref struct → data ptr (strings and slices both start with ptr at offset 0)
+          // Slice descriptor: ptr@0 (i64), len@8 (i32 for slices, i64 for
+          // strings — the two SVM layouts diverge here; see emitStringFromSlice).
+          val isString = array.typ == SyslType.StringType
+          emit("  dup")                                   // [base, base]
+          emit("  load64")                                // [base, data_ptr]
+          emit("  swap")                                  // [data_ptr, base]
+          emitPushInt(8)
+          emit("  add")
+          emit(if isString then "  load64" else "  load32") // [data_ptr, len]
+          genExpr(index)                                  // [data_ptr, len, idx]
+          emit("  dup")                                   // [data_ptr, len, idx, idx]
+          emit("  rot")                                   // [data_ptr, idx, idx, len]
+          emit("  ltu")                                   // [data_ptr, idx, ok]
+          val pass = newLabel("oob_pass")
+          emit(s"  jumpnz $pass")
+          emit("  halt")
+          emit(s"$pass:")                                 // [data_ptr, idx]
         case _ =>
-      genExpr(index)
+          genExpr(index)
       emitPushInt(elemType.sizeOf)
       emit("  mul")
       emit("  add")
