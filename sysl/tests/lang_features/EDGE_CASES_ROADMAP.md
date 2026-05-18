@@ -85,19 +85,22 @@ neighbours AND surfaced two new cross-backend bugs along the way:
 
 ---
 
-## 4. Defer interactions — 🔴 P1
+## 4. Defer interactions — 🟢
 
 Two defer bugs caught recently: field-self-concat across LLVM
 backends (`sysl@c8981cf49`) and defer-on-ARC-return
-(`sysl@103a54dba`). Untested:
+(`sysl@103a54dba`). After-the-fact corner check finds **zero
+new bugs** — the per-defer-site counter scheme handles every
+remaining corner uniformly. Three new files + two existing
+ones cover the surface:
 
 | File | Corners pinned |
 |---|---|
-| `defer/defer_multiple_lifo.lsysl` 🔴 | Multiple `defer` in the same block run LIFO (`defer a; defer b; defer c;` → `c, b, a`); a captured side-effect at defer-decl time is read at defer-fire time |
-| `defer/defer_in_loop.lsysl` 🔴 | `defer` inside a `for` body — does it fire per-iter or once at fn exit? Document and pin the answer |
-| `defer/defer_with_try.lsysl` 🔴 | `defer` + early return via `?` operator (and via plain `return`); `defer` fires on BOTH success and error exit paths |
-| `defer/defer_returns.lsysl` 🔴 | `defer` whose body itself contains a `return` (or panics); does it preempt the surrounding return value? |
-| `defer/defer_in_match.lsysl` 🔴 | `defer` in a match arm — scope-bound or fn-bound? |
+| `defer/defer_lifo.lsysl` 🟢 (existing) | Multiple `defer` in the same block run LIFO (`defer a; defer b; defer c;` → `c, b, a`) |
+| `defer/defer_in_loop.lsysl` 🟢 (existing) | Per-iter queuing in `for` and `while`; zero-iter case queues nothing; two sites in one body each get their own counter |
+| `defer/defer_with_try.lsysl` 🟢 (new, 9 tests) | `?` operator on `Result` + `Option`: defer queued *before* `?` fires on both Ok-success and Err-early-return paths; defer queued *after* a `?` that short-circuited does NOT fire; three-step chain with each `?` site triggering. |
+| `defer/defer_returns.lsysl` 🟢 (new, 7 tests) | Defer body calls a helper that returns — value silently discarded; stacked helpers fire LIFO and discard each return; helper returning `string` (16-byte descriptor) also discarded; `defer panic(msg)` unwinds; `defer assert(false, msg)` unwinds; second-queued defer panic fires first (LIFO before earlier defer); return value captured *at* `return`, defer mutation of same local doesn't reach caller; defer's mutation of caller-shared state via `*Trace` IS observable. The parser does NOT accept `return` as a defer body — that's a compile-time syntactic constraint not exercised here. |
+| `defer/defer_in_match.lsysl` 🟢 (new, 11 tests) | Defer inside an indented match arm queues dynamically (only if the arm is taken); defers in both arms compose with one firing per arm; arm-level + fn-level defers compose LIFO at fn exit; multiple stacked defers within one arm fire LIFO; arm body without explicit `return` still queues defer correctly; per-defer-site counter scheme handles match-arm defers inside a `for` loop (per-iter queuing). |
 
 ---
 

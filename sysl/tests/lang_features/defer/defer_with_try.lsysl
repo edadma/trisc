@@ -1,0 +1,171 @@
+Defer fires on `?`-operator early-return paths
+==============================================
+
+The postfix `?` operator (on `Option` or `Result`) compiles to
+an early return when the scrutinee is `None` / `Err(_)`. Any
+`defer stmt` queued *before* the `?` site must fire on that
+early-return path, exactly like an explicit `return`. Any
+`defer` queued *after* a `?` that short-circuited must NOT
+fire — defer queuing is dynamic, and the `?` exited before
+control reached the later `defer` statement.
+
+The relevant prior defer bugs ([feedback_sysl_codegen_defer_
+in_skipped_branch] and [feedback_sysl_trisc_defer_nonunit_
+return]) both share the same shape: the `?` operator desugars
+to an `if-is-err-then-return` block, and a backend that
+emitted defer-fire only at the textual `return` keyword would
+silently skip defers on the `?`-induced return path.
+
+    module sysl.tests.lang_features
+
+    enum DwtResult[T, E]
+        Ok(value: T)
+        Err(error: E)
+
+    enum DwtOption[T]
+        Some(value: T)
+        None
+
+    struct DwtTrace
+        s: string
+
+Defer queued before `?` on `Result` — fires on Err path
+-------------------------------------------------------
+
+The defer is queued *before* the `?` site. When the input is
+`Err`, the `?` short-circuits and returns the error from the
+function. The defer must still fire on that path.
+
+    dwt_pre_try_result(t: *DwtTrace, r: DwtResult[int, string]) -> DwtResult[int, string]
+        defer t.s = t.s + "D"
+        val x = r?
+        return Ok(x * 2)
+
+    #test
+    test_defer_fires_on_try_err_early_return() -> unit
+        var t = DwtTrace("")
+        val r = dwt_pre_try_result(&t, Err("bad"))
+        val msg = r match
+            Ok(_)  -> "ok"
+            Err(e) -> e
+        assert(msg == "bad", s"expected 'bad', got '$msg'")
+        assert(t.s == "D", s"expected 'D' after ?-induced early return, got '${t.s}'")
+
+    #test
+    test_defer_fires_on_try_ok_fall_through() -> unit
+        var t = DwtTrace("")
+        val r = dwt_pre_try_result(&t, Ok(21))
+        val v = r match
+            Ok(n)  -> n
+            Err(_) -> -1
+        assert(v == 42, s"expected 42, got $v")
+        assert(t.s == "D", s"expected 'D' after fall-through return, got '${t.s}'")
+
+Defer queued AFTER a `?` that short-circuited — does NOT fire
+-------------------------------------------------------------
+
+If `?` early-returns before control reaches a later `defer`,
+the later defer is never queued and must not fire on that
+path. On the success path the later defer IS queued and fires.
+
+    dwt_post_try(t: *DwtTrace, r: DwtResult[int, string]) -> DwtResult[int, string]
+        defer t.s = t.s + "A"
+        val x = r?
+        defer t.s = t.s + "B"
+        return Ok(x + 1)
+
+    #test
+    test_defer_after_try_skipped_on_err() -> unit
+        var t = DwtTrace("")
+        val r = dwt_post_try(&t, Err("nope"))
+        val msg = r match
+            Ok(_)  -> "ok"
+            Err(e) -> e
+        assert(msg == "nope", s"expected 'nope', got '$msg'")
+        assert(t.s == "A", s"defer-B should not fire when ?-Err short-circuits before it; expected 'A', got '${t.s}'")
+
+    #test
+    test_defer_after_try_fires_on_ok() -> unit
+        var t = DwtTrace("")
+        val r = dwt_post_try(&t, Ok(10))
+        val v = r match
+            Ok(n)  -> n
+            Err(_) -> -1
+        assert(v == 11, s"expected 11, got $v")
+        // LIFO: A queued first, B queued second; exit fires B then A.
+        assert(t.s == "BA", s"expected 'BA' (LIFO), got '${t.s}'")
+
+Multiple `?` in sequence — each is its own early-return site
+------------------------------------------------------------
+
+Three `?` peels in a row. The defer is queued before all of
+them. Whichever `?` short-circuits, the defer fires on that
+return path — the runtime can't tell the three sites apart.
+
+    dwt_three_tries(t: *DwtTrace, a: DwtResult[int, string], b: DwtResult[int, string], c: DwtResult[int, string]) -> DwtResult[int, string]
+        defer t.s = t.s + "X"
+        val x = a?
+        val y = b?
+        val z = c?
+        return Ok(x + y + z)
+
+    #test
+    test_defer_fires_when_first_try_fails() -> unit
+        var t = DwtTrace("")
+        val r = dwt_three_tries(&t, Err("first"), Ok(2), Ok(3))
+        val msg = r match
+            Ok(_)  -> "ok"
+            Err(e) -> e
+        assert(msg == "first", s"expected 'first', got '$msg'")
+        assert(t.s == "X", s"defer must fire on first ?-Err path; got '${t.s}'")
+
+    #test
+    test_defer_fires_when_middle_try_fails() -> unit
+        var t = DwtTrace("")
+        val r = dwt_three_tries(&t, Ok(1), Err("middle"), Ok(3))
+        val msg = r match
+            Ok(_)  -> "ok"
+            Err(e) -> e
+        assert(msg == "middle", s"expected 'middle', got '$msg'")
+        assert(t.s == "X", s"defer must fire on second ?-Err path; got '${t.s}'")
+
+    #test
+    test_defer_fires_when_last_try_fails() -> unit
+        var t = DwtTrace("")
+        val r = dwt_three_tries(&t, Ok(1), Ok(2), Err("last"))
+        val msg = r match
+            Ok(_)  -> "ok"
+            Err(e) -> e
+        assert(msg == "last", s"expected 'last', got '$msg'")
+        assert(t.s == "X", s"defer must fire on third ?-Err path; got '${t.s}'")
+
+`?` on `Option` — defer fires on None early-return
+--------------------------------------------------
+
+`Option`'s `?` early-returns `None` on the empty scrutinee;
+exactly the same defer obligation applies.
+
+    dwt_pre_try_option(t: *DwtTrace, o: DwtOption[int]) -> DwtOption[int]
+        defer t.s = t.s + "O"
+        val x = o?
+        return Some(x * 2)
+
+    #test
+    test_defer_fires_on_option_try_none() -> unit
+        var t = DwtTrace("")
+        val r = dwt_pre_try_option(&t, None)
+        val v = r match
+            None    -> -1
+            Some(n) -> n
+        assert(v == -1, s"expected None (-1 sentinel), got $v")
+        assert(t.s == "O", s"defer must fire on ?-None early return; got '${t.s}'")
+
+    #test
+    test_defer_fires_on_option_try_some() -> unit
+        var t = DwtTrace("")
+        val r = dwt_pre_try_option(&t, Some(7))
+        val v = r match
+            None    -> -1
+            Some(n) -> n
+        assert(v == 14, s"expected 14, got $v")
+        assert(t.s == "O", s"defer must fire on Some fall-through; got '${t.s}'")
