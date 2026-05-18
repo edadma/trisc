@@ -136,7 +136,20 @@ trait SyslAnalyzerCore:
               if invariants.nonEmpty then structInvariants(name) = invariants
           case DataEnumDeclAST(name, variants, typeParams, _, _, _) if typeParams.isEmpty =>
             val resolvedVariants = variants.map { case EnumVariantAST(vname, fields) =>
-              val resolvedFields = fields.map((fname, ftype) => (fname, resolveType(ftype)))
+              val resolvedFields = fields.map { (fname, ftype) =>
+                val resolved = resolveType(ftype)
+                // Auto-wrap directly-recursive variant fields as &Self. Without
+                // this the enum's layout is recursively-infinite and backends
+                // miscompile any walk past depth 1. Idempotent: an explicit
+                // `&Self` is already RefType and is left alone. Containers of
+                // Self (slice, raw pointer) and mutual recursion are out of
+                // scope — only the direct `field: Self` shape is rewritten.
+                val autoWrapped = resolved match
+                  case SyslType.EnumType(en, _) if en == name =>
+                    SyslType.RefType(resolved)
+                  case _ => resolved
+                (fname, autoWrapped)
+              }
               (vname, resolvedFields)
             }
             val et: SyslType.EnumType = SyslType.EnumType(name, resolvedVariants)

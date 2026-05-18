@@ -10,23 +10,23 @@ enum Tree
     Node(value: int, left: Tree, right: Tree)
 ```
 
-This file pins direct recursion (variant field is the enum
-type itself, NOT a slice or pointer wrapper — that's covered
-by `enum_data_slice_field.lsysl`).
+When a variant field's type is the enum being defined (direct
+recursion), the analyzer auto-wraps it as `&Self`. Without that
+wrap the enum's layout is recursively-infinite; with it, each
+descent step is a heap-allocated box pointed at by an 8-byte ref
+slot. The wrap is idempotent on an explicit `&Self` written by
+the user.
 
-**Wide multi-backend bug — multi-level recursive walk is
-broken** (6 of 7 backends fail when a recursive function
-walks into a Node-typed payload child; works only when the
-recursion's other arm is `Leaf -> base_case`). See
-`feedback_sysl_recursive_enum_walk.md`. Tests dropped:
+Construction-site bare variant literals are auto-promoted:
+`SedrNode(1, SedrLeaf, SedrLeaf)` synthesizes `new SedrLeaf()` at
+each leaf slot. A *variable* of value-enum type passed at a ref
+slot is NOT auto-boxed — that would silently double-allocate
+when shared ownership was intended; the user must write `new`
+explicitly (or bind the variable as `&SedrTree` to begin with).
 
-  - sum/depth functions called on trees ≥2 levels deep
-  - cons-list length / sum called on lists ≥2 long
-
-This file pins the surfaces that DO work on every backend:
-construction at arbitrary depth (analyzer accepts the
-shape), match distinguishing variants, payload binding,
-and depth-0 / single-level recursion.
+Recursive walks take a `&SedrTree` parameter so the match-binding
+on `left`/`right` (now ref-typed) flows naturally into the
+recursive call.
 
 File-local prefix `Sedr` (Sysl Enum Data Recursive).
 
@@ -46,19 +46,18 @@ Construction (analyzer + runtime accept the shape)
         var t: SedrTree = SedrLeaf
         assert(str(t) == "SedrLeaf", "leaf name")
 
-### A Node with two Leaf children
+### A Node with two Leaf children — bare-Leaf args are auto-promoted
 
     #test
     test_sedr_node_two_leaves() -> unit
         var t: SedrTree = SedrNode(42, SedrLeaf, SedrLeaf)
         assert(str(t) == "SedrNode", "node name")
 
-### A Node whose children are themselves Nodes — constructs OK
-(walking it recursively is the deferred case)
+### A Node whose children are themselves Nodes — `new` for the inner
 
     #test
     test_sedr_node_with_inner_nodes_constructs() -> unit
-        val inner: SedrTree = SedrNode(2, SedrLeaf, SedrLeaf)
+        val inner = new SedrNode(2, SedrLeaf, SedrLeaf)
         var outer: SedrTree = SedrNode(1, inner, SedrLeaf)
         assert(str(outer) == "SedrNode", "outer name")
 
@@ -76,7 +75,7 @@ Match distinguishes variants
             SedrNode(_, _, _) -> code = 2
         assert(code == 1, "leaf arm")
 
-### Match on a Node with two Leaves binds value
+### Match on a Node with two Leaves binds the int value field
 
     #test
     test_sedr_match_node_binds_value() -> unit
@@ -91,8 +90,8 @@ Match distinguishes variants
 
     #test
     test_sedr_match_node_with_inner_node_binds_top() -> unit
-        val left: SedrTree = SedrNode(10, SedrLeaf, SedrLeaf)
-        val right: SedrTree = SedrNode(20, SedrLeaf, SedrLeaf)
+        val left = new SedrNode(10, SedrLeaf, SedrLeaf)
+        val right = new SedrNode(20, SedrLeaf, SedrLeaf)
         var t: SedrTree = SedrNode(100, left, right)
         var top_val = 0
         t match
@@ -100,47 +99,111 @@ Match distinguishes variants
             SedrNode(val_, _, _) -> top_val = val_
         assert(top_val == 100, "top binds")
 
-Single-level recursion: Leaf base case
----------------------------------------
+Single-level recursion: `SedrTree` value param + Leaf base
+-----------------------------------------------------------
 
-The recursive function only descends if the variant is Node;
-on Leaf it terminates. We pin the depth-0 (single-Leaf) and
-single-Node-with-two-Leaf-children cases — both work because
-the recursive call only ever enters `Leaf -> 0`.
+A `SedrTree` value-typed parameter cannot recurse into its own
+`left`/`right` field (those are now `&SedrTree`, not assignable
+to the value param). The function is useful only on the Leaf
+case — but pinning it confirms the value form still type-checks
+and that auto-wrap doesn't accidentally rewrite the parameter
+type.
 
-    sedr_sum(t: SedrTree) -> int
+    sedr_sum_top(t: SedrTree) -> int
+        t match
+            SedrLeaf -> 0
+            SedrNode(v, _, _) -> v
+
+### Sum-top of a Leaf is 0
+
+    #test
+    test_sedr_sum_top_leaf() -> unit
+        var t: SedrTree = SedrLeaf
+        assert(sedr_sum_top(t) == 0, "leaf top = 0")
+
+### Sum-top of a single Node yields its int field
+
+    #test
+    test_sedr_sum_top_node() -> unit
+        var t: SedrTree = SedrNode(7, SedrLeaf, SedrLeaf)
+        assert(sedr_sum_top(t) == 7, "node top = v")
+
+Deep recursion: `&SedrTree` ref param + recursive descent
+----------------------------------------------------------
+
+The proper recursive walk takes `&SedrTree`. Match-binding on a
+variant field of ref type yields a `&SedrTree` local, which is
+assignable directly to the recursive call's ref parameter. No
+explicit clone, no manual deref — match-on-ref auto-dereferences
+the scrutinee to read the tag, but pattern bindings remain refs.
+
+    sedr_sum(t: &SedrTree) -> int
         t match
             SedrLeaf -> 0
             SedrNode(v, l, r) -> v + sedr_sum(l) + sedr_sum(r)
 
-### Sum of a single Leaf is 0 (no recursive call fires)
+### Sum of a single Leaf is 0
 
     #test
     test_sedr_sum_leaf() -> unit
-        var t: SedrTree = SedrLeaf
+        val t = new SedrLeaf()
         assert(sedr_sum(t) == 0, "leaf = 0")
 
-(`test_sedr_sum_one_node` would invoke `sedr_sum(Leaf)` from a
-Node arm, which fails on wasm with the wider recursive-walk bug.
-Dropped pending fix — see feedback_sysl_recursive_enum_walk.md.)
+### Sum of a single Node (two Leaf kids) is its int field
 
-Depth function — same shape
-----------------------------
+    #test
+    test_sedr_sum_one_node() -> unit
+        val t = new SedrNode(42, SedrLeaf, SedrLeaf)
+        assert(sedr_sum(t) == 42, "one node = 42")
 
-    sedr_depth(t: SedrTree) -> int
+### Sum of a three-node tree
+
+    #test
+    test_sedr_sum_three_nodes() -> unit
+        val l = new SedrNode(2, SedrLeaf, SedrLeaf)
+        val r = new SedrNode(3, SedrLeaf, SedrLeaf)
+        val t = new SedrNode(1, l, r)
+        assert(sedr_sum(t) == 6, s"1+2+3 = 6, got ${sedr_sum(t)}")
+
+### Sum of a deeper tree (four-level)
+
+    #test
+    test_sedr_sum_deeper_tree() -> unit
+        val deep = new SedrNode(4, new SedrNode(3, SedrLeaf, SedrLeaf), SedrLeaf)
+        val t = new SedrNode(1, new SedrNode(2, deep, SedrLeaf), SedrLeaf)
+        assert(sedr_sum(t) == 10, s"1+2+3+4 = 10, got ${sedr_sum(t)}")
+
+Depth function — recursive
+---------------------------
+
+    int_max(a: int, b: int) -> int
+        if a > b then a else b
+
+    sedr_depth(t: &SedrTree) -> int
         t match
             SedrLeaf -> 0
-            SedrNode(_, _, _) -> 1
-
-(Simplified to depth-1 only — the recursive `1 + max(...)`
-form fails on the wider bug.)
+            SedrNode(_, l, r) -> 1 + int_max(sedr_depth(l), sedr_depth(r))
 
 ### Leaf depth is 0
 
     #test
     test_sedr_depth_leaf() -> unit
-        var t: SedrTree = SedrLeaf
+        val t = new SedrLeaf()
         assert(sedr_depth(t) == 0, "leaf 0")
+
+### One-node tree has depth 1
+
+    #test
+    test_sedr_depth_one_node() -> unit
+        val t = new SedrNode(0, SedrLeaf, SedrLeaf)
+        assert(sedr_depth(t) == 1, "one node = 1")
+
+### Lopsided tree (left-heavy) has depth = left chain length
+
+    #test
+    test_sedr_depth_lopsided() -> unit
+        val t = new SedrNode(1, new SedrNode(2, new SedrNode(3, SedrLeaf, SedrLeaf), SedrLeaf), SedrLeaf)
+        assert(sedr_depth(t) == 3, s"left chain 3, got ${sedr_depth(t)}")
 
 A cons-list shape — terminating recursion via Nil base
 -------------------------------------------------------
@@ -178,3 +241,32 @@ A cons-list shape — terminating recursion via Nil base
             SedrNil -> h = -1
             SedrCons(head, _) -> h = head
         assert(h == 42, "head bound")
+
+Recursive list walks (length, sum) — `&SedrList` ref param
+-----------------------------------------------------------
+
+    sedr_list_len(xs: &SedrList) -> int
+        xs match
+            SedrNil -> 0
+            SedrCons(_, t) -> 1 + sedr_list_len(t)
+
+    sedr_list_sum(xs: &SedrList) -> int
+        xs match
+            SedrNil -> 0
+            SedrCons(h, t) -> h + sedr_list_sum(t)
+
+### Length of `[5]` is 1
+
+    #test
+    test_sedr_list_one() -> unit
+        val xs = new SedrCons(5, SedrNil)
+        assert(sedr_list_len(xs) == 1, "len 1")
+        assert(sedr_list_sum(xs) == 5, "sum 5")
+
+### Length of `[1, 2, 3]` is 3, sum is 6
+
+    #test
+    test_sedr_list_three() -> unit
+        val xs = new SedrCons(1, new SedrCons(2, new SedrCons(3, SedrNil)))
+        assert(sedr_list_len(xs) == 3, s"len 3, got ${sedr_list_len(xs)}")
+        assert(sedr_list_sum(xs) == 6, s"1+2+3=6, got ${sedr_list_sum(xs)}")

@@ -16,6 +16,20 @@ trait SyslAnalyzerExpressions:
    *  message names both operand types and suggests the two cast directions
    *  available — picking either side gives a working uniform-signedness expression.
    *  `kind` is `"mix"` for arithmetic / bitwise / shift, `"compare"` for relational. */
+  /** Auto-promote a value-typed variant constructor at a `&Self` variant-field
+   *  slot. The analyzer auto-wraps directly-recursive variant fields as
+   *  `RefType(EnumType)` (see [[SyslAnalyzerCore]] resolveStructsAndEnums); the
+   *  field then expects a heap-allocated ref. When the user wrote the bare
+   *  variant form (`SedrNode(1, SedrLeaf, SedrLeaf)` rather than `new SedrLeaf`),
+   *  the inner constructor analyzes as `TEnumConstruct` of value type; rewrite
+   *  it to the heap-allocating `TNewEnum` shape so the surrounding ref check
+   *  passes. Idempotent on already-ref args (`new SedrLeaf` is left alone). */
+   protected def autoPromoteVariantArgToRef(arg: TExpr, fieldType: SyslType): TExpr =
+     (arg, fieldType) match
+       case (TEnumConstruct(et, idx, innerArgs), SyslType.RefType(SyslType.EnumType(refName, _))) if et.name == refName =>
+         TNewEnum(et, idx, innerArgs)
+       case _ => arg
+
   protected def signednessMismatchMsg(op: String, left: SyslType, right: SyslType, kind: String): String =
     val verb = if kind == "compare" then "compare signed and unsigned" else s"mix signed and unsigned in $op"
     val (uType, sType) = (left, right) match
@@ -459,7 +473,7 @@ trait SyslAnalyzerExpressions:
             if tArgs.length != variantFields.length then
               throw AnalysisError(s"variant '${et.variants(idx)._1}' expects ${variantFields.length} field(s), got ${tArgs.length}")
             val checkedArgs = tArgs.zip(variantFields).map { case (arg, (fieldName, fieldType)) =>
-              val coerced = coerceLiteral(arg, fieldType)
+              val coerced = autoPromoteVariantArgToRef(coerceLiteral(arg, fieldType), fieldType)
               if !compatible(coerced.typ, fieldType) then
                 throw AnalysisError(s"field '$fieldName' expects $fieldType, got ${coerced.typ}")
               (fieldType, coerced.typ) match
@@ -1615,7 +1629,7 @@ trait SyslAnalyzerExpressions:
           if tArgs.length != variantFields.length then
             throw AnalysisError(s"variant '$name' has ${variantFields.length} field(s), got ${tArgs.length} argument(s)")
           val checkedArgs = tArgs.zip(variantFields).map { case (arg, (fieldName, fieldType)) =>
-            val coerced = coerceLiteral(arg, fieldType)
+            val coerced = autoPromoteVariantArgToRef(coerceLiteral(arg, fieldType), fieldType)
             if !compatible(coerced.typ, fieldType) then
               throw AnalysisError(s"variant '$name' field '$fieldName' expects $fieldType, got ${coerced.typ}")
             (fieldType, coerced.typ) match
@@ -1649,7 +1663,7 @@ trait SyslAnalyzerExpressions:
           val et = instantiateGenericEnum(enumName, inferredArgs)
           val (_, variantFields) = et.variants(variantIdx)
           val checkedArgs = tArgs.zip(variantFields).map { case (arg, (fieldName, fieldType)) =>
-            val coerced = coerceLiteral(arg, fieldType)
+            val coerced = autoPromoteVariantArgToRef(coerceLiteral(arg, fieldType), fieldType)
             if !compatible(coerced.typ, fieldType) then
               throw AnalysisError(s"variant '$name' field '$fieldName' expects $fieldType, got ${coerced.typ}")
             (fieldType, coerced.typ) match
