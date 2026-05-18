@@ -5031,6 +5031,15 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
         emit("  pshd r1")
         genExpr(array)           // r1 = array base address
         emit("  popd r2")        // r2 = index
+        // Bounds check by array.typ: fixed-array uses compile-time size,
+        // raw pointer is unchecked by design (unsafe escape hatch). String /
+        // slice / ref-slice variants are handled by the earlier when-guarded
+        // TIndex cases and don't reach here.
+        array.typ match
+          case SyslType.ArrayType(_, size) =>
+            emitLoadImm(3, size)
+            emitBoundsCheckRegs(2, 3)
+          case _ =>
         emitLoadImm(3, elemSize)
         emit("  mul r2, r2, r3") // r2 = index * elemSize
         emit("  add r1, r1, r2") // r1 = element address
