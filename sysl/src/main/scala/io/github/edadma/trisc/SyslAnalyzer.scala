@@ -1719,11 +1719,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
           if !functions.contains(name) && !genericTemplates.contains(name) then
             scala.util.Try {
               val paramTypes = params.map(p => (p.name, resolveType(p.typ)))
+              val paramModes = params.map(_.mode)
               val retType = returnType.map(resolveType).getOrElse(UnitType)
               val mangled = if shouldMangle(name) then mangleName(name) else name
               val isPure = attrs.exists(_.name == "pure")
               functions(name) = FunInfo(
                 mangled, paramTypes, retType, isDef, isPure,
+                modes = paramModes,
                 isParameterless = isParameterless,
               )
               externalSymbols += name
