@@ -137,14 +137,37 @@ Now testable as compile-fail tests via the new
 
 ---
 
-## 7. Pointer pathologies — 🔴 P2
+## 7. Pointer pathologies — 🟢
+
+The four sub-rows split:
+
+  - **Round-trips** — new file pins both `*&v` and `&*p`
+    identities, scalar + struct field + ref field; mutation
+    through `&*p` reaches the original; round-trip across
+    a function param preserves identity.
+  - **Comparison** — already pinned by the existing
+    `ptr_compare.lsysl` (same-target equal, different-target
+    unequal, retarget changes equality). No new file needed.
+  - **Null deref** — intentionally NOT pinned cross-backend.
+    Behaviour is non-uniform by design: host-mapped backends
+    (interpreter, llvm-host, riscv64/32, wasm32) trap on
+    read/write of address 0; raw-memory emulators (SVM,
+    TRISC) treat address 0 as a normal byte of the flat
+    address space and silently succeed. Pinning would
+    require an MMU in SVM/TRISC, not a sysl-language fix.
+    `ptr_null.lsysl` already pins null construction +
+    comparison; that's the testable surface.
+  - **Pointer to zero-length fixed array** — too esoteric to
+    pay rent. `[0]T` is degenerate; the meaningful
+    pointer-to-element coverage lives in `ptr_arithmetic.
+    lsysl` (`&a[0]` for non-empty arrays).
 
 | File | Corners pinned |
 |---|---|
-| `pointers/null_deref.lsysl` 🔴 | Null pointer deref must trap; cast `0` to `*T` then `*p` |
-| `pointers/ptr_roundtrip.lsysl` 🔴 | `*&v` and `&*p` round-trips preserve value and address |
-| `pointers/ptr_comparison.lsysl` 🔴 | Pointer compared with `0` (null); two pointers to same/different objects |
-| `pointers/ptr_to_zero_array.lsysl` 🔴 | Pointer to first element of `[0]int` fixed array |
+| `pointers/ptr_compare.lsysl` 🟢 (existing) | Same/different target equality; retarget |
+| `pointers/ptr_roundtrip.lsysl` 🟢 (new, 7 tests) | `*&v` on scalar / struct field; `&*p == p`; mutation through `&*p`; double round-trip `*&*&v`; `*&` through a `&T` ref's field; round-trip across a fn param. Zero new bugs. |
+| `pointers/ptr_null.lsysl` 🟢 (existing) | Null construction (`*int(0)`); null/null equality; null/non-null inequality; default-init `*T` is null. (Null *deref* is intentionally backend-divergent and not pinned — see above.) |
+| `pointers/ptr_arithmetic.lsysl` 🟢 (existing) | `&a[0]`, `p+n`, walking an array via pointer. (Subsumes the original "pointer to zero-length array" row, which is degenerate.) |
 
 ---
 
