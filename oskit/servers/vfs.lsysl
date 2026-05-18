@@ -1379,6 +1379,24 @@ Returns the inode or -1 on error.
             return -1
         vfs_msg_read_i32(reply, 1)
 
+Like `vfs_resolve_path` but sends `TFS_CMD_OPEN_NOFOLLOW` so a
+terminal `S_IFLNK` returns the symlink's own inode instead of being
+dereferenced. Required by `vfs_path_readlink` — `readlink(2)` reads
+the link itself, not its target.
+
+    vfs_resolve_path_nofollow(backend: int, path: *byte, path_len: int) -> int
+        var open_msg: [128]byte
+        open_msg[0] = 16  // TFS_CMD_OPEN_NOFOLLOW
+        var i = 0
+        while i < path_len
+            open_msg[1 + i] = path[i]
+            i += 1
+        var reply: [5]byte
+        ipc_send(backend, open_msg, path_len + 1, reply, 5)
+        if reply[0] != 0
+            return -1
+        vfs_msg_read_i32(reply, 1)
+
 Split a path into parent directory path length and basename pointer.
 For "/etc/passwd": parent_len=4 ("/etc"), basename points to "passwd".
 For "/hello": parent_len=1 ("/"), basename points to "hello".
@@ -1823,7 +1841,7 @@ Reply: [status(1), len(2be), target(len)]
     vfs_path_readlink(sender: int, buf: *byte, msg_len: int, backend: int)
         val path: *byte = buf + 1
         val path_len = msg_len - 1
-        val ino = vfs_resolve_path(backend, path, path_len)
+        val ino = vfs_resolve_path_nofollow(backend, path, path_len)
         if ino < 0
             var err: [1]byte
             err[0] = -1
