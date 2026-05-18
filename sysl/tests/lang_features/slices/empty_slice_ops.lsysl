@@ -1,0 +1,164 @@
+Empty slice / empty fixed-array operations
+============================================
+
+Length-zero collections are where backends most often have a
+fast path that skips the work entirely — and where that
+skip-the-work optimisation can mis-handle the descriptor, the
+allocator, or the comparison. These tests pin the boundary so
+a future codegen "the slice is empty, just return" can't
+silently violate one of the invariants.
+
+Three empty-slice shapes are exercised:
+
+1. **Borrowed-empty**: `(new [N]int)[:0]` — backing exists with
+   `cap == N`, but `len == 0`. Append can reuse the backing
+   in-place up to N elements before reallocating.
+2. **Sub-sliced to zero**: `s[i:i]`, `s[0:0]`, `s[len(s):]`,
+   `s[:0]` — the slice descriptor's `len` field is zero; the
+   data pointer points somewhere inside the source's backing
+   (mid-array, start, or one-past-end).
+3. **Zero-from-the-start**: an array literal with one element
+   sub-sliced down to zero, or the result of an iteration
+   that produces no elements.
+
+    module sysl.tests.lang_features
+
+Sub-slicing produces empty slices in three forms
+-------------------------------------------------
+
+### `s[0:0]` is length-0
+
+    #test
+    test_eso_zero_zero_subslice() -> unit
+        var s = [1, 2, 3]
+        val e = s[0:0]
+        assert(len(e) == 0, s"len(s[0:0]) should be 0, got ${len(e)}")
+
+### `s[len(s):]` is length-0 (slice past the last valid index)
+
+    #test
+    test_eso_past_end_subslice() -> unit
+        var s = [1, 2, 3]
+        val e = s[3:]
+        assert(len(e) == 0, s"len(s[len:]) should be 0, got ${len(e)}")
+
+### `s[:0]` is length-0 (slice up to but not including index 0)
+
+    #test
+    test_eso_to_zero_subslice() -> unit
+        var s = [1, 2, 3]
+        val e = s[:0]
+        assert(len(e) == 0, s"len(s[:0]) should be 0, got ${len(e)}")
+
+### `s[1:1]` is length-0 (zero-width interior slice)
+
+    #test
+    test_eso_interior_zero_width() -> unit
+        var s = [1, 2, 3]
+        val e = s[1:1]
+        assert(len(e) == 0, s"len(s[1:1]) should be 0, got ${len(e)}")
+
+Iterating an empty slice produces zero iterations
+--------------------------------------------------
+
+### `for i in 0..<len(empty)` body never fires
+
+    #test
+    test_eso_iter_zero_iterations() -> unit
+        val empty: []int = (new [4]int)[:0]
+        var counter = 0
+        for i in 0..<len(empty)
+            counter = counter + 1
+        assert(counter == 0, s"loop body fired ${counter} times on empty slice")
+
+### `for v in empty` body never fires
+
+    #test
+    test_eso_for_in_zero_iterations() -> unit
+        val empty: []int = (new [4]int)[:0]
+        var counter = 0
+        for v in empty
+            counter = counter + 1
+        assert(counter == 0, s"for-in body fired ${counter} times on empty slice")
+
+Append to an empty slice
+-------------------------
+
+### `append(emptyWithCap, x)` reuses the backing
+
+    #test
+    test_eso_append_to_borrowed_empty() -> unit
+        var s: []int = (new [16]int)[:0]
+        assert(len(s) == 0, "start empty")
+        s = append(s, 42)
+        assert(len(s) == 1, s"len after append should be 1, got ${len(s)}")
+        assert(s[0] == 42, s"s[0] should be 42, got ${s[0]}")
+
+### Repeated appends from empty produce a sequence
+
+    #test
+    test_eso_append_chain_from_empty() -> unit
+        var s: []int = (new [8]int)[:0]
+        s = append(s, 10)
+        s = append(s, 20)
+        s = append(s, 30)
+        assert(len(s) == 3, s"len should be 3, got ${len(s)}")
+        assert(s[0] == 10 && s[1] == 20 && s[2] == 30,
+            s"got [${s[0]},${s[1]},${s[2]}], expected [10,20,30]")
+
+### Append-past-cap forces a regrow; data preserved
+
+    #test
+    test_eso_append_past_initial_cap() -> unit
+        // Start with cap=2; append 3 elements — at least one regrow.
+        var s: []int = (new [2]int)[:0]
+        s = append(s, 1)
+        s = append(s, 2)
+        s = append(s, 3)
+        assert(len(s) == 3, s"len should be 3, got ${len(s)}")
+        assert(s[0] == 1 && s[1] == 2 && s[2] == 3,
+            s"got [${s[0]},${s[1]},${s[2]}]")
+
+Sub-slice of a sub-slice
+-------------------------
+
+### `s[0:0][:0]` stays empty
+
+    #test
+    test_eso_chained_empty_subslice() -> unit
+        var s = [1, 2, 3]
+        val e1 = s[0:0]
+        val e2 = e1[:0]
+        assert(len(e1) == 0 && len(e2) == 0,
+            s"len(e1)=${len(e1)} len(e2)=${len(e2)}")
+
+Match short-circuit on empty
+-----------------------------
+
+### `if len(s) == 0` recognises an empty borrowed-empty slice
+
+    #test
+    test_eso_len_check_short_circuit() -> unit
+        val empty: []int = (new [4]int)[:0]
+        var saw_empty = false
+        if len(empty) == 0 then
+            saw_empty = true
+        assert(saw_empty, "len==0 short-circuit recognised empty")
+
+Empty-from-empty after iteration
+---------------------------------
+
+### Filtering everything out leaves a length-0 result
+
+The hand-rolled "filter into a new slice" is the typical
+pattern; pinning this shape catches a regression where an
+empty result accidentally retained the source length or
+capacity in the descriptor.
+
+    #test
+    test_eso_filter_to_empty() -> unit
+        val src = [1, 2, 3, 4, 5]
+        var dst: []int = (new [8]int)[:0]
+        for i in 0..<len(src)
+            if src[i] > 100 then dst = append(dst, src[i])
+        assert(len(dst) == 0, s"filter result should be empty, got len=${len(dst)}")

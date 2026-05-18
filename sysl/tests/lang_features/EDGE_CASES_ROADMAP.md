@@ -43,17 +43,18 @@ at `sysl@8c8016e69`); adjacent corners are now pinned.
 
 ---
 
-## 2. Empty collections — 🔴 P0
+## 2. Empty collections — 🟢
 
 Backends frequently have a fast path that skips length-0 and
 mis-handles the allocator. Empty inputs are also where slice
 descriptors, string headers, and refcount headers most often
-get a stale pointer.
+get a stale pointer. No new bugs surfaced — all 7 backends green
+on first sweep.
 
 | File | Corners pinned |
 |---|---|
-| `slices/empty_slice_ops.lsysl` 🔴 | `append(emptySlice, x)` fresh-alloc vs borrowed-empty; `s[0:0]`, `s[len(s):]`, `s[:0]` all empty but different codepaths; `[0]int` fixed array sizeof + alignment; iterating over an empty slice; `len(emptySlice) == 0` short-circuit in match scrutinees; `copy(emptyDst, src)` returns 0 |
-| `strings/empty_string_ops.lsysl` 🔴 | `"" == ""`; `"" + "x" == "x"`; `"x" + "" == "x"`; `"" + ""`; `len("") == 0`; `str("")` is `""`; format-string `%s` on empty; slice of empty string `""[0:0]` |
+| `slices/empty_slice_ops.lsysl` 🟢 | four sub-slice forms produce empty (`s[0:0]`, `s[len:]`, `s[:0]`, `s[i:i]` interior); `for i in 0..<len(empty)` and `for v in empty` both zero-iter; append to borrowed-empty / append-chain / append-past-cap force regrow with data preserved; chained empty sub-slice; `len==0` short-circuit recognises empty; filter-all-out leaves length-0 result. (12 tests) |
+| `strings/empty_string_ops.lsysl` 🟢 | concat with empty as right operand / both-empty / triple-empty; `str("")` identity; interpolation `s"[$e]"` and `s"${a}X${b}"` with empties; `f"$e%s"` with empty; slice forms `""[0:0]`, `""[:0]`, `""[:]`; comparison orderings `"" < "x"`, `"x" > ""`, `"" <= ""`, `"" != "x"`; equality across construction paths (literal vs returned vs concat). (17 tests, on top of `string_len_empty.lsysl`'s 9.) |
 
 ---
 

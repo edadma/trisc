@@ -1,0 +1,189 @@
+Empty string — operations beyond `len`
+=========================================
+
+`string_len_empty.lsysl` already pins `len("")`, `"" == ""`,
+and concat with empty as the left operand. This file pins the
+remaining corners: empty as the RIGHT operand of concat (a
+different code path on most backends), both-empty concat,
+`str("")` identity, `%s` formatting, slice-of-empty, comparison
+orderings between empty and non-empty, and equality of two
+empties produced via different paths.
+
+The pattern that bugs hide behind: backends frequently have a
+"length-0 string → use the canonical empty literal" optimisation.
+That fast path skips an allocation but can leak the wrong
+descriptor or comparison-by-identity result if the source's
+data-pointer / refcount-header isn't reset.
+
+    module sysl.tests.lang_features
+
+Concat with empty as the right operand
+----------------------------------------
+
+### `"data" + ""` equals `"data"`
+
+    #test
+    test_eso_concat_right_empty() -> unit
+        val a = "data"
+        val b = ""
+        val c = a + b
+        assert(c == "data", s"got '$c'")
+        assert(len(c) == 4, s"len should be 4, got ${len(c)}")
+
+### Both operands empty: `"" + "" == ""`
+
+    #test
+    test_eso_concat_both_empty() -> unit
+        val a = ""
+        val b = ""
+        val c = a + b
+        assert(c == "", s"got '$c'")
+        assert(len(c) == 0, s"len should be 0, got ${len(c)}")
+
+### Triple-empty chain still empty
+
+    #test
+    test_eso_triple_empty_concat() -> unit
+        val a = ""
+        val b = ""
+        val c = ""
+        val d = a + b + c
+        assert(d == "" && len(d) == 0, s"got '$d', len=${len(d)}")
+
+`str("")` is the empty string
+------------------------------
+
+`str(s)` on a `string` value is the identity. The empty string
+identity is the same — pins that the `str()` builtin doesn't
+inject a placeholder (`"<empty>"`, `"\"\""`, etc.) for an empty
+input.
+
+    #test
+    test_eso_str_of_empty() -> unit
+        val s = ""
+        val r = str(s)
+        assert(r == "", s"str(\"\") should be \"\", got '$r'")
+        assert(len(r) == 0, s"len should be 0, got ${len(r)}")
+
+Interpolation with empty
+-------------------------
+
+### `s"...$e..."` where `e == ""` produces the surrounding context
+
+    #test
+    test_eso_interp_with_empty() -> unit
+        val e = ""
+        val r = s"[$e]"
+        assert(r == "[]", s"got '$r'")
+
+### Interpolating two adjacent empties yields the literal between
+
+    #test
+    test_eso_interp_two_empties() -> unit
+        val a = ""
+        val b = ""
+        val r = s"${a}X${b}"
+        assert(r == "X", s"got '$r'")
+
+`%s` formatting with empty
+---------------------------
+
+### `f"[$e%s]"` on empty produces no characters at that slot
+
+    #test
+    test_eso_fmt_s_empty() -> unit
+        val e = ""
+        val r = f"[$e%s]"
+        assert(r == "[]", s"got '$r'")
+
+### `f"$a%s $b%s"` with two empties produces just the literal space
+
+    #test
+    test_eso_fmt_s_two_empties() -> unit
+        val a = ""
+        val b = ""
+        val r = f"$a%s $b%s"
+        assert(r == " ", s"got '$r'")
+
+Slicing the empty string
+-------------------------
+
+### `""[0:0]` is empty
+
+    #test
+    test_eso_slice_zero_zero() -> unit
+        val s = ""
+        val e = s[0:0]
+        assert(len(e) == 0, s"len(\"\"[0:0]) should be 0, got ${len(e)}")
+        assert(e == "", s"got '$e'")
+
+### `""[:0]` is empty
+
+    #test
+    test_eso_slice_to_zero() -> unit
+        val s = ""
+        val e = s[:0]
+        assert(len(e) == 0, s"len should be 0, got ${len(e)}")
+        assert(e == "", s"got '$e'")
+
+### `""[:]` is empty (full slice of empty)
+
+    #test
+    test_eso_slice_full_of_empty() -> unit
+        val s = ""
+        val e = s[:]
+        assert(len(e) == 0, s"len should be 0, got ${len(e)}")
+        assert(e == "", s"got '$e'")
+
+Comparison orderings between empty and non-empty
+-------------------------------------------------
+
+Lexicographic byte-comparison: the empty string is strictly less
+than any non-empty string; the inequality is asymmetric.
+
+### `"" < "x"` is true (empty precedes anything)
+
+    #test
+    test_eso_empty_lt_any() -> unit
+        assert("" < "x", "\"\" < \"x\"")
+
+### `"x" > ""` is true (reverse direction)
+
+    #test
+    test_eso_any_gt_empty() -> unit
+        assert("x" > "", "\"x\" > \"\"")
+
+### `"" <= ""` is true (equality lifts to weak orderings)
+
+    #test
+    test_eso_empty_le_empty() -> unit
+        assert("" <= "", "\"\" <= \"\"")
+        assert("" >= "", "\"\" >= \"\"")
+
+### `"" != "x"` and `"x" != ""`
+
+    #test
+    test_eso_empty_ne_nonempty() -> unit
+        assert("" != "x", "\"\" != \"x\"")
+        assert("x" != "", "\"x\" != \"\"")
+
+Equality across construction paths
+-----------------------------------
+
+### Literal empty `==` empty returned from a function
+
+    eso_empty_fn() -> string = ""
+
+    #test
+    test_eso_literal_eq_returned() -> unit
+        val a = ""
+        val b = eso_empty_fn()
+        assert(a == b, "literal \"\" == returned \"\"")
+
+### Literal empty `==` empty from concat
+
+    #test
+    test_eso_literal_eq_concat_result() -> unit
+        val a = ""
+        val b = "" + ""
+        assert(a == b, "literal \"\" == \"\"+\"\"")
