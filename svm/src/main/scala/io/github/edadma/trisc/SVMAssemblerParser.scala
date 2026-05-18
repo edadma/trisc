@@ -105,7 +105,7 @@ object SVMAssemblerParser extends RegexParsers:
     "ffloor", "fceil", "fround", "ftrunc", "fmin", "fmax",
     "feq", "fneq", "flt", "fgt", "fle", "fge",
     "f2i", "i2f", "f2u", "u2f",
-    "push_f0", "push_f1",
+    "push_f0", "push_f1", "f64tof32",
     // 0xB0-0xCF: Superinstructions
     "dup_add", "dup_mul", "over_add", "over_sub",
     "add_imm8", "sub_imm8", "mul_imm8",

@@ -601,6 +601,15 @@ class SVM(
       case 0xA8 => push(0L) // PUSH_F0 (0.0 = all zeros)
       case 0xA9 => push(java.lang.Double.doubleToLongBits(1.0)) // PUSH_F1
 
+      case 0xAA => // F64TOF32 — round f64 through f32 precision, leave as f64 bits
+        // SVM stores every float as f64 on the stack; an f32 typed value lives
+        // as the f64 representation of its f32 round. This opcode is emitted by
+        // the sysl codegen for an explicit f64→f32 cast — without it the cast
+        // would be a silent no-op, and `f64(f32(x))` would return x unchanged
+        // instead of dropping the bits below f32's mantissa precision.
+        val d = java.lang.Double.longBitsToDouble(tos)
+        tos = java.lang.Double.doubleToLongBits(d.toFloat.toDouble)
+
       // === 0xB0-0xCF: Superinstructions ===
       case 0xB0 => tos += tos // DUP_ADD (multiply by 2)
       case 0xB1 => tos *= tos // DUP_MUL (square)

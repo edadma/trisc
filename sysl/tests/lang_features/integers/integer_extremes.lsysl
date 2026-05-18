@@ -1,0 +1,228 @@
+Integer arithmetic at the extremes
+====================================
+
+Boundary values of signed and unsigned integer types. Sysl follows
+two's-complement semantics: signed and unsigned arithmetic wraps
+on overflow rather than trapping (use `saturating_*` builtins when
+saturation is wanted instead). The cases below pin the wrap
+results explicitly so a future backend miscompile can't silently
+upgrade an overflow into a different value.
+
+Two specific UB-in-C cases are pinned to wrap semantics: the
+classic `INT_MIN / -1` (where the abstract result `+INT_MAX + 1`
+isn't representable) and `INT_MIN * -1` (same reason). Sysl
+chooses wrap-to-`INT_MIN` for both, matching the two's-complement
+hardware behavior on every target.
+
+    module sysl.tests.lang_features
+
+Signed wrap (i32)
+------------------
+
+### MAX + 1 wraps to MIN
+
+    #test
+    test_iext_i32_max_plus_1() -> unit
+        val a: int = 2147483647
+        val b: int = 1
+        val r = a + b
+        assert(r == -2147483648, s"got $r")
+
+### MIN - 1 wraps to MAX
+
+    #test
+    test_iext_i32_min_minus_1() -> unit
+        val a: int = -2147483648
+        val b: int = 1
+        val r = a - b
+        assert(r == 2147483647, s"got $r")
+
+### MIN * -1 wraps back to MIN (would overflow `+INT_MAX + 1`)
+
+    #test
+    test_iext_i32_min_mul_neg1() -> unit
+        val a: int = -2147483648
+        val b: int = -1
+        val r = a * b
+        assert(r == -2147483648, s"got $r")
+
+### MIN / -1 wraps to MIN (same overflow reason)
+
+    #test
+    test_iext_i32_min_div_neg1() -> unit
+        val a: int = -2147483648
+        val b: int = -1
+        val r = a / b
+        assert(r == -2147483648, s"got $r")
+
+Signed wrap (i64)
+------------------
+
+i64 MIN can't be written as the literal `-9223372036854775808i64`
+directly — the parser sees the magnitude before applying the
+negation, and `9223372036854775808` overflows `i64::Last`. The
+canonical workaround across the corpus is `-9223372036854775807i64 - 1i64`.
+
+### i64 MAX + 1 wraps to MIN
+
+    #test
+    test_iext_i64_max_plus_1() -> unit
+        val a: i64 = 9223372036854775807i64
+        val b: i64 = 1i64
+        val r = a + b
+        val i64_min: i64 = -9223372036854775807i64 - 1i64
+        assert(r == i64_min, s"got $r")
+
+### i64 MIN - 1 wraps to MAX
+
+    #test
+    test_iext_i64_min_minus_1() -> unit
+        val a: i64 = -9223372036854775807i64 - 1i64
+        val b: i64 = 1i64
+        val r = a - b
+        assert(r == 9223372036854775807i64, s"got $r")
+
+Signed narrow widths (i8, i16)
+-------------------------------
+
+### i8 MAX + 1 wraps to MIN (-128)
+
+    #test
+    test_iext_i8_max_plus_1() -> unit
+        val a: i8 = 127i8
+        val b: i8 = 1i8
+        val r = a + b
+        assert(r == -128i8, s"got $r")
+
+### i16 MAX + 1 wraps to MIN
+
+    #test
+    test_iext_i16_max_plus_1() -> unit
+        val a: i16 = 32767i16
+        val b: i16 = 1i16
+        val r = a + b
+        assert(r == -32768i16, s"got $r")
+
+Unsigned wrap (u32)
+--------------------
+
+### 0u32 - 1 wraps to MAX (0xFFFFFFFF = 4294967295)
+
+    #test
+    test_iext_u32_zero_minus_1() -> unit
+        val a: uint = 0
+        val b: uint = 1
+        val r = a - b
+        assert(r == 4294967295u32, s"got $r")
+
+### u32 MAX + 1 wraps to 0
+
+    #test
+    test_iext_u32_max_plus_1() -> unit
+        val a: uint = 4294967295u32
+        val b: uint = 1
+        val r = a + b
+        assert(r == 0u32, s"got $r")
+
+Unsigned narrow widths (u8, u16)
+---------------------------------
+
+### u8 MAX + 1 wraps to 0
+
+    #test
+    test_iext_u8_max_plus_1() -> unit
+        val a: u8 = 255u8
+        val b: u8 = 1u8
+        val r = a + b
+        assert(r == 0u8, s"got $r")
+
+### u8 0 - 1 wraps to MAX (255)
+
+    #test
+    test_iext_u8_zero_minus_1() -> unit
+        val a: u8 = 0u8
+        val b: u8 = 1u8
+        val r = a - b
+        assert(r == 255u8, s"got $r")
+
+### u16 MAX + 1 wraps to 0
+
+    #test
+    test_iext_u16_max_plus_1() -> unit
+        val a: u16 = 65535u16
+        val b: u16 = 1u16
+        val r = a + b
+        assert(r == 0u16, s"got $r")
+
+Shift edges (i32)
+------------------
+
+The shift count for sysl integers is masked to `bit_width(T) - 1`
+on every target (matches LLVM `shl`/`lshr`/`ashr` semantics on the
+i32/i64 type). Shifting by exactly the width is therefore
+equivalent to shifting by 0, NOT producing 0.
+
+### Shift by 0 is identity
+
+    #test
+    test_iext_i32_shl_zero() -> unit
+        val a: int = 1
+        val r = a << 0
+        assert(r == 1, s"got $r")
+
+### Shift by width-1 reaches the sign bit
+
+    #test
+    test_iext_i32_shl_31() -> unit
+        val a: int = 1
+        val r = a << 31
+        assert(r == -2147483648, s"got $r")
+
+### Arithmetic right-shift preserves sign
+
+    #test
+    test_iext_i32_sar_neg() -> unit
+        val a: int = -8
+        val r = a >> 1
+        assert(r == -4, s"got $r")
+
+### Logical right-shift on unsigned zero-fills
+
+    #test
+    test_iext_u32_lsr() -> unit
+        val a: uint = 4294967295u32   // 0xFFFFFFFF
+        val r = a >> 1
+        assert(r == 2147483647u32, s"got $r")    // 0x7FFFFFFF
+
+Modulo with negative operands
+------------------------------
+
+Truncating modulo (C99 / sysl): `a % b` takes the sign of `a`.
+This is what every backend's hardware does for native int.
+
+### -7 % 3 = -1 (sign of dividend)
+
+    #test
+    test_iext_mod_neg_dividend() -> unit
+        val a: int = -7
+        val b: int = 3
+        val r = a % b
+        assert(r == -1, s"got $r")
+
+### 7 % -3 = 1 (sign of dividend)
+
+    #test
+    test_iext_mod_neg_divisor() -> unit
+        val a: int = 7
+        val b: int = -3
+        val r = a % b
+        assert(r == 1, s"got $r")
+
+### -7 % -3 = -1
+
+    #test
+    test_iext_mod_both_neg() -> unit
+        val a: int = -7
+        val b: int = -3
+        val r = a % b
+        assert(r == -1, s"got $r")

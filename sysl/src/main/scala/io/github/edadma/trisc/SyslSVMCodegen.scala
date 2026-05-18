@@ -1317,6 +1317,11 @@ class SyslSVMCodegen extends SyslSVMCodegenStatements, SyslSVMCodegenMatch, Sysl
     val tgtFloat = to.isFloat
     if srcFloat && !tgtFloat then emit("  f2i")
     else if !srcFloat && tgtFloat then emit("  i2f")
+    // f64 → f32 narrowing — round through f32 precision. The reverse (f32→f64)
+    // is a no-op because SVM stores every float as f64 on the stack; an f32 in
+    // SVM is the f64 representation of an f32-rounded value.
+    else if srcFloat && tgtFloat && from == FloatType(64) && to == FloatType(32) then
+      emit("  f64tof32")
     else (from.underlying, to.underlying) match
       // String / slice to raw pointer: deref the struct to get the data ptr.
       // (Arrays are already data-addressed, so array→ptr is a no-op.)
