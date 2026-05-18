@@ -7095,15 +7095,20 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerExp
         if variantFields.nonEmpty then throw AnalysisError(s"variant '$name' requires ${variantFields.length} argument(s) in pattern")
         TVariantPattern(et, variantIdx, Nil, Nil)
       // Bare-name binding pattern at top level: any identifier that is NOT
-      // a struct or variant name (of the scrutinee's enum type) becomes a
-      // fresh binding capturing the whole scrutinee. Mirrors the destructure
-      // field-binding convention (see `analyzeFieldPattern` at line 6923):
-      // names bind freely; module-level consts referenced as patterns must
-      // be written `MOD.OK` or destructured explicitly.
+      // a struct, variant, or visible value becomes a fresh binding capturing
+      // the whole scrutinee. Mirrors the destructure field-binding convention
+      // (see `analyzeFieldPattern` at line 6923) — but unlike the destructure
+      // path, top-level names must defer to existing module-level vals/consts
+      // so dispatchers like `cmd match { CMD_FOO -> ... ; CMD_BAR -> ... }`
+      // keep doing value-comparison against the const. Without this
+      // `tryLookup` guard, the const would be shadowed by a fresh binding
+      // that always matches the scrutinee, collapsing every match arm into
+      // the first one.
       case ValuePatternAST(VarRefAST(name))
           if scopeStack != null
             && !structTypes.contains(name)
-            && resolveVariant(name, scrutineeType).isEmpty =>
+            && resolveVariant(name, scrutineeType).isEmpty
+            && tryLookup(name).isEmpty =>
         currentScope(name) = SymInfo(name, scrutineeType, false)
         TBindPattern(name, scrutineeType)
       // Top-level tuple pattern on a tuple-typed scrutinee — destructure directly.
