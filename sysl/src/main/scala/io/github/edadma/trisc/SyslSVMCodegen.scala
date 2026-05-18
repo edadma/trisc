@@ -2,41 +2,41 @@ package io.github.edadma.trisc
 
 import scala.collection.mutable
 
-class SyslSVMCodegen:
-  private val out = new StringBuilder
-  private var labelCounter = 0
-  private var modulePrefix = ""
-  private val stringLiterals = new mutable.ListBuffer[(String, String)]
+class SyslSVMCodegen extends SyslSVMCodegenStatements, SyslSVMCodegenMatch, SyslSVMCodegenExpressions:
+  val out = new StringBuilder
+  var labelCounter = 0
+  var modulePrefix = ""
+  val stringLiterals = new mutable.ListBuffer[(String, String)]
 
   // Local variable tracking — maps name → local index
-  private case class LocalInfo(index: Int, typ: SyslType)
-  private var locals: mutable.LinkedHashMap[String, LocalInfo] = null
-  private var nextLocalIndex: Int = 0
+  case class LocalInfo(index: Int, typ: SyslType)
+  var locals: mutable.LinkedHashMap[String, LocalInfo] = null
+  var nextLocalIndex: Int = 0
   // Names of scalar locals whose address is taken at some point in the body.
   // These are stored on the memory stack instead of in SVM local slots so
   // that &local and writes-through-pointer observe the same storage.
-  private var addressedLocals: mutable.HashSet[String] = null
+  var addressedLocals: mutable.HashSet[String] = null
 
   // Globals
-  private val globals = new mutable.LinkedHashMap[String, SyslType]
-  private val globalConstants = new mutable.LinkedHashMap[String, Long]
+  val globals = new mutable.LinkedHashMap[String, SyslType]
+  val globalConstants = new mutable.LinkedHashMap[String, Long]
 
   // Canonical struct types (name -> field-populated StructType). Placeholders
   // (StructType(_, Nil)) can leak into expression types; this map resolves them.
-  private val structTypes = new mutable.HashMap[String, SyslType.StructType]
+  val structTypes = new mutable.HashMap[String, SyslType.StructType]
 
   // Interface itables encountered during codegen. Key = itable symbol name,
   // value = (iface type, concrete struct name). Emitted in rodata at EOF.
-  private val itables = new mutable.LinkedHashMap[String, (SyslType.InterfaceType, String)]
+  val itables = new mutable.LinkedHashMap[String, (SyslType.InterfaceType, String)]
 
   // Set of function names defined in this module (for method name resolution).
-  private val definedFuncNames = new mutable.HashSet[String]
-  private def canonicalStruct(st: SyslType.StructType): SyslType.StructType =
+  val definedFuncNames = new mutable.HashSet[String]
+  def canonicalStruct(st: SyslType.StructType): SyslType.StructType =
     if st.fields.isEmpty then structTypes.getOrElse(st.name, st) else st
 
   /** Extract the canonical StructType from any expression's type (handles
     * NamedType / RefType / PtrType wrappers and empty placeholder structs). */
-  private def structOf(t: SyslType): SyslType.StructType = t.underlying match
+  def structOf(t: SyslType): SyslType.StructType = t.underlying match
     case s: SyslType.StructType => canonicalStruct(s)
     case SyslType.RefType(s) => s.underlying match
       case ss: SyslType.StructType => canonicalStruct(ss)
@@ -47,13 +47,13 @@ class SyslSVMCodegen:
     case _ => sys.error(s"not a struct type: $t")
 
   // Loop labels for break/continue
-  private val breakLabels = new mutable.Stack[String]
-  private val continueLabels = new mutable.Stack[String]
+  val breakLabels = new mutable.Stack[String]
+  val continueLabels = new mutable.Stack[String]
   // User-supplied loop labels (None for unlabeled loops). Parallel to break/continue stacks.
-  private val loopNameStack = new mutable.Stack[Option[String]]
+  val loopNameStack = new mutable.Stack[Option[String]]
 
   /** Find stack index of loop matching `label` (0 = innermost). None → innermost. */
-  private def resolveLoopIdx(label: Option[String]): Int = label match
+  def resolveLoopIdx(label: Option[String]): Int = label match
     case None => 0
     case Some(name) =>
       val idx = loopNameStack.indexWhere(_.contains(name))
@@ -66,55 +66,40 @@ class SyslSVMCodegen:
   // gives correct dynamic semantics — skipped branches see counter=0 (no
   // fire), loop iterations bump the counter to N (fires N times) — without
   // requiring a runtime defer queue.
-  private val deferSiteSlot = new mutable.LinkedHashMap[TStmt, Int]
-  private val deferBodies = new mutable.ArrayBuffer[TStmt]
-  private def emitDefers(): Unit =
-    for body <- deferBodies.reverseIterator do
-      val slot = deferSiteSlot(body)
-      val loopLbl = newLabel("defer_loop")
-      val endLbl = newLabel("defer_end")
-      emit(s"$loopLbl:")
-      emit(s"  local_get $slot")
-      emit("  eqz")
-      emit(s"  jumpnz $endLbl")
-      emit(s"  local_get $slot")
-      emit("  dec")
-      emit(s"  local_set $slot")
-      genStmt(body)
-      emit(s"  jump $loopLbl")
-      emit(s"$endLbl:")
+  val deferSiteSlot = new mutable.LinkedHashMap[TStmt, Int]
+  val deferBodies = new mutable.ArrayBuffer[TStmt]
 
   // Current function
-  private var currentFunction: TFunDecl = null
-  private var needsSpExtern: Boolean = false
-  private var needsStrConcat: Boolean = false
-  private var needsStrEq: Boolean = false
-  private var needsStrCmp: Boolean = false
-  private var needsNewSlice: Boolean = false
-  private var needsStrFromI64: Boolean = false
-  private var needsStrFromBool: Boolean = false
-  private var needsStrFmtI64: Boolean = false
-  private var needsStrFmtStr: Boolean = false
-  private var needsStrFromF64: Boolean = false
+  var currentFunction: TFunDecl = null
+  var needsSpExtern: Boolean = false
+  var needsStrConcat: Boolean = false
+  var needsStrEq: Boolean = false
+  var needsStrCmp: Boolean = false
+  var needsNewSlice: Boolean = false
+  var needsStrFromI64: Boolean = false
+  var needsStrFromBool: Boolean = false
+  var needsStrFmtI64: Boolean = false
+  var needsStrFmtStr: Boolean = false
+  var needsStrFromF64: Boolean = false
 
   // Map: function name → parameter types (for arg-coercion at call sites).
-  private val funcParamTypes = new mutable.HashMap[String, List[SyslType]]
+  val funcParamTypes = new mutable.HashMap[String, List[SyslType]]
 
   // Map: canonical struct name → user-defined deinit function name. Populated
   // by scanning all TFunDecls whose name ends in "_deinit". When a `&T` ref's
   // refcount drops to zero, emitRefDecr calls this fn (if present) with the
   // struct address.
-  private val deinitFunctions = new mutable.HashMap[String, String]
+  val deinitFunctions = new mutable.HashMap[String, String]
 
   // Per-function list of &T local indexes paired with their struct types.
   // Populated as `var v: &T = ...` / `val v: &T = ...` are lowered. At every
   // return (and the implicit end-of-function), emitFunctionExitRefDecrs
   // decrements each so that scope-exit fires deinit when the refcount hits
   // zero. Cleared at the start of every function.
-  private val refLocals = new mutable.ListBuffer[(Int, SyslType.StructType)]
+  val refLocals = new mutable.ListBuffer[(Int, SyslType.StructType)]
   /** True for `&T` where T is a struct — the SVM-deinit machinery handles
     * exactly this shape today. Slice/closure refs use their own paths. */
-  private def isStructRef(t: SyslType): Option[SyslType.StructType] = t.underlying match
+  def isStructRef(t: SyslType): Option[SyslType.StructType] = t.underlying match
     case SyslType.RefType(inner) => inner.underlying match
       case st: SyslType.StructType => Some(canonicalStruct(st))
       case _ => None
@@ -123,7 +108,7 @@ class SyslSVMCodegen:
   /** Mirror of LLVM's isOwnedStruct: true when the expression produces a
     * freshly-owned ref (refcount already 1 from `new`/call). Other expressions
     * (TVarRef, TFieldAccess) are borrowed — caller needs an incr. */
-  private def isOwnedRefExpr(e: TExpr): Boolean = e match
+  def isOwnedRefExpr(e: TExpr): Boolean = e match
     case _: TNew | _: TNewArray => true
     case _: TCall | _: TIndirectCall => true
     case _: TIfExpr | _: TMatchExpr => true
@@ -131,25 +116,25 @@ class SyslSVMCodegen:
 
   // Closures: hoisted bodies generated alongside regular functions. The hoisted
   // function's first param is a hidden env_ptr (stored in local 0).
-  private var closureCounter = 0
-  private val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
+  var closureCounter = 0
+  val pendingClosures = new mutable.ListBuffer[(String, TClosure)]
   // While compiling a hoisted closure body: capture name → (env offset, type).
   // TVarRef checks this first.
-  private var closureCaptures: Map[String, (Long, SyslType)] = Map.empty
+  var closureCaptures: Map[String, (Long, SyslType)] = Map.empty
   // Per-function shims: ignore env_ptr and forward to plain function.
-  private val emittedShims = new mutable.HashSet[String]
-  private val pendingShims = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)]
+  val emittedShims = new mutable.HashSet[String]
+  val pendingShims = new mutable.ListBuffer[(String, String, List[SyslType], SyslType)]
   // (shimName, targetName, paramTypes, returnType)
-  private def shimNameFor(target: String): String = s"__shim__$target"
+  def shimNameFor(target: String): String = s"__shim__$target"
 
-  private def emit(s: String): Unit = out ++= s + "\n"
-  private def newLabel(prefix: String): String =
+  def emit(s: String): Unit = out ++= s + "\n"
+  def newLabel(prefix: String): String =
     labelCounter += 1
     if modulePrefix.nonEmpty then s".${prefix}_${modulePrefix}_$labelCounter"
     else s".${prefix}_$labelCounter"
 
   // Pre-count locals needed for a function body
-  private def countLocals(body: TFunBody): Int =
+  def countLocals(body: TFunBody): Int =
     var count = 0
     val seen = new mutable.HashSet[String]
     def scanStmts(stmts: List[TStmt]): Unit = stmts.foreach(scanStmt)
@@ -264,7 +249,7 @@ class SyslSVMCodegen:
     count
 
   // Determine smallest push instruction for an integer
-  private def emitPushInt(n: Long): Unit =
+  def emitPushInt(n: Long): Unit =
     n match
       case 0 => emit("  push_0")
       case 1 => emit("  push_1")
@@ -279,11 +264,11 @@ class SyslSVMCodegen:
         emit("  push_i64 0x8000000000000000")
       case v => emit(s"  push_i64 $v")
 
-  private def isUnsigned(t: SyslType): Boolean = t.isInstanceOf[SyslType.UIntType]
-  private def isFloat(t: SyslType): Boolean = t.isFloat
+  def isUnsigned(t: SyslType): Boolean = t.isInstanceOf[SyslType.UIntType]
+  def isFloat(t: SyslType): Boolean = t.isFloat
 
   /** True if this type needs memory allocation (can't fit in a single 64-bit local slot). */
-  private def needsMemAlloc(t: SyslType): Boolean = t match
+  def needsMemAlloc(t: SyslType): Boolean = t match
     case _: SyslType.ArrayType => true
     case _: SyslType.StructType => true
     case _: SyslType.EnumType => true
@@ -301,7 +286,7 @@ class SyslSVMCodegen:
    *  Stack in : ( ..., scalar )
    *  Stack out: ( ..., enum-buf-addr )
    */
-  private def coerceScalarToEnumReturn(et: SyslType.EnumType): Unit =
+  def coerceScalarToEnumReturn(et: SyslType.EnumType): Unit =
     val size = et.sizeOf
     emitMemAlloc(size)                                       // ( scalar, addr )
     val aligned = ((size + 7) / 8 * 8).toInt
@@ -318,7 +303,7 @@ class SyslSVMCodegen:
   /** If the current function's declared return type is an `EnumType` but the
    *  expression being returned was lowered to a scalar, wrap it. No-op otherwise.
    */
-  private def maybeCoerceReturnToEnum(exprTyp: SyslType): Unit =
+  def maybeCoerceReturnToEnum(exprTyp: SyslType): Unit =
     if currentFunction != null then
       (currentFunction.returnType, exprTyp) match
         case (et: SyslType.EnumType, t) if !needsMemAlloc(t) && t != SyslType.StringType && !t.isInstanceOf[SyslType.SliceType] =>
@@ -326,7 +311,7 @@ class SyslSVMCodegen:
         case _ => ()
 
   /** Emit code to allocate `size` bytes on the memory stack. Leaves address on data stack. */
-  private def emitMemAlloc(size: Long): Unit =
+  def emitMemAlloc(size: Long): Unit =
     // __sp -= size (aligned to 8); push __sp
     emit("  push_i64 __sp")
     emit("  dup")
@@ -341,7 +326,7 @@ class SyslSVMCodegen:
   /** Allocate a fresh `len` bytes (top-of-stack i64) on the memory stack,
     * 8-aligned. Leaves the base address on TOS. Used when the size isn't
     * known at codegen time (e.g. `string(ptr, len)` byte-copy). */
-  private def emitMemAllocDyn(): Unit =
+  def emitMemAllocDyn(): Unit =
     // align len to 8: aligned = (len + 7) & ~7
     emitPushInt(7)
     emit("  add")                // ( aligned_plus_partial )
@@ -360,7 +345,7 @@ class SyslSVMCodegen:
   /** Allocate a fresh buffer holding `lenLocal` bytes copied from `srcLocal`,
     * and return the buffer's local index. Used by string-from-bytes
     * constructors to give the new string an independent backing store. */
-  private def emitDynByteAllocAndCopy(srcLocal: Int, lenLocal: Int): Int =
+  def emitDynByteAllocAndCopy(srcLocal: Int, lenLocal: Int): Int =
     emit(s"  local_get $lenLocal")
     emitMemAllocDyn()
     val bufIdx = nextLocalIndex; nextLocalIndex += 1
@@ -411,7 +396,7 @@ class SyslSVMCodegen:
 
   /** Allocate (header + size) bytes; init header to refcount=1; leave the
     * DATA pointer (header + 8) on TOS. */
-  private def emitNewRefAlloc(size: Long): Unit =
+  def emitNewRefAlloc(size: Long): Unit =
     val total = size + 8
     emitMemAlloc(total)         // ( base )           base is the start of the allocation
     emit("  dup")                // ( base, base )
@@ -423,7 +408,7 @@ class SyslSVMCodegen:
 
   /** Stack ( ptr ) → ( ptr ). Increment refcount at ptr-8 unless the header
     * holds the immortal sentinel (-1, used by static string literals). */
-  private def emitRefIncr(): Unit =
+  def emitRefIncr(): Unit =
     val skipLabel = newLabel("rc_incr_skip")
     val doIncrLabel = newLabel("rc_incr_do")
     emit("  dup")                       // ( ptr, ptr )
@@ -450,7 +435,7 @@ class SyslSVMCodegen:
     * deinit fn (if any) passing ptr. SVM can't release the memory itself,
     * but the deinit's observable side effects fire — that's the user-visible
     * contract. */
-  private def emitRefDecr(st: SyslType.StructType): Unit =
+  def emitRefDecr(st: SyslType.StructType): Unit =
     val immortal = newLabel("rc_decr_immortal")
     val nonzero  = newLabel("rc_decr_nonzero")
     val endLabel = newLabel("rc_decr_end")
@@ -489,14 +474,14 @@ class SyslSVMCodegen:
 
   /** Emit refcount decr for each tracked &T local. Called at every return
     * site and at the implicit end-of-function. */
-  private def emitFunctionExitRefDecrs(): Unit =
+  def emitFunctionExitRefDecrs(): Unit =
     for (idx, st) <- refLocals do
       emit(s"  local_get $idx")
       emitRefDecr(st)
 
   // Materialize a fixed [N]T array as a slice struct {ptr, len, cap, backref}
   // on the memory stack. Leaves the struct address on TOS.
-  private def emitArrayToSlice(arg: TExpr, size: Long): Unit =
+  def emitArrayToSlice(arg: TExpr, size: Long): Unit =
     emitMemAlloc(24)                 // allocate slice struct, TOS = sliceAddr
     emit("  dup")                    // [..., sliceAddr, sliceAddr]
     genExpr(arg)                     // [..., sliceAddr, sliceAddr, arrAddr]
@@ -521,13 +506,13 @@ class SyslSVMCodegen:
     emit("  swap")                   // [..., sliceAddr, 0, sliceAddr+16]
     emit("  store64")                // write backref=0; [..., sliceAddr]
 
-  private def allocLocal(name: String, typ: SyslType): Int =
+  def allocLocal(name: String, typ: SyslType): Int =
     val idx = nextLocalIndex
     locals(name) = LocalInfo(idx, typ)
     nextLocalIndex += 1
     idx
 
-  private def constEval(e: TExpr): Option[Long] = e match
+  def constEval(e: TExpr): Option[Long] = e match
     case TIntLit(n, _) => Some(n)
     case TBoolLit(v, _) => Some(if v then 1 else 0)
     case TUnitLit(_) => Some(0)
@@ -547,7 +532,7 @@ class SyslSVMCodegen:
     case TCast(inner, _) => constEval(inner)
     case _ => None
 
-  private def isZeroInit(typ: SyslType, init: TExpr): Boolean =
+  def isZeroInit(typ: SyslType, init: TExpr): Boolean =
     constEval(init).contains(0L) || init.isInstanceOf[TArrayDecl] || init.isInstanceOf[TStructLit]
 
   // ========================================================================
@@ -849,7 +834,7 @@ class SyslSVMCodegen:
   // ========================================================================
   // genFunction
   // ========================================================================
-  private def genFunction(fun: TFunDecl): Unit =
+  def genFunction(fun: TFunDecl): Unit =
     currentFunction = fun
     locals = new mutable.LinkedHashMap
     nextLocalIndex = 0
@@ -1020,7 +1005,7 @@ class SyslSVMCodegen:
   // Closure layout helpers
   // ========================================================================
   /** Compute env layout: list of (name, offset, type) and total size. */
-  private def envLayout(captures: List[(String, SyslType)]): (List[(String, Long, SyslType)], Long) =
+  def envLayout(captures: List[(String, SyslType)]): (List[(String, Long, SyslType)], Long) =
     var off: Long = 0L
     val items = captures.map { (n, t) =>
       val align = t.alignOf.max(1)
@@ -1033,7 +1018,7 @@ class SyslSVMCodegen:
 
   /** Emit code at the construction site to build a 16-byte closure descriptor
     * on the memory stack and leave its address on TOS. */
-  private def genClosureExpr(c: TClosure): Unit =
+  def genClosureExpr(c: TClosure): Unit =
     closureCounter += 1
     val cName = s"__closure_${closureCounter}"
     pendingClosures += ((cName, c))
@@ -1090,7 +1075,7 @@ class SyslSVMCodegen:
   /** Emit a hoisted closure body as a regular function. The first param is a
     * hidden env_ptr (local 0); explicit params follow. Captures are accessed
     * via env_ptr+offset using `closureCaptures`. */
-  private def genHoistedClosure(name: String, c: TClosure): Unit =
+  def genHoistedClosure(name: String, c: TClosure): Unit =
     emit(s"global $name, func")
     val (layout, _) = envLayout(c.captures)
     val captureMap = layout.map { case (n, off, t) => (n, (off, t)) }.toMap
@@ -1185,7 +1170,7 @@ class SyslSVMCodegen:
     currentFunction = savedFunc
 
   /** Fallback for TStr on types we can't render: emit "???" string. */
-  private def emitStrPlaceholder(inner: TExpr): Unit =
+  def emitStrPlaceholder(inner: TExpr): Unit =
     labelCounter += 1
     val lbl = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_${labelCounter}__qqq"
               else s"__str_${labelCounter}__qqq"
@@ -1211,7 +1196,7 @@ class SyslSVMCodegen:
   /** Emit a per-function shim: takes (env_ptr, ...args), tail-calls target
     * with (...args). Used so plain function pointers (TFuncRef) work uniformly
     * with the closure indirect-call convention. */
-  private def genShim(shim: String, target: String, paramTypes: List[SyslType], retType: SyslType): Unit =
+  def genShim(shim: String, target: String, paramTypes: List[SyslType], retType: SyslType): Unit =
     val nParams = paramTypes.length
     val totalLocals = 1 + nParams
     emit(s"global $shim, func")
@@ -1228,1766 +1213,10 @@ class SyslSVMCodegen:
     emit(s"  ret")
 
   // ========================================================================
-  // genStmts / genStmt
-  // ========================================================================
-  private def genStmts(stmts: List[TStmt]): Unit = stmts.foreach(genStmt)
-
-  /** Generate statements where the last one leaves its value on the stack (for if-expr, match-expr, function bodies).
-    * Always pushes exactly 1 value on the stack. If the last expression is void-typed (which can occur when an
-    * if-expression's branches have mismatched types — the analyzer types the enclosing expression based on the
-    * first branch only), synthesize a push_0 so the stack stays balanced.
-    */
-  private def genStmtsAsExpr(stmts: List[TStmt]): Unit =
-    if stmts.isEmpty then emitPushInt(0)
-    else
-      genStmts(stmts.init)
-      stmts.last match
-        case TExprStmt(expr) =>
-          genExpr(expr)
-          if expr.typ == SyslType.UnitType then emitPushInt(0)
-        case TReturnStmt(Some(expr)) => genExpr(expr); maybeCoerceReturnToEnum(expr.typ); emitDefers(); emitFunctionExitRefDecrs(); emit("  ret")
-        case other => genStmt(other); emitPushInt(0)
-
-  private def genStmt(stmt: TStmt): Unit = stmt match
-    case TVarStmt(name, typ, init, _, _) if addressedLocals.contains(name) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
-      // Scalar local whose address is taken. Allocate an 8-byte cell on the
-      // memory stack; the local slot holds the cell's address. Loads and
-      // stores go through the pointer so &x and the local refer to the
-      // same storage.
-      val idx = allocLocal(name, typ)
-      emitMemAlloc(8)
-      emit("  dup")
-      emit(s"  local_set $idx")
-      genExpr(init)
-      emit("  swap")
-      emitStore(typ)
-
-    case TVarStmt(name, typ, init, _, _) =>
-      val idx = allocLocal(name, typ)
-      if needsMemAlloc(typ) then
-        // Allocate memory on the memory stack, store address in local
-        val size = typ.sizeOf
-        emitMemAlloc(size)
-        emit(s"  dup")
-        emit(s"  local_set $idx") // local holds the address
-        // Zero-initialize the memory
-        val aligned = ((size + 7) / 8 * 8).toInt
-        for i <- 0 until aligned by 8 do
-          emit("  dup")
-          if i > 0 then { emitPushInt(i); emit("  add") }
-          emit("  push_0")
-          emit("  swap")
-          emit("  store64")
-        emit("  drop")
-        // If init is an array literal or struct construct, populate values
-        init match
-          case TArrayLit(elements, _) =>
-            val elemType = typ match { case SyslType.ArrayType(e, _) => e; case _ => SyslType.I64 }
-            for (elem, i) <- elements.zipWithIndex do
-              emit(s"  local_get $idx")
-              emitPushInt(i * elemType.sizeOf)
-              emit("  add")
-              genExpr(elem)
-              emit("  swap")
-              emitStore(elemType)
-          case TStructConstruct(structType, args) =>
-            for (arg, i) <- args.zipWithIndex do
-              val off = fieldOffset(structType, i)
-              val fieldType = structType.fields(i)._2
-              emit(s"  local_get $idx")
-              if off != 0 then { emitPushInt(off); emit("  add") }
-              genExpr(arg)
-              emit("  swap")
-              emitStore(fieldType)
-          case TEnumConstruct(et, variantIndex, args) =>
-            // Tag at offset 0 (i32)
-            emit(s"  local_get $idx")
-            emitPushInt(variantIndex)
-            emit("  swap")
-            emit("  store32")
-            // Variant fields at dataOffset
-            val dataOff = et.dataOffset.toInt
-            val variantFields = et.variants(variantIndex)._2
-            var fieldOff = 0
-            for (arg, i) <- args.zipWithIndex do
-              val (_, fieldType) = variantFields(i)
-              val align = fieldType.alignOf.toInt.max(1)
-              fieldOff = ((fieldOff + align - 1) / align) * align
-              emit(s"  local_get $idx")
-              val totalOff = dataOff + fieldOff
-              if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
-              genExpr(arg)
-              emit("  swap")
-              emitStore(fieldType)
-              fieldOff += fieldType.sizeOf.toInt
-          case _: TArrayDecl | _: TStructLit => // already zeroed
-          case _ =>
-            // General case: init returns an address, bulk copy into our allocation
-            genExpr(init) // ( src_addr )
-            val copySize = ((typ.sizeOf + 7) / 8 * 8).toInt
-            for i <- 0 until copySize by 8 do
-              emit("  dup")
-              if i > 0 then { emitPushInt(i); emit("  add") }
-              emit("  load64")
-              emit(s"  local_get $idx")
-              if i > 0 then { emitPushInt(i); emit("  add") }
-              emit("  store64")
-            emit("  drop") // drop src_addr
-      else
-        genExpr(init)
-        // For &T refs to a struct: incr the buffer's refcount if the source is
-        // borrowed (TVarRef etc.); track the local for scope-exit decr.
-        isStructRef(typ) match
-          case Some(st) =>
-            if !isOwnedRefExpr(init) then
-              emitRefIncr()  // ( ptr ) → ( ptr ) — incr at ptr-8
-            emit(s"  local_set $idx")
-            refLocals += ((idx, st))
-          case None =>
-            emit(s"  local_set $idx")
-
-    case TAssignStmt(target, value) =>
-      // For an existing `&T` local being reassigned, apply the release/acquire
-      // refcount protocol: INCR NEW first (so self-assign `r = r` keeps the
-      // buffer alive across the decr) → DECR OLD → STORE NEW.
-      locals.get(target) match
-        case Some(LocalInfo(idx, typ)) if isStructRef(typ).isDefined =>
-          val st = isStructRef(typ).get
-          genExpr(value)                  // ( new_ptr )
-          if !isOwnedRefExpr(value) then
-            emitRefIncr()                 // incr new_ptr, leave ( new_ptr )
-          // Save new_ptr to local first so we can read OLD via local_get
-          // ... but local_set overwrites OLD before decr fires. So:
-          // ( new_ptr ) — DUP, then decr OLD via local_get, then store NEW.
-          emit("  dup")                   // ( new_ptr, new_ptr )
-          emit(s"  local_get $idx")       // ( new_ptr, new_ptr, old_ptr )
-          emitRefDecr(st)                 // consumes old_ptr → ( new_ptr, new_ptr )
-          emit(s"  local_set $idx")       // ( new_ptr )
-          emit("  drop")                  // ( )
-        case _ =>
-          genExpr(value)
-          locals.get(target) match
-            case Some(LocalInfo(idx, typ)) if addressedLocals.contains(target) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
-              // Addressed scalar: write through the cell's pointer.
-              emit(s"  local_get $idx")
-              emitStore(typ)
-            case Some(LocalInfo(idx, _)) => emit(s"  local_set $idx")
-            case None if globals.contains(target) =>
-              // Scalars are 8-byte cells (matches load64 in TVarRef); aggregates
-              // (strings, structs, slices, ...) are address-represented, and
-              // assignment is a sizeof-bytes copy via emitStore-aggregate.
-              emit(s"  push_i64 $target")
-              globals(target).underlying match
-                case _: SyslType.StructType | _: SyslType.EnumType
-                   | SyslType.StringType | _: SyslType.SliceType
-                   | _: SyslType.ArrayType | _: SyslType.FuncType =>
-                  emitStore(globals(target))
-                case _ => emit("  store64")
-            case None =>
-              // Implicit local declaration (e.g. `v = expr?` sugar lowered by
-              // the analyzer into `TAssignStmt` with a fresh target).
-              val idx = allocLocal(target, value.typ)
-              emit(s"  local_set $idx")
-
-    case TCompoundAssignStmt(target, op, value) =>
-      locals.get(target) match
-        case Some(LocalInfo(idx, typ)) if addressedLocals.contains(target) && !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] =>
-          // Addressed scalar: read, compute, write through pointer.
-          emit(s"  local_get $idx")
-          emitLoad(typ)
-          genExpr(value)
-          emitBinaryOp(op, typ)
-          emit(s"  local_get $idx")
-          emitStore(typ)
-        case Some(LocalInfo(idx, typ)) =>
-          emit(s"  local_get $idx")
-          genExpr(value)
-          emitBinaryOp(op, typ)
-          emit(s"  local_set $idx")
-        case None =>
-          // Global: load, compute, store
-          emit(s"  push_i64 $target")
-          emit("  dup")
-          emit("  load64")
-          genExpr(value)
-          emitBinaryOp(op, globals.getOrElse(target, SyslType.I64))
-          emit("  swap")
-          emit("  store64")
-
-    case TDerefAssignStmt(pointer, value) =>
-      genExpr(value)
-      genExpr(pointer)
-      pointer.typ match
-        case SyslType.PtrType(pointee) => emitStore(pointee)
-        case _ => emit("  store64")
-
-    case TIndexAssignStmt(array, index, value) =>
-      val elemType = array.typ match
-        case SyslType.ArrayType(e, _) => e
-        case SyslType.PtrType(e) => e
-        case SyslType.SliceType(e) => e
-        case SyslType.RefType(SyslType.SliceType(e)) => e
-        case _ => SyslType.I64
-      genExpr(value)
-      genExpr(array)
-      array.typ match
-        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
-          emit("  load64") // deref slice struct → data ptr
-        case _ =>
-      genExpr(index)
-      emitPushInt(elemType.sizeOf)
-      emit("  mul")
-      emit("  add")
-      emitStore(elemType)
-
-    case TFieldAssignStmt(obj, fieldIndex, value) =>
-      val st = structOf(obj.typ)
-      val off = fieldOffset(st, fieldIndex)
-      val fieldType = st.fields(fieldIndex)._2
-      genExpr(value)
-      genStructAddr(obj)
-      if off != 0 then
-        emitPushInt(off)
-        emit("  add")
-      emitStore(fieldType)
-
-    case TReturnStmt(Some(expr)) =>
-      genExpr(expr)
-      maybeCoerceReturnToEnum(expr.typ)
-      emitDefers()
-      emitFunctionExitRefDecrs()
-      emit("  ret")
-
-    case TReturnStmt(None) =>
-      emitDefers()
-      emitFunctionExitRefDecrs()
-      emit("  ret")
-
-    case TWhileStmt(cond, body, userLabel) =>
-      val loopLabel = newLabel("while")
-      val endLabel = newLabel("while_end")
-      breakLabels.push(endLabel)
-      continueLabels.push(loopLabel)
-      loopNameStack.push(userLabel)
-      emit(s"$loopLabel:")
-      genExpr(cond)
-      emit(s"  jumpz $endLabel")
-      genStmts(body)
-      emit(s"  jump $loopLabel")
-      emit(s"$endLabel:")
-      loopNameStack.pop()
-      breakLabels.pop()
-      continueLabels.pop()
-
-    case TForStmt(init, cond, update, body, userLabel) =>
-      val loopLabel = newLabel("for")
-      val updateLabel = newLabel("for_upd")
-      val endLabel = newLabel("for_end")
-      genStmt(init)
-      breakLabels.push(endLabel)
-      continueLabels.push(updateLabel)
-      loopNameStack.push(userLabel)
-      emit(s"$loopLabel:")
-      genExpr(cond)
-      emit(s"  jumpz $endLabel")
-      genStmts(body)
-      emit(s"$updateLabel:")
-      genStmt(update)
-      emit(s"  jump $loopLabel")
-      emit(s"$endLabel:")
-      loopNameStack.pop()
-      breakLabels.pop()
-      continueLabels.pop()
-
-    case TDoWhileStmt(cond, body, userLabel) =>
-      val loopLabel = newLabel("do")
-      val endLabel = newLabel("do_end")
-      breakLabels.push(endLabel)
-      continueLabels.push(loopLabel)
-      loopNameStack.push(userLabel)
-      emit(s"$loopLabel:")
-      genStmts(body)
-      genExpr(cond)
-      emit(s"  jumpnz $loopLabel")
-      emit(s"$endLabel:")
-      loopNameStack.pop()
-      breakLabels.pop()
-      continueLabels.pop()
-
-    case TLoopStmt(body, userLabel) =>
-      val loopLabel = newLabel("loop")
-      val endLabel = newLabel("loop_end")
-      breakLabels.push(endLabel)
-      continueLabels.push(loopLabel)
-      loopNameStack.push(userLabel)
-      emit(s"$loopLabel:")
-      genStmts(body)
-      emit(s"  jump $loopLabel")
-      emit(s"$endLabel:")
-      loopNameStack.pop()
-      breakLabels.pop()
-      continueLabels.pop()
-
-    case TBreakStmt(lbl) =>
-      val idx = resolveLoopIdx(lbl)
-      emit(s"  jump ${breakLabels(idx)}")
-
-    case TContinueStmt(lbl) =>
-      val idx = resolveLoopIdx(lbl)
-      emit(s"  jump ${continueLabels(idx)}")
-
-    case TExprStmt(TMatchExpr(scrutinee, arms, default, matchTyp)) =>
-      genMatch(scrutinee, arms, default, matchTyp, asExpr = matchTyp != SyslType.UnitType)
-      if matchTyp != SyslType.UnitType then emit("  drop")
-
-    case TExprStmt(TIfExpr(cond, thenBody, elseBody, ifTyp)) if ifTyp == SyslType.UnitType =>
-      // Void-typed if-stmt: generate bodies as plain statements (no synthetic
-      // 0 push, which would leak onto the data stack because the outer
-      // TExprStmt won't drop void-typed values).
-      val elseLabel = newLabel("else")
-      val endLabel = newLabel("endif")
-      genExpr(cond)
-      emit(s"  jumpz $elseLabel")
-      genStmts(thenBody)
-      emit(s"  jump $endLabel")
-      emit(s"$elseLabel:")
-      elseBody match
-        case Some(stmts) => genStmts(stmts)
-        case None =>
-      emit(s"$endLabel:")
-
-    case TExprStmt(expr) =>
-      genExpr(expr)
-      if expr.typ != SyslType.UnitType then emit("  drop")
-
-    case TAsmStmt(code) =>
-      emit(s"  $code")
-
-    case TDeferStmt(body) =>
-      // Allocate a counter slot the first time we see this defer-site (keyed
-      // by body identity), then bump the counter at this point in the
-      // control flow. emitDefers replays the body `counter` times in a
-      // while-loop at every fn-exit path. The slot is zero-initialised by
-      // the `frame N` opcode at fn entry — DO NOT emit a push_0/local_set
-      // here, because if this defer is inside a loop body the explicit reset
-      // would zero the counter on every iteration and the defer would only
-      // ever fire once.
-      val slot = deferSiteSlot.getOrElseUpdate(body, {
-        deferBodies += body
-        val s = nextLocalIndex
-        nextLocalIndex += 1
-        s
-      })
-      emit(s"  local_get $slot")
-      emit("  inc")
-      emit(s"  local_set $slot")
-
-    case TMultiStmt(children) =>
-      children.foreach(genStmt)
-
-    case TContractCheck(kind, expr, message) =>
-      // Emit a kind-tagged trap on failure rather than a bare `halt`. The
-      // SVM `trap u8` opcode (0x6A) calls `handleTrap(num)`; the default impl
-      // halts on any non-zero number, but a debugging harness can override
-      // it to recover the kind. The `; <kind>: <message>` comment is emitted
-      // immediately above the trap so the message survives in the asm output
-      // — historically this was discarded entirely, audit item #17.
-      genExpr(expr)
-      val pass = newLabel("contract_pass")
-      emit(s"  jumpnz $pass")
-      val tag = if message == kind then kind else s"$kind: $message"
-      emit(s"  ; $tag")
-      emit("  trap 1")
-      emit(s"$pass:")
-
-    case TFieldCompoundAssignStmt(obj, fieldIndex, op, value) =>
-      val st = structOf(obj.typ)
-      val off = fieldOffset(st, fieldIndex)
-      val fieldType = st.fields(fieldIndex)._2
-      // Load current value
-      genStructAddr(obj)
-      if off != 0 then { emitPushInt(off); emit("  add") }
-      emit("  dup") // keep address
-      emitLoad(fieldType)
-      genExpr(value)
-      emitBinaryOp(op, fieldType)
-      emit("  swap") // ( new_val addr )
-      emitStore(fieldType)
-
-    case TDestructureStmt(names, types, init) =>
-      genExpr(init) // address of struct on stack
-      for (name, i) <- names.zipWithIndex do
-        if name != "_" then
-          val idx = allocLocal(name, types(i))
-          val st = structOf(init.typ)
-          val off = fieldOffset(st, i)
-          emit("  dup") // keep struct addr
-          if off != 0 then { emitPushInt(off); emit("  add") }
-          emitLoad(types(i))
-          emit(s"  local_set $idx")
-      emit("  drop") // discard struct address
-
-    case TDestructureAssignStmt(names, types, init) =>
-      // Like TDestructureStmt, but the names already refer to existing locals.
-      genExpr(init)
-      for (name, i) <- names.zipWithIndex do
-        if name != "_" then
-          val st = structOf(init.typ)
-          val off = fieldOffset(st, i)
-          val target = locals.getOrElse(name, {
-            val idx = allocLocal(name, types(i))
-            LocalInfo(idx, types(i))
-          })
-          emit("  dup")
-          if off != 0 then { emitPushInt(off); emit("  add") }
-          emitLoad(types(i))
-          emit(s"  local_set ${target.index}")
-      emit("  drop")
-
-    case _ => sys.error(s"unhandled TStmt in SVM codegen: ${stmt.getClass.getSimpleName}")
-
-  // ========================================================================
-  // genExpr — leaves exactly one value on the data stack
-  // ========================================================================
-  private def genExpr(expr: TExpr): Unit = expr match
-    case TIntLit(n, _) => emitPushInt(n)
-
-    case TFloatLit(d, _) =>
-      val bits = java.lang.Double.doubleToLongBits(d)
-      if bits == 0L then emit("  push_f0")
-      else if d == 1.0 then emit("  push_f1")
-      else emit(s"  push_i64 $bits")
-
-    case TBoolLit(true, _) => emit("  push_1")
-    case TBoolLit(false, _) => emit("  push_0")
-
-    case TUnitLit(_) => emit("  push_0")  // unit is 0-byte; represent at runtime as 0
-
-    case TSizeof(size, _) => emitPushInt(size)
-
-    case TVarRef(name, typ) =>
-      // Captures (when compiling a hoisted closure body): read from env_ptr
-      // (local 0) at the capture's offset.
-      closureCaptures.get(name) match
-        case Some((off, capTyp)) =>
-          emit("  local_get 0")               // env_ptr
-          if off > 0 then { emitPushInt(off); emit("  add") }
-          // For aggregates, the address into env IS the value. For scalars, load.
-          if !needsMemAlloc(capTyp) && capTyp != SyslType.StringType && !capTyp.isInstanceOf[SyslType.SliceType] then
-            emitLoad(capTyp)
-          return
-        case None =>
-      locals.get(name) match
-        case Some(LocalInfo(idx, localTyp)) if addressedLocals.contains(name) && !needsMemAlloc(localTyp) && localTyp != SyslType.StringType && !localTyp.isInstanceOf[SyslType.SliceType] =>
-          // Addressed scalar: load through the cell's pointer.
-          emit(s"  local_get $idx")
-          emitLoad(localTyp)
-        case Some(LocalInfo(idx, _)) => emit(s"  local_get $idx")
-        case None =>
-          // Global. Scalars load the cell; aggregates (string / slice /
-          // struct / enum / array) are address-represented so the symbol's
-          // address IS the value.
-          emit(s"  push_i64 $name")
-          typ.underlying match
-            case _: SyslType.StructType | _: SyslType.EnumType
-               | SyslType.StringType | _: SyslType.SliceType
-               | _: SyslType.ArrayType => ()
-            case _ => emit("  load64")
-
-    case TAddrOf(name, _) =>
-      locals.get(name) match
-        case Some(LocalInfo(idx, typ)) if needsMemAlloc(typ) =>
-          // Aggregate local: the local already holds the memory address
-          emit(s"  local_get $idx")
-        case Some(LocalInfo(idx, typ)) if addressedLocals.contains(name) =>
-          // Addressed scalar: the local already holds the cell's pointer.
-          emit(s"  local_get $idx")
-        case Some(LocalInfo(idx, typ)) =>
-          // Scalar local, not pre-flagged as addressed. Spill to a new slot
-          // — caveat: subsequent modifications through this pointer will
-          // NOT sync back to the local (fallback path for unscanned uses).
-          emitMemAlloc(8)
-          emit("  dup")
-          emit(s"  local_get $idx")
-          emit("  swap")
-          emit("  store64")
-        case None =>
-          emit(s"  push_i64 $name")
-
-    case TAddrOfIndex(array, index, typ) =>
-      genExpr(array)
-      val elemType = array.typ.underlying match
-        case SyslType.ArrayType(e, _) => e
-        case SyslType.PtrType(e) => e
-        case SyslType.SliceType(e) => e
-        case SyslType.RefType(SyslType.SliceType(e)) => e
-        case _ => SyslType.I64
-      array.typ.underlying match
-        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
-          emit("  load64") // slice struct → data ptr
-        case _ =>
-      genExpr(index)
-      emitPushInt(elemType.sizeOf)
-      emit("  mul")
-      emit("  add")
-
-    case TAddrOfField(obj, fieldIndex, typ) =>
-      genStructAddr(obj)
-      val st = obj.typ match
-        case s: SyslType.StructType => s
-        case SyslType.RefType(s: SyslType.StructType) => s
-        case SyslType.PtrType(s: SyslType.StructType) => s
-        case _ => sys.error(s"field addr on non-struct: ${obj.typ}")
-      val off = fieldOffset(st, fieldIndex)
-      if off != 0 then
-        emitPushInt(off)
-        emit("  add")
-
-    case TDeref(ptr, typ) =>
-      genExpr(ptr)
-      // Aggregates are address-represented; dereferencing a pointer to one
-      // is a no-op — the pointer value IS the aggregate "value".
-      if !needsMemAlloc(typ) && typ != SyslType.StringType && !typ.isInstanceOf[SyslType.SliceType] then
-        emitLoad(typ)
-
-    case TIndex(array, index, typ) =>
-      genExpr(array)
-      val elemType = array.typ match
-        case SyslType.ArrayType(e, _) => e
-        case SyslType.PtrType(e) => e
-        case SyslType.SliceType(e) => e
-        case SyslType.RefType(SyslType.SliceType(e)) => e
-        case SyslType.StringType => SyslType.UIntType(8)
-        case _ => typ
-      array.typ match
-        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) | SyslType.StringType =>
-          emit("  load64") // deref struct → data ptr (strings and slices both start with ptr at offset 0)
-        case _ =>
-      genExpr(index)
-      emitPushInt(elemType.sizeOf)
-      emit("  mul")
-      emit("  add")
-      emitLoad(typ)
-
-    case TFieldAccess(obj, fieldIndex, typ) =>
-      genStructAddr(obj)
-      val st = canonicalStruct(obj.typ.underlying match
-        case s: SyslType.StructType => s
-        case SyslType.RefType(s) => s.underlying match
-          case ss: SyslType.StructType => ss
-          case _ => sys.error(s"field access on non-struct: ${obj.typ}")
-        case SyslType.PtrType(s) => s.underlying match
-          case ss: SyslType.StructType => ss
-          case _ => sys.error(s"field access on non-struct: ${obj.typ}")
-        case _ => sys.error(s"field access on non-struct: ${obj.typ}"))
-      val off = fieldOffset(st, fieldIndex)
-      if off != 0 then
-        emitPushInt(off)
-        emit("  add")
-      emitLoad(typ)
-
-    case TBinary(left, "&&", right, _) =>
-      val falseLabel = newLabel("and_f")
-      val endLabel = newLabel("and_end")
-      genExpr(left)
-      emit(s"  jumpz $falseLabel")
-      genExpr(right)
-      emit(s"  jumpz $falseLabel")
-      emit("  push_1")
-      emit(s"  jump $endLabel")
-      emit(s"$falseLabel:")
-      emit("  push_0")
-      emit(s"$endLabel:")
-
-    case TBinary(left, "||", right, _) =>
-      val trueLabel = newLabel("or_t")
-      val endLabel = newLabel("or_end")
-      genExpr(left)
-      emit(s"  jumpnz $trueLabel")
-      genExpr(right)
-      emit(s"  jumpnz $trueLabel")
-      emit("  push_0")
-      emit(s"  jump $endLabel")
-      emit(s"$trueLabel:")
-      emit("  push_1")
-      emit(s"$endLabel:")
-
-    case TBinary(left, op @ ("+" | "-"), right, typ) if left.typ.isInstanceOf[SyslType.PtrType] =>
-      // Pointer arithmetic: scale the integer operand by pointee size
-      val pointee = left.typ.asInstanceOf[SyslType.PtrType].pointee
-      genExpr(left)
-      genExpr(right)
-      val elemSize = pointee.sizeOf
-      if elemSize != 1 then
-        emitPushInt(elemSize)
-        emit("  mul")
-      emitBinaryOp(op, SyslType.I64)
-
-    case TBinary(left, "+", right, SyslType.StringType) =>
-      genExpr(left)
-      genExpr(right)
-      emit("  call __svm_str_concat")
-      needsStrConcat = true
-
-    case TBinary(left, op @ ("==" | "!="), right, _) if left.typ == SyslType.StringType =>
-      genExpr(left)
-      genExpr(right)
-      emit("  call __svm_str_eq")
-      if op == "!=" then emit("  eqz")
-      needsStrEq = true
-
-    case TBinary(left, op @ ("<" | "<=" | ">" | ">="), right, _) if left.typ == SyslType.StringType =>
-      // Lexicographic byte-wise compare via __svm_str_cmp (returns signed
-      // 3-way: negative / zero / positive). Reduce to bool with the matching
-      // zero-relative predicate.
-      genExpr(left)
-      genExpr(right)
-      emit("  call __svm_str_cmp")
-      op match
-        case "<"  => emit("  ltz")
-        case "<=" => emit("  lez")
-        case ">"  => emit("  gtz")
-        case ">=" => emit("  gez")
-      needsStrCmp = true
-
-    case TBinary(left, op, right, typ) =>
-      genExpr(left)
-      genExpr(right)
-      emitBinaryOp(op, left.typ)
-
-    case TUnary("-", operand, _) =>
-      genExpr(operand)
-      if isFloat(operand.typ) then emit("  fneg")
-      else emit("  neg")
-      truncateForNarrow(operand.typ)
-
-    case TUnary("!", operand, _) =>
-      genExpr(operand)
-      emit("  eqz")
-
-    case TUnary("~", operand, _) =>
-      genExpr(operand)
-      emit("  not")
-      truncateForNarrow(operand.typ)
-
-    case TRangeCheck(inner, range, _, _) =>
-      genExpr(inner) // stack: [val]
-      val failLbl = newLabel("range_fail")
-      val passLbl = newLabel("range_pass")
-      val u = inner.typ.underlying.isUnsigned
-      val f = inner.typ.underlying.isFloat
-      def pushNum(n: Any): Unit = n match
-        case v: Long => emitPushInt(v)
-        case v: Double =>
-          val bits = java.lang.Double.doubleToRawLongBits(v)
-          emit(s"  push_i64 $bits")
-      def geOp(): String = if f then "fge" else if u then "geu" else "ge"
-      def ltOp(): String = if f then "flt" else if u then "ltu" else "lt"
-      def leOp(): String = if f then "fle" else if u then "leu" else "le"
-      range match
-        case IntRange(lo, hi, excl) =>
-          emit("  dup")
-          pushNum(lo)
-          emit(s"  ${geOp()}")
-          emit(s"  jumpz $failLbl")
-          emit("  dup")
-          pushNum(hi)
-          emit(s"  ${if excl then ltOp() else leOp()}")
-          emit(s"  jumpz $failLbl")
-        case FloatRange(lo, hi, excl) =>
-          emit("  dup")
-          pushNum(lo)
-          emit(s"  ${geOp()}")
-          emit(s"  jumpz $failLbl")
-          emit("  dup")
-          pushNum(hi)
-          emit(s"  ${if excl then ltOp() else leOp()}")
-          emit(s"  jumpz $failLbl")
-      emit(s"  jump $passLbl")
-      emit(s"$failLbl:")
-      emit("  halt")
-      emit(s"$passLbl:")
-
-    case TStringFromSlice(slice, _) =>
-      // []byte -> string: copy the slice's bytes into a fresh memory-stack
-      // buffer and return a new 16-byte {ptr, len} descriptor pointing at
-      // the copy. The reference (§3231) makes this an explicit copy so
-      // later mutation of the source array doesn't alias into the string.
-      genExpr(slice)
-      val srcIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $srcIdx")
-      // Slice layout is {ptr i64 @0, len i32 @8, cap i32 @12, backref ...}.
-      // Extract ptr + len-as-i64 (load32 zero-extends).
-      val srcPtrIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_get $srcIdx"); emit("  load64"); emit(s"  local_set $srcPtrIdx")
-      val lenIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_get $srcIdx"); emitPushInt(8); emit("  add"); emit("  load32")
-      emit(s"  local_set $lenIdx")
-      val bufIdx = emitDynByteAllocAndCopy(srcPtrIdx, lenIdx)
-      emitMemAlloc(16)
-      val dstIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $dstIdx")
-      emit(s"  local_get $bufIdx"); emit(s"  local_get $dstIdx"); emit("  store64")
-      emit(s"  local_get $lenIdx"); emit(s"  local_get $dstIdx"); emitPushInt(8); emit("  add"); emit("  store64")
-      emit(s"  local_get $dstIdx")
-
-    case TStringFromPtr(ptr, len, _) =>
-      // string(ptr, len) -> string: copy `len` bytes from `ptr` into a fresh
-      // buffer and stash that buffer in the new descriptor. Reference
-      // (§3231) prescribes the copy so subsequent writes through `ptr`
-      // don't bleed into the string.
-      genExpr(ptr)
-      val ptrIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $ptrIdx")
-      genExpr(len)
-      val lenIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $lenIdx")
-      val bufIdx = emitDynByteAllocAndCopy(ptrIdx, lenIdx)
-      emitMemAlloc(16)
-      val dstIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $dstIdx")
-      emit(s"  local_get $bufIdx"); emit(s"  local_get $dstIdx"); emit("  store64")
-      emit(s"  local_get $lenIdx"); emit(s"  local_get $dstIdx"); emitPushInt(8); emit("  add"); emit("  store64")
-      emit(s"  local_get $dstIdx")
-
-    case TCast(inner, target) =>
-      genExpr(inner)
-      emitCast(inner.typ, target)
-
-    case TCall(name, args, _) =>
-      // Push args left-to-right, materializing a slice struct when the param
-      // expects a slice and the caller is handing over a fixed array.
-      val paramTypes = funcParamTypes.getOrElse(name, Nil)
-      for (arg, idx) <- args.zipWithIndex do
-        val paramType = paramTypes.lift(idx)
-        (arg.typ.underlying, paramType.map(_.underlying)) match
-          case (SyslType.ArrayType(_, size), Some(_: SyslType.SliceType)) =>
-            emitArrayToSlice(arg, size)
-          case _ => genExpr(arg)
-      emit(s"  call $name")
-
-    case TStr(inner) =>
-      inner.typ.underlying match
-        case SyslType.StringType => genExpr(inner) // identity
-        case SyslType.BoolType =>
-          genExpr(inner)
-          emit("  call __svm_str_from_bool")
-          needsStrFromBool = true
-        case t if t.isIntegral =>
-          genExpr(inner)
-          // Widen narrow ints to i64 for the runtime helper. Sign-extend signed
-          // types; zero-extend unsigned.
-          if t.bitWidth < 64 then
-            if t.isSigned then
-              emitPushInt(64 - t.bitWidth); emit("  shl")
-              emitPushInt(64 - t.bitWidth); emit("  sar")
-            else
-              t.bitWidth match
-                case 8 => emitPushInt(0xff); emit("  and")
-                case 16 => emitPushInt(0xffff); emit("  and")
-                case 32 => emit("  push_i64 4294967295"); emit("  and")
-                case _ => ()
-          emit("  call __svm_str_from_i64")
-          needsStrFromI64 = true
-        case _: SyslType.EnumType =>
-          // Simple enum (no data variants): use the runtime int helper on the tag.
-          // Data-enum variants would need the analyzer's tag-dispatch helpers,
-          // which std/ doesn't currently exercise on SVM. Fall through to ???
-          // for non-simple enums.
-          val isSimple = inner.typ.underlying match
-            case SyslType.EnumType(_, vs) => vs.forall(_._2.isEmpty)
-            case _ => false
-          if isSimple then
-            genExpr(inner)
-            // Tag is loaded as i32; load it from the address and convert.
-            emit("  load32s")
-            emit("  call __svm_str_from_i64")
-            needsStrFromI64 = true
-          else
-            emitStrPlaceholder(inner)
-        case SyslType.FloatType(64) =>
-          genExpr(inner)
-          emit("  call __svm_str_from_f64")
-          needsStrFromF64 = true
-        case SyslType.FloatType(32) =>
-          // Widen f32 → f64, then format. SVM expression results for f32 live
-          // in the same 8-byte slot as f64; reinterpreting as double is a
-          // bit-pattern issue. Use a `dup; fneg; fneg` no-op? Simpler: route
-          // through the runtime helper as-is — f32 values in SVM are already
-          // stored as f64 bit patterns because the stack is 8 bytes wide.
-          // (If f32 ever genuinely materialises here, the helper still treats
-          // the bits as f64.)
-          genExpr(inner)
-          emit("  call __svm_str_from_f64")
-          needsStrFromF64 = true
-        case _ =>
-          emitStrPlaceholder(inner)
-
-    case TTempAddr(inner, _) =>
-      inner.typ.underlying match
-        case _: SyslType.StructType | _: SyslType.EnumType
-           | SyslType.StringType | _: SyslType.SliceType
-           | _: SyslType.ArrayType =>
-          // Address-represented aggregate: genExpr already returns an address.
-          genExpr(inner)
-        case _ =>
-          // Scalar: spill to 8-byte slot on the memory stack, return slot addr.
-          genExpr(inner)
-          emitMemAlloc(8)
-          emit("  dup")           // (val, slot, slot)
-          emit("  rot")           // (slot, slot, val)
-          emit("  swap")          // (slot, val, slot)
-          emit("  store64")       // stack: (slot)
-
-    case TIfExpr(cond, thenBody, Some(elseBody), typ) =>
-      val elseLabel = newLabel("else")
-      val endLabel = newLabel("endif")
-      genExpr(cond)
-      emit(s"  jumpz $elseLabel")
-      if typ == SyslType.UnitType then genStmts(thenBody) else genStmtsAsExpr(thenBody)
-      emit(s"  jump $endLabel")
-      emit(s"$elseLabel:")
-      if typ == SyslType.UnitType then genStmts(elseBody) else genStmtsAsExpr(elseBody)
-      emit(s"$endLabel:")
-
-    case TIfExpr(cond, thenBody, None, typ) =>
-      if typ == SyslType.UnitType then
-        val endLabel = newLabel("endif")
-        genExpr(cond)
-        emit(s"  jumpz $endLabel")
-        genStmts(thenBody)
-        emit(s"$endLabel:")
-      else
-        // Non-void if-without-else: skip path needs a synthetic value so the
-        // stack is balanced regardless of branch taken. (Analyzer types such
-        // expressions non-void based on the then-body's last expression.)
-        val elseLabel = newLabel("else")
-        val endLabel = newLabel("endif")
-        genExpr(cond)
-        emit(s"  jumpz $elseLabel")
-        genStmtsAsExpr(thenBody)
-        emit(s"  jump $endLabel")
-        emit(s"$elseLabel:")
-        emitPushInt(0)
-        emit(s"$endLabel:")
-
-    case TMatchExpr(scrutinee, arms, default, matchTyp) =>
-      genMatch(scrutinee, arms, default, matchTyp, asExpr = true)
-
-    case TPreInc(name, _) =>
-      val LocalInfo(idx, _) = locals(name): @unchecked
-      emit(s"  local_get $idx")
-      emit("  inc")
-      emit("  dup")
-      emit(s"  local_set $idx")
-
-    case TPreDec(name, _) =>
-      val LocalInfo(idx, _) = locals(name): @unchecked
-      emit(s"  local_get $idx")
-      emit("  dec")
-      emit("  dup")
-      emit(s"  local_set $idx")
-
-    case TPostInc(name, _) =>
-      val LocalInfo(idx, _) = locals(name): @unchecked
-      emit(s"  local_get $idx")
-      emit("  dup")
-      emit("  inc")
-      emit(s"  local_set $idx")
-
-    case TPostDec(name, _) =>
-      val LocalInfo(idx, _) = locals(name): @unchecked
-      emit(s"  local_get $idx")
-      emit("  dup")
-      emit("  dec")
-      emit(s"  local_set $idx")
-
-    case TStringLit(value, _) =>
-      labelCounter += 1
-      val label = if modulePrefix.nonEmpty then s"__str_${modulePrefix}_$labelCounter" else s"__str_$labelCounter"
-      stringLiterals += ((label, value))
-      val bytes = value.getBytes("ISO-8859-1")
-      // String is a 16-byte fat pointer {ptr, len} allocated on memory stack.
-      // The label points past the refcount header to the byte data.
-      emitMemAlloc(16)
-      emit("  dup")
-      emit(s"  push_i64 $label") // ptr to byte data
-      emit("  swap")
-      emit("  store64")          // store ptr at offset 0
-      emit("  dup")
-      emitPushInt(8)
-      emit("  add")
-      emitPushInt(bytes.length)
-      emit("  swap")
-      emit("  store64")          // store len at offset 8
-
-    case TAsmExpr(code, _) =>
-      emit(s"  $code")
-
-    case TFmtStr(inner, spec) =>
-      // Lower formatted-string interpolations to a runtime helper. For
-      // integer verbs we route through __svm_str_fmt_i64 with the appropriate
-      // base/width/flag bits. For %s we just pass the string through (with
-      // optional padding via __svm_str_fmt_i64 — not supported yet, fall back
-      // to the unpadded string).
-      val verb = spec.verb
-      verb match
-        case 'd' | 'x' | 'X' | 'o' | 'b' if inner.typ.isIntegral =>
-          genExpr(inner)
-          // Widen narrow ints to i64 for the runtime helper.
-          val t = inner.typ.underlying
-          if t.bitWidth < 64 then
-            if t.isSigned then
-              emitPushInt(64 - t.bitWidth); emit("  shl")
-              emitPushInt(64 - t.bitWidth); emit("  sar")
-            else
-              t.bitWidth match
-                case 8 => emitPushInt(0xff); emit("  and")
-                case 16 => emitPushInt(0xffff); emit("  and")
-                case 32 => emit("  push_i64 4294967295"); emit("  and")
-                case _ => ()
-          val base = verb match
-            case 'd' => 10; case 'x' | 'X' => 16; case 'o' => 8; case 'b' => 2
-            case _ => 10
-          emitPushInt(base)
-          emitPushInt(spec.width)
-          var flags = 0
-          if spec.zeroPad then flags |= 0x1
-          if spec.leftAlign then flags |= 0x2
-          if spec.showSign then flags |= 0x4
-          if spec.upperCase || verb == 'X' then flags |= 0x8
-          emitPushInt(flags)
-          emit("  call __svm_str_fmt_i64")
-          needsStrFmtI64 = true
-        case 's' if inner.typ.underlying == SyslType.StringType =>
-          genExpr(inner)
-          if spec.width > 0 then
-            emitPushInt(spec.width)
-            emitPushInt(if spec.leftAlign then 1 else 0)
-            emit("  call __svm_str_fmt_str")
-            needsStrFmtStr = true
-        case _ =>
-          // Any other shape: fall back to plain TStr semantics.
-          genExpr(TStr(inner))
-
-    case TQuantifier(kind, name, nameType, lo, hi, inclusive, pred, _) =>
-      // Lower to a short-circuiting loop. `result` is the accumulator —
-      // starts at 1 for "all" (vacuous truth on empty range) and 0 for
-      // "some". On a counterexample (all) or witness (some), set the result
-      // and break out of the loop.
-      val resultIdx = nextLocalIndex; nextLocalIndex += 1
-      val iterIdx = nextLocalIndex; nextLocalIndex += 1
-      val endIdx = nextLocalIndex; nextLocalIndex += 1
-      val initBit = if kind == "all" then 1 else 0
-      emitPushInt(initBit)
-      emit(s"  local_set $resultIdx")
-      genExpr(lo)
-      emit(s"  local_set $iterIdx")
-      genExpr(hi)
-      if !inclusive then emit("  dec")
-      emit(s"  local_set $endIdx")
-      // Bind the loop variable so genExpr(pred) finds it as a regular local.
-      val savedBinding = locals.get(name)
-      locals(name) = LocalInfo(iterIdx, nameType)
-      val condLbl = newLabel("quant_cond")
-      val incLbl = newLabel("quant_inc")
-      val endLbl = newLabel("quant_end")
-      emit(s"$condLbl:")
-      emit(s"  local_get $iterIdx")
-      emit(s"  local_get $endIdx")
-      emit(if nameType.isUnsigned then "  leu" else "  le")
-      emit(s"  jumpz $endLbl")
-      genExpr(pred)
-      if kind == "all" then
-        // pred true → continue; pred false → set 0 and break
-        emit(s"  jumpnz $incLbl")
-        emit("  push_0")
-        emit(s"  local_set $resultIdx")
-        emit(s"  jump $endLbl")
-      else
-        // pred true → set 1 and break; pred false → continue
-        emit(s"  jumpz $incLbl")
-        emit("  push_1")
-        emit(s"  local_set $resultIdx")
-        emit(s"  jump $endLbl")
-      emit(s"$incLbl:")
-      emit(s"  local_get $iterIdx")
-      emit("  inc")
-      emit(s"  local_set $iterIdx")
-      emit(s"  jump $condLbl")
-      emit(s"$endLbl:")
-      // Restore prior binding (or remove the synthetic one).
-      savedBinding match
-        case Some(b) => locals(name) = b
-        case None => locals.remove(name)
-      emit(s"  local_get $resultIdx")
-
-    case TIntrinsicCall(intrName, args, retTyp) =>
-      // Compiler intrinsics — wrapping/saturating arithmetic. SVM int ops
-      // wrap naturally for i64; for narrow types `emitBinaryOp` already
-      // truncates. Saturating variants need explicit overflow detection.
-      intrName match
-        case "wrapping_add" | "wrapping_sub" | "wrapping_mul" =>
-          genExpr(args(0))
-          genExpr(args(1))
-          val op = intrName.stripPrefix("wrapping_") match
-            case "add" => "+"; case "sub" => "-"; case "mul" => "*"
-          emitBinaryOp(op, retTyp)
-        case "saturating_add" | "saturating_sub" | "saturating_mul" =>
-          val signed = retTyp.isSigned
-          val width = retTyp.bitWidth
-          // Bounds for the target type
-          val (minV, maxV) = if signed then
-            (-(1L << (width - 1)), (1L << (width - 1)) - 1)
-          else
-            (0L, if width == 64 then -1L else (1L << width) - 1)
-          // Stash a, b in temp locals
-          val aIdx = nextLocalIndex; nextLocalIndex += 1
-          val bIdx = nextLocalIndex; nextLocalIndex += 1
-          val rIdx = nextLocalIndex; nextLocalIndex += 1
-          genExpr(args(0))
-          emit(s"  local_set $aIdx")
-          genExpr(args(1))
-          emit(s"  local_set $bIdx")
-          // r = wrapping op (full i64 then truncate at the end)
-          emit(s"  local_get $aIdx")
-          emit(s"  local_get $bIdx")
-          val op = intrName match
-            case "saturating_add" => "+"
-            case "saturating_sub" => "-"
-            case "saturating_mul" => "*"
-          emit(op match { case "+" => "  add"; case "-" => "  sub"; case "*" => "  mul" })
-          emit(s"  local_set $rIdx")
-          val satLbl = newLabel("sat_done")
-          if !signed then
-            // unsigned overflow detection:
-            // add: width<64 → r > MAX; width=64 → r < a (wrap)
-            // sub: a < b → underflow → set 0
-            // mul: if a != 0 && r/a != b → overflow → set MAX
-            intrName match
-              case "saturating_add" =>
-                if width < 64 then
-                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gtu")
-                else
-                  emit(s"  local_get $rIdx"); emit(s"  local_get $aIdx"); emit("  ltu")
-                val notOv = newLabel("sat_no_ov")
-                emit(s"  jumpz $notOv")
-                emitPushInt(maxV)
-                emit(s"  local_set $rIdx")
-                emit(s"$notOv:")
-              case "saturating_sub" =>
-                emit(s"  local_get $aIdx"); emit(s"  local_get $bIdx")
-                emit("  ltu")
-                val notUf = newLabel("sat_no_uf")
-                emit(s"  jumpz $notUf")
-                emit("  push_0")
-                emit(s"  local_set $rIdx")
-                emit(s"$notUf:")
-              case "saturating_mul" =>
-                // For narrow widths the wrapping result already truncated; check
-                // against MAX.  For i64, use divu by a to detect overflow.
-                if width < 64 then
-                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gtu")
-                  val notOv = newLabel("sat_no_ov")
-                  emit(s"  jumpz $notOv")
-                  emitPushInt(maxV); emit(s"  local_set $rIdx")
-                  emit(s"$notOv:")
-                else
-                  // 64-bit unsigned saturating_mul: if a != 0 && r/a != b → overflow.
-                  emit(s"  local_get $aIdx"); emit("  push_0"); emit("  neq")
-                  val skip = newLabel("sat_skip")
-                  emit(s"  jumpz $skip")     // a == 0 → r already 0, no overflow
-                  emit(s"  local_get $rIdx"); emit(s"  local_get $aIdx"); emit("  divu")
-                  emit(s"  local_get $bIdx"); emit("  neq")
-                  val notOv = newLabel("sat_no_ov")
-                  emit(s"  jumpz $notOv")
-                  emit("  push_m1")          // unsigned MAX = -1
-                  emit(s"  local_set $rIdx")
-                  emit(s"$notOv:")
-                  emit(s"$skip:")
-              case _ => ()
-          else
-            // signed overflow detection
-            intrName match
-              case "saturating_add" =>
-                if width < 64 then
-                  // Narrow signed add: SVM does the sum in full i64, so
-                  // r doesn't wrap yet — overflow is whether r escapes
-                  // [minV, maxV]. r > maxV → MAX; r < minV → MIN.
-                  val noOv = newLabel("sat_no_ov")
-                  val tryUf = newLabel("sat_try_uf")
-                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gt")
-                  emit(s"  jumpz $tryUf")
-                  emitPushInt(maxV); emit(s"  local_set $rIdx")
-                  emit(s"  jump $noOv")
-                  emit(s"$tryUf:")
-                  emit(s"  local_get $rIdx"); emitPushInt(minV); emit("  lt")
-                  emit(s"  jumpz $noOv")
-                  emitPushInt(minV); emit(s"  local_set $rIdx")
-                  emit(s"$noOv:")
-                else
-                  // 64-bit signed add: wrapping has already happened in r,
-                  // so detect by sign pattern of inputs vs result.
-                  // overflow if (a >= 0 && b >= 0 && r < 0) → MAX
-                  // underflow if (a < 0 && b < 0 && r >= 0) → MIN
-                  val noOv = newLabel("sat_no_ov")
-                  val checkUf = newLabel("sat_check_uf")
-                  emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpnz $checkUf") // a < 0 → check underflow
-                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpnz $noOv")    // b < 0 → no overflow
-                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpz $noOv")     // r >= 0 → no overflow
-                  emitPushInt(maxV); emit(s"  local_set $rIdx")
-                  emit(s"  jump $noOv")
-                  emit(s"$checkUf:")
-                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpz $noOv")     // b >= 0 → no underflow
-                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpnz $noOv")    // r < 0 → no underflow
-                  emitPushInt(minV); emit(s"  local_set $rIdx")
-                  emit(s"$noOv:")
-              case "saturating_sub" =>
-                if width < 64 then
-                  // Narrow signed sub: same range-check shape as narrow add.
-                  val noOv = newLabel("sat_no_ov")
-                  val tryUf = newLabel("sat_try_uf")
-                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gt")
-                  emit(s"  jumpz $tryUf")
-                  emitPushInt(maxV); emit(s"  local_set $rIdx")
-                  emit(s"  jump $noOv")
-                  emit(s"$tryUf:")
-                  emit(s"  local_get $rIdx"); emitPushInt(minV); emit("  lt")
-                  emit(s"  jumpz $noOv")
-                  emitPushInt(minV); emit(s"  local_set $rIdx")
-                  emit(s"$noOv:")
-                else
-                  // 64-bit signed sub: wrapping happened in r, detect by signs.
-                  // overflow if (a >= 0 && b < 0 && r < 0) → MAX
-                  // underflow if (a < 0 && b >= 0 && r >= 0) → MIN
-                  val noOv = newLabel("sat_no_ov")
-                  val checkUf = newLabel("sat_check_uf")
-                  emit(s"  local_get $aIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpnz $checkUf")
-                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpz $noOv")
-                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpz $noOv")
-                  emitPushInt(maxV); emit(s"  local_set $rIdx")
-                  emit(s"  jump $noOv")
-                  emit(s"$checkUf:")
-                  emit(s"  local_get $bIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpnz $noOv")
-                  emit(s"  local_get $rIdx"); emit("  push_0"); emit("  lt")
-                  emit(s"  jumpnz $noOv")
-                  emitPushInt(minV); emit(s"  local_set $rIdx")
-                  emit(s"$noOv:")
-              case "saturating_mul" =>
-                // For narrow widths: check against [minV, maxV].
-                if width < 64 then
-                  val skip = newLabel("sat_skip")
-                  val ov = newLabel("sat_ov")
-                  emit(s"  local_get $rIdx"); emitPushInt(maxV); emit("  gt")
-                  emit(s"  jumpnz $ov")
-                  emit(s"  local_get $rIdx"); emitPushInt(minV); emit("  lt")
-                  emit(s"  jumpz $skip")
-                  emit(s"$ov:")
-                  // sign of (a XOR b) determines clamp direction
-                  emit(s"  local_get $aIdx"); emit(s"  local_get $bIdx"); emit("  xor")
-                  emit("  push_0"); emit("  lt")
-                  val negSign = newLabel("sat_neg")
-                  emit(s"  jumpnz $negSign")
-                  emitPushInt(maxV); emit(s"  local_set $rIdx")
-                  emit(s"  jump $skip")
-                  emit(s"$negSign:")
-                  emitPushInt(minV); emit(s"  local_set $rIdx")
-                  emit(s"$skip:")
-                else
-                  // 64-bit signed saturating_mul: omit (rare; std/ doesn't use)
-                  ()
-              case _ => ()
-          emit(s"$satLbl:")
-          emit(s"  local_get $rIdx")
-        case _ =>
-          sys.error(s"unsupported intrinsic '$intrName' on SVM backend")
-
-    case TAddrLit(fpOffset) =>
-      // Address relative to the frame pointer — used only by hidden return
-      // slot args, which SVM doesn't use. Push the local slot's address as
-      // the byte offset; rely on the fact that locals are 8-byte cells.
-      // Since SVM doesn't have a frame-relative address mode, surface this as
-      // an error if it ever gets exercised — std/ doesn't reach here.
-      sys.error(s"TAddrLit(fp+$fpOffset) unsupported on SVM (no frame-relative addressing)")
-
-    case TFuncRef(name, typ) =>
-      // FuncType is a 16-byte aggregate {func_ptr, env_ptr}. Construct a
-      // descriptor on the memory stack pointing at a per-function shim that
-      // ignores env and forwards to `name`. Without the shim, an indirect
-      // call would push env_ptr as a hidden first arg that `name` does not
-      // accept.
-      val (paramTypes, retType) = typ match
-        case SyslType.FuncType(p, r, _, _) => (p, r)
-        case _ => (Nil, SyslType.UnitType)
-      val shim = shimNameFor(name)
-      if !emittedShims.contains(shim) then
-        emittedShims += shim
-        pendingShims += ((shim, name, paramTypes, retType))
-      emitMemAlloc(16)
-      emit("  dup")
-      emit(s"  push_i64 $shim")
-      emit("  swap")
-      emit("  store64")            // descr[0] = shim_ptr
-      emit("  dup")
-      emitPushInt(8)
-      emit("  add")
-      emit("  push_0")
-      emit("  swap")
-      emit("  store64")            // descr[8] = 0 (no env)
-
-    case c: TClosure =>
-      genClosureExpr(c)
-
-    case TIndirectCall(callee, args, _) =>
-      // Closure-style indirect call: callee evaluates to a 16-byte descriptor
-      // address. We push env_ptr as a hidden first arg, then explicit args,
-      // then load the func_ptr and `callr`. Plain function pointers go through
-      // their per-function shim (constructed by TFuncRef) which ignores env.
-      callee.typ match
-        case _: SyslType.FuncType =>
-          genExpr(callee)               // descr_addr
-          val descrIdx = nextLocalIndex
-          nextLocalIndex += 1
-          emit(s"  local_set $descrIdx")
-          // Push env_ptr (hidden first arg)
-          emit(s"  local_get $descrIdx")
-          emitPushInt(8)
-          emit("  add")
-          emit("  load64")
-          // Push explicit args
-          for a <- args do genExpr(a)
-          // Push func_ptr and callr
-          emit(s"  local_get $descrIdx")
-          emit("  load64")
-          emit("  callr")
-        case _ =>
-          // Legacy/non-FuncType callee: treat as raw 8-byte function pointer.
-          for a <- args do genExpr(a)
-          genExpr(callee)
-          emit("  callr")
-
-    case TLen(inner, _) =>
-      inner.typ match
-        case SyslType.StringType =>
-          genExpr(inner)
-          emitPushInt(8)
-          emit("  add")
-          emit("  load64")
-        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
-          genExpr(inner)
-          emitPushInt(8)
-          emit("  add")
-          emit("  load32")
-        case SyslType.ArrayType(_, size) =>
-          emitPushInt(size)
-        case _ =>
-          genExpr(inner)
-
-    case TCap(inner, _) =>
-      inner.typ match
-        case SyslType.SliceType(_) | SyslType.RefType(SyslType.SliceType(_)) =>
-          genExpr(inner)
-          emitPushInt(12)
-          emit("  add")
-          emit("  load32")
-        case SyslType.ArrayType(_, size) =>
-          emitPushInt(size)
-        case _ =>
-          genExpr(inner)
-
-    case TStructLit(typ) =>
-      // Zero-initialized struct on memory stack
-      val size = typ.sizeOf
-      emitMemAlloc(size)
-      // emitMemAlloc already returns fresh (zeroed by convention? no — we must zero)
-      val aligned = ((size + 7) / 8 * 8).toInt
-      for i <- 0 until aligned by 8 do
-        emit("  dup")
-        if i > 0 then { emitPushInt(i); emit("  add") }
-        emit("  push_0")
-        emit("  swap")
-        emit("  store64")
-
-    case TNewArray(elemType, size) =>
-      // __svm_new_slice(byteSize, elemCount) — returns pointer to 24-byte slice struct
-      genExpr(size)                 // elemCount
-      emit("  dup")                 // dup for byteSize computation
-      emitPushInt(elemType.sizeOf)
-      emit("  mul")                 // byteSize on TOS
-      emit("  swap")                // (byteSize, elemCount)
-      emit("  call __svm_new_slice")
-      needsNewSlice = true
-
-    case TAppend(slice, elem, SyslType.SliceType(elemType)) =>
-      val elemSize = elemType.sizeOf
-      // Eval slice addr, save to local
-      genExpr(slice)
-      val sliceIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $sliceIdx")
-      // oldPtr = slice.ptr
-      emit(s"  local_get $sliceIdx")
-      emit("  load64")
-      val oldPtrIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $oldPtrIdx")
-      // oldLen = slice.len
-      emit(s"  local_get $sliceIdx")
-      emitPushInt(8)
-      emit("  add")
-      emit("  load32")
-      val oldLenIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $oldLenIdx")
-      // Allocate new slice of (oldLen + 1) elements
-      emit(s"  local_get $oldLenIdx")
-      emit("  inc")
-      emit("  dup")
-      emitPushInt(elemSize)
-      emit("  mul")
-      emit("  swap")
-      emit("  call __svm_new_slice")
-      val newIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $newIdx")
-      needsNewSlice = true
-      // dst = new.ptr
-      emit(s"  local_get $newIdx")
-      emit("  load64")
-      val dstIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $dstIdx")
-      // remaining = oldLen * elemSize
-      emit(s"  local_get $oldLenIdx")
-      emitPushInt(elemSize)
-      emit("  mul")
-      val remIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $remIdx")
-      // byte copy loop
-      val loop = newLabel("app_copy")
-      val done = newLabel("app_copy_done")
-      emit(s"$loop:")
-      emit(s"  local_get $remIdx"); emit("  eqz"); emit(s"  jumpnz $done")
-      emit(s"  local_get $oldPtrIdx"); emit("  load8")
-      emit(s"  local_get $dstIdx"); emit("  store8")
-      emit(s"  local_get $oldPtrIdx"); emit("  inc"); emit(s"  local_set $oldPtrIdx")
-      emit(s"  local_get $dstIdx"); emit("  inc"); emit(s"  local_set $dstIdx")
-      emit(s"  local_get $remIdx"); emit("  dec"); emit(s"  local_set $remIdx")
-      emit(s"  jump $loop")
-      emit(s"$done:")
-      // Store new element at new.ptr + oldLen * elemSize
-      genExpr(elem)
-      emit(s"  local_get $newIdx")
-      emit("  load64")
-      emit(s"  local_get $oldLenIdx")
-      emitPushInt(elemSize)
-      emit("  mul")
-      emit("  add")
-      emitStore(elemType)
-      // Leave new slice addr on TOS
-      emit(s"  local_get $newIdx")
-
-    case TInterfaceBox(inner, iface, owns) =>
-      // Box a concrete value into a 16-byte {itable_ptr, data_ptr} struct
-      // on the memory stack. For struct values the data_ptr is the struct's
-      // backing address; for pointer/ref types the pointer IS the data_ptr.
-      // owns=true (set by the analyzer for boxes that escape their source
-      // frame, e.g. return position): heap-copy the source struct so the
-      // data buffer outlives the source's local slot.
-      val structName = inner.typ.underlying match
-        case SyslType.StructType(n, _, _) => n
-        case SyslType.PtrType(s) => s.underlying match
-          case SyslType.StructType(n, _, _) => n
-          case other => sys.error(s"TInterfaceBox: unsupported $other")
-        case SyslType.RefType(s) => s.underlying match
-          case SyslType.StructType(n, _, _) => n
-          case other => sys.error(s"TInterfaceBox: unsupported $other")
-        case other => sys.error(s"TInterfaceBox: unsupported $other")
-      val itableName = s"__itable_${structName}_${iface.name}"
-      if !itables.contains(itableName) then
-        itables(itableName) = (iface, structName)
-      // Evaluate inner — for struct types genExpr leaves the struct address
-      // on TOS; for ptr/ref types it leaves the pointer value.
-      genExpr(inner)
-      val dataIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $dataIdx")
-      // Allocate 16-byte iface struct
-      emitMemAlloc(16)
-      val ifaceIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $ifaceIdx")
-      // struct.itable = &itableName
-      emit(s"  push_i64 $itableName")
-      emit(s"  local_get $ifaceIdx")
-      emit("  store64")
-      // struct.data = dataPtr
-      emit(s"  local_get $dataIdx")
-      emit(s"  local_get $ifaceIdx")
-      emitPushInt(8)
-      emit("  add")
-      emit("  store64")
-      emit(s"  local_get $ifaceIdx")
-
-    case TInterfaceDispatch(ifaceVal, methodIndex, args, _) =>
-      // Load data_ptr (becomes first arg, as implicit self), push user args,
-      // then call through itable[methodIndex].
-      genExpr(ifaceVal)                      // iface struct addr
-      val ifaceIdx = nextLocalIndex; nextLocalIndex += 1
-      emit(s"  local_set $ifaceIdx")
-      emit(s"  local_get $ifaceIdx")
-      emitPushInt(8)
-      emit("  add")
-      emit("  load64")                        // data_ptr → pushed as first arg
-      for a <- args do genExpr(a)
-      emit(s"  local_get $ifaceIdx")
-      emit("  load64")                        // itable_ptr
-      if methodIndex != 0 then
-        emitPushInt(methodIndex * 8)
-        emit("  add")
-      emit("  load64")                        // method fn ptr
-      emit("  callr")
-
-    case TNewEnum(et, variantIndex, args) =>
-      // Heap-allocated enum variant. SVM has no real heap; allocate on the
-      // memory stack and leak per-test (same convention as TNew). The result
-      // type is RefType(EnumType) but at the bytecode level the value IS the
-      // data pointer — there is no separate rc header on SVM.
-      val size = et.sizeOf
-      emitMemAlloc(size)
-      val aligned = ((size + 7) / 8 * 8).toInt
-      for i <- 0 until aligned by 8 do
-        emit("  dup")
-        if i > 0 then { emitPushInt(i); emit("  add") }
-        emit("  push_0")
-        emit("  swap")
-        emit("  store64")
-      // Tag at offset 0 (i32)
-      emit("  dup")
-      emitPushInt(variantIndex)
-      emit("  swap")
-      emit("  store32")
-      val dataOff = et.dataOffset.toInt
-      val variantFields = et.variants(variantIndex)._2
-      var fieldOff = 0
-      for (arg, i) <- args.zipWithIndex do
-        val (_, fieldType) = variantFields(i)
-        val align = fieldType.alignOf.toInt.max(1)
-        fieldOff = ((fieldOff + align - 1) / align) * align
-        emit("  dup")
-        val totalOff = dataOff + fieldOff
-        if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
-        genExpr(arg)
-        emit("  swap")
-        emitStore(fieldType)
-        fieldOff += fieldType.sizeOf.toInt
-
-    case TNew(structType, args) =>
-      // Allocate on memory stack (no real heap in SVM); behaves like
-      // TStructConstruct but with an 8-byte refcount header before the data,
-      // and the type is RefType(StructType). Returned TOS is the DATA address
-      // (= header + 8); user code holds this. emitRefIncr/Decr reach the
-      // header via ptr-8.
-      val size = structType.sizeOf
-      emitNewRefAlloc(size)
-      // Zero-init the data area
-      val aligned = ((size + 7) / 8 * 8).toInt
-      for i <- 0 until aligned by 8 do
-        emit("  dup")
-        if i > 0 then { emitPushInt(i); emit("  add") }
-        emit("  push_0")
-        emit("  swap")
-        emit("  store64")
-      for (arg, i) <- args.zipWithIndex do
-        val off = fieldOffset(structType, i)
-        val fieldType = structType.fields(i)._2
-        emit("  dup")
-        if off != 0 then { emitPushInt(off); emit("  add") }
-        genExpr(arg)
-        emit("  swap")
-        emitStore(fieldType)
-
-    case TSliceExpr(array, lowOpt, highOpt, resultTyp)
-        if array.typ == SyslType.StringType && resultTyp == SyslType.StringType =>
-      // String sub-slice — result is a fresh 16-byte string descriptor
-      // {ptr, len(i64)}, NOT the 24-byte slice struct used for []T. Mixing
-      // the two layouts corrupts every downstream string consumer (concat,
-      // interp, equality) because they all read len at offset 8 as i64.
-      val baseIdx = nextLocalIndex; nextLocalIndex += 1
-      val srcLenIdx = nextLocalIndex; nextLocalIndex += 1
-      genExpr(array)
-      emit("  dup")
-      emit("  load64")          // ptr
-      emit(s"  local_set $baseIdx")
-      emitPushInt(8)
-      emit("  add")
-      emit("  load64")          // len (i64, string layout)
-      emit(s"  local_set $srcLenIdx")
-      val loIdx = nextLocalIndex; nextLocalIndex += 1
-      lowOpt match
-        case Some(e) => genExpr(e); emit(s"  local_set $loIdx")
-        case None    => emitPushInt(0); emit(s"  local_set $loIdx")
-      val hiIdx = nextLocalIndex; nextLocalIndex += 1
-      highOpt match
-        case Some(e) => genExpr(e); emit(s"  local_set $hiIdx")
-        case None    => emit(s"  local_get $srcLenIdx"); emit(s"  local_set $hiIdx")
-      emitMemAlloc(16)
-      val descIdx = nextLocalIndex; nextLocalIndex += 1
-      emit("  dup")
-      emit(s"  local_set $descIdx")
-      // desc.ptr = base + lo   (byte advance — element size is 1)
-      emit(s"  local_get $baseIdx")
-      emit(s"  local_get $loIdx")
-      emit("  add")
-      emit("  swap")
-      emit("  store64")
-      // desc.len = hi - lo   (i64)
-      emit(s"  local_get $hiIdx")
-      emit(s"  local_get $loIdx")
-      emit("  sub")
-      emit(s"  local_get $descIdx")
-      emitPushInt(8)
-      emit("  add")
-      emit("  store64")
-      emit(s"  local_get $descIdx")
-
-    case TSliceExpr(array, lowOpt, highOpt, resultTyp) =>
-      // Allocate a 24-byte slice struct on memory stack, fill with
-      //   ptr = base + lo * elemSize
-      //   len = hi - lo
-      //   cap = hi - lo
-      //   backref = 0
-      val elemType = resultTyp match
-        case SyslType.SliceType(e) => e
-        case SyslType.RefType(SyslType.SliceType(e)) => e
-        case _ => SyslType.I64
-      // Compute base pointer + source length based on array.typ
-      val baseIdx = nextLocalIndex; nextLocalIndex += 1
-      val lenIdx = nextLocalIndex; nextLocalIndex += 1
-      array.typ match
-        case SyslType.ArrayType(_, n) =>
-          genExpr(array)
-          emit(s"  local_set $baseIdx")
-          emitPushInt(n)
-          emit(s"  local_set $lenIdx")
-        case SyslType.SliceType(_) =>
-          // array is address of 24-byte slice struct
-          genExpr(array)
-          emit("  dup")             // keep addr
-          emit("  load64")          // ptr
-          emit(s"  local_set $baseIdx")
-          emitPushInt(8)
-          emit("  add")
-          emit("  load32")          // len (i32)
-          emit(s"  local_set $lenIdx")
-        case SyslType.RefType(SyslType.SliceType(_)) =>
-          // refs are pointers to slice structs in our impl; treat as slice
-          genExpr(array)
-          emit("  dup")
-          emit("  load64")
-          emit(s"  local_set $baseIdx")
-          emitPushInt(8)
-          emit("  add")
-          emit("  load32")
-          emit(s"  local_set $lenIdx")
-        case _ =>
-          genExpr(array)
-          emit(s"  local_set $baseIdx")
-          emitPushInt(0)
-          emit(s"  local_set $lenIdx")
-      // Evaluate lo (default 0)
-      val loIdx = nextLocalIndex; nextLocalIndex += 1
-      lowOpt match
-        case Some(e) => genExpr(e); emit(s"  local_set $loIdx")
-        case None    => emitPushInt(0); emit(s"  local_set $loIdx")
-      // Evaluate hi (default len)
-      val hiIdx = nextLocalIndex; nextLocalIndex += 1
-      highOpt match
-        case Some(e) => genExpr(e); emit(s"  local_set $hiIdx")
-        case None    => emit(s"  local_get $lenIdx"); emit(s"  local_set $hiIdx")
-      // Allocate 24-byte slice struct
-      emitMemAlloc(24)
-      val structIdx = nextLocalIndex; nextLocalIndex += 1
-      emit("  dup")
-      emit(s"  local_set $structIdx")
-      // struct.ptr = base + lo * elemSize
-      emit(s"  local_get $baseIdx")
-      emit(s"  local_get $loIdx")
-      emitPushInt(elemType.sizeOf)
-      emit("  mul")
-      emit("  add")
-      emit("  swap")                // (ptr, struct_addr)
-      emit("  store64")
-      // struct.len = hi - lo
-      emit(s"  local_get $hiIdx")
-      emit(s"  local_get $loIdx")
-      emit("  sub")
-      emit(s"  local_get $structIdx")
-      emitPushInt(8)
-      emit("  add")
-      emit("  store32")
-      // struct.cap = hi - lo
-      emit(s"  local_get $hiIdx")
-      emit(s"  local_get $loIdx")
-      emit("  sub")
-      emit(s"  local_get $structIdx")
-      emitPushInt(12)
-      emit("  add")
-      emit("  store32")
-      // struct.backref = 0
-      emit("  push_0")
-      emit(s"  local_get $structIdx")
-      emitPushInt(16)
-      emit("  add")
-      emit("  store64")
-      // leave struct addr on TOS
-      emit(s"  local_get $structIdx")
-
-    case TEnumConstruct(et, variantIndex, args) =>
-      // Allocate enum on memory stack, zero-init, populate tag + variant fields
-      val size = et.sizeOf
-      emitMemAlloc(size)
-      val aligned = ((size + 7) / 8 * 8).toInt
-      for i <- 0 until aligned by 8 do
-        emit("  dup")
-        if i > 0 then { emitPushInt(i); emit("  add") }
-        emit("  push_0")
-        emit("  swap")
-        emit("  store64")
-      // Tag at offset 0 (i32)
-      emit("  dup")
-      emitPushInt(variantIndex)
-      emit("  swap")
-      emit("  store32")
-      // Variant fields at dataOffset
-      val dataOff = et.dataOffset.toInt
-      val variantFields = et.variants(variantIndex)._2
-      var fieldOff = 0
-      for (arg, i) <- args.zipWithIndex do
-        val (_, fieldType) = variantFields(i)
-        val align = fieldType.alignOf.toInt.max(1)
-        fieldOff = ((fieldOff + align - 1) / align) * align
-        emit("  dup") // keep enum addr
-        val totalOff = dataOff + fieldOff
-        if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
-        genExpr(arg)
-        emit("  swap")
-        emitStore(fieldType)
-        fieldOff += fieldType.sizeOf.toInt
-
-    case TStructConstruct(structType, args) =>
-      // Allocate struct on memory stack, populate fields
-      val size = structType.sizeOf
-      emitMemAlloc(size)
-      // Zero-init first
-      val aligned = ((size + 7) / 8 * 8).toInt
-      for i <- 0 until aligned by 8 do
-        emit("  dup")
-        if i > 0 then { emitPushInt(i); emit("  add") }
-        emit("  push_0")
-        emit("  swap")
-        emit("  store64")
-      // Store each field
-      for (arg, i) <- args.zipWithIndex do
-        val off = fieldOffset(structType, i)
-        val fieldType = structType.fields(i)._2
-        emit("  dup") // keep struct addr
-        if off != 0 then { emitPushInt(off); emit("  add") }
-        genExpr(arg)
-        emit("  swap")
-        emitStore(fieldType)
-
-    case TFieldPreInc(obj, fieldIndex, typ) =>
-      val st = structOf(obj.typ)
-      val off = fieldOffset(st, fieldIndex)
-      val fieldType = st.fields(fieldIndex)._2
-      genStructAddr(obj)
-      if off != 0 then { emitPushInt(off); emit("  add") }
-      emit("  dup") // keep address
-      emitLoad(fieldType)
-      emit("  inc")
-      emit("  dup")  // ( addr new_val new_val )
-      emit("  rot")  // ( new_val new_val addr )
-      emitStore(fieldType)
-
-    case TFieldPreDec(obj, fieldIndex, typ) =>
-      val st = structOf(obj.typ)
-      val off = fieldOffset(st, fieldIndex)
-      val fieldType = st.fields(fieldIndex)._2
-      genStructAddr(obj)
-      if off != 0 then { emitPushInt(off); emit("  add") }
-      emit("  dup")
-      emitLoad(fieldType)
-      emit("  dec")
-      emit("  dup")
-      emit("  rot")
-      emitStore(fieldType)
-
-    case TFieldPostInc(obj, fieldIndex, typ) =>
-      val st = structOf(obj.typ)
-      val off = fieldOffset(st, fieldIndex)
-      val fieldType = st.fields(fieldIndex)._2
-      genStructAddr(obj)
-      if off != 0 then { emitPushInt(off); emit("  add") }
-      emit("  dup")
-      emitLoad(fieldType)
-      emit("  dup")  // ( addr old_val old_val )
-      emit("  inc")  // ( addr old_val new_val )
-      emit("  rot")  // ( old_val new_val addr )
-      emitStore(fieldType)
-
-    case TFieldPostDec(obj, fieldIndex, typ) =>
-      val st = structOf(obj.typ)
-      val off = fieldOffset(st, fieldIndex)
-      val fieldType = st.fields(fieldIndex)._2
-      genStructAddr(obj)
-      if off != 0 then { emitPushInt(off); emit("  add") }
-      emit("  dup")
-      emitLoad(fieldType)
-      emit("  dup")
-      emit("  dec")
-      emit("  rot")
-      emitStore(fieldType)
-
-    case TArrayLit(elements, arrType) =>
-      // Allocate the array on the memory stack, populate elements, leave
-      // base address on TOS. Element layout matches `[N]T`: each slot at
-      // offset `i * elemType.sizeOf`.
-      val (elemType, declaredLen) = arrType match
-        case SyslType.ArrayType(e, n) => (e, n.toInt)
-        case _                        => (SyslType.I64, elements.length)
-      val len = declaredLen.max(elements.length)
-      val size = elemType.sizeOf * len
-      emitMemAlloc(size)
-      // Zero-init the whole region first (so any tail past `elements.length`
-      // is well-defined; matches the TVarDecl/TStructConstruct paths).
-      val aligned = ((size + 7) / 8 * 8).toInt
-      for i <- 0 until aligned by 8 do
-        emit("  dup")
-        if i > 0 then { emitPushInt(i); emit("  add") }
-        emit("  push_0")
-        emit("  swap")
-        emit("  store64")
-      // Now write each element. Stack invariant during the loop: ( base ).
-      for (elem, i) <- elements.zipWithIndex do
-        emit("  dup")                          // ( base base )
-        if i != 0 then
-          emitPushInt(i * elemType.sizeOf)
-          emit("  add")                        // ( base base+offset )
-        genExpr(elem)                          // ( base base+offset value )
-        emit("  swap")                         // ( base value base+offset )
-        emitStore(elemType)                    // ( base )
-
-    case _ =>
-      sys.error(s"unhandled TExpr in SVM codegen: ${expr.getClass.getSimpleName}")
-
-  // ========================================================================
   // Helpers
   // ========================================================================
 
-  private def emitBinaryOp(op: String, operandType: SyslType): Unit =
+  def emitBinaryOp(op: String, operandType: SyslType): Unit =
     val f = isFloat(operandType)
     val u = isUnsigned(operandType)
     op match
@@ -3011,7 +1240,7 @@ class SyslSVMCodegen:
 
   /** Mask / sign-extend the 64-bit TOS back to the narrow-int range so
     * overflow in (u)i{8,16,32} arithmetic matches the source-level type. */
-  private def truncateForNarrow(t: SyslType): Unit = t.underlying match
+  def truncateForNarrow(t: SyslType): Unit = t.underlying match
     case SyslType.UIntType(8)  => emitPushInt(0xff); emit("  and")
     case SyslType.UIntType(16) => emitPushInt(0xffff); emit("  and")
     case SyslType.UIntType(32) => emit("  push_i64 4294967295"); emit("  and")
@@ -3020,7 +1249,7 @@ class SyslSVMCodegen:
     case SyslType.IntType(32)  => emitPushInt(32); emit("  shl"); emitPushInt(32); emit("  sar")
     case _ =>
 
-  private def emitStore(typ: SyslType): Unit = typ match
+  def emitStore(typ: SyslType): Unit = typ match
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => emit("  store8")
     case SyslType.IntType(16) | SyslType.UIntType(16) => emit("  store16")
     case SyslType.IntType(32) | SyslType.UIntType(32) => emit("  store32")
@@ -3068,7 +1297,7 @@ class SyslSVMCodegen:
       emit("  drop")
     case _ => emit("  store64")
 
-  private def emitLoad(typ: SyslType): Unit = typ.underlying match
+  def emitLoad(typ: SyslType): Unit = typ.underlying match
     case SyslType.IntType(8) => emit("  load8s")
     case SyslType.UIntType(8) | SyslType.BoolType => emit("  load8")
     case SyslType.IntType(16) => emit("  load16s")
@@ -3082,7 +1311,7 @@ class SyslSVMCodegen:
       ()
     case _ => emit("  load64")
 
-  private def emitCast(from: SyslType, to: SyslType): Unit =
+  def emitCast(from: SyslType, to: SyslType): Unit =
     import SyslType.*
     val srcFloat = from.isFloat
     val tgtFloat = to.isFloat
@@ -3118,105 +1347,7 @@ class SyslSVMCodegen:
           emit("  push_i64 4294967295"); emit("  and")
         case _ => // no-op for same-width or i64/u64/ptr
 
-  // Recursively emit a discriminator check for a (possibly nested) match
-  // pattern. The outer scrutinee value's address is in local `scrIdx`.
-  // `absOff` is the offset from the scrutinee's address where this nested
-  // sub-value lives. For variant patterns, loads the tag at the field
-  // address (i32 at offset 0 of the nested enum) and `jumpz`-es to
-  // `failLabel` on mismatch; recurses for any deeper nested patterns.
-  // For struct destructure patterns, recurses without a discriminator
-  // check. Other pattern shapes (TWildcard / primitives) act as
-  // wildcards in nested position.
-  private def emitNestedPatternCheckSVM(
-      pat: TMatchPattern,
-      fieldType: SyslType,
-      scrIdx: Int,
-      absOff: Int,
-      failLabel: String,
-  ): Unit = pat match
-    case TWildcard => ()
-    case TVariantPattern(et, variantIndex, _, _, deeperNested) =>
-      // Push field address (= scrutinee addr + absOff)
-      emit(s"  local_get $scrIdx")
-      if absOff != 0 then { emitPushInt(absOff); emit("  add") }
-      // Load tag (i32 at offset 0 of the nested enum)
-      emit("  load32")
-      emitPushInt(variantIndex)
-      emit("  eq")
-      emit(s"  jumpz $failLabel")
-      // Recurse into deeper nested
-      val variantFields = et.variants(variantIndex)._2
-      val dataOff = et.dataOffset.toInt
-      var fieldOff = 0
-      for ((deeperOpt, i) <- deeperNested.zipWithIndex) do
-        val (_, deeperFieldType) = variantFields(i)
-        val align = deeperFieldType.alignOf.toInt.max(1)
-        fieldOff = ((fieldOff + align - 1) / align) * align
-        deeperOpt.foreach { deeper =>
-          emitNestedPatternCheckSVM(deeper, deeperFieldType, scrIdx, absOff + dataOff + fieldOff, failLabel)
-        }
-        fieldOff += deeperFieldType.sizeOf.toInt
-    case TDestructurePattern(st, _, _, deeperNested) =>
-      for ((deeperOpt, i) <- deeperNested.zipWithIndex) do
-        deeperOpt.foreach { deeper =>
-          val deeperFieldType = st.fields(i)._2
-          val off = fieldOffset(st, i).toInt
-          emitNestedPatternCheckSVM(deeper, deeperFieldType, scrIdx, absOff + off, failLabel)
-        }
-    case _ => () // primitive nested patterns — treat as wildcard
-
-  // Recursively emit name bindings for a (possibly nested) match pattern.
-  // The outer scrutinee value's address is in local `scrIdx`. `absOff`
-  // is the offset from the scrutinee where this nested sub-value lives.
-  // Each named binding inside the nested pattern allocates a new local
-  // and copies the field value (loaded relative to scrutinee + absOff +
-  // local field offset).
-  private def emitNestedPatternBindingsSVM(
-      pat: TMatchPattern,
-      fieldType: SyslType,
-      scrIdx: Int,
-      absOff: Int,
-  ): Unit = pat match
-    case TVariantPattern(et, variantIndex, bindings, fieldTypes, deeperNested) =>
-      val variantFields = et.variants(variantIndex)._2
-      val dataOff = et.dataOffset.toInt
-      var fieldOff = 0
-      for (((binding, ft), i) <- bindings.zip(fieldTypes).zipWithIndex) do
-        val align = ft.alignOf.toInt.max(1)
-        fieldOff = ((fieldOff + align - 1) / align) * align
-        binding.foreach { name =>
-          val localIdx = nextLocalIndex
-          nextLocalIndex += 1
-          locals(name) = LocalInfo(localIdx, ft)
-          emit(s"  local_get $scrIdx")
-          val totalOff = absOff + dataOff + fieldOff
-          if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
-          emitLoad(ft)
-          emit(s"  local_set $localIdx")
-        }
-        if i < deeperNested.length then deeperNested(i).foreach { deeper =>
-          emitNestedPatternBindingsSVM(deeper, ft, scrIdx, absOff + dataOff + fieldOff)
-        }
-        fieldOff += ft.sizeOf.toInt
-    case TDestructurePattern(st, bindings, fieldTypes, deeperNested) =>
-      for (((binding, ft), i) <- bindings.zip(fieldTypes).zipWithIndex) do
-        val off = fieldOffset(st, i).toInt
-        binding.foreach { name =>
-          val localIdx = nextLocalIndex
-          nextLocalIndex += 1
-          locals(name) = LocalInfo(localIdx, ft)
-          emit(s"  local_get $scrIdx")
-          val totalOff = absOff + off
-          if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
-          emitLoad(ft)
-          emit(s"  local_set $localIdx")
-        }
-        if i < deeperNested.length then deeperNested(i).foreach { deeper =>
-          emitNestedPatternBindingsSVM(deeper, ft, scrIdx, absOff + off)
-        }
-    case _ => ()
-
-  private def fieldOffset(st: SyslType.StructType, fieldIndex: Int): Long =
+  def fieldOffset(st: SyslType.StructType, fieldIndex: Int): Long =
     if fieldIndex >= st.fields.length then
       sys.error(s"fieldOffset: index $fieldIndex out of range for struct '${st.name}' with ${st.fields.length} fields")
     var offset = 0L
@@ -3229,154 +1360,7 @@ class SyslSVMCodegen:
     val align = targetType.alignOf.max(1)
     ((offset + align - 1) / align) * align
 
-  /** Generate a match expression. If asExpr, each body leaves a value on the stack. */
-  private def genMatch(scrutinee: TExpr, arms: List[TMatchArm], default: Option[List[TStmt]], matchTyp: SyslType, asExpr: Boolean): Unit =
-    val scrIdx = nextLocalIndex
-    nextLocalIndex += 1
-    genExpr(scrutinee)
-    emit(s"  local_set $scrIdx")
-    val endLabel = newLabel("match_end")
-    for arm <- arms do
-      val hitLabel = newLabel("match_hit")
-      val nextArm = newLabel("match_next")
-      for pat <- arm.patterns do pat match
-        case TWildcard =>
-          emit(s"  jump $hitLabel")
-        case TBindPattern(_, _) =>
-          // Binding pattern matches anything; the actual name->slot
-          // wiring happens after the hit label below.
-          emit(s"  jump $hitLabel")
-        case TValuePattern(v) =>
-          genExpr(v)
-          emit(s"  local_get $scrIdx")
-          if scrutinee.typ == SyslType.StringType then
-            // Strings are 16-byte fat pointers; the generic `eq` opcode
-            // compares only the descriptor addresses (each TStringLit
-            // allocates a fresh descriptor, so two equal-content strings
-            // never compare equal under raw eq). Route through the
-            // dedicated byte-wise __svm_str_eq helper.
-            emit("  call __svm_str_eq")
-            needsStrEq = true
-          else
-            scrutinee.typ.underlying match
-              case et: SyslType.EnumType if et.variants.forall(_._2.isEmpty) =>
-                // Simple-enum scrutinee is stored as a pointer to an enum
-                // buffer (tag at offset 0). Pattern compares against the
-                // variant's i32 value, so deref the tag first.
-                emit("  load32")
-              case _ =>
-            emit("  eq")
-          emit(s"  jumpnz $hitLabel")
-        case TRangePattern(lo, hi) =>
-          val rangeNext = newLabel("match_rng")
-          emit(s"  local_get $scrIdx")
-          genExpr(lo)
-          emit(if scrutinee.typ.isUnsigned then "  geu" else "  ge")
-          emit(s"  jumpz $rangeNext")
-          emit(s"  local_get $scrIdx")
-          genExpr(hi)
-          emit(if scrutinee.typ.isUnsigned then "  leu" else "  le")
-          emit(s"  jumpnz $hitLabel")
-          emit(s"$rangeNext:")
-        case TDestructurePattern(st, _, _, nested) =>
-          if nested.forall(_.isEmpty) then
-            emit(s"  jump $hitLabel")
-          else
-            val patFail = newLabel("pat_fail")
-            for ((subOpt, i) <- nested.zipWithIndex) do subOpt.foreach { sub =>
-              val off = fieldOffset(st, i)
-              emitNestedPatternCheckSVM(sub, st.fields(i)._2, scrIdx, off.toInt, patFail)
-            }
-            emit(s"  jump $hitLabel")
-            emit(s"$patFail:")
-        case TVariantPattern(et, variantIndex, _, _, nested) =>
-          // Load tag (i32 at offset 0 of enum), compare with variant index
-          emit(s"  local_get $scrIdx")
-          emit("  load32")
-          emitPushInt(variantIndex)
-          emit("  eq")
-          if nested.forall(_.isEmpty) then
-            emit(s"  jumpnz $hitLabel")
-          else
-            val patFail = newLabel("pat_fail")
-            emit(s"  jumpz $patFail")
-            val variantFields = et.variants(variantIndex)._2
-            val dataOff = et.dataOffset.toInt
-            var fieldOff = 0
-            for ((subOpt, i) <- nested.zipWithIndex) do
-              val (_, fieldType) = variantFields(i)
-              val align = fieldType.alignOf.toInt.max(1)
-              fieldOff = ((fieldOff + align - 1) / align) * align
-              subOpt.foreach { sub =>
-                emitNestedPatternCheckSVM(sub, fieldType, scrIdx, dataOff + fieldOff, patFail)
-              }
-              fieldOff += fieldType.sizeOf.toInt
-            emit(s"  jump $hitLabel")
-            emit(s"$patFail:")
-      emit(s"  jump $nextArm")
-      emit(s"$hitLabel:")
-      // Bind destructure/variant pattern fields to locals before guard
-      for pat <- arm.patterns do pat match
-        case TBindPattern(name, typ) =>
-          // Top-level binding: alias the user's name to the scrutinee slot.
-          // No copy needed — arm body won't mutate the synthetic slot.
-          locals(name) = LocalInfo(scrIdx, typ)
-        case TVariantPattern(et, variantIndex, bindings, _, nested) =>
-          val dataOff = et.dataOffset.toInt
-          val variantFields = et.variants(variantIndex)._2
-          var fieldOff = 0
-          for (binding, i) <- bindings.zipWithIndex do
-            val (_, fieldType) = variantFields(i)
-            val align = fieldType.alignOf.toInt.max(1)
-            fieldOff = ((fieldOff + align - 1) / align) * align
-            binding.foreach { name =>
-              val localIdx = nextLocalIndex
-              nextLocalIndex += 1
-              locals(name) = LocalInfo(localIdx, fieldType)
-              emit(s"  local_get $scrIdx")
-              val totalOff = dataOff + fieldOff
-              if totalOff != 0 then { emitPushInt(totalOff); emit("  add") }
-              emitLoad(fieldType)
-              emit(s"  local_set $localIdx")
-            }
-            if i < nested.length then nested(i).foreach { sub =>
-              emitNestedPatternBindingsSVM(sub, fieldType, scrIdx, dataOff + fieldOff)
-            }
-            fieldOff += fieldType.sizeOf.toInt
-        case TDestructurePattern(st, bindings, _, nested) =>
-          for (binding, i) <- bindings.zipWithIndex do
-            val fieldType = st.fields(i)._2
-            binding.foreach { name =>
-              val localIdx = nextLocalIndex
-              nextLocalIndex += 1
-              locals(name) = LocalInfo(localIdx, fieldType)
-              val off = fieldOffset(st, i)
-              emit(s"  local_get $scrIdx")
-              if off != 0 then { emitPushInt(off); emit("  add") }
-              emitLoad(fieldType)
-              emit(s"  local_set $localIdx")
-            }
-            if i < nested.length then nested(i).foreach { sub =>
-              emitNestedPatternBindingsSVM(sub, fieldType, scrIdx, fieldOffset(st, i).toInt)
-            }
-        case _ =>
-      arm.guard.foreach { g =>
-        genExpr(g)
-        emit(s"  jumpz $nextArm")
-      }
-      if asExpr then genStmtsAsExpr(arm.body)
-      else genStmts(arm.body)
-      emit(s"  jump $endLabel")
-      emit(s"$nextArm:")
-    default match
-      case Some(stmts) =>
-        if asExpr then genStmtsAsExpr(stmts)
-        else genStmts(stmts)
-      case None =>
-        if asExpr then emitPushInt(0)
-    emit(s"$endLabel:")
-
-  private def genStructAddr(obj: TExpr): Unit = obj match
+  def genStructAddr(obj: TExpr): Unit = obj match
     case TDeref(ptr, _) =>
       genExpr(ptr) // pointer dereference yields the address
     case TFieldAccess(innerObj, fieldIndex, typ) if needsMemAlloc(typ) =>

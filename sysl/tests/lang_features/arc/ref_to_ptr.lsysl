@@ -1,0 +1,70 @@
+Ref-to-pointer downgrade (`&r` where `r: &T` → `*T`)
+======================================================
+
+Per CLAUDE.md's three-mode Conversion Rules:
+
+  - `ref → ptr`: `&r` yields a raw `*T` pointing at the same
+    heap allocation `r` references. **Unsafe** — no refcount
+    change, no lifetime extension. If the originating ref
+    drops while the raw pointer is still in use, the pointer
+    dangles; the programmer owns that risk. This is the
+    explicit escape hatch for handing ARC-managed data to
+    kernel-style code whose API takes `*T`.
+
+  - `ptr → ref`: ALWAYS REJECTED. You can't manufacture a
+    refcount from a raw pointer. That direction lives in
+    `compile_errors/compile_fail_ptr_to_ref.lsysl` (gated on
+    the `compile_errors/` infrastructure).
+
+Each test below pins one corner of the downgrade contract: a
+read through `*p`, a mutation through `*p` that's visible to the
+original ref, the same `r.field == p.field` value visible both
+ways, and passing `*T` to a function whose signature takes a raw
+pointer.
+
+    module sysl.tests.lang_features
+
+    struct R2pBox
+        v: int
+        tag: int
+
+### Read through `*p` sees the heap value
+
+    #test
+    test_r2p_read_through_ptr() -> unit
+        val r: &R2pBox = new R2pBox(42, 7)
+        val p: *R2pBox = &r
+        assert(p.v == 42, "v through ptr")
+        assert(p.tag == 7, "tag through ptr")
+
+### Mutation through `*p` is visible through the original ref
+
+    #test
+    test_r2p_mutate_through_ptr() -> unit
+        val r: &R2pBox = new R2pBox(1, 0)
+        val p: *R2pBox = &r
+        p.v = 99
+        p.tag = 3
+        assert(r.v == 99, "mutated v visible via ref")
+        assert(r.tag == 3, "mutated tag visible via ref")
+
+### Ref and pointer coexist and see the same data
+
+    #test
+    test_r2p_coexist() -> unit
+        val r: &R2pBox = new R2pBox(11, 22)
+        val p: *R2pBox = &r
+        assert(r.v == p.v, "v")
+        assert(r.tag == p.tag, "tag")
+        r.v = 33
+        assert(p.v == 33, "ref mutate seen by ptr")
+
+### Pass `*T` derived from `&T` to a `*T`-taking function
+
+    r2p_sum_via_ptr(p: *R2pBox) -> int
+        p.v + p.tag
+
+    #test
+    test_r2p_pass_as_ptr_param() -> unit
+        val r: &R2pBox = new R2pBox(10, 20)
+        assert(r2p_sum_via_ptr(&r) == 30, "ptr param")

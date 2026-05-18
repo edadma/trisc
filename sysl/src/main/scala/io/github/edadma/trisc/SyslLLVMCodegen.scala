@@ -538,6 +538,23 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("}")
     emit("")
 
+    // Built-in bounds-check failure helper: writes "panic: index out of bounds\n"
+    // to stderr, abort. The "panic: " prefix matches the existing @panic shape so
+    // the test runner's `panicMarker` (sysl-cli) picks the trap up across all four
+    // LLVM-derived backends, including the RV bare-metal qemu path that reads the
+    // SBI console stream (and not the qemu exit code). Signature takes idx + len
+    // for forward compatibility but only the constant message is printed today.
+    emit("@.str.oob_msg = private unnamed_addr constant [28 x i8] c\"panic: index out of bounds\\0A\\00\"")
+    emit("")
+    emit("define void @__bounds_fail(i32 %idx, i32 %len) {")
+    emit("entry:")
+    emit("  %p = getelementptr [28 x i8], [28 x i8]* @.str.oob_msg, i32 0, i32 0")
+    emit(s"  %w = call $sizeT @write(i32 2, i8* %p, $sizeT 27)")
+    emit("  call void @abort()")
+    emit("  unreachable")
+    emit("}")
+    emit("")
+
     // Built-in assert function: if !cond then panic(msg)
     emit("@.str.assert_prefix = private unnamed_addr constant [19 x i8] c\"assertion failed: \\00\"")
     emit("")
@@ -1272,6 +1289,18 @@ class SyslLLVMCodegen(target: String = "host"):
         val elt = elemType match
           case SyslType.RefType(_: SyslType.SliceType) => "%struct.slice"
           case _ => llvmType(elemType)
+        // Bounds check before computing the element pointer. PtrType is raw and
+        // unchecked by design; everything else gets a static (ArrayType) or runtime
+        // (slice / ref-slice) check that traps via __bounds_fail.
+        array.typ match
+          case SyslType.ArrayType(_, size) =>
+            emitBoundsCheck(idx, size.toString)
+          case SyslType.RefType(SyslType.ArrayType(_, size)) =>
+            emitBoundsCheck(idx, size.toString)
+          case SyslType.SliceType(_) | SyslType.RefType(_: SyslType.SliceType) =>
+            val len = emitSliceLen(base, array)
+            emitBoundsCheck(idx, len)
+          case _ =>
         // Compute element pointer — use GEP for arrays and pointers (LLVM calculates stride),
         // manual byte arithmetic only for slices (untyped i8* data pointer).
         val typedPtr: String = array.typ match
@@ -2336,6 +2365,9 @@ class SyslLLVMCodegen(target: String = "host"):
         val idx = genExpr(index)
         array.typ match
           case SyslType.ArrayType(elem, size) =>
+            // Fixed-size array: bounds is the compile-time `size`. Unsigned compare
+            // also catches negative indices (idx<0 sexts to a large unsigned value).
+            emitBoundsCheck(idx, size.toString)
             val elt = llvmType(elem)
             val arrType = s"[$size x $elt]"
             val gep = newReg()
@@ -2346,6 +2378,7 @@ class SyslLLVMCodegen(target: String = "host"):
               emit(s"  $r = load $elt, $elt* $gep")
               r
           case SyslType.PtrType(elem) =>
+            // Raw pointer — by design, no bounds check (kernel-style unsafe access).
             val elt = llvmType(elem)
             val idx64 = newReg()
             emit(s"  $idx64 = sext i32 $idx to i64")
@@ -2360,6 +2393,10 @@ class SyslLLVMCodegen(target: String = "host"):
             // Slice or other — use byte arithmetic on data pointer
             // For RefType(SliceType) array type from aggregate TIndex, base is %struct.slice*
             // — extract data pointer from field 0. Otherwise use emitSliceDataPtr.
+            // Runtime length needs the same context distinction; capture it before
+            // we tear up base into a data pointer.
+            val len = emitSliceLen(base, array)
+            emitBoundsCheck(idx, len)
             val dataPtr = (array.typ, array) match
               case (SyslType.RefType(SyslType.SliceType(_)), _: TIndex) =>
                 // base is %struct.slice* from inline slice element
@@ -4377,6 +4414,61 @@ class SyslLLVMCodegen(target: String = "host"):
       emitLabel(endLbl)
 
   // Extract the data pointer from a slice or ref-to-slice
+  /** Emit a bounds check: traps via `__bounds_fail` if `idx` is outside `[0, len)`.
+    * Uses unsigned comparison so negative indices (which sext to a large i32) fall
+    * outside `[0, len)` and trap correctly. After this call, `currentBlock` is the
+    * pass-label so subsequent emit() lands in the in-bounds path. */
+  private def emitBoundsCheck(idx: String, len: String): Unit =
+    val ok = newReg()
+    val failLbl = s"oob_fail_${labelCounter}"
+    val passLbl = s"oob_pass_${labelCounter}"
+    labelCounter += 1
+    emit(s"  $ok = icmp ult i32 $idx, $len")
+    emit(s"  br i1 $ok, label %$passLbl, label %$failLbl")
+    emit(s"$failLbl:")
+    emit(s"  call void @__bounds_fail(i32 $idx, i32 $len)")
+    emit(s"  unreachable")
+    emit(s"$passLbl:")
+    currentBlock = passLbl
+
+  /** Load the runtime length of a slice / ref-slice / string into an i32 register
+    * and return it. The layouts: `SliceType` and `StringType` are always
+    * %struct.slice* / %struct.string* (length at field 1); `RefType(SliceType)`
+    * from an aggregate context (TIndex) is also %struct.slice*, but from a ref
+    * variable it's an i8* data pointer with length stored at offset -8. */
+  private def emitSliceLen(base: String, array: TExpr): String =
+    array.typ match
+      case SyslType.SliceType(_) =>
+        val lenGep = newReg()
+        emit(s"  $lenGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 1")
+        val len32 = newReg()
+        emit(s"  $len32 = load i32, i32* $lenGep")
+        len32
+      case SyslType.StringType =>
+        val lenGep = newReg()
+        emit(s"  $lenGep = getelementptr %struct.string, %struct.string* $base, i32 0, i32 1")
+        val len32 = newReg()
+        emit(s"  $len32 = load i32, i32* $lenGep")
+        len32
+      case SyslType.RefType(_: SyslType.SliceType) =>
+        array match
+          case _: TIndex =>
+            val lenGep = newReg()
+            emit(s"  $lenGep = getelementptr %struct.slice, %struct.slice* $base, i32 0, i32 1")
+            val len32 = newReg()
+            emit(s"  $len32 = load i32, i32* $lenGep")
+            len32
+          case _ =>
+            val lenAddr = newReg()
+            emit(s"  $lenAddr = getelementptr i8, i8* $base, i64 -8")
+            val lenPtr = newReg()
+            emit(s"  $lenPtr = bitcast i8* $lenAddr to i32*")
+            val len32 = newReg()
+            emit(s"  $len32 = load i32, i32* $lenPtr")
+            len32
+      case other =>
+        throw new RuntimeException(s"emitSliceLen: expected slice/ref-slice/string type, got $other")
+
   private def emitSliceDataPtr(base: String, typ: SyslType): String =
     typ match
       case SyslType.SliceType(_) =>
