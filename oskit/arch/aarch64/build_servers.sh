@@ -30,7 +30,7 @@ SERVER_COMMON_SRCS=(
     oskit/arch/aarch64/prog_config.sysl
     std/alloc/alloc.lsysl
 )
-SERVER_LINKER_SCRIPT=prog.ld
+SERVER_LINKER_SCRIPT=server.ld
 
 source "$REPO_ROOT/oskit/arch/common.sh"
 
