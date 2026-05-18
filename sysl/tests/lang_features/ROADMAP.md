@@ -87,7 +87,7 @@ where noted.
 | `deinit_basic.lsysl` 🟢 | `Struct.deinit()` fires once at refcount=0 transition; before free; doesn't fire for value-struct drops (5 tests) |
 | `deinit_with_fields.lsysl` 🟢 | deinit body can read fields (including chasing through `&Inner` field) before the field's own refcount is decremented (3 tests). TODO: also pin "outer's drop transitively decrements `&Inner` field, firing inner's deinit" — currently every backend leaks the inner ref on outer-drop |
 | `ptr_to_value.lsysl` 🟢 | `&v` then `*p` round-trips; mutating through `*p` mutates the value (4 tests) |
-| `ptr_to_ref.lsysl` 🟡 | `&r` where `r: &T` yielding `*T` — NOT implemented on any backend; file is currently a placeholder + TODO. Cross-backend feature gap |
+| `ptr_to_ref.lsysl` 🟡 | Misnamed — actually pins the `&r` (ref→ptr) direction where `r: &T` yields `*T`. NOT implemented on any backend; file is a placeholder + TODO. The literal `*T → &T` direction is INTENTIONALLY REJECTED per CLAUDE.md "Conversion Rules" (can't manufacture a refcount) and lives in `compile_fail_ptr_to_ref.lsysl` 🔴 below (gated on compile_errors/ infra). |
 | `value_to_ref_explicit.lsysl` 🟢 | `new T(v)` heap-promotes a value struct, independent of source (2 tests) |
 | `field_self_concat.lsysl` 🟢 | original regression test for `TFieldAssignStmt` use-after-free (3 tests) |
 
