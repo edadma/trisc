@@ -1,0 +1,87 @@
+`++x` / `--x` prefix increment / decrement
+==========================================
+
+Audit memo (`project_sysl_audit_bugs.md` 2026-04-28) flagged
+LLVM `TPreInc` / `TPreDec` as not lowered. This file probes
+the prefix form on every backend. The companion forms
+covered elsewhere: postfix `x++` (different AST node);
+prefix-on-struct-field (`++obj.f`) is covered by the
+operators session 7 work — different AST node `TFieldPreInc`.
+
+File-local prefix `Ppd` (Pre-inc/Pre-dec).
+
+    module sysl.tests.lang_features
+
+Prefix `++x` increments and returns NEW value
+---------------------------------------------
+
+    #test
+    test_ppd_preinc_scalar() -> unit
+        var x = 10
+        val y = ++x
+        assert(x == 11, s"x should be 11 after ++x, got $x")
+        assert(y == 11, s"y should hold NEW value 11, got $y")
+
+    #test
+    test_ppd_preinc_chained() -> unit
+        var x = 0
+        ++x
+        ++x
+        ++x
+        assert(x == 3, s"three ++x should reach 3, got $x")
+
+Prefix `--x` decrements and returns NEW value
+---------------------------------------------
+
+    #test
+    test_ppd_predec_scalar() -> unit
+        var x = 10
+        val y = --x
+        assert(x == 9, s"x should be 9 after --x, got $x")
+        assert(y == 9, s"y should hold NEW value 9, got $y")
+
+    #test
+    test_ppd_predec_to_zero() -> unit
+        var x = 3
+        --x
+        --x
+        --x
+        assert(x == 0, s"three --x should reach 0, got $x")
+
+`++x` in an expression — uses NEW value
+---------------------------------------
+
+    #test
+    test_ppd_preinc_in_expr() -> unit
+        var x = 5
+        val r = ++x + 100
+        assert(r == 106, s"6 + 100 = 106, got $r")
+        assert(x == 6, s"x should be 6, got $x")
+
+    #test
+    test_ppd_predec_in_expr() -> unit
+        var x = 5
+        val r = --x * 2
+        assert(r == 8, s"4 * 2 = 8, got $r")
+        assert(x == 4, s"x should be 4, got $x")
+
+Prefix on different integer widths
+----------------------------------
+
+    #test
+    test_ppd_preinc_i8() -> unit
+        var x: i8 = 5
+        ++x
+        assert(i32(x) == 6, s"i8 ++ → 6, got ${i32(x)}")
+
+    #test
+    test_ppd_preinc_u32() -> unit
+        var x: u32 = 0xFFFFFFFE
+        ++x
+        assert(u64(x) == 0xFFFFFFFF, s"u32 0xFFFFFFFE ++ → 0xFFFFFFFF, got ${u64(x)}")
+
+    #test
+    test_ppd_preinc_i64() -> unit
+        var x: i64 = 1000000000
+        ++x
+        assert(x == 1000000001i64, s"i64 1e9 ++ → 1e9+1, got $x")

@@ -1,0 +1,76 @@
+i64 literal cast — high bits preserved across const folding
+=============================================================
+
+The audit memo (`project_sysl_audit_bugs.md` 2026-04-28) flagged
+LLVM's i64 literal cast as truncating high bits (≥ 32). This
+file probes whether large i64 literals round-trip correctly
+through `i64(N)` and direct assignment on every backend.
+
+File-local prefix `Ilc` (Integer Literal Cast).
+
+    module sysl.tests.lang_features
+
+i64(N) where N > 2^32 — preserves high bits
+-------------------------------------------
+
+The constant-folding path through `TCast(TIntLit(...), i64)`
+must NOT mask off bits ≥ 32.
+
+    #test
+    test_ilc_cast_above_2pow32() -> unit
+        val v = i64(0x1_0000_0000)   // 2^32
+        assert(v == 4294967296i64, s"i64(2^32) = 2^32, got $v")
+
+    #test
+    test_ilc_cast_max_i64() -> unit
+        val v = i64(0x7FFFFFFF_FFFFFFFF)
+        assert(v == 9223372036854775807i64, s"i64 max round-trip, got $v")
+
+    #test
+    test_ilc_cast_high_bit_only() -> unit
+        // Bit 35 set, others clear.
+        val v = i64(0x8_0000_0000)
+        assert(v == 34359738368i64, s"bit 35 only, got $v")
+
+Decimal literal > 2^32 also preserved
+-------------------------------------
+
+    #test
+    test_ilc_decimal_above_2pow32() -> unit
+        val v: i64 = 5000000000   // 5 billion, > 2^32
+        assert(v == 5000000000i64, s"5b, got $v")
+
+    #test
+    test_ilc_decimal_max_i64() -> unit
+        val v: i64 = 9223372036854775807
+        assert(v == 9223372036854775807i64, s"max, got $v")
+
+Constant arithmetic preserves high bits
+---------------------------------------
+
+The constant-folder shouldn't drop high bits when computing
+literal expressions.
+
+    #test
+    test_ilc_const_arith_high() -> unit
+        val v: i64 = 0x1_0000_0000 * 2   // 2^33
+        assert(v == 8589934592i64, s"2^33, got $v")
+
+    #test
+    test_ilc_const_arith_max_minus_one() -> unit
+        val v: i64 = 0x7FFFFFFF_FFFFFFFF - 1
+        assert(v == 9223372036854775806i64, s"max - 1, got $v")
+
+u64 literal cast preserves all bits
+-----------------------------------
+
+    #test
+    test_ilc_u64_cast_high() -> unit
+        val v: u64 = 0xFFFFFFFF_FFFFFFFE
+        assert(i64(v) == -2, s"u64 max-1 = -2 signed, got ${i64(v)}")
+
+    #test
+    test_ilc_u64_cast_high_bit() -> unit
+        val v: u64 = 0x80000000_00000000
+        // High-bit-set u64 interpreted as signed → i64 min.
+        assert(i64(v) == -9223372036854775807i64 - 1i64, s"u64 high-bit = i64 min, got ${i64(v)}")
