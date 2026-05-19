@@ -243,6 +243,33 @@ trait SyslAnalyzerPostPasses:
    *  would need additional bookkeeping and is not currently exercised by any test. */
   protected def rewriteEscapingClosureCaptureOwns(tBody: TFunBody): TFunBody =
     val capturedIfaceNames = scala.collection.mutable.Set.empty[String]
+    // Collect iface var names that escape via a TReturnStmt's value — direct
+    // (`return h`) OR indirect through a constructor (`return Some(h)`,
+    // `return Wrapper(h)`, `return [h]`, etc.). The val-decl auto-box at
+    // SyslAnalyzerStatements.scala defaults to owns=false (mutating-self
+    // through the iface var requires sharing storage with the source), but
+    // a var that escapes via return must own its data buffer or the
+    // descriptor's data_ptr dangles when the source struct's stack frame
+    // is freed. See feedback_sysl_iface_in_generic_enum_return_uaf.md.
+    def collectReturnEscapes(e: TExpr): Unit = e match
+      case TVarRef(n, _: SyslType.InterfaceType) => capturedIfaceNames += n
+      case TInterfaceBox(inner, _, _) => collectReturnEscapes(inner)
+      case TEnumConstruct(_, _, args) => args.foreach(collectReturnEscapes)
+      case TNewEnum(_, _, args) => args.foreach(collectReturnEscapes)
+      case TStructConstruct(_, args) => args.foreach(collectReturnEscapes)
+      case TNew(_, args) => args.foreach(collectReturnEscapes)
+      case TArrayLit(els, _) => els.foreach(collectReturnEscapes)
+      case TIfExpr(_, tb, eb, _) =>
+        tb.foreach(walkReturnStmt); eb.foreach(_.foreach(walkReturnStmt))
+      case TMatchExpr(_, arms, dflt, _) =>
+        arms.foreach(a => a.body.foreach(walkReturnStmt))
+        dflt.foreach(_.foreach(walkReturnStmt))
+      case TCast(inner, _) => collectReturnEscapes(inner)
+      case _ => ()
+    def walkReturnStmt(s: TStmt): Unit = s match
+      case TExprStmt(e) => collectReturnEscapes(e)
+      case TReturnStmt(Some(e)) => collectReturnEscapes(e)
+      case _ => ()
     def walkExpr(e: TExpr): Unit = e match
       case TClosure(_, _, body, captures, _, _, _) =>
         // Conservative: rewrite captured iface ownership for ANY closure regardless
@@ -311,7 +338,7 @@ trait SyslAnalyzerPostPasses:
       case TIndexAssignStmt(a, i, v) => walkExpr(a); walkExpr(i); walkExpr(v)
       case TFieldAssignStmt(o, _, v) => walkExpr(o); walkExpr(v)
       case TFieldCompoundAssignStmt(o, _, _, v) => walkExpr(o); walkExpr(v)
-      case TReturnStmt(v) => v.foreach(walkExpr)
+      case TReturnStmt(v) => v.foreach(walkExpr); v.foreach(collectReturnEscapes)
       case TWhileStmt(c, b, _) => walkExpr(c); b.foreach(walkStmt)
       case TForStmt(init, c, upd, b, _) =>
         walkStmt(init); walkExpr(c); walkStmt(upd); b.foreach(walkStmt)
@@ -323,7 +350,10 @@ trait SyslAnalyzerPostPasses:
       case TExprStmt(e) => walkExpr(e)
       case _ => ()
     tBody match
-      case TExprBody(e) => walkExpr(e)
+      case TExprBody(e) =>
+        // TExprBody is the function's implicit return value — treat it as
+        // an escape site for iface var refs.
+        walkExpr(e); collectReturnEscapes(e)
       case TBlockBody(ss) => ss.foreach(walkStmt)
     if capturedIfaceNames.isEmpty then return tBody
 

@@ -93,18 +93,34 @@ on the iface-typed variant, not on string-typed ones.
         val r: IorRes[IorValuator, string] = Err("nope")
         assert(ior_result_dispatch(r) == -1, s"Err(_) → -1; got ${ior_result_dispatch(r)}")
 
-Function returning `Option[Iface]` — None path
-----------------------------------------------
+Function returning `Option[Iface]` — call site dispatch
+-------------------------------------------------------
 
-The None path returns no iface payload — exercises the
-return-enum-from-factory shape without the iface-data
-escape problem.
+The factory chooses between Some and None based on a
+predicate. Caller dispatches through `match`. The iface
+local `h` is referenced inside `return Some(h)`; without
+the iface-escape post-pass, `h`'s descriptor's `data_ptr`
+points at the factory's stack frame (dead by the time the
+caller dereferences). Fix: `rewriteEscapingClosureCapture
+Owns` in SyslAnalyzerPostPasses now also collects iface
+vars used inside `return` expressions and flips their
+val-decl `TInterfaceBox` to `owns=true`. The codegen then
+heap-copies the source struct so the iface descriptor's
+data outlives the factory's frame.
 
     ior_maybe_holder(n: int) -> IorOpt[IorValuator]
         if n > 0
             val h: IorValuator = IorPlain(n)
             return Some(h)
         return None
+
+    #test
+    test_fn_returns_option_iface_some() -> unit
+        val o = ior_maybe_holder(11)
+        val r = o match
+            Some(h) -> h.value()
+            None    -> -1
+        assert(r == 11, s"Some(11) → 11; got $r")
 
     #test
     test_fn_returns_option_iface_none() -> unit
@@ -114,20 +130,23 @@ escape problem.
             None    -> 99
         assert(r == 99, s"None → 99; got $r")
 
-Known bug — return-Some-with-iface across fn boundary
------------------------------------------------------
+Two-call aliasing — independent iface descriptors
+-------------------------------------------------
 
-`return Some(h)` where `h: IorValuator` is a factory local
-loses the iface's data on LLVM-derived backends (llvm-host
-returns the wrong value or aliases the second call;
-riscv64 / trisc return 0). The TInterfaceBox for `val h:
-Iface = struct` heap-copies with `owns=true`, but the
-return-position copy of the variant-carried iface
-descriptor doesn't preserve the heap pointer correctly
-across the call boundary. Two-call aliasing variant of
-the same shape (`v1 + v2` should be 30, got 40 on llvm-
-host) is the same root cause. Documented as `feedback_
-sysl_iface_in_generic_enum_return_uaf.md`. Tests for the
-broken cases stay out of this file until fix lands;
-file-level row stays 🟡 in EDGE_CASES_ROADMAP until they
-return.
+Two factory calls produce two `Option[Iface]`s. Without the
+escape post-pass, both descriptors aliased the same dead
+stack slot in the factory, so both reads returned the
+second call's value (sum = 40 instead of 30). With the
+fix each call heap-copies its source.
+
+    #test
+    test_two_option_iface_summed() -> unit
+        val o1 = ior_maybe_holder(10)
+        val o2 = ior_maybe_holder(20)
+        val v1 = o1 match
+            Some(h) -> h.value()
+            None    -> 0
+        val v2 = o2 match
+            Some(h) -> h.value()
+            None    -> 0
+        assert(v1 + v2 == 30, s"10 + 20 = 30; got ${v1 + v2}")
