@@ -77,12 +77,20 @@ class SyslTriscSaturating64Tests extends AnyFreeSpec with Matchers {
   "i64 saturating_add emits add + signed XOR overflow detect" in {
     val out = asm("f(a: i64, b: i64) -> i64 = saturating_add(a, b)\n")
     out should include("add r1, r1, r2")
-    // XOR-trick signature
+    // XOR-trick signature. The second XOR reuses r2 (held b but no longer
+    // needed) — NOT r5, which is the frame pointer. Earlier codegen wrote
+    // r5 here and corrupted FP; the regression of that bug is the
+    // saturating_64bit_and_u32mul.lsysl runtime tests.
     out should include("xor r4, r3, r1")
-    out should include("xor r5, r2, r1")
-    out should include("and r4, r4, r5")
+    out should include("xor r2, r2, r1")
+    out should include("and r4, r4, r2")
     // signed compare against r0 (= 0) — must NOT use sltu
     out should include("slt r4, r4, r0")
+    // Guard against future regression: the second XOR's destination must
+    // not be r5 (the frame pointer). The old buggy form was
+    // `xor r5, r2, r1` / `xor r5, r3, r1` — explicitly forbid those.
+    out shouldNot include("xor r5, r2, r1")
+    out shouldNot include("xor r5, r3, r1")
     // both saturation directions present
     out should include regex "ldc r1, 9223372036854775807"
     out should include regex "ldc r1, -9223372036854775808"
@@ -91,11 +99,16 @@ class SyslTriscSaturating64Tests extends AnyFreeSpec with Matchers {
   "i64 saturating_sub emits sub + signed XOR overflow detect" in {
     val out = asm("f(a: i64, b: i64) -> i64 = saturating_sub(a, b)\n")
     out should include("sub r1, r1, r2")
-    // XOR trick for sub: ((a ^ b) & (a ^ result))
+    // XOR trick for sub: ((a ^ b) & (a ^ result)). Second XOR target is
+    // r2, not r5. Same FP-preservation as saturating_add.
     out should include("xor r4, r3, r2")
-    out should include("xor r5, r3, r1")
-    out should include("and r4, r4, r5")
+    out should include("xor r2, r3, r1")
+    out should include("and r4, r4, r2")
     out should include("slt r4, r4, r0")
+    // Guard against future regression: the second XOR's destination must
+    // not be r5 (the frame pointer). Old buggy form was `xor r5, r3, r1`.
+    out shouldNot include("xor r5, r3, r1")
+    out shouldNot include("xor r5, r2, r1")
     out should include regex "ldc r1, 9223372036854775807"
     out should include regex "ldc r1, -9223372036854775808"
   }

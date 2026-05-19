@@ -1,0 +1,167 @@
+`if x is Pattern` — non-trivial pattern coverage
+=================================================
+
+The basic `if .. is ..` surface lives in `if_is_pattern.lsysl`.
+The audit memo (`project_sysl_audit_bugs.md` 2026-04-28)
+flagged this as "verify with non-trivial patterns". This file
+covers the corners:
+
+  - Nested data-enum patterns (`Some(Ok(v))`).
+  - Multi-field variant destructuring.
+  - Bare-variant patterns (no payload — just tag check).
+  - Wildcards inside the pattern.
+  - The bound variable used in mutating contexts.
+  - Pattern in a fn that returns a value via the bind.
+
+    module sysl.tests.lang_features
+
+    enum Iin1Opt[T]
+        Iin1Some(v: T)
+        Iin1None
+
+    enum Iin1Res[T, E]
+        Iin1Ok(v: T)
+        Iin1Err(e: E)
+
+    enum Iin1Shape
+        Iin1Circle(r: int)
+        Iin1Rect(w: int, h: int)
+        Iin1Empty
+
+Nested data-enum pattern — `Some(Ok(v))`
+----------------------------------------
+
+A `Some(Ok(v))` destructures two layers in one shot.
+
+    iin1_unwrap_some_ok(x: Iin1Opt[Iin1Res[int, string]]) -> int
+        if x is Iin1Some(Iin1Ok(v)) then
+            return v
+        return -1
+
+    #test
+    test_iin1_nested_some_ok() -> unit
+        // Compose Some + Ok inline via type-inferred bindings.
+        val ok: Iin1Res[int, string] = Iin1Ok(42)
+        val o: Iin1Opt[Iin1Res[int, string]] = Iin1Some(ok)
+        assert(iin1_unwrap_some_ok(o) == 42, s"Some(Ok(42)) → 42, got ${iin1_unwrap_some_ok(o)}")
+
+    #test
+    test_iin1_nested_some_err() -> unit
+        val err: Iin1Res[int, string] = Iin1Err("nope")
+        val o: Iin1Opt[Iin1Res[int, string]] = Iin1Some(err)
+        // Outer is Some but inner is Err — pattern fails.
+        assert(iin1_unwrap_some_ok(o) == -1, s"Some(Err) → -1, got ${iin1_unwrap_some_ok(o)}")
+
+    #test
+    test_iin1_nested_none() -> unit
+        val o: Iin1Opt[Iin1Res[int, string]] = Iin1None
+        assert(iin1_unwrap_some_ok(o) == -1, s"None → -1, got ${iin1_unwrap_some_ok(o)}")
+
+Multi-field destructuring — `Rect(w, h)`
+----------------------------------------
+
+A variant with two fields. Both names bind in the `then` arm
+and can be used together.
+
+    iin1_area(s: Iin1Shape) -> int
+        if s is Iin1Rect(w, h) then
+            return w * h
+        return 0
+
+    #test
+    test_iin1_rect_destructure() -> unit
+        assert(iin1_area(Iin1Rect(3, 4)) == 12, "3*4=12")
+        assert(iin1_area(Iin1Rect(5, 5)) == 25, "5*5=25")
+
+    #test
+    test_iin1_rect_zero_field() -> unit
+        // Edge: zero-area rect — pattern still matches, bindings carry zeros.
+        assert(iin1_area(Iin1Rect(0, 10)) == 0, "0*10=0")
+        assert(iin1_area(Iin1Rect(7, 0)) == 0, "7*0=0")
+
+Bare-variant pattern — `Empty` (no payload)
+-------------------------------------------
+
+A variant with zero fields. The pattern is a pure tag check.
+
+    iin1_is_empty(s: Iin1Shape) -> bool
+        if s is Iin1Empty then
+            return true
+        return false
+
+    #test
+    test_iin1_bare_variant_match() -> unit
+        assert(iin1_is_empty(Iin1Empty), "Empty matches")
+        assert(!iin1_is_empty(Iin1Circle(5)), "Circle doesn't match Empty")
+        assert(!iin1_is_empty(Iin1Rect(2, 3)), "Rect doesn't match Empty")
+
+Wildcard inside the pattern — `Rect(_, h)` ignores `w`
+------------------------------------------------------
+
+    iin1_rect_height(s: Iin1Shape) -> int
+        if s is Iin1Rect(_, h) then
+            return h
+        return -1
+
+    #test
+    test_iin1_wildcard_in_pattern() -> unit
+        assert(iin1_rect_height(Iin1Rect(100, 7)) == 7, "ignore w, bind h")
+        assert(iin1_rect_height(Iin1Rect(0, 0)) == 0, "ignore w=0, bind h=0")
+        assert(iin1_rect_height(Iin1Circle(5)) == -1, "circle is not rect")
+
+Bound variable usable in arithmetic + further calls
+---------------------------------------------------
+
+The bound binding is a normal local — usable in expressions,
+passed to functions.
+
+    iin1_double(n: int) -> int = n * 2
+
+    iin1_double_some(x: Iin1Opt[int]) -> int
+        if x is Iin1Some(v) then
+            return iin1_double(v) + v
+        return 0
+
+    #test
+    test_iin1_binding_in_arith_and_call() -> unit
+        assert(iin1_double_some(Iin1Some(5)) == 15, "5*2 + 5 = 15")
+        assert(iin1_double_some(Iin1Some(0)) == 0, "0*2 + 0 = 0")
+        assert(iin1_double_some(Iin1None) == 0, "none → 0")
+
+Three-way bare-variant dispatch
+-------------------------------
+
+A bare-variant value with multiple variants; chained
+`if .. is ..` patterns distinguish them by tag.
+
+    iin1_shape_tag(s: Iin1Shape) -> int
+        if s is Iin1Circle(_) then return 1
+        if s is Iin1Rect(_, _) then return 2
+        if s is Iin1Empty then return 3
+        return 0
+
+    #test
+    test_iin1_three_way_dispatch() -> unit
+        assert(iin1_shape_tag(Iin1Circle(10)) == 1, "circle")
+        assert(iin1_shape_tag(Iin1Rect(3, 4)) == 2, "rect")
+        assert(iin1_shape_tag(Iin1Empty) == 3, "empty")
+
+Pattern check at the start of a function — early-narrow guard
+-------------------------------------------------------------
+
+Common idiom: check pattern at top of fn, return default if
+pattern fails, otherwise the binding is available for the
+rest of the body.
+
+    iin1_circle_area_x10(s: Iin1Shape) -> int
+        if s is Iin1Circle(r) then
+            val sq = r * r
+            return sq * 10
+        return 0
+
+    #test
+    test_iin1_pattern_then_locals() -> unit
+        // Approximate area (π ≈ 1 for the test).
+        assert(iin1_circle_area_x10(Iin1Circle(7)) == 490, "7*7*10")
+        assert(iin1_circle_area_x10(Iin1Circle(0)) == 0, "0 → 0")
+        assert(iin1_circle_area_x10(Iin1Rect(2, 3)) == 0, "non-circle → 0")

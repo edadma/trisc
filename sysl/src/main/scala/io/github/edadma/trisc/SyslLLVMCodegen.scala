@@ -555,6 +555,22 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("}")
     emit("")
 
+    // Built-in divide-by-zero failure helper. SVM / TRISC / interpreter all
+    // trap on integer div0 natively; LLVM `sdiv`/`udiv`/`srem`/`urem` are UB
+    // on zero divisor (typical x86 wraps to garbage or signals SIGFPE
+    // depending on host). This helper unifies the trapping contract across
+    // all four LLVM-derived backends (llvm-host, riscv64/32, wasm32).
+    emit("@.str.divzero_msg = private unnamed_addr constant [23 x i8] c\"panic: divide by zero\\0A\\00\"")
+    emit("")
+    emit("define void @__div_zero_fail() {")
+    emit("entry:")
+    emit("  %p = getelementptr [23 x i8], [23 x i8]* @.str.divzero_msg, i32 0, i32 0")
+    emit(s"  %w = call $sizeT @write(i32 2, i8* %p, $sizeT 22)")
+    emit("  call void @abort()")
+    emit("  unreachable")
+    emit("}")
+    emit("")
+
     // Built-in assert function: if !cond then panic(msg)
     emit("@.str.assert_prefix = private unnamed_addr constant [19 x i8] c\"assertion failed: \\00\"")
     emit("")
@@ -1131,7 +1147,11 @@ class SyslLLVMCodegen(target: String = "host"):
         val text = if message == kind then kind else s"$kind: $message"
         val (nameLbl, nameLen) = internCString(text)
         emit(s"  %${failLbl}_name = getelementptr [$nameLen x i8], [$nameLen x i8]* $nameLbl, i32 0, i32 0")
-        emit(s"  call void @__range_fail(i8* %${failLbl}_name, i64 ${nameLen - 1})")
+        // sizeT matches the host pointer width (i32 on wasm32 / riscv32,
+        // i64 on llvm-host / riscv64). The fn signature uses sizeT; this
+        // call must match or wasm-ld replaces the call with a trap stub
+        // (`__range_fail_bitcast_invalid`) and the message never prints.
+        emit(s"  call void @__range_fail(i8* %${failLbl}_name, $sizeT ${nameLen - 1})")
         emit(s"  unreachable")
         emit(s"$passLbl:")
         currentBlock = passLbl
@@ -1462,8 +1482,12 @@ class SyslLLVMCodegen(target: String = "host"):
           case "+" => emit(s"  $result = ${if isFloat then "fadd" else "add"} $lt $cur, $rv")
           case "-" => emit(s"  $result = ${if isFloat then "fsub" else "sub"} $lt $cur, $rv")
           case "*" => emit(s"  $result = ${if isFloat then "fmul" else "mul"} $lt $cur, $rv")
-          case "/" => emit(s"  $result = ${if isFloat then "fdiv" else if isUnsigned then "udiv" else "sdiv"} $lt $cur, $rv")
-          case "%" => emit(s"  $result = ${if isFloat then "frem" else if isUnsigned then "urem" else "srem"} $lt $cur, $rv")
+          case "/" =>
+            if !isFloat then emitDivByZeroGuard(rv, lt)
+            emit(s"  $result = ${if isFloat then "fdiv" else if isUnsigned then "udiv" else "sdiv"} $lt $cur, $rv")
+          case "%" =>
+            if !isFloat then emitDivByZeroGuard(rv, lt)
+            emit(s"  $result = ${if isFloat then "frem" else if isUnsigned then "urem" else "srem"} $lt $cur, $rv")
           case "&" => emit(s"  $result = and $lt $cur, $rv")
           case "|" => emit(s"  $result = or $lt $cur, $rv")
           case "^" => emit(s"  $result = xor $lt $cur, $rv")
@@ -1500,8 +1524,12 @@ class SyslLLVMCodegen(target: String = "host"):
           case "+" => emit(s"  $result = ${if isFloat then "fadd" else "add"} $fieldType $cur, $rv")
           case "-" => emit(s"  $result = ${if isFloat then "fsub" else "sub"} $fieldType $cur, $rv")
           case "*" => emit(s"  $result = ${if isFloat then "fmul" else "mul"} $fieldType $cur, $rv")
-          case "/" => emit(s"  $result = ${if isFloat then "fdiv" else if isUnsigned then "udiv" else "sdiv"} $fieldType $cur, $rv")
-          case "%" => emit(s"  $result = ${if isFloat then "frem" else if isUnsigned then "urem" else "srem"} $fieldType $cur, $rv")
+          case "/" =>
+            if !isFloat then emitDivByZeroGuard(rv, fieldType)
+            emit(s"  $result = ${if isFloat then "fdiv" else if isUnsigned then "udiv" else "sdiv"} $fieldType $cur, $rv")
+          case "%" =>
+            if !isFloat then emitDivByZeroGuard(rv, fieldType)
+            emit(s"  $result = ${if isFloat then "frem" else if isUnsigned then "urem" else "srem"} $fieldType $cur, $rv")
           case "&" => emit(s"  $result = and $fieldType $cur, $rv")
           case "|" => emit(s"  $result = or $fieldType $cur, $rv")
           case "^" => emit(s"  $result = xor $fieldType $cur, $rv")
@@ -1828,8 +1856,12 @@ class SyslLLVMCodegen(target: String = "host"):
           case "+" => emit(s"  $result = ${if isFloat then "fadd" else "add"} $lt $l, $r")
           case "-" => emit(s"  $result = ${if isFloat then "fsub" else "sub"} $lt $l, $r")
           case "*" => emit(s"  $result = ${if isFloat then "fmul" else "mul"} $lt $l, $r")
-          case "/" => emit(s"  $result = ${if isFloat then "fdiv" else if isUnsigned then "udiv" else "sdiv"} $lt $l, $r")
-          case "%" => emit(s"  $result = ${if isFloat then "frem" else if isUnsigned then "urem" else "srem"} $lt $l, $r")
+          case "/" =>
+            if !isFloat then emitDivByZeroGuard(r, lt)
+            emit(s"  $result = ${if isFloat then "fdiv" else if isUnsigned then "udiv" else "sdiv"} $lt $l, $r")
+          case "%" =>
+            if !isFloat then emitDivByZeroGuard(r, lt)
+            emit(s"  $result = ${if isFloat then "frem" else if isUnsigned then "urem" else "srem"} $lt $l, $r")
           case "&"  => emit(s"  $result = and $lt $l, $r")
           case "|"  => emit(s"  $result = or $lt $l, $r")
           case "^"  => emit(s"  $result = xor $lt $l, $r")
@@ -3835,7 +3867,8 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"$failLbl:")
         val (nameLbl, nameLen) = internCString(aliasName)
         emit(s"  %${failLbl}_name = getelementptr [$nameLen x i8], [$nameLen x i8]* $nameLbl, i32 0, i32 0")
-        emit(s"  call void @__range_fail(i8* %${failLbl}_name, i64 ${nameLen - 1})")
+        // sizeT matches the host pointer width — see TContractCheck note.
+        emit(s"  call void @__range_fail(i8* %${failLbl}_name, $sizeT ${nameLen - 1})")
         emit(s"  unreachable")
         emit(s"$passLbl:")
         currentBlock = passLbl
@@ -5547,6 +5580,22 @@ class SyslLLVMCodegen(target: String = "host"):
   private def emit(line: String): Unit =
     activeOut ++= line
     activeOut += '\n'
+
+  /** Emit a divide-by-zero guard before an integer `sdiv`/`udiv`/`srem`/`urem`.
+    * Float `fdiv`/`frem` are NOT guarded — IEEE 754 defines x/0 as ±Inf or
+    * NaN, which is the contract on every backend. The guard adds one icmp
+    * + branch per integer div/mod; the LLVM optimizer hoists the check out
+    * of loops when the divisor is loop-invariant. */
+  private def emitDivByZeroGuard(divisor: String, t: String): Unit =
+    val okLbl = newLabel("div_ok")
+    val trapLbl = newLabel("div_trap")
+    val cmp = newReg()
+    emit(s"  $cmp = icmp eq $t $divisor, 0")
+    emit(s"  br i1 $cmp, label %$trapLbl, label %$okLbl")
+    emitLabel(trapLbl)
+    emit("  call void @__div_zero_fail()")
+    emit("  unreachable")
+    emitLabel(okLbl)
 
   /** Emit a return instruction, handling void vs value returns. */
   private def emitRet(retType: String, value: String = "0"): Unit =

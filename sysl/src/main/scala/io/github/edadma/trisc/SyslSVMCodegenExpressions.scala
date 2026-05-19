@@ -821,8 +821,36 @@ trait SyslSVMCodegenExpressions:
                   emitPushInt(minV); emit(s"  local_set $rIdx")
                   emit(s"$skip:")
                 else
-                  // 64-bit signed saturating_mul: omit (rare; std/ doesn't use)
-                  ()
+                  // 64-bit signed saturating_mul: r is the wrapped product.
+                  // No overflow iff a == 0 or r/a == b. Special case the
+                  // i64_min × -1 sub-shape because i64_min/-1 itself wraps
+                  // and would falsely round-trip via div.
+                  // Clamp direction: same-sign operands → MAX; mixed → MIN.
+                  val skip = newLabel("sat_skip")
+                  val ov = newLabel("sat_ov")
+                  val checkDiv = newLabel("sat_div")
+                  // a == 0 → r is 0, no overflow
+                  emit(s"  local_get $aIdx"); emit("  push_0"); emit("  eq")
+                  emit(s"  jumpnz $skip")
+                  // a == i64_min && b == -1 → guaranteed overflow
+                  emit(s"  local_get $aIdx"); emitPushInt(minV); emit("  eq")
+                  emit(s"  local_get $bIdx"); emit("  push_m1"); emit("  eq")
+                  emit("  and")
+                  emit(s"  jumpnz $ov")
+                  emit(s"$checkDiv:")
+                  emit(s"  local_get $rIdx"); emit(s"  local_get $aIdx"); emit("  div")
+                  emit(s"  local_get $bIdx"); emit("  eq")
+                  emit(s"  jumpnz $skip")        // r/a == b → no overflow
+                  emit(s"$ov:")
+                  emit(s"  local_get $aIdx"); emit(s"  local_get $bIdx"); emit("  xor")
+                  emit("  push_0"); emit("  lt")
+                  val negSign = newLabel("sat_neg")
+                  emit(s"  jumpnz $negSign")
+                  emitPushInt(maxV); emit(s"  local_set $rIdx")
+                  emit(s"  jump $skip")
+                  emit(s"$negSign:")
+                  emitPushInt(minV); emit(s"  local_set $rIdx")
+                  emit(s"$skip:")
               case _ => ()
           emit(s"$satLbl:")
           emit(s"  local_get $rIdx")
