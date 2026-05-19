@@ -752,6 +752,13 @@ trait SyslAnalyzerImports:
           // forward consts). Anything else is left for the own-file pass — a
           // wrong stub type poisons type-checking far away (e.g. an int param
           // mistakenly fed an i64 forward-stub fails with "expects int, got i64").
+          //
+          // Mutable `var` globals must NOT have their initializer folded into
+          // compileTimeConstants — the value is observable at runtime via reads
+          // from sibling files and may change at any point. Folding it would
+          // make every cross-file read return the initializer constant instead
+          // of loading from the global, silently breaking counters, flags, and
+          // any other module-level mutable state shared across siblings.
           if !globalScope.contains(name) && !attrs.exists(_.name == "address") then
             scala.util.Try {
               val stubInfo: Option[(SyslType, Option[Long])] = typOpt match
@@ -765,10 +772,11 @@ trait SyslAnalyzerImports:
                 val isGhost = attrs.exists(_.name == "ghost")
                 globalScope(name) = SymInfo(mangledName, resolvedType, mutable = isMutable, isConst = isConst, isGhost = isGhost)
                 externalSymbols += name
-                foldedOpt.foreach { v =>
-                  compileTimeConstants(name) = v
-                  compileTimeConstants(mangledName) = v
-                }
+                if !isMutable then
+                  foldedOpt.foreach { v =>
+                    compileTimeConstants(name) = v
+                    compileTimeConstants(mangledName) = v
+                  }
               }
             }
         case _ => ()

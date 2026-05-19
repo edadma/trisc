@@ -144,6 +144,43 @@ state).
         assert(sib_counter == 7, s"after two bumps counter=${sib_counter}")
 
 
+### Cross-file `var` reads do NOT constant-fold to the initializer
+
+Regression coverage for the analyzer bug fixed 2026-05-18 in
+`SyslAnalyzerImports.registerSiblingForwardDeclsFrom`: the sibling
+forward-decl pre-registration code (commit f334fc5d4) folded the
+initializer of *every* `VarDeclAST` into `compileTimeConstants` —
+including mutable `var` globals. Cross-file reads bound to a local
+`val` then went through `tryConstEval(TVarRef)`, which checks
+`compileTimeConstants` unconditionally, and got replaced with the
+initializer literal at compile time. The increment site still wrote
+the global at runtime, but every cross-file read returned 0.
+
+Surfaced as silent counter regressions in SLIX inet (e.g. the
+`pmtutcp` test would emit segments but the counter stayed at 0,
+because `val v = inet_tcp_data_seg_emit_count` in a different file
+constant-folded). The fix gates `compileTimeConstants` population
+on `!isMutable` — mutable vars still register a SymInfo stub (so
+cross-sibling type-resolution works) but their value is never
+folded.
+
+`val ... = sib_counter` is the bug pattern: a local val bound to a
+sibling-defined var. Bare `sib_counter` references (in assertions,
+RHS of assignments) never triggered the bug — only the val-binding
+path did, because that's what runs `tryConstEval` on the init.
+
+    #test
+    test_sfv_var_no_fold_via_local_val() -> unit
+        sib_counter = 0
+        val before = sib_counter
+        sib_bump()
+        sib_bump()
+        sib_bump()
+        val after = sib_counter
+        assert(after - before == 3, s"after(${after}) - before(${before}) should be 3")
+        sib_counter = 0
+
+
 ### Cross-file `out` parameter writes back to the caller's local
 
 Regression coverage for the analyzer bug fixed 2026-05-17 in
