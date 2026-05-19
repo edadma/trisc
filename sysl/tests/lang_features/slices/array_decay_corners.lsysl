@@ -1,0 +1,124 @@
+Array decay — non-trivial shapes
+================================
+
+`array_decay.lsysl` pins the basic `[N]int → *int` decay
+shape. Per the sysl/CLAUDE.md "Array decay cleanup" TODO,
+the implicit decay should also work uniformly across:
+
+  - Array of struct: `[N]Point → *Point`.
+  - Array of byte / typed widths: `[N]u8 → *u8`.
+  - Through a struct field: `s.buf` where `buf: [N]int` →
+    `*int`.
+  - Inside an expression: passing the result of a call that
+    returns a fixed array.
+
+This file probes those corners. Any backend that doesn't
+auto-decay would force the user back to `&xs[0]` (the
+audit-era manual form).
+
+File-local prefix `Adc` (Array Decay Corners).
+
+    module sysl.tests.lang_features
+
+    struct AdcPoint
+        x: int
+        y: int
+
+    struct AdcBuffer
+        buf: [4]int
+        tag: int
+
+Decay `[N]Struct → *Struct`
+---------------------------
+
+The element type matters for the decayed pointer's stride.
+`p[i]` on a `*AdcPoint` parameter must use sizeof(AdcPoint)
+stride; using i64 stride would skip cells.
+
+    adc_sum_xs(p: *AdcPoint, n: int) -> int
+        var total = 0
+        var i = 0
+        while i < n
+            total = total + p[i].x
+            i = i + 1
+        return total
+
+    #test
+    test_adc_decay_struct_array() -> unit
+        var arr = [AdcPoint(1, 10), AdcPoint(2, 20), AdcPoint(3, 30)]
+        assert(adc_sum_xs(arr, 3) == 6, s"1+2+3 = 6, got ${adc_sum_xs(arr, 3)}")
+
+Decay `[N]u8 → *u8`
+-------------------
+
+Narrow integer types — the C-style buffer-byte case.
+
+    adc_sum_bytes(p: *u8, n: int) -> int
+        var total = 0
+        var i = 0
+        while i < n
+            total = total + i32(p[i])
+            i = i + 1
+        return total
+
+    #test
+    test_adc_decay_byte_array() -> unit
+        var arr: [4]u8 = [u8(10), u8(20), u8(30), u8(40)]
+        assert(adc_sum_bytes(arr, 4) == 100, s"10+20+30+40 = 100, got ${adc_sum_bytes(arr, 4)}")
+
+Decay `s.buf → *int` (through struct field)
+-------------------------------------------
+
+The struct field's value is an array — passing it should
+decay the same way as a plain local.
+
+    adc_sum4(p: *int) -> int = p[0] + p[1] + p[2] + p[3]
+
+    #test
+    test_adc_decay_via_struct_field() -> unit
+        var s = AdcBuffer([100, 200, 300, 400], 0)
+        assert(adc_sum4(s.buf) == 1000, s"100+200+300+400 = 1000, got ${adc_sum4(s.buf)}")
+
+    #test
+    test_adc_decay_via_struct_field_mutates_caller() -> unit
+        var s = AdcBuffer([1, 2, 3, 4], 0)
+        zero_first_two(s.buf)
+        assert(s.buf[0] == 0, s"s.buf[0] should be 0 (mutated through decayed ptr), got ${s.buf[0]}")
+        assert(s.buf[1] == 0, s"s.buf[1] should be 0, got ${s.buf[1]}")
+        assert(s.buf[2] == 3, s"s.buf[2] untouched, got ${s.buf[2]}")
+        assert(s.buf[3] == 4, s"s.buf[3] untouched, got ${s.buf[3]}")
+
+    zero_first_two(p: *int) -> unit
+        p[0] = 0
+        p[1] = 0
+
+Decay back-to-back call chain
+-----------------------------
+
+Pass a fixed array to one fn, which forwards through the
+`*T` to another fn — both call sites use implicit decay.
+
+    adc_first(p: *int) -> int = p[0]
+
+    adc_middle(p: *int) -> int = adc_first(p)
+
+    #test
+    test_adc_decay_chain() -> unit
+        var arr = [42, 99, 200]
+        assert(adc_middle(arr) == 42, s"chain returns first elem, got ${adc_middle(arr)}")
+
+Multi-dim — inner row decays to `*int`
+--------------------------------------
+
+`grid[0]` is a `[3]int` (one row of the 2-D grid). Passing
+it to a `*int` parameter decays the row to a raw pointer.
+
+    adc_sum3(p: *int) -> int = p[0] + p[1] + p[2]
+
+    #test
+    test_adc_multidim_inner_row_decay() -> unit
+        var grid: [2][3]int = [[10, 20, 30], [40, 50, 60]]
+        assert(adc_first(grid[0]) == 10, s"row 0 first: 10, got ${adc_first(grid[0])}")
+        assert(adc_first(grid[1]) == 40, s"row 1 first: 40, got ${adc_first(grid[1])}")
+        assert(adc_sum3(grid[0]) == 60, s"row 0 sum: 60, got ${adc_sum3(grid[0])}")
+        assert(adc_sum3(grid[1]) == 150, s"row 1 sum: 150, got ${adc_sum3(grid[1])}")
