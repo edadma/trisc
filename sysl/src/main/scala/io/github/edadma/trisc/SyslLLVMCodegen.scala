@@ -571,6 +571,42 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("}")
     emit("")
 
+    // Built-in malloc-failure helper. The C `malloc(n)` returns NULL when
+    // the host runtime is out of memory; without a guard, every emitted
+    // `new Struct(...)` / `new [n]T` / closure-env / string-buf malloc
+    // would silently write the refcount header to address 0 and either
+    // segfault (mapped page 0 protection) or corrupt memory (kernel mode).
+    //
+    // The guard is implemented as a wrapper function `@__checked_malloc`
+    // rather than an inline branch at each call site: an inline branch
+    // would insert a new basic block, and any downstream PHI node that
+    // tracked the call-site's `currentBlock` as a predecessor would then
+    // disagree with LLVM's actual control-flow graph and verifier-fail.
+    // The wrapper isolates the branching to a single function and keeps
+    // every codegen call site as a single LLVM instruction.
+    emit("@.str.malloc_msg = private unnamed_addr constant [22 x i8] c\"panic: out of memory\\0A\\00\"")
+    emit("")
+    emit("define void @__malloc_fail() {")
+    emit("entry:")
+    emit("  %p = getelementptr [22 x i8], [22 x i8]* @.str.malloc_msg, i32 0, i32 0")
+    emit(s"  %w = call $sizeT @write(i32 2, i8* %p, $sizeT 21)")
+    emit("  call void @abort()")
+    emit("  unreachable")
+    emit("}")
+    emit("")
+    emit(s"define i8* @__checked_malloc($sizeT %size) {")
+    emit("entry:")
+    emit(s"  %p = call i8* @malloc($sizeT %size)")
+    emit("  %is_null = icmp eq i8* %p, null")
+    emit("  br i1 %is_null, label %trap, label %ok")
+    emit("trap:")
+    emit("  call void @__malloc_fail()")
+    emit("  unreachable")
+    emit("ok:")
+    emit("  ret i8* %p")
+    emit("}")
+    emit("")
+
     // Built-in assert function: if !cond then panic(msg)
     emit("@.str.assert_prefix = private unnamed_addr constant [19 x i8] c\"assertion failed: \\00\"")
     emit("")
@@ -2856,7 +2892,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val allocSize = newReg()
         emit(s"  $allocSize = mul i64 $newCap64, $elemSize")
         val newBuf = newReg()
-        emit(s"  $newBuf = call i8* @malloc($sizeT ${narrowI64ToSizeT(allocSize)})")
+        emit(s"  $newBuf = call i8* @__checked_malloc($sizeT ${narrowI64ToSizeT(allocSize)})")
         // Copy old data
         val curLen64 = newReg()
         emit(s"  $curLen64 = sext i32 $curLen to i64")
@@ -2933,7 +2969,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val dataSize = llvmSizeOf(st)
         val totalSize = dataSize + 8 // 8-byte refcount header
         val buf = newReg()
-        emit(s"  $buf = call i8* @malloc($sizeT $totalSize)")
+        emit(s"  $buf = call i8* @__checked_malloc($sizeT $totalSize)")
         // Init refcount = 1
         val rcPtr = newReg()
         emit(s"  $rcPtr = bitcast i8* $buf to i64*")
@@ -2983,7 +3019,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val totalSize = newReg()
         emit(s"  $totalSize = add i64 $dataBytes, 16")
         val buf = newReg()
-        emit(s"  $buf = call i8* @malloc($sizeT ${narrowI64ToSizeT(totalSize)})")
+        emit(s"  $buf = call i8* @__checked_malloc($sizeT ${narrowI64ToSizeT(totalSize)})")
         // Zero the whole thing
         emit(s"  call void @$memsetIntrinsic(i8* $buf, i8 0, $sizeT ${narrowI64ToSizeT(totalSize)}, i1 false)")
         // Refcount = 1 at offset 0
@@ -3017,7 +3053,7 @@ class SyslLLVMCodegen(target: String = "host"):
         val dataSize = llvmSizeOf(et)
         val totalSize = dataSize + 8
         val buf = newReg()
-        emit(s"  $buf = call i8* @malloc($sizeT $totalSize)")
+        emit(s"  $buf = call i8* @__checked_malloc($sizeT $totalSize)")
         val rcPtr = newReg()
         emit(s"  $rcPtr = bitcast i8* $buf to i64*")
         emit(s"  store i64 1, i64* $rcPtr")
@@ -3489,7 +3525,7 @@ class SyslLLVMCodegen(target: String = "host"):
             val deinitOpt = closureEnvDeinitFor(closureName, c)
             // malloc(totalSize); base = result
             val base = newReg()
-            emit(s"  $base = call i8* @malloc($sizeT $totalSize)")
+            emit(s"  $base = call i8* @__checked_malloc($sizeT $totalSize)")
             // Write rc=1 at base+0
             val rcPtr = newReg()
             emit(s"  $rcPtr = bitcast i8* $base to i64*")
@@ -4182,7 +4218,7 @@ class SyslLLVMCodegen(target: String = "host"):
             if owns then
               val size = llvmSizeOf(st)
               val heapBuf = newReg()
-              emit(s"  $heapBuf = call i8* @malloc($sizeT $size)")
+              emit(s"  $heapBuf = call i8* @__checked_malloc($sizeT $size)")
               val cpResult = newReg()
               emit(s"  $cpResult = call i8* @memcpy(i8* $heapBuf, i8* $srcI8, $sizeT $size)")
               heapBuf
@@ -5131,7 +5167,7 @@ class SyslLLVMCodegen(target: String = "host"):
     val totalSize = newReg()
     emit(s"  $totalSize = add i64 $dataLen64, 8")
     val base = newReg()
-    emit(s"  $base = call i8* @malloc($sizeT ${narrowI64ToSizeT(totalSize)})")
+    emit(s"  $base = call i8* @__checked_malloc($sizeT ${narrowI64ToSizeT(totalSize)})")
     val rcPtr = newReg()
     emit(s"  $rcPtr = bitcast i8* $base to i64*")
     emit(s"  store i64 1, i64* $rcPtr")
@@ -5596,6 +5632,7 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("  call void @__div_zero_fail()")
     emit("  unreachable")
     emitLabel(okLbl)
+
 
   /** Emit a return instruction, handling void vs value returns. */
   private def emitRet(retType: String, value: String = "0"): Unit =
