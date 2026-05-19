@@ -352,6 +352,14 @@ trait SyslSVMCodegenExpressions:
       genExpr(inner)
       emitCast(inner.typ, target)
 
+    case TCall("abort", _, _) =>
+      // SVM has no `abort` runtime function — emit a trap directly with
+      // an abort-specific error code so the host stack-trace reads
+      // "panic (halt)" with svm.result=0x3 (matching the TRISC abort
+      // convention of `ldi r1, 3; trap 1`).
+      emit("  push_i8 3")
+      emit("  trap 1")
+
     case TCall(name, args, _) =>
       // Push args left-to-right, materializing a slice struct when the param
       // expects a slice and the caller is handing over a fixed array.

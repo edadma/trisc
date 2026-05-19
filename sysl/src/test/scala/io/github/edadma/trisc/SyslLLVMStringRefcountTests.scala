@@ -889,7 +889,7 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    val t = s[1:4]
         |""".stripMargin)
     // Substring path: malloc + memcpy + emitMakeString
-    ir should include("call i8* @malloc")
+    ir should include("call i8* @__checked_malloc")
     ir should include("call i8* @memcpy")
   }
 
@@ -1283,7 +1283,7 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    val f = (x: int) -> x + len(s)
         |""".stripMargin)
     // env malloc'd with envSize+16 (single 16-byte string capture → 16+16=32)
-    ir should include regex """call i8\* @malloc\(i64 32\)"""
+    ir should include regex """call i8\* @__checked_malloc\(i64 32\)"""
     // rc = 1 stored in header
     ir should include regex """store i64 1, i64\*"""
     // deinit_ptr cast (per-closure-id env deinit)
@@ -1302,7 +1302,7 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    val a = 10
         |    val f = (x: int) -> x + a
         |""".stripMargin)
-    ir should include("call i8* @malloc")
+    ir should include("call i8* @__checked_malloc")
     ir should include regex """store i8\* null, i8\*\*"""
     // No per-id deinit registered
     ir should not include "@__closure_env_deinit_"
@@ -1318,8 +1318,11 @@ class SyslLLVMStringRefcountTests extends SyslLLVMTestHelpers {
         |    val a = 10
         |    apply(x -> x + a, 32)
         |""".stripMargin)
-    // No malloc/free for the closure env
-    ir should not include "call i8* @malloc"
+    // No malloc/free for the closure env (stack-env optimization).
+    // Codegen call sites use `@__checked_malloc`; the bare `@malloc`
+    // inside the wrapper's body is always present, so this assertion
+    // looks at the codegen call site rather than the wrapper itself.
+    ir should not include "call i8* @__checked_malloc"
     ir should not include "@__closure_env_deinit_"
     ir should not include "@__closure_env_dispatch"
   }
