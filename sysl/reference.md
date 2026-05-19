@@ -2030,6 +2030,150 @@ trait 'X.method' matches arg type(s) ..."; when more than one matches,
 "ambiguous: N impls of 'X' match ...". Coherence ensures the second
 case can only happen across modules that violate the orphan rule.
 
+### Interfaces
+
+An `interface` declares a set of method signatures. Any struct whose own
+methods cover those signatures — by name and by parameter/return types —
+satisfies the interface and can be **boxed** into a value of the interface
+type. Calls through an interface dispatch dynamically through a per-type
+vtable.
+
+```sysl
+interface Counter
+    tick() -> unit
+    get() -> int
+
+struct IntCounter
+    n: int
+
+IntCounter.tick() -> unit
+    self.n = self.n + 1
+
+IntCounter.get() -> int = self.n
+
+bump(c: Counter) -> unit = c.tick()
+
+main() -> int
+    var ic = IntCounter(0)
+    bump(ic)                  // implicit box: IntCounter satisfies Counter
+    bump(ic)
+    ic.get()                  // 2
+```
+
+**Structural satisfaction.** There is no `impl Counter for IntCounter`
+declaration. The analyzer infers that `IntCounter` satisfies `Counter`
+because `IntCounter.tick` and `IntCounter.get` exist with matching
+signatures. Same struct can satisfy several unrelated interfaces with
+no further annotation.
+
+**Method signature matching.** Each interface method's parameter list
+matches against the struct method body's parameters (after the hidden
+`self` is added). Return types must match exactly; parameter types
+must match exactly. There is no implicit conversion at boxing time.
+
+**Memory layout.** An interface value is a 16-byte fat pointer
+`{itable_ptr: i64, data_ptr: i64}`. The itable carries function
+pointers, one per interface method in declaration order; the data
+slot points at the boxed struct's storage.
+
+**Boxing and the `owns` flag.** Whether the boxed data slot points at
+the *source's* storage or at an independent heap copy depends on how
+the box escapes:
+
+- **In-scope use (mutating self).** When the box is consumed by a
+  function parameter, indexed into, or otherwise used without
+  outliving the source, the box shares the source's storage —
+  `bump(ic)` above mutates the caller's `ic.n` directly. This is the
+  point of dynamic dispatch on a `Counter` parameter.
+- **Escape via return / capture.** When the box is returned from a
+  function, stored in `Option[Iface]` / `Result[Iface, _]`, captured
+  by a closure that escapes, or used as a field in a heap-allocated
+  struct, the box owns an independent heap copy of the source's
+  bytes. Refcount-bearing fields inside the copied struct are
+  incref'd so the copy is independently safe to outlive the source.
+
+```sysl
+make_counter() -> Counter
+    val c = IntCounter(0)
+    return c                  // box owns a heap copy of c (c is about to go out of scope)
+
+main() -> int
+    var x = make_counter()
+    x.tick()                  // mutates the heap copy, not the (gone) local c
+    x.get()                   // 1
+```
+
+The `owns` flag is invisible at the source level — both spellings are
+just `Counter`. The analyzer picks the right shape automatically. The
+guarantee: an interface value is always safe to use, including after
+its source goes out of scope, when the value was obtained from a
+return / `Option` / `Result` / heap-stored struct field.
+
+**Composed interfaces.** An interface body may name other interfaces
+as embedded members (bare identifier, no parens). The embedded
+interface's methods are merged into the composed one's method set:
+
+```sysl
+interface Reader
+    read() -> int
+
+interface Writer
+    write(b: int) -> unit
+
+interface ReadWriter
+    Reader
+    Writer
+    flush() -> unit            // composed interface may also add direct methods
+
+struct Cell
+    value: int
+
+Cell.read() -> int = self.value
+Cell.write(b: int) -> unit
+    self.value = b
+Cell.flush() -> unit = ()
+
+use(rw: ReadWriter) -> int
+    rw.write(7)
+    rw.flush()
+    rw.read()                  // 7
+```
+
+Composition is multi-level — a composed interface may itself be
+embedded in another. A struct that satisfies every transitively
+included method satisfies the composed interface.
+
+**Interaction with `&T` and `*T`.** A boxed `&T` is an interface value
+whose data slot points at the heap pointee; refcount semantics on the
+source ref still apply. A boxed `*T` is allowed only inside the
+unmanaged-pointer discipline (kernel/no-allocator contexts) — the
+interface dispatch goes through normally but the system has no way to
+free the pointee.
+
+**Generic interface methods.** Methods on an interface may use the
+struct's type parameters in their signatures. The vtable is per
+monomorphized struct type — `Box[int]` and `Box[string]` register
+different vtables under the same interface name.
+
+**Interfaces in slices and collections.** A `[]Iface` (or `&[]Iface`)
+stores boxed values one fat pointer per slot. Each element retains
+its own `owns` shape (so a slice may mix in-scope and heap-owned
+entries safely). Iteration with `for v in slice` binds `v` to the
+fat pointer, which can be passed on as another interface argument
+without re-boxing.
+
+**Limitations.**
+
+- Interface methods cannot currently be marked `#pure`, `#reads(...)`,
+  or `#writes(...)` — see the *Effect signatures on function types and
+  interface methods* section for the v2 plan.
+- Pattern matching on interface values is not supported. To extract
+  the original type, the producer must encode it explicitly (e.g. as
+  a sum type around the iface) or use a tag method on the interface.
+- Static-type erasure: once boxed, the original struct type is not
+  recoverable at runtime. (Compare this to data enums, which keep a
+  tag.)
+
 ### Methods
 
 Methods are declared with the `StructName.methodName(...)` syntax. The parser
