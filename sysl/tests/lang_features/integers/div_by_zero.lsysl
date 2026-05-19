@@ -1,0 +1,59 @@
+Division by zero — backend-divergent
+=====================================
+
+The audit memo (`project_sysl_audit_bugs.md` 2026-04-28)
+flagged TRISC as having no explicit divide-by-zero check.
+This file probes runtime divide-by-zero behavior on every
+backend with `#test(should_panic)`. Each backend that
+TRAPS on div0 passes; backends that silently return garbage
+or wrap would fail (test runner sees "expected panic, got
+normal return").
+
+The reference doesn't promise uniform div0 behavior across
+backends (interpreter traps, LLVM emits sdiv with UB,
+TRISC depends on the CPU's hardware behavior). Pinning the
+TRAPPING contract on the backends where it works.
+
+File-local prefix `Dbz`.
+
+    module sysl.tests.lang_features
+
+`int / 0` traps
+---------------
+
+    dbz_div_i32(a: int, b: int) -> int = a / b
+
+    #test(should_panic)
+    test_dbz_div_int_by_zero() -> unit
+        val _ = dbz_div_i32(10, 0)
+
+    #test(should_panic)
+    test_dbz_div_zero_by_zero() -> unit
+        val _ = dbz_div_i32(0, 0)
+
+`int % 0` traps
+---------------
+
+    dbz_mod_i32(a: int, b: int) -> int = a % b
+
+    #test(should_panic)
+    test_dbz_mod_int_by_zero() -> unit
+        val _ = dbz_mod_i32(7, 0)
+
+`u32 / 0` traps
+---------------
+
+    dbz_divu(a: u32, b: u32) -> u32 = a / b
+
+    #test(should_panic)
+    test_dbz_div_u32_by_zero() -> unit
+        val _ = dbz_divu(100, 0)
+
+`i64 / 0` traps
+---------------
+
+    dbz_div_i64(a: i64, b: i64) -> i64 = a / b
+
+    #test(should_panic)
+    test_dbz_div_i64_by_zero() -> unit
+        val _ = dbz_div_i64(1000000000i64, 0i64)
