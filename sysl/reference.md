@@ -54,7 +54,7 @@ module std.strings → trim_space → std_strings__trim_space
 module mylib       → helper     → mylib__helper
 ```
 
-**Never mangled:** `main`, `extern` functions, builtin functions, functions in files without a `module` declaration, and any function whose name matches an `extern` declaration in the compilation.
+**Never mangled:** `main`, `extern` functions, builtin functions, functions in files without a `module` declaration, and any function whose name matches an `extern` declaration in the compilation. The compiler also hard-codes a small set of allocation builtins (`malloc`, `free`, `calloc`, `realloc`, `sbrk`) and OS kernel ABI entry points (`kernel_init`, `kernel_main`, `schedule`, and similar boot-asm-callable symbols) — these are treated as if they were always extern.
 
 Source code always uses the short name — the compiler resolves it to the mangled name automatically.
 
@@ -373,6 +373,24 @@ A `[]Self` field stores a fixed-size slice descriptor, so the variant size is
 bounded — no infinite type. Build it with `(new [n]Tree)[:0]` and `append`,
 walk it by pattern-matching the variant and indexing the slice.
 
+```sysl
+build_tree() -> Tree
+    var children = (new [10]Tree)[:0]    // empty slice, capacity 10
+    children = append(children, Leaf(1))
+    children = append(children, Leaf(2))
+    children = append(children, Leaf(3))
+    Node(children)
+
+count_leaves(t: Tree) -> int
+    t match
+        Leaf(_)            -> 1
+        Branch(l, r)       -> count_leaves(*l) + count_leaves(*r)
+        Node(kids)         ->
+            var n = 0
+            for k in kids do n = n + count_leaves(k)
+            n
+```
+
 **Memory layout:** `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
 
 ### Type Declarations
@@ -576,6 +594,19 @@ The same struct definition supports three usage modes at the use site:
 - `ptr -> ref`: **always an error** (can't manufacture a refcount)
 - `value -> ptr`: `&v` (address-of)
 - `ptr -> value`: `*p` (dereference); implicit for struct function arguments
+
+`.copy()` on a `&T` produces an independent value of type `T` — a bitwise
+copy of the pointee, with no refcount adjustment on the source:
+
+```sysl
+val r = new Point(10, 20)    // r: &Point
+var v: Point = r.copy()       // v is a fresh stack copy; r still owns the heap pointee
+v.x = 99                      // does not affect r.x
+```
+
+`.copy()` is defined for every `&T` where `T` is a struct, tuple, or
+array. For non-struct refs it is unnecessary — dereference with `*r`
+instead.
 
 ### Backend Implementation Latitude
 
@@ -872,9 +903,15 @@ pos(x: int) -> int
     x + 1
 ```
 
-On failure: `"precondition check failed: x must be non-negative"`. The message is emitted
-by the LLVM backend and the interpreter; the TRISC and SVM backends currently trap with a
-fixed error code.
+On failure, the kind (`"precondition check failed"`, `"postcondition check failed"`, …)
+and the optional comma-message are joined as `"<kind>: <message>"`. The LLVM family
+prepends `"range check failed: "` and writes the joined text to stderr before aborting,
+so the line above renders as `"range check failed: precondition check failed: x must be
+non-negative"`. The interpreter raises an exception carrying the same joined text.
+TRISC traps with `r1 = 6` (contract violation); SVM emits `trap 1` and keeps the joined
+text as a comment in the assembly source. See [Runtime Safety](#runtime-safety) for the
+full per-backend trap behaviour and the panic-marker prefixes the test runner
+recognizes.
 
 **`result` in `ensure` clauses.** Inside an `ensure` expression, the identifier `result`
 refers to the function's return value. Outside `ensure` — in `require` or in the body —
@@ -3017,6 +3054,16 @@ cap(a)                    // 5
 // automatically freed when refcount reaches 0
 ```
 
+The returned `&[]T` is backed by a heap allocation with a refcount header
+immediately before the data: `[rc: i64 @ -16 | deinit_ptr: i8* @ -8 | data]`.
+Every assignment, parameter pass, and field write of the `&[]T` value
+increments `rc`; every scope exit, reassignment, and field overwrite
+decrements. When `rc` reaches 0, the deinit hook walks any rc-bearing
+elements (decrementing them in turn) and `free` reclaims the block.
+Sub-slices created via `a[lo:hi]` share the parent's backing storage and
+keep the parent alive — the slice descriptor (`{ptr, len, cap}`) is
+plain-data; the underlying buffer is what carries the count.
+
 ### Slices (Sub-slicing)
 
 ```sysl
@@ -3348,14 +3395,82 @@ type, function parameters, struct fields — all require explicit `*ptr`.
 
 ## Runtime Safety
 
-The codegen emits `trap 1` for runtime errors. On the OS, the trap handler terminates the faulting thread and outputs `!N` where N is the error code. On bare metal, execution halts.
+Every backend has a trapping contract for the same set of runtime errors —
+out-of-bounds indices, null-pointer dereferences, divide-by-zero, malloc
+failure, `panic` / `assert` / `abort`, `within` / `where` range-check
+failures, contract violations (`require` / `ensure` / `invariant` /
+`assume`), and enum-attribute out-of-range failures
+(`::Succ` / `::Pred` / `::Val` / `::Value`). What differs is the
+*delivery shape*.
 
-| Error Code | Condition |
+### Categories
+
+| Category | Trigger |
 |---|---|
-| 1 | Array/slice index out of bounds |
-| 2 | Null pointer (malloc returned null) |
-| 3 | `abort()` called |
-| 4 | `panic()` or `assert()` failure |
+| Out-of-bounds | `arr[i]`, slice index, ref-slice index outside `[0, len)` |
+| Null pointer | `new T(...)` / `new [n]T` when `malloc` returns null |
+| Divide-by-zero | integer `/` or `%` with zero divisor |
+| Malloc failure | any `new` / closure-env / string-buf alloc that returns null |
+| Panic / Assert | `panic(msg)`, `assert(cond, msg)` (when false), `expect(...)` |
+| Abort | user-called `abort()` |
+| Range check | `T` declared `within r` or `where p` with a failing produce site |
+| Contract | `require` / `ensure` / `invariant` / `assume` clause that's false at runtime |
+| Enum attribute | `::Succ` past upper bound, `::Pred` past lower, `::Val(n)` for out-of-range `n`, `::Value(s)` for unknown name |
+
+### Per-backend delivery
+
+**LLVM family** (`llvm-host`, `riscv64`, `riscv32`, `wasm32`) writes a
+category line to file descriptor 2 (stderr) and then calls libc
+`abort()` (which raises `SIGABRT` on hosted platforms, halts the qemu
+machine on bare-metal RISC-V, and exits the wasmtime runtime). Lines:
+
+| Category | Line written to stderr |
+|---|---|
+| Out-of-bounds | `panic: index out of bounds\n` |
+| Divide-by-zero | `panic: divide by zero\n` |
+| Malloc failure | `panic: out of memory\n` |
+| Abort | `panic: abort\n` |
+| Panic | `panic: <user message>\n` |
+| Assert | `assertion failed: <user message>\n` |
+| Range check / Contract | `range check failed: <kind>[: <message>]\n` |
+
+**TRISC** loads the error code into `r1` and emits `trap 1`. On the OS,
+the trap handler terminates the faulting thread and outputs `!N` where N
+is the value of `r1`. On bare metal, execution halts. Codes:
+
+| `r1` | Category |
+|---|---|
+| 1 | Out-of-bounds |
+| 2 | Null pointer |
+| 3 | Abort |
+| 4 | Panic / Assert |
+| 5 | Range check / Divide-by-zero |
+| 6 | Contract |
+
+**SVM** emits `trap 1` directly. The trap immediate is a single byte (1),
+and there is no distinguishing error code on the operand stack for most
+categories — they are differentiated only by an asm-source comment
+emitted above the trap. The exception is user-called `abort()`, which
+pushes the byte `3` onto the operand stack before trapping (matching
+TRISC's r1=3 convention) so a debugging host can recover the cause.
+
+**Interpreter** raises a Scala exception carrying the category string and
+any user-supplied message. Failing tests show the exception text in the
+test output capture.
+
+### Test runner integration
+
+`sysl test` recognizes a panic on stderr / stdout / interpreter exception
+text via three prefixes:
+
+- `panic: ` — covers index OOB, divide-by-zero, OOM, abort, panic, expect
+- `assertion failed: ` — covers `assert(...)` failures
+- `range check failed: ` — covers `within` / `where` failures and all
+  contract clauses
+
+A `#test(should_panic)` test must produce text starting with one of
+these prefixes; `#test(should_panic: "substring")` additionally
+substring-matches the suffix after the prefix.
 
 ### Disabling Contracts
 
