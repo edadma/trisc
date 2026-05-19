@@ -1,0 +1,152 @@
+Iface as Option/Result payload — generic enum + iface
+======================================================
+
+A generic enum `Option[T]` / `Result[T, E]` instantiated
+with `T = Iface` is a cross-feature combination: the
+analyzer must (a) instantiate the generic enum's variant
+field types with the iface, (b) auto-box at the variant
+construction site so the iface descriptor's data lives on
+the heap rather than on the constructor's stack, and (c)
+preserve the iface across the variant-unwrap path in a
+match arm.
+
+`enum_data_iface_field.lsysl` already pins a *non-generic*
+enum with an iface variant. This file pins the *generic*
+case where the same variant carries different iface
+descriptors per instantiation.
+
+    module sysl.tests.lang_features
+
+    interface IorValuator
+        value() -> int
+
+    struct IorPlain
+        n: int
+
+    IorPlain.value() -> int = self.n
+
+    struct IorDoubled
+        n: int
+
+    IorDoubled.value() -> int = self.n * 2
+
+`Option[Iface]` — Some + None
+-----------------------------
+
+`Option[IorValuator]`: `Some(iface)` carries the iface
+descriptor; `None` carries nothing. Match destructures and
+calls `.value()` on the payload.
+
+    enum IorOpt[T]
+        Some(v: T)
+        None
+
+    ior_unwrap_or_zero(o: IorOpt[IorValuator]) -> int
+        o match
+            Some(h) -> h.value()
+            None    -> 0
+
+    #test
+    test_option_iface_some() -> unit
+        // Explicit iface-typed local then construct Some — the variant's
+        // T infers as IorValuator from the binding's declared type.
+        val h: IorValuator = IorPlain(42)
+        val o = Some(h)
+        assert(ior_unwrap_or_zero(o) == 42, s"Some(IorPlain(42)) → 42; got ${ior_unwrap_or_zero(o)}")
+
+    #test
+    test_option_iface_some_doubled() -> unit
+        val h: IorValuator = IorDoubled(21)   // 21*2 = 42
+        val o = Some(h)
+        assert(ior_unwrap_or_zero(o) == 42, s"Some(IorDoubled(21)) → 42; got ${ior_unwrap_or_zero(o)}")
+
+    #test
+    test_option_iface_none() -> unit
+        val o: IorOpt[IorValuator] = None
+        assert(ior_unwrap_or_zero(o) == 0, s"None → 0; got ${ior_unwrap_or_zero(o)}")
+
+`Result[Iface, string]` — Ok + Err
+----------------------------------
+
+Same shape but with an `Err` variant carrying a payload
+type that's NOT an iface. The Ok carries the iface; Err
+carries a string. Pins that the iface auto-box only fires
+on the iface-typed variant, not on string-typed ones.
+
+    enum IorRes[T, E]
+        Ok(v: T)
+        Err(e: E)
+
+    ior_result_dispatch(r: IorRes[IorValuator, string]) -> int
+        r match
+            Ok(h)  -> h.value()
+            Err(_) -> -1
+
+    #test
+    test_result_iface_ok() -> unit
+        val h: IorValuator = IorPlain(7)
+        val r: IorRes[IorValuator, string] = Ok(h)
+        assert(ior_result_dispatch(r) == 7, s"Ok(IorPlain(7)) → 7; got ${ior_result_dispatch(r)}")
+
+    #test
+    test_result_iface_err() -> unit
+        val r: IorRes[IorValuator, string] = Err("nope")
+        assert(ior_result_dispatch(r) == -1, s"Err(_) → -1; got ${ior_result_dispatch(r)}")
+
+Function returning `Option[Iface]` — call site dispatch
+-------------------------------------------------------
+
+The factory chooses between Some and None based on a
+predicate. Caller dispatches through `match`. The iface
+local `h` is referenced inside `return Some(h)`; without
+the iface-escape post-pass, `h`'s descriptor's `data_ptr`
+points at the factory's stack frame (dead by the time the
+caller dereferences). Fix: `rewriteEscapingClosureCapture
+Owns` in SyslAnalyzerPostPasses now also collects iface
+vars used inside `return` expressions and flips their
+val-decl `TInterfaceBox` to `owns=true`. The codegen then
+heap-copies the source struct so the iface descriptor's
+data outlives the factory's frame.
+
+    ior_maybe_holder(n: int) -> IorOpt[IorValuator]
+        if n > 0
+            val h: IorValuator = IorPlain(n)
+            return Some(h)
+        return None
+
+    #test
+    test_fn_returns_option_iface_some() -> unit
+        val o = ior_maybe_holder(11)
+        val r = o match
+            Some(h) -> h.value()
+            None    -> -1
+        assert(r == 11, s"Some(11) → 11; got $r")
+
+    #test
+    test_fn_returns_option_iface_none() -> unit
+        val o = ior_maybe_holder(-5)
+        val r = o match
+            Some(_) -> 0
+            None    -> 99
+        assert(r == 99, s"None → 99; got $r")
+
+Two-call aliasing — independent iface descriptors
+-------------------------------------------------
+
+Two factory calls produce two `Option[Iface]`s. Without the
+escape post-pass, both descriptors aliased the same dead
+stack slot in the factory, so both reads returned the
+second call's value (sum = 40 instead of 30). With the
+fix each call heap-copies its source.
+
+    #test
+    test_two_option_iface_summed() -> unit
+        val o1 = ior_maybe_holder(10)
+        val o2 = ior_maybe_holder(20)
+        val v1 = o1 match
+            Some(h) -> h.value()
+            None    -> 0
+        val v2 = o2 match
+            Some(h) -> h.value()
+            None    -> 0
+        assert(v1 + v2 == 30, s"10 + 20 = 30; got ${v1 + v2}")

@@ -1,0 +1,171 @@
+For-each iteration + heterogeneous impls in a slice of iface
+============================================================
+
+`iface_box_lifetime.lsysl` already pins indexed iteration
+over a slice of iface (`while i < len(items): items[i].
+value()`). This file pins two adjacent corners:
+
+  - **For-each desugar**: `for h in items` uses a different
+    codegen path than `items[i]` — the parser-level once-eval
+    sub-slice desugar (sysl@<chunk1-cluster-A>) was a recent
+    bug. Pinning for-each over a slice of iface confirms
+    the iface receiver is recovered per-iteration regardless
+    of how the iteration is shaped.
+  - **Heterogeneous impls**: a single `[]Iface` slice can
+    hold cells implementing the iface from different structs.
+    Each cell's dispatch must pick the right concrete impl
+    via its own method table. A backend that mis-shares the
+    method-table pointer across cells (e.g. caches it
+    once per slice instead of per element) would return
+    wrong values.
+
+Companion to `iface_box_lifetime.lsysl` (indexed +
+struct-field cases).
+
+    module sysl.tests.lang_features
+
+    interface IsiValuator
+        value() -> int
+
+    struct IsiPlain
+        n: int
+
+    IsiPlain.value() -> int = self.n
+
+    struct IsiDoubled
+        n: int
+
+    IsiDoubled.value() -> int = self.n * 2
+
+    struct IsiNegated
+        n: int
+
+    IsiNegated.value() -> int = -self.n
+
+For-each over a homogeneous slice of iface
+------------------------------------------
+
+Three `IsiPlain`s wrapped as iface; for-each iteration
+yields each in turn. Summed value must match the indexed
+form's behaviour from `iface_box_lifetime`.
+
+    isi_sum_for_each(items: []IsiValuator) -> int
+        var total = 0
+        for h in items
+            total = total + h.value()
+        return total
+
+    #test
+    test_for_each_homogeneous_slice() -> unit
+        var arr = new [3]IsiValuator
+        arr[0] = IsiPlain(10)
+        arr[1] = IsiPlain(20)
+        arr[2] = IsiPlain(30)
+        val total = isi_sum_for_each(arr[:])
+        assert(total == 60, s"10+20+30 = 60; got $total")
+
+For-each over a heterogeneous slice — each cell dispatches separately
+---------------------------------------------------------------------
+
+Three different concrete types implementing the same iface
+populate consecutive cells. For-each picks each up; the
+method dispatch picks the right impl per cell.
+
+`IsiPlain(5).value() == 5`
+`IsiDoubled(5).value() == 10`
+`IsiNegated(5).value() == -5`
+Total = 5 + 10 + -5 = 10.
+
+    #test
+    test_for_each_heterogeneous_slice() -> unit
+        var arr = new [3]IsiValuator
+        arr[0] = IsiPlain(5)
+        arr[1] = IsiDoubled(5)
+        arr[2] = IsiNegated(5)
+        val total = isi_sum_for_each(arr[:])
+        assert(total == 10, s"5 + 10 + -5 = 10; got $total")
+
+For-each over a sub-slice of iface
+----------------------------------
+
+Sub-slicing a fully-populated slice produces a view. For-each
+over the view must dispatch correctly per cell.
+
+    #test
+    test_for_each_sub_slice_of_iface() -> unit
+        var arr = new [5]IsiValuator
+        arr[0] = IsiPlain(1)
+        arr[1] = IsiPlain(2)
+        arr[2] = IsiDoubled(10)    // .value() == 20
+        arr[3] = IsiNegated(3)     // .value() == -3
+        arr[4] = IsiPlain(100)
+        // View [1:4]: IsiPlain(2), IsiDoubled(10), IsiNegated(3) → 2 + 20 + -3 = 19
+        val total = isi_sum_for_each(arr[1:4])
+        assert(total == 19, s"2 + 20 + -3 = 19; got $total")
+
+Heterogeneous dispatch — index path matches for-each path
+---------------------------------------------------------
+
+The same heterogeneous slice traversed once via for-each and
+once via indexed iteration must produce identical totals.
+Pins that the two codepaths agree.
+
+    isi_sum_indexed(items: []IsiValuator) -> int
+        var total = 0
+        var i = 0
+        while i < len(items)
+            total = total + items[i].value()
+            i = i + 1
+        return total
+
+    #test
+    test_for_each_and_indexed_agree() -> unit
+        var arr = new [4]IsiValuator
+        arr[0] = IsiPlain(7)
+        arr[1] = IsiDoubled(7)    // 14
+        arr[2] = IsiNegated(7)    // -7
+        arr[3] = IsiPlain(3)
+        val via_for_each = isi_sum_for_each(arr[:])
+        val via_indexed = isi_sum_indexed(arr[:])
+        assert(via_for_each == via_indexed, s"for-each $via_for_each vs indexed $via_indexed")
+        // 7 + 14 + -7 + 3 = 17
+        assert(via_for_each == 17, s"expected 17; got $via_for_each")
+
+For-each captures dispatch through a local — outlives the loop
+--------------------------------------------------------------
+
+Inside the for-each body, save the iface to a local, then
+dispatch. The local is created and discarded each iteration;
+the iface box must survive long enough for the method call.
+
+    #test
+    test_for_each_local_binding_dispatches() -> unit
+        var arr = new [3]IsiValuator
+        arr[0] = IsiDoubled(2)    // 4
+        arr[1] = IsiDoubled(3)    // 6
+        arr[2] = IsiDoubled(5)    // 10
+        var total = 0
+        for h in arr[:]
+            val local: IsiValuator = h
+            total = total + local.value()
+        assert(total == 20, s"4+6+10=20; got $total")
+
+Reassigning iface cells then for-each re-reads
+----------------------------------------------
+
+Populate the slice with one set of impls, sum, then
+reassign cells to different impls (drops old boxes), sum
+again. The second sum sees the new impls' values.
+
+    #test
+    test_for_each_after_cell_reassign() -> unit
+        var arr = new [2]IsiValuator
+        arr[0] = IsiPlain(100)
+        arr[1] = IsiPlain(200)
+        val first_total = isi_sum_for_each(arr[:])
+        assert(first_total == 300, s"first: 100+200=300; got $first_total")
+        // Reassign — old IsiPlain boxes drop, new ones land
+        arr[0] = IsiDoubled(50)    // 100
+        arr[1] = IsiNegated(100)   // -100
+        val second_total = isi_sum_for_each(arr[:])
+        assert(second_total == 0, s"second: 100 + -100 = 0; got $second_total")

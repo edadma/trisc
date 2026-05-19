@@ -109,7 +109,7 @@ def svmAssemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = 
          "ffloor" | "fceil" | "fround" | "ftrunc" | "fmin" | "fmax" |
          "feq" | "fneq" | "flt" | "fgt" | "fle" | "fge" |
          "f2i" | "i2f" | "f2u" | "u2f" |
-         "push_f0" | "push_f1" |
+         "push_f0" | "push_f1" | "f64tof32" |
          "dup_add" | "dup_mul" | "over_add" | "over_sub" |
          "dup_load64" |
          "breakpoint" => 1
@@ -166,7 +166,7 @@ def svmAssemble(src: String, stacked: Boolean = true, orgs: Map[String, Long] = 
     "feq" -> 0x9E, "fneq" -> 0x9F, "flt" -> 0xA0, "fgt" -> 0xA1,
     "fle" -> 0xA2, "fge" -> 0xA3,
     "f2i" -> 0xA4, "i2f" -> 0xA5, "f2u" -> 0xA6, "u2f" -> 0xA7,
-    "push_f0" -> 0xA8, "push_f1" -> 0xA9,
+    "push_f0" -> 0xA8, "push_f1" -> 0xA9, "f64tof32" -> 0xAA,
     "dup_add" -> 0xB0, "dup_mul" -> 0xB1, "over_add" -> 0xB2, "over_sub" -> 0xB3,
     "add_imm8" -> 0xB4, "sub_imm8" -> 0xB5, "mul_imm8" -> 0xB6,
     "eqz_jumpz" -> 0xB7, "eqz_jumpnz" -> 0xB8, "inc_jumpnz" -> 0xB9, "dec_jumpnz" -> 0xBA,

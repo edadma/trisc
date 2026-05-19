@@ -65,3 +65,131 @@ the divergence is documented in
         assert(int(-3.7) == -3,  "-3.7 -> -3 (trunc toward zero)")
         assert(int(0.0)  == 0,   "0.0 -> 0")
         assert(int(127.99) == 127, "127.99 -> 127")
+
+NaN orderings — all four are false (unordered comparison)
+----------------------------------------------------------
+
+NaN compared with `<`, `>`, `<=`, `>=` against anything (including
+itself) is always false. Backends that lower these to flag-based
+comparisons can silently flip one of them by treating the
+"unordered" CPU flag as the wrong polarity — a single backend
+miscompile here would corrupt every `min`/`max`/`sort` that has
+to defend against NaN inputs.
+
+    #test
+    test_nan_lt_zero_is_false() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(nan < 0.0), "NaN < 0 is false")
+
+    #test
+    test_nan_gt_zero_is_false() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(nan > 0.0), "NaN > 0 is false")
+
+    #test
+    test_nan_le_zero_is_false() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(nan <= 0.0), "NaN <= 0 is false")
+
+    #test
+    test_nan_ge_zero_is_false() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(nan >= 0.0), "NaN >= 0 is false")
+
+    #test
+    test_nan_le_nan_is_false() -> unit
+        val nan = 0.0 / 0.0
+        // `<=` includes equality, but NaN ≠ NaN — so `<=` on identical
+        // NaNs must STILL be false. Tempting backend optimisation: short-
+        // circuit `x <= x` to true. That's wrong for NaN.
+        assert(!(nan <= nan), "NaN <= NaN is false")
+
+    #test
+    test_nan_ge_nan_is_false() -> unit
+        val nan = 0.0 / 0.0
+        assert(!(nan >= nan), "NaN >= NaN is false")
+
+NaN propagation through arithmetic
+-----------------------------------
+
+Any arithmetic involving NaN produces NaN; no operand can "absorb"
+it. Including `NaN * 0.0` — which is NOT 0 (despite the math
+identity), because IEEE 754 makes NaN the killer of indeterminate
+forms.
+
+    #test
+    test_nan_plus_finite_is_nan() -> unit
+        val nan = 0.0 / 0.0
+        val r = nan + 1.0
+        assert(r != r, "NaN + 1 is NaN")
+
+    #test
+    test_finite_minus_nan_is_nan() -> unit
+        val nan = 0.0 / 0.0
+        val r = 1.0 - nan
+        assert(r != r, "1 - NaN is NaN")
+
+    #test
+    test_nan_times_zero_is_nan() -> unit
+        val nan = 0.0 / 0.0
+        val r = nan * 0.0
+        assert(r != r, "NaN * 0 is NaN (not 0)")
+
+    #test
+    test_inf_minus_inf_is_nan() -> unit
+        val pos_inf = 1.0e308 * 10.0
+        val r = pos_inf - pos_inf
+        assert(r != r, "Inf - Inf is NaN (indeterminate)")
+
+    #test
+    test_zero_times_inf_is_nan() -> unit
+        val pos_inf = 1.0e308 * 10.0
+        val r = 0.0 * pos_inf
+        assert(r != r, "0 * Inf is NaN (indeterminate)")
+
+f64 ↔ f32 roundtrip — small values exact, big values lose precision
+--------------------------------------------------------------------
+
+f32 has a 24-bit mantissa (~7 decimal digits). A roundtrip through
+f32 is exact for small whole numbers and small fractions like 1.5,
+but lossy for values like 1.0e20 + 1.0 where "+1" is below the
+mantissa's resolution. Pinning both ends catches a backend that
+accidentally widens or narrows at the wrong intermediate.
+
+    #test
+    test_f64_f32_roundtrip_exact() -> unit
+        val a: f64 = 1.5
+        val b: f32 = f32(a)
+        val c: f64 = f64(b)
+        assert(c == 1.5, s"got $c")
+
+    #test
+    test_f64_f32_roundtrip_precision_loss() -> unit
+        // Use a value that requires more than f32's ~7-digit precision so
+        // a narrow→wide roundtrip detectably loses information. 1.0e10 + 1.0
+        // is exact in f64 (mantissa 53 bits → ~15 digits, plenty of room),
+        // but f32 only has ~7 digits — the trailing `+1` falls below f32's
+        // noise floor at 1e10. The roundtripped value drops that `+1`, so
+        // it differs from the original.
+        val a: f64 = 1.0e10 + 1.0
+        val b: f32 = f32(a)
+        val c: f64 = f64(b)
+        assert(c != a, "f32 narrowing dropped a bit it should have")
+
+Canonical binary-float lore — 0.1 + 0.2 != 0.3
+-----------------------------------------------
+
+The poster child for "use an epsilon when comparing floats". 0.1,
+0.2, and 0.3 cannot be represented exactly in binary f64; the
+sum 0.1 + 0.2 lands at 0.30000000000000004 (one ULP above the
+f64 representation of 0.3). Pinning the inequality protects
+against a backend that constant-folds floats with extended
+precision and silently produces equality.
+
+    #test
+    test_decimal_addition_inexact() -> unit
+        val a: f64 = 0.1
+        val b: f64 = 0.2
+        val c: f64 = 0.3
+        val sum = a + b
+        assert(sum != c, s"0.1+0.2 == 0.3 should be false in binary float; got sum=$sum c=$c")

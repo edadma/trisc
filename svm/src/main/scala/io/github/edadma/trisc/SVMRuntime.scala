@@ -820,32 +820,53 @@ object SVMRuntime:
        |  push_i8 2
        |  and
        |  jumpz .fmt_check_zeropad
-       |  ; leftAlign: emit sign, then digits, then space-pad on right
-       |  ; First write sign at write_ptr-1 if any
+       |  ; leftAlign: build result at the START of the buffer (struct+16),
+       |  ; sign first if any, then digits forward-copied from their tail
+       |  ; location, then pad_count spaces. The original code wrote spaces
+       |  ; AFTER the digits at the tail of the buffer, which overflowed the
+       |  ; 64-byte buffer by pad_count bytes — surfaced as "address not
+       |  ; found" crashes whenever leftAlign was used with width > digits.
+       |  local_get 8
+       |  push_i8 16
+       |  add
+       |  local_set 12         ; dst = struct+16 (buffer start)
+       |  ; If sign_char != 0, write it at dst and advance dst.
        |  local_get 9
        |  jumpz .fmt_la_no_sign
-       |  local_get 7
-       |  dec
-       |  local_set 7
        |  local_get 9
-       |  local_get 7
+       |  local_get 12
        |  store8
-       |  local_get 10
-       |  local_set 6
-       |  jump .fmt_la_pad
+       |  local_get 12
+       |  inc
+       |  local_set 12
        |.fmt_la_no_sign:
+       |  ; Forward-copy digit_count bytes from write_ptr to dst.
+       |  ; Loop uses a TOS i counter; pop on exit.
+       |  push_0
+       |.fmt_la_cpy:
+       |  dup
        |  local_get 6
-       |  local_set 6
-       |.fmt_la_pad:
-       |  ; Append (digit_count + sign) -- already there. Now emit pad spaces at end of digits.
-       |  ; The digits live at [write_ptr, struct_addr+80). We need to append spaces AFTER them.
-       |  ; total chars = digit_count + sign_count. After: pad_count spaces.
-       |  ; We'll write spaces starting at write_ptr + (digits + sign).
+       |  ltu
+       |  jumpz .fmt_la_cpy_done
+       |  dup
        |  local_get 7
+       |  add
+       |  load8                ; ( i byte )
+       |  over                 ; ( i byte i )
+       |  local_get 12
+       |  add                  ; ( i byte dst+i )
+       |  store8               ; ( i )
+       |  inc
+       |  jump .fmt_la_cpy
+       |.fmt_la_cpy_done:
+       |  drop                 ; drop i
+       |  ; dst += digit_count
+       |  local_get 12
        |  local_get 6
        |  add
-       |  local_set 12         ; tail pointer
-       |.fmt_la_loop:
+       |  local_set 12
+       |  ; Fill pad_count spaces at dst, dst+1, ...
+       |.fmt_la_pad:
        |  local_get 11
        |  eqz
        |  jumpnz .fmt_la_done
@@ -858,15 +879,21 @@ object SVMRuntime:
        |  local_get 11
        |  dec
        |  local_set 11
-       |  jump .fmt_la_loop
+       |  jump .fmt_la_pad
        |.fmt_la_done:
-       |  ; Now total length is digit_count + sign + width-padding (already accounted)
-       |  ; Compute final length: total_len + pad_count_remaining (which is 0 here)
-       |  ; Reset: final length = (write_ptr to struct+80) - actually let's compute it.
+       |  ; final length = dst - (struct+16)
        |  local_get 12
-       |  local_get 7
+       |  local_get 8
+       |  sub
+       |  push_i8 16
        |  sub
        |  local_set 6
+       |  ; struct.ptr will be struct+16 — reset write_ptr (local 7) so
+       |  ; fmt_finish writes the right address into the descriptor.
+       |  local_get 8
+       |  push_i8 16
+       |  add
+       |  local_set 7
        |  jump .fmt_finish
        |.fmt_check_zeropad:
        |  local_get 3

@@ -1169,7 +1169,10 @@ trait SyslAnalyzerExpressions:
             val coerced = coerceLiteral(arg, fieldType)
             if !compatible(coerced.typ, fieldType) then
               throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
-            coerced
+            (fieldType, coerced.typ) match
+              case (iface: SyslType.InterfaceType, ct) if !ct.isInstanceOf[SyslType.InterfaceType] =>
+                TInterfaceBox(coerced, iface, owns = true)
+              case _ => coerced
           }
           TStructConstruct(st, checkedArgs)
         else if genericTypeAliases.contains(name) then
@@ -1253,7 +1256,10 @@ trait SyslAnalyzerExpressions:
             val coerced = coerceLiteral(arg, fieldType)
             if !compatible(coerced.typ, fieldType) then
               throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
-            coerced
+            (fieldType, coerced.typ) match
+              case (iface: SyslType.InterfaceType, ct) if !ct.isInstanceOf[SyslType.InterfaceType] =>
+                TInterfaceBox(coerced, iface, owns = true)
+              case _ => coerced
           }
           TStructConstruct(st, checkedArgs)
         else if genericTypeAliases.contains(name) then
@@ -1598,7 +1604,12 @@ trait SyslAnalyzerExpressions:
             case e if e.typ == target => e
             case e => TCast(e, target)
         else if structTypes.contains(name) then
-          // Struct constructor: Point(10, 20)
+          // Struct constructor: Point(10, 20). owns=true on the iface
+          // field auto-box: the containing struct value may be returned
+          // from a factory, stored in another aggregate, or otherwise
+          // outlive the source struct's stack alloca. Mirrors the `new
+          // Struct(...)` path (sysl@972ea9f63) and TIndexAssignStmt /
+          // TFieldAssignStmt at sysl@046a9d446.
           val st = structTypes(name)
           if tArgs.length != st.fields.length then
             throw AnalysisError(s"struct '${st.name}' has ${st.fields.length} field(s), got ${tArgs.length} argument(s)")
@@ -1608,7 +1619,7 @@ trait SyslAnalyzerExpressions:
               throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
             (fieldType, coerced.typ) match
               case (iface: SyslType.InterfaceType, ct) if !ct.isInstanceOf[SyslType.InterfaceType] =>
-                TInterfaceBox(coerced, iface)
+                TInterfaceBox(coerced, iface, owns = true)
               case _ => coerced
           }
           TStructConstruct(st, checkedArgs)
@@ -1628,7 +1639,15 @@ trait SyslAnalyzerExpressions:
             val coerced = coerceLiteral(arg, fieldType)
             if !compatible(coerced.typ, fieldType) then
               throw AnalysisError(s"field '$fieldName' of '${st.name}' expects $fieldType, got ${coerced.typ}")
-            coerced
+            // Mirrors the non-generic struct ctor's owns=true iface
+            // auto-box — see sibling case at line 1611. Without this,
+            // `Wrapper[T](src)` where Wrapper has an iface field would
+            // store a stack pointer for the iface descriptor's data_ptr
+            // and dangle on factory return.
+            (fieldType, coerced.typ) match
+              case (iface: SyslType.InterfaceType, ct) if !ct.isInstanceOf[SyslType.InterfaceType] =>
+                TInterfaceBox(coerced, iface, owns = true)
+              case _ => coerced
           }
           TStructConstruct(st, checkedArgs)
         else if variantToEnum.contains(name) then

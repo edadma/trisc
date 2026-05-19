@@ -1,0 +1,188 @@
+Defer body interactions with returns and panics
+===============================================
+
+A `defer stmt`'s body is parsed as a single statement (deref-
+assign, ident-statement, or expression — see
+`SyslParser.deferStmt`). The parser does NOT accept `return`
+in defer-body position, so a defer cannot *directly* contain
+a `return` keyword — that's a compile-time syntactic
+constraint.
+
+A defer body CAN, however:
+
+  - call a helper function that performs its own internal
+    `return` — the helper's return value is discarded at the
+    defer site, and the enclosing function's return value is
+    unaffected.
+  - call `panic(msg)` — the panic unwinds the program
+    irrespective of the function's "would have returned" value.
+  - call `assert(false, msg)` — same as `panic` (asserts lower
+    to panics on failure).
+
+This file pins the runtime behaviour for the cases that DO
+parse. The compile-time rejection of `defer return X` is a
+parser-level invariant and is not tested here (would need a
+`SyslCompileErrorTests` row, tracked in roadmap §6).
+
+    module sysl.tests.lang_features
+
+    struct DrTrace
+        s: string
+
+Helper called from defer — its return value is discarded
+--------------------------------------------------------
+
+The defer body calls a helper function that itself contains
+`return v`. The helper's effect (mutation of the trace via a
+pointer) is observable, but the helper's return value is
+silently dropped at the defer site. The enclosing fn's return
+value is the one the caller sees.
+
+    dr_helper_with_return(t: *DrTrace) -> int
+        t.s = t.s + "h"
+        return 999
+
+    dr_defer_calls_helper(t: *DrTrace) -> int
+        defer dr_helper_with_return(t)
+        return 7
+
+    #test
+    test_helper_return_discarded() -> unit
+        var t = DrTrace("")
+        val r = dr_defer_calls_helper(&t)
+        assert(r == 7, s"caller should see 7, NOT helper's 999; got $r")
+        assert(t.s == "h", s"helper still mutated trace; expected 'h', got '${t.s}'")
+
+Helper called from a stacked defer — LIFO ordering preserved
+------------------------------------------------------------
+
+Two helpers, each returning a value; both defers fire LIFO. The
+return values of both helpers are discarded; only their
+side-effects are observable, and they accumulate in LIFO order.
+
+    dr_helper_a(t: *DrTrace) -> int
+        t.s = t.s + "A"
+        return 1
+
+    dr_helper_b(t: *DrTrace) -> int
+        t.s = t.s + "B"
+        return 2
+
+    dr_stacked(t: *DrTrace) -> int
+        defer dr_helper_a(t)
+        defer dr_helper_b(t)
+        return 0
+
+    #test
+    test_stacked_helper_returns_lifo() -> unit
+        var t = DrTrace("")
+        val r = dr_stacked(&t)
+        assert(r == 0, s"caller's return value unaffected; got $r")
+        // LIFO: A queued first, B queued second; exit fires B then A.
+        assert(t.s == "BA", s"expected 'BA' LIFO of helper side-effects, got '${t.s}'")
+
+Defer body using helper that returns string — discarded too
+-----------------------------------------------------------
+
+Non-trivial-typed returns (strings) are also discarded at the
+defer site. Confirms the discard works across the calling
+convention's struct-return path (string descriptors are 16-byte
+aggregates), not just for scalar i64.
+
+    dr_str_helper(t: *DrTrace) -> string
+        t.s = t.s + "x"
+        return "discarded"
+
+    dr_defer_calls_str_helper(t: *DrTrace) -> int
+        defer dr_str_helper(t)
+        return 100
+
+    #test
+    test_string_return_discarded() -> unit
+        var t = DrTrace("")
+        val r = dr_defer_calls_str_helper(&t)
+        assert(r == 100, s"caller should see 100; got $r")
+        assert(t.s == "x", s"helper side-effect visible; expected 'x', got '${t.s}'")
+
+Defer body panics
+-----------------
+
+A `panic` call inside a defer body unwinds the program. The
+function's "would have returned" value is irrelevant; the
+caller never observes a normal return. `#test(should_panic)`
+catches the panic and reports the test as passing.
+
+    dr_defer_panics() -> int
+        defer panic("from defer body")
+        return 42
+
+    #test(should_panic: "from defer body")
+    test_defer_panic_unwinds() -> unit
+        val _ = dr_defer_panics()
+
+A defer that panics PRE-EMPTS later defers
+------------------------------------------
+
+Two defers queued; the more-recent one (which fires first, by
+LIFO) panics. The earlier-queued defer should NOT fire after a
+panic — panics terminate execution. The test passes only if the
+panic message contains "first to fire", confirming the LIFO
+defer ran and the second-queued defer's panic terminated
+before the first-queued defer could write its trace.
+
+If a backend mis-ordered the defers or kept running after the
+panic, the message wouldn't match.
+
+    dr_defer_panic_lifo() -> int
+        defer panic("never reached")
+        defer panic("first to fire")
+        return 0
+
+    #test(should_panic: "first to fire")
+    test_defer_panic_runs_in_lifo_order() -> unit
+        val _ = dr_defer_panic_lifo()
+
+Defer body asserts (false) — same as panic
+------------------------------------------
+
+`assert(false, msg)` lowers to `panic(msg)` on failure. From
+inside a defer body it's indistinguishable from a direct panic.
+
+    dr_defer_asserts() -> int
+        defer assert(false, "assertion in defer")
+        return 1
+
+    #test(should_panic: "assertion in defer")
+    test_defer_assertion_unwinds() -> unit
+        val _ = dr_defer_asserts()
+
+Defer body mutates state then helper returns — caller sees pre-defer return
+---------------------------------------------------------------------------
+
+The function builds its return value (via local computation),
+queues a defer that mutates the SAME local var, and returns
+that var. The caller observes the function's return value,
+captured before the defer fired — the defer's mutation of `x`
+cannot reach back and change the return slot.
+
+Pins that "return value is captured at the `return` statement,
+not at the actual exit point after defers run". Two defers are
+used (defer doesn't accept a block body, only a single
+statement); both fire LIFO at fn exit.
+
+    dr_capture_before_defer(t: *DrTrace) -> int
+        var x = 5
+        defer t.s = t.s + "AFTER"
+        defer x = 999
+        x = 7
+        return x
+
+    #test
+    test_return_captured_before_defer_fires() -> unit
+        var t = DrTrace("")
+        val r = dr_capture_before_defer(&t)
+        // x was 7 when `return x` executed; defer's `x = 999` cannot
+        // change the already-captured return value.
+        assert(r == 7, s"return value captured at `return`; got $r")
+        // Defer's side-effect on trace IS observable to the caller via *t.
+        assert(t.s == "AFTER", s"defer's external-state mutation observable; got '${t.s}'")

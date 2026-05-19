@@ -1,0 +1,141 @@
+Refs captured by escaping closures
+==================================
+
+A closure that captures a `&T` ref must:
+
+  - **Incref** the captured ref at closure-construction time —
+    the closure env now holds an owning reference, so the
+    refcount is now (whatever-the-caller-holds + 1).
+  - **Keep the ref alive** for the closure's lifetime — when
+    the closure escapes (returned, stored, passed elsewhere),
+    the captured ref must outlive the constructing function's
+    stack frame.
+  - **Decref** the captured ref when the closure itself is
+    dropped — the env's owning slot goes away.
+
+If any step is missing the visible failure mode differs:
+  - Missing incref → captured ref drops to 0 when the
+    constructor's locals go away → closure invokes against
+    freed memory.
+  - Missing decref → captured ref leaks (not directly
+    observable in a finite test, but allocator state grows).
+  - Lifetime bug → typical UAF: closure works on first
+    invocation, traps on subsequent ones when the allocator
+    recycles the freed region.
+
+The companion `closure_return_from_fn.lsysl` already pins
+*value* and *plain int* captures. This file pins the
+**ref-typed capture** path specifically, where the env's
+incref/decref obligation is what's being exercised.
+
+    module sysl.tests.lang_features
+
+    struct ResBox
+        v: int
+
+Closure captures a ref local — invoked via direct call
+------------------------------------------------------
+
+The constructor `make_reader` makes a new `&ResBox`, then
+returns a closure that reads the captured ref's `v` field.
+The constructor exits — its local `b` binding goes away —
+but the returned closure must keep `b`'s target alive
+through its captured env.
+
+    make_reader() -> () -> int
+        val b: &ResBox = new ResBox(42)
+        return () -> b.v
+
+    #test
+    test_closure_captures_ref_basic() -> unit
+        val r = make_reader()
+        assert(r() == 42, s"first call: expected 42, got ${r()}")
+        // Repeated invocations stress lifetime — if the env or its
+        // captured box were freed, allocator recycling would surface
+        // on a subsequent call (the assert s"..." formatter mallocs).
+        assert(r() == 42, s"second call: expected 42, got ${r()}")
+        assert(r() == 42, s"third call: expected 42, got ${r()}")
+
+Closure captures a ref param — refcount must compose with caller's
+------------------------------------------------------------------
+
+The caller already owns a `&ResBox`; passing it to a factory
+that captures it in a closure makes the closure ANOTHER
+owner. Both bindings can drop independently. When the closure
+escapes, the captured ref outlives the constructor's frame;
+when both the original caller's binding AND the closure are
+dropped, the box hits 0 and frees.
+
+    capture_ref(b: &ResBox) -> () -> int = () -> b.v
+
+    #test
+    test_closure_captures_ref_param() -> unit
+        val owner: &ResBox = new ResBox(100)
+        val read = capture_ref(owner)
+        // Owner still alive AND closure alive — box has 2 owners now.
+        assert(read() == 100, s"closure sees owner's box; got ${read()}")
+        // Mutate through the original; closure reads the same box.
+        owner.v = 200
+        assert(read() == 200, s"closure sees post-mutation value; got ${read()}")
+
+Closure captures ref, owner drops, closure still works
+------------------------------------------------------
+
+A factory takes the caller's ref (which the caller then
+discards by going out of scope). The returned closure is
+the SOLE owner of the captured box and must keep it alive
+through every invocation.
+
+    capture_and_forget(b: &ResBox) -> () -> int = () -> b.v
+
+    drop_and_return_closure() -> () -> int
+        val b: &ResBox = new ResBox(7)
+        return capture_and_forget(b)
+
+    #test
+    test_closure_outlives_original_owner() -> unit
+        val r = drop_and_return_closure()
+        // Original `b` is gone — both `drop_and_return_closure`'s local
+        // and `capture_and_forget`'s param have been dropped.
+        // The captured env's ref is the only thing keeping the box alive.
+        assert(r() == 7, s"closure-only ownership: expected 7, got ${r()}")
+        assert(r() == 7, s"second invocation: expected 7, got ${r()}")
+
+Two closures capture the same ref — both keep it alive
+------------------------------------------------------
+
+Two closures built from the same ref each incref it. Either
+closure invokes correctly even if the other has been dropped.
+
+    make_two_readers(b: &ResBox) -> () -> int
+        val r1 = () -> b.v
+        return r1
+
+    #test
+    test_two_closures_share_ref() -> unit
+        val owner: &ResBox = new ResBox(50)
+        val a = make_two_readers(owner)
+        val b = make_two_readers(owner)
+        // Three owners now: owner local + a's env + b's env
+        assert(a() == 50, s"a(): expected 50, got ${a()}")
+        assert(b() == 50, s"b(): expected 50, got ${b()}")
+        // Mutate through original; both closures see the change.
+        owner.v = 60
+        assert(a() == 60, s"a() after mutation: expected 60, got ${a()}")
+        assert(b() == 60, s"b() after mutation: expected 60, got ${b()}")
+
+Many factory calls in a loop — no allocator corruption
+------------------------------------------------------
+
+Each iteration mallocs a new env + new box, then drops both
+when the closure binding goes out of scope. Allocator state
+must remain sound across N cycles. Stresses the decref-on-
+closure-drop path.
+
+    #test
+    test_many_capture_cycles() -> unit
+        var i = 0
+        while i < 100
+            val r = make_reader()
+            assert(r() == 42, s"iter $i: expected 42, got ${r()}")
+            i = i + 1

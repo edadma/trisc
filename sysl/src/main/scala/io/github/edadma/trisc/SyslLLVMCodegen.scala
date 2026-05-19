@@ -3506,6 +3506,11 @@ class SyslLLVMCodegen(target: String = "host"):
                   emit(s"  store $lt $v, $lt* $typedEnvPtr")
                 if structHasStringFields(capType) then
                   emitValueRC(typedEnvPtr, capType, incr = true)
+                else if capType.isInstanceOf[SyslType.RefType] then
+                  // Captured ref: the env is now an owner. Incref the
+                  // ref's heap header so the captured ref outlives the
+                  // constructor's frame. Decremented in the env deinit.
+                  emitRefIncr(v, refHeaderOffset(capType))
               offset += llvmSizeOf(capType)
             ep
         // Build %struct.closure
@@ -3727,6 +3732,21 @@ class SyslLLVMCodegen(target: String = "host"):
             val phi = newReg()
             emit(s"  $phi = phi %struct.string* [ $zeroStr, %$zeroLbl ], [ $nzStr, %$exitLbl ]")
             phi
+
+          case t if t.isIntegral && spec.verb == 'c' =>
+            // %c emits a 1-byte string with the value's low 8 bits — NOT a
+            // decimal stringification. The verb is in the analyzer's accepted
+            // set but every backend previously fell through to %d; this case
+            // is the missing implementation. Width and alignment flags are
+            // currently ignored (matches the existing pattern for unimplemented
+            // string padding paths — see f_format_strings.lsysl header).
+            val vt = llvmType(inner.typ)
+            val valI8 = newReg()
+            if vt == "i8" then emit(s"  $valI8 = bitcast i8 $v to i8")
+            else emit(s"  $valI8 = trunc $vt $v to i8")
+            val buf = emitStringBufferAlloc("1")
+            emit(s"  store i8 $valI8, i8* $buf")
+            emitMakeString(buf, "1")
 
           case t if t.isIntegral =>
             val verb = if spec.upperCase then spec.verb.toUpper else spec.verb
@@ -5241,6 +5261,17 @@ class SyslLLVMCodegen(target: String = "host"):
         val typedAddr = newReg()
         emit(s"  $typedAddr = bitcast i8* $byteAddr to $lt*")
         emitValueRC(typedAddr, capType, incr = false)
+      else if capType.isInstanceOf[SyslType.RefType] then
+        // Captured ref: load the data ptr from the env slot and
+        // decref it. Mirrors the incref done at closure
+        // construction.
+        val byteAddr = newReg()
+        emit(s"  $byteAddr = getelementptr i8, i8* %env, i64 $offset")
+        val refPtrPtr = newReg()
+        emit(s"  $refPtrPtr = bitcast i8* $byteAddr to i8**")
+        val refPtr = newReg()
+        emit(s"  $refPtr = load i8*, i8** $refPtrPtr")
+        emitRefDecr(refPtr, refHeaderOffset(capType), deinitFor(capType))
       offset += llvmSizeOf(capType)
     emit("  ret i32 0")
     emit("}")

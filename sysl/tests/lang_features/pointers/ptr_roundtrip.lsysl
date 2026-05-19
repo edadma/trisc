@@ -1,0 +1,126 @@
+Pointer round-trips — `*&v` and `&*p`
+======================================
+
+The two unary operators `&` (address-of) and `*` (dereference)
+are inverses on the value/address axis:
+
+  - `*&v` recovers the value at `v`'s address; the result equals
+    `v`. The pointer `&v` is computed and immediately discarded.
+  - `&*p` is the pointer's own address (after a no-op load).
+    Reading the pointer's contents then taking the address of
+    that "lvalue" must yield `p` itself.
+
+These tests pin both directions on a scalar, struct field,
+and ARC ref:
+
+  - The expression compiles as expected on every backend
+    (the AST shape may produce overlap between an lvalue load
+    and a struct address — easy to mis-elaborate).
+  - The result equals the original value/address.
+
+Companion to `ptr_deref_basic.lsysl` (basic `*p`) and
+`ptr_compare.lsysl` (pointer equality).
+
+    module sysl.tests.lang_features
+
+    struct PrtBox
+        v: int
+        next: int
+
+`*&v` on a scalar int — recovers the value
+------------------------------------------
+
+    #test
+    test_deref_addrof_scalar() -> unit
+        var x: int = 42
+        val y = *&x
+        assert(y == 42, s"expected 42, got $y")
+        // Mutate x; y was captured by value, so y stays 42 and x is updated.
+        x = 99
+        assert(y == 42, s"y captured by value, not aliased; got $y")
+        assert(x == 99, s"x mutated; got $x")
+
+`*&v` round-trip with a struct field
+------------------------------------
+
+The field is taken by address-of, then deref'd. The result is
+the field's value at the time of the expression.
+
+    #test
+    test_deref_addrof_field() -> unit
+        var b = PrtBox(7, 100)
+        val v = *&b.v
+        val n = *&b.next
+        assert(v == 7, s"field v: expected 7, got $v")
+        assert(n == 100, s"field next: expected 100, got $n")
+
+`&*p` round-trips — addr-of-deref equals the original pointer
+-------------------------------------------------------------
+
+`p` is a pointer; `*p` is the value at `p`'s target; `&*p` is
+the address of that target — which is just `p` again.
+
+    #test
+    test_addrof_deref_scalar() -> unit
+        var x: int = 5
+        val p: *int = &x
+        val q: *int = &*p
+        assert(p == q, "&*p should equal p")
+
+Mutation through `&*p` reaches the original
+--------------------------------------------
+
+`&*p` produces the original target's address; writing through
+that lvalue is the same as writing through `p`.
+
+    #test
+    test_mutation_via_addrof_deref() -> unit
+        var x: int = 0
+        val p: *int = &x
+        val q: *int = &*p
+        *q = 77
+        assert(x == 77, s"x should be 77 after write through q; got $x")
+        assert(*p == 77, s"*p should also see 77; got ${*p}")
+
+Round-trip in a chain — `*&*&v`
+-------------------------------
+
+Double composition: same result as `v`.
+
+    #test
+    test_double_roundtrip_scalar() -> unit
+        var x: int = 11
+        val y = *&*&x
+        assert(y == 11, s"double round-trip: expected 11, got $y")
+
+`*&` round-trip on a `&T` ref's field via the implicit lvalue
+-------------------------------------------------------------
+
+A ref-typed binding `r: &PrtBox` exposes `r.v` as a field
+read. `*&r.v` is the same as `r.v` itself.
+
+    #test
+    test_roundtrip_through_ref_field() -> unit
+        val r: &PrtBox = new PrtBox(13, 26)
+        val v = *&r.v
+        val n = *&r.next
+        assert(v == 13, s"r.v via round-trip: got $v")
+        assert(n == 26, s"r.next via round-trip: got $n")
+
+Round-trip across a function parameter
+--------------------------------------
+
+A function takes `*int`, returns `*int` after a round-trip
+through `&*p`. The caller's pointer is unchanged in value.
+
+    prt_roundtrip_param(p: *int) -> *int = &*p
+
+    #test
+    test_roundtrip_through_fn() -> unit
+        var x: int = 99
+        val p: *int = &x
+        val q = prt_roundtrip_param(p)
+        assert(p == q, "fn round-trip preserves pointer identity")
+        // Mutate through q — reaches the original x.
+        *q = 42
+        assert(x == 42, s"mutation via returned pointer: x = $x")

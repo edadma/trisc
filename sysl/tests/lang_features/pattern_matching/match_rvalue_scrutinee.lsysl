@@ -1,0 +1,153 @@
+Match on a function-call result (rvalue scrutinee)
+==================================================
+
+The scrutinee of a `match` expression is typically a variable
+or field — an lvalue. But it can also be an arbitrary
+expression: a function call, a constructor, an arithmetic
+result. The scrutinee is evaluated once and the result is
+matched against the arms.
+
+Two bug classes the rvalue case can surface:
+
+  - **Multiple evaluation**: a backend that lowers the
+    pattern-match by re-evaluating the scrutinee inside each
+    arm test would re-run the function call N times. If the
+    function has side effects, those repeat. If the call is
+    expensive, performance is wrong.
+  - **Temporary lifetime**: when the scrutinee returns an
+    aggregate (string, struct, slice), the temporary must
+    live across all arm tests + the chosen arm's body. A
+    backend that decrefs the temporary too early would
+    read freed memory.
+
+This file pins both: an rvalue scrutinee with observable
+side effects + an aggregate (string-returning) rvalue
+scrutinee.
+
+    module sysl.tests.lang_features
+
+    enum MrsOpt
+        MrsSome(v: int)
+        MrsNone
+
+Counter-incrementing call as the scrutinee
+------------------------------------------
+
+A function call that bumps a counter through a pointer is
+the scrutinee of the match. The match must invoke the
+function exactly once regardless of how many arms it tests.
+
+    mrs_get_and_bump(c: *int) -> int
+        *c = *c + 1
+        return *c
+
+    #test
+    test_scrutinee_evaluated_once_via_side_effect() -> unit
+        var c = 0
+        val tag = mrs_get_and_bump(&c) match
+            1 -> "one"
+            2 -> "two"
+            _ -> "other"
+        assert(c == 1, s"scrutinee should run exactly once; counter = $c")
+        assert(tag == "one", s"first call returned 1 → 'one'; got $tag")
+
+Rvalue scrutinee with enum payload
+----------------------------------
+
+Constructor-call as scrutinee. The constructed enum is the
+scrutinee; arms destructure it. Evaluation order: the
+constructor runs once, the destructure binds the field.
+
+    mrs_build_some(n: int) -> MrsOpt = MrsSome(n)
+
+    #test
+    test_constructor_as_scrutinee() -> unit
+        val v = mrs_build_some(42) match
+            MrsSome(n) -> n * 2
+            MrsNone -> -1
+        assert(v == 84, s"42 * 2 = 84; got $v")
+
+    #test
+    test_constructor_as_scrutinee_none_path() -> unit
+        val v = MrsNone match
+            MrsSome(_) -> 1
+            MrsNone -> 99
+        assert(v == 99, s"None arm chosen; got $v")
+
+Arithmetic expression as scrutinee
+----------------------------------
+
+The scrutinee is `x + y * 2`, evaluated once and dispatched
+through the arms.
+
+    #test
+    test_arithmetic_scrutinee() -> unit
+        var x = 10
+        var y = 7
+        val r = (x + y * 2) match
+            n if n > 100 -> "big"
+            n if n > 20  -> "med"
+            n if n > 0   -> "small"
+            _            -> "zero-or-neg"
+        // 10 + 14 = 24 → 24 > 20 → "med"
+        assert(r == "med", s"24 → 'med'; got $r")
+
+String-returning rvalue scrutinee
+---------------------------------
+
+The scrutinee returns a string. Aggregate temporaries must
+outlive the match body. Equality compares the temporary
+against literals.
+
+    mrs_pick_label(n: int) -> string
+        if n == 0 then return "zero"
+        if n < 0 then return "neg"
+        return "pos"
+
+    #test
+    test_string_rvalue_scrutinee_pos() -> unit
+        val r = mrs_pick_label(5) match
+            "zero" -> 0
+            "neg" -> -1
+            "pos" -> 1
+            _ -> 99
+        assert(r == 1, s"pos arm → 1; got $r")
+
+    #test
+    test_string_rvalue_scrutinee_neg() -> unit
+        val r = mrs_pick_label(-3) match
+            "zero" -> 0
+            "neg" -> -1
+            "pos" -> 1
+            _ -> 99
+        assert(r == -1, s"neg arm → -1; got $r")
+
+    #test
+    test_string_rvalue_scrutinee_zero() -> unit
+        val r = mrs_pick_label(0) match
+            "zero" -> 0
+            "neg" -> -1
+            "pos" -> 1
+            _ -> 99
+        assert(r == 0, s"zero arm → 0; got $r")
+
+Method-call result as scrutinee
+-------------------------------
+
+Mix struct construction + method call. The struct's method
+returns an enum; the enum is the scrutinee.
+
+    struct MrsClassifier
+        threshold: int
+
+    MrsClassifier.classify(n: int) -> MrsOpt
+        if n > self.threshold then return MrsSome(n - self.threshold)
+        return MrsNone
+
+    #test
+    test_method_call_as_scrutinee() -> unit
+        val c = MrsClassifier(10)
+        val v = c.classify(15) match
+            MrsSome(over) -> over
+            MrsNone -> -1
+        assert(v == 5, s"15 - 10 = 5; got $v")

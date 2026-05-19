@@ -1,0 +1,205 @@
+Defer inside a match arm
+========================
+
+`defer` is **function-scoped**, not block-scoped or arm-scoped.
+A `defer stmt` queued inside a match arm body fires at the
+enclosing function's exit, not at the end of the arm.
+
+In sysl, an indented match arm can host a block of statements
+(see `matchArm` in `SyslParser.scala`), so `defer` is parser-
+legal inside arms. The interesting questions:
+
+  1. Does the defer queue dynamically (only fires if the arm
+     was actually taken)?
+  2. Does it fire at the right time — at function exit, not
+     at the arm boundary?
+  3. Do multiple defers across multiple arms compose LIFO at
+     function exit?
+  4. Do defers in match arms inside loops queue per-iter, the
+     same way they do in plain loop bodies?
+
+The same per-defer-site counter scheme that fixed the
+skipped-branch and in-loop bugs must work transparently for
+match-arm sites.
+
+    module sysl.tests.lang_features
+
+    enum DimOpt
+        DimSome(v: int)
+        DimNone
+
+    struct DimTrace
+        s: string
+
+Defer in the taken arm fires at fn exit
+---------------------------------------
+
+A defer inside the `DimSome` arm only queues when that arm is
+taken at runtime. On the `DimSome` path the arm body runs, the
+defer queues, and fires at fn exit. On the `DimNone` path the
+defer never queues — the test reads an empty trace.
+
+This pins arm-bound defer queuing as dynamic (counter-based),
+not lexical.
+
+    dim_arm_defer(t: *DimTrace, o: DimOpt) -> int
+        o match
+            DimSome(v) ->
+                defer t.s = t.s + "S"
+                return v
+            DimNone -> return -1
+
+    #test
+    test_defer_in_some_arm_fires() -> unit
+        var t = DimTrace("")
+        val r = dim_arm_defer(&t, DimSome(42))
+        assert(r == 42, s"expected 42, got $r")
+        assert(t.s == "S", s"expected 'S' on Some arm, got '${t.s}'")
+
+    #test
+    test_defer_in_some_arm_skipped_on_none() -> unit
+        var t = DimTrace("")
+        val r = dim_arm_defer(&t, DimNone)
+        assert(r == -1, s"expected -1, got $r")
+        assert(t.s == "", s"defer in Some arm must not fire on None path; got '${t.s}'")
+
+Defers in both arms — exactly one fires
+---------------------------------------
+
+A defer in each arm. Whichever arm is taken queues its defer;
+the other's never runs. Same shape as `defer_skipped_branch`'s
+two-branches test but with `match` instead of `if`.
+
+    dim_both_arms(t: *DimTrace, o: DimOpt) -> int
+        o match
+            DimSome(v) ->
+                defer t.s = t.s + "s"
+                return v
+            DimNone ->
+                defer t.s = t.s + "n"
+                return -1
+
+    #test
+    test_both_arms_defer_some_path() -> unit
+        var t = DimTrace("")
+        val r = dim_both_arms(&t, DimSome(7))
+        assert(r == 7, s"expected 7, got $r")
+        assert(t.s == "s", s"expected 's' on Some arm, got '${t.s}'")
+
+    #test
+    test_both_arms_defer_none_path() -> unit
+        var t = DimTrace("")
+        val r = dim_both_arms(&t, DimNone)
+        assert(r == -1, s"expected -1, got $r")
+        assert(t.s == "n", s"expected 'n' on None arm, got '${t.s}'")
+
+Defer in arm composes LIFO with fn-level defer
+----------------------------------------------
+
+A defer queued before the match, then a defer queued inside
+the taken arm. LIFO means the inner (arm) defer queues second
+and fires first; the outer (fn-level) defer queues first and
+fires last.
+
+    dim_mixed_levels(t: *DimTrace, o: DimOpt) -> int
+        defer t.s = t.s + "F"
+        o match
+            DimSome(v) ->
+                defer t.s = t.s + "M"
+                return v
+            DimNone -> return -1
+
+    #test
+    test_arm_defer_lifo_with_fn_defer_some() -> unit
+        var t = DimTrace("")
+        val r = dim_mixed_levels(&t, DimSome(3))
+        assert(r == 3, s"expected 3, got $r")
+        // LIFO: F queued first, M queued second; exit fires M then F.
+        assert(t.s == "MF", s"expected 'MF' (arm-defer fires first, then fn-defer), got '${t.s}'")
+
+    #test
+    test_only_fn_defer_fires_on_none() -> unit
+        var t = DimTrace("")
+        val r = dim_mixed_levels(&t, DimNone)
+        assert(r == -1, s"expected -1, got $r")
+        assert(t.s == "F", s"only fn-level defer fires on None arm; got '${t.s}'")
+
+Multiple defers stacked inside a single arm — LIFO
+--------------------------------------------------
+
+Three defers in the same arm body. Same LIFO ordering as plain
+blocks: declared 1,2,3 → fire 3,2,1.
+
+    dim_stacked_in_arm(t: *DimTrace, o: DimOpt) -> int
+        o match
+            DimSome(v) ->
+                defer t.s = t.s + "1"
+                defer t.s = t.s + "2"
+                defer t.s = t.s + "3"
+                return v
+            DimNone -> return -1
+
+    #test
+    test_three_defers_stacked_in_arm() -> unit
+        var t = DimTrace("")
+        val r = dim_stacked_in_arm(&t, DimSome(11))
+        assert(r == 11, s"expected 11, got $r")
+        assert(t.s == "321", s"expected '321' LIFO in arm, got '${t.s}'")
+
+Defer in arm body, no return — arm fall-through
+-----------------------------------------------
+
+An arm body without an explicit `return` — the arm contributes
+its last expression as the match's value, the function then
+returns that. The defer must still fire at fn exit. Pins that
+arm-body defers don't require an explicit `return` to be
+honored.
+
+    dim_no_return(t: *DimTrace, o: DimOpt) -> int
+        val r = o match
+            DimSome(v) ->
+                defer t.s = t.s + "X"
+                v + 100
+            DimNone -> -1
+        return r
+
+    #test
+    test_arm_defer_no_return_some() -> unit
+        var t = DimTrace("")
+        val r = dim_no_return(&t, DimSome(5))
+        assert(r == 105, s"expected 105, got $r")
+        assert(t.s == "X", s"expected 'X' on Some arm fall-through, got '${t.s}'")
+
+    #test
+    test_arm_defer_no_return_none() -> unit
+        var t = DimTrace("")
+        val r = dim_no_return(&t, DimNone)
+        assert(r == -1, s"expected -1, got $r")
+        assert(t.s == "", s"defer must not fire on None path; got '${t.s}'")
+
+Defer in a match arm inside a loop fires per-iter
+-------------------------------------------------
+
+The match runs N times in a `for` loop; each `DimSome` iteration
+queues its arm defer. At fn exit all queued defers fire.
+Couples the per-defer-site counter scheme (loop case) with the
+per-arm dynamic queuing.
+
+    dim_arm_in_loop(t: *DimTrace, n: int) -> unit
+        for i in 0..<n
+            DimSome(i) match
+                DimSome(_) ->
+                    defer t.s = t.s + "."
+                DimNone -> ()
+
+    #test
+    test_arm_defer_fires_per_loop_iter() -> unit
+        var t = DimTrace("")
+        dim_arm_in_loop(&t, 4)
+        assert(t.s == "....", s"expected 4 '.' for 4 iters, got '${t.s}'")
+
+    #test
+    test_arm_defer_fires_zero_on_empty_loop() -> unit
+        var t = DimTrace("")
+        dim_arm_in_loop(&t, 0)
+        assert(t.s == "", s"empty loop queues 0 defers, got '${t.s}'")

@@ -1,0 +1,157 @@
+Overlapping patterns — first-arm-wins ordering
+==============================================
+
+Arms in a `match` are tested top-to-bottom; the first
+matching arm is the chosen one. When two arms cover the
+same scrutinee value (range overlapping a literal, two
+ranges that intersect, a guarded arm shadowing a fall-
+through), the arm listed first wins.
+
+This file pins:
+
+  - Range vs literal overlap: an arm `1..10` listed BEFORE
+    a literal `5` arm wins for the value 5 (and any other
+    value in 1..10). Conversely, `5` listed first wins for
+    the value 5 only; 1..10 covers the rest of the range.
+  - Two overlapping ranges: `1..10` vs `5..15`. Both cover
+    5..10. The arm listed first wins for that band.
+  - Catch-all (wildcard) below specific patterns: the
+    catch-all only fires when every prior arm misses.
+  - Guarded arm shadowing an unguarded arm of the same
+    pattern: the guarded arm runs only when the guard is
+    true; the unguarded arm catches the rest.
+
+    module sysl.tests.lang_features
+
+Range listed first — wins for values in the range
+-------------------------------------------------
+
+`1..10` covers 1 through 10 inclusive. Listed before the
+literal `5`, the range arm always fires for 5; the literal
+arm is dead code.
+
+    mpo_range_then_literal(n: int) -> int
+        n match
+            1..10 -> 100
+            5     -> 200
+            _     -> 0
+
+    #test
+    test_range_before_literal_in_range() -> unit
+        // 5 is inside 1..10 — range arm wins.
+        assert(mpo_range_then_literal(5) == 100, s"5: range wins; got ${mpo_range_then_literal(5)}")
+        assert(mpo_range_then_literal(1) == 100, s"1: range wins; got ${mpo_range_then_literal(1)}")
+        assert(mpo_range_then_literal(10) == 100, s"10: range wins; got ${mpo_range_then_literal(10)}")
+
+    #test
+    test_range_before_literal_outside() -> unit
+        // Outside the range — falls through to wildcard.
+        assert(mpo_range_then_literal(0) == 0, s"0: wildcard; got ${mpo_range_then_literal(0)}")
+        assert(mpo_range_then_literal(11) == 0, s"11: wildcard; got ${mpo_range_then_literal(11)}")
+        assert(mpo_range_then_literal(-5) == 0, s"-5: wildcard; got ${mpo_range_then_literal(-5)}")
+
+Literal listed first — wins for exact value
+-------------------------------------------
+
+Same arms in reverse order: literal `5` listed first. Now
+5 hits the literal arm; the range catches everything else
+in 1..10.
+
+    mpo_literal_then_range(n: int) -> int
+        n match
+            5     -> 200
+            1..10 -> 100
+            _     -> 0
+
+    #test
+    test_literal_before_range_at_overlap() -> unit
+        assert(mpo_literal_then_range(5) == 200, s"5: literal wins; got ${mpo_literal_then_range(5)}")
+
+    #test
+    test_literal_before_range_in_range_minus_overlap() -> unit
+        // 1..10 catches everything except 5.
+        assert(mpo_literal_then_range(1) == 100, s"1: range; got ${mpo_literal_then_range(1)}")
+        assert(mpo_literal_then_range(4) == 100, s"4: range; got ${mpo_literal_then_range(4)}")
+        assert(mpo_literal_then_range(6) == 100, s"6: range; got ${mpo_literal_then_range(6)}")
+        assert(mpo_literal_then_range(10) == 100, s"10: range; got ${mpo_literal_then_range(10)}")
+
+    #test
+    test_literal_before_range_outside() -> unit
+        assert(mpo_literal_then_range(0) == 0, s"0: wildcard; got ${mpo_literal_then_range(0)}")
+        assert(mpo_literal_then_range(11) == 0, s"11: wildcard; got ${mpo_literal_then_range(11)}")
+
+Two overlapping ranges — first wins
+-----------------------------------
+
+`1..10` and `5..15` both match 5..10. First arm wins.
+
+    mpo_two_ranges(n: int) -> int
+        n match
+            1..10 -> 1
+            5..15 -> 2
+            _     -> 0
+
+    #test
+    test_two_ranges_first_arm_wins() -> unit
+        assert(mpo_two_ranges(7) == 1, s"7 in both — first wins; got ${mpo_two_ranges(7)}")
+        assert(mpo_two_ranges(5) == 1, s"5 in both — first wins; got ${mpo_two_ranges(5)}")
+        assert(mpo_two_ranges(10) == 1, s"10 in both — first wins; got ${mpo_two_ranges(10)}")
+
+    #test
+    test_two_ranges_only_in_second() -> unit
+        // 11..15 only in the second arm.
+        assert(mpo_two_ranges(11) == 2, s"11: second arm only; got ${mpo_two_ranges(11)}")
+        assert(mpo_two_ranges(15) == 2, s"15: second arm only; got ${mpo_two_ranges(15)}")
+
+    #test
+    test_two_ranges_outside_both() -> unit
+        assert(mpo_two_ranges(0) == 0, s"0: wildcard; got ${mpo_two_ranges(0)}")
+        assert(mpo_two_ranges(16) == 0, s"16: wildcard; got ${mpo_two_ranges(16)}")
+
+Wildcard below specific patterns
+--------------------------------
+
+`_` matches anything; placed last, it only fires when
+every prior arm misses.
+
+    mpo_wildcard_last(n: int) -> string
+        n match
+            1     -> "one"
+            2     -> "two"
+            3..5  -> "few"
+            _     -> "other"
+
+    #test
+    test_wildcard_last_specific_matches() -> unit
+        assert(mpo_wildcard_last(1) == "one", "1")
+        assert(mpo_wildcard_last(2) == "two", "2")
+        assert(mpo_wildcard_last(3) == "few", "3")
+        assert(mpo_wildcard_last(5) == "few", "5")
+
+    #test
+    test_wildcard_last_default_fires() -> unit
+        assert(mpo_wildcard_last(0) == "other", "0")
+        assert(mpo_wildcard_last(6) == "other", "6")
+        assert(mpo_wildcard_last(100) == "other", "100")
+
+Guarded arm shadows unguarded arm of the same pattern
+-----------------------------------------------------
+
+`n if n > 0 -> "positive"` followed by `n -> "non-positive"`
+splits the integers. The first guarded arm wins for n > 0;
+the second arm catches the rest.
+
+    mpo_guard_then_bind(n: int) -> string
+        n match
+            x if x > 0 -> "positive"
+            _          -> "non-positive"
+
+    #test
+    test_guarded_arm_fires_when_guard_true() -> unit
+        assert(mpo_guard_then_bind(5) == "positive", "5")
+        assert(mpo_guard_then_bind(1) == "positive", "1")
+
+    #test
+    test_guarded_arm_skipped_when_guard_false() -> unit
+        assert(mpo_guard_then_bind(0) == "non-positive", "0")
+        assert(mpo_guard_then_bind(-5) == "non-positive", "-5")

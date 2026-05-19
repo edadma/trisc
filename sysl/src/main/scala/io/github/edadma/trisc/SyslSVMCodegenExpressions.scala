@@ -564,6 +564,26 @@ trait SyslSVMCodegenExpressions:
             emitPushInt(if spec.leftAlign then 1 else 0)
             emit("  call __svm_str_fmt_str")
             needsStrFmtStr = true
+        case 'c' if inner.typ.isIntegral =>
+          // %c emits a 1-byte string with the value's low 8 bits. Stack-only
+          // sequence (countLocals doesn't see TFmtStr-scoped temps, so any
+          // anonymous local here would land past the declared frame size at
+          // runtime — same trap that surfaced during the bounds-check
+          // campaign). Width and alignment flags are intentionally not
+          // honored on this path; padded `%c` would be unusual and the
+          // existing `%-Ns` path already covers padded strings.
+          genExpr(inner)
+          emitPushInt(0xff); emit("  and")    // ( byte )
+          emitMemAlloc(8);                     // ( byte buf )
+          emit("  dup"); emit("  rot")         // ( buf buf byte )
+          emit("  swap"); emit("  store8")     // ( buf )   buf[0] = byte
+          emitMemAlloc(16)                     // ( buf desc )
+          emit("  swap"); emit("  over")       // ( desc buf desc )
+          emit("  store64")                    // ( desc )  desc[0..8] = buf
+          emit("  dup")                        // ( desc desc )
+          emitPushInt(8); emit("  add")        // ( desc desc+8 )
+          emitPushInt(1); emit("  swap")       // ( desc 1 desc+8 )
+          emit("  store64")                    // ( desc )  desc[8..16] = 1
         case _ =>
           // Any other shape: fall back to plain TStr semantics.
           genExpr(TStr(inner))
