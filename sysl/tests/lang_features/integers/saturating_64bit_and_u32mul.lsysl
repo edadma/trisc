@@ -1,0 +1,161 @@
+Saturating intrinsics — 64-bit and `saturating_mul(u32)`
+=========================================================
+
+`overflow_intrinsics.lsysl` covers u8/u16/u32/i8/i16/i32
+saturating ops. The 64-bit cases (`saturating_*` on u64/i64)
+and `saturating_mul` on u32 were originally documented as
+TRISC gaps in the spec. The audit memo
+`project_sysl_audit_bugs.md` (2026-04-28) flagged them as
+🟠 high-severity. This file probes whether the gap is
+still real on each backend.
+
+File-local prefix `Sat6` (saturating 64-bit + u32mul).
+
+    module sysl.tests.lang_features
+
+`saturating_mul(u32, u32)` — full u64 product
+---------------------------------------------
+
+`u32 MAX × u32 MAX = 0xFFFF_FFFE_0000_0001`, well beyond
+`u32 MAX = 0xFFFF_FFFF`. Must clamp to u32 MAX, not wrap.
+
+    #test
+    test_sat6_mul_u32_clamp_max() -> unit
+        val a: u32 = 0xFFFFFFFF
+        val b: u32 = 0xFFFFFFFF
+        val c = saturating_mul(a, b)
+        val expected: u32 = 0xFFFFFFFF
+        assert(c == expected, s"u32 max × u32 max should clamp to u32 max, got ${u64(c)}")
+
+    #test
+    test_sat6_mul_u32_no_overflow() -> unit
+        val a: u32 = 100
+        val b: u32 = 200
+        val c = saturating_mul(a, b)
+        val expected: u32 = 20000
+        assert(c == expected, s"100 × 200 = 20000, got ${u64(c)}")
+
+    #test
+    test_sat6_mul_u32_just_overflows() -> unit
+        val a: u32 = 0x10000   // 65536
+        val b: u32 = 0x10000   // 65536
+        // Product = 0x1_0000_0000 = 2^32, exactly one past u32 max → clamps.
+        val c = saturating_mul(a, b)
+        val expected: u32 = 0xFFFFFFFF
+        assert(c == expected, s"2^32 should clamp to u32 max, got ${u64(c)}")
+
+`saturating_add(u64, u64)` — clamps at u64 MAX
+----------------------------------------------
+
+    #test
+    test_sat6_add_u64_clamp_max() -> unit
+        val a: u64 = 0xFFFFFFFF_FFFFFFFE  // u64 max - 1
+        val b: u64 = 10
+        val c = saturating_add(a, b)
+        // -1 (signed view) is u64 max.
+        assert(i64(c) == -1, s"u64 max-1 + 10 should clamp to u64 max (signed -1), got ${i64(c)}")
+
+    #test
+    test_sat6_add_u64_no_overflow() -> unit
+        val a: u64 = 100
+        val b: u64 = 200
+        val c = saturating_add(a, b)
+        assert(i64(c) == 300, s"100 + 200 = 300, got ${i64(c)}")
+
+`saturating_sub(u64, u64)` — clamps at 0
+----------------------------------------
+
+    #test
+    test_sat6_sub_u64_clamp_zero() -> unit
+        val a: u64 = 5
+        val b: u64 = 10
+        val c = saturating_sub(a, b)
+        assert(i64(c) == 0, s"5 - 10 unsigned should clamp to 0, got ${i64(c)}")
+
+    #test
+    test_sat6_sub_u64_no_underflow() -> unit
+        val a: u64 = 1000
+        val b: u64 = 100
+        val c = saturating_sub(a, b)
+        assert(i64(c) == 900, s"1000 - 100 = 900, got ${i64(c)}")
+
+`saturating_mul(u64, u64)` — clamps at u64 MAX
+----------------------------------------------
+
+`u32 MAX × u32 MAX` fits in u64 (0xFFFFFFFE_00000001).
+`u64 MAX × 2` overflows hard.
+
+    #test
+    test_sat6_mul_u64_clamp_max() -> unit
+        val a: u64 = 0xFFFFFFFFFFFFFFFF  // u64 max
+        val b: u64 = 2
+        val c = saturating_mul(a, b)
+        assert(i64(c) == -1, s"u64 max × 2 should clamp to u64 max, got ${i64(c)}")
+
+    #test
+    test_sat6_mul_u64_no_overflow() -> unit
+        val a: u64 = 0xFFFFFFFF       // 2^32 - 1, fits squared in u64
+        val b: u64 = 0xFFFFFFFF
+        val c = saturating_mul(a, b)
+        // Product = 0xFFFFFFFE_00000001, less than u64 MAX.
+        val expected: u64 = 0xFFFFFFFE00000001
+        assert(c == expected, s"u32max × u32max in u64 should be exact, got ${i64(c)}")
+
+`saturating_add(i64, i64)` — clamps at i64 MAX / MIN
+----------------------------------------------------
+
+    #test
+    test_sat6_add_i64_clamp_max() -> unit
+        val a: i64 = 0x7FFFFFFFFFFFFFFE  // i64 max - 1
+        val b: i64 = 10
+        val c = saturating_add(a, b)
+        assert(c == 0x7FFFFFFFFFFFFFFFi64, s"i64 max-1 + 10 should clamp to i64 max, got $c")
+
+    #test
+    test_sat6_add_i64_clamp_min() -> unit
+        val a: i64 = -9223372036854775807i64 - 1i64  // i64 min
+        val b: i64 = -10
+        val c = saturating_add(a, b)
+        assert(c == -9223372036854775807i64 - 1i64, s"i64 min + -10 should clamp to i64 min, got $c")
+
+`saturating_sub(i64, i64)` — clamps at i64 MAX / MIN
+----------------------------------------------------
+
+    #test
+    test_sat6_sub_i64_clamp_min() -> unit
+        val a: i64 = -9223372036854775807i64 - 1i64  // i64 min
+        val b: i64 = 10
+        val c = saturating_sub(a, b)
+        assert(c == -9223372036854775807i64 - 1i64, s"i64 min - 10 should clamp to i64 min, got $c")
+
+    #test
+    test_sat6_sub_i64_clamp_max() -> unit
+        val a: i64 = 0x7FFFFFFFFFFFFFFFi64  // i64 max
+        val b: i64 = -10
+        val c = saturating_sub(a, b)
+        assert(c == 0x7FFFFFFFFFFFFFFFi64, s"i64 max - (-10) should clamp to i64 max, got $c")
+
+`saturating_mul(i64, i64)` — clamps at i64 MAX / MIN
+----------------------------------------------------
+
+    #test
+    test_sat6_mul_i64_clamp_max() -> unit
+        val a: i64 = 0x7FFFFFFFFFFFFFFFi64  // i64 max
+        val b: i64 = 2
+        val c = saturating_mul(a, b)
+        assert(c == 0x7FFFFFFFFFFFFFFFi64, s"i64 max × 2 should clamp to i64 max, got $c")
+
+    #test
+    test_sat6_mul_i64_clamp_min() -> unit
+        val a: i64 = -9223372036854775807i64 - 1i64  // i64 min
+        val b: i64 = 2
+        val c = saturating_mul(a, b)
+        assert(c == -9223372036854775807i64 - 1i64, s"i64 min × 2 should clamp to i64 min, got $c")
+
+    #test
+    test_sat6_mul_i64_negative_overflow() -> unit
+        // i64 min × -1 is NOT representable (would be |i64 min| > i64 max). Clamps to i64 max.
+        val a: i64 = -9223372036854775807i64 - 1i64
+        val b: i64 = -1
+        val c = saturating_mul(a, b)
+        assert(c == 0x7FFFFFFFFFFFFFFFi64, s"i64 min × -1 should clamp to i64 max, got $c")

@@ -1255,24 +1255,91 @@ class SyslInterpreter(output: String => Unit = s => print(s)):
           if signed then (-(1L << (width - 1)), (1L << (width - 1)) - 1)
           else (0L, if width == 64 then -1L else (1L << width) - 1)  // unsigned: -1L = max u64
         def mask(v: Long): Long = truncateNarrow(v, typ)
-        def saturate(v: java.math.BigInteger): Long =
-          val mn = java.math.BigInteger.valueOf(minV)
-          val mx =
-            if !signed && width == 64 then
-              new java.math.BigInteger("FFFFFFFFFFFFFFFF", 16)
-            else java.math.BigInteger.valueOf(maxV)
-          if v.compareTo(mn) < 0 then minV
-          else if v.compareTo(mx) > 0 then if !signed && width == 64 then -1L else maxV
-          else v.longValue()
-        val ba = java.math.BigInteger.valueOf(a)
-        val bb = java.math.BigInteger.valueOf(b)
+
+        // Saturating ops detect overflow by inspecting operand values directly,
+        // avoiding BigInt allocation. Mirrors the LLVM / SVM / TRISC inline
+        // sequences (carry-flag tricks, signed-overflow predicate, divide-back
+        // for mul). Narrow signed widths fit in Long without wrap; narrow
+        // unsigned multiplications can exceed signed Long range when both
+        // operands approach u32 max, so unsigned ops always use unsigned
+        // compares / divideUnsigned.
+
+        def satAdd: Long =
+          if signed then
+            // Signed: narrow widths can't wrap in Long (operands fit; sum fits).
+            // Just clamp against [minV, maxV]. For i64 use the signs predicate.
+            if width < 64 then
+              val v = a + b
+              if v > maxV then maxV else if v < minV then minV else v
+            else
+              val v = a + b
+              // Overflow iff operand signs match and result sign differs.
+              if ((a ^ b) >= 0L) && ((a ^ v) < 0L) then
+                if a >= 0L then Long.MaxValue else Long.MinValue
+              else v
+          else
+            // Unsigned: a + b in Long fits for u8/u16/u32 without wrap (operands
+            // < 2^32, sum < 2^33). For u64 the sum can wrap; carry trick handles
+            // both uniformly via unsigned-compare.
+            val v = a + b
+            if width == 64 then
+              if java.lang.Long.compareUnsigned(v, a) < 0 then -1L else v
+            else
+              if java.lang.Long.compareUnsigned(v, maxV) > 0 then maxV else v
+
+        def satSub: Long =
+          if signed then
+            if width < 64 then
+              val v = a - b
+              if v > maxV then maxV else if v < minV then minV else v
+            else
+              val v = a - b
+              // Overflow iff operand signs differ and result sign differs from a's.
+              if ((a ^ b) < 0L) && ((a ^ v) < 0L) then
+                if a >= 0L then Long.MaxValue else Long.MinValue
+              else v
+          else
+            // Unsigned: underflow iff a < b (unsigned). Clamps to 0.
+            if java.lang.Long.compareUnsigned(a, b) < 0 then 0L else a - b
+
+        def satMul: Long =
+          if signed then
+            if width < 64 then
+              // Narrow signed: operands ≤ |2^31|, product fits in Long signed.
+              val v = a * b
+              if v > maxV then maxV else if v < minV then minV else v
+            else
+              // i64: special-case the two |i64_min| pairs (|i64_min| > i64_max
+              // so they always overflow); then verify via divide-back.
+              if a == 0L || b == 0L then 0L
+              else if a == Long.MinValue && b == -1L then Long.MaxValue
+              else if b == Long.MinValue && a == -1L then Long.MaxValue
+              else
+                val v = a * b
+                if v / b != a then
+                  if (a >= 0L) == (b >= 0L) then Long.MaxValue else Long.MinValue
+                else v
+          else
+            // Unsigned: u32 × u32 can exceed signed Long range, so the
+            // wrapped Long `v` interprets the LOW 64 bits. For narrow widths
+            // the true u64 product still fits in u64 (no high-64 carry), so
+            // an unsigned compare of v vs maxV detects width overflow.
+            // For u64, true product can carry past u64; divideUnsigned
+            // detects that case.
+            val v = a * b
+            if width == 64 then
+              if a != 0L && java.lang.Long.divideUnsigned(v, a) != b then -1L
+              else v
+            else
+              if java.lang.Long.compareUnsigned(v, maxV) > 0 then maxV else v
+
         name match
           case "wrapping_add" => IntVal(mask(a + b))
           case "wrapping_sub" => IntVal(mask(a - b))
           case "wrapping_mul" => IntVal(mask(a * b))
-          case "saturating_add" => IntVal(saturate(ba.add(bb)))
-          case "saturating_sub" => IntVal(saturate(ba.subtract(bb)))
-          case "saturating_mul" => IntVal(saturate(ba.multiply(bb)))
+          case "saturating_add" => IntVal(satAdd)
+          case "saturating_sub" => IntVal(satSub)
+          case "saturating_mul" => IntVal(satMul)
           case other => throw RuntimeError(s"unknown intrinsic: $other")
 
       case TFieldPreInc(obj, fieldIndex, _) =>

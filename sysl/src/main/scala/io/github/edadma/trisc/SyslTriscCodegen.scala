@@ -3631,6 +3631,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                 case ("saturating_add", false) =>
                   // i64 add: signed overflow iff sign(a)==sign(b) && sign(result)!=sign(a).
                   // XOR trick: ((a ^ result) & (b ^ result)) is negative ⇔ overflow.
+                  // Scratch registers limited to r2..r4 — r5 is FP, r6 is LR,
+                  // r7 is SP. We reuse r2 (held b but no longer needed) to
+                  // store the second XOR rather than r5 (would corrupt FP).
                   emit("  pshd r1")             // save a
                   stackOffset -= 8
                   emit("  pshd r2")             // save b
@@ -3640,9 +3643,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                   stackOffset += 8
                   emit("  popd r3")             // r3 = a
                   stackOffset += 8
-                  emit("  xor r4, r3, r1")      // a ^ result
-                  emit("  xor r5, r2, r1")      // b ^ result
-                  emit("  and r4, r4, r5")
+                  emit("  xor r4, r3, r1")      // r4 = a ^ result
+                  emit("  xor r2, r2, r1")      // r2 = b ^ result (overwrites b, no longer needed)
+                  emit("  and r4, r4, r2")
                   emit("  slt r4, r4, r0")      // r4 = 1 iff combined indicator < 0
                   val noOf = newLabel("sat_noof")
                   emit(s"  beq r4, r0, $noOf")
@@ -3658,6 +3661,8 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                 case ("saturating_sub", false) =>
                   // i64 sub: overflow iff sign(a)!=sign(b) && sign(result)!=sign(a).
                   // XOR trick: ((a ^ b) & (a ^ result)) is negative ⇔ overflow.
+                  // Same FP-preservation as saturating_add — reuse r2 (b) for
+                  // the second XOR instead of r5.
                   emit("  pshd r1")             // save a
                   stackOffset -= 8
                   emit("  pshd r2")             // save b
@@ -3667,9 +3672,9 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                   stackOffset += 8
                   emit("  popd r3")             // r3 = a
                   stackOffset += 8
-                  emit("  xor r4, r3, r2")      // a ^ b
-                  emit("  xor r5, r3, r1")      // a ^ result
-                  emit("  and r4, r4, r5")
+                  emit("  xor r4, r3, r2")      // r4 = a ^ b
+                  emit("  xor r2, r3, r1")      // r2 = a ^ result (overwrites b, no longer needed)
+                  emit("  and r4, r4, r2")
                   emit("  slt r4, r4, r0")      // r4 = 1 iff combined indicator < 0
                   val noOf = newLabel("sat_noof")
                   emit(s"  beq r4, r0, $noOf")
