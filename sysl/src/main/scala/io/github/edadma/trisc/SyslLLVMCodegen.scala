@@ -607,6 +607,24 @@ class SyslLLVMCodegen(target: String = "host"):
     emit("}")
     emit("")
 
+    // User-callable `abort()` helper. Writes a "panic: abort" line to
+    // stderr before calling libc abort. The "panic: " prefix is what
+    // the wasm32 / RV bare-metal test runners look for to classify the
+    // exit as an expected `should_panic` trap rather than an unexplained
+    // non-zero exit. On llvm-host it's harmless extra output before
+    // SIGABRT; on the embedded backends it's the only signal the runner
+    // gets that the trap was an intentional abort.
+    emit("@.str.abort_msg = private unnamed_addr constant [14 x i8] c\"panic: abort\\0A\\00\"")
+    emit("")
+    emit("define void @__user_abort() {")
+    emit("entry:")
+    emit("  %p = getelementptr [14 x i8], [14 x i8]* @.str.abort_msg, i32 0, i32 0")
+    emit(s"  %w = call $sizeT @write(i32 2, i8* %p, $sizeT 13)")
+    emit("  call void @abort()")
+    emit("  unreachable")
+    emit("}")
+    emit("")
+
     // Built-in assert function: if !cond then panic(msg)
     emit("@.str.assert_prefix = private unnamed_addr constant [19 x i8] c\"assertion failed: \\00\"")
     emit("")
@@ -2083,6 +2101,20 @@ class SyslLLVMCodegen(target: String = "host"):
             w
           else writtenST
         emitSextIfNeeded(written, "i64", t)
+
+      case TCall("abort", _, _) =>
+        // Route user-called abort through `@__user_abort` so it prints
+        // "panic: abort" to stderr before trapping. The "panic: "
+        // prefix is what wasm32 / RV bare-metal runners look for to
+        // classify the exit as a `should_panic` match instead of
+        // "non-zero exit with no panic marker". The trailing
+        // `unreachable` tells LLVM the call doesn't return so any
+        // downstream code is dead.
+        emit("  call void @__user_abort()")
+        emit("  unreachable")
+        val deadLbl = newLabel("abort_dead")
+        emitLabel(deadLbl)
+        "0"
 
       case TCall(name, args, _) =>
         val declaredParams = funcParamTypes.getOrElse(name, Nil)

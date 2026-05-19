@@ -1,0 +1,59 @@
+`abort()` traps the program
+===========================
+
+`abort()` is a sysl builtin (registered in
+`SyslAnalyzer.scala` as `FunInfo("abort", Nil, UnitType)`)
+that halts the program immediately. Per the project
+CLAUDE.md "Critical TODO":
+
+> abort() — POSIX-required (<stdlib.h>), emits trap. On bare
+> metal: halt CPU. On OS: kill process.
+
+This file pins the trap-on-call contract on every backend
+via `#test(should_panic)`. Each backend's runtime should
+treat `abort()` as an unrecoverable halt:
+
+  - **interpreter**: throws RuntimeError("abort")
+  - **LLVM family** (llvm-host, riscv64/32, wasm32): calls
+    libc `@abort()` which raises SIGABRT / wasm trap
+  - **TRISC**: emits `trap 3` (error code 3)
+  - **SVM**: routes through the builtin table
+
+File-local prefix `Abt`.
+
+    module sysl.tests.lang_features
+
+`abort()` traps immediately
+---------------------------
+
+    #test(should_panic)
+    test_abt_abort_traps() -> unit
+        abort()
+
+`abort()` skips post-call statements
+------------------------------------
+
+The statement after `abort()` is unreachable. The runner
+sees `abort()` panic before any subsequent assert fires.
+
+    #test(should_panic)
+    test_abt_abort_skips_following_stmts() -> unit
+        abort()
+        assert(false, "this assertion is unreachable; abort already trapped")
+
+`abort()` called inside a branch
+--------------------------------
+
+    abt_conditional_abort(x: int) -> int
+        if x == 0
+            abort()
+        return x * 2
+
+    #test(should_panic)
+    test_abt_abort_in_branch() -> unit
+        val _ = abt_conditional_abort(0)
+
+    #test
+    test_abt_no_abort_when_branch_skipped() -> unit
+        val r = abt_conditional_abort(5)
+        assert(r == 10, s"5 * 2 = 10, got $r")
