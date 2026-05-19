@@ -690,13 +690,14 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("meventfd: done")
   }
 
-  "musl: rt_sigaction / sigprocmask / sigpending + kill / tkill (Phase 2 chunks 1+2)" in {
+  "musl: rt_sigaction / sigprocmask / sigpending + kill / tkill / delivery" in {
     // sigact (slix/test/sigact.c) exercises 283 (rt_sigaction), 285
-    // (rt_sigprocmask), 284 (rt_sigpending) from chunk 1 and 214
-    // (kill), 360 (tkill, via libc raise) from chunk 2. Delivery
-    // does not exist yet — the test only verifies that state is
-    // stored, queried back, and that a raise()-while-blocked sets
-    // the pending bit. Default disposition is SIG_DFL, an installed
+    // (rt_sigprocmask), 284 (rt_sigpending), 214 (kill), and
+    // 360 (tkill via libc raise) on the state-plumbing side, then
+    // does an end-to-end delivery test in step 10: installs a real
+    // SIGUSR2 handler, calls raise(SIGUSR2), and verifies the
+    // handler ran exactly once and control returned past the
+    // raise() call. Default disposition is SIG_DFL, an installed
     // handler reads back identically, SIGKILL refuses installation,
     // sigprocmask block/unblock round-trips, sigpending starts
     // empty, raise() on a blocked signal sets pending, kill(pid, 0)
@@ -712,6 +713,7 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("sigact: step7 raised_pending_USR1=1")
     output should include("sigact: step8 kill0_rc=0")
     output should include("sigact: step9 bad_rc=-1 errno=22")
+    output should include("sigact: step10 counter=1 signo=12")
     output should include("sigact: done")
   }
 

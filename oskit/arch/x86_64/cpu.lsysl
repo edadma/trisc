@@ -8,6 +8,8 @@ cli/sti are extern (provided by boot.s as bare instruction
 
     module oskit.arch
 
+    extern arch_vm_copy_to_demand(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int) -> int
+
 Offset from saved SSP to the return-value register (RAX)
 in the context frame. Used by syscall_return to write the
 result where restore_context will pop it into RAX.
@@ -186,3 +188,259 @@ Returns the SSP value to store in the child thread (frame base).
         var rv: *i64 = *i64(frame + i64(SYSCALL_RETURN_OFFSET))
         *rv = i64(0)
         frame
+
+
+Signal-frame construction for POSIX signal delivery
+---------------------------------------------------
+
+`arch_build_sigframe` lays down an x86_64 `rt_sigframe`
+(`pretcode`, `ucontext_t`, `siginfo_t`) on the target thread's
+user stack and rewrites the saved iretq trap frame so the next
+iretq returns into the userspace signal handler with:
+
+  - RDI = signo, RSI = &siginfo, RDX = &ucontext
+  - RIP = handler, RSP = new frame base (pointing at pretcode)
+
+The handler returns normally via `ret`, which pops `pretcode` (the
+libc `__restore_rt` trampoline) into RIP. The trampoline then
+issues SYS_RT_SIGRETURN to undo the frame.
+
+User-side frame layout (Linux x86_64 ABI):
+
+```
+new_sp + 0     pretcode (8B = libc __restore_rt pointer)
+new_sp + 8     ucontext_t (424B):
+                 +0    uc_flags        (u64, 0)
+                 +8    uc_link         (u64, 0)
+                 +16   uc_stack        (24B, zeroed)
+                 +40   uc_mcontext (256B):
+                         +0    gregs[23]      (R8..CR2, 184B)
+                         +184  fpregs (ptr)   (8B, 0)
+                         +192  __reserved[8]  (64B, 0)
+                 +296  uc_sigmask      (128B; low 8B = saved kernel-shape mask)
+new_sp + 432   siginfo_t (128B, only si_signo non-zero)
+```
+
+Total frame = 560 bytes. `new_sp` is chosen so that `(new_sp + 8)`
+is 16-byte aligned (SysV ABI for entry via simulated CALL).
+
+`gregs[]` order mirrors Linux's `struct ucontext`:
+`R8 R9 R10 R11 R12 R13 R14 R15 RDI RSI RBP RBX RDX RAX RCX RSP
+RIP EFL CSGSFS ERR TRAPNO OLDMASK CR2`. Trap-frame slot offsets
+on SLIX are: R15(0) R14(8) R13(16) R12(24) R11(32) R10(40)
+R9(48) R8(56) RBP(64) RDI(72) RSI(80) RDX(88) RCX(96) RBX(104)
+RAX(112) RIP(120) CS(128) RFLAGS(136) RSP(144) SS(152).
+
+ERR/TRAPNO/OLDMASK/CR2 stay zero; SLIX doesn't propagate fault
+detail through ucontext yet. CSGSFS is packed as low-16 = CS.
+
+The 560-byte staging buffer is module-scoped and reused across
+deliveries; the walker is non-reentrant on a single-CPU kernel.
+
+    var _sigframe_buf: [560]byte
+
+    arch_build_sigframe(ssp: i64, ptbr: u64, signo: int,
+                        handler: i64, restorer: i64,
+                        sa_mask: i64, sa_flags: i32,
+                        old_sigmask: i64) -> i64
+        val saved_rsp_p:    *i64 = *i64(ssp + i64(144))
+        val saved_rip_p:    *i64 = *i64(ssp + i64(120))
+        val saved_rflags_p: *i64 = *i64(ssp + i64(136))
+        val saved_cs_p:     *i64 = *i64(ssp + i64(128))
+        val saved_rsp    = *saved_rsp_p
+        val saved_rip    = *saved_rip_p
+        val saved_rflags = *saved_rflags_p
+        val saved_cs     = *saved_cs_p
+
+        var z = 0
+        while z < 560
+            _sigframe_buf[z] = byte(0)
+            z += 1
+
+        val buf = i64(&_sigframe_buf[0])
+
+        var pretcode_p: *i64 = *i64(buf + i64(0))
+        *pretcode_p = restorer
+
+        var sigmask_p: *i64 = *i64(buf + i64(304))
+        *sigmask_p = old_sigmask
+
+        var g0_p:  *i64 = *i64(buf + i64(48 + 0  * 8))
+        var g1_p:  *i64 = *i64(buf + i64(48 + 1  * 8))
+        var g2_p:  *i64 = *i64(buf + i64(48 + 2  * 8))
+        var g3_p:  *i64 = *i64(buf + i64(48 + 3  * 8))
+        var g4_p:  *i64 = *i64(buf + i64(48 + 4  * 8))
+        var g5_p:  *i64 = *i64(buf + i64(48 + 5  * 8))
+        var g6_p:  *i64 = *i64(buf + i64(48 + 6  * 8))
+        var g7_p:  *i64 = *i64(buf + i64(48 + 7  * 8))
+        var g8_p:  *i64 = *i64(buf + i64(48 + 8  * 8))
+        var g9_p:  *i64 = *i64(buf + i64(48 + 9  * 8))
+        var g10_p: *i64 = *i64(buf + i64(48 + 10 * 8))
+        var g11_p: *i64 = *i64(buf + i64(48 + 11 * 8))
+        var g12_p: *i64 = *i64(buf + i64(48 + 12 * 8))
+        var g13_p: *i64 = *i64(buf + i64(48 + 13 * 8))
+        var g14_p: *i64 = *i64(buf + i64(48 + 14 * 8))
+        var g15_p: *i64 = *i64(buf + i64(48 + 15 * 8))
+        var g16_p: *i64 = *i64(buf + i64(48 + 16 * 8))
+        var g17_p: *i64 = *i64(buf + i64(48 + 17 * 8))
+        var g18_p: *i64 = *i64(buf + i64(48 + 18 * 8))
+
+        val r8_p:  *i64 = *i64(ssp + i64(56))
+        val r9_p:  *i64 = *i64(ssp + i64(48))
+        val r10_p: *i64 = *i64(ssp + i64(40))
+        val r11_p: *i64 = *i64(ssp + i64(32))
+        val r12_p: *i64 = *i64(ssp + i64(24))
+        val r13_p: *i64 = *i64(ssp + i64(16))
+        val r14_p: *i64 = *i64(ssp + i64(8))
+        val r15_p: *i64 = *i64(ssp + i64(0))
+        val rdi_p: *i64 = *i64(ssp + i64(72))
+        val rsi_p: *i64 = *i64(ssp + i64(80))
+        val rbp_p: *i64 = *i64(ssp + i64(64))
+        val rbx_p: *i64 = *i64(ssp + i64(104))
+        val rdx_p: *i64 = *i64(ssp + i64(88))
+        val rax_p: *i64 = *i64(ssp + i64(112))
+        val rcx_p: *i64 = *i64(ssp + i64(96))
+
+        *g0_p  = *r8_p
+        *g1_p  = *r9_p
+        *g2_p  = *r10_p
+        *g3_p  = *r11_p
+        *g4_p  = *r12_p
+        *g5_p  = *r13_p
+        *g6_p  = *r14_p
+        *g7_p  = *r15_p
+        *g8_p  = *rdi_p
+        *g9_p  = *rsi_p
+        *g10_p = *rbp_p
+        *g11_p = *rbx_p
+        *g12_p = *rdx_p
+        *g13_p = *rax_p
+        *g14_p = *rcx_p
+        *g15_p = saved_rsp
+        *g16_p = saved_rip
+        *g17_p = saved_rflags
+        *g18_p = saved_cs & i64(0xFFFF)
+
+        _sigframe_buf[432] = byte(signo & 0xFF)
+        _sigframe_buf[433] = byte((signo >> 8) & 0xFF)
+        _sigframe_buf[434] = byte((signo >> 16) & 0xFF)
+        _sigframe_buf[435] = byte((signo >> 24) & 0xFF)
+
+        val new_sp = ((saved_rsp - i64(552)) & ~i64(15)) - i64(8)
+        arch_vm_copy_to_demand(ptbr, u64(new_sp), &_sigframe_buf[0], 560)
+
+        val siginfo_addr = new_sp + i64(432)
+        val uctx_addr    = new_sp + i64(8)
+
+        var tf_rdi_p: *i64 = *i64(ssp + i64(72))
+        var tf_rsi_p: *i64 = *i64(ssp + i64(80))
+        var tf_rdx_p: *i64 = *i64(ssp + i64(88))
+        var tf_rip_p: *i64 = *i64(ssp + i64(120))
+        var tf_rsp_p: *i64 = *i64(ssp + i64(144))
+        *tf_rdi_p = i64(signo)
+        *tf_rsi_p = siginfo_addr
+        *tf_rdx_p = uctx_addr
+        *tf_rip_p = handler
+        *tf_rsp_p = new_sp
+
+        var new_mask = old_sigmask | sa_mask
+        if (sa_flags & i32(0x40000000)) == i32(0)
+            new_mask = new_mask | (i64(1) << (signo - 1))
+        new_mask
+
+
+Sigreturn — restore a user trap frame from `ucontext`
+-----------------------------------------------------
+
+Inverse of `arch_build_sigframe`. After the handler returns, its
+`ret` pops `pretcode` (the restorer) into RIP and bumps RSP by 8.
+The restorer issues SYS_RT_SIGRETURN with RSP pointing exactly at
+the `ucontext_t` we previously staged, so the user RSP saved in
+the trap frame *is* `&ucontext`.
+
+`arch_restore_sigframe` reads `gregs[]`, RIP, EFLAGS, and RSP
+out of `uc_mcontext` and writes them back into the saved iretq
+trap frame so the next iretq resumes the interrupted code with
+its full register state. RAX is **not** written into the trap
+frame — it is returned to the caller and the shim dispatcher
+stores it via its usual "syscall result" write.
+
+`out_sigmask` receives `uc_sigmask` (low 8 kernel-shape bytes);
+the caller copies it into `threads[tid].sigmask`.
+
+`gregs[]` ordering matches Linux's x86_64 `mcontext.gregs`:
+R8 R9 R10 R11 R12 R13 R14 R15 RDI RSI RBP RBX RDX RAX RCX RSP
+RIP EFL CSGSFS ERR TRAPNO OLDMASK CR2. Indices 18..22 (CSGSFS
+and friends) are ignored on restore — CS/SS stay kernel-set,
+fault metadata isn't propagated.
+
+    arch_restore_sigframe(ssp: i64, ptbr: u64, out_sigmask: *i64) -> i64
+        val user_rsp_p: *i64 = *i64(ssp + i64(144))
+        val user_rsp = *user_rsp_p
+        val uctx_va = user_rsp
+
+        var sigmask_bytes: [8]byte
+        vm_copy_from(ptbr, u64(uctx_va + i64(296)), &sigmask_bytes[0], 8)
+        val smp: *i64 = *i64(i64(&sigmask_bytes[0]))
+        *out_sigmask = *smp
+
+        var gregs: [184]byte
+        vm_copy_from(ptbr, u64(uctx_va + i64(40)), &gregs[0], 184)
+
+        val gbase = i64(&gregs[0])
+        val g_r8_p:  *i64 = *i64(gbase + i64(0  * 8))
+        val g_r9_p:  *i64 = *i64(gbase + i64(1  * 8))
+        val g_r10_p: *i64 = *i64(gbase + i64(2  * 8))
+        val g_r11_p: *i64 = *i64(gbase + i64(3  * 8))
+        val g_r12_p: *i64 = *i64(gbase + i64(4  * 8))
+        val g_r13_p: *i64 = *i64(gbase + i64(5  * 8))
+        val g_r14_p: *i64 = *i64(gbase + i64(6  * 8))
+        val g_r15_p: *i64 = *i64(gbase + i64(7  * 8))
+        val g_rdi_p: *i64 = *i64(gbase + i64(8  * 8))
+        val g_rsi_p: *i64 = *i64(gbase + i64(9  * 8))
+        val g_rbp_p: *i64 = *i64(gbase + i64(10 * 8))
+        val g_rbx_p: *i64 = *i64(gbase + i64(11 * 8))
+        val g_rdx_p: *i64 = *i64(gbase + i64(12 * 8))
+        val g_rax_p: *i64 = *i64(gbase + i64(13 * 8))
+        val g_rcx_p: *i64 = *i64(gbase + i64(14 * 8))
+        val g_rsp_p: *i64 = *i64(gbase + i64(15 * 8))
+        val g_rip_p: *i64 = *i64(gbase + i64(16 * 8))
+        val g_efl_p: *i64 = *i64(gbase + i64(17 * 8))
+
+        var tf_r8_p:  *i64 = *i64(ssp + i64(56))
+        var tf_r9_p:  *i64 = *i64(ssp + i64(48))
+        var tf_r10_p: *i64 = *i64(ssp + i64(40))
+        var tf_r11_p: *i64 = *i64(ssp + i64(32))
+        var tf_r12_p: *i64 = *i64(ssp + i64(24))
+        var tf_r13_p: *i64 = *i64(ssp + i64(16))
+        var tf_r14_p: *i64 = *i64(ssp + i64(8))
+        var tf_r15_p: *i64 = *i64(ssp + i64(0))
+        var tf_rdi_p: *i64 = *i64(ssp + i64(72))
+        var tf_rsi_p: *i64 = *i64(ssp + i64(80))
+        var tf_rbp_p: *i64 = *i64(ssp + i64(64))
+        var tf_rbx_p: *i64 = *i64(ssp + i64(104))
+        var tf_rdx_p: *i64 = *i64(ssp + i64(88))
+        var tf_rcx_p: *i64 = *i64(ssp + i64(96))
+        var tf_rsp_p: *i64 = *i64(ssp + i64(144))
+        var tf_rip_p: *i64 = *i64(ssp + i64(120))
+        var tf_efl_p: *i64 = *i64(ssp + i64(136))
+
+        *tf_r8_p  = *g_r8_p
+        *tf_r9_p  = *g_r9_p
+        *tf_r10_p = *g_r10_p
+        *tf_r11_p = *g_r11_p
+        *tf_r12_p = *g_r12_p
+        *tf_r13_p = *g_r13_p
+        *tf_r14_p = *g_r14_p
+        *tf_r15_p = *g_r15_p
+        *tf_rdi_p = *g_rdi_p
+        *tf_rsi_p = *g_rsi_p
+        *tf_rbp_p = *g_rbp_p
+        *tf_rbx_p = *g_rbx_p
+        *tf_rdx_p = *g_rdx_p
+        *tf_rcx_p = *g_rcx_p
+        *tf_rsp_p = *g_rsp_p
+        *tf_rip_p = *g_rip_p
+        *tf_efl_p = *g_efl_p
+
+        *g_rax_p

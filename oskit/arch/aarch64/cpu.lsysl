@@ -12,6 +12,8 @@ instructions without paying for a sysl function prologue.
 
     module oskit.arch
 
+    extern arch_vm_copy_to_demand(dst_ptbr: u64, dst_vaddr: u64, src: *byte, len: int) -> int
+
 Offset from the saved SP_EL1 to the syscall return register (x0).
 On aarch64 the Linux syscall ABI puts the return value in x0, and
 our 272-byte exception frame stores x0 at offset 0 (`[sp, #0x000]`).
@@ -208,3 +210,173 @@ Returns the SSP value to store in the child thread (frame base).
         var rv: *i64 = *i64(frame + i64(SYSCALL_RETURN_OFFSET))
         *rv = i64(0)
         frame
+
+
+Signal-frame construction for POSIX signal delivery
+---------------------------------------------------
+
+`arch_build_sigframe` lays down a `siginfo_t` + `ucontext_t` pair
+on the target thread's user stack and rewrites the saved EL0 trap
+frame so that the next ERET returns into the userspace signal
+handler with `x0 = signo`, `x1 = &siginfo`, `x2 = &ucontext`,
+`x30 = restorer`, and SP_EL0 pointing at the new frame. The
+handler's `ret` lands on the restorer (musl's `__restore_rt`),
+which issues SYS_RT_SIGRETURN to undo the frame.
+
+User-side frame layout (the byte image we push onto the stack):
+
+```
+new_sp + 0     siginfo_t (128B, only si_signo non-zero)
+new_sp + 128   ucontext_t (4544B):
+                 +0    uc_flags          (u64, 0)
+                 +8    uc_link           (u64, 0)
+                 +16   uc_stack          (24B, zeroed)
+                 +40   uc_sigmask        (128B; low 8B = saved
+                                            kernel-shape sigmask)
+                 +168  uc_mcontext (4376B):
+                         +0    fault_address  (0)
+                         +8    regs[31]       (x0..x30 from trap frame)
+                         +256  sp             (saved SP_EL0)
+                         +264  pc             (saved ELR_EL1)
+                         +272  pstate         (saved SPSR_EL1)
+                         +280  __reserved     (4096B, zeroed — no
+                                                  FP/SIMD save yet)
+```
+
+Returns the new blocked-signal mask. The caller stores it into
+`threads[tid].sigmask` and clears the pending bit. The 4672-byte
+staging buffer lives at module scope; SLIX is single-CPU and the
+walker is non-reentrant.
+
+Saved-frame reads/writes go through the kernel's identity mapping
+of the kstack: every page table SLIX builds mirrors the L1[1]
+kernel slot, so `ssp + offset` is reachable directly from kernel
+context regardless of which user PTBR is active. User-stack
+writes go through `vm_copy_to`, which strides per-page via
+`vm_v2p` internally.
+
+    var _sigframe_buf: [4672]byte
+
+    arch_build_sigframe(ssp: i64, ptbr: u64, signo: int,
+                        handler: i64, restorer: i64,
+                        sa_mask: i64, sa_flags: i32,
+                        old_sigmask: i64) -> i64
+        val saved_sp_p:     *i64 = *i64(ssp + i64(0xF8))
+        val saved_pc_p:     *i64 = *i64(ssp + i64(0x108))
+        val saved_pstate_p: *i64 = *i64(ssp + i64(0x100))
+        val saved_sp     = *saved_sp_p
+        val saved_pc     = *saved_pc_p
+        val saved_pstate = *saved_pstate_p
+
+        var z = 0
+        while z < 4672
+            _sigframe_buf[z] = byte(0)
+            z += 1
+
+        _sigframe_buf[0] = byte(signo & 0xFF)
+        _sigframe_buf[1] = byte((signo >> 8) & 0xFF)
+        _sigframe_buf[2] = byte((signo >> 16) & 0xFF)
+        _sigframe_buf[3] = byte((signo >> 24) & 0xFF)
+
+        var bi = 0
+        while bi < 8
+            val sh = i64(bi * 8)
+            _sigframe_buf[168 + bi] = byte((old_sigmask >> sh) & i64(0xFF))
+            bi += 1
+
+        var r = 0
+        while r < 248
+            val src: *byte = *byte(ssp + i64(r))
+            _sigframe_buf[304 + r] = *src
+            r += 1
+
+        var si = 0
+        while si < 8
+            val sh = i64(si * 8)
+            _sigframe_buf[552 + si] = byte((saved_sp     >> sh) & i64(0xFF))
+            _sigframe_buf[560 + si] = byte((saved_pc     >> sh) & i64(0xFF))
+            _sigframe_buf[568 + si] = byte((saved_pstate >> sh) & i64(0xFF))
+            si += 1
+
+        val new_sp = (saved_sp - i64(4672)) & ~i64(15)
+        arch_vm_copy_to_demand(ptbr, u64(new_sp), &_sigframe_buf[0], 4672)
+
+        val siginfo_addr = new_sp
+        val uctx_addr = new_sp + i64(128)
+
+        var x0_p:  *i64 = *i64(ssp + i64(0x000))
+        var x1_p:  *i64 = *i64(ssp + i64(0x008))
+        var x2_p:  *i64 = *i64(ssp + i64(0x010))
+        var x30_p: *i64 = *i64(ssp + i64(0x0F0))
+        var sp_p:  *i64 = *i64(ssp + i64(0x0F8))
+        var pc_p:  *i64 = *i64(ssp + i64(0x108))
+        *x0_p  = i64(signo)
+        *x1_p  = siginfo_addr
+        *x2_p  = uctx_addr
+        *x30_p = restorer
+        *sp_p  = new_sp
+        *pc_p  = handler
+
+        var new_mask = old_sigmask | sa_mask
+        if (sa_flags & i32(0x40000000)) == i32(0)
+            new_mask = new_mask | (i64(1) << (signo - 1))
+        new_mask
+
+
+Sigreturn — restore a user trap frame from `ucontext`
+-----------------------------------------------------
+
+Inverse of `arch_build_sigframe`. The user just returned from a
+signal handler via libc's `__restore_rt`, which issues SYS_RT_
+SIGRETURN. At that point SP_EL0 is back at the `siginfo`/`ucontext`
+pair we previously laid down — siginfo at sp+0, ucontext at sp+128
+(handlers don't shift sp before calling the restorer because lr
+already points at `__restore_rt`).
+
+`arch_restore_sigframe` reads x1..x30, sp_el0, elr_el1, and
+spsr_el1 out of `uc_mcontext` and writes them back into the
+saved EL0 trap frame so the next ERET resumes at the saved PC
+with the saved register state. `x0` is **not** written into the
+trap frame — it is returned to the caller and the shim dispatcher
+performs the usual "store syscall result" write, which lands the
+restored x0 in its trap-frame slot without a double-write.
+
+`out_sigmask` receives `uc_sigmask` (low 8 kernel-shape bytes);
+the caller copies it into `threads[tid].sigmask`.
+
+    arch_restore_sigframe(ssp: i64, ptbr: u64, out_sigmask: *i64) -> i64
+        val user_sp_p: *i64 = *i64(ssp + i64(0xF8))
+        val user_sp = *user_sp_p
+        val uctx_va = user_sp + i64(128)
+
+        var sigmask_bytes: [8]byte
+        vm_copy_from(ptbr, u64(uctx_va + i64(40)), &sigmask_bytes[0], 8)
+        val smp: *i64 = *i64(i64(&sigmask_bytes[0]))
+        *out_sigmask = *smp
+
+        var regbuf: [248]byte
+        vm_copy_from(ptbr, u64(uctx_va + i64(176)), &regbuf[0], 248)
+
+        var trio: [24]byte
+        vm_copy_from(ptbr, u64(uctx_va + i64(424)), &trio[0], 24)
+        val new_sp_p:     *i64 = *i64(i64(&trio[0]))
+        val new_pc_p:     *i64 = *i64(i64(&trio[8]))
+        val new_pstate_p: *i64 = *i64(i64(&trio[16]))
+
+        val regbase = i64(&regbuf[0])
+        var r = 1
+        while r <= 30
+            val src_p: *i64 = *i64(regbase + i64(r * 8))
+            var dst_p: *i64 = *i64(ssp + i64(r * 8))
+            *dst_p = *src_p
+            r += 1
+
+        var sp_w_p:   *i64 = *i64(ssp + i64(0xF8))
+        var spsr_w_p: *i64 = *i64(ssp + i64(0x100))
+        var elr_w_p:  *i64 = *i64(ssp + i64(0x108))
+        *sp_w_p   = *new_sp_p
+        *spsr_w_p = *new_pstate_p
+        *elr_w_p  = *new_pc_p
+
+        val x0_p: *i64 = *i64(regbase)
+        *x0_p

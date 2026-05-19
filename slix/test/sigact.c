@@ -1,11 +1,14 @@
-/* sigact: validate Phase 2 chunks 1 and 2 — sigaction /
- * sigprocmask / sigpending state plumbing (chunk 1) plus the
- * signal-generation syscalls kill / tkill / raise (chunk 2). No
- * signal is ever *delivered* in either chunk; the test verifies
- * only that state is stored, queried back, and (for chunk 2) that
- * the pending bitmap reflects raised signals.
+/* sigact: exercise the POSIX signal-handling surface end-to-end.
  *
- * Steps:
+ * Steps 1-9 cover state plumbing (sigaction / sigprocmask /
+ * sigpending) and signal generation (kill / tkill / raise) without
+ * any signal actually being delivered. Step 10 installs a real
+ * SIGUSR2 handler, calls raise(SIGUSR2), and checks that the
+ * handler ran — that's the end-to-end proof that the kernel built
+ * a sigframe, ERET'd into userspace at the handler, and that the
+ * libc trampoline's SYS_RT_SIGRETURN restored execution back to
+ * the caller.
+ *
  *   1. sigaction(SIGTERM, NULL, &old) — verify default disposition
  *      is SIG_DFL (sa_handler == NULL).
  *   2. sigaction(SIGTERM, &new, NULL) where new.sa_handler is a
@@ -16,11 +19,15 @@
  *   5. sigprocmask: block SIGUSR1, query mask, unblock, verify.
  *   6. sigpending with no pending signal — expect bit clear.
  *   7. raise(SIGUSR1) while blocked — expect pending bit set.
- *      (Pre-arms SIGUSR1 with SIG_IGN so chunk 3+ delivery will
- *      silently discard, preventing this test from killing itself
- *      on the chunk-4 default-TERM action.)
+ *      (Pre-arms SIGUSR1 with SIG_IGN so delivery silently discards
+ *      it once unblocked, preventing the test from killing itself
+ *      on the default-TERM action.)
  *   8. kill(getpid(), 0) — POSIX existence probe; must succeed.
  *   9. kill(getpid(), 999) — bad signo; must return EINVAL.
+ *  10. Install a real SIGUSR2 handler that bumps a counter, then
+ *      raise(SIGUSR2), then read the counter back — handler must
+ *      have run exactly once and control must have returned past
+ *      the raise() call line.
  */
 #include <signal.h>
 #include <unistd.h>
@@ -47,7 +54,15 @@ static void wlong(long v) {
 
 static void my_handler(int signo) {
     (void)signo;
-    /* never actually called in chunk 1 */
+    /* installed via sigaction but never delivered — step 2 only
+     * verifies storage, not invocation. */
+}
+
+static volatile int handler_counter = 0;
+static volatile int handler_signo = 0;
+static void counter_handler(int signo) {
+    handler_signo = signo;
+    handler_counter++;
 }
 
 int main(void) {
@@ -156,10 +171,29 @@ int main(void) {
     wstr("\n");
 
     /* Restore mask (after step 9 so SIGUSR1 stays blocked through
-     * step 7's pending probe). The pending bit will linger past
-     * the unblock until chunk-3 delivery lands; in chunk 2 with no
-     * delivery, the SIG_IGN-armed bit just stays set until exit. */
+     * step 7's pending probe). With delivery wired up the SIG_IGN
+     * disposition causes the kernel to silently clear the pending
+     * SIGUSR1 bit on the unblock — no handler runs. */
     sigprocmask(SIG_SETMASK, &oldset, NULL);
+
+    /* Step 10 — install a real handler, raise the signal, verify
+     * the handler ran and that we returned past raise(). */
+    struct sigaction usr2;
+    memset(&usr2, 0, sizeof(usr2));
+    usr2.sa_handler = counter_handler;
+    sigemptyset(&usr2.sa_mask);
+    usr2.sa_flags = 0;
+    if (sigaction(SIGUSR2, &usr2, NULL) != 0) {
+        wstr("sigact: usr2_install_rc<0 errno="); wlong(errno); wstr("\n"); return 11;
+    }
+    if (raise(SIGUSR2) != 0) {
+        wstr("sigact: raise2_rc<0 errno="); wlong(errno); wstr("\n"); return 12;
+    }
+    wstr("sigact: step10 counter=");
+    wlong(handler_counter);
+    wstr(" signo=");
+    wlong(handler_signo);
+    wstr("\n");
 
     wstr("sigact: done\n");
     return 0;

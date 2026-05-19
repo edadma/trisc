@@ -1044,6 +1044,11 @@ Returns 0 on success, negative errno on failure.
             return sys_kill(int(a0), int(a1))
         if num == 360
             return sys_tkill(int(a0), int(a1))
+        // Signal-handler return path. Currently returns 0 so musl's
+        // __restore_rt doesn't EINVAL; full ucontext restore lands
+        // once the delivery hook is in place.
+        if num == 287
+            return sys_rt_sigreturn()
         i64(-ENOSYS)
 
 SYS_WRITE. Looks up `fd` in the process's POSIX fd table and

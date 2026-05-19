@@ -105,3 +105,15 @@ void arch_irq_restore(unsigned long prev) {
                       :: "r"(prev) : "memory", "cc");
 }
 
+/* Trampoline so arch code can demand-allocate user pages without
+ * importing oskit.kernel (which would create a module-import cycle:
+ * oskit.kernel already imports oskit.arch.*). The implementation
+ * lives in oskit.kernel and is reached here through its mangled C
+ * symbol. */
+extern int oskit_kernel__kernel_vm_copy_to(unsigned long ptbr, unsigned long vaddr,
+                                            const void *src, int len);
+int arch_vm_copy_to_demand(unsigned long ptbr, unsigned long vaddr,
+                            const void *src, int len) {
+    return oskit_kernel__kernel_vm_copy_to(ptbr, vaddr, src, len);
+}
+

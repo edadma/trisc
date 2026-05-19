@@ -22,7 +22,7 @@ The dispatch entries (134/135/136/214/360) live in
 
     import oskit.kernel.{kernel_sigaction_set, kernel_sigmask_set,
         kernel_sigpending_get, kernel_sig_send_to_thread,
-        kernel_sig_send_to_process}
+        kernel_sig_send_to_process, kernel_perform_sigreturn}
 
 
 sys_rt_sigaction
@@ -187,3 +187,20 @@ SIGKILL is process-scoped at the implementation level).
         if rc == -3
             return i64(-ESRCH)
         i64(0)
+
+
+sys_rt_sigreturn
+----------------
+
+SYS_RT_SIGRETURN (287). No args. Invoked by libc's `__restore_rt`
+trampoline when a signal handler returns. The slix-musl restore
+shims (`slix/musl/src/signal/{aarch64-slix,x86_64-slix}/restore.s`)
+load `287` into the syscall reg and trap. The kernel reads the
+saved `ucontext` off the user stack and rewrites the trap frame so
+the next return-to-user resumes the interrupted code with its full
+register state and pre-delivery sigmask. Returns the saved
+syscall-result register (RAX on x86_64, x0 on aarch64); the
+dispatcher writes it to the trap frame's result slot.
+
+    sys_rt_sigreturn() -> i64
+        kernel_perform_sigreturn()

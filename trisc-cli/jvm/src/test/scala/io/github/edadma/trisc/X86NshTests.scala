@@ -361,13 +361,12 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("meventfd: done")
   }
 
-  "musl: rt_sigaction / sigprocmask / sigpending + kill / tkill (Phase 2 chunks 1+2)" in {
+  "musl: rt_sigaction / sigprocmask / sigpending + kill / tkill / delivery" in {
     // Mirror of the aarch64 sigact test — exercises slix-musl 283
-    // (rt_sigaction), 285 (rt_sigprocmask), 284 (rt_sigpending) from
-    // chunk 1 plus 214 (kill) and 360 (tkill, via libc raise) from
-    // chunk 2. Delivery does not exist yet; the test only verifies
-    // state is stored, queried back, and that raise()-while-blocked
-    // sets the pending bit. See slix/test/sigact.c.
+    // (rt_sigaction), 285 (rt_sigprocmask), 284 (rt_sigpending),
+    // 214 (kill), 360 (tkill via libc raise) on the state side, and
+    // an end-to-end delivery probe in step 10 (raise SIGUSR2 through
+    // a custom handler, verify counter == 1). See slix/test/sigact.c.
     qemu.send("sigact\n")
     val output = qemu.waitFor("sigact: done")
     output should include("sigact: step1 handler=0")
@@ -379,6 +378,7 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("sigact: step7 raised_pending_USR1=1")
     output should include("sigact: step8 kill0_rc=0")
     output should include("sigact: step9 bad_rc=-1 errno=22")
+    output should include("sigact: step10 counter=1 signo=12")
     output should include("sigact: done")
   }
 

@@ -2305,6 +2305,8 @@ Steps:
             total_ctx_switches += 1
             vm_set_ptbr(threads[next].ptbr)
             tss_set_rsp0(threads[next].kstack_top)
+            if threads[next].pid > 0
+                kernel_check_pending_signals(next)
             return threads[next].ssp
 
         // No ready threads — return 0 to signal idle

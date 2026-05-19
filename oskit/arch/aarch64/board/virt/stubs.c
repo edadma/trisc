@@ -10,6 +10,8 @@
 typedef unsigned long size_t;
 typedef long ssize_t;
 typedef unsigned int uint32_t;
+typedef unsigned long uint64_t;
+typedef int int32_t;
 
 #define UART0_BASE 0x09000000UL
 #define UARTDR (*(volatile uint32_t *)(UART0_BASE + 0x000))
@@ -95,4 +97,16 @@ void *memset(void *dst, int c, size_t n) {
     for (size_t i = 0; i < n; i++)
         d[i] = (unsigned char)c;
     return dst;
+}
+
+/* Trampoline so arch code can demand-allocate user pages without
+ * importing oskit.kernel (which would create a module-import cycle:
+ * oskit.kernel already imports oskit.arch.*). The implementation
+ * lives in oskit.kernel and is reached here through its mangled C
+ * symbol. */
+extern int32_t oskit_kernel__kernel_vm_copy_to(uint64_t ptbr, uint64_t vaddr,
+                                                const void *src, int32_t len);
+int32_t arch_vm_copy_to_demand(uint64_t ptbr, uint64_t vaddr,
+                                const void *src, int32_t len) {
+    return oskit_kernel__kernel_vm_copy_to(ptbr, vaddr, src, len);
 }
