@@ -63,7 +63,7 @@ Current → target mapping is shown in each category's table.
 
 ## Tier 0 — Foundation
 
-### `arc/` — Three allocation modes + refcount semantics — 🟡 P0
+### `arc/` — Three allocation modes + refcount semantics — 🟢 P0
 
 Reference §"Three Allocation Modes", "Conversion Rules", "Deinit Blocks".
 This was the highest-leverage gap. `std/` defines almost no `&T`
@@ -87,13 +87,13 @@ where noted.
 | `deinit_basic.lsysl` 🟢 | `Struct.deinit()` fires once at refcount=0 transition; before free; doesn't fire for value-struct drops (5 tests) |
 | `deinit_with_fields.lsysl` 🟢 | deinit body can read fields (including chasing through `&Inner` field) before the field's own refcount is decremented (3 tests). TODO: also pin "outer's drop transitively decrements `&Inner` field, firing inner's deinit" — currently every backend leaks the inner ref on outer-drop |
 | `ptr_to_value.lsysl` 🟢 | `&v` then `*p` round-trips; mutating through `*p` mutates the value (4 tests) |
-| `ref_to_ptr.lsysl` 🟢 | `&r` where `r: &T` yields `*T` per CLAUDE.md three-mode Conversion Rules (unsafe — no refcount change, no lifetime extension, programmer owns dangling risk). Read-through-`*p`, mutate-through-`*p` visible via the original ref, ref+ptr coexist seeing the same data, pass-as-`*T`-param (4 tests). Analyzer change in `SyslAnalyzerExpressions.scala` UnaryAST("&") path lowers `TVarRef(_, &T)` to `TCast(_, *T)`; LLVM/SVM/TRISC TCast is no-op; interpreter wraps ref-cells as a CellPtr-of-Cell-of-ArrVal so PtrVal field-access/deref paths see the same struct shape. Renamed from `ptr_to_ref.lsysl`. The literal `*T → &T` direction is intentionally rejected per CLAUDE.md and lives in `compile_fail_ptr_to_ref.lsysl` 🔴. |
+| `ref_to_ptr.lsysl` 🟢 | `&r` where `r: &T` yields `*T` per CLAUDE.md three-mode Conversion Rules (unsafe — no refcount change, no lifetime extension, programmer owns dangling risk). Read-through-`*p`, mutate-through-`*p` visible via the original ref, ref+ptr coexist seeing the same data, pass-as-`*T`-param (4 tests). Analyzer change in `SyslAnalyzerExpressions.scala` UnaryAST("&") path lowers `TVarRef(_, &T)` to `TCast(_, *T)`; LLVM/SVM/TRISC TCast is no-op; interpreter wraps ref-cells as a CellPtr-of-Cell-of-ArrVal so PtrVal field-access/deref paths see the same struct shape. Renamed from `ptr_to_ref.lsysl`. The literal `*T → &T` direction is intentionally rejected per CLAUDE.md and is pinned by `SyslCompileErrorTests.scala` ("ptr to ref conversion rejected (can't manufacture a refcount)") rather than a separate `.lsysl` runtime stub. |
 | `value_to_ref_explicit.lsysl` 🟢 | `new T(v)` heap-promotes a value struct, independent of source (2 tests) |
 | `field_self_concat.lsysl` 🟢 | original regression test for `TFieldAssignStmt` use-after-free (3 tests) |
 
 ---
 
-### `slices/` — Fixed arrays, dynamic arrays, slice descriptors, append — 🟡 P0
+### `slices/` — Fixed arrays, dynamic arrays, slice descriptors, append — 🟢 P0
 
 Reference §"Arrays, Slices, and Pointers", §"Append". `std/` uses slices
 constantly but rarely pins boundary conditions. Now substantially covered;
@@ -259,7 +259,7 @@ Existing: `out_inout_params.lsysl` → `functions/out_inout_params.lsysl`.
 
 ---
 
-### `interfaces/` — dispatch, mutating self, composed — 🟡 P1
+### `interfaces/` — dispatch, mutating self, composed — 🟢 P1
 
 | File | Tests pinned |
 |---|---|
@@ -444,7 +444,7 @@ from the planned rows:
 
 ---
 
-### `enums/` — simple + data + attributes — 🟡 P2
+### `enums/` — simple + data + attributes — 🟢 P2
 
 Reference §"Enum Types (Simple)", "Tagged Unions (Data Enums)". The
 *payload* variants are partly covered by `pattern_matching/enum_match_payload`;
