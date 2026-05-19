@@ -198,10 +198,10 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         // over the wire in CI — verify it in isolation instead.
         //
         // Frame layout: 14 B Ethernet header + 20 B IPv4 header +
-        // 28 B TCP header (MSS + SACK-permitted + 2 NOPs).
-        var synframe: [54]byte
+        // 28 B TCP header (MSS + SACK-permitted + 2 NOPs) = 62 bytes.
+        var synframe: [62]byte
         var bi = 0
-        while bi < 54
+        while bi < 62
             synframe[bi] = 0
             bi += 1
         // Data offset = 7 words (28 bytes); flags = SYN.
@@ -354,9 +354,10 @@ Expected final state: rcv_nxt = 300, recv_len = 200, recv_buf =
         // NOP + NOP + kind=5 + len=18 + 2 blocks.
         tcp_sack_board_clear(sb)
         tcp_sockets[sb].snd_una = u32(400)
-        var ackframe: [60]byte
+        // 14 B Eth + 20 B IPv4 + 40 B TCP header (NOP+NOP+SACK(2 blocks=18) = 20 B opts + 20 B base) = 74 bytes.
+        var ackframe: [74]byte
         var ai = 0
-        while ai < 60
+        while ai < 74
             ackframe[ai] = 0
             ai += 1
         // Data offset = 10 words (40 bytes header); flags = ACK.
