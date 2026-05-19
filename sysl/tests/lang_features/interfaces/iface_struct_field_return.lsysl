@@ -1,0 +1,138 @@
+Iface as a struct field — value struct returned from factory
+=============================================================
+
+`iface_box_lifetime.lsysl::test_sibl_iface_field_in_struct`
+pins the in-scope case (`val c = Tally(40); val w =
+Wrapper(c, 2)`). This file pins the **factory-return**
+case where a value struct carrying an iface field must
+survive the factory's frame exit.
+
+Companion bug to `iface_in_option_result.lsysl`'s
+return-from-fn case: the struct ctor's iface auto-box
+needed `owns = true` (it was missing) so the iface
+descriptor's data buffer is heap-malloc'd instead of
+pointing at the factory's stack slot. Both non-generic
+struct ctor and generic struct ctor paths were patched —
+see `SyslAnalyzerExpressions.scala` near "Struct
+constructor".
+
+    module sysl.tests.lang_features
+
+    interface PsiV
+        value() -> int
+
+    struct PsiP
+        n: int
+
+    PsiP.value() -> int = self.n
+
+    struct PsiWrap
+        h: PsiV
+
+    psi_factory(n: int) -> PsiWrap
+        val src = PsiP(n)
+        return PsiWrap(src)
+
+Single factory call — iface field reads correct value
+-----------------------------------------------------
+
+The factory builds `PsiWrap(src)` where src is a local
+struct. The iface field's data buffer must be heap-copied
+so it outlives the factory's frame.
+
+    #test
+    test_struct_with_iface_field_returned() -> unit
+        val w = psi_factory(42)
+        assert(w.h.value() == 42, s"expected 42, got ${w.h.value()}")
+
+Two factory calls — no aliasing
+-------------------------------
+
+Both calls allocate their own heap data buffer for the
+iface field. Without the owns=true fix, both ifaces
+aliased the same reused stack slot (second value
+overwrote first).
+
+    #test
+    test_two_struct_with_iface_field_returned() -> unit
+        val a = psi_factory(10)
+        val b = psi_factory(20)
+        val va = a.h.value()
+        val vb = b.h.value()
+        assert(va == 10, s"va: expected 10, got $va")
+        assert(vb == 20, s"vb: expected 20, got $vb")
+
+Three calls — earliest survives later allocations
+-------------------------------------------------
+
+Read the first call's value AFTER making two more calls.
+Without the fix this read sees a later value because the
+heap buffer is shared.
+
+    #test
+    test_struct_with_iface_field_three_calls() -> unit
+        val w = psi_factory(7)
+        val a = psi_factory(8)
+        val b = psi_factory(9)
+        assert(w.h.value() == 7, s"w preserved: expected 7, got ${w.h.value()}")
+        assert(a.h.value() == 8, s"a: expected 8, got ${a.h.value()}")
+        assert(b.h.value() == 9, s"b: expected 9, got ${b.h.value()}")
+
+Struct ctor inline (no factory) — still works
+---------------------------------------------
+
+The owns=true change also applies to in-scope use of
+struct constructors with iface fields. Stays correct.
+
+    #test
+    test_struct_with_iface_field_inline() -> unit
+        val src = PsiP(99)
+        val w = PsiWrap(src)
+        assert(w.h.value() == 99, s"inline: expected 99, got ${w.h.value()}")
+
+Generic struct with iface field, explicit type arg
+--------------------------------------------------
+
+`PsiGenericWrap[PsiV](src, t)` exercises the explicit-
+type-arg generic struct ctor path (`GenericCallAST` /
+`IndexAST` → `genericStructs`). The iface field auto-box
+needed owns=true.
+
+    struct PsiGenericWrap[T]
+        h: T
+        tag: int
+
+    psi_generic_factory_explicit(n: int, t: int) -> PsiGenericWrap[PsiV]
+        val src = PsiP(n)
+        return PsiGenericWrap[PsiV](src, t)
+
+    #test
+    test_generic_struct_explicit_typearg_returned() -> unit
+        val a = psi_generic_factory_explicit(10, 1)
+        val b = psi_generic_factory_explicit(20, 2)
+        assert(a.h.value() == 10, s"a: expected 10, got ${a.h.value()}")
+        assert(b.h.value() == 20, s"b: expected 20, got ${b.h.value()}")
+        assert(a.tag == 1, s"a.tag: ${a.tag}")
+        assert(b.tag == 2, s"b.tag: ${b.tag}")
+
+Generic struct with iface field, inferred type arg
+--------------------------------------------------
+
+`PsiGenericWrap(src, t)` infers T from the args. Exercises
+the inferred-type-arg path in the analyzer's struct-ctor
+case (the `genericStructs.contains(name)` branch in
+`CallAST` analysis). Needs the field type to drive an
+iface coercion from the concrete struct.
+
+    psi_generic_factory_inferred(n: int, t: int) -> PsiGenericWrap[PsiV]
+        val src: PsiV = PsiP(n)
+        return PsiGenericWrap(src, t)
+
+    #test
+    test_generic_struct_inferred_typearg_returned() -> unit
+        val a = psi_generic_factory_inferred(30, 3)
+        val b = psi_generic_factory_inferred(40, 4)
+        assert(a.h.value() == 30, s"a: expected 30, got ${a.h.value()}")
+        assert(b.h.value() == 40, s"b: expected 40, got ${b.h.value()}")
+        assert(a.tag == 3, s"a.tag: ${a.tag}")
+        assert(b.tag == 4, s"b.tag: ${b.tag}")
