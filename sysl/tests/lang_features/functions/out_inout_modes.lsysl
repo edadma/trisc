@@ -1,0 +1,123 @@
+`out` and `inout` parameter modes
+=================================
+
+The audit memo (`project_sysl_audit_bugs.md` 2026-04-28) flagged
+SVM as silently ignoring `out` and `inout` parameter modes:
+mutations don't propagate back to the caller's lvalue.
+Probe on every backend.
+
+File-local prefix `Oim` (Out / Inout Modes).
+
+    module sysl.tests.lang_features
+
+`out` — caller's lvalue receives the callee's writes
+----------------------------------------------------
+
+    oim_set_to_99(out v: int) -> unit
+        v = 99
+
+    #test
+    test_oim_out_int() -> unit
+        var x = 0
+        oim_set_to_99(x)
+        assert(x == 99, s"x should be 99 after out-param assignment, got $x")
+
+`out` writes multiple times — caller sees final value
+-----------------------------------------------------
+
+    oim_set_steps(out v: int) -> unit
+        v = 10
+        v = 20
+        v = 30
+
+    #test
+    test_oim_out_multiple_writes() -> unit
+        var x = 0
+        oim_set_steps(x)
+        assert(x == 30, s"x should be 30 (last write), got $x")
+
+`inout` — caller passes value AND receives writes
+-------------------------------------------------
+
+    oim_double(inout v: int) -> unit
+        v = v * 2
+
+    #test
+    test_oim_inout_doubles() -> unit
+        var x = 7
+        oim_double(x)
+        assert(x == 14, s"x should be 14 after inout doubling, got $x")
+
+    #test
+    test_oim_inout_chain() -> unit
+        var x = 1
+        oim_double(x)   // 2
+        oim_double(x)   // 4
+        oim_double(x)   // 8
+        assert(x == 8, s"three doublings of 1 → 8, got $x")
+
+`out` doesn't require caller to initialize
+------------------------------------------
+
+The reference (§"Param modes") says `out` doesn't read the
+caller's initial value; the callee must write before any
+read. We can't test "uninitialized at caller" because sysl
+requires a `var` declaration with an initializer, but we CAN
+verify the callee's write is what the caller sees regardless
+of caller's initial value.
+
+    #test
+    test_oim_out_overwrites_initial() -> unit
+        var x = -12345
+        oim_set_to_99(x)
+        assert(x == 99, s"out overwrites whatever was there, got $x")
+
+`inout` on different integer widths
+-----------------------------------
+
+    oim_inc_i8(inout v: i8) -> unit
+        v = v + 1
+
+    #test
+    test_oim_inout_i8() -> unit
+        var x: i8 = 5
+        oim_inc_i8(x)
+        assert(i32(x) == 6, s"i8 inout inc, got ${i32(x)}")
+
+    oim_inc_i64(inout v: i64) -> unit
+        v = v + 1
+
+    #test
+    test_oim_inout_i64() -> unit
+        var x: i64 = 1000000000
+        oim_inc_i64(x)
+        assert(x == 1000000001i64, s"i64 inout inc, got $x")
+
+Mixed `in` and `out` parameters
+-------------------------------
+
+    oim_divmod(a: int, b: int, out q: int, out r: int) -> unit
+        q = a / b
+        r = a % b
+
+    #test
+    test_oim_mixed_in_out() -> unit
+        var quot = 0
+        var rem = 0
+        oim_divmod(17, 5, quot, rem)
+        assert(quot == 3, s"17 / 5 = 3, got $quot")
+        assert(rem == 2, s"17 % 5 = 2, got $rem")
+
+`out` followed by read in caller
+--------------------------------
+
+The caller's `var` keeps the post-call value; reads after
+the call see it.
+
+    #test
+    test_oim_out_then_use() -> unit
+        var x = 0
+        oim_set_to_99(x)
+        val twice = x * 2
+        assert(twice == 198, s"99 * 2 = 198, got $twice")
+        assert(x == 99, s"x unchanged after read, got $x")
