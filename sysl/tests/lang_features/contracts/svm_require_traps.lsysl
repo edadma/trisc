@@ -1,0 +1,63 @@
+SVM `require` / `ensure` failure traps cleanly
+==============================================
+
+Audit memo (`project_sysl_audit_bugs.md` 2026-04-28) flagged
+SVM as emitting a bare `halt` on contract failure with the
+message discarded. Verified at sysl@0126a5f2b: SVM now emits
+`trap 1` and writes the message as an `;` asm comment above
+the trap (kind: message tag). The runtime emulator halts on
+`trap 1` and `should_panic` picks it up; the message survives
+in the asm output for debugging.
+
+This pins the runtime trap contract on the SVM backend.
+Cross-backend uniformity for the message-to-stderr behavior
+is a separate row (deferred — would require the SVM runtime
+to print embedded message strings on trap, which it doesn't
+do today).
+
+File-local prefix `Sreq` (SVM REQuire trap).
+
+    module sysl.tests.lang_features
+
+`require false` traps
+---------------------
+
+    sreq_assert_positive(n: int) -> int
+        require n > 0, "n must be positive"
+        return n * 2
+
+    #test(should_panic)
+    test_sreq_require_zero_traps() -> unit
+        val _ = sreq_assert_positive(0)
+
+    #test(should_panic)
+    test_sreq_require_negative_traps() -> unit
+        val _ = sreq_assert_positive(-5)
+
+    #test
+    test_sreq_require_positive_passes() -> unit
+        val r = sreq_assert_positive(10)
+        assert(r == 20, s"10 * 2 = 20, got $r")
+
+`ensure false` traps
+--------------------
+
+    sreq_bad_double(n: int) -> int
+        ensure result == n + 1, "wrong impl"
+        return n * 2
+
+    #test(should_panic)
+    test_sreq_ensure_violation_traps() -> unit
+        val _ = sreq_bad_double(5)
+
+`ensure result == ...` happy path
+---------------------------------
+
+    sreq_double(n: int) -> int
+        ensure result == n * 2, "should double"
+        return n * 2
+
+    #test
+    test_sreq_ensure_satisfied() -> unit
+        val r = sreq_double(7)
+        assert(r == 14, s"7 * 2 = 14, got $r")

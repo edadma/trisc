@@ -1147,7 +1147,11 @@ class SyslLLVMCodegen(target: String = "host"):
         val text = if message == kind then kind else s"$kind: $message"
         val (nameLbl, nameLen) = internCString(text)
         emit(s"  %${failLbl}_name = getelementptr [$nameLen x i8], [$nameLen x i8]* $nameLbl, i32 0, i32 0")
-        emit(s"  call void @__range_fail(i8* %${failLbl}_name, i64 ${nameLen - 1})")
+        // sizeT matches the host pointer width (i32 on wasm32 / riscv32,
+        // i64 on llvm-host / riscv64). The fn signature uses sizeT; this
+        // call must match or wasm-ld replaces the call with a trap stub
+        // (`__range_fail_bitcast_invalid`) and the message never prints.
+        emit(s"  call void @__range_fail(i8* %${failLbl}_name, $sizeT ${nameLen - 1})")
         emit(s"  unreachable")
         emit(s"$passLbl:")
         currentBlock = passLbl
@@ -3863,7 +3867,8 @@ class SyslLLVMCodegen(target: String = "host"):
         emit(s"$failLbl:")
         val (nameLbl, nameLen) = internCString(aliasName)
         emit(s"  %${failLbl}_name = getelementptr [$nameLen x i8], [$nameLen x i8]* $nameLbl, i32 0, i32 0")
-        emit(s"  call void @__range_fail(i8* %${failLbl}_name, i64 ${nameLen - 1})")
+        // sizeT matches the host pointer width — see TContractCheck note.
+        emit(s"  call void @__range_fail(i8* %${failLbl}_name, $sizeT ${nameLen - 1})")
         emit(s"  unreachable")
         emit(s"$passLbl:")
         currentBlock = passLbl
