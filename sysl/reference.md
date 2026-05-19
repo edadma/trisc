@@ -143,10 +143,6 @@ saturating_add(a, b)   // 255  (clamped to u8 MAX)
 saturating_sub(b, a)   // 0    (clamped to u8 MIN, would have been -100)
 ```
 
-> **TRISC backend:** `saturating_*` on 64-bit types and `saturating_mul` on
-> `u32` are not yet supported (would require explicit overflow detection or
-> 128-bit intermediate). LLVM backend supports all widths.
-
 ### Composite Types
 
 ```sysl
@@ -986,9 +982,8 @@ binsearch(a: *int, n: int, target: int) -> int
 - `all` and `some` are **contextual** keywords — they have meaning only directly after
   `for` in expression position, so user identifiers named `all` / `some` continue to
   work elsewhere.
-- Backend support: interpreter and LLVM are wired end-to-end. The TRISC backend traps at
-  codegen time with a clear "not yet supported" message — use `--no-contracts` to strip
-  quantifiers (along with the surrounding contract) when targeting TRISC.
+- Backend support: every backend emits a short-circuiting counted loop that accumulates
+  the bool. `--no-contracts` strips quantifiers along with the surrounding contract.
 
 **Function-level `variant <expr>` — recursion termination witness.** A SPARK-style
 `Subprogram_Variant` clause: declares an integer expression that strictly decreases at
@@ -3473,10 +3468,14 @@ test_bounds() -> unit
 ```
 sysl test <path>                      # file or directory (recursive)
 sysl test --filter <pattern> <path>   # substring match on test/display name
-sysl test --backend interpreter|trisc|all <path>
+sysl test --backend BACKEND <path>    # see list below
 sysl test --fail-fast <path>
 sysl test --verbose <path>
 ```
+
+Backend selectors: `interpreter` (default), `llvm-host`, `svm-host`, `trisc`,
+`riscv64`, `riscv32`, `wasm32`. The value `all` is reserved for future use;
+for now invoke each backend separately.
 
 Output groups tests by source file with pass/fail markers and timings:
 
