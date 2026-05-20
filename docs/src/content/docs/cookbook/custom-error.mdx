@@ -1,0 +1,97 @@
+---
+title: Define a Custom Error Enum
+description: "Module-specific error types with descriptive variants."
+---
+
+A common pattern: define an `Error` enum per module so each kind of failure has a name and (when useful) payload:
+
+```sysl
+module mylib.parser
+
+enum Error
+    EmptyInput
+    UnexpectedChar(at: int, got: u32)
+    Overflow(at: int)
+    UnknownKeyword(name: string)
+
+parse(s: string) -> Result[Tree, Error]
+    if len(s) == 0 then return Err(EmptyInput)
+    // ... parsing logic ...
+    Ok(...)
+```
+
+Each variant captures exactly the data the caller needs to diagnose the failure:
+
+- `EmptyInput` has no payload — the variant name is the whole message.
+- `UnexpectedChar(at, got)` carries position and value — enough to print "unexpected '#' at column 12".
+- `Overflow(at)` is similar but only needs position.
+- `UnknownKeyword(name)` carries the offending name.
+
+## Building a display function
+
+```sysl
+display(e: Error) -> string
+    e match
+        EmptyInput -> "input is empty"
+        UnexpectedChar(at, got) -> s"unexpected character at position $at"
+        Overflow(at) -> s"integer overflow at position $at"
+        UnknownKeyword(name) -> s"unknown keyword '$name'"
+```
+
+Exhaustiveness on the `match` guarantees you'll get a compile error if you add a new variant and forget to handle it here.
+
+## Using the enum from callers
+
+```sysl
+import mylib.parser.{parse, Error, Tree, display}
+
+main() -> int
+    parse("input text") match
+        Ok(tree) -> 0
+        Err(e) ->
+            puts(display(e))
+            1
+```
+
+## Composing across modules
+
+If your module calls into another that has its own error type, two options:
+
+**Wrap them.** Define a top-level error that carries the inner error variants:
+
+```sysl
+enum AppError
+    Parse(inner: parser.Error)
+    Io(inner: io.Error)
+    Config(msg: string)
+
+read_and_parse(path: string) -> Result[Tree, AppError]
+    val data = io.read_file(path) match
+        Ok(d) -> d
+        Err(e) -> return Err(AppError.Io(e))
+    parser.parse(data) match
+        Ok(t) -> Ok(t)
+        Err(e) -> Err(AppError.Parse(e))
+```
+
+The wrapping is explicit because Sysl doesn't have automatic `From` conversions yet.
+
+**Or use a string error.** For top-level applications that just want to display the failure, `Result[T, string]` is a fine choice:
+
+```sysl
+read_and_parse(path: string) -> Result[Tree, string]
+    val data = io.read_file(path) match
+        Ok(d) -> d
+        Err(e) -> return Err(s"io: ${io.display(e)}")
+    parser.parse(data) match
+        Ok(t) -> Ok(t)
+        Err(e) -> Err(s"parse: ${parser.display(e)}")
+```
+
+This loses the structural information but is shorter when the caller only cares about printing the error.
+
+## See also
+
+- [Enums: Tagged Unions](/language/types/enums#tagged-unions-data-enums) — the underlying mechanism.
+- [The Try Operator](/language/functions/try-operator) — `?` for cascading.
+- [Convert between error types](/cookbook/error-conversion).

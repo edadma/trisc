@@ -1,0 +1,175 @@
+---
+title: Strings
+description: Fat-pointer representation, interpolation, f-string formatting, and byte conversions.
+---
+
+Strings in Sysl are fat pointers — a 16-byte struct `{ptr: *u8, len: i64}` referencing a ref-counted heap buffer.
+
+```sysl
+s = "hello"
+len(s)                    // 5
+s[0]                      // 104 ('h' as byte value)
+t = s + " world"          // concatenation → new string
+```
+
+## Comparison
+
+```sysl
+s == t                    // structural equality
+s != t                    // structural inequality
+s <  t                    // lexicographic ordering (byte-wise)
+s <= t
+s >  t
+s >= t
+```
+
+Equality and ordering are **byte-wise**. The compare walks the bytes of both operands and returns at the first differing position; if one operand is a prefix of the other, the shorter operand is less.
+
+There is no locale, no Unicode normalization, no case folding — two strings with the same UTF-8 bytes are equal; two strings with different UTF-8 bytes are not. The semantics is equivalent to C's `memcmp` extended with a "shorter is less" tiebreaker.
+
+## Decay to `*byte`
+
+```sysl
+puts(s: *byte)            // can pass string directly
+```
+
+A `string` decays to `*u8` (or `*i8`) when passed to a pointer parameter. The decayed pointer is **not** NUL-terminated by default — if the C ABI requires NUL termination, ensure the string ends with `\0` explicitly:
+
+```sysl
+val ctext: [6]byte = "hello\0"
+extern strlen(s: *byte) -> int
+strlen(&ctext[0])        // safe — explicit NUL
+```
+
+Standard string literals (`"hello"`) do **not** automatically include a NUL byte.
+
+## String interpolation
+
+Prefix a string with `s` to enable interpolation. Use `$name` for variables and `${expr}` for expressions:
+
+```sysl
+x = 42
+s = s"value is $x"          // "value is 42"
+puts(s"${x + 1}")           // prints "43"
+name = "world"
+puts(s"hello $name")        // prints "hello world"
+puts(s"cost is $$5")        // prints "cost is $5" ($$ = literal $)
+```
+
+Plain strings (`"..."`) are never interpolated — `$` is just a regular character.
+
+Non-string expressions are automatically converted via `str()`. Integer, boolean, and float (`f32`/`f64`) types are supported.
+
+## Format strings (f-strings)
+
+Prefix a string with `f` for printf-style format specifiers. Each interpolation can be followed by `%` and a format spec:
+
+```sysl
+val n = 255
+puts(f"hex: $n%x")               // "hex: ff"
+puts(f"HEX: $n%X")               // "HEX: FF"
+puts(f"padded: $n%08x")          // "padded: 000000ff"
+puts(f"decimal: $n%d")           // "decimal: 255"
+puts(f"binary: ${26}%b")         // "binary: 11010" (expression needs braces)
+puts(f"octal: ${511}%o")         // "octal: 777"
+```
+
+### Format specifiers
+
+| Spec | Meaning |
+|------|---------|
+| `%d` | Decimal integer |
+| `%x` | Hexadecimal (lowercase) |
+| `%X` | Hexadecimal (uppercase) |
+| `%b` | Binary |
+| `%o` | Octal |
+| `%s` | String (default if no spec given) |
+| `%+d` | Decimal with explicit sign |
+| `%%` | Literal `%` |
+
+### Width and padding
+
+```sysl
+val n = 42
+puts(f"$n%08d")                   // "00000042" (zero-padded, width 8)
+puts(f"0x${10}%04x")             // "0x000a"   (literal needs braces)
+val s = "hi"
+puts(f"[$s%10s]")                 // "[        hi]"  (right-aligned, width 10)
+puts(f"[$s%-10s]")                // "[hi        ]"  (left-aligned, width 10)
+```
+
+### Mixed example
+
+```sysl
+val cp = 65
+val count = 3
+val name = "LATIN"
+puts(f"U+$cp%04X count=$count%d name=$name%s")
+// "U+0041 count=3 name=LATIN"
+```
+
+Without a format spec, `f"..."` works like `s"..."` — values are converted via `str()`.
+
+## `str()` builtin
+
+Converts a value to its string representation:
+
+```sysl
+str(42)                   // "42"
+str(-5)                   // "-5"
+str(0)                    // "0"
+str("hello")              // "hello" (identity for strings)
+str(3.14)                 // "3.140000" (codegen: fixed 6-digit fractional)
+str(Circle(5))            // "Circle" (variant name of a data-enum value)
+```
+
+Float formatting uses fixed 6-digit fractional precision in TRISC codegen (`3.14 -> "3.140000"`). The interpreter uses the host's default float formatting (`3.14 -> "3.14"`).
+
+`str()` on a data-enum (tagged union) value returns the variant name as a string, regardless of the variant's field contents. Each enum type gets one synthesized `__str_<EnumName>` helper the first time it's referenced.
+
+Simple integer enums and struct values are not yet supported — use field formatting manually.
+
+## String construction from bytes
+
+### From pointer + length
+
+Copies the bytes:
+
+```sysl
+var buf: [5]byte
+buf[0] = 'h'
+buf[1] = 'e'
+buf[2] = 'l'
+buf[3] = 'l'
+buf[4] = 'o'
+s = string(&buf[0], 5)   // s = "hello"
+```
+
+### From byte slice
+
+Also copies:
+
+```sysl
+data = new [10]byte
+// ... fill data ...
+s = string(data[:5])      // string from []byte slice
+```
+
+The `string()` constructor always copies — the caller's buffer is independent of the created string. The new string's storage is heap-allocated with a refcount header, like any other dynamically-constructed string.
+
+## Worked example: building a message
+
+```sysl
+log_event(name: string, code: int) -> unit
+    val timestamp = current_ms()
+    val line = f"[$timestamp%010d] $name=$code%08x\n"
+    write(stderr, line)
+```
+
+f-strings produce a fresh ref-counted string at evaluation; the temporary lives for the duration of the call.
+
+## See also
+
+- [Expressions: Literals](/language/expressions#literals) — string and char literal syntax.
+- [Builtins](/language/builtins) — `len`, `str`, `string`, `puts`.
+- [Three Allocation Modes](/language/types/three-allocation-modes) — strings interact with ARC like `&T`.

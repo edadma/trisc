@@ -1,0 +1,170 @@
+---
+title: Variables and Constants
+description: val, var, const, globals, volatile, the discard binding, and module-scope checks.
+---
+
+Sysl distinguishes mutable from immutable bindings using `val` (immutable) and `var` (mutable):
+
+```sysl
+// Immutable
+val x = 42
+val y: int = 42
+
+// Mutable
+var x = 42
+var y: int = 42
+x = 100              // reassignment
+
+// Uninitialized (zero-initialized)
+var x: int
+var arr: [10]int
+var p: *Node
+```
+
+A `var` may be reassigned; a `val` may not. Both are statically typed. Inferred types are common — explicit annotations are only required when type-inference can't see enough context.
+
+## Inferred types
+
+Inside a block, a bare assignment binds a fresh `var`:
+
+```sysl
+main() -> int
+    x = 42               // inferred as int — fresh `var x`
+    name = "hello"       // inferred as string — fresh `var name`
+    0
+```
+
+The first assignment in a scope creates the binding; later assignments to the same name reuse it.
+
+## Volatile
+
+The `volatile` qualifier prevents the compiler from optimizing away, reordering, or coalescing loads and stores. Use it for memory-mapped I/O registers and shared-memory variables.
+
+```sysl
+volatile var mmio_status: u32 = 0
+volatile var shared_flag: int
+```
+
+It also applies to struct fields:
+
+```sysl
+struct UartRegs
+    volatile status: u32
+    volatile data: u32
+    baud: int            // non-volatile, normal optimization allowed
+```
+
+In the LLVM family, `volatile` emits `load volatile` and `store volatile` instructions. The TRISC backend is unaffected — it doesn't optimize loads/stores in the first place.
+
+## Multi-line initializers
+
+When the right-hand side is long, break after `=` and indent the value on the next line. Works for `val`, `var`, and plain assignment:
+
+```sysl
+val sub: Parser[(int, int) -> int] =
+    success[(int, int) -> int]((a: int, b: int) -> a - b)
+
+var n: int =
+    100 + 23
+
+x =
+    f(some_long_argument)
+```
+
+The form mirrors function bodies' `=` ⏎ Indent stmts Dedent layout.
+
+## Discard binding (`_`)
+
+`_` is a write-only binding (Go/Rust style). You can bind to it; you cannot reference it; multiple `_` bindings in the same scope don't collide:
+
+```sysl
+val _ = foo()              // evaluate for side effects, discard result
+val _ = bar()              // fine — no collision with the first _
+val _: int = 7             // type annotations allowed
+var _ = baz()              // var form also works
+```
+
+In destructuring patterns, `_` discards the corresponding field:
+
+```sysl
+_, y = pair()              // discard first, bind second
+val x, _ = pair()          // discard second
+val a, _, c = triple()     // discard middle element
+_, _ = pair()              // discard all (evaluate for side effects)
+```
+
+## Global variables
+
+Module-level `val` and `var` declarations work the same way as locals, except they live in static storage and are visible everywhere in the module:
+
+```sysl
+var count = 0         // module-level mutable
+val MAX = 100         // module-level immutable
+
+main() -> int
+    count += 1
+    count
+```
+
+Globals respect [visibility](/language/program-structure#visibility) and [mangling](/language/program-structure#name-mangling) just like functions.
+
+## Compile-time constants (`const`)
+
+Use `const` to declare a compile-time integer constant. The initializer must be evaluable at compile time; the declaration emits no storage, and references are replaced with the folded literal value:
+
+```sysl
+const BASE = 0x1000
+const STATUS = BASE + 4        // folded to 0x1004
+const DATA = BASE + 8          // folded to 0x1008
+const MASK = 0xFF & (1 << 4)   // folded to 0x10
+
+type Age = int within 0..MAX_AGE   // const can be used in `within` bounds
+```
+
+Supported in initializers: `+`, `-`, `*`, `/`, `%`, `<<`, `>>`, `&`, `|`, `^`, unary `-`/`~`, numeric/char/bool literals, and references to other `const` names.
+
+An initializer that cannot be folded is a compile error. Values are truncated to the target type's width.
+
+`const` is valid at both module and function scope. Currently only integer types are supported — `const PI: f64 = 3.14` is not yet accepted.
+
+**`val` vs `const`:** `val` is also folded when the initializer happens to be constant, but unlike `const` it additionally allocates storage (and accepts non-const initializers). Prefer `const` when you want the guarantee and the zero-storage behavior.
+
+## `static_assert(cond [, "message"])`
+
+Module-scope compile-time check. The condition is evaluated by the same folder as `const` initializers (supports `sizeof`, comparisons, bitwise, shifts, arithmetic, and `const` references) and must produce a `bool`. A true result emits no code; a false result is a compile error citing the optional message.
+
+```sysl
+struct EthHeader
+    dst: [6]byte
+    src: [6]byte
+    ethertype: u16
+
+static_assert(sizeof(EthHeader) == 14, "EthHeader must be 14 bytes")
+static_assert(MAX_FRAME >= 64 && MAX_FRAME <= 1518)
+```
+
+The canonical use is locking down on-the-wire and on-disk struct layouts so an accidental field reorder or padding shift fails the build instead of corrupting packets at runtime.
+
+## `module_invariant <expr>`
+
+Module-scope **verification-only** predicate. Declares a property of module-level state (typically the mutable vars) that every public function must preserve.
+
+```sysl
+var counter: int = 0
+var max: int = 100
+
+module_invariant counter >= 0
+module_invariant counter <= max
+```
+
+Multiple declarations are conjoined; the verifier sees a single predicate equivalent to `counter >= 0 /\ counter <= max`. The expression must be `bool`-typed and may reference any module-level value or `const` in scope.
+
+**At runtime:** module invariants are spec-only. They produce no code in any backend (interpreter, LLVM, SVM, TRISC). The constraint is verified statically by Why3, not enforced dynamically.
+
+Used by the WhyML / Why3 verification backend: it emits the predicate as a WhyML `predicate module_inv ()` and implicitly attaches `requires { module_inv () }` and `ensures { module_inv () }` to every public function. Private functions don't carry the implicit clauses (they're checked transitively through their callers).
+
+## See also
+
+- [Functions: Contracts](/language/functions/contracts) — `require` / `ensure` / `assume` / quantifiers.
+- [Three Allocation Modes](/language/types/three-allocation-modes) — `val` vs `var` interaction with refs.
+- [Attributes](/language/attributes/overview) — `#address(N)` for hardware register variables.

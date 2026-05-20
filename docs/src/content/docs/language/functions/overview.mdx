@@ -1,0 +1,120 @@
+---
+title: Functions
+description: Declaration forms — expression body, block body, parameterless, statement body.
+---
+
+A Sysl function has the shape:
+
+```
+[private] name [generic-params] [(params)] [-> return-type] [contracts] body
+```
+
+Almost everything between `name` and `body` is optional — the language has several short forms for common cases.
+
+## Expression body
+
+The simplest form: one expression after `=`, no block:
+
+```sysl
+add(a: int, b: int) -> int = a + b
+
+double(x: int) = x * 2          // return type inferred
+
+uart_puts(s: string) = for c in s do uart_putc(int(c))   // statement body
+```
+
+The expression-body form supports `for` / `while` / `do-while` as a single-line void body. Contracts (`require`, `ensure`) are not supported on expression bodies — use a block body if you need them.
+
+## Block body
+
+When the function does more than evaluate one expression, drop the `=` and indent the body:
+
+```sysl
+factorial(n: int) -> int
+    if n <= 1
+        return 1
+    return n * factorial(n - 1)
+```
+
+The trailing expression of a block body is the implicit return value:
+
+```sysl
+sum_to(n: int) -> int
+    var s = 0
+    for i in 1..=n
+        s = s + i
+    s                       // implicit return
+```
+
+## Void functions
+
+A function with no return type returns `()` (unit):
+
+```sysl
+greet(name: *byte)
+    puts(name)
+```
+
+`return` (without a value) and falling off the end both produce `()`.
+
+## Zero-parameter functions
+
+A function declared with `()` is a zero-arg function — calls need `()` too:
+
+```sysl
+getAnswer() -> int = 42
+
+main() -> int = getAnswer()
+```
+
+## Parameterless functions
+
+Sysl distinguishes a **parameterless** function (no parens on the declaration, no parens at the call site) from a **zero-argument** function (parens on both). Mirrors Scala's `def foo` vs `def bar()`:
+
+```sysl
+seven -> int = 7              // parameterless
+greet -> int                  // block-body parameterless
+    puts("hi")
+    0
+
+main() -> int = seven         // bare name auto-calls
+```
+
+The two forms cannot share a name in the same scope. Internally the parameterless form lowers to the same `() -> T` mangling as the zero-arg form; the only difference is at the use site.
+
+The body has no purity restriction — unlike `def`, a parameterless function may mutate global state, call any function, etc. It is purely a syntactic-shortening device for "things that are computed each time their name is read."
+
+Generic parameterless functions are not supported (there is no call site to fix the type arguments).
+
+A parameterless function cannot be passed as a function value: bare `f` always auto-calls. If you need a function value, declare `f() -> T` instead — bare `f` then produces a function reference, and `f()` calls.
+
+## End markers
+
+For long functions or deeply nested blocks, an optional end marker improves readability:
+
+```sysl
+process_request(req: *Request) -> int
+    // ... 50 lines ...
+end process_request
+```
+
+End markers are documentary only — they don't affect parsing. The compiler doesn't verify the name matches, but typos make the file harder for humans to follow.
+
+## What follows
+
+Functions are large topic — each of these has its own page:
+
+- [Contracts](/language/functions/contracts) — `require`, `ensure`, `assume`, `for all` / `for some`.
+- [Parameters](/language/functions/parameters) — defaults, named args, `in` / `out` / `inout`, `=> T` by-name.
+- [Def & Pure Functions](/language/functions/def-pure-functions) — `def` for verification-grade pure helpers.
+- [Generics](/language/functions/generics) — type parameters, bounds, defaults.
+- [Try Operator](/language/functions/try-operator) — `?` for `Result` / `Option`.
+- [Traits & Impls](/language/functions/traits-and-impls) — `Ord`, `Eq`, `Add`, etc., and user traits.
+- [Operator Overloading](/language/functions/operator-overloading) — `#operator` and dispatch.
+- [Interfaces](/language/functions/interfaces) — structural fat-pointer dispatch.
+- [Methods](/language/functions/methods) — `StructName.method` syntax.
+- [Deinit & Defer](/language/functions/deinit-and-defer) — `Struct.deinit` and `defer` statements.
+- [Function Pointers](/language/functions/function-pointers).
+- [Closures](/language/functions/closures) — capture, escape, underscore syntax.
+- [Inner Def](/language/functions/inner-def) — recursive named local closures.
+- [Extern](/language/functions/extern) — C ABI interop.

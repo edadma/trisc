@@ -1,0 +1,95 @@
+---
+title: Access errno After a Failed Syscall
+description: "Reading the C library's thread-local errno from Sysl."
+---
+
+C library functions signal failure by returning a sentinel value (`-1` for most syscalls, `NULL` for pointer returns) and setting the thread-local variable `errno`. To check `errno` from Sysl, declare it as an extern variable:
+
+```sysl
+extern open(path: *byte, flags: int) -> int
+extern var errno: int
+
+const O_RDONLY = 0
+const ENOENT = 2
+
+main() -> int
+    val path: [13]byte = "missing.txt\0"
+    val fd = open(&path[0], O_RDONLY)
+    if fd < 0
+        if errno == ENOENT then
+            puts("file not found")
+        else
+            puts(f"open failed: errno=$errno%d")
+        return 1
+    0
+```
+
+## Why `extern var`
+
+`extern var errno` declares mutable access — necessary because the C library writes to `errno` from inside the syscall wrapper. `extern val errno` would declare immutable, which won't work since `errno`'s value changes.
+
+## Common errno constants
+
+For portability, declare the constants you need:
+
+```sysl
+const EAGAIN = 11        // try again
+const ENOENT = 2         // no such file or directory
+const EACCES = 13        // permission denied
+const EINVAL = 22        // invalid argument
+const ENOSPC = 28        // no space left on device
+```
+
+On Linux these match `<errno.h>`. On other Unix systems the numbers may differ; consult the platform headers.
+
+The `std.errno` module (when written) will provide cross-platform constants. For now, hard-code the platform-specific values you need.
+
+## Reading errno after each call
+
+`errno` is **only** valid immediately after a call that failed. Intervening calls (including stdlib functions) may clobber it. The pattern:
+
+```sysl
+do_thing() -> int
+    val fd = open(&path[0], O_RDONLY)
+    if fd < 0 then
+        val saved_errno = errno      // snapshot before doing anything else
+        cleanup()                     // might modify errno
+        return -saved_errno
+    fd
+```
+
+## On TRISC / SLIX
+
+The SLIX kernel and SLIX-musl libc set errno in the same place a Linux libc would. POSIX behavior is preserved.
+
+## On the interpreter
+
+The interpreter's built-in extern registry maps common syscalls to host functions. Failures translate to interpreter exceptions; `errno` is populated using the host's actual errno value. For a richer experience, use the LLVM-host backend during development.
+
+## When errno isn't what you want
+
+For new code, prefer functions that return `Result[T, E]` directly. The `errno` pattern is a C-API necessity, not a Sysl convention. Wrap C functions in safer signatures:
+
+```sysl
+enum FileError
+    NotFound
+    PermissionDenied
+    Other(code: int)
+
+open_safe(path: string) -> Result[int, FileError]
+    val cpath = to_c_string(path)
+    val fd = open(&cpath[0], O_RDONLY)
+    if fd < 0 then
+        if errno == ENOENT then Err(NotFound)
+        elif errno == EACCES then Err(PermissionDenied)
+        else Err(Other(errno))
+    else Ok(fd)
+```
+
+Callers get a typed error enum and don't have to think about `errno` themselves.
+
+## See also
+
+- [Extern Declarations](/language/functions/extern) — full reference.
+- [Call a C function](/cookbook/call-c) — extern basics.
+- [Cascade failures with Result](/cookbook/result-cascade) — wrapping C-style returns.

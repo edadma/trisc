@@ -1,0 +1,97 @@
+---
+title: Why the Three-Mode Memory Model
+description: "Why Sysl has T / &T / *T and not Rust-style borrows, Swift-style weak references, or C's all-pointers approach."
+---
+
+Sysl's three modes — value (`T`), ref-counted (`&T`), raw pointer (`*T`) — are the most visible part of the language at the type-system level. Every parameter, every field, every local declares which one it is. This page explains why three, why these three specifically, and why not other models.
+
+## The constraint
+
+Sysl is a systems language. It needs to:
+
+1. **Run in kernel and bare-metal contexts** where there's no allocator. The kernel cannot pay for refcount machinery on every value.
+2. **Be writeable for application code** where allocation, sharing, and automatic cleanup matter. ARC is the right answer here.
+3. **Stay teachable** — students should be able to read Sysl code and predict what the machine will do.
+4. **Avoid hiding cost** — every allocation, every refcount adjustment, every memcpy should be visible at the source level.
+
+Constraints 1 and 2 together are the load-bearing pair. Most languages pick a side: C is all-pointers; Java is all-references; Rust has borrows; Swift has ARC. Sysl needs both worlds to coexist without forcing every user to learn the other half.
+
+## The decision
+
+Each variable, parameter, and field independently chooses its mode at the **use site**:
+
+- **`T`** — stack-allocated, bitwise copy, no refcount. The default. Works in kernel, works in apps.
+- **`&T`** — heap-allocated, ARC-managed. Needs an allocator. The right choice for shared ownership.
+- **`*T`** — raw pointer, unmanaged. Kernel back-pointers, hardware registers, C interop.
+
+The same `struct` definition supports all three modes; the choice is at the use site, not the type definition. This avoids fragmenting the type system into "value types" and "reference types" (the Java / C# split).
+
+## Why not Rust-style borrows?
+
+Rust's borrow checker is a remarkable achievement but it imposes a real cost on teachability. The "lifetime arithmetic" needed to thread borrows through a non-trivial program is a barrier for students who are simultaneously trying to learn about pointers, the stack, the heap, and ARC.
+
+Sysl deliberately chose **runtime refcount over compile-time lifetime tracking**. ARC pays an actual runtime cost (an increment + decrement per scope) in exchange for not asking the user to convince a borrow checker. For the bulk of Sysl code — kernel and application — that trade is the right one.
+
+The cost: ARC can't reclaim cycles. Sysl's answer (next section) is structural rather than algorithmic.
+
+## Why no `weak` / `unowned`?
+
+Swift, the most directly analogous language, has *five* modes:
+
+1. Value types (`struct`).
+2. Strong references (`class` with retain count).
+3. `unowned` references (no retain, traps on access if dead).
+4. `weak` references (no retain, becomes `nil` when dead).
+5. Raw `UnsafePointer<T>`.
+
+Sysl has three. We considered the additional two and deferred them. The reasoning (documented at length in `project_sysl_swift_style_weak_unowned_future.md`):
+
+- Cycle-breaking in Sysl uses **structural workarounds**: indices into a backing array, or asymmetric `&Child` / `*Parent` ownership. These cover the realistic cases — parent/child trees, observers, linked lists with parents — without adding modes.
+- The kernel doesn't need `weak` (no allocator) and doesn't need `unowned` (just uses `*T`).
+- Adding `weak` requires a side-table per refcounted object — every backend gets new runtime infrastructure. The cost is real.
+
+When concrete user pain accumulates that the structural workarounds don't cover, we'll revisit. The deferred design memo documents what `weak` + `unowned` would look like; the memo itself is the evidence that "deferring" doesn't mean "forgotten about."
+
+## Why not "everything is a `&T`"?
+
+Some languages (Java, Python, Go) make every non-primitive a reference. Sysl rejected this because:
+
+- **Cost would be hidden.** A `var p = Point(...)` looks free; if it secretly allocates and refcount-tracks, the cost is invisible.
+- **Kernel code becomes impossible.** Without escape hatches, kernel-grade code (no allocator) needs a parallel "low-level" sub-language. Sysl doesn't want two sub-languages.
+- **Stack vs. heap is a real distinction.** Both behaviors are useful; collapsing them removes a tool.
+
+By making the choice explicit at every use site, Sysl forces the reader (and the writer) to know whether they're on the stack, on the heap, or unmanaged. That's the teaching point.
+
+## Why not C's "everything is a pointer"?
+
+C lets you use `T*` everywhere; you manually track who owns what. The problems:
+
+- **Use-after-free** is the canonical C bug; ARC eliminates it for `&T`.
+- **No cleanup notification** — C doesn't tell you when to call `free`. Sysl's `deinit` blocks run automatically.
+- **Sharing is invisible** — a function taking `T*` could mean "borrowed, don't keep" or "owned, you take it now". Sysl's `*T` vs `&T` distinction makes the contract visible.
+
+Sysl gives you C's `*T` when you need it (kernel, hardware, interop) but defaults to safer modes.
+
+## The cost we accept
+
+The three-mode model has costs:
+
+- **More verbose function signatures.** `f(p: *T)` vs `f(p: &T)` vs `f(p: T)` all appear in different contexts. Newcomers have to learn which to write.
+- **Conversions are explicit.** No implicit `&T` → `T` or `*T` → `T`. `.copy()` and `*p` are visible at every site.
+- **The cycle limitation is a real foot-gun.** Cyclic data structures need structural workarounds; ARC won't save you.
+
+We accept these costs because the alternative — hiding the cost — is worse for our target audience (students learning systems, kernel writers, anyone who needs to know what the machine is doing).
+
+## When the three-mode model is the wrong tool
+
+- **Throughput-critical applications.** ARC has a per-scope cost that GC can amortize. If you're processing millions of small objects per second and the refcount overhead is your bottleneck, a GC'd language (Go, Java) might serve you better.
+- **Cyclic data structures with many references.** The structural workarounds work but get awkward at scale. A language with `weak`/`unowned` (Swift) or precise GC (Java) handles these more directly.
+- **Whole-program type inference.** Sysl's modes are visible at every use site. Languages with whole-program inference (Haskell, OCaml) hide more.
+
+For everything else — kernels, embedded, compilers, interpreters, CLI tools, teaching — three modes is the sweet spot.
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes) — what each mode does at the spec level.
+- [Memory Modes by Example](/tutorials/memory-modes) — guided walkthrough.
+- [Why No Garbage Collector](/rationale/no-gc) — the other side of this decision.

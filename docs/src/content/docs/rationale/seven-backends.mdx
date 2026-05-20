@@ -1,0 +1,116 @@
+---
+title: Why Seven Backends
+description: "Each backend exists for a specific reason. This page lists those reasons and explains why we don't consolidate."
+---
+
+Sysl compiles to seven backends. That's a lot. Why?
+
+## The list
+
+| Backend | What it produces | What it's for |
+|---------|------------------|---------------|
+| `interpreter` | Tree-walking evaluator in JVM | Fast iteration, language development, debugging |
+| `llvm-host` | Native binary (clang) | Production apps on macOS / Linux / Windows |
+| `riscv64` | Bare-metal RISC-V 64 (clang + qemu) | OS dev on RV64 target |
+| `riscv32` | Bare-metal RISC-V 32 (clang + qemu) | Embedded RV32 |
+| `wasm32` | WASI module (clang) | Sandboxed apps, web targets |
+| `trisc` | TRISC ISA via custom emulator | Teaching architecture and OS |
+| `svm-host` | SVM stack-machine bytecode | Teaching VM design |
+
+Each one was added for a specific reason; none was added because it'd be cool to have. This page documents the reasons.
+
+## Why an interpreter?
+
+Compiling Sysl to LLVM IR and then to a native binary is slow — `clang` is the bottleneck, and it doesn't get faster. For language development, that's intolerable: every "edit, compile, run" cycle becomes ~5 seconds, most of it `clang` doing nothing relevant to the change.
+
+The interpreter is a tree walker in the JVM. It runs the AST directly. Compile-then-run-tests is ~100 ms for the entire standard library. That's the language-developer workflow.
+
+It's also the easiest backend to extend with new language features: there's no codegen to write, just an `evalAny` case in `SyslInterpreterExpressions`.
+
+## Why LLVM at all? Why not skip straight to native?
+
+LLVM is the standard tool for compiling C-shaped languages to machine code. It gives Sysl access to:
+
+- Decades of optimization passes.
+- All the architectures LLVM supports.
+- All the linkers, debuggers, and profilers that target LLVM IR.
+
+Writing a Sysl-native machine code generator would mean reinventing all of this. We don't want to. LLVM is the sensible choice.
+
+## Why three LLVM-family backends (host, riscv64, riscv32, wasm32) and not one?
+
+These three backends share most of their codegen — they all emit LLVM IR. The differences are:
+
+- **Target triple** (which `clang -target` flag).
+- **Linker** (which runtime to link against).
+- **Calling convention details** (mainly stack layout for variadics).
+- **Available syscalls** (host libc vs freestanding RV vs WASI).
+
+We expose them as separate backends because each has a different deployment target. A "production app" wants `llvm-host`. An OS targeting Raspberry Pi wants `riscv64`. An app distributed as a wasm module wants `wasm32`. The user picks; the compiler doesn't auto-detect.
+
+We could have one `llvm` backend with `--target=<triple>` flags. We did it the other way (separate backend names) because that maps better to the test harness and CI matrix — `sbt syslCliJVM/run test --backend riscv64` is unambiguous about what's being tested.
+
+## Why TRISC?
+
+TRISC is a custom 16-bit RISC instruction set we designed for teaching. The whole toolchain — assembler, linker, emulator, sysl compiler, kernel, shell — fits in one repo and is short enough for students to read end-to-end.
+
+Compare that to teaching with x86 or ARM:
+
+- x86 has hundreds of opcodes, decades of historical baggage, and three modes of operation (real / protected / long).
+- ARM has multiple variants (ARMv7, ARMv8 32, ARMv8 64), each with its own assembly conventions.
+- RISC-V is cleaner but its full spec is still large.
+
+TRISC's design goal was "small enough to teach in one semester." That's a different goal from "fast enough to deploy in production." It exists because the production-oriented backends don't serve teaching well.
+
+SLIX (the Sysl OS) runs on TRISC for the same reason — it's the easiest place to teach OS construction.
+
+## Why SVM?
+
+SVM is a simple stack-based VM with ~30 opcodes. It serves the same pedagogical role as TRISC but for a different concept: instead of teaching "what does real CPU machine code look like" (TRISC), SVM teaches "what does abstract-machine bytecode look like" (Java, .NET, WASM-style).
+
+SVM and TRISC together let a student compare register-machine vs stack-machine code generation for the *same source*. That's a useful teaching moment that we'd lose if we only had one.
+
+## Why no x86_64 or aarch64 backend directly?
+
+We use `llvm-host` for x86_64 and aarch64 — `clang` handles the codegen for those architectures, and we don't lose much by not writing a hand-rolled backend.
+
+There's a SLIX-on-LLVM port that runs on x86_64 and aarch64 already (it's how SLIX gets tested on real hardware). That uses the `llvm-host` backend internally.
+
+For a hypothetical "I want to study the x86_64 SLIX kernel's machine code by hand," `clang -S` already produces readable output, so we don't need a hand-rolled backend to support that workflow.
+
+## Why test on every backend?
+
+Per CLAUDE.md rule 13, every Sysl language change and codegen touch must pass tests on all seven backends. The reasoning:
+
+- **Silent backends are how miscompiles re-enter the tree.** If a feature works on the interpreter and we ship without testing on TRISC, a TRISC user finds it broken later.
+- **Different backends stress different code paths.** TRISC has a tiny register file (8 registers). LLVM-host has a huge register file. The same source compiles differently; bugs surface in one but not the other.
+- **Cross-checking catches semantic bugs.** If `expect(compute(7), 42)` passes on interpreter and fails on LLVM, the interpreter is probably wrong (or the LLVM codegen is). Either way, we want to know.
+
+The test matrix is the cost of having seven backends. We pay it.
+
+## When we'd consolidate
+
+We've considered merging backends. A few times. Each time the answer was "no":
+
+- **Merge interpreter + SVM?** They have very different shapes (tree walker vs bytecode dispatcher). Merging would lose pedagogical clarity.
+- **Merge `riscv64` and `riscv32`?** Already share a backend file; the difference is one flag. We keep the names separate because users care about the bit width.
+- **Drop SVM as redundant?** SVM and TRISC teach different things. Dropping SVM would force students to learn stack machines somewhere else.
+- **Drop TRISC as redundant?** TRISC is the load-bearing backend for SLIX OS work and the whole "teach systems on one repo" pitch. Couldn't drop without rebuilding SLIX on RV.
+
+We'll add an eighth backend if a concrete user case requires one (an ARM backend has been considered; same shape as the RV ones). We won't drop any of the existing seven without removing the use case they serve.
+
+## The bottom line
+
+Seven is the right number because:
+
+- 1 backend (interpreter) is for language development.
+- 1 backend (`llvm-host`) is for production apps.
+- 3 backends (`riscv64`, `riscv32`, `wasm32`) are for specific deployment targets that share LLVM but differ in linker / runtime.
+- 2 backends (TRISC, SVM) are for teaching, and serve different pedagogical roles.
+
+Consolidating would lose at least one of these. We'd rather pay the test-matrix cost than lose a use case.
+
+## See also
+
+- [Targeting Bare Metal](/tutorials/bare-metal) — picking a backend for your project.
+- [Architecture](/architecture/overview) — what TRISC actually is.

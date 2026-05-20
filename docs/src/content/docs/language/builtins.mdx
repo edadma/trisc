@@ -1,0 +1,104 @@
+---
+title: Builtin Functions
+description: The always-available functions — len, append, str, malloc, panic, and friends.
+---
+
+A small set of functions are available in every Sysl program without an `import`. They cover I/O, allocation, length/capacity, conversion, and the trap path.
+
+## Reference table
+
+| Function | Signature | Description |
+|---|---|---|
+| `putchar` | `(c: u32) -> u32` | Output single character |
+| `print` | `(n: int)` | Print integer |
+| `println` | `(n: int)` | Print integer with newline |
+| `puts` | `(s: string)` | Print string |
+| `len` | `(x) -> int` | Length of string, array, slice, or `&[]T`. Also accepts the field-access spelling `x.len` for the same receiver types. |
+| `cap` | `(x) -> int` | Capacity of slice or `&[]T` |
+| `append` | `(s: []T, elem: T) -> []T` | Append to slice (Go semantics) |
+| `str` | `(x) -> string` | Convert int/bool/float/data-enum to string |
+| `string` | `(ptr: *T, len: int) -> string` | Construct string from pointer + length |
+| `string` | `(s: []byte) -> string` | Construct string from byte slice |
+| `malloc` | `(size: i64) -> *i8` | Allocate heap memory |
+| `free` | `(ptr: *i8)` | Free heap memory |
+| `calloc` | `(count: i64, size: i64) -> *i8` | Allocate zeroed memory |
+| `realloc` | `(ptr: *i8, size: i64) -> *i8` | Resize allocation |
+| `sbrk` | `(increment: i32) -> *i8` | Extend heap (POSIX) |
+| `panic` | `(msg: string) -> unit` | Halt with message |
+| `assert` | `(cond: bool, msg: string) -> unit` | Panic if cond is false |
+| `expect` | `(actual: i64, expected: i64, msg: string) -> unit` | Panic if values differ |
+| `abort` | `()` | Terminate execution |
+
+User-defined functions shadow builtins of the same name.
+
+## Notes on individual builtins
+
+### `len` and `cap`
+
+`len` works on every collection type with a length: `string`, `[n]T`, `[]T`, `&[]T`. The field-access form `x.len` is exactly equivalent — pick whichever reads better at the call site.
+
+`cap` works only on slices and dynamic arrays. For a fixed array, `cap == len == n`, so `len` is what you want.
+
+### `append`
+
+Go-style. The returned slice may share the input's backing storage, or it may point at a fresh larger buffer if the input was at capacity. **Always use `s = append(s, x)`** — the return value is not optional.
+
+```sysl
+s = a[:0]
+s = append(s, 1)
+s = append(s, 2)
+s = append(s, 3)
+```
+
+### `panic`, `assert`, `expect`, `abort`
+
+These are the trap-path entry points:
+
+- `panic(msg)` — halts with `panic: <msg>` on the LLVM family. TRISC traps with `r1 = 4`. The interpreter raises an exception.
+- `assert(cond, msg)` — panics with `<msg>` if `cond` is false.
+- `expect(actual, expected, msg)` — for test code. Panics with `"<msg>: expected N, got M"` if the values differ.
+- `abort()` — terminates with `panic: abort` (LLVM) / `r1 = 3` (TRISC). Used by C `abort()` and by signal handlers.
+
+See [Runtime Safety](/language/runtime-safety) for the full per-backend trap behavior.
+
+### `malloc` / `free` / `calloc` / `realloc`
+
+Standard C allocator interface. On hosted backends (LLVM family), they call the libc functions. On bare-metal TRISC, they use the kernel's heap implementation. On the interpreter, they back onto a host JVM data structure.
+
+These are the lowest-level allocation primitives. Higher-level code should use `new T(...)` or `new [n]T` instead, which integrate with ARC.
+
+### `sbrk`
+
+POSIX-style heap extension. On hosted systems, `sbrk` is provided by libc. On bare metal, it's a kernel-provided primitive that bumps the heap break pointer. `malloc` is typically implemented in terms of `sbrk` plus a free-list manager.
+
+### `putchar` / `print` / `println` / `puts`
+
+Convenience wrappers. `puts(s)` is the canonical way to write a string to stdout; `println(n)` is the canonical way to write an integer with a newline.
+
+For more control, use [f-strings](/language/strings#format-strings-f-strings) plus `puts`:
+
+```sysl
+puts(f"value=$x%d code=$y%04x\n")
+```
+
+## Shadowing builtins
+
+A user-defined function with the same name as a builtin takes precedence in its declaring module:
+
+```sysl
+len(s: *byte) -> int       // shadows the builtin in this module
+    // ... custom length impl ...
+    0
+
+main() -> int
+    val s = "hello"
+    len(s)                  // calls the user-defined version
+```
+
+If you need the builtin after shadowing it, you currently have to rename your function. A future version may add an explicit way to reference the builtin (`@len(s)` or similar).
+
+## See also
+
+- [Strings: str() builtin](/language/strings#str-builtin) — full `str()` semantics.
+- [Runtime Safety](/language/runtime-safety) — what `panic` / `assert` / `abort` look like at runtime.
+- [Arrays, Slices, and Pointers](/language/arrays-slices-pointers) — `append` semantics in detail.

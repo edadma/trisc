@@ -1,0 +1,54 @@
+---
+title: "#deprecated"
+description: Mark a function as deprecated — emit a compile-time warning at every call site.
+---
+
+`#deprecated` marks a function as deprecated. Calls to the function emit a warning to stderr during analysis (once per callee per compilation):
+
+```sysl
+#deprecated("use foo2 instead")
+foo() -> int = 1
+
+#deprecated
+old_api() -> int = 2
+```
+
+Warnings look like:
+
+```
+warning: 'foo' is deprecated: use foo2 instead
+warning: 'old_api' is deprecated
+```
+
+Calls still compile and run normally — `#deprecated` only reports usage. There is no flag to elevate the warning to an error, and there is no way to silence it short of removing the call.
+
+## When to use it
+
+- A function has a better replacement, and you want existing callers to migrate at their own pace.
+- A function's behavior has subtle issues that aren't worth a hard removal yet.
+- A library export has been renamed; the old name keeps working with a `#deprecated` shim that forwards to the new name.
+
+## Migration pattern
+
+```sysl
+// Old API kept for backward compat
+#deprecated("use new_compute(x, opts) instead")
+compute(x: int) -> int = new_compute(x, default_opts())
+
+// New API
+new_compute(x: int, opts: Options) -> int
+    // ...
+```
+
+Each call to `compute(x)` emits a deprecation warning once, telling the caller to migrate. The old name continues to work indefinitely.
+
+## Limitations
+
+- `#deprecated` cannot currently be applied to structs, enums, type aliases, or interfaces — only functions.
+- The warning fires once per `(callee, compilation-unit)`. If you have many call sites of the same deprecated function, you'll see one warning, not many.
+- There's no way to suppress the warning at a specific call site. If you genuinely need to keep calling the old function and don't want the warning, the only option is to remove `#deprecated` (or to upgrade to the new API).
+
+## See also
+
+- [Attributes: Overview](/language/attributes/overview) — attribute syntax in general.
+- [Program Structure: Visibility](/language/program-structure#visibility) — `private` for fully removing public access.

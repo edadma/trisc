@@ -1,0 +1,153 @@
+---
+title: Targeting Bare Metal
+description: "When to use TRISC, LLVM-host, LLVM RISC-V, SVM, or wasm32 — picking the right backend for the job."
+---
+
+Sysl has seven backends. Each one was added for a reason; each one fits a slightly different problem. This tutorial walks through what each is good at and gives you a decision tree for picking one.
+
+## The backends at a glance
+
+| Backend | Target | Use case |
+|---------|--------|----------|
+| `interpreter` | JVM in-process | Fast iteration, tests, REPL-shaped work |
+| `llvm-host` | Host CPU via clang | Production hosted binaries (macOS / Linux / Windows) |
+| `riscv64` | Bare-metal RISC-V 64 via qemu | OS development on RV64, fastest path to real silicon |
+| `riscv32` | Bare-metal RISC-V 32 via qemu | Embedded RV32 work, smaller memory footprint |
+| `wasm32` | freestanding WASI via wasmtime | Sandboxed apps, web targets, untrusted plugins |
+| `trisc` | TRISC ISA via custom emulator | Teaching architecture and OS, SLIX OS |
+| `svm-host` | SVM stack machine | Teaching VM design, deterministic execution |
+
+The four LLVM-family backends (`llvm-host`, `riscv64`, `riscv32`, `wasm32`) share most of their codegen. The other three are independent.
+
+## Decision tree
+
+```
+What are you building?
+
+App that talks to the OS (Linux / macOS / Windows)?
+  → llvm-host. Use libc, dynamic linking, the works.
+
+App that runs in a sandbox?
+  → wasm32. Use WASI for I/O; everything else is up to your runtime.
+
+OS, kernel, or driver?
+  Targeting real silicon eventually?
+    → riscv64 (or riscv32 if memory-constrained).
+  Targeting an emulator / teaching?
+    → trisc. The toolchain is small enough to read end-to-end.
+
+Iterating on language features or tests?
+  → interpreter. Slowest at runtime, fastest at "compile then re-run".
+
+Studying VM design or want deterministic, simple bytecode?
+  → svm-host.
+```
+
+## What each gives you
+
+### Interpreter
+
+A tree-walking evaluator inside the JVM. No compilation step — just analyze and run. Useful for:
+
+- **Quickly iterating** on Sysl language changes. The interpreter is the easiest backend to extend.
+- **Running tests** during development. `sbt "syslCliJVM/run test --backend interpreter std/"` is the fast path.
+- **REPL-like workflows.** You can wrap interpreter calls in a thin host program.
+
+Limitations: ~100× slower than native code. No real OS interaction (it's host-mediated). Not suitable for production.
+
+### llvm-host
+
+Generates LLVM IR, hands it to `clang -O1`, produces a native binary for the host platform. Useful for:
+
+- **Production hosted apps.** Same shape as compiling C — gets you a real binary you can ship.
+- **Profiling and benchmarking** real-world workloads.
+- **C interop.** Every `extern` declaration resolves against the host libc.
+
+Limitations: needs `clang` installed. Builds are slower than the interpreter because of the `clang` invocation.
+
+### LLVM RISC-V (riscv64 / riscv32)
+
+Same LLVM IR pipeline, but `clang` targets the RISC-V architecture and the runtime is freestanding (no libc, no syscalls beyond what you provide). The output runs under `qemu-system-riscv{64,32}`.
+
+Useful for:
+
+- **OS development** on a realistic target. SLIX runs on aarch64 (via LLVM) and x86_64 (via LLVM); a future SLIX could also target RV64 via this backend.
+- **Embedded development** for actual RISC-V silicon. The codegen and ABI match what real chips expect.
+- **Teaching memory layout, MMU, traps** on an architecture students can later see in hardware.
+
+Limitations: `riscv32` cannot use 64-bit integers as efficiently as wider targets. Floating-point support depends on the qemu configuration.
+
+The toolchain expects Homebrew LLVM 22 at `/opt/homebrew/opt/llvm/bin/clang`, qemu, and a cached freestanding runtime under `sysl/runtime/rv/`. Override paths with `SYSL_RV_CLANG`, `SYSL_RV_QEMU64`, `SYSL_RV_QEMU32`.
+
+### wasm32
+
+LLVM IR → `clang --target=wasm32-wasi` → wasm module → run with `wasmtime`. Useful for:
+
+- **Sandboxed apps.** WASI gives you stdin/stdout/stderr and a virtual filesystem; nothing else.
+- **Plugin architectures.** Load untrusted code into your host without giving it filesystem or network access.
+- **Web targets.** With a different runtime (browser wasm, wasmer), the same module runs in JavaScript.
+
+Limitations: `wasm32` only — 32-bit pointers and integers for arithmetic that needs them. The runtime is freestanding; you build the WASI bindings yourself or use the std library's wrappers.
+
+Expects Homebrew LLVM 22 plus `wasmtime` at `/opt/homebrew/bin/wasmtime`. Override with `SYSL_WASM_CLANG`, `SYSL_WASMTIME`.
+
+### TRISC
+
+A custom 16-bit RISC instruction set with a tiny emulator (Scala). The whole thing — assembler, linker, emulator, compiler, kernel, shell — fits in one repo and is short enough for students to read end-to-end.
+
+Useful for:
+
+- **Teaching computer architecture.** Students can step through CPU instructions in the GUI debugger and watch registers change.
+- **Teaching OS construction.** SLIX is a Minix-3-style microkernel on TRISC with 5 isolated server processes; students can read every line.
+- **Anything where the toolchain's readability matters more than its performance.**
+
+Limitations: ~10× slower than LLVM-host. No SIMD, no FPU outside emulated double-precision, no real concurrency primitives (just cooperative threading). Not suitable for production.
+
+### SVM
+
+A simple stack-based VM with its own assembly format. Useful for:
+
+- **Studying VM design.** The instruction set is small (~30 opcodes); the dispatcher is a few hundred lines.
+- **Deterministic execution.** Stack VMs are easier to verify than register machines.
+- **Teaching abstract machine concepts** before introducing register allocation.
+
+Limitations: same as TRISC in performance terms. The use case is more pedagogical than practical.
+
+## Running tests on every backend
+
+For library code (anything in `std/` or shared infrastructure), the convention is to test on all seven:
+
+```bash
+sbt "syslCliJVM/run test --backend interpreter std/"
+sbt "syslCliJVM/run test --backend llvm-host std/"
+sbt "syslCliJVM/run test --backend svm-host std/"
+sbt "syslCliJVM/run test --backend trisc std/"
+sbt "syslCliJVM/run test --backend riscv64 std/"
+sbt "syslCliJVM/run test --backend riscv32 std/"
+sbt "syslCliJVM/run test --backend wasm32 std/"
+```
+
+`--backend all` is reserved for future use; today you invoke each backend explicitly. The standard library is tested this way before every release; differences between backends are real bugs.
+
+## What's the same across all seven
+
+This is what makes Sysl Sysl:
+
+- **Same source.** You don't write different code for different backends.
+- **Same trap semantics.** Out-of-bounds, divide-by-zero, `panic`, contract failure — all backends trap, with the same set of categories. See [Runtime Safety](/language/runtime-safety).
+- **Same `#test` machinery.** A test that passes on one backend should pass on the others (modulo backend-specific feature gaps, which are documented).
+- **Same ARC semantics.** `&T` works identically on the interpreter, LLVM, and TRISC. Heap allocation goes through `malloc` / `free` (or the kernel equivalent on bare-metal).
+
+## What's different
+
+- **Performance.** LLVM is ~100× the interpreter. TRISC and SVM are closer to the interpreter than LLVM.
+- **OS access.** `llvm-host` gets the full libc; freestanding backends (`riscv*`, `wasm32`, `trisc`) only get what you write yourself.
+- **Float precision.** TRISC stores `f32` as 4 bytes in memory but works with it as `f64` in registers. LLVM uses native `float`.
+- **Code-size baseline.** The wasm32 backend produces the smallest binaries; trisc and svm are in the middle; LLVM-host is largest due to libc linkage.
+
+## See also
+
+- [Architecture: Overview](/architecture/overview) — TRISC architecture in depth.
+- [SLIX: Overview](/slix/overview) — using TRISC + LLVM together to build an OS.
+- [Runtime Safety](/language/runtime-safety) — per-backend trap delivery.
+- [Attributes: #test](/language/attributes/test) — `--backend` flag for tests.

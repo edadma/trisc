@@ -1,0 +1,108 @@
+---
+title: Deinit and Defer
+description: Struct.deinit blocks for ref-counted cleanup, and defer for scope-exit code.
+---
+
+Sysl has two related cleanup mechanisms — `deinit` for type-bound cleanup that runs when a ref-counted reference hits zero, and `defer` for arbitrary code that runs at scope exit.
+
+## `Struct.deinit`
+
+When a `&T` reaches refcount 0, before the storage is freed, an optional `deinit` block runs. It's the canonical place to release resources owned by the struct:
+
+```sysl
+struct Buffer
+    data: *byte
+    size: int
+
+Buffer.deinit()
+    free(self.data)   // called automatically when &Buffer refcount hits 0
+
+main() -> int
+    val b = new Buffer(malloc(1024), 1024)
+    // ... use b ...
+    0                  // b goes out of scope: rc → 0, deinit runs, malloc'd data freed
+```
+
+The deinit signature is fixed: zero parameters, no return type, named exactly `deinit`. It's only meaningful for types you intend to allocate via `new` — value-typed `var b = Buffer(...)` doesn't trigger deinit (there's no refcount transition).
+
+### What goes in deinit
+
+The most common patterns:
+
+- **`free` a malloc'd buffer** (as above).
+- **Close a file or device handle.**
+- **Decrement a reference into shared state.**
+- **Unregister from an observer / listener list.**
+
+The deinit runs *before* fields are deallocated, so `self.data` is valid throughout the block.
+
+### Order of operations
+
+For a struct that contains refcount-bearing fields (`&T` or `string`), the order at rc=0 is:
+
+1. The user `deinit` runs.
+2. Each refcount-bearing field's refcount is decremented (which may cascade into more deinits).
+3. The struct's storage is `free`'d.
+
+You don't decrement field refcounts manually — that happens automatically.
+
+## `defer`
+
+`defer <statement>` schedules a statement to run when the enclosing **function** returns:
+
+```sysl
+main() -> int
+    f = open("file.txt", O_RDONLY)
+    defer close(f)     // runs when function exits
+    // ... use f ...
+    42                 // close(f) runs after return value is computed
+```
+
+Multiple defers execute in LIFO order:
+
+```sysl
+demo() -> int
+    defer puts("c")
+    defer puts("b")
+    defer puts("a")
+    0
+// Output: a, b, c (LIFO)
+```
+
+### When defers fire
+
+- At the end of the function body (any return path, including early `return` and trailing-expression).
+- On a successful `?` (try operator) short-circuit return — the defer fires before the early return.
+- On a contract failure or other trap, defers do **not** fire — the trap path skips them. Use `defer` for cleanup, not for invariant restoration.
+
+### Defer in branches
+
+A `defer` in a conditional branch fires only if that branch was entered:
+
+```sysl
+demo(open_first: bool) -> int
+    if open_first
+        f = open("a.txt", O_RDONLY)
+        defer close(f)         // only fires if open_first was true
+        // ...
+    return 0
+```
+
+The defer is scoped to the function, but the *registration* only happens when control reaches the `defer` statement.
+
+### Defer and refs
+
+A `defer` that captures a `&T` increments the refcount when the defer is registered, and the captured ref is released as part of the defer body. This is usually what you want — the deferred code sees the value even if the original variable goes out of scope earlier.
+
+### When to use which
+
+- **`Struct.deinit`** — cleanup that belongs *to a type*. Every instance of this struct needs it, anywhere in the codebase.
+- **`defer`** — cleanup that belongs *to a specific call site*. Local resources that don't justify a wrapper struct.
+
+A common pattern is a wrapper struct (`File` with `deinit { close(...) }`) for resources used throughout the codebase, and `defer` for ad-hoc local cleanups.
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes) — when refcount reaches zero.
+- [Structs](/language/types/structs) — declaring the struct that `deinit` attaches to.
+- [Try Operator](/language/functions/try-operator) — defers fire on `?` early returns.

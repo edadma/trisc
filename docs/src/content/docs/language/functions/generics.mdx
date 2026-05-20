@@ -1,0 +1,177 @@
+---
+title: Generics
+description: Generic functions, structs, enums, type aliases, trait bounds, and defaults.
+---
+
+Sysl has full monomorphizing generics — one specialized copy of each definition per unique set of type arguments, like Go or C++. Type arguments are inferred from call sites when possible; explicit type arguments use square brackets (`f[int](x)`).
+
+## Generic functions
+
+Functions declare type parameters in square brackets after the name:
+
+```sysl
+// Identity — works for any type
+id[T](x: T) -> T = x
+
+// Swap via pointers — works for any T
+swap[T](a: *T, b: *T)
+    var tmp: T = *a
+    *a = *b
+    *b = tmp
+
+// Multiple type parameters
+pair_first[K, V](k: K, v: V) -> K = k
+
+// Instantiation-time checking
+max[T](a: T, b: T) -> T
+    if a > b then a else b
+
+main() -> int
+    var x = 10
+    var y = 20
+    swap(&x, &y)        // T inferred as int
+    max(1.5, 2.5)       // T inferred as f64
+    id(42)              // T inferred as int
+```
+
+Operations on a type parameter are checked when the type is pinned: `max[int]` works because `>` is defined on `int`; `max[bool]` errors at the call site because `>` is not defined on `bool`.
+
+## Trait bounds
+
+A type parameter may be constrained to types that implement one or more traits:
+
+```sysl
+maxOf[T: Ord](a: T, b: T) -> T       // T must implement Ord
+bothCheck[T: Ord + Eq](a: T, b: T)   // T must implement Ord AND Eq
+```
+
+Bounds are checked at each call site when the concrete type arguments are known. An unsatisfied bound produces a clear error naming the missing trait and the type parameter. Inside the generic body, operators like `a > b` and `a == b` route through the bounded trait's methods.
+
+## Default type parameters
+
+A type parameter may carry a default type expression that fills in when the argument is missing at instantiation time. The default appears after any bound, mirroring Rust's `T: Bound = Default`:
+
+```sysl
+make[T = i64]() -> T = ...           // no inference target — T defaults to i64
+pick[I, O = I](x: I) -> O = x         // later default may reference an earlier param
+
+struct Box[T = int] { v: T }
+enum Result[T, E = string] { Ok(value: T); Err(error: E) }
+type Parser[I = Input, A] = ...       // partial defaults
+```
+
+Inference still wins where it succeeds, and explicit type arguments override the default: `Box(7i64)` instantiates `Box[i64]`, `Box[i32](7)` instantiates `Box[i32]`, `Box(7)` (with `T = int`) falls back to the default.
+
+Defaults resolve under the partial type-arg env, so `[I, O = I]` is well-defined. Trailing slots that have no default and no inference target still error.
+
+## Generic structs
+
+Structs declare type parameters in square brackets after the name. Each distinct instantiation gets its own monomorphized layout and `sizeof`:
+
+```sysl
+struct Pair[T]
+    a: T
+    b: T
+
+struct Tuple[K, V]
+    key: K
+    value: V
+
+main() -> int
+    p = Pair(10, 20)                  // T inferred as int
+    q: Pair[i64] = Pair(1i64, 2i64)
+    t = Tuple(5, 'A')
+    p.a + p.b + int(q.a) + t.key
+```
+
+Generic functions and structs compose naturally: a function `swapPair[T](p: *Pair[T])` works fine — `T` is inferred from the concrete `Pair[i32]` passed in.
+
+## Generic enums
+
+Tagged unions are the foundation for `Option[T]`, `Result[T, E]`, and similar sum types:
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+enum Result[T, E]
+    Ok(value: T)
+    Err(error: E)
+
+safeDiv(a: int, b: int) -> Option[int]
+    if b == 0 then None
+    else Some(a / b)
+
+main() -> int
+    r = safeDiv(20, 4)
+    r match
+        Some(v) -> v
+        None -> -1
+```
+
+Pattern matching uses the scrutinee's concrete enum type to look up variants.
+
+### Type inference for variants
+
+Variant constructors prefer to infer type args from argument types (`Some(42)` infers `T=int`). When a variant doesn't pin all type parameters — e.g. `Ok(42)` for `Result[T, E]` leaves `E` unknown — the analyzer consults the **expected type** from context:
+
+| Context | Expected type source |
+|---|---|
+| `var x: Option[int] = None` | the declared variable type |
+| `fn f() -> Result[int, string] { Ok(42) }` | the function's return type |
+
+Without an expected type and incomplete argument-based inference, the compiler errors with a message asking for an explicit type annotation.
+
+## Function-typed type arguments
+
+Generic type arguments accept the full type grammar — named types, tuples, slices, fixed-size arrays, nested generics, and **function types**. Function-typed type arguments are essential for combinator-shaped libraries:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+// Parse an operand, then a binary operator that combines two operands
+chainl1[A](operand: Parser[A], op: Parser[(A, A) -> A]) -> Parser[A]
+chainr1[A](operand: Parser[A], op: Parser[(A, A) -> A]) -> Parser[A]
+
+// Container holding a callback
+struct Cell[T] { value: T }
+val c: Cell[(int) -> int] = Cell((x: int) -> x + 1)
+
+// Option / Result wrapping a function
+var maybe_handler: Option[(Event) -> unit] = None
+
+// Zero-arg fn type
+val thunk: Parser[() -> int] = ...
+```
+
+Multi-parameter function types must use the parens form: `(int, int) -> int` (not `int, int -> int` — the latter is a multi-arg generic of `int, int` followed by a stray `->`). Bare `T -> R` (no parens) is not currently accepted as a type-argument shape; use `(T) -> R`.
+
+## Bounds and defaults on structs and enums
+
+Type parameters on structs and enums carry trait bounds and defaults exactly like generic functions:
+
+```sysl
+struct Wrap[T: Reader = int] { x: T::Token }
+enum Box[T: Ord = int]
+```
+
+The bound is enforced at instantiation; field and variant types may use associated-type projections (`T::Token`, `T::Item`), which resolve via the bound's matching impl.
+
+## Monomorphization
+
+Each unique `(definition, type-args)` combination produces one specialized copy with a mangled name:
+
+- `swap[int]` → `swap_i32`
+- `Pair[int]` → `Pair_i32`
+- `Result[int, string]` → `Result_i32_string`
+
+The specialized copies are cached, so calling `swap(&x, &y)` from many places (with the same inferred `T`) shares one body. Different `T`s get different bodies.
+
+There's no runtime cost to generics — the call goes straight through.
+
+## See also
+
+- [Traits & Impls](/language/functions/traits-and-impls) — defining and using trait bounds.
+- [Type Declarations: Generic Aliases](/language/types/type-declarations#generic-type-aliases) — `type Parser[A] = ...`.
+- [Try Operator](/language/functions/try-operator) — `?` for `Option` / `Result`.

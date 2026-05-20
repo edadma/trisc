@@ -1,0 +1,27 @@
+---
+title: Tutorials
+description: "Learning paths through Sysl — start here if the reference is too dense."
+---
+
+The [Language reference](/language/overview) describes *what* every Sysl feature does. These tutorials show *how* to use them — walking through real problems, one decision at a time.
+
+## Recommended order
+
+1. **[Your First Sysl Program](/tutorials/first-program)** — from `main() -> int = 42` to a small CLI tool. Start here if you've never written Sysl.
+2. **[Memory Modes by Example](/tutorials/memory-modes)** — `T` / `&T` / `*T` as a decision tree, with six worked patterns. The most important concept day-one if you're coming from C, Go, or Rust.
+3. **[Contracts in Practice](/tutorials/contracts-in-practice)** — port binary search from C to Sysl with full contract annotations; watch the contract checker find a real bug.
+4. **[Generic Combinators](/tutorials/generic-combinators)** — build a tiny parser-combinator library, exercising generics, nominal aliases, user operators, and call-by-name.
+5. **[Interfaces vs Traits](/tutorials/interfaces-vs-traits)** — when each polymorphism mechanism fits, with three concrete scenarios.
+6. **[Targeting Bare Metal](/tutorials/bare-metal)** — decision tree for picking among Sysl's seven backends.
+
+## What's not here
+
+- **API documentation** — see [Language](/language/overview) for the spec, [SLIX](/slix/overview) for the OS-level interface, and `std/` source for the standard library.
+- **Architecture / CPU documentation** — see [Architecture](/architecture/overview).
+- **Recipes for common tasks** — see the [Cookbook](/cookbook/) for short, focused snippets.
+
+## See also
+
+- [Language Overview](/language/overview) — the reference docs.
+- [Hello World](/getting-started/hello-world) — assembly-language hello-world, before any Sysl is involved.
+- [SLIX Overview](/slix/overview) — what Sysl was designed to build.

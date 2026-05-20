@@ -1,0 +1,100 @@
+---
+title: Pass a Sysl String to a C Function
+description: "Bridge between Sysl's fat-pointer strings and C's NUL-terminated `char*`."
+---
+
+A Sysl `string` is a 16-byte fat pointer `{ptr: *u8, len: i64}`. A C string is a NUL-terminated `char*`. These are not ABI-compatible — you can't pass a Sysl `string` directly where C expects `char*`.
+
+## The simple case: implicit decay
+
+For C functions that only read through a `*byte` until the first NUL, Sysl's string-to-pointer decay is enough — *if* the string was built from a literal that happens to have a NUL right after:
+
+```sysl
+extern puts(s: *byte) -> int
+
+main() -> int
+    puts("hello")           // works in practice because string literals
+                            // are usually stored with a NUL after the bytes
+    0
+```
+
+But this is fragile. The Sysl spec doesn't guarantee a NUL after string literals — it just happens to be there on most backends. **Don't rely on this for production code.**
+
+## The safe pattern: copy with explicit NUL
+
+Build a byte buffer with an explicit NUL terminator:
+
+```sysl
+to_c_string(s: string) -> &[]byte
+    var buf = new [len(s) + 1]byte
+    for i in 0..<len(s)
+        buf[i] = byte(s[i])
+    buf[len(s)] = 0
+    buf
+
+main() -> int
+    val s = build_message()    // some Sysl string
+    val cs = to_c_string(s)
+    puts(&cs[0])               // safe: cs is NUL-terminated
+    0
+```
+
+The `&[]byte` return owns the heap buffer; ARC frees it when the caller's reference goes out of scope.
+
+## Passing length explicitly
+
+Many C functions accept `(ptr, len)` instead of NUL-terminated strings — `write`, `fwrite`, `memcmp`, etc. For those, pass the pointer and length separately:
+
+```sysl
+extern write(fd: int, buf: *byte, n: i64) -> i64
+
+write_string(fd: int, s: string) -> i64
+    write(fd, &s[0], i64(len(s)))
+```
+
+`&s[0]` takes the address of the string's first byte; `len(s)` gives the byte count. No copy, no NUL.
+
+## A common pitfall: temporary lifetime
+
+A naive helper might look like:
+
+```sysl
+// WRONG — returned pointer becomes dangling
+to_c_string_bad(s: string) -> *byte
+    var buf: [256]byte
+    for i in 0..<len(s)
+        buf[i] = byte(s[i])
+    buf[len(s)] = 0
+    &buf[0]      // buf is a local; pointer dangles after return
+```
+
+The local `buf` is destroyed when the function returns. The caller gets a pointer into freed stack space.
+
+Always return a `&[]byte` (refcount-managed) or have the caller pre-allocate the buffer and pass it in:
+
+```sysl
+fill_c_buffer(s: string, buf: *byte, cap: int) -> int
+    if len(s) + 1 > cap then return -1
+    for i in 0..<len(s)
+        *(buf + i) = byte(s[i])
+    *(buf + len(s)) = 0
+    len(s)
+```
+
+## NUL inside the source string
+
+If your Sysl string contains a NUL byte before its end (e.g., binary data), most C string functions will see the wrong length:
+
+```sysl
+val s = "abc\0def"           // 7 bytes; C `strlen` would return 3
+val cs = to_c_string(s)       // buf has all 7 bytes + trailing NUL
+strlen(&cs[0])                // returns 3, not 7
+```
+
+This is the same gotcha as C — null bytes mid-string surprise length-by-NUL functions. Use length-explicit C functions (`memcmp`, `write`, etc.) when your strings may contain NULs.
+
+## See also
+
+- [Strings](/language/strings) — Sysl's string representation.
+- [Call a C function](/cookbook/call-c) — extern basics.
+- [Extern Declarations](/language/functions/extern) — full reference.

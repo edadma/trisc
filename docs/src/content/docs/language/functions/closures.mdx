@@ -1,0 +1,211 @@
+---
+title: Closures
+description: Anonymous functions with captured environment, underscore placeholders, and escape semantics.
+---
+
+Closures are anonymous functions that capture variables from their enclosing scope. They use the `->` arrow syntax:
+
+```sysl
+// Single parameter (no parens needed)
+f = x -> x + 1
+
+// Multiple parameters
+g = (x, y) -> x + y
+
+// Zero parameters
+h = () -> 42
+
+// With type annotations
+f = (x: int) -> x * 2
+
+// Multi-line body (indentation block)
+transform = x ->
+    val doubled = x * 2
+    doubled + 1
+```
+
+## Body shape — expression or block
+
+A closure body is either:
+
+- **A single expression** (when the `->` is followed by an expression on the same line).
+- **An indented statement block** (when the `->` line ends with a newline, opening an indented body).
+
+Both forms work in every expression position — top-level bindings, call arguments, cast arguments, tuple literals:
+
+```sysl
+// Multi-line if-else body inside a call argument
+apply((x: int) ->
+    if x > 0 then x * 2
+    else 0, 21)
+
+// Inside a generic-alias cast (parser-combinator idiom)
+type Parser[A] = new (Input) -> ParseResult[A]
+eof[A](v: A) -> Parser[A] =
+    Parser[A]((inp: Input) ->
+        if inp.at_end() then Success(v, inp)
+        else Failure("expected end of input", inp))
+```
+
+Statement-block bodies (multiple statements separated by newlines) work in any position — including inside call arguments, cast arguments, and tuple literals — even though the lexer normally suppresses Newline/Indent/Dedent inside parens. The lexer recognizes `->` followed by an indented block as a body trigger and re-enables indent processing for the body's extent.
+
+`match` works in this position too — it carries an inline-arms form that detects each arm by the start of its pattern:
+
+```sysl
+map[A, B](p: Parser[A], f: (A) -> B) -> Parser[B] =
+    Parser[B]((inp: Input) ->
+        p(inp) match
+            Success(v, n) -> Success(f(v), n)
+            Failure(m, n) -> Failure(m, n))
+```
+
+The arm list terminates at the first token that doesn't begin a pattern — typically the closing `)` of the enclosing call or a `,` introducing another argument.
+
+## Capture semantics
+
+Closures capture variables **by value** (copy at creation time). Mutations to the original variable after the closure is created do not affect the captured value:
+
+```sysl
+var a = 10
+f = x -> x + a      // captures a = 10
+a = 100
+f(32)                // 42 (uses captured a = 10, not 100)
+```
+
+To share mutable state, capture a pointer (`*T`) or ref (`&T`):
+
+```sysl
+var a = 10
+f = x -> x + *(&a)   // captures &a; reads current value
+a = 100
+f(32)                // 132 — reads through the pointer
+```
+
+## Type inference
+
+Closure parameter types are inferred from context when the closure is passed to a function expecting a specific `(...) -> T` type:
+
+```sysl
+apply(f: (int) -> int, x: int) -> int = f(x)
+
+main() -> int = apply(x -> x + 1, 41)    // x inferred as int
+```
+
+A closure with no expected type and no annotations errors: `var f = x -> x + 1` can't infer `x`'s type. Either annotate the parameter (`(x: int) -> x + 1`) or the binding (`var f: (int) -> int = x -> x + 1`).
+
+## Higher-order patterns
+
+```sysl
+// Closure as argument
+apply(f: (int) -> int, x: int) -> int = f(x)
+apply(x -> x * 2, 21)           // 42
+
+// Closure as return value (requires captures)
+make_adder(n: int) -> (int) -> int
+    val captured = n
+    x -> x + captured
+
+add10 = make_adder(10)
+add10(32)                        // 42
+
+// Closure assigned to variable
+val f: (int) -> int = x -> x * 2
+f(21)                            // 42
+```
+
+## Escaping closures
+
+Function parameters are **non-escaping by default** — the closure's captured environment is stack-allocated. Use `@escaping` to mark parameters where the callee may store the closure beyond the call's lifetime:
+
+```sysl
+// Non-escaping (default): env lives on caller's stack frame
+sort_by(arr: []int, cmp: (int, int) -> bool)
+
+// Escaping: env is heap-allocated via malloc
+on_click(handler: @escaping () -> unit)
+```
+
+Non-escaping closures are more efficient (no heap allocation) but the compiler trusts the annotation — storing a non-escaping closure into a global, struct field, or returning it is undefined behavior. Closures with no expected type context (e.g., `val f = x -> x + 1`) default to escaping.
+
+## Implementation
+
+All function values (including plain function pointers) are 16-byte fat pointers: `{func_ptr: i64, env_ptr: i64}`. Plain function pointers have `env_ptr = 0`.
+
+The environment allocation strategy depends on capture types:
+
+- **Non-escaping, all captures are non-rc-bearing** (ints, raw pointers, etc.): the environment is allocated on the caller's stack frame — no malloc, no free. This is what makes closures usable in no-allocator (kernel/bare-metal) contexts.
+- **Escaping, OR any rc-bearing capture** (string, ref, struct-with-string, enum-with-string): the environment is heap-allocated with a `[rc:i64 @ -16 | deinit_ptr:i8* @ -8 | data]` header. Closure descriptor scope-exit decrements the env's refcount; at zero, a per-closure-id deinit walks the captures (decrementing rc-bearing entries) and `free` reclaims the env block.
+
+The `env_ptr` is passed to the closure function via register r3 in the TRISC calling convention (LLVM passes it as the first hidden parameter `i8* %env`).
+
+## Underscore placeholder syntax
+
+`_` in expression position is a **placeholder** that desugars to a fresh parameter of an enclosing anonymous function. Each occurrence introduces one parameter, in lexical (left-to-right) order:
+
+```sysl
+xs.map(_ + 1)            // xs.map(x -> x + 1)
+xs.filter(_ > 0)         // xs.filter(x -> x > 0)
+xs.sortBy(_.timestamp)   // xs.sortBy(x -> x.timestamp)
+items.fold(_ + _)        // items.fold((a, b) -> a + b)
+```
+
+The lambda body is the **smallest enclosing expression** that contains the placeholder(s). Parens and call-arg boundaries delimit the body; binary/unary operators, field access, indexing, and method-receiver positions do not — so `_` "bubbles up" through them until it hits a boundary.
+
+### Boundaries
+
+- **Parens** explicitly delimit: `(_ + 1) * 2` is `(x -> x + 1) * 2`, not `x -> (x + 1) * 2`.
+- **Function-call arguments**: an arg expression that *contains* `_` (but is not bare `_`) wraps at the arg position — `xs.map(_ + 1)` is `xs.map(x -> x + 1)`.
+- **Statement-level expressions** (var/val init, return value, expression statements): `var f: (int) -> int = _ + 1` binds `f` to `x -> x + 1`.
+
+### Partial application
+
+When a `_` is *directly* a call argument (with no surrounding operators), it is absorbed by the **enclosing call**, making the whole call the lambda body:
+
+```sysl
+xs.map(f(_, 0))          // xs.map(x -> f(x, 0))
+xs.map(f(0, _))          // xs.map(x -> f(0, x))
+xs.map(f(_, _))          // xs.map((x, y) -> f(x, y))
+```
+
+This is the canonical "wildcard-arg" partial-application form.
+
+### Inference
+
+A placeholder lambda is type-checked the same as any other closure — its parameters infer from the expected type of the surrounding context. A placeholder lambda *without* an expected type (`var f = _ + 1` without an ascription) cannot infer the parameter's type and must be annotated:
+
+```sysl
+var f: (int) -> int = _ + 1   // OK — expected type drives inference
+var f = _ + 1                 // error: cannot infer placeholder's type
+```
+
+### Disambiguation with other `_` uses
+
+The placeholder meaning is *purely expression-positional*. The other positions where `_` appears keep their existing meaning:
+
+| Position | Meaning |
+|----------|---------|
+| LHS of `var _ = ...` / `val _` | discard binding |
+| Destructuring binder `(_, b) =` | discard |
+| `match` arm pattern `_ ->` | wildcard pattern |
+| Lambda parameter list `(_: T) -> body` | discard parameter |
+| Expression position (`_ + 1`) | placeholder (lambda) |
+
+The five positions are syntactically disjoint, so there is no parser ambiguity.
+
+### Discard parameter
+
+In a lambda parameter list, `_` introduces a parameter slot that is unreferenceable from the body. Type annotation is optional. Multiple `_` parameters in the same list are independent — they don't collide:
+
+```sysl
+apply((_: int) -> 42, 7)               // ignore the int, return 42
+apply2((_: int, _: int) -> 99, 1, 2)   // both slots discarded
+apply2((x: int, _: string) -> x, ...)  // mix named + discard
+```
+
+The single-param shorthand `name -> body` does **not** treat `_` as a discard binder — `_ -> body` parses `_` as the expression-position placeholder. Use the parens form `(_) -> body` for a discard parameter without an annotation.
+
+## See also
+
+- [Function Pointers](/language/functions/function-pointers) — plain function values without captures.
+- [Inner Def](/language/functions/inner-def) — recursive named local closures.
+- [Generics: function-typed parameters](/language/functions/generics#function-typed-type-arguments).

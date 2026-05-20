@@ -1,0 +1,114 @@
+---
+title: Why Contracts Are First-Class
+description: "`require` and `ensure` aren't a library — they're part of the language. This page explains why."
+---
+
+Most languages relegate contracts (preconditions, postconditions, invariants) to libraries or external tools. Sysl puts them in the syntax. This page explains the reasoning.
+
+## What "first-class" means here
+
+In Sysl, contracts are syntactic elements that appear at fixed positions in a function:
+
+```sysl
+sqrt(x: f64) -> f64
+    require x >= 0.0, "x must be non-negative"
+    ensure result >= 0.0
+    ensure result * result <= x + 1.0e-6
+    var r = x / 2.0
+    for _ in 0 downTo 20 step 1 do r = 0.5 * (r + x / r)
+    r
+```
+
+- They have dedicated keywords (`require`, `ensure`, `invariant`, `variant`, `assume`).
+- They have access to `result`, `old(expr)`, `loop_entry(expr)` — special identifiers usable nowhere else.
+- They check at compile time (`#pure` interaction, immutability of arguments) and at runtime (trap on failure).
+- They can be stripped wholesale with `--no-contracts` for release builds.
+
+Compare to C, where contracts are runtime-only macros (`assert(x >= 0)`), or to Java, where they're library-level patterns (`Objects.requireNonNull(...)` returns the value), or to Rust, where `debug_assert!` and `assert!` exist as macros.
+
+## Why bake this in
+
+Three reasons we made contracts a language-level feature rather than a library:
+
+### 1. Documentation that the compiler enforces
+
+`require x >= 0.0` *is* the documentation for the precondition. It can't drift from the implementation because the compiler checks it. A doc-comment can lie; a contract can't.
+
+This matters specifically at API boundaries. When you read someone else's function signature, the contracts tell you what to pass; if you violate them, you get an actionable trap at the call site, not silently-wrong behavior in the callee.
+
+### 2. The verifier reads them
+
+The longer-term reason: contracts are the input to a static verifier. We're shipping a Why3 / WhyML backend (per the master roadmap) that consumes contracts as proof obligations.
+
+A library-level `assert(x >= 0)` can't be used this way — the verifier would have to recognize the macro pattern, extract the predicate, and reconstruct the obligation. A language-level `require x >= 0.0` is *already* the obligation, in a parser-tractable form. Same for `ensure`, `variant` (termination measure), `module_invariant`, `for all` quantifiers.
+
+This isn't a hypothetical — SPARK-style verification is the model. The `def` / `#pure` / `#ghost` machinery exists for the same reason: to give the verifier the inputs it needs.
+
+### 3. Strippable for release
+
+`--no-contracts` removes every contract check at compile time. This is Ada's `pragma Assertion_Policy(Disable)` equivalent: the user takes responsibility for correctness in exchange for zero runtime overhead.
+
+A library-level `assert` mechanism doesn't compose with this naturally — every callsite is just a function call; the compiler can't tell which calls are "contract checks" vs "real logic." With dedicated syntax, stripping is trivial: the analyzer recognizes `TContractCheck` nodes and elides them.
+
+This is the load-bearing argument for the release-build cost story. "Contracts are free in release builds" is only credible if the compiler can elide them. Sysl can.
+
+## Why `result` and `old(expr)` are special
+
+The two identifiers exist because postconditions have a specific shape:
+
+- `result` — what the function returned. Only meaningful in `ensure`. Aliased to a synthesized local that captures the return value before the postcondition runs.
+- `old(expr)` — captures the value of `expr` at function entry. Essential for mutation contracts: `ensure *p == old(*p) + 1` says "the pointee is one greater than it was at the call's start."
+
+These could be library-level (a `prev` macro, a `result` global), but the semantics — capturing the entry state before any body runs, scoping `result` to ensure clauses only — needs analyzer support. Library implementations leak too much detail (what if `old(complex_call())` was evaluated twice?).
+
+## Why `for all` / `for some` quantifiers
+
+The two contextual keywords `for all` and `for some` give Ada-style quantification:
+
+```sysl
+require for all i in 0..<n => a[i] <= a[i+1]
+```
+
+For the verifier, this is the canonical "input is sorted" shape. For the runtime, it lowers to a counted loop that short-circuits at the first counterexample. Both consumers want the same syntactic shape — having it as a language feature instead of a library function gives them both at once.
+
+## What contracts don't replace
+
+Contracts are not:
+
+- **A panic mechanism.** Use `panic("explanation")` for general failures. `require` is specifically for caller-supplied precondition violations.
+- **A test framework.** Use `#test` for unit tests. Contracts are inline; tests are separate.
+- **A way to encode types.** Use `within` / `where` for range-constrained types. Contracts are per-call; type constraints are per-value.
+
+The boundary is: contracts describe the *relationship* between a function's inputs and outputs. Types describe the *shape* of individual values. Tests describe the *behavior* over specific examples.
+
+## When contracts are overkill
+
+We argued for first-class contracts but they aren't always the right tool:
+
+- **Internal helpers** with one caller: the caller's logic already does the precondition checking. Adding `require` is redundant.
+- **Single-line predicates** the body itself makes obvious: `pos(x) = x + 1` doesn't benefit from `require x >= 0`.
+- **Hot inner loops** where you've explicitly stripped contracts with `--no-contracts` anyway. Then they only document, and they take vertical space.
+
+Use contracts at the API boundary, on functions with non-trivial preconditions, and inside loops with non-obvious invariants. Skip them on three-line helpers.
+
+## What's deferred for v2
+
+Sysl 1.x has the runtime story. The verifier story is partly there:
+
+- **Static verification of `#pure` functions** — implemented, enforced.
+- **`module_invariant`** — declared, but only enforced via the Why3 backend (not in this release).
+- **Effect signatures** (`#reads(...)` / `#writes(...)`) — partially implemented; full closure / interface inference for v2.
+- **`#ghost` declarations** — implemented for vars, fns, and types; ghost parameters and fields for v2.
+
+The roadmap documents these explicitly. None of them break the v1 contract story; they extend it.
+
+## The bottom line
+
+Contracts are first-class because they're documentation that the compiler enforces, verifier input that's parser-tractable, and strippable runtime checks all in one syntactic form. None of those would work as a library.
+
+## See also
+
+- [Functions: Contracts](/language/functions/contracts) — full reference.
+- [Contracts in Practice](/tutorials/contracts-in-practice) — guided walkthrough.
+- [Attributes: #ghost](/language/attributes/ghost) — verification-only state.
+- [Functions: Def & Pure](/language/functions/def-pure-functions) — abstraction predicates.

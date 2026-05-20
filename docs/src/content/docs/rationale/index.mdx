@@ -1,0 +1,31 @@
+---
+title: Design Rationale
+description: "Why Sysl makes the choices it does — the reasoning the reference doesn't include."
+---
+
+The [Language reference](/language/overview) describes *what* every feature does. These pages describe *why* — the design conversations that produced each non-obvious choice. They're useful for:
+
+- **Evaluators** deciding whether Sysl fits their problem.
+- **Contributors** thinking about new features and wanting to know what trade-offs the existing ones already locked in.
+- **Educators** explaining the language to students, where "why" questions come up constantly.
+
+## Pages in this section
+
+- **[Why the Three-Mode Memory Model](/rationale/three-mode-model)** — what `T` / `&T` / `*T` gives up vs. what it gains, why no `weak` / `unowned`.
+- **[Why No Garbage Collector](/rationale/no-gc)** — when ARC wins, when it loses, why predictability beats throughput in our target domain.
+- **[Why Seven Backends](/rationale/seven-backends)** — what each one is for, why there isn't just one.
+- **[Why Contracts Are First-Class](/rationale/contracts-first-class)** — design-by-contract as documentation, runtime check, and verifier input.
+- **[Why Structural Interfaces, Not Traits Only](/rationale/structural-interfaces)** — why both polymorphism mechanisms exist.
+- **[Why Literate Source Files](/rationale/literate-source)** — `.lsysl` as a teaching tool and a maintainability tool.
+
+## What's not here
+
+These pages don't repeat content from the reference. If you want to know *how* `&T` works, read [Three Allocation Modes](/language/types/three-allocation-modes). If you want to know *why* ARC instead of GC, read [Why No Garbage Collector](/rationale/no-gc).
+
+The reference is the source of truth for behavior. Rationale pages are the source of *intent* — the reasoning that, if ever you want to challenge a design choice, you should engage with first.
+
+## See also
+
+- [Language Overview](/language/overview) — what the language does.
+- [Tutorials](/tutorials/) — how to use it.
+- [Cookbook](/cookbook/) — short answers to specific tasks.

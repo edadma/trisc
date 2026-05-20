@@ -1,0 +1,94 @@
+---
+title: Integers and Overflow
+description: How Sysl handles integer arithmetic, overflow, and the wrapping/saturating intrinsics.
+---
+
+Sysl follows the Go/Rust/Swift school: integer arithmetic *never* implicitly promotes, and overflow has a deterministic, documented behavior at every width.
+
+## No implicit promotion
+
+`u8 + u8` produces `u8`. Not `int`. Not `i64`. If you want a wider result, widen the operands first:
+
+```sysl
+var a: u8 = 200
+var b: u8 = 100
+
+a + b           // u8 — wraps to 44
+int(a) + int(b) // int — yields 300
+```
+
+This rules out the entire C family of "but it silently widened to `int` before checking" bugs.
+
+## Default overflow behavior
+
+All integer arithmetic wraps at the declared type width:
+
+- **Unsigned types** wrap via modular arithmetic (zero-extension): `u8(255) + u8(1)` → `0`.
+- **Signed types** wrap via two's complement (sign-extension): `int(2147483647) + 1` → `-2147483648`.
+- **64-bit types** (`i64`, `u64`) use the full register width and do not truncate further.
+
+Wrapping is the cheapest behavior on every backend — no overflow check, no branch. If you need a different behavior, use an intrinsic explicitly.
+
+## Overflow intrinsics
+
+When you want explicit, intent-marked overflow behavior, use the polymorphic intrinsics. All take two operands of the same integer type and return the same integer type:
+
+| Intrinsic | Behavior |
+|-----------|----------|
+| `wrapping_add(a, b)` | Two's-complement wrap on overflow (same as default `+`) |
+| `wrapping_sub(a, b)` | Two's-complement wrap on underflow |
+| `wrapping_mul(a, b)` | Low bits of the true product |
+| `saturating_add(a, b)` | Clamp to the type's MAX (or MIN for signed underflow) |
+| `saturating_sub(a, b)` | Clamp to the type's MIN (0 for unsigned) |
+| `saturating_mul(a, b)` | Clamp to the type's MAX/MIN on overflow |
+
+```sysl
+var a: u8 = 200
+var b: u8 = 100
+wrapping_add(a, b)     // 44   (300 & 0xFF)
+saturating_add(a, b)   // 255  (clamped to u8 MAX)
+saturating_sub(b, a)   // 0    (clamped to u8 MIN, would have been -100)
+
+var s: i8 = 100
+saturating_add(s, s)   // 127  (i8 MAX)
+
+var t: i8 = -100
+saturating_add(t, t)   // -128 (i8 MIN)
+```
+
+The intrinsics are available on all integer types (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`) on every backend.
+
+## Worked example: clamped audio gain
+
+A typical case where saturation matters — audio sample mixing where wrap-around would produce loud clicks:
+
+```sysl
+mix_samples(a: i16, b: i16) -> i16 = saturating_add(a, b)
+
+main() -> int
+    var loud_a: i16 = 30000
+    var loud_b: i16 = 5000
+    var mixed = mix_samples(loud_a, loud_b)   // 32767 (i16 MAX, not -30536)
+    println(mixed)
+    0
+```
+
+## Widening: the explicit promotion idiom
+
+When you need C-style "do the math at a wider width":
+
+```sysl
+sum_u8s(xs: []u8) -> int
+    var total: int = 0
+    for x in xs
+        total = total + int(x)    // explicit widen on each operand
+    total
+```
+
+The `int(x)` cast is zero-cost on every backend — it's just a register-width zero-extension.
+
+## See also
+
+- [Type Compatibility and Coercion](/language/type-compatibility) — when integer casts are required.
+- [Expressions](/language/expressions) — the operator precedence table.
+- [Runtime Safety](/language/runtime-safety) — what traps look like when contracts fail on integer operations.

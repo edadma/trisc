@@ -1,0 +1,172 @@
+---
+title: Type Declarations
+description: Type aliases, derived types, range-constrained subtypes, and where-predicates.
+---
+
+Sysl has a single `type` keyword that covers four concepts that other languages tend to spread across keywords:
+
+- **Plain aliases** — a transparent name for an existing type.
+- **Derived types** (`new`) — a nominally distinct type over the same base.
+- **Range constraints** (`within`) — base-compatible subtype with bounds checks.
+- **Predicate constraints** (`where`) — base-compatible subtype with an arbitrary boolean test.
+
+Two orthogonal modifiers (`new`, `within`/`where`) compose:
+
+```sysl
+type Callback = (int) -> int                       // plain alias (transparent)
+type Age      = int within 0..150                  // subtype: base-compatible, range-checked
+type Meters   = new f64                            // derived: nominally distinct, no cast mixing
+type SafeAge  = new int within 0..150              // derived + constrained
+type Even     = int where value % 2 == 0           // arbitrary predicate on value
+type PosEven  = int within 0..100 where value % 2 == 0   // within + where combined
+```
+
+## The compatibility matrix
+
+| Form | Base-compatible? | Runtime check? |
+|------|------------------|----------------|
+| `type A = B` | yes | no |
+| `type A = B within r` | yes | range |
+| `type A = B where p` | yes | predicate |
+| `type A = new B` | no | no |
+| `type A = new B within r` | no | range |
+| `type A = new B where p` | no | predicate |
+| `type A = new B within r where p` | no | both |
+
+**Base-compatible** means values flow between the type and its base without an explicit cast. **Nominally distinct** (`new`) means mixing the derived and base types in arithmetic or assignment is a compile error.
+
+## Range syntax (`within`)
+
+Bounds must be numeric literals (including `char`, which is `u32`) or references to a `const`; an optional unary sign is allowed:
+
+| Syntax | Meaning | Example |
+|--------|---------|---------|
+| `lo..hi` | Inclusive: `[lo, hi]` | `type Age = int within 0..150` |
+| `lo..<hi` | Exclusive upper: `[lo, hi)` | `type Prob = f64 within 0.0..<1.0` |
+
+```sysl
+type Age = int within 0..150
+
+var a: Age = 25            // ok
+var b: Age = 200           // traps at runtime
+```
+
+## Where predicates
+
+`where <bool-expr>` attaches an arbitrary boolean predicate. Inside the predicate, `value` binds to the value being checked:
+
+```sysl
+type Even = int where value % 2 == 0
+
+var x: Even = 4            // ok
+var y: Even = 5            // traps at runtime
+```
+
+The predicate runs at every produce site (assignment, parameter bind, return, explicit cast). A dedicated synthetic function `__pred_<TypeName>(value) -> value` is emitted and called at each check site. Unlike `within` bounds, `where` predicates are not compile-time folded — even for literals — because the predicate body can be arbitrary user code.
+
+## Derived types (`new`)
+
+Adding `new` makes the type nominally distinct from its base. Mixing requires an explicit cast:
+
+```sysl
+type Meters = new f64
+type Feet   = new f64
+
+walk(d: Meters) -> Meters = Meters(f64(d) + 1.0)
+
+main() -> int
+    var m: Meters = Meters(3.0)
+    var f: Feet   = Feet(3.0)
+    // m + f                          // ERROR: mixed nominal types
+    // var bad: Meters = 5.0          // ERROR: bare f64 not assignable
+    var ok: Meters = walk(m)          // OK
+    0
+```
+
+Arithmetic between two values of the same derived type yields that derived type. Out-of-range literal bounds are caught at compile time; any runtime violation traps.
+
+## Combining modifiers
+
+All four corners of the modifier matrix are valid:
+
+```sysl
+type Age      = int within 0..150                              // subtype + range
+type Even     = int where value % 2 == 0                       // subtype + predicate
+type SafeAge  = new int within 0..150                          // derived + range
+type Meters   = new f64                                        // derived only
+type EvenPos  = new int within 1..100 where value % 2 == 0     // derived + range + predicate
+```
+
+When both `within` and `where` are present, the range is checked first (cheaper), then the predicate.
+
+## Plain aliases
+
+The simplest form — a transparent rename:
+
+```sysl
+type IntPtr   = *int
+type Callback = (int) -> int
+```
+
+Plain aliases never run runtime checks and never produce a distinct type. They are pure type-level abbreviations.
+
+## Generic type aliases
+
+A type alias may take type parameters in `[...]` after the name. The parameters bind in the right-hand side and are substituted at each use site:
+
+```sysl
+type Transform[T]   = (T) -> T                  // generic function alias
+type Pair[A, B]     = (A) -> B                  // multiple parameters
+type Predicate[T]   = (T) -> bool               // common combinator shape
+type ParseResult[T] = Result[T, string]         // re-parameterize a generic enum
+```
+
+Aliases compose with generic functions and methods naturally:
+
+```sysl
+apply(f: Transform[int], x: int) -> int = f(x)
+
+unwrap_or[T, E](r: Result[T, E], default: T) -> T
+    r match
+        Ok(v)  -> v
+        Err(_) -> default
+```
+
+### Nominal generic aliases (`new`)
+
+Adding `new` makes each instantiation a distinct nominal type:
+
+```sysl
+type Parser[A] = new (int) -> ParseResult[A]
+
+id_i32(x: int) -> int = x
+
+main() -> int
+    var p: Parser[int] = Parser[int](id_i32)   // wrap with explicit cast
+    7
+```
+
+Each instantiation (`Parser[int]`, `Parser[string]`, etc.) is its own type. Trait/impl dispatch and operator overloading bind on the instantiation, not the underlying base, which lets patterns like `impl[A, B] Concat[Parser[A], Parser[B], Parser[(A, B)]]` express heterogeneous combinator operators directly.
+
+Wrapping uses the explicit cast `Parser[A](value)`; unwrapping uses an explicit cast to the underlying. There is no implicit conversion in either direction.
+
+### Restrictions
+
+`within` and `where` are rejected on generic aliases — both need scalar ordering or operations on `T`, which aren't available without trait bounds. They are rejected even when combined with `new`. Use a non-generic type declaration when you want a constrained type.
+
+### Bounds and defaults
+
+Type parameters carry trait bounds and defaults exactly like generic functions, structs, and enums:
+
+```sysl
+type Cmp[T: Ord]                  = (T, T) -> int
+type Cache[K: Hash, V = string]   = ...
+```
+
+The bound is enforced at each instantiation site; defaults fill in when the argument is missing.
+
+## See also
+
+- [Type Attributes](/language/types/type-attributes) — `T::First`, `T::Valid(x)`, `T::Image(x)` on constrained and enum types.
+- [Generics](/language/functions/generics) — generic functions, structs, and enums.
+- [Type Compatibility and Coercion](/language/type-compatibility) — when casts are required.

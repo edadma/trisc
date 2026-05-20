@@ -1,0 +1,87 @@
+---
+title: Run the Same Test Across Multiple Backends
+description: "Validating that your library works identically on interpreter, LLVM, TRISC, and the rest."
+---
+
+The same `#test` function compiles for every backend. The test runner has a `--backend` flag to pick which one:
+
+```bash
+sbt "syslCliJVM/run test --backend interpreter mylib/"
+sbt "syslCliJVM/run test --backend llvm-host mylib/"
+sbt "syslCliJVM/run test --backend trisc mylib/"
+sbt "syslCliJVM/run test --backend svm-host mylib/"
+sbt "syslCliJVM/run test --backend riscv64 mylib/"
+sbt "syslCliJVM/run test --backend riscv32 mylib/"
+sbt "syslCliJVM/run test --backend wasm32 mylib/"
+```
+
+This is the canonical way to lock in cross-backend correctness. If a test passes on the interpreter but fails on TRISC, that's a real bug — usually a codegen divergence — and worth filing.
+
+## Default behavior
+
+Without `--backend`, the runner uses the interpreter. That's the fastest backend to iterate on but the one most likely to mask codegen issues.
+
+For day-to-day development of pure library code, use the interpreter. For anything that touches integer arithmetic edge cases, allocation patterns, or system calls, run the LLVM backend too. Before claiming a library is "done", run all seven.
+
+## Filtering
+
+If only a subset of tests is relevant to multi-backend testing (e.g., excluding tests that are inherently host-only):
+
+```bash
+sbt "syslCliJVM/run test --backend trisc --filter pure_ mylib/"
+```
+
+The `--filter` flag matches against test/display names by substring. Combined with naming convention (`#test test_pure_arithmetic`), you can scope tests to specific backends.
+
+## Backend-specific test files
+
+If a test really cannot work on some backends — e.g., it uses `fork()` which only the LLVM-host has — put it in a separate file and skip that file when invoking incompatible backends. Currently there's no `#test(backends = ["llvm-host"])` attribute; use directory layout:
+
+```
+mylib/
+├── lib.sysl              # tested on all backends
+└── tests/
+    ├── unit/             # cross-backend tests
+    │   └── arithmetic.sysl
+    └── linux/            # llvm-host only
+        └── fork_test.sysl
+```
+
+Then invoke per-directory:
+
+```bash
+sbt "syslCliJVM/run test --backend trisc mylib/lib.sysl mylib/tests/unit/"
+sbt "syslCliJVM/run test --backend llvm-host mylib/lib.sysl mylib/tests/unit/ mylib/tests/linux/"
+```
+
+## CI configuration
+
+A typical CI matrix runs each backend in parallel:
+
+```yaml
+jobs:
+  test:
+    strategy:
+      matrix:
+        backend: [interpreter, llvm-host, svm-host, trisc, riscv64, riscv32, wasm32]
+    steps:
+      - run: sbt "syslCliJVM/run test --backend ${{ matrix.backend }} std/"
+```
+
+Failure on any backend fails the build. This is how `std/` is regression-tested before every release.
+
+## When backends diverge
+
+If a test passes on backend A but fails on backend B with identical input, that's a real bug. Common categories:
+
+- **Codegen divergence** — the same source produces different code on two backends.
+- **Library divergence** — an `extern` resolves to different host functions.
+- **Float precision** — TRISC uses `f64` internally for `f32`, which can differ from LLVM's `float` by a ULP or two on edge cases.
+
+File these as compiler bugs (per CLAUDE.md rule 8, compiler bugs are highest priority) — never paper over them in user code.
+
+## See also
+
+- [Attributes: #test](/language/attributes/test) — running tests.
+- [Targeting Bare Metal](/tutorials/bare-metal) — what each backend is good at.
+- [Runtime Safety](/language/runtime-safety) — per-backend trap delivery (where panic markers can differ).

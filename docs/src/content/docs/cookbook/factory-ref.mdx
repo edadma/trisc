@@ -1,0 +1,87 @@
+---
+title: Return a Ref-Counted Struct from a Factory
+description: "Functions that construct a heap-allocated struct and hand ownership to the caller."
+---
+
+The pattern: a factory function builds a struct via `new` and returns the resulting `&T`. The caller becomes the owner; ARC handles cleanup automatically when the last `&T` goes out of scope.
+
+```sysl
+struct Config
+    threshold: int
+    verbose: bool
+    timeout_ms: int
+
+default_config() -> &Config
+    new Config(100, false, 5000)
+
+debug_config() -> &Config
+    new Config(50, true, 30000)
+
+main() -> int
+    val cfg = default_config()
+    // ... use cfg ...
+    cfg.threshold       // 100
+```
+
+### Why `&Config`, not `Config`?
+
+A value-returning factory (`-> Config`) would still work, but it would mean the caller gets the struct **by value** — a stack copy. That's fine for small structs but two problems for larger or shared data:
+
+- Modifying the returned value doesn't propagate back to other callers who got their own copies.
+- Larger structs become expensive to copy at each `=` and parameter pass.
+
+`&Config` returns a refcount-managed heap reference. All copies share the underlying allocation; ARC tracks how many references exist.
+
+## With contracts
+
+```sysl
+make_buffer(size: int) -> &Buffer
+    require size > 0, "buffer size must be positive"
+    require size <= 1_000_000, "buffer size too large"
+    ensure result.size == size
+    val b = new Buffer(malloc(size), size)
+    b
+```
+
+`result` in the `ensure` clause refers to the function's return value. See [Functions: Contracts](/language/functions/contracts).
+
+## With `deinit` for cleanup
+
+If the constructed struct owns external resources, declare a `deinit` block:
+
+```sysl
+struct Buffer
+    data: *byte
+    size: int
+
+Buffer.deinit()
+    free(self.data)        // called when refcount hits 0
+
+make_buffer(size: int) -> &Buffer
+    val b = new Buffer(malloc(size), size)
+    b
+
+main() -> int
+    val buf = make_buffer(1024)
+    // ... use buf ...
+    0      // buf goes out of scope → deinit runs → malloc'd data freed
+```
+
+See [Deinit & Defer](/language/functions/deinit-and-defer).
+
+## Avoid: returning a `*T`
+
+```sysl
+// AVOID — pointer is dangling after the function returns
+make_thing() -> *Thing
+    val t = Thing(...)
+    &t                   // local stack address
+```
+
+The local `t` is destroyed when the function returns; the caller gets a dangling pointer. Always use `&T` (heap-allocated, refcount-managed) for factory return values, not `*T` (raw, lifetime-unmanaged).
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes) — `T` / `&T` / `*T` semantics.
+- [Deinit & Defer](/language/functions/deinit-and-defer) — refcount=0 cleanup.
+- [Memory Modes by Example](/tutorials/memory-modes) — when to pick each mode.

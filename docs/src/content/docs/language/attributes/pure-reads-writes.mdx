@@ -1,0 +1,163 @@
+---
+title: "#pure / #reads / #writes"
+description: Declare effect bounds — what functions can and cannot do.
+---
+
+Three attributes track side effects in Sysl: `#pure` (no effects), `#reads(...)` (specific module vars read), and `#writes(...)` (specific module vars written).
+
+These are static-only enforcement — at compile time, the analyzer rejects violations. There's no runtime overhead; the discipline is on the source code.
+
+## `#pure`
+
+A function marked `#pure` is checked by the compiler to have no observable side effects. Pure functions are a discipline enforcement tool: any violation is a compile-time error, not a warning.
+
+```sysl
+#pure
+square(x: int) -> int = x * x
+
+#pure
+fact(n: int) -> int
+    if n <= 1 then return 1
+    return n * fact(n - 1)
+```
+
+### What a `#pure` function may do
+
+- Read its parameters and module-level `const`s
+- Declare and mutate **local** variables (can't escape)
+- Call other `#pure` functions (same or different file)
+- Recurse (including mutually)
+- Use arithmetic, comparison, casts, control flow (if/while/for/match/break/continue)
+- Call `assert(cond, msg)` — termination is the only side effect, consistent with Ada `pragma Assert` policy
+
+### What a `#pure` function may NOT do
+
+- Call any non-`#pure` user function
+- Call IO builtins (`puts`, `print`, `println`, `putchar`, `puti`)
+- Call allocation builtins (`malloc`, `free`, `calloc`, `realloc`, `sbrk`)
+- Call `panic` / `abort` / `expect` (side-effecting traps with observable output)
+- Write to module-level `var`s
+- Write through a pointer (`*p = v`), indexed slot (`arr[i] = v`), or struct field (`p.f = v`) — callers might see the write
+- Increment/decrement struct fields (`p.f++`)
+- Heap-allocate (`new`), append to a slice, construct closures
+- Make indirect (function-pointer) calls or interface-dispatch calls
+- Contain `asm` blocks
+
+### Cross-module propagation
+
+`#pure` is carried through `.smeta` files. A `#pure` function in one module can call a `#pure` function in another module. Imported functions without `#pure` are impure, so annotate library functions you intend to call from pure code.
+
+### Interaction with `--no-contracts`
+
+`#pure` checking is not a contract — it is a static enforcement and always runs. Only the runtime verification that contracts describe is elided by `--no-contracts`.
+
+### Comparison with `def`
+
+[`def`](/language/functions/def-pure-functions) is implicitly `#pure` plus a few extras (zero-arg auto-call, forward references for mutual recursion). Use `def` for short combinator-shaped helpers; use `#pure` on regular functions for everything else.
+
+## `#reads(...)` / `#writes(...)`
+
+A looser sibling of `#pure`. The two attributes declare which module-level (file-scope or imported) mutable variables a function may read or write. They are the Sysl equivalent of SPARK's `Global => (Input => ..., Output => ..., In_Out => ...)` aspect, and are the static foundation a future verifier (Why3 / Boogie) needs to do sound weakest-precondition reasoning across function calls.
+
+```sysl
+var config_root: int = 0
+var io_buffer: [256]byte
+var io_pos = 0i32
+
+#reads(config_root)
+get_max_threads() -> int = config_root
+
+#reads(io_buffer)
+#writes(io_pos)
+write_byte(b: byte)
+    io_buffer[io_pos] = b
+    io_pos += 1
+
+#reads()
+#writes()
+double(x: int) -> int = x * 2     // no module state; allocation/IO still allowed
+```
+
+### Syntax
+
+Each attribute goes on its own line above the declaration (matching `#pure` / `#deprecated` style). Either may be omitted; absence-of-both keeps the function in the unannotated default.
+
+Identifiers must resolve to module-level mutable `var`s (or `#address(N)` MMIO vars). `val`s and `const`s are immutable and cannot appear; pass them around freely without declaring an effect.
+
+### The three rules the compiler enforces
+
+1. **Body conformance.** In a function with `#reads(R)` and `#writes(W)`:
+   - Every read of a module-level var V requires `V ∈ R ∪ W`.
+   - Every write to a module-level var V requires `V ∈ W`.
+   - Reads inside `require` / `ensure` / `invariant` / `assume` / `variant` clauses, and inside `for all` / `for some` predicates, count as reads.
+
+2. **Call-site subset.** A call to a function with `#reads(R')` `#writes(W')` requires `R' ⊆ R ∪ W` and `W' ⊆ W`. The compiler computes both subsets at the call site and reports the offending variable name on mismatch.
+
+3. **Strict closure.** An annotated function may only call other annotated functions (or `#pure` functions, which count as `#reads() #writes()`) and the pure builtins. Indirect calls, interface dispatch, `new`, `asm`, and unannotated functions are rejected. The intent is leaves-up adoption: annotate the bottom of the call graph first, then work upward.
+
+### Relationship to `#pure`
+
+`#pure` keeps its existing stricter discipline — no allocation, no I/O, no indirect calls, no closure construction — and is shorthand for `#reads() #writes()` plus those extra bans. Combining `#pure` with explicit `#reads`/`#writes` is rejected as redundant.
+
+### Compound assignment
+
+`counter += n` is a read-then-write of `counter`. By Rule 1, the implicit read is permitted whenever `counter` is in `#reads ∪ #writes`, so declaring `#writes(counter)` alone is sufficient. (SPARK's stricter `Output` vs `In_Out` distinction is deliberately not modeled in v1.)
+
+### Indirect calls and interfaces
+
+Function-pointer types and interface types do not yet carry effect annotations, so they have no callable bound on what they touch. Calls through them inside an annotated function are rejected for v1. v2 will lift this once `FuncType` / `InterfaceType` grow optional effect signatures.
+
+### Allocation
+
+`new`, `new []T`, slice `append`, and closure construction are all rejected from annotated function bodies. Allocation is an effect that the v1 model does not track; a future `#allocates(...)` attribute will handle it.
+
+### Adoption strategy
+
+Add annotations from the leaves upward. Existing code is untouched (no annotations means "effects unknown" — exactly today's behavior, with no new restrictions). The first time you mark a leaf function `#reads() #writes()`, every annotated caller must follow suit; this is the point — it propagates the discipline up to the surfaces of your program at your own pace.
+
+## Effect signatures on function types and interface methods
+
+`#pure`, `#reads(...)`, and `#writes(...)` are also accepted as a suffix on function types and on interface methods, so callbacks and interface-dispatched code can participate in the same effect tracking as direct calls.
+
+```sysl
+sort(arr: &[]int, cmp: (int, int) -> bool #pure)   // pure comparator
+
+interface Sink
+    push(x: int) #writes(buffer)                    // writes one global
+
+#writes(buffer)
+drain(s: Sink, arr: []int)
+    for i in 0..<len(arr) do s.push(arr[i])         // allowed — iface effect is a subset
+```
+
+### Rules at an indirect-call site
+
+Calling through a function-typed value `f` from a function with `#reads(R)` `#writes(W)` requires `f`'s effect signature to be one of:
+
+- **`#pure`** — always allowed (no module effects).
+- **`#reads(Rf)` / `#writes(Wf)`** — allowed iff `Rf ⊆ R ∪ W` and `Wf ⊆ W`.
+- **No signature** — **rejected**: the compiler cannot prove the call stays within the caller's declared effects.
+
+### Closure effect inference
+
+Lambda expressions synthesize a `FuncType` whose effects are inferred from the closure body. The inference walks the typed body and produces one of three outcomes:
+
+- **`#pure`** — no module-level reads/writes, no allocation, no impure calls, no writes to captured outer locals.
+- **`#reads(R)` / `#writes(W)`** — specific module-level mutable globals were read or written, and every called function is itself annotated so its effects can be absorbed into the closure's signature.
+- **`Unknown`** — the body contains an un-summarizable construct (`new`, `append`, asm, unannotated impure call, indirect call through an Unknown-typed callable, write to a captured outer local).
+
+```sysl
+sort(arr, (a: int, b: int) -> a < b)            // pure → fits any #pure slot
+find(arr, (v: int) -> v > threshold)            // reads `threshold` → fits #reads(threshold) slot
+each(arr, (v: int) -> count = count + v)        // writes `count` → fits #writes(count) slot
+```
+
+### Lattice direction
+
+`#pure ≤ #reads(R)/#writes(W) ≤ unannotated`. A `#pure` callable flows into any slot; an unannotated callable can't flow into a `#pure` slot. The unifier respects this in generic-impl dispatch and in generic-parameter inference.
+
+## See also
+
+- [Functions: Def & Pure](/language/functions/def-pure-functions) — `def` syntactic shortcut.
+- [Attributes: #ghost](/language/attributes/ghost) — verification-only state.
+- [Variables: module_invariant](/language/variables-and-constants#module_invariant-expr) — predicates over module state.

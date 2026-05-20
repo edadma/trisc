@@ -1,0 +1,115 @@
+---
+title: Runtime Safety
+description: The trap path across all seven backends — categories, per-backend delivery, test runner integration, and how to disable contracts.
+---
+
+Every backend has a trapping contract for the same set of runtime errors. What differs is the *delivery shape* — what stderr looks like, how the test runner detects the trap, what exit code or signal is produced.
+
+## Categories
+
+| Category | Trigger |
+|---|---|
+| Out-of-bounds | `arr[i]`, slice index, ref-slice index outside `[0, len)` |
+| Null pointer | `new T(...)` / `new [n]T` when `malloc` returns null |
+| Divide-by-zero | integer `/` or `%` with zero divisor |
+| Malloc failure | any `new` / closure-env / string-buf alloc that returns null |
+| Panic / Assert | `panic(msg)`, `assert(cond, msg)` (when false), `expect(...)` |
+| Abort | user-called `abort()` |
+| Range check | `T` declared `within r` or `where p` with a failing produce site |
+| Contract | `require` / `ensure` / `invariant` / `assume` clause that's false at runtime |
+| Enum attribute | `::Succ` past upper bound, `::Pred` past lower, `::Val(n)` for out-of-range `n`, `::Value(s)` for unknown name |
+
+## Per-backend delivery
+
+### LLVM family (`llvm-host`, `riscv64`, `riscv32`, `wasm32`)
+
+Writes a category line to file descriptor 2 (stderr) and then calls libc `abort()`. On hosted platforms this raises `SIGABRT`; on bare-metal RISC-V it halts the qemu machine; under wasmtime it exits the runtime.
+
+| Category | Line written to stderr |
+|---|---|
+| Out-of-bounds | `panic: index out of bounds\n` |
+| Divide-by-zero | `panic: divide by zero\n` |
+| Malloc failure | `panic: out of memory\n` |
+| Abort | `panic: abort\n` |
+| Panic | `panic: <user message>\n` |
+| Assert | `assertion failed: <user message>\n` |
+| Range check / Contract | `range check failed: <kind>[: <message>]\n` |
+
+For contract failures, `<kind>` is one of `precondition check failed`, `postcondition check failed`, `loop invariant check failed`, `assume check failed`, etc. The user-supplied message (if any) is appended after a colon.
+
+### TRISC
+
+Loads the error code into `r1` and emits `trap 1`. On the OS, the trap handler terminates the faulting thread and outputs `!N` where N is the value of `r1`. On bare metal, execution halts.
+
+| `r1` | Category |
+|---|---|
+| 1 | Out-of-bounds |
+| 2 | Null pointer |
+| 3 | Abort |
+| 4 | Panic / Assert |
+| 5 | Range check / Divide-by-zero |
+| 6 | Contract |
+
+The compact codes are chosen so the TRISC test harness can detect them with a single instruction-byte read in the trap handler.
+
+### SVM
+
+Emits `trap 1` directly. The trap immediate is a single byte (1), and there is no distinguishing error code on the operand stack for most categories — they are differentiated only by an asm-source comment emitted above the trap.
+
+The exception is user-called `abort()`, which pushes the byte `3` onto the operand stack before trapping (matching TRISC's `r1 = 3` convention) so a debugging host can recover the cause.
+
+### Interpreter
+
+Raises a Scala exception carrying the category string and any user-supplied message. Failing tests show the exception text in the test output capture.
+
+## Test runner integration
+
+`sysl test` recognizes a panic on stderr / stdout / interpreter exception text via three prefixes:
+
+- `panic: ` — covers index OOB, divide-by-zero, OOM, abort, panic, expect
+- `assertion failed: ` — covers `assert(...)` failures
+- `range check failed: ` — covers `within` / `where` failures and all contract clauses
+
+A `#test(should_panic)` test must produce text starting with one of these prefixes; `#test(should_panic: "substring")` additionally substring-matches the suffix after the prefix.
+
+```sysl
+#test(should_panic)
+test_div_zero() -> unit
+    val x = 10 / 0      // produces "panic: divide by zero"
+
+#test(should_panic: "x must be non-negative")
+test_precondition() -> unit
+    val r = sqrt(-1.0)  // produces "range check failed: precondition check failed: x must be non-negative"
+```
+
+## Disabling contracts
+
+Pass `--no-contracts` to `sysl compile` or `sysl run` to strip every contract check at compile time:
+
+- `require` / `ensure` clauses
+- `invariant` statements in loops
+- `variant` statements in loops (entire hoisted check state is elided)
+- `assume` statements
+- struct `invariant` clauses (no per-assignment check)
+- `where`-predicate bodies (synthesized predicate function still runs but performs no check)
+- `within`-range checks (compile-time literal check + runtime range check both skipped)
+- enum `::Pos` / `::Val` / `::Value` / `::Succ` / `::Pred` and within `::Succ` / `::Pred` traps (helper still returns a value, but invalid input yields garbage)
+
+This is Ada's `pragma Assertion_Policy(Disable)` equivalent — the user takes responsibility for correctness in exchange for no runtime overhead. Contract clauses still **type-check** at compile time regardless of the flag; only the runtime traps are elided.
+
+**`::Valid(x)` is *not* a contract** — it is non-throwing introspection — and is never stripped.
+
+## What doesn't trap
+
+The following are explicitly not in the trap path:
+
+- **Integer overflow** — wraps silently at the declared width. Use `saturating_add` / `saturating_sub` / `saturating_mul` if you want a trap (none of which actually trap — they clamp instead). See [Integers and Overflow](/language/types/integers-and-overflow).
+- **Use after `free`** — `*T` is unmanaged; using a freed pointer is undefined behavior, not a trap.
+- **Refcount cycle** — ARC leaks the cycle. No trap, no GC pass to detect it. See [Three Allocation Modes](/language/types/three-allocation-modes#cycle-limitation).
+- **Stack overflow** — depends on the OS / runtime. On Linux LLVM-host, it raises `SIGSEGV`. On TRISC, it eventually walks off the bottom of the stack and traps as an OOB on whatever happens to be below.
+
+## See also
+
+- [Functions: Contracts](/language/functions/contracts) — `require`, `ensure`, `assume`, etc.
+- [Type Declarations](/language/types/type-declarations) — `within` and `where` checks.
+- [Builtins: panic / assert / abort](/language/builtins) — explicit trap entry points.

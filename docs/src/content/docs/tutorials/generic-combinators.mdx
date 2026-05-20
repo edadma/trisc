@@ -1,0 +1,184 @@
+---
+title: Generic Combinators — A Tiny Parser Library
+description: "Build a working parser-combinator library in ~50 lines, showing off generics, nominal aliases, user operators, and call-by-name."
+---
+
+This tutorial builds a small parser-combinator library in Sysl. It exercises:
+
+- Generic functions and structs.
+- Nominal type aliases (`type Parser[A] = new ...`).
+- User-defined operator symbols (`~`, `|`, `^^`).
+- Call-by-name parameters (`=> T`) for recursive grammars.
+- Closures as first-class values.
+
+By the end you'll have something that parses simple arithmetic expressions like `1 + 2 * 3`.
+
+## The Parser type
+
+A parser is a function from input to a result that either succeeded with a value and a new input position, or failed:
+
+```sysl
+struct Input
+    src: string
+    pos: int
+
+enum ParseResult[A]
+    Success(value: A, rest: Input)
+    Failure(msg: string, rest: Input)
+
+type Parser[A] = new (Input) -> ParseResult[A]
+```
+
+The `new` keyword on the type alias makes each instantiation (`Parser[int]`, `Parser[string]`, etc.) a distinct nominal type. This matters for operator dispatch later — see [Type Declarations](/language/types/type-declarations#nominal-generic-aliases-new).
+
+## Two primitive parsers
+
+The simplest building blocks: `pure` always succeeds with the same value; `fail` always fails:
+
+```sysl
+pure[A](v: A) -> Parser[A] =
+    Parser[A]((inp: Input) -> Success(v, inp))
+
+fail[A](msg: string) -> Parser[A] =
+    Parser[A]((inp: Input) -> Failure(msg, inp))
+```
+
+`Parser[A]((inp: Input) -> ...)` is the wrapping cast — the lambda is `(Input) -> ParseResult[A]`, which is the underlying function type. The cast nominalizes it.
+
+A real primitive: parse one specific character.
+
+```sysl
+char_p(c: u32) -> Parser[u32] =
+    Parser[u32]((inp: Input) ->
+        if inp.pos >= len(inp.src) then
+            Failure(s"expected '${str(c)}', got EOF", inp)
+        elif u32(inp.src[inp.pos]) == c then
+            Success(c, Input(inp.src, inp.pos + 1))
+        else
+            Failure(s"expected '${str(c)}'", inp))
+```
+
+`char_p('a')` is a parser that consumes one `'a'`.
+
+## Sequence: `~`
+
+The `~` combinator runs two parsers in sequence, returning a tuple:
+
+```sysl
+trait Concat[A, B, R]
+    #operator("~")
+    concat(a: A, b: B) -> R
+
+impl[A, B] Concat[Parser[A], Parser[B], Parser[(A, B)]]
+    concat(a: Parser[A], b: Parser[B]) -> Parser[(A, B)] =
+        Parser[(A, B)]((inp: Input) ->
+            a(inp) match
+                Success(va, n1) ->
+                    b(n1) match
+                        Success(vb, n2) -> Success((va, vb), n2)
+                        Failure(m, n) -> Failure(m, n)
+                Failure(m, n) -> Failure(m, n))
+```
+
+Two things to notice:
+
+- **`#operator("~")`** on the trait method registers `~` as a user infix operator. The lexer picks it up greedily.
+- **Generic impl** with `[A, B]` — works for any pair of parsers. The compiler monomorphizes one specialization per instantiation.
+
+Now `char_p('a') ~ char_p('b')` is a parser that consumes `"ab"` and returns `('a', 'b')`.
+
+## Alternation: `|`
+
+The `|` combinator tries the first parser; on failure, tries the second. **Crucially**, the second parser must not be evaluated until the first fails — that's what `=> T` (call-by-name) gives us:
+
+```sysl
+trait Or[T]
+    #operator("|")
+    or_op(a: T, b: => T) -> T
+
+impl[A] Or[Parser[A]]
+    or_op(a: Parser[A], b: => Parser[A]) -> Parser[A] =
+        Parser[A]((inp: Input) ->
+            a(inp) match
+                Success(v, n) -> Success(v, n)
+                Failure(_, _) -> b(inp))
+```
+
+The `=> Parser[A]` parameter is a thunk — each reference to `b` re-evaluates the original expression. This is what makes recursive grammars (below) not loop at construction time. See [Call-by-Name](/language/functions/parameters#call-by-name--t).
+
+## Map: `^^`
+
+The `^^` combinator transforms the result of a successful parse:
+
+```sysl
+trait Map[A, F, R]
+    #operator("^^")
+    pmap(a: A, f: F) -> R
+
+impl[A, B] Map[Parser[A], (A) -> B, Parser[B]]
+    pmap(a: Parser[A], f: (A) -> B) -> Parser[B] =
+        Parser[B]((inp: Input) ->
+            a(inp) match
+                Success(v, n) -> Success(f(v), n)
+                Failure(m, n) -> Failure(m, n))
+```
+
+Note that the impl pattern uses `(A) -> B` — an unannotated function type. Closure effect inference will produce `(A) -> B #pure` for most closures, and the lattice rule `#pure ≤ unannotated` lets it flow into the slot. See [Effect Signatures](/language/attributes/pure-reads-writes#effect-signatures-on-function-types-and-interface-methods) for the details.
+
+## Putting it together: parse a digit
+
+```sysl
+digit_p -> Parser[int] =
+    (char_p(u32('0')) | char_p(u32('1')) | char_p(u32('2'))
+     | char_p(u32('3')) | char_p(u32('4')) | char_p(u32('5'))
+     | char_p(u32('6')) | char_p(u32('7')) | char_p(u32('8'))
+     | char_p(u32('9'))) ^^ ((c: u32) -> int(c) - int('0'))
+```
+
+This is a parameterless function (`digit_p`, no `()`). Bare references to it auto-call. See [Parameterless Functions](/language/functions/overview#parameterless-functions).
+
+The body builds a parser that tries each digit character, then maps the resulting `u32` codepoint to an `int` value.
+
+## A recursive grammar
+
+Now we can write a real grammar. Without `=> T`, this would infinite-loop at construction time because `expr_p` references itself before the body has finished executing:
+
+```sysl
+factor_p -> Parser[int] =
+    digit_p | (char_p(u32('(')) ~ expr_p ~ char_p(u32(')')) ^^ ((trip: ((u32, int), u32)) -> trip.0.1))
+
+term_p -> Parser[int] =
+    (factor_p ~ char_p(u32('*')) ~ factor_p ^^ ((trip: ((int, u32), int)) -> trip.0.0 * trip.1))
+    | factor_p
+
+expr_p -> Parser[int] =
+    (term_p ~ char_p(u32('+')) ~ term_p ^^ ((trip: ((int, u32), int)) -> trip.0.0 + trip.1))
+    | term_p
+```
+
+This parses one digit, optionally one `*` between digits, optionally one `+` between terms, and parenthesized sub-expressions. It's not a full expression parser — left-recursion (e.g. `1+2+3`) isn't handled — but it shows the shape.
+
+## Running the parser
+
+```sysl
+main() -> int
+    val inp = Input("3+4", 0)
+    expr_p(inp) match
+        Success(v, _) -> v          // 7
+        Failure(_, _) -> -1
+```
+
+## What you've learned
+
+- **Generic functions and structs** scale to combinator libraries.
+- **Nominal aliases (`new`)** are essential for operator dispatch — the operator implementations bind on `Parser[A]`, not on the underlying function type.
+- **User operators (`#operator`)** let you express `a ~ b ^^ f` directly instead of `concat(a, b).map(f)`.
+- **Call-by-name (`=> T`)** breaks the recursion-at-construction-time problem for grammars.
+- **Closures** are first-class values — `^^ ((trip) -> ...)` is the natural way to write the transformation.
+
+## Where to go next
+
+- Look at `std/strings/...` for a real-world example of generic combinators in production.
+- See [Generics](/language/functions/generics) for the full generic-function reference.
+- See [Operator Overloading](/language/functions/operator-overloading) for the operator dispatch rules.
+- See [Effect Signatures](/language/attributes/pure-reads-writes#effect-signatures-on-function-types-and-interface-methods) for how closures' inferred `#pure` flows into impl pattern slots.

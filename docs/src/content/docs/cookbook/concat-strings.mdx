@@ -1,0 +1,74 @@
+---
+title: Concatenate Strings
+description: "The four ways to build a string from pieces."
+---
+
+## With `+`
+
+The simplest case — concatenate two strings:
+
+```sysl
+val greeting = "hello, " + "world"
+// "hello, world"
+```
+
+`+` on strings produces a fresh ref-counted string. Both operands are copied into the new buffer.
+
+## With interpolation (`s"..."`)
+
+When you're mixing literals and variables:
+
+```sysl
+val name = "trisc"
+val msg = s"hello, $name"
+// "hello, trisc"
+```
+
+Non-string expressions are auto-converted via `str()`:
+
+```sysl
+val n = 42
+val msg = s"answer is $n"
+// "answer is 42"
+```
+
+Use `${expr}` for arbitrary expressions:
+
+```sysl
+val msg = s"twice is ${n * 2}"
+// "twice is 84"
+```
+
+## With format strings (`f"..."`)
+
+When you need printf-style formatting:
+
+```sysl
+val n = 255
+val msg = f"hex: $n%08x"
+// "hex: 000000ff"
+```
+
+See [Strings: Format Strings](/language/strings#format-strings-f-strings) for the full spec list.
+
+## With `append` (when building incrementally)
+
+For loops that accumulate, build a byte slice and convert at the end:
+
+```sysl
+build_csv(items: []string) -> string
+    var buf = (new [256]byte)[:0]
+    for i in 0..<len(items)
+        if i > 0
+            buf = append(buf, byte(','))
+        for c in items[i]
+            buf = append(buf, byte(c))
+    string(buf)
+```
+
+This avoids creating intermediate strings — each `+` would allocate a new buffer; `append` grows one buffer as needed.
+
+## See also
+
+- [Strings](/language/strings) — full reference.
+- [Builtins: str](/language/builtins) — value-to-string conversion.

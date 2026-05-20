@@ -1,0 +1,164 @@
+---
+title: Arrays, Slices, and Pointers
+description: Fixed arrays, dynamic arrays, slicing, append, and pointer arithmetic.
+---
+
+Sysl's collection types form a three-tier hierarchy:
+
+- **Fixed arrays** (`[n]T`) — stack-allocated, statically sized.
+- **Dynamic arrays / slices** (`[]T`, `&[]T`) — heap-allocated, runtime length.
+- **Pointers** (`*T`) — raw addresses, unmanaged.
+
+## Fixed arrays
+
+```sysl
+var arr: [5]int           // zero-initialized
+arr[0] = 42
+arr: [3]int = [10, 20, 30]  // array literal
+
+// Byte arrays from string and char literals
+var buf: [5]byte = "hello"          // copies string bytes into array
+var msg: [3]byte = ['H', 'i', '!'] // char literals coerce to bytes
+```
+
+Fixed arrays are value types — they live on the stack, copy by value, and decay to `*T` when passed to a pointer parameter:
+
+```sysl
+sum(arr: *int, n: int) -> int = ...
+
+main() -> int
+    myArr: [5]int = [1, 2, 3, 4, 5]
+    sum(myArr, 5)             // myArr decays to *int
+```
+
+### Chained indexing
+
+Indexing is a repeatable postfix operator — `arr[i][j]` works on arrays of arrays, slices of slices, etc:
+
+```sysl
+val grid = new [3][]int     // array of int slices
+grid[0] = row0[:]
+val v = grid[1][2]          // chain: grid[1] returns []int, then [2] indexes it
+
+// Address-of with chained index
+val p = &stacks[slot][0]    // address of first element of stacks[slot]
+```
+
+### Bounds checking
+
+`arr[i]` checks at runtime that `i` is in `[0, len(arr))`. An out-of-range index traps via the standard runtime-safety path — see [Runtime Safety](/language/runtime-safety).
+
+## Dynamic arrays (heap)
+
+```sysl
+a = new [5]int            // type: &[]int, ref-counted
+a[0] = 42
+len(a)                    // 5 (from heap header)
+cap(a)                    // 5
+// automatically freed when refcount reaches 0
+```
+
+The returned `&[]T` is backed by a heap allocation with a refcount header immediately before the data: `[rc: i64 @ -16 | deinit_ptr: i8* @ -8 | data]`.
+
+Every assignment, parameter pass, and field write of the `&[]T` value increments `rc`; every scope exit, reassignment, and field overwrite decrements. When `rc` reaches 0, the deinit hook walks any rc-bearing elements (decrementing them in turn) and `free` reclaims the block.
+
+Sub-slices created via `a[lo:hi]` share the parent's backing storage and keep the parent alive — the slice descriptor (`{ptr, len, cap}`) is plain-data; the underlying buffer is what carries the count.
+
+## Slices
+
+A slice (`[]T`) is a fat-pointer descriptor `{ptr: *T, len: i32, cap: i32}` — 16 bytes. It can point at a fixed array, a dynamic array, or another slice.
+
+```sysl
+a = new [5]int
+s = a[1:4]                // type: []int, shares backing array
+s = a[:3]                 // s = a[0:3]
+s = a[2:]                 // s = a[2:len]
+s = a[:]                  // s = a[0:len]
+len(s)                    // hi - lo
+cap(s)                    // original_cap - lo
+```
+
+Slices don't own their backing storage — the underlying array (or `&[]T`) does. As long as a slice is reachable, ARC keeps the backing allocation alive.
+
+## append
+
+```sysl
+s = a[:0]                 // empty slice with capacity
+s = append(s, 42)         // returns new slice value
+s = append(s, 99)         // Go semantics: may grow if len == cap
+```
+
+`append` follows Go semantics:
+
+- If `len(s) < cap(s)`, the new element is written in place and `len` increments. The returned slice shares the backing storage.
+- If `len(s) == cap(s)`, a new larger backing allocation is created, the existing elements are copied, the new element is appended, and the returned slice points at the new allocation. The old backing array is freed when its last reference goes out of scope.
+
+The growth factor depends on the backend but is typically 2× the current capacity. **Always use `s = append(s, x)`** — the returned slice may differ from the input.
+
+## Pointers
+
+```sysl
+x = 42
+p = &x                    // p: *int
+*p = 100                  // dereference and assign
+val y = *p                // dereference and read
+```
+
+### Expression lvalues (C-style)
+
+```sysl
+(*p).field = 10           // deref pointer, assign field
+(*p)[i] = 42              // deref pointer, index, assign
+(arr + 2)[0] = 99         // pointer arithmetic, index, assign
+```
+
+### Pointer arithmetic
+
+Pointer arithmetic is **scaled by element size** — `p + 1` advances by `sizeof(T)` bytes:
+
+```sysl
+p = &arr[0]
+val second = *(p + 1)     // pointer + offset
+p++                       // advance by one element
+p += 3                    // advance by 3 elements
+p--                       // retreat by one element
+p -= 2                    // retreat by 2 elements
+```
+
+### Array + offset decay
+
+```sysl
+q = arr + 2               // q: *int (not [n]int)
+```
+
+Array decay applies to the `arr + N` form as well as the bare `arr` form — both produce a `*T`.
+
+### Auto-deref on field access
+
+The compiler inserts the indirection automatically when you access a field through a pointer:
+
+```sysl
+ptr = &p                  // type: *Point
+ptr.x = 50                // auto-deref: (*ptr).x = 50
+```
+
+This works for method calls too: `ptr.method()` is `(*ptr).method()`.
+
+## Choosing the right type
+
+| Use | Type | Notes |
+|-----|------|-------|
+| Stack array, known size | `[n]T` | zero overhead, copies by value |
+| Heap array, ref-counted | `&[]T` | `new [n]T`, auto-freed |
+| Slice view into another | `[]T` | shares backing storage |
+| C-interop pointer | `*T` | raw, no checks, no refcount |
+| Owning ref to a struct | `&T` | refcount-managed |
+| Borrowed ref to a struct | `*T` | unmanaged, caller-responsible |
+
+For most application code, `&[]T` and `[]T` cover the array needs. For kernel/embedded code without an allocator, stick to `[n]T` and `*T`.
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes) — `T` / `&T` / `*T` for non-array types.
+- [Types: Overview](/language/types/overview) — composite type table.
+- [Strings](/language/strings) — strings are byte slices with extra structure.

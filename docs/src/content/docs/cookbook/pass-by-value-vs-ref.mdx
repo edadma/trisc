@@ -1,0 +1,119 @@
+---
+title: Pass a Struct by Value vs by Ref
+description: "Choosing between `f(p: Point)`, `f(p: &Point)`, and `f(p: *Point)` for parameters."
+---
+
+A function that takes a struct parameter has three obvious mode choices:
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+by_value(p: Point) -> int = p.x + p.y       // copy semantics
+by_ref(p: &Point) -> int = p.x + p.y         // refcount-managed reference
+by_ptr(p: *Point) -> int = p.x + p.y         // raw pointer
+```
+
+Each has different performance and semantics.
+
+## Decision matrix
+
+| Mode | Cost per call | Semantics | When to use |
+|------|---------------|-----------|-------------|
+| `T` | bitwise copy | Caller's struct unaffected by callee writes | Small structs, read-only, no sharing |
+| `&T` | incref + decref | Both see the same data; cleanup automatic | Large structs, shared ownership, allocator available |
+| `*T` | nothing | Both see the same data; caller manages lifetime | Kernel code, hardware, C interop |
+
+## When to use `T`
+
+For small structs you only need to read inside the function:
+
+```sysl
+magnitude(p: Point) -> int = p.x * p.x + p.y * p.y
+```
+
+The bitwise copy is cheap (16 bytes for a 2-int point) and the body can freely mutate `p` without affecting the caller. The compiler may optimize away the copy when it can prove the source isn't used again.
+
+Use `T` even for large structs if:
+
+- You explicitly want defensive copying.
+- You're inside a `#pure` function (no other choice for inputs).
+- The caller's variable shouldn't be mutated.
+
+## When to use `&T`
+
+For structs that should be shared between caller and callee:
+
+```sysl
+struct Config
+    // ... many fields ...
+
+apply_config(cfg: &Config)
+    // mutate cfg.something or read shared state
+```
+
+The incref/decref pair is cheap (a couple of indirect adjusts), much cheaper than a full struct copy. Cleanup is automatic when the last reference goes out of scope.
+
+Use `&T` when:
+
+- The struct is large enough that copying is noticeable.
+- Multiple callers should observe the same instance.
+- The data outlives the call (returns, stored in collections, captured by closures).
+
+## When to use `*T`
+
+For kernel code, hardware register blocks, or C interop:
+
+```sysl
+struct UartRegs
+    volatile data: u32
+    volatile status: u32
+
+read_byte(regs: *UartRegs) -> u32
+    while regs.status & 1 == 0 do ()
+    regs.data
+```
+
+`*T` is unmanaged — no refcount, no automatic cleanup. The caller is responsible for ensuring the pointee stays valid for the duration of the call.
+
+Use `*T` when:
+
+- You're talking to hardware (the address is fixed by the platform).
+- You're writing kernel code without an allocator.
+- You're interfacing with a C function that expects `T*`.
+
+## When you need to mutate caller's data
+
+Two ways:
+
+1. **`inout` parameter mode** (preferred for value types):
+
+```sysl
+clamp_in_place(inout p: Point, max: int)
+    if p.x > max then p.x = max
+    if p.y > max then p.y = max
+
+main() -> int
+    var p = Point(100, 50)
+    clamp_in_place(p, 20)        // auto-takes &p
+    p.x                            // 20
+```
+
+The body uses plain `p.x = ...` assignment; the compiler handles the indirection. See [Parameter Modes](/language/functions/parameters#in--out--inout).
+
+2. **`&T` parameter** when you already have a ref:
+
+```sysl
+clamp(p: &Point, max: int)
+    if p.x > max then p.x = max
+    if p.y > max then p.y = max
+```
+
+`inout` is the right choice when the caller has a value (`var p: Point`); `&T` is right when the caller has a ref (`val r = new Point(...)`).
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes) — full reference.
+- [Parameter Modes](/language/functions/parameters#in--out--inout) — `inout` mechanics.
+- [Memory Modes by Example](/tutorials/memory-modes) — guided walkthrough.

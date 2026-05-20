@@ -1,0 +1,96 @@
+---
+title: "#ghost"
+description: Verification-only declarations — visible to the prover, invisible at runtime.
+---
+
+A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost.
+
+Four places `#ghost` may appear:
+
+```sysl
+#ghost
+var seen_count: int = 0          // module-level ghost var
+
+#ghost
+is_sorted(s: &[]int) -> bool     // module-level ghost fn — body free to read real state
+    for i in 0..<len(s)-1 do
+        if s[i] > s[i+1] then return false
+    return true
+
+#ghost
+struct AbstractState              // module-level ghost type — used in contracts only
+    contents: int
+
+sort(s: &[]int)
+    require true
+    ensure is_sorted(s)
+    #ghost var input_len = len(s)  // ghost local — captured for use in `ensure`
+    ensure len(s) == input_len
+    ...
+```
+
+## The three discipline rules
+
+1. **Real code cannot read ghost state.** Reading a `#ghost` variable, or calling a `#ghost` function, from real (non-ghost, non-contract) code is a static error. Ghost state has no runtime existence to read; the rule prevents accidental dependence.
+
+2. **Ghost code cannot write real state.** A `#ghost` function may not assign to a non-ghost module-level var (writes to its own locals are fine — they're scoped to the function). This keeps the runtime behavior independent of whether ghost code is present.
+
+3. **Real code cannot construct ghost types.** A `#ghost struct` / `#ghost enum` / `#ghost data-enum` exists only for the verifier; instantiating it from real code (`Point(...)`, `new Point(...)`, `Variant(...)`, etc.) is a static error. Ghost vars and ghost fns can construct freely. The discipline catches the canonical footgun: declaring `#ghost struct Spec` for verification, then accidentally allocating it at runtime.
+
+## Contract context
+
+Contract clauses (`require` / `ensure` / `invariant` / `variant` / `assume` / `for all` / `for some` predicates) sit in *contract context* and may freely read both real and ghost state — that's the whole point of ghost code. The same is true for ghost var initializers, ghost-target assignment RHSes, and ghost function bodies.
+
+## The strip pass
+
+After analysis, the compiler removes every ghost declaration before codegen. Ghost vars produce no storage; ghost functions emit no code. Inside real-function bodies it also drops:
+
+- Statements that declare a ghost local (`#ghost var x = ...`).
+- Plain or compound assignments to a ghost name (real-code assignments to ghost are implicitly ghost statements).
+- Any `require` / `ensure` / `invariant` / `assume` clause whose expression touches a ghost name or calls a ghost function. The whole clause is dropped — there's no fallback runtime check that just covers "the real part."
+
+The runtime sees a program identical to one written without `#ghost` at all. The verifier sees the full ghost-aware AST.
+
+## Worked example: sort with ghost predicate
+
+```sysl
+#ghost
+is_sorted(a: &[]int, n: int) -> bool
+    for i in 0..<n-1
+        if a[i] > a[i+1] then return false
+    return true
+
+#ghost
+is_permutation_of(a: &[]int, b: &[]int) -> bool
+    // Abstract predicate — the verifier knows what this means;
+    // the runtime never sees it.
+    ...
+
+sort_in_place(a: &[]int)
+    ensure is_sorted(a, len(a))                  // not checked at runtime
+    ensure is_permutation_of(a, old(a))          // not checked at runtime
+    ...
+```
+
+At runtime, the `ensure` clauses are stripped (they reference ghost predicates). The verifier discharges them statically.
+
+## Interaction with other attributes
+
+`#ghost` is mutually exclusive with:
+
+- **`#pure`** — ghost code doesn't run, so its runtime effects are irrelevant.
+- **`#reads(...)` / `#writes(...)`** — same reason.
+- **`#address(N)`** — ghost vars have no storage.
+- **`const`** — constants are inlined at compile time, not stored.
+
+## v1 limitations
+
+- Ghost parameters are not yet supported. Lift the relevant state into a module-level `#ghost var` for now.
+- Ghost struct fields and ghost return values are not yet supported.
+- Ghost code may not yet be referenced through function pointers or interface dispatch (the strip pass would have to descend into indirect-call targets).
+
+## See also
+
+- [Functions: Contracts](/language/functions/contracts) — `require` / `ensure` / `assume` are where ghost code is consumed.
+- [Functions: Def & Pure](/language/functions/def-pure-functions) — pure functions are runtime-real; ghost functions are runtime-stripped.
+- [Variables: module_invariant](/language/variables-and-constants#module_invariant-expr) — module-scope verification predicates.
