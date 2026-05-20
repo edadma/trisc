@@ -172,6 +172,20 @@ signal was generated while blocked.
     kernel_sigpending_get() -> i64
         threads[current_thread].sigpending
 
+`kernel_sig_consume_pending` is the signalfd drain primitive.
+Reads the caller-thread's pending bitmap intersected with
+`mask` (the signalfd's selector set), clears those bits from
+`sigpending`, and returns the consumed bitmap so the shim can
+walk it once to emit one `signalfd_siginfo` per signal. Bits
+outside `mask` are untouched, so an unrelated handler still
+fires on its next return-to-user pass.
+
+    kernel_sig_consume_pending(mask: i64) -> i64
+        val consumed = threads[current_thread].sigpending & mask
+        threads[current_thread].sigpending =
+            threads[current_thread].sigpending & ~consumed
+        consumed
+
 Phase 2 chunk 2 — signal generation (kill / tkill / raise).
 
 `kernel_sig_send_to_thread` sets the pending bit for `signo` on

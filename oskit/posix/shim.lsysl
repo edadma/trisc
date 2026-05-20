@@ -41,6 +41,7 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
         kernel_grant_create_inline, kernel_grant_revoke_inline,
         kernel_get_thread_pid, kernel_get_process_main_tid,
         kernel_continue_current, kernel_fork,
+        kernel_sig_consume_pending,
         kernel_mmap_anon, kernel_munmap, kernel_mprotect,
         kernel_find_mmap_range, kernel_range_check_free,
         VMA_DEFAULT_STACK_BOT, VMA_USER_VA_BOT, VMA_USER_VA_TOP}
@@ -72,6 +73,11 @@ Slot kinds:
   forward to the VFS port. `pos` is unused (VFS tracks
   position server-side). `flags` carries POSIX flags
   (O_NONBLOCK, etc.) the shim consults locally.
+- `POSIX_FD_SIGNALFD` — kernel-side signal queue surface.
+  `signalfd_mask` is the user-supplied 8-byte kernel-shape
+  sigset; reading the fd drains the intersection of that mask
+  with the caller-thread's pending bitmap, one 128-byte
+  `signalfd_siginfo` per consumed signal. `target` is unused.
 
 Generation tracking uses `processes[pid].main_tid` as the sentinel:
 when a pid slot is reused by a new process, the new `main_tid`
@@ -95,6 +101,7 @@ posix_fd_bridge memory.
     val POSIX_FD_EVENTFD     = 8
     val POSIX_FD_TIMERFD     = 9
     val POSIX_FD_UNIX_SOCKET = 10
+    val POSIX_FD_SIGNALFD    = 11
 
     val POSIX_FDS_PER_PROC   = 64
 
@@ -238,6 +245,14 @@ the keepalive options).
 
         tcp_user_timeout_ms: int
 
+`signalfd_mask` is the 8-byte kernel-shape sigset the user passed
+to `signalfd4(fd, &mask, 8, flags)`.  Read drains the intersection
+of this mask with `threads[t].sigpending`, one 128-byte
+`signalfd_siginfo` per consumed signal; epoll reports EPOLLIN
+whenever `(pending & mask) != 0`.  Zero on non-signalfd slots.
+
+        signalfd_mask: i64
+
     var posix_fd_table: [1024]PosixFd     // 16 procs * 64 fds
     var posix_fd_last_gen: [16]int        // main_tid when last initialized
 
@@ -277,6 +292,7 @@ the keepalive options).
             posix_fd_table[base + i].recv_timeout_ms = 0
             posix_fd_table[base + i].send_timeout_ms = 0
             posix_fd_table[base + i].tcp_user_timeout_ms = 0
+            posix_fd_table[base + i].signalfd_mask = i64(0)
             i += 1
         posix_fd_table[base + 0].kind = POSIX_FD_STDIN
         posix_fd_table[base + 1].kind = POSIX_FD_STDOUT
@@ -370,6 +386,7 @@ fds at >= 10).
                 posix_fd_table[base + i].recv_timeout_ms = 0
                 posix_fd_table[base + i].send_timeout_ms = 0
                 posix_fd_table[base + i].tcp_user_timeout_ms = 0
+                posix_fd_table[base + i].signalfd_mask = i64(0)
                 return i
             i += 1
         -1
@@ -532,6 +549,7 @@ must move with the slot.
         posix_fd_table[dst_idx].recv_timeout_ms = posix_fd_table[src_idx].recv_timeout_ms
         posix_fd_table[dst_idx].send_timeout_ms = posix_fd_table[src_idx].send_timeout_ms
         posix_fd_table[dst_idx].tcp_user_timeout_ms = posix_fd_table[src_idx].tcp_user_timeout_ms
+        posix_fd_table[dst_idx].signalfd_mask = posix_fd_table[src_idx].signalfd_mask
 
 For backed-by-server kinds, fan out to the appropriate backend
 so its owners ring tracks the destination process's main thread
@@ -1049,6 +1067,12 @@ Returns 0 on success, negative errno on failure.
         // once the delivery hook is in place.
         if num == 287
             return sys_rt_sigreturn()
+        // signalfd4 — create or retarget a kernel-side signal queue
+        // fd whose read() drains pending blocked signals matching
+        // the supplied mask. Pairs with sigprocmask(SIG_BLOCK, ...)
+        // on the userspace side; epoll integration mirrors eventfd.
+        if num == 336
+            return sys_signalfd4(int(a0), a1, int(a2), int(a3))
         i64(-ENOSYS)
 
 SYS_WRITE. Looks up `fd` in the process's POSIX fd table and
@@ -1375,7 +1399,64 @@ handles read from the TTY driver.
                 ubuf[bi] = byte(int((deliver >> i64(bi * 8))) & 0xff)
                 bi += 1
             return i64(8)
+        if k == POSIX_FD_SIGNALFD
+            return signalfd_read(fd, buf, len)
         i64(-EBADF)
+
+`signalfd_read` drains pending blocked signals matching the
+fd's mask, writing one 128-byte `signalfd_siginfo` per signal.
+Linux requires `len >= 128`; short buffers EINVAL. Returns
+the number of bytes written, or `-EAGAIN` (non-blocking) /
+loops on `sleep_or_notify` (blocking) when nothing matches.
+The kernel-side consume primitive atomically clears the
+delivered bits from `sigpending` so the same signal isn't
+returned twice.
+
+Only `ssi_signo` is populated — chunks 1-4 don't carry
+si_pid / si_uid / si_code on the kernel side. The rest of
+the 128-byte struct stays zero, matching Linux's "unused
+fields are zero" guarantee for siginfo readers that only
+inspect `ssi_signo`.
+
+    val POSIX_SIGNALFD_SIGINFO_SIZE = 128
+
+    signalfd_read(fd: int, buf: i64, len: int) -> i64
+        if buf == i64(0)
+            return i64(-EFAULT)
+        if len < POSIX_SIGNALFD_SIGINFO_SIZE
+            return i64(-EINVAL)
+        val pid = posix_fd_current_pid()
+        val idx = pid * POSIX_FDS_PER_PROC + fd
+        val mask = posix_fd_table[idx].signalfd_mask
+        var consumed = kernel_sig_consume_pending(mask)
+        if consumed == i64(0)
+            if (posix_fd_flags(fd) & POSIX_O_NONBLOCK) != 0
+                return i64(-EAGAIN)
+            while consumed == i64(0)
+                sleep_or_notify(1)
+                consumed = kernel_sig_consume_pending(mask)
+        val max_slots = len / POSIX_SIGNALFD_SIGINFO_SIZE
+        val ubuf: *byte = *byte(buf)
+        var written = 0
+        var signo = 1
+        while signo <= 64
+            if written >= max_slots
+                break
+            val bit: i64 = i64(1) << (signo - 1)
+            if (consumed & bit) != i64(0)
+                val off = written * POSIX_SIGNALFD_SIGINFO_SIZE
+                var zi = 0
+                while zi < POSIX_SIGNALFD_SIGINFO_SIZE
+                    ubuf[off + zi] = byte(0)
+                    zi += 1
+                // ssi_signo (u32 LE) at offset 0.
+                ubuf[off + 0] = byte(signo & 0xff)
+                ubuf[off + 1] = byte((signo >> 8) & 0xff)
+                ubuf[off + 2] = byte((signo >> 16) & 0xff)
+                ubuf[off + 3] = byte((signo >> 24) & 0xff)
+                written += 1
+            signo += 1
+        i64(written * POSIX_SIGNALFD_SIGINFO_SIZE)
 
 VFS read/write helpers. Both create a grant against the user's
 buffer (granter_pid = current pid), send the appropriate VFS

@@ -11,7 +11,7 @@ unix), and translates `sys_epoll_*` / `sys_ppoll`. Sibling of
 
     import oskit.ipc.{ipc_send}
     import oskit.services.{sleep, notify_wait, notify_read_self, sleep_or_notify, monotonic_ms}
-    import oskit.kernel.{kernel_get_process_main_tid}
+    import oskit.kernel.{kernel_get_process_main_tid, kernel_sigpending_get}
 
 
 epoll instance table (shim-side)
@@ -612,6 +612,18 @@ multi-fd EPOLLET loops.
             timerfd_advance(tidx)
             var ev = 0
             if posix_fd_table[tidx].timerfd_expirations > i64(0)
+                ev = ev | POSIX_EPOLLIN
+            return ev & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
+        if k == POSIX_FD_SIGNALFD
+            // Readable when any signal in the fd's selector mask is
+            // pending on the caller thread.  Mirrors Linux: signalfd
+            // never reports EPOLLOUT — the queue is read-only.
+            val pid_s = posix_fd_current_pid()
+            val sidx = pid_s * POSIX_FDS_PER_PROC + target_fd
+            val mask = posix_fd_table[sidx].signalfd_mask
+            val pending = kernel_sigpending_get()
+            var ev = 0
+            if (pending & mask) != i64(0)
                 ev = ev | POSIX_EPOLLIN
             return ev & (want | POSIX_EPOLLERR | POSIX_EPOLLHUP)
         0

@@ -393,6 +393,25 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("sigterm: ok")
   }
 
+  "musl: signalfd4 + read + epoll integration" in {
+    // Mirror of the aarch64 msignalfd test — see slix/test/signalfd.c.
+    // Blocks SIGUSR1/SIGUSR2, opens a signalfd watching both, then
+    // exercises empty-read EAGAIN, raise+read drains the right signo
+    // (128-byte signalfd_siginfo), epoll readiness fires on a second
+    // raise, drain leaves the queue empty, and two-at-once read packs
+    // both signos into a 256-byte buffer.
+    qemu.send("msignalfd\n")
+    val output = qemu.waitFor("msignalfd: done")
+    output should include("msignalfd: step2 sfd_ok")
+    output should include("msignalfd: step3 empty_read=-1 errno=11")
+    output should include("msignalfd: step4 read=128 signo=10")
+    output should include("msignalfd: step5 epoll_n=1 events=1")
+    output should include("msignalfd: step6 read=128 signo=12")
+    output should include("msignalfd: step6 epoll_drained_n=0")
+    output should include("msignalfd: step7 read=256 signo0=10 signo1=12")
+    output should include("msignalfd: done")
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

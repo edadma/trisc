@@ -21,8 +21,9 @@ The dispatch entries (134/135/136/214/360) live in
     module oskit.posix
 
     import oskit.kernel.{kernel_sigaction_set, kernel_sigmask_set,
-        kernel_sigpending_get, kernel_sig_send_to_thread,
-        kernel_sig_send_to_process, kernel_perform_sigreturn}
+        kernel_sigpending_get, kernel_sig_consume_pending,
+        kernel_sig_send_to_thread, kernel_sig_send_to_process,
+        kernel_perform_sigreturn}
 
 
 sys_rt_sigaction
@@ -204,3 +205,56 @@ dispatcher writes it to the trap frame's result slot.
 
     sys_rt_sigreturn() -> i64
         kernel_perform_sigreturn()
+
+
+sys_signalfd4
+-------------
+
+SYS_SIGNALFD4 (336). Args: a0=fd (-1 to create a new one,
+otherwise the existing signalfd to retarget), a1=*mask (8-byte
+kernel-shape sigset), a2=sigsetsize, a3=flags. Returns the
+allocated fd on create, the input fd on retarget, -EMFILE if
+no slot is free, -EINVAL on bad args.
+
+Linux's `signalfd_siginfo` is 128 B; only `ssi_signo` (first
+4 B) is populated here — chunks 1-4 don't track `si_pid`,
+`si_uid`, or `si_code`, and there's no realtime-signal queue
+that would carry `si_value`. Callers that need richer siginfo
+will get it in the SA_SIGINFO follow-up; for the signalfd
+contract POSIX only requires `ssi_signo` to be accurate.
+
+Userspace flow: `sigprocmask(SIG_BLOCK, &mask)` first (so the
+delivery walker doesn't run the handler before we get to
+read), then `signalfd4(-1, &mask, 8, flags)`, then `read()`
+or `epoll_wait()` on the returned fd.
+
+    val POSIX_SFD_NONBLOCK = 2048
+    val POSIX_SFD_CLOEXEC  = 524288
+
+    sys_signalfd4(fd: int, mask_va: i64, sigsetsize: int, flags: int) -> i64
+        if sigsetsize < 8
+            return i64(-EINVAL)
+        if mask_va == i64(0)
+            return i64(-EFAULT)
+        val mp: *byte = *byte(mask_va)
+        val mask = shim_read_le_i64(mp, 0)
+        val pid = posix_fd_current_pid()
+        if pid <= 0
+            return i64(-EINVAL)
+        if pid >= 16
+            return i64(-EINVAL)
+        var pfd = fd
+        if pfd < 0
+            pfd = posix_fd_alloc(POSIX_FD_SIGNALFD, 0)
+            if pfd < 0
+                return i64(-EMFILE)
+            var fd_flags = 0
+            if (flags & POSIX_SFD_NONBLOCK) != 0
+                fd_flags = fd_flags | POSIX_O_NONBLOCK
+            posix_fd_set_flags(pfd, fd_flags)
+        else
+            if posix_fd_kind(pfd) != POSIX_FD_SIGNALFD
+                return i64(-EINVAL)
+        val idx = pid * POSIX_FDS_PER_PROC + pfd
+        posix_fd_table[idx].signalfd_mask = mask
+        i64(pfd)

@@ -44,6 +44,7 @@ TESTS=(
     "nbstdin.c nbstdin"
     "timerfd.c timerfd"
     "eventfd.c eventfd"
+    "signalfd.c msignalfd"
 )
 
 FAILED=()
