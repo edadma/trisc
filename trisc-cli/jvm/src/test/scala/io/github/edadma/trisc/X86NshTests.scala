@@ -382,6 +382,17 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("sigact: done")
   }
 
+  "musl: SIG_DFL terminate-class signal kills the target process" in {
+    // Mirror of the aarch64 sigterm test — see test_sigterm.lsysl.
+    // Forks a child that spin-loops, parent kill()s with SIGTERM,
+    // then pm_waitpid's: chunk 4's walker turns the SIG_DFL TERM-
+    // class signal into kernel_kill_process_by_signal, which encodes
+    // the signal number into exit_code so (rc & 0x7F) == SIGTERM.
+    qemu.send("test_sigterm\n")
+    val output = qemu.waitFor("sigterm: ok")
+    output should include("sigterm: ok")
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

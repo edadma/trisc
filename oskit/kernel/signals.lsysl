@@ -90,6 +90,22 @@ returns -2 when asked to override their disposition.
 
     val SIG_UNMASKABLE = i64(1 << 8) | i64(1 << 18)   // bit (SIGKILL-1) | bit (SIGSTOP-1)
 
+POSIX default actions for SIG_DFL. `SIG_DEFAULT_TERM` is the set
+of signals whose default action terminates the process; the rest
+default to silent discard (ignore, stop, or continue, none of
+which the kernel acts on today — stop/continue is a Phase-5+
+follow-up that needs job control).
+
+Members of TERM (numeric assignments per slix-musl
+`bits/signal.h`): SIGHUP(1), SIGINT(2), SIGQUIT(3), SIGILL(4),
+SIGTRAP(5), SIGABRT(6), SIGBUS(7), SIGFPE(8), SIGUSR1(10),
+SIGSEGV(11), SIGUSR2(12), SIGPIPE(13), SIGALRM(14), SIGTERM(15),
+SIGSTKFLT(16), SIGXCPU(24), SIGXFSZ(25), SIGVTALRM(26),
+SIGPROF(27), SIGIO/SIGPOLL(29), SIGPWR(30), SIGSYS(31). SIGKILL(9)
+is also TERM but is fast-pathed before ever entering the walker.
+
+    val SIG_DEFAULT_TERM: i64 = i64(0x7780FEFF)  // bits 0-7, 9-15, 23-26, 28-30
+
 Kernel-side signal API for the POSIX shim. The shim owns all
 wire-format conversion (musl's 152-byte `struct sigaction`,
 128-byte `sigset_t`); the kernel exposes a small set of native-
@@ -237,13 +253,18 @@ The pending bit is cleared and the new sigmask written back only
 *after* `arch_build_sigframe` has rewritten the saved trap frame,
 so a partially-delivered signal can never be silently dropped.
 
-For SIG_DFL (handler==0) the only path that fires today is silent
-discard — process-killing default actions land with the lifecycle
-machinery later. SIG_IGN (handler==1) likewise clears the pending
-bit and skips delivery.
+SIG_DFL (handler==0) routes through the POSIX default-action
+table: if the signal is in `SIG_DEFAULT_TERM`, the process is
+terminated and `exit_code` is set so `WTERMSIG(status) == signo`
+on the waiter side. All other SIG_DFL signals (ignore class —
+SIGCHLD/SIGURG/SIGWINCH — and the stop/continue class which is
+deferred to Phase 5+) are silently discarded. SIG_IGN (handler==1)
+likewise clears the pending bit and skips delivery.
 
-Returns: 0 = nothing delivered this trip, 1..64 = signo whose
-handler is now armed in the saved trap frame.
+Returns: 0 = nothing delivered this trip (and possibly the
+process was killed — caller in `schedule()` re-picks if the
+thread state went TERMINATED), 1..64 = signo whose handler is
+now armed in the saved trap frame.
 
     kernel_check_pending_signals(tid: int) -> int
         if tid < 0
@@ -270,6 +291,8 @@ handler is now armed in the saved trap frame.
                 val restorer = processes[pid].sigact[signo].restorer
                 threads[tid].sigpending = threads[tid].sigpending & ~bit
                 if handler == i64(0)
+                    if (SIG_DEFAULT_TERM & bit) != i64(0)
+                        kernel_kill_process_by_signal(pid, signo)
                     return 0
                 if handler == i64(1)
                     return 0

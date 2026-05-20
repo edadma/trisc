@@ -717,6 +717,19 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("sigact: done")
   }
 
+  "musl: SIG_DFL terminate-class signal kills the target process" in {
+    // test_sigterm (oskit/bin/test_sigterm.lsysl) forks a child, sends
+    // SIGTERM via kill(2), then pm_waitpids on the encoded exit_code.
+    // With chunk 4 wired, the kernel walker's SIG_DFL fast-path
+    // for terminate-class signals calls kernel_kill_process_by_signal,
+    // which encodes the signal number into exit_code so the parent
+    // sees (rc & 0x7F) == SIGTERM (15). Regression of the walker
+    // (e.g. silent discard for handler==0) makes the child spin
+    // forever and the test times out instead of asserting.
+    val output = qemu.command("/bin/test_sigterm")
+    output should include("sigterm: ok")
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

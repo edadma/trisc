@@ -2174,7 +2174,21 @@ slots safely (no per-slot translation needed).
 Kill a process by PID. Terminates its main thread and marks
 the process as zombie. Returns 0 on success, -1 on error.
 
+`exit_code = -1` means "killed without a specific reason"
+(generic admin kill). `kernel_kill_process_by_signal` below
+encodes the originating signal number into `exit_code` so that
+`waitpid()`'s `WIFSIGNALED` / `WTERMSIG` can be reconstructed
+by the user: the low 8 bits hold the signal number with bit 7
+reserved for "core dumped" (always 0 here — slix has no core
+files), matching Linux's `__W_EXITCODE(0, sig)` convention.
+
     kernel_kill_process(pid: int) -> int
+        kernel_terminate_with_status(pid, -1)
+
+    kernel_kill_process_by_signal(pid: int, signo: int) -> int
+        kernel_terminate_with_status(pid, signo & 0x7F)
+
+    kernel_terminate_with_status(pid: int, status: int) -> int
         if pid <= 0
             return -1
         if pid >= MAX_PROCESSES
@@ -2194,7 +2208,7 @@ the process as zombie. Returns 0 on success, -1 on error.
 
         // Mark as zombie and notify PM (like terminate_current).
         // PM handles VFS cleanup, waitpid, reparenting, and RS notification.
-        processes[pid].exit_code = -1
+        processes[pid].exit_code = status
         processes[pid].state = PROC_ZOMBIE
         if kernel_pm_tid >= 0
             notify_send(kernel_pm_tid, pid)
@@ -2296,9 +2310,19 @@ Steps:
                     threads[tid].wake_ms = 0
                     enqueue(threads[tid].priority, tid)
 
-        // Find highest-priority non-empty queue (lowest number)
-        val next = sched_pick_next()
-        if next >= 0
+        // Find highest-priority non-empty queue (lowest number).
+        // The walker (`kernel_check_pending_signals`) may turn an
+        // unhandled, terminate-class signal into a process kill on
+        // the just-picked thread; in that case the thread is now
+        // TERMINATED and resuming it would jump into a dead user
+        // context. Loop until either no signal-induced death occurs
+        // on the picked thread or the ready queues drain.
+        while true
+            val next = sched_pick_next()
+            if next < 0
+                current_thread = -1
+                vm_set_ptbr(kernel_ptbr())
+                return 0
             current_thread = next
             threads[next].state = STATE_RUNNING
             threads[next].ctx_switches += 1
@@ -2307,11 +2331,9 @@ Steps:
             tss_set_rsp0(threads[next].kstack_top)
             if threads[next].pid > 0
                 kernel_check_pending_signals(next)
+                if threads[next].state == STATE_TERMINATED
+                    continue
             return threads[next].ssp
-
-        // No ready threads — return 0 to signal idle
-        current_thread = -1
-        vm_set_ptbr(kernel_ptbr())
         0
 
 Called by boot.asm after kernel_main() returns, so boot can

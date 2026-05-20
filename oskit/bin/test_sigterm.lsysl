@@ -1,0 +1,114 @@
+test_sigterm — POSIX default-action TERM for SIG_DFL
+=====================================================
+
+Drives the kernel's signal-walker default-action path: when a
+process has not installed a handler for a signal in the TERM
+class (SIGTERM, SIGINT, SIGHUP, ...), the signal walker must
+terminate the target process. The child's `exit_code` is
+encoded so the parent's `waitpid` reports it as a "killed by
+signal N" status — low 8 bits of the returned value hold the
+signal number.
+
+What this test fails on if regressed:
+
+  * Walker silently discarding SIG_DFL (the pre-chunk-4
+    behavior) → child loops forever and parent's pm_waitpid
+    never returns.
+  * `kernel_kill_process_by_signal` setting `exit_code = -1`
+    (the generic-kill convention) → parent sees a non-signo
+    status and step 4 fails.
+  * `schedule()` not re-picking after a walker-induced kill →
+    the dead child's trap frame is resumed and the test never
+    terminates cleanly.
+
+Pass criterion: prints `sigterm: ok`. The fail() helper exits
+with the step number so a regression is greppable.
+
+    module oskit.bin.test_sigterm
+
+    import oskit.ulib.{puts, exit, exit_with, syscall6, pm_waitpid}
+
+
+    val SYS_FORK = 91
+    val SYS_KILL = 214
+
+    val SIGTERM = 15
+
+
+    print_idec(v: int)
+        var n = v
+        if n < 0
+            puts("-")
+            n = -n
+        if n >= 10
+            print_idec(n / 10)
+        var b: [1]byte
+        b[0] = byte('0' + (n % 10))
+        puts(string(&b[0], 1))
+
+
+    fail(code: int)
+        puts("sigterm: bad ")
+        print_idec(code)
+        puts("\n")
+        exit_with(code)
+
+
+    do_fork() -> int
+        int(syscall6(SYS_FORK, i64(0), i64(0),
+                     i64(0), i64(0), i64(0), i64(0)))
+
+
+    do_kill(pid: int, signo: int) -> int
+        int(syscall6(SYS_KILL, i64(pid), i64(signo),
+                     i64(0), i64(0), i64(0), i64(0)))
+
+
+    main(argv: []string)
+
+Step 1 — fork. The child branch spin-loops; the parent branch
+sends SIGTERM and waits for the child's signal-induced exit.
+
+        val pid = do_fork()
+        if pid < 0
+            fail(1)
+            return
+
+        if pid == 0
+
+Step 2 (child) — spin waiting to be killed. With SIGTERM left at
+its SIG_DFL disposition, the kernel walker tears the child down
+on the next scheduler pass after the parent's kill arrives.
+`exit_with(99)` is a safety net for a regression where the kill
+never lands; it should never run on a green build.
+
+            var spin = 0
+            while spin < 1000000000
+                spin += 1
+            exit_with(99)
+            return
+
+Step 3 — send SIGTERM. POSIX `kill(pid, SIGTERM)` returns 0 on
+success. The kernel sets the pending bit on the child's main
+thread; the walker fires on the next schedule() pick of that
+thread.
+
+        val r = do_kill(pid, SIGTERM)
+        if r != 0
+            fail(2)
+            return
+
+Step 4 — wait for the child. `pm_waitpid` returns the child's
+encoded exit_code; for a signal-induced kill we expect the low
+8 bits to equal the signal number.
+
+        val rc = pm_waitpid(pid)
+        if (rc & 0x7F) != SIGTERM
+            puts("sigterm: rc=")
+            print_idec(rc)
+            puts("\n")
+            fail(3)
+            return
+
+        puts("sigterm: ok\n")
+        exit()
