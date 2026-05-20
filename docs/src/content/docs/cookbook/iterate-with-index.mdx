@@ -1,0 +1,79 @@
+---
+title: Iterate with Index and Value
+description: "The `for i, v in arr` form, plus alternatives when you need only one."
+---
+
+Sysl's `for-in` loop supports binding both an index and a value:
+
+```sysl
+val xs: [4]int = [10, 20, 30, 40]
+for i, v in xs
+    println(i * 100 + v)         // 10, 120, 230, 340
+```
+
+The first binding is the index (always an `int`), the second is the element.
+
+## Index only
+
+If you don't need the value:
+
+```sysl
+for i in 0..<len(xs)
+    println(i)
+```
+
+This is also the way to iterate when you need to write to the array — `for v in xs` gives you a copy of each element, not the element itself.
+
+## Value only
+
+If you don't need the index:
+
+```sysl
+for v in xs
+    println(v)
+```
+
+This is the most common form.
+
+## Mutating elements
+
+To mutate by index, iterate over indices:
+
+```sysl
+for i in 0..<len(xs)
+    xs[i] = xs[i] * 2
+```
+
+`for v in xs` binds `v` to a copy of each element — writing to `v` doesn't change the array.
+
+## Skipping the index with `_`
+
+If you want both the form `for i, v` but to discard the index:
+
+```sysl
+for _, v in xs
+    println(v)
+```
+
+This is equivalent to `for v in xs` — the `_` discards.
+
+## Iterating backwards
+
+```sysl
+for v in reverse xs              // last element to first
+for i in (len(xs) - 1) downTo 0 // index form
+```
+
+The `reverse` keyword works on slices, strings, and `T::Range`. The `downTo` form is for explicit range bounds. See [Statements: Loops](/language/statements#loops).
+
+## Iterating with a stride
+
+```sysl
+for i in 0..<len(xs) step 2
+    println(xs[i])              // every other element
+```
+
+## See also
+
+- [Statements: Loops](/language/statements#loops) — full for-loop syntax.
+- [Build a slice incrementally](/cookbook/build-slice).

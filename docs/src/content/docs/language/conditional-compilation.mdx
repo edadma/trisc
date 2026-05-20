@@ -1,0 +1,87 @@
+---
+title: Conditional Compilation
+description: "#if / #else / #endif for compile-time branching on build-defined symbols."
+---
+
+Sysl supports compile-time conditional compilation via `#if` / `#else` / `#endif`. The directives are evaluated against build-defined symbols (the `-D NAME=value` flags passed to `sysl compile` or `sysl test`), and only the branch whose condition evaluates true is compiled.
+
+```sysl
+#if DEBUG
+    var verbose = true
+#else
+    var verbose = false
+#endif
+
+#if !BARE_METAL
+    import posix.stdlib.*
+#endif
+
+#if TARGET == "trisc"
+    extern halt()
+#endif
+
+#if VERSION != "1.0"
+    import new_api.*
+#endif
+```
+
+## Condition forms
+
+- **`#if SYMBOL`** — true if the symbol is defined and not `"false"`, `"0"`, or `""`.
+- **`#if !SYMBOL`** — negation of the above.
+- **`#if SYMBOL == "value"`** — string equality.
+- **`#if SYMBOL != "value"`** — string inequality.
+
+Compound conditions (`&&` / `||` / parentheses) are not currently supported. Nest `#if` blocks instead.
+
+## Where directives can appear
+
+`#if` works at module-top level and inside function bodies. Inside expressions and inside struct/enum field lists, it is not supported — extract the conditional code into a wrapper function or use a runtime branch.
+
+## Common patterns
+
+### Platform-specific imports
+
+```sysl
+#if TARGET == "trisc"
+    import oskit.kernel.*
+#else
+    import posix.stdlib.*
+#endif
+```
+
+### Debug-only assertions
+
+```sysl
+#if DEBUG
+    assert(invariant_holds(), "invariant broken")
+#endif
+```
+
+### Feature flags
+
+```sysl
+#if FEATURE_NETWORKING
+    extern socket(domain: int, type: int, protocol: int) -> int
+#endif
+```
+
+## Build invocation
+
+Pass `-D NAME=value` to the compiler:
+
+```bash
+sbt "syslCliJVM/run compile --backend llvm-host -D DEBUG=true -D TARGET=linux main.sysl"
+```
+
+Bare `-D NAME` is equivalent to `-D NAME=true`.
+
+## Not a macro system
+
+`#if` / `#else` / `#endif` only gate *which source the compiler sees*. They do not provide macro substitution, code generation, or token splicing. For build-time computation use `const`, `static_assert`, and the standard generic machinery.
+
+## See also
+
+- [Variables: const](/language/variables-and-constants#compile-time-constants-const) — build-time constants.
+- [Attributes: #ghost](/language/attributes/ghost) — verification-only state without runtime cost.
+- [Program Structure](/language/program-structure) — module declarations.

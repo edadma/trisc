@@ -1,0 +1,96 @@
+---
+title: "#address(N)"
+description: Map a module-level var to a fixed physical address for MMIO and hardware registers.
+---
+
+`#address(N)` binds a module-level `var` declaration to a fixed physical address. Reads and writes become direct loads and stores at that address. No storage is emitted for the variable — it is just a typed handle on hardware.
+
+This is the canonical way to talk to memory-mapped I/O.
+
+```sysl
+#address(0x1000_0000)
+var uart_data: u32
+
+#address(0x1000_0004)
+var uart_status: u32
+
+main() -> int
+    uart_data = 0x41       // write 'A' to the transmit register
+    while uart_status & 1 == 0 do ()  // poll the ready bit
+    return 0
+```
+
+## Rules
+
+- The var must have an **explicit type** (no inferred type).
+- `#address` cannot be combined with `const`.
+- The attribute argument must be a single integer literal (decimal or hex).
+- Compound assignment (`reg += v`, `reg |= mask`, …) lowers to a read-modify-write: `*(N as *T) = *(N as *T) op v`.
+
+## Interpreter behavior
+
+In the interpreter, writes persist in a virtual MMIO map for the duration of the run; reads from untouched addresses return 0. This makes the interpreter useful for testing driver logic without a real device — but be aware that the interpreter's MMIO map is *cooperative* (no actual hardware semantics, no side effects beyond the map).
+
+## Native backends
+
+On real hardware (LLVM / TRISC output), the load/store goes straight to the physical address. No locking, no atomic guarantees, no memory barriers — if you need those, write them explicitly.
+
+For volatile semantics (prevent compiler reordering / coalescing), declare the var as `volatile`:
+
+```sysl
+#address(0x1000_0000)
+volatile var uart_data: u32
+```
+
+See [Variables: Volatile](/language/variables-and-constants#volatile).
+
+## Multi-byte alignment
+
+The compiler does not check alignment — `#address(0x1000_0001)` on a `u32` will compile, but most architectures will trap or produce unaligned-access penalties at runtime. Use addresses appropriate for the type.
+
+## Common patterns
+
+### Register block as a struct
+
+For a contiguous block of related registers, declare a struct and a `#address`-bound pointer:
+
+```sysl
+struct UartRegs
+    volatile data: u32
+    volatile status: u32
+    volatile control: u32
+
+#address(0x1000_0000)
+var uart: UartRegs
+
+main() -> int
+    uart.data = 0x41
+    while uart.status & 1 == 0 do ()
+    return 0
+```
+
+Note: this only works when the struct's field layout matches the hardware's register layout exactly. Use `static_assert(sizeof(UartRegs) == 12)` to lock that down.
+
+### Multiple devices at known offsets
+
+```sysl
+const UART_BASE = 0x1000_0000
+
+#address(UART_BASE)
+var uart_data: u32
+
+#address(UART_BASE + 4)
+var uart_status: u32
+```
+
+The address argument must be a literal, so the `const` reference must fold at compile time — which it does for the cases above.
+
+## Ada equivalent
+
+The Ada equivalent is `for X use at 16#1000_0000#` in a representation clause.
+
+## See also
+
+- [Variables: Volatile](/language/variables-and-constants#volatile) — `volatile` modifier for MMIO.
+- [Variables: const](/language/variables-and-constants#compile-time-constants-const) — naming base addresses.
+- [Devices](/devices/device-map) — TRISC's standard MMIO map.

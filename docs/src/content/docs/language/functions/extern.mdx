@@ -1,0 +1,110 @@
+---
+title: Extern Declarations
+description: Calling C ABI functions and accessing C globals from Sysl.
+---
+
+`extern` declares a function or global that lives outside the current compilation unit — typically a C library, a syscall stub, or a runtime helper. The compiler emits a reference to the symbol and lets the linker resolve it.
+
+## Functions
+
+```sysl
+extern putchar(ch: int)
+extern sbrk(increment: int) -> *i8
+extern strlen(s: *byte) -> int
+```
+
+The signature describes the C calling convention exactly — no implicit pointer/length splitting, no `string`-fat-pointer marshalling. If the C function takes `(char*, size_t)`, you write `(*byte, i64)` in Sysl.
+
+The function name is **never mangled** — `extern strlen` resolves to the symbol `strlen` exactly, no module prefix. This is what makes `extern` work for C ABI interop.
+
+## Variables
+
+```sysl
+extern var errno: int
+extern val MAX_FILES: int      // immutable external symbol (rare in C)
+```
+
+`extern var` declares mutable access; `extern val` declares immutable. Both reference whatever symbol the linker resolves at link time. The type must match the C declaration's representation exactly.
+
+## When you need extern
+
+- **C library calls** — `printf`, `malloc`, `strcmp`, `open`, `read`.
+- **Syscalls** — wherever Sysl needs to talk to the OS directly.
+- **Kernel runtime helpers** — `sbrk`, `__bounds_fail`, `__div_zero_fail`.
+- **Assembly entry points** — when a function is written in `.s` files and called from Sysl.
+
+## Type mapping
+
+Sysl integer types map to standard C widths on every backend:
+
+| Sysl | C |
+|------|---|
+| `i8` | `int8_t` / `signed char` |
+| `i16` | `int16_t` / `short` |
+| `i32` / `int` | `int32_t` / `int` |
+| `i64` / `long` | `int64_t` / `long long` |
+| `u8` / `byte` | `uint8_t` / `unsigned char` |
+| `u32` / `uint` | `uint32_t` / `unsigned int` |
+| `u64` / `ulong` | `uint64_t` / `unsigned long long` |
+| `f32` / `float` | `float` |
+| `f64` / `double` | `double` |
+| `*T` | `T*` |
+| `*byte` | `char*` (a NUL-terminated C string) |
+
+Sysl's `string` (16-byte fat pointer) is **not** ABI-compatible with C — pass `*byte` and `len` separately when calling C code.
+
+## Pointer parameters
+
+Pointer parameters cross the boundary as raw `T*`:
+
+```sysl
+extern memcpy(dst: *u8, src: *u8, n: i64) -> *u8
+
+main() -> int
+    var src: [4]u8 = [1, 2, 3, 4]
+    var dst: [4]u8
+    memcpy(&dst[0], &src[0], 4)
+    int(dst[0]) + int(dst[3])    // 5
+```
+
+Sysl's address-of on an array element (`&dst[0]`) gives a `*u8` that can be passed directly to C.
+
+## Variadic C functions
+
+Sysl does not currently support variadic parameters in `extern` declarations. For calls to C variadic functions (`printf`, `scanf`, etc.), use a wrapper that fixes the argument list:
+
+```sysl
+extern fprintf_int(stream: *i8, fmt: *byte, n: int) -> int
+```
+
+with a corresponding C wrapper that delegates to `fprintf(stream, fmt, n)`.
+
+A future version may add `...` to extern declarations.
+
+## C globals
+
+```sysl
+extern var errno: int
+
+main() -> int
+    val f = open("nonexistent.txt", 0)
+    if f < 0 then errno
+    else 0
+```
+
+The `errno` reference compiles to a normal global-variable access; the linker resolves it to the libc thread-local errno.
+
+## Linking
+
+The backend determines how externs are linked:
+
+- **LLVM backends** — externs become regular `external` declarations in the IR; `clang` resolves them against the standard C library at link time.
+- **TRISC** — externs become unresolved symbols in the TOF (object) file; the linker resolves them against other TOFs or assembly sources.
+- **SVM** — externs are looked up in a host-provided symbol table at VM startup.
+- **Interpreter** — a built-in registry maps common externs (`malloc`, `puts`, `strlen`) to host functions. Unknown externs trap.
+
+## See also
+
+- [Program Structure: Name Mangling](/language/program-structure#name-mangling) — externs are never mangled.
+- [Three Allocation Modes](/language/types/three-allocation-modes) — `*T` is the C-interop type.
+- [Strings](/language/strings) — converting between Sysl `string` and C `*byte`.

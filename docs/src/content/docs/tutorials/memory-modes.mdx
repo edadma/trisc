@@ -1,0 +1,181 @@
+---
+title: Memory Modes by Example
+description: "A decision tree for choosing T, &T, or *T — with worked examples for each."
+---
+
+Sysl's three allocation modes — value (`T`), ref-counted (`&T`), and raw pointer (`*T`) — are the biggest day-one difference from C, Go, or Rust. This tutorial gives you a decision tree, then walks through five common patterns to show which mode fits each.
+
+## The decision tree
+
+```
+Do you need to share this data with anyone outside the current scope?
+├── No  → use T (value). Bitwise copy semantics, no allocator.
+└── Yes → who owns the cleanup?
+    ├── ARC handles it → use &T. Auto-freed at refcount = 0.
+    └── I do (or it's hardware) → use *T. Raw, no checks, no rc.
+```
+
+That's the whole story. Most code is `T` and stays that way. `&T` is the right choice when you need shared ownership and don't want to think about cleanup. `*T` is the escape hatch — kernel code, hardware registers, C interop, and intentional back-pointers.
+
+## Pattern 1: Small struct, used once — `T`
+
+A 2D point passed to one function and then discarded. No sharing, no lifetime concerns:
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+magnitude_sq(p: Point) -> int
+    p.x * p.x + p.y * p.y
+
+main() -> int
+    val origin = Point(0, 0)
+    val target = Point(3, 4)
+    magnitude_sq(target)           // 25
+```
+
+The struct lives on the stack. `magnitude_sq` gets a bitwise copy. Nothing escapes; the allocator is never involved.
+
+**When to switch:** when you start passing the same `Point` to many functions, storing it in collections, or returning it from constructors that "create" something the caller keeps using.
+
+## Pattern 2: Returning a constructed object — `&T`
+
+A factory that creates a `Node`, fills it in, and returns it. The caller owns the result:
+
+```sysl
+struct Node
+    value: int
+    next: *Node
+
+make_singleton(v: int) -> &Node
+    new Node(v, null)
+
+main() -> int
+    val n = make_singleton(42)
+    n.value                         // 42
+```
+
+Why `&T` and not `T`? Because `Node` contains a `*Node` next-pointer (eventually pointing to other heap nodes), and to build a list you need each node to outlive its constructor call.
+
+`new Node(v, null)` allocates with `malloc`, attaches a refcount header, and returns a `&Node`. When the last `&Node` referring to it goes out of scope, the allocator reclaims the memory.
+
+**Cost:** one allocation per node, plus refcount adjustments on assignment / parameter pass / scope exit.
+
+## Pattern 3: Tree with parent back-pointers — mixed `&T` / `*T`
+
+A classic case: a tree where each node holds a list of children (`&Child`) and a back-pointer to its parent (`*Parent`):
+
+```sysl
+struct TreeNode
+    value: int
+    children: []&TreeNode    // owning slice of children
+    parent: *TreeNode        // non-owning back-pointer
+
+add_child(parent: &TreeNode, child_val: int) -> &TreeNode
+    val child = new TreeNode(child_val, [], &(*parent))
+    parent.children = append(parent.children, child)
+    child
+```
+
+The trick: parent owns children via `&TreeNode`, child references parent via `*TreeNode`. ARC manages the down direction; the up direction is just a borrowed pointer.
+
+**Why not `&Parent` for the back-pointer?** A cycle. `parent → child → parent → child → ...` would never reach refcount 0. ARC can't break cycles. The asymmetric pattern dissolves the cycle by demoting one direction to raw.
+
+The cost is that you, the programmer, are responsible for not following a `*parent` pointer after the parent has been dropped. In practice, since parents outlive their children, this is usually trivial.
+
+## Pattern 4: Kernel data — `T` and `*T` only
+
+In the SLIX kernel (or any bare-metal environment), there is no allocator. `&T` doesn't work — there's no `malloc` to back it. The kernel is exclusively values and raw pointers:
+
+```sysl
+struct ProcessSlot
+    pid: int
+    state: u32
+    stack_top: u64
+
+var processes: [32]ProcessSlot     // BSS storage, no allocator needed
+
+find_free_slot() -> *ProcessSlot
+    for i in 0..<32
+        if processes[i].state == 0 then return &processes[i]
+    null
+
+main() -> int
+    val slot = find_free_slot()
+    if !bool(slot) then return -1
+    slot.pid = 1
+    slot.state = 1
+    0
+```
+
+The slot array lives in BSS — no allocator touches it. `find_free_slot` hands back a raw pointer into the array. The caller can mutate the slot through the pointer; when the slot is "freed" (state = 0), the storage is still there but is logically available again.
+
+This is exactly how SLIX manages processes, threads, and PT entries. Read [SLIX: Kernel](/slix/kernel) for the full picture.
+
+## Pattern 5: Graph with many cross-references — indices
+
+When many nodes refer to many other nodes, `&T` with back-pointers gets ugly fast. The Sysl idiom is indices into a backing slice:
+
+```sysl
+struct GraphNode
+    value: int
+    edges: []int          // indices into Graph.nodes
+
+struct Graph
+    nodes: []GraphNode
+
+add_edge(g: &Graph, from: int, to: int)
+    g.nodes[from].edges = append(g.nodes[from].edges, to)
+```
+
+Indices are just integers — they don't participate in ARC, can be freely copied, and survive backing-array resize as long as you don't compact.
+
+If you do need to compact, you can fix up all the indices afterward — but most graph traversal algorithms don't require it.
+
+**When indices win over `&T`:** dense graphs (many edges), graphs where node identity is more useful than node ownership (e.g., adjacency-matrix style), or graphs where the analysis cares about node-id stability across runs.
+
+## Pattern 6: Detaching a struct from heap storage — `.copy()`
+
+If you have a `&T` but want an independent value:
+
+```sysl
+struct Config
+    threshold: int
+    verbose: bool
+
+read_config_from_disk() -> &Config
+    new Config(100, true)
+
+main() -> int
+    val ref_cfg = read_config_from_disk()
+    var local_cfg = ref_cfg.copy()         // independent bitwise copy
+
+    local_cfg.threshold = 50                // doesn't affect ref_cfg
+    ref_cfg.threshold                       // still 100
+```
+
+`.copy()` on a `&T` produces a value-typed `T` — a bitwise copy of the pointee, with no refcount adjustment on the source. The two are completely independent from that point on.
+
+## Conversion summary
+
+| From | To | Operation | Notes |
+|------|-----|-----------|-------|
+| `&T` | `T` | `r.copy()` | bitwise copy, no rc change |
+| `T` | `&T` | `new T(v)` | fresh heap allocation, rc = 1 |
+| `&T` | `*T` | `&r` | raw address, no rc change |
+| `*T` | `&T` | not allowed | can't manufacture a refcount |
+| `T` | `*T` | `&v` | address-of value |
+| `*T` | `T` | `*p` | dereference; implicit for struct fn args |
+
+## Three rules of thumb
+
+1. **Start with `T`.** When in doubt, use the value type. Migrate to `&T` only when sharing actually shows up in the design.
+2. **Prefer indices over back-pointers.** If you find yourself reaching for `*Parent`, ask whether an index would work first — it almost always does.
+3. **Reserve `*T` for kernel, hardware, and C interop.** If a program uses `*T` for anything else, it usually means the design is fighting ARC and should be rethought.
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes) — the reference page.
+- [Arrays, Slices, and Pointers](/language/arrays-slices-pointers) — how `&[]T` interacts with these modes.
+- [Generic Combinators](/tutorials/generic-combinators) — applying these ideas in a parser library.

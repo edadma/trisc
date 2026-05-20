@@ -1,0 +1,95 @@
+---
+title: The Try Operator (`?`)
+description: Unwrap Option/Result success variants and early-return on failure.
+---
+
+The postfix `?` operator on an enum value unwraps the success variant or early-returns the failure variant from the enclosing function. It's the standard ergonomic for working with `Option[T]` and `Result[T, E]`.
+
+```sysl
+enum Option[T]
+    Some(value: T)
+    None
+
+parseAndDouble(s: string, start: int) -> Option[int]
+    x = parseInt(s, start)?         // unwrap Some(x), or early-return None
+    Some(x * 2)
+```
+
+## Semantics
+
+`expr?` desugars at analyze time to:
+
+```sysl
+match expr
+    Success(v) -> v
+    Failure(...) -> return Failure(...)
+```
+
+where `Success` is variant 0 and `Failure` is variant 1.
+
+The result type of the whole `expr?` is the success variant's field type.
+
+## Rules
+
+- Applies only to monomorphized generic enum values where the enum has exactly **two variants** and the **first variant has exactly one field** (the success type).
+- The enclosing function's return type must be the **same** enum type as the value being `?`-unwrapped (no error-type conversion yet).
+- The desugaring runs at analyze time, so the early-return is visible to flow analysis (`ensure` clauses are checked at the synthetic return site).
+
+## Chainable
+
+`a?.field` works if `a?` returns a struct:
+
+```sysl
+read_record(s: string) -> Result[Record, ParseError]
+    var name = parseField(s, 0)?.value     // unwrap, then access struct field
+    Ok(Record(name, ...))
+```
+
+Multiple `?`s across separate statements also work:
+
+```sysl
+sum_two(s: string) -> Result[int, ParseError]
+    x = parseInt(s, 0)?
+    y = parseInt(s, 10)?
+    Ok(x + y)
+```
+
+## Worked example
+
+A parser that propagates errors at every step:
+
+```sysl
+enum ParseError
+    EmptyInput
+    BadDigit
+    Overflow
+
+parseInt(s: string, start: int) -> Result[i64, ParseError]
+    if start >= len(s) then return Err(EmptyInput)
+    // ... actual parsing ...
+    Ok(42)
+
+parse_x_y_pair(s: string) -> Result[(i64, i64), ParseError]
+    x = parseInt(s, 0)?               // returns Err early on failure
+    y = parseInt(s, 5)?
+    Ok((x, y))
+
+main() -> int
+    parse_x_y_pair("12345,67890") match
+        Ok((x, y)) -> int(x + y)
+        Err(_)     -> -1
+```
+
+If `parseInt(s, 0)` returns `Err(EmptyInput)`, the `?` immediately returns `Err(EmptyInput)` from `parse_x_y_pair`. The error type is preserved unchanged — there's no implicit conversion between error types yet, so callers must use the same `Result[_, E]` shape.
+
+## Limitations
+
+- No error-type conversion (yet). If callee returns `Result[T, E1]` and caller returns `Result[T, E2]`, you must convert explicitly via a `match` arm.
+- Only two-variant enums where variant 0 has exactly one field. The standard `Option[T]` and `Result[T, E]` shapes match; custom enums with more variants need explicit `match`.
+- The success variant's payload must be exactly one field. `Option[(int, int)]` works (one tuple field); a hypothetical `Success(x: int, y: int)` would not.
+
+## See also
+
+- [Generic Tagged Unions](/language/functions/generics#generic-enums) — defining `Option` and `Result`.
+- [Statements: match](/language/statements) — the underlying mechanism.
+- [Contracts](/language/functions/contracts) — `ensure` clauses see the early-return site.

@@ -1,0 +1,143 @@
+---
+title: Structs
+description: Sysl struct declarations, invariants, and recursive definitions.
+---
+
+A struct in Sysl is a record type — named fields, fixed layout, no inheritance.
+
+## Declaration
+
+```sysl
+struct Point
+    x: int
+    y: int
+```
+
+Field names are unique within the struct. Fields are written one per line, indented under the struct name. The semicolon form is also accepted:
+
+```sysl
+struct Point { x: int; y: int }
+```
+
+Both forms produce identical types.
+
+## Construction
+
+```sysl
+val p = Point(10, 20)              // positional
+val q = Point(x: 10, y: 20)        // named
+val r = new Point(10, 20)          // ref-counted heap allocation
+```
+
+`Point(10, 20)` produces a value (`Point`). `new Point(10, 20)` produces a ref-counted reference (`&Point`). See [Three Allocation Modes](/language/types/three-allocation-modes) for the full conversion rules.
+
+## Field access
+
+```sysl
+val p = Point(10, 20)
+print(p.x)                  // 10
+print(p.y)                  // 20
+```
+
+Fields are accessed with `.` whether the receiver is a value, ref, or pointer. The compiler inserts the right indirection automatically — `r.x` on a `&Point` reads from `r->x` under the hood.
+
+## Recursive structs
+
+A struct can reference itself (or another struct) through a pointer, ref, or slice:
+
+```sysl
+struct Node
+    value: int
+    next: *Node       // recursive via pointer
+
+struct Tree
+    value: int
+    children: []&Tree // recursive via slice-of-ref
+```
+
+A direct recursive field (`next: Node`) is rejected — the struct would have infinite size. Indirection through `*T`, `&T`, or `[]T` works because those types are fixed-size descriptors.
+
+## Invariants
+
+A struct may declare one or more `invariant <bool>` clauses among its fields. Each invariant is checked after every field assignment, compound assignment, or whole-struct mutation:
+
+```sysl
+struct Account
+    balance: int
+    limit: int
+    invariant balance >= -limit
+
+struct Range
+    lo: int
+    hi: int
+    invariant lo <= hi
+    invariant hi - lo <= 100      // multiple clauses: all must hold
+```
+
+Bare field names are in scope inside the invariant; module-level consts and globals are too. Non-bool invariants are rejected at declaration time.
+
+A violating mutation traps via the standard contract-check path. The invariant is re-evaluated at each check site — so an invariant that refers to an expression with side effects re-runs those side effects.
+
+**Checks fire on:**
+
+- `var` init with a struct-typed value: `var a: Account = Account(...)`
+- Whole-struct reassignment: `a = Account(...)`
+- Field assignment: `s.field = v` (including through a pointer/ref: `(*p).field = v`)
+- Field compound assignment: `s.field op= v`
+
+## Memory layout
+
+Fields are laid out in declaration order with natural alignment for each field's type. `sizeof(S)` returns the total size including end-of-struct padding. Sysl does not reorder fields — the layout you write is the layout you get.
+
+```sysl
+struct Mixed
+    a: i8            // offset 0, 1 byte
+    // 3 bytes padding for alignment
+    b: int           // offset 4, 4 bytes
+    c: i8            // offset 8, 1 byte
+    // 3 bytes padding to end-of-struct
+// sizeof(Mixed) == 12
+```
+
+For C ABI interop, layout matches what a C compiler would produce on the same platform.
+
+## Methods
+
+Functions defined on a struct using the `StructName.methodName` syntax become methods callable with `.`:
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+Point.distance_from_origin() -> f64
+    f64(self.x * self.x + self.y * self.y).sqrt()
+
+main() -> int
+    val p = Point(3, 4)
+    println(p.distance_from_origin())   // 5.0
+    0
+```
+
+`self` is the receiver. The receiver mode (`Point` / `&Point` / `*Point`) follows the type the method is defined on; mutating methods declare `self` as `inout`. See [Methods](/language/functions/methods) for the full mechanics.
+
+## Deinit
+
+Structs allocated via `new T(...)` (and so reaching refcount 0 someday) can declare a `deinit` block that runs before the storage is freed:
+
+```sysl
+struct Buf
+    data: *u8
+    size: int
+
+Buf.deinit()
+    free(self.data)
+```
+
+See [Deinit & Defer](/language/functions/deinit-and-defer).
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes) — `T` / `&T` / `*T` semantics.
+- [Methods](/language/functions/methods) — adding methods to structs.
+- [Generics](/language/functions/generics) — `struct Pair[A, B] ...`.

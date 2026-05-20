@@ -1,0 +1,213 @@
+---
+title: Your First Sysl Program
+description: "From `main() -> int = 42` to a small CLI tool — a guided walkthrough."
+---
+
+This tutorial builds a small command-line tool in Sysl, starting from the simplest possible program and adding one feature at a time. By the end you'll have a working "word count" utility that reads stdin and prints line/word/byte counts.
+
+If you haven't installed the toolchain yet, see [Installation](/getting-started/installation).
+
+## Step 1: Hello, exit code
+
+The smallest valid Sysl program is one function — `main` — that returns an `int` exit code:
+
+```sysl
+main() -> int = 42
+```
+
+Save that as `first.sysl` and compile it for the LLVM host backend:
+
+```bash
+sbt "syslCliJVM/run compile --backend llvm-host first.sysl -o first"
+./first
+echo $?      # prints 42
+```
+
+`main() -> int = 42` is an [expression-body function](/language/functions/overview#expression-body): one expression after `=` is the entire body. Most of Sysl's short functions look like this.
+
+## Step 2: Print to stdout
+
+Add a `puts` call before the return value:
+
+```sysl
+main() -> int
+    puts("hello, world")
+    0
+```
+
+Two changes:
+
+- **Block body** instead of expression body. Drop the `=` and indent the body. The last expression (`0`) is the return value.
+- **`puts(s)`** is a [builtin](/language/builtins) that writes a string + newline to stdout.
+
+Rebuild and run:
+
+```bash
+sbt "syslCliJVM/run compile --backend llvm-host first.sysl -o first"
+./first
+# hello, world
+```
+
+## Step 3: Function with parameters
+
+Pull the greeting into a named function:
+
+```sysl
+greet(name: string)
+    puts(s"hello, $name")
+
+main() -> int
+    greet("world")
+    greet("trisc")
+    0
+```
+
+Notes:
+
+- **Void return type** — `greet` has no `-> T`, so it returns `()` (unit). The function body's trailing expression is discarded.
+- **`s"..."` interpolation** — `$name` is replaced with the variable's value. See [Strings](/language/strings#string-interpolation).
+
+## Step 4: Read from stdin
+
+Reading user input means calling the C library. Declare the `getchar` extern:
+
+```sysl
+extern getchar() -> int
+
+main() -> int
+    var c = getchar()
+    while c != -1
+        putchar(u32(c))
+        c = getchar()
+    0
+```
+
+This echoes stdin to stdout one byte at a time. `getchar()` returns -1 (EOF) when the stream ends. `putchar(u32)` is a Sysl builtin.
+
+Run it:
+
+```bash
+echo "test" | ./first
+# test
+```
+
+## Step 5: Count lines, words, bytes
+
+Now we can build a real `wc` clone. Track three counters and look at each byte to decide what to bump:
+
+```sysl
+extern getchar() -> int
+
+main() -> int
+    var lines = 0
+    var words = 0
+    var bytes = 0
+    var in_word = false
+
+    var c = getchar()
+    while c != -1
+        bytes = bytes + 1
+        if c == 10        // newline
+            lines = lines + 1
+        if c == 32 || c == 9 || c == 10
+            in_word = false
+        elif !in_word
+            words = words + 1
+            in_word = true
+        c = getchar()
+
+    println(lines)
+    println(words)
+    println(bytes)
+    0
+```
+
+Test it:
+
+```bash
+echo "hello world\nthis is a test" | ./first
+# 2
+# 5
+# 27
+```
+
+## Step 6: Extract the counter into a struct
+
+The three `var`s are clearly related. A struct makes that explicit:
+
+```sysl
+extern getchar() -> int
+
+struct Counts
+    lines: int
+    words: int
+    bytes: int
+
+count_one(c: int, inout counts: Counts, inout in_word: bool)
+    counts.bytes = counts.bytes + 1
+    if c == 10
+        counts.lines = counts.lines + 1
+    if c == 32 || c == 9 || c == 10
+        in_word = false
+    elif !in_word
+        counts.words = counts.words + 1
+        in_word = true
+
+main() -> int
+    var counts = Counts(0, 0, 0)
+    var in_word = false
+
+    var c = getchar()
+    while c != -1
+        count_one(c, counts, in_word)
+        c = getchar()
+
+    println(counts.lines)
+    println(counts.words)
+    println(counts.bytes)
+    0
+```
+
+Notes:
+
+- **`Counts(0, 0, 0)`** — positional struct constructor. Fields are filled in declaration order.
+- **`inout counts: Counts`** — this parameter mode lets `count_one` mutate the caller's struct in place. The hidden pointer indirection is invisible; you just write `counts.bytes = ...` in the body. See [Parameter Modes](/language/functions/parameters#in--out--inout).
+
+## Step 7: Add a `#test`
+
+Sysl has built-in test support. Add a test function above `main`:
+
+```sysl
+#test
+test_count_letter() -> unit
+    var counts = Counts(0, 0, 0)
+    var in_word = false
+    count_one(int('a'), counts, in_word)
+    expect(counts.bytes, 1, "one byte")
+    expect(counts.words, 1, "one word started")
+    expect(counts.lines, 0, "no newline yet")
+```
+
+Run tests:
+
+```bash
+sbt "syslCliJVM/run test first.sysl"
+```
+
+The compiler strips `#test` functions out of non-test builds — your production binary stays small.
+
+## What you've learned
+
+- The three function shapes: expression body, block body, void.
+- Calling C library functions with `extern`.
+- Module-level structs and basic field access.
+- `var` mutability, `inout` parameter mode.
+- String interpolation with `s"..."`.
+- Writing tests with `#test`.
+
+## Where to go next
+
+- **More language features:** [Three Allocation Modes](/language/types/three-allocation-modes) for `&T` and `*T`, the way Sysl makes ownership explicit.
+- **Generics:** [Generics](/language/functions/generics) for the parser-combinator family of patterns.
+- **Standalone CLIs:** [Targeting bare metal](/tutorials/bare-metal) for when LLVM isn't the right backend.
+- **Higher-order patterns:** [Closures](/language/functions/closures) and the `_` placeholder syntax.

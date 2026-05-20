@@ -1,0 +1,79 @@
+---
+title: Write a Test That Expects a Panic
+description: "'Using `#test(should_panic)` and the substring form to verify failure behavior.'"
+---
+
+By default, a `#test` function **fails** if it panics. The `should_panic` attribute inverts that — the test now **fails** if it does *not* panic:
+
+```sysl
+#test(should_panic)
+test_div_zero() -> unit
+    val x = 10 / 0          // produces "panic: divide by zero"
+```
+
+The test passes because the divide-by-zero trapped. If you ever changed the runtime to return `0` instead of trapping, this test would notice.
+
+## With substring matching
+
+For more specific verification, use `should_panic: "expected substring"`:
+
+```sysl
+#test(should_panic: "x must be non-negative")
+test_sqrt_negative() -> unit
+    val r = sqrt(-1.0)
+    // expects: "range check failed: precondition check failed: x must be non-negative"
+```
+
+The substring must appear in the panic message **after** the panic-marker prefix. Prefixes the test runner recognizes:
+
+- `panic: ` — from `panic()`, divide-by-zero, OOB, OOM, abort.
+- `assertion failed: ` — from `assert(cond, msg)` when `cond` is false.
+- `range check failed: ` — from `require` / `ensure` / `invariant` / `assume` / `where` / `within`.
+
+So `should_panic: "x must be non-negative"` matches against the suffix `"precondition check failed: x must be non-negative"` (after stripping `"range check failed: "`).
+
+## Locking in contract behavior
+
+The combination is especially useful for locking in **contract enforcement**:
+
+```sysl
+sqrt(x: f64) -> f64
+    require x >= 0.0, "x must be non-negative"
+    ensure result >= 0.0
+    // ... implementation ...
+
+#test
+test_sqrt_positive() -> unit
+    val r = sqrt(4.0)
+    // expect r ≈ 2.0 (with appropriate float tolerance)
+
+#test(should_panic: "x must be non-negative")
+test_sqrt_traps_on_negative() -> unit
+    val _ = sqrt(-1.0)
+```
+
+The pair documents both the happy path and the precondition's behavior in failing cases. Add tests like this whenever you write a precondition you want to lock down.
+
+## A common mistake
+
+If you `should_panic` but the function doesn't panic — say, an off-by-one means it returns garbage instead — the test **fails**. This is the right outcome: it tells you the contract isn't firing where you expected.
+
+If you wrote `should_panic: "specific message"` and the function panics with a *different* message, the test also fails. The substring must actually appear.
+
+## Catching the panic via `match`
+
+`#test(should_panic)` is the runner-level mechanism. There's no `try`/`catch` inside a Sysl program — a panic terminates the test (or, in non-test code, terminates the process). If you need to recover, the only option is to validate before the operation:
+
+```sysl
+safe_div(a: int, b: int) -> Option[int]
+    if b == 0 then None
+    else Some(a / b)
+```
+
+This is the canonical idiom — return `Option` (or `Result`) from any function that can fail, and let the caller decide.
+
+## See also
+
+- [Attributes: #test](/language/attributes/test) — full `#test` semantics.
+- [Runtime Safety](/language/runtime-safety) — what panic markers exist.
+- [Functions: Contracts](/language/functions/contracts) — `require` / `ensure` semantics.

@@ -1,0 +1,85 @@
+---
+title: Cascade Failures with `Result` and `?`
+description: "Chain fallible operations using the postfix `?` operator."
+---
+
+The standard `Result[T, E]` enum represents either success (`Ok(value)`) or failure (`Err(error)`). The `?` operator unwraps success or early-returns failure, like Rust:
+
+```sysl
+enum Result[T, E]
+    Ok(value: T)
+    Err(error: E)
+
+enum ParseError
+    EmptyInput
+    BadDigit
+    Overflow
+
+parse_int(s: string) -> Result[i64, ParseError]
+    if len(s) == 0 then return Err(EmptyInput)
+    // ... parsing logic ...
+    Ok(42i64)
+
+sum_two_strings(a: string, b: string) -> Result[i64, ParseError]
+    val x = parse_int(a)?         // unwrap Ok or return Err(EmptyInput) early
+    val y = parse_int(b)?
+    Ok(x + y)
+
+main() -> int
+    sum_two_strings("3", "4") match
+        Ok(v) -> int(v)            // 7
+        Err(_) -> -1
+```
+
+Each `?` desugars to:
+
+```sysl
+match parse_int(a)
+    Ok(v) -> v
+    Err(e) -> return Err(e)
+```
+
+The early return propagates the error unchanged to the caller. See [The Try Operator](/language/functions/try-operator).
+
+## When the caller and callee have different `E`
+
+`?` requires the enclosing function to return the **same** `Result[T, E]` type as the value being unwrapped. There's no implicit error-type conversion.
+
+To convert error types, match and re-wrap:
+
+```sysl
+enum IoError
+    NotFound
+    PermissionDenied
+
+read_and_parse(path: string) -> Result[i64, IoError]
+    val data = read_file(path)?              // returns IoError
+    parse_int(data) match
+        Ok(v) -> Ok(v)
+        Err(_) -> Err(IoError.NotFound)      // map ParseError → IoError
+```
+
+## When you want a default instead of propagating
+
+Sometimes you want "use the success value or fall back to a default":
+
+```sysl
+parse_or(s: string, dflt: i64) -> i64
+    parse_int(s) match
+        Ok(v) -> v
+        Err(_) -> dflt
+```
+
+This is the same pattern `Option.unwrap_or` follows in `std.option`.
+
+## Limitations of `?`
+
+- **Two-variant enum only.** The enum must have exactly two variants with the first having exactly one field. `Option[T]` and `Result[T, E]` match; an enum with three variants doesn't.
+- **Same error type.** No implicit `From`/`Into`-style conversions between error enums.
+- **No method chaining.** `parse(s)?.method()` is technically `?` followed by a method call — fine, but if you want to call the method only on success, prefer a `match`.
+
+## See also
+
+- [The Try Operator](/language/functions/try-operator) — full reference.
+- [Custom error enum](/cookbook/custom-error).
+- [Convert between error types](/cookbook/error-conversion).

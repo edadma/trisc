@@ -1,0 +1,217 @@
+---
+title: Contracts in Practice
+description: "Porting a C function to Sysl with require / ensure / loop invariant — and watching the contract checker catch a real bug."
+---
+
+This tutorial takes a familiar C function — binary search over a sorted array — and ports it to Sysl with full contract annotations. Along the way you'll see how `require`, `ensure`, `invariant`, and quantifier expressions catch a subtle off-by-one bug that the C version would let pass silently.
+
+## The starting point: binary search in C
+
+```c
+int bsearch_int(int *arr, int n, int target) {
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (arr[mid] == target) return mid;
+        if (arr[mid] < target) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return -1;
+}
+```
+
+It's 8 lines, and it has classic bugs:
+
+1. **Sorted-input precondition** — if `arr` isn't sorted, the result is silently nonsense.
+2. **`mid` overflow** — `(lo + hi) / 2` can overflow when `lo + hi > INT_MAX`. The fix is `lo + (hi - lo) / 2`.
+3. **Return value contract** — the caller doesn't know whether `-1` means "not found" or "error".
+
+Let's port this and lock all three down with Sysl contracts.
+
+## Step 1: Naive port
+
+```sysl
+bsearch_int(arr: &[]int, target: int) -> int
+    var lo = 0
+    var hi = len(arr) - 1
+    while lo <= hi
+        var mid = (lo + hi) / 2
+        if arr[mid] == target then return mid
+        if arr[mid] < target then lo = mid + 1
+        else hi = mid - 1
+    -1
+```
+
+Same as the C version. Same bugs.
+
+## Step 2: Pin down the precondition
+
+The sorted-input requirement is a `require` clause. Use the `for all` quantifier to express it:
+
+```sysl
+bsearch_int(arr: &[]int, target: int) -> int
+    require for all i in 0..<len(arr)-1 => arr[i] <= arr[i+1],
+            "haystack must be sorted ascending"
+    var lo = 0
+    var hi = len(arr) - 1
+    while lo <= hi
+        var mid = (lo + hi) / 2
+        if arr[mid] == target then return mid
+        if arr[mid] < target then lo = mid + 1
+        else hi = mid - 1
+    -1
+```
+
+Now passing an unsorted array traps at the call site:
+
+```
+range check failed: precondition check failed: haystack must be sorted ascending
+```
+
+This costs one O(n) check at function entry. For release builds, strip with `--no-contracts`. For test builds, keep it on — the check catches misuse before the silent-nonsense return.
+
+See [Functions: Contracts](/language/functions/contracts) and [Quantifier Expressions](/language/functions/contracts#quantifier-expressions).
+
+## Step 3: Pin down the postcondition
+
+What does the return value mean?
+
+```sysl
+ensure result == -1 || (result >= 0 && result < len(arr) && arr[result] == target),
+       "if found, index points at target; else -1"
+```
+
+The full function so far:
+
+```sysl
+bsearch_int(arr: &[]int, target: int) -> int
+    require for all i in 0..<len(arr)-1 => arr[i] <= arr[i+1],
+            "haystack must be sorted ascending"
+    ensure result == -1 || (result >= 0 && result < len(arr) && arr[result] == target),
+           "if found, index points at target; else -1"
+    var lo = 0
+    var hi = len(arr) - 1
+    while lo <= hi
+        var mid = (lo + hi) / 2
+        if arr[mid] == target then return mid
+        if arr[mid] < target then lo = mid + 1
+        else hi = mid - 1
+    -1
+```
+
+`result` is a special identifier inside `ensure` clauses — it's the function's return value. The compiler emits the check before every return path.
+
+If you ever break the function so it returns `len(arr)` by mistake, the postcondition fires. If you accidentally return an index whose contents differ from `target`, it also fires. The behavior is pinned.
+
+## Step 4: Add a loop invariant
+
+Loop invariants document properties that hold at every iteration's top. They're the canonical way to express "we haven't lost track of the search space":
+
+```sysl
+bsearch_int(arr: &[]int, target: int) -> int
+    require for all i in 0..<len(arr)-1 => arr[i] <= arr[i+1],
+            "haystack must be sorted ascending"
+    ensure result == -1 || (result >= 0 && result < len(arr) && arr[result] == target),
+           "if found, index points at target; else -1"
+    var lo = 0
+    var hi = len(arr) - 1
+    while lo <= hi
+        invariant lo >= 0
+        invariant hi < len(arr)
+        invariant lo <= hi + 1, "search space valid or empty"
+        var mid = (lo + hi) / 2
+        if arr[mid] == target then return mid
+        if arr[mid] < target then lo = mid + 1
+        else hi = mid - 1
+    -1
+```
+
+The invariants catch bugs like `lo = mid` (instead of `mid + 1`) — that would cause `lo` to stay equal to `hi` and the loop to run forever, eventually failing the variant check (see next step).
+
+See [Statements: Loop Invariants](/language/statements#invariant-bool---loop-invariant).
+
+## Step 5: Termination — `variant`
+
+A `variant` clause declares an integer expression that strictly decreases each iteration and stays ≥ 0. For binary search, `hi - lo` is the witness:
+
+```sysl
+while lo <= hi
+    invariant lo >= 0
+    invariant hi < len(arr)
+    invariant lo <= hi + 1, "search space valid or empty"
+    variant hi - lo + 1
+    var mid = (lo + hi) / 2
+    if arr[mid] == target then return mid
+    if arr[mid] < target then lo = mid + 1
+    else hi = mid - 1
+```
+
+If a bug ever made `lo` and `hi` move in the wrong direction, the variant check would trap immediately instead of letting the program spin.
+
+## Step 6: Catching the overflow bug
+
+Now for the famous mid-computation bug. In C, `(lo + hi) / 2` can overflow when both are near `INT_MAX`. In Sysl, integer arithmetic wraps silently — same problem. The fix is `lo + (hi - lo) / 2`:
+
+```sysl
+var mid = lo + (hi - lo) / 2
+```
+
+But here's where contracts pay off: without contracts, the buggy form silently produces wrong answers on large arrays. *With* contracts, the postcondition `result == -1 || ... && arr[result] == target` catches the bug on the first faulty test case — because the wrong `mid` points at the wrong element.
+
+This is the canonical "contracts catch bugs that escape unit tests" story. A unit test that happens not to hit the overflow case passes; the contract, which fires on every input, doesn't.
+
+## Step 7: A `#test` to lock it in
+
+```sysl
+#test
+test_bsearch_basic() -> unit
+    val a = new [5]int
+    a[0] = 1; a[1] = 3; a[2] = 5; a[3] = 7; a[4] = 9
+    expect(bsearch_int(a, 5), 2, "find middle")
+    expect(bsearch_int(a, 1), 0, "find first")
+    expect(bsearch_int(a, 9), 4, "find last")
+    expect(bsearch_int(a, 4), -1, "miss low side")
+    expect(bsearch_int(a, 11), -1, "miss high")
+
+#test(should_panic: "haystack must be sorted ascending")
+test_bsearch_unsorted_traps() -> unit
+    val a = new [3]int
+    a[0] = 3; a[1] = 1; a[2] = 2
+    val _ = bsearch_int(a, 1)         // contract fires
+```
+
+The first test validates correctness. The second locks in the precondition's behavior — proving the contract actually fires when violated.
+
+Run them:
+
+```bash
+sbt "syslCliJVM/run test bsearch.sysl"
+```
+
+## What you've learned
+
+- **`require`** captures preconditions — what callers must guarantee.
+- **`ensure` with `result`** captures postconditions — what the function guarantees.
+- **`for all` quantifier** expresses array-wide properties succinctly.
+- **`invariant` in loops** documents step-by-step properties.
+- **`variant` in loops** witnesses termination.
+- **`--no-contracts`** strips every contract check at compile time for release.
+- **`#test(should_panic: "...")`** locks in the trap behavior of a precondition.
+
+## When contracts pay off
+
+- **API boundaries.** Public functions that callers misuse benefit most. The contract documents the API *and* enforces it.
+- **Subtle invariants.** Anything where unit tests can pass but the property is occasionally violated — overflow, off-by-one, sorted-input requirements.
+- **Cross-function reasoning.** When function A's postcondition is function B's precondition, the compiler links them at the call site.
+
+## When contracts are overkill
+
+- **Internal helpers** that one caller uses once. The contract would be redundant with the calling code's logic.
+- **Hot loops** where even the `--no-contracts` stripped form doesn't help (because you've forgotten to actually strip them in your release build). Always benchmark with `--no-contracts` set.
+- **Implementations whose specification is shorter than the body itself.** A 3-line function rarely benefits from a 6-line contract.
+
+## See also
+
+- [Functions: Contracts](/language/functions/contracts) — the reference page.
+- [Statements: Loop Invariants](/language/statements#invariant-bool---loop-invariant) — full loop-invariant semantics.
+- [Functions: Def & Pure](/language/functions/def-pure-functions) — `def` for verification-grade pure predicates.

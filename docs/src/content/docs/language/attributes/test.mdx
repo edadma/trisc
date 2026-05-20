@@ -1,0 +1,145 @@
+---
+title: "#test"
+description: Mark functions as unit tests, run them with sysl test, expect panics.
+---
+
+Functions marked `#test` are unit tests. They run under `sysl test`; their pass/fail status is determined by whether they panic.
+
+## Requirements
+
+A `#test` function must:
+
+- Take zero parameters.
+- Return `unit` (or omit the return type, which is equivalent).
+- Not be generic.
+- Not be a method.
+
+## Basic test
+
+A test **passes** iff it does not panic. A panic (via `panic("msg")`, `abort()`, or any runtime trap) fails the test:
+
+```sysl
+#test
+test_trivial() -> unit
+    assert(1 + 1 == 2, "math is broken")
+```
+
+## Display name
+
+```sysl
+#test("descriptive name shown in output")
+test_with_display_name() -> unit
+    0
+```
+
+Useful when the function name alone doesn't describe what's being tested. Shown in `sysl test` output instead of the function name.
+
+## `should_panic`
+
+The test is expected to panic — passes iff it does:
+
+```sysl
+#test(should_panic)
+test_guard() -> unit
+    panic("this must fire")
+```
+
+### `should_panic` with substring matching
+
+The panic message must contain the given substring:
+
+```sysl
+#test(should_panic: "out of range")
+test_bounds() -> unit
+    panic("index 42 is out of range")
+```
+
+The substring must appear after the panic-marker prefix (`panic: `, `assertion failed: `, or `range check failed: `). See [Runtime Safety](/language/runtime-safety#test-runner-integration) for the prefix list.
+
+## Test isolation
+
+`#test` functions are **excluded from non-test builds**. `sysl compile` and `sysl run` strip them, so they don't contaminate normal execution and aren't emitted to `.asm` / `.tof` / `.ll` output.
+
+## Running tests
+
+```bash
+sysl test <path>                      # file or directory (recursive)
+sysl test --filter <pattern> <path>   # substring match on test/display name
+sysl test --backend BACKEND <path>    # see list below
+sysl test --fail-fast <path>
+sysl test --verbose <path>
+```
+
+Backend selectors: `interpreter` (default), `llvm-host`, `svm-host`, `trisc`, `riscv64`, `riscv32`, `wasm32`. The value `all` is reserved for future use; for now invoke each backend separately.
+
+## Output format
+
+Tests are grouped by source file with pass/fail markers and timings:
+
+```
+running 6 tests
+std/mem/mem.lsysl
+  ✓ test_copy_basic              (0.2ms)
+  ✗ test_cmp_prefix              (0.1ms)
+      panic: expected -1, got 1
+  ✓ test_index_byte_found        (0.1ms)
+...
+5 passed, 1 failed, 0 skipped — 0.6ms
+```
+
+Exit code is 0 iff all tests pass. Failing tests print the source file and line of the `#test` attribute (`at file:line`).
+
+## Builtins useful in tests
+
+- **`panic(msg: string) -> unit`** — halts with the given message. Primary failure signal inside tests.
+- **`assert(cond: bool, msg: string) -> unit`** — panics with `msg` if `cond` is false; returns otherwise.
+- **`expect(actual: i64, expected: i64, msg: string) -> unit`** — panics with `"msg: expected N, got M"` if values differ. Better diagnostics than `assert(a == b, ...)`.
+
+## Test output capture
+
+Any output from `print`, `println`, `puts`, or `puti` inside a test function is captured and displayed below the failure message if the test fails. This is useful for debugging intermediate values:
+
+```sysl
+#test
+test_parse() -> unit
+    val r = parse("42")
+    puts(s"parsed: $r")        // captured — printed only if test fails
+    expect(r, 42, "parse")
+```
+
+## Worked example: testing a sort function
+
+```sysl
+sort_in_place(a: &[]int)
+    require for all i in 0..<len(a)-1 => true   // trivial precondition
+    ensure for all i in 0..<len(a)-1 => a[i] <= a[i+1]
+    // ... implementation ...
+
+#test
+test_sort_empty() -> unit
+    val a = new [0]int
+    sort_in_place(a)
+    expect(len(a), 0, "empty stays empty")
+
+#test
+test_sort_one() -> unit
+    val a = new [1]int
+    a[0] = 42
+    sort_in_place(a)
+    expect(a[0], 42, "single element unchanged")
+
+#test
+test_sort_reverse() -> unit
+    val a = new [3]int
+    a[0] = 3; a[1] = 2; a[2] = 1
+    sort_in_place(a)
+    expect(a[0], 1, "first element")
+    expect(a[1], 2, "second element")
+    expect(a[2], 3, "third element")
+```
+
+## See also
+
+- [Runtime Safety](/language/runtime-safety) — what panic markers `should_panic` looks for.
+- [Builtins](/language/builtins) — `panic`, `assert`, `expect`.
+- [Functions: Contracts](/language/functions/contracts) — `require` and `ensure` work together with tests.

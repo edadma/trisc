@@ -1,0 +1,52 @@
+---
+title: Detach a `&T` to an Owned `T`
+description: "Using `.copy()` to break the shared-storage relationship."
+---
+
+When you have a `&T` but need an independent value, call `.copy()`:
+
+```sysl
+struct Config
+    threshold: int
+    verbose: bool
+
+main() -> int
+    val shared = new Config(100, true)        // type: &Config
+    var local: Config = shared.copy()         // type: Config — independent
+
+    local.threshold = 50                       // doesn't affect shared
+    shared.threshold                            // still 100
+```
+
+## What `.copy()` does
+
+- Bitwise-copies the pointee into a fresh stack-allocated value.
+- Does **not** adjust the source's refcount — `shared` is unchanged.
+- The new value is independent — mutations on `local` don't affect `shared` and vice versa.
+
+The cost is one `memcpy` of `sizeof(T)` bytes. For small structs that's a single load + store; for large ones it's proportional.
+
+## When `.copy()` is the right tool
+
+- **You need to mutate without affecting other holders.** A `&Config` shared by many components can produce an independent value via `.copy()`, customize it, and pass that down.
+- **You want to detach from heap storage.** If the original `&T` is going away soon, copying to a `T` lets the local survive without keeping the heap allocation alive.
+- **You're crossing a boundary that requires value semantics.** E.g. passing into an `extern` function that copies on entry anyway.
+
+## When `.copy()` is wrong
+
+- **The struct contains `&T` fields.** `.copy()` does a bitwise copy — it does NOT recursively copy what those `&T` fields point to. Both the original and the copy point to the same inner objects (and contribute to their refcounts via the bitwise-copied bytes).
+
+  For deep copies of nested ref-counted data, write a `deep_copy` helper manually.
+
+- **You want to share ownership.** Then `&T` is already what you want — just keep using the ref.
+
+- **The struct contains `*T` fields that should be unique per instance.** `.copy()` shares the pointer; you'll get aliasing where you didn't expect it.
+
+## Note: `.copy()` is only on `&T`
+
+Value types don't need it (`var b = a` already copies bytes). Raw pointers don't get it (no semantics to copy through). Only `&T` exposes `.copy()`, because that's the type where copy-vs-share is a meaningful question.
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes#conversion-rules) — `.copy()` in the conversion table.
+- [Pass a struct by value vs by ref](/cookbook/pass-by-value-vs-ref).

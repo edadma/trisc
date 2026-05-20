@@ -1,0 +1,69 @@
+---
+title: Parse an Integer from a String
+description: "Convert text to integer using std.strconv, with error propagation via the ? operator."
+---
+
+The standard library's `std.strconv` package handles integer parsing. The canonical entry points return `Result[i64, ParseError]`:
+
+```sysl
+import std.strconv.{parse_i64, ParseError}
+
+parse_or_default(s: string, dflt: i64) -> i64
+    parse_i64(s) match
+        Ok(n) -> n
+        Err(_) -> dflt
+
+main() -> int
+    val n = parse_or_default("42", 0)         // 42
+    val m = parse_or_default("not-a-number", 0) // 0
+    int(n + m)                                 // 42
+```
+
+## Propagating errors with `?`
+
+When the caller also returns a `Result`, the `?` operator forwards failures:
+
+```sysl
+import std.strconv.{parse_i64, ParseError}
+
+sum_pair(s1: string, s2: string) -> Result[i64, ParseError]
+    val a = parse_i64(s1)?
+    val b = parse_i64(s2)?
+    Ok(a + b)
+
+main() -> int
+    sum_pair("3", "4") match
+        Ok(v) -> int(v)         // 7
+        Err(_) -> -1
+```
+
+See [The Try Operator](/language/functions/try-operator) for the full mechanics.
+
+## Hex, octal, binary
+
+`parse_i64` accepts decimal only. For other bases, use the radix-aware form:
+
+```sysl
+import std.strconv.parse_i64_radix
+
+parse_i64_radix("ff", 16)       // Ok(255)
+parse_i64_radix("777", 8)       // Ok(511)
+parse_i64_radix("11010", 2)     // Ok(26)
+```
+
+## Unsigned variants
+
+`parse_u64`, `parse_u32`, etc. follow the same pattern. They reject negative inputs:
+
+```sysl
+import std.strconv.parse_u64
+
+parse_u64("42")       // Ok(42u64)
+parse_u64("-1")       // Err(InvalidDigit)
+```
+
+## See also
+
+- [The Try Operator](/language/functions/try-operator) — `?` semantics.
+- [Generic Tagged Unions](/language/functions/generics#generic-enums) — how `Result` is defined.
+- `std/strconv/` source for the full API.

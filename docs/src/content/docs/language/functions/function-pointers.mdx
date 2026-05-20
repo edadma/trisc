@@ -1,0 +1,109 @@
+---
+title: Function Pointers
+description: Storing functions in variables, arrays, and struct fields.
+---
+
+A function in Sysl is a first-class value. You can store it in a variable, pass it as an argument, return it, or hold it in an array or struct field.
+
+## Basics
+
+```sysl
+dbl(x: int) -> int = x * 2
+triple(x: int) -> int = x * 3
+
+main() -> int
+    f: (int) -> int = dbl
+    f(21)                         // indirect call → 42
+
+    var funcs: [2](int) -> int
+    funcs[0] = dbl
+    funcs[1] = triple
+    funcs[0](10) + funcs[1](10)   // call through array → 50
+```
+
+The function type written as `(P1, P2) -> R` is a 16-byte fat pointer `{func_ptr, env_ptr}` (see [Closures](/language/functions/closures) for the layout details). For plain function pointers, `env_ptr` is `0`.
+
+## In function parameters
+
+```sysl
+apply(f: (int) -> int, x: int) -> int = f(x)
+
+main() -> int
+    apply(dbl, 21)                // 42
+    apply(triple, 14)             // 42
+    apply(x -> x + 1, 41)         // 42 — closure literal
+```
+
+The parameter type drives type inference on the argument — `x -> x + 1` infers `x: int` from the expected `(int) -> int`.
+
+## In structs
+
+```sysl
+struct Handler
+    name: string
+    callback: (int) -> int
+
+main() -> int
+    h = Handler("doubler", dbl)
+    (h.callback)(21)              // 42 — call through field
+```
+
+The extra parens around `h.callback` are sometimes needed to disambiguate from method-call syntax — the parser would otherwise read `h.callback(21)` as a method call.
+
+## Return type
+
+```sysl
+get_op(kind: int) -> (int) -> int
+    if kind == 0 then dbl
+    else triple
+```
+
+Returning a function value is identical to returning any other value — the 16-byte fat pointer goes back through the normal return path.
+
+## Function pointers vs closures
+
+A plain function pointer references a top-level function and has `env_ptr = 0`. A closure references a function *plus* a captured environment, and has a non-null `env_ptr`. Both share the same `(P1, P2) -> R` type — at the type level there's no distinction.
+
+The runtime representation handles both cases uniformly:
+
+- **Direct call** (function pointer): the indirect call uses `func_ptr` and ignores `env_ptr`.
+- **Closure call**: the indirect call uses `func_ptr` and passes `env_ptr` as a hidden parameter (register r3 on TRISC, first `i8* %env` on LLVM).
+
+You don't have to distinguish them — every call site treats both forms identically.
+
+## Multi-line types
+
+Function types in declarations can wrap onto multiple lines just like any other expression:
+
+```sysl
+type Handler =
+    (
+        Request,
+        Response,
+        Context
+    ) -> int
+```
+
+## Function values vs parameterless functions
+
+A function declared with `()` parameter list is a callable value:
+
+```sysl
+get_answer() -> int = 42
+f: () -> int = get_answer       // function value, callable as f()
+```
+
+A [parameterless function](/language/functions/overview#parameterless-functions) (no `()`, no parens at call site) cannot be stored as a value — bare references auto-call:
+
+```sysl
+seven -> int = 7
+f = seven                       // error: bare reference auto-calls
+```
+
+If you need a function value, declare the function with `()`.
+
+## See also
+
+- [Closures](/language/functions/closures) — anonymous functions with captures.
+- [Generics: function-typed parameters](/language/functions/generics#function-typed-type-arguments) — `Parser[(A, A) -> A]`.
+- [Three Allocation Modes](/language/types/three-allocation-modes) — function values are stack-allocated.
