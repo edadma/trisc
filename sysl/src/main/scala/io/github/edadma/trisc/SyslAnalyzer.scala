@@ -793,6 +793,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
           validatePureFn(name, tBody, funInfo.params.map(_._1), isDefFn)
         if funInfo.reads.isDefined || funInfo.writes.isDefined then
           validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
+        if funInfo.isRealtime then
+          validateRealtimeFn(name, tBody, funInfo.params.map(_._1))
         validateGhostDiscipline(name, funInfo, tBody)
         val tBodyFixed = rewriteEscapingClosureCaptureOwns(tBody)
         TFunDecl(funInfo.name, tParams, retType, tBodyFixed, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo), isParameterless = funInfo.isParameterless)

@@ -3946,6 +3946,70 @@ val sub: Parser[(int, int) -> int] =
 // keeps A unannotated; the closure flows in as `#pure ≤ unannotated`.
 ```
 
+### `#realtime` — bounded-work, no-heap functions
+
+A function marked `#realtime` is checked by the compiler to perform only bounded, allocation-free, non-blocking work. Realtime functions are the discipline for code that runs under hard latency constraints: audio render callbacks, kernel interrupt handlers, signal handlers, anywhere a heap allocation or a blocking syscall would miss a deadline. Like `#pure`, it is a compile-time enforcement — any violation is an error, not a warning.
+
+```
+#realtime
+mix(out: *i16, in: *i16, gain: i32) -> unit
+    *out = (*in * gain) >> 16
+```
+
+**What a `#realtime` function may do:**
+- Mutate locals; loop with bounded counters; recurse with bounded depth
+- Read and write module-level vars (subject to any `#reads`/`#writes` it also carries)
+- Write through pointer parameters (`*p = …`), struct fields, and array indices
+- Call assert (termination-only)
+- Embed `asm("…")` (the user is responsible for what the asm does)
+- Call other `#realtime` functions, including via a `#realtime` function pointer or `#realtime`-declared interface method
+
+**What a `#realtime` function may NOT do:**
+- Heap-allocate (`new T`, `new [n]T`)
+- Append to a slice (may grow / allocate)
+- Construct closures (allocates closure environment)
+- Build a heap-allocated string — `str(x)`, `s"…"`, and `f"…"` interpolation are all rejected
+- Declare or assign a local `&T` variable — the refcount drop on scope exit / overwrite can reach `__sysl_drop_ref` → `free`. Reading a `&T` parameter is fine; the caller owns the increment.
+- Call any function whose effect signature is not `#realtime`, directly or via a function pointer
+- Dispatch through an interface method whose declared signature is not `#realtime`
+- Call a builtin other than `assert`
+
+**Orthogonal axis.** `#realtime` composes freely with `#pure` and with `#reads(...)` / `#writes(...)` — they describe different disciplines. A function may carry any combination:
+
+```
+#pure
+#realtime
+clamp(x: i32, lo: i32, hi: i32) -> i32
+    if x < lo then return lo
+    if x > hi then return hi
+    return x
+
+#realtime
+#reads(channel_table) #writes(out_buffer)
+render_block(n: int) -> unit
+    var i = 0
+    while i < n do
+        out_buffer[i] = channel_table[i & 7]
+        i = i + 1
+```
+
+`#realtime` does not imply `#pure`: the realtime renderer above writes to module-level state every block, which would be impossible under `#pure`. Conversely a `#pure` function is not automatically realtime — it may still call `str(...)`, allocate, or construct a closure.
+
+**Cross-module propagation.** Like `#pure` and `#reads`/`#writes`, the `#realtime` bit travels through `.smeta`. A realtime function in one module can call a realtime function in another. Imported functions without `#realtime` are non-realtime; annotate the leaves of your audio / interrupt call graph first, then work upward.
+
+**Function-pointer and interface slots.** The `#realtime` suffix is accepted on function types and interface methods exactly like `#pure`:
+
+```
+render(cb: (i16, i16) -> i16 #realtime, l: i16, r: i16) -> i16 = cb(l, r)
+
+interface Mixer
+    mix(in: i16) -> i16 #realtime
+```
+
+At a call / boxing / argument-passing site, `effectsSatisfy` checks the realtime bit as an additional gate before the pure/RW comparison: a slot that demands realtime requires the actual to be realtime; otherwise the realtime check passes through and the pure/RW lattice decides.
+
+**Why local `&T` is forbidden.** A new `&T` local bumps the refcount on the way in and decrements it on scope exit. The decrement-to-zero path runs the type's `deinit` block and calls `free` — both unbounded work from the realtime perspective. The conservative v1 rule keeps `&T` locals out of realtime function bodies. Users who need a transient reference inside a realtime function should pass the data as a parameter, use a value (`T`) or raw pointer (`*T`) instead, or factor the lifetime out into a non-realtime caller.
+
 ### `#ghost` — verification-only declarations
 
 A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost. Four places `#ghost` may appear:

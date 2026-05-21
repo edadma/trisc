@@ -62,3 +62,37 @@ signature is matched against the actual.
     #test
     test_rt_func_type_indirect() -> unit
         assert(rt_apply(rt_double, 21) == 42, "rt_apply(rt_double, 21)")
+
+
+### `#realtime` may mutate locals and loop
+
+Local mutation and bounded loops are realtime-safe — no allocation, no
+blocking, bounded work. The runtime answer matches the unmarked shape.
+
+    #realtime
+    rt_sum_to(n: int) -> int
+        var acc = 0
+        var i = 1
+        while i <= n do
+            acc = acc + i
+            i = i + 1
+        return acc
+
+    #test
+    test_rt_sum_to() -> unit
+        assert(rt_sum_to(10) == 55, "1+2+...+10 == 55")
+
+
+### `#realtime` may write through a pointer parameter
+
+Pointer/field/index writes are bounded and realtime-safe.
+
+    #realtime
+    rt_write_one(p: *int) -> unit
+        *p = 99
+
+    #test
+    test_rt_pointer_write() -> unit
+        var x = 0
+        rt_write_one(&x)
+        assert(x == 99, "*p = 99 should land")

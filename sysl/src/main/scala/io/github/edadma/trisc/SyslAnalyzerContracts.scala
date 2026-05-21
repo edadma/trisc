@@ -179,6 +179,171 @@ trait SyslAnalyzerContracts:
       case TExprBody(e) => checkExpr(e)
       case TBlockBody(stmts) => stmts.foreach(checkStmt)
 
+  /** Names of builtins safe to call from a `#realtime` function — bounded work,
+   *  no allocation, no blocking. Arithmetic / comparison intrinsics aren't calls
+   *  (they lower to TBinary / TUnary), so they don't appear here. `assert` is
+   *  allowed for the same reason it's allowed in pure functions: its only effect
+   *  is termination. IO, allocation, blocking, and unbounded loops are not. */
+  protected val realtimePermittedBuiltins: Set[String] = Set("assert")
+
+  /** Analyze a `#realtime` function body. The realtime discipline rejects any
+   *  construct that could allocate on the heap, block, take an unbounded amount
+   *  of time, or transitively do any of those things via a non-realtime callee.
+   *  Unlike `#pure`, realtime functions may freely mutate module-level state,
+   *  write through pointers/fields/indices, and embed asm — those are bounded
+   *  operations.
+   *
+   *  Forbidden:
+   *  - heap allocation: `new`, `new []T`, append, closures, `str(...)`, `f"..."`
+   *  - calls to non-realtime functions (direct, indirect, or interface-dispatched)
+   *  - non-realtime intrinsic calls
+   *  - declaring or assigning `&T`-typed locals (refcount drop on scope exit or
+   *    overwrite may call `__sysl_drop_ref` → `free`). Reading a `&T` parameter
+   *    is fine; the caller owns the increment.
+   *
+   *  Called after body analysis, like `validatePureFn`. */
+  protected def validateRealtimeFn(funcName: String, body: TFunBody, paramNames: List[String]): Unit =
+    val localVars = mutable.HashSet.from(paramNames)
+    val prefix = s"#realtime function '$funcName'"
+
+    def reject(msg: String): Nothing = throw AnalysisError(s"$prefix $msg")
+
+    def isRefType(t: SyslType): Boolean = t match
+      case RefType(_) => true
+      case _ => false
+
+    def isRealtimeCallee(callee: String): Boolean =
+      // Self-recursion is fine — the function is itself `#realtime`.
+      if callee == funcName then true
+      else if realtimePermittedBuiltins.contains(callee) then true
+      else if builtinFunctions.contains(callee) then false
+      else
+        // TCall carries the mangled name; the `functions` map is keyed by local
+        // name. Look up by key, fall back to scanning FunInfo.name.
+        val info = functions.get(callee).orElse(functions.values.find(_.name == callee))
+        info match
+          case Some(i) => i.isRealtime
+          case None    => false
+
+    def checkExpr(e: TExpr): Unit = e match
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TUnitLit => ()
+      case _: TVarRef | _: TAddrOf | _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl => ()
+      case TArrayLit(els, _)               => els.foreach(checkExpr)
+      case TAddrOfIndex(a, i, _)           => checkExpr(a); checkExpr(i)
+      case TAddrOfField(o, _, _)           => checkExpr(o)
+      case TTempAddr(e, _)                 => checkExpr(e)
+      case TDeref(e, _)                    => checkExpr(e)
+      case TIndex(e, i, _)                 => checkExpr(e); checkExpr(i)
+      case TFieldAccess(o, _, _)           => checkExpr(o)
+      case TFieldPreInc(o, _, _)           => checkExpr(o)
+      case TFieldPreDec(o, _, _)           => checkExpr(o)
+      case TFieldPostInc(o, _, _)          => checkExpr(o)
+      case TFieldPostDec(o, _, _)          => checkExpr(o)
+      case _: TStructLit                   => ()
+      case TStructConstruct(_, args)       => args.foreach(checkExpr)
+      case TPreInc(_, _) | TPreDec(_, _) | TPostInc(_, _) | TPostDec(_, _) => ()
+      case TUnary(_, o, _)                 => checkExpr(o)
+      case TBinary(l, _, r, _)             => checkExpr(l); checkExpr(r)
+      case TCall(callee, args, _) =>
+        if !isRealtimeCallee(callee) then reject(s"cannot call non-realtime function '$callee'")
+        args.foreach(checkExpr)
+      case TIndirectCall(callee, args, _) =>
+        callee.typ match
+          case FuncType(_, _, _, eff) if eff.isRealtime => checkExpr(callee); args.foreach(checkExpr)
+          case _ => reject("cannot make indirect call (callee is not declared `#realtime`)")
+      case TCast(e, _)                     => checkExpr(e)
+      case TIfExpr(c, t, el, _)            => checkExpr(c); t.foreach(checkStmt); el.foreach(_.foreach(checkStmt))
+      case TMatchExpr(e, arms, deflt, _) =>
+        checkExpr(e)
+        for arm <- arms do
+          arm.guard.foreach(checkExpr)
+          arm.body.foreach(checkStmt)
+        deflt.foreach(_.foreach(checkStmt))
+      case _: TEnumConstruct               => ()
+      case _: TNew =>
+        reject("cannot heap-allocate (`new`) — allocation is not realtime-safe")
+      case _: TNewEnum =>
+        reject("cannot heap-allocate (`new`) — allocation is not realtime-safe")
+      case _: TNewArray =>
+        reject("cannot heap-allocate (`new [n]T`) — allocation is not realtime-safe")
+      case TLen(e, _)                      => checkExpr(e)
+      case TCap(e, _)                      => checkExpr(e)
+      case TSliceExpr(a, lo, hi, _)        => checkExpr(a); lo.foreach(checkExpr); hi.foreach(checkExpr)
+      case TAppend(_, _, _) =>
+        reject("cannot append to a slice — append may allocate")
+      case TStringFromPtr(p, l, _)         => checkExpr(p); checkExpr(l)
+      case TStringFromSlice(s, _)          => checkExpr(s)
+      case _: TStr =>
+        reject("cannot call `str(...)` — produces a heap-allocated string")
+      case _: TFmtStr =>
+        reject("cannot use formatted string interpolation (`s\"...\"` / `f\"...\"`) — allocates")
+      case _: TClosure =>
+        reject("cannot construct closures — closure construction allocates")
+      case TInterfaceBox(e, _, _)          => checkExpr(e)
+      case TInterfaceDispatch(ifaceVal, methodIdx, args, _) =>
+        ifaceVal.typ match
+          case InterfaceType(_, methods) if methods(methodIdx)._4.isRealtime =>
+            checkExpr(ifaceVal); args.foreach(checkExpr)
+          case _ =>
+            reject("cannot make interface-dispatch call (interface method is not declared `#realtime`)")
+      case TIntrinsicCall(name, args, _) =>
+        if !realtimePermittedBuiltins.contains(name) then
+          reject(s"cannot call intrinsic '$name' — not in realtime-permitted set")
+        args.foreach(checkExpr)
+      case TRangeCheck(e, _, _, _)         => checkExpr(e)
+      case TAsmExpr(_, _)                  => ()   // asm is opaque, user-controlled — trust the user
+
+    def checkStmt(s: TStmt): Unit = s match
+      case TVarStmt(n, typ, init, _, _) =>
+        checkExpr(init)
+        if isRefType(typ) || isRefType(init.typ) then
+          reject(s"cannot declare local `&T` variable '$n' — refcount drop on scope exit may call free")
+        localVars += n
+      case TDestructureStmt(ns, _, init) =>
+        checkExpr(init)
+        localVars ++= ns
+      case TDestructureAssignStmt(ns, _, init) =>
+        checkExpr(init)
+      case TAssignStmt(target, value) =>
+        checkExpr(value)
+        if isRefType(value.typ) then
+          reject(s"cannot assign `&T` value to '$target' — refcount drop on overwrite may call free")
+      case TCompoundAssignStmt(_, _, value) =>
+        checkExpr(value)
+      case TDerefAssignStmt(target, value) =>
+        checkExpr(target); checkExpr(value)
+      case TIndexAssignStmt(arr, idx, value) =>
+        checkExpr(arr); checkExpr(idx); checkExpr(value)
+      case TFieldAssignStmt(o, _, value) =>
+        checkExpr(o); checkExpr(value)
+      case TFieldCompoundAssignStmt(o, _, _, value) =>
+        checkExpr(o); checkExpr(value)
+      case TReturnStmt(v) =>
+        v.foreach(checkExpr)
+      case TWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TForStmt(init, c, u, b, _) =>
+        checkStmt(init); checkExpr(c); checkStmt(u); b.foreach(checkStmt)
+      case TDoWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TLoopStmt(b, _) =>
+        b.foreach(checkStmt)
+      case TBreakStmt(_) => ()
+      case TContinueStmt(_) => ()
+      case TDeferStmt(inner) =>
+        checkStmt(inner)
+      case TAsmStmt(_) => ()   // user-controlled
+      case TContractCheck(_, e, _) =>
+        checkExpr(e)
+      case TMultiStmt(ss) =>
+        ss.foreach(checkStmt)
+      case TExprStmt(e) =>
+        checkExpr(e)
+
+    body match
+      case TExprBody(e) => checkExpr(e)
+      case TBlockBody(stmts) => stmts.foreach(checkStmt)
+
   /** Cache of resolved `#reads`/`#writes` effect sets, keyed by canonical (mangled)
    *  function name. Each entry is `(reads, writes)` where both are sets of *mangled*
    *  global-var names. Populated lazily by `resolveEffects` when validating bodies and
@@ -633,19 +798,27 @@ trait SyslAnalyzerContracts:
    *
    *  Symmetric direction matters: this is *contravariant in effects* — a slot accepting
    *  an unknown callable must allow anything, but a slot demanding a pure callable must
-   *  receive a pure callable. Effects unknown is the most-permissive side. */
+   *  receive a pure callable. Effects unknown is the most-permissive side.
+   *
+   *  `#realtime` is checked as an orthogonal axis: if the slot demands realtime, the
+   *  actual must also be realtime. The pure / RW / unknown comparison then proceeds
+   *  on the remaining (non-realtime) axis exactly as before. */
   protected def effectsSatisfy(actual: FuncEffects, slot: FuncEffects): Boolean =
-    if slot.isUnknown then true
-    else if actual.isPure then true
-    else if slot.isPure then false  // slot wants pure, actual is RW or unknown — reject
-    else if actual.isUnknown then false  // slot wants annotated, actual is unknown — reject
+    if slot.isRealtime && !actual.isRealtime then false
     else
-      // Both annotated RW. Check subset: actual's reads ⊆ slot's reads, actual's writes ⊆ slot's writes.
-      val aR = actual.reads.getOrElse(Set.empty)
-      val aW = actual.writes.getOrElse(Set.empty)
-      val sR = slot.reads.getOrElse(Set.empty)
-      val sW = slot.writes.getOrElse(Set.empty)
-      aR.subsetOf(sR) && aW.subsetOf(sW)
+      val actualNonRT = actual.copy(isRealtime = false)
+      val slotNonRT = slot.copy(isRealtime = false)
+      if slotNonRT.isUnknown then true
+      else if actualNonRT.isPure then true
+      else if slotNonRT.isPure then false  // slot wants pure, actual is RW or unknown — reject
+      else if actualNonRT.isUnknown then false  // slot wants annotated, actual is unknown — reject
+      else
+        // Both annotated RW. Check subset: actual's reads ⊆ slot's reads, actual's writes ⊆ slot's writes.
+        val aR = actualNonRT.reads.getOrElse(Set.empty)
+        val aW = actualNonRT.writes.getOrElse(Set.empty)
+        val sR = slotNonRT.reads.getOrElse(Set.empty)
+        val sW = slotNonRT.writes.getOrElse(Set.empty)
+        aR.subsetOf(sR) && aW.subsetOf(sW)
 
   /** Least upper bound of two effect signatures under the effect lattice
    *  (`Pure ≤ RW(R, W) ≤ Unknown`, with `RW` ordered by subset on its sets).
@@ -658,18 +831,24 @@ trait SyslAnalyzerContracts:
    *  `checkArgs` immediately afterwards.)
    */
   protected def lubEffect(e1: FuncEffects, e2: FuncEffects): Option[FuncEffects] =
-    if e1 == e2 then Some(e1)
-    else if e1.isUnknown || e2.isUnknown then Some(FuncEffects.Unknown)
-    else if e1.isPure then Some(e2)
-    else if e2.isPure then Some(e1)
-    else
-      val r1 = e1.reads.getOrElse(Set.empty)
-      val w1 = e1.writes.getOrElse(Set.empty)
-      val r2 = e2.reads.getOrElse(Set.empty)
-      val w2 = e2.writes.getOrElse(Set.empty)
-      if r1.subsetOf(r2) && w1.subsetOf(w2) then Some(e2)
-      else if r2.subsetOf(r1) && w2.subsetOf(w1) then Some(e1)
-      else None
+    // Realtime is a "stricter" guarantee — the LUB carries it only when both inputs do.
+    val lubRealtime = e1.isRealtime && e2.isRealtime
+    val a = e1.copy(isRealtime = false)
+    val b = e2.copy(isRealtime = false)
+    val base: Option[FuncEffects] =
+      if a == b then Some(a)
+      else if a.isUnknown || b.isUnknown then Some(FuncEffects.Unknown)
+      else if a.isPure then Some(b)
+      else if b.isPure then Some(a)
+      else
+        val r1 = a.reads.getOrElse(Set.empty)
+        val w1 = a.writes.getOrElse(Set.empty)
+        val r2 = b.reads.getOrElse(Set.empty)
+        val w2 = b.writes.getOrElse(Set.empty)
+        if r1.subsetOf(r2) && w1.subsetOf(w2) then Some(b)
+        else if r2.subsetOf(r1) && w2.subsetOf(w1) then Some(a)
+        else None
+    base.map(_.copy(isRealtime = lubRealtime))
 
   /** Walk a function body to enforce ghost-code discipline:
    *  - Real code cannot read ghost variables or call ghost functions. "Real code" is
