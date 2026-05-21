@@ -617,13 +617,13 @@ trait SyslAnalyzerContracts:
    *  through globalScope by the validator), so they're directly comparable at indirect
    *  call sites. */
   protected def funInfoEffects(fi: FunInfo): FuncEffects =
-    if fi.isPure then FuncEffects.Pure
+    if fi.isPure then FuncEffects(isPure = true, isRealtime = fi.isRealtime)
     else if fi.reads.isDefined || fi.writes.isDefined then
       // Resolve through the cached effects table (handles mangling once, idempotent).
       resolveEffects(fi) match
-        case Some((r, w)) => FuncEffects(reads = Some(r), writes = Some(w))
-        case None         => FuncEffects.Unknown
-    else FuncEffects.Unknown
+        case Some((r, w)) => FuncEffects(reads = Some(r), writes = Some(w), isRealtime = fi.isRealtime)
+        case None         => FuncEffects(isRealtime = fi.isRealtime)
+    else FuncEffects(isRealtime = fi.isRealtime)
 
   /** Effect subtyping for `FuncType` compatibility. Returns true iff a function with
    *  effects `actual` can be safely placed in a slot expecting effects `slot`. The rule

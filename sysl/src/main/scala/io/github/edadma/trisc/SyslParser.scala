@@ -564,14 +564,18 @@ class SyslParser extends StandardTokenParsers {
       typeName
 
   /** Optional effect suffix on a function type: `#pure`, or any combination of
-   *  `#reads(a, b)` / `#writes(c)` repeated. Distinguishes the three FuncEffects states
-   *  used in subset-check (caller-vs-callee) at every indirect call site:
+   *  `#reads(a, b)` / `#writes(c)` repeated, optionally combined with `#realtime`.
+   *  Distinguishes the FuncEffects states used in subset-check (caller-vs-callee)
+   *  at every indirect call site:
    *  - no suffix → Unknown (can only be called from unannotated callers)
    *  - `#pure` → Pure (callable from any annotated caller)
-   *  - `#reads`/`#writes` → RW(reads, writes) (callable when subset of caller's effect set) */
+   *  - `#reads`/`#writes` → RW(reads, writes) (callable when subset of caller's effect set)
+   *  - `#realtime` → orthogonal flag (no heap, no blocking, no unbounded work) — combinable
+   *    with any of the above. */
   lazy val funcTypeEffects: Parser[FuncEffects] =
     rep("#" ~> ident ~ opt("(" ~> repsep(ident, ",") <~ ")")) ^^ { items =>
       var isPure = false
+      var isRealtime = false
       var reads: Option[Set[String]] = None
       var writes: Option[Set[String]] = None
       for (name ~ args) <- items do
@@ -579,6 +583,9 @@ class SyslParser extends StandardTokenParsers {
           case "pure" =>
             if args.exists(_.nonEmpty) then throw new RuntimeException("#pure on a function type takes no arguments")
             isPure = true
+          case "realtime" =>
+            if args.exists(_.nonEmpty) then throw new RuntimeException("#realtime on a function type takes no arguments")
+            isRealtime = true
           case "reads" =>
             val r = args.getOrElse(Nil).toSet
             reads = Some(reads.getOrElse(Set.empty) ++ r)
@@ -588,7 +595,7 @@ class SyslParser extends StandardTokenParsers {
           case other => throw new RuntimeException(s"unknown effect annotation '#$other' on function type")
       if isPure && (reads.isDefined || writes.isDefined) then
         throw new RuntimeException("#pure on a function type cannot be combined with #reads/#writes")
-      FuncEffects(isPure, reads, writes)
+      FuncEffects(isPure, reads, writes, isRealtime)
     }
 
   lazy val funcTypeRef: Parser[TypeAST] =

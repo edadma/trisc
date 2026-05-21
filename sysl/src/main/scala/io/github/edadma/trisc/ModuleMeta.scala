@@ -45,9 +45,11 @@ class ModuleMeta(
       sym.typ match
         case SymbolMeta.Kind.Func(params, ret, isDef, isPure, modes, effects, _) =>
           // The FUNCP/DEFFUNCP keyword variants encode `#pure`. For `#reads`/`#writes`
-          // (effects.isUnknown is false but isPure is also false), we emit an additional
-          // `EFFECTS RW …` trailer.  When `isPure` is true we skip the EFFECTS trailer
-          // (the `P` keyword already says everything).
+          // (effects.isUnknown is false but isPure is also false), or for `#realtime`,
+          // we emit an additional `EFFECTS …` trailer.  When `isPure` is true and the
+          // function is NOT realtime we skip the EFFECTS trailer (the `P` keyword already
+          // says everything). A pure+realtime function still needs the trailer so that
+          // the realtime bit round-trips.
           val kw = (isDef, isPure) match
             case (true, true)   => "DEFFUNCP"
             case (true, false)  => "DEFFUNC"
@@ -63,7 +65,9 @@ class ModuleMeta(
               }.mkString
               s" MODES $codes"
             else ""
-          val effSuffix = if isPure || effects.isUnknown then "" else s" EFFECTS ${ModuleMeta.encodeEffects(effects)}"
+          val effSuffix =
+            if (isPure && !effects.isRealtime) || effects.isUnknown then ""
+            else s" EFFECTS ${ModuleMeta.encodeEffects(effects)}"
           buf ++= s"${vis}$kw ${sym.name} $sig$modeSuffix$effSuffix\n"
         case SymbolMeta.Kind.Data(dataType, isMutable) =>
           val mutSuffix = if isMutable then " MUT" else ""
@@ -169,32 +173,46 @@ object ModuleMeta:
    *  v16 adds default type parameters (`[T = Default]`) on trait/struct/enum/alias/fn
    *  declarations. They round-trip purely through the TEMPLATES pretty-printer +
    *  parser (no new SMETA fields), but the version bump prevents v15 readers from
-   *  silently mis-parsing default-bearing templates. */
-  val SMETA_VERSION = 16
+   *  silently mis-parsing default-bearing templates.
+   *  v17 extends the EFFECTS trailer (and the inline IFACE-method tail) with an
+   *  optional leading `RT` token marking `#realtime`. The bit composes orthogonally
+   *  with U/P/RW. A pure+realtime function now emits an `EFFECTS RT P` trailer where
+   *  pre-v17 emitted nothing (the FUNCP keyword alone) — version bump forces stale
+   *  v16 readers to recompile rather than silently dropping the realtime bit. */
+  val SMETA_VERSION = 17
 
-  /** Encode a FuncEffects as space-separated tokens — `U` (Unknown), `P` (Pure), or
-   *  `RW <nReads> <readsNames…> <nWrites> <writesNames…>`. Used both in the FUNC-line
-   *  trailer (after `EFFECTS`) and in the inline IFACE-method tail. Names are already
-   *  in their resolved (mangled) form so no further translation is needed on read. */
+  /** Encode a FuncEffects as space-separated tokens. An optional leading `RT` flag marks
+   *  `#realtime`. After it (or directly, if non-realtime), one of:
+   *    - `U` (Unknown)
+   *    - `P` (Pure)
+   *    - `RW <nReads> <readsNames…> <nWrites> <writesNames…>`
+   *  Examples: `U`, `P`, `RT P`, `RT U`, `RW 1 g 0`, `RT RW 1 g 0`.
+   *  Used both in the FUNC-line trailer (after `EFFECTS`) and in the inline IFACE-method
+   *  tail. Names are already in their resolved (mangled) form so no further translation
+   *  is needed on read. */
   def encodeEffects(eff: FuncEffects): String =
-    if eff.isPure then "P"
-    else if eff.isUnknown then "U"
+    val rt = if eff.isRealtime then "RT " else ""
+    if eff.isPure then s"${rt}P"
+    else if eff.reads.isEmpty && eff.writes.isEmpty then s"${rt}U"
     else
       val r = eff.reads.getOrElse(Set.empty).toList.sorted
       val w = eff.writes.getOrElse(Set.empty).toList.sorted
-      s"RW ${r.size}${if r.nonEmpty then " " + r.mkString(" ") else ""} ${w.size}${if w.nonEmpty then " " + w.mkString(" ") else ""}"
+      s"${rt}RW ${r.size}${if r.nonEmpty then " " + r.mkString(" ") else ""} ${w.size}${if w.nonEmpty then " " + w.mkString(" ") else ""}"
 
   /** Inverse of `encodeEffects`. Reads exactly the tokens it expects. */
   def decodeEffects(tokens: Iterator[String]): FuncEffects =
-    tokens.next() match
-      case "U" => FuncEffects.Unknown
-      case "P" => FuncEffects.Pure
+    val first = tokens.next()
+    val (isRealtime, kindTok) =
+      if first == "RT" then (true, tokens.next()) else (false, first)
+    kindTok match
+      case "U" => FuncEffects(isRealtime = isRealtime)
+      case "P" => FuncEffects(isPure = true, isRealtime = isRealtime)
       case "RW" =>
         val nR = tokens.next().toInt
         val r = (1 to nR).map(_ => tokens.next()).toSet
         val nW = tokens.next().toInt
         val w = (1 to nW).map(_ => tokens.next()).toSet
-        FuncEffects(reads = Some(r), writes = Some(w))
+        FuncEffects(reads = Some(r), writes = Some(w), isRealtime = isRealtime)
       case other => throw IllegalArgumentException(s"unknown effects token '$other'")
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =

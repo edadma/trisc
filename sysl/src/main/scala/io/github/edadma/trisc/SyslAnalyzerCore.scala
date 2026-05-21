@@ -254,6 +254,7 @@ trait SyslAnalyzerCore:
               throw AnalysisError(s"duplicate function: '$name'", decl)
             val mangledName = if shouldMangle(name) then mangleName(name) else name
             val isPureAttr = fd.attributes.exists(_.name == "pure")
+            val isRealtimeAttr = fd.attributes.exists(_.name == "realtime")
             val isGhost = fd.attributes.exists(_.name == "ghost")
             // Extract `#reads(a, b)` / `#writes(c)` raw identifier lists. Validation that
             // each name resolves to a module-level mutable var is deferred to validateEffects
@@ -284,13 +285,15 @@ trait SyslAnalyzerCore:
               throw AnalysisError(s"#ghost on '$name' is incompatible with #pure (ghost code is removed before codegen, so #pure is meaningless)", fd)
             if isGhost && (readsSet.isDefined || writesSet.isDefined) then
               throw AnalysisError(s"#ghost on '$name' is incompatible with #reads/#writes (ghost code is removed before codegen)", fd)
+            if isGhost && isRealtimeAttr then
+              throw AnalysisError(s"#ghost on '$name' is incompatible with #realtime (ghost code is removed before codegen, so #realtime is meaningless)", fd)
             // Collision check: a parameterless decl and a zero-arg decl with the
             // same name are ambiguous at the call site (`foo` could mean either),
             // so reject. (Two zero-arg or two parameterless decls with the same
             // name are caught by the regular duplicate-function check above.)
             if fd.isParameterless && fd.typeParams.nonEmpty then
               throw AnalysisError(s"parameterless function '$name' cannot be generic", decl)
-            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet, isGhost, if anyByName then byNameFlags else Nil, fd.isParameterless)
+            functions(name) = FunInfo(mangledName, paramTypes, retType, isDef && params.isEmpty, isPure, paramModes, readsSet, writesSet, isGhost, if anyByName then byNameFlags else Nil, fd.isParameterless, isRealtimeAttr)
             // Record #deprecated info. The lexer's StringLit carrier is
             // byte-form (each Char is one UTF-8 byte); decode for the host
             // diagnostic so Unicode reasons render correctly when printed.
@@ -439,7 +442,7 @@ trait SyslAnalyzerCore:
                     case Some(sym) if sym.mutable && !sym.isConst => sym.name
                     case Some(_) => throw AnalysisError(s"#$kind on interface '$name' method '${m.name}' references '$n' which is not mutable")
                     case None    => throw AnalysisError(s"#$kind on interface '$name' method '${m.name}' references unknown global '$n'")
-                FuncEffects(m.effects.isPure, m.effects.reads.map(_.map(resolveOne(_, "reads"))), m.effects.writes.map(_.map(resolveOne(_, "writes"))))
+                FuncEffects(m.effects.isPure, m.effects.reads.map(_.map(resolveOne(_, "reads"))), m.effects.writes.map(_.map(resolveOne(_, "writes"))), m.effects.isRealtime)
             (m.name, paramTypes, retType, resolvedEff)
           }
           val allMethods = embeddedMethods ++ ownMethods

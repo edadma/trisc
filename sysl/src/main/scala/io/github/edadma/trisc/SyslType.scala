@@ -5,21 +5,28 @@ sealed trait TypeRange
 case class IntRange(lo: Long, hi: Long, exclusiveHi: Boolean) extends TypeRange
 case class FloatRange(lo: Double, hi: Double, exclusiveHi: Boolean) extends TypeRange
 
-/** Effect signature carried by a `FuncType` / `FuncTypeAST`. Three states:
- *  - `isPure = false, reads = None, writes = None` → unannotated (default; effects unknown).
+/** Effect signature carried by a `FuncType` / `FuncTypeAST`. The state space:
+ *  - `isPure = false, reads = None, writes = None, isRealtime = false` → unannotated (default; effects unknown).
  *  - `isPure = true` → `#pure` callback (no module effects, plus the strict `#pure` discipline
  *    on allocation/IO/indirect calls when produced by a `#pure` decl). Reads/writes must be None.
  *  - `isPure = false, reads = Some(R), writes = Some(W)` → `#reads`/`#writes` callback.
+ *  - `isRealtime = true` → `#realtime` discipline (no allocator activity in the callee or any
+ *    function it dispatches to). Orthogonal to the pure/RW axis: a function may be any
+ *    combination of `#pure` / `#reads` / `#writes` + `#realtime`. Realtime forbids `new`,
+ *    growable-array push, closure construction, and calls to non-realtime callees; it allows
+ *    pointer/field/index writes and side-effects that pure rejects.
  *
  *  Names in `reads`/`writes` are mangled module-level variable names — already resolved through
  *  `globalScope` at type-construction time, so cross-callsite comparison is direct set equality. */
-case class FuncEffects(isPure: Boolean = false, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None):
-  def isUnknown: Boolean = !isPure && reads.isEmpty && writes.isEmpty
+case class FuncEffects(isPure: Boolean = false, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isRealtime: Boolean = false):
+  def isUnknown: Boolean = !isPure && reads.isEmpty && writes.isEmpty && !isRealtime
   def isAnnotated: Boolean = !isUnknown
 
 object FuncEffects:
   val Unknown: FuncEffects = FuncEffects()
   val Pure: FuncEffects = FuncEffects(isPure = true)
+  val Realtime: FuncEffects = FuncEffects(isRealtime = true)
+  val PureRealtime: FuncEffects = FuncEffects(isPure = true, isRealtime = true)
   def rw(reads: Set[String], writes: Set[String]): FuncEffects = FuncEffects(reads = Some(reads), writes = Some(writes))
 
 enum SyslType:
@@ -173,13 +180,14 @@ enum SyslType:
     case ArrayType(t, n) => s"[$n]$t"
     case FuncType(params, ret, esc, eff) =>
       val esca = if esc then "@escaping " else ""
+      val rtS = if eff.isRealtime then " #realtime" else ""
       val effS = if eff.isPure then " #pure"
         else (eff.reads, eff.writes) match
           case (Some(r), Some(w)) => s" #reads(${r.toList.sorted.mkString(", ")}) #writes(${w.toList.sorted.mkString(", ")})"
           case (Some(r), None)    => s" #reads(${r.toList.sorted.mkString(", ")})"
           case (None, Some(w))    => s" #writes(${w.toList.sorted.mkString(", ")})"
           case _                  => ""
-      s"$esca(${params.mkString(", ")}) -> $ret$effS"
+      s"$esca(${params.mkString(", ")}) -> $ret$effS$rtS"
     case StructType(name, _, _) => name
     case StringType => "string"
     case SliceType(t) => s"[]$t"
@@ -206,12 +214,15 @@ enum SyslType:
       s"enum $name ${variants.size} $vs"
     case InterfaceType(name, methods) =>
       val ms = methods.map { (mn, params, ret, eff) =>
-        val effStr = if eff.isPure then " EFF P"
-          else if eff.isUnknown then " EFF U"
+        val rtPrefix = if eff.isRealtime then "RT " else ""
+        val effStr =
+          if eff.isPure then s" EFF ${rtPrefix}P"
+          else if eff.isUnknown then s" EFF ${rtPrefix}U"
+          else if !eff.isRealtime && eff.reads.isEmpty && eff.writes.isEmpty then s" EFF U"
           else
             val r = eff.reads.getOrElse(Set.empty).toList.sorted
             val w = eff.writes.getOrElse(Set.empty).toList.sorted
-            s" EFF RW ${r.size}${if r.nonEmpty then " " + r.mkString(" ") else ""} ${w.size}${if w.nonEmpty then " " + w.mkString(" ") else ""}"
+            s" EFF ${rtPrefix}RW ${r.size}${if r.nonEmpty then " " + r.mkString(" ") else ""} ${w.size}${if w.nonEmpty then " " + w.mkString(" ") else ""}"
         s"$mn ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}$effStr"
       }.mkString(" ")
       s"iface $name ${methods.size} $ms"
@@ -350,20 +361,25 @@ object SyslType:
           val nparams = tokens.next().toInt
           val params = (1 to nparams).map(_ => parseType(tokens)).toList
           val ret = parseType(tokens)
-          // Read mandatory `EFF <encoding>` after each method's signature. Encoding mirrors
-          // the FuncEffects encoding used in the FUNC EFFECTS trailer.
+          // Read mandatory `EFF [RT] <encoding>` after each method's signature. Encoding mirrors
+          // the FuncEffects encoding used in the FUNC EFFECTS trailer. An optional `RT` token
+          // immediately after `EFF` marks the method as `#realtime`; it composes orthogonally
+          // with U / P / RW.
           val effMarker = tokens.next()
           if effMarker != "EFF" then
             throw IllegalArgumentException(s"expected EFF after iface method '$mname', got '$effMarker'")
-          val eff = tokens.next() match
-            case "U" => FuncEffects.Unknown
-            case "P" => FuncEffects.Pure
+          val firstTok = tokens.next()
+          val (isRealtime, kindTok) =
+            if firstTok == "RT" then (true, tokens.next()) else (false, firstTok)
+          val eff = kindTok match
+            case "U" => FuncEffects(isRealtime = isRealtime)
+            case "P" => FuncEffects(isPure = true, isRealtime = isRealtime)
             case "RW" =>
               val nR = tokens.next().toInt
               val r = (1 to nR).map(_ => tokens.next()).toSet
               val nW = tokens.next().toInt
               val w = (1 to nW).map(_ => tokens.next()).toSet
-              FuncEffects(reads = Some(r), writes = Some(w))
+              FuncEffects(reads = Some(r), writes = Some(w), isRealtime = isRealtime)
             case other => throw IllegalArgumentException(s"unknown iface method effects token '$other'")
           (mname, params, ret, eff)
         }.toList

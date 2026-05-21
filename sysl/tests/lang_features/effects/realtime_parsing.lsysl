@@ -1,0 +1,64 @@
+`#realtime` — Parsing and Round-Trip
+=====================================
+
+`#realtime` is an orthogonal effect annotation marking a function as
+safe to call from a real-time context (audio render callback, kernel
+interrupt handler, signal handler). The full enforcement rules (no
+heap allocation, no blocking, no unbounded work, only realtime-clean
+callees) live in a separate analyzer pass; this file pins the *runtime
+neutrality* of the annotation:
+
+- A `#realtime` function compiles and runs identically to an
+  unmarked function with the same body.
+- `#realtime` may combine with `#pure` and with `#reads`/`#writes`
+  (orthogonal axis).
+- `#realtime` parses on free functions, interface methods, and
+  function types.
+
+File-local prefix `Rt`.
+
+    module sysl.tests.lang_features
+
+
+### `#realtime` zero-arg function
+
+A `#realtime` function with no body-side effects runs as normal.
+
+    #realtime
+    rt_answer() -> int = 42
+
+    #test
+    test_rt_returns_constant() -> unit
+        assert(rt_answer() == 42, "rt_answer should return 42")
+
+
+### `#realtime` combined with `#pure`
+
+The two annotations are orthogonal — `#pure` (no module-level effects,
+proof-friendly) and `#realtime` (no heap/blocking) describe different
+disciplines. A function may carry both.
+
+    #pure
+    #realtime
+    rt_square(x: int) -> int = x * x
+
+    #test
+    test_rt_pure_combo() -> unit
+        assert(rt_square(7) == 49, "7² = 49")
+        assert(rt_square(-3) == 9, "(-3)² = 9")
+
+
+### `#realtime` on a function type
+
+The `#realtime` suffix on a function type participates in the same
+mechanism as `#pure` — at indirect call sites, the slot's effect
+signature is matched against the actual.
+
+    rt_apply(f: (int)->int #realtime, x: int) -> int = f(x)
+
+    #realtime
+    rt_double(x: int) -> int = x + x
+
+    #test
+    test_rt_func_type_indirect() -> unit
+        assert(rt_apply(rt_double, 21) == 42, "rt_apply(rt_double, 21)")
