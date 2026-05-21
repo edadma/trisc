@@ -1,0 +1,209 @@
+Kernel futex wait/wake table
+============================
+
+POSIX-style `futex(2)` substrate. The kernel-side state is a small
+hash table of per-bucket intrusive lists; each waiting thread is
+linked into one bucket keyed by the physical address it's parked on.
+Lookup keys are *physical addresses* (page-aligned base + low 12-bit
+offset) so MAP_SHARED futexes — same underlying frame mapped under
+two different virtual addresses, possibly in two different processes
+— hash to the same bucket and find each other.
+
+Bucket count is small but never linear in `MAX_THREADS`: the wake
+path walks one bucket's chain, not every thread slot. The chain
+itself is intrusive (per-thread `futex_next`), so insert and remove
+are O(1) once you have the bucket.
+
+The actual `*uaddr == val` compare, the timeout setup, the EINTR
+loop, and the user-space arg parsing all live in
+`oskit/posix/futex.lsysl`. This file owns only the kernel data
+structure plus the four primitives the shim layer needs:
+
+  - `kernel_futex_wait_enter(pa, bitset)` — insert current thread
+    into the bucket for `pa`. Sets per-thread `futex_addr_pa` /
+    `futex_bitset`.
+  - `kernel_futex_wait_exit()` — remove current thread from its
+    bucket (idempotent — safe to call on every exit path).
+  - `kernel_futex_wake(pa, max, bitset) -> int` — wake up to `max`
+    waiters parked on `pa` whose bitset intersects `bitset`. Wake
+    means: unlink, clear `futex_addr_pa`, call `notify_send(tid, 0)`
+    so the waiter's `sleep_or_notify` loop in the shim returns
+    promptly. Returns the count actually woken.
+  - `kernel_futex_requeue(from_pa, to_pa, wake_n, requeue_n) -> int`
+    — wake `wake_n` from `from_pa`, then move up to `requeue_n` of
+    the remaining waiters to `to_pa`'s bucket. Used by musl's
+    `pthread_cond_*` (`FUTEX_REQUEUE` / `FUTEX_CMP_REQUEUE`).
+    Returns total threads affected (woken + requeued).
+
+    module oskit.kernel
+
+    import oskit.services.{notify_send}
+
+
+Bucket count and hash. 16 buckets is more than slix's current
+MAX_THREADS=32 needs but the size is also load-bearing for the
+hash distribution: with 16 buckets every page-aligned waiter
+on the same page collides, which is exactly what `FUTEX_WAKE`
+wants (wake-all on a page reaches every per-word futex on that
+page in one walk). Pure power-of-2 lets the hash collapse to a
+mask.
+
+The shift-by-4 mirrors what Linux does: futex compare addresses
+have to be 32-bit-aligned, so the low two bits of the PA are
+always zero; shifting by 4 spreads the next four address bits
+across the bucket index.
+
+    val FUTEX_BUCKETS = 16
+    val FUTEX_BUCKET_MASK = 15
+
+    private var _futex_head: [16]int
+    private var _futex_init_done = 0
+
+    private futex_hash(pa: u64) -> int
+        int((pa >> u64(4))) & FUTEX_BUCKET_MASK
+
+    private futex_ensure_init()
+        if _futex_init_done != 0
+            return
+        for i in 0..<FUTEX_BUCKETS
+            _futex_head[i] = -1
+        _futex_init_done = 1
+
+
+Insert the current thread at the head of its bucket. The caller
+must have already set `futex_addr_pa` / `futex_bitset` to the
+target values; this routine only does the chain insertion. A
+thread is "on a futex" exactly when `futex_addr_pa != 0`.
+
+    kernel_futex_wait_enter(pa: u64, bitset: u32)
+        futex_ensure_init()
+        threads[current_thread].futex_addr_pa = pa
+        threads[current_thread].futex_bitset = bitset
+        val b = futex_hash(pa)
+        threads[current_thread].futex_next = _futex_head[b]
+        _futex_head[b] = current_thread
+
+
+Predicate the shim layer uses to detect "was I woken explicitly
+or did I time out / take a signal." After a successful
+`kernel_futex_wake`, the parked thread's `futex_addr_pa` is
+zeroed, so a non-zero value means we're still on a bucket and
+the wakeup must have come from elsewhere (timeout, signal).
+
+    kernel_futex_self_parked() -> int
+        if threads[current_thread].futex_addr_pa == u64(0)
+            return 0
+        1
+
+
+Remove `tid` from whatever bucket it's on. Idempotent: if
+`futex_addr_pa == 0` the thread isn't on the table and this is a
+cheap no-op, which matters because shim exit paths call us
+unconditionally on every wake/timeout/EINTR and the thread-
+termination path calls us defensively on every kill so a thread
+that died mid-park doesn't leave a stale pointer in a bucket
+(another process's wake would later find the terminated tid and
+post a notification to a freed slot — harmless today, broken once
+slot reuse happens fast enough to outrun a long wake walk).
+
+    kernel_futex_wait_exit_tid(tid: int)
+        if threads[tid].futex_addr_pa == u64(0)
+            return
+        val b = futex_hash(threads[tid].futex_addr_pa)
+        if _futex_head[b] == tid
+            _futex_head[b] = threads[tid].futex_next
+        else
+            var prev = _futex_head[b]
+            while prev >= 0 && threads[prev].futex_next != tid
+                prev = threads[prev].futex_next
+            if prev >= 0
+                threads[prev].futex_next = threads[tid].futex_next
+        threads[tid].futex_addr_pa = u64(0)
+        threads[tid].futex_bitset = u32(0)
+        threads[tid].futex_next = -1
+
+    kernel_futex_wait_exit()
+        kernel_futex_wait_exit_tid(current_thread)
+
+
+Wake up to `max` waiters on bucket `pa` whose bitset intersects
+`bitset` (use `0xFFFFFFFF` for plain `FUTEX_WAKE`; the bitset
+filter is only meaningful for `FUTEX_WAKE_BITSET`). Returns the
+number of threads actually woken.
+
+Each wake clears the waiter's `futex_addr_pa` (so a concurrent
+`kernel_futex_wait_exit` from another path is a no-op), unlinks
+it from the bucket, and posts a notification — the waiter's
+shim loop is sitting in `sleep_or_notify(1)`, and `notify_send`
+makes that return on the next 10 ms boundary at the latest.
+
+    kernel_futex_wake(pa: u64, max: int, bitset: u32) -> int
+        futex_ensure_init()
+        if max <= 0
+            return 0
+        val b = futex_hash(pa)
+        var woken = 0
+        var prev = -1
+        var cur = _futex_head[b]
+        while cur >= 0 && woken < max
+            val nxt = threads[cur].futex_next
+            if threads[cur].futex_addr_pa == pa
+                if (threads[cur].futex_bitset & bitset) != u32(0)
+                    if prev < 0
+                        _futex_head[b] = nxt
+                    else
+                        threads[prev].futex_next = nxt
+                    threads[cur].futex_addr_pa = u64(0)
+                    threads[cur].futex_bitset = u32(0)
+                    threads[cur].futex_next = -1
+                    notify_send(cur, 0)
+                    woken += 1
+                    cur = nxt
+                else
+                    prev = cur
+                    cur = nxt
+            else
+                prev = cur
+                cur = nxt
+        woken
+
+
+Move up to `requeue_n` waiters from `from_pa`'s bucket to
+`to_pa`'s bucket, after first waking up to `wake_n` of them.
+musl uses `FUTEX_REQUEUE` in `pthread_cond_signal` /
+`_broadcast`: it wakes one (so the woken thread can run the
+condvar protocol and grab the mutex), and requeues the rest
+onto the mutex's wait queue so they don't all wake up and
+contend for it. The return value is `woken + requeued`.
+
+`FUTEX_CMP_REQUEUE` adds a `*from_uaddr == val3` precondition;
+that check is the shim's responsibility (the kernel never sees
+the user pointer here), and on a mismatch the shim returns
+`-EAGAIN` without entering this routine.
+
+    kernel_futex_requeue(from_pa: u64, to_pa: u64, wake_n: int, requeue_n: int) -> int
+        futex_ensure_init()
+        var woken = kernel_futex_wake(from_pa, wake_n, u32(0xFFFFFFFF))
+        if requeue_n <= 0
+            return woken
+        val from_b = futex_hash(from_pa)
+        val to_b   = futex_hash(to_pa)
+        var moved = 0
+        var prev = -1
+        var cur = _futex_head[from_b]
+        while cur >= 0 && moved < requeue_n
+            val nxt = threads[cur].futex_next
+            if threads[cur].futex_addr_pa == from_pa
+                if prev < 0
+                    _futex_head[from_b] = nxt
+                else
+                    threads[prev].futex_next = nxt
+                threads[cur].futex_addr_pa = to_pa
+                threads[cur].futex_next = _futex_head[to_b]
+                _futex_head[to_b] = cur
+                moved += 1
+                cur = nxt
+            else
+                prev = cur
+                cur = nxt
+        woken + moved

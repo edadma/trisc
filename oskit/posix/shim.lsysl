@@ -890,6 +890,8 @@ Returns 0 on success, negative errno on failure.
             return sys_ppoll(a0, int(a1), a2, a3, int(a4))
         if num == 266
             return sys_pselect6(int(a0), a1, a2, a3, a4, a5)
+        if num == 182
+            return sys_futex(a0, int(a1), int(a2), a3, a4, int(a5))
         if num == 156
             return sys_eventfd2(int(a0), int(a1))
         if num == 356

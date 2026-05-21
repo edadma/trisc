@@ -1,0 +1,199 @@
+POSIX futex(2) shim
+===================
+
+User-facing surface for `SYS_futex` (slix syscall 182). Translates
+musl's six-arg call (`uaddr, op, val, timeout_ts, uaddr2, val3`)
+into operations on the kernel-side hash table in
+`oskit/kernel/futex.lsysl`. The shim is responsible for:
+
+  - validating user pointers and alignment,
+  - reading `*uaddr` and comparing it to `val` (the racy-but-by-design
+    futex precondition; the kernel running single-threaded between
+    the compare and the park is exactly what makes the race close
+    cleanly),
+  - converting the user timespec into a 10-ms-tick deadline,
+  - parking via `sleep_or_notify(1)` with the same EINTR /
+    signal-pending check that `sys_ppoll` uses,
+  - unwinding the kernel table on every exit path.
+
+Sibling of `shim.lsysl` and `epoll.lsysl` — POSIX_FD constants,
+errno values, and the LE-read helpers all resolve through the
+shared `oskit.posix` module scope.
+
+    module oskit.posix
+
+    import oskit.kernel.{current_thread, kernel_futex_wait_enter,
+        kernel_futex_wait_exit, kernel_futex_wake,
+        kernel_futex_requeue, kernel_futex_self_parked,
+        kernel_get_thread_ptbr,
+        kernel_sigpending_get, kernel_sigmask_set, SIG_UNMASKABLE}
+    import oskit.services.{sleep_or_notify, notify_read_self, monotonic_ms}
+    import oskit.arch.{vm_v2p}
+
+
+FUTEX op codes (match musl's `src/internal/futex.h`). The
+private-mapping bit (`FUTEX_PRIVATE = 128`) and the
+realtime-clock bit (`FUTEX_CLOCK_REALTIME = 256`) get masked off
+before dispatching — slix doesn't distinguish private from
+shared (there's only one process namespace right now) and treats
+the timeout for `FUTEX_WAIT_BITSET` as absolute against
+`monotonic_ms` regardless of which clock the caller picked.
+
+    val FUTEX_WAIT          = 0
+    val FUTEX_WAKE          = 1
+    val FUTEX_REQUEUE       = 3
+    val FUTEX_CMP_REQUEUE   = 4
+    val FUTEX_WAIT_BITSET   = 9
+    val FUTEX_WAKE_BITSET   = 10
+    val FUTEX_OP_MASK       = 127
+
+
+Argument shape from musl. `uaddr` is a `*int32_t` (4-byte aligned);
+`val` is the i32 the user expects to see at `*uaddr` (FUTEX_WAIT)
+or the wake count (FUTEX_WAKE). For FUTEX_WAIT the fourth arg is a
+relative `struct timespec*` (or NULL); for FUTEX_WAIT_BITSET it's
+absolute. For FUTEX_(CMP_)REQUEUE the fourth arg is a *count*
+(requeue_n), not a pointer.
+
+The dispatcher in `shim.lsysl` forwards all six arg slots straight
+through.
+
+    sys_futex(uaddr_va: i64, op: int, expected: int,
+              ts_or_count: i64, uaddr2_va: i64, bits3: int) -> i64
+        if uaddr_va == i64(0)
+            return i64(-EFAULT)
+        if (uaddr_va & i64(3)) != i64(0)
+            return i64(-EINVAL)
+
+        val base_op = op & FUTEX_OP_MASK
+
+The shim runs in the caller's PTBR, so `vm_v2p` translates the
+user address into a physical-page index using the caller's own
+page table. If the address isn't mapped we surface `-EFAULT`.
+
+        val ptbr = kernel_get_thread_ptbr(current_thread)
+        val pa = vm_v2p(ptbr, u64(uaddr_va))
+        if pa == u64(0)
+            return i64(-EFAULT)
+
+        if base_op == FUTEX_WAIT
+            return futex_do_wait(uaddr_va, pa, expected, ts_or_count, u32(0xFFFFFFFF), false)
+        if base_op == FUTEX_WAIT_BITSET
+            if bits3 == 0
+                return i64(-EINVAL)
+            return futex_do_wait(uaddr_va, pa, expected, ts_or_count, u32(bits3), true)
+        if base_op == FUTEX_WAKE
+            return i64(kernel_futex_wake(pa, expected, u32(0xFFFFFFFF)))
+        if base_op == FUTEX_WAKE_BITSET
+            if bits3 == 0
+                return i64(-EINVAL)
+            return i64(kernel_futex_wake(pa, expected, u32(bits3)))
+        if base_op == FUTEX_REQUEUE
+            return futex_do_requeue(pa, uaddr_va, uaddr2_va, expected, int(ts_or_count), 0, false)
+        if base_op == FUTEX_CMP_REQUEUE
+            return futex_do_requeue(pa, uaddr_va, uaddr2_va, expected, int(ts_or_count), bits3, true)
+        i64(-ENOSYS)
+
+
+`futex_do_wait` implements the FUTEX_WAIT and FUTEX_WAIT_BITSET
+park-and-sleep half. The precondition compare is racy by design
+(POSIX says the user does `cmpxchg` before calling, so a wake that
+races with the call should be observable here as `*uaddr != val`).
+We read the user word through its own page-table mapping, with no
+TOCTOU guard between the read and the park — that's safe because
+the kernel runs single-threaded between the two: any racing
+`FUTEX_WAKE` from another thread can only run after this routine
+yields (`sleep_or_notify`), and at that point the waiter is on the
+bucket and reachable.
+
+`absolute_deadline = true` means `ts_or_count` is a `*timespec`
+holding an absolute deadline against `monotonic_ms` (which is what
+musl's `__timedwait_cp` actually wants in the
+`FUTEX_WAIT_BITSET|FUTEX_CLOCK_REALTIME` form — slix collapses the
+distinction). `false` means relative.
+
+    private futex_do_wait(uaddr_va: i64, pa: u64, expected: int,
+                          ts_ptr: i64, bitset: u32,
+                          absolute_deadline: bool) -> i64
+        val up: *int = *int(uaddr_va)
+        if *up != expected
+            return i64(-EAGAIN)
+
+        var deadline_ms = i64(-1)
+        if ts_ptr != i64(0)
+            val ts: *byte = *byte(ts_ptr)
+            val tv_sec = shim_read_le_i64(ts, 0)
+            val tv_nsec = shim_read_le_i64(ts, 8)
+            if tv_sec < i64(0) || tv_nsec < i64(0) || tv_nsec >= i64(1000000000)
+                return i64(-EINVAL)
+            val timeout_ms = tv_sec * i64(1000) + tv_nsec / i64(1000000)
+            if absolute_deadline
+                deadline_ms = timeout_ms
+            else
+                deadline_ms = monotonic_ms() + timeout_ms
+
+        kernel_futex_wait_enter(pa, bitset)
+        var rc: i64 = i64(0)
+        var done = false
+        var iter = 0
+        while !done && iter < 1000000
+            iter += 1
+
+A signal that the caller hasn't blocked is the equivalent of
+EINTR — slix has no `SA_RESTART` yet, so every futex park is
+interruptible. The `(pending & ~mask & ~UNMASKABLE)` shape mirrors
+what `sys_ppoll` / `sys_pselect6` use; the signal walker on the
+return path arms the handler, so the user sees `errno=EINTR` and
+their normal `pthread_*` retry loops decide what to do.
+
+            if (kernel_sigpending_get() & ~kernel_sigmask_set(-1, i64(0)) & ~SIG_UNMASKABLE) != i64(0)
+                rc = i64(-EINTR)
+                done = true
+            else if *up != expected
+                rc = i64(-EAGAIN)
+                done = true
+            else
+                val _ = notify_read_self()
+
+`kernel_futex_wake` cleared our `futex_addr_pa` and posted a
+notification, so this branch only runs after a real wake — no
+notification, no expiry. The `*uaddr != val` recheck above takes
+care of the racy-overlap-with-wake case where the wake came in
+between the precondition compare and the park.
+
+                if kernel_futex_self_parked() == 0
+                    rc = i64(0)
+                    done = true
+                else if deadline_ms >= i64(0) && monotonic_ms() >= deadline_ms
+                    rc = i64(-ETIMEDOUT)
+                    done = true
+                else
+                    sleep_or_notify(1)
+
+        kernel_futex_wait_exit()
+        rc
+
+
+`futex_do_requeue` covers both `FUTEX_REQUEUE` and
+`FUTEX_CMP_REQUEUE`. The `cmp` variant adds a `*from == val3` guard
+that musl's `pthread_cond_*` uses to detect spurious wakeups before
+they cost a wake-and-requeue round-trip; mismatch returns
+`-EAGAIN`. Both forms return the number of threads woken plus
+requeued, matching Linux's contract.
+
+    private futex_do_requeue(from_pa: u64, from_va: i64, to_va: i64,
+                              wake_n: int, requeue_n: int,
+                              cmp_val: int, do_cmp: bool) -> i64
+        if to_va == i64(0)
+            return i64(-EFAULT)
+        if (to_va & i64(3)) != i64(0)
+            return i64(-EINVAL)
+        if do_cmp
+            val up: *int = *int(from_va)
+            if *up != cmp_val
+                return i64(-EAGAIN)
+        val ptbr = kernel_get_thread_ptbr(current_thread)
+        val to_pa = vm_v2p(ptbr, u64(to_va))
+        if to_pa == u64(0)
+            return i64(-EFAULT)
+        i64(kernel_futex_requeue(from_pa, to_pa, wake_n, requeue_n))

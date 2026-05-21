@@ -34,6 +34,7 @@ SYSL_FILES=(
     oskit/kernel/vma.lsysl
     oskit/kernel/page_refcnt.lsysl
     oskit/kernel/signals.lsysl
+    oskit/kernel/futex.lsysl
     oskit/kernel/elf_selftest.lsysl
     oskit/kernel/mmap.lsysl
     oskit/kernel/grants.lsysl
@@ -57,6 +58,7 @@ SYSL_FILES=(
     oskit/posix/mem.lsysl
     oskit/posix/epoll.lsysl
     oskit/posix/signals.lsysl
+    oskit/posix/futex.lsysl
 )
 
 # App-specific extra modules

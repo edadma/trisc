@@ -115,6 +115,9 @@ Statistics fields track per-thread performance:
         sig_deliveries: int // Monotonic count of handler deliveries via kernel_check_pending_signals; pselect/ppoll snapshots this to detect EINTR-by-handler
         saved_sigmask: i64  // Pre-syscall sigmask saved by pselect/ppoll's atomic mask swap; restored into the sigframe by the walker on EINTR-by-handler, otherwise restored directly by the syscall on its non-EINTR exit
         saved_sigmask_valid: int
+        futex_addr_pa: u64  // Physical address this thread is parked on via sys_futex (0 when not parked)
+        futex_bitset: u32   // FUTEX_WAIT_BITSET filter (FUTEX_WAIT uses 0xFFFFFFFF)
+        futex_next: int     // Intrusive next-pointer inside the bucket chain in `kernel/futex.lsysl` (-1 = end)
 
 Run queues: one FIFO queue per priority level. Each queue
 has a head and tail index. Enqueue appends to tail, dequeue
@@ -1584,6 +1587,9 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[idx].sig_deliveries = 0
         threads[idx].saved_sigmask = 0
         threads[idx].saved_sigmask_valid = 0
+        threads[idx].futex_addr_pa = u64(0)
+        threads[idx].futex_bitset = u32(0)
+        threads[idx].futex_next = -1
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -1653,6 +1659,7 @@ Also wakes any threads that are joining on this thread,
 enqueueing them back into their priority run queue.
 
     terminate_current(exit_code: int)
+        kernel_futex_wait_exit_tid(current_thread)
         threads[current_thread].state = STATE_TERMINATED
 
         // If this thread belongs to a process, mark it as zombie
@@ -1813,6 +1820,9 @@ Unlike create_process, the thread is never enqueued — no race.
         threads[idx].sig_deliveries = 0
         threads[idx].saved_sigmask = 0
         threads[idx].saved_sigmask_valid = 0
+        threads[idx].futex_addr_pa = u64(0)
+        threads[idx].futex_bitset = u32(0)
+        threads[idx].futex_next = -1
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -2014,6 +2024,12 @@ fault`'s COW path relies on. No PTBR switch is needed.
         threads[idx].sig_deliveries = 0
         threads[idx].saved_sigmask = 0
         threads[idx].saved_sigmask_valid = 0
+        // POSIX: futex waits are *not* inherited across fork — only
+        // the parent thread that called fork() is in the new process,
+        // and it's at the syscall return point, not in a futex park.
+        threads[idx].futex_addr_pa = u64(0)
+        threads[idx].futex_bitset = u32(0)
+        threads[idx].futex_next = -1
 
         // Set up the child's process slot. parent_tid is the parent's
         // *main* tid — same convention `create_process_suspended` uses
@@ -2216,6 +2232,7 @@ files), matching Linux's `__W_EXITCODE(0, sig)` convention.
             return -1
 
         arch_cli()
+        kernel_futex_wait_exit_tid(tid)
         threads[tid].state = STATE_TERMINATED
 
         // Mark as zombie and notify PM (like terminate_current).

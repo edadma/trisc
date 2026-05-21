@@ -42,6 +42,7 @@ SYSL_FILES=(
     oskit/kernel/page_refcnt.lsysl
     oskit/kernel/spinlock.lsysl
     oskit/kernel/signals.lsysl
+    oskit/kernel/futex.lsysl
     oskit/kernel/elf_selftest.lsysl
     oskit/kernel/mmap.lsysl
     oskit/kernel/grants.lsysl
@@ -63,6 +64,7 @@ SYSL_FILES=(
     oskit/posix/mem.lsysl
     oskit/posix/epoll.lsysl
     oskit/posix/signals.lsysl
+    oskit/posix/futex.lsysl
     oskit/arch/aarch64/board/virt/hello.lsysl
 )
 

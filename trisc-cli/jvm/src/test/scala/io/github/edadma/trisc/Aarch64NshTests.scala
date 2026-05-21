@@ -765,6 +765,25 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mppm: done")
   }
 
+  "musl: SYS_futex WAIT/WAKE + EAGAIN/ETIMEDOUT/WAIT_BITSET" in {
+    // mfx (slix/test/futex_basic.c) exercises five SYS_futex shapes
+    // in a single dyn-linked process: FUTEX_WAKE with no waiters (0),
+    // FUTEX_WAIT with the wrong precondition value (-1/EAGAIN), a
+    // short relative-timeout FUTEX_WAIT (-1/ETIMEDOUT), a fork+
+    // FUTEX_WAKE round-trip (parent parks, child wakes one waiter on
+    // the same uaddr → COW-shared physical page → parent r=0), and a
+    // short absolute-timeout FUTEX_WAIT_BITSET (-1/ETIMEDOUT). Pins
+    // the exit code shape on every branch so a kernel regression
+    // surfaces as a numeric diff in one of the five lines.
+    val output = qemu.command("/bin/mfx")
+    output should include("mfx: wake0 r=0")
+    output should include("mfx: wait_bad r=-1 errno=11")
+    output should include("mfx: wait_to r=-1 errno=110")
+    output should include("mfx: parent r=0 errno=0")
+    output should include("mfx: bitset_to r=-1 errno=110")
+    output should include("mfx: done")
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose
