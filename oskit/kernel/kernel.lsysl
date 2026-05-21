@@ -119,6 +119,7 @@ Statistics fields track per-thread performance:
         futex_bitset: u32   // FUTEX_WAIT_BITSET filter (FUTEX_WAIT uses 0xFFFFFFFF)
         futex_next: int     // Intrusive next-pointer inside the bucket chain in `kernel/futex.lsysl` (-1 = end)
         tls: i64            // Per-thread TLS pointer (TPIDR_EL0 on aarch64, FS_BASE on x86); saved/restored by schedule() on every context switch so user threads sharing one address space can hold distinct __thread storage pointers
+        clear_child_tid: i64 // User VA published by CLONE_CHILD_CLEARTID; when this thread exits, the kernel writes 0 there and FUTEX_WAKEs one waiter so pthread_join can detect termination (0 = none registered)
 
 Run queues: one FIFO queue per priority level. Each queue
 has a head and tail index. Enqueue appends to tail, dequeue
@@ -1595,6 +1596,7 @@ would monotonically bump thread_count and walk off the end of threads[].
         // slot recycled from a former user thread doesn't carry that
         // thread's stale TLS pointer into the kernel-thread context.
         threads[idx].tls = i64(0)
+        threads[idx].clear_child_tid = i64(0)
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -1665,19 +1667,42 @@ enqueueing them back into their priority run queue.
 
     terminate_current(exit_code: int)
         kernel_futex_wait_exit_tid(current_thread)
+        val pid = threads[current_thread].pid
+
+        // Sub-thread vs last-thread distinction. clone(2) spawns
+        // additional threads sharing the parent's pid; when one
+        // of those exits the process must keep running. We only
+        // mark PROC_ZOMBIE (and notify PM for whole-process
+        // teardown) once the last live thread of the pid is gone.
+        // The kstack of an exiting sub-thread is intentionally
+        // left allocated here — `reap_process` walks every thread
+        // of the pid at the eventual process exit and frees them
+        // together. Freeing it from the running thread itself
+        // would invalidate the very stack `schedule()` is about
+        // to use on the way out.
+        var others_alive = 0
+        if pid > 0
+            var ti = 0
+            while ti < thread_count
+                if ti != current_thread
+                    if threads[ti].pid == pid
+                        if threads[ti].state != STATE_TERMINATED
+                            others_alive = 1
+                            break
+                ti += 1
+
         threads[current_thread].state = STATE_TERMINATED
 
-        // If this thread belongs to a process, mark it as zombie
-        // and notify PM so it can handle reaping
-        val pid = threads[current_thread].pid
-        if pid > 0
-            processes[pid].exit_code = exit_code
-            processes[pid].state = PROC_ZOMBIE
-            if kernel_pm_tid >= 0
-                notify_send(kernel_pm_tid, pid)
+        if others_alive == 0
+            if pid > 0
+                processes[pid].exit_code = exit_code
+                processes[pid].state = PROC_ZOMBIE
+                if kernel_pm_tid >= 0
+                    notify_send(kernel_pm_tid, pid)
 
-        // Wake threads waiting to join on this thread
-        // (used for kernel threads; processes use PM)
+        // Wake threads STATE_JOINING on this one — applies to both
+        // sub-thread and last-thread exits (kernel threads use this
+        // path; PM handles per-process waitpid).
         var i = 0
         while i < thread_count
             if threads[i].state == STATE_JOINING
@@ -1832,6 +1857,7 @@ Unlike create_process, the thread is never enqueued — no race.
         // __init_tls sets the real value before any __thread access.
         // Zero defends against stale TLS in a recycled thread slot.
         threads[idx].tls = i64(0)
+        threads[idx].clear_child_tid = i64(0)
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -2046,6 +2072,11 @@ fault`'s COW path relies on. No PTBR switch is needed.
         // for the first time, schedule() restores this into TPIDR_EL0 /
         // FS_BASE before ERETing into user space.
         threads[idx].tls = arch_read_tls()
+        // fork() drops any pthread_join futex handoff from the parent:
+        // the new process starts with no other threads, so there is no
+        // one to clear-and-wake. CLONE_CHILD_CLEARTID lives on the
+        // clone(2) path only.
+        threads[idx].clear_child_tid = i64(0)
 
         // Set up the child's process slot. parent_tid is the parent's
         // *main* tid — same convention `create_process_suspended` uses
@@ -2081,6 +2112,182 @@ return register; the child gets 0 from `arch_setup_fork_frame`).
 
     sys_fork_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
         i64(kernel_fork())
+
+
+CLONE_* flag bits — match Linux. The kernel currently honours
+CLONE_SETTLS, CLONE_PARENT_SETTID, and CLONE_CHILD_CLEARTID
+explicitly; the other "share with parent" flags (CLONE_VM,
+CLONE_FS, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD,
+CLONE_SYSVSEM) are implicitly satisfied because
+`kernel_pthread_clone` always shares the parent's address
+space, signal table, and process identity.
+
+    val CLONE_VM             = 0x00000100
+    val CLONE_FS             = 0x00000200
+    val CLONE_FILES          = 0x00000400
+    val CLONE_SIGHAND        = 0x00000800
+    val CLONE_THREAD         = 0x00010000
+    val CLONE_SYSVSEM        = 0x00040000
+    val CLONE_SETTLS         = 0x00080000
+    val CLONE_PARENT_SETTID  = 0x00100000
+    val CLONE_CHILD_CLEARTID = 0x00200000
+
+
+`kernel_pthread_clone` spawns a new thread in the *calling*
+process: same pid, same ptbr, same VMA tree, same signal
+dispositions. The caller hands the kernel a user-allocated
+stack and (optionally) a TLS pointer. The new thread wakes up
+at the post-syscall instruction with the syscall return register
+zeroed — musl's `__clone` branches into the child trampoline,
+which loads func/arg off the new stack and calls into user code.
+
+The function is the kernel-side counterpart to `__clone` in
+slix-musl: `arch_clone_unpack` resolves the per-arch a3/a4
+ambiguity, so this implementation can be ABI-neutral.
+
+Returns the new tid (>0) on success, -1 on failure. The new
+thread's saved frame inherits the parent's register state, with
+just the return register and SP_EL0/RSP slots rewritten — every
+other GPR matches the SVC/int-$0x80 entry, which is what musl
+expects when it returns into the post-syscall instruction.
+
+    kernel_pthread_clone(flags: i64, user_stack: i64, ptid_addr: i64,
+                         ctid_addr: i64, tls_val: i64) -> int
+        if current_thread < 0
+            return -1
+        val parent_tid  = current_thread
+        val parent_pid  = threads[parent_tid].pid
+        if parent_pid <= 0
+            return -1
+        if parent_pid >= MAX_PROCESSES
+            return -1
+        val parent_ptbr = threads[parent_tid].ptbr
+        val parent_ssp  = syscall_ssp
+
+        arch_cli()
+        ensure_queues_init()
+
+        val kstack_page = kstack_alloc()
+        if kstack_page == u64(0)
+            arch_sti()
+            return -1
+        val kstack_top_val = i64(kstack_page + u64(4 * PAGE_SIZE))
+
+        var idx = -1
+        var ti = 0
+        while ti < thread_count
+            if threads[ti].state == STATE_TERMINATED
+                idx = ti
+                break
+            ti += 1
+        if idx < 0
+            if thread_count >= MAX_THREADS
+                kstack_free(kstack_page)
+                arch_sti()
+                return -1
+            idx = thread_count
+            thread_count += 1
+
+        threads[idx].ssp = arch_setup_clone_frame(parent_ssp,
+                                                  kstack_top_val,
+                                                  user_stack)
+        threads[idx].kstack_top = kstack_top_val
+        threads[idx].state      = STATE_READY
+        threads[idx].wake_ms    = 0
+
+        // Inherit parent's name so debug output identifies the new
+        // thread (tid disambiguates between siblings).
+        val pname = threads[parent_tid].name
+        val pnp   = *byte(pname)
+        var pnlen = len(pname)
+        if pnlen > 15
+            pnlen = 15
+        var ni = 0
+        while ni < pnlen
+            threads[idx].name_buf[ni] = pnp[ni]
+            ni += 1
+        threads[idx].name_buf[ni] = 0
+        threads[idx].name = string(threads[idx].name_buf[:pnlen])
+
+        threads[idx].priority       = threads[parent_tid].priority
+        threads[idx].base_priority  = threads[parent_tid].priority
+        threads[idx].join_target    = -1
+        threads[idx].quantum        = DEFAULT_QUANTUM
+        threads[idx].next           = QUEUE_EMPTY
+        threads[idx].ctx_switches   = 0
+        threads[idx].cpu_ticks      = 0
+        threads[idx].consec_quanta  = 0
+        threads[idx].notify_value   = 0
+        threads[idx].notify_pending = 0
+        threads[idx].blocked_on     = 0
+
+        // Share parent's process identity: pid, ptbr, uid.
+        threads[idx].ptbr = parent_ptbr
+        threads[idx].pid  = parent_pid
+        threads[idx].uid  = threads[parent_tid].uid
+
+        // POSIX threads inherit sigmask but start with no pending
+        // signals, no saved-mask state, and no futex park.
+        threads[idx].sigmask             = threads[parent_tid].sigmask
+        threads[idx].sigpending          = 0
+        threads[idx].sig_deliveries      = 0
+        threads[idx].saved_sigmask       = 0
+        threads[idx].saved_sigmask_valid = 0
+        threads[idx].futex_addr_pa       = u64(0)
+        threads[idx].futex_bitset        = u32(0)
+        threads[idx].futex_next          = -1
+
+        // CLONE_SETTLS: the caller passes the new thread's TLS
+        // pointer. When the scheduler picks this thread for the
+        // first time, schedule() will restore `tls` into TPIDR_EL0
+        // / FS_BASE before returning to user mode. Without the
+        // flag the new thread starts with TPIDR = 0 — fine if no
+        // __thread access happens before the thread sets TLS
+        // itself via a future syscall.
+        if (flags & i64(CLONE_SETTLS)) != i64(0)
+            threads[idx].tls = tls_val
+        else
+            threads[idx].tls = i64(0)
+
+        // CLONE_CHILD_CLEARTID: stash the user VA so the
+        // thread-exit path can clear it and FUTEX_WAKE one waiter
+        // (the join surface). Storing the address now keeps the
+        // exit path arch-neutral.
+        if (flags & i64(CLONE_CHILD_CLEARTID)) != i64(0)
+            threads[idx].clear_child_tid = ctid_addr
+        else
+            threads[idx].clear_child_tid = i64(0)
+
+        // CLONE_PARENT_SETTID: publish the new tid into the
+        // parent's *ptid before the new thread is enqueued, so
+        // the parent (which has not yet returned from clone)
+        // sees a consistent value if it dereferences ptid before
+        // observing the clone(2) return.
+        if (flags & i64(CLONE_PARENT_SETTID)) != i64(0)
+            if ptid_addr != i64(0)
+                var tid_buf: [4]byte
+                val tv = i32(idx)
+                tid_buf[0] = byte(int(tv) & 0xff)
+                tid_buf[1] = byte((int(tv) >> 8) & 0xff)
+                tid_buf[2] = byte((int(tv) >> 16) & 0xff)
+                tid_buf[3] = byte((int(tv) >> 24) & 0xff)
+                kernel_vm_copy_to(parent_ptbr, u64(ptid_addr),
+                                  &tid_buf[0], 4)
+
+        enqueue(threads[idx].priority, idx)
+        // Slow-path handler convention: stay cli; do_schedule does sti.
+        idx
+
+
+SYS_CLONE (146): the user-facing entry. `arch_clone_unpack`
+hides the per-arch a3/a4 ordering so the rest of the function
+is the same on both arches.
+
+    sys_clone_handler(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64
+        var ctid_addr: i64 = 0
+        var tls_val:  i64 = 0
+        arch_clone_unpack(a3, a4, ctid_addr, tls_val)
+        i64(kernel_pthread_clone(a0, a1, a2, ctid_addr, tls_val))
 
 
 
@@ -2181,14 +2388,25 @@ slots safely (no per-slot translation needed).
         // already left at zero).
         vma_unmap_all_pages(&processes[pid].vma_tree, processes[pid].ptbr)
         vma_clear_all(&processes[pid].vma_tree)
-        // Free per-process kernel stack (2 pages, allocated for ring 3 threads)
-        // Guard: only free if the thread slot still belongs to this process.
-        // Thread slots can be reused by create_process_suspended before reap runs.
-        val rtid = processes[pid].main_tid
-        if threads[rtid].pid == pid
-            if threads[rtid].kstack_top != 0
-                kstack_free(u64(threads[rtid].kstack_top - i64(4 * PAGE_SIZE)))
-                threads[rtid].kstack_top = 0
+        // Walk every thread that still claims this pid. The old code
+        // only touched `processes[pid].main_tid`; that was enough
+        // pre-clone(2) because every process had exactly one thread,
+        // but clone(2) sub-threads keep their own kstack out of the
+        // main thread's slot and would otherwise leak a kstack-slab
+        // slot per exit. Also drops any lingering futex park and
+        // forces the slot's state to TERMINATED so the scheduler
+        // never resumes a sub-thread whose ptbr is about to be torn
+        // down.
+        var ti = 0
+        while ti < thread_count
+            if threads[ti].pid == pid
+                kernel_futex_wait_exit_tid(ti)
+                if threads[ti].kstack_top != i64(0)
+                    kstack_free(u64(threads[ti].kstack_top - i64(4 * PAGE_SIZE)))
+                    threads[ti].kstack_top = i64(0)
+                threads[ti].state = STATE_TERMINATED
+                threads[ti].pid = 0
+            ti += 1
         vm_free_process_pt(processes[pid].ptbr)
         processes[pid].state = PROC_FREE
 

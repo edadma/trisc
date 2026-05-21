@@ -806,6 +806,24 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mtls: done")
   }
 
+  "musl: SYS_clone spawns a new thread sharing the parent's VM" in {
+    // mclone (slix/test/clone_basic.c) calls __clone() directly with
+    // CLONE_VM | CLONE_THREAD | CLONE_PARENT_SETTID. The child writes
+    // a shared volatile global (1 | 0xCA11ED), then SYS_exits.
+    // The parent's spin loop observes the write (proving CLONE_VM is
+    // honoured) and reads back *ptid (proving CLONE_PARENT_SETTID
+    // published the new tid). Sub-thread SYS_exit must not kill the
+    // process — that's what terminate_current's sub-thread vs
+    // last-thread distinction guards against.
+    val output = qemu.command("/bin/mclone")
+    output should include("mclone: rc=")
+    output should include("mclone: ptid=")
+    output should include("mclone: child_ran=13242861")
+    output should include("mclone: done")
+    output should not include "mclone: rc=-1"
+    output should not include "mclone: child_ran=0"
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

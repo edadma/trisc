@@ -45,6 +45,7 @@ TESTS=(
     "timerfd.c timerfd"
     "eventfd.c eventfd"
     "signalfd.c msignalfd"
+    "clone_basic.c mclone"
 )
 
 FAILED=()

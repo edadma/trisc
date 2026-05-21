@@ -201,6 +201,44 @@ Returns the SSP value to store in the child thread (frame base).
         frame
 
 
+`arch_setup_clone_frame` is the `clone(2)` analogue of
+`arch_setup_fork_frame`. The clone(2) caller hands the kernel a
+user-supplied stack pointer for the new thread; the child needs
+to wake up at the post-int-$0x80 instruction with rax zeroed (so
+musl's `__clone` sees rc=0 and branches into the child trampoline)
+and the iretq RSP slot pointing at the caller's stack instead of
+the parent's.
+
+    arch_setup_clone_frame(parent_ssp: i64, kstack_top_val: i64,
+                           new_user_sp: i64) -> i64
+        val frame = kstack_top_val - STACK_FRAME_SIZE
+        var i = 0
+        while i < STACK_FRAME_SIZE
+            var src: *byte = *byte(parent_ssp + i64(i))
+            var dst: *byte = *byte(frame + i64(i))
+            *dst = *src
+            i += 1
+        var rv: *i64 = *i64(frame + i64(SYSCALL_RETURN_OFFSET))
+        *rv = i64(0)
+        var sp_p: *i64 = *i64(frame + i64(ARCH_FRAME_USP_OFFSET))
+        *sp_p = new_user_sp
+        frame
+
+
+`arch_clone_unpack` resolves the per-arch ambiguity in the
+`SYS_clone` argument order. Linux's x86_64 clone(2) passes ctid
+in a3 and tls in a4; aarch64 swaps the two. slix-musl preserves
+each architecture's upstream register shuffle in
+`src/thread/<arch>-slix/clone.s`, so the kernel-side dispatch
+has to know which slot is which before calling
+`kernel_pthread_clone`. The x86_64 implementation reads a3 as
+ctid and a4 as tls.
+
+    arch_clone_unpack(a3: i64, a4: i64, out ctid: i64, out tls: i64)
+        ctid = a3
+        tls = a4
+
+
 `arch_trap_at_user_mode` reports whether the iretq trap frame at
 `ssp` records a ring-3 entry (returns 1) or a ring-0 entry
 (returns 0). The signal walker uses this to gate handler delivery

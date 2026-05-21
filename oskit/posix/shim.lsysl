@@ -40,7 +40,7 @@ modules (`oskit.ipc`, `oskit.services`, `oskit.kernel`).
     import oskit.kernel.{current_thread, terminate_current,
         kernel_grant_create_inline, kernel_grant_revoke_inline,
         kernel_get_thread_pid, kernel_get_process_main_tid,
-        kernel_continue_current, kernel_fork,
+        kernel_continue_current, kernel_fork, sys_clone_handler,
         kernel_sig_consume_pending,
         kernel_mmap_anon, kernel_munmap, kernel_mprotect,
         kernel_find_mmap_range, kernel_range_check_free,
@@ -868,18 +868,20 @@ Returns 0 on success, negative errno on failure.
         if num == 186
             return sys_getdents64(int(a0), a1, a2)
         if num == 146
-            // SYS_clone — slix-musl's _Fork unconditionally calls
-            // `clone(SIGCHLD, 0)` because SYS_fork isn't defined for
-            // the slix arch variants. We treat any clone with stack=0
-            // as a fork (ignoring flags — SIGCHLD is the only one
-            // ash and busybox-sh use). Real CLONE_THREAD / CLONE_VM
-            // is a pthread_create surface that lands later.
+            // SYS_clone wears two hats. `_Fork` in slix-musl issues
+            // `clone(SIGCHLD, 0)` — a zero user stack is the
+            // unambiguous "act like fork" signal, no matter what
+            // other flags are set. Anything with a non-zero stack is
+            // a pthread_create-style new thread within the calling
+            // process; that path lives in `sys_clone_handler`, which
+            // uses `arch_clone_unpack` to sort out the per-arch
+            // a3/a4 swap (tls vs. ctid).
             //
-            // a0 = flags, a1 = child_stack, a2/a3/a4 = tls/ctid/ptid
-            // For fork semantics we expect a1 == 0.
-            if a1 != i64(0)
-                return i64(-ENOSYS)
-            return i64(kernel_fork())
+            // a0 = flags, a1 = child_stack, a2 = ptid
+            // (per-arch a3/a4 = tls/ctid order is unpacked downstream).
+            if a1 == i64(0)
+                return i64(kernel_fork())
+            return sys_clone_handler(a0, a1, a2, a3, a4, a5)
         if num == 153
             return sys_epoll_create1(int(a0))
         if num == 154
