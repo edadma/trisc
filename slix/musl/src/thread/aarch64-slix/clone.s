@@ -17,7 +17,7 @@ __clone:
 	mov x2,x4
 	mov x3,x5
 	mov x4,x6
-	mov x8,#220 // SYS_clone
+	mov x8,#146 // SYS_clone (slix)
 	svc #0
 
 	cbz x0,1f
@@ -27,5 +27,5 @@ __clone:
 1:	mov x29, 0
 	ldp x1,x0,[sp],#16
 	blr x1
-	mov x8,#93 // SYS_exit
+	mov x8,#129 // SYS_exit (slix)
 	svc #0
