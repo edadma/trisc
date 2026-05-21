@@ -68,6 +68,7 @@ DYN_TESTS=(
     "dhello.c dhello"
     "phello.c phello"
     "sigact.c sigact"
+    "ppoll_mask.c mppm"
 )
 
 case "$ARCH_ARG" in

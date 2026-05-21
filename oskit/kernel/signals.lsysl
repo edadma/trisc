@@ -20,7 +20,8 @@ and `kernel_kill_process` — resolves without import.
     module oskit.kernel
 
     import oskit.config.{MAX_PROCESSES}
-    import oskit.arch.{arch_build_sigframe, arch_restore_sigframe}
+    import oskit.arch.{arch_build_sigframe, arch_restore_sigframe,
+        arch_trap_at_user_mode}
 
 
 Phase 2 chunk 1 — POSIX signal state plumbing.
@@ -186,6 +187,40 @@ fires on its next return-to-user pass.
             threads[current_thread].sigpending & ~consumed
         consumed
 
+`kernel_sig_delivery_count` snapshots the caller-thread's
+monotonic count of signal-handler invocations. The wait cores
+inside `ppoll` / `pselect6` take this snapshot before sleeping
+and compare it against the live counter inside the loop; any
+increase means a handler ran during the wait, which POSIX
+requires us to report as `-EINTR` (slix has no SA_RESTART yet,
+so every interrupted blocking syscall fails with EINTR).
+
+    kernel_sig_delivery_count() -> int
+        threads[current_thread].sig_deliveries
+
+`kernel_sig_set_saved_mask` arms the caller-thread's "restore this
+mask after handler delivery" slot. Called by `sys_ppoll` /
+`sys_pselect6` at the start of an atomic mask swap: they install
+the user's temporary mask via `kernel_sigmask_set` and stash the
+prior mask here. If a signal handler then fires during the wait,
+`kernel_check_pending_signals` reads `saved_sigmask` and writes it
+into the sigframe (so `sigreturn` restores the pre-syscall mask,
+not the temporary one), then clears `saved_sigmask_valid`. If no
+handler fires, the wait core calls `kernel_sig_consume_saved_mask`
+on its non-EINTR exit path to restore the mask directly and clear
+the flag.
+
+    kernel_sig_set_saved_mask(mask: i64)
+        threads[current_thread].saved_sigmask = mask
+        threads[current_thread].saved_sigmask_valid = 1
+
+    kernel_sig_consume_saved_mask() -> int
+        if threads[current_thread].saved_sigmask_valid == 0
+            return 0
+        threads[current_thread].sigmask = threads[current_thread].saved_sigmask
+        threads[current_thread].saved_sigmask_valid = 0
+        1
+
 Phase 2 chunk 2 — signal generation (kill / tkill / raise).
 
 `kernel_sig_send_to_thread` sets the pending bit for `signo` on
@@ -293,6 +328,8 @@ now armed in the saved trap frame.
             threads[tid].sigpending & ~threads[tid].sigmask & ~SIG_UNMASKABLE
         if deliverable == i64(0)
             return 0
+        if arch_trap_at_user_mode(threads[tid].ssp) == 0
+            return 0
 
         var signo = 1
         while signo <= 64
@@ -310,10 +347,17 @@ now armed in the saved trap frame.
                     return 0
                 if handler == i64(1)
                     return 0
+                val old_for_frame =
+                    if threads[tid].saved_sigmask_valid != 0
+                        threads[tid].saved_sigmask
+                    else
+                        threads[tid].sigmask
                 val new_mask = arch_build_sigframe(threads[tid].ssp, threads[tid].ptbr,
                                                    signo, handler, restorer,
-                                                   mask, flags, threads[tid].sigmask)
+                                                   mask, flags, old_for_frame)
                 threads[tid].sigmask = new_mask
+                threads[tid].saved_sigmask_valid = 0
+                threads[tid].sig_deliveries = threads[tid].sig_deliveries + 1
                 return signo
             signo += 1
         0

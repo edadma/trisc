@@ -749,6 +749,22 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("msignalfd: done")
   }
 
+  "musl: ppoll/pselect sigmask atomicity + EINTR" in {
+    // mppm (slix/test/ppoll_mask.c) blocks SIGUSR1, raises it so the
+    // pending bit is set under the blocked mask, then calls ppoll with
+    // an empty sigmask that unblocks SIGUSR1 for the duration of the
+    // wait. The kernel walker must arm the handler frame inside the
+    // wait, the syscall must return -1/EINTR, the post-wait
+    // sigprocmask must again report SIGUSR1 blocked. The same
+    // sequence is repeated through pselect6 on the second pass.
+    // Counter values are cumulative: hcount=1 after ppoll, hcount=2
+    // after pselect.
+    val output = qemu.command("/bin/mppm")
+    output should include("mppm: ppoll r=-1 errno=4 hcount=1 hsigno=10 blocked=1")
+    output should include("mppm: pselect r=-1 errno=4 hcount=2 hsigno=10 blocked=1")
+    output should include("mppm: done")
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

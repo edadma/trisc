@@ -11,7 +11,10 @@ unix), and translates `sys_epoll_*` / `sys_ppoll`. Sibling of
 
     import oskit.ipc.{ipc_send}
     import oskit.services.{sleep, notify_wait, notify_read_self, sleep_or_notify, monotonic_ms}
-    import oskit.kernel.{kernel_get_process_main_tid, kernel_sigpending_get}
+    import oskit.kernel.{kernel_get_process_main_tid, kernel_sigpending_get,
+        kernel_sigmask_set, kernel_sig_delivery_count,
+        kernel_sig_set_saved_mask, kernel_sig_consume_saved_mask,
+        KSIG_HOW_SETMASK, SIG_UNMASKABLE}
 
 
 epoll instance table (shim-side)
@@ -766,10 +769,24 @@ worth it for the resolver's 5-second timeouts. 10 ms latency is
 well below DNS round-trip.
 
 `tmo_p` is a `struct timespec { i64 tv_sec; i64 tv_nsec; }`. NULL
-means wait forever. `sigmask` and `sigsetsize` (a3, a4) are
-ignored — slix has no signals.
+means wait forever.
 
-    sys_ppoll(fds_ptr: i64, nfds: int, ts_ptr: i64) -> i64
+`sigmask_va` (when non-NULL) points at an 8-byte kernel-shape
+`sigset_t`. If supplied, the wait runs with that mask atomically
+installed: the caller's previous mask is saved before the first
+fd scan and restored on every return path, so no signal can be
+delivered with the wrong mask in effect. `sigsetsize` must be ≥ 8.
+
+A signal-handler delivery during the wait counts as interruption:
+we snapshot `kernel_sig_delivery_count` before the first scan and
+re-check it each iteration; any increase aborts the wait with
+`-EINTR` (slix has no SA_RESTART, so every interrupted blocking
+syscall fails with EINTR). The kernel's pre-resume walker arms
+the handler frame on the way back into userspace, so the handler
+runs *between* the kernel-side wait exit and the next user
+instruction.
+
+    sys_ppoll(fds_ptr: i64, nfds: int, ts_ptr: i64, sigmask_va: i64, sigsetsize: int) -> i64
         if nfds < 0 || nfds > 32
             return i64(-EINVAL)
         if nfds > 0 && fds_ptr == i64(0)
@@ -782,49 +799,215 @@ ignored — slix has no signals.
             if tv_sec < i64(0) || tv_nsec < i64(0) || tv_nsec >= i64(1000000000)
                 return i64(-EINVAL)
             timeout_ms = int(tv_sec * i64(1000) + tv_nsec / i64(1000000))
+
+        var have_mask = false
+        if sigmask_va != i64(0)
+            if sigsetsize < 8
+                return i64(-EINVAL)
+            val mp: *byte = *byte(sigmask_va)
+            val new_mask = shim_read_le_i64(mp, 0)
+            val saved_mask = kernel_sigmask_set(KSIG_HOW_SETMASK, new_mask)
+            kernel_sig_set_saved_mask(saved_mask)
+            have_mask = true
+
         val fds: *byte = *byte(fds_ptr)
-        // Wall-clock deadline (in 10 ms ticks). Using a deadline rather
-        // than decrementing per-iteration avoids early termination when
-        // sleep_or_notify wakes after >1 tick due to scheduling latency
-        // (which would happen with the old `ticks_left -= (after - before)`
-        // pattern under contention — eg. 126 iters could exhaust a 250-tick
-        // budget while only 1.26 s of wall time had passed).
         var deadline_tick = i64(0)
         if timeout_ms > 0
             deadline_tick = monotonic_ms() / i64(10) + i64((timeout_ms + 9) / 10)
+        var rc: i64 = i64(0)
+        var done = false
         var iter = 0
-        while iter < 1000000
+        while !done && iter < 1000000
             iter += 1
-            val _ = notify_read_self()
-            var ready_count = 0
-            var i = 0
-            while i < nfds
-                val off = i * 8
-                val fd = shim_read_le_u32(fds, off)
-                val events = (int(fds[off + 4]) & 0xff) | ((int(fds[off + 5]) & 0xff) << 8)
-                var revents = 0
-                // fd < 0 (sentinel "skip this slot") or out-of-range
-                // (no such slot in this process) → revents = 0. Sysl's
-                // int width can be 32 or 64 in context, so combine
-                // both bounds rather than relying on sign.
-                if fd >= 0 && fd < POSIX_FDS_PER_PROC
-                    var seq = 0
-                    revents = epoll_query_ready(fd, events, &seq)
-                fds[off + 6] = byte(revents & 0xff)
-                fds[off + 7] = byte((revents >> 8) & 0xff)
-                if revents != 0
-                    ready_count += 1
-                i += 1
-            if ready_count > 0
-                return i64(ready_count)
-            if timeout_ms == 0
-                return i64(0)
-            if timeout_ms > 0
-                if monotonic_ms() / i64(10) >= deadline_tick
-                    return i64(0)
-            // Re-poll every tick (10 ms). For waits ≥ ~50 ms this is
-            // imperceptible; the resolver case typically lands within
-            // 1–5 ticks of the response arriving.
-            sleep_or_notify(1)
-        i64(0)
+            if (kernel_sigpending_get() & ~kernel_sigmask_set(-1, i64(0)) & ~SIG_UNMASKABLE) != i64(0)
+                rc = i64(-EINTR)
+                done = true
+            else
+                val _ = notify_read_self()
+                var ready_count = 0
+                var i = 0
+                while i < nfds
+                    val off = i * 8
+                    val fd = shim_read_le_u32(fds, off)
+                    val events = (int(fds[off + 4]) & 0xff) | ((int(fds[off + 5]) & 0xff) << 8)
+                    var revents = 0
+                    if fd >= 0 && fd < POSIX_FDS_PER_PROC
+                        var seq = 0
+                        revents = epoll_query_ready(fd, events, &seq)
+                    fds[off + 6] = byte(revents & 0xff)
+                    fds[off + 7] = byte((revents >> 8) & 0xff)
+                    if revents != 0
+                        ready_count += 1
+                    i += 1
+                if ready_count > 0
+                    rc = i64(ready_count)
+                    done = true
+                else if timeout_ms == 0
+                    rc = i64(0)
+                    done = true
+                else if timeout_ms > 0 && monotonic_ms() / i64(10) >= deadline_tick
+                    rc = i64(0)
+                    done = true
+                else
+                    sleep_or_notify(1)
+
+        if have_mask && rc != i64(-EINTR)
+            val _ = kernel_sig_consume_saved_mask()
+        rc
+
+
+SYS_PSELECT6 — Linux pselect6(2). Args:
+
+  a0 = nfds (highest fd + 1 to scan)
+  a1 = readfds bitset    (or NULL)
+  a2 = writefds bitset   (or NULL)
+  a3 = exceptfds bitset  (or NULL)
+  a4 = timespec deadline (or NULL — wait forever)
+  a5 = pointer to a 2-element `unsigned long[2]` =
+         { sigmask_ptr_or_null, sigsetsize }
+       (musl always packs the mask this way so the syscall
+       only has to take six args, not seven.)
+
+Each `fd_set` is a flat bit array — `__FD_SETSIZE` is 1024 on
+Linux, but slix caps file descriptors at `POSIX_FDS_PER_PROC`,
+so we only inspect the low 32 bits. fds outside `nfds` are
+ignored. On return, the result bitsets are *rewritten* (Linux
+semantics — bits for ready fds set, all others cleared). On
+EINTR / timeout the user's bitsets are written all-zero.
+
+The sigmask atomicity contract is identical to `sys_ppoll`:
+swap the caller's mask in for the duration, snapshot the
+delivery counter, return `-EINTR` if a handler fires during
+the wait, restore the mask on every return path.
+
+    sys_pselect6(nfds: int, rfds_va: i64, wfds_va: i64, efds_va: i64,
+                 ts_va: i64, data_va: i64) -> i64
+        if nfds < 0 || nfds > POSIX_FDS_PER_PROC
+            return i64(-EINVAL)
+
+        var timeout_ms = -1
+        if ts_va != i64(0)
+            val ts: *byte = *byte(ts_va)
+            val tv_sec = shim_read_le_i64(ts, 0)
+            val tv_nsec = shim_read_le_i64(ts, 8)
+            if tv_sec < i64(0) || tv_nsec < i64(0) || tv_nsec >= i64(1000000000)
+                return i64(-EINVAL)
+            timeout_ms = int(tv_sec * i64(1000) + tv_nsec / i64(1000000))
+
+        var have_mask = false
+        if data_va != i64(0)
+            val dp: *byte = *byte(data_va)
+            val sigmask_va = shim_read_le_i64(dp, 0)
+            val sigsetsize = shim_read_le_i64(dp, 8)
+            if sigmask_va != i64(0)
+                if sigsetsize < i64(8)
+                    return i64(-EINVAL)
+                val mp: *byte = *byte(sigmask_va)
+                val new_mask = shim_read_le_i64(mp, 0)
+                val saved_mask = kernel_sigmask_set(KSIG_HOW_SETMASK, new_mask)
+                kernel_sig_set_saved_mask(saved_mask)
+                have_mask = true
+
+        var rmask_in: int = 0
+        var wmask_in: int = 0
+        var emask_in: int = 0
+        if rfds_va != i64(0)
+            val rp: *byte = *byte(rfds_va)
+            rmask_in = (int(rp[0]) & 0xff) | ((int(rp[1]) & 0xff) << 8) |
+                       ((int(rp[2]) & 0xff) << 16) | ((int(rp[3]) & 0xff) << 24)
+        if wfds_va != i64(0)
+            val wp: *byte = *byte(wfds_va)
+            wmask_in = (int(wp[0]) & 0xff) | ((int(wp[1]) & 0xff) << 8) |
+                       ((int(wp[2]) & 0xff) << 16) | ((int(wp[3]) & 0xff) << 24)
+        if efds_va != i64(0)
+            val ep: *byte = *byte(efds_va)
+            emask_in = (int(ep[0]) & 0xff) | ((int(ep[1]) & 0xff) << 8) |
+                       ((int(ep[2]) & 0xff) << 16) | ((int(ep[3]) & 0xff) << 24)
+
+        var deadline_tick = i64(0)
+        if timeout_ms > 0
+            deadline_tick = monotonic_ms() / i64(10) + i64((timeout_ms + 9) / 10)
+
+        var rc: i64 = i64(0)
+        var rmask_out: int = 0
+        var wmask_out: int = 0
+        var emask_out: int = 0
+        var done = false
+        var iter = 0
+        while !done && iter < 1000000
+            iter += 1
+            if (kernel_sigpending_get() & ~kernel_sigmask_set(-1, i64(0)) & ~SIG_UNMASKABLE) != i64(0)
+                rc = i64(-EINTR)
+                done = true
+            else
+                val _ = notify_read_self()
+                var ready_count = 0
+                rmask_out = 0
+                wmask_out = 0
+                emask_out = 0
+                var fd = 0
+                while fd < nfds
+                    val fd_bit = 1 << fd
+                    val want_r = (rmask_in & fd_bit) != 0
+                    val want_w = (wmask_in & fd_bit) != 0
+                    val want_e = (emask_in & fd_bit) != 0
+                    if want_r || want_w || want_e
+                        var events = 0
+                        if want_r
+                            events = events | POSIX_EPOLLIN
+                        if want_w
+                            events = events | POSIX_EPOLLOUT
+                        var seq = 0
+                        val revents = epoll_query_ready(fd, events, &seq)
+                        var fired = false
+                        if want_r && (revents & POSIX_EPOLLIN) != 0
+                            rmask_out = rmask_out | fd_bit
+                            fired = true
+                        if want_w && (revents & POSIX_EPOLLOUT) != 0
+                            wmask_out = wmask_out | fd_bit
+                            fired = true
+                        if want_e && (revents & (POSIX_EPOLLERR | POSIX_EPOLLHUP)) != 0
+                            emask_out = emask_out | fd_bit
+                            fired = true
+                        if fired
+                            ready_count += 1
+                    fd += 1
+                if ready_count > 0
+                    rc = i64(ready_count)
+                    done = true
+                else if timeout_ms == 0
+                    rc = i64(0)
+                    done = true
+                else if timeout_ms > 0 && monotonic_ms() / i64(10) >= deadline_tick
+                    rc = i64(0)
+                    done = true
+                else
+                    sleep_or_notify(1)
+
+        if rc <= i64(0)
+            rmask_out = 0
+            wmask_out = 0
+            emask_out = 0
+        if rfds_va != i64(0)
+            val rpw: *byte = *byte(rfds_va)
+            rpw[0] = byte(rmask_out & 0xff)
+            rpw[1] = byte((rmask_out >> 8) & 0xff)
+            rpw[2] = byte((rmask_out >> 16) & 0xff)
+            rpw[3] = byte((rmask_out >> 24) & 0xff)
+        if wfds_va != i64(0)
+            val wpw: *byte = *byte(wfds_va)
+            wpw[0] = byte(wmask_out & 0xff)
+            wpw[1] = byte((wmask_out >> 8) & 0xff)
+            wpw[2] = byte((wmask_out >> 16) & 0xff)
+            wpw[3] = byte((wmask_out >> 24) & 0xff)
+        if efds_va != i64(0)
+            val epw: *byte = *byte(efds_va)
+            epw[0] = byte(emask_out & 0xff)
+            epw[1] = byte((emask_out >> 8) & 0xff)
+            epw[2] = byte((emask_out >> 16) & 0xff)
+            epw[3] = byte((emask_out >> 24) & 0xff)
+
+        if have_mask && rc != i64(-EINTR)
+            val _ = kernel_sig_consume_saved_mask()
+        rc
 

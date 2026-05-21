@@ -110,8 +110,11 @@ Statistics fields track per-thread performance:
         ptbr: u64
         pid: int
         kstack_top: i64
-        sigmask: i64        // Phase 2 chunk 1 — per-thread blocked-signal bitmap (bit (signo-1))
-        sigpending: i64     // Phase 2 chunk 1 — per-thread pending-signal bitmap (bit (signo-1)); no delivery yet
+        sigmask: i64        // Per-thread blocked-signal bitmap (bit (signo-1))
+        sigpending: i64     // Per-thread pending-signal bitmap (bit (signo-1))
+        sig_deliveries: int // Monotonic count of handler deliveries via kernel_check_pending_signals; pselect/ppoll snapshots this to detect EINTR-by-handler
+        saved_sigmask: i64  // Pre-syscall sigmask saved by pselect/ppoll's atomic mask swap; restored into the sigframe by the walker on EINTR-by-handler, otherwise restored directly by the syscall on its non-EINTR exit
+        saved_sigmask_valid: int
 
 Run queues: one FIFO queue per priority level. Each queue
 has a head and tail index. Enqueue appends to tail, dequeue
@@ -1578,6 +1581,9 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[idx].kstack_top = 0
         threads[idx].sigmask = 0
         threads[idx].sigpending = 0
+        threads[idx].sig_deliveries = 0
+        threads[idx].saved_sigmask = 0
+        threads[idx].saved_sigmask_valid = 0
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -1804,6 +1810,9 @@ Unlike create_process, the thread is never enqueued — no race.
         threads[idx].pid = 0
         threads[idx].sigmask = 0
         threads[idx].sigpending = 0
+        threads[idx].sig_deliveries = 0
+        threads[idx].saved_sigmask = 0
+        threads[idx].saved_sigmask_valid = 0
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -2002,6 +2011,9 @@ fault`'s COW path relies on. No PTBR switch is needed.
         // but Linux/glibc/musl all clear pending on fork).
         threads[idx].sigmask       = threads[parent_tid].sigmask
         threads[idx].sigpending    = 0
+        threads[idx].sig_deliveries = 0
+        threads[idx].saved_sigmask = 0
+        threads[idx].saved_sigmask_valid = 0
 
         // Set up the child's process slot. parent_tid is the parent's
         // *main* tid — same convention `create_process_suspended` uses

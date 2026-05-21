@@ -212,6 +212,24 @@ Returns the SSP value to store in the child thread (frame base).
         frame
 
 
+`arch_trap_at_user_mode` reports whether the trap frame at `ssp`
+records an EL0 entry (returns 1) or a kernel-mode entry (returns
+0). The signal walker uses this to gate handler delivery: a thread
+that took an SVC from kernel mode (eg. `sleep_or_notify` called by
+`sys_ppoll`) has a nested current-EL trap frame on top, and arming
+a sigframe there would ERET back into EL1 with PC set to a user
+handler — an immediate instruction abort. Skipping delivery on
+such frames defers the handler until the syscall unwinds back to
+the original EL0-entry trap frame at the bottom of the kstack.
+
+    arch_trap_at_user_mode(ssp: i64) -> int
+        val pstate_p: *i64 = *i64(ssp + i64(0x100))
+        val pstate = *pstate_p
+        if (pstate & i64(0xF)) == i64(0)
+            return 1
+        0
+
+
 Signal-frame construction for POSIX signal delivery
 ---------------------------------------------------
 

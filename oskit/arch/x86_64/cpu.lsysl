@@ -190,6 +190,22 @@ Returns the SSP value to store in the child thread (frame base).
         frame
 
 
+`arch_trap_at_user_mode` reports whether the iretq trap frame at
+`ssp` records a ring-3 entry (returns 1) or a ring-0 entry
+(returns 0). The signal walker uses this to gate handler delivery
+so a thread that took an INT $0x80 from kernel mode (eg.
+`sleep_or_notify` called by `sys_ppoll`) doesn't get a sigframe
+armed on its inner ring-0 frame — that would iretq back into
+ring 0 with RIP set to a user handler and immediately page-fault.
+
+    arch_trap_at_user_mode(ssp: i64) -> int
+        val saved_cs_p: *i64 = *i64(ssp + i64(128))
+        val saved_cs = *saved_cs_p
+        if (saved_cs & i64(0x3)) == i64(0x3)
+            return 1
+        0
+
+
 Signal-frame construction for POSIX signal delivery
 ---------------------------------------------------
 

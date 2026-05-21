@@ -116,6 +116,7 @@ reader can scan by errno number.
     const EPERM            = 1
     const ENOENT           = 2
     const ESRCH            = 3
+    const EINTR            = 4
     const EIO              = 5
     const EBADF            = 9
     const EAGAIN           = 11
@@ -886,7 +887,9 @@ Returns 0 on success, negative errno on failure.
         if num == 155
             return sys_epoll_pwait(int(a0), a1, int(a2), int(a3))
         if num == 258
-            return sys_ppoll(a0, int(a1), a2)
+            return sys_ppoll(a0, int(a1), a2, a3, int(a4))
+        if num == 266
+            return sys_pselect6(int(a0), a1, a2, a3, a4, a5)
         if num == 156
             return sys_eventfd2(int(a0), int(a1))
         if num == 356
