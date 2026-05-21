@@ -105,6 +105,24 @@ void arch_irq_restore(unsigned long prev) {
                       :: "r"(prev) : "memory", "cc");
 }
 
+/* arch_read_tls() / arch_write_tls(v): read/write the per-thread
+ * TLS pointer register (FS_BASE, MSR 0xC0000100). CR4.FSGSBASE is
+ * enabled in boot.s so RDFSBASE/WRFSBASE run unprivileged in both
+ * ring 3 (musl __set_thread_area) and ring 0 (these hooks). The
+ * scheduler calls these on every context switch so user threads
+ * sharing one address space can hold distinct thread-local
+ * pointers — see oskit/kernel/kernel.lsysl::schedule().
+ */
+long arch_read_tls(void) {
+    unsigned long v;
+    __asm__ volatile ("rdfsbase %0" : "=r"(v));
+    return (long)v;
+}
+
+void arch_write_tls(long v) {
+    __asm__ volatile ("wrfsbase %0" :: "r"((unsigned long)v));
+}
+
 /* Trampoline so arch code can demand-allocate user pages without
  * importing oskit.kernel (which would create a module-import cycle:
  * oskit.kernel already imports oskit.arch.*). The implementation

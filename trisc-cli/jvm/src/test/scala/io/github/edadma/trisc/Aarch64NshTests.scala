@@ -784,6 +784,28 @@ class Aarch64NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach 
     output should include("mfx: done")
   }
 
+  "musl: __thread TLS initial-exec end-to-end" in {
+    // mtls (slix/test/tls_basic.c) is a dyn-linked PIE that defines
+    // its own __thread variables (int, long, char[16], struct). The
+    // compiler emits initial-exec relocations; ld-musl walks the
+    // main exe's PT_TLS, allocates a per-thread block via __copy_tls,
+    // and resolves each tpoff against TPIDR_EL0. The test verifies
+    // .tdata image was copied (initial values), .tbss was zeroed,
+    // and writes back through the TLS slots round-trip cleanly.
+    val output = qemu.command("/bin/mtls")
+    output should include("mtls: zero=0")
+    output should include("mtls: init=42")
+    output should include("mtls: big=81985529216486895")
+    output should include("mtls: greet=hello tls")
+    output should include("mtls: pt=7,11,4277009102")
+    output should include("mtls: zero2=1234")
+    output should include("mtls: init2=-1")
+    output should include("mtls: big2=6172840429334713770")
+    output should include("mtls: greet2=Hello tls")
+    output should include("mtls: pt2=-7,11,1234605616436508552")
+    output should include("mtls: done")
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

@@ -281,6 +281,23 @@ arch_resume_process:
     add  sp, sp, #0x110
     eret
 
+// arch_read_tls() -> i64
+//   Read TPIDR_EL0, the per-thread user TLS pointer. Called by
+//   schedule() on every context switch so the outgoing thread's
+//   value can be parked in its Thread record.
+.global arch_read_tls
+arch_read_tls:
+    mrs  x0, tpidr_el0
+    ret
+
+// arch_write_tls(v: i64)
+//   Write `v` into TPIDR_EL0. Called by schedule() to restore the
+//   incoming thread's TLS pointer before the next ERET to user mode.
+.global arch_write_tls
+arch_write_tls:
+    msr  tpidr_el0, x0
+    ret
+
 // shim_uart_putc(c: int)
 //   Write the low byte of x0 to the PL011 UART data register at
 //   0x09000000. Spin-waits for TX FIFO drain via UARTFR.TXFF (bit 5).

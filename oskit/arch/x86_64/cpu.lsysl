@@ -61,6 +61,17 @@ inline asm doesn't fight the Sysl prologue.
     extern arch_irq_save() -> u64
     extern arch_irq_restore(prev: u64)
 
+Read / write the per-thread TLS pointer register (FS_BASE, MSR
+0xC0000100). The scheduler calls these on every context switch so
+user threads sharing one address space can hold distinct thread-
+local pointers. CR4.FSGSBASE is enabled in boot.s so both ring 3
+and ring 0 can use RDFSBASE / WRFSBASE without trapping. Userspace
+sets FS_BASE directly via the musl `__set_thread_area` override;
+the kernel never reads or writes it outside these hooks.
+
+    extern arch_read_tls() -> i64
+    extern arch_write_tls(v: i64)
+
 Spinlock acquire. Spins using lock cmpxchg until the lock
 is obtained, then disables interrupts. Lock is 0=free, 1=held.
 x86 calling convention: rdi = first arg (lock pointer).

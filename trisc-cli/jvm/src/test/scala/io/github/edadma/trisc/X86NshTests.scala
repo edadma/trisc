@@ -444,6 +444,27 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should include("mfx: done")
   }
 
+  "musl: __thread TLS initial-exec end-to-end" in {
+    // Mirror of the aarch64 mtls test — see slix/test/tls_basic.c.
+    // The same dyn-linked PIE with __thread variables; on x86 the
+    // initial-exec relocations resolve to %fs:offset accesses, with
+    // FS_BASE set by the slix-specific WRFSBASE override in
+    // src/thread/x86_64-slix/__set_thread_area.s.
+    qemu.send("mtls\n")
+    val output = qemu.waitFor("mtls: done")
+    output should include("mtls: zero=0")
+    output should include("mtls: init=42")
+    output should include("mtls: big=81985529216486895")
+    output should include("mtls: greet=hello tls")
+    output should include("mtls: pt=7,11,4277009102")
+    output should include("mtls: zero2=1234")
+    output should include("mtls: init2=-1")
+    output should include("mtls: big2=6172840429334713770")
+    output should include("mtls: greet2=Hello tls")
+    output should include("mtls: pt2=-7,11,1234605616436508552")
+    output should include("mtls: done")
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

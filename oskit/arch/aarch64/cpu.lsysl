@@ -91,6 +91,15 @@ on success; `release` drops the word back to zero and unmasks.
     extern arch_spinlock_acquire(lock: *i64)
     extern arch_spinlock_release(lock: *i64)
 
+Read / write the per-thread TLS pointer register (TPIDR_EL0). The
+scheduler calls these on every context switch so user threads
+sharing one address space can hold distinct thread-local pointers.
+Userspace sets TPIDR_EL0 directly via the musl `__set_thread_area`
+override; the kernel never reads or writes it outside these hooks.
+
+    extern arch_read_tls() -> i64
+    extern arch_write_tls(v: i64)
+
 Restore a 272-byte EL0 exception frame at SP_EL1 = `frame_sp`, then
 ERET. Matches the save layout in `vectors.s`. Does not return.
 

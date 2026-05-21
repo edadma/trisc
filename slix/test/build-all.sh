@@ -70,6 +70,7 @@ DYN_TESTS=(
     "sigact.c sigact"
     "ppoll_mask.c mppm"
     "futex_basic.c mfx"
+    "tls_basic.c mtls"
 )
 
 case "$ARCH_ARG" in

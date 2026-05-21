@@ -118,6 +118,7 @@ Statistics fields track per-thread performance:
         futex_addr_pa: u64  // Physical address this thread is parked on via sys_futex (0 when not parked)
         futex_bitset: u32   // FUTEX_WAIT_BITSET filter (FUTEX_WAIT uses 0xFFFFFFFF)
         futex_next: int     // Intrusive next-pointer inside the bucket chain in `kernel/futex.lsysl` (-1 = end)
+        tls: i64            // Per-thread TLS pointer (TPIDR_EL0 on aarch64, FS_BASE on x86); saved/restored by schedule() on every context switch so user threads sharing one address space can hold distinct __thread storage pointers
 
 Run queues: one FIFO queue per priority level. Each queue
 has a head and tail index. Enqueue appends to tail, dequeue
@@ -1590,6 +1591,10 @@ would monotonically bump thread_count and walk off the end of threads[].
         threads[idx].futex_addr_pa = u64(0)
         threads[idx].futex_bitset = u32(0)
         threads[idx].futex_next = -1
+        // Kernel threads do not use TPIDR_EL0 / FS_BASE; zero it so a
+        // slot recycled from a former user thread doesn't carry that
+        // thread's stale TLS pointer into the kernel-thread context.
+        threads[idx].tls = i64(0)
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -1823,6 +1828,10 @@ Unlike create_process, the thread is never enqueued — no race.
         threads[idx].futex_addr_pa = u64(0)
         threads[idx].futex_bitset = u32(0)
         threads[idx].futex_next = -1
+        // New user process: TPIDR_EL0 / FS_BASE starts at 0; userspace
+        // __init_tls sets the real value before any __thread access.
+        // Zero defends against stale TLS in a recycled thread slot.
+        threads[idx].tls = i64(0)
         if current_thread >= 0
             threads[idx].uid = threads[current_thread].uid
         else
@@ -2030,6 +2039,13 @@ fault`'s COW path relies on. No PTBR switch is needed.
         threads[idx].futex_addr_pa = u64(0)
         threads[idx].futex_bitset = u32(0)
         threads[idx].futex_next = -1
+        // The child inherits the parent's current TLS pointer. Reading
+        // the live register captures any updates the parent made since
+        // its last context switch (e.g. an __init_tls call followed by
+        // fork before any IRQ has fired). When the child is scheduled
+        // for the first time, schedule() restores this into TPIDR_EL0 /
+        // FS_BASE before ERETing into user space.
+        threads[idx].tls = arch_read_tls()
 
         // Set up the child's process slot. parent_tid is the parent's
         // *main* tid — same convention `create_process_suspended` uses
@@ -2286,6 +2302,14 @@ Steps:
         ticks += 1
         timer_scan_subs()
 
+        // Capture outgoing thread's TLS pointer (TPIDR_EL0 / FS_BASE).
+        // The hardware register is per-CPU, not per-thread; without
+        // this round-trip two user threads sharing one address space
+        // would step on each other's __thread storage on every
+        // context switch. Skipped when idle (no outgoing thread).
+        if current_thread >= 0
+            threads[current_thread].tls = arch_read_tls()
+
         // Save current thread (skip when idle, current_thread == -1)
         if current_thread >= 0
             threads[current_thread].ssp = current_ssp
@@ -2362,6 +2386,7 @@ Steps:
                 kernel_check_pending_signals(next)
                 if threads[next].state == STATE_TERMINATED
                     continue
+            arch_write_tls(threads[next].tls)
             return threads[next].ssp
         0
 
@@ -2382,6 +2407,7 @@ highest-priority non-empty queue.
                     total_ctx_switches += 1
                     vm_set_ptbr(threads[next].ptbr)
                     tss_set_rsp0(threads[next].kstack_top)
+                    arch_write_tls(threads[next].tls)
                     return threads[next].ssp
             pri += 1
         0
