@@ -995,6 +995,60 @@ trait SyslAnalyzerTypes:
     if a.typ.isFloat then tryConstEvalFloat(a).map(Value.FloatVal(_))
     else tryConstEval(a).map(Value.IntVal(_))
 
+  /** Try to fold a typed expression to an aggregate (array or struct) literal
+    * whose elements are themselves literal-composed. Returns `Some(folded)`
+    * where `folded` is a tree of `TIntLit` / `TFloatLit` / `TBoolLit` /
+    * `TArrayLit` / `TStructConstruct` nodes — the shape every backend already
+    * accepts as a module-level static initializer. Used by the `const`-binding
+    * analyzer to materialize the result of `const TABLE: [N]T = const_fn(…)`
+    * as static data, with no per-backend codegen changes required.
+    *
+    *   - `TArrayLit` / `TStructConstruct` already in literal-of-literals shape
+    *     pass through unchanged.
+    *   - `TArrayLit` / `TStructConstruct` with element / arg expressions that
+    *     each fold (scalar, float, or recursively aggregate) get rebuilt with
+    *     the folded sub-expressions.
+    *   - `TCall` to an aggregate-returning `#const fn` routes through the
+    *     embedded interpreter via `evaluateConstCallValue`; the resulting
+    *     `Value` is reconstituted as a typed literal tree by the interpreter's
+    *     `valueToConstExpr`.
+    *
+    * Anything else returns `None` and lets the caller emit the standard
+    * "initializer is not compile-time evaluable" diagnostic. */
+  protected def tryConstEvalAggregate(expr: TExpr): Option[TExpr] = expr match
+    case TArrayLit(elems, t) =>
+      val folded = elems.foldLeft(Option(List.empty[TExpr])) { (acc, e) =>
+        for as <- acc; ef <- foldExprValue(e) yield as :+ ef
+      }
+      folded.map(es => TArrayLit(es, t))
+    case TStructConstruct(st, args) =>
+      val folded = args.foldLeft(Option(List.empty[TExpr])) { (acc, a) =>
+        for as <- acc; af <- foldExprValue(a) yield as :+ af
+      }
+      folded.map(as => TStructConstruct(st, as))
+    case TCall(name, args, t) =>
+      evaluateConstCallValue(name, args).flatMap { v =>
+        val interp = new SyslInterpreter(_ => ())
+        interp.valueToConstExpr(v, t)
+      }
+    case _ => None
+
+  /** Fold one expression into a literal-composed form, dispatching on its
+    * static type. Integer/bool/char yield `TIntLit`; float yields `TFloatLit`;
+    * array/struct recurse through `tryConstEvalAggregate`. Returns `None` for
+    * any kind we can't yet express as a static literal. Shared by the
+    * aggregate folder and (eventually) any caller that needs a literal-shape
+    * fold-result independent of int-vs-float dispatch. */
+  protected def foldExprValue(e: TExpr): Option[TExpr] =
+    val t = e.typ
+    if t.isIntegral || t == SyslType.BoolType then
+      tryConstEval(e).map(n => TIntLit(maskToType(n, t), t))
+    else if t.isFloat then
+      tryConstEvalFloat(e).map(d => TFloatLit(narrowFloatToType(d, t), t))
+    else t match
+      case _: SyslType.ArrayType | _: SyslType.StructType => tryConstEvalAggregate(e)
+      case _ => None
+
   /** Try to evaluate a typed expression as a compile-time `Double`. Mirrors
     * `tryConstEval` for the float case: handles float literals, integer
     * literals widened to double, cross-binding lookups in either

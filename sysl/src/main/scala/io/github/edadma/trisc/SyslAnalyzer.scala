@@ -856,7 +856,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
     val tInit0 = analyzeExpr(init)
     val declType = typOpt.map(resolveType).getOrElse(tInit0.typ)
     val tInit1 = coerceLiteral(tInit0, declType)
-    // `const` requires a compile-time-evaluable initializer.
+    // `const` requires a compile-time-evaluable initializer. Scalar consts
+    // (int / float) fold to a single `Long`/`Double` and are propagated by
+    // inlining at every use site (`compileTimeConstants` / `compileTimeFloats`).
+    // Aggregate consts (array / struct) materialize as a module-level
+    // immutable `TVarDecl` whose initializer is composed entirely of literal
+    // nodes — every backend already lowers those to a static data block.
     if isConst then
       val mangledName = if shouldMangle(name) then mangleName(name) else name
       if declType.isIntegral then
@@ -875,8 +880,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
             compileTimeFloats(mangledName) = narrowed
           case None =>
             throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
-      else
-        throw AnalysisError(s"const '$name' must have an integer or float type (found $declType); string/aggregate const is not yet supported")
+      else declType match
+        case _: SyslType.ArrayType | _: SyslType.StructType =>
+          tryConstEvalAggregate(tInit1) match
+            case Some(folded) =>
+              globalScope(name) = SymInfo(mangledName, declType, mutable = false, isConst = true, isGhost = isGhost)
+              if isGhost then ghostNames += mangledName
+              scopeStack = null
+              return TVarDecl(mangledName, declType, folded, isPrivate, isVolatile = false, isGhost = isGhost, isMutable = false)
+            case None =>
+              throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
+        case _ =>
+          throw AnalysisError(s"const '$name' must have an integer, float, array, or struct type (found $declType)")
     // Constant folding: immutable vals with constant initializers become compile-time constants
     val tInit = if !isMutable && !isGhost then
       tryConstEval(tInit1) match

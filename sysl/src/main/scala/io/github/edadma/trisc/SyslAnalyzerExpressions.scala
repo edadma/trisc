@@ -535,7 +535,7 @@ trait SyslAnalyzerExpressions:
         // `dispatch` reference would resolve to a global `dispatch(...)` function instead
         // of the just-created local closure value. See also the matching check in CallAST.
         lookupLocal(name) match
-          case Some(sym) if sym.isConst =>
+          case Some(sym) if sym.isConst && (sym.typ.isIntegral || sym.typ.isFloat || sym.typ == BoolType) =>
             if sym.typ.isFloat then
               val d = compileTimeFloats.getOrElse(sym.name,
                 compileTimeFloats.getOrElse(name,
@@ -574,8 +574,11 @@ trait SyslAnalyzerExpressions:
         else
           // Check for no-arg enum variant before falling through to variable lookup
           tryLookup(name) match
-            case Some(sym) if sym.isConst =>
+            case Some(sym) if sym.isConst && (sym.typ.isIntegral || sym.typ.isFloat || sym.typ == BoolType) =>
               // Inline compile-time constant — no load, no storage reference.
+              // Aggregate consts (array/struct) fall through to the normal
+              // `TVarRef` branch below: they are materialized as a module-level
+              // immutable `TVarDecl` and lowered by the existing global-init path.
               if sym.typ.isFloat then
                 val d = compileTimeFloats.getOrElse(sym.name,
                   compileTimeFloats.getOrElse(name,

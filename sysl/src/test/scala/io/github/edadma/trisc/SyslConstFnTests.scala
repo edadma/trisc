@@ -568,4 +568,83 @@ class SyslConstFnTests extends SyslTestHelpers {
       |    return 0
       |""".stripMargin) shouldBe s"$expected\n"
   }
+
+  // ===== Aggregate compile-time evaluation =====
+  // Array and struct consts don't inline at use sites — they materialize as a
+  // module-level immutable storage slot whose initializer is composed entirely
+  // of literal nodes (`TIntLit`, `TFloatLit`, `TArrayLit`, `TStructConstruct`).
+  // Every backend already lowers a literal-of-literals initializer to a static
+  // data block, so no per-backend codegen change is needed for the array case;
+  // the struct case adds a `TStructConstruct` initializer handler to llvm-host,
+  // svm-host, and trisc (each previously zero-filled struct globals at module
+  // scope).
+
+  "const binding folds a stack-array literal" in {
+    eval("""
+      |const SMALL: [3]int = [10, 20, 12]
+      |main() -> int = SMALL[0] + SMALL[1] + SMALL[2]
+      |""".stripMargin) shouldBe 42
+  }
+
+  "const binding folds an aggregate-returning const-fn call" in {
+    eval("""
+      |#const
+      |make3() -> [3]int
+      |    var t: [3]int
+      |    t[0] = 10
+      |    t[1] = 20
+      |    t[2] = 12
+      |    return t
+      |const TABLE: [3]int = make3()
+      |main() -> int = TABLE[0] + TABLE[1] + TABLE[2]
+      |""".stripMargin) shouldBe 42
+  }
+
+  "const binding folds a sized-loop const-fn returning an array" in {
+    // The shape `const SINE_TABLE: [N]i32 = build_sine_table(N)` will take —
+    // a fixed-size loop fills a stack array, the function returns it, and the
+    // binding materializes the folded array as static data.
+    eval("""
+      |#const
+      |squares() -> [8]int
+      |    var t: [8]int
+      |    var i = 0
+      |    while i < 8 do
+      |        t[i] = i * i
+      |        i = i + 1
+      |    return t
+      |const SQS: [8]int = squares()
+      |main() -> int = SQS[0] + SQS[1] + SQS[2] + SQS[3] + SQS[4] + SQS[5] + SQS[6] + SQS[7]
+      |""".stripMargin) shouldBe 140
+  }
+
+  "const binding folds a struct-returning const-fn" in {
+    eval("""
+      |struct Point
+      |    x: int
+      |    y: int
+      |#const
+      |make_point(x: int, y: int) -> Point = Point(x, y)
+      |const ORIGIN: Point = make_point(3, 4)
+      |main() -> int = ORIGIN.x + ORIGIN.y
+      |""".stripMargin) shouldBe 7
+  }
+
+  "const binding folds a float-array const-fn" in {
+    output("""
+      |#const
+      |make_floats() -> [4]f64
+      |    var t: [4]f64
+      |    t[0] = 0.5
+      |    t[1] = 1.0
+      |    t[2] = 1.5
+      |    t[3] = 2.0
+      |    return t
+      |const TABLE: [4]f64 = make_floats()
+      |main() -> int
+      |    println(TABLE[0])
+      |    println(TABLE[3])
+      |    return 0
+      |""".stripMargin) shouldBe "0.5\n2\n"
+  }
 }

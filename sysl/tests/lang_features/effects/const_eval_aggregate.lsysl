@@ -1,0 +1,130 @@
+`#const` — Compile-Time Evaluation (Aggregate)
+==============================================
+
+`const_eval.lsysl` and `const_eval_float.lsysl` pin the *scalar*
+surface of compile-time evaluation — int, bool, and float bindings
+that fold to a single `TIntLit` or `TFloatLit` and inline at every use
+site. This file pins the *aggregate* surface: a `const NAME: [N]T = …`
+or `const NAME: SomeStruct = …` binding whose initializer is either an
+all-literal aggregate or a `#const fn` returning an aggregate.
+
+Aggregates do not inline at use sites — they materialize as a
+module-level immutable storage slot whose initializer is composed
+entirely of literal nodes (`TIntLit`, `TFloatLit`, `TArrayLit`,
+`TStructConstruct`). Every backend already lowers a literal-of-literals
+initializer to a static data block, so no per-backend codegen change
+is required to support this surface.
+
+File-local prefix `Cea`.
+
+    module sysl.tests.lang_features
+
+
+### Array literal `const` is foldable
+
+The simplest aggregate case — a bare array literal initializer with no
+calls involved. The analyzer recognizes `TArrayLit` of foldable
+elements as already-in-literal-form and emits it unchanged as the
+initializer of a module-level immutable var.
+
+    const CEA_SMALL: [3]int = [10, 20, 12]
+
+    #test
+    test_cea_array_literal_const() -> unit
+        assert(CEA_SMALL[0] == 10, "CEA_SMALL[0] should fold to 10")
+        assert(CEA_SMALL[1] == 20, "CEA_SMALL[1] should fold to 20")
+        assert(CEA_SMALL[2] == 12, "CEA_SMALL[2] should fold to 12")
+
+
+### Const binding folds an aggregate-returning `#const fn`
+
+The folder routes the call through `evaluateConstCallValue`, which
+loads every accumulated `#const fn` into a fresh interpreter and
+reconstitutes the result `ArrVal` as a typed `TArrayLit` of `TIntLit`s
+via `valueToConstExpr`.
+
+    #const
+    cea_make_three() -> [3]int
+        var t: [3]int
+        t[0] = 10
+        t[1] = 20
+        t[2] = 12
+        return t
+
+    const CEA_TABLE3: [3]int = cea_make_three()
+
+    #test
+    test_cea_array_const_fn() -> unit
+        assert(CEA_TABLE3[0] + CEA_TABLE3[1] + CEA_TABLE3[2] == 42, "sum should be 42")
+
+
+### Sized-loop `#const fn` materializes a larger table
+
+This is the audio-roadmap shape: a fixed-size loop fills a stack array,
+the function returns it, and the binding materializes the folded array
+as static data. Same path the eventual `const SINE_TABLE: [1024]i32 =
+build_sine_table(1024)` form will take, just with a smaller size that
+fits comfortably inside the const-evaluator's step budget on every
+backend.
+
+    #const
+    cea_squares() -> [8]int
+        var t: [8]int
+        var i = 0
+        while i < 8 do
+            t[i] = i * i
+            i = i + 1
+        return t
+
+    const CEA_SQS: [8]int = cea_squares()
+
+    #test
+    test_cea_loop_filled_array() -> unit
+        assert(CEA_SQS[0] == 0,  "0*0")
+        assert(CEA_SQS[1] == 1,  "1*1")
+        assert(CEA_SQS[4] == 16, "4*4")
+        assert(CEA_SQS[7] == 49, "7*7")
+
+
+### Struct-returning `#const fn` folds to a `TStructConstruct` literal
+
+`Point(x, y)` evaluates inside the interpreter as an `ArrVal` whose
+cells correspond to the struct fields; `valueToConstExpr` rebuilds it
+as a typed `TStructConstruct` whose args are field literals.
+
+    struct CeaPoint
+        x: int
+        y: int
+
+    #const
+    cea_make_point(x: int, y: int) -> CeaPoint = CeaPoint(x, y)
+
+    const CEA_ORIGIN: CeaPoint = cea_make_point(3, 4)
+
+    #test
+    test_cea_struct_const_fn() -> unit
+        assert(CEA_ORIGIN.x + CEA_ORIGIN.y == 7, "3 + 4 should be 7")
+
+
+### Float-array `const` survives the round-trip
+
+Element values flow through `valueToConstExpr`'s float branch and land
+as `TFloatLit`s — `narrowFloatToType` runs at the per-cell granularity
+so an `[N]f32` would narrow each element separately. Here we stick to
+`f64` so the comparison is bit-exact.
+
+    #const
+    cea_make_halves() -> [4]f64
+        var t: [4]f64
+        t[0] = 0.5
+        t[1] = 1.0
+        t[2] = 1.5
+        t[3] = 2.0
+        return t
+
+    const CEA_HALVES: [4]f64 = cea_make_halves()
+
+    #test
+    test_cea_float_array_const_fn() -> unit
+        assert(CEA_HALVES[0] == 0.5, "CEA_HALVES[0] should fold to 0.5")
+        assert(CEA_HALVES[3] == 2.0, "CEA_HALVES[3] should fold to 2.0")

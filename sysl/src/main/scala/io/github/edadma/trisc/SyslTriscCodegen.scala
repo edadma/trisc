@@ -336,16 +336,33 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
                         emit(s"  dl $lenBytes")
                   case _ =>
                     val elemDir = emitDataDirective(declElemType)
+                    val elemIsFloat = declElemType.isFloat
                     for elem <- elements do
-                      constEval(elem) match
-                        case Some(n) => emit(s"  $elemDir $n")
-                        case None => emit(s"  $elemDir 0")
+                      if elemIsFloat then
+                        floatConstEval(elem) match
+                          case Some(d) => emit(s"  $elemDir $d")
+                          case None =>
+                            constEval(elem) match
+                              case Some(n) => emit(s"  $elemDir ${n.toDouble}")
+                              case None    => emit(s"  $elemDir 0")
+                      else
+                        constEval(elem) match
+                          case Some(n) => emit(s"  $elemDir $n")
+                          case None    => emit(s"  $elemDir 0")
               case TStringLit(_, _) =>
                 // Module-level scalar string init: emit a 16-byte {ptr, len} descriptor
                 // pointing at the interned blob.
                 val (label, lenBytes) = dataGlobalStringLabels(idx).head
                 emit(s"  dl $label")
                 emit(s"  dl $lenBytes")
+              case TStructConstruct(st, args) =>
+                // Struct initializer — emit one slot per field at the field's
+                // natural width, padding between fields and at the tail to
+                // match the struct's layout. Used by `const NAME: SomeStruct
+                // = …` whose folded initializer is a `TStructConstruct` of
+                // literal args. Scalar fields lower through the natural-width
+                // directive; nested fields zero-fill (uncommon at v1).
+                emitTriscStructInit(st, args)
               case _ =>
                 val directive = emitDataDirective(typ)
                 floatConstEval(init) match
@@ -475,6 +492,7 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
   private def isZeroInit(typ: SyslType, init: TExpr): Boolean =
     init match
       case TArrayLit(_, _) => false // array literal has explicit values → data
+      case TStructConstruct(_, _) => false // struct literal carries values → data
       case TStringLit("", _) => true  // empty string descriptor is {ptr=0, len=0} → bss
       case TStringLit(_, _) => false  // non-empty string literal needs interned data → data
       case _ =>
@@ -6791,6 +6809,41 @@ class SyslTriscCodegen(addresses: Int = 4, peepholeEnabled: Boolean = true):
     (label, value.getBytes("ISO-8859-1").length)
 
   // Data directive for a type: db (1 byte), ds (2), dw (4), dl (8)
+  /** Emit a struct's field-by-field initializer into the current data
+    * segment, honouring per-field alignment with `db` padding and padding
+    * the tail to the struct's full size. Used by the data-globals emitter
+    * when a folded `TStructConstruct` lands as the initializer of a `const`
+    * aggregate binding. Scalar fields lower via the natural-width directive
+    * (`db`/`ds`/`dw`/`dd`/`dl`); nested struct/array fields zero-fill (every
+    * Stage 2c use case has only scalar leaves). */
+  private def emitTriscStructInit(st: SyslType.StructType, args: List[TExpr]): Unit =
+    var byteOffset = 0L
+    def padTo(target: Long): Unit =
+      while byteOffset < target do
+        emit("  db 0")
+        byteOffset += 1
+    for ((_, fType), arg) <- st.fields.zip(args) do
+      val align         = fType.alignOf.max(1)
+      val alignedOffset = ((byteOffset + align - 1) / align) * align
+      padTo(alignedOffset)
+      val width = fType.sizeOf.toInt
+      if fType.isFloat && (width == 4 || width == 8) then
+        val directive = emitDataDirective(fType)
+        floatConstEval(arg) match
+          case Some(d) => emit(s"  $directive $d")
+          case None    => emit(s"  $directive 0")
+      else
+        width match
+          case 1 | 2 | 4 | 8 =>
+            val directive = emitDataDirective(fType)
+            constEval(arg) match
+              case Some(n) => emit(s"  $directive $n")
+              case None    => emit(s"  $directive 0")
+          case _ =>
+            for _ <- 0 until width do emit("  db 0")
+      byteOffset += width
+    padTo(st.sizeOf)
+
   private def emitDataDirective(typ: SyslType): String = typ match
     case SyslType.IntType(8) | SyslType.UIntType(8) | SyslType.BoolType => "db"
     case SyslType.IntType(16) | SyslType.UIntType(16) => "ds"

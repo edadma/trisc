@@ -771,6 +771,19 @@ class SyslSVMCodegen extends SyslSVMCodegenStatements, SyslSVMCodegenMatch, Sysl
                 case _ =>
                   for _ <- 0 until arrSize.toInt do
                     emit(s"  $directive 0")
+            case st: SyslType.StructType =>
+              // Struct initializer — emit each field with its natural-width
+              // directive plus inter-field alignment padding, then pad the
+              // tail to the struct's own alignment. Fields without literal
+              // initializers (anything not a TIntLit/TBoolLit/TFloatLit) zero
+              // out the slot, keeping the size accounting correct.
+              init match
+                case TStructConstruct(_, args) =>
+                  emitStructInit(st, args)
+                case _ =>
+                  // Unsupported initializer shape — zero-fill the whole slot.
+                  val sizeSlots = (typ.sizeOf.max(8) / 8).toInt
+                  for _ <- 0 until sizeSlots do emit("  dl 0")
             case _ =>
               val sizeSlots = (typ.sizeOf.max(8) / 8).toInt
               init match
@@ -1361,6 +1374,43 @@ class SyslSVMCodegen extends SyslSVMCodegenStatements, SyslSVMCodegenMatch, Sysl
         case UIntType(32) =>
           emit("  push_i64 4294967295"); emit("  and")
         case _ => // no-op for same-width or i64/u64/ptr
+
+  /** Emit a struct's field-by-field initializer into the current data
+    * segment, honouring per-field alignment and padding the tail to the
+    * struct's own size. Used by the module-level `TVarDecl` path when a
+    * folded `TStructConstruct` lands as the initializer of a `const`
+    * aggregate binding. Scalar fields lower via the natural-width directive
+    * (`db`/`ds`/`dw`/`dl`); nested struct/array fields zero-fill for now
+    * (every Stage 2c use case has only scalar leaves). */
+  def emitStructInit(st: SyslType.StructType, args: List[TExpr]): Unit =
+    var byteOffset = 0L
+    def padTo(target: Long): Unit =
+      while byteOffset < target do
+        emit("  db 0")
+        byteOffset += 1
+    for ((_, fType), arg) <- st.fields.zip(args) do
+      val align          = fType.alignOf.max(1)
+      val alignedOffset  = ((byteOffset + align - 1) / align) * align
+      padTo(alignedOffset)
+      val width = fType.sizeOf.toInt
+      val (directive, mask) = width match
+        case 1 => ("db", 0xffL)
+        case 2 => ("ds", 0xffffL)
+        case 4 => ("dw", 0xffffffffL)
+        case 8 => ("dl", -1L)
+        case _ => ("db", 0L)
+      width match
+        case 1 | 2 | 4 | 8 =>
+          val n = arg match
+            case TFloatLit(d, _) if width == 8 => java.lang.Double.doubleToLongBits(d)
+            case TFloatLit(d, _) if width == 4 =>
+              java.lang.Integer.toUnsignedLong(java.lang.Float.floatToIntBits(d.toFloat))
+            case _ => constEval(arg).getOrElse(0L) & mask
+          emit(s"  $directive $n")
+        case _ =>
+          for _ <- 0 until width do emit("  db 0")
+      byteOffset += width
+    padTo(st.sizeOf)
 
   def fieldOffset(st: SyslType.StructType, fieldIndex: Int): Long =
     if fieldIndex >= st.fields.length then

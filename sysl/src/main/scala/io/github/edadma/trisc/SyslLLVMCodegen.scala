@@ -5638,6 +5638,14 @@ class SyslLLVMCodegen(target: String = "host"):
       val elt = llvmType(elemType)
       val vals = elems.map(e => s"$elt ${constValue(e, elemType)}")
       s"[${vals.mkString(", ")}]"
+    case TStructConstruct(st, args) =>
+      // Struct literal initializer — one entry per field, typed and lowered
+      // in declaration order. Used by `const NAME: SomeStruct = …` bindings
+      // whose folded initializer is a `TStructConstruct` of literal args.
+      val vals = st.fields.zip(args).map { case ((_, ft), arg) =>
+        s"${llvmType(ft)} ${constValue(arg, ft)}"
+      }
+      s"{ ${vals.mkString(", ")} }"
     case _ =>
       typ match
         case SyslType.StringType => "{ i8* null, i32 0 }"

@@ -511,8 +511,17 @@ trait SyslAnalyzerCore:
             // `within` bounds or struct invariants, so deferring is safe.
             deferredConstNames += name
             ()
-          else
-            throw AnalysisError(s"const '$name' must have an integer or float type (found $declType); string/aggregate const is not yet supported", decl)
+          else declType match
+            case _: SyslType.ArrayType | _: SyslType.StructType =>
+              // Aggregate consts (array/struct) always defer. They are
+              // materialized by the main pass as a module-level immutable
+              // `TVarDecl` whose initializer is composed of literal nodes;
+              // `within` bounds and struct invariants never consume an
+              // aggregate, so deferral is safe here too.
+              deferredConstNames += name
+              ()
+            case _ =>
+              throw AnalysisError(s"const '$name' must have an integer, float, array, or struct type (found $declType)", decl)
         case _ =>
 
     // Validate all struct invariants now that constants are registered — catches wrong field

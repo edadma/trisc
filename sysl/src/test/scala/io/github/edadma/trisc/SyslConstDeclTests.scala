@@ -75,7 +75,7 @@ class SyslConstDeclTests extends SyslTestHelpers {
         |main() -> int = 0
         |""".stripMargin)
     }
-    thrown.getMessage.toLowerCase should include("integer or float type")
+    thrown.getMessage.toLowerCase should include("integer, float, array, or struct type")
   }
 
   "module-scope const rejects runtime initializer" in {

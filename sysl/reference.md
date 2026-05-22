@@ -4075,28 +4075,48 @@ At a call / boxing / argument-passing site, `effectsSatisfy` checks the const bi
 
 **Why local `&T` is forbidden.** Same reasoning as in `#realtime`: a `&T` local's drop on scope exit can reach `__sysl_drop_ref → free`, which is not const-evaluable. Users who need transient references inside a const function should pass data as parameters by value or by raw pointer.
 
-**Compile-time evaluation of `#const fn` calls.** A `const NAME: T = expr` binding whose RHS calls one or more `#const` functions with compile-time-foldable arguments triggers the const-evaluation driver: the analyzer spins up an embedded interpreter against the already-typed bodies of the `#const` callees, runs the call to completion under a step cap, and folds the resulting scalar into the appropriate compile-time table — `compileTimeConstants` for integer types, `compileTimeFloats` for `f32` / `f64`. Downstream references (subsequent `const` expressions, `val` bindings, `within` range bounds) see a literal, regardless of whether it came from `3 + 4` or `compute_table_size(8)`.
+**Compile-time evaluation of `#const fn` calls.** A `const NAME: T = expr` binding whose RHS calls one or more `#const` functions with compile-time-foldable arguments triggers the const-evaluation driver: the analyzer spins up an embedded interpreter against the already-typed bodies of the `#const` callees, runs the call to completion under a step cap, and folds the result into the appropriate compile-time form. *Scalar* results inline at every use site — `compileTimeConstants` for integer types, `compileTimeFloats` for `f32` / `f64`. *Aggregate* (array, struct) results materialize as a module-level immutable storage slot whose initializer is composed entirely of literal nodes; every backend already lowers a literal-of-literals initializer to a static data block. Downstream references (subsequent `const` expressions, `val` bindings, `within` range bounds, array indexing, field access) see either a literal or a normal global-variable load, depending on the kind.
 
 ```
 #const
 sq(x: int) -> int = x * x
 
-const SQ49: int = sq(7)   // folded at compile time to 49
-const TWO_SQ: int = SQ49 + SQ49   // sees SQ49 as a literal — folds to 98
+const SQ49: int = sq(7)               // folded at compile time to 49
+const TWO_SQ: int = SQ49 + SQ49       // sees SQ49 as a literal — folds to 98
 
 #const
 stride(n: int) -> f64 = 1.0 / f64(n)
 
-const STEP4: f64 = stride(4)   // folded to 0.25
+const STEP4: f64 = stride(4)          // folded to 0.25
+
+#const
+build_squares() -> [8]int
+    var t: [8]int
+    var i = 0
+    while i < 8 do
+        t[i] = i * i
+        i = i + 1
+    return t
+
+const SQUARES: [8]int = build_squares()   // materialized as a static [8]i32 data block
+
+struct Point
+    x: int
+    y: int
+
+#const
+make_point(x: int, y: int) -> Point = Point(x, y)
+
+const ORIGIN: Point = make_point(3, 4)    // materialized as a static {i32, i32} data block
 ```
 
-The driver runs only on calls whose arguments are themselves scalar-foldable; argument folding dispatches on each parameter's static type, so a `#const fn` taking mixed int and float parameters can be invoked with mixed int and float arguments. Source order matters: a `#const fn` must be declared *before* the `const` binding that calls it, because the interpreter needs the typed body of the callee. Cross-module forward references through `.smeta` are not yet evaluated — those land alongside aggregate `const` bindings in a later stage.
+The driver runs only on calls whose arguments are themselves scalar-foldable; argument folding dispatches on each parameter's static type, so a `#const fn` taking mixed int and float parameters can be invoked with mixed int and float arguments. Source order matters: a `#const fn` must be declared *before* the `const` binding that calls it, because the interpreter needs the typed body of the callee. Cross-module forward references through `.smeta` are not yet evaluated — that surface is the remaining item in this feature.
 
-`f32` results are narrowed to single precision at the binding site (`Double.toFloat.toDouble` round-trip) so the folded literal matches the bit pattern a runtime `f32` computation would produce. `f64` results retain full double precision; bit-exact serialization through `.smeta` uses `Double.doubleToLongBits` so NaN payloads and signed zeros round-trip unchanged.
+`f32` results are narrowed to single precision at the binding site (`Double.toFloat.toDouble` round-trip) so the folded literal matches the bit pattern a runtime `f32` computation would produce; the same narrowing runs per element for `[N]f32` results. `f64` results retain full double precision; bit-exact serialization through `.smeta` uses `Double.doubleToLongBits` so NaN payloads and signed zeros round-trip unchanged.
 
-**Step limit.** Each const-evaluation invocation is capped at a generous statement budget (millions) so a runaway recursion or infinite loop fails the binding cleanly with `const 'NAME' initializer is not compile-time evaluable` rather than hanging the compiler. The cap is large enough that any reasonable lookup-table construction completes; nothing the language reference describes is meant to push against it.
+**Step limit.** Each const-evaluation invocation is capped at a generous statement budget (millions) so a runaway recursion or infinite loop fails the binding cleanly with `const 'NAME' initializer is not compile-time evaluable` rather than hanging the compiler. The cap is large enough that any reasonable lookup-table construction — including the headline `const SINE_TABLE: [1024]i32 = build_sine_table(1024)` from the audio-features roadmap — completes; nothing the language reference describes is meant to push against it.
 
-**What ships in v1 vs. what comes later.** The v1 surface covers the annotation discipline plus *scalar* compile-time evaluation across both numeric kinds: `#const fn` calls returning integer types fold into `compileTimeConstants` as Long values; calls returning `f32` / `f64` fold into `compileTimeFloats` as Doubles. Aggregate (array, struct) `#const fn` results — the headline `const SINE_TABLE: [1024]i32 = build_sine_table(1024)` case from the audio-features roadmap — are deferred to a later stage that extends `TConstDecl` and per-backend static-data emission to handle non-scalar materialization.
+**What ships in v1 vs. what comes later.** The v1 surface covers the annotation discipline plus *scalar* and *aggregate* compile-time evaluation. Scalar results inline at every use site; aggregate results (fixed-size arrays of any element type, structs with scalar fields) materialize as immutable module-level data. Cross-module access works for aggregate consts because they expose the same SMETA shape as any other module-level immutable var; cross-module `#const fn` *body* visibility — needed so a `const X = lib::fn(7)` binding folds without re-compiling the leaf module from source — is the remaining item, deferred to a later stage. Nested aggregate fields (struct-of-struct, array-in-struct) fold correctly through the interpreter but are zero-filled by `svm-host` / `trisc` until those backends grow recursive struct-init emitters; LLVM-family backends (`llvm-host`, `riscv64`, `riscv32`, `wasm32`) handle the nested case via existing `constValue` recursion.
 
 ### `#ghost` — verification-only declarations
 

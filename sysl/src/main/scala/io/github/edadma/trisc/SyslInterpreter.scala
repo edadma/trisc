@@ -408,6 +408,55 @@ class SyslInterpreter(output: String => Unit = s => print(s))
     * float-returning `#const fn`. Symmetric with `valueToLong`. */
   def valueToDouble(v: Value): Double = toDouble(v)
 
+  /** Reconstruct a typed-AST literal tree from a folded interpreter `Value`,
+    * guided by the declared sysl type. Used by the const-evaluation driver
+    * to turn the result of an aggregate-returning `#const fn` call back into
+    * an initializer expression composed entirely of `TIntLit` / `TFloatLit` /
+    * `TBoolLit` / `TArrayLit` / `TStructConstruct` nodes — exactly the shape
+    * every backend already accepts as a module-level static initializer. The
+    * width-narrowing for integer cells mirrors `truncateNarrow` so an `[N]i8`
+    * gets sign-extended cells, an `[N]u32` gets zero-extended cells, etc.
+    * Returns `None` if the value's shape cannot be expressed as a literal
+    * (a pointer, slice, closure, reference, or interface — none of which a
+    * `#const fn` is allowed to surface at v1 anyway). */
+  def valueToConstExpr(v: Value, typ: SyslType): Option[TExpr] =
+    def stripAlias(t: SyslType): SyslType = t match
+      case SyslType.NamedType(_, base, _, _, _) => stripAlias(base)
+      case other                                => other
+    (v, stripAlias(typ)) match
+      case (IntVal(n), t @ (SyslType.IntType(_) | SyslType.UIntType(_))) =>
+        Some(TIntLit(truncateNarrow(n, t), typ))
+      case (IntVal(n), SyslType.BoolType) =>
+        Some(TBoolLit(n != 0L, typ))
+      case (FloatVal(d), SyslType.FloatType(32)) =>
+        Some(TFloatLit(d.toFloat.toDouble, typ))
+      case (FloatVal(d), SyslType.FloatType(_)) =>
+        Some(TFloatLit(d, typ))
+      case (IntVal(n), SyslType.FloatType(_)) =>
+        Some(TFloatLit(n.toDouble, typ))
+      case (ArrVal(cells, off), at: SyslType.ArrayType) =>
+        val elemType = at.elem
+        val len      = at.size
+        val builder  = List.newBuilder[TExpr]
+        var i        = 0
+        while i < len do
+          valueToConstExpr(cells(off + i).value, elemType) match
+            case Some(e) => builder += e
+            case None    => return None
+          i += 1
+        Some(TArrayLit(builder.result(), typ))
+      case (ArrVal(cells, off), st: SyslType.StructType) =>
+        val argsB = List.newBuilder[TExpr]
+        var i     = 0
+        while i < st.fields.size do
+          val (_, fieldType) = st.fields(i)
+          valueToConstExpr(cells(off + i).value, fieldType) match
+            case Some(e) => argsB += e
+            case None    => return None
+          i += 1
+        Some(TStructConstruct(st, argsB.result()))
+      case _ => None
+
   protected def runDefers(savedDefers: mutable.ArrayBuffer[(TStmt, Env)]): Unit =
     for (stmt, env) <- savedDefers.reverseIterator do
       exec(stmt, env)
