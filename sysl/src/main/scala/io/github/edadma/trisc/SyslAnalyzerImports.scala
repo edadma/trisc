@@ -216,9 +216,11 @@ trait SyslAnalyzerImports:
         case SymbolMeta.Kind.Const(constType, value) =>
           linkNestedGenericStructInstances(constType)
           // Cross-file `const`: register in globalScope (so VarRef name resolution
-          // succeeds) AND in compileTimeConstants under both the local-key short name
-          // and the fully-mangled name so the analyzer's constant-folding paths
-          // (VarRef → TIntLit substitution) find the value either way.
+          // succeeds) AND in compileTimeConstants / compileTimeFloats under both the
+          // local-key short name and the fully-mangled name so the analyzer's
+          // constant-folding paths (VarRef → TIntLit/TFloatLit substitution) find
+          // the value either way. Float consts carry the Double via the `value`
+          // Long slot's bit pattern — `Double.longBitsToDouble` recovers it.
           if globalScope.contains(localKey) then
             val existing = globalScope(localKey)
             if !sym.isExtern && existing.name != sym.name then
@@ -226,8 +228,13 @@ trait SyslAnalyzerImports:
           else
             globalScope(localKey) = SymInfo(sym.name, constType, mutable = false, isConst = true)
             externalSymbols += localKey
-          compileTimeConstants(localKey) = value
-          compileTimeConstants(sym.name) = value
+          if constType.isFloat then
+            val d = java.lang.Double.longBitsToDouble(value)
+            compileTimeFloats(localKey) = d
+            compileTimeFloats(sym.name) = d
+          else
+            compileTimeConstants(localKey) = value
+            compileTimeConstants(sym.name) = value
         case SymbolMeta.Kind.Struct(st) =>
           structTypes(shortName(sym.name)) = st
           linkImportedGenericStructToTemplate(st)

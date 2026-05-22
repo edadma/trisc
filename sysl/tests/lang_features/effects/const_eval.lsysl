@@ -10,9 +10,10 @@ references see a literal — every backend ultimately compiles the use
 site against an integer constant, regardless of how the value was
 computed at compile time.
 
-This file pins the *scalar* surface (integer-typed `#const` results
-folded into integer `const` bindings). Float-typed and aggregate
-results are deferred to a later stage.
+This file pins the *integer* scalar surface (integer-typed `#const`
+results folded into integer `const` bindings). The float scalar
+surface lives in `const_eval_float.lsysl`; aggregate results are
+deferred to a later stage.
 
 File-local prefix `Ce`.
 

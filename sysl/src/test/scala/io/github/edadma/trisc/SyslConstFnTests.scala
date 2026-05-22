@@ -467,4 +467,105 @@ class SyslConstFnTests extends SyslTestHelpers {
     }
     t.getMessage.toLowerCase should include("compile-time evaluable")
   }
+
+  // ===== Float compile-time evaluation =====
+  // Float-typed `const NAME: f64 = …` bindings route through `tryConstEvalFloat`,
+  // which mirrors the integer folder via a parallel `compileTimeFloats` map and
+  // a shared call-driver (`evaluateConstCallValue`). The result is folded into
+  // an inline `TFloatLit` at every use site.
+
+  "const binding folds a float literal" in {
+    output("""
+      |const HALF: f64 = 0.5
+      |main() -> int
+      |    println(HALF)
+      |    return 0
+      |""".stripMargin) shouldBe "0.5\n"
+  }
+
+  "const binding folds float arithmetic" in {
+    output("""
+      |const QUARTER: f64 = 1.0 / 4.0
+      |main() -> int
+      |    println(QUARTER)
+      |    return 0
+      |""".stripMargin) shouldBe "0.25\n"
+  }
+
+  "const binding folds a float-returning const-fn call" in {
+    output("""
+      |#const
+      |scale(x: f64) -> f64 = x * 2.0
+      |const SIX: f64 = scale(3.0)
+      |main() -> int
+      |    println(SIX)
+      |    return 0
+      |""".stripMargin) shouldBe "6\n"
+  }
+
+  "const binding folds a const-fn that mixes int and float args" in {
+    output("""
+      |#const
+      |stride(n: int) -> f64 = 1.0 / f64(n)
+      |const STEP4: f64 = stride(4)
+      |main() -> int
+      |    println(STEP4)
+      |    return 0
+      |""".stripMargin) shouldBe "0.25\n"
+  }
+
+  "const binding folds a recursive float const fn" in {
+    // Powers of two computed by recursion — keeps result exact in f64.
+    output("""
+      |#const
+      |pow2(n: int) -> f64
+      |    if n <= 0 then return 1.0
+      |    return 2.0 * pow2(n - 1)
+      |const P10: f64 = pow2(10)
+      |main() -> int
+      |    println(P10)
+      |    return 0
+      |""".stripMargin) shouldBe "1024\n"
+  }
+
+  "float const propagates into downstream const-folded sites" in {
+    // Same chained-const shape as the integer test — the second `const`
+    // binding's RHS references the first by name; the float folder must
+    // resolve `BASE` from `compileTimeFloats`.
+    output("""
+      |#const
+      |dim() -> f64 = 2.5
+      |const BASE: f64 = dim()
+      |const QUAD: f64 = BASE + BASE + BASE + BASE
+      |main() -> int
+      |    println(QUAD)
+      |    return 0
+      |""".stripMargin) shouldBe "10\n"
+  }
+
+  "float const folds and casts to int at use site" in {
+    // Bridges the float folder back to the int test harness — verifies that
+    // a float const can be read inside an integer expression via an explicit
+    // cast, the same path application code will take when sizing a runtime
+    // sine table from a folded `const TABLE_SIZE: f64`.
+    eval("""
+      |#const
+      |area(r: f64) -> f64 = r * r * 3.0
+      |const AREA: f64 = area(2.0)
+      |main() -> int = int(AREA)
+      |""".stripMargin) shouldBe 12
+  }
+
+  "const binding of f32 narrows the folded result to single precision" in {
+    // 0.1 is not representable exactly; the f32 narrowing must match the
+    // bit pattern a runtime `let x: f32 = 0.1` would observe. We compare
+    // against `0.1f.toDouble` to assert the narrowing actually happened.
+    val expected = 0.1f.toDouble.toString // e.g. "0.10000000149011612"
+    output(s"""
+      |const TENTH: f32 = 0.1
+      |main() -> int
+      |    println(TENTH)
+      |    return 0
+      |""".stripMargin) shouldBe s"$expected\n"
+  }
 }

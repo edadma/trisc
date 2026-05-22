@@ -98,6 +98,12 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
   protected var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   protected val compileTimeConstants = new mutable.LinkedHashMap[String, Long] // val name → folded value (for constant propagation)
 
+  /** Parallel to `compileTimeConstants` for float-typed `const` bindings (and, in
+    * the future, float `val` constant propagation). Keyed by both bare and
+    * mangled name so the substitution paths in `SyslAnalyzerExpressions`
+    * hit either form. */
+  protected val compileTimeFloats = new mutable.LinkedHashMap[String, Double]
+
   /** TFunDecls for every `#const fn` analyzed in the current compilation unit,
     * stored in source order. Populated as a side effect of `analyzeDecl` so
     * that a `const` binding declared *below* a const fn can evaluate the fn
@@ -852,16 +858,25 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
     val tInit1 = coerceLiteral(tInit0, declType)
     // `const` requires a compile-time-evaluable initializer.
     if isConst then
-      if !declType.isIntegral then
-        throw AnalysisError(s"const '$name' must have an integer type (found $declType); float/string/aggregate const is not yet supported")
-      tryConstEval(tInit1) match
-        case Some(n) =>
-          val masked = maskToType(n, declType)
-          val mangledName = if shouldMangle(name) then mangleName(name) else name
-          compileTimeConstants(name) = masked
-          compileTimeConstants(mangledName) = masked
-        case None =>
-          throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
+      val mangledName = if shouldMangle(name) then mangleName(name) else name
+      if declType.isIntegral then
+        tryConstEval(tInit1) match
+          case Some(n) =>
+            val masked = maskToType(n, declType)
+            compileTimeConstants(name) = masked
+            compileTimeConstants(mangledName) = masked
+          case None =>
+            throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
+      else if declType.isFloat then
+        tryConstEvalFloat(tInit1) match
+          case Some(d) =>
+            val narrowed = narrowFloatToType(d, declType)
+            compileTimeFloats(name) = narrowed
+            compileTimeFloats(mangledName) = narrowed
+          case None =>
+            throw AnalysisError(s"const '$name' initializer is not compile-time evaluable")
+      else
+        throw AnalysisError(s"const '$name' must have an integer or float type (found $declType); string/aggregate const is not yet supported")
     // Constant folding: immutable vals with constant initializers become compile-time constants
     val tInit = if !isMutable && !isGhost then
       tryConstEval(tInit1) match
@@ -878,9 +893,16 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
     if isGhost then ghostNames += mangledVarName
     scopeStack = null
     // `const` declarations do not generate a storage slot — callers inline the folded value
-    // via compileTimeConstants lookup during VarRef analysis. The value is also carried on
-    // the typed decl so cross-file ModuleMeta serialization can publish it to sibling files.
-    if isConst then TConstDecl(mangledVarName, declType, compileTimeConstants(mangledVarName))
+    // via compileTimeConstants / compileTimeFloats lookup during VarRef analysis. The value
+    // is also carried on the typed decl so cross-file ModuleMeta serialization can publish
+    // it to sibling files. Float consts ride in the same `Long` slot via
+    // `Double.doubleToLongBits`; the wire format and emission sites discriminate on the
+    // declared type.
+    if isConst then
+      val packed =
+        if declType.isFloat then java.lang.Double.doubleToLongBits(compileTimeFloats(mangledVarName))
+        else compileTimeConstants(mangledVarName)
+      TConstDecl(mangledVarName, declType, packed)
     else TVarDecl(mangledVarName, declType, tInit, isPrivate, isVolatile, isGhost = isGhost, isMutable = isMutable)
 
   protected def warnDeprecated(name: String): Unit =

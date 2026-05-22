@@ -536,10 +536,16 @@ trait SyslAnalyzerExpressions:
         // of the just-created local closure value. See also the matching check in CallAST.
         lookupLocal(name) match
           case Some(sym) if sym.isConst =>
-            val v = compileTimeConstants.getOrElse(sym.name,
-              compileTimeConstants.getOrElse(name,
-                throw AnalysisError(s"const '$name' missing folded value")))
-            return TIntLit(v, sym.typ)
+            if sym.typ.isFloat then
+              val d = compileTimeFloats.getOrElse(sym.name,
+                compileTimeFloats.getOrElse(name,
+                  throw AnalysisError(s"const '$name' missing folded value")))
+              return TFloatLit(d, sym.typ)
+            else
+              val v = compileTimeConstants.getOrElse(sym.name,
+                compileTimeConstants.getOrElse(name,
+                  throw AnalysisError(s"const '$name' missing folded value")))
+              return TIntLit(v, sym.typ)
           case Some(sym) if sym.isByName =>
             // By-name param: storage is `() -> T`, every reference auto-calls
             // (no memoization). Forwarding to another by-name slot at a call
@@ -570,10 +576,16 @@ trait SyslAnalyzerExpressions:
           tryLookup(name) match
             case Some(sym) if sym.isConst =>
               // Inline compile-time constant — no load, no storage reference.
-              val v = compileTimeConstants.getOrElse(sym.name,
-                compileTimeConstants.getOrElse(name,
-                  throw AnalysisError(s"const '$name' missing folded value")))
-              TIntLit(v, sym.typ)
+              if sym.typ.isFloat then
+                val d = compileTimeFloats.getOrElse(sym.name,
+                  compileTimeFloats.getOrElse(name,
+                    throw AnalysisError(s"const '$name' missing folded value")))
+                TFloatLit(d, sym.typ)
+              else
+                val v = compileTimeConstants.getOrElse(sym.name,
+                  compileTimeConstants.getOrElse(name,
+                    throw AnalysisError(s"const '$name' missing folded value")))
+                TIntLit(v, sym.typ)
             case Some(sym) if sym.isByName =>
               val thunkType = FuncType(Nil, sym.typ, effects = FuncEffects.Unknown)
               TIndirectCall(TVarRef(sym.name, thunkType), Nil, sym.typ)
@@ -699,7 +711,9 @@ trait SyslAnalyzerExpressions:
           .getOrElse(throw AnalysisError(s"module '$nsName' has no symbol '$member'"))
         sym.typ match
           case SymbolMeta.Kind.Data(dataType, _) => TVarRef(sym.name, dataType)
-          case SymbolMeta.Kind.Const(constType, value) => TIntLit(value, constType)
+          case SymbolMeta.Kind.Const(constType, value) =>
+            if constType.isFloat then TFloatLit(java.lang.Double.longBitsToDouble(value), constType)
+            else TIntLit(value, constType)
           case SymbolMeta.Kind.Func(params, retType, _, _, _, eff, _) => TFuncRef(sym.name, SyslType.FuncType(params, retType, effects = eff))
           case SymbolMeta.Kind.Struct(st) => throw AnalysisError(s"'$nsName.$member' is a struct type, not a value")
           case SymbolMeta.Kind.Enum(_) => throw AnalysisError(s"'$nsName.$member' is an enum type, not a value")

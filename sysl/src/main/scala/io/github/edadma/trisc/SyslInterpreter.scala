@@ -403,6 +403,11 @@ class SyslInterpreter(output: String => Unit = s => print(s))
     * needing access to the path-dependent helper. */
   def valueToLong(v: Value): Long = toLong(v)
 
+  /** Read a `FloatVal` (or widened `IntVal`) out of a `Value` as a `Double`.
+    * Used by the const-evaluation driver to unwrap the result of a
+    * float-returning `#const fn`. Symmetric with `valueToLong`. */
+  def valueToDouble(v: Value): Double = toDouble(v)
+
   protected def runDefers(savedDefers: mutable.ArrayBuffer[(TStmt, Env)]): Unit =
     for (stmt, env) <- savedDefers.reverseIterator do
       exec(stmt, env)

@@ -890,6 +890,14 @@ trait SyslAnalyzerTypes:
     case UIntType(32) => value & 0xFFFFFFFFL
     case _ => value // i64/u64/bool — no truncation needed
 
+  /** Narrow a `Double` to the binary precision of the target float type. The
+    * interpreter folds every float in `Double` precision; an `f32`-declared
+    * const must round-trip through `Float` to match the bit pattern a runtime
+    * `f32` computation would produce. */
+  protected def narrowFloatToType(value: Double, typ: SyslType): Double = typ match
+    case FloatType(32) => value.toFloat.toDouble
+    case _             => value
+
   /** Try to evaluate a typed expression as a compile-time integer constant. */
   protected def tryConstEval(expr: TExpr): Option[Long] = expr match
     case TIntLit(n, _) => Some(n)
@@ -945,16 +953,71 @@ trait SyslAnalyzerTypes:
     * stage will lift this to a richer error so the user sees *why* the
     * folder gave up — for now the binary signal is enough. */
   protected def evaluateConstCall(name: String, args: List[TExpr]): Option[Long] =
+    evaluateConstCallValue(name, args).collect { case Value.IntVal(n) => n }
+
+  /** Float counterpart to `evaluateConstCall`. Returns `Some(d)` exactly when
+    * the callee is a known `#const fn`, every argument folds, and the
+    * interpreter returns a `FloatVal` (or an `IntVal` widenable to a Double).
+    * Used by `tryConstEvalFloat` for the `TCall` case. */
+  protected def evaluateConstCallFloat(name: String, args: List[TExpr]): Option[Double] =
+    evaluateConstCallValue(name, args).flatMap {
+      case Value.FloatVal(d) => Some(d)
+      case Value.IntVal(n)   => Some(n.toDouble)
+      case _                 => None
+    }
+
+  /** Shared driver for the int / float specializations above. Folds each
+    * argument with the appropriate type-driven folder (integral args use
+    * `tryConstEval` → `IntVal`; float args use `tryConstEvalFloat` →
+    * `FloatVal`), loads every accumulated `#const fn` into a fresh
+    * `SyslInterpreter` capped at `CONST_EVAL_STEP_LIMIT`, and returns the
+    * raw result `Value`. Any failure (callee unknown, arg fails to fold,
+    * runtime throw) collapses to `None`. */
+  protected def evaluateConstCallValue(name: String, args: List[TExpr]): Option[Value] =
     constFunDecls.get(name).flatMap { fn =>
       val foldedArgs = args.foldLeft(Option(List.empty[Value])) { (acc, a) =>
-        for as <- acc; n <- tryConstEval(a) yield as :+ Value.IntVal(n)
+        for as <- acc; v <- foldArgValue(a) yield as :+ v
       }
       foldedArgs.flatMap { argValues =>
         val interp = new SyslInterpreter(_ => ())
         interp.setStepLimit(CONST_EVAL_STEP_LIMIT)
         interp.load(TProgram(constFunDecls.values.toSet.toList))
-        try Some(interp.valueToLong(interp.callByName(fn.name, argValues)))
+        try Some(interp.callByName(fn.name, argValues))
         catch case _: Throwable => None
       }
     }
+
+  /** Fold a typed argument into the `Value` shape the interpreter expects.
+    * Dispatches on the argument's static type so a float arg becomes a
+    * `FloatVal` and an integer arg becomes an `IntVal`. Other kinds fail
+    * folding for now — Stage 2c lifts this for aggregate const arguments. */
+  protected def foldArgValue(a: TExpr): Option[Value] =
+    if a.typ.isFloat then tryConstEvalFloat(a).map(Value.FloatVal(_))
+    else tryConstEval(a).map(Value.IntVal(_))
+
+  /** Try to evaluate a typed expression as a compile-time `Double`. Mirrors
+    * `tryConstEval` for the float case: handles float literals, integer
+    * literals widened to double, cross-binding lookups in either
+    * `compileTimeFloats` or (widened) `compileTimeConstants`, unary minus,
+    * the basic float arithmetic operators, casts (integer→float widening
+    * or float→float retag), and `TCall` to a `#const fn` returning a
+    * float type. */
+  protected def tryConstEvalFloat(expr: TExpr): Option[Double] = expr match
+    case TFloatLit(d, _) => Some(d)
+    case TIntLit(n, t) if t.isIntegral => Some(n.toDouble)
+    case TBoolLit(b, _) => Some(if b then 1.0 else 0.0)
+    case TVarRef(name, _) =>
+      compileTimeFloats.get(name).orElse(compileTimeConstants.get(name).map(_.toDouble))
+    case TUnary("-", operand, _) => tryConstEvalFloat(operand).map(-_)
+    case TUnary("+", operand, _) => tryConstEvalFloat(operand)
+    case TBinary(left, "+", right, _) => for l <- tryConstEvalFloat(left); r <- tryConstEvalFloat(right) yield l + r
+    case TBinary(left, "-", right, _) => for l <- tryConstEvalFloat(left); r <- tryConstEvalFloat(right) yield l - r
+    case TBinary(left, "*", right, _) => for l <- tryConstEvalFloat(left); r <- tryConstEvalFloat(right) yield l * r
+    case TBinary(left, "/", right, _) => for l <- tryConstEvalFloat(left); r <- tryConstEvalFloat(right) yield l / r
+    case TCast(inner, _) =>
+      if inner.typ.isFloat then tryConstEvalFloat(inner)
+      else if inner.typ.isIntegral then tryConstEval(inner).map(_.toDouble)
+      else None
+    case TCall(name, args, t) if t.isFloat => evaluateConstCallFloat(name, args)
+    case _ => None
 

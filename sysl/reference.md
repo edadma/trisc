@@ -4075,7 +4075,7 @@ At a call / boxing / argument-passing site, `effectsSatisfy` checks the const bi
 
 **Why local `&T` is forbidden.** Same reasoning as in `#realtime`: a `&T` local's drop on scope exit can reach `__sysl_drop_ref → free`, which is not const-evaluable. Users who need transient references inside a const function should pass data as parameters by value or by raw pointer.
 
-**Compile-time evaluation of `#const fn` calls.** A `const NAME: T = expr` binding whose RHS calls one or more `#const` functions with compile-time-foldable arguments triggers the const-evaluation driver: the analyzer spins up an embedded interpreter against the already-typed bodies of the `#const` callees, runs the call to completion under a step cap, and folds the resulting scalar integer into `compileTimeConstants` — exactly the same table that holds plain integer-literal `const`s. Downstream references (subsequent `const` expressions, `val` bindings, `within` range bounds) see a literal, regardless of whether it came from `3 + 4` or `compute_table_size(8)`.
+**Compile-time evaluation of `#const fn` calls.** A `const NAME: T = expr` binding whose RHS calls one or more `#const` functions with compile-time-foldable arguments triggers the const-evaluation driver: the analyzer spins up an embedded interpreter against the already-typed bodies of the `#const` callees, runs the call to completion under a step cap, and folds the resulting scalar into the appropriate compile-time table — `compileTimeConstants` for integer types, `compileTimeFloats` for `f32` / `f64`. Downstream references (subsequent `const` expressions, `val` bindings, `within` range bounds) see a literal, regardless of whether it came from `3 + 4` or `compute_table_size(8)`.
 
 ```
 #const
@@ -4083,13 +4083,20 @@ sq(x: int) -> int = x * x
 
 const SQ49: int = sq(7)   // folded at compile time to 49
 const TWO_SQ: int = SQ49 + SQ49   // sees SQ49 as a literal — folds to 98
+
+#const
+stride(n: int) -> f64 = 1.0 / f64(n)
+
+const STEP4: f64 = stride(4)   // folded to 0.25
 ```
 
-The driver runs only on calls whose arguments are themselves scalar-foldable. Source order matters: a `#const fn` must be declared *before* the `const` binding that calls it, because the interpreter needs the typed body of the callee. Cross-module forward references through `.smeta` are not yet evaluated — those land alongside non-integer `const` bindings in a later stage.
+The driver runs only on calls whose arguments are themselves scalar-foldable; argument folding dispatches on each parameter's static type, so a `#const fn` taking mixed int and float parameters can be invoked with mixed int and float arguments. Source order matters: a `#const fn` must be declared *before* the `const` binding that calls it, because the interpreter needs the typed body of the callee. Cross-module forward references through `.smeta` are not yet evaluated — those land alongside aggregate `const` bindings in a later stage.
+
+`f32` results are narrowed to single precision at the binding site (`Double.toFloat.toDouble` round-trip) so the folded literal matches the bit pattern a runtime `f32` computation would produce. `f64` results retain full double precision; bit-exact serialization through `.smeta` uses `Double.doubleToLongBits` so NaN payloads and signed zeros round-trip unchanged.
 
 **Step limit.** Each const-evaluation invocation is capped at a generous statement budget (millions) so a runaway recursion or infinite loop fails the binding cleanly with `const 'NAME' initializer is not compile-time evaluable` rather than hanging the compiler. The cap is large enough that any reasonable lookup-table construction completes; nothing the language reference describes is meant to push against it.
 
-**What ships in v1 vs. what comes later.** The v1 surface covers the annotation discipline plus *scalar-integer* compile-time evaluation: `#const fn` calls returning `int` / `i32` / `u64` / etc. fold into `compileTimeConstants` as Long values. Float-typed and aggregate (array, struct) `#const fn` results — the headline `const SINE_TABLE: [1024]i32 = build_sine_table(1024)` case from the audio-features roadmap — are deferred to a later stage that extends `TConstDecl` and per-backend static-data emission to handle non-scalar materialization.
+**What ships in v1 vs. what comes later.** The v1 surface covers the annotation discipline plus *scalar* compile-time evaluation across both numeric kinds: `#const fn` calls returning integer types fold into `compileTimeConstants` as Long values; calls returning `f32` / `f64` fold into `compileTimeFloats` as Doubles. Aggregate (array, struct) `#const fn` results — the headline `const SINE_TABLE: [1024]i32 = build_sine_table(1024)` case from the audio-features roadmap — are deferred to a later stage that extends `TConstDecl` and per-backend static-data emission to handle non-scalar materialization.
 
 ### `#ghost` — verification-only declarations
 

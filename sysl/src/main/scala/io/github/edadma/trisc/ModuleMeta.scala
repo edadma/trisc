@@ -82,7 +82,16 @@ class ModuleMeta(
           val m = methods.map((k, v) => s"$k=$v").mkString(" ")
           buf ++= s"IMPL $traitName ${targetType.toPrefix} $m\n"
         case SymbolMeta.Kind.Const(constType, value) =>
-          buf ++= s"${vis}CONST ${sym.name} ${constType.toPrefix} $value\n"
+          // CONST <name> <type-prefix> <kind> <value>
+          //   kind = INT for integer types, with `value` rendered as a signed Long
+          //   kind = FLOAT for float types, with `value` rendered as the
+          //          16-character unsigned-hex `Double.doubleToLongBits` payload —
+          //          chosen so all 64 bits (including NaN payloads and the sign
+          //          bit) round-trip without parser precision loss.
+          if constType.isFloat then
+            buf ++= s"${vis}CONST ${sym.name} ${constType.toPrefix} FLOAT ${java.lang.Long.toHexString(value)}\n"
+          else
+            buf ++= s"${vis}CONST ${sym.name} ${constType.toPrefix} INT $value\n"
     // Emit generic enum instance mappings
     for inst <- genericEnumInstances do
       buf ++= s"GENINST ${inst.mangledName} ${inst.baseName} ${inst.typeArgs.length} ${inst.typeArgs.map(_.toPrefix).mkString(" ")}\n"
@@ -183,8 +192,12 @@ object ModuleMeta:
    *  `CT` token (after the optional `RT` token) marking `#const` — a compile-time
    *  evaluable function. `#const` implies `#pure`, so the encoded form is always
    *  `[RT ]CT P` for the canonical case; mixed `CT RW` is permitted by the grammar
-   *  but rejected by the analyzer (const cannot read or write module state). */
-  val SMETA_VERSION = 18
+   *  but rejected by the analyzer (const cannot read or write module state).
+   *  v19 extends the CONST line with a kind token (`INT` or `FLOAT`) so float-typed
+   *  `const NAME: f64 = …` bindings can round-trip across files. Integer kinds
+   *  continue to encode the value as a signed `Long`; floats encode the
+   *  `Double.doubleToLongBits` bit pattern as unsigned hex. */
+  val SMETA_VERSION = 19
 
   /** Encode a FuncEffects as space-separated tokens. Optional leading flags (in order):
    *  `RT` for `#realtime`, `CT` for `#const`. After them (or directly, if neither), one of:
@@ -365,7 +378,11 @@ object ModuleMeta:
                   syms += SymbolMeta(name, SymbolMeta.Kind.Interface(it), isPrivate, sourceFile = currentSource)
                 case "CONST" =>
                   val constType = SyslType.parseType(tokens)
-                  val value = tokens.next().toLong
+                  val kindTok = tokens.next()
+                  val value = kindTok match
+                    case "INT"   => tokens.next().toLong
+                    case "FLOAT" => java.lang.Long.parseUnsignedLong(tokens.next(), 16)
+                    case other   => throw IllegalArgumentException(s"line $lineNum: CONST '$name' has unknown kind '$other'")
                   syms += SymbolMeta(name, SymbolMeta.Kind.Const(constType, value), isPrivate, sourceFile = currentSource)
                 case other =>
                   throw IllegalArgumentException(s"line $lineNum: unknown symbol kind '$other'")

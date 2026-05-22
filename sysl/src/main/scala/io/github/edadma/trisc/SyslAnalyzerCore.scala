@@ -488,24 +488,31 @@ trait SyslAnalyzerCore:
       decl match
         case VarDeclAST(name, typOpt, init, _, _, _, _, true) =>
           val declType = typOpt.map(resolveType).getOrElse(I32)
-          if !declType.isIntegral then
-            throw AnalysisError(s"const '$name' must have an integer type (found $declType); float/string/aggregate const is not yet supported", decl)
-          evalConstExprAST(init) match
-            case Some(v) =>
-              val masked = maskToType(v, declType)
-              compileTimeConstants(name) = masked
-              val mangled = if shouldMangle(name) then mangleName(name) else name
-              compileTimeConstants(mangled) = masked
-              // Also publish the const in globalScope so name-based lookups during this pass
-              // (e.g. struct invariant validation) can find it.
-              if !globalScope.contains(name) then
-                globalScope(name) = SymInfo(mangled, declType, mutable = false, isConst = true)
-            case None =>
-              if astContainsCall(init) || astReferencesDeferred(init, deferredConstNames) then
-                deferredConstNames += name
-                () // defer to analyzeRegularVarDecl — the const-fn driver runs there
-              else
-                throw AnalysisError(s"const '$name' initializer is not compile-time evaluable", decl)
+          if declType.isIntegral then
+            evalConstExprAST(init) match
+              case Some(v) =>
+                val masked = maskToType(v, declType)
+                compileTimeConstants(name) = masked
+                val mangled = if shouldMangle(name) then mangleName(name) else name
+                compileTimeConstants(mangled) = masked
+                // Also publish the const in globalScope so name-based lookups during this pass
+                // (e.g. struct invariant validation) can find it.
+                if !globalScope.contains(name) then
+                  globalScope(name) = SymInfo(mangled, declType, mutable = false, isConst = true)
+              case None =>
+                if astContainsCall(init) || astReferencesDeferred(init, deferredConstNames) then
+                  deferredConstNames += name
+                  () // defer to analyzeRegularVarDecl — the const-fn driver runs there
+                else
+                  throw AnalysisError(s"const '$name' initializer is not compile-time evaluable", decl)
+          else if declType.isFloat then
+            // Float consts always defer to the main pass — the AST-level pre-pass
+            // folder is integer-only, and float bindings are not consulted by
+            // `within` bounds or struct invariants, so deferring is safe.
+            deferredConstNames += name
+            ()
+          else
+            throw AnalysisError(s"const '$name' must have an integer or float type (found $declType); string/aggregate const is not yet supported", decl)
         case _ =>
 
     // Validate all struct invariants now that constants are registered — catches wrong field

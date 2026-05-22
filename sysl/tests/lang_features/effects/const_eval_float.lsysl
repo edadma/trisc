@@ -1,0 +1,109 @@
+`#const` — Compile-Time Evaluation (Float)
+==========================================
+
+The integer surface of compile-time evaluation lives in
+`const_eval.lsysl`. This file pins the *float* scalar surface: a
+`#const fn` returning `f32` or `f64` invoked in `const NAME = …`
+initializer position folds its result into an inline `TFloatLit` at
+every use site. The float folder mirrors the integer one — same
+step-limit, same source-order discipline, same shared call driver —
+but stores results in `compileTimeFloats` rather than
+`compileTimeConstants`.
+
+File-local prefix `Cef`.
+
+    module sysl.tests.lang_features
+
+
+### Float literal `const` is foldable
+
+The simplest float case — a plain literal initializer with no calls
+involved. Exercises the main-pass float folder (the pre-pass is
+integer-only, so float consts always defer).
+
+    const CEF_HALF: f64 = 0.5
+
+    #test
+    test_cef_float_literal_const() -> unit
+        assert(CEF_HALF == 0.5, "0.5 should fold as 0.5")
+
+
+### Float arithmetic folds at compile time
+
+`+`, `-`, `*`, `/`, and unary `-` all participate. Integer literals
+inside a float context widen via `tryConstEvalFloat`'s int→double case
+without an explicit cast.
+
+    const CEF_QUARTER: f64 = 1.0 / 4.0
+
+    #test
+    test_cef_float_arithmetic() -> unit
+        assert(CEF_QUARTER == 0.25, "1.0 / 4.0 should fold to 0.25")
+
+
+### Const binding folds a float-returning `#const fn` call
+
+The folder routes the call through `evaluateConstCallValue`, which
+loads every accumulated `#const fn` into a fresh interpreter and
+unwraps the resulting `FloatVal`.
+
+    #const
+    cef_scale(x: f64) -> f64 = x * 2.0
+
+    const CEF_SIX: f64 = cef_scale(3.0)
+
+    #test
+    test_cef_float_const_fn_call() -> unit
+        assert(CEF_SIX == 6.0, "cef_scale(3.0) should fold to 6.0")
+
+
+### Const binding folds a const fn with mixed int and float args
+
+Each argument is folded via the type-driven dispatch in
+`foldArgValue` — integer args become `IntVal`, float args become
+`FloatVal`. The body uses an explicit `f64(n)` cast to bridge.
+
+    #const
+    cef_stride(n: int) -> f64 = 1.0 / f64(n)
+
+    const CEF_STEP4: f64 = cef_stride(4)
+
+    #test
+    test_cef_float_mixed_args() -> unit
+        assert(CEF_STEP4 == 0.25, "cef_stride(4) should fold to 0.25")
+
+
+### Recursive float const fn folds correctly
+
+Recursion through the interpreter terminates when the base case is
+reached. Powers of two stay exact in `f64`, so the comparison is bit
+identical across backends.
+
+    #const
+    cef_pow2(n: int) -> f64
+        if n <= 0 then return 1.0
+        return 2.0 * cef_pow2(n - 1)
+
+    const CEF_P10: f64 = cef_pow2(10)
+
+    #test
+    test_cef_float_recursive() -> unit
+        assert(CEF_P10 == 1024.0, "cef_pow2(10) should fold to 1024.0")
+
+
+### Float const propagates into a later const binding
+
+A float `const` listed in `compileTimeFloats` is visible to the next
+const's folder via the same name-resolution path the integer folder
+uses for `compileTimeConstants`. The chain `BASE → QUAD` exercises
+that lookup.
+
+    #const
+    cef_dim() -> f64 = 2.5
+
+    const CEF_BASE: f64 = cef_dim()
+    const CEF_QUAD: f64 = CEF_BASE + CEF_BASE + CEF_BASE + CEF_BASE
+
+    #test
+    test_cef_float_chain() -> unit
+        assert(CEF_QUAD == 10.0, "CEF_BASE * 4 should fold to 10.0")

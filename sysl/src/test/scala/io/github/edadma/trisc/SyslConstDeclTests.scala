@@ -59,14 +59,23 @@ class SyslConstDeclTests extends SyslTestHelpers {
       |""".stripMargin) shouldBe 30
   }
 
-  "module-scope const rejects non-integer type" in {
+  "module-scope const accepts a float type" in {
+    output("""
+      |const PI: f64 = 3.14
+      |main() -> int
+      |    println(PI)
+      |    return 0
+      |""".stripMargin) shouldBe "3.14\n"
+  }
+
+  "module-scope const still rejects string and other unsupported types" in {
     val thrown = intercept[RuntimeException] {
       eval("""
-        |const PI: f64 = 3.14
+        |const NAME: string = "x"
         |main() -> int = 0
         |""".stripMargin)
     }
-    thrown.getMessage should include("integer type")
+    thrown.getMessage.toLowerCase should include("integer or float type")
   }
 
   "module-scope const rejects runtime initializer" in {
