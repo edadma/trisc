@@ -338,4 +338,133 @@ class SyslConstFnTests extends SyslTestHelpers {
     }
     t.getMessage.toLowerCase should (include("#ghost") or include("#const"))
   }
+
+  // ===== Compile-time evaluation =====
+  // The const-evaluation driver runs `#const fn` calls at compile time when they
+  // sit in `const NAME = ...` or `val NAME = ...` initializer position with
+  // scalar-foldable arguments. The result is folded into `compileTimeConstants`
+  // and propagated to use sites as a literal — same machinery as scalar `const`
+  // foldings of `1 + 2`. These tests pin the scalar surface; float / aggregate
+  // results are deferred to later stages.
+
+  "const binding evaluates a const-fn call at compile time" in {
+    eval("""
+      |#const
+      |sq(x: int) -> int = x * x
+      |const SQ49: int = sq(7)
+      |main() -> int = SQ49
+      |""".stripMargin) shouldBe 49
+  }
+
+  "const binding evaluates a multi-arg const-fn call" in {
+    eval("""
+      |#const
+      |add3(a: int, b: int, c: int) -> int = a + b + c
+      |const SUM: int = add3(10, 20, 30)
+      |main() -> int = SUM
+      |""".stripMargin) shouldBe 60
+  }
+
+  "const binding evaluates nested const-fn calls" in {
+    eval("""
+      |#const
+      |twice(x: int) -> int = x + x
+      |#const
+      |quad(x: int) -> int = twice(twice(x))
+      |const Q5: int = quad(5)
+      |main() -> int = Q5
+      |""".stripMargin) shouldBe 20
+  }
+
+  "const binding evaluates a recursive const fn" in {
+    eval("""
+      |#const
+      |fact(n: int) -> int
+      |    if n <= 1 then return 1
+      |    return n * fact(n - 1)
+      |const FACT5: int = fact(5)
+      |main() -> int = FACT5
+      |""".stripMargin) shouldBe 120
+  }
+
+  "const binding evaluates a const fn that loops and mutates" in {
+    eval("""
+      |#const
+      |sumTo(n: int) -> int
+      |    var acc = 0
+      |    var i = 1
+      |    while i <= n do
+      |        acc = acc + i
+      |        i = i + 1
+      |    return acc
+      |const S10: int = sumTo(10)
+      |main() -> int = S10
+      |""".stripMargin) shouldBe 55
+  }
+
+  "val binding also evaluates a const-fn call (constant propagation)" in {
+    eval("""
+      |#const
+      |sq(x: int) -> int = x * x
+      |main() -> int
+      |    val x = sq(9)
+      |    return x
+      |""".stripMargin) shouldBe 81
+  }
+
+  "const-fn result is referencable from other const-folded sites" in {
+    // The biggest user-facing benefit of routing const-fn evaluation through
+    // `compileTimeConstants` is that downstream `val`-folding picks up the
+    // result transparently — same name-resolution path as a literal `const`.
+    eval("""
+      |#const
+      |dim() -> int = 4 + 4
+      |const N: int = dim()
+      |main() -> int
+      |    val twice = N + N
+      |    return twice
+      |""".stripMargin) shouldBe 16
+  }
+
+  "const binding rejects calling a non-const function" in {
+    val t = intercept[Exception] {
+      eval("""
+        |plain(x: int) -> int = x * x
+        |const SQ49: int = plain(7)
+        |main() -> int = SQ49
+        |""".stripMargin)
+    }
+    t.getMessage.toLowerCase should include("compile-time evaluable")
+  }
+
+  "const binding rejects an unannotated callee declared later" in {
+    // Even if a `#const fn` is declared *below* the `const` binding, the
+    // driver can only run already-analyzed bodies. Source order matters.
+    val t = intercept[Exception] {
+      eval("""
+        |const SQ49: int = sq(7)
+        |#const
+        |sq(x: int) -> int = x * x
+        |main() -> int = SQ49
+        |""".stripMargin)
+    }
+    t.getMessage.toLowerCase should include("compile-time evaluable")
+  }
+
+  "const-fn infinite loop is caught by the step limit" in {
+    // Synthesize a guaranteed runaway: a recursion the body cannot escape
+    // within the step budget. The driver returns None, surfacing as the
+    // standard "not compile-time evaluable" diagnostic.
+    val t = intercept[Exception] {
+      eval("""
+        |#const
+        |spin(n: int) -> int
+        |    if n == 0 then return 0
+        |    return spin(n)
+        |const X: int = spin(1)
+        |main() -> int = X
+        |""".stripMargin)
+    }
+    t.getMessage.toLowerCase should include("compile-time evaluable")
+  }
 }

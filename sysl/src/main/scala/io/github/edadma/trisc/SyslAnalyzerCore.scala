@@ -475,6 +475,15 @@ trait SyslAnalyzerCore:
 
     // Pre-pass: evaluate module-level `const` initializers eagerly so they are available
     // to `within` range bounds and other contexts that resolve types before function bodies.
+    //
+    // Bindings whose RHS contains a function call cannot be folded here — the const-fn
+    // body hasn't been typed yet. Defer those to the main `analyzeRegularVarDecl` path,
+    // which runs after every function declaration has been analyzed and so can dispatch
+    // a `TCall` against `constFunDecls` via the const-evaluation driver. A binding that
+    // is call-free but still fails the AST folder (e.g. references an unknown variable)
+    // is reported here as today — the deferral is precisely for the case where a
+    // `#const fn` is the missing piece.
+    val deferredConstNames = mutable.HashSet[String]()
     for decl <- program.decls do
       decl match
         case VarDeclAST(name, typOpt, init, _, _, _, _, true) =>
@@ -492,7 +501,11 @@ trait SyslAnalyzerCore:
               if !globalScope.contains(name) then
                 globalScope(name) = SymInfo(mangled, declType, mutable = false, isConst = true)
             case None =>
-              throw AnalysisError(s"const '$name' initializer is not compile-time evaluable", decl)
+              if astContainsCall(init) || astReferencesDeferred(init, deferredConstNames) then
+                deferredConstNames += name
+                () // defer to analyzeRegularVarDecl — the const-fn driver runs there
+              else
+                throw AnalysisError(s"const '$name' initializer is not compile-time evaluable", decl)
         case _ =>
 
     // Validate all struct invariants now that constants are registered — catches wrong field

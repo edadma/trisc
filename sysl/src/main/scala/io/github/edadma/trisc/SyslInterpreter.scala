@@ -56,6 +56,29 @@ class SyslInterpreter(output: String => Unit = s => print(s))
   case class ContinueException(label: Option[String]) extends RuntimeException
   case class RuntimeError(msg: String) extends RuntimeException(msg)
 
+  /** Thrown when a const-evaluation run exceeds `stepLimit` statements. The
+    * driver catches it and reports a clean diagnostic against the binding
+    * whose RHS failed to converge. */
+  case class StepLimitExceeded(steps: Long) extends RuntimeException(s"const evaluation exceeded $steps steps")
+
+  /** Cap on statements executed since `resetSteps()`. `Long.MaxValue` is the
+    * normal-run sentinel — runtime tests, the test runner, and the runtime
+    * `interpreter` backend all leave it untouched. Compile-time const
+    * evaluation lowers it via `setStepLimit` so infinite loops in a const fn
+    * surface as a diagnostic, not a hang. */
+  protected var stepLimit: Long = Long.MaxValue
+  protected var stepCount: Long = 0L
+
+  def setStepLimit(limit: Long): Unit = stepLimit = limit
+  def resetSteps(): Unit = stepCount = 0L
+
+  /** Charge one step against the cap. Called at the top of `exec`. Cheap
+    * enough to leave on unconditionally because the comparison is one
+    * `Long.MaxValue` test on the normal path. */
+  protected def chargeStep(): Unit =
+    stepCount += 1
+    if stepCount > stepLimit then throw StepLimitExceeded(stepLimit)
+
   /** True if a break/continue exception is "for me" — label is None (nearest loop)
    *  or matches this loop's own label. */
   protected def claimsLoop(exLabel: Option[String], myLabel: Option[String]): Boolean =
@@ -365,6 +388,20 @@ class SyslInterpreter(output: String => Unit = s => print(s))
     functions.get(name) match
       case Some(fn) => toLong(call(fn, Nil))
       case None => throw RuntimeError(s"no function named '$name'")
+
+  /** Invoke a known function by name with caller-supplied argument values.
+    * Public so the analyzer's const-evaluation driver can run a `#const fn`
+    * against folded-literal arguments. The caller is responsible for matching
+    * argument arity / kind against the function's declared parameters. */
+  def callByName(name: String, args: List[Value]): Value =
+    functions.get(name) match
+      case Some(fn) => call(fn, args)
+      case None => throw RuntimeError(s"no function named '$name'")
+
+  /** Read an `IntVal` out of a `Value`. Public companion to the protected
+    * `toLong` so the const-evaluation driver can convert a result without
+    * needing access to the path-dependent helper. */
+  def valueToLong(v: Value): Long = toLong(v)
 
   protected def runDefers(savedDefers: mutable.ArrayBuffer[(TStmt, Env)]): Unit =
     for (stmt, env) <- savedDefers.reverseIterator do

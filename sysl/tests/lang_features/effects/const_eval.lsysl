@@ -1,0 +1,127 @@
+`#const` — Compile-Time Evaluation
+===================================
+
+When a `const NAME = expr` binding's RHS contains calls to `#const`
+functions with compile-time-foldable arguments, the analyzer runs the
+embedded interpreter against the typed body of the callee and folds the
+result into a scalar literal. The folded value flows through the same
+`compileTimeConstants` table as a plain integer `const`, so downstream
+references see a literal — every backend ultimately compiles the use
+site against an integer constant, regardless of how the value was
+computed at compile time.
+
+This file pins the *scalar* surface (integer-typed `#const` results
+folded into integer `const` bindings). Float-typed and aggregate
+results are deferred to a later stage.
+
+File-local prefix `Ce`.
+
+    module sysl.tests.lang_features
+
+
+### Const binding folds a `#const fn` call
+
+The simplest case: a `#const` function with no body-side effects is
+invoked at compile time and its return value is bound to a `const`.
+The runtime program never sees a call — the use site is already a
+literal.
+
+    #const
+    ce_sq(x: int) -> int = x * x
+
+    const CE_SQ49: int = ce_sq(7)
+
+    #test
+    test_ce_const_binding_folds_call() -> unit
+        assert(CE_SQ49 == 49, "ce_sq(7) should fold to 49")
+
+
+### Const binding folds a multi-arg `#const fn` call
+
+Several arguments fold independently and are passed positionally into
+the const evaluator.
+
+    #const
+    ce_add3(a: int, b: int, c: int) -> int = a + b + c
+
+    const CE_SUM: int = ce_add3(10, 20, 30)
+
+    #test
+    test_ce_const_binding_multi_arg() -> unit
+        assert(CE_SUM == 60, "ce_add3(10,20,30) should fold to 60")
+
+
+### Const binding folds nested `#const fn` calls
+
+A `#const` function calling another `#const` function evaluates
+transparently through the interpreter — each inner call runs against
+the same in-memory environment.
+
+    #const
+    ce_twice(x: int) -> int = x + x
+
+    #const
+    ce_quad(x: int) -> int = ce_twice(ce_twice(x))
+
+    const CE_Q5: int = ce_quad(5)
+
+    #test
+    test_ce_const_binding_nested() -> unit
+        assert(CE_Q5 == 20, "ce_quad(5) should fold to 20")
+
+
+### Const binding folds a recursive `#const fn`
+
+Recursive bodies run through the interpreter's normal call mechanism
+and return when the base case is hit. A reasonable step limit catches
+runaway recursion at compile time.
+
+    #const
+    ce_fact(n: int) -> int
+        if n <= 1 then return 1
+        return n * ce_fact(n - 1)
+
+    const CE_FACT5: int = ce_fact(5)
+
+    #test
+    test_ce_const_binding_recursive() -> unit
+        assert(CE_FACT5 == 120, "ce_fact(5) should fold to 120")
+
+
+### Const binding folds a loop-and-mutate `#const fn`
+
+Local mutation and bounded loops fold cleanly — the interpreter
+charges a step per statement, and any reasonable lookup-table-style
+construction stays well under the cap.
+
+    #const
+    ce_sum_to(n: int) -> int
+        var acc = 0
+        var i = 1
+        while i <= n do
+            acc = acc + i
+            i = i + 1
+        return acc
+
+    const CE_S10: int = ce_sum_to(10)
+
+    #test
+    test_ce_const_binding_loop() -> unit
+        assert(CE_S10 == 55, "ce_sum_to(10) should fold to 55")
+
+
+### Folded const composes with later const expressions
+
+Once a `#const fn` result is in `compileTimeConstants`, subsequent
+constant expressions can reference it — the second `const` below
+sees `CE_FOUR` as a literal `4`.
+
+    #const
+    ce_dim() -> int = 2 + 2
+
+    const CE_FOUR: int = ce_dim()
+    const CE_EIGHT: int = CE_FOUR + CE_FOUR
+
+    #test
+    test_ce_const_chain() -> unit
+        assert(CE_EIGHT == 8, "CE_FOUR + CE_FOUR should fold to 8")

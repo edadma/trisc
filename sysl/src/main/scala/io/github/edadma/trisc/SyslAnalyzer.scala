@@ -98,6 +98,14 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
   protected var scopeStack: mutable.ArrayBuffer[mutable.LinkedHashMap[String, SymInfo]] = null
   protected val compileTimeConstants = new mutable.LinkedHashMap[String, Long] // val name → folded value (for constant propagation)
 
+  /** TFunDecls for every `#const fn` analyzed in the current compilation unit,
+    * stored in source order. Populated as a side effect of `analyzeDecl` so
+    * that a `const` binding declared *below* a const fn can evaluate the fn
+    * via the embedded `SyslInterpreter` at analysis time. Both the bare and
+    * the mangled name route to the same TFunDecl (so calls inside one const
+    * fn that resolved to the mangled callee still find the decl). */
+  protected val constFunDecls = new mutable.LinkedHashMap[String, TFunDecl]
+
   /** Module-level vars tagged with `#address(N)` map to a fixed physical address — used
    *  for MMIO device registers. Reads lower to `*(N as *T)`, writes to `*(N as *T) = v`.
    *  No storage is emitted (the var is just a handle on hardware). Both the local and
@@ -799,7 +807,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
           validateConstFn(name, tBody, funInfo.params.map(_._1))
         validateGhostDiscipline(name, funInfo, tBody)
         val tBodyFixed = rewriteEscapingClosureCaptureOwns(tBody)
-        TFunDecl(funInfo.name, tParams, retType, tBodyFixed, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo), isParameterless = funInfo.isParameterless)
+        val tFunDecl = TFunDecl(funInfo.name, tParams, retType, tBodyFixed, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo), isParameterless = funInfo.isParameterless)
+        if funInfo.isConst then
+          constFunDecls(funInfo.name) = tFunDecl
+          constFunDecls(name) = tFunDecl
+        tFunDecl
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>
         scopeStack = new mutable.ArrayBuffer

@@ -203,6 +203,27 @@ trait SyslAnalyzerTypes:
     case VarRefAST(n) if compileTimeConstants.contains(n) => Some(compileTimeConstants(n))
     case _ => None
 
+  /** Does the AST tree mention a function call anywhere? Used by the module-level
+    * `const` pre-pass to distinguish "definitely unfoldable" RHSs (no calls, so the
+    * folder's failure is final) from "might be foldable later" RHSs (contains a
+    * call, so we defer to the main pass where the typed-AST const-evaluation
+    * driver can run `#const fn` bodies through the interpreter). */
+  protected def astContainsCall(e: ExpressionAST): Boolean = e match
+    case _: CallAST | _: MethodCallAST | _: IndirectCallAST | _: GenericCallAST => true
+    case UnaryAST(_, inner) => astContainsCall(inner)
+    case BinaryAST(l, _, r) => astContainsCall(l) || astContainsCall(r)
+    case _ => false
+
+  /** Does this AST reference any name that the pre-pass has already deferred?
+    * A const binding that consumes such a name must itself defer — its
+    * dependency isn't in `compileTimeConstants` until after the main pass
+    * runs the const-fn driver. */
+  protected def astReferencesDeferred(e: ExpressionAST, deferred: scala.collection.Set[String]): Boolean = e match
+    case VarRefAST(n) => deferred.contains(n)
+    case UnaryAST(_, inner) => astReferencesDeferred(inner, deferred)
+    case BinaryAST(l, _, r) => astReferencesDeferred(l, deferred) || astReferencesDeferred(r, deferred)
+    case _ => false
+
   /** Evaluate a `within` range bound as a compile-time literal against the base numeric type.
    * Supports numeric literals with optional unary sign and references to `const` names. */
   protected def evalRangeBound(aliasName: String, ra: RangeAST, base: SyslType): TypeRange =
@@ -897,5 +918,43 @@ trait SyslAnalyzerTypes:
     case TBinary(left, "&&", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if (l != 0 && r != 0) then 1L else 0L
     case TBinary(left, "||", right, _) => for l <- tryConstEval(left); r <- tryConstEval(right) yield if (l != 0 || r != 0) then 1L else 0L
     case TCast(inner, _) => tryConstEval(inner)
+    case TCall(name, args, _) => evaluateConstCall(name, args)
     case _ => None
+
+  /** Cap on the number of statements a single const-evaluation run may
+    * execute before being aborted with a clear diagnostic. Ten million is
+    * deliberately generous (covers a degree-N lookup table for N ≈ 1024 with
+    * a few thousand stmts per entry) while keeping a runaway recursion from
+    * hanging the compiler. */
+  protected val CONST_EVAL_STEP_LIMIT: Long = 10_000_000L
+
+  /** Try to evaluate a call expression at compile time. Returns `Some(n)`
+    * exactly when:
+    *   - the callee resolves to a `#const fn` we have already analyzed in
+    *     this compilation unit (forward references through SMETA are
+    *     deferred to a later stage of the const-evaluation feature);
+    *   - every argument folds to a scalar `Long` via `tryConstEval` (this
+    *     is the v1 limitation — float, string, and aggregate arguments
+    *     route through the still-deferred richer evaluator);
+    *   - the embedded interpreter runs to completion within
+    *     `CONST_EVAL_STEP_LIMIT` statements without throwing.
+    *
+    * On any failure (callee unknown, arg fails to fold, interpreter panics,
+    * step limit) we return `None` and let the existing
+    * "initializer is not compile-time evaluable" diagnostic fire. A future
+    * stage will lift this to a richer error so the user sees *why* the
+    * folder gave up — for now the binary signal is enough. */
+  protected def evaluateConstCall(name: String, args: List[TExpr]): Option[Long] =
+    constFunDecls.get(name).flatMap { fn =>
+      val foldedArgs = args.foldLeft(Option(List.empty[Value])) { (acc, a) =>
+        for as <- acc; n <- tryConstEval(a) yield as :+ Value.IntVal(n)
+      }
+      foldedArgs.flatMap { argValues =>
+        val interp = new SyslInterpreter(_ => ())
+        interp.setStepLimit(CONST_EVAL_STEP_LIMIT)
+        interp.load(TProgram(constFunDecls.values.toSet.toList))
+        try Some(interp.valueToLong(interp.callByName(fn.name, argValues)))
+        catch case _: Throwable => None
+      }
+    }
 

@@ -19,6 +19,7 @@ trait SyslInterpreterStatements {
   import Value.*
 
   protected def exec(stmt: TStmt, env: Env): Unit =
+    chargeStep()
     stmt match
       case TVarStmt(name, _, init, _, _) =>
         val raw = evalAny(init, env)
