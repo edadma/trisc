@@ -448,6 +448,21 @@ trait SyslAnalyzerImports:
     if modulePath.nonEmpty then
       visibleExtensionModules += importedDefiningModule
 
+    // Stash non-generic `#const fn` bodies for later re-analysis in this unit's
+    // context. The owning-module prefix matches what the source unit mangled
+    // with — for sibling imports `modulePath` is empty so we fall back to the
+    // current unit's `currentModule` (siblings share the same module path).
+    val constFnOwningModule =
+      if modulePath.nonEmpty then modulePath.replace('/', '_').replace('.', '_')
+      else currentModule.getOrElse("")
+    for fd <- meta.constFunBodies do
+      val mangled =
+        if constFnOwningModule.nonEmpty && !neverMangle.contains(fd.name) then
+          s"${constFnOwningModule}__${fd.name}"
+        else fd.name
+      if !pendingImportedConstFnBodies.contains(mangled) && !constFunDecls.contains(mangled) then
+        pendingImportedConstFnBodies(mangled) = (fd, constFnOwningModule)
+
   def isExternal(name: String): Boolean = externalSymbols.contains(name)
   def externals: Set[String] = externalSymbols.toSet
 

@@ -225,6 +225,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               meta.traitImpls,
               meta.genericEnumInstances,
               meta.extensions,
+              meta.constFunBodies,
             )
             analyzer.registerImport(siblings)
             // Register cross-module imports — fall back to resolveExternalMeta so
@@ -288,6 +289,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
               analyzer.getTraitImplMetas,
               analyzer.getGenericEnumInstances,
               analyzer.getExtensionMetas,
+              analyzer.getConstFunBodies,
             )
           } match
             case scala.util.Success(fileMeta) =>
@@ -374,6 +376,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
             sibAccum.traitImpls,
             sibAccum.genericEnumInstances,
             sibAccum.extensions,
+            sibAccum.constFunBodies,
           )
           analyzer.registerImport(siblings)
 
@@ -447,7 +450,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
         case _ => false
       } ++ analyzer.getTraitDecls ++ analyzer.getExtensionTemplates ++ analyzer.getExtensionImplDecls
       val baseMeta = ModuleMeta.fromProgram(typed, if modPath.isDefined then Some(s"$name.sysl") else None)
-      val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances, analyzer.getExtensionMetas)
+      val meta = new ModuleMeta(baseMeta.symbols, templates, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances, analyzer.getExtensionMetas, analyzer.getConstFunBodies)
       val smeta = meta.toSmeta
 
       modPath match
@@ -572,7 +575,7 @@ class SyslDriver(fileOps: Option[FileOps] = None, baseDirs: List[String] = Nil, 
           val analyzer = new SyslAnalyzer(contractsEnabled = contractsEnabled)
           val typed = analyzer.analyze(stripped)
           val meta = ModuleMeta.fromProgram(typed)
-          new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances, analyzer.getExtensionMetas)
+          new ModuleMeta(meta.symbols, templates ++ analyzer.getTraitDecls, analyzer.getTraitImplMetas, analyzer.getGenericEnumInstances, analyzer.getExtensionMetas, analyzer.getConstFunBodies)
         }.toOption
       case Left(_) => None
 

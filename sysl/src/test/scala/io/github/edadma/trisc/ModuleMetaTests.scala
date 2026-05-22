@@ -351,4 +351,66 @@ class ModuleMetaTests extends AnyFreeSpec with Matchers {
     meta2.extensions.foreach(_.receiverType shouldBe SyslType.IntType(32))
     meta2.extensions.find(_.methodName == "doubled").get.mangledFnName shouldBe "__ext_i32__doubled"
   }
+
+  // ===== `#const fn` body round-trip =====
+  // Non-generic `#const fn` bodies travel through a dedicated SMETA block so
+  // importing modules can fold cross-module `const X = lib::fn(7)` at compile
+  // time. These tests pin the serialization / re-parse boundary directly,
+  // ahead of the integration coverage in SyslConstFnTests.
+
+  "emits CONST_FN_BODIES block for a non-generic #const fn" in {
+    val src =
+      """#const
+        |scale(x: int) -> int = x * 3
+        |main() -> int = 0
+        |""".stripMargin
+    val Right(ast) = (new SyslParser).parseProgram(src): @unchecked
+    val analyzer = new SyslAnalyzer
+    val typed = analyzer.analyze(ast)
+    val baseMeta = ModuleMeta.fromProgram(typed)
+    val meta = new ModuleMeta(
+      baseMeta.symbols, Nil, Nil, Nil, Nil, analyzer.getConstFunBodies,
+    )
+    val text = meta.toSmeta
+    text should include("CONST_FN_BODIES")
+    text should include("CONST_FN_BODIES_END")
+    text should include("scale")
+    val meta2 = ModuleMeta.fromSmeta(text).get
+    meta2.constFunBodies.length shouldBe 1
+    meta2.constFunBodies.head.name shouldBe "scale"
+  }
+
+  "omits CONST_FN_BODIES block when no non-generic #const fn is declared" in {
+    val meta = ModuleMeta.fromProgram(analyze(
+      """add(a: int, b: int) -> int = a + b
+        |main() -> int = 0
+        |""".stripMargin))
+    val text = meta.toSmeta
+    text should not include "CONST_FN_BODIES"
+  }
+
+  "round-trips a #const fn body through SMETA" in {
+    val src =
+      """#const
+        |inc(x: int) -> int = x + 1
+        |#const
+        |squared(x: int) -> int
+        |    val y = x * x
+        |    return y
+        |""".stripMargin
+    val Right(ast) = (new SyslParser).parseProgram(src): @unchecked
+    val analyzer = new SyslAnalyzer
+    val typed = analyzer.analyze(ast)
+    val baseMeta = ModuleMeta.fromProgram(typed)
+    val meta = new ModuleMeta(
+      baseMeta.symbols, Nil, Nil, Nil, Nil, analyzer.getConstFunBodies,
+    )
+    val text = meta.toSmeta
+    val meta2 = ModuleMeta.fromSmeta(text).get
+    meta2.constFunBodies.map(_.name).toSet shouldBe Set("inc", "squared")
+    // Re-parsed FunDeclAST should retain the #const attribute.
+    meta2.constFunBodies.foreach { fd =>
+      fd.attributes.map(_.name) should contain("const")
+    }
+  }
 }

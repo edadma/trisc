@@ -775,6 +775,13 @@ trait SyslAnalyzerCore:
     // no method 'foo'" at the first call site.
     resolveStructsAndEnums()
 
+    // Re-analyze the bodies of `#const fn` declarations imported from other
+    // units so that local `const X = lib::fn(7)` bindings can fold them at
+    // compile time. Must run before the main typed-AST pass below, because
+    // `analyzeRegularVarDecl`'s const branch calls into the const-evaluation
+    // driver as soon as it processes a binding.
+    analyzeImportedConstFnBodies()
+
     // Second pass: produce typed AST (skip generic templates; they're instantiated on demand)
     val tDecls = program.decls.flatMap {
       case f: FunDeclAST if f.typeParams.nonEmpty => Nil

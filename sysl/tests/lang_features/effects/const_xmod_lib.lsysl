@@ -1,0 +1,63 @@
+`#const` — Cross-Module Library Half
+====================================
+
+This is the **library half** of the cross-module compile-time
+evaluation pin. It declares a handful of `#const fn` decls in a
+dedicated module so the consumer file (`const_xmod_main.lsysl`)
+can fold them inside its `const` bindings at compile time.
+
+A non-generic `#const fn` body round-trips through `.smeta` so any
+importing module can re-analyze it locally and feed it to the
+const-evaluation driver. This file has no `#test` decls of its
+own — it only provides material for the consumer to bind against.
+
+    module sysl.tests.lang_features.effects.const_xmod_lib
+
+
+### Scalar `#const fn`
+
+The minimal cross-module case — a one-argument `#const fn`
+returning an integer. The consumer binds `const X: int = cxm_double(21)`.
+
+    #const
+    cxm_double(x: int) -> int = x * 2
+
+
+### Chained `#const fn`
+
+A second function in the same library — used by the consumer to
+pin that two cross-module calls can be folded in a single
+binding. Also used internally to demonstrate that one `#const fn`
+in the library can call another in the same library and still
+re-analyze correctly downstream.
+
+    #const
+    cxm_inc(x: int) -> int = x + 1
+
+    #const
+    cxm_double_then_inc(x: int) -> int = cxm_inc(cxm_double(x))
+
+
+### Aggregate-returning `#const fn`
+
+An `#const fn` returning a fixed-size array. The consumer binds
+`const T: [4]int = cxm_squares()`, materializing the table as
+static data in the consumer's compilation unit.
+
+    #const
+    cxm_squares() -> [4]int
+        var t: [4]int
+        var i = 0
+        while i < 4 do
+            t[i] = i * i
+            i = i + 1
+        return t
+
+
+### Float `#const fn`
+
+A float-returning `#const fn` to pin the f64 round-trip across the
+SMETA boundary.
+
+    #const
+    cxm_to_half(x: f64) -> f64 = x * 0.5

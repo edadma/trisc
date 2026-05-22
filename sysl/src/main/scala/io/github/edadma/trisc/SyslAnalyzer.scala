@@ -112,6 +112,18 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
     * fn that resolved to the mangled callee still find the decl). */
   protected val constFunDecls = new mutable.LinkedHashMap[String, TFunDecl]
 
+  /** Original `FunDeclAST` for every `#const fn` analyzed in this unit, keyed
+    * by the mangled name. Kept so the driver can serialize the bodies into
+    * `.smeta` for cross-module access — importing units re-parse + re-analyze
+    * each body to populate their own `constFunDecls`. Only non-generic
+    * `#const fn`s round-trip through this slot; generic ones already ride the
+    * existing `genericTemplates` path. */
+  protected val constFunDeclsAst = new mutable.LinkedHashMap[String, FunDeclAST]
+
+  /** Public accessor: the driver folds these into the module's SMETA via
+    * `meta.constFunBodies`. */
+  def getConstFunBodies: List[FunDeclAST] = constFunDeclsAst.values.toList
+
   /** Module-level vars tagged with `#address(N)` map to a fixed physical address — used
    *  for MMIO device registers. Reads lower to `*(N as *T)`, writes to `*(N as *T) = v`.
    *  No storage is emitted (the var is just a handle on hardware). Both the local and
@@ -355,6 +367,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
   // when those templates round-trip back through Step 5's sibling import.
   protected val importedTemplateNames = mutable.HashSet[String]()
   protected val importedTraitNames = mutable.HashSet[String]()
+  /** Pending re-analysis queue for imported `#const fn` bodies: mangled name →
+   *  (FunDeclAST, owning-module-mangled). Drained by `analyzeImportedConstFnBodies`
+   *  during `analyze()` so the bodies are visible to local `const X = lib::fn(7)`
+   *  bindings without the importer having to recompile the source unit. */
+  protected val pendingImportedConstFnBodies = new mutable.LinkedHashMap[String, (FunDeclAST, String)]
   // Concrete-impl key uses the full target list so multi-target impls
   // (e.g. `impl Combine[Box, Box, Box]`) are tracked correctly. Single-target
   // impls store a one-element list.
@@ -700,6 +717,52 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
       case None =>
         throw AnalysisError(s"static_assert condition is not compile-time evaluable", sa)
 
+  /** Drain `pendingImportedConstFnBodies`, re-analyzing each `#const fn`
+   *  body in this unit's context. The body produces no codegen output —
+   *  only a `TFunDecl` registered in `constFunDecls` so the const-evaluation
+   *  driver can fold cross-module `const X = lib::fn(7)` bindings.
+   *
+   *  Bodies that fail to re-analyze (e.g. because they reference a private
+   *  symbol of the source module that the importing unit cannot see) are
+   *  silently skipped — the binding then fails with the existing
+   *  "initializer is not compile-time evaluable" diagnostic. A future
+   *  stage can lift this to a clearer cross-module error. */
+  protected def analyzeImportedConstFnBodies(): Unit =
+    if pendingImportedConstFnBodies.isEmpty then return
+    val drained = pendingImportedConstFnBodies.toList
+    pendingImportedConstFnBodies.clear()
+    for (mangledName, (fd, _)) <- drained do
+      try
+        scopeStack = new mutable.ArrayBuffer
+        pushScope()
+        val resolvedParams = fd.params.map { p =>
+          val t = resolveType(p.typ)
+          currentScope(p.name) = SymInfo(p.name, t, mutable = true)
+          (p.name, t)
+        }
+        val retType = fd.returnType.map(resolveType).getOrElse(UnitType)
+        val savedReturnType = currentReturnType
+        currentReturnType = retType
+        val savedExp = currentExpected
+        currentExpected = if retType == UnitType then None else Some(retType)
+        val tBody = try fd.body match
+          case ExprBodyAST(expr) =>
+            val tExpr = analyzeExpr(expr)
+            val checked = if retType != UnitType then applyTargetType(tExpr, retType) else tExpr
+            TExprBody(checked)
+          case BlockBodyAST(stmts, contracts) =>
+            analyzeBlockWithContracts(stmts, contracts, retType, mangledName, fd.params.map(_.name))
+        finally
+          currentExpected = savedExp
+          currentReturnType = savedReturnType
+        val tParams = resolvedParams.map { case (n, t) => TParam(n, t, None, ParamMode.In) }
+        val effects = FuncEffects(isPure = true, isConst = true)
+        val tFunDecl = TFunDecl(mangledName, tParams, retType, tBody, isPrivate = false, fd.attributes, fd.isDef, isGhost = false, effects = effects, isParameterless = fd.isParameterless)
+        constFunDecls(mangledName) = tFunDecl
+        if fd.name != mangledName then constFunDecls(fd.name) = tFunDecl
+      catch case _: Throwable => () // body un-analyzable in this context; binding will fail with std diagnostic
+      finally scopeStack = null
+
   protected def analyzeDecl(decl: DeclAST): TDecl =
     decl match
       case ModuleDeclAST(path) =>
@@ -817,6 +880,13 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
         if funInfo.isConst then
           constFunDecls(funInfo.name) = tFunDecl
           constFunDecls(name) = tFunDecl
+          // Non-generic `#const fn` bodies travel through SMETA so importing
+          // modules can fold cross-module `const X = lib::fn(7)` bindings.
+          // Generic ones already ride the existing `genericTemplates` path
+          // and are re-instantiated lazily; deferring serialization of those
+          // until a real cross-module generic-const use case surfaces.
+          if fdAst.typeParams.isEmpty then
+            constFunDeclsAst(funInfo.name) = fdAst
         tFunDecl
 
       case VarDeclAST(name, typOpt, init, isPrivate, isMutable, attrs, isVolatile, isConst) =>

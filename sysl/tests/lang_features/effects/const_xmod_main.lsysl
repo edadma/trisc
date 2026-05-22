@@ -1,0 +1,90 @@
+`#const` — Cross-Module Compile-Time Evaluation
+================================================
+
+The body of every non-generic `#const fn` declared in a module
+round-trips through `.smeta` so any importing module can fold
+`const X = lib::fn(7)` bindings at compile time. This file pins
+that surface against the helper library in
+`const_xmod_lib.lsysl`.
+
+Scalar, aggregate, and float `#const fn` calls are all exercised
+to confirm the driver re-analyzes each body in the importer's
+context and routes the call through the embedded interpreter.
+
+File-local prefix `Cxm` (Cross-module). Keep entries here in step
+with `const_xmod_lib.lsysl` — adding a new `#const fn` in the lib
+is only useful if a `Cxm` test binds against it.
+
+    module sysl.tests.lang_features.effects.const_xmod_main
+
+    import sysl.tests.lang_features.effects.const_xmod_lib.*
+
+
+### Scalar `#const fn` import folds at the binding site
+
+The binding `const CXM_DOUBLED = cxm_double(21)` triggers the
+const-evaluation driver, which finds `cxm_double` in the
+re-analyzed import set and folds the call to `42`.
+
+    const CXM_DOUBLED: int = cxm_double(21)
+
+    #test
+    test_cxm_scalar_const_fn() -> unit
+        assert(CXM_DOUBLED == 42, "CXM_DOUBLED should fold to 42")
+
+
+### Chained imported `#const fn` calls fold
+
+Two cross-module calls in one binding. Both `cxm_double` and
+`cxm_inc` are imported; the driver resolves them as part of one
+expression evaluation.
+
+    const CXM_CHAINED: int = cxm_inc(cxm_double(20))
+
+    #test
+    test_cxm_chained_const_fn() -> unit
+        assert(CXM_CHAINED == 41, "CXM_CHAINED should fold to 41")
+
+
+### Imported `#const fn` body calls another imported `#const fn`
+
+`cxm_double_then_inc` calls `cxm_inc` and `cxm_double` from its
+own module. When re-analyzed in this module, those callees still
+resolve correctly because they are visible through the same
+wildcard import.
+
+    const CXM_SELF_CALLED: int = cxm_double_then_inc(10)
+
+    #test
+    test_cxm_internal_const_fn_call() -> unit
+        assert(CXM_SELF_CALLED == 21, "10 * 2 + 1 = 21")
+
+
+### Aggregate-returning imported `#const fn`
+
+`cxm_squares()` runs in the embedded interpreter and the resulting
+`ArrVal` is reconstituted as a `TArrayLit` initializer in this
+module. The binding materializes as a static `[4]int` block.
+
+    const CXM_SQS: [4]int = cxm_squares()
+
+    #test
+    test_cxm_array_const_fn() -> unit
+        assert(CXM_SQS[0] == 0, "CXM_SQS[0]")
+        assert(CXM_SQS[1] == 1, "CXM_SQS[1]")
+        assert(CXM_SQS[2] == 4, "CXM_SQS[2]")
+        assert(CXM_SQS[3] == 9, "CXM_SQS[3]")
+
+
+### Float `#const fn` import folds
+
+`f64`-valued bindings round-trip through the bit-pattern carrier in
+the `Const` SMETA line for scalar bindings, but `#const fn` results
+ride through the body re-analysis path — this test pins that the
+two stay consistent across modules.
+
+    const CXM_HALF: f64 = cxm_to_half(7.0)
+
+    #test
+    test_cxm_float_const_fn() -> unit
+        assert(CXM_HALF == 3.5, "7.0 * 0.5 = 3.5")

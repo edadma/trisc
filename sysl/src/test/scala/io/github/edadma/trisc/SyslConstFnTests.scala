@@ -647,4 +647,106 @@ class SyslConstFnTests extends SyslTestHelpers {
       |    return 0
       |""".stripMargin) shouldBe "0.5\n2\n"
   }
+
+  // ===== Cross-module compile-time evaluation =====
+  // The body of every non-generic `#const fn` declared in module A round-trips
+  // through `.smeta` and is re-analyzed in any module B that imports A, so a
+  // `const X = a::fn(7)` binding in B folds to a literal at compile time.
+
+  "const binding folds a scalar #const fn from an imported module" in {
+    evalWithLibs(
+      Map(
+        "mathlib/core" ->
+          """module mathlib
+            |#const
+            |lib_double(x: int) -> int = x * 2
+            |""".stripMargin,
+      ),
+      """import mathlib.*
+        |const DOUBLED: int = lib_double(21)
+        |main() -> int = DOUBLED
+        |""".stripMargin
+    ) shouldBe 42L
+  }
+
+  "const binding folds a chained cross-module #const fn call" in {
+    evalWithLibs(
+      Map(
+        "mathlib/core" ->
+          """module mathlib
+            |#const
+            |lib_inc(x: int) -> int = x + 1
+            |#const
+            |lib_square(x: int) -> int = x * x
+            |""".stripMargin,
+      ),
+      """import mathlib.*
+        |#const
+        |triple(x: int) -> int = x * 3
+        |const N: int = triple(lib_square(lib_inc(2)))
+        |main() -> int = N
+        |""".stripMargin
+    ) shouldBe (3L * 3L * 3L)
+  }
+
+  "const binding folds a struct-returning #const fn from an imported module" in {
+    evalWithLibs(
+      Map(
+        "geom/point" ->
+          """module geom
+            |struct Pt
+            |    x: int
+            |    y: int
+            |#const
+            |make_pt(x: int, y: int) -> Pt = Pt(x, y)
+            |""".stripMargin,
+      ),
+      """import geom.*
+        |const P: Pt = make_pt(3, 4)
+        |main() -> int = P.x + P.y
+        |""".stripMargin
+    ) shouldBe 7L
+  }
+
+  "const binding folds an array-returning #const fn from an imported module" in {
+    evalWithLibs(
+      Map(
+        "tables/build" ->
+          """module tables
+            |#const
+            |squares() -> [4]int
+            |    var t: [4]int
+            |    var i = 0
+            |    while i < 4 do
+            |        t[i] = i * i
+            |        i = i + 1
+            |    return t
+            |""".stripMargin,
+      ),
+      """import tables.*
+        |const SQS: [4]int = squares()
+        |main() -> int = SQS[0] + SQS[1] + SQS[2] + SQS[3]
+        |""".stripMargin
+    ) shouldBe (0L + 1L + 4L + 9L)
+  }
+
+  "const binding folds a float #const fn from an imported module" in {
+    val (rc, out) = runWithLibs(
+      Map(
+        "mathlib/core" ->
+          """module mathlib
+            |#const
+            |to_half(x: f64) -> f64 = x * 0.5
+            |""".stripMargin,
+      ),
+      """import mathlib.*
+        |const HALF: f64 = to_half(7.0)
+        |main() -> int
+        |    println(HALF)
+        |    return 0
+        |""".stripMargin
+    )
+    rc shouldBe 0L
+    out shouldBe "3.5\n"
+  }
 }

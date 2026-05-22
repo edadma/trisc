@@ -31,6 +31,7 @@ class ModuleMeta(
     val traitImpls: List[TraitImplMeta] = Nil,
     val genericEnumInstances: List[GenericEnumInstanceMeta] = Nil,
     val extensions: List[ExtensionMeta] = Nil,
+    val constFunBodies: List[FunDeclAST] = Nil,
 ):
 
   def toSmeta: String =
@@ -112,6 +113,16 @@ class ModuleMeta(
         buf ++= SyslPrettyPrinter.declToSource(template)
         buf ++= "\n\n"
       buf ++= "TEMPLATES_END\n"
+    // Bodies of non-generic `#const fn` declarations — needed so importing
+    // modules can fold `const X = lib::fn(7)` at compile time. The block is
+    // line-delimited; entries are separated by a blank line and the
+    // pretty-printer keeps each declaration self-contained.
+    if constFunBodies.nonEmpty then
+      buf ++= "CONST_FN_BODIES\n"
+      for fd <- constFunBodies do
+        buf ++= SyslPrettyPrinter.declToSource(fd)
+        buf ++= "\n\n"
+      buf ++= "CONST_FN_BODIES_END\n"
     buf.toString
 
   def toAsmGlobals: String =
@@ -147,6 +158,7 @@ class ModuleMeta(
       traitImpls ++ other.traitImpls,
       genericEnumInstances ++ other.genericEnumInstances,
       extensions ++ other.extensions,
+      constFunBodies ++ other.constFunBodies,
     )
 
   /** Get the set of source files that define the given symbol names. */
@@ -196,8 +208,13 @@ object ModuleMeta:
    *  v19 extends the CONST line with a kind token (`INT` or `FLOAT`) so float-typed
    *  `const NAME: f64 = …` bindings can round-trip across files. Integer kinds
    *  continue to encode the value as a signed `Long`; floats encode the
-   *  `Double.doubleToLongBits` bit pattern as unsigned hex. */
-  val SMETA_VERSION = 19
+   *  `Double.doubleToLongBits` bit pattern as unsigned hex.
+   *  v20 adds a `CONST_FN_BODIES … CONST_FN_BODIES_END` block carrying the
+   *  pretty-printed source of every non-generic `#const fn` declared in the
+   *  module, so importing modules can re-analyze each body in their own
+   *  context and fold cross-module `const X = lib::fn(…)` bindings. The
+   *  block is empty (omitted) when the module exports no `#const fn`. */
+  val SMETA_VERSION = 20
 
   /** Encode a FuncEffects as space-separated tokens. Optional leading flags (in order):
    *  `RT` for `#realtime`, `CT` for `#const`. After them (or directly, if neither), one of:
@@ -282,6 +299,8 @@ object ModuleMeta:
       var currentSource: Option[String] = None
       var inTemplates = false
       val templateBuf = new StringBuilder
+      var inConstFnBodies = false
+      val constFnBodiesBuf = new StringBuilder
 
       for rawLine <- source.linesIterator do
         lineNum += 1
@@ -291,6 +310,12 @@ object ModuleMeta:
           else
             templateBuf ++= rawLine
             templateBuf += '\n'
+        else if inConstFnBodies then
+          if rawLine.trim == "CONST_FN_BODIES_END" then
+            inConstFnBodies = false
+          else
+            constFnBodiesBuf ++= rawLine
+            constFnBodiesBuf += '\n'
         else
           val line = rawLine.trim
           if line.nonEmpty then
@@ -301,6 +326,8 @@ object ModuleMeta:
               headerSeen = true
             else if line == "TEMPLATES" then
               inTemplates = true
+            else if line == "CONST_FN_BODIES" then
+              inConstFnBodies = true
             else if line.startsWith("SOURCE ") then
               currentSource = Some(line.drop(7).trim)
             else if line.startsWith("GENINST ") then
@@ -408,4 +435,13 @@ object ModuleMeta:
               }
             case Left(_) => Nil // silently ignore parse failures in templates
         else Nil
-        Some(new ModuleMeta(syms.toList, templates, implMetas.toList, genInstMetas.toList, extMetas.toList))
+        // Parse non-generic `#const fn` bodies from the CONST_FN_BODIES section.
+        // Filter to FunDeclAST so a stray block in someone's hand-rolled fixture
+        // can't surface non-fn decls; the analyzer also re-checks downstream.
+        val constFnBodies = if constFnBodiesBuf.nonEmpty then
+          val parser = new SyslParser
+          parser.parseProgram(constFnBodiesBuf.toString) match
+            case Right(ast) => ast.decls.collect { case fd: FunDeclAST => fd }
+            case Left(_)    => Nil
+        else Nil
+        Some(new ModuleMeta(syms.toList, templates, implMetas.toList, genInstMetas.toList, extMetas.toList, constFnBodies))
