@@ -59,8 +59,15 @@ class SyslParser extends StandardTokenParsers {
 
   // --- Attributes ---
 
+  // `const` is a reserved keyword (used for `const NAME = expr` bindings), so the
+  // default `ident` rule rejects it. Accept it explicitly after `#` so `#const`
+  // parses as a function-decl attribute. (`#pure`, `#realtime`, etc. work via the
+  // ident path because their names are not reserved.)
+  lazy val attrName: Parser[String] =
+    ident | ("const" ^^^ "const")
+
   lazy val attribute: Parser[Attribute] =
-    "#" ~> ident ~ opt("(" ~> repsep(attrArg, ",") <~ ")") ^^ {
+    "#" ~> attrName ~ opt("(" ~> repsep(attrArg, ",") <~ ")") ^^ {
       case name ~ args => Attribute(name, args.getOrElse(Nil))
     }
 
@@ -564,18 +571,21 @@ class SyslParser extends StandardTokenParsers {
       typeName
 
   /** Optional effect suffix on a function type: `#pure`, or any combination of
-   *  `#reads(a, b)` / `#writes(c)` repeated, optionally combined with `#realtime`.
-   *  Distinguishes the FuncEffects states used in subset-check (caller-vs-callee)
+   *  `#reads(a, b)` / `#writes(c)` repeated, optionally combined with `#realtime` and/or
+   *  `#const`. Distinguishes the FuncEffects states used in subset-check (caller-vs-callee)
    *  at every indirect call site:
    *  - no suffix → Unknown (can only be called from unannotated callers)
    *  - `#pure` → Pure (callable from any annotated caller)
    *  - `#reads`/`#writes` → RW(reads, writes) (callable when subset of caller's effect set)
    *  - `#realtime` → orthogonal flag (no heap, no blocking, no unbounded work) — combinable
-   *    with any of the above. */
+   *    with any of the above
+   *  - `#const` → orthogonal flag (compile-time evaluable). Implies `#pure`; the analyzer
+   *    auto-promotes pure when the const bit is set. */
   lazy val funcTypeEffects: Parser[FuncEffects] =
-    rep("#" ~> ident ~ opt("(" ~> repsep(ident, ",") <~ ")")) ^^ { items =>
+    rep("#" ~> attrName ~ opt("(" ~> repsep(ident, ",") <~ ")")) ^^ { items =>
       var isPure = false
       var isRealtime = false
+      var isConst = false
       var reads: Option[Set[String]] = None
       var writes: Option[Set[String]] = None
       for (name ~ args) <- items do
@@ -586,6 +596,9 @@ class SyslParser extends StandardTokenParsers {
           case "realtime" =>
             if args.exists(_.nonEmpty) then throw new RuntimeException("#realtime on a function type takes no arguments")
             isRealtime = true
+          case "const" =>
+            if args.exists(_.nonEmpty) then throw new RuntimeException("#const on a function type takes no arguments")
+            isConst = true
           case "reads" =>
             val r = args.getOrElse(Nil).toSet
             reads = Some(reads.getOrElse(Set.empty) ++ r)
@@ -595,7 +608,9 @@ class SyslParser extends StandardTokenParsers {
           case other => throw new RuntimeException(s"unknown effect annotation '#$other' on function type")
       if isPure && (reads.isDefined || writes.isDefined) then
         throw new RuntimeException("#pure on a function type cannot be combined with #reads/#writes")
-      FuncEffects(isPure, reads, writes, isRealtime)
+      if isConst && (reads.isDefined || writes.isDefined) then
+        throw new RuntimeException("#const on a function type cannot be combined with #reads/#writes")
+      FuncEffects(isPure, reads, writes, isRealtime, isConst)
     }
 
   lazy val funcTypeRef: Parser[TypeAST] =

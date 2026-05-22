@@ -43,11 +43,11 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
   // `isParameterless`: declared without `()` (`f -> T = body`); referenced
   // by bare name (auto-called at every VarRefAST). Same auto-call mechanism
   // as `isDef` uses, but does not imply purity.
-  protected case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isGhost: Boolean = false, byName: List[Boolean] = Nil, isParameterless: Boolean = false, isRealtime: Boolean = false):
+  protected case class FunInfo(name: String, params: List[(String, SyslType)], returnType: SyslType, isDef: Boolean = false, isPure: Boolean = false, modes: List[ParamMode] = Nil, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isGhost: Boolean = false, byName: List[Boolean] = Nil, isParameterless: Boolean = false, isRealtime: Boolean = false, isConst: Boolean = false):
     def modeOf(i: Int): ParamMode = if modes.isEmpty then ParamMode.In else modes(i)
     def isByNameAt(i: Int): Boolean = byName.nonEmpty && i < byName.length && byName(i)
     def autoCallsBare: Boolean = isDef || isParameterless
-    def hasEffectAnnotations: Boolean = reads.isDefined || writes.isDefined || isPure || isRealtime
+    def hasEffectAnnotations: Boolean = reads.isDefined || writes.isDefined || isPure || isRealtime || isConst
 
   protected val globalScope = new mutable.LinkedHashMap[String, SymInfo]
   protected val functions = new mutable.LinkedHashMap[String, FunInfo]
@@ -795,6 +795,8 @@ class SyslAnalyzer(val contractsEnabled: Boolean = true) extends SyslAnalyzerCon
           validateEffects(name, funInfo, tBody, funInfo.params.map(_._1))
         if funInfo.isRealtime then
           validateRealtimeFn(name, tBody, funInfo.params.map(_._1))
+        if funInfo.isConst then
+          validateConstFn(name, tBody, funInfo.params.map(_._1))
         validateGhostDiscipline(name, funInfo, tBody)
         val tBodyFixed = rewriteEscapingClosureCaptureOwns(tBody)
         TFunDecl(funInfo.name, tParams, retType, tBodyFixed, isPrivate, attrs, funInfo.isDef, isGhost = funInfo.isGhost, effects = funInfoEffects(funInfo), isParameterless = funInfo.isParameterless)

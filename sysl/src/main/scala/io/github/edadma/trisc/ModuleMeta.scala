@@ -45,11 +45,11 @@ class ModuleMeta(
       sym.typ match
         case SymbolMeta.Kind.Func(params, ret, isDef, isPure, modes, effects, _) =>
           // The FUNCP/DEFFUNCP keyword variants encode `#pure`. For `#reads`/`#writes`
-          // (effects.isUnknown is false but isPure is also false), or for `#realtime`,
-          // we emit an additional `EFFECTS …` trailer.  When `isPure` is true and the
-          // function is NOT realtime we skip the EFFECTS trailer (the `P` keyword already
-          // says everything). A pure+realtime function still needs the trailer so that
-          // the realtime bit round-trips.
+          // (effects.isUnknown is false but isPure is also false), or for `#realtime`, or
+          // for `#const`, we emit an additional `EFFECTS …` trailer.  When `isPure` is true
+          // and the function carries no other effect bits we skip the EFFECTS trailer (the
+          // `P` keyword already says everything). A pure+realtime or pure+const function
+          // still needs the trailer so the extra bit round-trips.
           val kw = (isDef, isPure) match
             case (true, true)   => "DEFFUNCP"
             case (true, false)  => "DEFFUNC"
@@ -66,7 +66,7 @@ class ModuleMeta(
               s" MODES $codes"
             else ""
           val effSuffix =
-            if (isPure && !effects.isRealtime) || effects.isUnknown then ""
+            if (isPure && !effects.isRealtime && !effects.isConst) || effects.isUnknown then ""
             else s" EFFECTS ${ModuleMeta.encodeEffects(effects)}"
           buf ++= s"${vis}$kw ${sym.name} $sig$modeSuffix$effSuffix\n"
         case SymbolMeta.Kind.Data(dataType, isMutable) =>
@@ -178,41 +178,49 @@ object ModuleMeta:
    *  optional leading `RT` token marking `#realtime`. The bit composes orthogonally
    *  with U/P/RW. A pure+realtime function now emits an `EFFECTS RT P` trailer where
    *  pre-v17 emitted nothing (the FUNCP keyword alone) — version bump forces stale
-   *  v16 readers to recompile rather than silently dropping the realtime bit. */
-  val SMETA_VERSION = 17
+   *  v16 readers to recompile rather than silently dropping the realtime bit.
+   *  v18 extends the EFFECTS trailer and inline IFACE-method tail with an optional
+   *  `CT` token (after the optional `RT` token) marking `#const` — a compile-time
+   *  evaluable function. `#const` implies `#pure`, so the encoded form is always
+   *  `[RT ]CT P` for the canonical case; mixed `CT RW` is permitted by the grammar
+   *  but rejected by the analyzer (const cannot read or write module state). */
+  val SMETA_VERSION = 18
 
-  /** Encode a FuncEffects as space-separated tokens. An optional leading `RT` flag marks
-   *  `#realtime`. After it (or directly, if non-realtime), one of:
+  /** Encode a FuncEffects as space-separated tokens. Optional leading flags (in order):
+   *  `RT` for `#realtime`, `CT` for `#const`. After them (or directly, if neither), one of:
    *    - `U` (Unknown)
    *    - `P` (Pure)
    *    - `RW <nReads> <readsNames…> <nWrites> <writesNames…>`
-   *  Examples: `U`, `P`, `RT P`, `RT U`, `RW 1 g 0`, `RT RW 1 g 0`.
+   *  Examples: `U`, `P`, `RT P`, `RT U`, `RW 1 g 0`, `RT RW 1 g 0`, `CT P`, `RT CT P`.
    *  Used both in the FUNC-line trailer (after `EFFECTS`) and in the inline IFACE-method
    *  tail. Names are already in their resolved (mangled) form so no further translation
    *  is needed on read. */
   def encodeEffects(eff: FuncEffects): String =
     val rt = if eff.isRealtime then "RT " else ""
-    if eff.isPure then s"${rt}P"
-    else if eff.reads.isEmpty && eff.writes.isEmpty then s"${rt}U"
+    val ct = if eff.isConst then "CT " else ""
+    if eff.isPure then s"${rt}${ct}P"
+    else if eff.reads.isEmpty && eff.writes.isEmpty then s"${rt}${ct}U"
     else
       val r = eff.reads.getOrElse(Set.empty).toList.sorted
       val w = eff.writes.getOrElse(Set.empty).toList.sorted
-      s"${rt}RW ${r.size}${if r.nonEmpty then " " + r.mkString(" ") else ""} ${w.size}${if w.nonEmpty then " " + w.mkString(" ") else ""}"
+      s"${rt}${ct}RW ${r.size}${if r.nonEmpty then " " + r.mkString(" ") else ""} ${w.size}${if w.nonEmpty then " " + w.mkString(" ") else ""}"
 
   /** Inverse of `encodeEffects`. Reads exactly the tokens it expects. */
   def decodeEffects(tokens: Iterator[String]): FuncEffects =
     val first = tokens.next()
-    val (isRealtime, kindTok) =
+    val (isRealtime, afterRT) =
       if first == "RT" then (true, tokens.next()) else (false, first)
+    val (isConst, kindTok) =
+      if afterRT == "CT" then (true, tokens.next()) else (false, afterRT)
     kindTok match
-      case "U" => FuncEffects(isRealtime = isRealtime)
-      case "P" => FuncEffects(isPure = true, isRealtime = isRealtime)
+      case "U" => FuncEffects(isRealtime = isRealtime, isConst = isConst)
+      case "P" => FuncEffects(isPure = true, isRealtime = isRealtime, isConst = isConst)
       case "RW" =>
         val nR = tokens.next().toInt
         val r = (1 to nR).map(_ => tokens.next()).toSet
         val nW = tokens.next().toInt
         val w = (1 to nW).map(_ => tokens.next()).toSet
-        FuncEffects(reads = Some(r), writes = Some(w), isRealtime = isRealtime)
+        FuncEffects(reads = Some(r), writes = Some(w), isRealtime = isRealtime, isConst = isConst)
       case other => throw IllegalArgumentException(s"unknown effects token '$other'")
 
   def fromProgram(program: TProgram, sourceFile: Option[String] = None): ModuleMeta =

@@ -344,6 +344,172 @@ trait SyslAnalyzerContracts:
       case TExprBody(e) => checkExpr(e)
       case TBlockBody(stmts) => stmts.foreach(checkStmt)
 
+  /** Names of builtins safe to call from a `#const` function — bounded work,
+   *  no allocation, no IO, no side effects. `assert` is included for the same
+   *  reason as in the realtime set: termination is the only "effect" it has. */
+  protected val constPermittedBuiltins: Set[String] = Set("assert")
+
+  /** Analyze a `#const` function body. The const discipline rejects any construct
+   *  the compile-time interpreter cannot evaluate — heap allocation, closures,
+   *  string allocation, asm — and any call that would escape the const closure
+   *  (non-const callees, indirect calls through non-const function types, interface
+   *  dispatch through non-const methods).
+   *
+   *  `#const` implies `#pure`; the pure check still runs on the body via the
+   *  normal `validatePureFn` path. This pass is the additional discipline beyond
+   *  pure: pure allows IO-free reads + bounded recursion but does not constrain
+   *  what an evaluator must be able to execute. Const adds that constraint.
+   *
+   *  Forbidden:
+   *  - heap allocation: `new`, `new []T`, append, closures, `str(...)`, `f"..."`/`s"..."`
+   *  - calls to non-`#const` functions (direct, indirect, or interface-dispatched)
+   *  - non-`#const` intrinsic calls
+   *  - asm (opaque to the compile-time interpreter)
+   *  - declaring or assigning `&T`-typed locals (refcount semantics are not modeled
+   *    at compile time; conservatively reject for v1)
+   *
+   *  Called after body analysis, like `validateRealtimeFn`. */
+  protected def validateConstFn(funcName: String, body: TFunBody, paramNames: List[String]): Unit =
+    val localVars = mutable.HashSet.from(paramNames)
+    val prefix = s"#const function '$funcName'"
+
+    def reject(msg: String): Nothing = throw AnalysisError(s"$prefix $msg")
+
+    def isRefType(t: SyslType): Boolean = t match
+      case RefType(_) => true
+      case _ => false
+
+    def isConstCallee(callee: String): Boolean =
+      if callee == funcName then true
+      else if constPermittedBuiltins.contains(callee) then true
+      else if builtinFunctions.contains(callee) then false
+      else
+        val info = functions.get(callee).orElse(functions.values.find(_.name == callee))
+        info match
+          case Some(i) => i.isConst
+          case None    => false
+
+    def checkExpr(e: TExpr): Unit = e match
+      case _: TIntLit | _: TFloatLit | _: TBoolLit | _: TStringLit | _: TUnitLit => ()
+      case _: TVarRef | _: TAddrOf | _: TAddrLit | _: TFuncRef | _: TSizeof | _: TArrayDecl => ()
+      case TArrayLit(els, _)               => els.foreach(checkExpr)
+      case TAddrOfIndex(a, i, _)           => checkExpr(a); checkExpr(i)
+      case TAddrOfField(o, _, _)           => checkExpr(o)
+      case TTempAddr(e, _)                 => checkExpr(e)
+      case TDeref(e, _)                    => checkExpr(e)
+      case TIndex(e, i, _)                 => checkExpr(e); checkExpr(i)
+      case TFieldAccess(o, _, _)           => checkExpr(o)
+      case TFieldPreInc(o, _, _)           => checkExpr(o)
+      case TFieldPreDec(o, _, _)           => checkExpr(o)
+      case TFieldPostInc(o, _, _)          => checkExpr(o)
+      case TFieldPostDec(o, _, _)          => checkExpr(o)
+      case _: TStructLit                   => ()
+      case TStructConstruct(_, args)       => args.foreach(checkExpr)
+      case TPreInc(_, _) | TPreDec(_, _) | TPostInc(_, _) | TPostDec(_, _) => ()
+      case TUnary(_, o, _)                 => checkExpr(o)
+      case TBinary(l, _, r, _)             => checkExpr(l); checkExpr(r)
+      case TCall(callee, args, _) =>
+        if !isConstCallee(callee) then reject(s"cannot call non-const function '$callee'")
+        args.foreach(checkExpr)
+      case TIndirectCall(callee, args, _) =>
+        callee.typ match
+          case FuncType(_, _, _, eff) if eff.isConst => checkExpr(callee); args.foreach(checkExpr)
+          case _ => reject("cannot make indirect call (callee is not declared `#const`)")
+      case TCast(e, _)                     => checkExpr(e)
+      case TIfExpr(c, t, el, _)            => checkExpr(c); t.foreach(checkStmt); el.foreach(_.foreach(checkStmt))
+      case TMatchExpr(e, arms, deflt, _) =>
+        checkExpr(e)
+        for arm <- arms do
+          arm.guard.foreach(checkExpr)
+          arm.body.foreach(checkStmt)
+        deflt.foreach(_.foreach(checkStmt))
+      case _: TEnumConstruct               => ()
+      case _: TNew =>
+        reject("cannot heap-allocate (`new`) — allocation is not const-evaluable")
+      case _: TNewEnum =>
+        reject("cannot heap-allocate (`new`) — allocation is not const-evaluable")
+      case _: TNewArray =>
+        reject("cannot heap-allocate (`new [n]T`) — allocation is not const-evaluable")
+      case TLen(e, _)                      => checkExpr(e)
+      case TCap(e, _)                      => checkExpr(e)
+      case TSliceExpr(a, lo, hi, _)        => checkExpr(a); lo.foreach(checkExpr); hi.foreach(checkExpr)
+      case TAppend(_, _, _) =>
+        reject("cannot append to a slice — append may allocate")
+      case TStringFromPtr(p, l, _)         => checkExpr(p); checkExpr(l)
+      case TStringFromSlice(s, _)          => checkExpr(s)
+      case _: TStr =>
+        reject("cannot call `str(...)` — produces a heap-allocated string at runtime")
+      case _: TFmtStr =>
+        reject("cannot use formatted string interpolation (`s\"...\"` / `f\"...\"`) — allocates")
+      case _: TClosure =>
+        reject("cannot construct closures — closure construction allocates")
+      case TInterfaceBox(e, _, _)          => checkExpr(e)
+      case TInterfaceDispatch(ifaceVal, methodIdx, args, _) =>
+        ifaceVal.typ match
+          case InterfaceType(_, methods) if methods(methodIdx)._4.isConst =>
+            checkExpr(ifaceVal); args.foreach(checkExpr)
+          case _ =>
+            reject("cannot make interface-dispatch call (interface method is not declared `#const`)")
+      case TIntrinsicCall(name, args, _) =>
+        if !constPermittedBuiltins.contains(name) then
+          reject(s"cannot call intrinsic '$name' — not in const-permitted set")
+        args.foreach(checkExpr)
+      case TRangeCheck(e, _, _, _)         => checkExpr(e)
+      case _: TAsmExpr =>
+        reject("cannot embed asm — opaque to the compile-time interpreter")
+
+    def checkStmt(s: TStmt): Unit = s match
+      case TVarStmt(n, typ, init, _, _) =>
+        checkExpr(init)
+        if isRefType(typ) || isRefType(init.typ) then
+          reject(s"cannot declare local `&T` variable '$n' — refcount semantics are not const-evaluable")
+        localVars += n
+      case TDestructureStmt(ns, _, init) =>
+        checkExpr(init)
+        localVars ++= ns
+      case TDestructureAssignStmt(ns, _, init) =>
+        checkExpr(init)
+      case TAssignStmt(target, value) =>
+        checkExpr(value)
+        if isRefType(value.typ) then
+          reject(s"cannot assign `&T` value to '$target' — refcount semantics are not const-evaluable")
+      case TCompoundAssignStmt(_, _, value) =>
+        checkExpr(value)
+      case TDerefAssignStmt(target, value) =>
+        checkExpr(target); checkExpr(value)
+      case TIndexAssignStmt(arr, idx, value) =>
+        checkExpr(arr); checkExpr(idx); checkExpr(value)
+      case TFieldAssignStmt(o, _, value) =>
+        checkExpr(o); checkExpr(value)
+      case TFieldCompoundAssignStmt(o, _, _, value) =>
+        checkExpr(o); checkExpr(value)
+      case TReturnStmt(v) =>
+        v.foreach(checkExpr)
+      case TWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TForStmt(init, c, u, b, _) =>
+        checkStmt(init); checkExpr(c); checkStmt(u); b.foreach(checkStmt)
+      case TDoWhileStmt(c, b, _) =>
+        checkExpr(c); b.foreach(checkStmt)
+      case TLoopStmt(b, _) =>
+        b.foreach(checkStmt)
+      case TBreakStmt(_) => ()
+      case TContinueStmt(_) => ()
+      case TDeferStmt(inner) =>
+        checkStmt(inner)
+      case TAsmStmt(_) =>
+        reject("cannot embed asm — opaque to the compile-time interpreter")
+      case TContractCheck(_, e, _) =>
+        checkExpr(e)
+      case TMultiStmt(ss) =>
+        ss.foreach(checkStmt)
+      case TExprStmt(e) =>
+        checkExpr(e)
+
+    body match
+      case TExprBody(e) => checkExpr(e)
+      case TBlockBody(stmts) => stmts.foreach(checkStmt)
+
   /** Cache of resolved `#reads`/`#writes` effect sets, keyed by canonical (mangled)
    *  function name. Each entry is `(reads, writes)` where both are sets of *mangled*
    *  global-var names. Populated lazily by `resolveEffects` when validating bodies and
@@ -782,13 +948,13 @@ trait SyslAnalyzerContracts:
    *  through globalScope by the validator), so they're directly comparable at indirect
    *  call sites. */
   protected def funInfoEffects(fi: FunInfo): FuncEffects =
-    if fi.isPure then FuncEffects(isPure = true, isRealtime = fi.isRealtime)
+    if fi.isPure then FuncEffects(isPure = true, isRealtime = fi.isRealtime, isConst = fi.isConst)
     else if fi.reads.isDefined || fi.writes.isDefined then
       // Resolve through the cached effects table (handles mangling once, idempotent).
       resolveEffects(fi) match
-        case Some((r, w)) => FuncEffects(reads = Some(r), writes = Some(w), isRealtime = fi.isRealtime)
-        case None         => FuncEffects(isRealtime = fi.isRealtime)
-    else FuncEffects(isRealtime = fi.isRealtime)
+        case Some((r, w)) => FuncEffects(reads = Some(r), writes = Some(w), isRealtime = fi.isRealtime, isConst = fi.isConst)
+        case None         => FuncEffects(isRealtime = fi.isRealtime, isConst = fi.isConst)
+    else FuncEffects(isRealtime = fi.isRealtime, isConst = fi.isConst)
 
   /** Effect subtyping for `FuncType` compatibility. Returns true iff a function with
    *  effects `actual` can be safely placed in a slot expecting effects `slot`. The rule
@@ -800,24 +966,26 @@ trait SyslAnalyzerContracts:
    *  an unknown callable must allow anything, but a slot demanding a pure callable must
    *  receive a pure callable. Effects unknown is the most-permissive side.
    *
-   *  `#realtime` is checked as an orthogonal axis: if the slot demands realtime, the
-   *  actual must also be realtime. The pure / RW / unknown comparison then proceeds
-   *  on the remaining (non-realtime) axis exactly as before. */
+   *  `#realtime` and `#const` are each checked as an orthogonal axis: if the slot
+   *  demands either, the actual must carry the same bit. The pure / RW / unknown
+   *  comparison then proceeds on the remaining (axis-cleared) signature exactly
+   *  as before. */
   protected def effectsSatisfy(actual: FuncEffects, slot: FuncEffects): Boolean =
     if slot.isRealtime && !actual.isRealtime then false
+    else if slot.isConst && !actual.isConst then false
     else
-      val actualNonRT = actual.copy(isRealtime = false)
-      val slotNonRT = slot.copy(isRealtime = false)
-      if slotNonRT.isUnknown then true
-      else if actualNonRT.isPure then true
-      else if slotNonRT.isPure then false  // slot wants pure, actual is RW or unknown — reject
-      else if actualNonRT.isUnknown then false  // slot wants annotated, actual is unknown — reject
+      val actualBase = actual.copy(isRealtime = false, isConst = false)
+      val slotBase = slot.copy(isRealtime = false, isConst = false)
+      if slotBase.isUnknown then true
+      else if actualBase.isPure then true
+      else if slotBase.isPure then false  // slot wants pure, actual is RW or unknown — reject
+      else if actualBase.isUnknown then false  // slot wants annotated, actual is unknown — reject
       else
         // Both annotated RW. Check subset: actual's reads ⊆ slot's reads, actual's writes ⊆ slot's writes.
-        val aR = actualNonRT.reads.getOrElse(Set.empty)
-        val aW = actualNonRT.writes.getOrElse(Set.empty)
-        val sR = slotNonRT.reads.getOrElse(Set.empty)
-        val sW = slotNonRT.writes.getOrElse(Set.empty)
+        val aR = actualBase.reads.getOrElse(Set.empty)
+        val aW = actualBase.writes.getOrElse(Set.empty)
+        val sR = slotBase.reads.getOrElse(Set.empty)
+        val sW = slotBase.writes.getOrElse(Set.empty)
         aR.subsetOf(sR) && aW.subsetOf(sW)
 
   /** Least upper bound of two effect signatures under the effect lattice
@@ -831,10 +999,13 @@ trait SyslAnalyzerContracts:
    *  `checkArgs` immediately afterwards.)
    */
   protected def lubEffect(e1: FuncEffects, e2: FuncEffects): Option[FuncEffects] =
-    // Realtime is a "stricter" guarantee — the LUB carries it only when both inputs do.
+    // Realtime and const are each "stricter" guarantees — the LUB carries them only
+    // when both inputs do. Both axes are stripped before the pure/RW/unknown lattice
+    // is consulted, then reattached on the result.
     val lubRealtime = e1.isRealtime && e2.isRealtime
-    val a = e1.copy(isRealtime = false)
-    val b = e2.copy(isRealtime = false)
+    val lubConst = e1.isConst && e2.isConst
+    val a = e1.copy(isRealtime = false, isConst = false)
+    val b = e2.copy(isRealtime = false, isConst = false)
     val base: Option[FuncEffects] =
       if a == b then Some(a)
       else if a.isUnknown || b.isUnknown then Some(FuncEffects.Unknown)
@@ -848,7 +1019,7 @@ trait SyslAnalyzerContracts:
         if r1.subsetOf(r2) && w1.subsetOf(w2) then Some(b)
         else if r2.subsetOf(r1) && w2.subsetOf(w1) then Some(a)
         else None
-    base.map(_.copy(isRealtime = lubRealtime))
+    base.map(_.copy(isRealtime = lubRealtime, isConst = lubConst))
 
   /** Walk a function body to enforce ghost-code discipline:
    *  - Real code cannot read ghost variables or call ghost functions. "Real code" is

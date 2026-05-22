@@ -34,7 +34,7 @@ trait SyslAnalyzerImports:
                 val (reads, writes) = effects match
                   case e if e.isPure || e.isUnknown => (None, None)
                   case e => (e.reads, e.writes)
-                functions(sn) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes, isParameterless = isParameterless, isRealtime = effects.isRealtime)
+                functions(sn) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes, isParameterless = isParameterless, isRealtime = effects.isRealtime, isConst = effects.isConst)
                 if reads.isDefined || writes.isDefined then
                   resolvedEffectsCache(sym.name) = (reads.getOrElse(Set.empty), writes.getOrElse(Set.empty))
                 externalSymbols += sn
@@ -198,7 +198,7 @@ trait SyslAnalyzerImports:
               case e if e.isPure => (None, None)
               case e if e.isUnknown => (None, None)
               case e => (e.reads, e.writes)
-            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes, isParameterless = isParameterless, isRealtime = effects.isRealtime)
+            functions(localKey) = FunInfo(sym.name, paramPairs, returnType, isDef, isPure || effects.isPure, modes, reads, writes, isParameterless = isParameterless, isRealtime = effects.isRealtime, isConst = effects.isConst)
             // Pre-populate the resolved-effects cache so cross-module reads use the same
             // already-mangled names without trying to look them up in this unit's globalScope.
             if reads.isDefined || writes.isDefined then
@@ -657,9 +657,10 @@ trait SyslAnalyzerImports:
               val mangled = if shouldMangle(name) then mangleName(name) else name
               val isPure = attrs.exists(_.name == "pure")
               val isRealtime = attrs.exists(_.name == "realtime")
+              val isConst = attrs.exists(_.name == "const")
               functions(name) = FunInfo(
                 mangled, paramTypes, retType, isDef, isPure,
-                isParameterless = isParameterless, isRealtime = isRealtime,
+                isParameterless = isParameterless, isRealtime = isRealtime, isConst = isConst,
               )
               externalSymbols += name
               importedSiblingFreeFnStubKeys += name

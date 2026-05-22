@@ -6,7 +6,8 @@ case class IntRange(lo: Long, hi: Long, exclusiveHi: Boolean) extends TypeRange
 case class FloatRange(lo: Double, hi: Double, exclusiveHi: Boolean) extends TypeRange
 
 /** Effect signature carried by a `FuncType` / `FuncTypeAST`. The state space:
- *  - `isPure = false, reads = None, writes = None, isRealtime = false` → unannotated (default; effects unknown).
+ *  - `isPure = false, reads = None, writes = None, isRealtime = false, isConst = false` → unannotated
+ *    (default; effects unknown).
  *  - `isPure = true` → `#pure` callback (no module effects, plus the strict `#pure` discipline
  *    on allocation/IO/indirect calls when produced by a `#pure` decl). Reads/writes must be None.
  *  - `isPure = false, reads = Some(R), writes = Some(W)` → `#reads`/`#writes` callback.
@@ -15,11 +16,17 @@ case class FloatRange(lo: Double, hi: Double, exclusiveHi: Boolean) extends Type
  *    combination of `#pure` / `#reads` / `#writes` + `#realtime`. Realtime forbids `new`,
  *    growable-array push, closure construction, and calls to non-realtime callees; it allows
  *    pointer/field/index writes and side-effects that pure rejects.
+ *  - `isConst = true` → `#const` discipline (compile-time evaluable). Implies and forces
+ *    `isPure = true`. Forbids heap allocation, growable-array push, closure construction,
+ *    strings (`s"..."`, `f"..."`, `str(x)`), asm, and calls to non-`#const` callees. Allows
+ *    scalars, fixed-size arrays/structs, recursion, loops. The compile-time evaluator is the
+ *    JVM interpreter — it is the single source of truth across all backends so IEEE-754 float
+ *    results are bit-identical regardless of target.
  *
  *  Names in `reads`/`writes` are mangled module-level variable names — already resolved through
  *  `globalScope` at type-construction time, so cross-callsite comparison is direct set equality. */
-case class FuncEffects(isPure: Boolean = false, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isRealtime: Boolean = false):
-  def isUnknown: Boolean = !isPure && reads.isEmpty && writes.isEmpty && !isRealtime
+case class FuncEffects(isPure: Boolean = false, reads: Option[Set[String]] = None, writes: Option[Set[String]] = None, isRealtime: Boolean = false, isConst: Boolean = false):
+  def isUnknown: Boolean = !isPure && reads.isEmpty && writes.isEmpty && !isRealtime && !isConst
   def isAnnotated: Boolean = !isUnknown
 
 object FuncEffects:
@@ -27,6 +34,8 @@ object FuncEffects:
   val Pure: FuncEffects = FuncEffects(isPure = true)
   val Realtime: FuncEffects = FuncEffects(isRealtime = true)
   val PureRealtime: FuncEffects = FuncEffects(isPure = true, isRealtime = true)
+  // `#const` implies `#pure`, so the canonical Const constant carries both bits.
+  val Const: FuncEffects = FuncEffects(isPure = true, isConst = true)
   def rw(reads: Set[String], writes: Set[String]): FuncEffects = FuncEffects(reads = Some(reads), writes = Some(writes))
 
 enum SyslType:
@@ -181,13 +190,18 @@ enum SyslType:
     case FuncType(params, ret, esc, eff) =>
       val esca = if esc then "@escaping " else ""
       val rtS = if eff.isRealtime then " #realtime" else ""
-      val effS = if eff.isPure then " #pure"
+      val ctS = if eff.isConst then " #const" else ""
+      // A `#const` function is implicitly `#pure`, so suppress the redundant ` #pure` suffix
+      // when both bits are set — the surface form should print as just `#const`.
+      val effS =
+        if eff.isConst then ""
+        else if eff.isPure then " #pure"
         else (eff.reads, eff.writes) match
           case (Some(r), Some(w)) => s" #reads(${r.toList.sorted.mkString(", ")}) #writes(${w.toList.sorted.mkString(", ")})"
           case (Some(r), None)    => s" #reads(${r.toList.sorted.mkString(", ")})"
           case (None, Some(w))    => s" #writes(${w.toList.sorted.mkString(", ")})"
           case _                  => ""
-      s"$esca(${params.mkString(", ")}) -> $ret$effS$rtS"
+      s"$esca(${params.mkString(", ")}) -> $ret$effS$rtS$ctS"
     case StructType(name, _, _) => name
     case StringType => "string"
     case SliceType(t) => s"[]$t"
@@ -215,14 +229,15 @@ enum SyslType:
     case InterfaceType(name, methods) =>
       val ms = methods.map { (mn, params, ret, eff) =>
         val rtPrefix = if eff.isRealtime then "RT " else ""
+        val ctPrefix = if eff.isConst then "CT " else ""
         val effStr =
-          if eff.isPure then s" EFF ${rtPrefix}P"
-          else if eff.isUnknown then s" EFF ${rtPrefix}U"
-          else if !eff.isRealtime && eff.reads.isEmpty && eff.writes.isEmpty then s" EFF U"
+          if eff.isPure then s" EFF ${rtPrefix}${ctPrefix}P"
+          else if eff.isUnknown then s" EFF ${rtPrefix}${ctPrefix}U"
+          else if !eff.isRealtime && !eff.isConst && eff.reads.isEmpty && eff.writes.isEmpty then s" EFF U"
           else
             val r = eff.reads.getOrElse(Set.empty).toList.sorted
             val w = eff.writes.getOrElse(Set.empty).toList.sorted
-            s" EFF ${rtPrefix}RW ${r.size}${if r.nonEmpty then " " + r.mkString(" ") else ""} ${w.size}${if w.nonEmpty then " " + w.mkString(" ") else ""}"
+            s" EFF ${rtPrefix}${ctPrefix}RW ${r.size}${if r.nonEmpty then " " + r.mkString(" ") else ""} ${w.size}${if w.nonEmpty then " " + w.mkString(" ") else ""}"
         s"$mn ${params.size} ${params.map(_.toPrefix).mkString(" ")}${if params.nonEmpty then " " else ""}${ret.toPrefix}$effStr"
       }.mkString(" ")
       s"iface $name ${methods.size} $ms"
@@ -361,25 +376,27 @@ object SyslType:
           val nparams = tokens.next().toInt
           val params = (1 to nparams).map(_ => parseType(tokens)).toList
           val ret = parseType(tokens)
-          // Read mandatory `EFF [RT] <encoding>` after each method's signature. Encoding mirrors
-          // the FuncEffects encoding used in the FUNC EFFECTS trailer. An optional `RT` token
-          // immediately after `EFF` marks the method as `#realtime`; it composes orthogonally
-          // with U / P / RW.
+          // Read mandatory `EFF [RT] [CT] <encoding>` after each method's signature. Encoding
+          // mirrors the FuncEffects encoding used in the FUNC EFFECTS trailer. Optional `RT`
+          // and `CT` tokens (in that order) mark the method as `#realtime` and `#const`
+          // respectively; they compose orthogonally with U / P / RW.
           val effMarker = tokens.next()
           if effMarker != "EFF" then
             throw IllegalArgumentException(s"expected EFF after iface method '$mname', got '$effMarker'")
           val firstTok = tokens.next()
-          val (isRealtime, kindTok) =
+          val (isRealtime, afterRT) =
             if firstTok == "RT" then (true, tokens.next()) else (false, firstTok)
+          val (isConst, kindTok) =
+            if afterRT == "CT" then (true, tokens.next()) else (false, afterRT)
           val eff = kindTok match
-            case "U" => FuncEffects(isRealtime = isRealtime)
-            case "P" => FuncEffects(isPure = true, isRealtime = isRealtime)
+            case "U" => FuncEffects(isRealtime = isRealtime, isConst = isConst)
+            case "P" => FuncEffects(isPure = true, isRealtime = isRealtime, isConst = isConst)
             case "RW" =>
               val nR = tokens.next().toInt
               val r = (1 to nR).map(_ => tokens.next()).toSet
               val nW = tokens.next().toInt
               val w = (1 to nW).map(_ => tokens.next()).toSet
-              FuncEffects(reads = Some(r), writes = Some(w), isRealtime = isRealtime)
+              FuncEffects(reads = Some(r), writes = Some(w), isRealtime = isRealtime, isConst = isConst)
             case other => throw IllegalArgumentException(s"unknown iface method effects token '$other'")
           (mname, params, ret, eff)
         }.toList

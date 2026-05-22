@@ -4010,6 +4010,73 @@ At a call / boxing / argument-passing site, `effectsSatisfy` checks the realtime
 
 **Why local `&T` is forbidden.** A new `&T` local bumps the refcount on the way in and decrements it on scope exit. The decrement-to-zero path runs the type's `deinit` block and calls `free` — both unbounded work from the realtime perspective. The conservative v1 rule keeps `&T` locals out of realtime function bodies. Users who need a transient reference inside a realtime function should pass the data as a parameter, use a value (`T`) or raw pointer (`*T`) instead, or factor the lifetime out into a non-realtime caller.
 
+### `#const` — compile-time evaluable functions
+
+A function marked `#const` is checked by the compiler to be evaluable at compile time by the JVM-side interpreter. The motivating use cases are precomputed lookup tables (sine tables, CRC tables, hash seeds, Unicode classification tables) and kernel jump tables — anything that today gets initialized at program startup and could just as well be embedded as a literal in the binary.
+
+```
+#const
+build_sine_lut(size: int) -> [256]i32
+    var table: [256]i32
+    var i = 0
+    while i < 256 do
+        table[i] = isin_q31(i, size)
+        i = i + 1
+    return table
+```
+
+**What a `#const` function may do:**
+- Mutate locals; loop with bounded counters; recurse with bounded depth
+- Construct fixed-size structs and stack-allocated arrays by value
+- Write through pointer parameters, struct fields, and array indices (the interpreter models these as plain compile-time mutations — there is no observer outside the function)
+- Call assert (termination-only)
+- Call other `#const` functions, including via a `#const` function pointer or `#const`-declared interface method
+
+**What a `#const` function may NOT do:**
+- Heap-allocate (`new T`, `new [n]T`) — the const evaluator has no compile-time heap in v1
+- Append to a slice (may grow / allocate)
+- Construct closures (allocate environments)
+- Build a heap-allocated string — `str(x)`, `s"…"`, and `f"…"` are all rejected
+- Embed `asm("…")` — opaque to the interpreter
+- Declare or assign a local `&T` variable — refcount semantics are not modeled at compile time
+- Call any function whose effect signature is not `#const`, directly or via a function pointer
+- Dispatch through an interface method whose declared signature is not `#const`
+- Combine `#const` with `#reads(...)` or `#writes(...)` — a const fn cannot read or write module state
+
+**Orthogonal axis.** `#const` composes freely with `#pure` and `#realtime`. The three describe different disciplines:
+
+- `#pure` blocks all observable side effects (including pointer/field/index writes) — proof-friendly abstraction.
+- `#realtime` blocks heap allocation, blocking, and closures but allows pointer/field/index writes — hard-latency code.
+- `#const` blocks the same things as `#realtime` (allocation, closures, asm, non-const callees) but additionally must be executable by the compile-time interpreter.
+
+A `#pure #const` function is the strictest discipline available; a bare `#const` function is one step looser (allows pointer/field/array writes inside the function, which the interpreter can model). `#const` does *not* automatically imply `#pure` — they are checked independently, and either or both can apply.
+
+```
+#pure
+#const
+clamp(x: i32, lo: i32, hi: i32) -> i32
+    if x < lo then return lo
+    if x > hi then return hi
+    return x
+```
+
+**Cross-module propagation.** Like `#pure` and `#realtime`, the `#const` bit travels through `.smeta`. A const function in one module can call a const function in another. Imported functions without `#const` are not const-evaluable; annotate the leaves of your compile-time call graph first, then work upward.
+
+**Function-pointer and interface slots.** The `#const` suffix is accepted on function types and interface methods exactly like `#pure` and `#realtime`:
+
+```
+apply(f: (i32) -> i32 #const, x: i32) -> i32 = f(x)
+
+interface Constant
+    eval(x: i32) -> i32 #const
+```
+
+At a call / boxing / argument-passing site, `effectsSatisfy` checks the const bit as an additional gate (parallel to the realtime gate) before the pure/RW comparison: a slot that demands const requires the actual to be const; otherwise the const check passes through and the rest of the lattice decides.
+
+**Why local `&T` is forbidden.** Same reasoning as in `#realtime`: a `&T` local's drop on scope exit can reach `__sysl_drop_ref → free`, which is not const-evaluable. Users who need transient references inside a const function should pass data as parameters by value or by raw pointer.
+
+**What ships in v1 vs. what comes later.** The v1 surface here is the *annotation discipline* — `#const` parses, validates, round-trips through `.smeta`, and composes orthogonally with the other effect axes. The compile-time evaluation *driver* — finding `const NAME: T = expr` bindings whose RHS calls `#const` functions, invoking the interpreter against the typed AST with empty environment, and embedding the materialized literal in the IR — is a separate pass to land alongside non-integer `const` bindings. Today, `const` bindings remain restricted to scalar-integer compile-time-foldable expressions (the existing pre-`#const` scaffolding); `#const fn` calls are not yet evaluated at compile time.
+
 ### `#ghost` — verification-only declarations
 
 A `#ghost` annotation marks a declaration as visible to the verifier but invisible at runtime. Ghost code lets contracts and proofs talk about state that doesn't exist in the executable — snapshots, counters, abstract collection state, "is this slice a permutation of the input" predicates — without paying any runtime cost. Four places `#ghost` may appear:

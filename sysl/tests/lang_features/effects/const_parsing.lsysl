@@ -1,0 +1,125 @@
+`#const` — Parsing and Round-Trip
+==================================
+
+`#const` marks a function as evaluable at compile time. The full
+discipline (no heap allocation, no closures, no string allocation, no
+asm, no calls to non-`#const` callees, no module-level state) is
+checked in a separate analyzer pass; this file pins the *runtime
+neutrality* of the annotation:
+
+- A `#const` function compiles and runs identically to an unmarked
+  function with the same body.
+- `#const` parses on free functions, interface methods, and function
+  types.
+- `#const` is orthogonal to `#pure`, `#realtime`, `#reads`, and
+  `#writes` on the lattice (the analyzer's incompatibility checks
+  reject the meaningless combinations — `#const #reads(g)` etc. —
+  before this file's tests run).
+
+File-local prefix `Ct`.
+
+    module sysl.tests.lang_features
+
+
+### `#const` zero-arg function
+
+A `#const` function with no body-side effects runs as normal.
+
+    #const
+    ct_answer() -> int = 42
+
+    #test
+    test_ct_returns_constant() -> unit
+        assert(ct_answer() == 42, "ct_answer should return 42")
+
+
+### `#const` combined with `#pure`
+
+A function may carry both `#pure` and `#const`. The two describe
+different disciplines (`#pure` blocks pointer/field/index writes;
+`#const` allows them but blocks heap allocation and non-const callees),
+so the analyzer enforces both in turn.
+
+    #pure
+    #const
+    ct_square(x: int) -> int = x * x
+
+    #test
+    test_ct_pure_combo() -> unit
+        assert(ct_square(7) == 49, "7² = 49")
+        assert(ct_square(-3) == 9, "(-3)² = 9")
+
+
+### `#const` on a function type
+
+The `#const` suffix on a function type participates in the same
+mechanism as `#pure` and `#realtime` — at indirect call sites, the
+slot's effect signature is matched against the actual.
+
+    #const
+    ct_apply(f: (int)->int #const, x: int) -> int = f(x)
+
+    #const
+    ct_double(x: int) -> int = x + x
+
+    #test
+    test_ct_func_type_indirect() -> unit
+        assert(ct_apply(ct_double, 21) == 42, "ct_apply(ct_double, 21)")
+
+
+### `#const` may mutate locals and loop
+
+Local mutation and bounded loops are const-evaluable — the compile-time
+interpreter can run them. The runtime answer matches the unmarked
+shape.
+
+    #const
+    ct_sum_to(n: int) -> int
+        var acc = 0
+        var i = 1
+        while i <= n do
+            acc = acc + i
+            i = i + 1
+        return acc
+
+    #test
+    test_ct_sum_to() -> unit
+        assert(ct_sum_to(10) == 55, "1+2+...+10 == 55")
+
+
+### `#const` may write through a pointer parameter
+
+Pointer/field/index writes to const-evaluable storage (stack-allocated
+locals, struct fields, array elements) are allowed. The interpreter
+models them as normal mutations at compile time.
+
+    #const
+    ct_write_one(p: *int) -> unit
+        *p = 99
+
+    #test
+    test_ct_pointer_write() -> unit
+        var x = 0
+        ct_write_one(&x)
+        assert(x == 99, "*p = 99 should land")
+
+
+### `#const` may build a fixed-size stack array
+
+Fixed-size stack arrays plus loops cover the headline use case (lookup
+tables built at compile time). The body runs at runtime today; the
+const-eval driver that materializes the array as an embedded literal
+at compile time is a separate, future pass.
+
+    #const
+    ct_sum_squares(n: int) -> int
+        var acc = 0
+        var i = 0
+        while i < n do
+            acc = acc + i * i
+            i = i + 1
+        return acc
+
+    #test
+    test_ct_sum_squares() -> unit
+        assert(ct_sum_squares(5) == 30, "0+1+4+9+16 == 30")
