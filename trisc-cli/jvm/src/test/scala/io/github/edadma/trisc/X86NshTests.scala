@@ -481,6 +481,22 @@ class X86NshTests extends AnyFreeSpec with Matchers with BeforeAndAfterEach {
     output should not include "mclone: child_ran=0"
   }
 
+  "musl: pthread_create + pthread_join end-to-end" in {
+    // Mirror of the aarch64 mpb test — see slix/test/pthread_basic.c.
+    // 4 workers via real musl pthread_create, each writes 0x1000+idx
+    // into a shared slot + its own __thread mirror. Main pthread_joins
+    // all four; the joins only return once each child fires the
+    // CLONE_CHILD_CLEARTID futex-wake in terminate_current.
+    qemu.send("mpb\n")
+    val output = qemu.waitFor("mpb: done")
+    output should include("mpb: slots=16390")
+    output should include("mpb: rets=16390")
+    output should include("mpb: main_local=0")
+    output should include("mpb: done")
+    output should not include "mpb: create failed"
+    output should not include "mpb: join failed"
+  }
+
   "net: inbound ICMP Port Unreachable surfaces as -ECONNREFUSED" in {
     // test_icmperr binds a UDP socket to 127.0.0.1:7801, asks
     // inet to inject a synthetic ICMP type-3 / code-3 frame whose

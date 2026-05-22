@@ -39,7 +39,7 @@ Pass criterion: prints `cow: ok`.
     import oskit.ulib.{puts, exit, exit_with, syscall6}
 
 
-    val SYS_MMAP                 = 222
+    val SYS_MMAP                 = 232
     val SYS_COW_REFCNT_SELFTEST  = 89
     val SYS_COW_SHARE_SELF       = 90
 

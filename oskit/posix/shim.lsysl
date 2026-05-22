@@ -930,21 +930,20 @@ Returns 0 on success, negative errno on failure.
             // flags arg in a4 instead of a3. We map to the same
             // helper (slix doesn't honor AT_SYMLINK_NOFOLLOW yet).
             return sys_faccessat(int(a0), a1, int(a2), int(a3))
-        if num == 215
+        if num == 249
             // munmap(addr, len)
             return sys_munmap(a0, a1)
-        if num == 216
+        if num == 241
             // mremap(old_addr, old_len, new_len, flags, new_addr) —
-            // chunk 4 doesn't move/grow mappings. Returning -ENOMEM
-            // makes musl's realloc-via-mremap path fall back to
-            // mmap+memcpy+munmap, which works under our shim.
+            // slix's anonymous VMA layer doesn't move/grow mappings.
+            // Returning -ENOMEM makes musl's realloc-via-mremap path
+            // fall back to mmap+memcpy+munmap, which works.
             return i64(-ENOMEM)
-        if num == 222
-            // mmap(addr, len, prot, flags, fd, offset). Linux ARM64
-            // generic ABI passes 6 args; the 7-th args slot is
-            // ignored.
+        if num == 232
+            // mmap(addr, len, prot, flags, fd, offset). The slix
+            // syscall ABI passes 6 args; the 7-th slot is ignored.
             return sys_mmap(a0, a1, int(a2), int(a3), int(a4), a5)
-        if num == 226
+        if num == 234
             // mprotect(addr, len, prot)
             return sys_mprotect(a0, a1, int(a2))
         if num == 223

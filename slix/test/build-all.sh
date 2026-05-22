@@ -72,6 +72,7 @@ DYN_TESTS=(
     "ppoll_mask.c mppm"
     "futex_basic.c mfx"
     "tls_basic.c mtls"
+    "pthread_basic.c mpb"
 )
 
 case "$ARCH_ARG" in

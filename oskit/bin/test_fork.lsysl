@@ -33,7 +33,7 @@ the step number so a regression is greppable.
 
 
     val SYS_FORK = 91
-    val SYS_MMAP = 222
+    val SYS_MMAP = 232
 
     val PROT_READ  = 1
     val PROT_WRITE = 2

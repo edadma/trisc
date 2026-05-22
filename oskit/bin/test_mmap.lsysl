@@ -41,9 +41,9 @@ Pass criterion: prints `mmap: ok`.
     import oskit.ulib.{puts, exit, exit_with, syscall6}
 
 
-    val SYS_MMAP     = 222
-    val SYS_MUNMAP   = 215
-    val SYS_MPROTECT = 226
+    val SYS_MMAP     = 232
+    val SYS_MUNMAP   = 249
+    val SYS_MPROTECT = 234
 
     val PROT_READ  = 1
     val PROT_WRITE = 2

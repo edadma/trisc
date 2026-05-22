@@ -1693,6 +1693,27 @@ enqueueing them back into their priority run queue.
 
         threads[current_thread].state = STATE_TERMINATED
 
+        // CLONE_CHILD_CLEARTID: clear *ctid in the dying thread's
+        // address space and FUTEX_WAKE one waiter. musl's
+        // pthread_join is parked in FUTEX_WAIT on the child's tid
+        // value; when it reads 0 it returns. Resolving the user VA
+        // to a PA gives the futex bucket key. Skip the wake if the
+        // VA happens to be unmapped (a partially-faulted user page
+        // during teardown).
+        if threads[current_thread].clear_child_tid != i64(0)
+            val ctid_va = threads[current_thread].clear_child_tid
+            val ctid_ptbr = threads[current_thread].ptbr
+            val ctid_pa = vm_v2p(ctid_ptbr, u64(ctid_va))
+            if ctid_pa != u64(0)
+                var zero_buf: [4]byte
+                zero_buf[0] = byte(0)
+                zero_buf[1] = byte(0)
+                zero_buf[2] = byte(0)
+                zero_buf[3] = byte(0)
+                kernel_vm_copy_to(ctid_ptbr, u64(ctid_va), &zero_buf[0], 4)
+                kernel_futex_wake(ctid_pa, 1, u32(0xFFFFFFFF))
+            threads[current_thread].clear_child_tid = i64(0)
+
         if others_alive == 0
             if pid > 0
                 processes[pid].exit_code = exit_code
