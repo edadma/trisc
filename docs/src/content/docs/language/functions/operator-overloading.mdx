@@ -1,0 +1,215 @@
+---
+title: Operator Overloading
+description: Operators desugar to trait methods. Built-in operators via Add/Sub/Mul/Div/Ord/Eq, plus user-defined operator symbols via #operator.
+---
+
+Operators on user-defined struct and enum types desugar to trait method calls. The compiler maps each operator to a fixed `(trait, method)` pair and dispatches through the impl registered for the operand type.
+
+## Built-in operator map
+
+| Operator | Trait | Method | Signature |
+|---|---|---|---|
+| `<` `<=` `>` `>=` | `Ord` | `lt` `le` `gt` `ge` | `(T, T) -> bool` |
+| `==` `!=` | `Eq` | `eq` `ne` | `(T, T) -> bool` |
+| `+` | `Add` | `add` | `(T, T) -> T` |
+| `-` | `Sub` | `sub` | `(T, T) -> T` |
+| `*` | `Mul` | `mul` | `(T, T) -> T` |
+| `/` | `Div` | `div` | `(T, T) -> T` |
+
+```sysl
+struct Vec2
+    x: int
+    y: int
+
+trait Add[T]
+    add(a: T, b: T) -> T
+
+impl Add[Vec2]
+    add(a: Vec2, b: Vec2) -> Vec2 = Vec2(a.x + b.x, a.y + b.y)
+
+main() -> int
+    a = Vec2(1, 2)
+    b = Vec2(10, 20)
+    c = a + b                  // desugars to Add.add(a, b)
+    c.x * 100 + c.y
+```
+
+## Dispatch rules
+
+Built-in numeric operators are unaffected — `3 + 4` on `int` still uses the native instruction. Dispatch through a trait applies whenever **at least one** operand is a user-defined named type (struct, enum, or nominal type alias) and a matching `impl` exists.
+
+When neither operand is user-defined, the operator falls through to the built-in operator table. Built-in scalar types are **not** overloadable through this mechanism.
+
+## Mixed-operand impls
+
+Mixed-operand impls let primitives appear on either side:
+
+```sysl
+struct Vec3
+    x: int
+    y: int
+    z: int
+
+trait Mul[A, B, R]
+    mul(a: A, b: B) -> R
+
+impl Mul[int, Vec3, Vec3]
+    mul(s: int, v: Vec3) -> Vec3 = Vec3(s * v.x, s * v.y, s * v.z)
+```
+
+`3 * Vec3(1, 2, 4)` dispatches via `Mul[int, Vec3, Vec3]`. The reverse (`Vec3(...) * 3`) needs its own `impl Mul[Vec3, int, Vec3]` — there is no implicit symmetry. Dispatch is by operand types, not LHS-only.
+
+Operator sugar composes with generic functions. Inside `max[T](a: T, b: T)`, writing `a > b` works for any `T` that has an `Ord` impl, checked at instantiation time.
+
+## User-defined operator symbols
+
+Beyond the fixed built-in operators, users can introduce new binary operator symbols by attaching `#operator("sym")` to a trait method. The lexer is greedy over the operator characters:
+
+```
++  -  *  /  %  <  >  =  !  &  |  ^  ~
+```
+
+Any sequence of these characters lexes as one operator token, including new symbols like `<>`, `>>>`, `|>`, `<*>`, or `~~`. The parser slots each user operator into the precedence ladder by its **first character** (Scala-style):
+
+| First char | Level | Examples |
+|---|---|---|
+| `*` `/` `%` | multiplicative | `<*` `*>` `/?` |
+| `+` `-` | additive | `+++` `<+>` |
+| `<` `>` `=` `!` | comparison | `<>` `<=>` `>>>` `===` `!==` |
+| `&` | bitwise-and | `&&&` (user) |
+| `^` `~` | bitwise-xor | `~~` `^^` |
+| `\|` | bitwise-or | `\|>` `<\|` |
+
+**Reserved sigils** (not redefinable): `( ) [ ] { } , ; : :: . .. ..< -> => ? # // /* */` plus assignment / compound-assignment (`=`, `+=`, `-=`, ..., `<<=`, `>>=`), the built-in arithmetic / comparison / shift operators, the logical `&&` `||`, and `++` `--`.
+
+### Defining a new operator
+
+```sysl
+struct Set
+    bits: int
+
+trait Union[T]
+    #operator("<>")
+    union(a: T, b: T) -> T
+
+impl Union[Set]
+    union(a: Set, b: Set) -> Set = Set(a.bits | b.bits)
+
+main() -> int
+    a = Set(3)
+    b = Set(12)
+    c = a <> b               // desugars to Union.union(a, b)
+    c.bits                   // 15
+```
+
+The dispatch rules are the same as for built-in operators: an operator binds when at least one operand is a user-defined named type and an `impl` of the trait carrying the `#operator` annotation matches.
+
+### Parser-combinator example
+
+User operators make combinator-style sugar work directly:
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+trait Concat[A, B, R]
+    #operator("~")
+    concat(a: A, b: B) -> R
+
+impl[A, B] Concat[Parser[A], Parser[B], Parser[(A, B)]]
+    concat(a: Parser[A], b: Parser[B]) -> Parser[(A, B)] = seq(a, b)
+
+impl[A] Concat[string, Parser[A], Parser[(string, A)]]
+    concat(a: string, b: Parser[A]) -> Parser[(string, A)] = seq(literal(a), b)
+```
+
+`"foo" ~ ident` dispatches via the second impl even though the LHS is a primitive `string`.
+
+## User-defined prefix operators
+
+A trait method that takes **one** parameter (rather than two) and is annotated with `#operator("sym")` registers `sym` as a **prefix** operator. The same `#operator(...)` attribute is used for both forms; the trait method's arity decides which slot the symbol fills:
+
+- **2 params → infix** (binary operator).
+- **1 param → prefix** (unary operator, applied to the operand on its right).
+
+```sysl
+struct N
+    v: int
+
+trait Boost[T]
+    #operator("<>")
+    boost(a: T) -> T
+
+impl Boost[N]
+    boost(a: N) -> N = N(a.v * 2 + 1)
+
+main() -> int
+    var x = N(7)
+    var r = <>x              // desugars to Boost.boost(x)
+    r.v                      // 15
+```
+
+Chaining requires whitespace (or parentheses) between successive prefix tokens — `<><><>x` lexes as the single operator `<><><>`, but `<> <> <> x` lexes as three separate `<>` tokens, applied right-associatively.
+
+The same symbol may be registered both as a prefix and as an infix operator if it lives on two distinct traits — arity routes the registration into separate dispatch tables.
+
+### Built-in prefix sigils
+
+The five sigils `-`, `!`, `~`, `*`, `&` keep their fixed built-in semantics on their natural operand types:
+
+| Sigil | Built-in domain | Built-in meaning |
+|-------|------------------|------------------|
+| `-` | numeric (int / uint / float) | arithmetic negation |
+| `!` | `bool` | logical negation |
+| `~` | integral (int / uint) | bitwise complement |
+| `*` | pointer / ref | dereference |
+| `&` | built-in scalars + ptr | address-of |
+
+For *other* operand types the analyzer falls through to a user `#operator(<sigil>)` impl when one is registered. This is what makes PEG-style libraries express `&p` / `!p` lookahead naturally:
+
+```sysl
+type Parser[A] = new int
+
+trait Peek[A, R]
+    #operator("&")
+    peek(a: A) -> R
+
+impl[A] Peek[Parser[A], Parser[A]]
+    peek(a: Parser[A]) -> Parser[A] = a   // positive lookahead
+
+trait Not[A, R]
+    #operator("!")
+    notp(a: A) -> R
+
+impl[A] Not[Parser[A], Parser[unit]]
+    notp(a: Parser[A]) -> Parser[unit] = ...  // negative lookahead
+```
+
+`&p` for `p: Parser[int]` dispatches to `Peek.peek(p)` and returns a `Parser[int]`; `&i` for `i: int` still produces `*int` (built-in address-of).
+
+`++` and `--` remain reserved (statement-shaped lvalue mutation).
+
+## Diagnostics
+
+Two operator failure modes get specific diagnostics:
+
+- **Unbound operator.** `a <~> b` where `<~>` isn't bound anywhere produces `operator '<~>' is not bound; declare it via #operator("<~>") on a trait method`.
+- **Bound but no impl matches.** `1 |> 2` when `|>` is bound to `Pipe[T]` but neither operand is user-defined produces `operator '|>' is bound to trait 'Pipe', but no impl matches operand types (int, int) — operands must be a struct, enum, or nominal alias that impls 'Pipe'`. When one operand is user-defined but no matching impl exists (e.g. `1 ~ Box(2)` with only `impl Concat[Box, Box, _]` defined), you get `no impl of 'Concat' for operator '~' on int, Box`.
+
+For prefix operators:
+
+- An impl that would steal a built-in's natural domain — e.g. `impl Neg[bool]` with `#operator("!")` — is rejected at registration: *impl of 'Neg' for bool conflicts with built-in prefix '!' on its natural type; pick a different operand type*.
+- An unbound prefix-shaped expression like `<>x` produces `unknown prefix operator '<>' on T; bind it via #operator("<>") on a single-param trait method`.
+
+## Nominal aliases
+
+Nominal aliases preserve their outer type through operator dispatch — the unifier matches an operand whose static type is `Parser[i32]` against a generic impl `impl[X, Y] Concat[Parser[X], Parser[Y], R]`, even though `Parser[A]` desugars to `new (Input) -> ParseResult[A]`. The nominal name gates the dispatch; the underlying function type is only consulted when the alias is *called*.
+
+Combined with the "either operand is user-defined" rule, `success(1) ~ success(2)` (both nominal) and `"x" ~ ident` (mixed primitive + nominal) both work.
+
+Nominal aliases of numeric types stay arithmetically usable: `Meters + Meters` (where `type Meters = new int`) does plain int arithmetic and re-wraps the result, even with no `impl Add[Meters]`. If you *do* register an impl, dispatch fires through it instead.
+
+## See also
+
+- [Traits & Impls](/language/functions/traits-and-impls) — the underlying mechanism.
+- [Interfaces](/language/functions/interfaces) — runtime dispatch instead of compile-time.
+- [Generics](/language/functions/generics) — generic operator impls.

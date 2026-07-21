@@ -1,0 +1,96 @@
+---
+title: Why Literate Source Files
+description: "`.lsysl` isn't just a docs feature — it's how the standard library is written, and it's a teaching tool."
+---
+
+Sysl supports two source-file formats:
+
+- **`.sysl`** — plain Sysl source. Familiar to anyone who's used a curly-brace or indentation language.
+- **`.lsysl`** — Markdown documents where indented blocks are extracted as Sysl code; column-0 prose is ignored by the compiler but rendered by `sysl doc`.
+
+Most Sysl code in this repo (the standard library, the kernel, the bulk of SLIX) is written in `.lsysl`. This page explains why we picked literate programming as a first-class format.
+
+## The argument from teaching
+
+Sysl was designed alongside SLIX, an OS for teaching systems. Two things students need that conventional source files don't easily give:
+
+- **Why explanations.** Code shows you *what*. Comments show you *what next to a specific line*. Neither explains *why this function exists*, *what invariant the caller relies on*, *why this implementation strategy and not another*. Prose between functions does.
+- **Mixed media.** Sometimes the right explanation involves a table, a diagram, a math equation, a snippet of another language for contrast. Markdown supports all of these; `//` comments can't.
+
+A `.lsysl` file can be 5 lines of prose explaining the algorithm, then the implementation, then a table of edge cases. That's a unit of teachable content. A `.sysl` file with `// comments` can't reach that shape.
+
+## The argument from maintainability
+
+Long-form documentation that lives in a separate `docs/` directory rots. Source comments age slowly but reliably. Literate sources sit between: the prose is *in the file*, right next to the code that justifies it. When the code changes, the prose is right there to update.
+
+In the standard library, we've watched this play out for ~50 modules. The literate source's documentation stays in sync with its implementation far better than separate Markdown files do — because writing the prose is part of writing the code, not a separate task.
+
+## Why Markdown specifically
+
+Several literate formats exist. We picked CommonMark Markdown because:
+
+- **Familiar.** Everyone who reads READMEs already knows Markdown. The learning curve is zero.
+- **Tooling.** Every text editor renders it. Every doc-generator consumes it. GitHub shows literate-source diffs sensibly.
+- **Code blocks are unambiguous.** Indented blocks are code; fenced blocks (` ``` `) are documentation-only examples. The distinction is built into the format.
+- **Math support.** KaTeX-via-Markdown gives us inline `$x^2$` and display `$$equation$$` for the (occasional) algorithmic math that needs to render. The kernel's MMU page tables benefit from this.
+
+We considered:
+
+- **Org-mode** — too tied to Emacs; smaller ecosystem.
+- **AsciiDoc** — capable, but the toolchain is heavier and the learning curve is steeper.
+- **Custom DSL** — building yet another format for a project that already has many.
+
+Markdown wins on ecosystem.
+
+## Why indented blocks, not fenced blocks, for the code
+
+The convention: column-0 lines are prose, 4+ spaces or 1+ tabs are code. Fenced (` ``` `) blocks are doc-only.
+
+This is the inverse of what some literate formats use (where ` ``` `-fenced blocks contain the executable code). We went the other way because:
+
+- **Indented code is unobtrusive in raw form.** A `.lsysl` file is readable as text without any rendering — the prose flows at column 0, the code is visibly offset.
+- **Fenced blocks are still useful for example code in another language.** ` ```python` for a Python comparison, ` ```c` for a C version of the algorithm. These shouldn't be extracted as Sysl.
+- **Indented code matches the rest of Sysl's syntax.** Sysl already uses indentation for blocks; literate code blocks being indented is consistent.
+
+The downside is that copy-paste from external sources (e.g., a code sample from a paper) requires re-indentation. We accepted that cost.
+
+## What `.lsysl` adds to the toolchain
+
+Two extra capabilities:
+
+- **`sysl doc <file.lsysl>`** renders one file to standalone HTML.
+- **`sysl doc <dir>`** renders every `.lsysl` in a directory plus an index.
+
+The HTML output is self-contained — CSS inlined, no external dependencies. Drop it into a static site, GitHub Pages, anywhere.
+
+The rendered output is what makes literate worth doing as a first-class feature. Without it, you'd have prose-next-to-code that no one ever reads except the people editing the file. With it, the prose is publishable.
+
+## When `.sysl` is the right choice
+
+Plain `.sysl` files are still valid and sometimes better:
+
+- **Auto-generated code.** Generators don't need prose.
+- **Trivial helpers** (3-line modules that need no explanation).
+- **Tests** that consist entirely of `#test` functions.
+
+The standard library uses `.lsysl` because every module has something to explain. Application code can be `.sysl` if the code self-explains.
+
+## What we gave up
+
+A real cost of literate-as-first-class:
+
+- **Stricter file-content discipline.** A `.lsysl` file with mismatched indentation is harder to debug than a `.sysl` file — the compiler sees the wrong code, and the literate-extractor's interpretation might disagree with what the human reads.
+- **Tooling investment.** Every editor needs `.lsysl` mode for syntax highlighting. We ship configurations for VS Code and IntelliJ but anyone else has to roll their own.
+- **Build pipelines** need to know `.lsysl` is a source file, not just docs.
+
+These costs are real. We pay them because the maintainability and teachability wins are bigger.
+
+## The bottom line
+
+`.lsysl` exists because we want documentation to live next to code that justifies it. We've watched this work for ~50 modules in the standard library, and we ship it as a first-class language feature because picking it after the fact would require migrating everything. Other projects don't need literate sources; ours does.
+
+## See also
+
+- [Literate Sysl](/language/literate-sysl) — format reference.
+- The `std/` source tree — ~50 examples of well-written literate modules.
+- `sysl doc` — the rendering command.

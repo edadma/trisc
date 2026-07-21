@@ -1,0 +1,100 @@
+---
+title: Define a Generic Container
+description: "Build a `Stack[T]` with push, pop, and len methods."
+---
+
+A simple generic container — a stack with `push`, `pop`, and `len`:
+
+```sysl
+struct Stack[T]
+    data: []T
+
+Stack[T].push(v: T)
+    self.data = append(self.data, v)
+
+Stack[T].pop() -> Option[T]
+    if len(self.data) == 0 then
+        None
+    else
+        val v = self.data[len(self.data) - 1]
+        self.data = self.data[:len(self.data) - 1]
+        Some(v)
+
+Stack[T].len() -> int = len(self.data)
+
+main() -> int
+    var s: Stack[int] = Stack([])
+    s.push(1)
+    s.push(2)
+    s.push(3)
+    s.pop() match
+        Some(v) -> v          // 3
+        None -> -1
+```
+
+## What's happening
+
+- **`struct Stack[T]`** declares a generic struct with one type parameter.
+- **`Stack[T].method`** declares a generic method — the body can refer to `T` like any other type.
+- **Each instantiation** (`Stack[int]`, `Stack[string]`, etc.) is a monomorphized type with its own size and layout.
+
+## Constructing
+
+The zero-value form needs an explicit type annotation:
+
+```sysl
+var s: Stack[int] = Stack([])     // empty data slice, inferred element type
+```
+
+The empty-literal `[]` infers its element type from the expected struct field type.
+
+## Trait bounds on methods
+
+If a method requires a trait, declare the bound:
+
+```sysl
+Stack[T: Eq].contains(v: T) -> bool
+    for x in self.data
+        if x == v then return true
+    false
+```
+
+The `T: Eq` bound is checked at instantiation — `Stack[int].contains(5)` works because `int` has an `Eq` impl; `Stack[SomeUnEqualType].contains(...)` errors at the call site.
+
+## Default field values
+
+Sysl doesn't currently support default field values directly, but you can write an explicit factory:
+
+```sysl
+Stack.empty[T]() -> Stack[T] = Stack[T]([])
+
+main() -> int
+    var s = Stack.empty[int]()
+    s.push(42)
+    s.len()                    // 1
+```
+
+## What about `Stack[&T]`?
+
+Generics work for ref-counted types too:
+
+```sysl
+struct Node
+    value: int
+
+main() -> int
+    var s: Stack[&Node] = Stack([])
+    s.push(new Node(1))
+    s.push(new Node(2))
+    s.pop() match
+        Some(n) -> n.value      // 2
+        None -> -1
+```
+
+ARC manages the inner refs — when a `&Node` is popped and the result is dropped, its refcount decrements.
+
+## See also
+
+- [Generics](/language/functions/generics) — full generic-function reference.
+- [Methods on generic structs](/language/functions/methods#methods-on-generic-structs).
+- `std/container/list/` for a real-world generic list implementation.

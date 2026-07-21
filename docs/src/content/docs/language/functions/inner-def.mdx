@@ -1,0 +1,131 @@
+---
+title: Inner Def
+description: Recursive named local closures with full capture support.
+---
+
+Inside a function body, `def name(params) -> ret body` declares a **recursively callable named local closure** with full capture support. The recursive call resolves to the local binding (not a global), and outer-scope variables are captured through the same pipeline as anonymous closures.
+
+```sysl
+outer(bonus: int) -> int
+    def sum_with_bonus(n: int) -> int
+        if n == 0 then return 0
+        n + bonus + sum_with_bonus(n - 1)
+    sum_with_bonus(3)
+```
+
+The body sees `bonus` (captured from `outer`) and `sum_with_bonus` itself (self-referential). Non-recursive inner defs (no self-call in the body) cost the same as an anonymous lambda; the self-cell is only allocated when needed.
+
+## When to use inner def
+
+- **Recursive local helper** — anonymous closures can't refer to themselves, so a recursive helper needs a name. Inner def is the cleanest way.
+- **Mutual recursion** between local helpers — see below.
+- **Local function with contracts** — `require` / `ensure` work on inner defs.
+
+For non-recursive helpers, prefer an anonymous closure (`val f = x -> ...`) — fewer ceremonies, same code.
+
+## Required signature
+
+Inner defs **must declare the return type** — self-references need the binding's type to resolve, and inference would require a two-pass analysis. Top-level functions still allow inferred return types.
+
+```sysl
+def fact(n: int) -> int    // OK
+    if n <= 1 then 1
+    else n * fact(n - 1)
+
+def bad(n: int)             // error: inner def requires return type
+    if n <= 1 then 1
+    else n * bad(n - 1)
+```
+
+## Restrictions
+
+- No type parameters (inner defs can't be generic).
+- No return-type inference.
+
+## Contracts on inner defs
+
+Contracts (`require` / `ensure`) are fully supported on inner defs, including on inner defs that capture outer-scope variables. They are syntactically the same as on top-level functions and are wired through the same `TContractCheck` lowering.
+
+Two paths internally:
+
+### No outer-scope captures
+
+The analyzer lifts the def to a top-level synthesized fn, where the contract-aware analysis runs exactly as for top-level fns:
+
+```sysl
+outer() -> int
+    def squared(n: int) -> int
+        require n >= 0
+        ensure result >= 0
+        n * n
+    squared(7)
+```
+
+### Captures outer-scope state
+
+The def stays as a closure; the closure analyzer routes its body through the contract-aware path so `require`/`ensure` become `TContractCheck` nodes baked into the closure body. The capture scanner picks up any vars referenced in the contracts:
+
+```sysl
+outer(threshold: int) -> int
+    def check(n: int) -> int
+        require n >= threshold       // captures threshold
+        n + 1
+    check(5)
+```
+
+## Mutual recursion
+
+Mutual recursion is supported when the cluster of cross-referencing inner defs captures no outer-scope variables. The analyzer pre-binds every sibling inner-def name in a block before analyzing any body, so forward references type-check, then lifts the connected cluster to top-level synthesized fns so capture-by-value semantics don't read garbage at runtime:
+
+```sysl
+main() -> int
+    def is_even(n: int) -> bool
+        if n == 0 then true
+        else is_odd(n - 1)
+    def is_odd(n: int) -> bool
+        if n == 0 then false
+        else is_even(n - 1)
+    if is_even(10) then 1 else 0
+```
+
+Two-way, three-way, and forward-only sibling chains all work.
+
+A single self-recursive inner def with no sibling references is **not** lifted — it keeps the existing closure path with self-reference.
+
+### Cluster captures: not supported
+
+The one remaining restriction is **cluster members with outer captures** (mutual-recursion siblings that ALSO capture outer state). The lift can't preserve those captures, so the analyzer rejects with a clear "promote to top-level fn" diagnostic.
+
+Refactor by passing captured state as extra parameters, or promote the cluster to top-level fns (where both contracts and captures work fully):
+
+```sysl
+// Doesn't work: mutual recursion + outer capture
+outer(threshold: int) -> int
+    def is_above(n: int) -> bool       // error: cluster member captures outer state
+        if n == 0 then false
+        else is_at_or_below(n - 1) == false
+    def is_at_or_below(n: int) -> bool
+        n <= threshold || is_above(n - 1)
+    if is_above(5) then 1 else 0
+
+// Works: pass threshold explicitly
+above(n: int, threshold: int) -> bool
+    if n == 0 then false
+    else at_or_below(n - 1, threshold) == false
+
+at_or_below(n: int, threshold: int) -> bool
+    n <= threshold || above(n - 1, threshold)
+
+outer(threshold: int) -> int
+    if above(5, threshold) then 1 else 0
+```
+
+## Backend support
+
+Implemented across all four primary backends — interpreter, LLVM, SVM, TRISC. RISC-V and wasm32 backends inherit the LLVM lowering.
+
+## See also
+
+- [Closures](/language/functions/closures) — anonymous closure mechanics.
+- [Functions: Contracts](/language/functions/contracts) — `require` / `ensure` semantics.
+- [Functions: Def & Pure](/language/functions/def-pure-functions) — top-level `def` for verification-grade pure helpers.

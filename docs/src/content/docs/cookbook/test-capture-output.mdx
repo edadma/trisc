@@ -1,0 +1,69 @@
+---
+title: Capture and Inspect Output in a Test
+description: "Use `print` / `puts` inside a test — output shows only when the test fails."
+---
+
+Any `print`, `println`, `puts`, or `putchar` call inside a `#test` function is captured by the test runner and displayed only if the test fails:
+
+```sysl
+#test
+test_compute() -> unit
+    val expected = 42
+    val actual = my_compute(7)
+    puts(s"my_compute(7) returned $actual")    // only printed on failure
+    expect(actual, expected, "compute(7)")
+```
+
+If the test passes, the `puts` is silent. If it fails, you see:
+
+```
+✗ test_compute              (0.2ms)
+    panic: compute(7): expected 42, got 35
+    captured output:
+    my_compute(7) returned 35
+```
+
+## Why this is useful
+
+- **Diagnostic-only**, doesn't pollute passing-test output.
+- **Lazy** — the captured output buffers, so you don't pay for the formatting cost when the test is going to pass anyway.
+- **Self-documenting** — when CI reports a failure, the captured output is right there in the log; you don't need to re-run locally.
+
+## A debugging pattern
+
+When a complex test fails, sprinkle `puts` at each intermediate step to see where it went wrong:
+
+```sysl
+#test
+test_complex_pipeline() -> unit
+    val input = "raw data"
+    val parsed = parse(input)
+    puts(s"parsed: $parsed")
+
+    val processed = process(parsed)
+    puts(s"processed: $processed")
+
+    val final = finalize(processed)
+    puts(s"final: $final")
+
+    expect(final, "expected", "pipeline")
+```
+
+If `expect` fails, all three intermediate values are visible. Once the test passes, leave the `puts` calls in — they cost nothing.
+
+## What gets captured
+
+| Function | Captured? |
+|----------|-----------|
+| `print(n)` | ✓ |
+| `println(n)` | ✓ |
+| `puts(s)` | ✓ |
+| `putchar(c)` | ✓ |
+| `panic(s)` | ✓ (the panic itself, plus any captured output, are shown together) |
+
+Direct writes through `extern` calls (e.g., calling C `printf` or writing to a Sysl-bound file descriptor 1) are **not** captured.
+
+## See also
+
+- [Attributes: #test](/language/attributes/test) — the full `#test` reference.
+- [Builtins: print / println / puts](/language/builtins).

@@ -1,0 +1,151 @@
+---
+title: Why Structural Interfaces, Not Traits Only
+description: "Sysl has both compile-time traits and runtime interfaces. This page explains why both exist."
+---
+
+Sysl has two polymorphism mechanisms:
+
+- **Traits** — compile-time, monomorphized, explicit `impl Trait[T]` declaration required.
+- **Interfaces** — runtime, fat-pointer-dispatched, structural (no `impl` declaration).
+
+The [tutorial on interfaces vs traits](/tutorials/interfaces-vs-traits) walks through when each fits. This page explains *why both exist* rather than picking one.
+
+## Why not traits only?
+
+Traits handle compile-time polymorphism beautifully. Generic functions, operator overloading, ordering, hashing — all of these want a known concrete type at every call site. Traits are perfect.
+
+But some problems need **heterogeneous collections** — different concrete types in the same slot:
+
+- A scene graph holding `Circle`, `Rect`, `Text` shapes.
+- A pipeline composing arbitrary plug-ins.
+- A vtable for OS-level dispatch (file ops, syscalls).
+
+Traits can't express this. To put `Circle` and `Rect` in the same slice, you'd need:
+
+```sysl
+// Traits-only approach: encode the type at the slice level
+enum Shape
+    SCircle(Circle)
+    SRect(Rect)
+
+trait Drawable[T]
+    draw(t: T) -> unit
+
+draw_all(shapes: []Shape)
+    for s in shapes
+        s match
+            SCircle(c) -> Drawable.draw(c)
+            SRect(r) -> Drawable.draw(r)
+```
+
+This is the same pattern Rust used before `dyn Trait` existed. It works, but:
+
+- Every new shape requires editing the `Shape` enum AND adding a `match` arm in `draw_all`. With interfaces, you just write `Triangle.draw()` and you're done.
+- The match-and-dispatch is the vtable lookup, hand-written. We may as well let the compiler do it.
+
+So we added interfaces.
+
+## Why not interfaces only?
+
+If interfaces solve everything, why keep traits?
+
+Because **boxing has a cost**. An interface value is a 16-byte fat pointer `{itable, data}`. Every call through it is an indirect load + indirect call. For sorting a list of integers, this is laughable overhead — there's no heterogeneity to dispatch over, just `int` comparing to `int`.
+
+Traits resolve at compile time:
+
+```sysl
+sort_int[T: Ord](xs: &[]int)
+    // calls Ord_cmp_i32 directly — no vtable
+```
+
+The compiler picks the impl based on the call-site type, monomorphizes the function once per concrete `T`, and emits direct calls. Zero overhead vs hand-rolled code.
+
+If we used interfaces for everything, every generic operation would pay the vtable cost. That's unacceptable for code where the type is statically known.
+
+## Why structural, not declared, interfaces?
+
+The other big design choice: interface conformance is **structural**. A struct satisfies `Counter` if it has methods `tick() -> unit` and `get() -> int` — no `impl Counter for IntCounter` block needed.
+
+This contrasts with traits, where every conformance is explicit (`impl Ord[int]`).
+
+Why the difference?
+
+**Traits represent invariants.** When you write `impl Ord[Point]`, you're asserting "this is a total order; comparisons are reflexive, antisymmetric, transitive." That's a property that the compiler can't verify alone — it's a design statement. Making it explicit is the point.
+
+**Interfaces represent capability.** When a struct happens to have `tick()` and `get()`, that's enough to use it as a `Counter`. The interface doesn't care *why* the struct has those methods — only that it does. No invariants are being asserted; only that the call site can dispatch.
+
+This is the Go vs Java distinction. Go uses structural interfaces (any type with the right methods); Java uses declared interfaces (`implements`). Sysl follows Go for interfaces and Rust for traits — different mechanisms for different roles.
+
+## When the line is fuzzy
+
+For some types, the choice between trait and interface isn't obvious. Heuristics:
+
+- **If the operation is fundamental** (comparison, hashing, equality), use a **trait**. These are the kinds of operations the compiler should resolve at maximum speed.
+- **If the operation describes a *role*** (Drawable, Serializable, Comparable-in-a-DAG), use an **interface**. The role is what matters; the implementation is incidental.
+- **If you'll have heterogeneous collections**, use an **interface**. Mixing types in one slot is the killer feature.
+- **If you need to constrain a type parameter with a multi-method contract**, use a **trait**. Constraining "`T` must support these three methods" works at compile time.
+
+## A combined design
+
+Many real libraries use both: a trait for the compile-time API, an interface for runtime plug-in extension:
+
+```sysl
+// Compile-time path
+trait Codec[T]
+    encode(v: T, w: &Writer)
+    decode(r: &Reader) -> T
+
+// Runtime path
+interface AnyCodec
+    encode_dyn(v: *u8, w: &Writer)
+    decode_dyn(r: &Reader) -> *u8
+
+// Adapter
+struct CodecBox[T: Codec]
+    // ...
+```
+
+Users who know the concrete type compile-time get fast direct calls. Users who need to load codecs at runtime go through the interface. Both paths share the same body.
+
+This was discussed during the Sysl design — could we collapse them into one mechanism? But the costs diverged too cleanly: compile-time-only was free; runtime was 16-byte fat pointer + indirect call. Having both lets users pick the right cost for each call site.
+
+## Why structural conformance with no explicit declaration
+
+A specific footgun structural interfaces avoid: **method name collisions**. If `interface A` and `interface B` both declare a method `commit()`, and a struct has a `commit()` method, that struct satisfies both interfaces *with the same body*. No "you must distinguish A's commit from B's commit" ceremony.
+
+Traits handle this by being declared — `impl A[Struct]` and `impl B[Struct]` are separate `commit` functions. For interfaces, where the dispatch is via vtable, the simpler "one method, satisfies anything that asks for that signature" is cleaner.
+
+The cost: a struct can satisfy an interface "accidentally" — adding a method called `flush()` for some other reason means the struct now satisfies `Flushable`. In practice, this is rare and not a problem; in the cases where it bites, it bites once.
+
+## What about Java-style declared interfaces?
+
+We considered them — `IntCounter implements Counter` — but didn't see what they'd buy. The cases where you want explicit "this type intends to be Counter" are the same cases where you should write a trait instead.
+
+If you want the "this struct is meant to satisfy these interfaces" documentation, write it as a comment or in the prose. The structural check will catch any drift.
+
+## Why the `owns` flag is invisible
+
+A subtle design choice: when an interface value is boxed, the data pointer either shares storage with the source or owns a heap copy. The compiler picks; the user doesn't write `owns: true/false`.
+
+We could have made this explicit:
+
+```sysl
+shared_counter: Counter shared          // borrows source storage
+heap_counter: Counter owned             // owns a heap copy
+```
+
+But which one you need depends on how the box *escapes*, not how you declare it. A `Counter` returned from a function must own; one passed into a function may share. Forcing the user to mark the boxing site would mean changing the spelling at every site where the iface flows — error-prone and visually noisy.
+
+We instead inferred it from escape analysis. The compiler tracks where the box flows; if it escapes (returns, gets stored in `Option[Iface]`, captured by escaping closure), it owns; otherwise shares. The user writes `Counter` everywhere and the compiler picks.
+
+The downside is that adding `owns` later (if a user needs it as an annotation for performance tuning) is harder than starting with it. We accepted that risk.
+
+## The bottom line
+
+Two mechanisms because the cost profile of compile-time dispatch differs sharply from runtime dispatch. Forcing every operation through one paths the wrong cost on the wrong calls. Structural interfaces because conformance is about capability, not invariants — and Go's structural style fits "capability" better than Java's declared style.
+
+## See also
+
+- [Traits & Impls](/language/functions/traits-and-impls) — the trait reference.
+- [Interfaces](/language/functions/interfaces) — the interface reference.
+- [Interfaces vs Traits](/tutorials/interfaces-vs-traits) — guided comparison.

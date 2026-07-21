@@ -1,0 +1,69 @@
+---
+title: Iterate Over String Bytes vs Characters
+description: "When to iterate byte-by-byte, and when to decode UTF-8 codepoints."
+---
+
+A Sysl `string` is a UTF-8 byte sequence. Iteration mode matters when non-ASCII characters appear.
+
+## Iterate over raw bytes
+
+`for c in s` yields each byte as a `u8`:
+
+```sysl
+val s = "abc"
+for c in s
+    print(int(c))         // prints 97 98 99 (ASCII codepoints)
+```
+
+Use this when:
+
+- You're counting bytes (file length, network packet size).
+- You're hashing — byte iteration is what every hash function expects.
+- The string is known to be ASCII-only (config keys, hex digits, base64).
+
+## Iterate over codepoints
+
+For Unicode-aware processing, decode UTF-8 explicitly using `std.utf8`:
+
+```sysl
+import std.utf8.{decode_next, DecodeResult}
+
+count_codepoints(s: string) -> int
+    var n = 0
+    var i = 0
+    while i < len(s)
+        decode_next(s, i) match
+            DecodeResult.Cp(cp, width) ->
+                n = n + 1
+                i = i + width
+            DecodeResult.Bad ->
+                i = i + 1     // skip the bad byte
+    n
+```
+
+`decode_next(s, i)` returns the codepoint at byte offset `i` along with its UTF-8 width (1-4 bytes), or `Bad` on an invalid sequence.
+
+Use this when:
+
+- You're displaying user-visible characters (`"café"` has 5 bytes, 4 codepoints).
+- You're enforcing length limits in user-visible units.
+- You're case-folding or normalizing text.
+
+## Counting differences
+
+```sysl
+import std.utf8.codepoint_count
+
+val s = "café"
+len(s)                   // 5 (bytes: c, a, f, c3, a9)
+codepoint_count(s)       // 4 (codepoints: c, a, f, é)
+```
+
+## Performance note
+
+Byte iteration is one load + compare per byte. Codepoint iteration is the same plus 1-3 extra loads for multi-byte sequences. For ASCII-only strings the costs are identical; for typical mixed text, codepoint iteration is ~10% slower.
+
+## See also
+
+- [Strings](/language/strings) — byte-level representation.
+- `std/utf8/` source — UTF-8 decode / encode / validation utilities.

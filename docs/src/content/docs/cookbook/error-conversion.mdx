@@ -1,0 +1,91 @@
+---
+title: Convert Between Error Types
+description: "Bridge two Result types when ? alone can't."
+---
+
+The `?` operator only works when the caller and callee return `Result` with the same error type. When they differ, you bridge them with an explicit `match`:
+
+```sysl
+enum LowError
+    Underflow
+    Overflow
+
+enum HighError
+    BadInput(reason: string)
+
+low_op() -> Result[int, LowError] = Ok(42)
+
+high_caller() -> Result[int, HighError]
+    val v = low_op() match
+        Ok(n) -> n
+        Err(LowError.Underflow) -> return Err(HighError.BadInput("underflow"))
+        Err(LowError.Overflow)  -> return Err(HighError.BadInput("overflow"))
+    Ok(v * 2)
+```
+
+## The pattern
+
+1. `match` on the callee's return.
+2. On `Ok`, bind the value.
+3. On `Err`, map each variant to a corresponding `HighError` variant (or fold them all into one default).
+
+When the bridge is short and used in many places, factor it into a small helper:
+
+```sysl
+to_high(e: LowError) -> HighError
+    e match
+        Underflow -> BadInput("underflow")
+        Overflow  -> BadInput("overflow")
+```
+
+Then callers stay simple:
+
+```sysl
+high_caller() -> Result[int, HighError]
+    val v = low_op() match
+        Ok(n) -> n
+        Err(e) -> return Err(to_high(e))
+    Ok(v * 2)
+```
+
+## Future direction
+
+Sysl doesn't yet have a `From`/`Into` mechanism for auto-conversion of error types. The above explicit-match pattern is the canonical workaround. If a future version adds something like `?` with conversion (Rust's `impl From<LowError> for HighError`), this recipe will get a shorter form.
+
+## Folding many variants to one
+
+When the high-level caller doesn't care about the specific low-level cause, fold everything to a single `_`:
+
+```sysl
+high_caller() -> Result[int, HighError]
+    val v = low_op() match
+        Ok(n) -> n
+        Err(_) -> return Err(HighError.BadInput("low-level error"))
+    Ok(v * 2)
+```
+
+This drops the low-level detail but is the right choice when the caller's API doesn't expose finer distinctions.
+
+## Preserving the original
+
+If you want the high-level error to carry the low-level error as data, define an `Inner` variant:
+
+```sysl
+enum HighError
+    BadInput(reason: string)
+    LowFailure(inner: LowError)
+
+high_caller() -> Result[int, HighError]
+    val v = low_op() match
+        Ok(n) -> n
+        Err(e) -> return Err(HighError.LowFailure(e))
+    Ok(v * 2)
+```
+
+Now a caller of `high_caller` can pattern-match on `LowFailure` and recover the original `LowError` if it needs to.
+
+## See also
+
+- [The Try Operator](/language/functions/try-operator) — `?` for same-type cascading.
+- [Custom error enum](/cookbook/custom-error).
+- [Enums: Tagged Unions](/language/types/enums#tagged-unions-data-enums) — variants with payload.

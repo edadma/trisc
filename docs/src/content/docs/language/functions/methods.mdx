@@ -1,0 +1,114 @@
+---
+title: Methods
+description: StructName.methodName syntax, the self receiver, and methods on generic structs.
+---
+
+Methods are declared with the `StructName.methodName(...)` syntax. The parser automatically prepends a hidden `__self__: *StructName` parameter, so you do **not** write `self` in the parameter list — just refer to `self` inside the method body:
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+Point.magnitude() -> int
+    self.x * self.x + self.y * self.y
+
+main() -> int
+    var p: Point
+    p.x = 3
+    p.y = 4
+    p.magnitude()     // desugars to Point_magnitude(&p)
+```
+
+Inside the method body, `self` is an alias for the implicit receiver — it has type `*StructName` (raw pointer to the instance). Field access on `self` (`self.x`) uses normal pointer-deref semantics; the compiler inserts the indirection.
+
+## Call syntax
+
+Methods are called with `instance.method(args)`. The compiler:
+
+1. Takes the address of the receiver (if it's a value).
+2. Passes that pointer as the hidden `__self__` argument.
+3. Dispatches to the mangled top-level function `StructName_methodName`.
+
+The same method works on values, refs, and pointers:
+
+```sysl
+val p1: Point = Point(3, 4)
+p1.magnitude()                 // OK — auto-takes &p1
+
+val p2: &Point = new Point(3, 4)
+p2.magnitude()                 // OK — uses the heap pointer
+
+var p3: *Point = &p1
+p3.magnitude()                 // OK — passes the pointer directly
+```
+
+## Mutating methods
+
+Methods that need to modify the receiver assign to `self.field` directly. Because `self` is `*StructName`, writes go through the pointer:
+
+```sysl
+struct Counter
+    n: int
+
+Counter.bump() -> unit
+    self.n = self.n + 1
+
+main() -> int
+    var c = Counter(0)
+    c.bump()
+    c.bump()
+    c.n                       // 2
+```
+
+This works for value receivers because the compiler auto-takes the address. For an immutable receiver (`val r = new Counter(0)`), mutating-method calls still type-check — Sysl doesn't currently distinguish mutating from non-mutating methods at the declaration site.
+
+## Methods on generic structs
+
+Generic structs can have methods too. Include the type parameters after the struct name:
+
+```sysl
+struct MinHeap[T]
+    data: []T
+    less: (T, T) -> bool
+
+MinHeap[T].len() -> int = len(self.data)
+
+MinHeap[T].push(v: T)
+    self.data = append(self.data, v)
+    self._sift_up(len(self.data) - 1)
+```
+
+The parser desugars `MinHeap[T].push(v: T)` into a generic function `MinHeap_push[T](__self__: *MinHeap[T], v: T)`. When you call `h.push(42)` on a `MinHeap[int]`, the compiler instantiates `MinHeap_i32_push` with `T = int` — the same monomorphization used for any generic function.
+
+### Bounds on generic methods
+
+Type parameter bounds work on generic methods just as on generic functions:
+
+```sysl
+MinHeap[T: Ord].sorted_push(v: T)
+    // T must implement the Ord trait
+```
+
+## Methods and visibility
+
+`private` works on methods like any other top-level declaration:
+
+```sysl
+private MinHeap[T]._sift_up(i: int)
+    // internal helper, not visible outside the module
+```
+
+The underscore prefix is a convention, not a language feature — `_sift_up` is callable like any other method; `private` is what actually restricts visibility.
+
+## Methods and traits
+
+A struct's methods aren't automatically trait impls. To say "this struct implements `Ord`", write an `impl Ord[Struct]` block — the compiler will not infer trait conformance from method names matching.
+
+[Interfaces](/language/functions/interfaces) are the exception: a struct that happens to have methods matching an interface's signatures satisfies that interface structurally, with no `impl` declaration.
+
+## See also
+
+- [Structs](/language/types/structs) — struct declarations.
+- [Interfaces](/language/functions/interfaces) — methods power structural interface conformance.
+- [Generics](/language/functions/generics) — generic struct and method declarations.

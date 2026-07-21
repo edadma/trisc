@@ -1,0 +1,109 @@
+---
+title: Program Structure
+description: Modules, imports, project roots, visibility, and name mangling.
+---
+
+A Sysl source file is one of:
+
+- A regular `.sysl` file — plain source.
+- A literate `.lsysl` file — Markdown prose at column 0, code indented 4 spaces or one tab.
+
+Both forms compile identically. Literate sources are how the standard library and the SLIX kernel are written.
+
+## Modules
+
+Each file declares exactly one module path at the top:
+
+```sysl
+module path.to.module
+```
+
+The module path drives import resolution and [name mangling](#name-mangling). If a file has no `module` declaration, its top-level names are not mangled — useful for one-off scripts and entry-point files.
+
+## Imports
+
+```sysl
+module oskit.kernel
+
+import posix.stdlib.{malloc, free}      // named imports
+import posix.string.*                   // wildcard import
+import posix.io.{open => fopen}         // aliased import
+```
+
+- **Named** — bring specific names into scope.
+- **Wildcard** — bring every exported name into scope.
+- **Aliased** — rename on import to avoid conflicts.
+
+Imports do not define visibility; they only make names reachable in this file. A name being imported here doesn't make it public for other importers.
+
+## Project roots (`sysl.toml`)
+
+A file named `sysl.toml` placed in a directory designates that directory as a *project root*. Source files under such a directory have their declared module paths checked relative to the project root rather than relative to the filesystem root.
+
+```
+parsyl/
+├── sysl.toml                 ← marker (empty file is fine)
+└── parsyl/
+    └── parsyl.lsysl          ← `module parsyl` (matches dir under root)
+```
+
+With the marker, running `sbt "syslCliJVM/run test /Users/ed/dev/parsyl/parsyl/parsyl.lsysl"` succeeds because the expected module is computed as `parsyl` (the directory under the marker), not `Users.ed.dev.parsyl.parsyl` (the full filesystem path).
+
+Files outside any marker'd tree fall back to filesystem-path-based validation. The in-tree `std/`, `oskit/`, and `posix/` packages all work without markers because their on-disk paths line up with their module declarations.
+
+v1 only uses the marker's existence. Future versions may parse the file's contents for package metadata (name, version, dependencies).
+
+## Visibility
+
+By default, top-level declarations are public:
+
+```sysl
+myPublicFunc() -> int = 0            // public by default
+private myHelper() -> int = 42       // not exported
+```
+
+`private` applies to functions, variables, structs, enums, type aliases, and externs. A private name is visible only inside its declaring module.
+
+## Name mangling
+
+Functions and global variables in modules are mangled with the module path to avoid cross-module name collisions:
+
+```
+module std.strings → trim_space → std_strings__trim_space
+module mylib       → helper     → mylib__helper
+```
+
+The mangled-name format is `modpart1_modpart2__funcname` — module parts joined by `_`, separated from the function name by `__`.
+
+**Never mangled:**
+
+- `main` (the entry point)
+- `extern` functions (must match an external C ABI symbol)
+- builtin functions (`print`, `puts`, `sizeof`, etc.)
+- functions in files without a `module` declaration
+- any function whose name matches an `extern` declaration in the current compilation unit
+- a small hardcoded set: `malloc`, `free`, `calloc`, `realloc`, `sbrk`, plus OS kernel ABI entry points (`kernel_init`, `kernel_main`, `schedule`, and similar boot-callable symbols)
+
+You write the short name everywhere in source. The compiler resolves it to the mangled symbol automatically — call sites, function-pointer values, debug info, and the final ELF/COFF/TRB output all use the mangled form.
+
+## Top-level declarations
+
+A module file can contain any mix of:
+
+- Function declarations (`f() -> T = ...`).
+- Global variables (`var g: int = 0`, `val k: int = 42`).
+- Compile-time constants (`const PI: f64 = 3.14159`).
+- Struct types (`struct Point ...`).
+- Enum types (`enum Shape ...`).
+- Type aliases and derived types (`type Age = int within 0..150`).
+- Extern declarations (`extern printf(fmt: *u8, ...) -> int`).
+- Trait declarations and `impl` blocks.
+- Interface declarations.
+
+Order within a file does not matter — Sysl resolves all top-level names before checking bodies, so mutual recursion across functions, types, and modules works without forward declarations.
+
+## See also
+
+- [Variables & Constants](/language/variables-and-constants) — `val`, `var`, `const`, globals.
+- [Functions](/language/functions/overview) — declaration syntax and the parameter modes.
+- [Conditional Compilation](/language/conditional-compilation) — `#if` blocks at module scope.

@@ -1,0 +1,80 @@
+---
+title: Sysl Language Overview
+description: A tour of Sysl — what it is, what makes it different, and how to read these docs.
+---
+
+Sysl is a systems programming language that compiles to seven backends — a tree-walking interpreter, three LLVM targets (host, RISC-V 64, RISC-V 32), the SVM stack VM, the TRISC 16-bit RISC ISA, and freestanding wasm32-WASI. The same source builds for all of them, which is how the SLIX microkernel runs on both x86_64 and aarch64 hardware from one codebase.
+
+## Design at a glance
+
+- **Go-style syntax** — indentation-friendly, no semicolons, `module` and `import`, no header files.
+- **Swift-style memory model** — three explicit modes (`T`, `&T`, `*T`) at every use site. ARC for `&T`, raw for `*T`, bitwise copy for `T`. No GC, no borrow checker.
+- **C-level control** — explicit sizes (`i8`/`u32`/`f64`/...), fixed and dynamic arrays with bounds checks, struct layout you can predict, `extern` for C ABI interop.
+- **First-class generics** — generic functions, structs, enums, type aliases, trait bounds, defaults. Monomorphized at compile time.
+- **Tagged unions** — Rust-style data enums with exhaustive pattern matching and nested patterns.
+- **Contracts** — `require` / `ensure` / `invariant` / `variant` on function bodies and struct definitions. Static-when-possible, runtime check otherwise.
+- **Interfaces** — structural fat-pointer dispatch (`{itable_ptr, data_ptr}`) with no `impl` blocks needed.
+- **Literate sources** — `.lsysl` files mix Markdown prose with indented code; the whole standard library is written this way.
+
+## How these pages are organized
+
+The pages under **Language** mirror [`sysl/reference.md`](https://github.com/edadma/trisc) chapter-for-chapter — one focused page per topic, with at least one runnable example per major concept lifted from the test suite.
+
+- **Program Structure** — modules, imports, visibility, name mangling.
+- **Types** — scalars, integer overflow, structs, enums, type declarations, attributes, the three allocation modes.
+- **Variables & Constants** — `val` / `var` / `volatile`, globals, `const`, `static_assert`.
+- **Functions** — declarations, contracts, parameter modes, traits, operators, interfaces, methods, closures, `extern`.
+- **Expressions** — literals, operators, casts, `sizeof`, `if-is`.
+- **Statements** — control flow, `match`, loops, `break` / `continue`, end markers.
+- **Arrays, Slices & Pointers** — fixed arrays, dynamic arrays, slices, `append`, pointer arithmetic.
+- **Strings** — `string` representation, interpolation, `f"..."` format strings.
+- **Builtin Functions** — the always-available set.
+- **Type Compatibility** — widening, mixed signed/unsigned, decay rules, explicit casts.
+- **Runtime Safety** — categories, per-backend trap delivery, test-runner integration.
+- **Conditional Compilation** — `#if` / `#else` / `#endif`.
+- **Attributes** — `#test`, `#address`, `#pure`, `#reads`/`#writes`, `#ghost`, `#deprecated`.
+- **Literate Sysl** — the `.lsysl` Markdown-with-code format.
+
+## A taste
+
+A complete program that touches scalars, structs, refs, and pattern matching:
+
+```sysl
+module example.hello
+
+enum Shape
+    Circle(radius: f64)
+    Rect(w: f64, h: f64)
+
+area(s: Shape) -> f64
+    s match
+        Circle(r)  -> 3.14159 * r * r
+        Rect(w, h) -> w * h
+
+main() -> int
+    val shapes: [2]Shape = [Circle(2.0), Rect(3.0, 4.0)]
+    var total: f64 = 0.0
+    for s in shapes
+        total = total + area(s)
+    print(f"total area = %.2f\n", total)
+    0
+```
+
+`shapes` is a fixed-size stack-allocated array of value enums; `s` in the loop is a value copy; `match` is exhaustive (no `else` arm needed because every variant is covered).
+
+## When to use Sysl
+
+Sysl is for code that lives close to the metal but wants more help than C gives:
+
+- **Operating systems and bare-metal embedded** — SLIX is the canonical example, but `*T`, fixed-size arrays, and `extern` let you talk to any hardware.
+- **Compilers and interpreters** — generics and tagged unions make ASTs ergonomic; the TRISC backend is short enough to study.
+- **Teaching architecture and systems** — the language is small enough to read end-to-end, and every backend can be inspected with `sysl compile --backend <B>`.
+
+It is not designed for high-level scripting, web frontends, or async I/O servers — there is no scheduler, no green threads, no `async`/`await`. Pick a higher-level language for those.
+
+## Where to read next
+
+- New to Sysl? Start with [Program Structure](/language/program-structure) and walk forward.
+- Coming from C or Go? Skim [Three Allocation Modes](/language/types/three-allocation-modes) first — it's the biggest day-one difference.
+- Coming from Rust or Swift? Read [Type Declarations](/language/types/type-declarations) and [Interfaces](/language/functions/interfaces).
+- Want to learn by example? Every page lifts code from `sysl/tests/lang_features/`; the test files are the most up-to-date, multi-backend-validated examples in the project.

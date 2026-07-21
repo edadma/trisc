@@ -1,0 +1,77 @@
+---
+title: Why No Garbage Collector
+description: "When ARC wins, when it loses, and why Sysl's target domain favors predictability over throughput."
+---
+
+Sysl uses ARC (Automatic Reference Counting), not GC (Garbage Collection). The two approaches have different cost profiles; which is "better" depends on what you're building. This page lays out the trade-off and why Sysl made the call it did.
+
+## The two approaches in one paragraph
+
+**ARC** (Sysl, Swift, modern Objective-C): each heap-allocated object has a counter. Every assignment, parameter pass, and scope exit increments or decrements it. At zero, the deinit runs and the object is freed immediately. Cost is paid steadily, throughout the program's runtime. No pauses, no compacting, no separate thread.
+
+**GC** (Java, Go, Haskell): heap objects have no per-object machinery. A separate process traces the object graph from known roots, marks live objects, and reclaims unreachable ones. Cost is paid in bursts; between collections, allocation is nearly free. Pauses happen (though modern collectors keep them short).
+
+## What ARC gives you
+
+1. **Deterministic cleanup.** When the last `&T` goes out of scope, the deinit runs at that exact point. You can `defer close(file)` and know exactly when it fires.
+2. **No GC pauses.** No "stop the world" moments. Real-time and latency-sensitive code stays predictable.
+3. **No separate runtime thread.** Trivial to embed in a kernel, a microcontroller, an interpreter.
+4. **Small memory overhead.** Each refcounted object pays 16 bytes for the header. No mark bits, no card tables, no large nursery space.
+5. **Predictable cost.** Every assignment is "one refcount adjustment, branchless." Profiling is easier when the cost is uniform.
+
+## What ARC costs you
+
+1. **Cycles leak.** ARC can't reclaim a cycle: if A owns B owns A, both refcounts stay ≥ 1. Sysl handles this structurally (indices, asymmetric `*Parent` back-pointers); see [Three Allocation Modes](/language/types/three-allocation-modes#cycle-limitation). It's a real cost.
+2. **Per-scope overhead.** Every `=`, every parameter pass, every scope exit is one refcount adjustment. For code with lots of short-lived references, GC's amortized "free until trace" can be cheaper.
+3. **Refcount thrash on contention.** Multi-threaded code with many threads touching the same `&T` will contend on the refcount's atomic operations. (Sysl's current threading story doesn't expose this, but if it did, this would matter.)
+4. **Limited optimization scope.** A clever compiler can elide some incref/decref pairs, but the proof obligations are real. Java's GC doesn't have this problem — there are no per-reference ops to elide.
+
+## When ARC wins
+
+- **OS and kernel code.** No GC thread to schedule, no pauses to worry about. SLIX uses ARC.
+- **Real-time / latency-sensitive code.** No "stop the world." Audio, games, control loops.
+- **Embedded / memory-constrained.** GC needs more headroom than the heap actually contains; ARC packs better.
+- **Programs with clear ownership trees.** When data has obvious parent/child relationships, ARC handles it efficiently. Most application code is in this category.
+
+## When GC wins
+
+- **Highly-shared object graphs.** GC handles complex shared structures (interned strings, observer patterns, plugin systems) without the contortions ARC needs.
+- **High-throughput batch processing.** Amortized cost over a batch is lower than ARC's per-reference cost.
+- **Heavily multi-threaded data structures.** GC handles arbitrary concurrent updates; ARC's atomic refcount ops contend.
+
+## Sysl's target domain favors ARC
+
+Sysl is for OSes, compilers, drivers, interpreters, and the kind of application code that already feels comfortable in C++ or Swift. Across that domain:
+
+- Ownership is usually clear.
+- Real-time guarantees matter (kernel preemption, latency).
+- Memory budgets are tight.
+- Predictable cost is more valuable than throughput.
+
+That's the ARC sweet spot. The cost (cycles, refcount overhead) is acceptable for the gain (predictability, no separate runtime).
+
+## What about a "GC mode"?
+
+Could Sysl have a `gc T` mode that uses tracing GC for the cyclic cases? In principle yes, but:
+
+- Adding GC means adding a runtime thread (or a stop-the-world pause). Every backend has to support it, including the bare-metal ones. The cost is huge.
+- The kernel can't use it. So we'd have a sub-language anyway.
+- ARC's cycle limitation has structural workarounds that work in practice; the deferred design memo (`project_sysl_swift_style_weak_unowned_future.md`) documents what `weak` references would add if pain accumulates.
+
+We've kept the door open by not making any decision that *precludes* adding GC later. But we're not adding it now, and we're not adding it for hypothetical use cases.
+
+## What about manual `malloc` / `free`?
+
+Sysl gives you `malloc` and `free` as builtins. Use them when you have a specific allocation pattern that ARC doesn't fit (pool allocators, arenas, custom strategies). The `*T` mode is the natural pair — raw pointers that you manage manually.
+
+For everything else, `new T(...)` and `&T` are easier to use correctly than manual `malloc`/`free`. The compiler emits the refcount machinery; you don't have to track it.
+
+## The bottom line
+
+Sysl's "no GC" choice is a deliberate trade for predictability, kernel-friendliness, and simplicity at the cost of cycle reclamation and per-scope overhead. For our target domain, it's the right call. For your domain, it might not be — and that's fine, but it's a reason to use a different language, not a reason to add GC to this one.
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes) — how ARC interacts with `T` / `&T` / `*T`.
+- [Why the Three-Mode Memory Model](/rationale/three-mode-model) — the bigger picture.
+- [Memory Modes by Example](/tutorials/memory-modes) — practical walkthrough.

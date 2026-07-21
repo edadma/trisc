@@ -1,0 +1,188 @@
+---
+title: Enums
+description: Simple integer enums and Rust-style tagged unions with pattern matching.
+---
+
+Sysl has two flavors of enum that share a single keyword:
+
+- **Simple enums** — integer constants with auto-incrementing values.
+- **Tagged unions (data enums)** — variant types where each variant can carry typed fields.
+
+The compiler picks the right form based on whether any variant has a payload.
+
+## Simple enums
+
+```sysl
+enum Color
+    Red               // 0
+    Green             // 1
+    Blue = 10         // explicit value
+    Yellow            // 11 (auto-increment)
+```
+
+Access via `Color.Red`, `Color.Blue`, etc. At runtime, simple enum members are plain `i32` values.
+
+Simple enums work as distinct types in type positions:
+
+```sysl
+enum ParseError
+    EmptyInput
+    BadDigit
+    Overflow
+
+parse(s: string) -> Result[i64, ParseError]
+    if len(s) == 0 then return Err(EmptyInput)   // bare variant name
+    Ok(42)
+```
+
+The bare variant name (`EmptyInput`) works as a constructor when the expected type makes it unambiguous.
+
+## Tagged unions (data enums)
+
+Variants can carry data — Rust-style sum types:
+
+```sysl
+enum Shape
+    Circle(radius: int)
+    Rect(w: int, h: int)
+    Empty                   // no-data variant
+```
+
+**Construction:**
+
+```sysl
+s  = Circle(5)             // variant with data
+e  = Empty                 // no-data variant (bare name)
+e2 = Shape.Empty           // qualified name also works
+```
+
+**Pattern matching:**
+
+```sysl
+s match
+    Circle(r)  -> r * r * 3   // destructure fields
+    Rect(w, h) -> w * h       // bind multiple fields
+    Empty      -> 0           // match no-data variant
+```
+
+## Exhaustiveness
+
+A `match` on a data-enum value must cover every variant, or include a wildcard `_ -> ...` or `else -> ...` default. Missing variants produce a compile error listing them.
+
+Guarded arms (`Circle(r) if r > 0 -> ...`) do not count toward exhaustiveness, since the guard may be false. Non-enum matches (on integers, strings, etc.) do not require exhaustiveness — the user is responsible for covering their own domain.
+
+## Variants as parameters and returns
+
+```sysl
+area(s: Shape) -> int
+    s match
+        Circle(r)  -> r * r * 3
+        Rect(w, h) -> w * h
+        Empty      -> 0
+
+make_shape(kind: int) -> Shape
+    if kind == 0 then Circle(5)
+    else Rect(3, 4)
+```
+
+## Guards
+
+A guard runs after the pattern binds but before the arm body. The first arm with a matching pattern *and* a true guard wins:
+
+```sysl
+s match
+    Circle(r) if r > 10 -> 1   // guard with binding
+    Circle(r)            -> 2
+    Rect(w, h)           -> 3
+```
+
+## Nested variant patterns
+
+A field position inside a variant pattern can itself be another variant pattern. The outer discriminator is checked first; if it matches, each nested sub-pattern is checked in turn:
+
+```sysl
+enum Inner
+    Val(x: int)
+    None
+
+enum Outer
+    Wrap(i: Inner)
+    Empty
+
+go(o: Outer) -> int
+    o match
+        Wrap(Val(v)) -> v       // bind v if Outer is Wrap AND Inner is Val
+        Wrap(None)   -> -1
+        Empty        -> 0
+        else         -> -99     // exhaustiveness fallback (see note)
+```
+
+**Limitation.** The exhaustiveness check treats any arm with an active nested pattern as not fully covering its outer variant (since the inner pattern might fail to match). Add an `else` arm or wildcard fallback when using nested patterns. Full nested-coverage analysis (recognizing that `Wrap(A) | Wrap(B)` together cover `Wrap(Inner)` when `Inner` has only `A` and `B`) is a future improvement.
+
+## Heap-allocated enums (`new` on variants)
+
+`new VariantName(args)` heap-allocates an enum value and returns a ref-counted `&EnumType`. This enables recursive data structures like AST trees:
+
+```sysl
+enum Expr
+    Lit(value: int)
+    Add(left: &Expr, right: &Expr)
+
+eval_expr(e: &Expr) -> int
+    *e match
+        Lit(v)    -> v
+        Add(l, r) -> eval_expr(l) + eval_expr(r)
+
+main() -> int
+    val tree = new Add(new Lit(1), new Add(new Lit(2), new Lit(3)))
+    eval_expr(tree)    // 6
+```
+
+`*e` dereferences the ref to a value enum for pattern matching. The ref is automatically freed when the refcount reaches zero, just like `&Struct`.
+
+## Recursive types
+
+Structs and enums may reference themselves (or each other) through pointers (`*T`), refs (`&T`), or slices (`[]T`):
+
+```sysl
+struct Node
+    value: int
+    next: *Node       // recursive via pointer
+
+enum Tree
+    Leaf(value: int)
+    Branch(left: &Tree, right: &Tree)   // binary tree via ref
+    Node(children: []Tree)              // n-ary tree via slice-of-self
+```
+
+A `[]Self` field stores a fixed-size slice descriptor, so the variant size is bounded — no infinite type. Build it with `(new [n]Tree)[:0]` and `append`, walk it by pattern-matching the variant and indexing the slice:
+
+```sysl
+build_tree() -> Tree
+    var children = (new [10]Tree)[:0]    // empty slice, capacity 10
+    children = append(children, Leaf(1))
+    children = append(children, Leaf(2))
+    children = append(children, Leaf(3))
+    Node(children)
+
+count_leaves(t: Tree) -> int
+    t match
+        Leaf(_)            -> 1
+        Branch(l, r)       -> count_leaves(*l) + count_leaves(*r)
+        Node(kids)         ->
+            var n = 0
+            for k in kids do n = n + count_leaves(k)
+            n
+```
+
+## Memory layout
+
+A tagged enum is laid out as `{tag: i32, padding, data: union of variant fields}`. The tag is a small integer (0, 1, 2...) identifying the variant. Data is overlapping storage sized to the largest variant. `sizeof(Shape)` returns the total size including tag and padding.
+
+A simple enum is just `i32`.
+
+## See also
+
+- [Statements](/language/statements) — full `match` syntax including non-enum patterns.
+- [Type Attributes](/language/types/type-attributes) — `T::First`, `T::Image(x)`, `T::Value(s)` for simple enums.
+- [Three Allocation Modes](/language/types/three-allocation-modes) — `new` for ref-counted variants.

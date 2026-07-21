@@ -1,0 +1,122 @@
+---
+title: Three Allocation Modes
+description: Value (T), ref-counted (&T), and raw pointer (*T) — choosing a mode is the use-site decision Sysl makes you take seriously.
+---
+
+The same `struct` definition supports three usage modes — chosen at the *use site*, not at the *type definition*:
+
+| Declaration | Type | Semantics |
+|---|---|---|
+| `var v = Point(10, 20)` | `Point` (value) | stack-allocated, bitwise copy, no refcount |
+| `val r = new Point(10, 20)` | `&Point` (ref) | heap-allocated, ref-counted, auto-freed at zero |
+| `var p: *Point = &v` | `*Point` (pointer) | raw, unmanaged, kernel-safe |
+
+This is the biggest day-one difference from C, Go, or Rust. Every parameter, field, local, and return type explicitly says which mode it is.
+
+## Conversion rules
+
+| From → To | Operation | Notes |
+|-----------|-----------|-------|
+| `&T → T` | `r.copy()` | bitwise copy of the pointee, no refcount change |
+| `T → &T` | `new T(v)` | fresh heap allocation, refcount = 1 |
+| `&T → *T` | `&r` | raw address, no refcount change — unsafe |
+| `*T → &T` | not allowed | can't manufacture a refcount |
+| `T → *T` | `&v` | address-of a value-typed variable |
+| `*T → T` | `*p` | dereference; implicit for struct function arguments |
+
+`.copy()` on a `&T` produces an independent value of type `T` — a bitwise copy of the pointee, with no refcount adjustment on the source:
+
+```sysl
+struct Node
+    value: int
+    next: *Node
+
+main() -> int
+    val r = new Node(42, &Node(0, null))
+    val v = r.copy()        // v: Node, independent of r
+    v.value                  // 42
+```
+
+For struct value semantics, `.copy()` is the explicit way to detach from heap storage.
+
+## When to use which mode
+
+**Use `T` (value) by default.** It's the simplest semantics: bitwise copy, no allocator involvement, predictable size. Most function parameters and local variables should be `T`.
+
+**Use `&T` (ref-counted) when you need shared ownership.** Trees, graphs, callbacks, and data that outlives its construction context. ARC handles the cleanup automatically — when the last `&T` goes out of scope, the destructor runs and the memory is freed.
+
+**Use `*T` (raw pointer) for unmanaged memory or back-pointers.** Kernel code, hardware register blocks, parent pointers in tree nodes, interop with C. `*T` is the escape hatch — no refcount overhead, no automatic cleanup, no checks. You're responsible for keeping it valid.
+
+### Idiom: parent / child via mixed modes
+
+Trees in Sysl typically use asymmetric ownership — the parent owns its children via `&Child`, the child holds a `*Parent` back-pointer:
+
+```sysl
+struct Parent
+    children: []&Child
+
+struct Child
+    parent: *Parent      // back-pointer, not refcounted
+    value: int
+```
+
+This breaks the cycle without `weak` references and keeps the type system honest about ownership.
+
+### Idiom: index-based graphs
+
+For dense graphs or when many nodes refer to many other nodes, use indices into a backing slice:
+
+```sysl
+struct Graph
+    nodes: []Node
+
+struct Node
+    value: int
+    edges: []int       // indices into Graph.nodes
+```
+
+Indices are values, not pointers — they don't participate in ARC, can be freely copied, and survive backing-array resize as long as you don't compact.
+
+## ARC mechanics
+
+`&T` is a fat pointer with a small refcount header stored 16 bytes before the user data:
+
+```
+header:  [refcount: i64] [deinit_ptr: *void]   ← 16 bytes
+data:    [field0] [field1] ...                  ← what &T points at
+```
+
+When `&T` is assigned, returned, or stored into a field, the refcount increments. When it goes out of scope, the refcount decrements. At zero, the optional `deinit` (see [Deinit & Defer](/language/functions/deinit-and-defer)) runs, then the allocator reclaims the storage.
+
+```sysl
+struct Buf
+    data: *u8
+    size: int
+
+Buf.deinit()
+    free(self.data)
+
+main() -> int
+    val b = new Buf(malloc(1024), 1024)
+    // ... use b ...
+    0   // b goes out of scope: rc → 0, deinit runs, malloc'd data freed
+```
+
+ARC is deterministic — there is no GC pause. The cost is at every assignment and scope exit (one refcount adjustment, branchless on most backends).
+
+## Cycle limitation
+
+ARC cannot reclaim cycles. If A owns B via `&B` and B owns A via `&A`, neither will ever drop to refcount 0.
+
+Sysl does not have `weak` or `unowned` references. Cycle-breaking is by convention:
+
+1. **Asymmetric ownership** — one direction is `&T`, the other is `*T`. Most trees, doubly-linked structures, and observer patterns work this way.
+2. **Index-based** — store ids/indices into a backing array instead of refs.
+
+These cover the realistic cases in kernel and application code. The deferred design note in `project_sysl_swift_style_weak_unowned_future.md` documents what `weak`/`unowned` would look like if real user pain accumulates.
+
+## See also
+
+- [Variables & Constants](/language/variables-and-constants) — `val` vs `var` and how each interacts with modes.
+- [Function Parameters](/language/functions/parameters) — `in` / `out` / `inout` modes layer on top of allocation modes.
+- [Deinit & Defer](/language/functions/deinit-and-defer) — what runs when a `&T` hits rc=0.

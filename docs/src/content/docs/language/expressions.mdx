@@ -1,0 +1,257 @@
+---
+title: Expressions
+description: Literals, operators, casts, sizeof, conditional expressions, and pattern-matching expressions.
+---
+
+Sysl is expression-oriented — most syntactic forms produce a value. Functions return their last expression. `if`, `match`, and blocks are all valid in expression position.
+
+## Literals
+
+```sysl
+42                    // int (i32)
+0xFF                  // hex literal
+100u32                // typed literal suffix
+3.14                  // double (f64)
+1.5e10                // scientific notation
+'A'                   // char literal (u32, value 65)
+'\n'                  // escape char
+"hello"               // string literal
+true, false           // bool
+[1, 2, 3]            // array literal
+1_000_000             // underscore separators (decimal, hex, float, exponent)
+0xDEAD_BEEF           // grouping for readability
+0xFF_00_FF_00u32      // combined with type suffix
+3.141_592             // underscores in fractional part
+```
+
+### Type suffixes
+
+Integer literals can force a specific type with a suffix:
+
+```sysl
+42i8                  // i8
+42i16                 // i16
+42i32                 // i32 (same as plain `42`)
+42i64                 // i64
+200u8                 // u8
+1000u16               // u16
+100u32                // u32
+0xFFu64               // u64
+```
+
+### Literal overflow is a compile-time error
+
+A bare integer literal that does not fit in the type it's being assigned to produces a hard compile error rather than a silent truncation:
+
+```sysl
+var x: u8 = 256       // error: literal 256 does not fit in u8 (range 0..255)
+var y: i8 = 200       // error: literal 200 does not fit in i8 (range -128..127)
+var n: u8 = -1        // error: literal -1 does not fit in u8 (range 0..255)
+var m: i8 = -129      // error: literal -129 does not fit in i8 (range -128..127)
+```
+
+Unary minus and bitwise NOT on a literal are constant-folded before the range check fires, with NOT's bit-flip width determined by the inner literal's type:
+
+```sysl
+var p: u8 = ~0        // error: literal -1 does not fit in u8
+                      //   (`~0` is i32 → -1; the i32 width applies to NOT)
+var q: u8 = ~0u32     // error: literal 4294967295 does not fit in u8
+                      //   (`~0u32` is u32 → 0xFFFFFFFF, width = u32)
+```
+
+If truncation or bit-pattern reinterpretation is intended, write the cast explicitly:
+
+```sysl
+var x: u8 = u8(256)   // ok — wraps to 0; intent is clear
+var n: u8 = u8(-1)    // ok — bit-pattern reinterpretation, yields 255
+var p: u8 = ~0u8      // ok — width matches target, folds to 0xFF
+```
+
+Negative literals into signed types within range are accepted as written (`var x: i8 = -1`).
+
+Float literals (`3.14`, `1e5`) default to `f64`, but coerce to `f32` when the context demands it (`var x: f32 = 1.5` works without a cast). Mixed-width float arithmetic widens to the wider operand; `f64 -> f32` requires explicit `f32(x)`.
+
+### Escape sequences
+
+In string and char literals:
+
+```
+\n    newline
+\t    tab
+\r    carriage return
+\0    null (0x00)
+\\    literal backslash
+\'    literal single quote
+\"    literal double quote
+\xNN  hex byte (e.g., \x1b for ESC, \x00 for null)
+```
+
+## Operators
+
+Operators by precedence (lowest to highest):
+
+| Precedence | Operators | Associativity |
+|---|---|---|
+| 1 | `\|\|` | left |
+| 2 | `&&` | left |
+| 3 | `==` `!=` `<` `>` `<=` `>=` | left (chainable) |
+| 4 | `\|` | left |
+| 5 | `^` | left |
+| 6 | `&` | left |
+| 7 | `<<` `>>` | left |
+| 8 | `+` `-` | left |
+| 9 | `*` `/` `%` | left |
+| 10 | `-` `!` `~` `*` `&` `++` `--` (prefix) | right |
+| 11 | `[]` `.` `()` `++` `--` (postfix) | left |
+
+Bitwise operators bind tighter than comparisons (unlike C). `x & mask == 0` works as expected.
+
+### Chained comparisons
+
+```sysl
+if 1 <= x <= 10 then ...    // equivalent to: 1 <= x && x <= 10
+if a < b < c < d then ...   // all pairs checked, short-circuits
+```
+
+### Increment / decrement
+
+```sysl
+++x       // prefix: increments x, returns new value
+x++       // postfix: returns old value, then increments
+--x       // prefix decrement
+x--       // postfix decrement
+```
+
+### Compound assignment
+
+```sysl
+x += 5    x -= 3    x *= 2    x /= 4    x %= 7
+x &= 0xFF   x |= 0x01   x ^= 0xAA   x <<= 2   x >>= 1
+
+// Also works on pointers (scaled by element size)
+p += 2    p -= 1
+```
+
+## Line continuation
+
+A binary operator at the end of a line — built-in or user-defined via `#operator(...)` — suppresses the implicit newline so the right-hand side can live on the next indented line:
+
+```sysl
+// Built-in operators
+val x = some_long_call() +
+    another_call() * 2
+
+if condition_one &&
+    condition_two then ...
+
+x +=
+    expensive_computation()
+
+// User-defined operators (parser-combinator style)
+val parser = literal("ab") ~>
+    rep(digit) <~
+    literal(";") ^^
+    ((digits) -> ...)
+```
+
+Tokens excluded from the rule (because they end a statement or drive their own indented-block construct):
+
+| Token | Why excluded |
+|-------|--------------|
+| `=` | introduces an indented val/var/function body |
+| `->` `=>` | block trigger (function body, match arm, etc.) |
+| `++` `--` | postfix; legitimately ends a statement |
+| `*` | the `import std.foo.*` glob marker |
+
+For multi-line multiplication, break **inside** parens or before — not after — the `*`:
+
+```sysl
+val product = (
+    very_long_factor *
+    another_factor *
+    one_more_factor
+)
+```
+
+Leading-operator continuation (operator at the *start* of the next line) is not supported.
+
+## Casts
+
+```sysl
+// Numeric
+int(true)         // bool -> int: 1
+bool(42)          // int -> bool: true (nonzero)
+byte(0x1FF)       // truncate to u8: 255
+char(65)          // int -> u32: 65
+i64(3.14)         // float -> int: 3
+f32(3.14)         // f64 -> f32 (precision narrowing)
+f64(x: f32)       // f32 -> f64 (lossless widening, also implicit)
+
+// Pointer / int conversions
+*i8(address)      // int -> pointer
+*Point(address)   // int -> struct pointer
+i64(ptr)          // pointer -> int
+bool(ptr)         // pointer -> bool (null = false)
+
+// Pointer-to-pointer
+*i8(refVal)       // &T -> *i8 (ref to raw pointer)
+
+// Function pointers
+i64(funcPtr)      // func -> int (address)
+bool(funcPtr)     // func -> bool (non-null = true)
+
+// Array decay (address of first element)
+*byte(arr)        // [N]T -> *byte
+*i64(arr)         // [N]T -> *i64
+i64(arr)          // [N]T -> i64 (address as integer)
+string(arr, len)  // [N]byte + len -> string
+```
+
+## sizeof
+
+```sysl
+sizeof(int)        // 4
+sizeof(*int)       // 8
+sizeof(Point)      // sum of fields + padding
+sizeof([10]int)    // 40
+```
+
+`sizeof` is a compile-time constant — its result is foldable into `const` initializers, `static_assert` conditions, and `within` bounds.
+
+## If expression
+
+```sysl
+x = if cond then a else b
+result = if x > 0 then x else -x
+```
+
+The `if` returns the value of whichever branch executed. Both branches must produce the same type. Without `else`, the type is `unit` and the result must be discarded.
+
+## If-Is (pattern matching in if)
+
+`if expr is Pattern then ...` is sugar for a single-arm `match`. The pattern binds variables in the then-branch. Like Rust's `if let`:
+
+```sysl
+// Extract value or use default
+val v = if r is Ok(x) then x else -1
+
+// Guard with pattern
+if o is Some(x) then
+    process(x)
+
+// With block body and else
+if parse(s) is Ok(val, pos) then
+    handle(val, pos)
+else
+    report_error()
+```
+
+Desugars to `match` at parse time — no new analyzer or runtime machinery.
+
+A no-`else` `if-is` (`if x is Some(v) then body`) supplies an empty default, matching the behaviour of plain `if cond then body`. Exhaustiveness is satisfied automatically and unmatched values are skipped silently. To recover a value from the no-match path, write the `else` arm explicitly.
+
+## See also
+
+- [Statements](/language/statements) — control flow including `match`, `for`, `while`.
+- [Type Compatibility](/language/type-compatibility) — implicit conversions and decay rules.
+- [Integers and Overflow](/language/types/integers-and-overflow) — arithmetic behavior.

@@ -1,0 +1,85 @@
+---
+title: Constrain a Type Parameter to Multiple Traits
+description: "Using `T: A + B` to require multiple capabilities on the same generic parameter."
+---
+
+When a generic function needs more than one operation on its type parameter, list every required trait with `+`:
+
+```sysl
+trait Show[T]
+    show(v: T) -> string
+
+trait Ord[T]
+    cmp(a: T, b: T) -> int
+
+print_sorted_pair[T: Show + Ord](a: T, b: T) -> string
+    if Ord.cmp(a, b) <= 0 then
+        Show.show(a) + " " + Show.show(b)
+    else
+        Show.show(b) + " " + Show.show(a)
+```
+
+Both `Show[T]` and `Ord[T]` impls must exist for the concrete `T`. If either is missing, the call site errors with a specific diagnostic naming the missing trait.
+
+## On the same axis
+
+`T: Ord + Eq` requires both ordering and equality — common when you want both `<` and `==` available:
+
+```sysl
+unique_sorted[T: Ord + Eq](xs: []T) -> []T
+    if len(xs) == 0 then return []
+    var result = (new [len(xs)]T)[:0]
+    result = append(result, xs[0])
+    for i in 1..<len(xs)
+        if xs[i] != xs[i-1] then
+            result = append(result, xs[i])
+    result
+```
+
+This builds a duplicate-free copy. It assumes the input is sorted (otherwise `xs[i] != xs[i-1]` only detects adjacent duplicates).
+
+## With associated types
+
+If the trait declares associated types, the projection works in the function signature too:
+
+```sysl
+trait Reader[I]
+    type Token
+    head(i: I) -> Self::Token
+
+first_token[I: Reader](inp: I) -> I::Token =
+    Reader.head(inp)
+```
+
+`I::Token` resolves via the bound trait's matching impl.
+
+## Same trait on different type parameters
+
+If two type parameters each need a bound, write each bound separately:
+
+```sysl
+zip_with[A: Show, B: Show](xs: []A, ys: []B) -> []string
+    val n = if len(xs) < len(ys) then len(xs) else len(ys)
+    var result = (new [n]string)[:0]
+    for i in 0..<n
+        result = append(result, Show.show(xs[i]) + "/" + Show.show(ys[i]))
+    result
+```
+
+## When bounds get unwieldy
+
+If you find yourself writing `T: A + B + C + D`, consider extracting a composite trait:
+
+```sysl
+trait Comparable[T]
+    Ord[T]
+    Eq[T]
+```
+
+Then `T: Comparable` is the single bound that implies both. (Composite traits work the same way as composite [interfaces](/language/functions/interfaces#composed-interfaces).)
+
+## See also
+
+- [Generics: Trait bounds](/language/functions/generics#trait-bounds) — the reference.
+- [Traits & Impls](/language/functions/traits-and-impls) — the trait mechanism.
+- [Use trait bounds for comparison](/cookbook/bounded-generic-compare).

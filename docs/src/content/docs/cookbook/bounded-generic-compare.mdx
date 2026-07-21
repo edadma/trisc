@@ -1,0 +1,90 @@
+---
+title: Use Trait Bounds for Comparison
+description: "Constrain a generic type parameter to types that implement Ord, so `<` and `>` work in the body."
+---
+
+By default, a generic function can't use operators on its type parameter — the compiler doesn't know whether `>` is defined for `T`. Add an `: Ord` bound to declare the requirement:
+
+```sysl
+max_of[T: Ord](a: T, b: T) -> T =
+    if a > b then a else b
+
+main() -> int
+    max_of(3, 7)              // 7 — int has Ord
+    int(max_of(1.5, 2.5))     // 2 — f64 has Ord (cast to int for return)
+```
+
+`max_of[bool]` would fail at the call site because `bool` doesn't have an `Ord` impl.
+
+## How dispatch works
+
+`a > b` in the body desugars to `Ord.gt(a, b)`, which routes through the impl registered for `T`. The compiler monomorphizes one specialized copy per type:
+
+- `max_of[int]` → calls `Ord_gt_i32`
+- `max_of[string]` → calls `Ord_gt_string`
+
+No runtime dispatch; each call is direct.
+
+## Combining bounds
+
+Use `+` to require multiple traits:
+
+```sysl
+max_eq[T: Ord + Eq](a: T, b: T) -> T =
+    if a == b then a
+    elif a > b then a
+    else b
+```
+
+`T` must implement both `Ord` and `Eq`. Failures name the missing trait specifically.
+
+## Other built-in traits
+
+| Trait | Methods | Used by |
+|-------|---------|---------|
+| `Ord` | `cmp`, `lt`, `le`, `gt`, `ge` | `<` `<=` `>` `>=` |
+| `Eq` | `eq`, `ne` | `==` `!=` |
+| `Add` | `add` | `+` |
+| `Sub` | `sub` | `-` |
+| `Mul` | `mul` | `*` |
+| `Div` | `div` | `/` |
+| `Hash` | `hash` | `std.container` hash maps |
+
+## Custom bounds
+
+You can require a custom trait the same way:
+
+```sysl
+trait Display[T]
+    show(v: T) -> string
+
+impl Display[int]
+    show(v: int) -> string = str(v)
+
+impl Display[bool]
+    show(v: bool) -> string = if v then "true" else "false"
+
+print_thing[T: Display](v: T)
+    puts(Display.show(v))
+
+main() -> int
+    print_thing(42)               // "42"
+    print_thing(true)             // "true"
+    0
+```
+
+## When `T: Trait` is unnecessary
+
+If your function only does things every type supports (assignment, copy, sizeof), no bound is needed:
+
+```sysl
+identity[T](x: T) -> T = x          // no bound — every type supports this
+```
+
+A bound that isn't used in the body is rejected at declaration — unused bounds are a footgun.
+
+## See also
+
+- [Traits & Impls](/language/functions/traits-and-impls) — defining and impl-ing traits.
+- [Generics](/language/functions/generics) — type parameters and inference.
+- [Operator Overloading](/language/functions/operator-overloading) — operators-to-traits mapping.

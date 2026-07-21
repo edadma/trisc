@@ -1,0 +1,164 @@
+---
+title: Parameters
+description: Defaults, named arguments, in/out/inout modes, and call-by-name (=> T).
+---
+
+Sysl supports several parameter conveniences beyond plain positional arguments — defaults, named arguments, Ada-style `in`/`out`/`inout` modes, and Scala-style call-by-name.
+
+## Default values
+
+Parameters can have default values, given with `= expr` after the type. Any parameter with a default must come at the end of the parameter list; once a parameter has a default, all later parameters must too.
+
+```sysl
+val BASE = 100
+
+greet(x: int, y: int = 10) -> int = x + y
+compute(x: int, k: int = BASE * 2) -> int = x + k
+
+main() -> int
+    greet(32)          // 42 — uses default y=10
+    greet(32, 100)     // 132 — explicit y=100
+    compute(42)        // 242 — k defaults to 200
+```
+
+Default expressions are evaluated at each call site (re-evaluated per call, not cached). They can reference module-level vals and constants, but not other parameters or local variables. Constant defaults are folded by the analyzer.
+
+Default values are not yet supported on generic functions.
+
+## Named arguments
+
+Function call arguments can be passed by name using `name = expr`. Named arguments can appear in any order, can be mixed with positional arguments (positional must come first), and work with default values — including skipping middle defaults:
+
+```sysl
+greet(x: int, y: int, z: int = 0) -> int = x * 100 + y * 10 + z
+
+main() -> int
+    greet(1, 2, 3)                  // positional
+    greet(x = 1, y = 2, z = 3)      // all named
+    greet(y = 2, x = 1, z = 3)      // named, any order
+    greet(1, z = 3, y = 2)          // mixed: positional first, then named
+    greet(1, z = 3)                 // named skips middle
+```
+
+**Errors:**
+
+- Positional argument after a named argument.
+- Unknown parameter name.
+- Duplicate named argument.
+- Named argument that conflicts with a positional one (same slot).
+
+Named arguments are currently supported for regular function calls, struct constructors, and builtins — not yet for generic function instantiation, method calls, or trait methods.
+
+## `in` / `out` / `inout`
+
+Each parameter can carry an Ada-style mode prefix that states **how** the argument is passed:
+
+- **`in x: T`** (default) — pass-by-value. The body sees a local copy; the caller's value is not affected by writes inside the function. Same as plain `x: T`.
+- **`out x: T`** — caller passes an **lvalue** (variable, field, or array element). The body writes into it through a hidden pointer; whatever value the body last assigned is visible at the call site after the call returns. The caller doesn't need to have initialized the lvalue beforehand.
+- **`inout x: T`** — same as `out`, but the body also reads the initial value the caller supplied. Useful for accumulating / transforming a variable in place.
+
+```sysl
+// Out: initialize a caller-supplied variable.
+set_to(out x: int, v: int)
+    x = v
+
+// Inout: read initial, write updated.
+inc_by(inout x: int, by: int)
+    x = x + by
+
+main() -> int
+    var v: int = 0
+    set_to(v, 42)   // v is now 42
+    inc_by(v, 5)    // v is now 47
+    return v
+```
+
+Writes inside the body use plain assignment — the body always sees the parameter as type `T`, not `*T`. The hidden pointer indirection is invisible:
+
+```sysl
+swap(inout a: int, inout b: int)
+    val t: int = a
+    a = b
+    b = t
+
+split(x: int, out q: int, out r: int)
+    q = x / 10
+    r = x % 10
+```
+
+At a call site, the compiler auto-takes the address of the argument — you do not write `&v`:
+
+```sysl
+inc(inout n: int)
+    n += 1
+
+main() -> int
+    var p: Point = Point(10, 20)
+    inc(p.x)              // field lvalue — OK
+    var arr: [3]int = [0, 0, 0]
+    inc(arr[1])           // index lvalue — OK
+    // inc(p.x + 1)       // error: not an lvalue
+    // inc(42)            // error: not an lvalue
+    return p.x + p.y + arr[1]
+```
+
+**Errors:**
+
+- Passing a literal, arithmetic expression, or call result to an `out`/`inout` param.
+- A default value on an `out`/`inout` parameter (only `in` can have defaults).
+- `out` or `inout` on the implicit method receiver `self`.
+- `out` or `inout` parameters on a generic function (not yet supported in V1).
+
+`out` and `inout` interact with `#pure`: writing to such a parameter is a write to the caller's memory and will be rejected by the purity checker. Read-only (`in`) parameters are fine in pure functions.
+
+Internally the body auto-dereferences reads and writes: `x` in the body lowers to `*ptr_x`, and `x = v` to `*ptr_x = v`. Both behaviors mean there is **no early-return write-back**: every assignment commits immediately.
+
+Contextual-keyword rules: `in` is already reserved; `out` and `inout` are contextual, so user identifiers with those names still work outside parameter position.
+
+## Call-by-name (`=> T`)
+
+A parameter type prefixed with `=>` declares **call-by-name** semantics: the argument is not evaluated at the call site. Instead it is implicitly wrapped as a zero-arg thunk; every body reference to the parameter re-enters the thunk (no memoization — Scala-style, not lazy val).
+
+```sysl
+use_lazy(b: => int) -> int = b + b   // each `b` re-evaluates
+ignore(b: => int) -> int = 0         // `b` never evaluated → arg never runs
+
+main() -> int
+    val r = use_lazy(bump())          // `bump()` runs twice (b+b)
+    ignore(panic_if_called())         // safe: arg never fires
+```
+
+The user-visible type of a by-name param is `T` (you read `b + b`, not `b() + b()`). Internally the storage type is `() -> T`; the analyzer auto-wraps each call-site argument and auto-calls each body reference. Forwarding to another by-name slot composes naturally:
+
+```sysl
+outer(b: => int) -> int = inner(b)   // forwards correctly
+inner(c: => int) -> int = c + 1
+main() -> int = outer(41)            // 42
+```
+
+By-name interacts with operator dispatch: traits and impls may declare operator slots `=> T`, and the analyzer wraps the corresponding operand AST before analysis. This is the natural shape for combinator libraries that want short-circuiting `|` or recursive grammars without explicit thunks:
+
+```sysl
+trait Or[T]
+    #operator("|")
+    or_op(a: T, b: => T) -> T
+
+impl[A] Or[Parser[A]]
+    or_op(a: Parser[A], b: => Parser[A]) -> Parser[A] = a
+
+// `expr_p()` is wrapped — recursive grammars don't infinite-loop at
+// construction time:
+factor_p -> Parser[int] = number_p | ("(" ~> expr_p <~ ")")
+```
+
+**Restrictions:**
+
+- `=> T` is only valid in parameter position (not in arbitrary type contexts like `var x: => int`).
+- A by-name parameter cannot also be `out` / `inout` (the thunk has no lvalue to write back to).
+- A by-name parameter cannot have a default value.
+
+## See also
+
+- [Functions: Overview](/language/functions/overview) — declaration forms.
+- [Functions: Generics](/language/functions/generics) — type parameters and bounds.
+- [Three Allocation Modes](/language/types/three-allocation-modes) — how `T` / `&T` / `*T` interact with parameter modes.

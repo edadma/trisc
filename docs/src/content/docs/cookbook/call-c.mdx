@@ -1,0 +1,110 @@
+---
+title: Call a C Function with `extern`
+description: "Declare a C ABI signature in Sysl and let the linker resolve it."
+---
+
+`extern` declares a function that lives outside the compilation — typically libc or another shared library:
+
+```sysl
+extern strlen(s: *byte) -> int
+extern atoi(s: *byte) -> int
+extern getenv(name: *byte) -> *byte
+```
+
+The signature is the C calling convention exactly — no `string` fat pointers, no `&T` refs, no implicit conversions. Map every C type by hand.
+
+## Type mapping cheat sheet
+
+| C | Sysl |
+|---|------|
+| `int` / `int32_t` | `int` or `i32` |
+| `long long` / `int64_t` | `i64` |
+| `unsigned int` | `u32` |
+| `unsigned long long` | `u64` |
+| `unsigned char` / `uint8_t` | `byte` / `u8` |
+| `float` | `f32` |
+| `double` | `f64` |
+| `char*` (NUL-terminated string) | `*byte` |
+| `T*` | `*T` |
+| `T (*)(int)` | `(int) -> T` |
+| `void` (return) | omit return type |
+
+`size_t` is `i64` on 64-bit hosts and `i32` on 32-bit/wasm32. Use the architecture-appropriate type.
+
+## Calling
+
+```sysl
+extern strlen(s: *byte) -> int
+
+main() -> int
+    val ctext: [6]byte = "hello\0"
+    val n = strlen(&ctext[0])           // 5
+    n
+```
+
+A few things to notice:
+
+- **Explicit NUL** in `ctext` — Sysl string literals don't auto-include a NUL byte. The C library needs one.
+- **`&ctext[0]`** — explicit address-of the first byte. Implicit decay (`strlen(ctext)`) wouldn't quite work because `ctext` is a `[6]byte`, not a `*byte`; the address-of converts.
+
+## Passing Sysl strings
+
+A Sysl `string` is a fat pointer `{ptr, len}`, not NUL-terminated. To pass to C:
+
+```sysl
+extern fputs(s: *byte, f: *u8) -> int
+extern stdout: *u8
+
+print_via_c(s: string)
+    fputs(s, stdout)        // string decays to *byte automatically
+```
+
+This works when the C function reads through the byte pointer until a NUL — which **most** C string functions do. If your Sysl `string` doesn't contain a NUL, the C function reads off the end. For safety, copy into a buffer with an explicit NUL:
+
+```sysl
+print_safe_via_c(s: string)
+    var buf = new [len(s) + 1]byte
+    for i in 0..<len(s)
+        buf[i] = byte(s[i])
+    buf[len(s)] = 0
+    fputs(&buf[0], stdout)
+```
+
+## Variadic C functions
+
+Sysl does not currently support `...` in extern declarations. For variadic functions like `printf`, write a C wrapper that fixes the argument list:
+
+```c
+// in a separate .c file
+int sysl_printf_int(const char *fmt, int n) {
+    return printf(fmt, n);
+}
+```
+
+Declare and call it from Sysl:
+
+```sysl
+extern sysl_printf_int(fmt: *byte, n: int) -> int
+
+main() -> int
+    val fmt: [4]byte = "%d\n\0"
+    sysl_printf_int(&fmt[0], 42)
+    0
+```
+
+A future Sysl version may add variadic support directly.
+
+## Linking
+
+How `extern` resolves depends on the backend:
+
+- **`llvm-host`** — externs become regular `external` declarations in the IR; `clang` links against the standard C library.
+- **`trisc`** — externs become unresolved symbols; the linker resolves against other TOFs or assembly sources.
+- **`svm-host`** — externs are looked up in a host-provided symbol table at VM startup.
+- **`interpreter`** — a built-in registry maps common externs (`malloc`, `puts`, `strlen`, etc.) to host functions. Unknown externs trap.
+
+## See also
+
+- [Extern Declarations](/language/functions/extern) — full reference.
+- [Pass a Sysl string to a C function](/cookbook/string-to-c).
+- [Access errno after a failed syscall](/cookbook/errno).

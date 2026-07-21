@@ -1,0 +1,117 @@
+---
+title: Types
+description: The Sysl type system — scalars, composites, and the three allocation modes.
+---
+
+Sysl's type system has three layers:
+
+1. **Scalars** — integers, floats, `bool`, `unit`, `string`. Sizes are explicit and consistent across all seven backends.
+2. **Composites** — pointers, refs, fixed arrays, slices, tuples, function types.
+3. **User types** — structs, enums (simple and tagged-union), type aliases, derived types.
+
+Every type belongs to one of three [allocation modes](/language/types/three-allocation-modes) at any use site: a value (`T`), a ref-counted reference (`&T`), or a raw pointer (`*T`).
+
+## Scalar types
+
+| Type | Alias | Size | Description |
+|------|-------|------|-------------|
+| `i8` | | 1 byte | signed 8-bit integer |
+| `i16` | `short` | 2 bytes | signed 16-bit integer |
+| `i32` | `int` | 4 bytes | signed 32-bit integer |
+| `i64` | `long` | 8 bytes | signed 64-bit integer |
+| `u8` | `byte` | 1 byte | unsigned 8-bit integer |
+| `u16` | `ushort` | 2 bytes | unsigned 16-bit integer |
+| `u32` | `char`, `uint` | 4 bytes | unsigned 32-bit integer (Unicode codepoint) |
+| `u64` | `ulong` | 8 bytes | unsigned 64-bit integer |
+| `f32` | `float` | 4 bytes | IEEE-754 single-precision floating point |
+| `f64` | `double` | 8 bytes | IEEE-754 double-precision floating point |
+| `bool` | | 1 byte | `true` or `false` |
+| `unit` | | 0 bytes | sole value `()` |
+| `string` | | 16 bytes | fat pointer: `{ptr: *u8, len: i64}` |
+
+The default integer type for an integer literal is `int` (`i32`) unless context demands otherwise. The default floating-point type for a literal is `f64`.
+
+## The `unit` type
+
+`unit` is a first-class scalar type with a single value, written `()`. It is the canonical translation of Scala's `Unit`, Rust's `()`, Haskell's `()`, and the C concept of "function that returns nothing." It works everywhere any other scalar type works:
+
+- Variable type: `val x: unit = ()`, `var y: unit = ()`
+- Parameter type: `f(x: unit) -> int = ...`
+- Return type: `g() -> unit = ()`
+- Generic type argument: `Option[unit]`, `Parser[unit]`, `Result[unit, string]`
+- Struct field: `struct S { f: unit; n: int }`
+- Enum-variant payload: `Some(())`, custom variants like `Done(x: unit)`
+
+`unit` does not implicitly convert to or from `int`, `bool`, or any other type — it is a distinct nominal scalar.
+
+```sysl
+type Parser[A] = new (Input) -> ParseResult[A]
+
+eof() -> Parser[unit] = Parser[unit]((inp: Input) -> Success((), inp))
+```
+
+The size is 0 bytes; `sizeof(unit) == 0`. A `unit` field contributes nothing to the parent struct's size or alignment. At runtime, codegen treats `()` as a discardable zero-byte placeholder.
+
+## Composite types
+
+```sysl
+*T              // raw pointer (8 bytes, unmanaged)
+*T not null     // raw pointer constrained to be non-null at produce sites
+&T              // ref-counted reference (8 bytes, auto-freed at rc=0)
+[n]T            // fixed-size array (n * sizeof(T) bytes, stack-allocated)
+[]T             // slice: {ptr: *T, len: i32, cap: i32} (16 bytes)
+&[]T            // ref-counted heap array from new [n]T
+(T1, T2, T3)    // tuple (desugars to anonymous struct)
+(P1, P2) -> R   // function pointer / closure (16 bytes: {func_ptr, env_ptr})
+```
+
+### `not null` pointers
+
+`*T not null` is a subtype of `*T` with a runtime check: every assignment, parameter bind, return, or cast that produces a `*T not null` value verifies the pointer is non-null. A null value traps at the produce site.
+
+The check is inserted via the same `where`-predicate mechanism used for user-defined predicates. `*T not null` is pointer-compatible with `*T`, so it can be passed anywhere a `*T` is expected — the constraint is only on values *flowing into* the non-null type.
+
+### Empty array literals (`[]`)
+
+An empty literal infers its element type from the expected type at the use site:
+
+```sysl
+var xs: []int = []                  // expected []int → element T = int
+val ys: []string = []               // works for any element type
+f() -> []int = []                   // expected return type
+g(items: []int) -> int = ...
+g([])                               // expected from parameter type
+struct Bag { items: []int; n: int }
+Bag([], 0)                          // expected from struct field type
+```
+
+`val xs = []` (no expected type) still errors with "cannot infer element type". A non-zero fixed-array type rejects `[]` (you can't give zero elements to a `[3]int`). Only `[0]T` accepts the empty fixed-array form.
+
+## User types
+
+Each of these has its own page:
+
+- [Structs](/language/types/structs) — record types with optional invariants.
+- [Enums](/language/types/enums) — simple enums (integer constants) and tagged unions (data enums).
+- [Type Declarations](/language/types/type-declarations) — `within`, `where`, `new`, generic aliases.
+- [Type Attributes](/language/types/type-attributes) — `T::First`, `T::Image(x)`, `T::Valid(x)`, etc.
+
+## Integer overflow
+
+All integer arithmetic wraps at the declared type width. There is no implicit integer promotion — `u8 + u8` produces `u8`, not `int`.
+
+- **Unsigned types** wrap via modular arithmetic (zero-extension): `u8(255) + u8(1)` → `0`.
+- **Signed types** wrap via two's complement (sign-extension): `int(2147483647) + 1` → `-2147483648`.
+- **64-bit types** (`i64`, `u64`) use the full register width and do not truncate.
+
+To avoid wrapping, widen operands explicitly: `int(a) + int(b)`.
+
+This matches Go, Rust, and Swift. C-style implicit integer promotion is not used.
+
+For explicit, intent-marked overflow behavior, use the overflow [intrinsics](/language/types/integers-and-overflow).
+
+## See also
+
+- [Three Allocation Modes](/language/types/three-allocation-modes) — how `T`, `&T`, and `*T` differ.
+- [Type Compatibility and Coercion](/language/type-compatibility) — when types convert without a cast.
+- [Arrays, Slices & Pointers](/language/arrays-slices-pointers) — the composite types in depth.

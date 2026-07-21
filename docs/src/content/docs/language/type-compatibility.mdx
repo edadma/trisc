@@ -1,0 +1,92 @@
+---
+title: Type Compatibility and Coercion
+description: When integer types widen, when casts are required, and how array/pointer decay works.
+---
+
+Sysl's type rules are explicit by default — when a conversion would silently lose information or hide a cost, you write the cast. The rules below describe what *doesn't* need a cast.
+
+## Implicit widening
+
+These conversions happen without an explicit cast:
+
+- **Signed integer widening**: `i8` → `i16` → `i32` → `i64`
+- **Unsigned integer widening**: `u8` → `u16` → `u32` → `u64`
+- **Cross-sign widening**: `u8` → `i16` (unsigned fits in wider signed). Generally, `uN` → `iM` is implicit iff `M > N`.
+- **Float widening**: `f32` → `f64`
+- **Int to float**: any integer → `f32` or `f64`
+
+Narrowing is never implicit. `i64` → `i32`, `f64` → `f32`, signed → unsigned of the same width all require explicit casts.
+
+## Mixed signed / unsigned arithmetic
+
+Operations between signed and unsigned types are allowed when the unsigned value fits entirely within the signed type's range:
+
+```sysl
+var b: byte = 200       // u8
+var x: int = b + 1      // OK: u8 fits in i32
+if b == 0 then ...       // OK: u8 compared with i32 literal
+
+var big: u32 = 100
+var y: int = big + 1     // ERROR: u32 doesn't fit in i32
+```
+
+The check is on type widths, not runtime values — `u32` doesn't fit in `i32` regardless of what value it actually holds.
+
+## Array / pointer decay
+
+These conversions happen at function-argument sites and other "consume-as-pointer" positions:
+
+- `[n]T` → `*T` (array decays to pointer to first element)
+- `string` → `*u8` or `*i8` (string decays to its underlying byte pointer)
+- `&T` → `*U` (ref decays to a raw pointer of any compatible inner type)
+- Any `*T` → any `*U` (permissive pointer casting between pointer types)
+
+Decay is one-way — you can't go back to `[n]T` or `&T` from `*T`.
+
+## Pointer dereference is explicit
+
+Passing `*T` to a function parameter of type `T` is a **type error**. Implicit deref-and-copy was removed because it hides cost: a pointer-passing site that *looks* like pass-by-reference silently becomes a `memcpy` of the entire pointee. For a small struct that's free; for a 4 KB packet it isn't. Write the deref:
+
+```sysl
+struct Point
+    x: int
+    y: int
+
+sum(p: Point) -> int = p.x + p.y
+
+main() -> int
+    var p = Point(20, 22)
+    val ptr: *Point = &p
+    sum(*ptr)              // explicit: sum receives a copy of *ptr
+```
+
+Equivalently, take the pointer's pointee directly: `sum(p)` (no `&`/`*` at all).
+
+The reverse direction (`T` → `*T`) is also not implicit — it would create a dangling pointer to a temporary.
+
+## Exception: `self` in methods
+
+Inside a method body `self` has type `*StructName`. Passing `self` to a function that expects the value type auto-derefs, because the method-call sugar already hides the pointer:
+
+```sysl
+Point.total() -> int = sum(self)   // self is *Point; sum gets a copy of *self
+```
+
+This is the **only** implicit `*T -> T` allowed. Local variables of pointer type, function parameters, struct fields — all require explicit `*ptr`.
+
+## Explicit casts required
+
+- `bool` ↔ `int`: use `int(flag)` or `bool(n)`
+- `int` ↔ pointer: use `*i8(addr)` or `i64(ptr)`
+- `f64` → `f32`: use `f32(x)`
+- `i64` → `i32`: use `int(x)`
+- `T` → derived `new T`: use the wrapping constructor (`Meters(3.0)`)
+- `new T` → `T`: use the base-type constructor (`f64(m)`)
+
+See [Expressions: Casts](/language/expressions#casts) for the full cast syntax.
+
+## See also
+
+- [Types: Overview](/language/types/overview) — the scalar type table.
+- [Integers and Overflow](/language/types/integers-and-overflow) — arithmetic behavior.
+- [Three Allocation Modes](/language/types/three-allocation-modes) — when explicit conversion between `T` / `&T` / `*T` is needed.

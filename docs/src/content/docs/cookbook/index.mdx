@@ -1,0 +1,53 @@
+---
+title: Cookbook
+description: "Short, focused recipes for common Sysl tasks."
+---
+
+The cookbook collects small "how do I..." snippets. Each recipe is short (typically under 50 lines), self-contained, and answers one specific question. If you're trying to learn the language from scratch, start with the [Tutorials](/tutorials/). If you have a concrete task, scan this list.
+
+## Strings & text
+
+- [Concatenate strings](/cookbook/concat-strings) — `+`, `s"..."` interpolation, `f"..."` formatting.
+- [Parse an integer from a string](/cookbook/parse-int) — using `std.strconv` and the `?` operator.
+- [Iterate over bytes vs. characters](/cookbook/iterate-string) — when each is right.
+
+## Collections
+
+- [Build a slice incrementally](/cookbook/build-slice) — `[:0]` + `append`, the canonical pattern.
+- [Iterate with index and value](/cookbook/iterate-with-index) — `for i, v in arr`.
+- [Pre-allocate a slice with known capacity](/cookbook/preallocate-slice).
+
+## Memory & refs
+
+- [Return a ref-counted struct from a factory](/cookbook/factory-ref).
+- [Pass a struct by value vs by ref](/cookbook/pass-by-value-vs-ref).
+- [Detach a `&T` to an owned `T`](/cookbook/copy-from-ref) — `.copy()` semantics.
+
+## Generics
+
+- [Define a generic container](/cookbook/generic-container) — `struct Stack[T]`.
+- [Use trait bounds for comparison](/cookbook/bounded-generic-compare) — `T: Ord`.
+- [Constrain a type parameter to multiple traits](/cookbook/multi-bound).
+
+## Error handling
+
+- [Use `Result` and `?` for cascading failures](/cookbook/result-cascade).
+- [Custom error enum](/cookbook/custom-error).
+- [Convert between error types](/cookbook/error-conversion).
+
+## Testing
+
+- [Write a `#test` that expects a panic](/cookbook/test-panic).
+- [Capture and inspect output in a test](/cookbook/test-capture-output).
+- [Test the same logic across multiple backends](/cookbook/test-multi-backend).
+
+## C interop
+
+- [Call a C function with `extern`](/cookbook/call-c).
+- [Pass a Sysl string to a C function](/cookbook/string-to-c).
+- [Access errno after a failed syscall](/cookbook/errno).
+
+## See also
+
+- [Tutorials](/tutorials/) — longer guided walkthroughs.
+- [Language Overview](/language/overview) — the reference manual.

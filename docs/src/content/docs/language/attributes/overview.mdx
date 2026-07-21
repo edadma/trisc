@@ -1,0 +1,56 @@
+---
+title: Attributes
+description: Annotations prefixed with # that attach to declarations — tests, purity, effects, MMIO, deprecation.
+---
+
+Attributes are annotations prefixed with `#` that attach to the following declaration. They appear on their own line(s) immediately before the declaration:
+
+```sysl
+#test
+test_copy_basic() -> unit
+    0
+
+#inline
+#deprecated("use foo2")
+foo() -> int = 1
+```
+
+## Forms
+
+- **Flag**: `#name`
+- **With arguments**: `#name(arg1, arg2, ...)` — arguments are literals (string, int, bool), bare identifiers, or `key: value` pairs.
+
+Multiple attributes stack on separate preceding lines. Unknown attribute names are stored as-is (no error), so new attributes can be introduced incrementally.
+
+## Built-in attributes
+
+Each of these has its own page:
+
+- [`#test`](/language/attributes/test) — mark a function as a unit test.
+- [`#address(N)`](/language/attributes/address) — map a var to a fixed physical address (MMIO).
+- [`#pure` / `#reads(...)` / `#writes(...)`](/language/attributes/pure-reads-writes) — declare side-effect bounds.
+- [`#ghost`](/language/attributes/ghost) — verification-only declarations.
+- [`#deprecated`](/language/attributes/deprecated) — emit a warning at every call site.
+
+## Related directives
+
+`#if` / `#else` / `#endif` (conditional compilation) use `#` but are not attributes — they gate which source the compiler sees, rather than annotating a declaration. See [Conditional Compilation](/language/conditional-compilation).
+
+`#operator("sym")` is used inside trait declarations to register a custom operator symbol — see [Operator Overloading](/language/functions/operator-overloading).
+
+## Unknown attributes
+
+The compiler does not reject unknown attribute names. This allows experimental or external attributes (used by build tooling, documentation generators, etc.) to be added without compiler changes:
+
+```sysl
+#warmup_calls(100)               // unknown to the compiler — passed through
+foo() -> int = 42
+```
+
+If you mistype a known attribute (`#tset` instead of `#test`), the compiler won't catch it — the declaration just won't have the effect you expected. Run your test suite to verify.
+
+## See also
+
+- [Functions: Def & Pure](/language/functions/def-pure-functions) — `def` is implicitly `#pure`.
+- [Variables: module_invariant](/language/variables-and-constants#module_invariant-expr) — verification predicates.
+- [Operator Overloading](/language/functions/operator-overloading) — `#operator(...)` for custom operators.

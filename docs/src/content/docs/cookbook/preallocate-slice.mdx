@@ -1,0 +1,58 @@
+---
+title: Pre-allocate a Slice with Known Capacity
+description: "Allocate a slice's backing buffer once when you know how many elements you'll add."
+---
+
+When you know the eventual length in advance (or a tight upper bound), pre-allocating avoids the repeated reallocations `append` would otherwise do as a growing slice exhausts its capacity:
+
+```sysl
+// You know there will be exactly n elements
+make_squares(n: int) -> []int
+    val result = new [n]int
+    for i in 0..<n
+        result[i] = i * i
+    result[:]      // convert &[]int → []int
+
+main() -> int
+    val sq = make_squares(5)         // [0, 1, 4, 9, 16]
+    sq[4]                             // 16
+```
+
+### Pattern breakdown
+
+- **`new [n]int`** allocates a heap buffer of exactly `n` elements (`&[]int`).
+- **Direct index assignment** (`result[i] = ...`) writes into the buffer in place — no `append`, no copy.
+- **`result[:]`** converts the ref slice (`&[]int`) into a regular slice (`[]int`) that shares the backing storage.
+
+## When you know the upper bound but not the exact length
+
+Use the `[:0]` + `append` pattern with the upper bound as capacity. See [Build a slice incrementally](/cookbook/build-slice):
+
+```sysl
+take_positives(xs: []int) -> []int
+    var result = (new [len(xs)]int)[:0]
+    for x in xs
+        if x > 0
+            result = append(result, x)
+    result
+```
+
+This pre-allocates `len(xs)` slots but only fills the ones that survive the filter. No reallocations occur regardless of how many positives there are.
+
+## Why this matters
+
+Each call to `append` on a full slice triggers:
+
+1. Allocate a new buffer (typically 2× the current capacity).
+2. Copy every existing element to the new buffer.
+3. Update the slice descriptor to point at the new buffer.
+4. Free the old buffer when its last reference goes out of scope.
+
+For a slice that grows from 0 to N, the total copy cost is `1 + 2 + 4 + ... + N` ≈ `2N`. Pre-allocating gets you N writes total, no copying.
+
+For small N (under ~100), the difference rarely matters. For larger N, especially in hot paths, pre-allocation is a real win.
+
+## See also
+
+- [Arrays, Slices, and Pointers](/language/arrays-slices-pointers) — `[]T` vs `&[]T` semantics.
+- [Build a slice incrementally](/cookbook/build-slice) — when you don't know the capacity.

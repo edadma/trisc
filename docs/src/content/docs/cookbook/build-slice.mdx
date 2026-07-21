@@ -1,0 +1,76 @@
+---
+title: Build a Slice Incrementally
+description: "The canonical empty-with-capacity + append pattern."
+---
+
+The Go-style pattern is "empty slice with reserved capacity, then `append`":
+
+```sysl
+collect_evens(upto: int) -> []int
+    var result = (new [upto]int)[:0]    // capacity = upto, length = 0
+    for i in 0..<upto
+        if i % 2 == 0
+            result = append(result, i)
+    result
+
+main() -> int
+    val evens = collect_evens(10)        // [0, 2, 4, 6, 8]
+    var sum = 0
+    for n in evens
+        sum = sum + n
+    sum                                   // 20
+```
+
+### What's happening
+
+1. `new [upto]int` heap-allocates an `&[]int` with `len = cap = upto`. The buffer is zero-initialized.
+2. `[:0]` slices to length 0 — same backing buffer, same capacity, just no elements visible yet.
+3. Each `append` adds one element. As long as `len < cap`, it writes in place and increments `len`.
+
+If you guess the capacity wrong, `append` will reallocate when it overflows — same Go semantics. Always use `result = append(result, ...)` because the returned slice might point at a fresh allocation.
+
+## When you don't know the capacity
+
+Two options:
+
+**Estimate generously and trim afterward:**
+
+```sysl
+filter_positive(xs: []int) -> []int
+    var result = (new [len(xs)]int)[:0]   // worst case: every element kept
+    for x in xs
+        if x > 0
+            result = append(result, x)
+    result
+```
+
+The unused capacity is wasted until the slice is dropped. For most workloads this is fine.
+
+**Start small and let `append` grow:**
+
+```sysl
+filter_positive(xs: []int) -> []int
+    var result = (new [4]int)[:0]         // start small
+    for x in xs
+        if x > 0
+            result = append(result, x)
+    result
+```
+
+`append` grows the buffer (typically 2×) when capacity is exhausted. The amortized cost is O(1) per append, but the worst-case append is O(n) due to the copy.
+
+## When the result is empty
+
+The empty-literal `[]` form works with type inference from context:
+
+```sysl
+filter_empty() -> []int = []     // returns []int with len = cap = 0
+```
+
+This produces a zero-length, zero-capacity slice. Any subsequent `append` will trigger a fresh allocation.
+
+## See also
+
+- [Arrays, Slices, and Pointers](/language/arrays-slices-pointers) — full slice mechanics.
+- [Builtins: append](/language/builtins) — semantics.
+- [Pre-allocate a slice with known capacity](/cookbook/preallocate-slice).
